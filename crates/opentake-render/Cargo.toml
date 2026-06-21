@@ -7,3 +7,19 @@ repository.workspace = true
 description = "RenderPlan (Timeline -> per-frame composition instructions) + wgpu compositor + ffmpeg codec backends."
 
 [dependencies]
+opentake-domain = { workspace = true }
+thiserror = "2"
+
+# GPU frame compositor. macOS ships Metal; we keep the backend surface lean
+# (wgsl + metal only) so the default build links no Vulkan/DX/GL stack. wgpu 23
+# is the pinned baseline — its dependency tree is already vendored in Cargo.lock,
+# so once fetched the build/test path is fully offline.
+wgpu = { version = "23", default-features = false, features = ["wgsl", "metal"] }
+# POD uniforms uploaded to the GPU (mat3x2 / crop_uv / opacity / flags).
+bytemuck = { version = "1", features = ["derive"] }
+# Block on wgpu's async device/queue/map calls from synchronous render code.
+pollster = "0.4"
+
+[dev-dependencies]
+# PNG read-back round-trip checks in the GPU smoke test (offline, no assets).
+image = { version = "0.25", default-features = false, features = ["png"] }
