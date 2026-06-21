@@ -198,3 +198,13 @@ MyProject.opentake/
 | 密钥存储 | keyring |
 | 序列化 | serde / serde_json |
 ```
+
+## 11. Agent Context Signal + 工作流插件（2026 新增）
+
+以上 §7 MCP + Agent 层描述的是 31 个工具的核心执行能力。在此基础上，OpenTake 新增两个 Agent 层的设计系统：
+
+- **[Agent Context Signal](AGENT-CONTEXT-SIGNAL.md)**：软件主动向 Agent 发送剪辑指引信号。当 Agent 通过 MCP 操作轨道和时间线时，软件在每次工具返回中附带 `context_signal`（视频类型判定、轨道角色标注、剪辑阶段指引、规则校验）。这个系统的知识来源是 ClipSkills 技能套件（[appergb/ClipSkills](https://github.com/appergb/ClipSkills)，MIT 许可）——12 册软件无关的剪辑知识内核，被内化为软件端的"信号发射器"，Agent 不需要自己加载技能文件。
+
+- **[工作流插件系统](WORKFLOW-PLUGIN-SYSTEM.md)**：JSON + Markdown 的轻量插件格式，让社区可以为特定视频类型（科普、评测、游戏、婚礼……）编写可复用的剪辑工作流。插件激活后自动注入系统提示词并附加规则校验。与核心编辑逻辑解耦，完全在 Agent 层运作。
+
+两个系统在 Phase 7（MCP server）同步交付，ROADMAP 中已有对应阶段 S 和 W。

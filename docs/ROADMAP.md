@@ -93,3 +93,32 @@
 | 导出预设与上游画质不一致 | 🟠 中 | 逐预设调参对比;非阻塞核心功能 |
 | 字幕渲染像素级对齐难 | 🟠 中 | 先静态对齐再接关键帧;可接受小阈值 |
 | FFmpeg(L)GPL 与分发合规 | 🟢 低 | GPL-3.0 项目兼容;动态链接/标注来源 |
+
+---
+
+## Phase S — Agent Context Signal 系统（随 Phase 7 交付）
+
+对应 `opentake-agent` 的信号发射侧。来源：ClipSkills 技能套件（`appergb/ClipSkills`，MIT）。
+
+- **做**：
+  1. 在 `opentake-domain` 定义 `ContextSignal` / `TrackRole` / `VideoType` 类型。
+  2. 视频类型自动检测引擎（来自工程特征推断 talking_head / montage / vlog / interview / short_form / long_form）。
+  3. 轨道角色自动标注（MainCamera / B_RollOverlay / VoiceOver / BGM / SFX / TextOverlay）。
+  4. MCP 工具返回结果中附加 `context_signal`（含类型判定 + 轨道角色 + 剪辑阶段指引）。
+  5. 剪辑规则校验引擎：口播精剪规则（气口三规则、不在词中间切） / B-roll 匹配规则（时长对齐、不重复、成组添加）/ 节奏结构规则（信息密度、时钟理论、波峰制）。
+  6. 外部工具能力映射（AI Cut / 剪映 / Pika / Runway → OpenTake 工具）。
+- **验证**：`get_timeline` 返回结果含 `context_signal`;轨道角色标注正确;规则不匹配时产生 warning 信号。
+- **设计文档**：[AGENT-CONTEXT-SIGNAL.md](AGENT-CONTEXT-SIGNAL.md)
+
+## Phase W — 工作流插件系统（随 Phase 7 交付）
+
+对应 `opentake-agent` 的插件加载侧。纯 JSON + Markdown，不需 Rust 编译。
+
+- **做**：
+  1. 插件格式定义（`plugin.json` + `instructions.md` + 可选 assets）。
+  2. `activate_workflow` MCP 工具。
+  3. `instructions.md` 自动注入系统提示词。
+  4. `workflow.rules` 校验引擎。
+  5. 插件 CLI（`opentake plugin create/validate/package`）。
+- **验证**：创建示例插件 → 激活 → Agent 获得插件指引;rules 校验正确。
+- **设计文档**：[WORKFLOW-PLUGIN-SYSTEM.md](WORKFLOW-PLUGIN-SYSTEM.md)

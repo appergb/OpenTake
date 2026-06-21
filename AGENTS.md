@@ -25,6 +25,7 @@ PRIMARY-CN/
 | 了解项目全局 | [README.md](README.md) |
 | 理解目标架构 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | 知道当前阶段 + 下一步做什么 | [docs/ROADMAP.md](docs/ROADMAP.md) |
+| 理解 Agent 如何与软件协作 | [docs/AGENT-CONTEXT-SIGNAL.md](docs/AGENT-CONTEXT-SIGNAL.md) |
 | 移植某个上游模块 | [docs/MODULE-PORT-MAP.md](docs/MODULE-PORT-MAP.md) |
 | 了解为何选了 Rust / Tauri / GPL-3.0 | [DECISIONS.md](DECISIONS.md) |
 | 查找某个上游模块的源码 | `palmier-pro-upstream/Sources/PalmierPro/` |
@@ -100,3 +101,15 @@ cargo tauri dev
 - 编辑算法：`palmier-pro-upstream/Sources/PalmierPro/Editor/`
 - Agent/MCP 工具：`palmier-pro-upstream/Sources/PalmierPro/Agent/`
 <!-- OPENSPEC:END -->
+
+## Agent Context Signal — 软件主动发信号
+
+OpenTake 的核心创新之一是 **软件主动向 Agent 发送剪辑指引**，而不是让 Agent 自己去读技能文件。
+
+当 Agent 通过 MCP 操作时间线和轨道时，软件会在每次工具返回中附带 `context_signal`：
+- 视频类型判定（口播 / Vlog / 混剪 / 采访 / 短剧 / 长视频）
+- 每个轨道的角色和用途（主画面 / B-roll / 旁白 / BGM / SFX / 文字）
+- 当前剪辑阶段和下一步建议
+- 该视频类型适用的剪辑规则
+
+这些指引内化自 ClipSkills 技能套件（[appergb/ClipSkills](https://github.com/appergb/ClipSkills)，MIT 许可）。详见 [docs/AGENT-CONTEXT-SIGNAL.md](docs/AGENT-CONTEXT-SIGNAL.md) 和 [docs/WORKFLOW-PLUGIN-SYSTEM.md](docs/WORKFLOW-PLUGIN-SYSTEM.md)。
