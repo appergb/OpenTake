@@ -21,6 +21,14 @@ version = "0.1.0"
 [[package]]
 name = "opentake-core"
 version = "0.1.0"
+dependencies = [
+ "opentake-domain",
+ "opentake-ops",
+ "opentake-project",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "opentake-domain"

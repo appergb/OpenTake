@@ -7,3 +7,9 @@ repository.workspace = true
 description = "Assembly: EditorState (timeline + manifest), command routing, event bus."
 
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+opentake-domain = { workspace = true }
+opentake-ops = { workspace = true }
+opentake-project = { workspace = true }
+thiserror = "2"
