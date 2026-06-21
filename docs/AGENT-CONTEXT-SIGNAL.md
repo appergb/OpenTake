@@ -15,10 +15,17 @@ Agent 调用 get_timeline
     {
       "video_type": "talking_head",
       "track_roles": {"V1":"main_camera","V2":"b_roll_overlay","A1":"voice","A2":"bgm"},
-      "editing_advice": {
-        "flow": "audio_driven",
-        "current_stage": "rough_cut",
-        "next_action": "identify_breaks_in_a_roll"
+      "editing_skeleton": {
+        "approach": "audio_driven",
+        "flow": [
+          "提取主音轨 → 转写为字幕 → 识别气口/断点",
+          "精剪 A-roll → 语义匹配 B-roll → 贴画面上层"
+        ]
+      },
+      "editing_stage": "RoughCut",
+      "stage_guidance": {
+        "next_actions": ["识别并标记所有气口和句界断点"],
+        "warnings": ["不要在词中间切分"]
       }
     }
 ```
@@ -74,6 +81,22 @@ ContextSignal {
     }],
 }
 ```
+
+
+## 1.4 工作流插件对信号的增强
+
+当用户激活一个工作流插件（见 [WORKFLOW-PLUGIN-SYSTEM.md](WORKFLOW-PLUGIN-SYSTEM.md)）时，插件的以下内容**叠加**到 ContextSignal 中：
+
+| 插件字段 | 注入位置 | 规则 |
+|---|---|---|
+| `plugin.json → workflow.stages` | `ContextSignal.stage_guidance` | 插件的阶段列表追加到内置阶段之后，标注来源为 `plugin:{plugin_id}` |
+| `plugin.json → workflow.rules` | `ContextSignal.track_hints[].advice` | 插件的 do/dont 规则在每次工具调用返回时校验，违规产生 warning |
+| `plugin.json → track_roles` | `ContextSignal.track_roles` | 插件定义的轨道角色**覆盖**自动检测的角色（手动指定优先） |
+| `plugin.json → video_type` | `ContextSignal.video_type` | 插件声明的视频类型**覆盖**自动检测的类型 |
+| `instructions.md` | **系统提示词**（不在 context_signal 中） | 注入到 MCP server 的 serverInstructions |
+
+叠加优先级：插件声明 > 用户手动设置 > 软件自动检测 > 默认值。
+
 
 ## 2. 视频类型检测机制
 
@@ -178,6 +201,16 @@ Track Role 检测规则：
 | 时钟理论 | 爆点位置缺少高能内容 | "当前 3 点位置（约 X 分钟处）暂无爆点，建议在此安排高能片段" |
 | 波峰制 | 连续长段无起伏 | "已连续 Y 段平淡内容，建议在位置 Z 插入高潮" |
 
+
+## 4.4 规则集成：内置规则 + 插件规则
+
+§4.1-§4.3 描述的是**内置剪辑规则**（来自 ClipSkills 通用知识）。当工作流插件激活时：
+
+- 插件 `workflow.rules.do` 和 `workflow.rules.dont` 作为**额外规则层**参与校验
+- 内置规则和插件规则**同时生效**，不互斥
+- 若同一操作同时触发内置规则 warning 和插件规则 warning，两者都返回
+- 规则校验顺序：内置规则 → 插件规则 → 组合 warning 列表返回
+
 ## 5. 外部工具能力内化
 
 ### 5.1 AI Cut / 剪映智能能力内化
@@ -220,3 +253,4 @@ Track Role 检测规则：
 - [WORKFLOW-PLUGIN-SYSTEM.md](WORKFLOW-PLUGIN-SYSTEM.md) — 工作流插件系统
 - [MODULE-PORT-MAP.md](MODULE-PORT-MAP.md) — Agent 工具层移植
 - `appergb/ClipSkills` — 技能来源，MIT 许可
+
