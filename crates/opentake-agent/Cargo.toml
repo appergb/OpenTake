@@ -1,0 +1,9 @@
+[package]
+name = "opentake-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tool layer (= ToolExecutor) + MCP server (rmcp) + in-app chat client + short-id + system prompts."
+
+[dependencies]

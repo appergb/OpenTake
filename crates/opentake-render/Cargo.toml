@@ -1,0 +1,9 @@
+[package]
+name = "opentake-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "RenderPlan (Timeline -> per-frame composition instructions) + wgpu compositor + ffmpeg codec backends."
+
+[dependencies]

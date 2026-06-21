@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/opentake-domain",
+    "crates/opentake-ops",
+    "crates/opentake-project",
+    "crates/opentake-render",
+    "crates/opentake-media",
+    "crates/opentake-agent",
+    "crates/opentake-gen",
+    "crates/opentake-core",
+]
+# src-tauri is intentionally NOT a workspace member yet (Phase 0 scaffold).
+# Pulling the full Tauri 2 dependency tree is heavy and not required to prove
+# the 8 core crates + web build. See src-tauri/README.md for the TODO.
+exclude = ["src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/appergb/OpenTake"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+opentake-domain = { path = "crates/opentake-domain" }
+opentake-ops = { path = "crates/opentake-ops" }
+opentake-project = { path = "crates/opentake-project" }
+opentake-render = { path = "crates/opentake-render" }
+opentake-media = { path = "crates/opentake-media" }
+opentake-agent = { path = "crates/opentake-agent" }
+opentake-gen = { path = "crates/opentake-gen" }
+opentake-core = { path = "crates/opentake-core" }

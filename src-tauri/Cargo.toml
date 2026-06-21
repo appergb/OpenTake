@@ -1,0 +1,26 @@
+# NOTE: src-tauri is intentionally EXCLUDED from the root Cargo workspace during
+# Phase 0 (see ../Cargo.toml `exclude`). The full Tauri 2 dependency tree is heavy
+# and not required to prove the 8 core crates + web build in CI. Re-include it
+# (and wire the #[tauri::command] glue to opentake-core) in a later phase.
+#
+# This manifest is kept as a buildable-once-Tauri-is-set-up skeleton, NOT compiled
+# by `cargo build --workspace` today. See README.md in this directory.
+
+[package]
+name = "opentake-tauri"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "OpenTake desktop shell (Tauri 2)."
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# this feature is used for production builds or when `devUrl` is not set
+custom-protocol = ["tauri/custom-protocol"]

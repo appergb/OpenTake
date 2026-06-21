@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OpenTake",
+  "version": "0.1.0",
+  "identifier": "com.opentake.app",
+  "build": {
+    "frontendDist": "../web/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "pnpm -C web dev",
+    "beforeBuildCommand": "pnpm -C web build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "OpenTake",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.png"
+    ]
+  }
+}

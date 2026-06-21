@@ -1,0 +1,9 @@
+[package]
+name = "opentake-gen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Generation backend clients (BYOK direct / self-hosted proxy); GenerationParams union types."
+
+[dependencies]

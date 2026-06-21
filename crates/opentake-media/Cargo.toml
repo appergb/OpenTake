@@ -1,0 +1,9 @@
+[package]
+name = "opentake-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Decode/thumbnail/waveform/transcribe/semantic-search (ffmpeg-next/symphonia/whisper-rs/ort)."
+
+[dependencies]
