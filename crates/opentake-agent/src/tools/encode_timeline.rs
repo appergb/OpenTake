@@ -8,9 +8,11 @@
 //!   syncLocked:true}`; clip `{mediaType:"video", speed:1, volume:1,
 //!   opacity:1, trims/fades 0, identity transform/crop, default textStyle}`;
 //!   `sourceClipType == mediaType` is dropped. Text clips never report trims.
-//! - Caption clips (shared `captionGroupId`) fold into `captionGroups`: common
-//!   style hoisted into `shared`, each clip a `[clipId, startFrame,
-//!   durationFrames, text]` row, capped at 200 rows/group.
+//! - Caption clips (shared `captionGroupId`) fold into `captionGroups`: the modal
+//!   (most common) residual style hoisted into `shared`, each conforming clip a
+//!   `[clipId, startFrame, durationFrames, text]` row under `clips`, capped at 200
+//!   rows/group. Clips whose residual deviates from the modal style are emitted
+//!   individually in the track's plain `clips` array instead.
 //! - Floats rounded to 3 places.
 //! - Window paging: `startFrame`/`endFrame` keep only intersecting clips;
 //!   hidden clips reported via `totalClips`/`totalFrames`.
@@ -218,16 +220,21 @@ fn encode_track(timeline: &Timeline, index: usize, start: Option<i32>, end: Opti
         }
     }
 
+    // Fold each group; clips that deviate from the modal style fall back to the
+    // plain clips array (1:1 with upstream `compactTrack`).
+    let mut groups: Vec<Value> = Vec::new();
+    for (gid, clips) in &caption_groups {
+        let (group, deviants) = encode_caption_group(gid, clips);
+        groups.push(group);
+        plain.extend(deviants);
+    }
+
     if !plain.is_empty() {
         let clips: Vec<Value> = plain.iter().map(|c| encode_clip(c)).collect();
         m.insert("clips".into(), Value::Array(clips));
     }
 
-    if !caption_groups.is_empty() {
-        let groups: Vec<Value> = caption_groups
-            .iter()
-            .map(|(gid, clips)| encode_caption_group(gid, clips))
-            .collect();
+    if !groups.is_empty() {
         m.insert("captionGroups".into(), Value::Array(groups));
     }
 
@@ -239,51 +246,129 @@ fn encode_track(timeline: &Timeline, index: usize, start: Option<i32>, end: Opti
     Value::Object(m)
 }
 
-/// Fold a caption group: hoist shared style, emit `[clipId, startFrame,
-/// durationFrames, text]` rows capped at `CAPTION_ROW_LIMIT`.
-fn encode_caption_group(group_id: &str, clips: &[&Clip]) -> Value {
-    let mut shared = Map::new();
-    // Hoist common font/color/center from the first clip's text style.
-    if let Some(first) = clips.first() {
-        if let Some(style) = &first.text_style {
-            shared.insert("fontName".into(), json!(style.font_name));
-            shared.insert("fontSize".into(), json!(round3(style.font_size)));
-            shared.insert(
-                "color".into(),
-                json!({
-                    "r": round3(style.color.r),
-                    "g": round3(style.color.g),
-                    "b": round3(style.color.b),
-                    "a": round3(style.color.a),
-                }),
-            );
-        }
-        let tf = &first.transform;
-        shared.insert("centerX".into(), json!(round3(tf.center_x)));
-        shared.insert("centerY".into(), json!(round3(tf.center_y)));
-    }
+/// The clip fields that live in each compact row, so they are excluded from the
+/// residual style used for modal grouping. Mirrors upstream `rowKeys`
+/// (`captionGroupId` is never emitted by `encode_clip`, so it is absent here).
+const CAPTION_ROW_KEYS: [&str; 4] = ["clipId", "startFrame", "durationFrames", "content"];
 
-    let shown = clips.len().min(CAPTION_ROW_LIMIT);
-    let rows: Vec<Value> = clips
+/// The residual style of a caption clip: its compact encoding minus the per-row
+/// keys, with the auto-fit caption box width/height dropped (derived data, not
+/// signal). 1:1 with upstream `captionGroup`'s `residual` computation.
+fn caption_residual(clip: &Clip) -> Map<String, Value> {
+    let Value::Object(mut residual) = encode_clip(clip) else {
+        return Map::new();
+    };
+    for key in CAPTION_ROW_KEYS {
+        residual.remove(key);
+    }
+    if let Some(Value::Object(mut tf)) = residual.remove("transform") {
+        tf.remove("width");
+        tf.remove("height");
+        if !tf.is_empty() {
+            residual.insert("transform".into(), Value::Object(tf));
+        }
+    }
+    residual
+}
+
+/// Stable, order-independent JSON string for a residual map (recursively sorts
+/// object keys), used to count and compare styles. Mirrors upstream
+/// `canonicalJSON` (`JSONSerialization` with `.sortedKeys`).
+fn canonical_json(value: &Value) -> String {
+    fn sort(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let sorted: BTreeMap<&String, Value> =
+                    map.iter().map(|(k, v)| (k, sort(v))).collect();
+                let mut out = Map::new();
+                for (k, v) in sorted {
+                    out.insert(k.clone(), v);
+                }
+                Value::Object(out)
+            }
+            Value::Array(items) => Value::Array(items.iter().map(sort).collect()),
+            other => other.clone(),
+        }
+    }
+    serde_json::to_string(&sort(value)).unwrap_or_default()
+}
+
+/// Fold a caption group: hoist the modal (most common) residual style into
+/// `shared`, emit conforming clips as `[clipId, startFrame, durationFrames, text]`
+/// rows capped at `CAPTION_ROW_LIMIT`, and return clips that deviate from the
+/// modal style so the caller emits them individually. 1:1 with upstream
+/// `captionGroup`.
+fn encode_caption_group<'a>(group_id: &str, clips: &[&'a Clip]) -> (Value, Vec<&'a Clip>) {
+    // First pass: residual per clip + modal selection by frequency.
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut modal_key = String::new();
+    let mut modal_count = 0usize;
+    let mut shared: Map<String, Value> = Map::new();
+    let keys: Vec<String> = clips
         .iter()
-        .take(shown)
         .map(|c| {
-            json!([
-                c.id,
-                c.start_frame,
-                c.duration_frames,
-                c.text_content.clone().unwrap_or_default()
-            ])
+            let residual = caption_residual(c);
+            let key = canonical_json(&Value::Object(residual.clone()));
+            let count = counts.entry(key.clone()).or_insert(0);
+            *count += 1;
+            if *count > modal_count {
+                modal_count = *count;
+                modal_key = key.clone();
+                shared = residual;
+            }
+            key
         })
         .collect();
 
+    // Second pass: split conforming rows from deviants, track the frame range.
+    let mut rows: Vec<(i32, Value)> = Vec::new();
+    let mut deviants: Vec<&Clip> = Vec::new();
+    let mut frame_min = i32::MAX;
+    let mut frame_max = 0;
+    for (clip, key) in clips.iter().zip(keys.iter()) {
+        frame_min = frame_min.min(clip.start_frame);
+        frame_max = frame_max.max(clip.end_frame());
+        if *key == modal_key {
+            rows.push((
+                clip.start_frame,
+                json!([
+                    clip.id,
+                    clip.start_frame,
+                    clip.duration_frames,
+                    clip.text_content.clone().unwrap_or_default()
+                ]),
+            ));
+        } else {
+            deviants.push(clip);
+        }
+    }
+
+    let total = rows.len();
+    rows.sort_by_key(|(start, _)| *start);
+    let shown: Vec<Value> = rows.into_iter().take(CAPTION_ROW_LIMIT).map(|(_, r)| r).collect();
+
     let mut m = Map::new();
     m.insert("captionGroupId".into(), json!(group_id));
-    m.insert("rowFormat".into(), json!("[clipId, startFrame, durationFrames, text]"));
-    m.insert("shared".into(), Value::Object(shared));
-    m.insert("rows".into(), Value::Array(rows));
-    m.insert("clipCount".into(), json!(clips.len()));
-    Value::Object(m)
+    m.insert("clipCount".into(), json!(total));
+    m.insert("frameRange".into(), json!([frame_min, frame_max]));
+    m.insert(
+        "clipFormat".into(),
+        json!(["clipId", "startFrame", "durationFrames", "text"]),
+    );
+    if !shared.is_empty() {
+        m.insert("shared".into(), Value::Object(shared));
+    }
+    let shown_count = shown.len();
+    m.insert("clips".into(), Value::Array(shown));
+    if shown_count < total {
+        m.insert(
+            "clipsNote".into(),
+            json!(format!(
+                "Showing {shown_count} of {total} caption clips. Page with startFrame/endFrame."
+            )),
+        );
+    }
+    (Value::Object(m), deviants)
 }
 
 /// Encode the whole timeline into the compact JSON `get_timeline` returns.
@@ -399,12 +484,73 @@ mod tests {
         let g = &groups[0];
         assert_eq!(g["captionGroupId"], json!("grp-1"));
         assert_eq!(g["clipCount"], json!(2));
-        assert_eq!(g["rows"][0][3], json!("Hello"));
-        assert_eq!(g["rows"][1][3], json!("World"));
-        // Shared style hoisted.
-        assert_eq!(g["shared"]["fontName"], json!("Helvetica-Bold"));
-        // Plain clips array absent when only captions present.
+        assert_eq!(
+            g["clipFormat"],
+            json!(["clipId", "startFrame", "durationFrames", "text"])
+        );
+        assert_eq!(g["frameRange"], json!([0, 60]));
+        assert_eq!(g["clips"][0][3], json!("Hello"));
+        assert_eq!(g["clips"][1][3], json!("World"));
+        // Identical styles -> all clips conform, none deviate.
         assert!(v["tracks"][0].get("clips").is_none());
+        // No paging note when every clip is shown.
+        assert!(g.get("clipsNote").is_none());
+    }
+
+    #[test]
+    fn caption_clips_use_upstream_key_names() {
+        let mut tl = Timeline::new();
+        let mut t = Track::new("t1", ClipType::Video);
+        let mut c = Clip::new("cap0", "", 0, 30);
+        c.media_type = ClipType::Text;
+        c.caption_group_id = Some("grp".into());
+        c.text_content = Some("Hi".into());
+        t.clips.push(c);
+        tl.tracks.push(t);
+        let v = encode_timeline(&tl, None, None, true);
+        let g = &v["tracks"][0]["captionGroups"][0];
+        // Upstream uses clips/clipFormat, not rows/rowFormat.
+        assert!(g.get("clips").is_some());
+        assert!(g.get("rows").is_none());
+        assert!(g.get("clipFormat").is_some());
+        assert!(g.get("rowFormat").is_none());
+    }
+
+    #[test]
+    fn caption_deviant_clips_emitted_individually() {
+        let mut tl = Timeline::new();
+        let mut t = Track::new("t1", ClipType::Video);
+        // Three clips share a style (modal); one deviates via opacity.
+        for (i, txt) in ["a", "b", "c"].iter().enumerate() {
+            let mut c = Clip::new(format!("cap{i}"), "", i as i32 * 30, 30);
+            c.media_type = ClipType::Text;
+            c.source_clip_type = ClipType::Text;
+            c.caption_group_id = Some("grp".into());
+            c.text_content = Some(txt.to_string());
+            t.clips.push(c);
+        }
+        let mut deviant = Clip::new("capX", "", 90, 30);
+        deviant.media_type = ClipType::Text;
+        deviant.source_clip_type = ClipType::Text;
+        deviant.caption_group_id = Some("grp".into());
+        deviant.text_content = Some("x".into());
+        deviant.opacity = 0.5; // breaks from the modal residual
+        t.clips.push(deviant);
+        tl.tracks.push(t);
+
+        let v = encode_timeline(&tl, None, None, true);
+        let track = &v["tracks"][0];
+        let g = &track["captionGroups"][0];
+        // Modal group keeps only the three conforming clips.
+        assert_eq!(g["clipCount"], json!(3));
+        assert_eq!(g["clips"].as_array().unwrap().len(), 3);
+        // frameRange spans all four clips.
+        assert_eq!(g["frameRange"], json!([0, 120]));
+        // The deviant clip is emitted individually in the plain clips array.
+        let clips = track["clips"].as_array().unwrap();
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0]["clipId"], json!("capX"));
+        assert_eq!(clips[0]["opacity"], json!(0.5));
     }
 
     #[test]
@@ -421,8 +567,13 @@ mod tests {
         tl.tracks.push(t);
         let v = encode_timeline(&tl, None, None, true);
         let g = &v["tracks"][0]["captionGroups"][0];
-        assert_eq!(g["rows"].as_array().unwrap().len(), 200); // capped
+        assert_eq!(g["clips"].as_array().unwrap().len(), 200); // capped
         assert_eq!(g["clipCount"], json!(250)); // true count reported
+        // Paging note appears when not all clips are shown.
+        assert_eq!(
+            g["clipsNote"],
+            json!("Showing 200 of 250 caption clips. Page with startFrame/endFrame.")
+        );
     }
 
     #[test]
