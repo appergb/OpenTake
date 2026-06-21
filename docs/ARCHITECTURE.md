@@ -28,6 +28,8 @@
 
 > 落地策略:**第一步就做合成器 PoC**(单轨视频 + 一个 transform 关键帧 + 一条字幕,导出帧与上游做像素 diff),用它验证整条 Rust core 路线,再铺开其余。
 
+> 💡 **风险即机会**:这个被迫自建的 wgpu 合成器,同时是 OpenTake 反超上游的最大窗口。上游被 AVFoundation 声明式合成锁死,**做不了**特效/转场/调色/绿幕/蒙版;而这些本质都是「合成片元着色器里的像素数学」,wgpu 合成器天生适合承载。对标剪映的进阶能力深化见 [ADVANCED-FEATURES.md](ADVANCED-FEATURES.md)。
+
 ## 2. 分层架构
 
 ```
@@ -82,6 +84,8 @@ OpenTake/
 
 依赖法则(经上游验证):`domain` 零依赖叶子;`ops` 只依赖 `domain`;`command` 是唯一编辑入口;UI/Agent/MCP 是命令层三个对等客户端。
 
+> 后期新增 `crates/opentake-motion/`(Web 动效模块 / 插件宿主,Agent 用 HTML/CSS/JS 写动画,见 [MOTION-GRAPHICS-PLUGIN.md](MOTION-GRAPHICS-PLUGIN.md))。它只是「又一个片段源」接入 `opentake-render`,不改动上述 8 个核心 crate 的边界。
+
 ## 4. 领域模型(可直接复刻,见 MODULE-PORT-MAP.md「Models」)
 
 要点(务必保持语义一致以便与上游工程对拍):
@@ -90,6 +94,11 @@ OpenTake/
 - Clip 派生逻辑(纯函数,必须原样移植):`end_frame`、`source_frames_consumed=round(duration*speed)`、`opacity_at/volume_at/transform_at/crop_at`(先采样关键帧→叠加 fade→乘静态值)、`fade_multiplier`(in/out 取 min,linear/smoothstep)。
 - 关键帧:**存储用 clip 相对帧偏移,公开 API 用绝对时间线帧**(`to_offset`/`to_abs`);采样端点钳制 + 按左端点 `interpolation_out` 决定 hold/linear/smooth;`smoothstep(t)=t*t*(3-2t)`。
 - 媒体:**运行时富对象 `MediaAsset` 与磁盘 `MediaManifestEntry` 分离**;clip 永不存路径,只存 `media_ref`(=asset id);`MediaSource::Project(rel)|External(abs)`。
+
+**进阶能力的 domain 扩展**(对标剪映,详见 [ADVANCED-FEATURES.md](ADVANCED-FEATURES.md);全部 `#[serde(default)] + Option`,不破坏旧工程):
+- `Clip` 新增:`effects: Vec<Effect>`(着色器特效链)、`masks: Vec<Mask>`(线性/圆形/钢笔)、`chroma_key: Option<ChromaKey>`(绿幕)、`color_grade: Option<ColorGrade>`(浮点调色链)、`speed_curve: Option<KeyframeTrack<f64>>`(曲线变速)。
+- `Interpolation` 扩展:在 linear/hold/smooth 之外加 `Bezier(c1,c2)` / `Spring(..)`(物理级缓动)。
+- 新增 `Transition{kind,duration,params}`(作用于相邻 clip 重叠区);`MediaSource::Nested(child_timeline_id)`(复合片段嵌套)。
 
 ## 5. 编辑命令层(唯一入口 = 上游 ToolExecutor)
 
