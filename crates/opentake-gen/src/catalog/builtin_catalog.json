@@ -1,0 +1,167 @@
+[
+  {
+    "id": "fal:flux-pro",
+    "kind": "image",
+    "displayName": "FLUX.1 [pro]",
+    "allowedEndpoints": [],
+    "responseShape": "images",
+    "uiCapabilities": {
+      "resolutions": ["1024x1024", "1024x1536", "1536x1024"],
+      "aspectRatios": ["1:1", "16:9", "9:16", "4:3", "3:4"],
+      "qualities": null,
+      "supportsImageReference": false,
+      "maxImages": 4
+    }
+  },
+  {
+    "id": "fal:flux-kontext",
+    "kind": "image",
+    "displayName": "FLUX.1 Kontext",
+    "allowedEndpoints": [],
+    "responseShape": "images",
+    "uiCapabilities": {
+      "resolutions": ["1024x1024"],
+      "aspectRatios": ["1:1", "16:9", "9:16"],
+      "qualities": null,
+      "supportsImageReference": true,
+      "maxImages": 1
+    }
+  },
+  {
+    "id": "fal:kling-video",
+    "kind": "video",
+    "displayName": "Kling 2.5",
+    "allowedEndpoints": [],
+    "responseShape": "video",
+    "uiCapabilities": {
+      "durations": [5, 10],
+      "resolutions": ["720p", "1080p"],
+      "aspectRatios": ["16:9", "9:16", "1:1"],
+      "supportsFirstFrame": true,
+      "supportsLastFrame": true,
+      "maxReferenceImages": 4,
+      "maxReferenceVideos": 0,
+      "maxReferenceAudios": 0,
+      "maxTotalReferences": 4,
+      "maxCombinedVideoRefSeconds": null,
+      "maxCombinedAudioRefSeconds": null,
+      "framesAndReferencesExclusive": false,
+      "referenceTagNoun": "element",
+      "requiresSourceVideo": false,
+      "requiresReferenceImage": false
+    }
+  },
+  {
+    "id": "replicate:seedance-1-pro",
+    "kind": "video",
+    "displayName": "Seedance 1 Pro",
+    "allowedEndpoints": [],
+    "responseShape": "video",
+    "uiCapabilities": {
+      "durations": [5, 10],
+      "resolutions": ["480p", "720p", "1080p"],
+      "aspectRatios": ["16:9", "9:16", "1:1", "4:3"],
+      "supportsFirstFrame": true,
+      "supportsLastFrame": false,
+      "maxReferenceImages": 0,
+      "maxReferenceVideos": 0,
+      "maxReferenceAudios": 0,
+      "maxTotalReferences": 0,
+      "maxCombinedVideoRefSeconds": null,
+      "maxCombinedAudioRefSeconds": null,
+      "framesAndReferencesExclusive": false,
+      "referenceTagNoun": "reference",
+      "requiresSourceVideo": false,
+      "requiresReferenceImage": false
+    }
+  },
+  {
+    "id": "openai:gpt-image-1",
+    "kind": "image",
+    "displayName": "GPT Image 1",
+    "allowedEndpoints": [],
+    "responseShape": "images",
+    "uiCapabilities": {
+      "resolutions": ["1024x1024", "1024x1536", "1536x1024"],
+      "aspectRatios": ["1:1", "3:2", "2:3"],
+      "qualities": ["low", "medium", "high"],
+      "supportsImageReference": true,
+      "maxImages": 4
+    }
+  },
+  {
+    "id": "openai:tts-1",
+    "kind": "audio",
+    "displayName": "OpenAI TTS",
+    "allowedEndpoints": [],
+    "responseShape": "audio",
+    "uiCapabilities": {
+      "category": "tts",
+      "voices": ["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
+      "defaultVoice": "alloy",
+      "supportsLyrics": false,
+      "supportsInstrumental": false,
+      "supportsStyleInstructions": false,
+      "durations": null,
+      "minPromptLength": 1,
+      "inputs": ["text"],
+      "promptLabel": "What should the voice say?",
+      "minSeconds": null,
+      "maxSeconds": null
+    }
+  },
+  {
+    "id": "elevenlabs:eleven-multilingual-v2",
+    "kind": "audio",
+    "displayName": "ElevenLabs Multilingual v2",
+    "allowedEndpoints": [],
+    "responseShape": "audio",
+    "uiCapabilities": {
+      "category": "tts",
+      "voices": ["rachel", "drew", "clyde", "domi", "dave"],
+      "defaultVoice": "rachel",
+      "supportsLyrics": false,
+      "supportsInstrumental": false,
+      "supportsStyleInstructions": true,
+      "durations": null,
+      "minPromptLength": 1,
+      "inputs": ["text"],
+      "promptLabel": "What should the voice say?",
+      "minSeconds": null,
+      "maxSeconds": null
+    }
+  },
+  {
+    "id": "elevenlabs:eleven-music",
+    "kind": "audio",
+    "displayName": "ElevenLabs Music",
+    "allowedEndpoints": [],
+    "responseShape": "audio",
+    "uiCapabilities": {
+      "category": "music",
+      "voices": null,
+      "defaultVoice": null,
+      "supportsLyrics": true,
+      "supportsInstrumental": true,
+      "supportsStyleInstructions": true,
+      "durations": null,
+      "minPromptLength": 1,
+      "inputs": ["text"],
+      "promptLabel": "Describe the music",
+      "minSeconds": 10,
+      "maxSeconds": 300
+    }
+  },
+  {
+    "id": "replicate:topaz-upscale",
+    "kind": "upscale",
+    "displayName": "Topaz Video Upscale",
+    "allowedEndpoints": [],
+    "responseShape": "upscaledImage",
+    "uiCapabilities": {
+      "speed": "Medium",
+      "p75DurationSeconds": 60,
+      "supportedTypes": ["video", "image"]
+    }
+  }
+]

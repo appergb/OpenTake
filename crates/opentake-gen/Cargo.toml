@@ -7,3 +7,18 @@ repository.workspace = true
 description = "Generation backend clients (BYOK direct / self-hosted proxy); GenerationParams union types."
 
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "fs", "sync"] }
+futures-util = "0.3"
+async-trait = "0.1"
+thiserror = "2"
+anyhow = "1"
+url = "2"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+bytes = "1"
+opentake-domain = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "time", "sync", "rt-multi-thread"] }
