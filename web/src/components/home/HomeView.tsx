@@ -10,7 +10,7 @@
 import { useState } from "react";
 import { Plus, FolderOpen, Settings as SettingsIcon, Film, Trash2 } from "lucide-react";
 import { Icon } from "../ui/Icon";
-import { useT } from "../../i18n";
+import { useT, type TFunction } from "../../i18n";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useRecentStore, type RecentProject } from "../../store/recentStore";
 import {
@@ -233,7 +233,7 @@ function NewProjectCard({ onClick }: { onClick: () => void }) {
         textAlign: "left",
         position: "relative",
         zIndex: hovered ? 2 : 1,
-        transform: hovered ? "scale(1.02)" : "scale(1)",
+        transform: hovered ? "scale(1.03)" : "scale(1)",
         transition: "transform var(--anim-transition) var(--ease-out)",
       }}
     >
@@ -267,6 +267,23 @@ function NewProjectCard({ onClick }: { onClick: () => void }) {
   );
 }
 
+/** Format `openedAt` (epoch ms) as a relative time string — today / yesterday /
+ *  N days ago / N weeks ago / N months ago. Mirrors upstream's
+ *  `RelativeDateTimeFormatter` output. */
+function relativeTime(openedAt: number, t: TFunction): string {
+  const now = Date.now();
+  const diffMs = now - openedAt;
+  const dayMs = 86_400_000;
+  const days = Math.floor(diffMs / dayMs);
+  if (days <= 0) return t("home.relative.today");
+  if (days === 1) return t("home.relative.yesterday");
+  if (days < 7) return t("home.relative.daysAgo", { count: days });
+  const weeks = Math.floor(days / 7);
+  if (weeks < 5) return t("home.relative.weeksAgo", { count: weeks });
+  const months = Math.floor(days / 30);
+  return t("home.relative.monthsAgo", { count: months });
+}
+
 function ProjectCard({ entry }: { entry: RecentProject }) {
   const t = useT();
   const remove = useRecentStore((s) => s.remove);
@@ -279,7 +296,7 @@ function ProjectCard({ entry }: { entry: RecentProject }) {
       style={{
         position: "relative",
         zIndex: hovered ? 2 : 1,
-        transform: hovered ? "scale(1.02)" : "scale(1)",
+        transform: hovered ? "scale(1.03)" : "scale(1)",
         transition: "transform var(--anim-transition) var(--ease-out)",
       }}
     >
@@ -304,30 +321,47 @@ function ProjectCard({ entry }: { entry: RecentProject }) {
           }}
         >
           <Icon icon={Film} size={28} strokeWidth={1.4} />
-        </div>
-        <div
-          style={{
-            marginTop: "var(--space-sm)",
-            fontSize: "var(--fs-sm-md)",
-            color: "var(--text-primary)",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {entry.name}
+          {/* Bottom gradient + name overlay (mirrors upstream ProjectCard's
+              60pt black gradient + white title). Keeps the title inside the
+              thumbnail so the card footprint matches upstream. */}
+          <div
+            style={{
+              position: "absolute",
+              left: 0,
+              right: 0,
+              bottom: 0,
+              height: 60,
+              background: "linear-gradient(to top, rgba(0,0,0,0.7), rgba(0,0,0,0))",
+              display: "flex",
+              alignItems: "flex-end",
+              padding: "var(--space-sm)",
+              pointerEvents: "none",
+            }}
+          >
+            <span
+              style={{
+                color: "#fff",
+                fontSize: "var(--fs-sm)",
+                fontWeight: "var(--fw-medium)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                maxWidth: "100%",
+              }}
+            >
+              {entry.name}
+            </span>
+          </div>
         </div>
         <div
           className="tabular"
           style={{
+            marginTop: "var(--space-sm)",
             fontSize: "var(--fs-xs)",
             color: "var(--text-muted)",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
           }}
         >
-          {entry.path}
+          {relativeTime(entry.openedAt, t)}
         </div>
       </button>
 
@@ -347,7 +381,7 @@ function ProjectCard({ entry }: { entry: RecentProject }) {
             display: "inline-flex",
             alignItems: "center",
             justifyContent: "center",
-            borderRadius: "var(--radius-sm)",
+            borderRadius: "50%",
             background: "rgba(0,0,0,0.55)",
             color: "var(--status-error)",
           }}

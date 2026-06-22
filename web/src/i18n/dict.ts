@@ -156,6 +156,53 @@ const zh: Dict = {
   "settings.aboutLicense": "许可",
   "settings.aboutDesc": "OpenTake 是 Palmier Pro 的开源跨平台分支。",
 
+  // Settings panes (sidebar labels)
+  "settings.section.mcp": "MCP 说明",
+  "settings.section.storage": "存储",
+  "settings.section.notifications": "通知",
+
+  // MCP Instructions pane
+  "mcp.title": "MCP 服务器连接说明",
+  "mcp.overview":
+    "OpenTake 内置一个 MCP (Model Context Protocol) 服务器，将当前项目暴露给外部 AI 客户端。启用后，AI 助手可以直接读取时间线、添加片段、执行工作流。",
+  "mcp.serverUrl": "服务器地址",
+  "mcp.serverUrlDesc": "在支持的客户端中粘贴此地址，或使用下方一键命令。",
+  "mcp.copy": "复制",
+  "mcp.copied": "已复制",
+  "mcp.cursor": "Cursor",
+  "mcp.cursorInstall": "一键安装到 Cursor",
+  "mcp.cursorManual": "手动配置（settings.json 的 mcpServers 字段）",
+  "mcp.claudeCode": "Claude Code",
+  "mcp.claudeCodeCmd": "在终端运行",
+  "mcp.codex": "Codex",
+  "mcp.codexCmd": "在终端运行",
+  "mcp.claudeDesktop": "Claude Desktop",
+  "mcp.claudeDesktopManual": "手动配置（claude_desktop_config.json 的 mcpServers 字段）",
+  "mcp.note": "服务器仅在应用运行时可用，绑定 127.0.0.1，不接受外部连接。",
+
+  // Storage pane
+  "storage.cache": "缓存",
+  "storage.cacheDesc": "导入与生成过程中产生的临时文件缓存。",
+  "storage.cachePath": "缓存位置",
+  "storage.clearCache": "清除缓存",
+  "storage.clearCacheConfirm": "确定清除缓存？这不会影响已导入的媒体。",
+  "storage.cacheCleared": "缓存已清除。",
+  "storage.searchIndex": "搜索索引",
+  "storage.searchIndexDesc": "媒体库的语义搜索索引（如启用）。",
+  "storage.placeholder": "暂未提供运行时统计，将在后续版本补齐。",
+
+  // Notifications pane
+  "notifications.generation": "生成完成通知",
+  "notifications.generationDesc": "当 AI 生成任务完成时显示系统通知。",
+  "notifications.restartHint": "更改将在下次启动应用时生效。",
+
+  // Home relative time
+  "home.relative.today": "今天",
+  "home.relative.yesterday": "昨天",
+  "home.relative.daysAgo": "{count} 天前",
+  "home.relative.weeksAgo": "{count} 周前",
+  "home.relative.monthsAgo": "{count} 个月前",
+
   // Common
   "common.cancel": "取消",
   "common.open": "打开",
@@ -290,6 +337,53 @@ const en: Dict = {
   "settings.aboutVersion": "Version",
   "settings.aboutLicense": "License",
   "settings.aboutDesc": "OpenTake is the open-source, cross-platform fork of Palmier Pro.",
+
+  // Settings panes (sidebar labels)
+  "settings.section.mcp": "MCP Instructions",
+  "settings.section.storage": "Storage",
+  "settings.section.notifications": "Notifications",
+
+  // MCP Instructions pane
+  "mcp.title": "MCP Server Connection Guide",
+  "mcp.overview":
+    "OpenTake ships a built-in MCP (Model Context Protocol) server that exposes the current project to external AI clients. Once connected, an AI assistant can read the timeline, add clips, and run workflows.",
+  "mcp.serverUrl": "Server URL",
+  "mcp.serverUrlDesc": "Paste this URL into a supported client, or use one of the one-line commands below.",
+  "mcp.copy": "Copy",
+  "mcp.copied": "Copied",
+  "mcp.cursor": "Cursor",
+  "mcp.cursorInstall": "Install in Cursor",
+  "mcp.cursorManual": "Manual config (mcpServers field of settings.json)",
+  "mcp.claudeCode": "Claude Code",
+  "mcp.claudeCodeCmd": "Run in terminal",
+  "mcp.codex": "Codex",
+  "mcp.codexCmd": "Run in terminal",
+  "mcp.claudeDesktop": "Claude Desktop",
+  "mcp.claudeDesktopManual": "Manual config (mcpServers field of claude_desktop_config.json)",
+  "mcp.note": "The server is only available while the app is running, bound to 127.0.0.1, and does not accept external connections.",
+
+  // Storage pane
+  "storage.cache": "Cache",
+  "storage.cacheDesc": "Temporary files produced during import and generation.",
+  "storage.cachePath": "Cache location",
+  "storage.clearCache": "Clear cache",
+  "storage.clearCacheConfirm": "Clear the cache? This does not affect imported media.",
+  "storage.cacheCleared": "Cache cleared.",
+  "storage.searchIndex": "Search index",
+  "storage.searchIndexDesc": "Semantic search index for the media library (if enabled).",
+  "storage.placeholder": "Runtime statistics are not yet available; they will arrive in a later release.",
+
+  // Notifications pane
+  "notifications.generation": "Generation-complete notifications",
+  "notifications.generationDesc": "Show a system notification when an AI generation task finishes.",
+  "notifications.restartHint": "Changes take effect on the next app launch.",
+
+  // Home relative time
+  "home.relative.today": "Today",
+  "home.relative.yesterday": "Yesterday",
+  "home.relative.daysAgo": "{count} days ago",
+  "home.relative.weeksAgo": "{count} weeks ago",
+  "home.relative.monthsAgo": "{count} months ago",
 
   "common.cancel": "Cancel",
   "common.open": "Open",
