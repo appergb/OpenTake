@@ -32,6 +32,7 @@ opentake-domain = { workspace = true }
 opentake-media = { workspace = true }
 opentake-render = { workspace = true }
 opentake-gen = { workspace = true }
+opentake-agent = { workspace = true }
 # Preview composite frames are returned to the WebView as a base64 PNG data URL.
 image = { version = "0.25", default-features = false, features = ["png"] }
 base64 = "0.22"

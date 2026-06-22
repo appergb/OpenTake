@@ -7,6 +7,7 @@
 //! §2 — "真相源在 Rust，前端持镜像").
 
 mod commands;
+mod mcp;
 mod media;
 mod render;
 mod secret;
@@ -82,6 +83,16 @@ pub fn run() {
                 .unwrap_or_else(|_| std::env::temp_dir())
                 .join("models");
             let engine = MediaEngine::new(cache_root, models_dir);
+
+            // Bring up the loopback MCP server (#36) over a session-sharing clone
+            // of the core, before the core is moved into managed state. Bundled +
+            // user workflow plugins live under <app_data_dir>/workflows.
+            let workflows_dir = app
+                .path()
+                .app_data_dir()
+                .unwrap_or_else(|_| std::env::temp_dir())
+                .join("workflows");
+            mcp::spawn(core.clone(), workflows_dir);
 
             app.manage(core);
             app.manage(MediaState::new(engine));

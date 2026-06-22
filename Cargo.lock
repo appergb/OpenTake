@@ -3279,6 +3279,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "image",
+ "opentake-agent",
  "opentake-core",
  "opentake-domain",
  "opentake-gen",
