@@ -3212,6 +3212,7 @@ version = "0.1.0"
 dependencies = [
  "opentake-core",
  "opentake-domain",
+ "opentake-gen",
  "opentake-media",
  "opentake-ops",
  "serde",

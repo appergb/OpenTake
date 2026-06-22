@@ -12,6 +12,7 @@ import type {
   EditRequest,
   EditResult,
   MediaList,
+  SecretStatus,
   TimelineSnapshot,
 } from "./types";
 
@@ -122,6 +123,37 @@ export async function getMedia(): Promise<MediaList> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<MediaList>("get_media");
   return { items: [] };
+}
+
+// MARK: - BYOK secret store
+//
+// API keys are stored in the OS keychain by the Rust backend (`secret_*`
+// commands wrapping `opentake-gen`'s `KeyringStore`). The plaintext key is sent
+// only on save; every command returns a masked `SecretStatus`, so the key never
+// lives in JS memory or localStorage. Outside Tauri there is no keychain, so the
+// fallback reports "no key" — the form renders but cannot persist.
+
+const NO_SECRET: SecretStatus = { hasKey: false, masked: "" };
+
+export async function secretSave(
+  provider: string,
+  key: string,
+): Promise<SecretStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<SecretStatus>("secret_save", { provider, key });
+  return NO_SECRET;
+}
+
+export async function secretLoad(provider: string): Promise<SecretStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<SecretStatus>("secret_load", { provider });
+  return NO_SECRET;
+}
+
+export async function secretDelete(provider: string): Promise<SecretStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<SecretStatus>("secret_delete", { provider });
+  return NO_SECRET;
 }
 
 // MARK: - Events

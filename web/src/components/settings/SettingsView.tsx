@@ -1,13 +1,14 @@
 /**
  * Settings view. Reachable from both the Home sidebar and the editor title bar.
  * Panes (single scrollable page in this phase): General (language), Appearance
- * (theme), Import (default folder), AI (BYOK key — placeholder form), and About
- * (version / license). Preferences persist via `settingsStore` / `i18nStore`;
- * the BYOK form is a non-functional placeholder (a real secret store is later).
+ * (theme), Import (default folder), AI (BYOK key), and About (version / license).
+ * Preferences persist via `settingsStore` / `i18nStore`; the BYOK key is stored
+ * in the OS keychain via the `secret_*` Tauri commands (see `lib/api.ts`) — the
+ * plaintext key never reaches this component's persisted state.
  */
 
-import { useState } from "react";
-import { Check, FolderOpen } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Check, FolderOpen, Trash2 } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { Dropdown } from "../ui/Dropdown";
 import { useT, useI18nStore, LOCALES } from "../../i18n";
@@ -18,6 +19,8 @@ import {
 } from "../../store/settingsStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { openDialog } from "../../lib/dialog";
+import { secretSave, secretLoad, secretDelete } from "../../lib/api";
+import type { SecretStatus } from "../../lib/types";
 
 export function SettingsView() {
   const t = useT();
@@ -317,12 +320,71 @@ const PROVIDERS: Array<{ id: ByokProvider; label: string }> = [
   { id: "google", label: "Google" },
 ];
 
+/** Narrow a rejected-promise reason (a `String` from the Tauri boundary, or an
+ *  `Error`) to a displayable message. */
+function errorMessage(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
 function AiPane() {
   const t = useT();
   const provider = useSettingsStore((s) => s.byokProvider);
   const setProvider = useSettingsStore((s) => s.setByokProvider);
-  const [key, setKey] = useState("");
-  const [saved, setSaved] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [status, setStatus] = useState<SecretStatus>({ hasKey: false, masked: "" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Reflect the keychain status for the active provider; reload on switch. The
+  // plaintext key is never fetched — only `hasKey` and the masked form.
+  useEffect(() => {
+    let alive = true;
+    setDraft("");
+    setError(null);
+    void secretLoad(provider).then(
+      (s) => {
+        if (alive) setStatus(s);
+      },
+      () => {
+        if (alive) setStatus({ hasKey: false, masked: "" });
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [provider]);
+
+  const trimmed = draft.trim();
+
+  const save = async () => {
+    if (trimmed.length === 0 || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setStatus(await secretSave(provider, trimmed));
+      setDraft("");
+    } catch (e) {
+      setError(t("settings.byokSaveFailed", { error: errorMessage(e) }));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setStatus(await secretDelete(provider));
+      setDraft("");
+    } catch (e) {
+      setError(t("settings.byokSaveFailed", { error: errorMessage(e) }));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <Section title={t("settings.section.ai")}>
@@ -342,12 +404,16 @@ function AiPane() {
         <div style={{ display: "flex", gap: "var(--space-xs)" }}>
           <input
             type="password"
-            value={key}
+            value={draft}
             onChange={(e) => {
-              setKey(e.target.value);
-              setSaved(false);
+              setDraft(e.target.value);
+              setError(null);
             }}
-            placeholder={t("settings.byokKeyPlaceholder")}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void save();
+            }}
+            placeholder={status.hasKey ? status.masked : t("settings.byokKeyPlaceholder")}
+            className="tabular"
             style={{
               flex: 1,
               height: 28,
@@ -359,29 +425,60 @@ function AiPane() {
               padding: "0 var(--space-sm)",
             }}
           />
-          <button
-            type="button"
-            disabled={key.length === 0}
-            onClick={() => setSaved(true)}
-            className="hover-area"
-            style={{
-              height: 28,
-              padding: "0 var(--space-lg)",
-              borderRadius: "var(--radius-sm)",
-              border: "var(--bw-thin) solid var(--border-primary)",
-              color: "var(--text-primary)",
-              fontSize: "var(--fs-sm)",
-              fontWeight: "var(--fw-medium)",
-              opacity: key.length === 0 ? 0.4 : 1,
-            }}
-          >
-            {t("settings.byokSave")}
-          </button>
+          {trimmed.length > 0 ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void save()}
+              className="hover-area"
+              style={{
+                height: 28,
+                padding: "0 var(--space-lg)",
+                borderRadius: "var(--radius-sm)",
+                border: "var(--bw-thin) solid var(--border-primary)",
+                color: "var(--text-primary)",
+                fontSize: "var(--fs-sm)",
+                fontWeight: "var(--fw-medium)",
+                opacity: busy ? 0.4 : 1,
+              }}
+            >
+              {t("settings.byokSave")}
+            </button>
+          ) : (
+            status.hasKey && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void remove()}
+                className="hover-area"
+                title={t("settings.byokDelete")}
+                aria-label={t("settings.byokDelete")}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: 28,
+                  height: 28,
+                  borderRadius: "var(--radius-sm)",
+                  border: "var(--bw-thin) solid var(--border-primary)",
+                  color: "var(--text-secondary)",
+                  opacity: busy ? 0.4 : 1,
+                }}
+              >
+                <Icon icon={Trash2} size={14} />
+              </button>
+            )
+          )}
         </div>
-        {saved && (
-          <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)" }}>
-            {t("settings.byokSaved")}
-          </div>
+        {error ? (
+          <div style={{ fontSize: "var(--fs-xs)", color: "var(--status-error)" }}>{error}</div>
+        ) : (
+          status.hasKey &&
+          trimmed.length === 0 && (
+            <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)" }}>
+              {t("settings.byokSaved")}
+            </div>
+          )
         )}
       </div>
     </Section>

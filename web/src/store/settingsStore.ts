@@ -1,9 +1,10 @@
 /**
  * App-level settings (UI preferences only — never editing truth). Persisted to
  * localStorage so they survive restarts: theme, the default folder the import
- * dialog opens to, and the BYOK provider choice. The actual API key is also kept
- * here only as a local convenience for the placeholder form; a real secret store
- * is a later concern.
+ * dialog opens to, and the BYOK provider choice. Only the *provider choice* is
+ * stored here — the API key itself never touches this store or localStorage; it
+ * lives in the OS keychain via the `secret_*` Tauri commands (see
+ * `lib/api.ts` / `src-tauri/src/secret.rs`).
  */
 
 import { create } from "zustand";

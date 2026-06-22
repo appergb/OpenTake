@@ -8,6 +8,7 @@
 
 mod commands;
 mod media;
+mod secret;
 
 use opentake_core::{AppCore, CoreEvent};
 use opentake_media::MediaEngine;
@@ -63,6 +64,9 @@ pub fn run() {
             media::import_folder,
             media::import_media,
             media::get_media,
+            secret::secret_save,
+            secret::secret_load,
+            secret::secret_delete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

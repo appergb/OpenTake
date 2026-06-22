@@ -182,3 +182,13 @@ export interface MediaItem {
 export interface MediaList {
   items: MediaItem[];
 }
+
+// MARK: - BYOK secret store (mirror of src-tauri SecretStatus)
+
+/** Masked status of a provider's stored API key. The plaintext key never
+ *  crosses the Tauri boundary: `secret_load` / `secret_save` / `secret_delete`
+ *  return only `hasKey` and a bullet-`masked` form (last 4 chars revealed). */
+export interface SecretStatus {
+  hasKey: boolean;
+  masked: string;
+}
