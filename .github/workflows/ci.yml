@@ -73,3 +73,6 @@ jobs:
 
       - name: pnpm build
         run: pnpm -C web build
+
+      - name: pnpm test
+        run: pnpm -C web test

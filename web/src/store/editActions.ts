@@ -153,11 +153,30 @@ function entryForMedia(timeline: Timeline, item: MediaItem): ClipEntryReq | null
   };
 }
 
-/** Add a media-library item to the timeline (drag-drop from the media panel).
- *  Resolves the target track and append position from the current mirror; if the
- *  timeline has no compatible track (e.g. a brand-new empty project), creates one
- *  on demand first (upstream `placeClip` auto-creates), then places the clip. */
-export async function addMediaToTimeline(item: MediaItem) {
+/** Serialized tail for media -> timeline adds. Both call sites fire-and-forget
+ *  (`void addMediaToTimeline(...)`), so this chains adds to keep them from
+ *  racing on the shared mirror. See [`addMediaToTimeline`]. */
+let mediaAddQueue: Promise<void> = Promise.resolve();
+
+/** Add a media-library item to the timeline (drag-drop / double-click from the
+ *  media panel). Resolves the target track and append position from the current
+ *  mirror; if the timeline has no compatible track (e.g. a brand-new empty
+ *  project), creates one on demand first (upstream `placeClip` auto-creates),
+ *  then places the clip.
+ *
+ *  Adds are **serialized**: a rapid second drop/double-click would otherwise
+ *  start while the first is still in flight, read a stale (clip-less) mirror,
+ *  compute `startFrame` 0 again, and have the core's overwrite-on-place drop the
+ *  first clip. The queue makes each add observe the previous one's result. */
+export function addMediaToTimeline(item: MediaItem): Promise<void> {
+  const run = () => addMediaToTimelineInner(item);
+  const result = mediaAddQueue.then(run, run);
+  // Keep the queue alive even if an individual add rejects.
+  mediaAddQueue = result.catch(() => {});
+  return result;
+}
+
+async function addMediaToTimelineInner(item: MediaItem): Promise<void> {
   let timeline = useProjectStore.getState().timeline;
   if (firstCompatibleTrackIndex(timeline, item.type) === null) {
     await insertTrack(item.type === "audio" ? "audio" : "video");
@@ -169,4 +188,9 @@ export async function addMediaToTimeline(item: MediaItem) {
   const entry = entryForMedia(timeline, item);
   if (!entry) return;
   await addClips([entry]);
+  // Tauri refreshes the mirror via the async `timeline_changed` event, which may
+  // not have fired yet; refresh now so the next queued add computes its append
+  // position from a mirror that already includes this clip. (Browser mode
+  // already refreshed inside `applyAndRefresh` — guard to avoid a double fetch.)
+  if (isTauri) await forceRefresh();
 }

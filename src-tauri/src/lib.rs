@@ -38,6 +38,13 @@ pub fn run() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 // Background-run: don't quit, hide and return to Home.
                 api.prevent_close();
+                // Flush the open project before hiding so background-run never
+                // loses edits (autosave is debounced; this is the final write).
+                // No-op when no project is open (save_project returns an error we
+                // intentionally ignore).
+                if let Some(core) = window.app_handle().try_state::<AppCore>() {
+                    let _ = core.save_project(None);
+                }
                 let _ = window.hide();
                 let _ = window.app_handle().emit("go_home", ());
             }

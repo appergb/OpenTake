@@ -152,8 +152,14 @@ export async function compositeFrame(
   maxSize?: number,
 ): Promise<CompositeFrame | null> {
   await ensureTauri();
+  // The backend command takes an `i32`; the playhead accumulates as a float
+  // during playback, so floor to the current frame before invoking (a
+  // non-integer is rejected/coerced inconsistently by Tauri's deserializer).
   if (invokeImpl)
-    return invokeImpl<CompositeFrame>("composite_frame", { frame, maxSize });
+    return invokeImpl<CompositeFrame>("composite_frame", {
+      frame: Math.floor(frame),
+      maxSize,
+    });
   return null;
 }
 

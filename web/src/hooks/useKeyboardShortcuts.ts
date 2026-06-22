@@ -9,6 +9,7 @@ import { useEffect } from "react";
 import { useEditorUiStore } from "../store/uiStore";
 import { useProjectStore } from "../store/projectStore";
 import * as edit from "../store/editActions";
+import { saveCurrentProject } from "../store/projectActions";
 
 function isTextEntry(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -43,6 +44,10 @@ export function useKeyboardShortcuts() {
           case "KeyK":
             e.preventDefault();
             edit.splitAtPlayhead();
+            return;
+          case "KeyS":
+            e.preventDefault();
+            void saveCurrentProject();
             return;
           case "Digit1":
             e.preventDefault();

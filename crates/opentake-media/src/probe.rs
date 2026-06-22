@@ -89,9 +89,17 @@ pub fn parse_probe(json: &serde_json::Value) -> MediaProbe {
         .iter()
         .find(|s| s.get("codec_type").and_then(|v| v.as_str()) == Some("video"));
     let has_video = video.is_some();
-    let has_audio = streams
-        .iter()
-        .any(|s| s.get("codec_type").and_then(|v| v.as_str()) == Some("audio"));
+    // An audio stream that reports zero channels carries no real sound (an
+    // empty/placeholder track some exporters add). Treating it as "has audio"
+    // makes a dropped video spawn a phantom linked audio clip (the user's "no
+    // audio but it split" report), so require channels > 0 when reported. Streams
+    // that don't report `channels` are kept as audio (conservative default).
+    let has_audio = streams.iter().any(|s| {
+        if s.get("codec_type").and_then(|v| v.as_str()) != Some("audio") {
+            return false;
+        }
+        s.get("channels").and_then(|v| v.as_u64()) != Some(0)
+    });
 
     let mut width = None;
     let mut height = None;
@@ -273,5 +281,32 @@ mod tests {
         });
         let p = parse_probe(&j);
         assert!(p.has_video && p.has_audio);
+    }
+
+    #[test]
+    fn video_with_zero_channel_audio_has_no_audio() {
+        // An empty/placeholder audio stream (0 channels) must not count as audio,
+        // so a dropped video does not spawn a phantom linked audio clip.
+        let j = json!({
+            "streams": [
+                {"codec_type": "video", "width": 640, "height": 480, "avg_frame_rate": "30/1"},
+                {"codec_type": "audio", "channels": 0}
+            ],
+            "format": {"duration": "5.0"}
+        });
+        let p = parse_probe(&j);
+        assert!(p.has_video && !p.has_audio);
+    }
+
+    #[test]
+    fn video_with_multichannel_audio_flags_audio() {
+        let j = json!({
+            "streams": [
+                {"codec_type": "video", "width": 640, "height": 480, "avg_frame_rate": "30/1"},
+                {"codec_type": "audio", "channels": 2, "sample_rate": "48000"}
+            ],
+            "format": {"duration": "5.0"}
+        });
+        assert!(parse_probe(&j).has_audio);
     }
 }

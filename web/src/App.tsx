@@ -5,6 +5,7 @@ import { HomeView } from "./components/home/HomeView";
 import { SettingsView } from "./components/settings/SettingsView";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { usePlaybackTicker } from "./hooks/usePlaybackTicker";
+import { useAutosave } from "./hooks/useAutosave";
 import { startSync } from "./store/sync";
 import { startMediaSync } from "./store/mediaStore";
 import { useEditorUiStore } from "./store/uiStore";
@@ -19,6 +20,7 @@ export default function App() {
   // order across navigation.
   useKeyboardShortcuts();
   usePlaybackTicker();
+  useAutosave();
 
   const view = useEditorUiStore((s) => s.view);
 

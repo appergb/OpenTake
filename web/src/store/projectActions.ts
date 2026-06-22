@@ -57,9 +57,28 @@ export async function newProjectAndEnter(): Promise<void> {
   await api.projectNew();
   await api.projectSave(path);
   useProjectStore.getState().setProjectPath(path);
+  useProjectStore.getState().markSaved();
   useRecentStore.getState().add(path);
   await forceRefresh();
   useEditorUiStore.getState().setView("editor");
+}
+
+/**
+ * Save the open project back to its bundle (`project_save(None)`). Used by the
+ * Cmd/Ctrl+S shortcut and the debounced autosave. No-op when no project is open
+ * (Home view) or outside Tauri. The backend already knows the bundle path from
+ * the initial save, so no path is passed. Best-effort: a failure leaves the
+ * dirty state so the next autosave/Cmd+S retries.
+ */
+export async function saveCurrentProject(): Promise<void> {
+  const { projectPath } = useProjectStore.getState();
+  if (!projectPath) return;
+  try {
+    await api.projectSave(null);
+    useProjectStore.getState().markSaved();
+  } catch {
+    // Keep the document dirty so a later save retries; surfaced via UI later.
+  }
 }
 
 /** Open `path` (a `.opentake` bundle), refresh the mirror, record it, and enter
@@ -68,6 +87,7 @@ export async function openProjectPath(path: string): Promise<void> {
   const snap = await api.projectOpen(path);
   useProjectStore.getState().setMirror(snap.timeline, snap.version);
   useProjectStore.getState().setProjectPath(path);
+  useProjectStore.getState().markSaved();
   useRecentStore.getState().add(path);
   useEditorUiStore.getState().setView("editor");
 }
