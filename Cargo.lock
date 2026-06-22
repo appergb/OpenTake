@@ -3216,11 +3216,14 @@ dependencies = [
 name = "opentake-tauri"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "image",
  "opentake-core",
  "opentake-domain",
  "opentake-gen",
  "opentake-media",
  "opentake-ops",
+ "opentake-render",
  "serde",
  "serde_json",
  "tauri",

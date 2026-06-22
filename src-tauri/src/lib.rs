@@ -8,6 +8,7 @@
 
 mod commands;
 mod media;
+mod render;
 mod secret;
 
 use opentake_core::{AppCore, CoreEvent};
@@ -74,6 +75,8 @@ pub fn run() {
 
             app.manage(core);
             app.manage(MediaState::new(engine));
+            // Lazily-acquired GPU context for timeline composite previews (#47).
+            app.manage(render::RenderState::new());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -90,6 +93,7 @@ pub fn run() {
             media::import_folder,
             media::import_media,
             media::get_media,
+            render::composite_frame,
             secret::secret_save,
             secret::secret_load,
             secret::secret_delete,

@@ -133,6 +133,30 @@ export async function getMedia(): Promise<MediaList> {
   return { items: [] };
 }
 
+// MARK: - Timeline composite preview (#47)
+//
+// `composite_frame` renders the timeline at a frame on the GPU (wgpu compositor)
+// and returns a PNG data URL the Preview paints onto a <canvas>. `maxSize` caps
+// the longest side (px); omit for the backend default. Outside Tauri there is no
+// GPU/core, so this returns null and the Preview keeps its placeholder.
+
+/** One composited timeline frame: a PNG data URL plus its pixel size. */
+export interface CompositeFrame {
+  width: number;
+  height: number;
+  dataUrl: string;
+}
+
+export async function compositeFrame(
+  frame: number,
+  maxSize?: number,
+): Promise<CompositeFrame | null> {
+  await ensureTauri();
+  if (invokeImpl)
+    return invokeImpl<CompositeFrame>("composite_frame", { frame, maxSize });
+  return null;
+}
+
 // MARK: - BYOK secret store
 //
 // API keys are stored in the OS keychain by the Rust backend (`secret_*`

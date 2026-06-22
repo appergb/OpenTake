@@ -23,6 +23,7 @@ import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
 import { formatTimecode, totalFrames } from "../../lib/geometry";
 import { assetUrl } from "../../lib/asset";
+import { useTimelineFrame } from "./useTimelineFrame";
 import { useT } from "../../i18n";
 import type { MediaItem } from "../../lib/types";
 
@@ -53,6 +54,14 @@ export function Preview() {
   }, [previewMediaId]);
 
   const previewing = previewItem !== null;
+  // Timeline composite preview (#47): on the Timeline tab, paint the GPU-
+  // composited frame for the current playhead (replacing the black placeholder).
+  // `timeline` identity changes on every `timeline_changed`, forcing a refetch.
+  const timelineFrameUrl = useTimelineFrame(
+    activeFrame,
+    !previewing && timeline.tracks.length > 0,
+    timeline,
+  );
   const fps = timeline.fps;
   const total = previewing
     ? Math.max(0, Math.round(mediaDuration * fps))
@@ -145,8 +154,15 @@ export function Preview() {
               onDuration={setMediaDuration}
               onPlayingChange={setMediaPlaying}
             />
+          ) : timelineFrameUrl ? (
+            // Rust GPU composite of the timeline at the current playhead (#47).
+            <img
+              src={timelineFrameUrl}
+              alt=""
+              draggable={false}
+              style={{ width: "100%", height: "100%", objectFit: "contain" }}
+            />
           ) : (
-            // Rust composite frame target (timeline preview — wired in a later batch).
             <span>{timeline.tracks.length === 0 ? t("preview.noMedia") : `${timeline.width}×${timeline.height}`}</span>
           )}
         </div>
