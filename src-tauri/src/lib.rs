@@ -114,6 +114,7 @@ pub fn run() {
             media::import_folder,
             media::import_media,
             media::get_media,
+            media::extract_audio,
             render::composite_frame,
             secret::secret_save,
             secret::secret_load,

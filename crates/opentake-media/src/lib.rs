@@ -163,6 +163,65 @@ impl MediaEngine {
     pub fn export_pause(&self) -> ExportPause {
         self.export_pause.clone()
     }
+
+    /// Extract the audio track from `input` into `output` as a self-contained
+    /// audio file. The container/codec is picked from the output extension:
+    /// `.m4a` → AAC in MP4, `.mp3` → libmp3lame, `.wav` → PCM s16le. Video is
+    /// dropped (`-vn`). Streams the mux directly (input file → output file),
+    /// never holding the full audio in memory — suitable for long sources.
+    ///
+    /// Returns the output path on success. Errors bubble up as `MediaError::Ffmpeg`
+    /// when ffmpeg is missing, exits non-zero, or the extension is unsupported.
+    pub fn extract_audio(&self, input: &Path, output: &Path) -> Result<std::path::PathBuf> {
+        extract_audio_file(input, output).map(|_| output.to_path_buf())
+    }
+}
+
+/// Run `ffmpeg -y -i <input> -vn <codec args> <output>` to mux the audio track
+/// into a standalone file. Codec is selected by `output`'s extension so the
+/// caller just picks a save-path filter in the native dialog and the right
+/// encoder falls out. `-y` overwrites (the save dialog already confirmed).
+fn extract_audio_file(input: &Path, output: &Path) -> Result<()> {
+    let codec_args: Vec<&str> = match output.extension().and_then(|e| e.to_str()) {
+        Some("m4a") | Some("m4r") | Some("aac") => vec!["-c:a", "aac", "-b:a", "192k"],
+        Some("mp3") => vec!["-c:a", "libmp3lame", "-b:a", "192k"],
+        Some("wav") => vec!["-c:a", "pcm_s16le"],
+        Some(ext) => {
+            return Err(MediaError::Ffmpeg(format!(
+                "unsupported audio extension: .{ext} (use m4a, mp3, or wav)"
+            )));
+        }
+        None => {
+            return Err(MediaError::Ffmpeg(
+                "output path has no extension (use .m4a, .mp3, or .wav)".into(),
+            ));
+        }
+    };
+
+    let mut cmd = std::process::Command::new(ff::ffmpeg_path());
+    cmd.arg("-y")
+        .arg("-i")
+        .arg(input)
+        .arg("-vn")
+        .args(&codec_args)
+        .arg(output);
+
+    let out = cmd
+        .output()
+        .map_err(|e| MediaError::Ffmpeg(format!("ffmpeg spawn: {e}")))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(MediaError::Ffmpeg(format!(
+            "ffmpeg exited {}{}",
+            out.status,
+            if stderr.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", stderr.trim())
+            }
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

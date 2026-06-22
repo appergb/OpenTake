@@ -22,6 +22,7 @@ import {
   FileAudio,
   Image as ImageIcon,
   Type as TypeIcon,
+  Star,
 } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { HoverButton } from "../ui/HoverButton";
@@ -33,6 +34,8 @@ import { formatTimecode } from "../../lib/geometry";
 import { assetUrl } from "../../lib/asset";
 import { useProjectStore } from "../../store/projectStore";
 import { addMediaToTimeline } from "../../store/editActions";
+import { extractAudio } from "../../lib/api";
+import { saveDialog } from "../../lib/dialog";
 import type { MediaItem } from "../../lib/types";
 
 /** MIME-ish type used on dataTransfer when dragging a media item to the timeline. */
@@ -376,17 +379,51 @@ function MediaGrid({ items }: { items: MediaItem[] }) {
 }
 
 function MediaCard({ item }: { item: MediaItem }) {
+  const t = useT();
   const fps = useProjectStore((s) => s.timeline.fps);
   const setPreviewMedia = useEditorUiStore((s) => s.setPreviewMedia);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
   const durationFrames = Math.round(item.duration * fps);
   const selected = previewMediaId === item.id;
   const thumb = assetUrl(item.path);
+  const [hovered, setHovered] = useState(false);
+  const [feedback, setFeedback] = useState<string | null>(null);
 
   const onDragStart = (e: React.DragEvent) => {
     e.dataTransfer.setData(MEDIA_DND_TYPE, item.id);
     e.dataTransfer.effectAllowed = "copy";
   };
+
+  /** Extract the audio track into a standalone file via ffmpeg. Opens a native
+   *  save dialog (m4a/mp3/wav), then calls the `extract_audio` Tauri command.
+   *  Only shown for video assets that carry audio (Issue #39). */
+  const onExtractAudio = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const save = await saveDialog();
+    if (!save) return; // non-Tauri / dialog unavailable
+    const chosen = await save({
+      title: t("media.extractAudio"),
+      defaultPath: `${item.name}.m4a`,
+      filters: [
+        { name: "Audio (M4A)", extensions: ["m4a"] },
+        { name: "Audio (MP3)", extensions: ["mp3"] },
+        { name: "Audio (WAV)", extensions: ["wav"] },
+      ],
+    });
+    if (typeof chosen !== "string") return; // user cancelled
+    setFeedback(null);
+    try {
+      const out = await extractAudio(item.id, chosen);
+      setFeedback(t("media.extractAudioSuccess", { path: out }));
+    } catch (err) {
+      setFeedback(t("media.extractAudioFailed", { error: String(err) }));
+    }
+    setTimeout(() => setFeedback(null), 4000);
+  };
+
+  // The star/export button only appears for video assets with an audio track.
+  const canExtractAudio = item.type === "video" && item.hasAudio;
 
   return (
     <div
@@ -394,6 +431,8 @@ function MediaCard({ item }: { item: MediaItem }) {
       onDragStart={onDragStart}
       onClick={() => setPreviewMedia(item.id)}
       onDoubleClick={() => void addMediaToTimeline(item)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       title={item.name}
       style={{ display: "flex", flexDirection: "column", gap: 4, cursor: "grab" }}
     >
@@ -454,6 +493,33 @@ function MediaCard({ item }: { item: MediaItem }) {
             {formatTimecode(durationFrames, fps)}
           </span>
         )}
+        {/* Extract-audio star button (top-right). Shown only for video assets
+            with audio, on hover. stopPropagation prevents the card's click-to-
+            preview and drag-start from firing. */}
+        {canExtractAudio && hovered && (
+          <button
+            type="button"
+            title={t("media.extractAudioHint")}
+            aria-label={t("media.extractAudio")}
+            onClick={onExtractAudio}
+            className="hover-area"
+            style={{
+              position: "absolute",
+              top: 4,
+              left: 4,
+              width: 22,
+              height: 22,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              borderRadius: "var(--radius-xs)",
+              background: "rgba(0,0,0,0.6)",
+              color: "var(--text-secondary)",
+            }}
+          >
+            <Icon icon={Star} size={12} />
+          </button>
+        )}
       </div>
       <span
         style={{
@@ -466,6 +532,19 @@ function MediaCard({ item }: { item: MediaItem }) {
       >
         {item.name}
       </span>
+      {feedback && (
+        <span
+          style={{
+            fontSize: "var(--fs-micro)",
+            color: "var(--text-tertiary)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {feedback}
+        </span>
+      )}
     </div>
   );
 }

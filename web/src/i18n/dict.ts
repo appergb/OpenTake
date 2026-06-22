@@ -57,6 +57,11 @@ const zh: Dict = {
   "media.importing": "正在导入…",
   "media.importFailed": "导入失败:{error}",
   "media.dropToAdd": "松开以添加到时间线",
+  "media.extractAudio": "提取音频",
+  "media.extractAudioHint": "提取音频轨到本地文件",
+  "media.extractAudioSuccess": "音频已保存：{path}",
+  "media.extractAudioFailed": "提取失败：{error}",
+  "media.extractAudioNoAudio": "此媒体没有音频轨",
 
   // Inspector
   "inspector.title": "检查器",
@@ -199,7 +204,13 @@ const en: Dict = {
   "media.importing": "Importing…",
   "media.importFailed": "Import failed: {error}",
   "media.dropToAdd": "Release to add to the timeline",
+  "media.extractAudio": "Extract Audio",
+  "media.extractAudioHint": "Extract the audio track to a local file",
+  "media.extractAudioSuccess": "Audio saved: {path}",
+  "media.extractAudioFailed": "Extract failed: {error}",
+  "media.extractAudioNoAudio": "No audio track in this media",
 
+  // Inspector
   "inspector.title": "Inspector",
   "inspector.timeline": "Timeline",
   "inspector.selectedCount": "{count} selected",
