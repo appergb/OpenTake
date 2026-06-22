@@ -136,7 +136,8 @@ impl OpenAiAdapter {
             return Err(map_http_error(resp.status, &resp.body));
         }
         // Raw audio bytes -> data URL (no object storage configured).
-        let data_url = super::encode_data_url(&resp.body, resp.header("Content-Type"), "audio/mpeg");
+        let data_url =
+            super::encode_data_url(&resp.body, resp.header("Content-Type"), "audio/mpeg");
         let job_id = format!("openai-tts-{}", resp.body.len());
         Ok(self.cache_job(GenerationJob::succeeded(job_id, vec![data_url])))
     }
@@ -255,7 +256,10 @@ mod tests {
         let a = adapter(&mock);
         let route = ModelRoute::parse("openai:gpt-image-1").unwrap();
         let job = a
-            .submit(&route, &GenerationParams::Image(ImageParams::new("x", "1:1", 1)))
+            .submit(
+                &route,
+                &GenerationParams::Image(ImageParams::new("x", "1:1", 1)),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -269,7 +273,8 @@ mod tests {
         let mock = MockTransport::new();
         // Raw bytes "ABC" -> base64 "QUJD"
         let mut resp = HttpResponse::new(200, b"ABC".to_vec());
-        resp.headers.push(("Content-Type".into(), "audio/mpeg".into()));
+        resp.headers
+            .push(("Content-Type".into(), "audio/mpeg".into()));
         mock.on_raw(Method::Post, "https://mockoai/v1/audio/speech", resp);
         let a = adapter(&mock);
         let route = ModelRoute::parse("openai:tts-1").unwrap();
@@ -310,6 +315,9 @@ mod tests {
     #[tokio::test]
     async fn upload_unsupported() {
         let a = adapter(&MockTransport::new());
-        assert!(a.upload(Path::new("/tmp/x.png"), "image/png").await.is_err());
+        assert!(a
+            .upload(Path::new("/tmp/x.png"), "image/png")
+            .await
+            .is_err());
     }
 }

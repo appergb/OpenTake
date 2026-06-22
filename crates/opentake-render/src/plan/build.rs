@@ -28,12 +28,7 @@ fn round_haz(v: f64) -> i64 {
 /// preferredTransform = pt.concatenating(translate(-box.minX, -box.minY))
 /// ```
 fn normalize_box(nat0: (f64, f64), pt: [f64; 6]) -> ((f64, f64), [f64; 6]) {
-    let corners = [
-        (0.0, 0.0),
-        (nat0.0, 0.0),
-        (0.0, nat0.1),
-        (nat0.0, nat0.1),
-    ];
+    let corners = [(0.0, 0.0), (nat0.0, 0.0), (0.0, nat0.1), (nat0.0, nat0.1)];
     let mut min_x = f64::INFINITY;
     let mut min_y = f64::INFINITY;
     let mut max_x = f64::NEG_INFINITY;

@@ -79,13 +79,15 @@ impl ProviderRegistry {
 
     /// Register an adapter under its `prefix()`.
     pub fn with(mut self, adapter: Arc<dyn ProviderAdapter>) -> Self {
-        self.adapters
-            .insert(adapter.prefix().to_string(), adapter);
+        self.adapters.insert(adapter.prefix().to_string(), adapter);
         self
     }
 
     /// Resolve `model_id` to its adapter + parsed route. Errors on unknown prefix.
-    pub fn route(&self, model_id: &str) -> Result<(Arc<dyn ProviderAdapter>, ModelRoute), GenError> {
+    pub fn route(
+        &self,
+        model_id: &str,
+    ) -> Result<(Arc<dyn ProviderAdapter>, ModelRoute), GenError> {
         let route = ModelRoute::parse(model_id)?;
         match self.adapters.get(&route.prefix) {
             Some(a) => Ok((a.clone(), route)),
@@ -156,7 +158,11 @@ pub(crate) fn base64_encode(input: &[u8]) -> String {
 }
 
 /// Encode raw media bytes into a `data:` URL with a best-effort MIME type.
-pub(crate) fn encode_data_url(bytes: &[u8], content_type: Option<&str>, default_mime: &str) -> String {
+pub(crate) fn encode_data_url(
+    bytes: &[u8],
+    content_type: Option<&str>,
+    default_mime: &str,
+) -> String {
     let mime = content_type.unwrap_or(default_mime);
     format!("data:{};base64,{}", mime, base64_encode(bytes))
 }
@@ -232,24 +238,66 @@ mod tests {
 
     #[test]
     fn content_type_inference_matches_upstream_table() {
-        assert_eq!(content_type_for(&PathBuf::from("a.JPG"), "image"), "image/jpeg");
-        assert_eq!(content_type_for(&PathBuf::from("a.png"), "image"), "image/png");
-        assert_eq!(content_type_for(&PathBuf::from("a.webp"), "image"), "image/webp");
-        assert_eq!(content_type_for(&PathBuf::from("a.heic"), "image"), "image/heic");
-        assert_eq!(content_type_for(&PathBuf::from("a.gif"), "image"), "image/gif");
-        assert_eq!(content_type_for(&PathBuf::from("a.mp4"), "video"), "video/mp4");
-        assert_eq!(content_type_for(&PathBuf::from("a.m4v"), "video"), "video/mp4");
-        assert_eq!(content_type_for(&PathBuf::from("a.mov"), "video"), "video/quicktime");
-        assert_eq!(content_type_for(&PathBuf::from("a.mp3"), "audio"), "audio/mpeg");
-        assert_eq!(content_type_for(&PathBuf::from("a.wav"), "audio"), "audio/wav");
-        assert_eq!(content_type_for(&PathBuf::from("a.m4a"), "audio"), "audio/mp4");
+        assert_eq!(
+            content_type_for(&PathBuf::from("a.JPG"), "image"),
+            "image/jpeg"
+        );
+        assert_eq!(
+            content_type_for(&PathBuf::from("a.png"), "image"),
+            "image/png"
+        );
+        assert_eq!(
+            content_type_for(&PathBuf::from("a.webp"), "image"),
+            "image/webp"
+        );
+        assert_eq!(
+            content_type_for(&PathBuf::from("a.heic"), "image"),
+            "image/heic"
+        );
+        assert_eq!(
+            content_type_for(&PathBuf::from("a.gif"), "image"),
+            "image/gif"
+        );
+        assert_eq!(
+            content_type_for(&PathBuf::from("a.mp4"), "video"),
+            "video/mp4"
+        );
+        assert_eq!(
+            content_type_for(&PathBuf::from("a.m4v"), "video"),
+            "video/mp4"
+        );
+        assert_eq!(
+            content_type_for(&PathBuf::from("a.mov"), "video"),
+            "video/quicktime"
+        );
+        assert_eq!(
+            content_type_for(&PathBuf::from("a.mp3"), "audio"),
+            "audio/mpeg"
+        );
+        assert_eq!(
+            content_type_for(&PathBuf::from("a.wav"), "audio"),
+            "audio/wav"
+        );
+        assert_eq!(
+            content_type_for(&PathBuf::from("a.m4a"), "audio"),
+            "audio/mp4"
+        );
     }
 
     #[test]
     fn content_type_fallbacks() {
-        assert_eq!(content_type_for(&PathBuf::from("a.xyz"), "image"), "image/jpeg");
-        assert_eq!(content_type_for(&PathBuf::from("noext"), "video"), "video/mp4");
-        assert_eq!(content_type_for(&PathBuf::from("a.xyz"), "audio"), "audio/mpeg");
+        assert_eq!(
+            content_type_for(&PathBuf::from("a.xyz"), "image"),
+            "image/jpeg"
+        );
+        assert_eq!(
+            content_type_for(&PathBuf::from("noext"), "video"),
+            "video/mp4"
+        );
+        assert_eq!(
+            content_type_for(&PathBuf::from("a.xyz"), "audio"),
+            "audio/mpeg"
+        );
         assert_eq!(
             content_type_for(&PathBuf::from("a.xyz"), "other"),
             "application/octet-stream"
@@ -285,7 +333,10 @@ mod tests {
             normalize_output_urls(&json!([{"url":"a"},{"url":"b"}])),
             vec!["a", "b"]
         );
-        assert_eq!(normalize_output_urls(&json!({"url":"single"})), vec!["single"]);
+        assert_eq!(
+            normalize_output_urls(&json!({"url":"single"})),
+            vec!["single"]
+        );
         assert!(normalize_output_urls(&json!(null)).is_empty());
     }
 }

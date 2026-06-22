@@ -64,7 +64,13 @@ impl OrtEmbedder {
         tokenizer_json: &Path,
         spec: EmbedderSpec,
     ) -> Result<Self> {
-        Self::with_io(image_encoder, text_encoder, tokenizer_json, spec, IoNames::default())
+        Self::with_io(
+            image_encoder,
+            text_encoder,
+            tokenizer_json,
+            spec,
+            IoNames::default(),
+        )
     }
 
     pub fn with_io(
@@ -132,8 +138,8 @@ impl Embedder for OrtEmbedder {
     fn encode_image(&self, frame: &RgbaFrame) -> Result<Vec<f32>> {
         let tensor: Array4<f32> =
             preprocess_image(frame, self.spec.image_size, SIGLIP_MEAN, SIGLIP_STD);
-        let input =
-            Tensor::from_array(tensor).map_err(|e| MediaError::Decode(format!("ort tensor: {e}")))?;
+        let input = Tensor::from_array(tensor)
+            .map_err(|e| MediaError::Decode(format!("ort tensor: {e}")))?;
         let mut session = self.image.lock().unwrap();
         let outputs = session
             .run(ort::inputs![self.io.image_input.as_str() => input])

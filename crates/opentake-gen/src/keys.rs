@@ -253,7 +253,10 @@ mod tests {
             .unwrap();
         let dyn_store: &dyn KeyStore = &store;
         assert_eq!(
-            dyn_store.load_key(ProviderKey::Replicate).unwrap().as_deref(),
+            dyn_store
+                .load_key(ProviderKey::Replicate)
+                .unwrap()
+                .as_deref(),
             Some("tok-123")
         );
     }

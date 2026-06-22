@@ -58,12 +58,12 @@ pub fn compose(a: [f64; 6], b: [f64; 6]) -> [f64; 6] {
     let [b0, b1, b2, b3, b4, b5] = b;
     // a as 3x3 (last column 0,0,1) times b as 3x3.
     [
-        a0 * b0 + a1 * b2,         // a
-        a0 * b1 + a1 * b3,         // b
-        a2 * b0 + a3 * b2,         // c
-        a2 * b1 + a3 * b3,         // d
-        a4 * b0 + a5 * b2 + b4,    // tx
-        a4 * b1 + a5 * b3 + b5,    // ty
+        a0 * b0 + a1 * b2,      // a
+        a0 * b1 + a1 * b3,      // b
+        a2 * b0 + a3 * b2,      // c
+        a2 * b1 + a3 * b3,      // d
+        a4 * b0 + a5 * b2 + b4, // tx
+        a4 * b1 + a5 * b3 + b5, // ty
     ]
 }
 

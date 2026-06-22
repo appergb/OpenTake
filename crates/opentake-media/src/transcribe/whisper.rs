@@ -13,7 +13,7 @@ use std::path::Path;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 use super::{
-    TranscribeOptions, TranscriptionResult, TranscriptionSegment, TranscriptionWord, Transcriber,
+    TranscribeOptions, Transcriber, TranscriptionResult, TranscriptionSegment, TranscriptionWord,
 };
 use crate::decode::pcm::PcmBuffer;
 use crate::error::{MediaError, Result};
@@ -111,7 +111,7 @@ impl Transcriber for WhisperTranscriber {
                 let trimmed_tok = tok_text.trim();
                 // Skip special tokens (whisper wraps them in [..] / <|..|>) and blanks.
                 if trimmed_tok.is_empty()
-                    || (trimmed_tok.starts_with("[_") )
+                    || (trimmed_tok.starts_with("[_"))
                     || (trimmed_tok.starts_with("<|") && trimmed_tok.ends_with("|>"))
                 {
                     continue;

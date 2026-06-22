@@ -121,7 +121,10 @@ pub fn luma_grid(frame: &RgbaFrame) -> [f32; LUMA_CELLS * LUMA_CELLS] {
 
 /// Mean absolute per-cell difference of two luma grids. Port of
 /// `LumaGrid.meanDiff` (`:112-116`).
-pub fn luma_mean_diff(a: &[f32; LUMA_CELLS * LUMA_CELLS], b: &[f32; LUMA_CELLS * LUMA_CELLS]) -> f32 {
+pub fn luma_mean_diff(
+    a: &[f32; LUMA_CELLS * LUMA_CELLS],
+    b: &[f32; LUMA_CELLS * LUMA_CELLS],
+) -> f32 {
     let mut diff = 0.0f32;
     for i in 0..a.len() {
         diff += (a[i] - b[i]).abs();
@@ -160,11 +163,7 @@ impl ShotDetector {
 
     /// Process a decoded frame at `time` with luma `grid`. Returns `None` if the
     /// frame is a non-advancing duplicate (`time <= last_time`).
-    pub fn observe(
-        &mut self,
-        time: f64,
-        grid: [f32; LUMA_CELLS * LUMA_CELLS],
-    ) -> Option<Decision> {
+    pub fn observe(&mut self, time: f64, grid: [f32; LUMA_CELLS * LUMA_CELLS]) -> Option<Decision> {
         if time <= self.last_time {
             return None; // dedupe frames that don't advance
         }
@@ -347,7 +346,7 @@ mod tests {
     fn detector_small_change_within_coverage_floor_is_dropped() {
         let mut d = ShotDetector::new(12.0, 8.0);
         d.observe(1.0, flat_grid(50.0)).unwrap(); // kept (first), last_kept=1
-        // tiny change, only 2s later (< coverage 8) → not new shot, not kept.
+                                                  // tiny change, only 2s later (< coverage 8) → not new shot, not kept.
         let dec = d.observe(3.0, flat_grid(51.0)).unwrap();
         assert!(!dec.is_new_shot);
         assert!(!dec.keep);
@@ -358,7 +357,7 @@ mod tests {
         let mut d = ShotDetector::new(12.0, 8.0);
         d.observe(1.0, flat_grid(50.0)).unwrap(); // kept, last_kept=1
         d.observe(3.0, flat_grid(50.0)).unwrap(); // dropped (3-1<8)
-        // 10s after first keep → coverage floor triggers keep even with no change.
+                                                  // 10s after first keep → coverage floor triggers keep even with no change.
         let dec = d.observe(10.0, flat_grid(50.0)).unwrap();
         assert!(!dec.is_new_shot);
         assert!(dec.keep);
@@ -370,13 +369,16 @@ mod tests {
         // compared against B, not against the kept frame A.
         let mut d = ShotDetector::new(12.0, 8.0);
         d.observe(1.0, flat_grid(0.0)).unwrap(); // A kept, grid=0
-        // B at 2s: diff vs A = (small)? Use 5 → diff 5 < 12 not new; 2-1<8 dropped.
+                                                 // B at 2s: diff vs A = (small)? Use 5 → diff 5 < 12 not new; 2-1<8 dropped.
         let b = d.observe(2.0, flat_grid(5.0)).unwrap();
         assert!(!b.keep);
         // C at 3s: grid 10 → diff vs B(5) = 5 < 12 (NOT new). If it compared to
         // A(0) the diff would be 10, still <12, so use a sharper check:
         // C grid 16 → diff vs B(5)=11 (<12, not new) but vs A(0)=16 (>12 new).
         let c = d.observe(3.0, flat_grid(16.0)).unwrap();
-        assert!(!c.is_new_shot, "must compare against last decoded frame B, not kept A");
+        assert!(
+            !c.is_new_shot,
+            "must compare against last decoded frame B, not kept A"
+        );
     }
 }

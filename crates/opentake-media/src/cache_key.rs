@@ -32,7 +32,12 @@ pub fn file_identity_key(path: &Path, prefix_chars: usize) -> Option<String> {
     let size = meta.len();
     let mtime = meta.modified().ok()?;
     let secs = mtime.duration_since(UNIX_EPOCH).ok()?.as_secs_f64();
-    Some(identity_hex(&path.to_string_lossy(), secs, size, prefix_chars))
+    Some(identity_hex(
+        &path.to_string_lossy(),
+        secs,
+        size,
+        prefix_chars,
+    ))
 }
 
 /// Pure core: hash a pre-resolved `(path, mtime_secs, size)` identity. Split out
@@ -81,7 +86,9 @@ mod tests {
         let b = identity_hex("/a/b.mp4", 1000.0, 42, KEY_HEX_LEN);
         assert_eq!(a, b);
         assert_eq!(a.len(), KEY_HEX_LEN);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(a
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
     #[test]

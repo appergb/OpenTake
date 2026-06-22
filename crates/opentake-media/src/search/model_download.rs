@@ -215,8 +215,8 @@ pub async fn install(
 #[cfg(feature = "model-download")]
 fn unzip_single_top_level(zip_path: &Path, into: &Path) -> Result<PathBuf> {
     let file = std::fs::File::open(zip_path)?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| MediaError::ModelInstall(format!("zip open: {e}")))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| MediaError::ModelInstall(format!("zip open: {e}")))?;
     let out_root = into.join(format!(
         "{}-extracted",
         zip_path.file_stem().unwrap_or_default().to_string_lossy()

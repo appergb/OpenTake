@@ -192,8 +192,10 @@ impl ProviderAdapter for FalAdapter {
 
         match status {
             JobStatus::Succeeded => {
-                let result_url =
-                    format!("{}/{}/requests/{}", self.queue_base, vendor_model, request_id);
+                let result_url = format!(
+                    "{}/{}/requests/{}",
+                    self.queue_base, vendor_model, request_id
+                );
                 let rresp = self
                     .http
                     .send(HttpRequest::get(result_url).header(hk, hv))

@@ -108,12 +108,9 @@ fn raw_to_mono_f32(bytes: &[u8], spec: &PcmSpec) -> Vec<f32> {
                     let v = i16::from_le_bytes([bytes[off], bytes[off + 1]]);
                     v as f32 / 32768.0
                 }
-                PcmFormat::F32 => f32::from_le_bytes([
-                    bytes[off],
-                    bytes[off + 1],
-                    bytes[off + 2],
-                    bytes[off + 3],
-                ]),
+                PcmFormat::F32 => {
+                    f32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+                }
             };
             sum += s;
         }

@@ -2,7 +2,9 @@
 //! stage guidance (`agent-SPEC.md` §6.3/§6.5). Skeleton flow text is VERBATIM
 //! from the doc.
 
-use opentake_domain::{ClipType, EditingSkeleton, EditingStage, StageGuidance, Timeline, VideoType};
+use opentake_domain::{
+    ClipType, EditingSkeleton, EditingStage, StageGuidance, Timeline, VideoType,
+};
 
 /// The editing skeleton for a video type (`AGENT-CONTEXT-SIGNAL.md` §2.3; flow
 /// text verbatim).
@@ -126,7 +128,10 @@ pub fn stage_guidance(stage: EditingStage) -> StageGuidance {
     match stage {
         EditingStage::Importing => StageGuidance {
             description: "导入阶段：工程还没有轨道。先导入素材。".into(),
-            next_actions: vec!["导入口播、B-roll、音乐素材".into(), "调用 get_media 确认资源".into()],
+            next_actions: vec![
+                "导入口播、B-roll、音乐素材".into(),
+                "调用 get_media 确认资源".into(),
+            ],
             warnings: vec![],
         },
         EditingStage::Classifying => StageGuidance {
@@ -136,17 +141,26 @@ pub fn stage_guidance(stage: EditingStage) -> StageGuidance {
         },
         EditingStage::RoughCut => StageGuidance {
             description: "粗剪阶段：主时间线已铺好，开始精剪口播。".into(),
-            next_actions: vec!["识别并标记所有气口和句界断点".into(), "删除啰嗦/重复/卡顿段".into()],
+            next_actions: vec![
+                "识别并标记所有气口和句界断点".into(),
+                "删除啰嗦/重复/卡顿段".into(),
+            ],
             warnings: vec!["不要在词中间切分".into()],
         },
         EditingStage::BRollOverlay => StageGuidance {
             description: "贴 B-roll 阶段：在主画面上层补充镜头。".into(),
-            next_actions: vec!["按口播语义匹配 B-roll".into(), "对齐口播时长，成组添加".into()],
+            next_actions: vec![
+                "按口播语义匹配 B-roll".into(),
+                "对齐口播时长，成组添加".into(),
+            ],
             warnings: vec!["B-roll 不要重复，整轨静音".into()],
         },
         EditingStage::AudioPolish => StageGuidance {
             description: "音频精修阶段：处理气口、音量、BGM 让位。".into(),
-            next_actions: vec!["BGM 在口播段压低让位人声".into(), "段落间做 J/L-cut 过渡".into()],
+            next_actions: vec![
+                "BGM 在口播段压低让位人声".into(),
+                "段落间做 J/L-cut 过渡".into(),
+            ],
             warnings: vec!["不可整轨静音主声音轨".into()],
         },
         EditingStage::ColorGrade => StageGuidance {

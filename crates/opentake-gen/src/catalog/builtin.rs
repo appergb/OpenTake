@@ -32,11 +32,7 @@ mod tests {
         let cat = builtin_catalog();
         let mut seen = HashSet::new();
         for e in &cat {
-            assert!(
-                e.id.contains(':'),
-                "id {} must be prefix:vendorModel",
-                e.id
-            );
+            assert!(e.id.contains(':'), "id {} must be prefix:vendorModel", e.id);
             assert!(seen.insert(e.id.clone()), "duplicate id {}", e.id);
         }
     }
@@ -54,10 +50,7 @@ mod tests {
     #[test]
     fn covers_all_four_providers() {
         let cat = builtin_catalog();
-        let prefixes: HashSet<&str> = cat
-            .iter()
-            .filter_map(|e| e.id.split(':').next())
-            .collect();
+        let prefixes: HashSet<&str> = cat.iter().filter_map(|e| e.id.split(':').next()).collect();
         for p in ["fal", "replicate", "openai", "elevenlabs"] {
             assert!(prefixes.contains(p), "missing provider {p}");
         }

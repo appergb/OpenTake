@@ -412,8 +412,7 @@ mod tests {
 
     #[test]
     fn audio_pricing_per_second_and_flat() {
-        let ps: AudioPricing =
-            serde_json::from_str(r#"{"mode":"perSecond","rate":1.5}"#).unwrap();
+        let ps: AudioPricing = serde_json::from_str(r#"{"mode":"perSecond","rate":1.5}"#).unwrap();
         assert_eq!(ps, AudioPricing::PerSecond { rate: 1.5 });
         let flat: AudioPricing = serde_json::from_str(r#"{"mode":"flat","price":7.0}"#).unwrap();
         assert_eq!(flat, AudioPricing::Flat { price: 7.0 });

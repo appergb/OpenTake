@@ -26,7 +26,7 @@ pub mod ort_embedder;
 
 pub use embed_store::{AssetIndex, Header, Row};
 pub use embedder::{Embedder, EmbedderSpec};
-pub use frame_sampler::{SamplerOptions, SampledFrame};
+pub use frame_sampler::{SampledFrame, SamplerOptions};
 pub use indexer::{index_image, index_video, needs_index, CancelToken};
 pub use ranker::{search as rank, Hit};
 pub use tokenizer::SiglipTokenizer;
@@ -65,8 +65,14 @@ mod integration_tests {
         let bk = embed_store::key(&bright_file).unwrap();
         let dk = embed_store::key(&dark_file).unwrap();
         let indexes = vec![
-            ("bright".to_string(), embed_store::load(dir.path(), &bk).unwrap()),
-            ("dark".to_string(), embed_store::load(dir.path(), &dk).unwrap()),
+            (
+                "bright".to_string(),
+                embed_store::load(dir.path(), &bk).unwrap(),
+            ),
+            (
+                "dark".to_string(),
+                embed_store::load(dir.path(), &dk).unwrap(),
+            ),
         ];
 
         // Query with the bright image's own embedding → it must rank first.

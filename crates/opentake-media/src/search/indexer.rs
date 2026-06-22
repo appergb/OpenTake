@@ -41,13 +41,9 @@ impl CancelToken {
 /// True when `path` needs (re)indexing for `spec` (no current on-disk index).
 pub fn needs_index(cache_root: &Path, path: &Path, spec: &EmbedderSpec) -> bool {
     match embed_store::key(path) {
-        Some(key) => !embed_store::is_current(
-            cache_root,
-            &key,
-            &spec.model,
-            spec.version,
-            SAMPLER_VERSION,
-        ),
+        Some(key) => {
+            !embed_store::is_current(cache_root, &key, &spec.model, spec.version, SAMPLER_VERSION)
+        }
         None => false,
     }
 }
@@ -84,10 +80,7 @@ pub fn accumulate_rows(frames: &[(f64, bool)], duration: f64) -> Vec<Row> {
         .zip(shot_index_per_frame.iter())
         .map(|(&(time, _), &shot)| {
             let shot_start = shot_starts.get(shot).copied().unwrap_or(0.0);
-            let shot_end = shot_starts
-                .get(shot + 1)
-                .copied()
-                .unwrap_or(duration);
+            let shot_end = shot_starts.get(shot + 1).copied().unwrap_or(duration);
             Row {
                 time,
                 shot_start,
@@ -219,7 +212,9 @@ mod tests {
     fn single_shot_ends_at_duration() {
         let frames = vec![(2.0, true), (4.0, false), (6.0, false)];
         let rows = accumulate_rows(&frames, 12.0);
-        assert!(rows.iter().all(|r| r.shot_start == 0.0 && r.shot_end == 12.0));
+        assert!(rows
+            .iter()
+            .all(|r| r.shot_start == 0.0 && r.shot_end == 12.0));
     }
 
     #[test]

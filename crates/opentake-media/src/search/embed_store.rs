@@ -112,8 +112,8 @@ pub fn decode(data: &[u8]) -> Result<AssetIndex> {
     if data.len() < offset + header_len {
         return Err(MediaError::StoreCorrupt);
     }
-    let header: Header =
-        serde_json::from_slice(&data[offset..offset + header_len]).map_err(|_| MediaError::StoreCorrupt)?;
+    let header: Header = serde_json::from_slice(&data[offset..offset + header_len])
+        .map_err(|_| MediaError::StoreCorrupt)?;
     offset += header_len;
 
     let rb = row_bytes(header.dim);
@@ -170,7 +170,9 @@ pub fn is_current(
 ) -> bool {
     match header(cache_root, key) {
         Some(h) => {
-            h.model == model && h.model_version == model_version && h.sampler_version == sampler_version
+            h.model == model
+                && h.model_version == model_version
+                && h.sampler_version == sampler_version
         }
         None => false,
     }
@@ -382,11 +384,35 @@ mod tests {
             &[0.0; 4],
         )
         .unwrap();
-        assert!(is_current(dir.path(), "k", "siglip2-base-patch16-256", 1, 1));
+        assert!(is_current(
+            dir.path(),
+            "k",
+            "siglip2-base-patch16-256",
+            1,
+            1
+        ));
         assert!(!is_current(dir.path(), "k", "other-model", 1, 1));
-        assert!(!is_current(dir.path(), "k", "siglip2-base-patch16-256", 2, 1));
-        assert!(!is_current(dir.path(), "k", "siglip2-base-patch16-256", 1, 2));
-        assert!(!is_current(dir.path(), "missing", "siglip2-base-patch16-256", 1, 1));
+        assert!(!is_current(
+            dir.path(),
+            "k",
+            "siglip2-base-patch16-256",
+            2,
+            1
+        ));
+        assert!(!is_current(
+            dir.path(),
+            "k",
+            "siglip2-base-patch16-256",
+            1,
+            2
+        ));
+        assert!(!is_current(
+            dir.path(),
+            "missing",
+            "siglip2-base-patch16-256",
+            1,
+            1
+        ));
     }
 
     #[test]

@@ -128,7 +128,10 @@ mod tests {
 
     #[test]
     fn parse_consecutive_threshold() {
-        assert_eq!(parse_consecutive_no_broll("不要连续 3 段以上无 B-roll 覆盖"), Some(3));
+        assert_eq!(
+            parse_consecutive_no_broll("不要连续 3 段以上无 B-roll 覆盖"),
+            Some(3)
+        );
         assert_eq!(parse_consecutive_no_broll("不要用花哨转场"), None);
     }
 

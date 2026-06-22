@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use super::{TranscribeOptions, TranscriptionResult, Transcriber};
+use super::{TranscribeOptions, Transcriber, TranscriptionResult};
 use crate::cache_key::{file_identity_key, KEY_HEX_LEN};
 
 /// Cache subdirectory name (kept identical to upstream).

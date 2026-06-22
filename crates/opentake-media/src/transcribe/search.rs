@@ -27,8 +27,10 @@ pub fn terms(query: &str) -> Vec<String> {
     query
         .split_whitespace()
         .map(|w| {
-            w.trim_matches(|c: char| c.is_ascii_punctuation() || (!c.is_alphanumeric() && !c.is_whitespace()))
-                .to_string()
+            w.trim_matches(|c: char| {
+                c.is_ascii_punctuation() || (!c.is_alphanumeric() && !c.is_whitespace())
+            })
+            .to_string()
         })
         .filter(|w| !w.is_empty())
         .collect()

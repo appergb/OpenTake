@@ -12,7 +12,7 @@ use serde_json::json;
 
 use crate::plugin::registry::{parse_track_role, parse_video_type, LoadedPlugin};
 use crate::plugin::rules::plugin_rules;
-use crate::signal::{classify, rules::OpContext, rules::builtin_rules, stages, track_roles};
+use crate::signal::{classify, rules::builtin_rules, rules::OpContext, stages, track_roles};
 use crate::tools::names::ToolName;
 use crate::tools::result::{Block, ToolResult};
 
@@ -26,8 +26,7 @@ pub fn build_signal(
 ) -> ContextSignal {
     // Video type: plugin > manual > auto.
     let (auto_type, auto_conf) = classify::classify(timeline);
-    let plugin_type =
-        plugin.and_then(|p| parse_video_type(&p.manifest.video_type.primary));
+    let plugin_type = plugin.and_then(|p| parse_video_type(&p.manifest.video_type.primary));
     let (video_type, confidence) = match (plugin_type, manual_video_type) {
         (Some(t), _) => (t, 1.0),
         (None, Some(t)) => (t, 1.0),
@@ -245,7 +244,14 @@ mod tests {
     fn error_result_gets_no_signal() {
         let tl = talking_head_timeline();
         let r = ToolResult::error("boom");
-        let out = attach(ToolName::GetTimeline, r, &tl, None, None, &OpContext::default());
+        let out = attach(
+            ToolName::GetTimeline,
+            r,
+            &tl,
+            None,
+            None,
+            &OpContext::default(),
+        );
         assert!(extract_signal(&out).is_none());
     }
 
@@ -253,15 +259,24 @@ mod tests {
     fn pure_crud_tool_gets_no_signal() {
         let tl = talking_head_timeline();
         let r = ToolResult::ok("folders...");
-        let out = attach(ToolName::ListFolders, r, &tl, None, None, &OpContext::default());
+        let out = attach(
+            ToolName::ListFolders,
+            r,
+            &tl,
+            None,
+            None,
+            &OpContext::default(),
+        );
         assert!(extract_signal(&out).is_none());
     }
 
     #[test]
     fn plugin_video_type_overrides_auto() {
         let tl = talking_head_timeline(); // auto = talking_head
-        let json = r#"{"schema_version":"1.0","id":"wp","name":"WP","video_type":{"primary":"montage"}}"#;
-        let plugin = crate::plugin::registry::PluginRegistry::load_from_strings(json, "", ".").unwrap();
+        let json =
+            r#"{"schema_version":"1.0","id":"wp","name":"WP","video_type":{"primary":"montage"}}"#;
+        let plugin =
+            crate::plugin::registry::PluginRegistry::load_from_strings(json, "", ".").unwrap();
         let sig = build_signal(&tl, Some(&plugin), None);
         assert_eq!(sig.video_type, VideoType::Montage); // plugin wins
         assert_eq!(sig.confidence, 1.0);
@@ -283,7 +298,8 @@ mod tests {
         v.clips.push(Clip::new("c", "a", 0, 30 * 15));
         tl.tracks.push(v);
         let json = r#"{"schema_version":"1.0","id":"wp","name":"WP","track_roles":{"V1":{"role":"BRollOverlay"}}}"#;
-        let plugin = crate::plugin::registry::PluginRegistry::load_from_strings(json, "", ".").unwrap();
+        let plugin =
+            crate::plugin::registry::PluginRegistry::load_from_strings(json, "", ".").unwrap();
         let sig = build_signal(&tl, Some(&plugin), None);
         assert_eq!(sig.track_roles[0].role, TrackRole::BRoll);
     }
@@ -292,7 +308,8 @@ mod tests {
     fn plugin_stages_appended_to_guidance() {
         let tl = talking_head_timeline();
         let json = r#"{"schema_version":"1.0","id":"wp","name":"WP","workflow":{"stages":[{"id":"s","order":0,"actions":[{"tool":"split_clip","tip":"在气口处分割"}]}]}}"#;
-        let plugin = crate::plugin::registry::PluginRegistry::load_from_strings(json, "", ".").unwrap();
+        let plugin =
+            crate::plugin::registry::PluginRegistry::load_from_strings(json, "", ".").unwrap();
         let sig = build_signal(&tl, Some(&plugin), None);
         assert!(sig
             .stage_guidance
@@ -313,7 +330,9 @@ mod tests {
         let out = attach(ToolName::RemoveClips, r, &tl, None, None, &op);
         let sig = extract_signal(&out).expect("signal");
         let warnings = sig["warnings"].as_array().unwrap();
-        assert!(warnings.iter().any(|w| w.as_str().unwrap().contains("主干内容")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("主干内容")));
     }
 
     #[test]

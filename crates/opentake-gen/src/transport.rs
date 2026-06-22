@@ -30,10 +30,7 @@ impl Method {
 pub enum Body {
     Empty,
     Json(serde_json::Value),
-    Bytes {
-        content_type: String,
-        data: Vec<u8>,
-    },
+    Bytes { content_type: String, data: Vec<u8> },
 }
 
 /// A transport-agnostic HTTP request.
@@ -174,7 +171,11 @@ impl HttpTransport for ReqwestTransport {
         let headers = resp
             .headers()
             .iter()
-            .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.as_str().to_string(), s.to_string())))
+            .filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|s| (k.as_str().to_string(), s.to_string()))
+            })
             .collect();
         let body = resp
             .bytes()
@@ -225,7 +226,13 @@ impl MockTransport {
 
     /// Register a single response for `method url`. Repeated registration on the
     /// same key appends to that key's sequence.
-    pub fn on(&self, method: Method, url: impl AsRef<str>, status: u16, body: serde_json::Value) -> &Self {
+    pub fn on(
+        &self,
+        method: Method,
+        url: impl AsRef<str>,
+        status: u16,
+        body: serde_json::Value,
+    ) -> &Self {
         self.on_raw(
             method,
             url,
@@ -261,8 +268,10 @@ impl MockTransport {
 
     /// Set a catch-all response for any unmatched request.
     pub fn fallback(&self, status: u16, body: serde_json::Value) -> &Self {
-        *self.inner.fallback.lock().unwrap() =
-            Some(HttpResponse::new(status, serde_json::to_vec(&body).unwrap()));
+        *self.inner.fallback.lock().unwrap() = Some(HttpResponse::new(
+            status,
+            serde_json::to_vec(&body).unwrap(),
+        ));
         self
     }
 
@@ -315,12 +324,12 @@ mod tests {
     async fn mock_serves_keyed_response() {
         let m = MockTransport::new();
         m.on(Method::Get, "https://x/a", 200, json!({"ok": true}));
-        let resp = m
-            .send(HttpRequest::get("https://x/a"))
-            .await
-            .unwrap();
+        let resp = m.send(HttpRequest::get("https://x/a")).await.unwrap();
         assert_eq!(resp.status, 200);
-        assert_eq!(resp.json::<serde_json::Value>().unwrap(), json!({"ok":true}));
+        assert_eq!(
+            resp.json::<serde_json::Value>().unwrap(),
+            json!({"ok":true})
+        );
         assert_eq!(m.call_count(), 1);
     }
 
@@ -336,10 +345,30 @@ mod tests {
                 (200, json!({"status":"succeeded"})),
             ],
         );
-        let s1: serde_json::Value = m.send(HttpRequest::get("https://x/poll")).await.unwrap().json().unwrap();
-        let s2: serde_json::Value = m.send(HttpRequest::get("https://x/poll")).await.unwrap().json().unwrap();
-        let s3: serde_json::Value = m.send(HttpRequest::get("https://x/poll")).await.unwrap().json().unwrap();
-        let s4: serde_json::Value = m.send(HttpRequest::get("https://x/poll")).await.unwrap().json().unwrap();
+        let s1: serde_json::Value = m
+            .send(HttpRequest::get("https://x/poll"))
+            .await
+            .unwrap()
+            .json()
+            .unwrap();
+        let s2: serde_json::Value = m
+            .send(HttpRequest::get("https://x/poll"))
+            .await
+            .unwrap()
+            .json()
+            .unwrap();
+        let s3: serde_json::Value = m
+            .send(HttpRequest::get("https://x/poll"))
+            .await
+            .unwrap()
+            .json()
+            .unwrap();
+        let s4: serde_json::Value = m
+            .send(HttpRequest::get("https://x/poll"))
+            .await
+            .unwrap()
+            .json()
+            .unwrap();
         assert_eq!(s1["status"], "queued");
         assert_eq!(s2["status"], "running");
         assert_eq!(s3["status"], "succeeded");

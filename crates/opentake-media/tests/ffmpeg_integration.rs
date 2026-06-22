@@ -49,7 +49,13 @@ fn make_av(path: &Path) -> bool {
 fn make_audio(path: &Path) -> bool {
     Command::new("ffmpeg")
         .args([
-            "-v", "error", "-f", "lavfi", "-i", "sine=frequency=220:duration=1", "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=220:duration=1",
+            "-y",
         ])
         .arg(path)
         .status()
@@ -122,7 +128,10 @@ fn decode_frame_scales_within_box() {
     let (_t, frame) = decode_frame_at(&av, &req).unwrap();
     // 320x240 into 120x68 → height-limited (68), width 90.
     assert!(frame.width <= 120 && frame.height <= 68);
-    assert_eq!(frame.rgba.len(), frame.width as usize * frame.height as usize * 4);
+    assert_eq!(
+        frame.rgba.len(),
+        frame.width as usize * frame.height as usize * 4
+    );
 }
 
 #[test]
@@ -176,8 +185,17 @@ fn extract_pcm_no_audio_track_errors() {
     let video_only = dir.path().join("v.mp4");
     let ok = Command::new("ffmpeg")
         .args([
-            "-v", "error", "-f", "lavfi", "-i", "testsrc=duration=1:size=64x64:rate=5",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=1:size=64x64:rate=5",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-y",
         ])
         .arg(&video_only)
         .status()
@@ -192,7 +210,10 @@ fn extract_pcm_no_audio_track_errors() {
         format: PcmFormat::F32,
     };
     let err = extract_pcm(&video_only, &spec, None);
-    assert!(err.is_err(), "expected NoTrack error for video without audio");
+    assert!(
+        err.is_err(),
+        "expected NoTrack error for video without audio"
+    );
 }
 
 #[test]

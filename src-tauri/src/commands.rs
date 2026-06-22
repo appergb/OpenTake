@@ -53,19 +53,13 @@ pub fn project_new(core: State<'_, AppCore>) {
 
 /// `project_open`: open a `.opentake` bundle, returning the first snapshot.
 #[tauri::command]
-pub fn project_open(
-    core: State<'_, AppCore>,
-    path: String,
-) -> Result<TimelineSnapshotDto, String> {
+pub fn project_open(core: State<'_, AppCore>, path: String) -> Result<TimelineSnapshotDto, String> {
     handle_project_open(&core, path).map_err(msg)
 }
 
 /// `project_save`: `path = None` saves back to the open bundle; `Some` is save-as.
 #[tauri::command]
-pub fn project_save(
-    core: State<'_, AppCore>,
-    path: Option<String>,
-) -> Result<String, String> {
+pub fn project_save(core: State<'_, AppCore>, path: Option<String>) -> Result<String, String> {
     handle_project_save(&core, path).map_err(msg)
 }
 
@@ -87,10 +81,7 @@ pub fn can_redo(core: State<'_, AppCore>) -> bool {
 /// routes it through [`AppCore::apply`] (which performs the snapshot/commit/
 /// version transaction and emits `TimelineChanged`).
 #[tauri::command]
-pub fn edit_apply(
-    core: State<'_, AppCore>,
-    command: EditRequest,
-) -> Result<EditResultDto, String> {
+pub fn edit_apply(core: State<'_, AppCore>, command: EditRequest) -> Result<EditResultDto, String> {
     let cmd = command.into_command()?;
     handle_edit_apply(&core, cmd).map_err(msg)
 }
@@ -213,10 +204,7 @@ impl EditRequest {
                 ranges: ranges.into_iter().map(FrameRangeDto::into_range).collect(),
             },
             EditRequest::AddTexts { entries } => EditCommand::AddTexts {
-                entries: entries
-                    .into_iter()
-                    .map(TextEntryDto::into_entry)
-                    .collect(),
+                entries: entries.into_iter().map(TextEntryDto::into_entry).collect(),
             },
             EditRequest::Link { clip_ids } => EditCommand::Link { clip_ids },
             EditRequest::Unlink { clip_ids } => EditCommand::Unlink { clip_ids },

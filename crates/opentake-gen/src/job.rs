@@ -122,10 +122,7 @@ mod tests {
         let job: GenerationJob = serde_json::from_str(json).unwrap();
         assert_eq!(job.id, "doc123");
         assert_eq!(job.status, JobStatus::Succeeded);
-        assert_eq!(
-            job.result_urls,
-            Some(vec!["https://x/a.png".to_string()])
-        );
+        assert_eq!(job.result_urls, Some(vec!["https://x/a.png".to_string()]));
         assert_eq!(job.cost_credits, Some(42));
         assert_eq!(job.completed_at, Some(1700.0));
     }

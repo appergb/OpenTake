@@ -91,7 +91,11 @@ pub fn search(
     }
 
     // Sort by score descending (stable; preserves insertion order on ties).
-    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     if let Some(min) = min_score {
         hits.retain(|h| h.score >= min);

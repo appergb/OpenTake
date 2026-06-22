@@ -31,7 +31,10 @@ impl ReplicateAdapter {
     }
 
     pub fn for_test() -> Self {
-        Self::new(Arc::new(crate::transport::MockTransport::new()), "test-token")
+        Self::new(
+            Arc::new(crate::transport::MockTransport::new()),
+            "test-token",
+        )
     }
 
     pub fn with_base(mut self, base: impl Into<String>) -> Self {
@@ -102,7 +105,11 @@ impl ReplicateAdapter {
     }
 
     fn normalize(&self, v: &serde_json::Value) -> GenerationJob {
-        let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let id = v
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         let status = v
             .get("status")
             .and_then(|x| x.as_str())
@@ -153,7 +160,9 @@ impl ProviderAdapter for ReplicateAdapter {
         }
         let v: serde_json::Value = resp.json()?;
         if v.get("id").and_then(|x| x.as_str()).is_none() {
-            return Err(GenError::Transport("replicate: missing prediction id".into()));
+            return Err(GenError::Transport(
+                "replicate: missing prediction id".into(),
+            ));
         }
         Ok(self.normalize(&v))
     }

@@ -345,7 +345,11 @@ fn encode_caption_group<'a>(group_id: &str, clips: &[&'a Clip]) -> (Value, Vec<&
 
     let total = rows.len();
     rows.sort_by_key(|(start, _)| *start);
-    let shown: Vec<Value> = rows.into_iter().take(CAPTION_ROW_LIMIT).map(|(_, r)| r).collect();
+    let shown: Vec<Value> = rows
+        .into_iter()
+        .take(CAPTION_ROW_LIMIT)
+        .map(|(_, r)| r)
+        .collect();
 
     let mut m = Map::new();
     m.insert("captionGroupId".into(), json!(group_id));
@@ -569,7 +573,7 @@ mod tests {
         let g = &v["tracks"][0]["captionGroups"][0];
         assert_eq!(g["clips"].as_array().unwrap().len(), 200); // capped
         assert_eq!(g["clipCount"], json!(250)); // true count reported
-        // Paging note appears when not all clips are shown.
+                                                // Paging note appears when not all clips are shown.
         assert_eq!(
             g["clipsNote"],
             json!("Showing 200 of 250 caption clips. Page with startFrame/endFrame.")

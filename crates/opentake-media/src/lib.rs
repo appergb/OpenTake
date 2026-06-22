@@ -64,7 +64,7 @@ pub use waveform::{waveform, waveform_cached, waveform_sample_count};
 pub use transcribe::{
     cache::TranscriptCache,
     search::{search as search_spoken, SpokenHit},
-    TranscribeOptions, TranscriptionResult, TranscriptionSegment, TranscriptionWord, Transcriber,
+    TranscribeOptions, Transcriber, TranscriptionResult, TranscriptionSegment, TranscriptionWord,
 };
 
 pub use search::{

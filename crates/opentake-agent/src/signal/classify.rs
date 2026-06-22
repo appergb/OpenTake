@@ -96,7 +96,11 @@ fn has_simultaneous_starts(timeline: &Timeline) -> bool {
     for i in 0..video.len() {
         for j in (i + 1)..video.len() {
             for a in &video[i].clips {
-                if video[j].clips.iter().any(|b| b.start_frame == a.start_frame) {
+                if video[j]
+                    .clips
+                    .iter()
+                    .any(|b| b.start_frame == a.start_frame)
+                {
                     return true;
                 }
             }

@@ -79,11 +79,8 @@ fn compose_sprite(thumbs: &[VideoThumb]) -> Option<(RgbaImage, ThumbnailCacheMet
     let tile_h = first.image.height;
     let (columns, rows) = grid_geometry(thumbs.len());
 
-    let mut sprite: RgbaImage = ImageBuffer::from_pixel(
-        tile_w * columns,
-        tile_h * rows,
-        Rgba([0, 0, 0, 255]),
-    );
+    let mut sprite: RgbaImage =
+        ImageBuffer::from_pixel(tile_w * columns, tile_h * rows, Rgba([0, 0, 0, 255]));
     for (i, thumb) in thumbs.iter().enumerate() {
         // Only place tiles matching the canonical tile size (defensive).
         if thumb.image.width != tile_w || thumb.image.height != tile_h {
@@ -141,7 +138,8 @@ pub fn save_sprite(cache_root: &Path, key: &str, thumbs: &[VideoThumb]) -> Resul
     std::fs::write(jpg_path(cache_root, key), &jpg_bytes)?;
 
     // Sidecar last.
-    let json = serde_json::to_vec(&meta).map_err(|e| crate::error::MediaError::Encode(e.to_string()))?;
+    let json =
+        serde_json::to_vec(&meta).map_err(|e| crate::error::MediaError::Encode(e.to_string()))?;
     std::fs::write(json_path(cache_root, key), json)?;
     Ok(())
 }
@@ -303,7 +301,9 @@ mod tests {
     fn multi_row_sprite_roundtrips() {
         let dir = tempfile::tempdir().unwrap();
         // 60 tiles → 50 cols, 2 rows.
-        let thumbs: Vec<_> = (0..60).map(|i| thumb(i as f64, 2, 2, (i * 4) as u8)).collect();
+        let thumbs: Vec<_> = (0..60)
+            .map(|i| thumb(i as f64, 2, 2, (i * 4) as u8))
+            .collect();
         save_sprite(dir.path(), "multi", &thumbs).unwrap();
         let back = load_sprite(dir.path(), "multi").unwrap();
         assert_eq!(back.len(), 60);

@@ -80,7 +80,9 @@ mod tests {
 
     #[test]
     fn transcript_warning_verbatim() {
-        assert!(EDITING.contains("read the WORD-level get_transcript end-to-end as prose at least once before deduping"));
+        assert!(EDITING.contains(
+            "read the WORD-level get_transcript end-to-end as prose at least once before deduping"
+        ));
     }
 
     #[test]

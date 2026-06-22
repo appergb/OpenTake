@@ -26,7 +26,7 @@ use crate::frame::RgbaFrame;
 fn encode_args(out: &Path, w: u32, h: u32, fps: i32, preset: &ExportPreset) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     args.push("-y".into()); // overwrite
-    // Raw video input from stdin.
+                            // Raw video input from stdin.
     args.push("-f".into());
     args.push("rawvideo".into());
     args.push("-pix_fmt".into());

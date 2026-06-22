@@ -283,7 +283,11 @@ mod tests {
         let u = universe(&[A, B]);
         // "11111111" matches both A and B.
         let err = expand_one("11111111", &u).unwrap_err();
-        assert!(err.message.contains("Ambiguous id '11111111'"), "{}", err.message);
+        assert!(
+            err.message.contains("Ambiguous id '11111111'"),
+            "{}",
+            err.message
+        );
         assert!(err.message.contains("matches 2 items"), "{}", err.message);
     }
 

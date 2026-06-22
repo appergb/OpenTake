@@ -223,7 +223,8 @@ mod tests {
 
     #[test]
     fn spec_serde_camel_case_and_normalized_default() {
-        let json = r#"{"model":"m","version":1,"embeddingDim":768,"imageSize":256,"contextLength":64}"#;
+        let json =
+            r#"{"model":"m","version":1,"embeddingDim":768,"imageSize":256,"contextLength":64}"#;
         let s: EmbedderSpec = serde_json::from_str(json).unwrap();
         assert_eq!(s.embedding_dim, 768);
         assert!(!s.normalized); // defaulted

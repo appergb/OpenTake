@@ -92,343 +92,430 @@ pub fn description(tool: ToolName) -> &'static str {
 /// `ToolDefinitions.swift`, transcribed to `serde_json`.
 pub fn input_schema(tool: ToolName) -> Value {
     match tool {
-        ToolName::GetTimeline => object(json!({
-            "startFrame": {"type": "integer", "description": "Optional. Window start (inclusive); only clips intersecting [startFrame, endFrame) are returned. Tracks report totalClips when the window hides some."},
-            "endFrame": {"type": "integer", "description": "Optional. Window end (exclusive)."}
-        }), &[]),
+        ToolName::GetTimeline => object(
+            json!({
+                "startFrame": {"type": "integer", "description": "Optional. Window start (inclusive); only clips intersecting [startFrame, endFrame) are returned. Tracks report totalClips when the window hides some."},
+                "endFrame": {"type": "integer", "description": "Optional. Window end (exclusive)."}
+            }),
+            &[],
+        ),
 
         ToolName::GetMedia => object(json!({}), &[]),
 
-        ToolName::InspectMedia => object(json!({
-            "mediaRef": {"type": "string", "description": "Asset ID from get_media."},
-            "clipId": {"type": "string", "description": "Optional. A clip referencing this mediaRef; transcript times come back as project frames for that clip (out-of-range entries dropped)."},
-            "maxFrames": {"type": "integer", "description": "Video and Lottie. Sample frame count (default 6, max 12)."},
-            "startSeconds": {"type": "number", "description": "Video/audio. Source-time window start; scopes frames and transcription."},
-            "endSeconds": {"type": "number", "description": "Video/audio. Window end (default: asset duration)."},
-            "wordTimestamps": {"type": "boolean", "description": "Video/audio. Add word-level [text, start, end] tuples (capped at 10000 — most clips return all words at once; narrow with startSeconds/endSeconds only for very long media). Use for word-boundary edits like filler-word removal."},
-            "overview": {"type": "boolean", "description": "Video only. One storyboard grid of visually distinct, timestamped moments instead of frames — far more coverage per token; few tiles means static footage. maxFrames ignored."}
-        }), &["mediaRef"]),
+        ToolName::InspectMedia => object(
+            json!({
+                "mediaRef": {"type": "string", "description": "Asset ID from get_media."},
+                "clipId": {"type": "string", "description": "Optional. A clip referencing this mediaRef; transcript times come back as project frames for that clip (out-of-range entries dropped)."},
+                "maxFrames": {"type": "integer", "description": "Video and Lottie. Sample frame count (default 6, max 12)."},
+                "startSeconds": {"type": "number", "description": "Video/audio. Source-time window start; scopes frames and transcription."},
+                "endSeconds": {"type": "number", "description": "Video/audio. Window end (default: asset duration)."},
+                "wordTimestamps": {"type": "boolean", "description": "Video/audio. Add word-level [text, start, end] tuples (capped at 10000 — most clips return all words at once; narrow with startSeconds/endSeconds only for very long media). Use for word-boundary edits like filler-word removal."},
+                "overview": {"type": "boolean", "description": "Video only. One storyboard grid of visually distinct, timestamped moments instead of frames — far more coverage per token; few tiles means static footage. maxFrames ignored."}
+            }),
+            &["mediaRef"],
+        ),
 
-        ToolName::GetTranscript => object(json!({
-            "startFrame": {"type": "integer", "description": "Optional. Only return words ending after this project frame. Use with the returned nextStartFrame to page a long timeline."},
-            "endFrame": {"type": "integer", "description": "Optional. Only return words starting before this project frame."},
-            "clipId": {"type": "string", "description": "Scope the transcript to a single clip — returns only what that clip says, in project frames. Answers \"what's in clip X?\" without scanning the whole timeline."}
-        }), &[]),
+        ToolName::GetTranscript => object(
+            json!({
+                "startFrame": {"type": "integer", "description": "Optional. Only return words ending after this project frame. Use with the returned nextStartFrame to page a long timeline."},
+                "endFrame": {"type": "integer", "description": "Optional. Only return words starting before this project frame."},
+                "clipId": {"type": "string", "description": "Scope the transcript to a single clip — returns only what that clip says, in project frames. Answers \"what's in clip X?\" without scanning the whole timeline."}
+            }),
+            &[],
+        ),
 
-        ToolName::InspectTimeline => object(json!({
-            "startFrame": {"type": "integer", "description": "Project frame to render (default 0). With no endFrame, a single frame is returned."},
-            "endFrame": {"type": "integer", "description": "Optional. Sample maxFrames evenly across [startFrame, endFrame) instead of one frame."},
-            "maxFrames": {"type": "integer", "description": "Frames to sample when endFrame is set (default 6, max 12)."}
-        }), &[]),
+        ToolName::InspectTimeline => object(
+            json!({
+                "startFrame": {"type": "integer", "description": "Project frame to render (default 0). With no endFrame, a single frame is returned."},
+                "endFrame": {"type": "integer", "description": "Optional. Sample maxFrames evenly across [startFrame, endFrame) instead of one frame."},
+                "maxFrames": {"type": "integer", "description": "Frames to sample when endFrame is set (default 6, max 12)."}
+            }),
+            &[],
+        ),
 
-        ToolName::SearchMedia => object(json!({
-            "query": {"type": "string", "description": "What to find. Visual: a caption-style scene description. Spoken: the words to match."},
-            "scope": {"type": "string", "enum": ["visual", "spoken", "both"], "description": "Optional. Default both."},
-            "mediaRef": {"type": "string", "description": "Optional. Restrict the search to one asset from get_media."},
-            "limit": {"type": "integer", "description": "Optional. Max hits per group (default 10, max 50)."}
-        }), &["query"]),
+        ToolName::SearchMedia => object(
+            json!({
+                "query": {"type": "string", "description": "What to find. Visual: a caption-style scene description. Spoken: the words to match."},
+                "scope": {"type": "string", "enum": ["visual", "spoken", "both"], "description": "Optional. Default both."},
+                "mediaRef": {"type": "string", "description": "Optional. Restrict the search to one asset from get_media."},
+                "limit": {"type": "integer", "description": "Optional. Max hits per group (default 10, max 50)."}
+            }),
+            &["query"],
+        ),
 
-        ToolName::AddClips => object(json!({
-            "entries": {
-                "type": "array",
-                "description": "Clips to add. Each entry is validated up front; one bad entry rejects the whole call with no partial state.",
-                "items": {
+        ToolName::AddClips => object(
+            json!({
+                "entries": {
+                    "type": "array",
+                    "description": "Clips to add. Each entry is validated up front; one bad entry rejects the whole call with no partial state.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "mediaRef": {"type": "string", "description": "ID of the media asset from get_media"},
+                            "trackIndex": {"type": "integer", "description": "Optional. Track index (0-based). Omit on every entry to auto-create one shared track per asset zone (video/audio)."},
+                            "startFrame": {"type": "integer", "description": "Timeline frame position to place the clip (project frames)."},
+                            "durationFrames": {"type": "integer", "description": "Clip length on the timeline, in project frames."},
+                            "trimStartFrame": {"type": "integer", "description": "Optional. Frames skipped from the START of the source media before the clip begins — a SOURCE offset, NOT a timeline position, but measured in PROJECT frames (the timeline's fps, same units as startFrame/durationFrames — never the source's own fps). 0 (default) starts at the source's first frame. Set this to trim on placement instead of a follow-up set_clip_properties call; semantics are identical to set_clip_properties."},
+                            "trimEndFrame": {"type": "integer", "description": "Optional. Frames trimmed off the END of the source media, in PROJECT frames — same units as trimStartFrame. 0 (default) trims nothing off the end."}
+                        },
+                        "required": ["mediaRef", "startFrame", "durationFrames"]
+                    }
+                }
+            }),
+            &["entries"],
+        ),
+
+        ToolName::InsertClips => object(
+            json!({
+                "trackIndex": {"type": "integer", "description": "Track index (0-based, from get_timeline) to insert into and ripple."},
+                "atFrame": {"type": "integer", "description": "Timeline frame (project frames) where insertion begins. Every clip at or after this frame on rippled tracks shifts right by the total inserted duration."},
+                "entries": {
+                    "type": "array",
+                    "description": "Clips to insert, placed sequentially from atFrame. Validated up front; one bad entry rejects the whole call.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "mediaRef": {"type": "string", "description": "ID of the media asset from get_media."},
+                            "durationFrames": {"type": "integer", "description": "Optional. Timeline length in project frames. Omit to use the asset's full source duration."},
+                            "trimStartFrame": {"type": "integer", "description": "Optional. Frames skipped from the START of the source media — a SOURCE offset in PROJECT frames (same units as atFrame/durationFrames, never the source's own fps). 0 (default) starts at the source's first frame."},
+                            "trimEndFrame": {"type": "integer", "description": "Optional. Frames trimmed off the END of the source media, in PROJECT frames. 0 (default) trims nothing."}
+                        },
+                        "required": ["mediaRef"]
+                    }
+                }
+            }),
+            &["trackIndex", "atFrame", "entries"],
+        ),
+
+        ToolName::RemoveClips => object(
+            json!({
+                "clipIds": {"type": "array", "description": "Clip IDs to remove.", "items": {"type": "string"}}
+            }),
+            &["clipIds"],
+        ),
+
+        ToolName::RemoveTracks => object(
+            json!({
+                "trackIndexes": {"type": "array", "items": {"type": "integer"}, "description": "Track indexes (0-based, from get_timeline) to remove."}
+            }),
+            &["trackIndexes"],
+        ),
+
+        ToolName::MoveClips => object(
+            json!({
+                "moves": {
+                    "type": "array",
+                    "description": "Per-clip move requests. At least one of toTrack or toFrame is required per entry.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "clipId": {"type": "string", "description": "The clip ID to move."},
+                            "toTrack": {"type": "integer", "description": "Destination track index (0-based). Omit to keep the clip on its current track."},
+                            "toFrame": {"type": "integer", "description": "Destination start frame. Omit to keep the clip at its current start."}
+                        },
+                        "required": ["clipId"]
+                    }
+                }
+            }),
+            &["moves"],
+        ),
+
+        ToolName::SetClipProperties => object(
+            json!({
+                "clipIds": {"type": "array", "description": "Clip IDs to update. The property values below apply to every clip in this list.", "items": {"type": "string"}},
+                "durationFrames": {"type": "integer", "description": "New duration in frames."},
+                "trimStartFrame": {"type": "integer", "description": "SOURCE-media offset, NOT a timeline frame: frames trimmed off the start of the source — measured in PROJECT frames (the timeline's fps, same units as startFrame/durationFrames; never the source's own fps). To turn a get_transcript project frame P into this clip's source offset, use trimStartFrame + (P − startFrame) × speed; setting trimStartFrame to that value makes the clip begin at P's source content."},
+                "trimEndFrame": {"type": "integer", "description": "SOURCE-media offset, NOT a timeline frame: frames trimmed off the end of the source, in PROJECT frames. Maps the same way as trimStartFrame via startFrame/speed."},
+                "speed": {"type": "number", "description": "Playback speed multiplier (default 1.0). >1 speeds up, <1 slows down. The clip's timeline length is rescaled to keep the same source content (2x speed → half the frames), unless you also pass durationFrames to set the length explicitly."},
+                "volume": {"type": "number", "description": "Volume 0.0-1.0. Clears any existing volume keyframes."},
+                "opacity": {"type": "number", "description": "Opacity 0.0-1.0. Clears any existing opacity keyframes."},
+                "transform": {
                     "type": "object",
+                    "description": "Partial transform. Any combination of centerX, centerY, width, height, flipHorizontal, flipVertical; omitted fields keep their current value.",
                     "properties": {
-                        "mediaRef": {"type": "string", "description": "ID of the media asset from get_media"},
-                        "trackIndex": {"type": "integer", "description": "Optional. Track index (0-based). Omit on every entry to auto-create one shared track per asset zone (video/audio)."},
-                        "startFrame": {"type": "integer", "description": "Timeline frame position to place the clip (project frames)."},
-                        "durationFrames": {"type": "integer", "description": "Clip length on the timeline, in project frames."},
-                        "trimStartFrame": {"type": "integer", "description": "Optional. Frames skipped from the START of the source media before the clip begins — a SOURCE offset, NOT a timeline position, but measured in PROJECT frames (the timeline's fps, same units as startFrame/durationFrames — never the source's own fps). 0 (default) starts at the source's first frame. Set this to trim on placement instead of a follow-up set_clip_properties call; semantics are identical to set_clip_properties."},
-                        "trimEndFrame": {"type": "integer", "description": "Optional. Frames trimmed off the END of the source media, in PROJECT frames — same units as trimStartFrame. 0 (default) trims nothing off the end."}
-                    },
-                    "required": ["mediaRef", "startFrame", "durationFrames"]
-                }
-            }
-        }), &["entries"]),
+                        "centerX": {"type": "number"},
+                        "centerY": {"type": "number"},
+                        "width": {"type": "number"},
+                        "height": {"type": "number"},
+                        "flipHorizontal": {"type": "boolean", "description": "Mirror across the vertical axis."},
+                        "flipVertical": {"type": "boolean", "description": "Mirror across the horizontal axis."}
+                    }
+                },
+                "content": {"type": "string", "description": "Text clips only. New text content."},
+                "fontName": {"type": "string", "description": "Text clips only. Font PostScript or family name."},
+                "fontSize": {"type": "number", "description": "Text clips only. Font size in canvas points."},
+                "color": {"type": "string", "description": "Text clips only. Hex '#RRGGBB' or '#RRGGBBAA'."},
+                "alignment": {"type": "string", "enum": ["left", "center", "right"], "description": "Text clips only."}
+            }),
+            &["clipIds"],
+        ),
 
-        ToolName::InsertClips => object(json!({
-            "trackIndex": {"type": "integer", "description": "Track index (0-based, from get_timeline) to insert into and ripple."},
-            "atFrame": {"type": "integer", "description": "Timeline frame (project frames) where insertion begins. Every clip at or after this frame on rippled tracks shifts right by the total inserted duration."},
-            "entries": {
-                "type": "array",
-                "description": "Clips to insert, placed sequentially from atFrame. Validated up front; one bad entry rejects the whole call.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "mediaRef": {"type": "string", "description": "ID of the media asset from get_media."},
-                        "durationFrames": {"type": "integer", "description": "Optional. Timeline length in project frames. Omit to use the asset's full source duration."},
-                        "trimStartFrame": {"type": "integer", "description": "Optional. Frames skipped from the START of the source media — a SOURCE offset in PROJECT frames (same units as atFrame/durationFrames, never the source's own fps). 0 (default) starts at the source's first frame."},
-                        "trimEndFrame": {"type": "integer", "description": "Optional. Frames trimmed off the END of the source media, in PROJECT frames. 0 (default) trims nothing."}
-                    },
-                    "required": ["mediaRef"]
-                }
-            }
-        }), &["trackIndex", "atFrame", "entries"]),
+        ToolName::SetKeyframes => object(
+            json!({
+                "clipId": {"type": "string", "description": "The clip ID."},
+                "property": {"type": "string", "enum": ["volume", "opacity", "rotation", "position", "scale", "crop"], "description": "Which property's keyframe track to set."},
+                "keyframes": {"type": "array", "description": "Replacement keyframe rows. Empty array clears the track. Row shape depends on property — see tool description.", "items": {"type": "array"}}
+            }),
+            &["clipId", "property", "keyframes"],
+        ),
 
-        ToolName::RemoveClips => object(json!({
-            "clipIds": {"type": "array", "description": "Clip IDs to remove.", "items": {"type": "string"}}
-        }), &["clipIds"]),
+        ToolName::SplitClip => object(
+            json!({
+                "clipId": {"type": "string", "description": "The clip ID to split"},
+                "atFrame": {"type": "integer", "description": "Frame position to split at (must be between clip start and end)"}
+            }),
+            &["clipId", "atFrame"],
+        ),
 
-        ToolName::RemoveTracks => object(json!({
-            "trackIndexes": {"type": "array", "items": {"type": "integer"}, "description": "Track indexes (0-based, from get_timeline) to remove."}
-        }), &["trackIndexes"]),
-
-        ToolName::MoveClips => object(json!({
-            "moves": {
-                "type": "array",
-                "description": "Per-clip move requests. At least one of toTrack or toFrame is required per entry.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "clipId": {"type": "string", "description": "The clip ID to move."},
-                        "toTrack": {"type": "integer", "description": "Destination track index (0-based). Omit to keep the clip on its current track."},
-                        "toFrame": {"type": "integer", "description": "Destination start frame. Omit to keep the clip at its current start."}
-                    },
-                    "required": ["clipId"]
-                }
-            }
-        }), &["moves"]),
-
-        ToolName::SetClipProperties => object(json!({
-            "clipIds": {"type": "array", "description": "Clip IDs to update. The property values below apply to every clip in this list.", "items": {"type": "string"}},
-            "durationFrames": {"type": "integer", "description": "New duration in frames."},
-            "trimStartFrame": {"type": "integer", "description": "SOURCE-media offset, NOT a timeline frame: frames trimmed off the start of the source — measured in PROJECT frames (the timeline's fps, same units as startFrame/durationFrames; never the source's own fps). To turn a get_transcript project frame P into this clip's source offset, use trimStartFrame + (P − startFrame) × speed; setting trimStartFrame to that value makes the clip begin at P's source content."},
-            "trimEndFrame": {"type": "integer", "description": "SOURCE-media offset, NOT a timeline frame: frames trimmed off the end of the source, in PROJECT frames. Maps the same way as trimStartFrame via startFrame/speed."},
-            "speed": {"type": "number", "description": "Playback speed multiplier (default 1.0). >1 speeds up, <1 slows down. The clip's timeline length is rescaled to keep the same source content (2x speed → half the frames), unless you also pass durationFrames to set the length explicitly."},
-            "volume": {"type": "number", "description": "Volume 0.0-1.0. Clears any existing volume keyframes."},
-            "opacity": {"type": "number", "description": "Opacity 0.0-1.0. Clears any existing opacity keyframes."},
-            "transform": {
-                "type": "object",
-                "description": "Partial transform. Any combination of centerX, centerY, width, height, flipHorizontal, flipVertical; omitted fields keep their current value.",
-                "properties": {
-                    "centerX": {"type": "number"},
-                    "centerY": {"type": "number"},
-                    "width": {"type": "number"},
-                    "height": {"type": "number"},
-                    "flipHorizontal": {"type": "boolean", "description": "Mirror across the vertical axis."},
-                    "flipVertical": {"type": "boolean", "description": "Mirror across the horizontal axis."}
-                }
-            },
-            "content": {"type": "string", "description": "Text clips only. New text content."},
-            "fontName": {"type": "string", "description": "Text clips only. Font PostScript or family name."},
-            "fontSize": {"type": "number", "description": "Text clips only. Font size in canvas points."},
-            "color": {"type": "string", "description": "Text clips only. Hex '#RRGGBB' or '#RRGGBBAA'."},
-            "alignment": {"type": "string", "enum": ["left", "center", "right"], "description": "Text clips only."}
-        }), &["clipIds"]),
-
-        ToolName::SetKeyframes => object(json!({
-            "clipId": {"type": "string", "description": "The clip ID."},
-            "property": {"type": "string", "enum": ["volume", "opacity", "rotation", "position", "scale", "crop"], "description": "Which property's keyframe track to set."},
-            "keyframes": {"type": "array", "description": "Replacement keyframe rows. Empty array clears the track. Row shape depends on property — see tool description.", "items": {"type": "array"}}
-        }), &["clipId", "property", "keyframes"]),
-
-        ToolName::SplitClip => object(json!({
-            "clipId": {"type": "string", "description": "The clip ID to split"},
-            "atFrame": {"type": "integer", "description": "Frame position to split at (must be between clip start and end)"}
-        }), &["clipId", "atFrame"]),
-
-        ToolName::RippleDeleteRanges => object(json!({
-            "trackIndex": {"type": "integer", "description": "Cut project-frame ranges spanning every clip they cross on this track, in one call. From get_transcript's clips array. Mutually exclusive with clipId; requires units 'frames'."},
-            "clipId": {"type": "string", "description": "Cut ranges within this single clip only, clamped to its visible span. Mutually exclusive with trackIndex."},
-            "ranges": {"type": "array", "description": "Ranges to remove, each a [start, end] pair (end > start). In the unit given by 'units'.", "items": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}},
-            "units": {"type": "string", "enum": ["seconds", "frames"], "description": "Interpretation of range values. 'frames' (default) = project/timeline frames, matching get_transcript and inspect_media-with-clipId. 'seconds' = source-media seconds (clipId mode only)."}
-        }), &["ranges"]),
+        ToolName::RippleDeleteRanges => object(
+            json!({
+                "trackIndex": {"type": "integer", "description": "Cut project-frame ranges spanning every clip they cross on this track, in one call. From get_transcript's clips array. Mutually exclusive with clipId; requires units 'frames'."},
+                "clipId": {"type": "string", "description": "Cut ranges within this single clip only, clamped to its visible span. Mutually exclusive with trackIndex."},
+                "ranges": {"type": "array", "description": "Ranges to remove, each a [start, end] pair (end > start). In the unit given by 'units'.", "items": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}},
+                "units": {"type": "string", "enum": ["seconds", "frames"], "description": "Interpretation of range values. 'frames' (default) = project/timeline frames, matching get_transcript and inspect_media-with-clipId. 'seconds' = source-media seconds (clipId mode only)."}
+            }),
+            &["ranges"],
+        ),
 
         ToolName::Undo => object(json!({}), &[]),
 
-        ToolName::AddTexts => object(json!({
-            "entries": {
-                "type": "array",
-                "description": "Text clips to add. Each entry is independent.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "trackIndex": {"type": "integer", "description": "Optional. Track index (0-based) for an existing non-audio track. Omit on every entry to auto-create one new track for the batch."},
-                        "startFrame": {"type": "integer", "description": "Frame position to place the clip"},
-                        "durationFrames": {"type": "integer", "description": "Duration in frames (>= 1)"},
-                        "content": {"type": "string", "description": "Text to display. Supports \\n for line breaks."},
-                        "transform": {
-                            "type": "object",
-                            "description": "Optional position/size. Omit for center + auto-fit. Pass centerX+centerY only for a specific position with auto-fit size. Pass all four for full override.",
-                            "properties": {
-                                "centerX": {"type": "number", "description": "Horizontal center 0–1 (0=left edge, 1=right edge)"},
-                                "centerY": {"type": "number", "description": "Vertical center 0–1 (0=top, 1=bottom)"},
-                                "width": {"type": "number", "description": "Width 0–1 (optional; omit for auto-fit)"},
-                                "height": {"type": "number", "description": "Height 0–1 (optional; omit for auto-fit)"}
-                            }
+        ToolName::AddTexts => object(
+            json!({
+                "entries": {
+                    "type": "array",
+                    "description": "Text clips to add. Each entry is independent.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "trackIndex": {"type": "integer", "description": "Optional. Track index (0-based) for an existing non-audio track. Omit on every entry to auto-create one new track for the batch."},
+                            "startFrame": {"type": "integer", "description": "Frame position to place the clip"},
+                            "durationFrames": {"type": "integer", "description": "Duration in frames (>= 1)"},
+                            "content": {"type": "string", "description": "Text to display. Supports \\n for line breaks."},
+                            "transform": {
+                                "type": "object",
+                                "description": "Optional position/size. Omit for center + auto-fit. Pass centerX+centerY only for a specific position with auto-fit size. Pass all four for full override.",
+                                "properties": {
+                                    "centerX": {"type": "number", "description": "Horizontal center 0–1 (0=left edge, 1=right edge)"},
+                                    "centerY": {"type": "number", "description": "Vertical center 0–1 (0=top, 1=bottom)"},
+                                    "width": {"type": "number", "description": "Width 0–1 (optional; omit for auto-fit)"},
+                                    "height": {"type": "number", "description": "Height 0–1 (optional; omit for auto-fit)"}
+                                }
+                            },
+                            "fontName": {"type": "string", "description": "Font PostScript or family name, e.g. 'Helvetica-Bold', 'Georgia-Bold'. Default 'Helvetica-Bold'. Falls back to bold system font if not found."},
+                            "fontSize": {"type": "number", "description": "Font size in canvas points (default 96). On a 1080p canvas ~50 is a caption, ~120 is a title."},
+                            "color": {"type": "string", "description": "Hex '#RRGGBB' or '#RRGGBBAA' (default '#FFFFFF')"},
+                            "alignment": {"type": "string", "enum": ["left", "center", "right"], "description": "Text alignment (default 'center')"}
                         },
-                        "fontName": {"type": "string", "description": "Font PostScript or family name, e.g. 'Helvetica-Bold', 'Georgia-Bold'. Default 'Helvetica-Bold'. Falls back to bold system font if not found."},
-                        "fontSize": {"type": "number", "description": "Font size in canvas points (default 96). On a 1080p canvas ~50 is a caption, ~120 is a title."},
-                        "color": {"type": "string", "description": "Hex '#RRGGBB' or '#RRGGBBAA' (default '#FFFFFF')"},
-                        "alignment": {"type": "string", "enum": ["left", "center", "right"], "description": "Text alignment (default 'center')"}
-                    },
-                    "required": ["startFrame", "durationFrames", "content"]
+                        "required": ["startFrame", "durationFrames", "content"]
+                    }
                 }
-            }
-        }), &["entries"]),
+            }),
+            &["entries"],
+        ),
 
-        ToolName::AddCaptions => object(json!({
-            "clipIds": {"type": "array", "items": {"type": "string"}, "description": "Optional. Audio/video clips to caption. Omit to auto-detect the primary spoken track."},
-            "language": {"type": "string", "description": "Optional BCP-47 language of the speech (e.g. 'es', 'ja', 'en-GB'). Defaults to the system language — set this when the footage is in another language, or transcription will be garbage."},
-            "fontName": {"type": "string", "description": "Optional font PostScript or family name (default 'Helvetica-Bold'). Falls back to bold system font if not found."},
-            "fontSize": {"type": "number", "description": "Optional font size in canvas points (default 48)."},
-            "color": {"type": "string", "description": "Optional hex '#RRGGBB' or '#RRGGBBAA' (default white)."},
-            "centerX": {"type": "number", "description": "Optional horizontal center 0–1 (default 0.5)."},
-            "centerY": {"type": "number", "description": "Optional vertical center 0–1 (default 0.9, near the bottom)."},
-            "textCase": {"type": "string", "enum": ["auto", "upper", "lower"], "description": "Optional letter case (default auto)."},
-            "censorProfanity": {"type": "boolean", "description": "Optional. Mask profanity (default false)."}
-        }), &[]),
+        ToolName::AddCaptions => object(
+            json!({
+                "clipIds": {"type": "array", "items": {"type": "string"}, "description": "Optional. Audio/video clips to caption. Omit to auto-detect the primary spoken track."},
+                "language": {"type": "string", "description": "Optional BCP-47 language of the speech (e.g. 'es', 'ja', 'en-GB'). Defaults to the system language — set this when the footage is in another language, or transcription will be garbage."},
+                "fontName": {"type": "string", "description": "Optional font PostScript or family name (default 'Helvetica-Bold'). Falls back to bold system font if not found."},
+                "fontSize": {"type": "number", "description": "Optional font size in canvas points (default 48)."},
+                "color": {"type": "string", "description": "Optional hex '#RRGGBB' or '#RRGGBBAA' (default white)."},
+                "centerX": {"type": "number", "description": "Optional horizontal center 0–1 (default 0.5)."},
+                "centerY": {"type": "number", "description": "Optional vertical center 0–1 (default 0.9, near the bottom)."},
+                "textCase": {"type": "string", "enum": ["auto", "upper", "lower"], "description": "Optional letter case (default auto)."},
+                "censorProfanity": {"type": "boolean", "description": "Optional. Mask profanity (default false)."}
+            }),
+            &[],
+        ),
 
-        ToolName::GenerateVideo => object(json!({
-            "prompt": {"type": "string", "description": "Text description of the video to generate"},
-            "name": {"type": "string", "description": "Display name for the asset in the media library. Defaults to first 30 chars of prompt."},
-            "model": {"type": "string", "description": "Model ID (e.g. 'veo3.1-fast'). Use list_models to see options. Defaults to first available model."},
-            "duration": {"type": "integer", "description": "Duration in seconds. Valid values depend on model."},
-            "aspectRatio": {"type": "string", "description": "Aspect ratio (e.g. '16:9', '9:16', '1:1')"},
-            "resolution": {"type": "string", "description": "Resolution (e.g. '720p', '1080p', '4k')"},
-            "startFrameMediaRef": {"type": "string", "description": "Media asset ID to use as the first frame (image-to-video)"},
-            "endFrameMediaRef": {"type": "string", "description": "Media asset ID to use as the last frame (supported by some models)"},
-            "sourceVideoMediaRef": {"type": "string", "description": "Media asset ID of a source video (required by video-to-video edit models; ignores duration/aspectRatio/resolution)"},
-            "sourceClipId": {"type": "string", "description": "Optional. Clip id (from get_timeline) referencing sourceVideoMediaRef. When set and the clip is trimmed, only the clip's visible range is sent to the model, not the full source — matches the UI's 'Use trimmed portion only'."},
-            "referenceImageMediaRefs": {"type": "array", "items": {"type": "string"}, "description": "Media asset IDs of image references. Covers both reference-to-video generation (Seedance, Kling V3/O3 elements, Grok — refer as @Image1/@Element1 in prompt) and the single-image ref used by video-to-video edit models (Kling V3 Motion Control). See list_models maxReferenceImages for per-model cap."},
-            "referenceVideoMediaRefs": {"type": "array", "items": {"type": "string"}, "description": "Media asset IDs of video references (Seedance only). Refer to them as @Video1, @Video2. See maxReferenceVideos and maxCombinedVideoRefSeconds."},
-            "referenceAudioMediaRefs": {"type": "array", "items": {"type": "string"}, "description": "Media asset IDs of audio references (Seedance only). Refer to them as @Audio1, @Audio2. See maxReferenceAudios and maxCombinedAudioRefSeconds."},
-            "folderId": {"type": "string", "description": "Optional. Folder id (from list_folders or create_folder) to place the result in. Omit for the project root."}
-        }), &["prompt"]),
+        ToolName::GenerateVideo => object(
+            json!({
+                "prompt": {"type": "string", "description": "Text description of the video to generate"},
+                "name": {"type": "string", "description": "Display name for the asset in the media library. Defaults to first 30 chars of prompt."},
+                "model": {"type": "string", "description": "Model ID (e.g. 'veo3.1-fast'). Use list_models to see options. Defaults to first available model."},
+                "duration": {"type": "integer", "description": "Duration in seconds. Valid values depend on model."},
+                "aspectRatio": {"type": "string", "description": "Aspect ratio (e.g. '16:9', '9:16', '1:1')"},
+                "resolution": {"type": "string", "description": "Resolution (e.g. '720p', '1080p', '4k')"},
+                "startFrameMediaRef": {"type": "string", "description": "Media asset ID to use as the first frame (image-to-video)"},
+                "endFrameMediaRef": {"type": "string", "description": "Media asset ID to use as the last frame (supported by some models)"},
+                "sourceVideoMediaRef": {"type": "string", "description": "Media asset ID of a source video (required by video-to-video edit models; ignores duration/aspectRatio/resolution)"},
+                "sourceClipId": {"type": "string", "description": "Optional. Clip id (from get_timeline) referencing sourceVideoMediaRef. When set and the clip is trimmed, only the clip's visible range is sent to the model, not the full source — matches the UI's 'Use trimmed portion only'."},
+                "referenceImageMediaRefs": {"type": "array", "items": {"type": "string"}, "description": "Media asset IDs of image references. Covers both reference-to-video generation (Seedance, Kling V3/O3 elements, Grok — refer as @Image1/@Element1 in prompt) and the single-image ref used by video-to-video edit models (Kling V3 Motion Control). See list_models maxReferenceImages for per-model cap."},
+                "referenceVideoMediaRefs": {"type": "array", "items": {"type": "string"}, "description": "Media asset IDs of video references (Seedance only). Refer to them as @Video1, @Video2. See maxReferenceVideos and maxCombinedVideoRefSeconds."},
+                "referenceAudioMediaRefs": {"type": "array", "items": {"type": "string"}, "description": "Media asset IDs of audio references (Seedance only). Refer to them as @Audio1, @Audio2. See maxReferenceAudios and maxCombinedAudioRefSeconds."},
+                "folderId": {"type": "string", "description": "Optional. Folder id (from list_folders or create_folder) to place the result in. Omit for the project root."}
+            }),
+            &["prompt"],
+        ),
 
-        ToolName::GenerateImage => object(json!({
-            "prompt": {"type": "string", "description": "Text description of the image to generate"},
-            "name": {"type": "string", "description": "Display name for the asset in the media library. Defaults to first 30 chars of prompt."},
-            "model": {"type": "string", "description": "Model ID (e.g. 'nano-banana-pro'). Use list_models to see options. Defaults to first available model."},
-            "aspectRatio": {"type": "string", "description": "Aspect ratio (e.g. '16:9', '9:16')"},
-            "resolution": {"type": "string", "description": "Resolution (e.g. '2K', '4K')"},
-            "quality": {"type": "string", "description": "Image quality (e.g. 'low', 'medium', 'high'). Only supported by some models — see list_models."},
-            "referenceMediaRefs": {"type": "array", "items": {"type": "string"}, "description": "Media asset IDs to use as reference images"},
-            "folderId": {"type": "string", "description": "Optional. Folder id (from list_folders or create_folder) to place the result in. Omit for the project root."}
-        }), &["prompt"]),
+        ToolName::GenerateImage => object(
+            json!({
+                "prompt": {"type": "string", "description": "Text description of the image to generate"},
+                "name": {"type": "string", "description": "Display name for the asset in the media library. Defaults to first 30 chars of prompt."},
+                "model": {"type": "string", "description": "Model ID (e.g. 'nano-banana-pro'). Use list_models to see options. Defaults to first available model."},
+                "aspectRatio": {"type": "string", "description": "Aspect ratio (e.g. '16:9', '9:16')"},
+                "resolution": {"type": "string", "description": "Resolution (e.g. '2K', '4K')"},
+                "quality": {"type": "string", "description": "Image quality (e.g. 'low', 'medium', 'high'). Only supported by some models — see list_models."},
+                "referenceMediaRefs": {"type": "array", "items": {"type": "string"}, "description": "Media asset IDs to use as reference images"},
+                "folderId": {"type": "string", "description": "Optional. Folder id (from list_folders or create_folder) to place the result in. Omit for the project root."}
+            }),
+            &["prompt"],
+        ),
 
-        ToolName::GenerateAudio => object(json!({
-            "prompt": {"type": "string", "description": "Required for TTS (the text to speak) and text-to-music (style/mood/genre; MiniMax needs ≥10 chars). For Lyria 3 Pro, include lyrics, tempo, language, and vocal style directly in the prompt. Optional style guide for video-to-music models."},
-            "name": {"type": "string", "description": "Display name for the asset in the media library. Defaults to first 30 chars of prompt."},
-            "model": {"type": "string", "description": "Model ID. Use list_models with type='audio' to see options and their 'inputs'. Defaults to the first model."},
-            "voice": {"type": "string", "description": "TTS only. Voice preset name. list_models shows voicesSample (first 3) + voiceCount; any voice supported by the model is accepted. Defaults to the model's defaultVoice. Ignored by music models."},
-            "lyrics": {"type": "string", "description": "MiniMax Music only. Lyrics with optional [Verse]/[Chorus] section tags. If omitted and instrumental=false, MiniMax auto-writes lyrics from the prompt."},
-            "styleInstructions": {"type": "string", "description": "Gemini TTS only. Optional delivery instructions (e.g. 'warm and slow', 'British accent')."},
-            "instrumental": {"type": "boolean", "description": "Music models only. true = no vocals when the selected model supports it. Defaults to false."},
-            "duration": {"type": "integer", "description": "Length in seconds. ElevenLabs Music: 3–600. Sonilo text-to-music: up to 600. For a video source, defaults to the span/clip length. Ignored by TTS, MiniMax, and Lyria 3 Pro."},
-            "videoSourceStartFrame": {"type": "integer", "description": "Video-to-audio models only. Start frame (timeline) of a span to render and score — pair with videoSourceEndFrame. Use get_timeline for frame numbers; for the whole timeline use 0 to the timeline's end frame."},
-            "videoSourceEndFrame": {"type": "integer", "description": "Video-to-audio models only. End frame (exclusive) of the span to score. Must be > videoSourceStartFrame."},
-            "videoSourceMediaRef": {"type": "string", "description": "Video-to-audio models only. Score this existing video asset instead of a timeline span. Mutually exclusive with the videoSource frames."},
-            "folderId": {"type": "string", "description": "Optional. Folder id (from list_folders or create_folder) to place the result in. Omit for the project root."}
-        }), &[]),
+        ToolName::GenerateAudio => object(
+            json!({
+                "prompt": {"type": "string", "description": "Required for TTS (the text to speak) and text-to-music (style/mood/genre; MiniMax needs ≥10 chars). For Lyria 3 Pro, include lyrics, tempo, language, and vocal style directly in the prompt. Optional style guide for video-to-music models."},
+                "name": {"type": "string", "description": "Display name for the asset in the media library. Defaults to first 30 chars of prompt."},
+                "model": {"type": "string", "description": "Model ID. Use list_models with type='audio' to see options and their 'inputs'. Defaults to the first model."},
+                "voice": {"type": "string", "description": "TTS only. Voice preset name. list_models shows voicesSample (first 3) + voiceCount; any voice supported by the model is accepted. Defaults to the model's defaultVoice. Ignored by music models."},
+                "lyrics": {"type": "string", "description": "MiniMax Music only. Lyrics with optional [Verse]/[Chorus] section tags. If omitted and instrumental=false, MiniMax auto-writes lyrics from the prompt."},
+                "styleInstructions": {"type": "string", "description": "Gemini TTS only. Optional delivery instructions (e.g. 'warm and slow', 'British accent')."},
+                "instrumental": {"type": "boolean", "description": "Music models only. true = no vocals when the selected model supports it. Defaults to false."},
+                "duration": {"type": "integer", "description": "Length in seconds. ElevenLabs Music: 3–600. Sonilo text-to-music: up to 600. For a video source, defaults to the span/clip length. Ignored by TTS, MiniMax, and Lyria 3 Pro."},
+                "videoSourceStartFrame": {"type": "integer", "description": "Video-to-audio models only. Start frame (timeline) of a span to render and score — pair with videoSourceEndFrame. Use get_timeline for frame numbers; for the whole timeline use 0 to the timeline's end frame."},
+                "videoSourceEndFrame": {"type": "integer", "description": "Video-to-audio models only. End frame (exclusive) of the span to score. Must be > videoSourceStartFrame."},
+                "videoSourceMediaRef": {"type": "string", "description": "Video-to-audio models only. Score this existing video asset instead of a timeline span. Mutually exclusive with the videoSource frames."},
+                "folderId": {"type": "string", "description": "Optional. Folder id (from list_folders or create_folder) to place the result in. Omit for the project root."}
+            }),
+            &[],
+        ),
 
-        ToolName::UpscaleMedia => object(json!({
-            "mediaRef": {"type": "string", "description": "ID of the video or image asset to upscale"},
-            "model": {"type": "string", "description": "Upscaler model ID (e.g. 'bytedance-upscaler', 'seedvr-image-upscaler'). Defaults to the first model that supports the asset's type."},
-            "sourceClipId": {"type": "string", "description": "Optional. Video clip id (from get_timeline) referencing mediaRef. When set and the clip is trimmed, only the clip's visible range is upscaled, not the full source."}
-        }), &["mediaRef"]),
+        ToolName::UpscaleMedia => object(
+            json!({
+                "mediaRef": {"type": "string", "description": "ID of the video or image asset to upscale"},
+                "model": {"type": "string", "description": "Upscaler model ID (e.g. 'bytedance-upscaler', 'seedvr-image-upscaler'). Defaults to the first model that supports the asset's type."},
+                "sourceClipId": {"type": "string", "description": "Optional. Video clip id (from get_timeline) referencing mediaRef. When set and the clip is trimmed, only the clip's visible range is upscaled, not the full source."}
+            }),
+            &["mediaRef"],
+        ),
 
-        ToolName::ImportMedia => object(json!({
-            "source": {
-                "type": "object",
-                "description": "Exactly one of url, path, or bytes must be set. mimeType is required when bytes is set; for url it acts as a type-inference override.",
-                "properties": {
-                    "url": {"type": "string", "description": "HTTPS URL. Pre-signed URLs are fine but must not expire mid-download."},
-                    "path": {"type": "string", "description": "Absolute local file or directory path, readable by the OpenTake process. A directory is imported recursively — every openable file is pulled in and the folder structure is replicated as media folders."},
-                    "bytes": {"type": "string", "description": "Base64-encoded media data. Prefer url or path for anything over ~10MB."},
-                    "mimeType": {"type": "string", "description": "Required when bytes is set. Optional override for url when its path has no usable extension (e.g. signed URLs). Accepted: video/mp4, video/quicktime, audio/mpeg, audio/wav, audio/aac, audio/mp4, image/png, image/jpeg, image/tiff, image/heic."}
-                }
-            },
-            "name": {"type": "string", "description": "Display name in the library. Defaults to the filename derived from url/path, or 'Imported asset' for bytes."},
-            "folderId": {"type": "string", "description": "Optional. Folder id (from list_folders or create_folder) to place the result in. Omit for the project root."}
-        }), &["source"]),
+        ToolName::ImportMedia => object(
+            json!({
+                "source": {
+                    "type": "object",
+                    "description": "Exactly one of url, path, or bytes must be set. mimeType is required when bytes is set; for url it acts as a type-inference override.",
+                    "properties": {
+                        "url": {"type": "string", "description": "HTTPS URL. Pre-signed URLs are fine but must not expire mid-download."},
+                        "path": {"type": "string", "description": "Absolute local file or directory path, readable by the OpenTake process. A directory is imported recursively — every openable file is pulled in and the folder structure is replicated as media folders."},
+                        "bytes": {"type": "string", "description": "Base64-encoded media data. Prefer url or path for anything over ~10MB."},
+                        "mimeType": {"type": "string", "description": "Required when bytes is set. Optional override for url when its path has no usable extension (e.g. signed URLs). Accepted: video/mp4, video/quicktime, audio/mpeg, audio/wav, audio/aac, audio/mp4, image/png, image/jpeg, image/tiff, image/heic."}
+                    }
+                },
+                "name": {"type": "string", "description": "Display name in the library. Defaults to the filename derived from url/path, or 'Imported asset' for bytes."},
+                "folderId": {"type": "string", "description": "Optional. Folder id (from list_folders or create_folder) to place the result in. Omit for the project root."}
+            }),
+            &["source"],
+        ),
 
         ToolName::ListFolders => object(json!({}), &[]),
 
-        ToolName::CreateFolder => object(json!({
-            "name": {"type": "string", "description": "Folder name."},
-            "parentFolderId": {"type": "string", "description": "Optional parent folder id; omit for top level."},
-            "entries": {
-                "type": "array",
-                "description": "Folders to create in one undoable action.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "Folder name."},
-                        "parentFolderId": {"type": "string", "description": "Optional parent folder id; omit for top level."}
-                    },
-                    "required": ["name"]
+        ToolName::CreateFolder => object(
+            json!({
+                "name": {"type": "string", "description": "Folder name."},
+                "parentFolderId": {"type": "string", "description": "Optional parent folder id; omit for top level."},
+                "entries": {
+                    "type": "array",
+                    "description": "Folders to create in one undoable action.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "Folder name."},
+                            "parentFolderId": {"type": "string", "description": "Optional parent folder id; omit for top level."}
+                        },
+                        "required": ["name"]
+                    }
                 }
-            }
-        }), &[]),
+            }),
+            &[],
+        ),
 
-        ToolName::MoveToFolder => object(json!({
-            "assetIds": {"type": "array", "items": {"type": "string"}, "description": "Media asset ids to move."},
-            "folderId": {"type": "string", "description": "Destination folder id. Omit to move to the project root."},
-            "entries": {
-                "type": "array",
-                "description": "Move operations to apply in one undoable action. Each entry can target a different folder.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "assetIds": {"type": "array", "items": {"type": "string"}, "description": "Media asset ids to move."},
-                        "folderId": {"type": "string", "description": "Destination folder id. Omit to move to the project root."}
-                    },
-                    "required": ["assetIds"]
+        ToolName::MoveToFolder => object(
+            json!({
+                "assetIds": {"type": "array", "items": {"type": "string"}, "description": "Media asset ids to move."},
+                "folderId": {"type": "string", "description": "Destination folder id. Omit to move to the project root."},
+                "entries": {
+                    "type": "array",
+                    "description": "Move operations to apply in one undoable action. Each entry can target a different folder.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "assetIds": {"type": "array", "items": {"type": "string"}, "description": "Media asset ids to move."},
+                            "folderId": {"type": "string", "description": "Destination folder id. Omit to move to the project root."}
+                        },
+                        "required": ["assetIds"]
+                    }
                 }
-            }
-        }), &[]),
+            }),
+            &[],
+        ),
 
-        ToolName::RenameMedia => object(json!({
-            "mediaRef": {"type": "string", "description": "Media asset id from get_media."},
-            "name": {"type": "string", "description": "New display name."},
-            "entries": {
-                "type": "array",
-                "description": "Media assets to rename in one undoable action.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "mediaRef": {"type": "string", "description": "Media asset id from get_media."},
-                        "name": {"type": "string", "description": "New display name."}
-                    },
-                    "required": ["mediaRef", "name"]
+        ToolName::RenameMedia => object(
+            json!({
+                "mediaRef": {"type": "string", "description": "Media asset id from get_media."},
+                "name": {"type": "string", "description": "New display name."},
+                "entries": {
+                    "type": "array",
+                    "description": "Media assets to rename in one undoable action.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "mediaRef": {"type": "string", "description": "Media asset id from get_media."},
+                            "name": {"type": "string", "description": "New display name."}
+                        },
+                        "required": ["mediaRef", "name"]
+                    }
                 }
-            }
-        }), &[]),
+            }),
+            &[],
+        ),
 
-        ToolName::RenameFolder => object(json!({
-            "folderId": {"type": "string", "description": "Folder id from list_folders."},
-            "name": {"type": "string", "description": "New folder name."},
-            "entries": {
-                "type": "array",
-                "description": "Folders to rename in one undoable action.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "folderId": {"type": "string", "description": "Folder id from list_folders."},
-                        "name": {"type": "string", "description": "New folder name."}
-                    },
-                    "required": ["folderId", "name"]
+        ToolName::RenameFolder => object(
+            json!({
+                "folderId": {"type": "string", "description": "Folder id from list_folders."},
+                "name": {"type": "string", "description": "New folder name."},
+                "entries": {
+                    "type": "array",
+                    "description": "Folders to rename in one undoable action.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "folderId": {"type": "string", "description": "Folder id from list_folders."},
+                            "name": {"type": "string", "description": "New folder name."}
+                        },
+                        "required": ["folderId", "name"]
+                    }
                 }
-            }
-        }), &[]),
+            }),
+            &[],
+        ),
 
-        ToolName::DeleteMedia => object(json!({
-            "assetIds": {"type": "array", "items": {"type": "string"}, "description": "Media asset ids to delete."}
-        }), &["assetIds"]),
+        ToolName::DeleteMedia => object(
+            json!({
+                "assetIds": {"type": "array", "items": {"type": "string"}, "description": "Media asset ids to delete."}
+            }),
+            &["assetIds"],
+        ),
 
-        ToolName::DeleteFolder => object(json!({
-            "folderIds": {"type": "array", "items": {"type": "string"}, "description": "Folder ids to delete."}
-        }), &["folderIds"]),
+        ToolName::DeleteFolder => object(
+            json!({
+                "folderIds": {"type": "array", "items": {"type": "string"}, "description": "Folder ids to delete."}
+            }),
+            &["folderIds"],
+        ),
 
-        ToolName::ListModels => object(json!({
-            "type": {"type": "string", "enum": ["video", "image", "audio", "upscale"], "description": "Filter by type. Omit to list all models."}
-        }), &[]),
+        ToolName::ListModels => object(
+            json!({
+                "type": {"type": "string", "enum": ["video", "image", "audio", "upscale"], "description": "Filter by type. Omit to list all models."}
+            }),
+            &[],
+        ),
 
-        ToolName::ActivateWorkflow => object(json!({
-            "workflowId": {"type": "string", "description": "Plugin id from list_workflows (e.g. 'opentake-workflow-popular-science')."}
-        }), &["workflowId"]),
+        ToolName::ActivateWorkflow => object(
+            json!({
+                "workflowId": {"type": "string", "description": "Plugin id from list_workflows (e.g. 'opentake-workflow-popular-science')."}
+            }),
+            &["workflowId"],
+        ),
 
         ToolName::ListWorkflows => object(json!({}), &[]),
 
@@ -449,7 +536,12 @@ fn object(properties: Value, required: &[&str]) -> Value {
     if !required.is_empty() {
         obj.insert(
             "required".into(),
-            Value::Array(required.iter().map(|s| Value::String(s.to_string())).collect()),
+            Value::Array(
+                required
+                    .iter()
+                    .map(|s| Value::String(s.to_string()))
+                    .collect(),
+            ),
         );
     }
     Value::Object(obj)
@@ -462,7 +554,11 @@ mod tests {
     #[test]
     fn every_tool_has_nonempty_description() {
         for t in ToolName::ALL {
-            assert!(!description(t).is_empty(), "{} has empty description", t.as_str());
+            assert!(
+                !description(t).is_empty(),
+                "{} has empty description",
+                t.as_str()
+            );
         }
     }
 
@@ -511,7 +607,10 @@ mod tests {
             ),
             "{d}"
         );
-        assert!(d.ends_with("Path and bytes imports finalize synchronously. Costs nothing."), "{d}");
+        assert!(
+            d.ends_with("Path and bytes imports finalize synchronously. Costs nothing."),
+            "{d}"
+        );
     }
 
     #[test]
@@ -526,37 +625,161 @@ mod tests {
         //
         // (variant, head_anchor, tail_anchor)
         const ANCHORS: &[(ToolName, &str, &str)] = &[
-            (ToolName::GetTimeline, "Always call at the start of a session. Returns project", "he group appear individually in clips."),
-            (ToolName::GetMedia, "Call before referencing any asset. Every mediaRef/refer", " async-generated and -imported assets."),
-            (ToolName::AddClips, "Places one or more media assets on the timeline as a si", "'s drag-onto-track overwrite behavior."),
-            (ToolName::InsertClips, "Inserts one or more media assets at a single point and", "ement into empty space, use add_clips."),
-            (ToolName::RemoveClips, "Removes one or more clips by ID as a single undoable ac", "ching the UI's linked-delete behavior."),
-            (ToolName::RemoveTracks, "Removes whole tracks and every clip on them in one undo", "rack indexes shift down after removal."),
-            (ToolName::MoveClips, "Moves one or more clips to a new track and/or frame pos", "sets; tracks stay with the named clip."),
-            (ToolName::SetClipProperties, "Apply the same property values to one or more clips in", "d speed are skipped for text partners."),
-            (ToolName::SetKeyframes, "Set animated keyframes on one property of one clip. Rep", " static `transform` value when active."),
-            (ToolName::SplitClip, "Splits a clip into two at atFrame. The frame must be st", "use get_timeline to confirm the range."),
-            (ToolName::RippleDeleteRanges, "Cuts one or more ranges out and closes the gaps in one", "/frames) so you don't need to re-read."),
-            (ToolName::Undo, "Reverts the assistant's most recent timeline edit (a cu", "you'll edit again. Takes no arguments."),
-            (ToolName::AddTexts, "Adds one or more text clips (titles, captions, lower-th", " by hand. Unknown fields are rejected."),
-            (ToolName::AddCaptions, "Auto-caption spoken audio: transcribes on-device and pl", "cific clips (e.g. only the interview)."),
-            (ToolName::GenerateVideo, "Starts an async AI video generation. Returns a placehol", " Costs real money and is not undoable."),
-            (ToolName::GenerateImage, "Starts an async AI image generation. Returns a placehol", " Costs real money and is not undoable."),
-            (ToolName::GenerateAudio, "Starts an async AI audio generation: text-to-speech, te", " Costs real money and is not undoable."),
-            (ToolName::UpscaleMedia, "Upscales an existing video or image asset to higher res", " Costs real money and is not undoable."),
-            (ToolName::ImportMedia, "Imports external media into the project's library — the", "finalize synchronously. Costs nothing."),
-            (ToolName::ListModels, "Lists AI models with their capabilities (durations, asp", "ilable. Retry after the user signs in."),
-            (ToolName::InspectMedia, "Look at a media asset before referencing or editing it.", "ranscribe that span, so they are fast."),
-            (ToolName::GetTranscript, "Returns the spoken transcript of the CURRENT timeline i", " to verify what remains after cutting."),
-            (ToolName::InspectTimeline, "See the composited timeline — what the user actually se", "ciency, with the frameNumbers sampled."),
-            (ToolName::SearchMedia, "Search the media library by content: what's on screen (", "ken results work regardless of status."),
-            (ToolName::ListFolders, "Lists every folder in the media panel as {id, name, par", "r by name before generating new media."),
-            (ToolName::CreateFolder, "Creates folders in the media panel. Pass either name/pa", "create folders for unrelated concepts."),
-            (ToolName::MoveToFolder, "Moves media assets to folders. Pass either assetIds/fol", "it folderId to move to root. Undoable."),
-            (ToolName::RenameMedia, "Renames media assets in the library. Pass either mediaR", "r multiple assets, not both. Undoable."),
-            (ToolName::RenameFolder, "Renames folders in the media panel. Pass either folderI", " multiple folders, not both. Undoable."),
-            (ToolName::DeleteMedia, "Deletes media assets from the library. Any clips refere", " timeline in the same undoable action."),
-            (ToolName::DeleteFolder, "Deletes folders and everything inside them (subfolders", " timeline in the same undoable action."),
+            (
+                ToolName::GetTimeline,
+                "Always call at the start of a session. Returns project",
+                "he group appear individually in clips.",
+            ),
+            (
+                ToolName::GetMedia,
+                "Call before referencing any asset. Every mediaRef/refer",
+                " async-generated and -imported assets.",
+            ),
+            (
+                ToolName::AddClips,
+                "Places one or more media assets on the timeline as a si",
+                "'s drag-onto-track overwrite behavior.",
+            ),
+            (
+                ToolName::InsertClips,
+                "Inserts one or more media assets at a single point and",
+                "ement into empty space, use add_clips.",
+            ),
+            (
+                ToolName::RemoveClips,
+                "Removes one or more clips by ID as a single undoable ac",
+                "ching the UI's linked-delete behavior.",
+            ),
+            (
+                ToolName::RemoveTracks,
+                "Removes whole tracks and every clip on them in one undo",
+                "rack indexes shift down after removal.",
+            ),
+            (
+                ToolName::MoveClips,
+                "Moves one or more clips to a new track and/or frame pos",
+                "sets; tracks stay with the named clip.",
+            ),
+            (
+                ToolName::SetClipProperties,
+                "Apply the same property values to one or more clips in",
+                "d speed are skipped for text partners.",
+            ),
+            (
+                ToolName::SetKeyframes,
+                "Set animated keyframes on one property of one clip. Rep",
+                " static `transform` value when active.",
+            ),
+            (
+                ToolName::SplitClip,
+                "Splits a clip into two at atFrame. The frame must be st",
+                "use get_timeline to confirm the range.",
+            ),
+            (
+                ToolName::RippleDeleteRanges,
+                "Cuts one or more ranges out and closes the gaps in one",
+                "/frames) so you don't need to re-read.",
+            ),
+            (
+                ToolName::Undo,
+                "Reverts the assistant's most recent timeline edit (a cu",
+                "you'll edit again. Takes no arguments.",
+            ),
+            (
+                ToolName::AddTexts,
+                "Adds one or more text clips (titles, captions, lower-th",
+                " by hand. Unknown fields are rejected.",
+            ),
+            (
+                ToolName::AddCaptions,
+                "Auto-caption spoken audio: transcribes on-device and pl",
+                "cific clips (e.g. only the interview).",
+            ),
+            (
+                ToolName::GenerateVideo,
+                "Starts an async AI video generation. Returns a placehol",
+                " Costs real money and is not undoable.",
+            ),
+            (
+                ToolName::GenerateImage,
+                "Starts an async AI image generation. Returns a placehol",
+                " Costs real money and is not undoable.",
+            ),
+            (
+                ToolName::GenerateAudio,
+                "Starts an async AI audio generation: text-to-speech, te",
+                " Costs real money and is not undoable.",
+            ),
+            (
+                ToolName::UpscaleMedia,
+                "Upscales an existing video or image asset to higher res",
+                " Costs real money and is not undoable.",
+            ),
+            (
+                ToolName::ImportMedia,
+                "Imports external media into the project's library — the",
+                "finalize synchronously. Costs nothing.",
+            ),
+            (
+                ToolName::ListModels,
+                "Lists AI models with their capabilities (durations, asp",
+                "ilable. Retry after the user signs in.",
+            ),
+            (
+                ToolName::InspectMedia,
+                "Look at a media asset before referencing or editing it.",
+                "ranscribe that span, so they are fast.",
+            ),
+            (
+                ToolName::GetTranscript,
+                "Returns the spoken transcript of the CURRENT timeline i",
+                " to verify what remains after cutting.",
+            ),
+            (
+                ToolName::InspectTimeline,
+                "See the composited timeline — what the user actually se",
+                "ciency, with the frameNumbers sampled.",
+            ),
+            (
+                ToolName::SearchMedia,
+                "Search the media library by content: what's on screen (",
+                "ken results work regardless of status.",
+            ),
+            (
+                ToolName::ListFolders,
+                "Lists every folder in the media panel as {id, name, par",
+                "r by name before generating new media.",
+            ),
+            (
+                ToolName::CreateFolder,
+                "Creates folders in the media panel. Pass either name/pa",
+                "create folders for unrelated concepts.",
+            ),
+            (
+                ToolName::MoveToFolder,
+                "Moves media assets to folders. Pass either assetIds/fol",
+                "it folderId to move to root. Undoable.",
+            ),
+            (
+                ToolName::RenameMedia,
+                "Renames media assets in the library. Pass either mediaR",
+                "r multiple assets, not both. Undoable.",
+            ),
+            (
+                ToolName::RenameFolder,
+                "Renames folders in the media panel. Pass either folderI",
+                " multiple folders, not both. Undoable.",
+            ),
+            (
+                ToolName::DeleteMedia,
+                "Deletes media assets from the library. Any clips refere",
+                " timeline in the same undoable action.",
+            ),
+            (
+                ToolName::DeleteFolder,
+                "Deletes folders and everything inside them (subfolders",
+                " timeline in the same undoable action.",
+            ),
         ];
         assert_eq!(ANCHORS.len(), 31, "all 31 upstream tools must be anchored");
         for (tool, head, tail) in ANCHORS {
@@ -590,16 +813,32 @@ mod tests {
         assert_eq!(s["required"], serde_json::json!(["entries"]));
         // Nested entry required keys preserved.
         let item_required = &s["properties"]["entries"]["items"]["required"];
-        assert_eq!(item_required, &serde_json::json!(["mediaRef", "startFrame", "durationFrames"]));
+        assert_eq!(
+            item_required,
+            &serde_json::json!(["mediaRef", "startFrame", "durationFrames"])
+        );
     }
 
     #[test]
     fn no_args_tools_omit_properties() {
         // get_media / undo / list_folders take no args.
-        for t in [ToolName::GetMedia, ToolName::Undo, ToolName::ListFolders, ToolName::ListWorkflows] {
+        for t in [
+            ToolName::GetMedia,
+            ToolName::Undo,
+            ToolName::ListFolders,
+            ToolName::ListWorkflows,
+        ] {
             let s = input_schema(t);
-            assert!(s.get("properties").is_none(), "{} should omit properties", t.as_str());
-            assert!(s.get("required").is_none(), "{} should omit required", t.as_str());
+            assert!(
+                s.get("properties").is_none(),
+                "{} should omit properties",
+                t.as_str()
+            );
+            assert!(
+                s.get("required").is_none(),
+                "{} should omit required",
+                t.as_str()
+            );
         }
     }
 }

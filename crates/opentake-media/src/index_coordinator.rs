@@ -44,7 +44,9 @@ impl ExportPause {
     pub fn end(&self) {
         let _ = self
             .0
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some(v.saturating_sub(1)));
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                Some(v.saturating_sub(1))
+            });
     }
     /// True while any export is active.
     pub fn is_active(&self) -> bool {
@@ -71,11 +73,7 @@ impl WorkNeeded {
 /// - skip while the asset is still generating;
 /// - **visual**: a video or image whose embedding index is not current;
 /// - **transcript**: audio, or a video with audio, that has no disk transcript.
-pub fn work_needed(
-    cache_root: &Path,
-    asset: &MediaAsset,
-    spec: &EmbedderSpec,
-) -> WorkNeeded {
+pub fn work_needed(cache_root: &Path, asset: &MediaAsset, spec: &EmbedderSpec) -> WorkNeeded {
     if asset.is_generating() {
         return WorkNeeded::default();
     }

@@ -257,7 +257,11 @@ mod tests {
         assert!(err.message.contains("expected"), "{}", err.message);
         // The recovered type name (an integer) and upstream's "got something
         // else" wording are both present, and no line/column noise leaks.
-        assert!(err.message.contains("got something else"), "{}", err.message);
+        assert!(
+            err.message.contains("got something else"),
+            "{}",
+            err.message
+        );
         assert!(!err.message.contains("at line"), "{}", err.message);
         assert!(
             !err.message.contains("a different type"),
@@ -333,9 +337,15 @@ mod tests {
 
     #[test]
     fn normalize_path_converts_indices() {
-        assert_eq!(normalize_path("", "entries.3.startFrame"), "entries[3].startFrame");
+        assert_eq!(
+            normalize_path("", "entries.3.startFrame"),
+            "entries[3].startFrame"
+        );
         assert_eq!(normalize_path("", "moves.0.clipId"), "moves[0].clipId");
-        assert_eq!(normalize_path("entries[2]", "trimStartFrame"), "entries[2].trimStartFrame");
+        assert_eq!(
+            normalize_path("entries[2]", "trimStartFrame"),
+            "entries[2].trimStartFrame"
+        );
         assert_eq!(normalize_path("", "."), "");
     }
 }

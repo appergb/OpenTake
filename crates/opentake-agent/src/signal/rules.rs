@@ -58,9 +58,7 @@ pub fn builtin_rules(
         ToolName::SplitClip => {
             // 不在词中间切：only when we positively know it's mid-word.
             if op.mid_word == Some(true) {
-                warnings.push(
-                    "切点位于词中间，会导致漏字。请移到句界（语义完整处）。".to_string(),
-                );
+                warnings.push("切点位于词中间，会导致漏字。请移到句界（语义完整处）。".to_string());
             } else if op.mid_word.is_none() && on_voice_track {
                 // Unknown without word-level timestamps → soft reminder.
                 warnings.push(
@@ -70,9 +68,8 @@ pub fn builtin_rules(
         }
         ToolName::RemoveClips => {
             if on_voice_track && !op.clip_ids.is_empty() {
-                warnings.push(
-                    "该 clip 为主干内容，删除会破坏叙事。确认这是啰嗦/卡顿？".to_string(),
-                );
+                warnings
+                    .push("该 clip 为主干内容，删除会破坏叙事。确认这是啰嗦/卡顿？".to_string());
             }
         }
         // --- B-roll 匹配 (add_clips / search_media) ---
@@ -136,7 +133,10 @@ mod tests {
             ..Default::default()
         };
         let w = builtin_rules(ToolName::SplitClip, &op, &[], &Timeline::new());
-        assert_eq!(w, vec!["切点位于词中间，会导致漏字。请移到句界（语义完整处）。"]);
+        assert_eq!(
+            w,
+            vec!["切点位于词中间，会导致漏字。请移到句界（语义完整处）。"]
+        );
     }
 
     #[test]
@@ -146,7 +146,12 @@ mod tests {
             mid_word: None,
             ..Default::default()
         };
-        let w = builtin_rules(ToolName::SplitClip, &op, &roles_voice_at(0), &Timeline::new());
+        let w = builtin_rules(
+            ToolName::SplitClip,
+            &op,
+            &roles_voice_at(0),
+            &Timeline::new(),
+        );
         assert_eq!(
             w,
             vec!["该处为气口，请判断：保留(衔接不自然)/扩充(太急促)/叠化(去不掉时)"]
@@ -160,8 +165,16 @@ mod tests {
             clip_ids: vec!["c1".into()],
             ..Default::default()
         };
-        let w = builtin_rules(ToolName::RemoveClips, &op, &roles_voice_at(0), &Timeline::new());
-        assert_eq!(w, vec!["该 clip 为主干内容，删除会破坏叙事。确认这是啰嗦/卡顿？"]);
+        let w = builtin_rules(
+            ToolName::RemoveClips,
+            &op,
+            &roles_voice_at(0),
+            &Timeline::new(),
+        );
+        assert_eq!(
+            w,
+            vec!["该 clip 为主干内容，删除会破坏叙事。确认这是啰嗦/卡顿？"]
+        );
     }
 
     #[test]
@@ -176,7 +189,10 @@ mod tests {
             ..Default::default()
         };
         let w = builtin_rules(ToolName::AddClips, &op, &[], &tl);
-        assert_eq!(w, vec!["该素材已于 frame 10 处使用。避免同一素材重复出现。"]);
+        assert_eq!(
+            w,
+            vec!["该素材已于 frame 10 处使用。避免同一素材重复出现。"]
+        );
     }
 
     #[test]

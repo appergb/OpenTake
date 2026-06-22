@@ -144,12 +144,7 @@ pub fn build_upscale_params(input: &GenerationInput, uploaded: &[String]) -> Ups
         source_url: uploaded
             .first()
             .cloned()
-            .or_else(|| {
-                input
-                    .image_urls
-                    .as_ref()
-                    .and_then(|v| v.first().cloned())
-            })
+            .or_else(|| input.image_urls.as_ref().and_then(|v| v.first().cloned()))
             .unwrap_or_default(),
         duration_seconds: input.duration.max(0) as u32,
     }
@@ -173,11 +168,7 @@ pub fn build_params(
                 GenerationParams::Video(build_video_edit_params(input, uploaded))
             } else {
                 // Frame count: derive from start/end presence via image_urls slot.
-                let frame_count = input
-                    .image_urls
-                    .as_ref()
-                    .map(|v| v.len())
-                    .unwrap_or(0);
+                let frame_count = input.image_urls.as_ref().map(|v| v.len()).unwrap_or(0);
                 let image_ref_count = input
                     .reference_image_urls
                     .as_ref()
@@ -324,7 +315,9 @@ mod tests {
         let uploaded = vec!["src.mp4".to_string(), "ref.png".to_string()];
         let edit = build_params(&base_input(), &uploaded, ModelKind::Video, true);
         match edit {
-            GenerationParams::Video(v) => assert_eq!(v.source_video_url.as_deref(), Some("src.mp4")),
+            GenerationParams::Video(v) => {
+                assert_eq!(v.source_video_url.as_deref(), Some("src.mp4"))
+            }
             _ => panic!("expected video"),
         }
         let mut input = base_input();

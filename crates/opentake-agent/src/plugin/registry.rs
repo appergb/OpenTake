@@ -254,14 +254,18 @@ mod tests {
 
     #[test]
     fn parse_video_type_maps_snake_case() {
-        assert_eq!(parse_video_type("talking_head"), Some(VideoType::TalkingHead));
+        assert_eq!(
+            parse_video_type("talking_head"),
+            Some(VideoType::TalkingHead)
+        );
         assert_eq!(parse_video_type("short_form"), Some(VideoType::ShortForm));
         assert_eq!(parse_video_type("bogus"), None);
     }
 
     #[test]
     fn valid_manifest_has_no_warnings() {
-        let p = PluginRegistry::load_from_strings(&valid_manifest_json("p1"), "# Guide", ".").unwrap();
+        let p =
+            PluginRegistry::load_from_strings(&valid_manifest_json("p1"), "# Guide", ".").unwrap();
         assert!(p.warnings.is_empty());
         assert_eq!(p.instructions_md, "# Guide");
     }
@@ -291,21 +295,32 @@ mod tests {
     fn unknown_tool_is_warning_not_fatal() {
         let json = r#"{"schema_version":"1.0","id":"p","name":"N","workflow":{"stages":[{"id":"a","order":0,"actions":[{"tool":"not_a_tool","tip":"x"}]}]}}"#;
         let p = PluginRegistry::load_from_strings(json, "", ".").unwrap();
-        assert!(p.warnings.iter().any(|w| w.contains("unknown tool 'not_a_tool'")));
+        assert!(p
+            .warnings
+            .iter()
+            .any(|w| w.contains("unknown tool 'not_a_tool'")));
     }
 
     #[test]
     fn unrecognized_role_is_warning() {
-        let json = r#"{"schema_version":"1.0","id":"p","name":"N","track_roles":{"V1":{"role":"Wat"}}}"#;
+        let json =
+            r#"{"schema_version":"1.0","id":"p","name":"N","track_roles":{"V1":{"role":"Wat"}}}"#;
         let p = PluginRegistry::load_from_strings(json, "", ".").unwrap();
-        assert!(p.warnings.iter().any(|w| w.contains("unrecognized role 'Wat'")));
+        assert!(p
+            .warnings
+            .iter()
+            .any(|w| w.contains("unrecognized role 'Wat'")));
     }
 
     #[test]
     fn activate_and_deactivate() {
         let mut reg = PluginRegistry::new();
-        reg.register(PluginRegistry::load_from_strings(&valid_manifest_json("p1"), "I1", ".").unwrap());
-        reg.register(PluginRegistry::load_from_strings(&valid_manifest_json("p2"), "I2", ".").unwrap());
+        reg.register(
+            PluginRegistry::load_from_strings(&valid_manifest_json("p1"), "I1", ".").unwrap(),
+        );
+        reg.register(
+            PluginRegistry::load_from_strings(&valid_manifest_json("p2"), "I2", ".").unwrap(),
+        );
         assert!(reg.active().is_none());
 
         let active = reg.activate("p2").unwrap();
@@ -330,8 +345,12 @@ mod tests {
     #[test]
     fn register_replaces_same_id() {
         let mut reg = PluginRegistry::new();
-        reg.register(PluginRegistry::load_from_strings(&valid_manifest_json("p1"), "v1", ".").unwrap());
-        reg.register(PluginRegistry::load_from_strings(&valid_manifest_json("p1"), "v2", ".").unwrap());
+        reg.register(
+            PluginRegistry::load_from_strings(&valid_manifest_json("p1"), "v1", ".").unwrap(),
+        );
+        reg.register(
+            PluginRegistry::load_from_strings(&valid_manifest_json("p1"), "v2", ".").unwrap(),
+        );
         assert_eq!(reg.installed().len(), 1);
         assert_eq!(reg.installed()[0].instructions_md, "v2");
     }

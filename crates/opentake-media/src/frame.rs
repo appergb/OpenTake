@@ -14,7 +14,11 @@ impl RgbaFrame {
     /// Construct, asserting the buffer length matches the dimensions.
     pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Self {
         debug_assert_eq!(rgba.len(), width as usize * height as usize * 4);
-        RgbaFrame { width, height, rgba }
+        RgbaFrame {
+            width,
+            height,
+            rgba,
+        }
     }
 
     /// A solid opaque-black frame (used as the SigLIP squash-resize backdrop and
@@ -24,7 +28,11 @@ impl RgbaFrame {
         for px in rgba.chunks_exact_mut(4) {
             px[3] = 255;
         }
-        RgbaFrame { width, height, rgba }
+        RgbaFrame {
+            width,
+            height,
+            rgba,
+        }
     }
 
     /// Number of pixels.

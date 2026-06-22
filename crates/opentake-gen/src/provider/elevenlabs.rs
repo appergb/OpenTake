@@ -84,7 +84,8 @@ impl ElevenLabsAdapter {
         if !resp.is_success() {
             return Err(map_http_error(resp.status, &resp.body));
         }
-        let data_url = super::encode_data_url(&resp.body, resp.header("Content-Type"), "audio/mpeg");
+        let data_url =
+            super::encode_data_url(&resp.body, resp.header("Content-Type"), "audio/mpeg");
         let job_id = format!("eleven-tts-{}", resp.body.len());
         Ok(self.cache_job(GenerationJob::succeeded(job_id, vec![data_url])))
     }
@@ -111,7 +112,8 @@ impl ElevenLabsAdapter {
         if !resp.is_success() {
             return Err(map_http_error(resp.status, &resp.body));
         }
-        let data_url = super::encode_data_url(&resp.body, resp.header("Content-Type"), "audio/mpeg");
+        let data_url =
+            super::encode_data_url(&resp.body, resp.header("Content-Type"), "audio/mpeg");
         let job_id = format!("eleven-music-{}", resp.body.len());
         Ok(self.cache_job(GenerationJob::succeeded(job_id, vec![data_url])))
     }
@@ -174,7 +176,8 @@ mod tests {
     async fn tts_uses_voice_path_and_xi_header() {
         let mock = MockTransport::new();
         let mut resp = HttpResponse::new(200, b"ABC".to_vec());
-        resp.headers.push(("Content-Type".into(), "audio/mpeg".into()));
+        resp.headers
+            .push(("Content-Type".into(), "audio/mpeg".into()));
         mock.on_raw(
             Method::Post,
             "https://mockel/v1/text-to-speech/rachel-id",
@@ -267,7 +270,9 @@ mod tests {
         let mut p = AudioParams::new("hi", false);
         p.voice = Some("v".into());
         match a.submit(&route, &GenerationParams::Audio(p)).await {
-            Err(GenError::Api { status, message, .. }) => {
+            Err(GenError::Api {
+                status, message, ..
+            }) => {
                 assert_eq!(status, 422);
                 assert_eq!(message, "nope");
             }

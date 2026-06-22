@@ -273,8 +273,14 @@ fn read_back_round_trips_through_png() {
         )
         .expect("encode png");
     }
-    let decoded = image::load_from_memory(&bytes).expect("decode png").to_rgba8();
-    assert_eq!(decoded.as_raw(), &frame.rgba, "png round-trip preserves pixels");
+    let decoded = image::load_from_memory(&bytes)
+        .expect("decode png")
+        .to_rgba8();
+    assert_eq!(
+        decoded.as_raw(),
+        &frame.rgba,
+        "png round-trip preserves pixels"
+    );
 }
 
 fn make_solid(device: &wgpu::Device, queue: &wgpu::Queue, rgba: [u8; 4]) -> Rc<GpuTexture> {

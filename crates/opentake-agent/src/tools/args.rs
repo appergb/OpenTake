@@ -76,8 +76,12 @@ pub struct InsertClipEntry {
     pub trim_end_frame: Option<i32>,
 }
 impl ToolArgs for InsertClipEntry {
-    const ALLOWED_KEYS: &'static [&'static str] =
-        &["mediaRef", "durationFrames", "trimStartFrame", "trimEndFrame"];
+    const ALLOWED_KEYS: &'static [&'static str] = &[
+        "mediaRef",
+        "durationFrames",
+        "trimStartFrame",
+        "trimEndFrame",
+    ];
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -619,7 +623,12 @@ mod tests {
             "mediaRef": "m", "startFrame": 0, "durationFrames": 30, "speed": 2.0
         });
         let err = decode_tool_args::<AddClipEntry>(&v, "entries[2]").unwrap_err();
-        assert!(err.message.starts_with("entries[2]: unknown field(s) 'speed'"), "{}", err.message);
+        assert!(
+            err.message
+                .starts_with("entries[2]: unknown field(s) 'speed'"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]
@@ -635,7 +644,10 @@ mod tests {
     fn move_entry_requires_clip_id() {
         let v = serde_json::json!({"toFrame": 10});
         let err = decode_tool_args::<MoveEntry>(&v, "moves[0]").unwrap_err();
-        assert_eq!(err.message, "moves[0].clipId: missing required field 'clipId'");
+        assert_eq!(
+            err.message,
+            "moves[0].clipId: missing required field 'clipId'"
+        );
     }
 
     #[test]
@@ -678,7 +690,8 @@ mod tests {
         let v = serde_json::json!({"mediaRef": "m", "bogus": 1});
         let err = decode_tool_args::<InspectMediaArgs>(&v, "").unwrap_err();
         assert!(
-            err.message.starts_with("arguments: unknown field(s) 'bogus'"),
+            err.message
+                .starts_with("arguments: unknown field(s) 'bogus'"),
             "{}",
             err.message
         );
@@ -705,7 +718,11 @@ mod tests {
         // The wire key is `type`; an unknown sibling is still rejected.
         let bad = serde_json::json!({"type": "video", "kind": "x"});
         let err = decode_tool_args::<ListModelsArgs>(&bad, "").unwrap_err();
-        assert!(err.message.contains("unknown field(s) 'kind'"), "{}", err.message);
+        assert!(
+            err.message.contains("unknown field(s) 'kind'"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]
@@ -749,7 +766,10 @@ mod tests {
     fn rename_media_entry_requires_both_with_path() {
         let v = serde_json::json!({"mediaRef": "m"});
         let err = decode_tool_args::<RenameMediaEntry>(&v, "entries[0]").unwrap_err();
-        assert_eq!(err.message, "entries[0].name: missing required field 'name'");
+        assert_eq!(
+            err.message,
+            "entries[0].name: missing required field 'name'"
+        );
     }
 
     #[test]

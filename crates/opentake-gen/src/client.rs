@@ -361,21 +361,15 @@ fn split_byok_job_id(job_id: &str) -> Result<(&str, &str), GenError> {
 pub async fn can_generate(client: &GenClient) -> bool {
     match &client.inner.mode {
         AuthMode::Bearer { token_provider, .. } => token_provider.bearer_token().await.is_ok(),
-        AuthMode::Byok { registry, .. } => {
-            ["fal", "replicate", "openai", "elevenlabs"]
-                .iter()
-                .any(|p| registry.has_prefix(p))
-        }
+        AuthMode::Byok { registry, .. } => ["fal", "replicate", "openai", "elevenlabs"]
+            .iter()
+            .any(|p| registry.has_prefix(p)),
     }
 }
 
 /// Filter a catalog list by kind (mirrors the proxy `?type=` filter).
 pub fn filter_by_kind(entries: &[CatalogEntry], kind: ModelKind) -> Vec<CatalogEntry> {
-    entries
-        .iter()
-        .filter(|e| e.kind == kind)
-        .cloned()
-        .collect()
+    entries.iter().filter(|e| e.kind == kind).cloned().collect()
 }
 
 #[cfg(test)]
@@ -455,17 +449,10 @@ mod tests {
         assert!(job_id.starts_with("fal::"));
 
         let states: Vec<_> = client.watch(&job_id).collect().await;
-        let statuses: Vec<JobStatus> = states
-            .iter()
-            .map(|r| r.as_ref().unwrap().status)
-            .collect();
+        let statuses: Vec<JobStatus> = states.iter().map(|r| r.as_ref().unwrap().status).collect();
         assert_eq!(
             statuses,
-            vec![
-                JobStatus::Queued,
-                JobStatus::Running,
-                JobStatus::Succeeded
-            ]
+            vec![JobStatus::Queued, JobStatus::Running, JobStatus::Succeeded]
         );
         let last = states.last().unwrap().as_ref().unwrap();
         assert_eq!(last.result_urls, Some(vec!["https://out/final.png".into()]));
@@ -489,10 +476,7 @@ mod tests {
         let client = byok_client(&mock);
         let states: Vec<_> = client.watch("fal::m|r").collect().await;
         assert_eq!(states.len(), 1);
-        assert_eq!(
-            states[0].as_ref().unwrap().status,
-            JobStatus::Succeeded
-        );
+        assert_eq!(states[0].as_ref().unwrap().status, JobStatus::Succeeded);
     }
 
     #[tokio::test]
@@ -602,7 +586,10 @@ mod tests {
             200,
             json!({"uploadUrl": "https://put.test/key", "publicUrl": "https://cdn.test/key"}),
         );
-        let ticket = managed_client(&mock).sign_upload("image/png").await.unwrap();
+        let ticket = managed_client(&mock)
+            .sign_upload("image/png")
+            .await
+            .unwrap();
         assert_eq!(ticket.public_url, "https://cdn.test/key");
         match mock.last_call().unwrap().body {
             crate::transport::Body::Json(v) => assert_eq!(v["contentType"], "image/png"),
