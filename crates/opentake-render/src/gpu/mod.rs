@@ -8,12 +8,14 @@
 pub mod color;
 pub mod compositor;
 pub mod device;
+pub mod text_engine;
 pub mod text_raster;
 pub mod texture;
 
 pub use color::{linear_to_srgb, srgb_to_linear};
 pub use compositor::{Compositor, TextureResolver};
 pub use device::RenderDevice;
+pub use text_engine::CosmicTextRasterizer;
 pub use text_raster::{NullTextRasterizer, TextRasterRequest, TextRasterizer};
 pub use texture::{upload_rgba, GpuTexture, TextureCache};
 

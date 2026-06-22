@@ -31,7 +31,8 @@ jobs:
             libglib2.0-dev \
             libsoup-3.0-dev \
             patchelf \
-            pkg-config
+            pkg-config \
+            fonts-dejavu-core
 
       - name: Cache cargo
         uses: actions/cache@v4

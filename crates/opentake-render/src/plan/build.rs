@@ -78,15 +78,16 @@ fn make_clip_plan(
     // natSize / preferredTransform. Text uses its layout box (preferred =
     // identity); other sources use the metrics + box normalization (L166-172).
     let (nat_size, preferred_transform) = if is_text {
-        // Text natural size comes from the clip's frame box; resolve via metrics
-        // by clip id is not meaningful, so fall back to the render size. The
-        // text raster path (SPEC §4.2) recomputes the true box; here nat_size is
-        // only used to scale the quad, and the text texture is authored at the
-        // canvas box, so the render-size fallback keeps the quad full-canvas-safe.
-        (
-            (render_size.width_f(), render_size.height_f()),
-            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-        )
+        // Text rasterizes to its BOX (not the whole canvas): the texture covers
+        // `clip.transform`'s box in pixels. Setting nat_size to that box size
+        // makes `affine_transform(clip.transform, nat=box, render)` collapse to
+        // sx=sy=1 placed at the box top-left — the box texture maps 1:1 and the
+        // existing affine carries position / rotation / flip / opacity, exactly
+        // like video/image layers. (A full-canvas text clip — the add_texts
+        // default transform — yields the render size, unchanged from before.)
+        let bw = (clip.transform.width * render_size.width_f()).max(1.0);
+        let bh = (clip.transform.height * render_size.height_f()).max(1.0);
+        ((bw, bh), [1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
     } else {
         let nat0 = sources
             .natural_size(&clip.media_ref)

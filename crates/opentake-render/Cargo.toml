@@ -19,6 +19,11 @@ wgpu = { version = "23", default-features = false, features = ["wgsl", "metal"] 
 bytemuck = { version = "1", features = ["derive"] }
 # Block on wgpu's async device/queue/map calls from synchronous render code.
 pollster = "0.4"
+# Text shaping + layout + glyph rasterization for timeline text clips (upstream
+# CATextLayer). `FontSystem::new()` discovers system fonts; `swash` rasterizes
+# glyphs to coverage we composite as a premultiplied-RGBA texture. fontconfig is
+# left off so Linux/CI needs no system fontconfig lib (fontdb scans dirs itself).
+cosmic-text = { version = "0.12", default-features = false, features = ["std", "swash"] }
 
 [dev-dependencies]
 # PNG read-back round-trip checks in the GPU smoke test (offline, no assets).

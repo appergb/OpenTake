@@ -7,10 +7,11 @@
 //! base64 PNG data URL the WebView paints onto a `<canvas>` (replacing the black
 //! placeholder shown on the Timeline tab).
 //!
-//! Scope (first cut, #47-A): **video + image** layers — the core fix for the
-//! black timeline preview. **Text / Lottie** layers are skipped (the resolver
-//! returns `None`, so the compositor simply omits them) until their raster paths
-//! are wired; see #47 follow-ups (#52/#53).
+//! Scope: **video + image + text** layers. Text clips rasterize through
+//! `CosmicTextRasterizer` (cosmic-text glyph layout + swash raster) to a
+//! premultiplied-RGBA box texture composited last, like upstream's `CATextLayer`
+//! (#65). **Lottie** layers are still skipped (the resolver returns `None`, so
+//! the compositor omits them) until the bake path is wired (#65 follow-up).
 //!
 //! The GPU device + compositor are acquired once and cached in Tauri managed
 //! state ([`RenderState`]); only the per-frame texture cache is short-lived. A
@@ -28,13 +29,14 @@ use serde::Serialize;
 use tauri::State;
 
 use opentake_core::AppCore;
-use opentake_domain::MediaSource;
+use opentake_domain::{ClipType, MediaSource, TextStyle};
 use opentake_media::{decode_frame_at, FrameRequest};
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::wgpu;
 use opentake_render::{
-    build_render_plan, even, Compositor, DecodedFrame, GpuTexture, RenderDevice, RenderSize,
-    SourceMetrics, TextureCache, TextureResolver, TextureSource,
+    build_render_plan, even, Compositor, CosmicTextRasterizer, DecodedFrame, GpuTexture,
+    RenderDevice, RenderSize, SourceMetrics, TextRasterRequest, TextRasterizer, TextureCache,
+    TextureResolver, TextureSource,
 };
 
 /// Cap (longest canvas side, px) for a composite when the caller passes no
@@ -64,6 +66,8 @@ struct GpuContext {
     device: wgpu::Device,
     queue: wgpu::Queue,
     compositor: Compositor,
+    /// Text rasterizer (system fonts discovered once on first composite).
+    text_rasterizer: CosmicTextRasterizer,
 }
 
 /// Tauri managed state holding the (lazily created) GPU context. `None` until the
@@ -88,6 +92,15 @@ struct MediaInfo {
     fps: f64,
 }
 
+/// A text clip projected from the timeline, keyed by clip id. The box's width /
+/// height drive the rasterized texture size; position is carried by the layer
+/// affine (so x/y are kept only for completeness).
+struct TextInfo {
+    content: String,
+    style: TextStyle,
+    box_norm: (f64, f64, f64, f64),
+}
+
 /// `SourceMetrics` backed by the media manifest: only intrinsic size is known
 /// here (orientation/alpha use the documented identity/false defaults; ffmpeg
 /// auto-rotates on decode in this first cut).
@@ -109,20 +122,50 @@ struct MediaResolver<'d> {
     queue: &'d wgpu::Queue,
     cache: TextureCache,
     media: &'d HashMap<String, MediaInfo>,
+    /// Text clips by id (content + style + box) for on-demand rasterization.
+    text: &'d HashMap<String, TextInfo>,
+    /// cosmic-text rasterizer (system fonts) for text layers.
+    text_rasterizer: &'d CosmicTextRasterizer,
     /// Downscale box for decoded source frames (matches the preview render size).
     preview_box: (u32, u32),
+}
+
+impl MediaResolver<'_> {
+    /// Rasterize a text clip's box to a premultiplied-RGBA texture (composited
+    /// last, like upstream's `CATextLayer`). The box texture is uploaded with
+    /// `srgb = false` so it blends in the same encoded space as video/image, and
+    /// the plan marks text `needs_premultiply = false` so the shader treats it as
+    /// already premultiplied (which it is).
+    fn resolve_text(&mut self, clip_id: &str) -> Option<Rc<GpuTexture>> {
+        let key = format!("t:{clip_id}");
+        if let Some(tex) = self.cache.get(&key) {
+            return Some(tex);
+        }
+        let info = self.text.get(clip_id)?;
+        let req = TextRasterRequest {
+            clip_id,
+            content: &info.content,
+            style: &info.style,
+            box_norm: info.box_norm,
+            canvas: self.preview_box,
+        };
+        let frame = self.text_rasterizer.rasterize(&req)?;
+        let tex = upload_rgba(self.device, self.queue, &frame, false, Some("preview-text"));
+        Some(self.cache.insert(key, tex))
+    }
 }
 
 impl TextureResolver for MediaResolver<'_> {
     fn resolve(&mut self, source: &TextureSource, source_frame: i64) -> Option<Rc<GpuTexture>> {
         // Map the source to (asset id, cache key). Video keys per frame; images
-        // key once. Text/Lottie are not supported yet.
+        // key once. Text rasterizes its box; Lottie is not supported yet.
         let (media_ref, key, is_image) = match source {
             TextureSource::Decoded { media_ref } => {
                 (media_ref, format!("v:{media_ref}:{source_frame}"), false)
             }
             TextureSource::Image { media_ref } => (media_ref, format!("i:{media_ref}"), true),
-            TextureSource::Lottie { .. } | TextureSource::Text { .. } => return None,
+            TextureSource::Text { clip_id } => return self.resolve_text(clip_id),
+            TextureSource::Lottie { .. } => return None,
         };
 
         if let Some(tex) = self.cache.get(&key) {
@@ -217,6 +260,29 @@ pub fn composite_frame(
     // project's preview black.
     let project_dir = core.project_dir();
 
+    // Project text clips (content + style + box) so the resolver can rasterize
+    // them on demand. Keyed by clip id, matching `TextureSource::Text { clip_id }`.
+    let mut text: HashMap<String, TextInfo> = HashMap::new();
+    for track in &timeline.tracks {
+        for clip in &track.clips {
+            if clip.media_type != ClipType::Text {
+                continue;
+            }
+            let (Some(content), Some(style)) = (&clip.text_content, &clip.text_style) else {
+                continue;
+            };
+            let tl = clip.transform.top_left();
+            text.insert(
+                clip.id.clone(),
+                TextInfo {
+                    content: content.clone(),
+                    style: style.clone(),
+                    box_norm: (tl.x, tl.y, clip.transform.width, clip.transform.height),
+                },
+            );
+        }
+    }
+
     // Project the manifest into render-side lookups.
     let mut sizes: HashMap<String, (u32, u32)> = HashMap::new();
     let mut media: HashMap<String, MediaInfo> = HashMap::new();
@@ -265,6 +331,7 @@ pub fn composite_frame(
             device: dev.device,
             queue: dev.queue,
             compositor,
+            text_rasterizer: CosmicTextRasterizer::new(),
         });
     }
     let ctx = guard.as_ref().expect("ctx set above");
@@ -274,6 +341,8 @@ pub fn composite_frame(
         queue: &ctx.queue,
         cache: TextureCache::new(TEXTURE_CACHE_CAP),
         media: &media,
+        text: &text,
+        text_rasterizer: &ctx.text_rasterizer,
         preview_box: (render_size.width, render_size.height),
     };
     let composite = ctx
