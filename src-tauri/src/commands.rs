@@ -164,6 +164,12 @@ pub enum EditRequest {
     InsertTrack {
         kind: ClipType,
     },
+    SetTrackProps {
+        track_index: usize,
+        muted: Option<bool>,
+        hidden: Option<bool>,
+        sync_locked: Option<bool>,
+    },
     CreateFolder {
         name: String,
         parent_folder_id: Option<String>,
@@ -231,6 +237,17 @@ impl EditRequest {
                 EditCommand::RemoveTracks { track_indexes }
             }
             EditRequest::InsertTrack { kind } => EditCommand::InsertTrack { kind },
+            EditRequest::SetTrackProps {
+                track_index,
+                muted,
+                hidden,
+                sync_locked,
+            } => EditCommand::SetTrackProps {
+                track_index,
+                muted,
+                hidden,
+                sync_locked,
+            },
             EditRequest::CreateFolder {
                 name,
                 parent_folder_id,

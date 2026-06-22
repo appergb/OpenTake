@@ -14,6 +14,7 @@ import { trackColor } from "../../lib/clip";
 import { trackDisplayLabel, firstAudioIndex } from "../../lib/zones";
 import { trackDisplayHeight } from "../../lib/geometry";
 import { useEditorUiStore } from "../../store/uiStore";
+import { setTrackProps } from "../../store/editActions";
 import type { Timeline } from "../../lib/types";
 
 interface Props {
@@ -71,6 +72,7 @@ export function TrackHeaderColumn({ timeline, scrollTop, totalHeight }: Props) {
           return (
             <TrackHeaderRow
               key={track.id || i}
+              index={i}
               label={trackDisplayLabel(timeline, i)}
               color={trackColor(track.type)}
               top={top}
@@ -106,6 +108,7 @@ function trackTop(
 }
 
 interface RowProps {
+  index: number;
   label: string;
   color: string;
   top: number;
@@ -178,20 +181,35 @@ function TrackHeaderRow(p: RowProps) {
       >
         {p.label}
       </span>
-      {/* Toggles. */}
+      {/* Toggles. Clicking dispatches SetTrackProps (toggles the field). */}
       <div style={{ display: "flex", alignItems: "center", gap: 2, paddingRight: 4 }}>
         {p.isAudio ? (
-          <span title={t("timeline.mute")} style={{ color: iconColor(!p.muted), display: "inline-flex" }}>
+          <span
+            title={t("timeline.mute")}
+            role="button"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={() => void setTrackProps(p.index, { muted: !p.muted })}
+            style={{ color: iconColor(!p.muted), display: "inline-flex", cursor: "pointer" }}
+          >
             <Icon icon={p.muted ? VolumeX : Volume2} size={11} />
           </span>
         ) : (
-          <span title={t("timeline.hide")} style={{ color: iconColor(!p.hidden), display: "inline-flex" }}>
+          <span
+            title={t("timeline.hide")}
+            role="button"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={() => void setTrackProps(p.index, { hidden: !p.hidden })}
+            style={{ color: iconColor(!p.hidden), display: "inline-flex", cursor: "pointer" }}
+          >
             <Icon icon={p.hidden ? EyeOff : Eye} size={11} />
           </span>
         )}
         <span
           title={t("timeline.syncLock")}
-          style={{ color: iconColor(p.syncLocked), display: "inline-flex" }}
+          role="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={() => void setTrackProps(p.index, { syncLocked: !p.syncLocked })}
+          style={{ color: iconColor(p.syncLocked), display: "inline-flex", cursor: "pointer" }}
         >
           <Icon icon={p.syncLocked ? Link : Unlink} size={11} />
         </span>

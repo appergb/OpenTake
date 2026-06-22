@@ -220,6 +220,14 @@ pub enum EditCommand {
     /// (upstream `placeClip` / `add_clips` with omitted `trackIndex` →
     /// `insertTrack`), so dragging media onto an empty timeline produces a clip.
     InsertTrack { kind: ClipType },
+    /// Toggle track-head properties (mute / hide / sync-lock). `None` leaves a
+    /// field unchanged. 1:1 with the upstream track-header toggles.
+    SetTrackProps {
+        track_index: usize,
+        muted: Option<bool>,
+        hidden: Option<bool>,
+        sync_locked: Option<bool>,
+    },
     /// Create a media-library folder.
     CreateFolder {
         name: String,
@@ -318,6 +326,12 @@ pub fn apply(
         EditCommand::Unlink { clip_ids } => unlink(state, clip_ids),
         EditCommand::RemoveTracks { track_indexes } => remove_tracks(state, track_indexes),
         EditCommand::InsertTrack { kind } => insert_track_cmd(state, kind, ids),
+        EditCommand::SetTrackProps {
+            track_index,
+            muted,
+            hidden,
+            sync_locked,
+        } => set_track_props(state, track_index, muted, hidden, sync_locked),
         EditCommand::CreateFolder {
             name,
             parent_folder_id,
@@ -436,6 +450,38 @@ fn insert_track_cmd(
             let at = st.timeline.tracks.len();
             let idx = ops::insert_track(&mut st.timeline, at, kind, ids);
             Ok(vec![st.timeline.tracks[idx].id.clone()])
+        },
+    )
+}
+
+fn set_track_props(
+    state: &mut EditorState,
+    track_index: usize,
+    muted: Option<bool>,
+    hidden: Option<bool>,
+    sync_locked: Option<bool>,
+) -> Result<EditResult, EditError> {
+    if track_index >= state.timeline.tracks.len() {
+        return Err(EditError::Invalid(format!(
+            "trackIndex {track_index} out of range"
+        )));
+    }
+    transact(
+        state,
+        "Set Track Properties",
+        |_| "Updated track properties".to_string(),
+        |st| {
+            let track = &mut st.timeline.tracks[track_index];
+            if let Some(m) = muted {
+                track.muted = m;
+            }
+            if let Some(h) = hidden {
+                track.hidden = h;
+            }
+            if let Some(s) = sync_locked {
+                track.sync_locked = s;
+            }
+            Ok(Vec::new())
         },
     )
 }
@@ -1425,5 +1471,53 @@ mod insert_track_tests {
         .unwrap();
         assert_eq!(state.timeline.tracks.len(), 2);
         assert_eq!(state.timeline.tracks[1].kind, ClipType::Audio);
+    }
+
+    #[test]
+    fn set_track_props_toggles_only_given_fields() {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+        apply(
+            &mut state,
+            EditCommand::InsertTrack {
+                kind: ClipType::Audio,
+            },
+            &ids,
+        )
+        .unwrap();
+        // Mute + hide track 0; leave sync_locked unchanged.
+        let prev_sync = state.timeline.tracks[0].sync_locked;
+        let res = apply(
+            &mut state,
+            EditCommand::SetTrackProps {
+                track_index: 0,
+                muted: Some(true),
+                hidden: Some(true),
+                sync_locked: None,
+            },
+            &ids,
+        )
+        .unwrap();
+        assert!(res.changed);
+        assert!(state.timeline.tracks[0].muted);
+        assert!(state.timeline.tracks[0].hidden);
+        assert_eq!(state.timeline.tracks[0].sync_locked, prev_sync);
+    }
+
+    #[test]
+    fn set_track_props_out_of_range_errors() {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+        let err = apply(
+            &mut state,
+            EditCommand::SetTrackProps {
+                track_index: 5,
+                muted: Some(true),
+                hidden: None,
+                sync_locked: None,
+            },
+            &ids,
+        );
+        assert!(err.is_err());
     }
 }

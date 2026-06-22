@@ -125,6 +125,28 @@ export interface ClipPropertiesReq {
   textContent?: string;
 }
 
+/** Which property a keyframe track targets (mirror of `KeyframeProperty`). */
+export type KeyframeProperty =
+  | "opacity"
+  | "volume"
+  | "rotation"
+  | "position"
+  | "scale"
+  | "crop";
+
+/** Keyframe payload, tagged by `kind` (mirror of `KeyframePayloadDto`). Reuses
+ *  the shared `Keyframe<V>` / `AnimPair` / `Crop` types above. */
+export type KeyframePayloadReq =
+  | { kind: "scalar"; keyframes: Keyframe<number>[] }
+  | { kind: "pair"; keyframes: Keyframe<AnimPair>[] }
+  | { kind: "crop"; keyframes: Keyframe<Crop>[] };
+
+/** A project-frame range `[start, end)` for ripple delete. */
+export interface FrameRangeReq {
+  start: number;
+  end: number;
+}
+
 /** The discriminated union mapped to Rust `EditRequest` (tag = "type"). */
 export type EditRequest =
   | { type: "addClips"; entries: ClipEntryReq[] }
@@ -134,11 +156,22 @@ export type EditRequest =
   | { type: "splitClip"; clipId: string; atFrame: number }
   | { type: "trimClips"; edits: TrimEditReq[] }
   | { type: "setClipProperties"; clipIds: string[]; properties: ClipPropertiesReq }
+  | { type: "setKeyframes"; clipId: string; property: KeyframeProperty; payload: KeyframePayloadReq }
+  | { type: "rippleDeleteRanges"; trackIndex: number; ranges: FrameRangeReq[] }
   | { type: "addTexts"; entries: TextEntryReq[] }
   | { type: "link"; clipIds: string[] }
   | { type: "unlink"; clipIds: string[] }
   | { type: "removeTracks"; trackIndexes: number[] }
-  | { type: "insertTrack"; kind: ClipType };
+  | { type: "insertTrack"; kind: ClipType }
+  | {
+      type: "setTrackProps";
+      trackIndex: number;
+      muted?: boolean;
+      hidden?: boolean;
+      syncLocked?: boolean;
+    }
+  | { type: "createFolder"; name: string; parentFolderId?: string }
+  | { type: "moveToFolder"; assetIds: string[]; folderId?: string };
 
 export interface TextEntryReq {
   trackIndex: number;

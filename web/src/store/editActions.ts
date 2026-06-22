@@ -14,6 +14,9 @@ import type {
   ClipMoveReq,
   ClipPropertiesReq,
   ClipType,
+  FrameRangeReq,
+  KeyframePayloadReq,
+  KeyframeProperty,
   MediaItem,
   Timeline,
   TrimEditReq,
@@ -69,6 +72,40 @@ export async function insertTrack(kind: ClipType) {
 
 export async function unlinkClips(clipIds: string[]) {
   await applyAndRefresh({ type: "unlink", clipIds });
+}
+
+/** Toggle a track head's mute / hide / sync-lock. Omitted fields are unchanged. */
+export async function setTrackProps(
+  trackIndex: number,
+  props: { muted?: boolean; hidden?: boolean; syncLocked?: boolean },
+) {
+  await applyAndRefresh({ type: "setTrackProps", trackIndex, ...props });
+}
+
+/** Replace (or clear) a clip's keyframe track for one property. */
+export async function setKeyframes(
+  clipId: string,
+  property: KeyframeProperty,
+  payload: KeyframePayloadReq,
+) {
+  await applyAndRefresh({ type: "setKeyframes", clipId, property, payload });
+}
+
+/** Ripple-delete project-frame ranges on a track, closing the gaps. */
+export async function rippleDeleteRanges(trackIndex: number, ranges: FrameRangeReq[]) {
+  if (ranges.length === 0) return;
+  await applyAndRefresh({ type: "rippleDeleteRanges", trackIndex, ranges });
+}
+
+/** Create a media-library folder (optionally nested under `parentFolderId`). */
+export async function createFolder(name: string, parentFolderId?: string) {
+  await applyAndRefresh({ type: "createFolder", name, parentFolderId });
+}
+
+/** Move media assets into a folder (or to root with no `folderId`). */
+export async function moveToFolder(assetIds: string[], folderId?: string) {
+  if (assetIds.length === 0) return;
+  await applyAndRefresh({ type: "moveToFolder", assetIds, folderId });
 }
 
 export async function undo() {
