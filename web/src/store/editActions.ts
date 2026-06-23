@@ -9,7 +9,9 @@ import { isTauri } from "../lib/api";
 import { forceRefresh } from "./sync";
 import { useEditorUiStore } from "./uiStore";
 import { useProjectStore } from "./projectStore";
+import { trimToPlayheadEdits } from "../lib/clip";
 import type {
+  Clip,
   ClipEntryReq,
   ClipMoveReq,
   ClipPropertiesReq,
@@ -140,6 +142,39 @@ export async function splitAtPlayhead() {
   for (const id of ids) {
     await splitClip(id, frame);
   }
+}
+
+/** Clips the playhead is strictly inside, restricted to the selection when one
+ *  exists (else all clips under the playhead) — the target set for trim-to-
+ *  playhead, matching `splitAtPlayhead`'s "act on what's under the playhead". */
+function clipsUnderPlayhead(): Clip[] {
+  const ui = useEditorUiStore.getState();
+  const frame = Math.round(ui.activeFrame);
+  const selected = new Set(ui.selectedClipIds);
+  const restrict = selected.size > 0;
+  const out: Clip[] = [];
+  for (const track of useProjectStore.getState().timeline.tracks) {
+    for (const c of track.clips) {
+      if (frame <= c.startFrame || frame >= c.startFrame + c.durationFrames) continue;
+      if (restrict && !selected.has(c.id)) continue;
+      out.push(c);
+    }
+  }
+  return out;
+}
+
+/** Trim each target clip's IN point to the playhead (Q / Toolbar `[` — 剪映
+ *  "删除播放头左侧"). The right edge stays put; the left part is removed. */
+export async function trimStartToPlayhead() {
+  const frame = Math.round(useEditorUiStore.getState().activeFrame);
+  await trimClips(trimToPlayheadEdits(clipsUnderPlayhead(), frame, "left"));
+}
+
+/** Trim each target clip's OUT point to the playhead (W / Toolbar `]` — 剪映
+ *  "删除播放头右侧"). The left edge stays put; the right part is removed. */
+export async function trimEndToPlayhead() {
+  const frame = Math.round(useEditorUiStore.getState().activeFrame);
+  await trimClips(trimToPlayheadEdits(clipsUnderPlayhead(), frame, "right"));
 }
 
 /** Delete selected clips (⌫ / menu). */

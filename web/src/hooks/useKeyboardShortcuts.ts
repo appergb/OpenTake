@@ -69,6 +69,8 @@ export function useKeyboardShortcuts() {
             zoomBy(1 / ZOOM_KEY_STEP);
             return;
           case "KeyK":
+          case "KeyB":
+            // ⌘K (existing) and ⌘B (剪映 split-at-playhead) both split.
             e.preventDefault();
             edit.splitAtPlayhead();
             return;
@@ -125,10 +127,24 @@ export function useKeyboardShortcuts() {
           if (e.shiftKey) edit.rippleDeleteSelectedClips();
           else edit.deleteSelectedClips();
           return;
+        case "KeyQ":
+          // 剪映 Q：删除播放头左侧（修剪入点到播放头）。
+          e.preventDefault();
+          edit.trimStartToPlayhead();
+          return;
+        case "KeyW":
+          // 剪映 W：删除播放头右侧（修剪出点到播放头）。
+          e.preventDefault();
+          edit.trimEndToPlayhead();
+          return;
         case "KeyC":
+        case "KeyB":
+          // C (existing) and B (剪映 切割模式) both enter the razor/blade tool.
           ui.setToolMode("razor");
           return;
         case "KeyV":
+        case "KeyA":
+          // V (existing) and A (剪映 选择模式) both return to the pointer tool.
           ui.setToolMode("pointer");
           return;
         case "KeyZ":

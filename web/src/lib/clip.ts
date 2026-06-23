@@ -6,7 +6,7 @@
 
 import { TRACK_COLOR } from "./theme";
 import { formatClipDuration } from "./geometry";
-import type { Clip, ClipType } from "./types";
+import type { Clip, ClipType, TrimEditReq } from "./types";
 
 export function trackColor(type: ClipType): string {
   return TRACK_COLOR[type] ?? TRACK_COLOR.video;
@@ -90,4 +90,25 @@ export function trimSourceValues(
     trimStartFrame: clip.trimStartFrame,
     trimEndFrame: isUnbounded(clip) ? ne : Math.max(0, ne),
   };
+}
+
+/**
+ * Trim-edit reqs that move each clip's IN (`edge:"left"`) or OUT (`edge:"right"`)
+ * point to `frame` — 剪映's Q / W ("删除播放头左/右"). Only clips the playhead is
+ * strictly inside are affected (a clip whose edge already sits at the playhead,
+ * or that the playhead misses, is skipped). The delta is the same TIMELINE-frame
+ * edge move the trim drag computes, so the source conversion + clamps match it.
+ */
+export function trimToPlayheadEdits(clips: Clip[], frame: number, edge: TrimEdge): TrimEditReq[] {
+  const edits: TrimEditReq[] = [];
+  for (const c of clips) {
+    const end = c.startFrame + c.durationFrames;
+    if (frame <= c.startFrame || frame >= end) continue; // playhead must be strictly inside
+    const rawDelta = edge === "left" ? frame - c.startFrame : frame - end;
+    const delta = clampTrimDeltaFrames(c, edge, rawDelta);
+    if (delta === 0) continue;
+    const { trimStartFrame, trimEndFrame } = trimSourceValues(c, edge, delta);
+    edits.push({ clipId: c.id, trimStartFrame, trimEndFrame });
+  }
+  return edits;
 }

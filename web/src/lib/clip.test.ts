@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { clampTrimDeltaFrames, trimSourceValues } from "./clip";
-import type { ClipType } from "./types";
+import { clampTrimDeltaFrames, trimSourceValues, trimToPlayheadEdits } from "./clip";
+import type { Clip, ClipType } from "./types";
 
 function tc(over: Partial<{ durationFrames: number; speed: number; trimStartFrame: number; trimEndFrame: number; mediaType: ClipType }> = {}) {
   return {
@@ -49,5 +49,39 @@ describe("clampTrimDeltaFrames", () => {
   });
   it("image/text left: no source floor on negative extend", () => {
     expect(clampTrimDeltaFrames(tc({ trimStartFrame: 0, mediaType: "image" as ClipType }), "left", -50)).toBe(-50);
+  });
+});
+
+describe("trimToPlayheadEdits", () => {
+  // clip [100, 200), speed 1, 10 frames trimmed off each end.
+  const c = {
+    id: "c",
+    startFrame: 100,
+    durationFrames: 100,
+    speed: 1,
+    trimStartFrame: 10,
+    trimEndFrame: 10,
+    mediaType: "video" as ClipType,
+  } as unknown as Clip;
+
+  it("left edge: trims the in-point to the playhead (剪映 Q, delete left)", () => {
+    // delta 50 → source +50 → trimStart 10+50=60, right edge fixed.
+    expect(trimToPlayheadEdits([c], 150, "left")).toEqual([
+      { clipId: "c", trimStartFrame: 60, trimEndFrame: 10 },
+    ]);
+  });
+
+  it("right edge: trims the out-point to the playhead (剪映 W, delete right)", () => {
+    // delta -50 → trimEnd 10-(-50)=60, left edge fixed.
+    expect(trimToPlayheadEdits([c], 150, "right")).toEqual([
+      { clipId: "c", trimStartFrame: 10, trimEndFrame: 60 },
+    ]);
+  });
+
+  it("skips clips the playhead is not strictly inside", () => {
+    expect(trimToPlayheadEdits([c], 100, "left")).toEqual([]); // exactly at start
+    expect(trimToPlayheadEdits([c], 200, "right")).toEqual([]); // exactly at end
+    expect(trimToPlayheadEdits([c], 40, "left")).toEqual([]); // before the clip
+    expect(trimToPlayheadEdits([c], 999, "right")).toEqual([]); // after the clip
   });
 });
