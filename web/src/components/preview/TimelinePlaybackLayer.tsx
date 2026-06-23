@@ -197,12 +197,14 @@ export function TimelinePlayback({ timeline, fps }: { timeline: Timeline; fps: n
     };
   }, []);
 
+  // Aspect-fit via intrinsic media size + max-width/height; the parent stage
+  // flex-centers us. No absolute positioning (which would escape an unpositioned
+  // ancestor and mis-place the frame).
   const fill: React.CSSProperties = {
-    position: "absolute",
-    inset: 0,
-    width: "100%",
-    height: "100%",
+    maxWidth: "100%",
+    maxHeight: "100%",
     objectFit: "contain",
+    display: "block",
   };
 
   const visualUrl = visual ? urlFor(visual.clip.mediaRef) : null;
@@ -216,7 +218,16 @@ export function TimelinePlayback({ timeline, fps }: { timeline: Timeline; fps: n
   };
 
   return (
-    <div style={{ position: "absolute", inset: 0 }}>
+    <div
+      style={{
+        width: "100%",
+        height: "100%",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        overflow: "hidden",
+      }}
+    >
       {visual && visualUrl && visual.clip.mediaType === "video" && (
         <video
           key={visual.clip.id}
@@ -246,6 +257,7 @@ export function TimelinePlayback({ timeline, fps }: { timeline: Timeline; fps: n
             src={url}
             preload="auto"
             onLoadedData={seekOnLoad(a.clip)}
+            style={{ display: "none" }}
           />
         ) : null;
       })}

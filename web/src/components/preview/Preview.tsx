@@ -5,7 +5,7 @@
  * background + a centered placeholder. Transport drives the local playhead.
  */
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   SkipBack,
   SkipForward,
@@ -35,7 +35,6 @@ export function Preview() {
   const setCurrentFrame = useEditorUiStore((s) => s.setCurrentFrame);
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
   const setPlaying = useEditorUiStore((s) => s.setPlaying);
-  const canvasZoom = useEditorUiStore((s) => s.canvasZoom);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
   const previewItem = useMediaStore((s) =>
     previewMediaId ? s.items.find((m) => m.id === previewMediaId) ?? null : null,
@@ -101,30 +100,10 @@ export function Preview() {
     }
   };
 
-  const stageRef = useRef<HTMLDivElement>(null);
-  const [fit, setFit] = useState({ w: 0, h: 0 });
-
-  useLayoutEffect(() => {
-    const el = stageRef.current;
-    if (!el) return;
-    const update = () => {
-      const cw = el.clientWidth;
-      const ch = el.clientHeight;
-      let w = cw;
-      let h = cw / aspect;
-      if (h > ch) {
-        h = ch;
-        w = ch * aspect;
-      }
-      // Round to whole pixels so the canvas box never renders a sub-pixel torn
-      // edge (the "preview looks missing/glitchy" report).
-      setFit({ w: Math.round(w * canvasZoom), h: Math.round(h * canvasZoom) });
-    };
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [aspect, canvasZoom]);
+  // Aspect-fit is done in pure CSS (intrinsic media size + max-width/height,
+  // centered by the stage's flexbox) — no JS measurement, so there's no stale /
+  // zero-size race that could render the frame tiny or off-center.
+  void aspect;
 
   return (
     <>
@@ -132,9 +111,10 @@ export function Preview() {
         <PreviewTabs item={previewItem} />
       </PanelHeaderBar>
 
-      {/* Canvas stage */}
+      {/* Canvas stage: a flex-centered area; the media inside aspect-fits via
+          intrinsic size + max-width/height, so it always fills the largest 16:9
+          box and stays centered. */}
       <div
-        ref={stageRef}
         style={{
           flex: 1,
           minHeight: 0,
@@ -143,50 +123,55 @@ export function Preview() {
           alignItems: "center",
           justifyContent: "center",
           overflow: "hidden",
+          padding: 8,
         }}
       >
-        <div
-          style={{
-            width: fit.w,
-            height: fit.h,
-            background: "var(--bg-preview-canvas)",
-            // Always outline the canvas surface so the preview area is visibly
-            // present even when the composite is black (empty/end frame).
-            border:
-              canvasZoom < 1
-                ? "1px solid rgba(255,255,255,0.25)"
-                : "1px solid rgba(255,255,255,0.08)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "var(--text-muted)",
-            fontSize: "var(--fs-xs)",
-            overflow: "hidden",
-          }}
-        >
-          {previewItem ? (
-            <MediaPreview
-              item={previewItem}
-              mediaRef={mediaRef}
-              onTime={setMediaTime}
-              onDuration={setMediaDuration}
-              onPlayingChange={setMediaPlaying}
-            />
-          ) : timelinePlaying ? (
-            // Real-time playback: actual <video>/<audio> elements (#53).
-            <TimelinePlayback timeline={timeline} fps={fps} />
-          ) : timelineFrameUrl ? (
-            // Rust GPU composite of the timeline at the current playhead (#47).
-            <img
-              src={timelineFrameUrl}
-              alt=""
-              draggable={false}
-              style={{ width: "100%", height: "100%", objectFit: "contain" }}
-            />
-          ) : (
-            <span>{timeline.tracks.length === 0 ? t("preview.noMedia") : `${timeline.width}×${timeline.height}`}</span>
-          )}
-        </div>
+        {previewItem ? (
+          <MediaPreview
+            item={previewItem}
+            mediaRef={mediaRef}
+            onTime={setMediaTime}
+            onDuration={setMediaDuration}
+            onPlayingChange={setMediaPlaying}
+          />
+        ) : timelinePlaying ? (
+          // Real-time playback: actual <video>/<audio> elements (#53).
+          <TimelinePlayback timeline={timeline} fps={fps} />
+        ) : timelineFrameUrl ? (
+          // Rust GPU composite of the timeline at the current playhead (#47).
+          <img
+            src={timelineFrameUrl}
+            alt=""
+            draggable={false}
+            style={{
+              maxWidth: "100%",
+              maxHeight: "100%",
+              objectFit: "contain",
+              display: "block",
+              background: "var(--bg-preview-canvas)",
+              border: "1px solid rgba(255,255,255,0.08)",
+            }}
+          />
+        ) : (
+          // Empty / no-frame: a framed 16:9 canvas surface placeholder.
+          <div
+            style={{
+              aspectRatio: `${timeline.width} / ${timeline.height}`,
+              height: "100%",
+              maxWidth: "100%",
+              maxHeight: "100%",
+              background: "var(--bg-preview-canvas)",
+              border: "1px solid rgba(255,255,255,0.08)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "var(--text-muted)",
+              fontSize: "var(--fs-xs)",
+            }}
+          >
+            {timeline.tracks.length === 0 ? t("preview.noMedia") : `${timeline.width}×${timeline.height}`}
+          </div>
+        )}
       </div>
 
       {/* The app's scrub + transport are the single control surface — they drive
@@ -257,7 +242,12 @@ function MediaPreview({
 }) {
   const t = useT();
   const url = assetUrl(item.path);
-  const box: React.CSSProperties = { width: "100%", height: "100%", objectFit: "contain" };
+  const box: React.CSSProperties = {
+    maxWidth: "100%",
+    maxHeight: "100%",
+    objectFit: "contain",
+    display: "block",
+  };
 
   if (!url) {
     return <span>{t("preview.unavailable")}</span>;
