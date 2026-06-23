@@ -22,6 +22,7 @@ import { TrackHeaderColumn } from "./TrackHeaderColumn";
 import { Playhead } from "./Playhead";
 import { SnapIndicator } from "./SnapIndicator";
 import { hitTestClip, expandLinkGroup, clipsInRect, type ClipHit } from "./hitTest";
+import { ClipContextMenu } from "./ClipContextMenu";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import * as edit from "../../store/editActions";
@@ -57,6 +58,7 @@ export function TimelineContainer() {
   const dragRef = useRef<DragState>(null);
   const [snapFrame, setSnapFrame] = useState<number | null>(null);
   const [, forceTick] = useState(0);
+  const [menu, setMenu] = useState<{ clipId: string } | null>(null);
 
   const total = useMemo(() => totalFrames(timeline), [timeline]);
   const docWidth = useMemo(
@@ -404,6 +406,23 @@ export function TimelineContainer() {
   // Ghost preview offsets for the active drag (read from dragRef during render).
   const drag = dragRef.current;
 
+  // Right-click on a clip -> context menu.
+  const onContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      const { docX, docY } = toDoc(e);
+      const hit = hitTestClip(timeline, docX, docY, zoomScale, trackHeights);
+      if (!hit) return; // empty space: keep the default (suppressed) menu
+      e.preventDefault();
+      // If the clip isn't already selected, select just it so menu actions
+      // target the right clip.
+      if (!selectedClipIds.has(hit.clip.id)) {
+        selectClips(new Set([hit.clip.id]));
+      }
+      setMenu({ clipId: hit.clip.id });
+    },
+    [toDoc, timeline, zoomScale, trackHeights, selectedClipIds, selectClips],
+  );
+
   return (
     <div
       ref={viewportRef}
@@ -416,6 +435,7 @@ export function TimelineContainer() {
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onContextMenu={onContextMenu}
         style={{
           position: "absolute",
           left: LAYOUT.trackHeaderWidth,
@@ -457,6 +477,9 @@ export function TimelineContainer() {
       {drag?.kind === "marquee" && (
         <MarqueeBox drag={drag} scrollLeft={scrollLeft} scrollTop={scrollTop} />
       )}
+
+      {/* Clip right-click context menu. */}
+      {menu && <ClipContextMenu clipId={menu.clipId} onClose={() => setMenu(null)} />}
 
       {/* Horizontal scrollbar proxy (thin) — drag handled via wheel; kept minimal. */}
     </div>

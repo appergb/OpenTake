@@ -97,6 +97,12 @@ const zh: Dict = {
   "timeline.hide": "隐藏",
   "timeline.syncLock": "同步锁定",
 
+  // Clip context menu (right-click)
+  "contextMenu.split": "在播放头处分割",
+  "contextMenu.delete": "删除",
+  "contextMenu.link": "链接",
+  "contextMenu.unlink": "取消链接",
+
   // Preview
   "preview.fit": "适应",
   "preview.timelineTab": "时间线",
@@ -235,6 +241,12 @@ const en: Dict = {
   "timeline.mute": "Mute",
   "timeline.hide": "Hide",
   "timeline.syncLock": "Sync lock",
+
+  // Clip context menu (right-click)
+  "contextMenu.split": "Split at Playhead",
+  "contextMenu.delete": "Delete",
+  "contextMenu.link": "Link",
+  "contextMenu.unlink": "Unlink",
 
   "preview.fit": "Fit",
   "preview.timelineTab": "Timeline",
