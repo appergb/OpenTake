@@ -6,7 +6,7 @@
 
 import { TRACK_COLOR } from "./theme";
 import { formatClipDuration } from "./geometry";
-import type { Clip, ClipType, TrimEditReq } from "./types";
+import type { Clip, ClipType, Timeline, TrimEditReq } from "./types";
 
 export function trackColor(type: ClipType): string {
   return TRACK_COLOR[type] ?? TRACK_COLOR.video;
@@ -111,4 +111,39 @@ export function trimToPlayheadEdits(clips: Clip[], frame: number, edge: TrimEdge
     edits.push({ clipId: c.id, trimStartFrame, trimEndFrame });
   }
   return edits;
+}
+
+/**
+ * Frame offset of `clipId` within its link group, relative to the group's lead
+ * (earliest-starting) clip. Returns `null` when the clip isn't linked, or when
+ * it IS the lead (offset 0 → no badge needed). A positive result means this
+ * clip starts LATER than the lead (e.g. audio trailing video by 3 frames → 3);
+ * negative means it starts earlier. Used by the offset badge renderer (SPEC
+ * §5.4 linked-offset indicator).
+ */
+export function linkOffsetForClip(timeline: Timeline, clipId: string): number | null {
+  let target: Clip | null = null;
+  let groupId: string | undefined;
+  for (const track of timeline.tracks) {
+    for (const c of track.clips) {
+      if (c.id === clipId) {
+        target = c;
+        groupId = c.linkGroupId;
+      }
+    }
+  }
+  if (!target || !groupId) return null;
+  // Collect every clip in the same link group, find the lead (min startFrame).
+  let leadStart = Number.POSITIVE_INFINITY;
+  for (const track of timeline.tracks) {
+    for (const c of track.clips) {
+      if (c.linkGroupId === groupId && c.startFrame < leadStart) {
+        leadStart = c.startFrame;
+      }
+    }
+  }
+  if (!Number.isFinite(leadStart)) return null;
+  const offset = target.startFrame - leadStart;
+  if (offset === 0) return null; // lead clip → no badge
+  return offset;
 }
