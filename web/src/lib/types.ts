@@ -158,6 +158,7 @@ export type EditRequest =
   | { type: "setClipProperties"; clipIds: string[]; properties: ClipPropertiesReq }
   | { type: "setKeyframes"; clipId: string; property: KeyframeProperty; payload: KeyframePayloadReq }
   | { type: "rippleDeleteRanges"; trackIndex: number; ranges: FrameRangeReq[] }
+  | { type: "rippleDeleteClips"; clipIds: string[] }
   | { type: "addTexts"; entries: TextEntryReq[] }
   | { type: "link"; clipIds: string[] }
   | { type: "unlink"; clipIds: string[] }

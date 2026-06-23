@@ -94,7 +94,9 @@ export function useKeyboardShortcuts() {
         case "Backspace":
         case "Delete":
           e.preventDefault();
-          edit.deleteSelectedClips();
+          // ⇧⌫ ripple-deletes (closes the gap); plain ⌫ lifts out (leaves a gap).
+          if (e.shiftKey) edit.rippleDeleteSelectedClips();
+          else edit.deleteSelectedClips();
           return;
         case "KeyC":
           ui.setToolMode("razor");

@@ -207,6 +207,9 @@ pub enum EditCommand {
         track_index: usize,
         ranges: Vec<FrameRange>,
     },
+    /// Ripple-delete a set of selected clips, closing the gaps and shifting
+    /// sync-locked followers (refuses on a follower collision).
+    RippleDeleteClips { clip_ids: Vec<String> },
     /// Add text overlays.
     AddTexts { entries: Vec<TextEntry> },
     /// Link clips into one group.
@@ -321,6 +324,7 @@ pub fn apply(
             track_index,
             ranges,
         } => ripple_delete_ranges(state, track_index, ranges, ids),
+        EditCommand::RippleDeleteClips { clip_ids } => ripple_delete_clips(state, clip_ids),
         EditCommand::AddTexts { entries } => add_texts(state, entries, ids),
         EditCommand::Link { clip_ids } => link(state, clip_ids, ids),
         EditCommand::Unlink { clip_ids } => unlink(state, clip_ids),
@@ -967,6 +971,50 @@ fn ripple_delete_ranges(
                 .map(|f| f.0.clone())
                 .collect();
             Ok(result(state, changed, "Ripple Delete", affected, &summary))
+        }
+    }
+}
+
+/// Ripple-delete the selected clips (and their link groups), closing the gaps
+/// and shifting sync-locked followers. Refuses (no mutation) if a follower would
+/// collide. 1:1 with upstream `rippleDeleteSelectedClips`.
+fn ripple_delete_clips(
+    state: &mut EditorState,
+    clip_ids: Vec<String>,
+) -> Result<EditResult, EditError> {
+    if clip_ids.is_empty() {
+        return Err(EditError::Invalid(
+            "Missing or empty 'clipIds' array".into(),
+        ));
+    }
+    for id in &clip_ids {
+        if state.find_clip(id).is_none() {
+            return Err(EditError::Invalid(format!("Clip not found: {id}")));
+        }
+    }
+    // Selecting one of a linked pair deletes the whole group (upstream selection).
+    let id_set = ops::expand_to_link_group(&state.timeline, &clip_ids.into_iter().collect());
+    let before = state.snapshot();
+    match ops::ripple::ripple_delete(&mut state.timeline, &id_set, &track_display_label) {
+        Err(reason) => {
+            state.restore(before);
+            Err(EditError::Refused(reason))
+        }
+        Ok(()) => {
+            let after = state.snapshot();
+            let changed = before != after;
+            if changed {
+                state.commit(before);
+            }
+            let affected: Vec<String> = id_set.iter().cloned().collect();
+            let n = affected.len();
+            Ok(result(
+                state,
+                changed,
+                "Ripple Delete",
+                affected,
+                &format!("Ripple-deleted {n} clip(s)"),
+            ))
         }
     }
 }

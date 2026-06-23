@@ -140,6 +140,16 @@ export async function deleteSelectedClips() {
   }
 }
 
+/** Ripple-delete selected clips (⇧⌫): remove and close the gaps, shifting
+ *  sync-locked followers (the core refuses if a follower would collide). */
+export async function rippleDeleteSelectedClips() {
+  const ui = useEditorUiStore.getState();
+  const ids = [...ui.selectedClipIds];
+  if (ids.length === 0) return;
+  await applyAndRefresh({ type: "rippleDeleteClips", clipIds: ids });
+  ui.clearSelection();
+}
+
 // MARK: - Media -> timeline (drag and drop)
 
 /** Stills get a fixed default duration (upstream `Constants.defaultImageDuration`

@@ -149,6 +149,9 @@ pub enum EditRequest {
         track_index: usize,
         ranges: Vec<FrameRangeDto>,
     },
+    RippleDeleteClips {
+        clip_ids: Vec<String>,
+    },
     AddTexts {
         entries: Vec<TextEntryDto>,
     },
@@ -228,6 +231,9 @@ impl EditRequest {
                 track_index,
                 ranges: ranges.into_iter().map(FrameRangeDto::into_range).collect(),
             },
+            EditRequest::RippleDeleteClips { clip_ids } => {
+                EditCommand::RippleDeleteClips { clip_ids }
+            }
             EditRequest::AddTexts { entries } => EditCommand::AddTexts {
                 entries: entries.into_iter().map(TextEntryDto::into_entry).collect(),
             },
