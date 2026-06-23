@@ -130,8 +130,8 @@ mod tests {
     use super::*;
     use crate::id::SeqIdGen;
     use opentake_domain::{
-        ChromaKey, ClipType, ColorGrade, Crop, Effect, Interpolation, Keyframe,
-        KeyframeTrack, Mask, MaskShape, Point2, Track,
+        ChromaKey, ClipType, ColorGrade, Crop, Effect, Interpolation, Keyframe, KeyframeTrack,
+        Mask, MaskShape, Point2, Track,
     };
 
     fn clip(id: &str, start: i32, dur: i32) -> Clip {
