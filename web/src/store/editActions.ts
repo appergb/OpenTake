@@ -118,13 +118,15 @@ export async function redo() {
   if (!isTauri) await forceRefresh();
 }
 
-/** Split at the current playhead for the selected clip (Toolbar / ⌘K). */
+/** Split every selected clip at the current playhead (Toolbar / ⌘K). Splitting a
+ *  clip the playhead doesn't intersect is a no-op in the core, so looping over
+ *  the whole selection is safe. */
 export async function splitAtPlayhead() {
   const ui = useEditorUiStore.getState();
-  const frame = ui.activeFrame;
+  const frame = Math.round(ui.activeFrame);
   const selected = [...ui.selectedClipIds];
-  if (selected.length === 1) {
-    await splitClip(selected[0], frame);
+  for (const id of selected) {
+    await splitClip(id, frame);
   }
 }
 

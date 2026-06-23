@@ -44,6 +44,7 @@ export function TimelineContainer() {
   const setVisibleWidth = useEditorUiStore((s) => s.setVisibleWidth);
   const toolMode = useEditorUiStore((s) => s.toolMode);
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
+  const isPlaying = useEditorUiStore((s) => s.isPlaying);
   const setCurrentFrame = useEditorUiStore((s) => s.setCurrentFrame);
   const selectedClipIds = useEditorUiStore((s) => s.selectedClipIds);
   const selectClips = useEditorUiStore((s) => s.selectClips);
@@ -92,6 +93,21 @@ export function TimelineContainer() {
       setMinZoomScale(Math.min(ZOOM.default, Math.max(0.01, fit)));
     }
   }, [viewport.width, total, setMinZoomScale]);
+
+  // Auto-scroll to keep the playhead visible during playback (upstream follows
+  // the playhead, but never auto-selects the clip under it). Gated on isPlaying
+  // so it never fights manual scrolling while paused; when the playhead nears a
+  // horizontal edge it recenters to a quarter from the left.
+  useEffect(() => {
+    if (!isPlaying || viewport.width <= 0) return;
+    const playheadX = activeFrame * zoomScale;
+    const margin = 60;
+    if (playheadX < scrollLeft + margin || playheadX > scrollLeft + viewport.width - margin) {
+      const maxScroll = Math.max(0, docWidth - viewport.width);
+      const target = Math.min(maxScroll, Math.max(0, playheadX - viewport.width * 0.25));
+      if (target !== scrollLeft) setScroll(target, scrollTop);
+    }
+  }, [isPlaying, activeFrame, zoomScale, viewport.width, scrollLeft, scrollTop, docWidth, setScroll]);
 
   // Paint content canvas.
   useEffect(() => {
