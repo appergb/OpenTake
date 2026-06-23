@@ -251,6 +251,20 @@ pub enum EditCommand {
     /// Delete folders recursively (subfolders + their assets) and cascade-remove
     /// clips referencing any deleted asset.
     DeleteFolder { folder_ids: Vec<String> },
+    /// Replace a clip's `media_ref` in place, preserving all editing attributes
+    /// (transform / crop / keyframe tracks / grade / masks / effects / fade).
+    /// When the new media is shorter than the clip's current duration, the
+    /// duration is truncated and `trim_end_frame` is clamped to fit. Optional
+    /// fields override the inferred defaults; `media_type` (when set) also
+    /// implies `source_clip_type` unless `source_clip_type` is explicitly given.
+    SwapMedia {
+        clip_id: String,
+        media_ref: String,
+        media_type: Option<ClipType>,
+        source_clip_type: Option<ClipType>,
+        duration_frames: Option<i32>,
+        trim_start_frame: Option<i32>,
+    },
     /// Undo the last committed command.
     Undo,
     /// Redo the last undone command.
@@ -348,6 +362,22 @@ pub fn apply(
         EditCommand::RenameFolder { entries } => rename_folder(state, entries),
         EditCommand::DeleteMedia { asset_ids } => delete_media(state, asset_ids),
         EditCommand::DeleteFolder { folder_ids } => delete_folder(state, folder_ids),
+        EditCommand::SwapMedia {
+            clip_id,
+            media_ref,
+            media_type,
+            source_clip_type,
+            duration_frames,
+            trim_start_frame,
+        } => swap_media(
+            state,
+            clip_id,
+            media_ref,
+            media_type,
+            source_clip_type,
+            duration_frames,
+            trim_start_frame,
+        ),
     }
 }
 
@@ -1378,6 +1408,122 @@ fn delete_folder(
             let set: HashSet<String> = folder_ids.iter().cloned().collect();
             ops::delete_folder(&mut st.timeline, &mut st.manifest, &set);
             Ok(Vec::new())
+        },
+    )
+}
+
+/// Replace a clip's `media_ref` in place, preserving every editing attribute
+/// (transform / crop / keyframe tracks / grade / masks / effects / fade / text).
+/// The new `media_ref` must exist in the manifest; when the new media is shorter
+/// than the clip's current duration, the duration is truncated and
+/// `trim_end_frame` is clamped so the source span fits. `media_type`, when set,
+/// also implies `source_clip_type` unless `source_clip_type` is explicitly given
+/// (matches the spec's "sync media_type" scenario).
+fn swap_media(
+    state: &mut EditorState,
+    clip_id: String,
+    media_ref: String,
+    media_type: Option<ClipType>,
+    source_clip_type: Option<ClipType>,
+    duration_frames: Option<i32>,
+    trim_start_frame: Option<i32>,
+) -> Result<EditResult, EditError> {
+    // 1. Validate clip exists.
+    let loc = state
+        .find_clip(&clip_id)
+        .ok_or_else(|| EditError::Invalid(format!("Clip not found: {clip_id}")))?;
+
+    // 2. Validate media_ref exists in manifest; read its duration (seconds).
+    let new_asset = state
+        .manifest
+        .entries
+        .iter()
+        .find(|e| e.id == media_ref)
+        .ok_or_else(|| EditError::Invalid(format!("media not found: {media_ref}")))?;
+
+    // 3. Convert new media duration (seconds) -> frames using the timeline fps.
+    let fps = state.timeline.fps;
+    let new_media_duration_frames =
+        ((new_asset.duration * fps as f64).round() as i32).max(1);
+
+    // 4. Snapshot the current clip's timing fields for validation.
+    let clip = &state.timeline.tracks[loc.track_index].clips[loc.clip_index];
+    let current_duration = clip.duration_frames;
+    let current_trim_start = clip.trim_start_frame;
+    let current_trim_end = clip.trim_end_frame;
+    let speed = clip.speed;
+
+    // 5. Validate an explicitly-provided duration.
+    if let Some(d) = duration_frames {
+        if d < 1 {
+            return Err(EditError::Invalid(format!(
+                "durationFrames must be >= 1 (got {d})"
+            )));
+        }
+    }
+
+    // 6. Resolve final trim_start (explicit override or current value).
+    let final_trim_start = trim_start_frame.unwrap_or(current_trim_start);
+    if final_trim_start < 0 {
+        return Err(EditError::Invalid(format!(
+            "trimStartFrame must be >= 0 (got {final_trim_start})"
+        )));
+    }
+    if final_trim_start >= new_media_duration_frames {
+        return Err(EditError::Invalid(format!(
+            "trimStartFrame {final_trim_start} must be < new media duration ({new_media_duration_frames})"
+        )));
+    }
+
+    // 7. Determine final duration: explicit > truncate-to-fit > keep current.
+    let final_duration = if let Some(d) = duration_frames {
+        d
+    } else if new_media_duration_frames < current_duration {
+        // New media is shorter: fit the clip into the available source span.
+        let available = (new_media_duration_frames - final_trim_start).max(1);
+        ((available as f64 / speed.max(0.0001)).round() as i32).max(1)
+    } else {
+        current_duration
+    };
+
+    // 8. Clamp trim_end so the total source span fits the new media.
+    let consumed = (final_duration as f64 * speed).round() as i32;
+    let max_trim_end = (new_media_duration_frames - final_trim_start - consumed).max(0);
+    let final_trim_end = current_trim_end.min(max_trim_end);
+
+    // 9. media_type implies source_clip_type when the latter is not explicit.
+    let final_media_type = media_type;
+    let final_source_clip_type = source_clip_type.or(media_type);
+
+    let summary_media_ref = media_ref.clone();
+    let summary_clip_id = clip_id.clone();
+    transact(
+        state,
+        "Swap Media",
+        move |_| {
+            format!(
+                "Swapped media on {} to {}",
+                summary_clip_id, summary_media_ref
+            )
+        },
+        move |st| {
+            let loc = st.find_clip(&clip_id).expect("validated above");
+            let clip = &mut st.timeline.tracks[loc.track_index].clips[loc.clip_index];
+            clip.media_ref = media_ref.clone();
+            if let Some(mt) = final_media_type {
+                clip.media_type = mt;
+            }
+            if let Some(sct) = final_source_clip_type {
+                clip.source_clip_type = sct;
+            }
+            if clip.duration_frames != final_duration {
+                clip.duration_frames = final_duration;
+                clip.clamp_keyframes_to_duration();
+                clip.clamp_fades_to_duration();
+            }
+            clip.trim_start_frame = final_trim_start;
+            clip.trim_end_frame = final_trim_end;
+            Ok(vec![clip_id.clone()])
         },
     )
 }

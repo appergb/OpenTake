@@ -102,6 +102,10 @@ const zh: Dict = {
   "inspector.field.duration": "时长",
   "inspector.keyframes": "关键帧",
   "inspector.textPlaceholder": "输入文本…",
+  "inspector.swapMedia": "替换媒体",
+  "inspector.swapMediaTitle": "选择新媒体",
+  "inspector.swapMediaEmpty": "媒体库为空，请先导入媒体。",
+  "inspector.swapMediaCurrent": "当前",
 
   // Toolbar
   "toolbar.undo": "撤销 (⌘Z)",
@@ -287,6 +291,10 @@ const en: Dict = {
   "inspector.field.duration": "Duration",
   "inspector.keyframes": "Keyframes",
   "inspector.textPlaceholder": "Enter text…",
+  "inspector.swapMedia": "Swap Media",
+  "inspector.swapMediaTitle": "Select New Media",
+  "inspector.swapMediaEmpty": "Media library is empty. Import media first.",
+  "inspector.swapMediaCurrent": "Current",
 
   "toolbar.undo": "Undo (⌘Z)",
   "toolbar.redo": "Redo (⇧⌘Z)",

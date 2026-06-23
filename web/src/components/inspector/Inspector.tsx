@@ -5,17 +5,19 @@
  * Text/AI-Edit tabs are scaffolded (TODO: full parity in a later pass).
  */
 
-import { Info, SlidersHorizontal, Diamond } from "lucide-react";
+import { useState } from "react";
+import { Info, SlidersHorizontal, Diamond, RefreshCw } from "lucide-react";
 import { PanelHeaderBar } from "../ui/PanelShell";
 import { Icon } from "../ui/Icon";
 import { ScrubbableNumberField } from "./ScrubbableNumberField";
 import { TextTab } from "./TextTab";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
+import { useMediaStore } from "../../store/mediaStore";
 import * as edit from "../../store/editActions";
 import { formatTimecode } from "../../lib/geometry";
 import { useT, type TFunction } from "../../i18n";
-import type { Clip, Timeline } from "../../lib/types";
+import type { Clip, MediaItem, Timeline } from "../../lib/types";
 
 function gcd(a: number, b: number): number {
   return b === 0 ? a : gcd(b, a % b);
@@ -133,6 +135,141 @@ const TAB_LABEL_KEY: Record<"text" | "video" | "audio" | "aiEdit", string> = {
   aiEdit: "inspector.tab.aiEdit",
 };
 
+/** A compact media-type badge label. */
+function mediaTypeLabel(type: MediaItem["type"]): string {
+  switch (type) {
+    case "video":
+      return "Video";
+    case "audio":
+      return "Audio";
+    case "image":
+      return "Image";
+    case "text":
+      return "Text";
+    case "lottie":
+      return "Lottie";
+  }
+}
+
+/** "替换媒体" section: opens an inline media picker that lists every library
+ *  asset except the clip's current `mediaRef`. Selecting one fires
+ *  `edit.swapMedia`, which preserves all editing attributes and truncates the
+ *  duration when the new media is shorter. Text clips don't render this section
+ *  (they have no source media to swap). */
+function SwapMediaSection({ clip, t }: { clip: Clip; t: TFunction }) {
+  const [open, setOpen] = useState(false);
+  const items = useMediaStore((s) => s.items);
+
+  // Exclude the current media source; text items aren't swappable targets.
+  const candidates = items.filter((m) => m.id !== clip.mediaRef && m.type !== "text");
+
+  const handlePick = (item: MediaItem) => {
+    void edit.swapMedia(clip.id, item.id, { mediaType: item.type });
+    setOpen(false);
+  };
+
+  return (
+    <section>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: "var(--space-xs)",
+          fontSize: "var(--fs-sm)",
+          color: open ? "var(--text-primary)" : "var(--text-tertiary)",
+          background: "none",
+          border: "none",
+          cursor: "pointer",
+          padding: 0,
+        }}
+      >
+        <Icon icon={RefreshCw} size={12} />
+        {t("inspector.swapMedia")}
+      </button>
+
+      {open && (
+        <div
+          style={{
+            marginTop: "var(--space-sm)",
+            maxHeight: 200,
+            overflowY: "auto",
+            borderRadius: "var(--radius-sm)",
+            border: "var(--bw-thin) solid var(--border-primary)",
+            background: "var(--bg-secondary)",
+          }}
+        >
+          <div
+            style={{
+              padding: "var(--space-xs) var(--space-sm)",
+              fontSize: "var(--fs-xxs)",
+              fontWeight: "var(--fw-semibold)",
+              letterSpacing: "var(--tracking-wide)",
+              color: "var(--text-muted)",
+              textTransform: "uppercase",
+              borderBottom: "var(--bw-thin) solid var(--border-primary)",
+            }}
+          >
+            {t("inspector.swapMediaTitle")}
+          </div>
+          {candidates.length === 0 ? (
+            <div
+              style={{
+                padding: "var(--space-sm)",
+                fontSize: "var(--fs-xs)",
+                color: "var(--text-tertiary)",
+              }}
+            >
+              {t("inspector.swapMediaEmpty")}
+            </div>
+          ) : (
+            candidates.map((item) => (
+              <button
+                key={item.id}
+                onClick={() => handlePick(item)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  width: "100%",
+                  padding: "var(--space-xs) var(--space-sm)",
+                  fontSize: "var(--fs-xs)",
+                  color: "var(--text-secondary)",
+                  background: "none",
+                  border: "none",
+                  borderBottom: "var(--bw-thin) solid var(--border-primary)",
+                  cursor: "pointer",
+                  textAlign: "left",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "var(--bg-hover)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "none";
+                }}
+              >
+                <span
+                  style={{
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    flex: 1,
+                  }}
+                >
+                  {item.name || item.id}
+                </span>
+                <span style={{ color: "var(--text-muted)", marginLeft: "var(--space-sm)" }}>
+                  {mediaTypeLabel(item.type)}
+                </span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function ClipInspector({
   clip,
   tab,
@@ -191,6 +328,7 @@ function ClipInspector({
       )}
 
       <div style={{ padding: "var(--space-lg)", display: "flex", flexDirection: "column", gap: "var(--space-lg)" }}>
+        {clip.mediaType !== "text" && <SwapMediaSection clip={clip} t={t} />}
         {activeTab === "text" ? (
           <TextTab clip={clip} t={t} />
         ) : activeTab === "audio" ? (
