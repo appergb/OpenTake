@@ -182,6 +182,36 @@ pub enum EditCommand {
         property: KeyframeProperty,
         payload: KeyframePayload,
     },
+    /// Stamp a keyframe at `frame` (absolute timeline frame) using the clip's
+    /// current sampled value for `property`. Creates the track if absent.
+    StampKeyframe {
+        clip_id: String,
+        property: KeyframeProperty,
+        frame: i32,
+    },
+    /// Remove the keyframe at `frame` (absolute timeline frame). Clears the track
+    /// to `None` when it becomes empty.
+    RemoveKeyframe {
+        clip_id: String,
+        property: KeyframeProperty,
+        frame: i32,
+    },
+    /// Move a keyframe from `from_frame` to `to_frame` (both absolute timeline
+    /// frames). Refuses if `to_frame` is already occupied.
+    MoveKeyframe {
+        clip_id: String,
+        property: KeyframeProperty,
+        from_frame: i32,
+        to_frame: i32,
+    },
+    /// Change the interpolation mode of the keyframe at `frame` (absolute timeline
+    /// frame).
+    SetKeyframeInterpolation {
+        clip_id: String,
+        property: KeyframeProperty,
+        frame: i32,
+        interpolation: opentake_domain::Interpolation,
+    },
     /// Set (or clear with `None`) the color grade on one or more clips.
     SetColorGrade {
         clip_ids: Vec<String>,
@@ -313,6 +343,28 @@ pub fn apply(
             property,
             payload,
         } => set_keyframes(state, clip_id, property, payload),
+        EditCommand::StampKeyframe {
+            clip_id,
+            property,
+            frame,
+        } => stamp_keyframe(state, clip_id, property, frame),
+        EditCommand::RemoveKeyframe {
+            clip_id,
+            property,
+            frame,
+        } => remove_keyframe(state, clip_id, property, frame),
+        EditCommand::MoveKeyframe {
+            clip_id,
+            property,
+            from_frame,
+            to_frame,
+        } => move_keyframe(state, clip_id, property, from_frame, to_frame),
+        EditCommand::SetKeyframeInterpolation {
+            clip_id,
+            property,
+            frame,
+            interpolation,
+        } => set_keyframe_interpolation(state, clip_id, property, frame, interpolation),
         EditCommand::SetColorGrade { clip_ids, grade } => set_color_grade(state, clip_ids, grade),
         EditCommand::SetChromaKey {
             clip_ids,
@@ -839,6 +891,318 @@ fn set_keyframes(
                 _ => unreachable!("validated above"),
             }
             Ok(vec![loc_clip_id(st, loc)])
+        },
+    )
+}
+
+fn stamp_keyframe(
+    state: &mut EditorState,
+    clip_id: String,
+    property: KeyframeProperty,
+    frame: i32,
+) -> Result<EditResult, EditError> {
+    let loc = state.find_clip(&clip_id).ok_or_else(|| {
+        EditError::Invalid(format!("Clip not found: {clip_id}"))
+    })?;
+    let clip = &state.timeline.tracks[loc.track_index].clips[loc.clip_index];
+    if !clip.contains(frame) {
+        return Err(EditError::Invalid(format!(
+            "Frame {frame} is outside clip range ({}..{})",
+            clip.start_frame,
+            clip.end_frame()
+        )));
+    }
+    let summary = format!("Stamp keyframe on {clip_id}");
+    transact(
+        state,
+        "Stamp Keyframe",
+        move |_| summary,
+        move |st| {
+            let loc = st.find_clip(&clip_id).expect("validated above");
+            let clip = &mut st.timeline.tracks[loc.track_index].clips[loc.clip_index];
+            let rel = frame - clip.start_frame;
+            match property {
+                KeyframeProperty::Opacity => {
+                    let v = clip.raw_opacity_at(frame);
+                    let mut track = clip.opacity_track.take().unwrap_or_default();
+                    track.upsert(opentake_domain::Keyframe::new(rel, v));
+                    clip.opacity_track = empty_to_none(track);
+                }
+                KeyframeProperty::Volume => {
+                    let v = clip
+                        .volume_track
+                        .as_ref()
+                        .map(|t| t.sample(rel, 0.0))
+                        .unwrap_or(0.0);
+                    let mut track = clip.volume_track.take().unwrap_or_default();
+                    track.upsert(opentake_domain::Keyframe::new(rel, v));
+                    clip.volume_track = empty_to_none(track);
+                }
+                KeyframeProperty::Rotation => {
+                    let v = clip.rotation_at(frame);
+                    let mut track = clip.rotation_track.take().unwrap_or_default();
+                    track.upsert(opentake_domain::Keyframe::new(rel, v));
+                    clip.rotation_track = empty_to_none(track);
+                }
+                KeyframeProperty::Position => {
+                    let tl = clip.top_left_at(frame);
+                    let v = opentake_domain::AnimPair::new(tl.x, tl.y);
+                    let mut track = clip.position_track.take().unwrap_or_default();
+                    track.upsert(opentake_domain::Keyframe::new(rel, v));
+                    clip.position_track = empty_to_none(track);
+                }
+                KeyframeProperty::Scale => {
+                    let sz = clip.size_at(frame);
+                    let v = opentake_domain::AnimPair::new(sz.0, sz.1);
+                    let mut track = clip.scale_track.take().unwrap_or_default();
+                    track.upsert(opentake_domain::Keyframe::new(rel, v));
+                    clip.scale_track = empty_to_none(track);
+                }
+                KeyframeProperty::Crop => {
+                    let v = clip.crop_at(frame);
+                    let mut track = clip.crop_track.take().unwrap_or_default();
+                    track.upsert(opentake_domain::Keyframe::new(rel, v));
+                    clip.crop_track = empty_to_none(track);
+                }
+            }
+            Ok(vec![clip_id])
+        },
+    )
+}
+
+fn remove_keyframe(
+    state: &mut EditorState,
+    clip_id: String,
+    property: KeyframeProperty,
+    frame: i32,
+) -> Result<EditResult, EditError> {
+    let loc = state
+        .find_clip(&clip_id)
+        .ok_or_else(|| EditError::Invalid(format!("Clip not found: {clip_id}")))?;
+    let clip = &state.timeline.tracks[loc.track_index].clips[loc.clip_index];
+    let rel = frame - clip.start_frame;
+    let has_kf = match property {
+        KeyframeProperty::Opacity => has_keyframe_at(&clip.opacity_track, rel),
+        KeyframeProperty::Volume => has_keyframe_at(&clip.volume_track, rel),
+        KeyframeProperty::Rotation => has_keyframe_at(&clip.rotation_track, rel),
+        KeyframeProperty::Position => has_keyframe_at(&clip.position_track, rel),
+        KeyframeProperty::Scale => has_keyframe_at(&clip.scale_track, rel),
+        KeyframeProperty::Crop => has_keyframe_at(&clip.crop_track, rel),
+    };
+    if !has_kf {
+        return Err(EditError::Invalid(format!(
+            "Keyframe not found at frame {frame}"
+        )));
+    }
+    let summary = format!("Remove keyframe on {clip_id}");
+    transact(
+        state,
+        "Remove Keyframe",
+        move |_| summary,
+        move |st| {
+            let loc = st.find_clip(&clip_id).expect("validated above");
+            let clip = &mut st.timeline.tracks[loc.track_index].clips[loc.clip_index];
+            let rel = frame - clip.start_frame;
+            match property {
+                KeyframeProperty::Opacity => {
+                    if let Some(mut t) = clip.opacity_track.take() {
+                        t.remove(rel);
+                        clip.opacity_track = empty_to_none(t);
+                    }
+                }
+                KeyframeProperty::Volume => {
+                    if let Some(mut t) = clip.volume_track.take() {
+                        t.remove(rel);
+                        clip.volume_track = empty_to_none(t);
+                    }
+                }
+                KeyframeProperty::Rotation => {
+                    if let Some(mut t) = clip.rotation_track.take() {
+                        t.remove(rel);
+                        clip.rotation_track = empty_to_none(t);
+                    }
+                }
+                KeyframeProperty::Position => {
+                    if let Some(mut t) = clip.position_track.take() {
+                        t.remove(rel);
+                        clip.position_track = empty_to_none(t);
+                    }
+                }
+                KeyframeProperty::Scale => {
+                    if let Some(mut t) = clip.scale_track.take() {
+                        t.remove(rel);
+                        clip.scale_track = empty_to_none(t);
+                    }
+                }
+                KeyframeProperty::Crop => {
+                    if let Some(mut t) = clip.crop_track.take() {
+                        t.remove(rel);
+                        clip.crop_track = empty_to_none(t);
+                    }
+                }
+            }
+            Ok(vec![clip_id])
+        },
+    )
+}
+
+fn move_keyframe(
+    state: &mut EditorState,
+    clip_id: String,
+    property: KeyframeProperty,
+    from_frame: i32,
+    to_frame: i32,
+) -> Result<EditResult, EditError> {
+    let loc = state
+        .find_clip(&clip_id)
+        .ok_or_else(|| EditError::Invalid(format!("Clip not found: {clip_id}")))?;
+    let clip = &state.timeline.tracks[loc.track_index].clips[loc.clip_index];
+    let from_rel = from_frame - clip.start_frame;
+    let to_rel = to_frame - clip.start_frame;
+    let has_source = match property {
+        KeyframeProperty::Opacity => has_keyframe_at(&clip.opacity_track, from_rel),
+        KeyframeProperty::Volume => has_keyframe_at(&clip.volume_track, from_rel),
+        KeyframeProperty::Rotation => has_keyframe_at(&clip.rotation_track, from_rel),
+        KeyframeProperty::Position => has_keyframe_at(&clip.position_track, from_rel),
+        KeyframeProperty::Scale => has_keyframe_at(&clip.scale_track, from_rel),
+        KeyframeProperty::Crop => has_keyframe_at(&clip.crop_track, from_rel),
+    };
+    if !has_source {
+        return Err(EditError::Invalid(format!(
+            "Keyframe not found at frame {from_frame}"
+        )));
+    }
+    // Validate target frame is within clip range (half-open [start, end)).
+    if !clip.contains(to_frame) {
+        return Err(EditError::Invalid(format!(
+            "Target frame {to_frame} is outside clip range ({}..{})",
+            clip.start_frame,
+            clip.end_frame()
+        )));
+    }
+    if from_rel != to_rel {
+        let target_occupied = match property {
+            KeyframeProperty::Opacity => has_keyframe_at(&clip.opacity_track, to_rel),
+            KeyframeProperty::Volume => has_keyframe_at(&clip.volume_track, to_rel),
+            KeyframeProperty::Rotation => has_keyframe_at(&clip.rotation_track, to_rel),
+            KeyframeProperty::Position => has_keyframe_at(&clip.position_track, to_rel),
+            KeyframeProperty::Scale => has_keyframe_at(&clip.scale_track, to_rel),
+            KeyframeProperty::Crop => has_keyframe_at(&clip.crop_track, to_rel),
+        };
+        if target_occupied {
+            return Err(EditError::Invalid(format!(
+                "Target frame {to_frame} already occupied"
+            )));
+        }
+    }
+    let summary = format!("Move keyframe on {clip_id}");
+    transact(
+        state,
+        "Move Keyframe",
+        move |_| summary,
+        move |st| {
+            let loc = st.find_clip(&clip_id).expect("validated above");
+            let clip = &mut st.timeline.tracks[loc.track_index].clips[loc.clip_index];
+            let from_rel = from_frame - clip.start_frame;
+            let to_rel = to_frame - clip.start_frame;
+            match property {
+                KeyframeProperty::Opacity => {
+                    if let Some(mut t) = clip.opacity_track.take() {
+                        t.move_keyframe(from_rel, to_rel);
+                        clip.opacity_track = empty_to_none(t);
+                    }
+                }
+                KeyframeProperty::Volume => {
+                    if let Some(mut t) = clip.volume_track.take() {
+                        t.move_keyframe(from_rel, to_rel);
+                        clip.volume_track = empty_to_none(t);
+                    }
+                }
+                KeyframeProperty::Rotation => {
+                    if let Some(mut t) = clip.rotation_track.take() {
+                        t.move_keyframe(from_rel, to_rel);
+                        clip.rotation_track = empty_to_none(t);
+                    }
+                }
+                KeyframeProperty::Position => {
+                    if let Some(mut t) = clip.position_track.take() {
+                        t.move_keyframe(from_rel, to_rel);
+                        clip.position_track = empty_to_none(t);
+                    }
+                }
+                KeyframeProperty::Scale => {
+                    if let Some(mut t) = clip.scale_track.take() {
+                        t.move_keyframe(from_rel, to_rel);
+                        clip.scale_track = empty_to_none(t);
+                    }
+                }
+                KeyframeProperty::Crop => {
+                    if let Some(mut t) = clip.crop_track.take() {
+                        t.move_keyframe(from_rel, to_rel);
+                        clip.crop_track = empty_to_none(t);
+                    }
+                }
+            }
+            Ok(vec![clip_id])
+        },
+    )
+}
+
+fn set_keyframe_interpolation(
+    state: &mut EditorState,
+    clip_id: String,
+    property: KeyframeProperty,
+    frame: i32,
+    interpolation: opentake_domain::Interpolation,
+) -> Result<EditResult, EditError> {
+    let loc = state
+        .find_clip(&clip_id)
+        .ok_or_else(|| EditError::Invalid(format!("Clip not found: {clip_id}")))?;
+    let clip = &state.timeline.tracks[loc.track_index].clips[loc.clip_index];
+    let rel = frame - clip.start_frame;
+    let has_kf = match property {
+        KeyframeProperty::Opacity => has_keyframe_at(&clip.opacity_track, rel),
+        KeyframeProperty::Volume => has_keyframe_at(&clip.volume_track, rel),
+        KeyframeProperty::Rotation => has_keyframe_at(&clip.rotation_track, rel),
+        KeyframeProperty::Position => has_keyframe_at(&clip.position_track, rel),
+        KeyframeProperty::Scale => has_keyframe_at(&clip.scale_track, rel),
+        KeyframeProperty::Crop => has_keyframe_at(&clip.crop_track, rel),
+    };
+    if !has_kf {
+        return Err(EditError::Invalid(format!(
+            "Keyframe not found at frame {frame}"
+        )));
+    }
+    let summary = format!("Set keyframe interpolation on {clip_id}");
+    transact(
+        state,
+        "Set Keyframe Interpolation",
+        move |_| summary,
+        move |st| {
+            let loc = st.find_clip(&clip_id).expect("validated above");
+            let clip = &mut st.timeline.tracks[loc.track_index].clips[loc.clip_index];
+            let rel = frame - clip.start_frame;
+            match property {
+                KeyframeProperty::Opacity => {
+                    set_kf_interp(&mut clip.opacity_track, rel, interpolation)
+                }
+                KeyframeProperty::Volume => {
+                    set_kf_interp(&mut clip.volume_track, rel, interpolation)
+                }
+                KeyframeProperty::Rotation => {
+                    set_kf_interp(&mut clip.rotation_track, rel, interpolation)
+                }
+                KeyframeProperty::Position => {
+                    set_kf_interp(&mut clip.position_track, rel, interpolation)
+                }
+                KeyframeProperty::Scale => {
+                    set_kf_interp(&mut clip.scale_track, rel, interpolation)
+                }
+                KeyframeProperty::Crop => {
+                    set_kf_interp(&mut clip.crop_track, rel, interpolation)
+                }
+            }
+            Ok(vec![clip_id])
         },
     )
 }
@@ -1436,6 +1800,29 @@ fn empty_to_none<V>(
     }
 }
 
+fn has_keyframe_at<V>(
+    t_opt: &Option<opentake_domain::KeyframeTrack<V>>,
+    rel: i32,
+) -> bool {
+    t_opt.as_ref()
+        .map(|t| t.keyframes.iter().any(|k| k.frame == rel))
+        .unwrap_or(false)
+}
+
+fn set_kf_interp<V>(
+    t_opt: &mut Option<opentake_domain::KeyframeTrack<V>>,
+    rel: i32,
+    interpolation: opentake_domain::Interpolation,
+) {
+    if let Some(t) = t_opt {
+        for kf in &mut t.keyframes {
+            if kf.frame == rel {
+                kf.interpolation_out = interpolation;
+            }
+        }
+    }
+}
+
 fn loc_clip_id(state: &EditorState, loc: opentake_domain::ClipLocation) -> String {
     state.timeline.tracks[loc.track_index].clips[loc.clip_index]
         .id
@@ -1567,5 +1954,301 @@ mod insert_track_tests {
             &ids,
         );
         assert!(err.is_err());
+    }
+}
+
+#[cfg(test)]
+mod keyframe_edit_tests {
+    use super::*;
+    use crate::id::SeqIdGen;
+    use opentake_domain::{ClipType, Interpolation, Keyframe, KeyframeTrack};
+
+    /// Build a state with one video track and one clip at [100, 130).
+    fn make_state_with_clip() -> (EditorState, SeqIdGen, String) {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+        apply(
+            &mut state,
+            EditCommand::InsertTrack {
+                kind: ClipType::Video,
+            },
+            &ids,
+        )
+        .unwrap();
+        let clip_id = ids.next_id();
+        let clip = opentake_domain::Clip::new(clip_id.clone(), "asset1", 100, 30);
+        state.timeline.tracks[0].clips.push(clip);
+        (state, ids, clip_id)
+    }
+
+    fn set_opacity_track(state: &mut EditorState, clip_id: &str, kfs: Vec<Keyframe<f64>>) {
+        let loc = state.find_clip(clip_id).unwrap();
+        state.timeline.tracks[loc.track_index].clips[loc.clip_index].opacity_track =
+            Some(KeyframeTrack::from_keyframes(kfs));
+    }
+
+    fn opacity_track_kfs(state: &EditorState, clip_id: &str) -> Vec<(i32, f64, Interpolation)> {
+        let loc = state.find_clip(clip_id).unwrap();
+        let clip = &state.timeline.tracks[loc.track_index].clips[loc.clip_index];
+        clip.opacity_track
+            .as_ref()
+            .map(|t| {
+                t.keyframes
+                    .iter()
+                    .map(|k| (k.frame, k.value, k.interpolation_out))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    // --- StampKeyframe ---
+
+    #[test]
+    fn stamp_keyframe_creates_track_when_absent() {
+        let (mut state, ids, clip_id) = make_state_with_clip();
+        // No opacity track initially.
+        assert!(state.find_clip(&clip_id).unwrap().opacity_track.is_none());
+
+        let res = apply(
+            &mut state,
+            EditCommand::StampKeyframe {
+                clip_id: clip_id.clone(),
+                property: KeyframeProperty::Opacity,
+                frame: 110, // rel 10
+            },
+            &ids,
+        )
+        .unwrap();
+        assert!(res.changed);
+        assert_eq!(res.affected_clip_ids, vec![clip_id]);
+
+        let kfs = opacity_track_kfs(&state, &clip_id);
+        assert_eq!(kfs.len(), 1);
+        assert_eq!(kfs[0].0, 10); // rel frame
+        // Default opacity is 1.0, so stamped value is 1.0.
+        approx(kfs[0].1, 1.0);
+    }
+
+    #[test]
+    fn stamp_keyframe_upserts_existing() {
+        let (mut state, ids, clip_id) = make_state_with_clip();
+        // Pre-existing track with a kf at rel 10.
+        set_opacity_track(&mut state, &clip_id, vec![Keyframe::new(10, 0.5)]);
+
+        apply(
+            &mut state,
+            EditCommand::StampKeyframe {
+                clip_id: clip_id.clone(),
+                property: KeyframeProperty::Opacity,
+                frame: 110, // rel 10 — same as existing kf
+            },
+            &ids,
+        )
+        .unwrap();
+
+        // Upsert should not duplicate.
+        let kfs = opacity_track_kfs(&state, &clip_id);
+        assert_eq!(kfs.len(), 1);
+        assert_eq!(kfs[0].0, 10);
+    }
+
+    #[test]
+    fn stamp_keyframe_clip_not_found() {
+        let (mut state, ids, _clip_id) = make_state_with_clip();
+        let err = apply(
+            &mut state,
+            EditCommand::StampKeyframe {
+                clip_id: "nonexistent".into(),
+                property: KeyframeProperty::Opacity,
+                frame: 110,
+            },
+            &ids,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn stamp_keyframe_frame_outside_clip() {
+        let (mut state, ids, clip_id) = make_state_with_clip();
+        // Clip spans [100, 130). Frame 200 is outside.
+        let err = apply(
+            &mut state,
+            EditCommand::StampKeyframe {
+                clip_id,
+                property: KeyframeProperty::Opacity,
+                frame: 200,
+            },
+            &ids,
+        );
+        assert!(err.is_err());
+    }
+
+    // --- RemoveKeyframe ---
+
+    #[test]
+    fn remove_keyframe_deletes_and_clears_empty_track() {
+        let (mut state, ids, clip_id) = make_state_with_clip();
+        set_opacity_track(&mut state, &clip_id, vec![Keyframe::new(10, 0.5)]);
+
+        apply(
+            &mut state,
+            EditCommand::RemoveKeyframe {
+                clip_id: clip_id.clone(),
+                property: KeyframeProperty::Opacity,
+                frame: 110, // rel 10
+            },
+            &ids,
+        )
+        .unwrap();
+
+        // Track should be cleared to None when empty.
+        let loc = state.find_clip(&clip_id).unwrap();
+        assert!(state.timeline.tracks[loc.track_index].clips[loc.clip_index].opacity_track.is_none());
+    }
+
+    #[test]
+    fn remove_keyframe_not_found() {
+        let (mut state, ids, clip_id) = make_state_with_clip();
+        set_opacity_track(&mut state, &clip_id, vec![Keyframe::new(0, 0.5)]);
+
+        let err = apply(
+            &mut state,
+            EditCommand::RemoveKeyframe {
+                clip_id,
+                property: KeyframeProperty::Opacity,
+                frame: 110, // rel 10 — no kf here
+            },
+            &ids,
+        );
+        assert!(err.is_err());
+    }
+
+    // --- MoveKeyframe ---
+
+    #[test]
+    fn move_keyframe_to_empty() {
+        let (mut state, ids, clip_id) = make_state_with_clip();
+        set_opacity_track(&mut state, &clip_id, vec![Keyframe::new(0, 0.5)]);
+
+        apply(
+            &mut state,
+            EditCommand::MoveKeyframe {
+                clip_id: clip_id.clone(),
+                property: KeyframeProperty::Opacity,
+                from_frame: 100, // rel 0
+                to_frame: 110,   // rel 10
+            },
+            &ids,
+        )
+        .unwrap();
+
+        let kfs = opacity_track_kfs(&state, &clip_id);
+        assert_eq!(kfs.len(), 1);
+        assert_eq!(kfs[0].0, 10); // moved to rel 10
+    }
+
+    #[test]
+    fn move_keyframe_target_occupied() {
+        let (mut state, ids, clip_id) = make_state_with_clip();
+        set_opacity_track(
+            &mut state,
+            &clip_id,
+            vec![Keyframe::new(0, 0.0), Keyframe::new(10, 1.0)],
+        );
+
+        let err = apply(
+            &mut state,
+            EditCommand::MoveKeyframe {
+                clip_id,
+                property: KeyframeProperty::Opacity,
+                from_frame: 100, // rel 0
+                to_frame: 110,   // rel 10 — occupied
+            },
+            &ids,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn move_keyframe_source_missing() {
+        let (mut state, ids, clip_id) = make_state_with_clip();
+        set_opacity_track(&mut state, &clip_id, vec![Keyframe::new(0, 0.5)]);
+
+        let err = apply(
+            &mut state,
+            EditCommand::MoveKeyframe {
+                clip_id,
+                property: KeyframeProperty::Opacity,
+                from_frame: 115, // rel 15 — no kf
+                to_frame: 120,   // rel 20
+            },
+            &ids,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn move_keyframe_target_outside_clip() {
+        let (mut state, ids, clip_id) = make_state_with_clip();
+        // Clip spans [100, 130). Frame 200 is outside.
+        set_opacity_track(&mut state, &clip_id, vec![Keyframe::new(0, 0.5)]);
+        let err = apply(
+            &mut state,
+            EditCommand::MoveKeyframe {
+                clip_id,
+                property: KeyframeProperty::Opacity,
+                from_frame: 100, // rel 0
+                to_frame: 200,   // outside clip range
+            },
+            &ids,
+        );
+        assert!(err.is_err());
+    }
+
+    // --- SetKeyframeInterpolation ---
+
+    #[test]
+    fn set_keyframe_interpolation_changes_mode() {
+        let (mut state, ids, clip_id) = make_state_with_clip();
+        // Keyframe::new defaults to Smooth.
+        set_opacity_track(&mut state, &clip_id, vec![Keyframe::new(0, 0.5)]);
+        assert_eq!(opacity_track_kfs(&state, &clip_id)[0].2, Interpolation::Smooth);
+
+        apply(
+            &mut state,
+            EditCommand::SetKeyframeInterpolation {
+                clip_id: clip_id.clone(),
+                property: KeyframeProperty::Opacity,
+                frame: 100, // rel 0
+                interpolation: Interpolation::Linear,
+            },
+            &ids,
+        )
+        .unwrap();
+
+        let kfs = opacity_track_kfs(&state, &clip_id);
+        assert_eq!(kfs[0].2, Interpolation::Linear);
+    }
+
+    #[test]
+    fn set_keyframe_interpolation_kf_not_found() {
+        let (mut state, ids, clip_id) = make_state_with_clip();
+        set_opacity_track(&mut state, &clip_id, vec![Keyframe::new(0, 0.5)]);
+
+        let err = apply(
+            &mut state,
+            EditCommand::SetKeyframeInterpolation {
+                clip_id,
+                property: KeyframeProperty::Opacity,
+                frame: 115, // rel 15 — no kf
+                interpolation: Interpolation::Linear,
+            },
+            &ids,
+        );
+        assert!(err.is_err());
+    }
+
+    fn approx(a: f64, b: f64) {
+        assert!((a - b).abs() < 1e-9, "{a} != {b}");
     }
 }
