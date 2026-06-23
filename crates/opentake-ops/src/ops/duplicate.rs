@@ -260,10 +260,7 @@ mod tests {
             .find(|c| c.id == created[0])
             .unwrap();
         assert_eq!(copy.color_grade, orig_color_grade);
-        assert_eq!(
-            copy.chroma_key.as_ref().map(|c| c.clone()),
-            orig_chroma_key
-        );
+        assert_eq!(copy.chroma_key.as_ref().map(|c| c.clone()), orig_chroma_key);
         assert_eq!(copy.masks.len(), 1);
         assert_eq!(copy.effects.len(), 1);
         // Mutate the copy's masks; the original must be unaffected (no shared ref).
