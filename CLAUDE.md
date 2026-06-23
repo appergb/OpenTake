@@ -3,6 +3,23 @@
 > 本文件是 OpenTake 开发的**权威状态 + 操作手册**。每次上下文压缩后先读它,再读 `docs/PORT-1TO1-GAP.md`(1:1 差距与实现计划,批次蓝图)。
 > 用户用中文沟通,回复用中文。用户要我**全自主**:自己开子 Agent / workflow,**绝不让用户开 agent / 不向用户提问要他操作**;**自己用真机 computer-use 测试**,做到能用再回报。
 
+> ⚠️ computer-use 点击本机被 Dock 遮挡全局拦截(报"会落在程序坞")。改用 `preview_start` dev server(浏览器 fallback `web/src/lib/fallback.ts` 有 demo 时间线)+ `preview_eval` 注入测量验证布局,绕开真机点击。详见 `memory/opentake-editing-parity.md`。
+
+## 🔥 当前最高优先级(2026-06-23,详见 `../新的需求和工程文档/需求与问题汇总.md`)
+
+**🔴 待修 BUG(用户反复反馈):**
+1. **无法暂停 / 暂停卡顿**(CRITICAL):首要嫌疑——`TimelinePlaybackLayer` 卸载时 per-render ref 回调 `els.current.delete` 先于 effect cleanup 执行 → cleanup 的 `el.pause()` 拿到空 Map → 被移除的 `<audio>/<video>` 继续播放 = 暂停不了。修法:加 `containerRef`,cleanup 用 `containerRef.current?.querySelectorAll('video,audio').forEach(el=>el.pause())`。卡顿:暂停瞬间 `composite_frame` 同步开销,考虑异步/复用末帧。
+2. **音频波形不渲染**(HIGH):16:03 构建含波形代码但实测 A1 纯色块无波形 → 嫌疑 `get_waveform` 失败被前端 catch 吞掉。排查 `src-tauri/src/media.rs get_waveform` 失败原因(加日志/真机/Rust 集成测试)。
+3. **丢失素材→全红不恢复**(HIGH):路径不可达→"丢失素材",重选路径后片段+媒体库全红未复原。对照上游 `EditorViewModel+Relink.swift`。
+
+**🟦 新需求:**
+- F1 触控板:裸双指滚动=移动时间线/播放头,捏合=缩放(剪映式;当前在 `TimelineContainer onWheel` 是 Option/Cmd+滚轮)。
+- F2 删左上角"切换 Agent 面板"按钮(`TitleBar.tsx`/toolbar)。
+- F3 剪映式顶栏:素材/音频/文本/贴纸/特效/转场/字幕/智能包裹(未做灰色:文本/贴纸/转场/字幕/智能包裹);素材→导入/我的(星标收藏到全局"我的"=#37);音频同理;已导入持久保留。
+- F4 工程文件互操作:右上角保存工程,可被剪映(`com.lveditor.draft` JSON)/PR(FCPXML)打开。先调研当前 `opentake-project`/`project.json` 格式 + 导出 FCPXML/剪映 draft。
+
+> 本轮(2026-06-23)已完成的剪辑修复都在分支 `feat/realtime-timeline-playback`(PR #81,CI 绿):真实播放、波形端口(=B2 实测未现)、trim/move 正确性、fade smoothstep、razor 吸附、轨道编号、⇧⌫ ripple、预览左下角根因修复、split 无选区、链接 co-trim。**注意 PR #81 已远超"播放"范围,合并时改标题/描述或拆分。**
+
 ## 0. 项目身份
 - OpenTake = [palmier-io/palmier-pro](https://github.com/palmier-io/palmier-pro)(Swift 原生 macOS 视频编辑器,GPL-3.0)的**跨平台社区分支**。**忠实 1:1 复刻其编辑逻辑与 UI**(用户反复强调:别自己发明,照上游源码复刻;除登录/账号外都对齐),再加更强 Agent 能力。
 - 栈:Tauri 2 + Rust workspace + React/TS;媒体 = FFmpeg(sidecar)+ wgpu(合成)+ cpal + whisper-rs + candle/ort。
