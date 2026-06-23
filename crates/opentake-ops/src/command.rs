@@ -1443,8 +1443,7 @@ fn swap_media(
 
     // 3. Convert new media duration (seconds) -> frames using the timeline fps.
     let fps = state.timeline.fps;
-    let new_media_duration_frames =
-        ((new_asset.duration * fps as f64).round() as i32).max(1);
+    let new_media_duration_frames = ((new_asset.duration * fps as f64).round() as i32).max(1);
 
     // 4. Snapshot the current clip's timing fields for validation.
     let clip = &state.timeline.tracks[loc.track_index].clips[loc.clip_index];

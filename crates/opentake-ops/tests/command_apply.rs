@@ -1134,7 +1134,7 @@ fn swap_media_replaces_ref_and_preserves_attributes() {
     let clip = &st.timeline.tracks[0].clips[0];
     assert_eq!(clip.media_ref, "new");
     assert_eq!(clip.duration_frames, 100); // unchanged
-    // Preserved editing attributes
+                                          // Preserved editing attributes
     assert!((clip.opacity - 0.7).abs() < 1e-9);
     assert!((clip.transform.center_x - 0.3).abs() < 1e-9);
     assert!((clip.transform.rotation - 15.0).abs() < 1e-9);
@@ -1195,7 +1195,7 @@ fn swap_media_rejects_missing_media_ref() {
 
     assert!(matches!(err, EditError::Invalid(_)));
     assert_eq!(st.version(), 0); // unchanged
-    // Original media_ref preserved.
+                                 // Original media_ref preserved.
     assert_eq!(st.timeline.tracks[0].clips[0].media_ref, "asset");
 }
 
