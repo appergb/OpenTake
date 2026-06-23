@@ -1,184 +1,321 @@
 <div align="center">
-<img src="./assets/opentake-logo.png" alt="OpenTake Logo" width="120" />
+  <img src="./assets/opentake-logo.png" alt="OpenTake" width="128" />
 
-# OpenTake
+  <h1>OpenTake</h1>
 
-**Agent 原生的视频剪辑工作引擎 —— 让 Agent 内化、学习并蒸馏各大视频博主的剪辑能力与手法。**
+  <p>
+    <strong>Agent-Native Video Production Engine</strong><br />
+    エージェントネイティブな動画制作エンジン<br />
+    Agent 原生的视频制作引擎
+  </p>
+
+  <p>
+    <a href="#-installation"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-6e7385?logo=rust" alt="Platforms" /></a>
+    <a href="https://github.com/appergb/OpenTake/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue.svg" alt="License" /></a>
+    <a href="https://github.com/appergb/OpenTake/stargazers"><img src="https://img.shields.io/github/stars/appergb/OpenTake?style=flat&color=f5c542" alt="Stars" /></a>
+    <a href="https://discord.gg/opentake"><img src="https://img.shields.io/badge/Discord-EN-5865F2?logo=discord&logoColor=white" alt="Discord EN" /></a>
+    <a href="https://discord.gg/opentake-cn"><img src="https://img.shields.io/badge/Discord-中文-5865F2?logo=discord&logoColor=white" alt="Discord CN" /></a>
+    <a href="https://github.com/appergb/OpenTake/actions"><img src="https://img.shields.io/github/actions/workflow/status/appergb/OpenTake/ci.yml?branch=main" alt="CI" /></a>
+  </p>
+
+  <hr style="width: 60%; margin: 16px auto;" />
 </div>
+
+## 目录 / Table of Contents / 目次
+
+- [📖 项目介绍](#-项目介绍--about--プロジェクトについて)
+- [🎯 为什么选 OpenTake](#-为什么选-opentake--why-opentake--なぜopentakeか)
+- [⚡ 竞品对比优势](#-竞品对比优势--competitive-edge--競合との違い)
+- [✨ 核心特性](#-核心特性--features--主な機能)
+- [🖥️ 支持平台](#-支持平台--platforms--対応プラットフォーム)
+- [🦀 Rust 工作空间](#-rust-工作空间--rust-workspace--rustワークスペース)
+- [🏗️ 架构一览](#-架构一览--architecture--アーキテクチャ)
+- [📚 文档](#-文档--docs--ドキュメント)
+- [🚀 快速开始](#-快速开始--quick-start--クイックスタート)
+- [📋 版本历史](#-版本历史--version-history--バージョン履歴)
+- [🌍 社区](#-社区--community--コミュニティ)
+- [📜 许可证](#-许可证--license--ライセンス)
 
 ---
 
-OpenTake 是 [Palmier Pro](https://github.com/palmier-io/palmier-pro) 的跨平台社区分支 —— 在 **Rust 核心（Tauri 2 + React）** 上重建，媒体引擎采用 **FFmpeg**（编解码）+ **wgpu**（合成），忠实复刻其编辑逻辑，并内置更强的 Agent 上下文信号系统和工作流插件引擎。目标平台：**macOS / Windows / Linux**。
+## 📖 项目介绍 / About / プロジェクトについて
 
-> 🌟 **核心理念：不让 Agent 去读技能文件，而是让软件主动向 Agent 发送剪辑指引。** 我们把影视飓风等专业视频博主的剪辑方法论内化为软件端的"信号发射器"——Agent 操作时间线时，软件直接告诉它"这条轨道是干什么的、这个素材该用什么手法剪、这一段该匹配哪类 B-roll"。Agent 从来不需要自己翻技能文档。
+**OpenTake** 是一个基于 **Rust + Tauri 2** 构建的**跨平台视频制作引擎**，可在 macOS / Windows / Linux 三大平台上运行，旨在将 AI Agent 与专业视频编辑工作流深度集成。
 
-> ⚠️ **当前状态：早期设计阶段。** 本仓库已包含从上游逐模块拆解得出的架构设计、路线图、模块移植地图、Agent 上下文信号系统设计，以及工作流插件系统规划。代码即将落地。
+**OpenTake** is a **cross-platform video production engine** built on **Rust + Tauri 2**, running on macOS / Windows / Linux, designed to deeply integrate AI Agents into professional video editing workflows.
 
-## 核心特性
+> 🌟 **核心创新 / Core Innovation**: 我们不让 Agent 去翻技能文档。OpenTake 会**主动向 Agent 发送编辑指导（Context Signal）**——时间线的每条轨道、每段素材、每个剪辑阶段，软件都能精准告知 Agent「这段该怎么做」。これが、他の動画編集ツールと OpenTake の決定的な違いです。
 
-### 🔧 Rust 核心引擎
+### 定位 / Positioning
 
-从上游 Swift/AVFoundation 栈**忠实复刻**全部编辑逻辑：
-- **领域模型**：Timeline / Track / Clip / Keyframe / Transform —— 全部纯函数式值语义，1:1 移植到 Rust
-- **编辑算法**：OverwriteEngine / RippleEngine / SnapEngine（含波纹拒绝语义、A/V 链接组联动、分割关键帧边界保持）
-- **命令层**：UI 手势、Agent、MCP 三个前端归一到一个 `EditCommand` 枚举，撤销/校验/遥测只写一遍
-- **撤销系统**：整树快照栈（Timeline derive Clone），每步操作自动压栈
+OpenTake 不是剪映 / DaVinci Resolve / Final Cut Pro 的替代品——它是**为 AI Agent 工作流设计的视频引擎**。传统剪辑软件的设计哲学是「让人用」，界面围绕鼠标和键盘搭建。OpenTake 的设计哲学是「让人和 Agent 一起用」——它的时间线、预览、关键帧系统天然可被 MCP 协议操控，Agent 可以像人类剪辑师一样在时间线上放置素材、调整属性、添加特效。
+
+OpenTake is not a replacement for CapCut / DaVinci Resolve / Final Cut Pro — it's a **video engine designed for AI Agent workflows**. Traditional editors are built for humans; OpenTake is built for humans *and* Agents, with its timeline, preview, and keyframe systems natively controllable via the MCP protocol.
+
+---
+
+## 🎯 为什么选 OpenTake / Why OpenTake / なぜOpenTakeか
+
+| 痛点 / Pain Point | 传统做法 / Traditional | OpenTake 的做法 / Our Approach |
+|:--|:--|:--|
+| Agent 不知道素材怎么剪 | Agent 自己去读 Skill 文档 | 软件主动发射 Context Signal，告诉 Agent「这条轨是主画面，素材该用口播手法剪」 |
+| 跨平台需要三套代码 | macOS 用 Swift/AVFoundation，Windows 用 C++/DirectShow | Rust 单一代码库，FFmpeg + wgpu 跨平台编译，三平台体验一致 |
+| 我想用自己的 AI Key | 被锁定在厂商的云服务里 | BYOK（自带 Key）直连 fal.ai / Replicate / OpenAI，零后端、零运营成本 |
+| Agent 只能聊不能操作 | CLI Agent 读文本输出 | MCP Server 31 个工具——Agent 直接在时间线上 add_clips / split_clip / set_keyframes |
+| 每个视频类型都要重新写提示词 | 每次重复「你要剪一个评测视频...」 | 工作流插件系统：评测/科普/游戏/婚礼每种类型封装好方法论，Agent 开机即用 |
+| 学新软件成本高 | 界面复杂，学习曲线陡 | Agent 替你操作，你只需要告诉它「帮我把这个采访剪成 3 分钟的精华」 |
+
+---
+
+## ⚡ 竞品对比优势 / Competitive Edge / 競合との違い
+
+| 维度 / Dimension | 剪映 / CapCut | DaVinci Resolve | Final Cut Pro | **OpenTake** |
+|:--|:--|:--|:--|:--|
+| **Agent 原生集成** | ❌ | ❌ | ❌ | ✅ MCP 31 工具 + Context Signal |
+| **跨平台** | ✅ macOS / Win | ✅ macOS / Win / Linux | ❌ macOS only | ✅ macOS / Win / Linux |
+| **BYOK AI 生成** | 内置模板付费 | ❌ | ❌ | ✅ 直连 fal.ai / Replicate / OpenAI |
+| **本地语音转写** | ❌ 云端 | ❌ 需插件 | ❌ 需插件 | ✅ whisper-rs 端侧推理 |
+| **本地语义搜索** | ❌ | ❌ | ❌ | ✅ SigLIP2 + Ort 本地索引 |
+| **工作流插件** | ❌ 固定模板 | ❌ | ❌ | ✅ JSON+MD 社区插件系统 |
+| **开源** | ❌ | ❌ | ❌ | ✅ GPL-3.0 |
+| **Agent 可操控所有关键帧属性** | ❌ | ❌ | ❌ | ✅ opacity / position / scale / rotation / crop / volume |
+
+---
+
+## ✨ 核心特性 / Features / 主な機能
+
+### 🧠 Agent Context Signal 系统
+
+> 软件主动向 Agent 发送剪辑指导，而非让 Agent 读文件。
+> The software pushes editing guidance *to* the Agent, instead of making the Agent parse documentation.
+
+Agent 操作时间线时，每次工具返回附带 `context_signal`：
+- **视频类型自动判定**: 口播 / Vlog / 混剪 / 采访 / 短剧 / 长视频
+- **轨道角色标注**: 主画面 / B-roll / 旁白 / BGM / SFX / 文字
+- **剪辑规则实时校验**: 气口规则、B-roll 五大注意、时钟理论、波峰制动
+
+知识来源: [ClipSkills](https://github.com/appergb/ClipSkills) — 12 册专业剪辑知识内核（MIT 许可），融合影视飓风等专业课程方法论。
+
+📖 [Context Signal 设计文档](docs/AGENT-CONTEXT-SIGNAL.md)
+
+### 🔌 MCP Server — 31 个工具
+
+完整的 MCP server (`127.0.0.1:19789`)，Agent 可直接操控时间线：
+
+| Group 分组 | Count | 代表工具 |
+|:--|:--:|:--|
+| Read / Introspect 读 / 内省 | 7 | `get_timeline`, `get_media`, `inspect_media`, `search_media` |
+| Timeline Edit 时间线编辑 | 11 | `add_clips`, `split_clip`, `set_clip_properties`, `set_keyframes`, `ripple_delete_ranges` |
+| Generate / Import 生成 / 导入 | 5 | `generate_video`, `generate_image`, `generate_audio`, `import_media` |
+| Library 库组织 | 7 | `create_folder`, `move_to_folder`, `rename_media` |
+| Resources | 2 | `models/video`, `models/image` |
+
+内置 Agent chat panel，与 MCP 共享工具定义和系统提示词。
 
 ### 🎬 跨平台媒体引擎
 
-- **FFmpeg**（`ffmpeg-next`）：解码 / 编码 / 缩略图 / 波形 —— 成熟 Rust 绑定，代替 AVFoundation
-- **wgpu**：自写帧合成器 —— 多轨叠加 + 逐帧属性采样 + 仿射/裁剪/混合，代替 AVVideoComposition 声明式合成器
-- **cpal**：跨平台音频播放
-- **whisper-rs**：端侧语音转写（word/segment 时间戳）
-- **candle / ort**：本地语义搜索（SigLIP2 图文双编码器）
+| 能力 / Capability | 技术 / Tech |
+|:--|:--|
+| 编解码 / Codec | FFmpeg (`ffmpeg-next`) — 成熟 Rust 绑定 |
+| 帧合成 / Compositor | wgpu 自写合成器 — 多轨叠加 + 逐帧属性采样 + 仿射/裁剪/混合 |
+| 音频播放 / Audio Playback | cpal |
+| 语音转写 / Transcription | whisper-rs (word/segment 时间戳) |
+| 语义搜索 / Semantic Search | candle / ort + SigLIP2 图文双编码器 |
 
-### 🧠 Agent 上下文信号系统
+### 🌐 BYOK 生成式 AI
 
-OpenTake 的核心创新：**软件主动向 Agent 发送剪辑指引**，而不是让 Agent 自己去读技能文件。
-
-当 Agent 通过 MCP 操作时间线和轨道时，软件在每次工具返回中附带 `context_signal`：
-- **视频类型判定**：口播 / Vlog / 混剪 / 采访 / 短剧 / 长视频 —— 自动识别，自动套用对应剪辑骨架
-- **轨道角色标注**：主画面 / B-roll / 旁白 / BGM / SFX / 文字 —— Agent 看到轨道就知道该怎么做
-- **剪辑阶段指引**：当前阶段 + 下一步建议 + 规则校验（气口三规则、B-roll 五注意、时钟理论、波峰制等）
-
-这套系统的知识来源是 [ClipSkills](https://github.com/appergb/ClipSkills) 技能套件（MIT 许可）—— 12 册专业剪辑知识内核，融合了影视飓风《剪辑全能必修课》等专业课程的方法论，被内化为软件端的"信号发射器"。
-
-详见 [docs/AGENT-CONTEXT-SIGNAL.md](docs/AGENT-CONTEXT-SIGNAL.md)。
-
-### 🔌 MCP Server（31 个工具）
-
-与上游 Palmier Pro 兼容的 MCP server（`127.0.0.1:19789`），对外暴露 31 个工具：
-
-| 工具分组 | 数量 | 功能 |
-|---|---|---|
-| 读 / 内省 | 7 | get_timeline, get_media, inspect_media, search_media 等 |
-| 时间线编辑 | 11 | add_clips, split_clip, set_clip_properties, set_keyframes, ripple_delete_ranges 等 |
-| 媒体生成 / 导入 | 5 | generate_video, generate_image, generate_audio, import_media 等 |
-| 库组织 | 7 | create_folder, move_to_folder, rename_media 等 |
-| MCP Resources | 2 | models/video, models/image |
-
-同时支持应用内 Agent chat（via Anthropic API / BYOK），与 MCP 共享同一套工具定义和系统提示词。
-
-### 🌐 自建 / BYOK 生成式 AI
-
-上游的生成式 AI 云服务为闭源，**不在本次分支中**。OpenTake 提供双模运行：
-
-| 模式 | 说明 |
-|---|---|
-| **BYOK 模式** | 用户自带 fal.ai / Replicate / OpenAI key，本地直连厂商，**零后端、零运营成本** |
-| **托管模式（可选）** | 自建轻量代理（opentake-gen-proxy），持厂商 key + 积分计费 |
+**自带 Key**（Bring Your Own Key）：直连 fal.ai / Replicate / OpenAI，零后端、零运营成本。可选自建托管代理。
 
 ### 📋 工作流插件系统
 
-社区可为特定视频类型（科普、评测、游戏、婚礼……）编写 JSON + Markdown 轻量插件。每个插件封装了该类型视频的专业剪辑方法论，Agent 激活后自动获得完整的剪辑决策链。详见 [docs/WORKFLOW-PLUGIN-SYSTEM.md](docs/WORKFLOW-PLUGIN-SYSTEM.md)。
+社区为每种视频类型编写 JSON + Markdown 插件——评测 / 科普 / 游戏 / 婚礼 / 口播——每个插件封装专业剪辑方法论，Agent 激活即用。
 
-## 技术栈
+📖 [Workflow Plugin System 设计](docs/WORKFLOW-PLUGIN-SYSTEM.md)
 
-| 关注点 | 选型 |
-|---|---|
-| 核心语言 | Rust（workspace，多 crate） |
-| 桌面外壳 | Tauri 2 |
-| 前端 | React + TypeScript + Vite |
-| 状态管理 | Zustand（前端只读镜像） |
-| 编解码 | FFmpeg（`ffmpeg-next`） |
-| 帧合成 | wgpu（自写合成器） |
-| 音频播放 | cpal |
-| 转写 | whisper-rs（whisper.cpp） |
-| 语义搜索 | candle / ort + SigLIP2 |
-| MCP server | rmcp（streamable-http-server） |
-| LLM 客户端 | reqwest + eventsource-stream |
-| 生成代理 | axum（可选） |
-| 密钥存储 | keyring |
-| 序列化 | serde / serde_json |
+---
 
-## 架构一览
+## 🖥️ 支持平台 / Platforms / 対応プラットフォーム
+
+| 平台 | 状态 | 说明 |
+|:--|:--|:--|
+| **macOS** (Apple Silicon + Intel) | ✅ 主要开发平台 | 原生 ARM64 + x86_64，GPU 加速 via Metal (wgpu) |
+| **Windows** (10/11 x86_64) | ✅ 支持 | Vulkan / DX12 backend (wgpu)，完整 Tauri 2 支持 |
+| **Linux** (x86_64) | ✅ 支持 | Vulkan backend，AppImage / deb 打包 |
+| **Backend / Headless** | ✅ 支持 | 纯 Rust 核心可在无 GUI 环境下运行，用于 CI / 服务端渲染 / Agent 批量处理 |
+
+<sub>📋 macOS 需 ≥12.0 (Monterey)，Windows 需 ≥10 (1809+)，Linux 需 glibc ≥2.31</sub>
+
+---
+
+## 🦀 Rust 工作空间 / Rust Workspace / Rustワークスペース
 
 ```
-┌───────────────────────────────────────────────┐
-│ React + TypeScript 前端                         │
-│ TimelineView · Preview · Inspector · MediaPanel│
-│ Zustand: Timeline 只读镜像 + UI-only 态         │
-└───────────────┬───────────────────────────────┘
-                │ Tauri invoke + event
-┌───────────────▼───────────────────────────────┐
-│ Rust core（真相源 + 全部领域逻辑）               │
-│ domain · ops · project · render · media        │
-│ agent · gen · core                              │
-│         ▲               │                      │
-│       MCP server         调用                   │
-│  in-app agent            ▼                     │
-│       media: FFmpeg + wgpu + cpal + whisper-rs │
-└────────────────────────────────────────────────┘
+crates/
+├── opentake-domain     # Timeline / Track / Clip / Keyframe — 纯函数式值语义
+├── opentake-ops        # OverwriteEngine / RippleEngine / SnapEngine — 编辑算法层
+├── opentake-project    # 项目持久化 / bundle / archive / export
+├── opentake-media      # FFmpeg 编解码 / 缩略图 / 波形 / 转写 / 语义搜索
+├── opentake-render     # wgpu 帧合成器 + 文字光栅化
+├── opentake-motion     # Lottie / Web 动效渲染
+├── opentake-agent      # MCP Server + Agent chat + 上下文信号系统
+├── opentake-gen        # 生成式 AI 客户端 (fal.ai / Replicate / OpenAI)
+├── opentake-core       # 会话管理 / 依赖注入 / 事件总线
+└── src-tauri           # Tauri 2 桌面外壳
 ```
-
-详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
-
-## 文档
-
-| 文档 | 内容 |
-|---|---|
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | 目标架构、分层、crate 布局、命令层、渲染管线 |
-| [ROADMAP.md](docs/ROADMAP.md) | 阶段实施路线图（Phase 0 - Phase 10），含验证标准与风险登记 |
-| [MODULE-PORT-MAP.md](docs/MODULE-PORT-MAP.md) | 20 个上游模块逐项移植规格、核心算法、移植判定 |
-| [AGENT-CONTEXT-SIGNAL.md](docs/AGENT-CONTEXT-SIGNAL.md) | Agent 上下文信号系统（视频类型判定 / 轨道角色标注 / 剪辑规则内化） |
-| [WORKFLOW-PLUGIN-SYSTEM.md](docs/WORKFLOW-PLUGIN-SYSTEM.md) | 工作流插件系统设计（JSON + Markdown 轻量插件） |
-| [ADVANCED-FEATURES.md](docs/ADVANCED-FEATURES.md) | 对标剪映的进阶能力设计（特效 / 转场 / 调色 / 蒙版 / AI 扣像） |
-| [CAPCUT-GAP.md](docs/CAPCUT-GAP.md) | 与剪映模块 1-5 的 33 项特性差距分析 |
-| [MOTION-GRAPHICS-PLUGIN.md](docs/MOTION-GRAPHICS-PLUGIN.md) | Web 动效模块与插件系统设计 |
-| [DECISIONS.md](DECISIONS.md) | 技术栈 / 许可 / 品牌决策记录（ADR） |
-| [docs/_analysis/](docs/_analysis/) | 4 份上游横切分析报告 + 原始子 Agent 输出 |
-
-## 与 Palmier Pro 的关系
-
-OpenTake 是**独立的社区分支**，与 Palmier, Inc. 无隶属关系，亦未获其赞助或背书。
-
-"Palmier" / "Palmier Pro" 是其各自所有者的名称/商标，此处仅用于说明 OpenTake 的来源（指明性合理使用），并非 OpenTake 自身品牌。
-
-OpenTake 依据 **GPL-3.0** 开源（与上游一致）。上游的生成式 AI 云服务为闭源、不属于本分支，相关能力由 OpenTake 自建。详见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
-
-## 开发与贡献
-
-### 本地开发（Phase 0+）
 
 ```bash
+> cargo build --workspace   # 全 crate 编译
+> cargo test --workspace    # 全 crate 测试 (≥80% coverage target)
+```
+
+---
+
+## 🏗️ 架构一览 / Architecture / アーキテクチャ
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ React + TypeScript Frontend                              │
+│ TimelineView · Preview · Inspector · MediaPanel          │
+│ Zustand: Timeline 只读镜像 + UI-only 状态                 │
+└─────────────────────┬───────────────────────────────────┘
+                      │ Tauri invoke + event
+┌─────────────────────▼───────────────────────────────────┐
+│ 🦀 Rust Core — Source of Truth                           │
+│                                                          │
+│  opentake-domain    Timeline / Track / Clip / Keyframe   │
+│  opentake-ops       EditCommand apply / Undo / Ripple    │
+│  opentake-project   Bundle / Archive / Export             │
+│  opentake-render    wgpu Compositor + Text Rasterizer    │
+│  opentake-media     FFmpeg / Waveform / Transcribe        │
+│  opentake-agent     MCP Server + Agent Chat + Signals     │
+│  opentake-gen       fal.ai / Replicate / OpenAI Client   │
+│  opentake-core      Session / DI / Events                 │
+│                                                          │
+│         ▲                              │                 │
+│   MCP Server (:19789)         调用     ▼                 │
+│   In-app Agent Chat     FFmpeg + wgpu + cpal + whisper   │
+└─────────────────────────────────────────────────────────┘
+```
+
+📖 [详细架构文档 / Architecture Docs](docs/ARCHITECTURE.md)
+
+---
+
+## 📚 文档 / Docs / ドキュメント
+
+| Document | 内容 / Content |
+|:--|:--|
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | 目标架构、分层、crate 布局、命令层、渲染管线 |
+| [ROADMAP.md](docs/ROADMAP.md) | Phase 0–10 路线图，含验证标准与风险登记 |
+| [MODULE-PORT-MAP.md](docs/MODULE-PORT-MAP.md) | 20 个上游模块逐项移植规格、核心算法 |
+| [AGENT-CONTEXT-SIGNAL.md](docs/AGENT-CONTEXT-SIGNAL.md) | Agent 上下文信号系统设计 |
+| [WORKFLOW-PLUGIN-SYSTEM.md](docs/WORKFLOW-PLUGIN-SYSTEM.md) | 工作流插件系统 (JSON + Markdown) |
+| [ADVANCED-FEATURES.md](docs/ADVANCED-FEATURES.md) | 对标剪映的进阶能力设计 |
+| [CAPCUT-GAP.md](docs/CAPCUT-GAP.md) | 与剪映的 33 项特性差距分析 |
+| [DECISIONS.md](DECISIONS.md) | 技术栈 / 许可 / 品牌决策记录 (ADR) |
+| [PORT-1TO1-GAP.md](docs/PORT-1TO1-GAP.md) | 1:1 端口差距分析 |
+
+---
+
+## 🚀 快速开始 / Quick Start / クイックスタート
+
+### 前置依赖 / Prerequisites
+
+- **Rust** ≥ 1.82 (via [rustup](https://rustup.rs))
+- **Node.js** ≥ 20 + **pnpm**
+- **FFmpeg** ≥ 6.0 (`brew install ffmpeg` / `winget install ffmpeg` / `apt install ffmpeg`)
+
+### 构建 / Build
+
+```bash
+# Clone
+git clone https://github.com/appergb/OpenTake.git
+cd OpenTake
+
 # Rust core
 cargo build
 cargo test
 cargo clippy
 
-# 前端
+# Frontend
 cd web && pnpm install && pnpm build
 
-# 启动 Tauri 开发模式
-cargo tauri dev
+# Launch Tauri dev mode
+cd .. && cargo tauri dev
 ```
 
-当前代码尚未产生，请参考 [ROADMAP.md](docs/ROADMAP.md) 了解当前阶段。欢迎在 [Issues](https://github.com/appergb/OpenTake/issues) 中提交建议或设计讨论。
+> ⚠️ **当前状态 / Current Status**: 早期设计阶段。架构设计、路线图、模块移植地图已完成，代码正在落地中。
+> Early design phase. Architecture, roadmap, and module port maps are complete; code is being implemented.
 
-### 上游参考
+项目根目录同级 `palmier-pro-upstream/` 含上游 Swift 源码，用于编辑逻辑移植时的对照参考。
 
-本项目的上游参考代码位于同目录 `palmier-pro-upstream/`。编辑逻辑的移植应首先查阅该目录的 Swift 源码（`Sources/PalmierPro/`）。
+---
 
-## 致谢与引用
+## 📋 版本历史 / Version History / バージョン履歴
 
-OpenTake 建立在以下优秀开源项目的肩膀之上：
+| 版本 / Version | 日期 / Date | 里程碑 / Milestone |
+|:--|:--|:--|
+| `0.1.0-dev` | 2026-06 | Phase 0+1: Cargo workspace + Domain models + Edit ops + Tauri scaffold |
+| *(planned)* `0.2.0` | TBD | Phase 2: Persistence + Media import + Thumbnails + Waveform |
+| *(planned)* `0.3.0` | TBD | Phase 3: Timeline UI + Preview + MCP Server |
+| *(planned)* `0.4.0` | TBD | Phase 4: GPU Compositor (wgpu) + Text rasterization |
+| *(planned)* `1.0.0` | TBD | Phase 10: 全功能发布 — 对标剪映 + Agent 深度集成 |
 
-| 项目 | 许可证 | 用途 |
-|---|---|---|
-| [Palmier Pro](https://github.com/palmier-io/palmier-pro) | GPL-3.0 | 本项目为其社区分支。编辑逻辑和领域模型均在此基础上移植。 |
-| [ClipSkills](https://github.com/appergb/ClipSkills) | MIT | 剪辑知识内核（12 册技能参考），融合影视飓风等专业课程的方法论，被内化为 OpenTake 的 Agent 上下文信号系统。 |
-| [FFmpeg](https://ffmpeg.org) | LGPL-2.1+ / GPL-2.0+ | 媒体编解码引擎。通过 `ffmpeg-next` Rust 绑定动态链接，与 GPL-3.0 兼容。 |
-| [Tauri](https://tauri.app) | MIT / Apache 2.0 | 跨平台桌面应用框架。 |
-| [wgpu](https://wgpu.rs) | MIT / Apache 2.0 | GPU 渲染引擎，用于自写帧合成器。 |
+📖 [完整路线图 / Full Roadmap](docs/ROADMAP.md)
 
-以上所有引用的开源项目均按其各自的许可证条款使用。OpenTake 整体适用 **GPL-3.0**。
+---
 
-## 许可证
+## 🌍 社区 / Community / コミュニティ
+
+| Discord (English) | Discord (中文) | WeChat 联系群 |
+|:--:|:--:|:--:|
+| [![Discord EN](https://img.shields.io/badge/Join-EN-5865F2?logo=discord&logoColor=white)](https://discord.gg/opentake) | [![Discord CN](https://img.shields.io/badge/加入-中文-5865F2?logo=discord&logoColor=white)](https://discord.gg/opentake-cn) | 联系群信息稍后提供 |
+
+<br/>
+
+<p align="center">
+  <img src="https://img.shields.io/github/stars/appergb/OpenTake?style=social" alt="Stars" />
+  <img src="https://img.shields.io/github/forks/appergb/OpenTake?style=social" alt="Forks" />
+  <img src="https://img.shields.io/github/issues/appergb/OpenTake?style=social" alt="Issues" />
+</p>
+
+### 贡献 / Contributing
+
+欢迎在 [Issues](https://github.com/appergb/OpenTake/issues) 中提交建议或设计讨论。
+
+---
+
+## 致谢 / Acknowledgments / 謝辞
+
+OpenTake 建立在以下优秀开源项目的肩膀之上。
+
+| 项目 / Project | License | 用途 / Usage |
+|:--|:--|:--|
+| [Palmier Pro](https://github.com/palmier-io/palmier-pro) | GPL-3.0 | 编辑逻辑与领域模型来源于此社区分支 |
+| [ClipSkills](https://github.com/appergb/ClipSkills) | MIT | 12 册剪辑知识内核，内化为 Agent Context Signal 系统 |
+| [FFmpeg](https://ffmpeg.org) | LGPL-2.1+ / GPL-2.0+ | 媒体编解码引擎 |
+| [Tauri](https://tauri.app) | MIT / Apache 2.0 | 跨平台桌面应用框架 |
+| [wgpu](https://wgpu.rs) | MIT / Apache 2.0 | GPU 渲染引擎 |
+| [whisper.cpp](https://github.com/ggerganov/whisper.cpp) | MIT | 语音转写推理引擎 |
+| [rmcp](https://github.com/nicholasxuu/rmcp) | MIT | Rust MCP server SDK |
+
+> "Palmier" / "Palmier Pro" 是其各自所有者的名称/商标，此处仅用于说明 OpenTake 的来源（指明性合理使用）。
+> "Palmier" / "Palmier Pro" are names/trademarks of their respective owners, used here only for nominative fair use.
+
+---
+
+## 📜 许可证 / License / ライセンス
 
 Copyright (C) 2026 OpenTake contributors
 
-OpenTake 是自由软件：您可以依据自由软件基金会发布的 **GNU 通用公共许可证第三版（GPLv3）** 或（由您选择）任何更新版本的条款，再分发和/或修改本软件。
+OpenTake is free software: you can redistribute it and/or modify it under the terms of the **GNU General Public License version 3 (GPLv3)** or (at your option) any later version.
 
-分发本软件是希望它有用，但**没有任何担保**；甚至没有适销性或特定用途适用性的默示担保。详见 [GNU 通用公共许可证](LICENSE)。
+OpenTake is distributed in the hope that it will be useful, but **WITHOUT ANY WARRANTY**; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the [GNU General Public License](LICENSE) for more details.
 
-本程序基于 [Palmier Pro](https://github.com/palmier-io/palmier-pro)（Copyright (C) 2026 Palmier, Inc.），亦以 GPLv3 许可分发。详见 [NOTICE](NOTICE)。
+This program is based on [Palmier Pro](https://github.com/palmier-io/palmier-pro) (Copyright (C) 2026 Palmier, Inc.), also distributed under GPLv3. See [NOTICE](NOTICE).
+
+---
+
+<div align="center">
+  <sub>Built with 🦀 Rust + 💙 Open Source</sub>
+</div>
