@@ -19,6 +19,7 @@
 //!
 //! Zero IO, pure logic, fully unit-testable. The only dependency is `serde`.
 
+pub mod caption_sync;
 pub mod clip;
 pub mod clip_type;
 pub mod grade;
@@ -32,6 +33,7 @@ pub mod timeline;
 pub mod transform;
 
 // Flat re-export of the public domain API for ergonomic downstream use.
+pub use caption_sync::{caption_group_ids, clips_in_group, sync_caption_group_style};
 pub use clip::{Clip, FadeEdge, VolumeScale};
 pub use clip_type::ClipType;
 pub use grade::{
