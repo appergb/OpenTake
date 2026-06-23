@@ -57,6 +57,8 @@ const zh: Dict = {
   "media.importing": "正在导入…",
   "media.importFailed": "导入失败:{error}",
   "media.dropToAdd": "松开以添加到时间线",
+  "media.offline": "媒体离线",
+  "media.relink": "重新链接",
 
   // Inspector
   "inspector.title": "检查器",
@@ -199,6 +201,8 @@ const en: Dict = {
   "media.importing": "Importing…",
   "media.importFailed": "Import failed: {error}",
   "media.dropToAdd": "Release to add to the timeline",
+  "media.offline": "Media Offline",
+  "media.relink": "Relink",
 
   "inspector.title": "Inspector",
   "inspector.timeline": "Timeline",

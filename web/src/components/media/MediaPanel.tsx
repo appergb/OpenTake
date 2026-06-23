@@ -22,12 +22,17 @@ import {
   FileAudio,
   Image as ImageIcon,
   Type as TypeIcon,
+  AlertTriangle,
 } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { HoverButton } from "../ui/HoverButton";
 import { useEditorUiStore, type MediaTabId } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
-import { importFolderViaDialog, importFilesViaDialog } from "../../store/mediaActions";
+import {
+  importFolderViaDialog,
+  importFilesViaDialog,
+  relinkMediaViaDialog,
+} from "../../store/mediaActions";
 import { useT } from "../../i18n";
 import { formatTimecode } from "../../lib/geometry";
 import { assetUrl } from "../../lib/asset";
@@ -376,12 +381,14 @@ function MediaGrid({ items }: { items: MediaItem[] }) {
 }
 
 function MediaCard({ item }: { item: MediaItem }) {
+  const t = useT();
   const fps = useProjectStore((s) => s.timeline.fps);
   const setPreviewMedia = useEditorUiStore((s) => s.setPreviewMedia);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
   const durationFrames = Math.round(item.duration * fps);
   const selected = previewMediaId === item.id;
-  const thumb = assetUrl(item.path);
+  // Offline assets shouldn't try to load a (now-missing) thumbnail.
+  const thumb = item.missing ? null : assetUrl(item.path);
 
   const onDragStart = (e: React.DragEvent) => {
     e.dataTransfer.setData(MEDIA_DND_TYPE, item.id);
@@ -404,7 +411,7 @@ function MediaCard({ item }: { item: MediaItem }) {
           position: "relative",
           aspectRatio: "5 / 4",
           background: "var(--bg-placeholder)",
-          border: `var(--bw-thin) solid ${selected ? "var(--accent-primary)" : "var(--border-primary)"}`,
+          border: `var(--bw-thin) solid ${item.missing ? "rgb(255,59,48)" : selected ? "var(--accent-primary)" : "var(--border-primary)"}`,
           borderRadius: "var(--radius-sm)",
           display: "flex",
           alignItems: "center",
@@ -453,6 +460,49 @@ function MediaCard({ item }: { item: MediaItem }) {
           >
             {formatTimecode(durationFrames, fps)}
           </span>
+        )}
+        {/* Offline overlay: the source file is missing. Relink keeps the asset
+            id, so the timeline clips referencing it recover (no re-import). */}
+        {item.missing && (
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 4,
+              background: "rgba(255,59,48,0.32)",
+              color: "#fff",
+              textAlign: "center",
+              padding: 4,
+            }}
+          >
+            <Icon icon={AlertTriangle} size={18} />
+            <span style={{ fontSize: "var(--fs-micro)", fontWeight: "var(--fw-medium)" }}>
+              {t("media.offline")}
+            </span>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                void relinkMediaViaDialog(item.id);
+              }}
+              style={{
+                fontSize: "var(--fs-micro)",
+                fontWeight: "var(--fw-medium)",
+                padding: "2px 8px",
+                borderRadius: "var(--radius-xs)",
+                background: "rgba(0,0,0,0.55)",
+                color: "#fff",
+                cursor: "pointer",
+              }}
+            >
+              {t("media.relink")}
+            </button>
+          </div>
         )}
       </div>
       <span

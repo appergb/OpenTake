@@ -113,6 +113,7 @@ pub fn run() {
             commands::get_default_project_dir,
             media::import_folder,
             media::import_media,
+            media::relink_media,
             media::get_media,
             media::get_waveform,
             render::composite_frame,

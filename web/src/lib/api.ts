@@ -133,6 +133,19 @@ export async function getMedia(): Promise<MediaList> {
   return { items: [], folders: [] };
 }
 
+/**
+ * Relink an offline asset to a newly chosen file, KEEPING its id so every clip
+ * that references it recovers in place (the fix for "lost media stays red after
+ * re-selecting the path" — re-importing would mint a new id and strand the old
+ * clips). The new file's type must match the original. Returns the refreshed
+ * catalog (the asset's `missing` is recomputed → `false`).
+ */
+export async function relinkMedia(mediaRef: string, newPath: string): Promise<MediaList> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MediaList>("relink_media", { mediaRef, newPath });
+  return { items: [], folders: [] };
+}
+
 // MARK: - Timeline composite preview (#47)
 //
 // `composite_frame` renders the timeline at a frame on the GPU (wgpu compositor)

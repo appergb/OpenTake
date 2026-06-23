@@ -25,6 +25,7 @@ import { SnapIndicator } from "./SnapIndicator";
 import { hitTestClip, expandLinkGroup, clipsInRect, type ClipHit } from "./hitTest";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
+import { useMediaStore } from "../../store/mediaStore";
 import * as edit from "../../store/editActions";
 import { getWaveform } from "../../lib/api";
 
@@ -52,6 +53,14 @@ export function TimelineContainer() {
   const selectClips = useEditorUiStore((s) => s.selectClips);
   const clearSelection = useEditorUiStore((s) => s.clearSelection);
   const trackHeights = useEditorUiStore((s) => s.trackDisplayHeights);
+  const mediaItems = useMediaStore((s) => s.items);
+
+  // Asset ids whose source file is offline → clips referencing them get the
+  // error wash. Recomputed when the catalog changes (so a relink clears it).
+  const missingMediaRefs = useMemo(
+    () => new Set(mediaItems.filter((m) => m.missing).map((m) => m.id)),
+    [mediaItems],
+  );
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const contentCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -139,6 +148,7 @@ export function TimelineContainer() {
       viewWidth: viewport.width,
       viewHeight: viewport.height,
       waveforms: waveformsRef.current,
+      missingMediaRefs,
     });
   }, [
     timeline,
@@ -152,6 +162,7 @@ export function TimelineContainer() {
     docHeight,
     firstAudio,
     waveformVersion,
+    missingMediaRefs,
   ]);
 
   // Load waveform samples for every audio clip's source on demand (cached by

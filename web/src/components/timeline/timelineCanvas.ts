@@ -31,6 +31,9 @@ export interface PaintState {
   /** Normalized waveform buckets per media asset id (`0 = loud, 1 = silence`),
    *  loaded on demand from the Rust media cache. Absent until resolved. */
   waveforms: Map<string, number[]>;
+  /** Media asset ids whose source file is offline (moved/deleted). Clips that
+   *  reference one render with the error wash. */
+  missingMediaRefs: Set<string>;
 }
 
 export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
@@ -72,6 +75,9 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
         isSelected: s.selectedClipIds.has(clip.id),
         fps: timeline.fps,
         waveform: clip.mediaType === "audio" ? s.waveforms.get(clip.mediaRef) : undefined,
+        // Text clips have no source file; everything else is "missing" when its
+        // asset's file is offline.
+        missing: clip.mediaType !== "text" && s.missingMediaRefs.has(clip.mediaRef),
       });
     }
   }

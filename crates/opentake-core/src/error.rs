@@ -40,6 +40,13 @@ pub enum CoreError {
     /// render/media/agent/gen modules are kept decoupled without `todo!()`.
     #[error("capability not available in this build: {0}")]
     Unsupported(&'static str),
+
+    /// A media-library operation was rejected by input validation — e.g. a
+    /// relink target whose asset id is unknown or whose type does not match the
+    /// original (mirrors upstream's relink type-mismatch refusal). The catalog is
+    /// unchanged. Maps to the `validation` error class.
+    #[error("{0}")]
+    Media(String),
 }
 
 /// Convenience alias for fallible assembly-layer operations.
@@ -50,7 +57,7 @@ impl CoreError {
     /// `"validation"` for rejected input, `"internal"` for everything else.
     pub fn code(&self) -> &'static str {
         match self {
-            CoreError::Edit(_) => "validation",
+            CoreError::Edit(_) | CoreError::Media(_) => "validation",
             CoreError::Project(_) | CoreError::NoProjectOpen | CoreError::Unsupported(_) => {
                 "internal"
             }

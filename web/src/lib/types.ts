@@ -214,6 +214,9 @@ export interface MediaItem {
   thumbnail?: string | null;
   /** Library folder this asset lives in (`null`/absent = root). */
   folderId?: string | null;
+  /** `true` when the source file is offline (moved/deleted). Derived from file
+   *  existence on the backend; clears after a successful relink. */
+  missing?: boolean;
 }
 
 /** A media-library folder (flat list; nest via `parentFolderId`). */

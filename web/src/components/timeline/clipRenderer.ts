@@ -17,6 +17,9 @@ interface DrawOpts {
   /** Normalized waveform buckets (`0 = loud, 1 = silence`) spanning the WHOLE
    *  source media, or undefined until the Rust `get_waveform` cache resolves. */
   waveform?: number[];
+  /** The clip's source media file is offline (moved/deleted). Draws the error
+   *  wash (port of `ClipRenderer` missing state). */
+  missing?: boolean;
 }
 
 /** Linear amplitude → dB, clamped to the volume slider range. 1:1 port of
@@ -149,6 +152,19 @@ export function drawClip(
     ctx.lineWidth = 0.5;
   }
   ctx.stroke();
+
+  // 6. Missing-media wash (ClipRenderer:134-143): a translucent red fill + red
+  //    border when the clip's source file is offline, so a "lost media" clip
+  //    reads as broken. Clears automatically once the asset is relinked (the
+  //    `missing` flag is derived from file existence on each refresh).
+  if (opts.missing) {
+    roundRectPath(ctx, x, y, width, height, r);
+    ctx.fillStyle = withAlpha(ACCENT.systemRed, 0.35);
+    ctx.fill();
+    ctx.strokeStyle = ACCENT.systemRed;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
 
   // 7. Label bar (ClipRenderer:594-621): clip wider than 20px.
   if (width > CLIP.minWidthForLabel) {
