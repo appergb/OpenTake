@@ -2,6 +2,31 @@
 
 本文件记录 OpenTake 的重要改动。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)。
 
+## [未发布] — 2026-06-23 第三轮（自动 PR 审核：全局素材库 + 文本工具 + 字幕/视频导出 + list_models）
+
+本轮为**自动 PR 审核流程**:逐 PR 专家审核 + 对抗验证 + 对照开发文档,审核通过且 CI 双绿的纯新增项合并,其余 @作者 rebase/修改。
+
+### 新增（Added）
+
+- **全局可复用素材库后端**（#37）:
+  - **#37-A / #54**（PR #104）后端存储层 `crates/opentake-media/src/library.rs`:copy-on-favorite + SHA-256 内容寻址去重 + JSON manifest 原子写（`.tmp` rename）+ Mutex 并发安全。9 个单测。
+  - **#37-B / #55**（PR #106）Tauri 命令层 `src-tauri/src/library.rs`:7 个命令 `library_list` / `favorite` / `unfavorite` / `categorize` / `rename` / `delete` / `import_to_project`。
+  - 上游 palmier-pro 无此模块,#37 为 OpenTake 新增子系统,不要求 1:1。前端（#37-C / #56）尚未实现,收藏暂仍走前端 localStorage。
+- **文本工具 MVP**（#96,PR #107）:Toolbar `T` 按钮接线 `addTextClip()`、新增 `TextTab.tsx` 文字内容编辑、Inspector 路由 text tab。字体/字号/颜色等 `textStyle` 留后续（依赖后端 ClipProperties 扩展）。
+- **SRT/VTT 字幕导出纯逻辑**（#29 D 层切片,PR #110）:`crates/opentake-domain/src/subtitle_export.rs` 把按 `caption_group_id` 分组的字幕 clip 序列化为 SubRip/WebVTT 字符串（零 IO、零新依赖、16 单测）。导出层/agent 工具/前端对话框留后续切片。
+- **整条时间线视频导出编排**（Phase 5 spine,PR #112）:`src-tauri/src/export.rs` + `export_video` 命令,逐帧 `Compositor::render_to_rgba` → `VideoEncoder::push_frame` → `finish`,全分辨率 H.264/.mp4（H.265/ProRes/音频/进度取消留后续）。含 ffmpeg/GPU 门控集成测试。自包含复制 preview 路径,未碰 `composite_frame`。
+- **`list_models` 工具接线**（#9/#10 切片,PR #111）:`opentake-agent` 从存根接 `opentake-gen` 内置静态 catalog,`?type=` 过滤 + `{ models, loaded }` JSON,纯本地无网络/BYOK。
+
+### 审核处置（本轮）
+
+| PR | 处置 | 说明 |
+|---|---|---|
+| #104 #106 #107 #110 #111 #112 | **已合并** | CI 双绿 + 审核通过 + 对抗验证 CONFIRM 的纯新增项 |
+| #76 | **已关闭** | bundle id 改名冗余（main 已是 `com.opentake.desktop`,#74 已合） |
+| #77 #78 #79 #105 #108 | **请修改（@作者）** | 详见下「待审 PR」 |
+
+---
+
 ## [未发布] — 2026-06-23 第二轮（剪映式 UI + 时间线剪辑修复 + 导出）
 
 合并自 PR #102（基于已合并的 #81）。多 Agent 协作：主控修 Bug + 编排 workflow 做功能。
@@ -58,11 +83,12 @@ web `tsc` 干净 + `vitest` 43；Rust `fmt`/`clippy` 干净 + `opentake-project`
 3. **基础剪辑手感**：#93 右键菜单 + #94 复制粘贴 → #96 文本 T → #95 关键帧 → #97 Inspector 三段式（后端 ClipProperties 需扩 crop/fade）。
 4. **打磨**：#98 落点路由/Option 复制 · #99 吸附迟滞/offset 角标/音量线 · #101 后端命令。
 
-## 待审 PR（建议队友处理）
+## 待审 PR（经第三轮审核：请修改 / @作者）
 
-以下为更早会话遗留、**无 CI 校验、mergeable 未知、且与本轮 #102 改动（媒体文件）或 #91 重写计划重叠**，本轮未合并，需 rebase 到新 main 后审查：
+以下 PR 经第三轮自动审核**未合并**,均已在 PR 上 @作者 给出具体阻塞项与修改要求（CHANGES_REQUESTED）:
 
-- **#77** folder browsing in media panel — 与 #91 素材重写重叠，建议并入 #91 一并设计。
-- **#79** extract audio track — 与 #101 相关，可作参考。
-- **#78** settings 7-pane + MCP Instructions — 与本轮 i18n/lib.rs 可能冲突，需 rebase。
-- **#76** bundle id rename — bundle id 已为 `com.opentake.desktop`，疑似冗余，需确认。
+- **#108** 片段右键菜单（#93）— **CONFLICTING**,需 rebase;菜单 `position:fixed` 缺 `top/left`（永远渲染在 0,0,功能不可用）;渲染期直接调 `onClose()` 违反 React 规则;缺 Swap/Save/Extract Audio 菜单项（即使 disabled）。
+- **#105** 复制/剪切/粘贴 ⌘C/⌘X/⌘V（#94）— **CONFLICTING**,落后 main 39 commit,`editActions.ts` import 段冲突需 rebase;粘贴视频丢链接音轨（`addLinkedAudio:false`）、空剪贴板无提示待补。
+- **#79** 提取音频到本地（#39）— **CONFLICTING**,基于旧版 patch 上下文不匹配（命令注册不上）;「提取音频」星标与 main 已有收藏星标在同坐标叠层;缺验收测试;out_path 无路径校验;触碰 #91 范围。
+- **#78** 设置 7-pane + MCP + 主页（#40）— 验收仅约 50%（缺 Models/Privacy/Shortcuts/Account pane、主页 Sign in/File missing/SampleProjects/Update 徽标）;`SettingsView.tsx` 合并后超 800 行规约,需按上游每 pane 拆文件。
+- **#77** 文件夹浏览前端（#58）— **CONFLICTING**,Rust diff 基于旧版 media.rs（字段重复）、`FolderTile` 未导入 `Folder` 图标（tsc 报错）、`createFolder` 签名与 main 重复;缺上游选中/重命名/右键/文件夹互拖;与 **#91 素材重写重叠,建议并入 #91**。

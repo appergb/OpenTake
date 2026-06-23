@@ -5,6 +5,16 @@
 
 > ⚠️ computer-use 点击本机被 Dock 遮挡全局拦截(报"会落在程序坞")。改用 `preview_start` dev server(浏览器 fallback `web/src/lib/fallback.ts` 有 demo 时间线)+ `preview_eval` 注入测量验证布局,绕开真机点击。详见 `memory/opentake-editing-parity.md`。
 
+## ✅ 2026-06-23 第三轮已合并(自动 PR 审核,均 CI 双绿 + 对抗验证 CONFIRM)
+
+逐 PR 专家审核 + 对抗验证 + 对照文档后合并的纯新增项(详见 CHANGELOG「第三轮」):
+- **#104/#106 全局素材库后端 + 命令层**(#37-A/B):`opentake-media/src/library.rs`(内容寻址去重 + JSON manifest 原子写)+ `src-tauri/src/library.rs`(7 命令)。前端 #37-C/#56 待做。
+- **#107 文本工具 MVP**(#96):Toolbar `T` → `addTextClip()` + `TextTab.tsx`;textStyle 字段留后续(依赖后端 ClipProperties 扩展)。
+- **#110 SRT/VTT 字幕导出纯逻辑**(#29 切片):`opentake-domain/src/subtitle_export.rs`(16 单测);导出层/agent 工具/前端对话框待接。
+- **#111 `list_models` 接 opentake-gen catalog**(#9/#10 切片);`generate_*`/upscale 仍待 async+BYOK。
+- **#112 整条时间线视频导出编排**(Phase 5 spine):`src-tauri/src/export.rs` + `export_video`(逐帧 composite→ffmpeg,H.264/.mp4 全分辨率,含集成测试);自包含复制 preview、未碰 `composite_frame`。H.265/ProRes/音频/进度取消留后续。
+- **关闭** #76(bundle id 改名冗余);**请修改 @作者** #77/#78/#79/#105/#108(冲突/验收未达标,详见 CHANGELOG「待审 PR」)。
+
 ## ✅ 2026-06-23 第二轮已完成(分支 `feat/jianying-ui-and-timeline-fixes`,基于 PR#81)
 
 多 Agent 模式:本人修 Bug + 小改;编排 workflow 做大功能。**全部本地验证通过、已提交、尚未推送/未真机目视确认(Dock 拦截)。**
