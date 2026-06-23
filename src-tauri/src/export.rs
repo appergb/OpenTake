@@ -7,9 +7,13 @@
 //! (`opentake_media::VideoEncoder`) to produce a real `.mp4` on disk.
 //!
 //! Scope of this first cut (SPEC §2.4 / §8.2):
-//! - **Pure video** (no audio mix), **H.264 / .mp4** only. The encoder already
-//!   supports H.265 / ProRes presets and an audio side-channel; those land in a
-//!   follow-up so this slice stays a clean, verifiable spine.
+//! - **H.264 / .mp4** only. The encoder already supports H.265 / ProRes presets;
+//!   those land in a follow-up so this slice stays a clean, verifiable spine.
+//! - **Linear audio mixdown**: every audio-bearing clip's source window is
+//!   decoded to mono f32 at the mix rate, placed at its frame-derived sample
+//!   offset, scaled by its `volume_at` envelope, summed, hard-limited, and mux'd
+//!   in by the encoder (`-c:v copy` + AAC). A timeline with no audio still
+//!   produces the same video-only file as before.
 //! - Export renders at the **full** export resolution
 //!   ([`opentake_render::export_render_size`]), not the preview cap.
 //! - No progress callback / cancellation yet (the orchestrator runs to
@@ -29,10 +33,11 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use opentake_core::AppCore;
-use opentake_domain::{ClipType, MediaSource, TextStyle};
+use opentake_domain::{Clip, ClipType, MediaSource, TextStyle};
+use opentake_media::encode::{mix, ClipAudio, MIX_SAMPLE_RATE};
 use opentake_media::{
-    decode_frame_at, ExportPreset, ExportResolution as EncodeResolution, FrameRequest, RgbaFrame,
-    VideoCodec, VideoEncoder,
+    decode_frame_at, extract_pcm, ExportPreset, ExportResolution as EncodeResolution, FrameRequest,
+    PcmBuffer, PcmFormat, PcmSpec, RgbaFrame, VideoCodec, VideoEncoder,
 };
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::{
@@ -314,6 +319,124 @@ fn project_media(
     (sizes, media)
 }
 
+/// PCM spec the export decodes every audio source window into: mono f32 at the
+/// shared mix sample rate. Decoding at the mix rate up front makes the mixdown a
+/// plain sample-aligned add (no per-clip resampling in this cut).
+const AUDIO_DECODE_SPEC: PcmSpec = PcmSpec {
+    sample_rate: MIX_SAMPLE_RATE,
+    channels: 1,
+    format: PcmFormat::F32,
+};
+
+/// Project one audio clip into a [`ClipAudio`] for the mixdown: decode its
+/// visible source window, place it at its frame-derived sample offset, and build
+/// the per-sample `volume_at` gain envelope.
+///
+/// Returns `Ok(None)` when the clip contributes no audio (no media path, no
+/// audio track, zero-length window, or a fully-decoded-to-empty buffer). Decode
+/// failures other than "no audio track" propagate as `Err`.
+fn project_clip_audio(
+    clip: &Clip,
+    media: &HashMap<String, MediaInfo>,
+    timeline_fps: i32,
+) -> Result<Option<ClipAudio>, String> {
+    if clip.duration_frames <= 0 || timeline_fps <= 0 {
+        return Ok(None);
+    }
+    let Some(info) = media.get(&clip.media_ref) else {
+        return Ok(None);
+    };
+
+    // Source window in seconds: the clip's trim start through the frames it
+    // consumes, at the *source* fps. Falls back to the timeline fps when the
+    // source rate is unknown (audio-only assets often report no fps).
+    let src_fps = if info.fps > 0.0 {
+        info.fps
+    } else {
+        timeline_fps as f64
+    };
+    let lo = clip.trim_start_frame.max(0) as f64 / src_fps;
+    let consumed = clip.source_frames_consumed().max(0);
+    if consumed == 0 {
+        return Ok(None);
+    }
+    let hi = lo + consumed as f64 / src_fps;
+
+    let pcm = match extract_pcm(&info.path, &AUDIO_DECODE_SPEC, Some((lo, hi))) {
+        Ok(p) => p,
+        // A clip pointing at a video with no audio track simply contributes
+        // silence — not an export failure.
+        Err(opentake_media::MediaError::NoTrack(_, _)) => return Ok(None),
+        Err(e) => return Err(format!("audio decode failed for {}: {e}", clip.media_ref)),
+    };
+    if pcm.samples_f32.is_empty() {
+        return Ok(None);
+    }
+
+    // Placement: the clip's timeline start frame, in mix samples.
+    let start_sample = ((clip.start_frame.max(0) as f64) / timeline_fps as f64
+        * MIX_SAMPLE_RATE as f64)
+        .round() as usize;
+
+    // Per-sample gain from `volume_at`, sampled at the timeline frame each mix
+    // sample falls on. Unity throughout collapses to an empty envelope.
+    let samples_per_frame = MIX_SAMPLE_RATE as f64 / timeline_fps as f64;
+    let mut gains = Vec::with_capacity(pcm.samples_f32.len());
+    let mut all_unity = true;
+    for k in 0..pcm.samples_f32.len() {
+        let tl_frame = clip.start_frame + (k as f64 / samples_per_frame).floor() as i32;
+        let g = clip.volume_at(tl_frame) as f32;
+        if (g - 1.0).abs() > f32::EPSILON {
+            all_unity = false;
+        }
+        gains.push(g);
+    }
+
+    Ok(Some(ClipAudio {
+        start_sample,
+        samples: pcm.samples_f32,
+        gains: if all_unity { Vec::new() } else { gains },
+    }))
+}
+
+/// Decode + mix every audio-bearing clip on the timeline into one mono buffer.
+///
+/// Walks audio and video clips (video clips can carry an audio track), projects
+/// each through [`project_clip_audio`], and linearly mixes the lot. Returns
+/// `None` when nothing contributes audio (→ the caller keeps the video-only
+/// output). Errors surface decode/mix failures to the front-end.
+fn mix_timeline_audio(
+    timeline: &opentake_domain::Timeline,
+    media: &HashMap<String, MediaInfo>,
+) -> Result<Option<PcmBuffer>, String> {
+    let mut clips_audio: Vec<ClipAudio> = Vec::new();
+    for track in &timeline.tracks {
+        if track.muted {
+            continue;
+        }
+        for clip in &track.clips {
+            // Only audio and video clips carry sound; text/image/lottie don't.
+            if clip.media_type != ClipType::Audio && clip.media_type != ClipType::Video {
+                continue;
+            }
+            if let Some(ca) = project_clip_audio(clip, media, timeline.fps)? {
+                clips_audio.push(ca);
+            }
+        }
+    }
+    if clips_audio.is_empty() {
+        return Ok(None);
+    }
+    let mixed = mix::mix_clips(&clips_audio).map_err(|e| format!("audio mix failed: {e}"))?;
+    if mixed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PcmBuffer {
+        spec: AUDIO_DECODE_SPEC,
+        samples_f32: mixed,
+    }))
+}
+
 /// `export_video`: render the whole timeline to a video file on disk.
 ///
 /// Composites every frame at the full export resolution and encodes them to
@@ -400,6 +523,12 @@ pub fn run_export(
                 composite.rgba,
             ))
             .map_err(|e| format!("encode frame {f} failed: {e}"))?;
+    }
+
+    // Decode + linearly mix every audio-bearing clip, then hand the mixed PCM to
+    // the encoder so `finish` mux's it into the container. No audio → video-only.
+    if let Some(pcm) = mix_timeline_audio(timeline, &media)? {
+        encoder.push_audio(pcm);
     }
 
     encoder
@@ -506,5 +635,67 @@ mod tests {
         )
         .expect("parse");
         assert_eq!(req.quality, ExportQuality::P720);
+    }
+
+    use opentake_domain::{Timeline, Track};
+
+    #[test]
+    fn project_clip_audio_skips_clip_with_no_media_entry() {
+        // No matching manifest entry → no audio contribution, no decode attempt.
+        let clip = Clip::new("c1", "missing-asset", 0, 30);
+        let media: HashMap<String, MediaInfo> = HashMap::new();
+        let got = project_clip_audio(&clip, &media, 30).expect("ok");
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn project_clip_audio_skips_zero_duration() {
+        let clip = Clip::new("c1", "asset-1", 0, 0);
+        let mut media: HashMap<String, MediaInfo> = HashMap::new();
+        media.insert(
+            "asset-1".into(),
+            MediaInfo {
+                path: PathBuf::from("/nonexistent.wav"),
+                fps: 0.0,
+            },
+        );
+        // duration 0 short-circuits before any decode is attempted.
+        assert!(project_clip_audio(&clip, &media, 30).expect("ok").is_none());
+    }
+
+    #[test]
+    fn mix_timeline_audio_none_when_only_text_clips() {
+        // A text clip carries no sound; with no audio/video clips there's nothing
+        // to decode, so the result is None without touching the media map.
+        let mut tl = Timeline::new();
+        let mut track = Track::new("t1", ClipType::Text);
+        let mut clip = Clip::new("c1", "asset-1", 0, 30);
+        clip.media_type = ClipType::Text;
+        track.clips.push(clip);
+        tl.tracks.push(track);
+        let media: HashMap<String, MediaInfo> = HashMap::new();
+        assert!(mix_timeline_audio(&tl, &media).expect("ok").is_none());
+    }
+
+    #[test]
+    fn mix_timeline_audio_skips_muted_tracks() {
+        // A muted audio track is excluded; with no other audio the result is None
+        // and the (missing-path) asset is never decoded.
+        let mut tl = Timeline::new();
+        let mut track = Track::new("t1", ClipType::Audio);
+        track.muted = true;
+        let mut clip = Clip::new("c1", "asset-1", 0, 30);
+        clip.media_type = ClipType::Audio;
+        track.clips.push(clip);
+        tl.tracks.push(track);
+        let mut media: HashMap<String, MediaInfo> = HashMap::new();
+        media.insert(
+            "asset-1".into(),
+            MediaInfo {
+                path: PathBuf::from("/nonexistent.wav"),
+                fps: 0.0,
+            },
+        );
+        assert!(mix_timeline_audio(&tl, &media).expect("ok").is_none());
     }
 }

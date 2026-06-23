@@ -54,6 +54,58 @@ fn make_video(path: &Path, w: u32, h: u32, fps: u32, frames: u32) -> bool {
         .unwrap_or(false)
 }
 
+/// Generate an N-frame test video *with* a sine audio track. Returns false on
+/// failure (→ skip).
+fn make_video_with_audio(path: &Path, w: u32, h: u32, fps: u32, frames: u32) -> bool {
+    let dur = frames as f64 / fps as f64;
+    Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc=duration={dur}:size={w}x{h}:rate={fps}"),
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=frequency=440:duration={dur}"),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            "-y",
+        ])
+        .arg(path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// True when the file has at least one audio stream (per ffprobe).
+fn has_audio_stream(path: &Path) -> bool {
+    let out = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output();
+    match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).trim() == "audio",
+        Err(_) => false,
+    }
+}
+
 /// ffprobe a single stream field as a trimmed string.
 fn probe_field(path: &Path, entry: &str) -> Option<String> {
     let out = Command::new("ffprobe")
@@ -111,6 +163,18 @@ fn build_timeline(frames: i32, src_w: i32, src_h: i32, src_fps: f64) -> Timeline
 
 /// Build a manifest with one external video asset pointing at `media_path`.
 fn build_manifest(media_path: &Path, src_w: i32, src_h: i32, src_fps: f64) -> MediaManifest {
+    build_manifest_with_audio(media_path, src_w, src_h, src_fps, false)
+}
+
+/// Like [`build_manifest`] but lets the test declare whether the asset carries
+/// an audio track (so the export's audio mixdown path is exercised).
+fn build_manifest_with_audio(
+    media_path: &Path,
+    src_w: i32,
+    src_h: i32,
+    src_fps: f64,
+    has_audio: bool,
+) -> MediaManifest {
     let mut manifest = MediaManifest::new();
     manifest.entries.push(MediaManifestEntry {
         id: "asset-1".into(),
@@ -124,7 +188,7 @@ fn build_manifest(media_path: &Path, src_w: i32, src_h: i32, src_fps: f64) -> Me
         source_width: Some(src_w),
         source_height: Some(src_h),
         source_fps: Some(src_fps),
-        has_audio: Some(false),
+        has_audio: Some(has_audio),
         folder_id: None,
         cached_remote_url: None,
         cached_remote_url_expires_at: None,
@@ -204,4 +268,91 @@ fn export_full_timeline_produces_playable_mp4() {
         nframes, frames as u64,
         "encoded frame count matches timeline"
     );
+
+    // The video-only source has no audio track → export stays video-only.
+    assert!(
+        !has_audio_stream(&out),
+        "video-only timeline must not gain an audio stream"
+    );
+}
+
+#[test]
+fn export_with_audio_clip_mux_aac_stream() {
+    if !ffmpeg_ready() {
+        eprintln!("skip: ffmpeg/ffprobe not available");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src_audio.mp4");
+    let out = dir.path().join("out_audio.mp4");
+
+    // Source: 320x240 @ 10fps, 10 frames (1.0s), WITH a 440 Hz sine track.
+    let (sw, sh, sfps, frames) = (320u32, 240u32, 10u32, 10u32);
+    if !make_video_with_audio(&src, sw, sh, sfps, frames) {
+        eprintln!("skip: could not generate audio fixture media");
+        return;
+    }
+    // Sanity: the fixture really has audio (else the assertion below is vacuous).
+    if !has_audio_stream(&src) {
+        eprintln!("skip: fixture lacks an audio stream");
+        return;
+    }
+
+    let timeline = build_timeline(frames as i32, sw as i32, sh as i32, sfps as f64);
+    let manifest = build_manifest_with_audio(&src, sw as i32, sh as i32, sfps as f64, true);
+
+    let req = ExportRequest {
+        out_path: out.to_string_lossy().into_owned(),
+        codec: Default::default(), // H.264 → AAC audio
+        quality: ExportQuality::P720,
+    };
+
+    let summary = match run_export(&timeline, &manifest, &None, &req) {
+        Ok(s) => s,
+        Err(e) => {
+            if e.contains("no GPU device") {
+                eprintln!("skip: no GPU adapter available ({e})");
+                return;
+            }
+            panic!("export failed: {e}");
+        }
+    };
+
+    assert!(out.exists(), "output file should exist");
+    assert_eq!(summary.frame_count, frames as i32);
+
+    // Video stream is still H.264 at the reported size.
+    let vcodec = probe_field(&out, "stream=codec_name").unwrap();
+    assert_eq!(vcodec, "h264", "video codec should be H.264");
+
+    // The mixdown muxed an audio stream into the container.
+    assert!(
+        has_audio_stream(&out),
+        "audio-bearing timeline must produce an audio stream"
+    );
+
+    // The muxed audio codec is AAC (H.264 preset's `-c:a aac`).
+    let acodec = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(&out)
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    assert_eq!(acodec.as_deref(), Some("aac"), "muxed audio should be AAC");
+
+    // The temp mux artifacts are cleaned up (no `.tmp` siblings left behind).
+    let leftover_video = dir.path().join("out_audio.mp4.video.tmp");
+    let leftover_pcm = dir.path().join("out_audio.mp4.pcm.tmp");
+    assert!(!leftover_video.exists(), "video temp should be removed");
+    assert!(!leftover_pcm.exists(), "pcm temp should be removed");
 }
