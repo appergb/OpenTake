@@ -2017,7 +2017,7 @@ mod keyframe_edit_tests {
         )
         .unwrap();
         assert!(res.changed);
-        assert_eq!(res.affected_clip_ids, vec![clip_id]);
+        assert_eq!(res.affected_clip_ids, vec![clip_id.clone()]);
 
         let kfs = opacity_track_kfs(&state, &clip_id);
         assert_eq!(kfs.len(), 1);
