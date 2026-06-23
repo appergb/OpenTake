@@ -5,20 +5,22 @@
 
 > ⚠️ computer-use 点击本机被 Dock 遮挡全局拦截(报"会落在程序坞")。改用 `preview_start` dev server(浏览器 fallback `web/src/lib/fallback.ts` 有 demo 时间线)+ `preview_eval` 注入测量验证布局,绕开真机点击。详见 `memory/opentake-editing-parity.md`。
 
-## 🔥 当前最高优先级(2026-06-23,详见 `../新的需求和工程文档/需求与问题汇总.md`)
+## ✅ 2026-06-23 第二轮已完成(分支 `feat/jianying-ui-and-timeline-fixes`,基于 PR#81)
 
-**🔴 待修 BUG(用户反复反馈):**
-1. **无法暂停 / 暂停卡顿**(CRITICAL):首要嫌疑——`TimelinePlaybackLayer` 卸载时 per-render ref 回调 `els.current.delete` 先于 effect cleanup 执行 → cleanup 的 `el.pause()` 拿到空 Map → 被移除的 `<audio>/<video>` 继续播放 = 暂停不了。修法:加 `containerRef`,cleanup 用 `containerRef.current?.querySelectorAll('video,audio').forEach(el=>el.pause())`。卡顿:暂停瞬间 `composite_frame` 同步开销,考虑异步/复用末帧。
-2. **音频波形不渲染**(HIGH):16:03 构建含波形代码但实测 A1 纯色块无波形 → 嫌疑 `get_waveform` 失败被前端 catch 吞掉。排查 `src-tauri/src/media.rs get_waveform` 失败原因(加日志/真机/Rust 集成测试)。
-3. **丢失素材→全红不恢复**(HIGH):路径不可达→"丢失素材",重选路径后片段+媒体库全红未复原。对照上游 `EditorViewModel+Relink.swift`。
+多 Agent 模式:本人修 Bug + 小改;编排 workflow 做大功能。**全部本地验证通过、已提交、尚未推送/未真机目视确认(Dock 拦截)。**
 
-**🟦 新需求:**
-- F1 触控板:裸双指滚动=移动时间线/播放头,捏合=缩放(剪映式;当前在 `TimelineContainer onWheel` 是 Option/Cmd+滚轮)。
-- F2 删左上角"切换 Agent 面板"按钮(`TitleBar.tsx`/toolbar)。
-- F3 剪映式顶栏:素材/音频/文本/贴纸/特效/转场/字幕/智能包裹(未做灰色:文本/贴纸/转场/字幕/智能包裹);素材→导入/我的(星标收藏到全局"我的"=#37);音频同理;已导入持久保留。
-- F4 工程文件互操作:右上角保存工程,可被剪映(`com.lveditor.draft` JSON)/PR(FCPXML)打开。先调研当前 `opentake-project`/`project.json` 格式 + 导出 FCPXML/剪映 draft。
+- **B1 暂停**(`64ab37f`):`TimelinePlaybackLayer` ref-detach 路径先 `pause()` 再 `delete`——React 卸载时 ref detach 先于 effect cleanup(旧 cleanup 拿到空 Map),且 DOM 移除的媒体元素不自停。
+- **B2 波形**(`c17dc04`):`crates/opentake-media/src/waveform/mod.rs` 改用 ffmpeg `extract_pcm`(原 Symphonia 解不了 .mov/非 AAC),移除 symphonia 依赖 + 前后端失败日志 + mp4 视频容器波形集成测试。
+- **B3 重链接**(`183e270`):新增 `relink_media` 命令 + `EditorSession/AppCore::relink_media_file`(保持同 id、只改 source、类型须匹配,`CoreError::Media`);`MediaItemDto.missing` 按文件存在性实时派生;clip 红 wash + 卡片离线覆盖层 + "重新链接"。3+1 测试。
+- **F1 触控板**(`f06c71f`)+ **剪映手势对齐**(`0892c0b`):`TimelineContainer` 用**原生 `{passive:false}` wheel 监听**(React onWheel 是 passive,preventDefault 无效→捏合会变页面缩放)。1:1 对齐剪映:Cmd/Ctrl/捏合=缩放、Option=横滚、裸滚/双指=平移;⌘±=放大缩小、⇧Z=适配窗口(`useKeyboardShortcuts`)。
+- **F2**(`dedfdbb`):删 TitleBar "切换 Agent 面板"按钮(面板仍经 ViewMenu/快捷键)。
+- **F3 剪映式顶栏**(`b89fc56`):8 主标签(素材/音频可用,文本/贴纸/特效/转场/字幕/智能包裹置灰);素材/音频→导入/我的;星标收藏 localStorage(`favorites.ts`);保留 missing/relink。`MediaTabBar.tsx`+`favorites.ts`。
+- **F4 时间线导出**(`b89fc56`):`crates/opentake-project/src/fcpxml.rs` 导出 **XMEML 4(FCP7 XML)**——1:1 端口上游 `Export/XMLExporter.swift`(Premiere 不读 FCPXML,故选 XMEML);`export_fcpxml` 命令+api+TitleBar 导出按钮(saveDialog .xml);`Clip::keyframe_frames`(带测试)。13 fcpxml 测试。
 
-> 本轮(2026-06-23)已完成的剪辑修复都在分支 `feat/realtime-timeline-playback`(PR #81,CI 绿):真实播放、波形端口(=B2 实测未现)、trim/move 正确性、fade smoothstep、razor 吸附、轨道编号、⇧⌫ ripple、预览左下角根因修复、split 无选区、链接 co-trim。**注意 PR #81 已远超"播放"范围,合并时改标题/描述或拆分。**
+**遗留/后续:** ① 推送 + 真机目视确认(B1暂停/B2波形需原生构建,Dock 拦截 computer-use)。② `fcpxml.rs` 1489 行 > 800 规约,建议拆分。③ `export_fcpxml` 名实不符(产物是 XMEML),可考虑改名 `export_xml`。④ Q/W(现=修剪入出点,Premiere习惯)与 ⌘K 分割 跟剪映(Q/W=删左右、⌘B/B切割)不同,待用户定夺。⑤ 星标"我的"现为 localStorage,跨项目全局库=#37 待做。⑥ 剪映 draft(`com.lveditor.draft`)导出未做(格式易碎,留后续)。
+
+## 历史(第一轮,分支 `feat/realtime-timeline-playback`/PR #81,CI 绿)
+真实播放、波形端口、trim/move 正确性、fade smoothstep、razor 吸附、轨道编号、⇧⌫ ripple、预览左下角根因修复、split 无选区、链接 co-trim。**PR #81 已超"播放"范围,合并时改标题/拆分。**
 
 ## 0. 项目身份
 - OpenTake = [palmier-io/palmier-pro](https://github.com/palmier-io/palmier-pro)(Swift 原生 macOS 视频编辑器,GPL-3.0)的**跨平台社区分支**。**忠实 1:1 复刻其编辑逻辑与 UI**(用户反复强调:别自己发明,照上游源码复刻;除登录/账号外都对齐),再加更强 Agent 能力。
