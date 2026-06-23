@@ -1081,10 +1081,7 @@ fn media_entry(id: &str, kind: ClipType, duration_secs: f64) -> MediaManifestEnt
 }
 
 /// Build a state with the given tracks and manifest entries (fps defaults to 30).
-fn state_with_media(
-    tracks: Vec<Track>,
-    entries: Vec<MediaManifestEntry>,
-) -> EditorState {
+fn state_with_media(tracks: Vec<Track>, entries: Vec<MediaManifestEntry>) -> EditorState {
     let mut tl = Timeline::new();
     tl.tracks = tracks;
     let mut manifest = MediaManifest::new();
