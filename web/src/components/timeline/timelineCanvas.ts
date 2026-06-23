@@ -7,6 +7,7 @@
 
 import { BG, BORDER, TEXT } from "../../lib/theme";
 import { clipRect, trackDisplayHeight, trackY } from "../../lib/geometry";
+import { linkOffsetForClip } from "../../lib/clip";
 import { drawClip } from "./clipRenderer";
 import type { Timeline } from "../../lib/types";
 
@@ -43,7 +44,8 @@ export interface PaintState {
 /** A live move/trim, projected for ghost rendering. */
 export type DragPaint =
   | { kind: "move"; ids: Set<string>; deltaFrames: number; trackDelta: number }
-  | { kind: "trim"; clipId: string; edge: "left" | "right"; deltaFrames: number };
+  | { kind: "trim"; clipId: string; edge: "left" | "right"; deltaFrames: number }
+  | { kind: "volumeKf"; clipId: string; fromFrame: number; ghostFrame: number };
 
 export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
   const { timeline, pixelsPerFrame, trackHeights, width, dpr, scrollLeft, scrollTop } = s;
@@ -101,6 +103,13 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
         ghost = true;
       }
       if (rect.x + rect.width < scrollLeft || rect.x > visRight) continue;
+      // Volume-kf drag ghost: when this clip is the one being dragged, tell the
+      // renderer to draw the grabbed dot at its ghost frame instead of the
+      // original, so the dot follows the cursor (SPEC §5.4).
+      const volumeKfGhost =
+        drag?.kind === "volumeKf" && drag.clipId === clip.id
+          ? { fromFrame: drag.fromFrame, ghostFrame: drag.ghostFrame }
+          : undefined;
       drawClip(ctx, clip, rect, {
         isSelected: s.selectedClipIds.has(clip.id),
         fps: timeline.fps,
@@ -109,6 +118,8 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
         // asset's file is offline.
         missing: clip.mediaType !== "text" && s.missingMediaRefs.has(clip.mediaRef),
         ghost,
+        linkOffset: linkOffsetForClip(timeline, clip.id),
+        volumeKfGhost,
       });
     }
   }
