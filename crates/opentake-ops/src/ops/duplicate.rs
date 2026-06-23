@@ -259,7 +259,8 @@ mod tests {
             .iter_mut()
             .find(|c| c.id == created[0])
             .unwrap()
-            .masks.clear();
+            .masks
+            .clear();
         assert_eq!(tl.tracks[0].clips[0].masks, copy_masks);
     }
 
@@ -289,8 +290,16 @@ mod tests {
         let g = SeqIdGen::default();
         let created = duplicate_clips(&mut tl, &["a".into(), "b".into()], 100, &[0, 0], &g);
         assert_eq!(created.len(), 2);
-        let c0 = tl.tracks[0].clips.iter().find(|c| c.id == created[0]).unwrap();
-        let c1 = tl.tracks[0].clips.iter().find(|c| c.id == created[1]).unwrap();
+        let c0 = tl.tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == created[0])
+            .unwrap();
+        let c1 = tl.tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == created[1])
+            .unwrap();
         // a@0 -> 100, b@60 -> 160; gap of 30 preserved.
         assert_eq!(c0.start_frame, 100);
         assert_eq!(c1.start_frame, 160);
