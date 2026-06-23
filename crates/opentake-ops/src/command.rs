@@ -18,7 +18,9 @@
 
 use std::collections::HashSet;
 
-use opentake_domain::{ChromaKey, ClipType, ColorGrade, Crop, Effect, Interpolation, Mask, Timeline, Transform};
+use opentake_domain::{
+    ChromaKey, ClipType, ColorGrade, Crop, Effect, Interpolation, Mask, Timeline, Transform,
+};
 
 use crate::editor_state::EditorState;
 use crate::engines::FrameRange;
