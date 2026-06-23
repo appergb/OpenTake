@@ -250,8 +250,8 @@ mod tests {
             invert: false,
         }];
         src.effects = vec![Effect::new("gaussianBlur").with_param("radius", 4.0)];
-        let orig_color_grade = src.color_grade.clone();
-        let orig_chroma_key = src.chroma_key.clone();
+        let orig_color_grade = src.color_grade;
+        let orig_chroma_key = src.chroma_key;
         let g = SeqIdGen::default();
         let created = duplicate_clips(&mut tl, &["a".into()], 100, &[0], &g);
         let copy = tl.tracks[0]
@@ -260,7 +260,7 @@ mod tests {
             .find(|c| c.id == created[0])
             .unwrap();
         assert_eq!(copy.color_grade, orig_color_grade);
-        assert_eq!(copy.chroma_key.as_ref().map(|c| c.clone()), orig_chroma_key);
+        assert_eq!(copy.chroma_key, orig_chroma_key);
         assert_eq!(copy.masks.len(), 1);
         assert_eq!(copy.effects.len(), 1);
         // Mutate the copy's masks; the original must be unaffected (no shared ref).
