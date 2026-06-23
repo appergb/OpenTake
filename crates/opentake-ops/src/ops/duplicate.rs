@@ -155,7 +155,10 @@ mod tests {
         let created = duplicate_clips(&mut tl, &["a".into()], 100, &[0], &g);
         assert_eq!(created.len(), 1);
         // Original stays put.
-        assert!(tl.tracks[0].clips.iter().any(|c| c.id == "a" && c.start_frame == 0));
+        assert!(tl.tracks[0]
+            .clips
+            .iter()
+            .any(|c| c.id == "a" && c.start_frame == 0));
         // Copy lands at frame 100 on the same track with a fresh id.
         let copy = tl.tracks[0].clips.iter().find(|c| c.id == "d-1").unwrap();
         assert_eq!(copy.start_frame, 100);
@@ -223,7 +226,10 @@ mod tests {
             .unwrap()
             .opacity_track = None;
         assert!(tl.tracks[0].clips[0].opacity_track.is_some());
-        assert_eq!(tl.tracks[0].clips[0].opacity_track.as_ref().unwrap(), &copy_op);
+        assert_eq!(
+            tl.tracks[0].clips[0].opacity_track.as_ref().unwrap(),
+            &copy_op
+        );
     }
 
     #[test]
@@ -252,7 +258,10 @@ mod tests {
             .find(|c| c.id == created[0])
             .unwrap();
         assert_eq!(copy.color_grade, src.color_grade);
-        assert_eq!(copy.chroma_key.as_ref().map(|c| c.clone()), src.chroma_key.clone());
+        assert_eq!(
+            copy.chroma_key.as_ref().map(|c| c.clone()),
+            src.chroma_key.clone()
+        );
         assert_eq!(copy.masks.len(), 1);
         assert_eq!(copy.effects.len(), 1);
         // Mutate the copy's masks; the original must be unaffected (no shared ref).
