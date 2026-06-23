@@ -18,7 +18,7 @@
 
 use std::collections::HashSet;
 
-use opentake_domain::{ChromaKey, ClipType, ColorGrade, Effect, Mask, Timeline, Transform};
+use opentake_domain::{ChromaKey, ClipType, ColorGrade, Crop, Effect, Interpolation, Mask, Timeline, Transform};
 
 use crate::editor_state::EditorState;
 use crate::engines::FrameRange;
@@ -130,6 +130,20 @@ pub struct ClipProperties {
     pub opacity: Option<f64>,
     pub transform: Option<Transform>,
     pub text_content: Option<String>,
+    /// Per-clip crop insets (normalized 0–1). Setting this clears `crop_track`.
+    pub crop: Option<Crop>,
+    /// Fade-in length in frames. Setting this clamps to the clip duration.
+    pub fade_in_frames: Option<i32>,
+    /// Fade-out length in frames. Setting this clamps to the clip duration.
+    pub fade_out_frames: Option<i32>,
+    /// Fade-in interpolation mode.
+    pub fade_in_interpolation: Option<Interpolation>,
+    /// Fade-out interpolation mode.
+    pub fade_out_interpolation: Option<Interpolation>,
+    /// Horizontal flip flag (writes to `transform.flip_horizontal`).
+    pub flip_horizontal: Option<bool>,
+    /// Vertical flip flag (writes to `transform.flip_vertical`).
+    pub flip_vertical: Option<bool>,
 }
 
 /// Which keyframe track [`EditCommand::SetKeyframes`] targets.
@@ -779,6 +793,30 @@ fn apply_property_changes(
     }
     if let Some(t) = props.transform {
         clip.transform = t;
+    }
+    if let Some(c) = props.crop {
+        clip.crop = c;
+        clip.crop_track = None;
+    }
+    if let Some(v) = props.fade_in_frames {
+        clip.fade_in_frames = v.max(0);
+        clip.clamp_fades_to_duration();
+    }
+    if let Some(v) = props.fade_out_frames {
+        clip.fade_out_frames = v.max(0);
+        clip.clamp_fades_to_duration();
+    }
+    if let Some(i) = props.fade_in_interpolation {
+        clip.fade_in_interpolation = i;
+    }
+    if let Some(i) = props.fade_out_interpolation {
+        clip.fade_out_interpolation = i;
+    }
+    if let Some(f) = props.flip_horizontal {
+        clip.transform.flip_horizontal = f;
+    }
+    if let Some(f) = props.flip_vertical {
+        clip.transform.flip_vertical = f;
     }
     if let Some(c) = &props.text_content {
         clip.text_content = Some(c.clone());

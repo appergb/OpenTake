@@ -123,6 +123,18 @@ export interface ClipPropertiesReq {
   opacity?: number;
   transform?: Transform;
   textContent?: string;
+  /** Per-clip crop insets (normalized 0–1). Clears `cropTrack` on the backend. */
+  crop?: Crop;
+  /** Fade-in length in frames. Clamped to clip duration on the backend. */
+  fadeInFrames?: number;
+  /** Fade-out length in frames. Clamped to clip duration on the backend. */
+  fadeOutFrames?: number;
+  fadeInInterpolation?: Interpolation;
+  fadeOutInterpolation?: Interpolation;
+  /** Writes to `transform.flipHorizontal` on the backend. */
+  flipHorizontal?: boolean;
+  /** Writes to `transform.flipVertical` on the backend. */
+  flipVertical?: boolean;
 }
 
 /** Which property a keyframe track targets (mirror of `KeyframeProperty`). */
