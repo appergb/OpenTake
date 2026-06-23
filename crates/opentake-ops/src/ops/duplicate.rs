@@ -130,7 +130,7 @@ mod tests {
     use super::*;
     use crate::id::SeqIdGen;
     use opentake_domain::{
-        AnimPair, ChromaKey, ClipType, ColorGrade, Crop, Effect, Interpolation, Keyframe,
+        ChromaKey, ClipType, ColorGrade, Crop, Effect, Interpolation, Keyframe,
         KeyframeTrack, Mask, MaskShape, Point2, Track,
     };
 
@@ -250,6 +250,8 @@ mod tests {
             invert: false,
         }];
         src.effects = vec![Effect::new("gaussianBlur").with_param("radius", 4.0)];
+        let orig_color_grade = src.color_grade.clone();
+        let orig_chroma_key = src.chroma_key.clone();
         let g = SeqIdGen::default();
         let created = duplicate_clips(&mut tl, &["a".into()], 100, &[0], &g);
         let copy = tl.tracks[0]
@@ -257,10 +259,10 @@ mod tests {
             .iter()
             .find(|c| c.id == created[0])
             .unwrap();
-        assert_eq!(copy.color_grade, src.color_grade);
+        assert_eq!(copy.color_grade, orig_color_grade);
         assert_eq!(
             copy.chroma_key.as_ref().map(|c| c.clone()),
-            src.chroma_key.clone()
+            orig_chroma_key
         );
         assert_eq!(copy.masks.len(), 1);
         assert_eq!(copy.effects.len(), 1);
@@ -403,8 +405,8 @@ mod tests {
         c.fade_in_frames = 5;
         c.fade_in_interpolation = Interpolation::Smooth;
         c.rotation_track = Some(KeyframeTrack::from_keyframes(vec![
-            Keyframe::with_interpolation(0, AnimPair::new(0.0, 0.0), Interpolation::Linear),
-            Keyframe::new(10, AnimPair::new(0.2, 0.4)),
+            Keyframe::with_interpolation(0, 0.0, Interpolation::Linear),
+            Keyframe::new(10, 0.2),
         ]));
         t.clips.push(c);
         tl.tracks.push(t);
