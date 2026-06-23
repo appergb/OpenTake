@@ -9,7 +9,9 @@ import { isTauri } from "../lib/api";
 import { forceRefresh } from "./sync";
 import { useEditorUiStore } from "./uiStore";
 import { useProjectStore } from "./projectStore";
+import { useClipboardStore } from "./clipboardStore";
 import type {
+  Clip,
   ClipEntryReq,
   ClipMoveReq,
   ClipPropertiesReq,
@@ -29,7 +31,7 @@ async function applyAndRefresh(cmd: Parameters<typeof api.editApply>[0]) {
 
 export async function addClips(entries: ClipEntryReq[]) {
   if (entries.length === 0) return;
-  await applyAndRefresh({ type: "addClips", entries });
+  return applyAndRefresh({ type: "addClips", entries });
 }
 
 export async function moveClips(moves: ClipMoveReq[]) {
@@ -193,4 +195,74 @@ async function addMediaToTimelineInner(item: MediaItem): Promise<void> {
   // position from a mirror that already includes this clip. (Browser mode
   // already refreshed inside `applyAndRefresh` — guard to avoid a double fetch.)
   if (isTauri) await forceRefresh();
+}
+
+// MARK: - Clipboard (copy / cut / paste, Issue #94)
+//
+// Front-end paste buffer: copy snapshots the selected clips; paste re-places
+// them at the playhead with a fresh `linkGroupId` (cleared so the backend
+// re-assigns, mirroring upstream `pasteClipsAtPlayhead` link re-reflection).
+// Track placement is preserved (clip stays on its original track index); if
+// the target track no longer exists the clip is skipped.
+
+/** Collect selected clips with their track index into the clipboard store. */
+export function copyClips() {
+  const ui = useEditorUiStore.getState();
+  const tl = useProjectStore.getState().timeline;
+  const ids = ui.selectedClipIds;
+  if (ids.size === 0) return;
+  const entries: { clip: Clip; sourceTrackIndex: number }[] = [];
+  for (let ti = 0; ti < tl.tracks.length; ti++) {
+    for (const clip of tl.tracks[ti].clips) {
+      if (ids.has(clip.id)) entries.push({ clip, sourceTrackIndex: ti });
+    }
+  }
+  if (entries.length === 0) return;
+  const sourceFirstFrame = entries.reduce(
+    (min, e) => Math.min(min, e.clip.startFrame),
+    Number.POSITIVE_INFINITY,
+  );
+  useClipboardStore.getState().set(entries, sourceFirstFrame);
+}
+
+/** Copy then delete — the standard cut semantics. */
+export async function cutClips() {
+  copyClips();
+  await deleteSelectedClips();
+}
+
+/** Paste clipboard entries at the current playhead. Each clip's `startFrame`
+ *  is offset by `activeFrame - sourceFirstFrame`; `linkGroupId` is cleared so
+ *  the backend assigns fresh groups. Clips whose source track no longer exists
+ *  are silently skipped (upstream drops them too). */
+export async function pasteClipsAtPlayhead() {
+  const cb = useClipboardStore.getState();
+  if (!cb.hasContent || cb.entries.length === 0) return;
+  const ui = useEditorUiStore.getState();
+  const tl = useProjectStore.getState().timeline;
+  const offset = ui.activeFrame - cb.sourceFirstFrame;
+  const entries: ClipEntryReq[] = [];
+  for (const e of cb.entries) {
+    if (e.sourceTrackIndex >= tl.tracks.length) continue;
+    const startFrame = Math.max(0, e.clip.startFrame + offset);
+    entries.push({
+      mediaRef: e.clip.mediaRef,
+      mediaType: e.clip.mediaType,
+      sourceClipType: e.clip.sourceClipType,
+      trackIndex: e.sourceTrackIndex,
+      startFrame,
+      durationFrames: e.clip.durationFrames,
+      trimStartFrame: e.clip.trimStartFrame,
+      trimEndFrame: e.clip.trimEndFrame,
+      hasAudio: e.clip.mediaType === "audio" || e.clip.mediaType === "video",
+      // Don't re-link: clearing addLinkedAudio lets the paste stand alone.
+      addLinkedAudio: false,
+    });
+  }
+  if (entries.length === 0) return;
+  const res = await addClips(entries);
+  // Select the freshly pasted clips so the user can immediately move/trim them.
+  if (res && res.affectedClipIds.length > 0) {
+    ui.selectClips(new Set(res.affectedClipIds));
+  }
 }

@@ -73,6 +73,18 @@ export function useKeyboardShortcuts() {
               return;
             }
             return;
+          case "KeyC":
+            e.preventDefault();
+            edit.copyClips();
+            return;
+          case "KeyX":
+            e.preventDefault();
+            void edit.cutClips();
+            return;
+          case "KeyV":
+            e.preventDefault();
+            void edit.pasteClipsAtPlayhead();
+            return;
         }
         return;
       }
