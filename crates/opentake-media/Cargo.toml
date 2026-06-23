@@ -13,6 +13,7 @@ serde_json = { workspace = true }
 thiserror = "2"
 anyhow = "1"
 sha2 = "0.10"
+dirs = "6"
 half = "2"
 byteorder = "1"
 ndarray = "0.16"
