@@ -175,7 +175,10 @@ mod tests {
             .iter()
             .find(|c| c.id == created[0])
             .unwrap();
-        assert!(copy.link_group_id.is_none(), "duplicate must not inherit link");
+        assert!(
+            copy.link_group_id.is_none(),
+            "duplicate must not inherit link"
+        );
         // Original keeps its link group.
         assert_eq!(tl.tracks[0].clips[0].link_group_id.as_deref(), Some("grp"));
     }
