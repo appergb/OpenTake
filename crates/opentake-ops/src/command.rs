@@ -165,6 +165,16 @@ pub enum EditCommand {
     },
     /// Move clips (expanded to linked partners by the caller) to new tracks/frames.
     MoveClips { moves: Vec<ClipMove> },
+    /// Deep-copy clips (Option/Alt-drag duplicate) to new positions. Each clip
+    /// is cloned with all its fields (keyframe tracks / grade / chroma / masks /
+    /// effects / text / transform / crop / fades), gets a fresh id, is shifted
+    /// by `offset_frames`, lands on `target_track_indexes[i]`, and has its
+    /// `link_group_id` cleared (a copy is not linked to the original's group).
+    DuplicateClips {
+        clip_ids: Vec<String>,
+        offset_frames: i32,
+        target_track_indexes: Vec<usize>,
+    },
     /// Remove clips (expanded to linked partners), pruning emptied tracks.
     RemoveClips { clip_ids: Vec<String> },
     /// Split a clip at a frame (splits linked partners too).
@@ -301,6 +311,11 @@ pub fn apply(
             entries,
         } => insert_clips(state, track_index, at_frame, entries, ids),
         EditCommand::MoveClips { moves } => move_clips(state, moves, ids),
+        EditCommand::DuplicateClips {
+            clip_ids,
+            offset_frames,
+            target_track_indexes,
+        } => duplicate_clips_cmd(state, clip_ids, offset_frames, target_track_indexes, ids),
         EditCommand::RemoveClips { clip_ids } => remove_clips(state, clip_ids),
         EditCommand::SplitClip { clip_id, at_frame } => split(state, clip_id, at_frame, ids),
         EditCommand::TrimClips { edits } => trim(state, edits),
@@ -569,6 +584,54 @@ fn move_clips(
         |st| {
             ops::move_clips(&mut st.timeline, &moves, ids);
             Ok(moves.iter().map(|m| m.clip_id.clone()).collect())
+        },
+    )
+}
+
+/// Option/Alt-drag duplicate: deep-copy each clip to a new position. See
+/// [`EditCommand::DuplicateClips`].
+fn duplicate_clips_cmd(
+    state: &mut EditorState,
+    clip_ids: Vec<String>,
+    offset_frames: i32,
+    target_track_indexes: Vec<usize>,
+    ids: &dyn IdGen,
+) -> Result<EditResult, EditError> {
+    if clip_ids.is_empty() {
+        return Err(EditError::Invalid(
+            "Missing or empty 'clipIds' array".into(),
+        ));
+    }
+    if target_track_indexes.len() != clip_ids.len() {
+        return Err(EditError::Invalid(format!(
+            "targetTrackIndexes length ({}) must match clipIds length ({})",
+            target_track_indexes.len(),
+            clip_ids.len()
+        )));
+    }
+    for id in &clip_ids {
+        if state.find_clip(id).is_none() {
+            return Err(EditError::Invalid(format!("Clip not found: {id}")));
+        }
+    }
+    let action_name = if clip_ids.len() == 1 {
+        "Duplicate Clip"
+    } else {
+        "Duplicate Clips"
+    };
+    let n = clip_ids.len();
+    transact(
+        state,
+        action_name,
+        move |_| format!("Duplicated {n} clip(s)"),
+        |st| {
+            Ok(ops::duplicate_clips(
+                &mut st.timeline,
+                &clip_ids,
+                offset_frames,
+                &target_track_indexes,
+                ids,
+            ))
         },
     )
 }
@@ -1567,5 +1630,173 @@ mod insert_track_tests {
             &ids,
         );
         assert!(err.is_err());
+    }
+}
+
+#[cfg(test)]
+mod duplicate_clips_tests {
+    use super::*;
+    use crate::id::SeqIdGen;
+    use opentake_domain::{Clip, ClipType, Keyframe, KeyframeTrack, Track};
+
+    fn state_with_clip() -> EditorState {
+        let mut tl = Timeline::new();
+        let mut t = Track::new("v1", ClipType::Video);
+        t.clips.push(Clip::new("c1", "asset", 0, 30));
+        tl.tracks.push(t);
+        EditorState::from_timeline(tl)
+    }
+
+    #[test]
+    fn duplicate_clips_creates_copy_with_new_id() {
+        let mut state = state_with_clip();
+        let ids = SeqIdGen::new("d-");
+        let res = apply(
+            &mut state,
+            EditCommand::DuplicateClips {
+                clip_ids: vec!["c1".into()],
+                offset_frames: 100,
+                target_track_indexes: vec![0],
+            },
+            &ids,
+        )
+        .unwrap();
+        assert!(res.changed);
+        assert_eq!(res.action_name, "Duplicate Clip");
+        assert_eq!(res.affected_clip_ids.len(), 1);
+        // Original retained, copy present at frame 100.
+        assert!(state.timeline.tracks[0].clips.iter().any(|c| c.id == "c1"));
+        let copy = state.timeline.tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == res.affected_clip_ids[0])
+            .unwrap();
+        assert_eq!(copy.start_frame, 100);
+        assert_ne!(copy.id, "c1");
+    }
+
+    #[test]
+    fn duplicate_clips_deep_copies_keyframe_tracks() {
+        let mut state = state_with_clip();
+        state.timeline.tracks[0].clips[0].opacity_track =
+            Some(KeyframeTrack::from_keyframes(vec![
+                Keyframe::new(0, 0.0),
+                Keyframe::new(30, 1.0),
+            ]));
+        let ids = SeqIdGen::default();
+        let res = apply(
+            &mut state,
+            EditCommand::DuplicateClips {
+                clip_ids: vec!["c1".into()],
+                offset_frames: 100,
+                target_track_indexes: vec![0],
+            },
+            &ids,
+        )
+        .unwrap();
+        let copy = state.timeline.tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == res.affected_clip_ids[0])
+            .unwrap();
+        let op = copy.opacity_track.as_ref().unwrap();
+        assert_eq!(
+            op.keyframes.iter().map(|k| k.frame).collect::<Vec<_>>(),
+            vec![0, 30]
+        );
+    }
+
+    #[test]
+    fn duplicate_clips_clears_link_group_id() {
+        let mut state = state_with_clip();
+        state.timeline.tracks[0].clips[0].link_group_id = Some("grp".into());
+        let ids = SeqIdGen::default();
+        let res = apply(
+            &mut state,
+            EditCommand::DuplicateClips {
+                clip_ids: vec!["c1".into()],
+                offset_frames: 50,
+                target_track_indexes: vec![0],
+            },
+            &ids,
+        )
+        .unwrap();
+        let copy = state.timeline.tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == res.affected_clip_ids[0])
+            .unwrap();
+        assert!(copy.link_group_id.is_none());
+    }
+
+    #[test]
+    fn duplicate_clips_missing_clip_errors() {
+        let mut state = state_with_clip();
+        let ids = SeqIdGen::default();
+        let err = apply(
+            &mut state,
+            EditCommand::DuplicateClips {
+                clip_ids: vec!["nope".into()],
+                offset_frames: 100,
+                target_track_indexes: vec![0],
+            },
+            &ids,
+        );
+        assert!(matches!(err, Err(EditError::Invalid(_))));
+    }
+
+    #[test]
+    fn duplicate_clips_length_mismatch_errors() {
+        let mut state = state_with_clip();
+        let ids = SeqIdGen::default();
+        let err = apply(
+            &mut state,
+            EditCommand::DuplicateClips {
+                clip_ids: vec!["c1".into()],
+                offset_frames: 100,
+                target_track_indexes: vec![0, 1], // wrong length
+            },
+            &ids,
+        );
+        assert!(matches!(err, Err(EditError::Invalid(_))));
+    }
+
+    #[test]
+    fn duplicate_clips_empty_ids_errors() {
+        let mut state = state_with_clip();
+        let ids = SeqIdGen::default();
+        let err = apply(
+            &mut state,
+            EditCommand::DuplicateClips {
+                clip_ids: vec![],
+                offset_frames: 100,
+                target_track_indexes: vec![],
+            },
+            &ids,
+        );
+        assert!(matches!(err, Err(EditError::Invalid(_))));
+    }
+
+    #[test]
+    fn duplicate_clips_is_undoable() {
+        let mut state = state_with_clip();
+        let ids = SeqIdGen::default();
+        let version_before = state.version();
+        apply(
+            &mut state,
+            EditCommand::DuplicateClips {
+                clip_ids: vec!["c1".into()],
+                offset_frames: 100,
+                target_track_indexes: vec![0],
+            },
+            &ids,
+        )
+        .unwrap();
+        assert_eq!(state.timeline.tracks[0].clips.len(), 2);
+        assert!(state.can_undo());
+        apply(&mut state, EditCommand::Undo, &ids).unwrap();
+        assert_eq!(state.timeline.tracks[0].clips.len(), 1);
+        assert_eq!(state.timeline.tracks[0].clips[0].id, "c1");
+        assert_eq!(state.version(), version_before + 2); // commit + undo
     }
 }
