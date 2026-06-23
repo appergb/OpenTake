@@ -217,6 +217,18 @@ pub enum EditRequest {
         asset_ids: Vec<String>,
         folder_id: Option<String>,
     },
+    SwapMedia {
+        clip_id: String,
+        media_ref: String,
+        #[serde(default)]
+        media_type: Option<ClipType>,
+        #[serde(default)]
+        source_clip_type: Option<ClipType>,
+        #[serde(default)]
+        duration_frames: Option<i32>,
+        #[serde(default)]
+        trim_start_frame: Option<i32>,
+    },
 }
 
 impl EditRequest {
@@ -343,6 +355,21 @@ impl EditRequest {
             } => EditCommand::MoveToFolder {
                 asset_ids,
                 folder_id,
+            },
+            EditRequest::SwapMedia {
+                clip_id,
+                media_ref,
+                media_type,
+                source_clip_type,
+                duration_frames,
+                trim_start_frame,
+            } => EditCommand::SwapMedia {
+                clip_id,
+                media_ref,
+                media_type,
+                source_clip_type,
+                duration_frames,
+                trim_start_frame,
             },
         })
     }
