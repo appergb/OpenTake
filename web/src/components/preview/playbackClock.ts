@@ -7,16 +7,18 @@
  * mid-playback (e.g. the preview panel unmounts), the fallback resumes.
  */
 
-let owner = false;
+// Reference-counted so overlapping claim/release (StrictMode double-invoke, a
+// brief mount/unmount overlap) can't leave the clock stuck owned or released.
+let refCount = 0;
 
 export const mediaClock = {
   claim(): void {
-    owner = true;
+    refCount += 1;
   },
   release(): void {
-    owner = false;
+    refCount = Math.max(0, refCount - 1);
   },
   get active(): boolean {
-    return owner;
+    return refCount > 0;
   },
 };

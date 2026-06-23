@@ -58,9 +58,20 @@ export function TimelinePlayback({ timeline, fps }: { timeline: Timeline; fps: n
 
   // clipId -> media element registry, read by the clock loop.
   const els = useRef<Map<string, HTMLMediaElement>>(new Map());
-  const register = (id: string) => (el: HTMLMediaElement | null) => {
-    if (el) els.current.set(id, el);
-    else els.current.delete(id);
+  // Stable ref callback per clip id (cached) so a clip's element isn't
+  // detached/re-attached every rAF re-render — only the function identity
+  // changing would do that, so we keep one callback per id.
+  const cbCache = useRef<Map<string, (el: HTMLMediaElement | null) => void>>(new Map());
+  const register = (id: string) => {
+    let cb = cbCache.current.get(id);
+    if (!cb) {
+      cb = (el: HTMLMediaElement | null) => {
+        if (el) els.current.set(id, el);
+        else els.current.delete(id);
+      };
+      cbCache.current.set(id, cb);
+    }
+    return cb;
   };
 
   // Latest model in refs so the once-mounted clock reads current values.
@@ -108,7 +119,8 @@ export function TimelinePlayback({ timeline, fps }: { timeline: Timeline; fps: n
         const el = elFor(m.clip.id);
         if (!el) continue; // images carry no media element
         const vol = clipVolume(m.track, m.clip);
-        el.muted = vol <= 0 || (m === v && dup);
+        const isVisualVideo = v !== null && m.clip.id === v.clip.id;
+        el.muted = vol <= 0 || (isVisualVideo && dup);
         el.volume = vol;
         const desired = sourceTimeSec(m.clip, f, safeFps);
         if (el.paused) {
