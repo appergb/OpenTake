@@ -8,11 +8,12 @@
 ## ✅ 2026-06-23 第三轮已合并(自动 PR 审核,均 CI 双绿 + 对抗验证 CONFIRM)
 
 逐 PR 专家审核 + 对抗验证 + 对照文档后合并的纯新增项(详见 CHANGELOG「第三轮」):
-- **#104/#106 全局素材库后端 + 命令层**(#37-A/B):`opentake-media/src/library.rs`(内容寻址去重 + JSON manifest 原子写)+ `src-tauri/src/library.rs`(7 命令)。前端 #37-C/#56 待做。
+- **#104/#106/#115 全局素材库 epic 收口**(#37):后端存储层 `opentake-media/src/library.rs`(内容寻址去重 + JSON manifest 原子写)+ 命令层 `src-tauri/src/library.rs`(7 命令)+ **前端 #115** `LibraryView`/`libraryStore`/`libraryApi`(分类树/网格/搜索/排序/音效库,前端↔后端契约已核实)。剩:库→时间线拖拽(现用导入按钮)、媒体面板「星标→library_favorite」接线、收藏迁后端。
 - **#107 文本工具 MVP**(#96):Toolbar `T` → `addTextClip()` + `TextTab.tsx`;textStyle 字段留后续(依赖后端 ClipProperties 扩展)。
 - **#110 SRT/VTT 字幕导出纯逻辑**(#29 切片):`opentake-domain/src/subtitle_export.rs`(16 单测);导出层/agent 工具/前端对话框待接。
 - **#111 `list_models` 接 opentake-gen catalog**(#9/#10 切片);`generate_*`/upscale 仍待 async+BYOK。
 - **#112 整条时间线视频导出编排**(Phase 5 spine):`src-tauri/src/export.rs` + `export_video`(逐帧 composite→ffmpeg,H.264/.mp4 全分辨率,含集成测试);自包含复制 preview、未碰 `composite_frame`。H.265/ProRes/音频/进度取消留后续。
+- **#113 caption-group 样式批量同步纯逻辑**(#29 切片):`opentake-domain/src/caption_sync.rs`(不可变 / 跨组隔离 / legacy 安全,12 单测);接 UI/命令留后续。
 - **关闭** #76(bundle id 改名冗余);**请修改 @作者** #77/#78/#79/#105/#108(冲突/验收未达标,详见 CHANGELOG「待审 PR」)。
 
 ## ✅ 2026-06-23 第二轮已完成(分支 `feat/jianying-ui-and-timeline-fixes`,基于 PR#81)
@@ -71,7 +72,7 @@
 - **#48 片段编辑收尾**:Delete/切割/片段右键菜单/Inspector 三段式/Toolbar 接线。
 - **剩余 MCP 工具 stub**:媒体读取(inspect_media/get_transcript/search_media)+ import_media 需**拓宽 CoreHandle 接 MediaEngine**(注意:CoreHandle 现仅持 AppCore,MediaEngine 在 MediaState,需架构扩展);`generate_*`/upscale 需异步 GenClient + BYOK;add_captions 需端上 whisper。
 - **#49 项目内文件夹导入 + 嵌套文件夹浏览(剪映式)**:文件夹图标/双击进入/面包屑/拖出;DTO 加 folderId+folders;import_folder 镜像目录树。用户很想要。
-- **#37 全局可复用素材库 + 收藏**(跨项目/分类/音效库/全库可见):**后端已并入 main** —— 存储层 `crates/opentake-media/src/library.rs`(#37-A/#54,PR #104,copy-on-favorite + SHA-256 内容寻址去重 + JSON manifest 原子写)+ Tauri 命令层 `src-tauri/src/library.rs`(#37-B/#55,PR #106,7 命令 list/favorite/unfavorite/categorize/rename/delete/import_to_project)。**剩前端 #37-C/#56**(库视图 UI + 收藏从 localStorage 迁到后端 `library_favorite`/`library_list`)尚无 PR。follow-up:`library.rs:322` remove() 静默吞 remove_file 错误,建议补 `tracing::warn!`;`library_delete` 与 `library_unfavorite` 现为纯别名,建议语义区分。
+- **#37 全局可复用素材库 + 收藏**(跨项目/分类/音效库/全库可见):**后端已并入 main** —— 存储层 `crates/opentake-media/src/library.rs`(#37-A/#54,PR #104,copy-on-favorite + SHA-256 内容寻址去重 + JSON manifest 原子写)+ Tauri 命令层 `src-tauri/src/library.rs`(#37-B/#55,PR #106,7 命令 list/favorite/unfavorite/categorize/rename/delete/import_to_project)。**前端 #37-C/#56 已并入 main**(PR #115:独立 `LibraryView` 全屏视图 + `libraryStore`/`libraryApi`,分类树/网格/搜索/排序/跨视图聚合/音效库;Home/TitleBar 入口;前端↔后端 7 命令契约已核实)。**#37 epic 收口**(后端 #104/#106 + 前端 #115)。剩:库→时间线拖拽(现用「导入当前项目」按钮)、媒体面板「星标→library_favorite」接线、收藏从 localStorage 迁后端。follow-up:`library.rs:322` remove() 静默吞 remove_file 错误,建议补 `tracing::warn!`;`library_delete` 与 `library_unfavorite` 现为纯别名,建议语义区分。
 - **#39 提取音频星标 · #40 设置多分页+主页 1:1 · #34 motion dispatch · #27–30 进阶 B/C/D/E · #22–25 #12 follow-up · #35 bundle id 改名**。
 - 冲突注意:我(#47/#48)动 opentake-render/opentake-media(decode/FrameProvider)/src-tauri(composite_frame、autosave)/web Preview+timeline;#36 动 agent+src-tauri(server 段);#37/#49 动 opentake-media(library/folders)+web media。**src-tauri/lib.rs、opentake-media 是多方交汇点,合并按 issue 顺序、各自小段、勤 rebase。**
 
