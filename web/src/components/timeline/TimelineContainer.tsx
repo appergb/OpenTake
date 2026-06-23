@@ -14,6 +14,7 @@ import {
   frameAt,
   totalFrames,
   trackAt,
+  trackY,
 } from "../../lib/geometry";
 import { firstAudioIndex } from "../../lib/zones";
 import { clampTrimDeltaFrames, trimSourceValues } from "../../lib/clip";
@@ -31,15 +32,45 @@ import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
 import * as edit from "../../store/editActions";
+import { forceRefresh } from "../../store/sync";
+import { isTauri } from "../../lib/api";
 import { getWaveform } from "../../lib/api";
+import type { ClipType } from "../../lib/types";
+
+/** Where a move/duplicate drag will land. `newTrack` creates a fresh track of
+ *  `trackType` below the last existing one (upstream `placeClip` auto-track-
+ *  creation), so dragging into the empty area below the track region still
+ *  produces a clip. */
+type DropTarget =
+  | { kind: "existing"; trackIndex: number }
+  | { kind: "newTrack"; trackType: ClipType };
 
 type DragState =
   | { kind: "scrub" }
-  | { kind: "move"; hit: ClipHit; grabFrame: number; deltaFrames: number; startTrack: number; targetTrack: number; companions: string[] }
+  | {
+      kind: "move";
+      hit: ClipHit;
+      grabFrame: number;
+      deltaFrames: number;
+      startTrack: number;
+      targetTrack: number;
+      companions: string[];
+      /** Option/Alt held at pointer-down: duplicate instead of move. */
+      isDuplicate: boolean;
+      /** Where the drag will land (existing track or a new track below). */
+      dropTarget: DropTarget;
+    }
   | { kind: "trimLeft" | "trimRight"; hit: ClipHit; startTrim: number; deltaFrames: number }
   | { kind: "marquee"; startDocX: number; startDocY: number; curDocX: number; curDocY: number }
   | { kind: "audioVolumeKf"; clipId: string; fromFrame: number; ghostFrame: number }
   | null;
+
+/** New-track kind for a dragged clip: audio clips → "audio", everything else
+ *  → "video" (visual types share the video zone, matching `addMediaToTimeline`
+ *  and upstream `placeClip`). */
+function newTrackTypeFor(clip: { mediaType: ClipType }): ClipType {
+  return clip.mediaType === "audio" ? "audio" : "video";
+}
 
 export function TimelineContainer() {
   const timeline = useProjectStore((s) => s.timeline);
@@ -165,6 +196,8 @@ export function TimelineContainer() {
         ids: new Set(d.companions),
         deltaFrames: d.deltaFrames,
         trackDelta: d.targetTrack - d.startTrack,
+        isDuplicate: d.isDuplicate,
+        newTrackType: d.dropTarget.kind === "newTrack" ? d.dropTarget.trackType : undefined,
       };
     } else if (d?.kind === "trimLeft" || d?.kind === "trimRight") {
       drag = {
@@ -449,6 +482,8 @@ export function TimelineContainer() {
             startTrack: hit.trackIndex,
             targetTrack: hit.trackIndex,
             companions: [...nextSel],
+            isDuplicate: e.altKey,
+            dropTarget: { kind: "existing", trackIndex: hit.trackIndex },
           };
         }
         return;
@@ -524,8 +559,35 @@ export function TimelineContainer() {
           snapped = null;
           snapStateRef.current = null;
         }
-        const targetTrack = trackAt(timeline, docY, trackHeights) ?? d.startTrack;
-        dragRef.current = { ...d, deltaFrames, targetTrack };
+        // Drop target: existing track under the cursor, or a new track when the
+        // pointer is below the last track's bottom (upstream `placeClip` auto-
+        // track-creation). `trackAt` returns null both above and below the track
+        // region; only treat the below-last-track case as a new-track drop.
+        const hovered = trackAt(timeline, docY, trackHeights);
+        let targetTrack: number;
+        let dropTarget: DropTarget;
+        if (hovered !== null) {
+          targetTrack = hovered;
+          dropTarget = { kind: "existing", trackIndex: hovered };
+        } else {
+          const lastTrackBottom =
+            timeline.tracks.length > 0
+              ? trackY(timeline, timeline.tracks.length, trackHeights)
+              : LAYOUT.rulerHeight + LAYOUT.dropZoneHeight;
+          if (docY >= lastTrackBottom) {
+            // Below the last track → create a new track on drop.
+            const trackType = newTrackTypeFor(d.hit.clip);
+            dropTarget = { kind: "newTrack", trackType };
+            // Clamp the ghost to the last existing track for rendering; the
+            // actual new track is created on pointer-up.
+            targetTrack = Math.max(0, timeline.tracks.length - 1);
+          } else {
+            // Above the first track (ruler/drop zone) → keep the previous target.
+            targetTrack = d.targetTrack;
+            dropTarget = d.dropTarget;
+          }
+        }
+        dragRef.current = { ...d, deltaFrames, targetTrack, dropTarget };
         setSnapFrame(snapped);
         forceTick((n) => n + 1);
         return;
@@ -606,7 +668,14 @@ export function TimelineContainer() {
       if (!d) return;
 
       if (d.kind === "move") {
-        if (d.deltaFrames === 0 && d.targetTrack === d.startTrack) return; // no-op
+        // No-op: no movement, no track change, and not dropping on a new track.
+        if (
+          d.deltaFrames === 0 &&
+          d.dropTarget.kind === "existing" &&
+          d.dropTarget.trackIndex === d.startTrack
+        ) {
+          return;
+        }
         // Resolve every dragged clip's current location.
         const locs = d.companions
           .map((id) => {
@@ -623,9 +692,41 @@ export function TimelineContainer() {
         const minStart = Math.min(...locs.map((l) => l.clip.startFrame));
         const frameDelta = Math.max(d.deltaFrames, -minStart);
 
+        // Drop below the last track → create a new track first, then move/dup.
+        if (d.dropTarget.kind === "newTrack") {
+          const trackType = d.dropTarget.trackType;
+          const isDup = d.isDuplicate;
+          const locSnapshot = locs.map((l) => ({ id: l.id, ti: l.ti, startFrame: l.clip.startFrame }));
+          void (async () => {
+            await edit.insertTrack(trackType);
+            // Ensure the mirror reflects the new track before computing the
+            // target index (Tauri's timeline_changed is async; browser mode
+            // already refreshed inside applyAndRefresh).
+            if (isTauri) await forceRefresh();
+            const tl = useProjectStore.getState().timeline;
+            const newTrackIndex = tl.tracks.length - 1; // appended at end
+            if (isDup) {
+              await edit.duplicateClips(
+                locSnapshot.map((l) => l.id),
+                frameDelta,
+                locSnapshot.map(() => newTrackIndex),
+              );
+            } else {
+              await edit.moveClips(
+                locSnapshot.map((l) => ({
+                  clipId: l.id,
+                  toTrack: newTrackIndex,
+                  toFrame: l.startFrame + frameDelta,
+                })),
+              );
+            }
+          })();
+          return;
+        }
+
         // One group TRACK delta: step toward 0 until every clip stays in-bounds
         // and lands on a type-compatible track (rigid group, not per-clip clamp).
-        const rawTrackDelta = d.targetTrack - d.startTrack;
+        const rawTrackDelta = d.dropTarget.trackIndex - d.startTrack;
         let trackDelta = rawTrackDelta;
         const step = rawTrackDelta > 0 ? -1 : 1;
         while (trackDelta !== 0) {
@@ -638,12 +739,23 @@ export function TimelineContainer() {
         }
 
         if (frameDelta === 0 && trackDelta === 0) return; // nothing actually moves
-        const moves = locs.map((l) => ({
-          clipId: l.id,
-          toTrack: l.ti + trackDelta,
-          toFrame: l.clip.startFrame + frameDelta,
-        }));
-        void edit.moveClips(moves);
+        if (d.isDuplicate) {
+          // Option/Alt-drag duplicate: deep-copy each clip to its target. The
+          // backend mints fresh ids, shifts start_frame by offsetFrames, and
+          // clears link_group_id (copies aren't linked to the originals).
+          void edit.duplicateClips(
+            locs.map((l) => l.id),
+            frameDelta,
+            locs.map((l) => l.ti + trackDelta),
+          );
+        } else {
+          const moves = locs.map((l) => ({
+            clipId: l.id,
+            toTrack: l.ti + trackDelta,
+            toFrame: l.clip.startFrame + frameDelta,
+          }));
+          void edit.moveClips(moves);
+        }
         return;
       }
 

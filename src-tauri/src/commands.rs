@@ -145,6 +145,12 @@ pub enum EditRequest {
         moves: Vec<ClipMoveDto>,
     },
     #[serde(rename_all = "camelCase")]
+    DuplicateClips {
+        clip_ids: Vec<String>,
+        offset_frames: i32,
+        target_track_indexes: Vec<usize>,
+    },
+    #[serde(rename_all = "camelCase")]
     RemoveClips {
         clip_ids: Vec<String>,
     },
@@ -263,6 +269,15 @@ impl EditRequest {
             },
             EditRequest::MoveClips { moves } => EditCommand::MoveClips {
                 moves: moves.into_iter().map(ClipMoveDto::into_move).collect(),
+            },
+            EditRequest::DuplicateClips {
+                clip_ids,
+                offset_frames,
+                target_track_indexes,
+            } => EditCommand::DuplicateClips {
+                clip_ids,
+                offset_frames,
+                target_track_indexes,
             },
             EditRequest::RemoveClips { clip_ids } => EditCommand::RemoveClips { clip_ids },
             EditRequest::SplitClip { clip_id, at_frame } => {

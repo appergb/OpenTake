@@ -9,7 +9,7 @@ import { BG, BORDER, TEXT } from "../../lib/theme";
 import { clipRect, trackDisplayHeight, trackY } from "../../lib/geometry";
 import { linkOffsetForClip } from "../../lib/clip";
 import { drawClip } from "./clipRenderer";
-import type { Timeline } from "../../lib/types";
+import type { Timeline, ClipType } from "../../lib/types";
 
 export interface PaintState {
   timeline: Timeline;
@@ -43,7 +43,18 @@ export interface PaintState {
 
 /** A live move/trim, projected for ghost rendering. */
 export type DragPaint =
-  | { kind: "move"; ids: Set<string>; deltaFrames: number; trackDelta: number }
+  | {
+      kind: "move";
+      ids: Set<string>;
+      deltaFrames: number;
+      trackDelta: number;
+      /** Option/Alt-drag duplicate: ghost renders with a "+" badge. */
+      isDuplicate?: boolean;
+      /** Dropping below the last track creates a new track of this type; the
+       *  ghost renders at the new-track position and a dashed indicator is
+       *  drawn below the last track. `undefined` = drop on an existing track. */
+      newTrackType?: ClipType;
+    }
   | { kind: "trim"; clipId: string; edge: "left" | "right"; deltaFrames: number }
   | { kind: "volumeKf"; clipId: string; fromFrame: number; ghostFrame: number };
 
@@ -79,21 +90,51 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
   // 3. Clips (skip those fully outside the visible window). A clip being dragged
   // is drawn at its live (offset) position as a ghost so it follows the cursor.
   const drag = s.drag;
+  // New-track drop indicator: a dashed zone below the last track showing where
+  // the new track will be created (upstream `placeClip` auto-track-creation).
+  if (drag?.kind === "move" && drag.newTrackType && timeline.tracks.length > 0) {
+    const newTrackY = trackY(timeline, timeline.tracks.length, trackHeights);
+    const newTrackH = trackDisplayHeight(timeline.tracks[0], trackHeights); // default height
+    if (newTrackY + newTrackH > scrollTop && newTrackY < scrollTop + s.viewHeight) {
+      ctx.fillStyle = "rgba(255,255,255,0.04)";
+      ctx.fillRect(scrollLeft, newTrackY, s.viewWidth, newTrackH);
+      ctx.strokeStyle = "rgba(255,255,255,0.3)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeRect(scrollLeft + 0.5, newTrackY + 0.5, s.viewWidth - 1, newTrackH - 1);
+      ctx.setLineDash([]);
+    }
+  }
   for (let ti = 0; ti < timeline.tracks.length; ti++) {
     const track = timeline.tracks[ti];
     for (const clip of track.clips) {
       let rect = clipRect(timeline, ti, clip, pixelsPerFrame, trackHeights);
       let ghost = false;
+      let isDuplicate = false;
       if (drag?.kind === "move" && drag.ids.has(clip.id)) {
-        const nti = Math.max(0, Math.min(timeline.tracks.length - 1, ti + drag.trackDelta));
-        rect = clipRect(
-          timeline,
-          nti,
-          { ...clip, startFrame: clip.startFrame + drag.deltaFrames },
-          pixelsPerFrame,
-          trackHeights,
-        );
+        if (drag.newTrackType) {
+          // Dropping on a new track: render the ghost at the new-track Y
+          // (below the last existing track) using a default track height.
+          const newTrackY = trackY(timeline, timeline.tracks.length, trackHeights);
+          const ghostH = trackDisplayHeight(timeline.tracks[0], trackHeights) - 4;
+          rect = {
+            x: (clip.startFrame + drag.deltaFrames) * pixelsPerFrame,
+            y: newTrackY + 2,
+            width: clip.durationFrames * pixelsPerFrame,
+            height: ghostH,
+          };
+        } else {
+          const nti = Math.max(0, Math.min(timeline.tracks.length - 1, ti + drag.trackDelta));
+          rect = clipRect(
+            timeline,
+            nti,
+            { ...clip, startFrame: clip.startFrame + drag.deltaFrames },
+            pixelsPerFrame,
+            trackHeights,
+          );
+        }
         ghost = true;
+        isDuplicate = drag.isDuplicate === true;
       } else if (drag?.kind === "trim" && drag.clipId === clip.id) {
         const dx = drag.deltaFrames * pixelsPerFrame;
         rect =
@@ -120,6 +161,7 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
         ghost,
         linkOffset: linkOffsetForClip(timeline, clip.id),
         volumeKfGhost,
+        isDuplicate,
       });
     }
   }

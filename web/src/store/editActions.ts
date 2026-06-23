@@ -46,6 +46,26 @@ export async function moveClips(moves: ClipMoveReq[]) {
   await applyAndRefresh({ type: "moveClips", moves });
 }
 
+/** Option/Alt-drag duplicate: deep-copy each clip to a new position. The
+ *  backend clones every field (keyframe tracks / grade / masks / effects /
+ *  text / transform / crop / fades), mints a fresh id, shifts `startFrame` by
+ *  `offsetFrames`, lands on `targetTrackIndexes[i]`, and clears the link group
+ *  (a copy is not linked to the original's partners). Returns the new clip ids
+ *  via the EditResult so the caller can select them. */
+export async function duplicateClips(
+  clipIds: string[],
+  offsetFrames: number,
+  targetTrackIndexes: number[],
+) {
+  if (clipIds.length === 0) return;
+  return applyAndRefresh({
+    type: "duplicateClips",
+    clipIds,
+    offsetFrames,
+    targetTrackIndexes,
+  });
+}
+
 export async function removeClips(clipIds: string[]) {
   if (clipIds.length === 0) return;
   await applyAndRefresh({ type: "removeClips", clipIds });
