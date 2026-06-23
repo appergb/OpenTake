@@ -8,7 +8,7 @@
  * menu, the in-app menu entry point for an environment without a native menu bar.
  */
 
-import { Upload, Home, Settings as SettingsIcon } from "lucide-react";
+import { Upload, Home, Settings as SettingsIcon, Library } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { ViewMenu } from "./ViewMenu";
 import { useEditorUiStore } from "../../store/uiStore";
@@ -104,7 +104,23 @@ export function TitleBar() {
 
       <div style={{ flex: 1 }} />
 
-      {/* Trailing: Settings + Export. */}
+      {/* Trailing: Library + Settings + Export. */}
+      <button
+        title={t("library.entry")}
+        aria-label={t("library.entry")}
+        onClick={() => setView("library")}
+        className="hover-area"
+        style={{
+          width: 26,
+          height: 26,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "var(--text-secondary)",
+        }}
+      >
+        <Icon icon={Library} size={13} />
+      </button>
       <button
         title={t("title.settings")}
         aria-label={t("title.settings")}

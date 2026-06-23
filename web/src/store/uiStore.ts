@@ -10,7 +10,7 @@ import { ZOOM } from "../lib/theme";
 export type Panel = "agent" | "media" | "preview" | "inspector" | "timeline";
 /** Top-level app view (SPEC: 启动先进主页). The editor is one of three views;
  *  switching is in-app (no router) so editor state survives navigation. */
-export type AppView = "home" | "editor" | "settings";
+export type AppView = "home" | "editor" | "settings" | "library";
 export type ToolMode = "pointer" | "razor";
 export type LayoutPreset = "default" | "media" | "vertical";
 /** 剪映式顶部素材面板主标签（英文标识符，中文文案在 dict）。

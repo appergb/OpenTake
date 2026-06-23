@@ -180,6 +180,30 @@ const zh: Dict = {
   // Common
   "common.cancel": "取消",
   "common.open": "打开",
+
+  // Global asset library (#56)
+  "library.title": "素材库",
+  "library.entry": "素材库",
+  "library.libraries": "库",
+  "library.myCategories": "我的分类",
+  "library.search": "搜索素材…",
+  "library.sortBy": "排序方式",
+  "library.sort.recent": "最近收藏",
+  "library.sort.oldest": "最早收藏",
+  "library.sort.type": "按类型",
+  "library.cat.all": "全部",
+  "library.cat.video": "视频",
+  "library.cat.audio": "音频",
+  "library.cat.sound": "音效",
+  "library.cat.image": "图片",
+  "library.cat.effect": "特效",
+  "library.import": "导入当前项目",
+  "library.categorize": "设置分类",
+  "library.categorizePrompt": "输入分类名(留空表示取消分类):",
+  "library.unfavorite": "取消收藏",
+  "library.loading": "加载中…",
+  "library.empty": "还没有收藏的素材。在媒体面板里星标素材即可加入全局库。",
+  "library.noMatch": "没有匹配的素材。",
 };
 
 const en: Dict = {
@@ -332,6 +356,30 @@ const en: Dict = {
 
   "common.cancel": "Cancel",
   "common.open": "Open",
+
+  // Global asset library (#56)
+  "library.title": "Library",
+  "library.entry": "Library",
+  "library.libraries": "Libraries",
+  "library.myCategories": "My Categories",
+  "library.search": "Search assets…",
+  "library.sortBy": "Sort by",
+  "library.sort.recent": "Recently added",
+  "library.sort.oldest": "Oldest first",
+  "library.sort.type": "By type",
+  "library.cat.all": "All",
+  "library.cat.video": "Video",
+  "library.cat.audio": "Audio",
+  "library.cat.sound": "Sound FX",
+  "library.cat.image": "Image",
+  "library.cat.effect": "Effects",
+  "library.import": "Import to project",
+  "library.categorize": "Set category",
+  "library.categorizePrompt": "Category name (leave empty to clear):",
+  "library.unfavorite": "Remove from library",
+  "library.loading": "Loading…",
+  "library.empty": "No favorited assets yet. Star assets in the media panel to add them here.",
+  "library.noMatch": "No matching assets.",
 };
 
 export const DICTS: Record<Locale, Dict> = {

@@ -8,7 +8,7 @@
  */
 
 import { useState } from "react";
-import { Plus, FolderOpen, Settings as SettingsIcon, Film, Trash2 } from "lucide-react";
+import { Plus, FolderOpen, Settings as SettingsIcon, Film, Trash2, Library } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { useT } from "../../i18n";
 import { useEditorUiStore } from "../../store/uiStore";
@@ -134,6 +134,8 @@ function Sidebar() {
           onClick={() => void handleOpen()}
         />
       </div>
+
+      <SidebarRow icon={Library} label={t("library.entry")} onClick={() => setView("library")} />
 
       <div style={{ flex: 1 }} />
 
