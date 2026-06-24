@@ -1,10 +1,11 @@
 /**
  * ClipContextMenu (SPEC §5.8). Right-click menu for timeline clips. MVP items:
  * Split at Playhead / Delete / Link or Unlink. Copy/Cut/Paste will be added
- * once the clipboard PR (#94) lands. Closes on outside click or item action.
+ * once the clipboard PR (#94) lands. Appears AT the cursor (`x`/`y`, flipped to
+ * stay inside the viewport) and closes on outside click, Escape, or item action.
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import * as edit from "../../store/editActions";
@@ -12,9 +13,13 @@ import { useT } from "../../i18n";
 
 export function ClipContextMenu({
   clipId,
+  x,
+  y,
   onClose,
 }: {
   clipId: string;
+  x: number;
+  y: number;
   onClose: () => void;
 }) {
   const t = useT();
@@ -22,9 +27,26 @@ export function ClipContextMenu({
   const selectedClipIds = useEditorUiStore((s) => s.selectedClipIds);
   const selectClips = useEditorUiStore((s) => s.selectClips);
   const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ left: x, top: y });
 
-  // Close on outside click or Escape.
+  // Locate the clip to read linkGroupId.
+  let clip: { linkGroupId?: string } | null = null;
+  for (const track of timeline.tracks) {
+    const found = track.clips.find((c) => c.id === clipId);
+    if (found) {
+      clip = found;
+      break;
+    }
+  }
+  const clipMissing = !clip;
+
+  // Close on outside click / Escape, and close (via effect, NOT during render) if
+  // the target clip was removed out from under the menu.
   useEffect(() => {
+    if (clipMissing) {
+      onClose();
+      return;
+    }
     const onDown = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
     };
@@ -37,21 +59,23 @@ export function ClipContextMenu({
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [onClose]);
+  }, [onClose, clipMissing]);
 
-  // Locate the clip to read linkGroupId.
-  let clip: { linkGroupId?: string } | null = null;
-  for (const track of timeline.tracks) {
-    const found = track.clips.find((c) => c.id === clipId);
-    if (found) {
-      clip = found;
-      break;
-    }
-  }
-  if (!clip) {
-    onClose();
-    return null;
-  }
+  // Place the menu at the cursor, flipping left/up when it would overflow the
+  // viewport so it's never clipped off-screen.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const { width, height } = el.getBoundingClientRect();
+    const margin = 8;
+    let left = x;
+    let top = y;
+    if (left + width + margin > window.innerWidth) left = Math.max(margin, x - width);
+    if (top + height + margin > window.innerHeight) top = Math.max(margin, y - height);
+    setPos({ left, top });
+  }, [x, y, clipMissing]);
+
+  if (clipMissing) return null;
 
   // The menu acts on the current selection; if the right-clicked clip isn't
   // selected, select just it (mirrors typical NLE behavior).
@@ -79,7 +103,7 @@ export function ClipContextMenu({
   ];
 
   // Link/Unlink: operate on the full selection (>= 2 clips to link).
-  if (clip.linkGroupId) {
+  if (clip!.linkGroupId) {
     items.push({
       label: t("contextMenu.unlink"),
       action: () => {
@@ -104,6 +128,8 @@ export function ClipContextMenu({
       ref={ref}
       style={{
         position: "fixed",
+        left: pos.left,
+        top: pos.top,
         zIndex: 1000,
         minWidth: 160,
         padding: "4px 0",

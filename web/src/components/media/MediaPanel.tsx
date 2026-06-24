@@ -139,7 +139,8 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
             </button>
           )}
           <button
-            title={t("media.generate")}
+            title={t("media.generateSoon")}
+            onClick={() => useEditorUiStore.getState().pushToast(t("media.generateSoon"))}
             style={{
               display: "inline-flex",
               alignItems: "center",
@@ -151,6 +152,7 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
               color: "#111",
               fontSize: "var(--fs-sm)",
               fontWeight: "var(--fw-medium)",
+              cursor: "pointer",
             }}
           >
             <Icon icon={Sparkles} size={12} />

@@ -28,17 +28,12 @@ import { TimelinePlayback } from "./TimelinePlaybackLayer";
 import { useT } from "../../i18n";
 import type { MediaItem } from "../../lib/types";
 
-/** A value that only updates after it has been stable for `ms` (trailing
- *  debounce). Used to defer the expensive timeline composite until the playhead
- *  stops moving, so scrubbing doesn't spawn a per-frame ffmpeg/GPU storm. */
-function useDebounced<T>(value: T, ms: number): T {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const id = window.setTimeout(() => setDebounced(value), ms);
-    return () => window.clearTimeout(id);
-  }, [value, ms]);
-  return debounced;
-}
+/** Minimum gap between timeline-composite requests while scrubbing (≈12 fps).
+ *  A RATE gate (in useTimelineFrame) rather than a trailing debounce: the playhead
+ *  frame is fed live and the compositor coalesces to the latest, so dragging shows
+ *  frames immediately instead of waiting until you stop — while still bounding the
+ *  ffmpeg/wgpu/PNG churn that a per-frame storm would cause. */
+const SCRUB_MIN_INTERVAL_MS = 80;
 
 export function Preview() {
   const t = useT();
@@ -87,21 +82,19 @@ export function Preview() {
   // GPU composite is fetched only when PAUSED/scrubbing (accurate text/effects,
   // and no per-frame ffmpeg/PNG churn while playing).
   const timelineHasContent = !previewing && timeline.tracks.length > 0;
-  // Debounce the composited frame: each composite is a separate ffmpeg decode +
-  // wgpu pass + PNG + base64, so firing one per scrubbed frame spawns a storm of
-  // subprocess + GPU work that can lock up the whole machine (reported freeze).
-  // The playhead still moves instantly; the composite is fetched only once the
-  // playhead has settled for ~140ms (i.e. you stop scrubbing). See the perf
-  // issue for the proper fix (a streaming playback/scrub engine).
-  const composeFrame = useDebounced(
-    Math.min(Math.round(activeFrame), Math.max(0, timelineTotal - 1)),
-    140,
-  );
+  // Feed the LIVE playhead frame to the compositor, rate-gated (not trailing-
+  // debounced): each composite is a separate ffmpeg decode + wgpu pass + PNG +
+  // base64, so firing one per scrubbed frame would storm the machine. The rate
+  // gate in useTimelineFrame caps requests to ≈12 fps and coalesces to the latest
+  // frame, so dragging the playhead updates the picture immediately (no "wait
+  // until you stop" lag) while staying bounded. Clamped to the last DRAWABLE frame
+  // (total-1; clips are half-open [start,end)) so parking at the end isn't black.
+  const composeFrame = Math.min(Math.round(activeFrame), Math.max(0, timelineTotal - 1));
   const timelineFrameUrl = useTimelineFrame(
     composeFrame,
     !previewing && timeline.tracks.length > 0 && !isPlaying,
     timeline,
-    0,
+    SCRUB_MIN_INTERVAL_MS,
   );
   const fps = timeline.fps;
   const total = previewing

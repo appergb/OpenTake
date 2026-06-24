@@ -11,6 +11,10 @@ import { trackColor, clipLabel, isLinked } from "../../lib/clip";
 import type { ClipRect } from "../../lib/geometry";
 import type { Clip } from "../../lib/types";
 
+/** Selection outline colour: a vivid blue that stays obvious on any clip body
+ *  (the previous near-white border read as grey and was easy to miss). */
+const SELECTION_BLUE = "rgba(56,139,253,1)";
+
 interface DrawOpts {
   isSelected: boolean;
   fps: number;
@@ -163,11 +167,13 @@ export function drawClip(
   ctx.fillRect(x, y, CLIP.stripWidth, height);
   ctx.restore();
 
-  // 5. Border (ClipRenderer:121-132).
+  // 5. Border (ClipRenderer:121-132). Selected clips get a clear blue 2px outline
+  //    (the old white border read as grey on the clip body and was easy to miss);
+  //    blue is the unambiguous "this is selected" cue.
   roundRectPath(ctx, x, y, width, height, r);
   if (opts.isSelected) {
-    ctx.strokeStyle = "rgba(255,255,255,0.9)";
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = SELECTION_BLUE;
+    ctx.lineWidth = 2;
   } else {
     ctx.strokeStyle = BORDER.primary;
     ctx.lineWidth = 0.5;

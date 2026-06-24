@@ -27,6 +27,7 @@ import { Playhead } from "./Playhead";
 import { SnapIndicator } from "./SnapIndicator";
 import { hitTestClip, expandLinkGroup, clipsInRect, audioVolumeKfHit, type ClipHit } from "./hitTest";
 import { ClipContextMenu } from "./ClipContextMenu";
+import { MEDIA_DND_TYPE } from "../media/MediaPanel";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
@@ -108,7 +109,7 @@ export function TimelineContainer() {
   const snapStateRef = useRef<{ frame: number; probeOffset: number } | null>(null);
   const [snapFrame, setSnapFrame] = useState<number | null>(null);
   const [dragTick, forceTick] = useState(0);
-  const [menu, setMenu] = useState<{ clipId: string } | null>(null);
+  const [menu, setMenu] = useState<{ clipId: string; x: number; y: number } | null>(null);
   const t = useT();
   // Waveform sample cache (media id → buckets), loaded on demand from Rust.
   const waveformsRef = useRef<Map<string, number[]>>(new Map());
@@ -803,15 +804,42 @@ export function TimelineContainer() {
       if (!selectedClipIds.has(hit.clip.id)) {
         selectClips(new Set([hit.clip.id]));
       }
-      setMenu({ clipId: hit.clip.id });
+      setMenu({ clipId: hit.clip.id, x: e.clientX, y: e.clientY });
     },
     [toDoc, timeline, zoomScale, trackHeights, selectedClipIds, selectClips],
+  );
+
+  // Media dropped from the panel lands AT the cursor: its start frame = the drop
+  // X, on the track under the drop Y. `addMediaToTimelineAt` skips tracks where it
+  // would overlap an existing clip (and makes a new track if none is free), so a
+  // drop onto an occupied audio lane opens a second lane instead of overwriting.
+  const onMediaDragOver = useCallback((e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes(MEDIA_DND_TYPE)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  }, []);
+
+  const onMediaDrop = useCallback(
+    (e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes(MEDIA_DND_TYPE)) return;
+      e.preventDefault();
+      const id = e.dataTransfer.getData(MEDIA_DND_TYPE);
+      const item = useMediaStore.getState().items.find((m) => m.id === id);
+      if (!item) return;
+      const { docX, docY } = toDoc(e);
+      const startFrame = Math.max(0, Math.round(frameAt(docX, zoomScale)));
+      const preferredTrackIndex = trackAt(timeline, docY, trackHeights);
+      void edit.addMediaToTimelineAt(item, startFrame, preferredTrackIndex);
+    },
+    [toDoc, zoomScale, timeline, trackHeights],
   );
 
   return (
     <div
       ref={viewportRef}
       style={{ position: "relative", width: "100%", height: "100%", overflow: "hidden" }}
+      onDragOver={onMediaDragOver}
+      onDrop={onMediaDrop}
     >
       {/* Content canvas (clips + backgrounds), positioned right of header column. */}
       <canvas
@@ -866,7 +894,14 @@ export function TimelineContainer() {
       )}
 
       {/* Clip right-click context menu. */}
-      {menu && <ClipContextMenu clipId={menu.clipId} onClose={() => setMenu(null)} />}
+      {menu && (
+        <ClipContextMenu
+          clipId={menu.clipId}
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+        />
+      )}
 
       {/* Horizontal scrollbar proxy (thin) — drag handled via wheel; kept minimal. */}
     </div>

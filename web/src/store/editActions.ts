@@ -265,23 +265,41 @@ export async function trimEndToPlayhead() {
   await trimClips(trimToPlayheadEdits(clipsUnderPlayhead(), frame, "right"));
 }
 
+/** The subset of `selected` that still exists as a clip in the current timeline.
+ *  A stale id (a clip already removed/replaced/split by a prior edit, left behind
+ *  in the selection set) makes the core's RemoveClips/RippleDelete reject the
+ *  WHOLE batch — so one orphan silently blocks deletion of everything. Filtering
+ *  to live ids first is what makes ⌫ reliably delete. */
+function liveSelectedClipIds(): string[] {
+  const live = new Set<string>();
+  for (const track of useProjectStore.getState().timeline.tracks) {
+    for (const clip of track.clips) live.add(clip.id);
+  }
+  return [...useEditorUiStore.getState().selectedClipIds].filter((id) => live.has(id));
+}
+
 /** Delete selected clips (⌫ / menu). */
 export async function deleteSelectedClips() {
   const ui = useEditorUiStore.getState();
-  const ids = [...ui.selectedClipIds];
+  const ids = liveSelectedClipIds();
   if (ids.length > 0) {
     await removeClips(ids);
-    ui.clearSelection();
+    // Tauri normally refreshes via the timeline_changed event; force it too so a
+    // missed/raced event can't leave the just-deleted clip painted on screen.
+    if (isTauri) await forceRefresh();
   }
+  ui.clearSelection();
 }
 
 /** Ripple-delete selected clips (⇧⌫): remove and close the gaps, shifting
  *  sync-locked followers (the core refuses if a follower would collide). */
 export async function rippleDeleteSelectedClips() {
   const ui = useEditorUiStore.getState();
-  const ids = [...ui.selectedClipIds];
-  if (ids.length === 0) return;
-  await applyAndRefresh({ type: "rippleDeleteClips", clipIds: ids });
+  const ids = liveSelectedClipIds();
+  if (ids.length > 0) {
+    await applyAndRefresh({ type: "rippleDeleteClips", clipIds: ids });
+    if (isTauri) await forceRefresh();
+  }
   ui.clearSelection();
 }
 
@@ -310,12 +328,45 @@ function firstCompatibleTrackIndex(timeline: Timeline, type: MediaItem["type"]):
   return null;
 }
 
+function trackIsCompatible(timeline: Timeline, trackIndex: number, type: MediaItem["type"]): boolean {
+  const track = timeline.tracks[trackIndex];
+  if (!track) return false;
+  const wantAudio = type === "audio";
+  const trackIsAudio = track.type === "audio";
+  return wantAudio ? trackIsAudio : !trackIsAudio && isVisual(track.type);
+}
+
 /** Append position on a track: just past its last clip (clamped to >= 0). */
 function appendStartFrame(timeline: Timeline, trackIndex: number): number {
   return timeline.tracks[trackIndex].clips.reduce(
     (max, c) => Math.max(max, c.startFrame + c.durationFrames),
     0,
   );
+}
+
+function trackOverlaps(timeline: Timeline, trackIndex: number, startFrame: number, durationFrames: number): boolean {
+  const endFrame = startFrame + durationFrames;
+  return timeline.tracks[trackIndex].clips.some((c) => c.startFrame < endFrame && c.startFrame + c.durationFrames > startFrame);
+}
+
+function firstOpenCompatibleTrackIndex(
+  timeline: Timeline,
+  type: MediaItem["type"],
+  startFrame: number,
+  durationFrames: number,
+  preferredTrackIndex: number | null,
+): number | null {
+  const candidates: number[] = [];
+  if (preferredTrackIndex !== null && trackIsCompatible(timeline, preferredTrackIndex, type)) {
+    candidates.push(preferredTrackIndex);
+  }
+  for (let i = 0; i < timeline.tracks.length; i++) {
+    if (i !== preferredTrackIndex && trackIsCompatible(timeline, i, type)) candidates.push(i);
+  }
+  for (const trackIndex of candidates) {
+    if (!trackOverlaps(timeline, trackIndex, startFrame, durationFrames)) return trackIndex;
+  }
+  return null;
 }
 
 /** Build the clip entry for a media item dropped on the timeline, or null when
@@ -337,10 +388,45 @@ function entryForMedia(timeline: Timeline, item: MediaItem): ClipEntryReq | null
   };
 }
 
+function entryForMediaAt(
+  timeline: Timeline,
+  item: MediaItem,
+  startFrame: number,
+  preferredTrackIndex: number | null,
+): ClipEntryReq | null {
+  const seconds = item.duration > 0 ? item.duration : DEFAULT_IMAGE_SECONDS;
+  const durationFrames = Math.max(1, Math.round(seconds * timeline.fps));
+  const trackIndex = firstOpenCompatibleTrackIndex(
+    timeline,
+    item.type,
+    startFrame,
+    durationFrames,
+    preferredTrackIndex,
+  );
+  if (trackIndex === null) return null;
+  return {
+    mediaRef: item.id,
+    mediaType: item.type,
+    sourceClipType: item.type,
+    trackIndex,
+    startFrame: Math.max(0, startFrame),
+    durationFrames,
+    hasAudio: item.hasAudio,
+    addLinkedAudio: item.type === "video" && item.hasAudio,
+  };
+}
+
 /** Serialized tail for media -> timeline adds. Both call sites fire-and-forget
  *  (`void addMediaToTimeline(...)`), so this chains adds to keep them from
  *  racing on the shared mirror. See [`addMediaToTimeline`]. */
 let mediaAddQueue: Promise<void> = Promise.resolve();
+
+function enqueueMediaAdd(run: () => Promise<void>): Promise<void> {
+  const result = mediaAddQueue.then(run, run);
+  // Keep the queue alive even if an individual add rejects.
+  mediaAddQueue = result.catch(() => {});
+  return result;
+}
 
 /** Add a media-library item to the timeline (drag-drop / double-click from the
  *  media panel). Resolves the target track and append position from the current
@@ -353,11 +439,15 @@ let mediaAddQueue: Promise<void> = Promise.resolve();
  *  compute `startFrame` 0 again, and have the core's overwrite-on-place drop the
  *  first clip. The queue makes each add observe the previous one's result. */
 export function addMediaToTimeline(item: MediaItem): Promise<void> {
-  const run = () => addMediaToTimelineInner(item);
-  const result = mediaAddQueue.then(run, run);
-  // Keep the queue alive even if an individual add rejects.
-  mediaAddQueue = result.catch(() => {});
-  return result;
+  return enqueueMediaAdd(() => addMediaToTimelineInner(item));
+}
+
+export function addMediaToTimelineAt(
+  item: MediaItem,
+  startFrame: number,
+  preferredTrackIndex: number | null,
+): Promise<void> {
+  return enqueueMediaAdd(() => addMediaToTimelineAtInner(item, startFrame, preferredTrackIndex));
 }
 
 async function addMediaToTimelineInner(item: MediaItem): Promise<void> {
@@ -376,6 +466,27 @@ async function addMediaToTimelineInner(item: MediaItem): Promise<void> {
   // not have fired yet; refresh now so the next queued add computes its append
   // position from a mirror that already includes this clip. (Browser mode
   // already refreshed inside `applyAndRefresh` — guard to avoid a double fetch.)
+  if (isTauri) await forceRefresh();
+}
+
+async function addMediaToTimelineAtInner(
+  item: MediaItem,
+  startFrame: number,
+  preferredTrackIndex: number | null,
+): Promise<void> {
+  let timeline = useProjectStore.getState().timeline;
+  let entry = entryForMediaAt(timeline, item, Math.max(0, startFrame), preferredTrackIndex);
+  if (!entry) {
+    await insertTrack(item.type === "audio" ? "audio" : "video");
+    await forceRefresh();
+    timeline = useProjectStore.getState().timeline;
+    entry = entryForMediaAt(timeline, item, Math.max(0, startFrame), preferredTrackIndex);
+  }
+  if (!entry) return;
+  const res = await addClips([entry]);
+  if (res && res.affectedClipIds.length > 0) {
+    useEditorUiStore.getState().selectClips(new Set(res.affectedClipIds));
+  }
   if (isTauri) await forceRefresh();
 }
 

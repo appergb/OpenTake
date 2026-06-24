@@ -13,9 +13,7 @@ import { PanelShell } from "../ui/PanelShell";
 import { Toolbar } from "../toolbar/Toolbar";
 import { TimelineContainer } from "./TimelineContainer";
 import { MEDIA_DND_TYPE } from "../media/MediaPanel";
-import { useMediaStore } from "../../store/mediaStore";
 import { useEditorUiStore } from "../../store/uiStore";
-import { addMediaToTimeline } from "../../store/editActions";
 import { useT } from "../../i18n";
 
 export function TimelineRegion() {
@@ -39,13 +37,12 @@ export function TimelineRegion() {
     setDragOver(false);
   };
 
+  // The actual positioned placement is handled inside `TimelineContainer` (it owns
+  // the timeline geometry), so here we only clear the drag-over affordance. The
+  // drop event bubbles up to both, so we must NOT add the clip again here.
   const onDrop = (e: React.DragEvent) => {
     if (!hasMediaPayload(e)) return;
-    e.preventDefault();
     setDragOver(false);
-    const id = e.dataTransfer.getData(MEDIA_DND_TYPE);
-    const item = useMediaStore.getState().items.find((m) => m.id === id);
-    if (item) void addMediaToTimeline(item);
   };
 
   return (

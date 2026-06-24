@@ -40,7 +40,9 @@ export async function importFolderViaDialog(): Promise<void> {
     });
     if (typeof selected !== "string") return; // cancelled
     store.setImporting(true);
-    await api.importFolder(selected, false);
+    // recursive=true: import every media file under the chosen directory tree
+    // (nested folders included), not just the top level.
+    await api.importFolder(selected, true);
     await refreshMedia();
   } catch (error: unknown) {
     store.setError(getErrorMessage(error));
