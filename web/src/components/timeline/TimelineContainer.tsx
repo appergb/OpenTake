@@ -611,6 +611,7 @@ export function TimelineContainer() {
         onPointerUp={onPointerUp}
         onPointerCancel={endDrag}
         onLostPointerCapture={endDrag}
+        onContextMenu={onContextMenu}
         style={{
           position: "absolute",
           left: LAYOUT.trackHeaderWidth,
