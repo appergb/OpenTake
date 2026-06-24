@@ -160,6 +160,28 @@ pub enum EditRequest {
         property: KeyframePropertyDto,
         payload: KeyframePayloadDto,
     },
+    StampKeyframe {
+        clip_id: String,
+        property: KeyframePropertyDto,
+        frame: i32,
+    },
+    RemoveKeyframe {
+        clip_id: String,
+        property: KeyframePropertyDto,
+        frame: i32,
+    },
+    MoveKeyframe {
+        clip_id: String,
+        property: KeyframePropertyDto,
+        from_frame: i32,
+        to_frame: i32,
+    },
+    SetKeyframeInterpolation {
+        clip_id: String,
+        property: KeyframePropertyDto,
+        frame: i32,
+        interpolation: Interpolation,
+    },
     RippleDeleteRanges {
         track_index: usize,
         ranges: Vec<FrameRangeDto>,
@@ -250,6 +272,46 @@ impl EditRequest {
                 clip_id,
                 property: property.into(),
                 payload: payload.into_payload()?,
+            },
+            EditRequest::StampKeyframe {
+                clip_id,
+                property,
+                frame,
+            } => EditCommand::StampKeyframe {
+                clip_id,
+                property: property.into(),
+                frame,
+            },
+            EditRequest::RemoveKeyframe {
+                clip_id,
+                property,
+                frame,
+            } => EditCommand::RemoveKeyframe {
+                clip_id,
+                property: property.into(),
+                frame,
+            },
+            EditRequest::MoveKeyframe {
+                clip_id,
+                property,
+                from_frame,
+                to_frame,
+            } => EditCommand::MoveKeyframe {
+                clip_id,
+                property: property.into(),
+                from_frame,
+                to_frame,
+            },
+            EditRequest::SetKeyframeInterpolation {
+                clip_id,
+                property,
+                frame,
+                interpolation,
+            } => EditCommand::SetKeyframeInterpolation {
+                clip_id,
+                property: property.into(),
+                frame,
+                interpolation,
             },
             EditRequest::RippleDeleteRanges {
                 track_index,

@@ -74,6 +74,14 @@ export function TimelineContainer() {
   const t = useT();
   // Waveform sample cache (media id → buckets), loaded on demand from Rust.
   const waveformsRef = useRef<Map<string, number[]>>(new Map());
+  // Refs of media whose waveform fetch is currently in flight — kept separate from
+  // the resolved-cache `waveformsRef` so a failed/empty fetch can be retried on a
+  // later effect run instead of being permanently suppressed by a placeholder (#127).
+  const inFlightRef = useRef<Set<string>>(new Set());
+  // Guards `setWaveformVersion` against firing after unmount (the cache write itself
+  // is mount-independent and must NOT be discarded on re-render — see #127).
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
   const [waveformVersion, setWaveformVersion] = useState(0);
 
   const total = useMemo(() => totalFrames(timeline), [timeline]);
@@ -201,19 +209,27 @@ export function TimelineContainer() {
         if (clip.mediaType === "audio") wanted.add(clip.mediaRef);
       }
     }
-    let cancelled = false;
     for (const ref of wanted) {
-      if (waveformsRef.current.has(ref)) continue;
-      waveformsRef.current.set(ref, []); // mark in-flight so we fetch once
-      void getWaveform(ref).then((samples) => {
-        if (cancelled || !samples || samples.length === 0) return;
-        waveformsRef.current.set(ref, samples);
-        setWaveformVersion((v) => v + 1);
-      });
+      // Skip only if already resolved (cached) or a fetch is in flight. A failed or
+      // empty fetch leaves no placeholder, so a later effect run retries it.
+      if (waveformsRef.current.has(ref) || inFlightRef.current.has(ref)) continue;
+      inFlightRef.current.add(ref);
+      void getWaveform(ref)
+        .then((samples) => {
+          // Write the cache even if `timeline` changed meanwhile — a ref write is
+          // idempotent and mount-independent. Discarding valid results on every edit
+          // was exactly what dropped waveforms intermittently (#127). Only the
+          // repaint bump is guarded against unmount.
+          if (samples && samples.length > 0) {
+            waveformsRef.current.set(ref, samples);
+            if (mountedRef.current) setWaveformVersion((v) => v + 1);
+          }
+        })
+        .finally(() => {
+          // Clear in-flight so a failed/empty ref is retried on the next effect run.
+          inFlightRef.current.delete(ref);
+        });
     }
-    return () => {
-      cancelled = true;
-    };
   }, [timeline]);
 
   // Paint ruler canvas (sticky top).
@@ -472,6 +488,19 @@ export function TimelineContainer() {
     [toDoc, zoomScale, timeline, trackHeights, activeFrame, setCurrentFrame, selectClips],
   );
 
+  // Abandon an in-progress drag WITHOUT committing — fires on pointercancel (a
+  // touch/trackpad gesture, or an HTML5 DnD started over the canvas) and on
+  // lostpointercapture (capture stolen by a reflow, e.g. importing a second media
+  // item triggers insertTrack→refresh→addClips→refresh mid-gesture). Without these
+  // the gesture never reaches pointerup, so dragRef and the pointer capture stay
+  // stuck and the whole timeline becomes undraggable (#126).
+  const endDrag = useCallback((e: React.PointerEvent) => {
+    dragRef.current = null;
+    setSnapFrame(null);
+    const el = e.currentTarget as HTMLElement;
+    if (el.hasPointerCapture?.(e.pointerId)) el.releasePointerCapture(e.pointerId);
+  }, []);
+
   const onPointerUp = useCallback(
     (e: React.PointerEvent) => {
       const d = dragRef.current;
@@ -558,10 +587,13 @@ export function TimelineContainer() {
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onPointerCancel={endDrag}
+        onLostPointerCapture={endDrag}
         style={{
           position: "absolute",
           left: LAYOUT.trackHeaderWidth,
           top: 0,
+          touchAction: "none",
           cursor: toolMode === "razor" ? "crosshair" : "default",
         }}
       />

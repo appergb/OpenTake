@@ -44,7 +44,7 @@ const SEEK_EPSILON_FRAMES = 2;
  *  yet (just mounted/seeked); advance by dt and nudge it rather than snapping. */
 const MASTER_ALIGN_FRAMES = 15;
 
-export function TimelinePlayback({ timeline, fps }: { timeline: Timeline; fps: number }) {
+export function TimelinePlayback({ timeline, fps, playing }: { timeline: Timeline; fps: number; playing: boolean }) {
   // Subscribe to activeFrame so the right clips stay mounted as the playhead moves.
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
   const items = useMediaStore((s) => s.items);
@@ -93,6 +93,13 @@ export function TimelinePlayback({ timeline, fps }: { timeline: Timeline; fps: n
   fpsRef.current = fps;
 
   useEffect(() => {
+    if (!playing) {
+      // Paused: keep elements in DOM but silence the clock and media.
+      mediaClock.release();
+      
+      for (const el of els.current.values()) el.pause();
+      return;
+    }
     mediaClock.claim();
     let raf = 0;
     let lastTs: number | null = null;
@@ -207,7 +214,7 @@ export function TimelinePlayback({ timeline, fps }: { timeline: Timeline; fps: n
       mediaClock.release();
       for (const el of els.current.values()) el.pause();
     };
-  }, []);
+  }, [playing]);
 
   // Aspect-fit via intrinsic media size + max-width/height; the parent stage
   // flex-centers us. No absolute positioning (which would escape an unpositioned
@@ -248,7 +255,7 @@ export function TimelinePlayback({ timeline, fps }: { timeline: Timeline; fps: n
           playsInline
           preload="auto"
           onLoadedData={seekOnLoad(visual.clip)}
-          style={{ ...fill, opacity: clipOpacity(visual.clip) }}
+          style={{ ...fill, opacity: playing ? clipOpacity(visual.clip) : 0 }}
         />
       )}
       {visual && visualUrl && visual.clip.mediaType === "image" && (
@@ -257,7 +264,7 @@ export function TimelinePlayback({ timeline, fps }: { timeline: Timeline; fps: n
           src={visualUrl}
           alt=""
           draggable={false}
-          style={{ ...fill, opacity: clipOpacity(visual.clip) }}
+          style={{ ...fill, opacity: playing ? clipOpacity(visual.clip) : 0 }}
         />
       )}
       {audios.map((a) => {
