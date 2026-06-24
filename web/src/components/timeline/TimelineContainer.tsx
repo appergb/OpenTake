@@ -26,6 +26,7 @@ import { Playhead } from "./Playhead";
 import { SnapIndicator } from "./SnapIndicator";
 import { hitTestClip, expandLinkGroup, clipsInRect, type ClipHit } from "./hitTest";
 import { ClipContextMenu } from "./ClipContextMenu";
+import { SwapMediaPicker } from "./SwapMediaPicker";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
@@ -662,6 +663,9 @@ export function TimelineContainer() {
           onClose={() => setMenu(null)}
         />
       )}
+
+      {/* Swap Media picker modal (SPEC §5.10). */}
+      <SwapMediaPicker />
 
       {/* Horizontal scrollbar proxy (thin) — drag handled via wheel; kept minimal. */}
     </div>

@@ -6,7 +6,7 @@
 
 import { TRACK_COLOR } from "./theme";
 import { formatClipDuration } from "./geometry";
-import type { Clip, ClipType, TrimEditReq } from "./types";
+import type { Clip, ClipType, Timeline, TrimEditReq } from "./types";
 
 export function trackColor(type: ClipType): string {
   return TRACK_COLOR[type] ?? TRACK_COLOR.video;
@@ -29,6 +29,21 @@ export function clipLabel(clip: Clip, fps: number): string {
 
 export function isLinked(clip: Clip): boolean {
   return clip.linkGroupId != null;
+}
+
+/** Whether `clip` is alone in its link group (SPEC §5.10 "单链组" gate for
+ *  Swap Media). True when the clip has no `linkGroupId`, or when no OTHER clip
+ *  in the timeline shares the same `linkGroupId`. A multi-clip link group
+ *  (e.g. linked A/V pair) disables Swap Media to avoid desyncing the partners.
+ *  1:1 with upstream `TimelineView.menu` Swap Media availability condition. */
+export function isSingleLinkGroup(clip: Clip, timeline: Timeline): boolean {
+  if (!clip.linkGroupId) return true;
+  for (const track of timeline.tracks) {
+    for (const c of track.clips) {
+      if (c.id !== clip.id && c.linkGroupId === clip.linkGroupId) return false;
+    }
+  }
+  return true;
 }
 
 /** Which edge a trim drag grabs. */

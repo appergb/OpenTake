@@ -14,6 +14,8 @@ import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import * as edit from "../../store/editActions";
 import { useT } from "../../i18n";
+import { isSingleLinkGroup } from "../../lib/clip";
+import type { Clip } from "../../lib/types";
 
 // Fixed size estimate for viewport-boundary flipping before the menu is
 // measured. Close to the rendered size so the flip decision is correct on the
@@ -35,6 +37,7 @@ export function ClipContextMenu({
   const timeline = useProjectStore((s) => s.timeline);
   const selectedClipIds = useEditorUiStore((s) => s.selectedClipIds);
   const selectClips = useEditorUiStore((s) => s.selectClips);
+  const setPendingSwapClipId = useEditorUiStore((s) => s.setPendingSwapClipId);
   const ref = useRef<HTMLDivElement>(null);
 
   // Compute the final position with viewport-boundary flipping. Start from the
@@ -69,11 +72,12 @@ export function ClipContextMenu({
     };
   }, [onClose]);
 
-  // Locate the clip to read linkGroupId. The parent (TimelineContainer) already
-  // validates the clip exists in onContextMenu before opening the menu, so a
-  // missing clip here is a stale-state edge case — just render nothing. Do NOT
-  // call onClose() during render (React render purity, review #108 item 2).
-  let clip: { linkGroupId?: string } | null = null;
+  // Locate the clip to read linkGroupId + mediaType for menu gating. The parent
+  // (TimelineContainer) already validates the clip exists in onContextMenu before
+  // opening the menu, so a missing clip here is a stale-state edge case — just
+  // render nothing. Do NOT call onClose() during render (React render purity,
+  // review #108 item 2).
+  let clip: Clip | null = null;
   for (const track of timeline.tracks) {
     const found = track.clips.find((c) => c.id === clipId);
     if (found) {
@@ -90,8 +94,9 @@ export function ClipContextMenu({
     if (!isSelected) selectClips(new Set([clipId]));
   };
 
-  const items: Array<{ label: string; action: () => void; danger?: boolean }> = [
+  const items: Array<{ id: string; label: string; action: () => void; danger?: boolean; disabled?: boolean }> = [
     {
+      id: "split",
       label: t("contextMenu.split"),
       action: () => {
         ensureSelected();
@@ -99,6 +104,7 @@ export function ClipContextMenu({
       },
     },
     {
+      id: "delete",
       label: t("contextMenu.delete"),
       action: () => {
         ensureSelected();
@@ -111,6 +117,7 @@ export function ClipContextMenu({
   // Link/Unlink: operate on the full selection (>= 2 clips to link).
   if (clip.linkGroupId) {
     items.push({
+      id: "unlink",
       label: t("contextMenu.unlink"),
       action: () => {
         ensureSelected();
@@ -120,6 +127,7 @@ export function ClipContextMenu({
     });
   } else {
     items.push({
+      id: "link",
       label: t("contextMenu.link"),
       action: () => {
         ensureSelected();
@@ -129,14 +137,26 @@ export function ClipContextMenu({
     });
   }
 
-  // Disabled placeholders (issue #93 acceptance: menu must list Swap Media /
-  // Save as Media / Extract Audio even if stub). Rendered with reduced opacity
-  // and disabled so they're visible but non-interactive.
-  const disabledItems: Array<{ label: string }> = [
-    { label: t("contextMenu.swapMedia") },
-    { label: t("contextMenu.saveAsMedia") },
-    { label: t("contextMenu.extractAudio") },
-  ];
+  // Swap Media: enabled only for non-text clips that are alone in their link
+  // group (SPEC §5.10 "非 text 且单链组"). A multi-clip link group (e.g. linked
+  // A/V pair) is disabled to avoid desyncing partners. On click, opens the
+  // SwapMediaPicker modal (pre-filters candidates by strict type equality).
+  const swapDisabled = clip.mediaType === "text" || !isSingleLinkGroup(clip, timeline);
+
+  // Disabled placeholders for upcoming features (no action on click).
+  items.push(
+    {
+      id: "swapMedia",
+      label: t("contextMenu.swapMedia"),
+      action: () => {
+        ensureSelected();
+        setPendingSwapClipId(clipId);
+      },
+      disabled: swapDisabled,
+    },
+    { id: "saveAsMedia", label: t("contextMenu.saveAsMedia"), action: () => {}, disabled: true },
+    { id: "extractAudio", label: t("contextMenu.extractAudio"), action: () => {}, disabled: true },
+  );
 
   return (
     <div
@@ -155,9 +175,10 @@ export function ClipContextMenu({
         fontSize: "var(--fs-sm)",
       }}
     >
-      {items.map((item, i) => (
+      {items.map((item) => (
         <button
-          key={i}
+          key={item.id}
+          disabled={item.disabled}
           onClick={() => {
             item.action();
             onClose();
@@ -167,40 +188,25 @@ export function ClipContextMenu({
             width: "100%",
             padding: "6px 12px",
             textAlign: "left",
-            color: item.danger ? "var(--accent-danger, #ff6b6b)" : "var(--text-primary)",
+            color: item.danger
+              ? "var(--accent-danger, #ff6b6b)"
+              : item.disabled
+                ? "var(--text-disabled, rgba(255,255,255,0.35))"
+                : "var(--text-primary)",
             background: "transparent",
             border: "none",
-            cursor: "pointer",
+            cursor: item.disabled ? "default" : "pointer",
             fontFamily: "var(--font-sans)",
             fontSize: "var(--fs-sm)",
+            opacity: item.disabled ? 0.5 : 1,
           }}
           onMouseEnter={(e) => {
-            (e.currentTarget as HTMLElement).style.background = "var(--bg-hover, rgba(255,255,255,0.08))";
+            if (!item.disabled) {
+              (e.currentTarget as HTMLElement).style.background = "var(--bg-hover, rgba(255,255,255,0.08))";
+            }
           }}
           onMouseLeave={(e) => {
             (e.currentTarget as HTMLElement).style.background = "transparent";
-          }}
-        >
-          {item.label}
-        </button>
-      ))}
-      {/* Disabled placeholder items (issue #93 acceptance). */}
-      {disabledItems.map((item, i) => (
-        <button
-          key={`d-${i}`}
-          disabled
-          style={{
-            display: "block",
-            width: "100%",
-            padding: "6px 12px",
-            textAlign: "left",
-            color: "var(--text-primary)",
-            background: "transparent",
-            border: "none",
-            cursor: "not-allowed",
-            fontFamily: "var(--font-sans)",
-            fontSize: "var(--fs-sm)",
-            opacity: 0.4,
           }}
         >
           {item.label}

@@ -151,6 +151,15 @@ export async function moveToFolder(assetIds: string[], folderId?: string) {
   await applyAndRefresh({ type: "moveToFolder", assetIds, folderId });
 }
 
+/** Replace a clip's media source in place, preserving all editing attributes
+ *  (trim / speed / keyframes / transform / crop / grade / masks / effects /
+ *  fade). 1:1 with upstream `replaceClipMediaRef(resetTrim: false)`: the backend
+ *  strictly checks `clip.mediaType == asset.kind` (refuses on mismatch), no-ops
+ *  on same mediaRef, and cascades to linked clips sharing the same old media. */
+export async function swapMedia(clipId: string, mediaRef: string) {
+  await applyAndRefresh({ type: "swapMedia", clipId, mediaRef });
+}
+
 export async function undo() {
   await api.undo();
   if (!isTauri) await forceRefresh();

@@ -176,7 +176,8 @@ export type EditRequest =
       syncLocked?: boolean;
     }
   | { type: "createFolder"; name: string; parentFolderId?: string }
-  | { type: "moveToFolder"; assetIds: string[]; folderId?: string };
+  | { type: "moveToFolder"; assetIds: string[]; folderId?: string }
+  | { type: "swapMedia"; clipId: string; mediaRef: string };
 
 export interface TextEntryReq {
   trackIndex: number;
