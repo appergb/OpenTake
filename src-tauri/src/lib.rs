@@ -135,6 +135,7 @@ pub fn run() {
             media::import_media,
             media::relink_media,
             media::get_media,
+            media::extract_audio,
             media::get_waveform,
             render::composite_frame,
             export::export_video,

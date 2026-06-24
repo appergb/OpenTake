@@ -39,6 +39,8 @@ import { formatTimecode } from "../../lib/geometry";
 import { assetUrl } from "../../lib/asset";
 import { useProjectStore } from "../../store/projectStore";
 import { addMediaToTimeline, createFolder, moveToFolder } from "../../store/editActions";
+import { extractAudio } from "../../lib/api";
+import { saveDialog } from "../../lib/dialog";
 import type { MediaFolder, MediaItem } from "../../lib/types";
 import { MediaTabBar, MediaSubTabBar } from "./MediaTabBar";
 import { useFavoritesStore, useIsFavorite } from "./favorites";
@@ -593,11 +595,44 @@ function MediaCard({ item }: { item: MediaItem }) {
   const toggleFavorite = useFavoritesStore((s) => s.toggle);
   // Offline assets shouldn't try to load a (now-missing) thumbnail.
   const thumb = item.missing ? null : assetUrl(item.path);
+  const [hovered, setHovered] = useState(false);
+  const [feedback, setFeedback] = useState<string | null>(null);
 
   const onDragStart = (e: React.DragEvent) => {
     e.dataTransfer.setData(MEDIA_DND_TYPE, item.id);
     e.dataTransfer.effectAllowed = "copy";
   };
+
+  /** Extract the audio track into a standalone file via ffmpeg. Opens a native
+   *  save dialog (m4a/mp3/wav), then calls the `extract_audio` Tauri command.
+   *  Only shown for video assets that carry audio (Issue #39). */
+  const onExtractAudio = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const save = await saveDialog();
+    if (!save) return; // non-Tauri / dialog unavailable
+    const chosen = await save({
+      title: t("media.extractAudio"),
+      defaultPath: `${item.name}.m4a`,
+      filters: [
+        { name: "Audio (M4A)", extensions: ["m4a"] },
+        { name: "Audio (MP3)", extensions: ["mp3"] },
+        { name: "Audio (WAV)", extensions: ["wav"] },
+      ],
+    });
+    if (typeof chosen !== "string") return; // user cancelled
+    setFeedback(null);
+    try {
+      const out = await extractAudio(item.id, chosen);
+      setFeedback(t("media.extractAudioSuccess", { path: out }));
+    } catch (err) {
+      setFeedback(t("media.extractAudioFailed", { error: String(err) }));
+    }
+    setTimeout(() => setFeedback(null), 4000);
+  };
+
+  // Only local, present video assets with an audio track can be extracted.
+  const canExtractAudio = item.type === "video" && item.hasAudio && !item.missing;
 
   return (
     <div
@@ -605,6 +640,8 @@ function MediaCard({ item }: { item: MediaItem }) {
       onDragStart={onDragStart}
       onClick={() => setPreviewMedia(item.id)}
       onDoubleClick={() => void addMediaToTimeline(item)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       title={item.name}
       style={{ display: "flex", flexDirection: "column", gap: 4, cursor: "grab" }}
     >
@@ -737,6 +774,32 @@ function MediaCard({ item }: { item: MediaItem }) {
         >
           <Icon icon={Star} size={12} strokeWidth={2} fill={favorite ? "currentColor" : "none"} />
         </button>
+        {canExtractAudio && hovered && (
+          <button
+            type="button"
+            title={t("media.extractAudioHint")}
+            aria-label={t("media.extractAudio")}
+            onClick={onExtractAudio}
+            className="hover-area"
+            style={{
+              position: "absolute",
+              right: 4,
+              top: 4,
+              zIndex: 3,
+              width: 20,
+              height: 20,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              borderRadius: "var(--radius-xs)",
+              background: "rgba(0,0,0,0.6)",
+              color: "var(--text-secondary)",
+              cursor: "pointer",
+            }}
+          >
+            <Icon icon={FileAudio} size={12} />
+          </button>
+        )}
       </div>
       <span
         style={{
@@ -749,6 +812,19 @@ function MediaCard({ item }: { item: MediaItem }) {
       >
         {item.name}
       </span>
+      {feedback && (
+        <span
+          style={{
+            fontSize: "var(--fs-micro)",
+            color: "var(--text-tertiary)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {feedback}
+        </span>
+      )}
     </div>
   );
 }

@@ -84,6 +84,11 @@ const zh: Dict = {
   "media.folder.dropHere": "拖放到此文件夹",
   "media.folder.rename": "重命名",
   "media.folder.delete": "删除文件夹",
+  "media.extractAudio": "提取音频",
+  "media.extractAudioHint": "提取音频轨到本地文件",
+  "media.extractAudioSuccess": "音频已保存：{path}",
+  "media.extractAudioFailed": "提取失败：{error}",
+  "media.extractAudioNoAudio": "此媒体没有音频轨",
   "media.offline": "媒体离线",
   "media.relink": "重新链接",
 
@@ -376,9 +381,15 @@ const en: Dict = {
   "media.folder.dropHere": "Drop into this folder",
   "media.folder.rename": "Rename",
   "media.folder.delete": "Delete Folder",
+  "media.extractAudio": "Extract Audio",
+  "media.extractAudioHint": "Extract the audio track to a local file",
+  "media.extractAudioSuccess": "Audio saved: {path}",
+  "media.extractAudioFailed": "Extract failed: {error}",
+  "media.extractAudioNoAudio": "No audio track in this media",
   "media.offline": "Media Offline",
   "media.relink": "Relink",
 
+  // Inspector
   "inspector.title": "Inspector",
   "inspector.timeline": "Timeline",
   "inspector.selectedCount": "{count} selected",
