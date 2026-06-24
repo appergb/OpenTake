@@ -23,7 +23,7 @@ PRIMARY-CN/
 | 整体架构 | **Tauri 2**(Rust core + Web 前端) | 与 Rust 核心天然契合;二进制小;一套代码覆盖三桌面平台 |
 | 核心语言 | **Rust** | 领域模型 / 编辑操作 / 工程格式 / 媒体管线 / MCP server |
 | 前端 | **React + TypeScript** | 生态最全,AI/人协作最顺,契合既有 web 规则 |
-| 媒体引擎 | **FFmpeg 绑定**(`ffmpeg-next` 等) | 替代 AVFoundation:解码/合成/导出/缩略图/波形;LGPL/GPL 与本项目 GPL-3.0 兼容 |
+| 媒体引擎 | **FFmpeg 调用层**(`ffmpeg-sidecar`, 调用系统 `ffmpeg`/`ffprobe`) | 替代 AVFoundation:解码/合成/导出/缩略图/波形;LGPL/GPL 与本项目 GPL-3.0 兼容 |
 | 目标平台 | **桌面优先**:macOS / Windows / Linux | 先把跨平台桌面做扎实(已实现"让 mac 用户也能用 + 扩到 Win/Linux") |
 | 生成式 AI | **自建后端 / BYOK** | 上游 genAI 闭源(Convex+Clerk),代码不在仓库,必须新建:轻量代理对接 fal.ai/Replicate/各厂商 API |
 

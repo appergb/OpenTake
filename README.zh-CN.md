@@ -100,11 +100,11 @@ Agent 操作时间线时，每次工具返回附带 `context_signal`：
 
 | 能力 | 技术 |
 |:--|:--|
-| 编解码 | FFmpeg (`ffmpeg-next`) — 成熟 Rust 绑定 |
+| 编解码 | ffmpeg-sidecar（调用系统 ffmpeg/ffprobe） |
 | 帧合成 | wgpu 自写合成器 — 多轨叠加 + 逐帧属性采样 + 仿射/裁剪/混合 |
 | 音频播放 | cpal |
 | 语音转写 | whisper-rs (word/segment 时间戳) |
-| 语义搜索 | candle / ort + SigLIP2 图文双编码器 |
+| 语义搜索 | ort + SigLIP2 + tokenizers |
 
 ### 🌐 BYOK 生成式 AI
 
@@ -251,7 +251,7 @@ cd web && pnpm install && pnpm build
 cd .. && cargo tauri dev
 ```
 
-> ⚠️ **当前状态**: 早期设计阶段。架构设计、路线图、模块移植地图已完成，代码正在落地中。
+> ⚠️ **当前状态**: 核心实现已落地，Rust 工作空间、Tauri 壳、React UI、MCP/Agent 层和核心文档都已就位；路线图现在主要追踪剩余的对齐差距和高风险阻塞点。
 
 ---
 
@@ -259,7 +259,7 @@ cd .. && cargo tauri dev
 
 | 版本 | 日期 | 里程碑 |
 |:--|:--|:--|
-| `0.1.0-dev` | 2026-06 | Phase 0+1: Cargo workspace + Domain models + Edit ops + Tauri scaffold |
+| `0.1.0-dev` | 2026-06 | 进行中的开发快照：工作空间、核心 crate、Tauri 壳、React UI 与 MCP/Agent 层 |
 | *(planned)* `0.2.0` | TBD | Phase 2: Persistence + Media import + Thumbnails + Waveform |
 | *(planned)* `0.3.0` | TBD | Phase 3: Timeline UI + Preview + MCP Server |
 | *(planned)* `0.4.0` | TBD | Phase 4: GPU Compositor (wgpu) + Text rasterization |
