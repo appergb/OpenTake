@@ -3,10 +3,12 @@ import type { Clip, ClipType, Timeline, Track } from "../../lib/types";
 import {
   activeAudioClips,
   activeVisualClip,
+  advancePlayhead,
   clipCoversFrame,
   clipOpacity,
   clipVolume,
   frameForSourceTime,
+  MASTER_ALIGN_FRAMES,
   sourceTimeSec,
   visualAudioIsDuplicated,
 } from "./timelinePlayback";
@@ -156,5 +158,28 @@ describe("visualAudioIsDuplicated", () => {
     const visual = { clip: clip({ id: "v", mediaType: "video", mediaRef: "m1" }), track: track({ id: "v1", type: "video", clips: [] }), trackIndex: 0 };
     const audios = [{ clip: clip({ id: "a", mediaType: "audio", mediaRef: "music" }), track: track({ id: "a1", type: "audio", clips: [] }), trackIndex: 1 }];
     expect(visualAudioIsDuplicated(visual, audios)).toBe(false);
+  });
+});
+
+describe("advancePlayhead", () => {
+  it("advances by dt*fps when there is no master element", () => {
+    // 0.5s elapsed at 30fps -> +15 frames.
+    expect(advancePlayhead({ currentFrame: 100, masterFrame: null, dtSec: 0.5, fps: 30 })).toBeCloseTo(115);
+  });
+
+  it("follows an aligned master exactly (ignores dt)", () => {
+    // Master is within MASTER_ALIGN_FRAMES of the playhead -> snap to it.
+    expect(advancePlayhead({ currentFrame: 100, masterFrame: 105, dtSec: 1, fps: 30 })).toBe(105);
+  });
+
+  it("does not snap to a master that hasn't aligned yet", () => {
+    // Master clock is > MASTER_ALIGN_FRAMES away (just mounted/seeked): advance by
+    // dt instead of jumping the playhead to the stale element time.
+    const masterFrame = 100 + MASTER_ALIGN_FRAMES + 50;
+    expect(advancePlayhead({ currentFrame: 100, masterFrame, dtSec: 0.5, fps: 30 })).toBeCloseTo(115);
+  });
+
+  it("falls back to 30fps when fps is non-positive", () => {
+    expect(advancePlayhead({ currentFrame: 0, masterFrame: null, dtSec: 1, fps: 0 })).toBeCloseTo(30);
   });
 });

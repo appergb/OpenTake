@@ -5,7 +5,7 @@ import { HomeView } from "./components/home/HomeView";
 import { SettingsView } from "./components/settings/SettingsView";
 import { LibraryView } from "./components/media/LibraryView";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
-import { usePlaybackTicker } from "./hooks/usePlaybackTicker";
+import { useTimelinePlaybackEngine } from "./components/preview/previewEngine";
 import { useAutosave } from "./hooks/useAutosave";
 import { startSync } from "./store/sync";
 import { startMediaSync } from "./store/mediaStore";
@@ -20,7 +20,7 @@ export default function App() {
   // shown (no selection / no focus). Keeping them unconditional preserves hook
   // order across navigation.
   useKeyboardShortcuts();
-  usePlaybackTicker();
+  useTimelinePlaybackEngine();
   useAutosave();
 
   const view = useEditorUiStore((s) => s.view);

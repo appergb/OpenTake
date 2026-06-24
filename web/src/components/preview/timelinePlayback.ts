@@ -117,3 +117,30 @@ export function visualAudioIsDuplicated(
   if (!visual || visual.clip.mediaType !== "video") return false;
   return audios.some((a) => a.clip.mediaRef === visual.clip.mediaRef);
 }
+
+/** A just-mounted/seeked master element whose clock is this far (frames) from the
+ *  playhead isn't aligned yet (e.g. starting playback mid-timeline); advance by
+ *  dt and nudge it into place rather than snapping the playhead to it. */
+export const MASTER_ALIGN_FRAMES = 15;
+
+/**
+ * Next playhead frame for one engine tick (pure; the seam upstream calls the
+ * periodic time observer, VideoEngine.swift). With a master element whose clock
+ * (`masterFrame` = {@link frameForSourceTime}) is aligned, the playhead follows
+ * it exactly; otherwise (no master, or a master not yet aligned) it advances by
+ * elapsed wall-clock `dtSec * fps`. The result is pre-clamp — the caller clamps
+ * to the last drawable frame and stops at the end.
+ */
+export function advancePlayhead(args: {
+  currentFrame: number;
+  masterFrame: number | null;
+  dtSec: number;
+  fps: number;
+}): number {
+  const { currentFrame, masterFrame, dtSec } = args;
+  const safeFps = args.fps > 0 ? args.fps : 30;
+  if (masterFrame === null || Math.abs(masterFrame - currentFrame) > MASTER_ALIGN_FRAMES) {
+    return currentFrame + dtSec * safeFps;
+  }
+  return masterFrame;
+}

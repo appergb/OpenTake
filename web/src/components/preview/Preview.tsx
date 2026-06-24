@@ -28,24 +28,15 @@ import { TimelinePlayback } from "./TimelinePlaybackLayer";
 import { useT } from "../../i18n";
 import type { MediaItem } from "../../lib/types";
 
-/** A value that only updates after it has been stable for `ms` (trailing
- *  debounce). Used to defer the expensive timeline composite until the playhead
- *  stops moving, so scrubbing doesn't spawn a per-frame ffmpeg/GPU storm. */
-function useDebounced<T>(value: T, ms: number): T {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const id = window.setTimeout(() => setDebounced(value), ms);
-    return () => window.clearTimeout(id);
-  }, [value, ms]);
-  return debounced;
-}
-
 export function Preview() {
   const t = useT();
   const timeline = useProjectStore((s) => s.timeline);
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
+  const currentFrame = useEditorUiStore((s) => s.currentFrame);
   const setCurrentFrame = useEditorUiStore((s) => s.setCurrentFrame);
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
+  const isScrubbing = useEditorUiStore((s) => s.isScrubbing);
+  const setScrubbing = useEditorUiStore((s) => s.setScrubbing);
   const togglePlayTimeline = useEditorUiStore((s) => s.togglePlay);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
   const previewItem = useMediaStore((s) =>
@@ -75,34 +66,17 @@ export function Preview() {
   }, [mediaToggleCount]);
 
   const previewing = previewItem !== null;
-  // Timeline composite preview (#47): on the Timeline tab, paint the GPU-
-  // composited frame for the current playhead (replacing the black placeholder).
-  // `timeline` identity changes on every `timeline_changed`, forcing a refetch.
-  // The frame is clamped to the last DRAWABLE frame (total-1; clips are half-open
-  // [start,end)) so parking at the very end doesn't composite to black. During
-  // playback the request rate is capped (~11fps) to bound ffmpeg/PNG churn until
-  // the streaming engine (#53) lands; paused/scrub stays immediate.
   const timelineTotal = totalFrames(timeline);
-  // During playback `<TimelinePlayback>` plays the real media elements, so the
-  // GPU composite is fetched only when PAUSED/scrubbing (accurate text/effects,
-  // and no per-frame ffmpeg/PNG churn while playing).
   const timelineHasContent = !previewing && timeline.tracks.length > 0;
-  // Debounce the composited frame: each composite is a separate ffmpeg decode +
-  // wgpu pass + PNG + base64, so firing one per scrubbed frame spawns a storm of
-  // subprocess + GPU work that can lock up the whole machine (reported freeze).
-  // The playhead still moves instantly; the composite is fetched only once the
-  // playhead has settled for ~140ms (i.e. you stop scrubbing). See the perf
-  // issue for the proper fix (a streaming playback/scrub engine).
-  const composeFrame = useDebounced(
-    Math.min(Math.round(activeFrame), Math.max(0, timelineTotal - 1)),
-    140,
-  );
-  const timelineFrameUrl = useTimelineFrame(
-    composeFrame,
-    !previewing && timeline.tracks.length > 0 && !isPlaying,
-    timeline,
-    0,
-  );
+  // Surface selection (issue #142), mirroring upstream's exact / interactiveScrub
+  // seek modes: while PLAYING or SCRUBBING the live <video> stack
+  // (<TimelinePlayback>) shows the frame; only when SETTLED do we fetch the
+  // high-fidelity Rust GPU composite — once, at the committed frame, with no
+  // per-frame ffmpeg/PNG churn. Clamped to the last DRAWABLE frame (total-1;
+  // clips are half-open [start,end)) so parking at the end isn't black.
+  const live = isPlaying || isScrubbing;
+  const composeFrame = Math.min(Math.round(currentFrame), Math.max(0, timelineTotal - 1));
+  const timelineFrameUrl = useTimelineFrame(composeFrame, timelineHasContent && !live, timeline);
   const fps = timeline.fps;
   const total = previewing
     ? Math.max(0, Math.round(mediaDuration * fps))
@@ -162,7 +136,7 @@ export function Preview() {
              it stays mounted even when paused so audio/video elements
              survive the pause→play transition (upstream VideoEngine model). */}
         {!previewItem && timelineHasContent && (
-          <TimelinePlayback timeline={timeline} fps={fps} playing={isPlaying} />
+          <TimelinePlayback timeline={timeline} fps={fps} />
         )}
         {previewItem ? (
           <MediaPreview
@@ -172,7 +146,7 @@ export function Preview() {
             onDuration={setMediaDuration}
             onPlayingChange={setMediaPlaying}
           />
-        ) : isPlaying ? null : timelineFrameUrl ? (
+        ) : live ? null : timelineFrameUrl ? (
           // Rust GPU composite of the timeline at the current playhead (#47).
           <img
             src={timelineFrameUrl}
@@ -212,7 +186,12 @@ export function Preview() {
       {/* The app's scrub + transport are the single control surface — they drive
           both the timeline composite and (via mediaRef) single-media preview, so
           the <video>/<audio> renders without its native controls. */}
-      <ScrubBar frame={activeShownFrame} total={total} onSeek={seekTo} />
+      <ScrubBar
+        frame={activeShownFrame}
+        total={total}
+        onSeek={seekTo}
+        onScrubbingChange={previewing ? undefined : setScrubbing}
+      />
 
       {/* Transport bar */}
       <div
@@ -369,7 +348,19 @@ function PreviewTabs({ item }: { item: MediaItem | null }) {
   );
 }
 
-function ScrubBar({ frame, total, onSeek }: { frame: number; total: number; onSeek: (f: number) => void }) {
+function ScrubBar({
+  frame,
+  total,
+  onSeek,
+  onScrubbingChange,
+}: {
+  frame: number;
+  total: number;
+  onSeek: (f: number) => void;
+  /** Toggled while the user drags the bar, so the engine drives the live
+   *  <video> scrub (issue #142) and the GPU composite stays settled-only. */
+  onScrubbingChange?: (scrubbing: boolean) => void;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState(false);
   const progress = total > 0 ? frame / total : 0;
@@ -389,11 +380,14 @@ function ScrubBar({ frame, total, onSeek }: { frame: number; total: number; onSe
       onMouseLeave={() => setHover(false)}
       onPointerDown={(e) => {
         (e.target as HTMLElement).setPointerCapture(e.pointerId);
+        onScrubbingChange?.(true);
         seekFromEvent(e.clientX);
       }}
       onPointerMove={(e) => {
         if (e.buttons === 1) seekFromEvent(e.clientX);
       }}
+      onPointerUp={() => onScrubbingChange?.(false)}
+      onLostPointerCapture={() => onScrubbingChange?.(false)}
       style={{
         height: 18,
         flex: "0 0 auto",

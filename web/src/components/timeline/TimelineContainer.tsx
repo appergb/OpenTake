@@ -51,6 +51,7 @@ export function TimelineContainer() {
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
   const setCurrentFrame = useEditorUiStore((s) => s.setCurrentFrame);
+  const setScrubbing = useEditorUiStore((s) => s.setScrubbing);
   const selectedClipIds = useEditorUiStore((s) => s.selectedClipIds);
   const selectClips = useEditorUiStore((s) => s.selectClips);
   const clearSelection = useEditorUiStore((s) => s.clearSelection);
@@ -328,9 +329,11 @@ export function TimelineContainer() {
       const { docX, docY, inRuler } = toDoc(e);
       (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
 
-      // Ruler -> scrub playhead.
+      // Ruler -> scrub playhead. Scrubbing routes the preview through the live
+      // <video> surface (issue #142) instead of the settled GPU composite.
       if (inRuler) {
         dragRef.current = { kind: "scrub" };
+        setScrubbing(true);
         const f = frameAt(docX, zoomScale);
         setCurrentFrame(f);
         return;
@@ -413,7 +416,7 @@ export function TimelineContainer() {
         curDocY: docY,
       };
     },
-    [toDoc, timeline, zoomScale, trackHeights, toolMode, selectedClipIds, selectClips, clearSelection, setCurrentFrame],
+    [toDoc, timeline, zoomScale, trackHeights, toolMode, selectedClipIds, selectClips, clearSelection, setCurrentFrame, setScrubbing],
   );
 
   const onPointerMove = useCallback(
@@ -497,9 +500,10 @@ export function TimelineContainer() {
   const endDrag = useCallback((e: React.PointerEvent) => {
     dragRef.current = null;
     setSnapFrame(null);
+    setScrubbing(false);
     const el = e.currentTarget as HTMLElement;
     if (el.hasPointerCapture?.(e.pointerId)) el.releasePointerCapture(e.pointerId);
-  }, []);
+  }, [setScrubbing]);
 
   const onPointerUp = useCallback(
     (e: React.PointerEvent) => {
@@ -508,6 +512,13 @@ export function TimelineContainer() {
       setSnapFrame(null);
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
       if (!d) return;
+
+      // Scrub end: commit the playhead and drop back to the settled GPU
+      // composite (issue #142). The moves already set currentFrame.
+      if (d.kind === "scrub") {
+        setScrubbing(false);
+        return;
+      }
 
       if (d.kind === "move") {
         if (d.deltaFrames === 0 && d.targetTrack === d.startTrack) return; // no-op
@@ -570,7 +581,7 @@ export function TimelineContainer() {
         void edit.trimClips(edits);
       }
     },
-    [timeline],
+    [timeline, setScrubbing],
   );
 
   // Ghost preview offsets for the active drag (read from dragRef during render).
