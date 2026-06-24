@@ -151,6 +151,7 @@ export function Preview() {
           flex: 1,
           minHeight: 0,
           background: "var(--bg-surface)",
+          position: "relative",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",

@@ -9,11 +9,11 @@
 //! Scope of this first cut (SPEC §2.4 / §8.2):
 //! - **H.264 / .mp4** only. The encoder already supports H.265 / ProRes presets;
 //!   those land in a follow-up so this slice stays a clean, verifiable spine.
-//! - **Linear audio mixdown**: every audio-bearing clip's source window is
-//!   decoded to mono f32 at the mix rate, placed at its frame-derived sample
-//!   offset, scaled by its `volume_at` envelope, summed, hard-limited, and mux'd
-//!   in by the encoder (`-c:v copy` + AAC). A timeline with no audio still
-//!   produces the same video-only file as before.
+//! - **Linear audio mixdown**: every audio-track clip's source window is decoded
+//!   to mono f32 at the mix rate, placed at its frame-derived sample offset,
+//!   scaled by its `volume_at` envelope, summed, hard-limited, and mux'd in by
+//!   the encoder (`-c:v copy` + AAC). A timeline with no audio still produces
+//!   the same video-only file as before.
 //! - Export renders at the **full** export resolution
 //!   ([`opentake_render::export_render_size`]), not the preview cap.
 //! - No progress callback / cancellation yet (the orchestrator runs to
@@ -399,24 +399,24 @@ fn project_clip_audio(
     }))
 }
 
-/// Decode + mix every audio-bearing clip on the timeline into one mono buffer.
+/// Decode + mix every audio-track clip on the timeline into one mono buffer.
 ///
-/// Walks audio and video clips (video clips can carry an audio track), projects
-/// each through [`project_clip_audio`], and linearly mixes the lot. Returns
-/// `None` when nothing contributes audio (→ the caller keeps the video-only
-/// output). Errors surface decode/mix failures to the front-end.
+/// Mirrors upstream's `audioMix`: visual video tracks are rendered silently, and
+/// sound comes from explicit audio clips (including linked audio partners for
+/// video-with-audio). Returns `None` when nothing contributes audio (→ the
+/// caller keeps the video-only output). Errors surface decode/mix failures to
+/// the front-end.
 fn mix_timeline_audio(
     timeline: &opentake_domain::Timeline,
     media: &HashMap<String, MediaInfo>,
 ) -> Result<Option<PcmBuffer>, String> {
     let mut clips_audio: Vec<ClipAudio> = Vec::new();
     for track in &timeline.tracks {
-        if track.muted {
+        if track.kind != ClipType::Audio || track.muted {
             continue;
         }
         for clip in &track.clips {
-            // Only audio and video clips carry sound; text/image/lottie don't.
-            if clip.media_type != ClipType::Audio && clip.media_type != ClipType::Video {
+            if clip.media_type != ClipType::Audio {
                 continue;
             }
             if let Some(ca) = project_clip_audio(clip, media, timeline.fps)? {
@@ -525,7 +525,7 @@ pub fn run_export(
             .map_err(|e| format!("encode frame {f} failed: {e}"))?;
     }
 
-    // Decode + linearly mix every audio-bearing clip, then hand the mixed PCM to
+    // Decode + linearly mix every audio-track clip, then hand the mixed PCM to
     // the encoder so `finish` mux's it into the container. No audio → video-only.
     if let Some(pcm) = mix_timeline_audio(timeline, &media)? {
         encoder.push_audio(pcm);
@@ -665,7 +665,7 @@ mod tests {
 
     #[test]
     fn mix_timeline_audio_none_when_only_text_clips() {
-        // A text clip carries no sound; with no audio/video clips there's nothing
+        // A text clip carries no sound; with no audio clips there's nothing
         // to decode, so the result is None without touching the media map.
         let mut tl = Timeline::new();
         let mut track = Track::new("t1", ClipType::Text);
@@ -674,6 +674,28 @@ mod tests {
         track.clips.push(clip);
         tl.tracks.push(track);
         let media: HashMap<String, MediaInfo> = HashMap::new();
+        assert!(mix_timeline_audio(&tl, &media).expect("ok").is_none());
+    }
+
+    #[test]
+    fn mix_timeline_audio_ignores_video_track_audio_source() {
+        // Upstream audioMix only walks audio tracks. A video asset's sound must
+        // come from its linked audio clip, not the visual clip, or exports double
+        // the audio compared with preview playback.
+        let mut tl = Timeline::new();
+        let mut track = Track::new("v1", ClipType::Video);
+        let mut clip = Clip::new("c1", "asset-1", 0, 30);
+        clip.media_type = ClipType::Video;
+        track.clips.push(clip);
+        tl.tracks.push(track);
+        let mut media: HashMap<String, MediaInfo> = HashMap::new();
+        media.insert(
+            "asset-1".into(),
+            MediaInfo {
+                path: PathBuf::from("/nonexistent-with-audio.mp4"),
+                fps: 30.0,
+            },
+        );
         assert!(mix_timeline_audio(&tl, &media).expect("ok").is_none());
     }
 

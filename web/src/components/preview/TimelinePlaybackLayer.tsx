@@ -25,11 +25,11 @@ import { mediaClock } from "./playbackClock";
 import {
   activeAudioClips,
   activeVisualClip,
+  activeVisualClips,
   clipOpacity,
   clipVolume,
   frameForSourceTime,
   sourceTimeSec,
-  visualAudioIsDuplicated,
   type ActiveMedia,
 } from "./timelinePlayback";
 import type { Clip, Timeline } from "../../lib/types";
@@ -50,7 +50,7 @@ export function TimelinePlayback({ timeline, fps, playing }: { timeline: Timelin
   const items = useMediaStore((s) => s.items);
   const frame = Math.round(activeFrame);
 
-  const visual = activeVisualClip(timeline, frame);
+  const visuals = activeVisualClips(timeline, frame);
   const audios = activeAudioClips(timeline, frame);
 
   const urlFor = (mediaRef: string): string | null =>
@@ -109,9 +109,7 @@ export function TimelinePlayback({ timeline, fps, playing }: { timeline: Timelin
 
     const activeAt = (tl: Timeline, f: number): ActiveMedia[] => {
       const r = Math.round(f);
-      const v = activeVisualClip(tl, r);
-      const list = activeAudioClips(tl, r);
-      return v ? [v, ...list] : list;
+      return [...activeVisualClips(tl, r), ...activeAudioClips(tl, r)];
     };
 
     const pickMaster = (tl: Timeline, f: number): ActiveMedia | null => {
@@ -121,7 +119,7 @@ export function TimelinePlayback({ timeline, fps, playing }: { timeline: Timelin
         if (el && el.readyState >= 2 && !el.paused) return a;
       }
       const v = activeVisualClip(tl, r);
-      if (v && v.clip.mediaType === "video") {
+      if (v?.clip.mediaType === "video") {
         const el = elFor(v.clip.id);
         if (el && el.readyState >= 2 && !el.paused) return v;
       }
@@ -131,16 +129,14 @@ export function TimelinePlayback({ timeline, fps, playing }: { timeline: Timelin
     const syncFollowers = (tl: Timeline, f: number, masterId: string | null) => {
       const safeFps = fpsRef.current > 0 ? fpsRef.current : 30;
       const r = Math.round(f);
-      const v = activeVisualClip(tl, r);
-      const auds = activeAudioClips(tl, r);
-      const dup = visualAudioIsDuplicated(v, auds);
+      const visualIds = new Set(activeVisualClips(tl, r).map((m) => m.clip.id));
       for (const m of activeAt(tl, f)) {
         const el = elFor(m.clip.id);
         if (!el) continue; // images carry no media element
         const vol = clipVolume(m.track, m.clip);
-        const isVisualVideo = v !== null && m.clip.id === v.clip.id;
-        el.muted = vol <= 0 || (isVisualVideo && dup);
-        el.volume = vol;
+        const isVisualVideo = visualIds.has(m.clip.id);
+        el.muted = isVisualVideo || vol <= 0;
+        el.volume = isVisualVideo ? 0 : vol;
         const desired = sourceTimeSec(m.clip, f, safeFps);
         if (el.paused) {
           if (Math.abs(el.currentTime - desired) > 0.05) el.currentTime = desired;
@@ -216,17 +212,15 @@ export function TimelinePlayback({ timeline, fps, playing }: { timeline: Timelin
     };
   }, [playing]);
 
-  // Aspect-fit via intrinsic media size + max-width/height; the parent stage
-  // flex-centers us. No absolute positioning (which would escape an unpositioned
-  // ancestor and mis-place the frame).
+  // Each active visual clip occupies the same aspect-fit preview stage and is
+  // stacked in render-plan order. Full transform/crop/effects are still supplied
+  // by the paused GPU composite.
   const fill: React.CSSProperties = {
     maxWidth: "100%",
     maxHeight: "100%",
     objectFit: "contain",
     display: "block",
   };
-
-  const visualUrl = visual ? urlFor(visual.clip.mediaRef) : null;
 
   // Seek a freshly-mounted element to the right source position immediately, so
   // entering a clip (or starting playback mid-timeline) shows the correct frame
@@ -241,32 +235,44 @@ export function TimelinePlayback({ timeline, fps, playing }: { timeline: Timelin
       style={{
         width: "100%",
         height: "100%",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
+        position: "relative",
         overflow: "hidden",
       }}
     >
-      {visual && visualUrl && visual.clip.mediaType === "video" && (
-        <video
-          key={visual.clip.id}
-          ref={register(visual.clip.id)}
-          src={visualUrl}
-          playsInline
-          preload="auto"
-          onLoadedData={seekOnLoad(visual.clip)}
-          style={{ ...fill, opacity: playing ? clipOpacity(visual.clip) : 0 }}
-        />
-      )}
-      {visual && visualUrl && visual.clip.mediaType === "image" && (
-        <img
-          key={visual.clip.id}
-          src={visualUrl}
-          alt=""
-          draggable={false}
-          style={{ ...fill, opacity: playing ? clipOpacity(visual.clip) : 0 }}
-        />
-      )}
+      {visuals.map((visual, index) => {
+        const visualUrl = urlFor(visual.clip.mediaRef);
+        const layerStyle: React.CSSProperties = {
+          ...fill,
+          position: "absolute",
+          inset: 0,
+          width: "100%",
+          height: "100%",
+          margin: "auto",
+          opacity: playing ? clipOpacity(visual.clip) : 0,
+          zIndex: index,
+        };
+        if (!visualUrl) return null;
+        return visual.clip.mediaType === "video" ? (
+          <video
+            key={visual.clip.id}
+            ref={register(visual.clip.id)}
+            src={visualUrl}
+            muted
+            playsInline
+            preload="auto"
+            onLoadedData={seekOnLoad(visual.clip)}
+            style={layerStyle}
+          />
+        ) : (
+          <img
+            key={visual.clip.id}
+            src={visualUrl}
+            alt=""
+            draggable={false}
+            style={layerStyle}
+          />
+        );
+      })}
       {audios.map((a) => {
         const url = urlFor(a.clip.mediaRef);
         return url ? (

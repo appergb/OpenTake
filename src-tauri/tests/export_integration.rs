@@ -161,6 +161,17 @@ fn build_timeline(frames: i32, src_w: i32, src_h: i32, src_fps: f64) -> Timeline
     tl
 }
 
+/// Add the audio half of the same asset, matching the UI/core linked-audio
+/// placement for a video file that carries sound.
+fn add_linked_audio_track(tl: &mut Timeline, frames: i32) {
+    let mut track = Track::new("a1", ClipType::Audio);
+    let mut clip = Clip::new("clip-1-audio", "asset-1", 0, frames);
+    clip.media_type = ClipType::Audio;
+    clip.source_clip_type = ClipType::Video;
+    track.clips.push(clip);
+    tl.tracks.push(track);
+}
+
 /// Build a manifest with one external video asset pointing at `media_path`.
 fn build_manifest(media_path: &Path, src_w: i32, src_h: i32, src_fps: f64) -> MediaManifest {
     build_manifest_with_audio(media_path, src_w, src_h, src_fps, false)
@@ -299,7 +310,8 @@ fn export_with_audio_clip_mux_aac_stream() {
         return;
     }
 
-    let timeline = build_timeline(frames as i32, sw as i32, sh as i32, sfps as f64);
+    let mut timeline = build_timeline(frames as i32, sw as i32, sh as i32, sfps as f64);
+    add_linked_audio_track(&mut timeline, frames as i32);
     let manifest = build_manifest_with_audio(&src, sw as i32, sh as i32, sfps as f64, true);
 
     let req = ExportRequest {

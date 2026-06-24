@@ -3,12 +3,12 @@ import type { Clip, ClipType, Timeline, Track } from "../../lib/types";
 import {
   activeAudioClips,
   activeVisualClip,
+  activeVisualClips,
   clipCoversFrame,
   clipOpacity,
   clipVolume,
   frameForSourceTime,
   sourceTimeSec,
-  visualAudioIsDuplicated,
 } from "./timelinePlayback";
 
 function clip(over: Partial<Clip> & { id: string; mediaType: ClipType }): Clip {
@@ -84,12 +84,24 @@ describe("activeVisualClip", () => {
     expect(activeVisualClip(tl, 10)?.clip.id).toBe("high");
   });
 
+  it("returns every active visual clip in render-plan order", () => {
+    const tl = timeline([
+      track({ id: "v1", type: "video", clips: [clip({ id: "low", mediaType: "video" })] }),
+      track({ id: "v2", type: "video", clips: [clip({ id: "mid", mediaType: "image" })] }),
+      track({ id: "a1", type: "audio", clips: [clip({ id: "sound", mediaType: "audio" })] }),
+      track({ id: "v3", type: "video", clips: [clip({ id: "high", mediaType: "video" })] }),
+    ]);
+    expect(activeVisualClips(tl, 10).map((m) => m.clip.id)).toEqual(["low", "mid", "high"]);
+    expect(activeVisualClip(tl, 10)?.clip.id).toBe("high");
+  });
+
   it("skips hidden tracks and audio/text", () => {
     const tl = timeline([
       track({ id: "v1", type: "video", hidden: true, clips: [clip({ id: "hid", mediaType: "video" })] }),
       track({ id: "t1", type: "text", clips: [clip({ id: "txt", mediaType: "text" })] }),
     ]);
     expect(activeVisualClip(tl, 10)).toBeNull();
+    expect(activeVisualClips(tl, 10)).toEqual([]);
   });
 });
 
@@ -102,6 +114,14 @@ describe("activeAudioClips", () => {
     ]);
     const ids = activeAudioClips(tl, 10).map((a) => a.clip.id);
     expect(ids).toEqual(["music"]);
+  });
+
+  it("does not use visual video elements as audio sources", () => {
+    const tl = timeline([
+      track({ id: "v1", type: "video", clips: [clip({ id: "vid", mediaType: "video", mediaRef: "m1" })] }),
+      track({ id: "a1", type: "audio", clips: [clip({ id: "linked", mediaType: "audio", mediaRef: "m1" })] }),
+    ]);
+    expect(activeAudioClips(tl, 10).map((a) => a.clip.id)).toEqual(["linked"]);
   });
 });
 
@@ -142,19 +162,5 @@ describe("clipVolume / clipOpacity", () => {
     const t = track({ id: "a", type: "audio", clips: [] });
     expect(clipVolume(t, clip({ id: "c", mediaType: "audio", volume: 2 }))).toBe(1);
     expect(clipOpacity(clip({ id: "c", mediaType: "video", opacity: -1 }))).toBe(0);
-  });
-});
-
-describe("visualAudioIsDuplicated", () => {
-  it("flags a video whose source is also on an audio track", () => {
-    const visual = { clip: clip({ id: "v", mediaType: "video", mediaRef: "m1" }), track: track({ id: "v1", type: "video", clips: [] }), trackIndex: 0 };
-    const audios = [{ clip: clip({ id: "a", mediaType: "audio", mediaRef: "m1" }), track: track({ id: "a1", type: "audio", clips: [] }), trackIndex: 1 }];
-    expect(visualAudioIsDuplicated(visual, audios)).toBe(true);
-  });
-
-  it("does not flag separate sources", () => {
-    const visual = { clip: clip({ id: "v", mediaType: "video", mediaRef: "m1" }), track: track({ id: "v1", type: "video", clips: [] }), trackIndex: 0 };
-    const audios = [{ clip: clip({ id: "a", mediaType: "audio", mediaRef: "music" }), track: track({ id: "a1", type: "audio", clips: [] }), trackIndex: 1 }];
-    expect(visualAudioIsDuplicated(visual, audios)).toBe(false);
   });
 });

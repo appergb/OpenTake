@@ -35,27 +35,35 @@ function clipAt(track: Track, frame: number): Clip | null {
 }
 
 /**
- * Top-most VISUAL clip (video or image) at `frame`. Higher track index draws on
- * top (matches the render plan's ascending-track blend order), so the last
- * matching track wins. Text / Lottie have no DOM media element and are left to
- * the paused composite, so they're skipped here.
+ * VISUAL clips (video or image) at `frame`, in render-plan blend order. Higher
+ * track indexes draw later/on top. Text / Lottie have no DOM media element and
+ * are left to the paused composite, so they're skipped here.
  */
-export function activeVisualClip(timeline: Timeline, frame: number): ActiveMedia | null {
-  let best: ActiveMedia | null = null;
+export function activeVisualClips(timeline: Timeline, frame: number): ActiveMedia[] {
+  const out: ActiveMedia[] = [];
   timeline.tracks.forEach((track, trackIndex) => {
     if (track.hidden || track.type === "audio") return;
     const clip = clipAt(track, frame);
     if (!clip) return;
     if (clip.mediaType !== "video" && clip.mediaType !== "image") return;
-    best = { clip, track, trackIndex };
+    out.push({ clip, track, trackIndex });
   });
-  return best;
+  return out;
 }
 
 /**
- * Audio sources at `frame`: every clip on a non-muted AUDIO track. A video
- * clip's own sound is played by its visual `<video>` element (see
- * `activeVisualClip`), so it is not duplicated here.
+ * Top-most visual clip at `frame`. Kept for callers that need a single master
+ * candidate; rendering uses {@link activeVisualClips}.
+ */
+export function activeVisualClip(timeline: Timeline, frame: number): ActiveMedia | null {
+  const visuals = activeVisualClips(timeline, frame);
+  return visuals.length > 0 ? visuals[visuals.length - 1] : null;
+}
+
+/**
+ * Audio sources at `frame`: every clip on a non-muted AUDIO track. Visual
+ * `<video>` elements are muted in the playback layer; timeline sound comes from
+ * explicit audio tracks, matching the upstream composition/audioMix model.
  */
 export function activeAudioClips(timeline: Timeline, frame: number): ActiveMedia[] {
   const out: ActiveMedia[] = [];
@@ -102,18 +110,4 @@ export function clipVolume(track: Track, clip: Clip): number {
 export function clipOpacity(clip: Clip): number {
   const o = clip.opacity;
   return Math.max(0, Math.min(1, Number.isFinite(o) ? o : 1));
-}
-
-/**
- * Whether a visual video clip's own audio should be silenced because an audio
- * track is already playing the SAME source (its sound was extracted to a linked
- * audio clip). Prevents the double-audio that linked-audio splitting would
- * otherwise cause.
- */
-export function visualAudioIsDuplicated(
-  visual: ActiveMedia | null,
-  audios: ActiveMedia[],
-): boolean {
-  if (!visual || visual.clip.mediaType !== "video") return false;
-  return audios.some((a) => a.clip.mediaRef === visual.clip.mediaRef);
 }
