@@ -1,27 +1,71 @@
 /**
- * Title bar (SPEC §2.8), a 1:1 copy of the upstream TitleBarView. Leading: the
- * Agent-panel toggle (aiGradient bubble icon). Trailing: the Export button.
- * (UpdateBadge/Avatar belong to a separate issue.) The bubble switches between
- * the hollow (`bubble.left`) and filled (`bubble.left.fill`) glyph with the
- * Agent panel's visibility, mirroring the upstream symbol swap.
+ * Title bar (SPEC §2.8). Leading: Home (return to launcher). Trailing:
+ * Settings + Export. (UpdateBadge/Avatar belong to a separate issue.)
  *
- * Layout presets and panel-visibility toggles live in the §2.9 View menu
- * (ViewMenu), not here — the upstream title bar carries neither. The View-menu
- * trigger is the only added affordance, acting as the in-app menu entry point
- * for an environment without a native menu bar.
+ * The Agent panel is toggled from the §2.9 View menu (ViewMenu) and the
+ * keyboard shortcut — the dedicated title-bar toggle button was removed by
+ * request. Layout presets and panel-visibility toggles also live in the View
+ * menu, the in-app menu entry point for an environment without a native menu bar.
  */
 
-import { MessageSquare, Upload, Home, Settings as SettingsIcon } from "lucide-react";
+import { Upload, Home, Settings as SettingsIcon, Library } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { ViewMenu } from "./ViewMenu";
 import { useEditorUiStore } from "../../store/uiStore";
+import { useProjectStore } from "../../store/projectStore";
 import { useT } from "../../i18n";
+import * as api from "../../lib/api";
+import { saveDialog } from "../../lib/dialog";
+
+const XML_EXT = "xml";
+
+/** Ensure a chosen path carries the `.xml` extension. */
+function withXmlExt(path: string): string {
+  return path.endsWith(`.${XML_EXT}`) ? path : `${path}.${XML_EXT}`;
+}
+
+/**
+ * Default export filename: the open project's base name with `.xml`, falling
+ * back to "Timeline.xml" for an unsaved project. The bundle path ends in
+ * `…/Name.opentake`, so strip the directory and the `.opentake` suffix.
+ */
+function defaultXmlName(projectPath: string | null): string {
+  if (!projectPath) return `Timeline.${XML_EXT}`;
+  const base = projectPath.split(/[\\/]/).pop() ?? projectPath;
+  const stem = base.replace(/\.opentake$/i, "");
+  return `${stem || "Timeline"}.${XML_EXT}`;
+}
 
 export function TitleBar() {
-  const agentVisible = useEditorUiStore((s) => s.agentPanelVisible);
-  const toggleAgent = useEditorUiStore((s) => s.toggleAgentPanel);
   const setView = useEditorUiStore((s) => s.setView);
+  const projectPath = useProjectStore((s) => s.projectPath);
   const t = useT();
+
+  /**
+   * Export the timeline as Final Cut Pro 7 XML (`.xml`). Mirrors the new-project
+   * save flow (`projectActions.newProjectAndEnter`): open the native save panel,
+   * default the name to the project, then write via `export_fcpxml`. No-op
+   * outside Tauri (no save panel / file system).
+   */
+  async function onExport(): Promise<void> {
+    const save = await saveDialog();
+    if (!save) return;
+    const dir = projectPath
+      ? projectPath.replace(/[\\/][^\\/]*$/, "")
+      : await api.getDefaultProjectDir().catch(() => "");
+    const sep = dir && !dir.endsWith("/") ? "/" : "";
+    const defaultPath = dir
+      ? `${dir}${sep}${defaultXmlName(projectPath)}`
+      : undefined;
+
+    const chosen = await save({
+      title: t("title.exportXmlDialog"),
+      defaultPath,
+      filters: [{ name: t("title.exportXmlFilter"), extensions: [XML_EXT] }],
+    });
+    if (typeof chosen !== "string") return; // cancelled
+    await api.exportFcpxml(withXmlExt(chosen));
+  }
 
   return (
     <div
@@ -55,12 +99,16 @@ export function TitleBar() {
         <Icon icon={Home} size={13} />
       </button>
 
-      {/* Agent toggle (aiGradient icon, hollow/filled by visibility). */}
+      {/* §2.9 menu entry point (hosts Layout presets + Agent panel + visibility). */}
+      <ViewMenu />
+
+      <div style={{ flex: 1 }} />
+
+      {/* Trailing: Library + Settings + Export. */}
       <button
-        title={t("title.toggleAgent")}
-        aria-label={t("title.toggleAgent")}
-        aria-pressed={agentVisible}
-        onClick={toggleAgent}
+        title={t("library.entry")}
+        aria-label={t("library.entry")}
+        onClick={() => setView("library")}
         className="hover-area"
         style={{
           width: 26,
@@ -68,28 +116,11 @@ export function TitleBar() {
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "center",
-          opacity: agentVisible ? 1 : 0.55,
+          color: "var(--text-secondary)",
         }}
       >
-        <span
-          style={{
-            background: "var(--ai-gradient)",
-            WebkitBackgroundClip: "text",
-            backgroundClip: "text",
-            color: "transparent",
-            display: "inline-flex",
-          }}
-        >
-          <Icon icon={MessageSquare} size={13} fill={agentVisible ? "currentColor" : "none"} />
-        </span>
+        <Icon icon={Library} size={13} />
       </button>
-
-      {/* §2.9 menu entry point (hosts Layout presets + panel visibility). */}
-      <ViewMenu />
-
-      <div style={{ flex: 1 }} />
-
-      {/* Trailing: Settings + Export. */}
       <button
         title={t("title.settings")}
         aria-label={t("title.settings")}
@@ -109,6 +140,7 @@ export function TitleBar() {
       <button
         title={t("title.exportHint")}
         aria-label={t("title.export")}
+        onClick={onExport}
         className="hover-area"
         style={{
           display: "inline-flex",

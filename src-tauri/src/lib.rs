@@ -7,12 +7,18 @@
 //! §2 — "真相源在 Rust，前端持镜像").
 
 mod commands;
+// `pub` so the ffmpeg-gated integration test (`tests/export_integration.rs`) can
+// drive the export orchestrator (`export::run_export`) against the library
+// target. The Tauri command itself is registered below like the other modules.
+pub mod export;
+mod library;
 mod mcp;
 mod media;
 mod render;
 mod secret;
 
 use opentake_core::{AppCore, CoreEvent};
+use opentake_media::library::LibraryStore;
 use opentake_media::MediaEngine;
 use tauri::{Emitter, Manager, WindowEvent};
 // `RunEvent::Reopen` (Dock click) is a macOS-only variant.
@@ -94,8 +100,21 @@ pub fn run() {
                 .join("workflows");
             mcp::spawn(core.clone(), workflows_dir);
 
+            // Global asset library (#37/#54): a cross-project copy-on-favorite
+            // store under <app_data_dir>/OpenTake/Library, falling back to the OS
+            // temp dir if the platform data path is unavailable so favoriting
+            // still works. Lazily created on first write by the store itself.
+            let library_root = app
+                .path()
+                .app_data_dir()
+                .unwrap_or_else(|_| std::env::temp_dir())
+                .join("OpenTake")
+                .join("Library");
+            let library_store = LibraryStore::new(library_root);
+
             app.manage(core);
             app.manage(MediaState::new(engine));
+            app.manage(crate::library::LibraryState::new(library_store));
             // Lazily-acquired GPU context for timeline composite previews (#47).
             app.manage(render::RenderState::new());
             Ok(())
@@ -111,14 +130,25 @@ pub fn run() {
             commands::project_open,
             commands::project_save,
             commands::get_default_project_dir,
+            commands::export_fcpxml,
             media::import_folder,
             media::import_media,
+            media::relink_media,
             media::get_media,
             media::extract_audio,
+            media::get_waveform,
             render::composite_frame,
+            export::export_video,
             secret::secret_save,
             secret::secret_load,
             secret::secret_delete,
+            library::library_list,
+            library::library_favorite,
+            library::library_unfavorite,
+            library::library_categorize,
+            library::library_rename,
+            library::library_delete,
+            library::library_import_to_project,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

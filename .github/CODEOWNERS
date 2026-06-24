@@ -1,0 +1,8 @@
+# CODEOWNERS
+# Protected branches require an approving review from a repository admin (code owner).
+# Only the owners listed here can satisfy the required "Code Owner review" on
+# pull requests targeting protected branches such as `main`.
+#
+# Add more admins as additional owners if the maintainer team grows.
+
+* @appergb

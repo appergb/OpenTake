@@ -7,12 +7,14 @@
 //! frames (SPEC §2.4 / §8.2). The arg builder ([`encode_args`]) is pure and
 //! unit-tested; the encode itself requires ffmpeg.
 
+pub mod mix;
 pub mod preset;
 
+pub use mix::{mix_clips, mono_f32_to_s16le, ClipAudio, MIX_SAMPLE_RATE};
 pub use preset::{even_dimension, ExportPreset, ExportResolution, VideoCodec};
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::decode::pcm::PcmBuffer;
 use crate::error::{MediaError, Result};
@@ -49,16 +51,60 @@ fn encode_args(out: &Path, w: u32, h: u32, fps: i32, preset: &ExportPreset) -> V
     args
 }
 
+/// Build the ffmpeg arg list for the second mux pass: take the already-encoded
+/// (audio-less) video at `video_in` and a raw mono `s16le` PCM stream at
+/// `pcm_in`, copy the video stream untouched, encode the audio with `acodec`,
+/// and write the muxed container to `out`. Pure so the CLI contract is testable.
+///
+/// `-shortest` trims the muxed output to the shorter of the two streams, so a
+/// trailing audio tail past the last video frame doesn't extend the video.
+fn mux_args(
+    video_in: &Path,
+    pcm_in: &Path,
+    out: &Path,
+    sample_rate: u32,
+    acodec: &str,
+) -> Vec<String> {
+    vec![
+        "-y".into(),
+        // Input 0: the encoded video (audio-less).
+        "-i".into(),
+        video_in.to_string_lossy().into_owned(),
+        // Input 1: raw mono s16le PCM (the mixed audio).
+        "-f".into(),
+        "s16le".into(),
+        "-ar".into(),
+        sample_rate.to_string(),
+        "-ac".into(),
+        "1".into(),
+        "-i".into(),
+        pcm_in.to_string_lossy().into_owned(),
+        // Copy the video stream verbatim; (re-)encode the audio.
+        "-c:v".into(),
+        "copy".into(),
+        "-c:a".into(),
+        acodec.into(),
+        "-shortest".into(),
+        out.to_string_lossy().into_owned(),
+    ]
+}
+
 /// A streaming RGBA → video encoder. Push frames in order, then `finish`.
 ///
-/// Audio muxing for a pre-rendered mix is intentionally limited here: the export
-/// pipeline composites/mixes audio in `opentake-render`; a follow-up wires the
-/// mixed PCM as a second ffmpeg input. For now [`push_audio`] records the PCM so
-/// the render layer can supply it, and the video-only path is fully functional.
+/// When [`push_audio`] has supplied a mixed PCM buffer, `finish` runs a second
+/// ffmpeg pass that mux's the audio into the encoded container (`-c:v copy` +
+/// `-c:a aac`/`pcm_s16le`). Without audio the video-only first pass *is* the
+/// final file. The mux-args builder ([`mux_args`]) is pure and unit-tested; the
+/// mux itself requires ffmpeg.
 pub struct VideoEncoder {
     child: ffmpeg_sidecar::child::FfmpegChild,
     stdin: Option<std::process::ChildStdin>,
     expected_frame_bytes: usize,
+    /// Final output path (the video first pass writes here; the mux pass, when
+    /// audio is present, rewrites it from a temp video + the PCM).
+    out_path: PathBuf,
+    /// ffmpeg `-c:a` token for the mux pass (from the preset).
+    acodec: &'static str,
     pending_audio: Option<PcmBuffer>,
 }
 
@@ -74,6 +120,8 @@ impl VideoEncoder {
             child,
             stdin,
             expected_frame_bytes: w as usize * h as usize * 4,
+            out_path: out.to_path_buf(),
+            acodec: preset.acodec_arg(),
             pending_audio: None,
         })
     }
@@ -98,22 +146,91 @@ impl VideoEncoder {
         Ok(())
     }
 
-    /// Record the mixed audio PCM to mux. (Muxing is completed by the render
-    /// export pipeline; see the type docs.)
+    /// Record the mixed-down mono audio buffer to mux on `finish`. The buffer's
+    /// `spec.sample_rate` is the rate ffmpeg is told to read the muxed PCM at
+    /// (the orchestrator decodes/mixes at [`MIX_SAMPLE_RATE`]). An empty buffer
+    /// is ignored — `finish` then keeps the video-only output.
     pub fn push_audio(&mut self, pcm: PcmBuffer) {
-        self.pending_audio = Some(pcm);
+        if pcm.samples_f32.is_empty() {
+            self.pending_audio = None;
+        } else {
+            self.pending_audio = Some(pcm);
+        }
     }
 
-    /// Finish encoding: close stdin and wait for ffmpeg to flush the container.
+    /// Finish encoding: close stdin, wait for the video pass, then — when a
+    /// mixed audio buffer was supplied — run a second ffmpeg pass to mux it in.
+    ///
+    /// The video first pass writes `out_path` directly. To mux, the encoded
+    /// video is moved aside to a sibling temp file, the mixed PCM is written to
+    /// another temp file, and ffmpeg copies the video stream while encoding the
+    /// audio back into `out_path`. Both temp files are removed afterward (best
+    /// effort). Without audio this is exactly the old video-only `finish`.
     pub fn finish(mut self) -> Result<()> {
-        // Drop stdin to signal EOF to ffmpeg.
+        // Drop stdin to signal EOF to ffmpeg, then wait for the video pass.
         self.stdin.take();
         let status = self.child.wait().map_err(MediaError::Io)?;
         if !status.success() {
             return Err(MediaError::Encode(format!("ffmpeg exited {status}")));
         }
-        Ok(())
+
+        let Some(pcm) = self.pending_audio.take() else {
+            return Ok(()); // video-only: the first pass is the final file.
+        };
+
+        self.mux_audio(&pcm)
     }
+
+    /// Second ffmpeg pass: mux `pcm` (mono f32, written as s16le) into the
+    /// already-encoded video at `self.out_path`, in place.
+    fn mux_audio(&self, pcm: &PcmBuffer) -> Result<()> {
+        let out = &self.out_path;
+        // Sibling temp paths next to the output (same dir → cheap rename, same
+        // filesystem). Suffixes keep them distinct from the final artifact.
+        let video_tmp = sibling_temp(out, "video");
+        let pcm_tmp = sibling_temp(out, "pcm");
+
+        // Move the encoded video aside so ffmpeg can rewrite `out` from it.
+        std::fs::rename(out, &video_tmp).map_err(MediaError::Io)?;
+
+        // Run the mux, cleaning up temps regardless of outcome.
+        let result = (|| {
+            let bytes = mix::mono_f32_to_s16le(&pcm.samples_f32);
+            std::fs::write(&pcm_tmp, &bytes).map_err(MediaError::Io)?;
+
+            let args = mux_args(&video_tmp, &pcm_tmp, out, pcm.spec.sample_rate, self.acodec);
+            let mut child = crate::ff::ffmpeg()
+                .args(args)
+                .spawn()
+                .map_err(|e| MediaError::Encode(format!("mux spawn: {e}")))?;
+            let status = child.wait().map_err(MediaError::Io)?;
+            if !status.success() {
+                return Err(MediaError::Encode(format!("ffmpeg mux exited {status}")));
+            }
+            Ok(())
+        })();
+
+        // Best-effort cleanup. If the mux failed, restore the video-only file so
+        // the caller still has a valid (audio-less) export rather than nothing.
+        let _ = std::fs::remove_file(&pcm_tmp);
+        if result.is_err() {
+            let _ = std::fs::rename(&video_tmp, out);
+        } else {
+            let _ = std::fs::remove_file(&video_tmp);
+        }
+        result
+    }
+}
+
+/// Build a sibling temp path next to `out`: `<out>.<tag>.tmp`. Stays on the same
+/// filesystem so the rename in `mux_audio` is atomic and cheap.
+fn sibling_temp(out: &Path, tag: &str) -> PathBuf {
+    let mut name = out
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(format!(".{tag}.tmp"));
+    out.with_file_name(name)
 }
 
 #[cfg(test)]
@@ -150,5 +267,45 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["-pix_fmt", "yuv422p10le"]));
         // ProRes path does not add BT.709 color tags here.
         assert!(!args.windows(2).any(|w| w == ["-colorspace", "bt709"]));
+    }
+
+    #[test]
+    fn mux_args_copy_video_and_encode_audio() {
+        let args = mux_args(
+            Path::new("/v.mp4"),
+            Path::new("/a.pcm"),
+            Path::new("/out.mp4"),
+            48_000,
+            "aac",
+        );
+        // video input first, then the raw s16le PCM input declared with rate/ch.
+        assert!(args.windows(2).any(|w| w == ["-i", "/v.mp4"]));
+        assert!(args.windows(2).any(|w| w == ["-f", "s16le"]));
+        assert!(args.windows(2).any(|w| w == ["-ar", "48000"]));
+        assert!(args.windows(2).any(|w| w == ["-ac", "1"]));
+        assert!(args.windows(2).any(|w| w == ["-i", "/a.pcm"]));
+        // copy the video stream, encode audio with the preset codec.
+        assert!(args.windows(2).any(|w| w == ["-c:v", "copy"]));
+        assert!(args.windows(2).any(|w| w == ["-c:a", "aac"]));
+        assert!(args.iter().any(|a| a == "-shortest"));
+        assert_eq!(args.last().unwrap(), "/out.mp4");
+    }
+
+    #[test]
+    fn mux_args_threads_prores_lpcm_codec() {
+        let args = mux_args(
+            Path::new("/v.mov"),
+            Path::new("/a.pcm"),
+            Path::new("/out.mov"),
+            48_000,
+            "pcm_s16le",
+        );
+        assert!(args.windows(2).any(|w| w == ["-c:a", "pcm_s16le"]));
+    }
+
+    #[test]
+    fn sibling_temp_keeps_directory_and_tags_name() {
+        let t = sibling_temp(Path::new("/tmp/clip/out.mp4"), "video");
+        assert_eq!(t, PathBuf::from("/tmp/clip/out.mp4.video.tmp"));
     }
 }

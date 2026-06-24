@@ -230,6 +230,52 @@ impl EditorSession {
         Ok(entry)
     }
 
+    /// Relink an existing asset to a new on-disk file, **keeping the same id** so
+    /// every clip that references it recovers in place (mirrors upstream
+    /// `EditorViewModel+Relink.applyRelink`: same asset, swapped url + refreshed
+    /// metadata). The new file's type must match the original's `kind`
+    /// (`CoreError::Media` on mismatch — upstream rejects a type change), and the
+    /// id must exist. Re-importing instead would mint a NEW id, orphaning the old
+    /// clips on the missing entry forever — which is the bug this fixes.
+    pub fn relink_media_file(
+        &mut self,
+        asset_id: &str,
+        path: impl AsRef<Path>,
+        probe: &ProbedMedia,
+    ) -> Result<MediaManifestEntry> {
+        let path = path.as_ref();
+        let kind = importable_clip_type(path).ok_or(CoreError::Unsupported("media"))?;
+        let entry = self
+            .state
+            .manifest
+            .entries
+            .iter_mut()
+            .find(|e| e.id == asset_id)
+            .ok_or_else(|| CoreError::Media(format!("unknown media asset: {asset_id}")))?;
+        if entry.kind != kind {
+            return Err(CoreError::Media(format!(
+                "cannot relink a {:?} asset to a {:?} file",
+                entry.kind, kind
+            )));
+        }
+        // Same id; only the source path + probed metadata change. The `missing`
+        // state the panel derives from file existence clears automatically once
+        // the source points at a real file again.
+        entry.source = opentake_domain::MediaSource::External {
+            absolute_path: path.to_string_lossy().into_owned(),
+        };
+        entry.duration = probe.duration_secs;
+        entry.source_width = probe.width;
+        entry.source_height = probe.height;
+        entry.source_fps = probe.fps;
+        entry.has_audio = Some(match kind {
+            ClipType::Audio => true,
+            ClipType::Video => probe.has_audio,
+            _ => false,
+        });
+        Ok(entry.clone())
+    }
+
     /// A clone of the current media manifest (read-only mirror for the media
     /// panel). The manifest is the persisted id→file catalog.
     pub fn media(&self) -> MediaManifest {

@@ -105,6 +105,20 @@ export async function getDefaultProjectDir(): Promise<string> {
   return "";
 }
 
+/**
+ * Export the current timeline to `path` as Final Cut Pro 7 XML (XMEML, `.xml`)
+ * so it opens in Premiere / DaVinci Resolve / FCP. The command name says
+ * "fcpxml" (the F4 contract) but the produced format is XMEML — Premiere doesn't
+ * read FCPXML natively, so upstream exports XMEML; DaVinci/FCP still import it.
+ * No-op outside Tauri (no Rust core / no file system).
+ */
+export async function exportFcpxml(path: string): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) {
+    await invokeImpl<void>("export_fcpxml", { path });
+  }
+}
+
 // MARK: - Media commands
 //
 // `import_folder` scans a directory for white-listed media and imports each;
@@ -136,14 +150,27 @@ export async function getMedia(): Promise<MediaList> {
 /**
  * `extract_audio`: extract the audio track from a media asset into a
  * self-contained audio file. `outPath`'s extension picks the codec
- * (`.m4a` → AAC, `.mp3` → libmp3lame, `.wav` → PCM s16le). Returns the
- * output path on success. Outside Tauri there is no ffmpeg, so this
- * rejects with a friendly error.
+ * (`.m4a` -> AAC, `.mp3` -> libmp3lame, `.wav` -> PCM s16le). Returns the
+ * output path on success. Outside Tauri there is no ffmpeg, so this rejects
+ * with a friendly error.
  */
 export async function extractAudio(mediaId: string, outPath: string): Promise<string> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<string>("extract_audio", { mediaId, outPath });
   throw new Error("audio extraction requires the desktop app (ffmpeg)");
+}
+
+/**
+ * Relink an offline asset to a newly chosen file, KEEPING its id so every clip
+ * that references it recovers in place (the fix for "lost media stays red after
+ * re-selecting the path" — re-importing would mint a new id and strand the old
+ * clips). The new file's type must match the original. Returns the refreshed
+ * catalog (the asset's `missing` is recomputed → `false`).
+ */
+export async function relinkMedia(mediaRef: string, newPath: string): Promise<MediaList> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MediaList>("relink_media", { mediaRef, newPath });
+  return { items: [], folders: [] };
 }
 
 // MARK: - Timeline composite preview (#47)
@@ -173,6 +200,28 @@ export async function compositeFrame(
       frame: Math.floor(frame),
       maxSize,
     });
+  return null;
+}
+
+/**
+ * Normalized waveform buckets (`0 = loud, 1 = silence`) for a media asset,
+ * computed/cached by the Rust media engine (`get_waveform`). The array spans the
+ * WHOLE source; the timeline renderer maps the clip's trimmed sub-range into it.
+ * Returns null outside Tauri (no media engine).
+ */
+export async function getWaveform(mediaRef: string): Promise<number[] | null> {
+  await ensureTauri();
+  if (invokeImpl) {
+    try {
+      return await invokeImpl<number[]>("get_waveform", { mediaRef });
+    } catch (e) {
+      // No audio track / decode failure: the caller renders nothing. Surface
+      // the reason — a silent swallow here is what masked the waveform decode
+      // backend failing for whole categories of source files.
+      console.warn(`get_waveform failed for ${mediaRef}:`, e);
+      return null;
+    }
+  }
   return null;
 }
 

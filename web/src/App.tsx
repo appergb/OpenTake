@@ -3,6 +3,7 @@ import { TitleBar } from "./components/shell/TitleBar";
 import { EditorSplit } from "./components/shell/EditorSplit";
 import { HomeView } from "./components/home/HomeView";
 import { SettingsView } from "./components/settings/SettingsView";
+import { LibraryView } from "./components/media/LibraryView";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { usePlaybackTicker } from "./hooks/usePlaybackTicker";
 import { useAutosave } from "./hooks/useAutosave";
@@ -56,6 +57,7 @@ export default function App() {
 
   if (view === "home") return <HomeView />;
   if (view === "settings") return <SettingsView />;
+  if (view === "library") return <LibraryView />;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", width: "100%" }}>

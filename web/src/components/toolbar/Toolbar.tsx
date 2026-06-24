@@ -136,14 +136,18 @@ export function Toolbar() {
         <HoverButton title={t("toolbar.split")} onClick={() => edit.splitAtPlayhead()}>
           <Icon icon={SplitSquareHorizontal} size={13} />
         </HoverButton>
-        <GlyphButton glyph="[" title={t("toolbar.trimStart")} />
-        <GlyphButton glyph="]" title={t("toolbar.trimEnd")} />
+        <GlyphButton
+          glyph="["
+          title={t("toolbar.trimStart")}
+          onClick={() => edit.trimStartToPlayhead()}
+        />
+        <GlyphButton glyph="]" title={t("toolbar.trimEnd")} onClick={() => edit.trimEndToPlayhead()} />
       </div>
 
       <Divider />
 
       {/* Add text */}
-      <GlyphButton glyph="T" title={t("toolbar.addText")} serif fontSize={17} />
+      <GlyphButton glyph="T" title={t("toolbar.addText")} serif fontSize={17} onClick={() => edit.addTextClip()} />
 
       <div style={{ flex: 1 }} />
 

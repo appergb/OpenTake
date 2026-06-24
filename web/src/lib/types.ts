@@ -157,7 +157,12 @@ export type EditRequest =
   | { type: "trimClips"; edits: TrimEditReq[] }
   | { type: "setClipProperties"; clipIds: string[]; properties: ClipPropertiesReq }
   | { type: "setKeyframes"; clipId: string; property: KeyframeProperty; payload: KeyframePayloadReq }
+  | { type: "stampKeyframe"; clipId: string; property: KeyframeProperty; frame: number }
+  | { type: "removeKeyframe"; clipId: string; property: KeyframeProperty; frame: number }
+  | { type: "moveKeyframe"; clipId: string; property: KeyframeProperty; fromFrame: number; toFrame: number }
+  | { type: "setKeyframeInterpolation"; clipId: string; property: KeyframeProperty; frame: number; interpolation: Interpolation }
   | { type: "rippleDeleteRanges"; trackIndex: number; ranges: FrameRangeReq[] }
+  | { type: "rippleDeleteClips"; clipIds: string[] }
   | { type: "addTexts"; entries: TextEntryReq[] }
   | { type: "link"; clipIds: string[] }
   | { type: "unlink"; clipIds: string[] }
@@ -213,6 +218,9 @@ export interface MediaItem {
   thumbnail?: string | null;
   /** Library folder this asset lives in (`null`/absent = root). */
   folderId?: string | null;
+  /** `true` when the source file is offline (moved/deleted). Derived from file
+   *  existence on the backend; clears after a successful relink. */
+  missing?: boolean;
 }
 
 /** A media-library folder (flat list; nest via `parentFolderId`). */

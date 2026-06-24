@@ -10,6 +10,10 @@ import { useEditorUiStore } from "../store/uiStore";
 import { useProjectStore } from "../store/projectStore";
 import * as edit from "../store/editActions";
 import { saveCurrentProject } from "../store/projectActions";
+import { ZOOM } from "../lib/theme";
+
+/** Per-keypress zoom step for ⌘+ / ⌘- (剪映: Cmd + +/-). */
+const ZOOM_KEY_STEP = 1.3;
 
 function isTextEntry(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -33,6 +37,18 @@ export function useKeyboardShortcuts() {
         return m;
       })();
 
+      // Zoom the timeline by `factor`, keeping the playhead stationary on screen
+      // (剪映 zooms around the current position). Uses existing store actions.
+      const zoomBy = (factor: number) => {
+        const old = ui.zoomScale;
+        const next = Math.max(ui.minZoomScale, Math.min(ZOOM.max, old * factor));
+        if (next === old) return;
+        ui.setZoomScale(next);
+        // newScrollLeft keeps the playhead's screen x fixed: f*next - (f*old - left).
+        const f = ui.activeFrame;
+        ui.setScroll(Math.max(0, f * (next - old) + ui.scrollLeft), ui.scrollTop);
+      };
+
       // Cmd-modified actions.
       if (mod) {
         switch (e.code) {
@@ -41,7 +57,20 @@ export function useKeyboardShortcuts() {
             if (e.shiftKey) edit.redo();
             else edit.undo();
             return;
+          // ⌘+ / ⌘- zoom in/out (剪映 Cmd + +/-). "Equal" is the +/= key.
+          case "Equal":
+          case "NumpadAdd":
+            e.preventDefault();
+            zoomBy(ZOOM_KEY_STEP);
+            return;
+          case "Minus":
+          case "NumpadSubtract":
+            e.preventDefault();
+            zoomBy(1 / ZOOM_KEY_STEP);
+            return;
           case "KeyK":
+          case "KeyB":
+            // ⌘K (existing) and ⌘B (剪映 split-at-playhead) both split.
             e.preventDefault();
             edit.splitAtPlayhead();
             return;
@@ -81,7 +110,11 @@ export function useKeyboardShortcuts() {
       switch (e.code) {
         case "Space":
           e.preventDefault();
-          ui.setPlaying(!ui.isPlaying);
+          if (ui.previewMediaId) {
+            ui.requestMediaPreviewToggle();
+          } else {
+            ui.togglePlay(); // rewinds from the parked end frame on replay
+          }
           return;
         case "ArrowLeft":
           e.preventDefault();
@@ -94,13 +127,37 @@ export function useKeyboardShortcuts() {
         case "Backspace":
         case "Delete":
           e.preventDefault();
-          edit.deleteSelectedClips();
+          // ⇧⌫ ripple-deletes (closes the gap); plain ⌫ lifts out (leaves a gap).
+          if (e.shiftKey) edit.rippleDeleteSelectedClips();
+          else edit.deleteSelectedClips();
+          return;
+        case "KeyQ":
+          // 剪映 Q：删除播放头左侧（修剪入点到播放头）。
+          e.preventDefault();
+          edit.trimStartToPlayhead();
+          return;
+        case "KeyW":
+          // 剪映 W：删除播放头右侧（修剪出点到播放头）。
+          e.preventDefault();
+          edit.trimEndToPlayhead();
           return;
         case "KeyC":
+        case "KeyB":
+          // C (existing) and B (剪映 切割模式) both enter the razor/blade tool.
           ui.setToolMode("razor");
           return;
         case "KeyV":
+        case "KeyA":
+          // V (existing) and A (剪映 选择模式) both return to the pointer tool.
           ui.setToolMode("pointer");
+          return;
+        case "KeyZ":
+          // ⇧Z fits the whole timeline to the window (剪映 Shift+Z 适配窗口).
+          if (e.shiftKey) {
+            e.preventDefault();
+            ui.setZoomScale(ui.minZoomScale);
+            ui.setScroll(0, ui.scrollTop);
+          }
           return;
         case "Backquote": {
           e.preventDefault();
