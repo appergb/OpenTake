@@ -521,6 +521,153 @@ fn set_clip_properties_scalar_clears_keyframe_track() {
     assert!(c.opacity_track.is_none()); // cleared by setting the scalar
 }
 
+#[test]
+fn set_clip_properties_crop_sets_and_clears_track() {
+    let mut st = state(vec![video_track("v", true, vec![clip("c", 0, 60)])]);
+    let g = SeqIdGen::default();
+    // Pre-existing crop track should be cleared when a static crop is set.
+    let mut existing = st.timeline.tracks[0].clips[0].clone();
+    existing.crop_track = Some(KeyframeTrack::from_keyframes(vec![Keyframe::new(
+        0,
+        opentake_domain::Crop {
+            left: 0.1,
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+        },
+    )]));
+    st.timeline.tracks[0].clips[0] = existing;
+
+    apply(
+        &mut st,
+        EditCommand::SetClipProperties {
+            clip_ids: vec!["c".into()],
+            properties: ClipProperties {
+                crop: Some(opentake_domain::Crop {
+                    left: 0.2,
+                    top: 0.1,
+                    right: 0.0,
+                    bottom: 0.0,
+                }),
+                ..Default::default()
+            },
+        },
+        &g,
+    )
+    .unwrap();
+
+    let c = &st.timeline.tracks[0].clips[0];
+    assert!((c.crop.left - 0.2).abs() < 1e-9);
+    assert!((c.crop.top - 0.1).abs() < 1e-9);
+    assert!(c.crop_track.is_none()); // cleared by setting the static value
+}
+
+#[test]
+fn set_clip_properties_fade_sets_frames_and_interpolation() {
+    let mut st = state(vec![video_track("v", true, vec![clip("c", 0, 60)])]);
+    let g = SeqIdGen::default();
+    apply(
+        &mut st,
+        EditCommand::SetClipProperties {
+            clip_ids: vec!["c".into()],
+            properties: ClipProperties {
+                fade_in_frames: Some(10),
+                fade_out_frames: Some(15),
+                fade_in_interpolation: Some(Interpolation::Smooth),
+                fade_out_interpolation: Some(Interpolation::Hold),
+                ..Default::default()
+            },
+        },
+        &g,
+    )
+    .unwrap();
+
+    let c = &st.timeline.tracks[0].clips[0];
+    assert_eq!(c.fade_in_frames, 10);
+    assert_eq!(c.fade_out_frames, 15);
+    assert_eq!(c.fade_in_interpolation, Interpolation::Smooth);
+    assert_eq!(c.fade_out_interpolation, Interpolation::Hold);
+}
+
+#[test]
+fn set_clip_properties_fade_clamps_to_duration() {
+    let mut st = state(vec![video_track("v", true, vec![clip("c", 0, 30)])]);
+    let g = SeqIdGen::default();
+    // fade_in 100 on a 30-frame clip should clamp to 30, fade_out to 0.
+    apply(
+        &mut st,
+        EditCommand::SetClipProperties {
+            clip_ids: vec!["c".into()],
+            properties: ClipProperties {
+                fade_in_frames: Some(100),
+                ..Default::default()
+            },
+        },
+        &g,
+    )
+    .unwrap();
+    let c = &st.timeline.tracks[0].clips[0];
+    assert_eq!(c.fade_in_frames, 30);
+    assert_eq!(c.fade_out_frames, 0);
+}
+
+#[test]
+fn set_clip_properties_flip_writes_to_transform() {
+    let mut st = state(vec![video_track("v", true, vec![clip("c", 0, 60)])]);
+    let g = SeqIdGen::default();
+    apply(
+        &mut st,
+        EditCommand::SetClipProperties {
+            clip_ids: vec!["c".into()],
+            properties: ClipProperties {
+                flip_horizontal: Some(true),
+                flip_vertical: Some(true),
+                ..Default::default()
+            },
+        },
+        &g,
+    )
+    .unwrap();
+    let c = &st.timeline.tracks[0].clips[0];
+    assert!(c.transform.flip_horizontal);
+    assert!(c.transform.flip_vertical);
+}
+
+#[test]
+fn set_clip_properties_multiple_fields_at_once() {
+    let mut st = state(vec![video_track("v", true, vec![clip("c", 0, 60)])]);
+    let g = SeqIdGen::default();
+    apply(
+        &mut st,
+        EditCommand::SetClipProperties {
+            clip_ids: vec!["c".into()],
+            properties: ClipProperties {
+                crop: Some(opentake_domain::Crop {
+                    left: 0.1,
+                    top: 0.2,
+                    right: 0.3,
+                    bottom: 0.4,
+                }),
+                fade_in_frames: Some(5),
+                fade_in_interpolation: Some(Interpolation::Smooth),
+                flip_horizontal: Some(true),
+                opacity: Some(0.8),
+                ..Default::default()
+            },
+        },
+        &g,
+    )
+    .unwrap();
+    let c = &st.timeline.tracks[0].clips[0];
+    assert!((c.crop.left - 0.1).abs() < 1e-9);
+    assert!((c.crop.bottom - 0.4).abs() < 1e-9);
+    assert_eq!(c.fade_in_frames, 5);
+    assert_eq!(c.fade_in_interpolation, Interpolation::Smooth);
+    assert!(c.transform.flip_horizontal);
+    assert!((c.opacity - 0.8).abs() < 1e-9);
+    assert!(c.opacity_track.is_none()); // opacity scalar cleared its track
+}
+
 // ---- set_keyframes --------------------------------------------------------
 
 #[test]

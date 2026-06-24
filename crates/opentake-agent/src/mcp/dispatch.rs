@@ -437,6 +437,7 @@ impl Dispatcher {
             opacity: a.opacity,
             transform: a.transform.map(transform_from_arg),
             text_content: a.content.clone(),
+            ..Default::default()
         };
         let res = self.apply(EditCommand::SetClipProperties {
             clip_ids,
