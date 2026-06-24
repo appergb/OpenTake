@@ -130,8 +130,8 @@
   /* Window chrome: macOS traffic-light safe area for the Overlay title bar
      (titleBarStyle:Overlay keeps the close/min/zoom buttons floating over the
      top-left of the content). Top-of-window UI must clear this region. */
-  --titlebar-safe-left: 78px;
-  --titlebar-safe-top: 30px;
+  --titlebar-safe-left: 82px;
+  --titlebar-safe-top: 44px;
 
   /* §1.12 Animation (AppTheme.swift:282-285) */
   --anim-hover: 150ms;

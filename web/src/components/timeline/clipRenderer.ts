@@ -148,11 +148,12 @@ export function drawClip(
   ctx.fillRect(x, y, CLIP.stripWidth, height);
   ctx.restore();
 
-  // 5. Border (ClipRenderer:121-132).
+  // 5. Border (ClipRenderer:121-132). Selected = a clear blue 2px outline (the
+  //    old near-white border read as grey on the clip body and was easy to miss).
   roundRectPath(ctx, x, y, width, height, r);
   if (opts.isSelected) {
-    ctx.strokeStyle = "rgba(255,255,255,0.9)";
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = "rgba(56,139,253,1)";
+    ctx.lineWidth = 2;
   } else {
     ctx.strokeStyle = BORDER.primary;
     ctx.lineWidth = 0.5;

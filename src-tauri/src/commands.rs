@@ -130,90 +130,89 @@ fn msg(e: CmdError) -> String {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum EditRequest {
-    AddClips {
-        entries: Vec<ClipEntryDto>,
-    },
+    #[serde(rename_all = "camelCase")]
+    AddClips { entries: Vec<ClipEntryDto> },
+    #[serde(rename_all = "camelCase")]
     InsertClips {
         track_index: usize,
         at_frame: i32,
         entries: Vec<ClipEntryDto>,
     },
-    MoveClips {
-        moves: Vec<ClipMoveDto>,
-    },
-    RemoveClips {
-        clip_ids: Vec<String>,
-    },
-    SplitClip {
-        clip_id: String,
-        at_frame: i32,
-    },
-    TrimClips {
-        edits: Vec<TrimEditDto>,
-    },
+    #[serde(rename_all = "camelCase")]
+    MoveClips { moves: Vec<ClipMoveDto> },
+    #[serde(rename_all = "camelCase")]
+    RemoveClips { clip_ids: Vec<String> },
+    #[serde(rename_all = "camelCase")]
+    SplitClip { clip_id: String, at_frame: i32 },
+    #[serde(rename_all = "camelCase")]
+    TrimClips { edits: Vec<TrimEditDto> },
+    #[serde(rename_all = "camelCase")]
     SetClipProperties {
         clip_ids: Vec<String>,
         properties: ClipPropertiesDto,
     },
+    #[serde(rename_all = "camelCase")]
     SetKeyframes {
         clip_id: String,
         property: KeyframePropertyDto,
         payload: KeyframePayloadDto,
     },
+    #[serde(rename_all = "camelCase")]
     StampKeyframe {
         clip_id: String,
         property: KeyframePropertyDto,
         frame: i32,
     },
+    #[serde(rename_all = "camelCase")]
     RemoveKeyframe {
         clip_id: String,
         property: KeyframePropertyDto,
         frame: i32,
     },
+    #[serde(rename_all = "camelCase")]
     MoveKeyframe {
         clip_id: String,
         property: KeyframePropertyDto,
         from_frame: i32,
         to_frame: i32,
     },
+    #[serde(rename_all = "camelCase")]
     SetKeyframeInterpolation {
         clip_id: String,
         property: KeyframePropertyDto,
         frame: i32,
         interpolation: Interpolation,
     },
+    #[serde(rename_all = "camelCase")]
     RippleDeleteRanges {
         track_index: usize,
         ranges: Vec<FrameRangeDto>,
     },
-    RippleDeleteClips {
-        clip_ids: Vec<String>,
-    },
-    AddTexts {
-        entries: Vec<TextEntryDto>,
-    },
-    Link {
-        clip_ids: Vec<String>,
-    },
-    Unlink {
-        clip_ids: Vec<String>,
-    },
-    RemoveTracks {
-        track_indexes: Vec<usize>,
-    },
-    InsertTrack {
-        kind: ClipType,
-    },
+    #[serde(rename_all = "camelCase")]
+    RippleDeleteClips { clip_ids: Vec<String> },
+    #[serde(rename_all = "camelCase")]
+    AddTexts { entries: Vec<TextEntryDto> },
+    #[serde(rename_all = "camelCase")]
+    Link { clip_ids: Vec<String> },
+    #[serde(rename_all = "camelCase")]
+    Unlink { clip_ids: Vec<String> },
+    #[serde(rename_all = "camelCase")]
+    RemoveTracks { track_indexes: Vec<usize> },
+    #[serde(rename_all = "camelCase")]
+    InsertTrack { kind: ClipType },
+    #[serde(rename_all = "camelCase")]
     SetTrackProps {
         track_index: usize,
         muted: Option<bool>,
         hidden: Option<bool>,
         sync_locked: Option<bool>,
     },
+    #[serde(rename_all = "camelCase")]
     CreateFolder {
         name: String,
         parent_folder_id: Option<String>,
     },
+    #[serde(rename_all = "camelCase")]
     MoveToFolder {
         asset_ids: Vec<String>,
         folder_id: Option<String>,
@@ -586,5 +585,29 @@ impl KeyframePayloadDto {
                 KeyframePayload::Crop(KeyframeTrack::from_keyframes(kfs))
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod edit_request_serde_tests {
+    use super::EditRequest;
+
+    // Regression: the front end sends camelCase keys (clipIds/clipId/atFrame…).
+    // serde's enum-level `rename_all` does NOT rename struct-variant fields, so
+    // each variant needs its own `rename_all`; without it RemoveClips/SplitClip/
+    // … failed to deserialize ("missing field `clip_ids`") and delete/split/etc.
+    // silently did nothing.
+    #[test]
+    fn deserializes_camelcase_multiword_commands() {
+        serde_json::from_str::<EditRequest>(r#"{"type":"removeClips","clipIds":["a"]}"#)
+            .expect("removeClips camelCase");
+        serde_json::from_str::<EditRequest>(r#"{"type":"splitClip","clipId":"a","atFrame":5}"#)
+            .expect("splitClip camelCase");
+        serde_json::from_str::<EditRequest>(
+            r#"{"type":"insertClips","trackIndex":0,"atFrame":0,"entries":[]}"#,
+        )
+        .expect("insertClips camelCase");
+        serde_json::from_str::<EditRequest>(r#"{"type":"rippleDeleteClips","clipIds":["a"]}"#)
+            .expect("rippleDeleteClips camelCase");
     }
 }
