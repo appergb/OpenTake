@@ -319,16 +319,18 @@ export function TimelineContainer() {
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         const { docX } = toDoc(e);
-        const anchorFrame = docX / zoomScale;
-        const factor = Math.exp(e.deltaY * ZOOM.scrollSensitivity);
+        const pointerViewX = docX - scrollLeft;
+        const hasPointerAnchor = pointerViewX >= 0 && pointerViewX <= viewport.width;
+        const anchorFrame = hasPointerAnchor ? docX / zoomScale : activeFrame;
+        const viewX = hasPointerAnchor ? pointerViewX : activeFrame * zoomScale - scrollLeft;
+        const factor = Math.exp(-e.deltaY * ZOOM.scrollSensitivity);
         const newScale = Math.max(
           useEditorUiStore.getState().minZoomScale,
           Math.min(ZOOM.max, zoomScale * factor),
         );
         setZoomScale(newScale);
-        // Keep the frame under the cursor stationary.
+        // Keep the frame under the cursor/playhead stationary.
         const newDocX = anchorFrame * newScale;
-        const viewX = docX - scrollLeft;
         setScroll(Math.max(0, newDocX - viewX), scrollTop);
       } else if (e.altKey) {
         e.preventDefault();
@@ -350,7 +352,7 @@ export function TimelineContainer() {
         );
       }
     },
-    [toDoc, zoomScale, scrollLeft, scrollTop, setZoomScale, setScroll, docWidth, docHeight, viewport],
+    [toDoc, zoomScale, activeFrame, scrollLeft, scrollTop, setZoomScale, setScroll, docWidth, docHeight, viewport],
   );
 
   // Attach the wheel handler natively with { passive: false }. React's onWheel
