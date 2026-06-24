@@ -12,19 +12,33 @@
  *
  * `enabled` gates fetching (Timeline tab active, not single-media preview).
  * `refreshKey` forces a refetch when the document changes (pass the timeline
- * snapshot). Returns null outside Tauri and before the first frame resolves.
+ * snapshot). Returns `{ dataUrl, readyFrame }`; both are null outside Tauri and
+ * before the first frame resolves. `readyFrame` is the frame the current
+ * `dataUrl` was composited for, so callers can tell when the composite has
+ * caught up to the frame they actually want.
  */
 
 import { useEffect, useRef, useState } from "react";
 import { compositeFrame, isTauri } from "../../lib/api";
+
+export interface TimelineFrameResult {
+  /** Composited PNG data URL for `readyFrame`, or null before the first resolves. */
+  dataUrl: string | null;
+  /** The `frame` argument that produced the current `dataUrl`. Lets callers gate
+   *  a surface swap on "the composite now equals the exact frame I want" (used by
+   *  Preview to hold the played video frame until the stop-frame composite lands,
+   *  instead of flashing a stale earlier frame). */
+  readyFrame: number | null;
+}
 
 export function useTimelineFrame(
   frame: number,
   enabled: boolean,
   refreshKey: unknown,
   minIntervalMs = 0,
-): string | null {
+): TimelineFrameResult {
   const [dataUrl, setDataUrl] = useState<string | null>(null);
+  const [readyFrame, setReadyFrame] = useState<number | null>(null);
   const inFlight = useRef(false);
   const pending = useRef<number | null>(null);
   const lastStart = useRef(0);
@@ -44,7 +58,10 @@ export function useTimelineFrame(
     lastStart.current = performance.now();
     void compositeFrame(f)
       .then((res) => {
-        if (res && enabledRef.current) setDataUrl(res.dataUrl);
+        if (res && enabledRef.current) {
+          setDataUrl(res.dataUrl);
+          setReadyFrame(f);
+        }
       })
       .catch(() => {
         // A failed composite leaves the last good frame.
@@ -99,5 +116,5 @@ export function useTimelineFrame(
     [],
   );
 
-  return dataUrl;
+  return { dataUrl, readyFrame };
 }

@@ -44,7 +44,27 @@ const SEEK_EPSILON_FRAMES = 2;
  *  yet (just mounted/seeked); advance by dt and nudge it rather than snapping. */
 const MASTER_ALIGN_FRAMES = 15;
 
-export function TimelinePlayback({ timeline, fps, playing }: { timeline: Timeline; fps: number; playing: boolean }) {
+/**
+ * `playing` drives the clock/effect (claim, advance the playhead, pause elements
+ * on stop). `holdVisible` drives only PAINT: it stays true through the brief
+ * play→pause "settle" so the already-paused <video> keeps showing its last
+ * decoded frame — the true stop frame — until the composite <img> for that exact
+ * frame is ready (Preview swaps then). This is the WebView analog of upstream's
+ * single AVPlayerLayer staying parked on the player's CMTime: no backward flash
+ * to an earlier composite, no black. The element is still paused (no motion/audio)
+ * whenever `playing` is false; `holdVisible` only keeps the frozen frame painted.
+ */
+export function TimelinePlayback({
+  timeline,
+  fps,
+  playing,
+  holdVisible,
+}: {
+  timeline: Timeline;
+  fps: number;
+  playing: boolean;
+  holdVisible: boolean;
+}) {
   // Subscribe to activeFrame so the right clips stay mounted as the playhead moves.
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
   const items = useMediaStore((s) => s.items);
@@ -255,7 +275,7 @@ export function TimelinePlayback({ timeline, fps, playing }: { timeline: Timelin
           playsInline
           preload="auto"
           onLoadedData={seekOnLoad(visual.clip)}
-          style={{ ...fill, opacity: playing ? clipOpacity(visual.clip) : 0 }}
+          style={{ ...fill, opacity: holdVisible ? clipOpacity(visual.clip) : 0 }}
         />
       )}
       {visual && visualUrl && visual.clip.mediaType === "image" && (
@@ -264,7 +284,7 @@ export function TimelinePlayback({ timeline, fps, playing }: { timeline: Timelin
           src={visualUrl}
           alt=""
           draggable={false}
-          style={{ ...fill, opacity: playing ? clipOpacity(visual.clip) : 0 }}
+          style={{ ...fill, opacity: holdVisible ? clipOpacity(visual.clip) : 0 }}
         />
       )}
       {audios.map((a) => {

@@ -93,16 +93,50 @@ export function Preview() {
   // The playhead still moves instantly; the composite is fetched only once the
   // playhead has settled for ~140ms (i.e. you stop scrubbing). See the perf
   // issue for the proper fix (a streaming playback/scrub engine).
-  const composeFrame = useDebounced(
-    Math.min(Math.round(activeFrame), Math.max(0, timelineTotal - 1)),
-    140,
-  );
-  const timelineFrameUrl = useTimelineFrame(
+  //
+  // The frame the composite should show: rounded, clamped playhead. Computed once
+  // and shared by the request AND the readiness gate so `readyFrame === targetFrame`
+  // can actually match.
+  const targetFrame = Math.min(Math.round(activeFrame), Math.max(0, timelineTotal - 1));
+  // Debounce ONLY for paused scrubbing. The play→pause settle bypasses it below.
+  const scrubFrame = useDebounced(targetFrame, 140);
+
+  // Settle window: spans the play→pause edge until the composite for the EXACT
+  // stop frame is ready. During it we keep the played <video> frame painted (the
+  // browser holds a paused element's last decoded frame = the true stop frame) and
+  // request that frame immediately (no 140ms debounce), so the preview never
+  // flashes the earlier/stale pre-playback composite before snapping to the real
+  // pause frame — the WebView analog of upstream's single AVPlayerLayer staying
+  // parked on the player's current CMTime when paused.
+  const [settling, setSettling] = useState(false);
+  const prevPlaying = useRef(isPlaying);
+  if (prevPlaying.current !== isPlaying) {
+    // Set-state-during-render to adjust on the isPlaying edge with no wasted commit
+    // (React re-renders before painting): entering pause → settle; (re)play → end.
+    prevPlaying.current = isPlaying;
+    setSettling(!isPlaying);
+  }
+
+  const composeFrame = settling ? targetFrame : scrubFrame;
+  const { dataUrl: timelineFrameUrl, readyFrame } = useTimelineFrame(
     composeFrame,
     !previewing && timeline.tracks.length > 0 && !isPlaying,
     timeline,
     0,
   );
+
+  // End the settle once the composite has caught up to the exact stop frame, OR
+  // after a short ceiling so a failed/never-resolving composite (e.g. outside
+  // Tauri) can't pin the held video frame forever — fall back to the <img> path.
+  useEffect(() => {
+    if (!settling) return;
+    if (!isPlaying && timelineFrameUrl !== null && readyFrame === targetFrame) {
+      setSettling(false);
+      return;
+    }
+    const id = window.setTimeout(() => setSettling(false), 800);
+    return () => window.clearTimeout(id);
+  }, [settling, isPlaying, timelineFrameUrl, readyFrame, targetFrame]);
   const fps = timeline.fps;
   const total = previewing
     ? Math.max(0, Math.round(mediaDuration * fps))
@@ -162,7 +196,12 @@ export function Preview() {
              it stays mounted even when paused so audio/video elements
              survive the pause→play transition (upstream VideoEngine model). */}
         {!previewItem && timelineHasContent && (
-          <TimelinePlayback timeline={timeline} fps={fps} playing={isPlaying} />
+          <TimelinePlayback
+            timeline={timeline}
+            fps={fps}
+            playing={isPlaying}
+            holdVisible={isPlaying || settling}
+          />
         )}
         {previewItem ? (
           <MediaPreview
@@ -172,7 +211,7 @@ export function Preview() {
             onDuration={setMediaDuration}
             onPlayingChange={setMediaPlaying}
           />
-        ) : isPlaying ? null : timelineFrameUrl ? (
+        ) : isPlaying || settling ? null : timelineFrameUrl ? (
           // Rust GPU composite of the timeline at the current playhead (#47).
           <img
             src={timelineFrameUrl}
