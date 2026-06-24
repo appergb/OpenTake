@@ -103,6 +103,7 @@ interface UiState {
 
   // Media panel navigation
   mediaPanelCurrentFolderId: string | null;
+  setMediaPanelCurrentFolderId: (id: string | null) => void;
 
   // Actions
   setActiveFrame: (frame: number) => void;
@@ -190,6 +191,7 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   previewActiveTabId: "timeline",
 
   mediaPanelCurrentFolderId: null,
+  setMediaPanelCurrentFolderId: (mediaPanelCurrentFolderId) => set({ mediaPanelCurrentFolderId }),
 
   setActiveFrame: (activeFrame) => set({ activeFrame }),
   setCurrentFrame: (currentFrame) => set({ currentFrame, activeFrame: currentFrame }),

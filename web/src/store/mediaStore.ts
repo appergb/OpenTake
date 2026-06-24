@@ -8,22 +8,29 @@
 
 import { create } from "zustand";
 import * as api from "../lib/api";
-import type { MediaItem } from "../lib/types";
+import type { MediaFolder, MediaItem } from "../lib/types";
 
 interface MediaState {
   items: MediaItem[];
+  /** All folders in the manifest. Empty when the project has no folders. */
+  folders: MediaFolder[];
   importing: boolean;
   error: string | null;
   setItems: (items: MediaItem[]) => void;
+  setFolders: (folders: MediaFolder[]) => void;
+  setCatalog: (items: MediaItem[], folders: MediaFolder[]) => void;
   setImporting: (importing: boolean) => void;
   setError: (error: string | null) => void;
 }
 
 export const useMediaStore = create<MediaState>((set) => ({
   items: [],
+  folders: [],
   importing: false,
   error: null,
   setItems: (items) => set({ items }),
+  setFolders: (folders) => set({ folders }),
+  setCatalog: (items, folders) => set({ items, folders }),
   setImporting: (importing) => set({ importing }),
   setError: (error) => set({ error }),
 }));
@@ -34,7 +41,7 @@ let unlisten: (() => void) | null = null;
 /** Fetch the current catalog into the store. */
 export async function refreshMedia(): Promise<void> {
   const list = await api.getMedia();
-  useMediaStore.getState().setItems(list.items);
+  useMediaStore.getState().setCatalog(list.items, list.folders ?? []);
 }
 
 /** Idempotent bootstrap: initial fetch + subscribe to `media_changed`. */

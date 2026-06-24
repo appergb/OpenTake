@@ -192,7 +192,7 @@ export type EditRequest =
       muted?: boolean;
       hidden?: boolean;
       syncLocked?: boolean;
-    }
+     }
   | { type: "createFolder"; name: string; parentFolderId?: string }
   | { type: "moveToFolder"; assetIds: string[]; folderId?: string }
   | {

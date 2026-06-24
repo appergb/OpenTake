@@ -14,11 +14,14 @@ import {
   Filter,
   ArrowUpDown,
   LayoutGrid,
+  Folder,
   FolderOpen,
   FileVideo,
   FileAudio,
   Image as ImageIcon,
   Type as TypeIcon,
+  ChevronRight,
+  FolderPlus,
   AlertTriangle,
   Star,
 } from "lucide-react";
@@ -35,8 +38,8 @@ import { useT } from "../../i18n";
 import { formatTimecode } from "../../lib/geometry";
 import { assetUrl } from "../../lib/asset";
 import { useProjectStore } from "../../store/projectStore";
-import { addMediaToTimeline } from "../../store/editActions";
-import type { MediaItem } from "../../lib/types";
+import { addMediaToTimeline, createFolder, moveToFolder } from "../../store/editActions";
+import type { MediaFolder, MediaItem } from "../../lib/types";
 import { MediaTabBar, MediaSubTabBar } from "./MediaTabBar";
 import { useFavoritesStore, useIsFavorite } from "./favorites";
 
@@ -73,22 +76,27 @@ export function MediaPanel() {
 function MediaTab({ kind }: { kind: MediaTabKind }) {
   const t = useT();
   const items = useMediaStore((s) => s.items);
+  const folders = useMediaStore((s) => s.folders);
   const importing = useMediaStore((s) => s.importing);
   const error = useMediaStore((s) => s.error);
+  const currentFolderId = useEditorUiStore((s) => s.mediaPanelCurrentFolderId);
+  const setCurrentFolderId = useEditorUiStore((s) => s.setMediaPanelCurrentFolderId);
   const subTab = useEditorUiStore((s) => s.mediaSubTab);
   const setSubTab = useEditorUiStore((s) => s.setMediaSubTab);
   const favoriteIds = useFavoritesStore((s) => s.ids);
 
-  // 过滤管线（全部不可变 filter，不改 store）：
-  // 1) 按主标签——「音频」仅纯音频素材（严格 type==='audio'，不含有声视频，匹配剪映）；
-  //    若日后需含「有音轨的视频」，改为 `item.type === "audio" || item.hasAudio`。
-  //    「素材」显示全部类型。
-  // 2) 按二级标签——「我的」仅星标收藏（命中当前已加载 items）；「导入」显示全部。
-  const filtered = items.filter((item) => {
+  const visibleItems = items.filter((item) => {
+    if ((item.folderId ?? null) !== currentFolderId) return false;
     if (kind === "audio" && item.type !== "audio") return false;
     if (subTab === "mine" && !favoriteIds.has(item.id)) return false;
     return true;
   });
+  const visibleFolders =
+    kind === "material" && subTab === "import"
+      ? folders.filter((folder) => (folder.parentFolderId ?? null) === currentFolderId)
+      : [];
+  const breadcrumb = buildBreadcrumb(folders, currentFolderId);
+  const totalCount = visibleFolders.length + visibleItems.length;
 
   return (
     <>
@@ -106,6 +114,28 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
         {/* actionsRow */}
         <div style={{ height: 28, display: "flex", alignItems: "center", gap: "var(--space-xs)" }}>
           <ImportMenu />
+          {kind === "material" && subTab === "import" && (
+            <button
+              title={t("media.folder.new")}
+              onClick={() => void createFolder(t("media.folder.untitled"), currentFolderId ?? undefined)}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                height: 24,
+                padding: "0 8px",
+                borderRadius: "var(--radius-sm)",
+                background: "var(--bg-raised)",
+                border: "var(--bw-thin) solid var(--border-primary)",
+                color: "var(--text-secondary)",
+                fontSize: "var(--fs-sm)",
+                fontWeight: "var(--fw-medium)",
+              }}
+            >
+              <Icon icon={FolderPlus} size={12} />
+              {t("media.folder.new")}
+            </button>
+          )}
           <button
             title={t("media.generate")}
             style={{
@@ -153,6 +183,12 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
             <Icon icon={Filter} size={13} />
           </HoverButton>
         </div>
+        {/* Breadcrumb */}
+        <Breadcrumb
+          path={breadcrumb}
+          currentFolderId={currentFolderId}
+          onNavigate={setCurrentFolderId}
+        />
         {/* contextBar */}
         <div
           style={{
@@ -165,7 +201,7 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
           }}
         >
           <span>{t("media.library")}</span>
-          <span>{importing ? t("media.importing") : t("media.itemCount", { count: filtered.length })}</span>
+          <span>{importing ? t("media.importing") : t("media.itemCount", { count: totalCount })}</span>
         </div>
         {error && (
           <div style={{ color: "var(--status-error)", fontSize: "var(--fs-xs)" }}>
@@ -174,8 +210,110 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
         )}
       </div>
 
-      {filtered.length === 0 ? <EmptyState subTab={subTab} /> : <MediaGrid items={filtered} />}
+      {totalCount === 0 ? (
+        <EmptyState subTab={subTab} />
+      ) : (
+        <MediaGrid
+          items={visibleItems}
+          folders={visibleFolders}
+          allItems={items}
+        />
+      )}
     </>
+  );
+}
+
+/** Build the breadcrumb path from root to `folderId` (inclusive). Root is
+ *  represented as a synthetic entry with id=null. */
+function buildBreadcrumb(
+  folders: MediaFolder[],
+  folderId: string | null,
+): Array<{ id: string | null; name: string }> {
+  const path: Array<{ id: string | null; name: string }> = [];
+  let cur = folderId;
+  const guard = new Set<string>();
+  while (cur !== null && !guard.has(cur)) {
+    guard.add(cur);
+    const f = folders.find((x) => x.id === cur);
+    if (!f) break;
+    path.unshift({ id: f.id, name: f.name });
+    cur = f.parentFolderId ?? null;
+  }
+  return path;
+}
+
+function Breadcrumb({
+  path,
+  currentFolderId,
+  onNavigate,
+}: {
+  path: Array<{ id: string | null; name: string }>;
+  currentFolderId: string | null;
+  onNavigate: (id: string | null) => void;
+}) {
+  const t = useT();
+  return (
+    <div
+      style={{
+        height: 22,
+        display: "flex",
+        alignItems: "center",
+        gap: 2,
+        fontSize: "var(--fs-xs)",
+        color: "var(--text-secondary)",
+        overflow: "hidden",
+      }}
+    >
+      <BreadcrumbCrumb
+        label={t("media.folder.breadcrumbRoot")}
+        active={currentFolderId === null}
+        onClick={() => onNavigate(null)}
+      />
+      {path.map((p) => (
+        <span key={p.id} style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
+          <Icon icon={ChevronRight} size={11} strokeWidth={2} />
+          <BreadcrumbCrumb
+            label={p.name}
+            active={p.id === currentFolderId}
+            onClick={() => onNavigate(p.id)}
+          />
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function BreadcrumbCrumb({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        background: "transparent",
+        border: "none",
+        padding: "0 4px",
+        height: 18,
+        borderRadius: "var(--radius-xs)",
+        color: active ? "var(--text-primary)" : "var(--text-tertiary)",
+        fontWeight: active ? "var(--fw-medium)" : "var(--fw-regular)",
+        fontSize: "var(--fs-xs)",
+        cursor: "pointer",
+        maxWidth: 120,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {label}
+    </button>
   );
 }
 
@@ -300,7 +438,15 @@ const TYPE_ICON: Record<MediaItem["type"], typeof FileVideo> = {
   lottie: Sparkles,
 };
 
-function MediaGrid({ items }: { items: MediaItem[] }) {
+function MediaGrid({
+  items,
+  folders,
+  allItems,
+}: {
+  items: MediaItem[];
+  folders: MediaFolder[];
+  allItems: MediaItem[];
+}) {
   return (
     <div
       style={{
@@ -313,9 +459,125 @@ function MediaGrid({ items }: { items: MediaItem[] }) {
         alignContent: "start",
       }}
     >
+      {folders.map((folder) => (
+        <FolderTile
+          key={folder.id}
+          folder={folder}
+          itemCount={countDescendants(allItems, folder.id)}
+        />
+      ))}
       {items.map((item) => (
         <MediaCard key={item.id} item={item} />
       ))}
+    </div>
+  );
+}
+
+/** Count items whose folderId is `folderId` (direct children only — matches the
+ *  panel's single-level navigation). Used for the FolderTile badge. */
+function countDescendants(items: MediaItem[], folderId: string): number {
+  return items.reduce((n, it) => (it.folderId === folderId ? n + 1 : n), 0);
+}
+
+/** A folder tile in the media grid. Double-click opens it (sets the current
+ *  folder id in the UI store); single-click selects. Drag-over highlights and
+ *  accepts dropped media items (reparents them via `moveToFolder`). Mirrors
+ *  upstream `FolderTileView` (onTap / onOpen / drop target). */
+function FolderTile({
+  folder,
+  itemCount,
+}: {
+  folder: MediaFolder;
+  itemCount: number;
+}) {
+  const t = useT();
+  const setCurrentFolderId = useEditorUiStore((s) => s.setMediaPanelCurrentFolderId);
+  const [dragOver, setDragOver] = useState(false);
+
+  const onDragOver = (e: React.DragEvent) => {
+    if (e.dataTransfer.types.includes(MEDIA_DND_TYPE)) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      setDragOver(true);
+    }
+  };
+  const onDragLeave = () => setDragOver(false);
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    const assetId = e.dataTransfer.getData(MEDIA_DND_TYPE);
+    if (assetId && assetId !== folder.id) {
+      void moveToFolder([assetId], folder.id);
+    }
+  };
+
+  return (
+    <div
+      onDoubleClick={() => setCurrentFolderId(folder.id)}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      title={folder.name}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 4,
+        cursor: "pointer",
+      }}
+    >
+      <div
+        style={{
+          position: "relative",
+          aspectRatio: "5 / 4",
+          background: dragOver ? "var(--accent-soft, rgba(80,140,255,0.18))" : "var(--bg-placeholder)",
+          border: `var(--bw-thin) solid ${dragOver ? "var(--accent-primary)" : "var(--border-primary)"}`,
+          borderRadius: "var(--radius-sm)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "var(--text-muted)",
+        }}
+      >
+        <Icon icon={Folder} size={28} strokeWidth={1.5} />
+        {dragOver && (
+          <span
+            style={{
+              position: "absolute",
+              bottom: 4,
+              left: 4,
+              right: 4,
+              textAlign: "center",
+              fontSize: "var(--fs-micro)",
+              color: "var(--text-secondary)",
+              background: "rgba(0,0,0,0.5)",
+              borderRadius: "var(--radius-xs)",
+              padding: "0 4px",
+            }}
+          >
+            {t("media.folder.dropHere")}
+          </span>
+        )}
+      </div>
+      <span
+        style={{
+          fontSize: "var(--fs-xs)",
+          color: "var(--text-secondary)",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {folder.name}
+      </span>
+      <span
+        className="tabular"
+        style={{
+          fontSize: "var(--fs-micro)",
+          color: "var(--text-tertiary)",
+        }}
+      >
+        {t("media.folder.itemCount", { count: itemCount })}
+      </span>
     </div>
   );
 }
