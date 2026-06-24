@@ -7,6 +7,10 @@
 //! §2 — "真相源在 Rust，前端持镜像").
 
 mod commands;
+// `pub` so the ffmpeg-gated integration test (`tests/export_integration.rs`) can
+// drive the export orchestrator (`export::run_export`) against the library
+// target. The Tauri command itself is registered below like the other modules.
+pub mod export;
 mod library;
 mod mcp;
 mod media;
@@ -133,6 +137,7 @@ pub fn run() {
             media::get_media,
             media::get_waveform,
             render::composite_frame,
+            export::export_video,
             secret::secret_save,
             secret::secret_load,
             secret::secret_delete,

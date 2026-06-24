@@ -3128,6 +3128,7 @@ dependencies = [
  "keyring",
  "opentake-core",
  "opentake-domain",
+ "opentake-gen",
  "opentake-ops",
  "regex",
  "reqwest 0.12.28",

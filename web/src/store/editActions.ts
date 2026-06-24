@@ -18,6 +18,7 @@ import type {
   ClipPropertiesReq,
   ClipType,
   FrameRangeReq,
+  Interpolation,
   KeyframePayloadReq,
   KeyframeProperty,
   MediaItem,
@@ -94,6 +95,44 @@ export async function setKeyframes(
   payload: KeyframePayloadReq,
 ) {
   await applyAndRefresh({ type: "setKeyframes", clipId, property, payload });
+}
+
+/** Stamp a keyframe at `frame` using the clip's current sampled value. */
+export async function stampKeyframe(
+  clipId: string,
+  property: KeyframeProperty,
+  frame: number,
+) {
+  await applyAndRefresh({ type: "stampKeyframe", clipId, property, frame });
+}
+
+/** Remove the keyframe at `frame`. */
+export async function removeKeyframe(
+  clipId: string,
+  property: KeyframeProperty,
+  frame: number,
+) {
+  await applyAndRefresh({ type: "removeKeyframe", clipId, property, frame });
+}
+
+/** Move a keyframe from `fromFrame` to `toFrame`. */
+export async function moveKeyframe(
+  clipId: string,
+  property: KeyframeProperty,
+  fromFrame: number,
+  toFrame: number,
+) {
+  await applyAndRefresh({ type: "moveKeyframe", clipId, property, fromFrame, toFrame });
+}
+
+/** Change the interpolation mode of the keyframe at `frame`. */
+export async function setKeyframeInterpolation(
+  clipId: string,
+  property: KeyframeProperty,
+  frame: number,
+  interpolation: Interpolation,
+) {
+  await applyAndRefresh({ type: "setKeyframeInterpolation", clipId, property, frame, interpolation });
 }
 
 /** Ripple-delete project-frame ranges on a track, closing the gaps. */

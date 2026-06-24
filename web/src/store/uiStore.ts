@@ -6,11 +6,13 @@
 
 import { create } from "zustand";
 import { ZOOM } from "../lib/theme";
+import { useProjectStore } from "./projectStore";
+import { totalFrames } from "../lib/geometry";
 
 export type Panel = "agent" | "media" | "preview" | "inspector" | "timeline";
 /** Top-level app view (SPEC: 启动先进主页). The editor is one of three views;
  *  switching is in-app (no router) so editor state survives navigation. */
-export type AppView = "home" | "editor" | "settings";
+export type AppView = "home" | "editor" | "settings" | "library";
 export type ToolMode = "pointer" | "razor";
 export type LayoutPreset = "default" | "media" | "vertical";
 /** 剪映式顶部素材面板主标签（英文标识符，中文文案在 dict）。
@@ -106,6 +108,13 @@ interface UiState {
   setActiveFrame: (frame: number) => void;
   setCurrentFrame: (frame: number) => void;
   setPlaying: (playing: boolean) => void;
+  /** Toggle play/pause. When STARTING from the parked end-of-timeline frame,
+   *  rewinds to 0 first (both tickers stop at the last drawable frame, so without
+   *  this the stop check fires immediately and play does nothing). Mirrors
+   *  upstream VideoEngine.playbackStartFrame(). */
+  togglePlay: () => void;
+  mediaPreviewToggleRequest: number;
+  requestMediaPreviewToggle: () => void;
   setScrubbing: (scrubbing: boolean) => void;
 
   selectClips: (ids: Set<string>) => void;
@@ -185,7 +194,25 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   setActiveFrame: (activeFrame) => set({ activeFrame }),
   setCurrentFrame: (currentFrame) => set({ currentFrame, activeFrame: currentFrame }),
   setPlaying: (isPlaying) => set({ isPlaying }),
+  togglePlay: () => {
+    const { isPlaying, activeFrame } = get();
+    if (isPlaying) {
+      set({ isPlaying: false });
+      return;
+    }
+    // Starting playback: if parked at/after the last drawable frame (where the
+    // ticker stopped), rewind to the start so `next >= last` doesn't fire on the
+    // very first tick and stall play. Without media there's nothing to rewind.
+    const last = Math.max(0, totalFrames(useProjectStore.getState().timeline) - 1);
+    if (activeFrame >= last) {
+      set({ currentFrame: 0, activeFrame: 0, isPlaying: true });
+    } else {
+      set({ isPlaying: true });
+    }
+  },
   setScrubbing: (isScrubbing) => set({ isScrubbing }),
+  mediaPreviewToggleRequest: 0,
+  requestMediaPreviewToggle: () => set((s) => ({ mediaPreviewToggleRequest: s.mediaPreviewToggleRequest + 1 })),
 
   selectClips: (selectedClipIds) => set({ selectedClipIds }),
   clearSelection: () =>

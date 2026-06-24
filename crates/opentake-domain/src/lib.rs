@@ -19,6 +19,7 @@
 //!
 //! Zero IO, pure logic, fully unit-testable. The only dependency is `serde`.
 
+pub mod caption_sync;
 pub mod clip;
 pub mod clip_type;
 pub mod grade;
@@ -26,11 +27,13 @@ pub mod keyframe;
 pub mod media;
 pub mod signal;
 pub mod split;
+pub mod subtitle_export;
 pub mod text;
 pub mod timeline;
 pub mod transform;
 
 // Flat re-export of the public domain API for ergonomic downstream use.
+pub use caption_sync::{caption_group_ids, clips_in_group, sync_caption_group_style};
 pub use clip::{Clip, FadeEdge, VolumeScale};
 pub use clip_type::ClipType;
 pub use grade::{
@@ -50,6 +53,7 @@ pub use signal::{
     TrackRoleAssignment, VideoType,
 };
 pub use split::split_clip;
+pub use subtitle_export::{collect_caption_cues, export_srt, export_vtt, SubtitleCue};
 pub use text::{Fill, Rgba, Shadow, TextAlignment, TextLayout, TextStyle};
 pub use timeline::{ClipLocation, Timeline, Track};
 pub use transform::{Crop, CropAspectLock, Point, Transform};

@@ -290,6 +290,10 @@ fn eval_layer<'a>(
         source: &plan.source,
         source_frame,
         affine,
+        // Carry the SAME natural size the affine was built with (above) so the
+        // shader's quad lands in the right place regardless of the (possibly
+        // downscaled) decoded texture resolution (#125).
+        nat_size: plan.nat_size,
         crop_uv,
         opacity,
         needs_premultiply: plan.needs_premultiply,
