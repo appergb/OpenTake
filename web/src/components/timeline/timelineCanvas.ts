@@ -93,6 +93,7 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
           const offset = clip.startFrame - partner.startFrame;
           linkOffsetMap.set(clip.id, offset);
           linkOffsetMap.set(partner.id, -offset);
+          break; // stop at first partner (paired video↔audio is the common case)
         }
       }
     }

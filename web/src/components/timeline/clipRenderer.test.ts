@@ -76,6 +76,34 @@ describe("drawClip missing wash", () => {
   });
 });
 
+describe("drawClip linkOffset badge", () => {
+  const rect = { x: 0, y: 0, width: 200, height: 60 };
+
+  it("draws the red offset badge when linkOffset is nonzero", () => {
+    const { ctx, fills } = makeCtx();
+    drawClip(ctx, testClip, rect, { isSelected: false, fps: 30, linkOffset: 5 });
+    expect(fills).toContain("rgba(220, 38, 38, 0.92)");
+  });
+
+  it("draws the badge for negative offsets too", () => {
+    const { ctx, fills } = makeCtx();
+    drawClip(ctx, testClip, rect, { isSelected: false, fps: 30, linkOffset: -3 });
+    expect(fills).toContain("rgba(220, 38, 38, 0.92)");
+  });
+
+  it("skips the badge when linkOffset is zero", () => {
+    const { ctx, fills } = makeCtx();
+    drawClip(ctx, testClip, rect, { isSelected: false, fps: 30, linkOffset: 0 });
+    expect(fills).not.toContain("rgba(220, 38, 38, 0.92)");
+  });
+
+  it("skips the badge when linkOffset is undefined", () => {
+    const { ctx, fills } = makeCtx();
+    drawClip(ctx, testClip, rect, { isSelected: false, fps: 30 });
+    expect(fills).not.toContain("rgba(220, 38, 38, 0.92)");
+  });
+});
+
 describe("dbFromLinear", () => {
   it("maps unity to 0 dB", () => {
     expect(dbFromLinear(1)).toBeCloseTo(0);
