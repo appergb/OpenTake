@@ -28,7 +28,22 @@ export interface PaintState {
   /** Visible viewport size (CSS px). */
   viewWidth: number;
   viewHeight: number;
+  /** Normalized waveform buckets per media asset id (`0 = loud, 1 = silence`),
+   *  loaded on demand from the Rust media cache. Absent until resolved. */
+  waveforms: Map<string, number[]>;
+  /** Media asset ids whose source file is offline (moved/deleted). Clips that
+   *  reference one render with the error wash. */
+  missingMediaRefs: Set<string>;
+  /** Localized "drop media here" hint shown when the timeline has no tracks. */
+  emptyLabel: string;
+  /** Active drag, so clips follow the cursor (ghost). Absent when not dragging. */
+  drag?: DragPaint;
 }
+
+/** A live move/trim, projected for ghost rendering. */
+export type DragPaint =
+  | { kind: "move"; ids: Set<string>; deltaFrames: number; trackDelta: number }
+  | { kind: "trim"; clipId: string; edge: "left" | "right"; deltaFrames: number };
 
 export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
   const { timeline, pixelsPerFrame, trackHeights, width, dpr, scrollLeft, scrollTop } = s;
@@ -59,15 +74,41 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
     ctx.fillRect(scrollLeft, dy, s.viewWidth, 2);
   }
 
-  // 3. Clips (skip those fully outside the visible window).
+  // 3. Clips (skip those fully outside the visible window). A clip being dragged
+  // is drawn at its live (offset) position as a ghost so it follows the cursor.
+  const drag = s.drag;
   for (let ti = 0; ti < timeline.tracks.length; ti++) {
     const track = timeline.tracks[ti];
     for (const clip of track.clips) {
-      const rect = clipRect(timeline, ti, clip, pixelsPerFrame, trackHeights);
+      let rect = clipRect(timeline, ti, clip, pixelsPerFrame, trackHeights);
+      let ghost = false;
+      if (drag?.kind === "move" && drag.ids.has(clip.id)) {
+        const nti = Math.max(0, Math.min(timeline.tracks.length - 1, ti + drag.trackDelta));
+        rect = clipRect(
+          timeline,
+          nti,
+          { ...clip, startFrame: clip.startFrame + drag.deltaFrames },
+          pixelsPerFrame,
+          trackHeights,
+        );
+        ghost = true;
+      } else if (drag?.kind === "trim" && drag.clipId === clip.id) {
+        const dx = drag.deltaFrames * pixelsPerFrame;
+        rect =
+          drag.edge === "left"
+            ? { ...rect, x: rect.x + dx, width: rect.width - dx }
+            : { ...rect, width: rect.width + dx };
+        ghost = true;
+      }
       if (rect.x + rect.width < scrollLeft || rect.x > visRight) continue;
       drawClip(ctx, clip, rect, {
         isSelected: s.selectedClipIds.has(clip.id),
         fps: timeline.fps,
+        waveform: clip.mediaType === "audio" ? s.waveforms.get(clip.mediaRef) : undefined,
+        // Text clips have no source file; everything else is "missing" when its
+        // asset's file is offline.
+        missing: clip.mediaType !== "text" && s.missingMediaRefs.has(clip.mediaRef),
+        ghost,
       });
     }
   }
@@ -77,11 +118,7 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
     ctx.fillStyle = TEXT.muted;
     ctx.font = '13px -apple-system, system-ui, sans-serif';
     ctx.textAlign = "center";
-    ctx.fillText(
-      "Drop media here to start",
-      scrollLeft + s.viewWidth / 2,
-      scrollTop + s.viewHeight / 2,
-    );
+    ctx.fillText(s.emptyLabel, scrollLeft + s.viewWidth / 2, scrollTop + s.viewHeight / 2);
     ctx.textAlign = "left";
   }
   void width;

@@ -22,6 +22,8 @@
 - **做**:`.opentake` 目录包读写(serde + `#[serde(default)]` 容错,与上游 schema 对齐);媒体导入(本地/URL/bytes,扩展名白名单);ffmpeg 抽缩略图 + sprite 网格缓存(逻辑照搬 `MediaVisualCache`);Symphonia 出波形(归一化 0..1 缓存)。
 - **验证**:能打开上游导出的工程文件并还原 timeline;导入媒体后缩略图/波形/时长/分辨率正确;`.opentake` 往返序列化无损。
 
+> 注:**跨项目全局素材库(#37,独立于「每项目媒体」)后端已并入 main** —— 存储层 `crates/opentake-media/src/library.rs`(copy-on-favorite + SHA-256 内容寻址去重 + JSON manifest 原子写,#104)+ Tauri 命令层 `src-tauri/src/library.rs`(7 命令,#106)。前端(#37-C / #56)未做。该子系统上游 palmier-pro 无对应,不要求 1:1。注意区分:**#37 = 跨项目全局库;#49/#91 = 每项目媒体与文件夹浏览**。
+
 ## Phase 3 — 🔴 wgpu 帧合成器 PoC(项目命门,尽早验证)
 对应 `opentake-render`。**这一步成败决定整条 Rust core 路线。**
 - **做**:
@@ -43,6 +45,7 @@
 ## Phase 5 — 导出
 - **做**:wgpu 逐帧合成 → ffmpeg 编码;复刻预设(H.264/H.265/ProRes × 三档分辨率),逐项对齐码率/profile/色彩逼近上游;`renderSize` 取偶数。
 - **验证**:导出 mp4 可播放;与上游导出对比画质/时长/音画同步一致。
+- **进度**:整条时间线逐帧导出 spine 已落地(#112,`src-tauri/src/export.rs` + `export_video` 命令,H.264/.mp4 全分辨率,逐帧 `Compositor::render_to_rgba` → `VideoEncoder` 编码,含 ffmpeg/GPU 门控集成测试)。**线性音频混音已接入**(#117,`opentake-media/src/encode/mix.rs` 逐 clip PCM 按帧偏移 + volume_at 增益 + 叠加硬限幅,`finish()` 第二趟 ffmpeg mux AAC/`-shortest`,mux 失败回退视频-only,含 AAC 轨集成测试)。剩 H.265/ProRes 预设 + 进度/取消(音频重采样曲线/pan/立体声/动态为后续)。
 
 ## Phase 6 — React 前端
 对应 ui-rebuild 模块(Timeline/MediaPanel/Inspector/Settings/Toolbar/Help/UI)。
@@ -57,10 +60,12 @@
   3. 应用内 chat(reqwest→Anthropic SSE,BYOK;prompt caching)。
   4. **OpenTake 增强**:分层可组合系统提示词 + 模型策略配置化;高阶工具 `remove_filler_words`/`tighten_silences`;写工具返回结构化 JSON;新增 `get_capabilities`。
 - **验证**:`claude mcp add` 能连;每个工具走通;应用内 chat 能完成多步链式编辑;助手专属 undo 正确。
+- **进度**:`list_models` 工具已从存根接到 `opentake-gen` 内置静态 catalog(#111,`?type=` 过滤 + `{ models, loaded }`,纯本地无网络/BYOK);`generate_*`/`upscale_media` 仍待 async + ProviderRegistry + BYOK。
 
 ## Phase 8 — 文字/字幕渲染 + 转写 + 语义搜索
 - **做**:cosmic-text + tiny-skia/Vello 文字渲染(阴影/描边/背景/对齐/换行,逐帧 opacity)接入合成器;whisper-rs 转写(word/segment 时间戳,`TranscriptionResult` 模型复用);candle/ort 跑 SigLIP2 + tokenizers 做视觉/口语搜索。
 - **验证**:字幕静态渲染像素对齐上游;转写时间码映射正确;`search_media` 视觉/口语命中合理。
+- **进度**:SRT/VTT 字幕**导出纯逻辑**已落地(#110,`crates/opentake-domain/src/subtitle_export.rs`,按 `caption_group_id` 分组序列化,16 单测);剩接导出层 + `export_captions` agent 工具 + 前端导出对话框。
 - **进阶扩展(ADVANCED-FEATURES B/C/D 层)**:
   - AI 推理特性(统一 ort worker):超分(Real-ESRGAN/SeedVR)、AI 抠像(RVM/BiRefNet)、运动追踪(CoTracker)、防抖(FFmpeg vidstab 起步)、光流补帧(RIFE/FILM,p3)、消除瑕疵(p3)。
   - 音频工程(FFmpeg):响度统一(loudnorm/EBU R128)、降噪(afftdn/arnndn→DeepFilterNet)、人声分离(Demucs via ort)。

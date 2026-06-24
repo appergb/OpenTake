@@ -27,6 +27,7 @@ tauri-plugin-dialog = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 opentake-core = { workspace = true }
+opentake-project = { workspace = true }
 opentake-ops = { workspace = true }
 opentake-domain = { workspace = true }
 opentake-media = { workspace = true }

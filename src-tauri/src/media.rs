@@ -80,17 +80,28 @@ pub struct MediaItemDto {
     pub thumbnail: Option<String>,
     /// Library folder this asset lives in (`None` = root), for the folder view.
     pub folder_id: Option<String>,
+    /// `true` when the asset's source file is not on disk (moved / deleted /
+    /// offline). Derived from file existence on every read (mirrors upstream
+    /// `MediaResolver.isMissing`), so it clears automatically once a `relink_media`
+    /// points the asset at a real file again. The panel/timeline render an
+    /// "offline" affordance for missing assets.
+    pub missing: bool,
 }
 
 impl MediaItemDto {
-    /// Project a manifest entry onto the panel DTO.
-    fn from_entry(entry: &MediaManifestEntry) -> Self {
+    /// Project a manifest entry onto the panel DTO. `project_dir` resolves
+    /// [`MediaSource::Project`] relative paths for the `missing` existence check.
+    fn from_entry(entry: &MediaManifestEntry, project_dir: Option<&Path>) -> Self {
+        let resolved = resolve_source_path(entry, project_dir);
         let path = match &entry.source {
             MediaSource::External { absolute_path } => Some(absolute_path.clone()),
             // Project-relative assets need the bundle base to resolve; not
             // produced by importing (always external) but handled for safety.
             MediaSource::Project { .. } => None,
         };
+        // Missing = we can resolve a local source path and it doesn't exist.
+        // An unresolvable (e.g. remote-only) source is not flagged missing.
+        let missing = resolved.map(|p| !p.exists()).unwrap_or(false);
         MediaItemDto {
             id: entry.id.clone(),
             name: entry.name.clone(),
@@ -102,7 +113,17 @@ impl MediaItemDto {
             path,
             thumbnail: None,
             folder_id: entry.folder_id.clone(),
+            missing,
         }
+    }
+}
+
+/// Resolve a manifest entry's source to a local path, when it has one:
+/// external assets are absolute; project-relative assets join the bundle base.
+fn resolve_source_path(entry: &MediaManifestEntry, project_dir: Option<&Path>) -> Option<PathBuf> {
+    match &entry.source {
+        MediaSource::External { absolute_path } => Some(PathBuf::from(absolute_path)),
+        MediaSource::Project { relative_path } => project_dir.map(|base| base.join(relative_path)),
     }
 }
 
@@ -130,11 +151,12 @@ impl MediaListDto {
     /// Build the list from the core's current manifest snapshot.
     fn from_core(core: &AppCore) -> Self {
         let manifest = core.media();
+        let project_dir = core.project_dir();
         MediaListDto {
             items: manifest
                 .entries
                 .iter()
-                .map(MediaItemDto::from_entry)
+                .map(|e| MediaItemDto::from_entry(e, project_dir.as_deref()))
                 .collect(),
             folders: manifest
                 .folders
@@ -326,6 +348,84 @@ pub fn get_media(core: State<'_, AppCore>) -> MediaListDto {
     MediaListDto::from_core(&core)
 }
 
+/// `relink_media`: point a missing/offline asset at a newly chosen file, KEEPING
+/// the same asset id so every clip that references it recovers in place. This is
+/// the fix for "lost media stays red after re-selecting the path": the old flow
+/// only had `import_media`, which mints a NEW id and leaves existing clips
+/// stranded on the missing entry forever. Mirrors upstream
+/// `EditorViewModel.relinkAsset(id:to:)` — the new file's type must match the
+/// original (rejected otherwise), and the freshly probed metadata refreshes the
+/// entry. Returns the updated catalog (with `missing` recomputed → now `false`).
+#[tauri::command]
+pub fn relink_media(
+    core: State<'_, AppCore>,
+    media: State<'_, MediaState>,
+    media_ref: String,
+    new_path: String,
+) -> Result<MediaListDto, String> {
+    let new = PathBuf::from(&new_path);
+    if !new.is_file() {
+        return Err(format!("file not found: {new_path}"));
+    }
+    // Validate the target type matches before touching the catalog (upstream
+    // rejects relinking across types). `relink_media_file` re-checks, but doing
+    // it here yields a precise message and avoids a needless probe.
+    let manifest = core.media();
+    let entry = manifest
+        .entries
+        .iter()
+        .find(|e| e.id == media_ref)
+        .ok_or_else(|| format!("media not found: {media_ref}"))?;
+    let new_kind =
+        importable_clip_type(&new).ok_or_else(|| format!("unsupported file: {new_path}"))?;
+    if new_kind != entry.kind {
+        return Err(format!(
+            "cannot relink a {:?} asset to a {:?} file",
+            entry.kind, new_kind
+        ));
+    }
+
+    let probe = probe_media(media.engine(), &new);
+    core.relink_media_file(&media_ref, &new, &probe)
+        .map_err(|e| e.to_string())?;
+    Ok(MediaListDto::from_core(&core))
+}
+
+/// `get_waveform`: normalized waveform buckets (`0 = loud, 1 = silence`) for the
+/// media asset `media_ref`, computed (and disk-cached) by the media engine. The
+/// returned array spans the WHOLE source; the timeline maps each clip's trimmed
+/// sub-range into it (mirrors upstream `MediaVisualCache.waveform`). Errors when
+/// the asset is unknown, has no resolvable path, or carries no audio track.
+#[tauri::command]
+pub fn get_waveform(
+    core: State<'_, AppCore>,
+    media: State<'_, MediaState>,
+    media_ref: String,
+) -> Result<Vec<f32>, String> {
+    let manifest = core.media();
+    let entry = manifest
+        .entries
+        .iter()
+        .find(|e| e.id == media_ref)
+        .ok_or_else(|| format!("media not found: {media_ref}"))?;
+    let path = match &entry.source {
+        MediaSource::External { absolute_path } => PathBuf::from(absolute_path),
+        MediaSource::Project { relative_path } => match core.project_dir() {
+            Some(base) => base.join(relative_path),
+            None => return Err("project not saved; cannot resolve media path".into()),
+        },
+    };
+    media.engine().waveform(&path, entry.duration).map_err(|e| {
+        // Log server-side too (the frontend swallows the error into "no
+        // waveform"); without this a decode failure is invisible.
+        eprintln!(
+            "get_waveform failed: media_ref={media_ref} path={} error={e}",
+            path.display()
+        );
+        e.to_string()
+    })
+}
+
 /// Collect importable media files under `root`. Top-level only unless
 /// `recursive`. Sorted by case-insensitive file name so a folder import mints
 /// asset ids in a stable order. Hidden entries (dot-prefixed) are skipped, as
@@ -397,7 +497,7 @@ mod tests {
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
         };
-        let dto = MediaItemDto::from_entry(&entry);
+        let dto = MediaItemDto::from_entry(&entry, None);
         assert_eq!(dto.id, "a");
         assert_eq!(dto.kind, ClipType::Video);
         assert_eq!(dto.duration, 3.0);
@@ -405,6 +505,8 @@ mod tests {
         assert!(dto.has_audio);
         assert_eq!(dto.path.as_deref(), Some("/abs/clip.mp4"));
         assert_eq!(dto.thumbnail, None);
+        // /abs/clip.mp4 doesn't exist → missing is true (existence-derived).
+        assert!(dto.missing);
     }
 
     #[test]
@@ -420,12 +522,14 @@ mod tests {
             path: Some("/p.png".into()),
             thumbnail: None,
             folder_id: None,
+            missing: false,
         };
         let json = serde_json::to_string(&dto).unwrap();
         assert!(json.contains("\"hasAudio\""));
         assert!(json.contains("\"type\":\"image\""));
         assert!(json.contains("\"thumbnail\":null"));
         assert!(json.contains("\"folderId\":null"));
+        assert!(json.contains("\"missing\":false"));
     }
 
     #[test]
@@ -564,5 +668,71 @@ mod tests {
         let list = MediaListDto::from_core(&core);
         assert_eq!(list.items.len(), 1);
         assert_eq!(list.items[0].kind, ClipType::Image);
+        // The touched file exists → not missing.
+        assert!(!list.items[0].missing);
+    }
+
+    #[test]
+    fn relink_keeps_same_id_and_clears_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let core = AppCore::new();
+        let engine = engine_for(root);
+        let orig = root.join("clip.mp4");
+        touch(&orig);
+        let id = import_one(&core, &engine, &orig).unwrap().id;
+
+        // Source goes missing → the panel reads it as offline.
+        fs::remove_file(&orig).unwrap();
+        let list = MediaListDto::from_core(&core);
+        assert_eq!(list.items.len(), 1);
+        assert!(
+            list.items[0].missing,
+            "a deleted source must read as missing"
+        );
+
+        // Relink to a new file of the SAME type — keeps the id, heals in place.
+        let moved = root.join("clip-moved.mp4");
+        touch(&moved);
+        let probe = probe_media(&engine, &moved);
+        core.relink_media_file(&id, &moved, &probe).unwrap();
+
+        let list = MediaListDto::from_core(&core);
+        assert_eq!(list.items.len(), 1, "relink must not mint a new entry");
+        assert_eq!(list.items[0].id, id, "same id so existing clips recover");
+        assert!(
+            !list.items[0].missing,
+            "relinked source exists → not missing"
+        );
+        assert_eq!(list.items[0].path.as_deref(), moved.to_str());
+    }
+
+    #[test]
+    fn relink_rejects_type_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let core = AppCore::new();
+        let engine = engine_for(root);
+        let orig = root.join("clip.mp4");
+        touch(&orig);
+        let id = import_one(&core, &engine, &orig).unwrap().id;
+
+        // Relinking a video asset to an audio file is rejected (upstream parity).
+        let wrong = root.join("song.mp3");
+        touch(&wrong);
+        let probe = probe_media(&engine, &wrong);
+        assert!(core.relink_media_file(&id, &wrong, &probe).is_err());
+        let list = MediaListDto::from_core(&core);
+        assert_eq!(list.items[0].kind, ClipType::Video, "catalog unchanged");
+    }
+
+    #[test]
+    fn relink_unknown_id_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let core = AppCore::new();
+        let f = tmp.path().join("x.mp4");
+        touch(&f);
+        let probe = probe_media(&engine_for(tmp.path()), &f);
+        assert!(core.relink_media_file("nope", &f, &probe).is_err());
     }
 }

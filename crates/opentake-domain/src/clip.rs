@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::clip_type::ClipType;
 use crate::grade::{ChromaKey, ColorGrade, Effect, Mask};
-use crate::keyframe::{AnimPair, Interpolation, KeyframeTrack};
+use crate::keyframe::{AnimPair, AnimatableProperty, Interpolation, KeyframeTrack};
 use crate::text::TextStyle;
 use crate::transform::{Crop, Point, Transform};
 
@@ -279,6 +279,21 @@ impl Clip {
         }
     }
 
+    /// Absolute timeline frames of every keyframe on `property`'s track. Tracks
+    /// store clip-relative offsets, so each is shifted by `start_frame`. Empty
+    /// when the track is absent. 1:1 port of upstream `keyframeFrames(for:)`.
+    pub fn keyframe_frames(&self, property: AnimatableProperty) -> Vec<i32> {
+        let offsets: Vec<i32> = match property {
+            AnimatableProperty::Opacity => kf_offsets(&self.opacity_track),
+            AnimatableProperty::Position => kf_offsets(&self.position_track),
+            AnimatableProperty::Scale => kf_offsets(&self.scale_track),
+            AnimatableProperty::Rotation => kf_offsets(&self.rotation_track),
+            AnimatableProperty::Crop => kf_offsets(&self.crop_track),
+            AnimatableProperty::Volume => kf_offsets(&self.volume_track),
+        };
+        offsets.into_iter().map(|o| o + self.start_frame).collect()
+    }
+
     /// Live volume keyframe value in dB, or `None` when the frame is outside the
     /// clip or no active volume track exists. Note: upstream uses the raw
     /// `frame - start_frame` offset here (same as `keyframe_offset`).
@@ -441,6 +456,17 @@ impl Clip {
         self.rotation_track = rescaled_track(self.rotation_track.take(), scale);
         self.crop_track = rescaled_track(self.crop_track.take(), scale);
         self.volume_track = rescaled_track(self.volume_track.take(), scale);
+    }
+}
+
+/// Clip-relative offsets of every keyframe on `track`, in storage order. Empty
+/// when the track is absent.
+fn kf_offsets<V: Clone + PartialEq + std::fmt::Debug>(
+    track: &Option<KeyframeTrack<V>>,
+) -> Vec<i32> {
+    match track {
+        Some(t) => t.keyframes.iter().map(|kf| kf.frame).collect(),
+        None => Vec::new(),
     }
 }
 
@@ -750,6 +776,36 @@ mod tests {
             bottom: 0.0,
         };
         approx(c.crop_at(110).left, 0.1);
+    }
+
+    #[test]
+    fn keyframe_frames_empty_track_returns_empty() {
+        let c = base_clip(); // start 100
+        assert!(c.keyframe_frames(AnimatableProperty::Opacity).is_empty());
+        assert!(c.keyframe_frames(AnimatableProperty::Volume).is_empty());
+    }
+
+    #[test]
+    fn keyframe_frames_shifts_offsets_by_start_frame() {
+        let mut c = base_clip(); // start 100
+        c.opacity_track = Some(KeyframeTrack::from_keyframes(vec![
+            Keyframe::new(0, 0.0),
+            Keyframe::new(5, 0.5),
+            Keyframe::new(20, 1.0),
+        ]));
+        // stored offsets 0/5/20 -> absolute 100/105/120
+        assert_eq!(
+            c.keyframe_frames(AnimatableProperty::Opacity),
+            vec![100, 105, 120]
+        );
+    }
+
+    #[test]
+    fn keyframe_frames_per_property_isolation() {
+        let mut c = base_clip(); // start 100
+        c.volume_track = Some(KeyframeTrack::from_keyframes(vec![Keyframe::new(3, -6.0)]));
+        assert_eq!(c.keyframe_frames(AnimatableProperty::Volume), vec![103]);
+        assert!(c.keyframe_frames(AnimatableProperty::Scale).is_empty());
     }
 
     #[test]

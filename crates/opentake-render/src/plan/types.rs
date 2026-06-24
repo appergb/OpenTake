@@ -134,6 +134,14 @@ pub struct LayerDraw<'a> {
     /// `[a, b, c, d, tx, ty]`; coordinate frame: origin bottom-left, y up, unit =
     /// pixels (SPEC §1.3 projection convention).
     pub affine: [f64; 6],
+    /// Source natural size (pixels) the `affine` was built against — the shader
+    /// scales its `[0,1]` quad by THIS to recover source-pixel space before
+    /// applying `affine`. It MUST be the value passed to `affine_transform`
+    /// (`ClipPlan.nat_size`), NOT the decoded texture's resolution: the preview
+    /// decodes at a downscaled `max_size`, so a texture-size proxy mismatches the
+    /// affine and renders the layer shrunk into a corner (and jittering as the
+    /// texture size varies). SPEC §1.3 / §3.3.
+    pub nat_size: (f64, f64),
     /// Source-texture UV sub-rect (folded from `crop_at(f)`), `(u0, v0, u1, v1)`
     /// in `[0, 1]`. SPEC §3.4.
     pub crop_uv: (f64, f64, f64, f64),

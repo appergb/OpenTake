@@ -30,6 +30,7 @@ use opentake_ops::{
 use serde_json::Value;
 
 use crate::mcp::core_handle::CoreHandle;
+use crate::mcp::gen_catalog;
 use crate::plugin::registry::PluginRegistry;
 use crate::signal::engine;
 use crate::signal::rules::OpContext;
@@ -136,6 +137,7 @@ impl Dispatcher {
                     .map_err(|e| ToolError::new(format!("list_folders: {e}")))?;
                 Ok(ToolResult::ok(json.to_string()))
             }
+            ToolName::ListModels => self.list_models_catalog(args),
 
             // --- Editing (wired to EditCommand) ---
             ToolName::AddClips => self.add_clips(args, manifest, op),
@@ -175,7 +177,6 @@ impl Dispatcher {
             | ToolName::GetTranscript
             | ToolName::InspectTimeline
             | ToolName::SearchMedia
-            | ToolName::ListModels
             | ToolName::GenerateVideo
             | ToolName::GenerateImage
             | ToolName::GenerateAudio
@@ -188,6 +189,20 @@ impl Dispatcher {
                 tool.as_str()
             ))),
         }
+    }
+
+    // MARK: - Generative read bodies
+
+    /// `list_models`: project the built-in static catalog from `opentake-gen`
+    /// into the `{ models, loaded }` payload, optionally filtered by `?type=`.
+    /// Fully local — no network, no BYOK key — so it runs synchronously here and
+    /// gives `get_timeline`'s `canGenerate` gate a real "catalog is listable"
+    /// signal to build on.
+    fn list_models_catalog(&self, args: &Value) -> Result<ToolResult, ToolError> {
+        let a: ListModelsArgs = decode_tool_args(args, "")?;
+        let kind = gen_catalog::parse_kind(a.kind.as_deref())?;
+        let payload = gen_catalog::list_models_payload(kind);
+        Ok(ToolResult::ok(payload.to_string()))
     }
 
     // MARK: - Editing tool bodies
@@ -1183,6 +1198,46 @@ mod tests {
         let v: Value = serde_json::from_str(&r.text_joined()).unwrap();
         assert!(v.get("entries").is_some());
         assert!(v.get("folders").is_some());
+    }
+
+    #[test]
+    fn list_models_returns_builtin_catalog() {
+        let d = dispatcher_with(Arc::new(TestHandle::new()));
+        let r = d.dispatch("list_models", serde_json::json!({}));
+        assert!(!r.is_error, "{}", r.text_joined());
+        let v: Value = serde_json::from_str(&r.text_joined()).unwrap();
+        assert_eq!(v["loaded"], serde_json::json!(true));
+        let models = v["models"].as_array().expect("models array");
+        // The static catalog is non-empty and carries the upstream wire shape.
+        assert!(!models.is_empty());
+        assert!(models
+            .iter()
+            .all(|m| m.get("id").is_some() && m.get("uiCapabilities").is_some()));
+    }
+
+    #[test]
+    fn list_models_filters_by_kind() {
+        let d = dispatcher_with(Arc::new(TestHandle::new()));
+        let r = d.dispatch("list_models", serde_json::json!({ "type": "image" }));
+        assert!(!r.is_error, "{}", r.text_joined());
+        let v: Value = serde_json::from_str(&r.text_joined()).unwrap();
+        let models = v["models"].as_array().expect("models array");
+        assert!(!models.is_empty(), "catalog must have image models");
+        assert!(models
+            .iter()
+            .all(|m| m["kind"] == serde_json::json!("image")));
+    }
+
+    #[test]
+    fn list_models_unknown_kind_errors() {
+        let d = dispatcher_with(Arc::new(TestHandle::new()));
+        let r = d.dispatch("list_models", serde_json::json!({ "type": "gif" }));
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("type: unknown value 'gif'"),
+            "{}",
+            r.text_joined()
+        );
     }
 
     // MARK: - Manifest-backed fixtures (rename / delete / workflow tools)

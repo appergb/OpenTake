@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Decode/probe/thumbnail/waveform/transcribe/semantic-search (ffmpeg-sidecar CLI / symphonia / whisper-rs / ort)."
+description = "Decode/probe/thumbnail/waveform/transcribe/semantic-search (ffmpeg-sidecar CLI / whisper-rs / ort)."
 
 [dependencies]
 opentake-domain = { workspace = true }
@@ -13,6 +13,7 @@ serde_json = { workspace = true }
 thiserror = "2"
 anyhow = "1"
 sha2 = "0.10"
+dirs = "6"
 half = "2"
 byteorder = "1"
 ndarray = "0.16"
@@ -28,18 +29,6 @@ unicode-normalization = "0.1"
 # rustls + zip/tar/xz2 stack is the crate's only HTTP/TLS dependency and is dead
 # weight for us; the FfmpegCommand command/parse API lives in the always-on core.
 ffmpeg-sidecar = { version = "2", default-features = false }
-
-# Pure-Rust audio decode for the waveform path (no ffmpeg dependency).
-symphonia = { version = "0.5", default-features = false, features = [
-    "mp3",
-    "aac",
-    "isomp4",
-    "wav",
-    "pcm",
-    "vorbis",
-    "ogg",
-    "flac",
-] }
 
 # Image decode/scale + JPEG sprite encode (image thumbnails, sprite cache,
 # SigLIP squash-resize). Default features pull readers we do not need; keep it lean.
