@@ -17,14 +17,14 @@ import {
 } from "../../lib/geometry";
 import { firstAudioIndex } from "../../lib/zones";
 import { clampTrimDeltaFrames, trimSourceValues } from "../../lib/clip";
-import { collectTargets, findSnap } from "../../lib/snap";
+import { collectTargets, findSnap, findSnapDelta } from "../../lib/snap";
 import { paintTimeline, type DragPaint } from "./timelineCanvas";
 import { useT } from "../../i18n";
 import { paintRuler } from "./rulerCanvas";
 import { TrackHeaderColumn } from "./TrackHeaderColumn";
 import { Playhead } from "./Playhead";
 import { SnapIndicator } from "./SnapIndicator";
-import { hitTestClip, expandLinkGroup, clipsInRect, type ClipHit } from "./hitTest";
+import { hitTestClip, expandLinkGroup, clipsInRect, audioVolumeKfHit, type ClipHit } from "./hitTest";
 import { ClipContextMenu } from "./ClipContextMenu";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
@@ -37,6 +37,7 @@ type DragState =
   | { kind: "move"; hit: ClipHit; grabFrame: number; deltaFrames: number; startTrack: number; targetTrack: number; companions: string[] }
   | { kind: "trimLeft" | "trimRight"; hit: ClipHit; startTrim: number; deltaFrames: number }
   | { kind: "marquee"; startDocX: number; startDocY: number; curDocX: number; curDocY: number }
+  | { kind: "audioVolumeKf"; clipId: string; fromFrame: number; ghostFrame: number }
   | null;
 
 export function TimelineContainer() {
@@ -70,6 +71,10 @@ export function TimelineContainer() {
   const rulerCanvasRef = useRef<HTMLCanvasElement>(null);
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
   const dragRef = useRef<DragState>(null);
+  // Snap hysteresis: keeps the snapped {frame, probeOffset} across pointer
+  // events so the sticky band (1.5x threshold) holds the clip on its target
+  // instead of jittering at the edge (SPEC §5.7). Cleared on pointerUp.
+  const snapStateRef = useRef<{ frame: number; probeOffset: number } | null>(null);
   const [snapFrame, setSnapFrame] = useState<number | null>(null);
   const [dragTick, forceTick] = useState(0);
   const [menu, setMenu] = useState<{ clipId: string } | null>(null);
@@ -164,6 +169,13 @@ export function TimelineContainer() {
         clipId: d.hit.clip.id,
         edge: d.kind === "trimLeft" ? "left" : "right",
         deltaFrames: d.deltaFrames,
+      };
+    } else if (d?.kind === "audioVolumeKf") {
+      drag = {
+        kind: "volumeKf",
+        clipId: d.clipId,
+        fromFrame: d.fromFrame,
+        ghostFrame: d.ghostFrame,
       };
     }
     paintTimeline(ctx, {
@@ -352,6 +364,40 @@ export function TimelineContainer() {
         return;
       }
 
+      // Volume-keyframe dot drag (non-Cmd, non-shift): grab a volume kf dot to
+      // move it (SPEC §5.4 volume envelope). Checked before the clip-body hit so
+      // a dot click drags the kf instead of starting a clip move.
+      if (!e.metaKey && !e.shiftKey) {
+        const kfHit = audioVolumeKfHit(timeline, docX, docY, zoomScale, trackHeights);
+        if (kfHit) {
+          selectClips(new Set([kfHit.clipId]));
+          dragRef.current = {
+            kind: "audioVolumeKf",
+            clipId: kfHit.clipId,
+            fromFrame: kfHit.frame,
+            ghostFrame: kfHit.frame,
+          };
+          return;
+        }
+      }
+
+      // Cmd+click on an audio clip's volume line (not a kf dot) → stamp a new
+      // volume keyframe at the clicked frame (SPEC §5.4). A click landing on an
+      // existing dot is a no-op (the kf already exists there).
+      if (e.metaKey && hit && hit.clip.mediaType === "audio") {
+        const onDot = audioVolumeKfHit(timeline, docX, docY, zoomScale, trackHeights) !== null;
+        if (!onDot) {
+          const clipFrame = Math.max(
+            0,
+            Math.min(hit.clip.durationFrames, frameAt(docX, zoomScale) - hit.clip.startFrame),
+          );
+          void edit.stampKeyframe(hit.clip.id, "volume", clipFrame);
+        }
+        selectClips(new Set([hit.clip.id]));
+        dragRef.current = null;
+        return;
+      }
+
       if (hit) {
         // Selection logic (linkedOn = !Option).
         const linked = !e.altKey;
@@ -432,29 +478,70 @@ export function TimelineContainer() {
       if (d.kind === "move") {
         const rawFrame = frameAt(docX, zoomScale);
         let deltaFrames = rawFrame - d.grabFrame;
-        // Snap: probe the moved clip's edges.
+        // Snap: probe every companion's start+end (multi-probe, SPEC §5.8) and
+        // keep the snap engaged across moves via snapStateRef (sticky band).
         const excluded = new Set(d.companions);
         const targets = collectTargets(timeline, excluded, activeFrame);
-        const movedStart = d.hit.clip.startFrame + deltaFrames;
-        const movedEnd = movedStart + d.hit.clip.durationFrames;
-        const snapStart = findSnap(movedStart, targets, zoomScale, null);
-        const snapEnd = findSnap(movedEnd, targets, zoomScale, null);
+        const leadStart = d.hit.clip.startFrame;
+        const probes: number[] = [];
+        const probeOffsets: number[] = [];
+        for (const id of d.companions) {
+          const loc = findClipLoc(timeline, id);
+          if (!loc) continue;
+          const c = timeline.tracks[loc[0]].clips[loc[1]];
+          const startOff = c.startFrame - leadStart;
+          const endOff = startOff + c.durationFrames;
+          // Moved absolute frame = lead's moved start + this probe's offset.
+          probes.push(leadStart + deltaFrames + startOff);
+          probeOffsets.push(startOff);
+          probes.push(leadStart + deltaFrames + endOff);
+          probeOffsets.push(endOff);
+        }
+        const snap = findSnapDelta(
+          probes,
+          targets,
+          zoomScale,
+          snapStateRef.current,
+          probeOffsets,
+        );
         let snapped: number | null = null;
-        if (snapStart && (!snapEnd || Math.abs(snapStart.frame - movedStart) <= Math.abs(snapEnd.frame - movedEnd))) {
-          deltaFrames += snapStart.frame - movedStart;
-          snapped = snapStart.frame;
-        } else if (snapEnd) {
-          deltaFrames += snapEnd.frame - movedEnd;
-          snapped = snapEnd.frame;
+        if (snap) {
+          deltaFrames += snap.delta;
+          snapStateRef.current = { frame: snap.snappedFrame, probeOffset: snap.probeOffset };
+          snapped = snap.snappedFrame;
+        } else {
+          snapStateRef.current = null;
         }
         // Clamp so the clip can't go before frame 0.
         if (d.hit.clip.startFrame + deltaFrames < 0) {
           deltaFrames = -d.hit.clip.startFrame;
           snapped = null;
+          snapStateRef.current = null;
         }
         const targetTrack = trackAt(timeline, docY, trackHeights) ?? d.startTrack;
         dragRef.current = { ...d, deltaFrames, targetTrack };
         setSnapFrame(snapped);
+        forceTick((n) => n + 1);
+        return;
+      }
+
+      if (d.kind === "audioVolumeKf") {
+        const loc = findClipLoc(timeline, d.clipId);
+        if (!loc) return;
+        const clip = timeline.tracks[loc[0]].clips[loc[1]];
+        // Cursor → clip-relative frame, clamped to the clip's span.
+        let ghostFrame = frameAt(docX, zoomScale) - clip.startFrame;
+        // Snap to the playhead (±5 frames, clip-relative) so a kf can be parked
+        // exactly on the playhead for precise editing.
+        const playheadRel = activeFrame - clip.startFrame;
+        if (Math.abs(ghostFrame - playheadRel) <= 5) {
+          ghostFrame = playheadRel;
+          setSnapFrame(activeFrame);
+        } else {
+          setSnapFrame(null);
+        }
+        ghostFrame = Math.max(0, Math.min(clip.durationFrames, ghostFrame));
+        dragRef.current = { ...d, ghostFrame };
         forceTick((n) => n + 1);
         return;
       }
@@ -507,6 +594,7 @@ export function TimelineContainer() {
     (e: React.PointerEvent) => {
       const d = dragRef.current;
       dragRef.current = null;
+      snapStateRef.current = null;
       setSnapFrame(null);
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
       if (!d) return;
@@ -550,6 +638,17 @@ export function TimelineContainer() {
           toFrame: l.clip.startFrame + frameDelta,
         }));
         void edit.moveClips(moves);
+        return;
+      }
+
+      if (d.kind === "audioVolumeKf") {
+        // Commit the keyframe move only when the frame actually changed (a bare
+        // click on a dot is a no-op). The backend `moveKeyframe` is idempotent
+        // for fromFrame === toFrame, but skipping the round-trip avoids an
+        // unnecessary history entry.
+        if (d.ghostFrame !== d.fromFrame) {
+          void edit.moveKeyframe(d.clipId, "volume", d.fromFrame, d.ghostFrame);
+        }
         return;
       }
 
