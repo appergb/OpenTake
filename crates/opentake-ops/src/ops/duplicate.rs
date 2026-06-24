@@ -1,14 +1,17 @@
 //! Clip duplication (Option/Alt-drag copy). Deep-clips each source clip —
 //! including all keyframe tracks / grade / chroma / masks / effects / text /
 //! transform / crop / fades — mints a fresh id, shifts `start_frame` by
-//! `offset_frames`, places it on `target_track_indexes[i]`, and clears the
-//! link group (a duplicate is its own clip, not part of the original's link
-//! group). The destination range is cleared overwrite-style first (mirrors
+//! `offset_frames`, places it on `target_track_indexes[i]`, and remaps the
+//! link group (a multi-clip group — e.g. an A/V linked pair — gets a fresh
+//! shared id so the copies stay linked; a single-clip group is cleared).
+//! The destination range is cleared overwrite-style first (mirrors
 //! `move_clips`), so a duplicate landing on an existing clip overwrites it.
 //!
 //! Companion to [`crate::ops::move_clips`]: same destination-clearing +
 //! pin-by-id + sort + prune flow, but the source clip stays put and a deep
 //! copy is dropped at the target.
+
+use std::collections::HashMap;
 
 use opentake_domain::{Clip, Timeline};
 
@@ -27,8 +30,9 @@ use crate::ops::tracks::prune_empty_tracks;
 /// - gets a fresh id from `ids`,
 /// - keeps every field of the source (keyframe tracks, grade, chroma, masks,
 ///   effects, text, transform, crop, fades — `Clip: Clone` is a deep copy),
-/// - has its `link_group_id` cleared (the copy is not linked to the original's
-///   partners),
+/// - has its `link_group_id` remapped (a group shared by multiple copied
+///   clips gets a fresh shared id so the copies stay linked; a single-clip
+///   group is cleared to `None`),
 /// - has `start_frame = source.start_frame + offset_frames` (clamped `>= 0`).
 pub fn duplicate_clips(
     timeline: &mut Timeline,
@@ -95,7 +99,28 @@ pub fn duplicate_clips(
         }
     }
 
-    // Drop each deep copy at its target frame with a fresh id + no link group.
+    // Build the link-group remap table (mirrors upstream's `groupCounts` /
+    // `groupRemap` in EditorViewModel+Clipboard.swift): a group shared by
+    // multiple copied clips (e.g. an A/V linked pair) maps to a fresh shared id
+    // so the copies stay linked to each other; a group with only one clip (or
+    // no group) maps to None — that copy stands alone.
+    let mut group_counts: HashMap<Option<String>, usize> = HashMap::new();
+    for plan in &plans {
+        *group_counts
+            .entry(plan.clone.link_group_id.clone())
+            .or_insert(0) += 1;
+    }
+    let mut group_remap: HashMap<Option<String>, Option<String>> = HashMap::new();
+    for (group_id, &count) in &group_counts {
+        let new_id = if count > 1 && group_id.is_some() {
+            Some(ids.next_id())
+        } else {
+            None
+        };
+        group_remap.insert(group_id.clone(), new_id);
+    }
+
+    // Drop each deep copy at its target frame with a fresh id + remapped link.
     let mut created = Vec::new();
     for plan in plans {
         if let Some(idx) = timeline
@@ -106,7 +131,10 @@ pub fn duplicate_clips(
             let mut clip = plan.clone;
             clip.id = ids.next_id();
             clip.start_frame = plan.to_frame;
-            clip.link_group_id = None;
+            // Remap the link group: multi-clip groups get the fresh shared id,
+            // single-clip groups (and None) clear to None.
+            let remapped = group_remap.get(&clip.link_group_id).cloned().flatten();
+            clip.link_group_id = remapped;
             created.push(clip.id.clone());
             timeline.tracks[idx].clips.push(clip);
             sort_clips(&mut timeline.tracks[idx]);
@@ -184,6 +212,68 @@ mod tests {
         );
         // Original keeps its link group.
         assert_eq!(tl.tracks[0].clips[0].link_group_id.as_deref(), Some("grp"));
+    }
+
+    fn find_clip<'a>(tl: &'a Timeline, id: &str) -> &'a Clip {
+        tl.tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .find(|c| c.id == id)
+            .expect("clip exists")
+    }
+
+    #[test]
+    fn duplicate_clips_remaps_link_group_for_multi_clip_group() {
+        // A/V linked pair (shared group "g1") + a lone clip in its own group
+        // ("g2"). Mirrors upstream's groupCounts/groupRemap: the pair's copies
+        // must share a fresh group id; the lone clip's copy clears to None.
+        let mut tl = Timeline::new();
+        let mut v = Track::new("v", ClipType::Video);
+        let mut va = clip("va", 0, 30);
+        va.link_group_id = Some("g1".into());
+        let mut sv = clip("sv", 60, 30);
+        sv.link_group_id = Some("g2".into());
+        v.clips.push(va);
+        v.clips.push(sv);
+        let mut a = Track::new("a", ClipType::Audio);
+        let mut aa = clip("aa", 0, 30);
+        aa.media_type = ClipType::Audio;
+        aa.link_group_id = Some("g1".into());
+        a.clips.push(aa);
+        tl.tracks.push(v);
+        tl.tracks.push(a);
+
+        let g = SeqIdGen::default();
+        let created = duplicate_clips(
+            &mut tl,
+            &["va".into(), "aa".into(), "sv".into()],
+            200,
+            &[0, 1, 0],
+            &g,
+        );
+        assert_eq!(created.len(), 3);
+
+        // The A/V pair copies share a NEW link_group_id (same as each other,
+        // different from the source "g1").
+        let va_copy = find_clip(&tl, &created[0]);
+        let aa_copy = find_clip(&tl, &created[1]);
+        assert_eq!(va_copy.link_group_id, aa_copy.link_group_id);
+        assert_ne!(va_copy.link_group_id.as_deref(), Some("g1"));
+        assert!(
+            va_copy.link_group_id.is_some(),
+            "multi-clip group copies must stay linked"
+        );
+
+        // The lone clip's group ("g2", count == 1) clears to None.
+        let sv_copy = find_clip(&tl, &created[2]);
+        assert!(
+            sv_copy.link_group_id.is_none(),
+            "single-clip group must clear to None"
+        );
+
+        // Originals keep their original group ids.
+        assert_eq!(find_clip(&tl, "va").link_group_id.as_deref(), Some("g1"));
+        assert_eq!(find_clip(&tl, "aa").link_group_id.as_deref(), Some("g1"));
     }
 
     #[test]
