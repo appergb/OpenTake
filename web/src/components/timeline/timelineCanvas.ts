@@ -76,6 +76,28 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
 
   // 3. Clips (skip those fully outside the visible window). A clip being dragged
   // is drawn at its live (offset) position as a ghost so it follows the cursor.
+
+  // Pre-compute link offsets: for each linked clip, find its partner's start
+  // frame and compute the signed delta (clip.startFrame − partner.startFrame).
+  // Only nonzero deltas produce a badge (port of ClipRenderer.drawOffsetBadge).
+  const linkOffsetMap = new Map<string, number>();
+  for (const track of timeline.tracks) {
+    for (const clip of track.clips) {
+      if (!clip.linkGroupId) continue;
+      if (linkOffsetMap.has(clip.id)) continue;
+      // Find any partner with the same linkGroupId on a different track or id.
+      for (const t2 of timeline.tracks) {
+        for (const partner of t2.clips) {
+          if (partner.id === clip.id) continue;
+          if (partner.linkGroupId !== clip.linkGroupId) continue;
+          const offset = clip.startFrame - partner.startFrame;
+          linkOffsetMap.set(clip.id, offset);
+          linkOffsetMap.set(partner.id, -offset);
+        }
+      }
+    }
+  }
+
   const drag = s.drag;
   for (let ti = 0; ti < timeline.tracks.length; ti++) {
     const track = timeline.tracks[ti];
@@ -109,6 +131,7 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
         // asset's file is offline.
         missing: clip.mediaType !== "text" && s.missingMediaRefs.has(clip.mediaRef),
         ghost,
+        linkOffset: linkOffsetMap.get(clip.id),
       });
     }
   }

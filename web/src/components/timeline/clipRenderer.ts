@@ -23,6 +23,11 @@ interface DrawOpts {
   /** This clip is being dragged (move/trim ghost): drawn semi-transparent at its
    *  live position so it follows the cursor. */
   ghost?: boolean;
+  /** Frame offset relative to the linked partner clip. Nonzero only when the
+   *  clip is linked and its partner starts at a different frame. The badge shows
+   *  the signed delta (e.g. "+5" / "-3"). Port of `ClipRenderer.drawOffsetBadge`
+   *  (Swift 624-656). */
+  linkOffset?: number;
 }
 
 /** Linear amplitude → dB, clamped to the volume slider range. 1:1 port of
@@ -197,6 +202,13 @@ export function drawClip(
       ctx.stroke();
     }
     ctx.restore();
+  }
+
+  // 8. Offset badge (ClipRenderer.swift:624-656): when a linked clip is out of
+  //    sync with its partner, a red rounded-rect badge shows the signed frame
+  //    delta (+N / −N) at the clip top-right, inside the trim handle margin.
+  if (opts.linkOffset != null && opts.linkOffset !== 0) {
+    drawOffsetBadge(ctx, opts.linkOffset, rect);
   }
 
   // 9. Keyframe diamonds along the bottom (ClipRenderer:163-191), y = maxY-5.
@@ -401,6 +413,43 @@ function drawKeyframeMarkers(ctx: CanvasRenderingContext2D, clip: Clip, rect: Cl
     ctx.lineWidth = 0.5;
     ctx.stroke();
   }
+  ctx.restore();
+}
+
+/**
+ * Linked offset badge (ClipRenderer.swift:624-656). Red rounded-rect with white
+ * "±N" frame count at the clip's top-right corner. Only drawn when the clip is
+ * linked and its partner starts at a different frame.
+ */
+function drawOffsetBadge(
+  ctx: CanvasRenderingContext2D,
+  offset: number,
+  rect: ClipRect,
+) {
+  const text = offset > 0 ? `+${offset}` : `${offset}`;
+  ctx.save();
+  ctx.font = `500 9px ${cssFontStack()}`;
+  const metrics = ctx.measureText(text);
+  const padX = 4;
+  const padY = 2;
+  const bw = metrics.width + padX * 2;
+  const bh = 10 + padY * 2;
+  const bx = rect.x + rect.width - TRIM.handleWidth - bw - 2;
+  const by = rect.y + 2;
+
+  // Red pill background.
+  roundRectPath(ctx, bx, by, bw, bh, 3);
+  ctx.fillStyle = "rgba(220, 38, 38, 0.92)";
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
+
+  // White centered text.
+  ctx.fillStyle = "#ffffff";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "center";
+  ctx.fillText(text, bx + bw / 2, by + bh / 2);
   ctx.restore();
 }
 
