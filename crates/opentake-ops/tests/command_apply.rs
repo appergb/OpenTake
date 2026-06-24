@@ -5,7 +5,9 @@
 
 use opentake_domain::{AnimPair, Interpolation, Keyframe, KeyframeTrack};
 use opentake_domain::{ChromaKey, ColorGrade, Effect, Mask, MaskShape, Point2};
-use opentake_domain::{Clip, ClipType, MediaManifest, Timeline, Track, Transform};
+use opentake_domain::{
+    Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track, Transform,
+};
 use opentake_ops::{
     apply, ClipEntry, ClipMove, ClipProperties, EditCommand, EditError, EditorState, FrameRange,
     KeyframePayload, KeyframeProperty, SeqIdGen, TextEntry,
@@ -1053,4 +1055,233 @@ fn ripple_delete_clips_rejects_unknown_clip() {
         Err(EditError::Invalid(_))
     ));
     assert_eq!(st.version(), 0);
+}
+
+// ---- swap_media ------------------------------------------------------------
+
+/// Build a manifest entry with `duration` in seconds and an External source.
+fn media_entry(id: &str, kind: ClipType, duration_secs: f64) -> MediaManifestEntry {
+    MediaManifestEntry {
+        id: id.into(),
+        name: id.into(),
+        kind,
+        source: MediaSource::External {
+            absolute_path: format!("/abs/{id}"),
+        },
+        duration: duration_secs,
+        generation_input: None,
+        source_width: None,
+        source_height: None,
+        source_fps: None,
+        has_audio: None,
+        folder_id: None,
+        cached_remote_url: None,
+        cached_remote_url_expires_at: None,
+    }
+}
+
+/// Build a state with the given tracks and manifest entries (fps defaults to 30).
+fn state_with_media(tracks: Vec<Track>, entries: Vec<MediaManifestEntry>) -> EditorState {
+    let mut tl = Timeline::new();
+    tl.tracks = tracks;
+    let mut manifest = MediaManifest::new();
+    manifest.entries = entries;
+    EditorState::new(tl, manifest)
+}
+
+#[test]
+fn swap_media_replaces_ref_and_preserves_attributes() {
+    // Clip duration 100 frames (fps=30 -> 100/30 secs). New media same length.
+    let mut c = clip("c", 0, 100);
+    c.opacity = 0.7;
+    c.transform = Transform {
+        center_x: 0.3,
+        center_y: 0.4,
+        width: 0.5,
+        height: 0.6,
+        rotation: 15.0,
+        flip_horizontal: true,
+        flip_vertical: false,
+    };
+    let v = video_track("v", true, vec![c]);
+    let entries = vec![
+        media_entry("old", ClipType::Video, 100.0 / 30.0),
+        media_entry("new", ClipType::Video, 100.0 / 30.0),
+    ];
+    let mut st = state_with_media(vec![v], entries);
+    let g = SeqIdGen::default();
+
+    let res = apply(
+        &mut st,
+        EditCommand::SwapMedia {
+            clip_id: "c".into(),
+            media_ref: "new".into(),
+            media_type: None,
+            source_clip_type: None,
+            duration_frames: None,
+            trim_start_frame: None,
+        },
+        &g,
+    )
+    .unwrap();
+
+    assert!(res.changed);
+    assert_eq!(res.action_name, "Swap Media");
+    assert_eq!(res.affected_clip_ids, vec!["c".to_string()]);
+    let clip = &st.timeline.tracks[0].clips[0];
+    assert_eq!(clip.media_ref, "new");
+    assert_eq!(clip.duration_frames, 100); // unchanged
+                                           // Preserved editing attributes
+    assert!((clip.opacity - 0.7).abs() < 1e-9);
+    assert!((clip.transform.center_x - 0.3).abs() < 1e-9);
+    assert!((clip.transform.rotation - 15.0).abs() < 1e-9);
+    assert!(clip.transform.flip_horizontal);
+}
+
+#[test]
+fn swap_media_truncates_when_new_media_shorter() {
+    // Clip duration 100 frames; new media is 50 frames -> truncate to 50.
+    let v = video_track("v", true, vec![clip("c", 0, 100)]);
+    let entries = vec![
+        media_entry("old", ClipType::Video, 100.0 / 30.0),
+        media_entry("short", ClipType::Video, 50.0 / 30.0),
+    ];
+    let mut st = state_with_media(vec![v], entries);
+    let g = SeqIdGen::default();
+
+    let res = apply(
+        &mut st,
+        EditCommand::SwapMedia {
+            clip_id: "c".into(),
+            media_ref: "short".into(),
+            media_type: None,
+            source_clip_type: None,
+            duration_frames: None,
+            trim_start_frame: None,
+        },
+        &g,
+    )
+    .unwrap();
+
+    assert!(res.changed);
+    let clip = &st.timeline.tracks[0].clips[0];
+    assert_eq!(clip.media_ref, "short");
+    assert_eq!(clip.duration_frames, 50); // truncated to new media length
+}
+
+#[test]
+fn swap_media_rejects_missing_media_ref() {
+    let v = video_track("v", true, vec![clip("c", 0, 100)]);
+    let entries = vec![media_entry("old", ClipType::Video, 100.0 / 30.0)];
+    let mut st = state_with_media(vec![v], entries);
+    let g = SeqIdGen::default();
+
+    let err = apply(
+        &mut st,
+        EditCommand::SwapMedia {
+            clip_id: "c".into(),
+            media_ref: "nonexistent".into(),
+            media_type: None,
+            source_clip_type: None,
+            duration_frames: None,
+            trim_start_frame: None,
+        },
+        &g,
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, EditError::Invalid(_)));
+    assert_eq!(st.version(), 0); // unchanged
+                                 // Original media_ref preserved.
+    assert_eq!(st.timeline.tracks[0].clips[0].media_ref, "asset");
+}
+
+#[test]
+fn swap_media_syncs_media_type_and_source_clip_type() {
+    // Original clip is video; swap to an audio asset with mediaType=Audio.
+    let mut c = clip("c", 0, 100);
+    c.media_type = ClipType::Video;
+    c.source_clip_type = ClipType::Video;
+    let v = video_track("v", true, vec![c]);
+    let entries = vec![
+        media_entry("old", ClipType::Video, 100.0 / 30.0),
+        media_entry("audio1", ClipType::Audio, 100.0 / 30.0),
+    ];
+    let mut st = state_with_media(vec![v], entries);
+    let g = SeqIdGen::default();
+
+    apply(
+        &mut st,
+        EditCommand::SwapMedia {
+            clip_id: "c".into(),
+            media_ref: "audio1".into(),
+            media_type: Some(ClipType::Audio),
+            source_clip_type: None,
+            duration_frames: None,
+            trim_start_frame: None,
+        },
+        &g,
+    )
+    .unwrap();
+
+    let clip = &st.timeline.tracks[0].clips[0];
+    assert_eq!(clip.media_ref, "audio1");
+    assert_eq!(clip.media_type, ClipType::Audio);
+    assert_eq!(clip.source_clip_type, ClipType::Audio); // implied by media_type
+}
+
+#[test]
+fn swap_media_rejects_missing_clip() {
+    let v = video_track("v", true, vec![]);
+    let entries = vec![media_entry("new", ClipType::Video, 100.0 / 30.0)];
+    let mut st = state_with_media(vec![v], entries);
+    let g = SeqIdGen::default();
+
+    let err = apply(
+        &mut st,
+        EditCommand::SwapMedia {
+            clip_id: "missing".into(),
+            media_ref: "new".into(),
+            media_type: None,
+            source_clip_type: None,
+            duration_frames: None,
+            trim_start_frame: None,
+        },
+        &g,
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, EditError::Invalid(_)));
+    assert_eq!(st.version(), 0);
+}
+
+#[test]
+fn swap_media_is_undoable() {
+    let v = video_track("v", true, vec![clip("c", 0, 100)]);
+    let entries = vec![
+        media_entry("old", ClipType::Video, 100.0 / 30.0),
+        media_entry("new", ClipType::Video, 100.0 / 30.0),
+    ];
+    let mut st = state_with_media(vec![v], entries);
+    let g = SeqIdGen::default();
+
+    apply(
+        &mut st,
+        EditCommand::SwapMedia {
+            clip_id: "c".into(),
+            media_ref: "new".into(),
+            media_type: None,
+            source_clip_type: None,
+            duration_frames: None,
+            trim_start_frame: None,
+        },
+        &g,
+    )
+    .unwrap();
+    assert_eq!(st.timeline.tracks[0].clips[0].media_ref, "new");
+    assert!(st.can_undo());
+
+    // Undo via the command (undo() is pub(crate), so we route through apply).
+    apply(&mut st, EditCommand::Undo, &g).unwrap();
+    assert_eq!(st.timeline.tracks[0].clips[0].media_ref, "asset"); // restored
 }

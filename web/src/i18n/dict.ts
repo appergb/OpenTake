@@ -116,6 +116,10 @@ const zh: Dict = {
   "inspector.keyframes.property.volume": "音量",
   "inspector.keyframes.empty": "无关键帧",
   "inspector.textPlaceholder": "输入文本…",
+  "inspector.swapMedia": "替换媒体",
+  "inspector.swapMediaTitle": "选择新媒体",
+  "inspector.swapMediaEmpty": "媒体库为空，请先导入媒体。",
+  "inspector.swapMediaCurrent": "当前",
 
   // Toolbar
   "toolbar.undo": "撤销 (⌘Z)",
@@ -362,6 +366,10 @@ const en: Dict = {
   "inspector.keyframes.property.volume": "Volume",
   "inspector.keyframes.empty": "No keyframes",
   "inspector.textPlaceholder": "Enter text…",
+  "inspector.swapMedia": "Swap Media",
+  "inspector.swapMediaTitle": "Select New Media",
+  "inspector.swapMediaEmpty": "Media library is empty. Import media first.",
+  "inspector.swapMediaCurrent": "Current",
 
   "toolbar.undo": "Undo (⌘Z)",
   "toolbar.redo": "Redo (⇧⌘Z)",

@@ -151,6 +151,32 @@ export async function moveToFolder(assetIds: string[], folderId?: string) {
   await applyAndRefresh({ type: "moveToFolder", assetIds, folderId });
 }
 
+/** Replace a clip's media source in place, preserving all editing attributes
+ *  (transform / crop / keyframe tracks / grade / masks / effects / fade). When
+ *  the new media is shorter than the clip's current duration, the backend
+ *  truncates the duration and clamps `trim_end_frame` to fit. `mediaType`, when
+ *  set, also implies `sourceClipType` unless `sourceClipType` is explicit. */
+export async function swapMedia(
+  clipId: string,
+  mediaRef: string,
+  options?: {
+    mediaType?: ClipType;
+    sourceClipType?: ClipType;
+    durationFrames?: number;
+    trimStartFrame?: number;
+  },
+) {
+  await applyAndRefresh({
+    type: "swapMedia",
+    clipId,
+    mediaRef,
+    mediaType: options?.mediaType,
+    sourceClipType: options?.sourceClipType,
+    durationFrames: options?.durationFrames,
+    trimStartFrame: options?.trimStartFrame,
+  });
+}
+
 export async function undo() {
   await api.undo();
   if (!isTauri) await forceRefresh();
