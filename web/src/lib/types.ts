@@ -164,6 +164,12 @@ export type EditRequest =
   | { type: "addClips"; entries: ClipEntryReq[] }
   | { type: "insertClips"; trackIndex: number; atFrame: number; entries: ClipEntryReq[] }
   | { type: "moveClips"; moves: ClipMoveReq[] }
+  | {
+      type: "duplicateClips";
+      clipIds: string[];
+      offsetFrames: number;
+      targetTrackIndexes: number[];
+    }
   | { type: "removeClips"; clipIds: string[] }
   | { type: "splitClip"; clipId: string; atFrame: number }
   | { type: "trimClips"; edits: TrimEditReq[] }
