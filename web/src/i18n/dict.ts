@@ -158,6 +158,12 @@ const zh: Dict = {
   "timeline.syncLock": "同步锁定",
   "timeline.dropHint": "将媒体拖到此处开始",
 
+  // Clip context menu (right-click)
+  "contextMenu.split": "在播放头处分割",
+  "contextMenu.delete": "删除",
+  "contextMenu.link": "链接",
+  "contextMenu.unlink": "取消链接",
+
   // Preview
   "preview.fit": "适应",
   "preview.timelineTab": "时间线",
@@ -431,6 +437,12 @@ const en: Dict = {
   "timeline.hide": "Hide",
   "timeline.syncLock": "Sync lock",
   "timeline.dropHint": "Drop media here to start",
+
+  // Clip context menu (right-click)
+  "contextMenu.split": "Split at Playhead",
+  "contextMenu.delete": "Delete",
+  "contextMenu.link": "Link",
+  "contextMenu.unlink": "Unlink",
 
   "preview.fit": "Fit",
   "preview.timelineTab": "Timeline",
