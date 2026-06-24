@@ -393,7 +393,7 @@ export function TimelineContainer() {
       // clip's own edge is a backend no-op, which is fine).
       if (toolMode === "razor" && hit) {
         const raw = frameAt(docX, zoomScale);
-        const targets = collectTargets(timeline, new Set(), activeFrame);
+        const targets = collectTargets(timeline, new Set(), activeFrame, true);
         const snap = findSnap(raw, targets, zoomScale, null);
         void edit.splitClip(hit.clip.id, snap ? snap.frame : raw);
         dragRef.current = null;

@@ -22,11 +22,13 @@ export interface SnapResult {
 }
 
 /** Collect snap targets: every clip start/end (excluding dragged clips) plus an
- *  optional playhead (SnapEngine.swift:31-48). */
+ *  optional playhead (SnapEngine.swift:31-48). `includePlayhead` defaults false
+ *  to match upstream: only callers that explicitly opt in get playhead snap. */
 export function collectTargets(
   timeline: Timeline,
   excludeClipIds: Set<string>,
   playheadFrame: number | null,
+  includePlayhead = false,
 ): SnapTarget[] {
   const targets: SnapTarget[] = [];
   for (const track of timeline.tracks) {
@@ -36,7 +38,7 @@ export function collectTargets(
       targets.push({ frame: endFrame(clip), kind: "clipEdge" });
     }
   }
-  if (playheadFrame !== null) {
+  if (playheadFrame !== null && includePlayhead) {
     targets.push({ frame: playheadFrame, kind: "playhead" });
   }
   return targets;
