@@ -10,6 +10,7 @@ import { PanelHeaderBar } from "../ui/PanelShell";
 import { Icon } from "../ui/Icon";
 import { ScrubbableNumberField } from "./ScrubbableNumberField";
 import { TextTab } from "./TextTab";
+import { KeyframesPanel } from "./KeyframesPanel";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import * as edit from "../../store/editActions";
@@ -450,6 +451,8 @@ function ClipInspector({
           {t("inspector.keyframes")}
         </button>
       </div>
+
+      {keyframesOpen && <KeyframesPanel clip={clip} t={t} />}
     </div>
   );
 }
