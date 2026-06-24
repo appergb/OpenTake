@@ -139,6 +139,10 @@ const zh: Dict = {
   "contextMenu.delete": "删除",
   "contextMenu.link": "链接",
   "contextMenu.unlink": "取消链接",
+  // Disabled placeholders (issue #93 acceptance: menu must list these even if stub)
+  "contextMenu.swapMedia": "替换媒体",
+  "contextMenu.saveAsMedia": "另存为媒体",
+  "contextMenu.extractAudio": "提取音频",
 
   // Preview
   "preview.fit": "适应",
