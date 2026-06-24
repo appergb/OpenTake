@@ -532,12 +532,17 @@ function drawOffsetBadge(ctx: CanvasRenderingContext2D, offsetFrames: number, re
   const padX = 4;
   const badgeH = 13;
   const badgeW = Math.ceil(textW + padX * 2);
-  // Skip when the clip is too small to legibly hold the badge.
-  if (rect.width < badgeW + CLIP.stripWidth + 4 || rect.height < CLIP.labelBarHeight + badgeH + 2) {
+  // Skip when the clip is too small to legibly hold the badge (now reserves
+  // room for the right trim handle too — the badge must never overlap it).
+  if (rect.width < badgeW + CLIP.stripWidth + TRIM.handleWidth + 6 || rect.height < CLIP.labelBarHeight + badgeH + 2) {
     ctx.restore();
     return;
   }
-  const bx = rect.x + CLIP.stripWidth + 3;
+  // Anchor to the right edge, just inside the right trim handle. Upstream
+  // `ClipRenderer.swift:640-644` draws the offset pill in the top-right so
+  // it doesn't sit on top of the color strip or the trim handle (the PR
+  // #120 review request-changes fix).
+  const bx = rect.x + rect.width - TRIM.handleWidth - badgeW - 2;
   const by = rect.y + CLIP.labelBarHeight + 2;
   roundRectPath(ctx, bx, by, badgeW, badgeH, 3);
   ctx.fillStyle = ACCENT.offsetBadge;
