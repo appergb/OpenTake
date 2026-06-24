@@ -195,3 +195,5 @@
 7. **账号/订阅/积分、Sample 后端、WelcomeOverlay/Tutorial、Models 目录** 属账号与引导体系,非窗口/保存/剪辑核心,全部后置(P2 或占位隐藏)。
 
 8. **新建落盘与自动保存必须配套设计。** `project_dir=None` 时 `save_project(None)` 报 NoProjectOpen,所以 P0-1(新建即落盘)是 P1-1(自动保存)的硬前置,二者同期落地。
+
+9. **全局可复用素材库(#37)是 OpenTake 新增子系统,不在本 1:1 差距清单约束内。** 上游 palmier-pro 无对应模块(grep 确认无全局收藏库)。采用 copy-on-favorite + SHA-256 内容寻址去重 + JSON manifest 原子写;后端存储层(#37-A / #104)+ Tauri 命令层(#37-B / #106)**已并入 main**,前端(#37-C / #56)待做。注意区分范畴:**#37 = 跨项目全局库;#49/#91 = 每项目媒体与文件夹浏览**,两者不同。

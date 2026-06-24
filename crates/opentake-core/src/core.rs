@@ -297,6 +297,28 @@ impl AppCore {
         Ok(entry)
     }
 
+    /// Relink an existing asset (by id) to a new file, keeping the same id, and
+    /// emit [`CoreEvent::MediaChanged`] after releasing the lock so observers
+    /// refresh. See [`EditorSession::relink_media_file`]: re-importing would mint
+    /// a new id and leave clips stranded on the missing entry; relinking heals
+    /// them in place. Errors with [`crate::CoreError::Media`] for an unknown id
+    /// or a type mismatch.
+    pub fn relink_media_file(
+        &self,
+        asset_id: &str,
+        path: impl AsRef<std::path::Path>,
+        probe: &ProbedMedia,
+    ) -> Result<MediaManifestEntry> {
+        let (entry, count) = {
+            let mut session = self.lock();
+            let entry = session.relink_media_file(asset_id, path, probe)?;
+            let count = session.media().entries.len();
+            (entry, count)
+        };
+        self.events.emit(&CoreEvent::MediaChanged { count });
+        Ok(entry)
+    }
+
     // MARK: - Internal
 
     /// Lock the session, recovering from a poisoned mutex by taking the inner

@@ -32,6 +32,7 @@ pub mod encode;
 pub mod error;
 pub mod frame;
 pub mod index_coordinator;
+pub mod library;
 pub mod ort_worker;
 pub mod probe;
 pub mod search;

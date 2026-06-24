@@ -5,7 +5,7 @@
  * background + a centered placeholder. Transport drives the local playhead.
  */
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   SkipBack,
   SkipForward,
@@ -24,8 +24,21 @@ import { useMediaStore } from "../../store/mediaStore";
 import { formatTimecode, totalFrames } from "../../lib/geometry";
 import { assetUrl } from "../../lib/asset";
 import { useTimelineFrame } from "./useTimelineFrame";
+import { TimelinePlayback } from "./TimelinePlaybackLayer";
 import { useT } from "../../i18n";
 import type { MediaItem } from "../../lib/types";
+
+/** A value that only updates after it has been stable for `ms` (trailing
+ *  debounce). Used to defer the expensive timeline composite until the playhead
+ *  stops moving, so scrubbing doesn't spawn a per-frame ffmpeg/GPU storm. */
+function useDebounced<T>(value: T, ms: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const id = window.setTimeout(() => setDebounced(value), ms);
+    return () => window.clearTimeout(id);
+  }, [value, ms]);
+  return debounced;
+}
 
 export function Preview() {
   const t = useT();
@@ -33,8 +46,7 @@ export function Preview() {
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
   const setCurrentFrame = useEditorUiStore((s) => s.setCurrentFrame);
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
-  const setPlaying = useEditorUiStore((s) => s.setPlaying);
-  const canvasZoom = useEditorUiStore((s) => s.canvasZoom);
+  const togglePlayTimeline = useEditorUiStore((s) => s.togglePlay);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
   const previewItem = useMediaStore((s) =>
     previewMediaId ? s.items.find((m) => m.id === previewMediaId) ?? null : null,
@@ -53,6 +65,15 @@ export function Preview() {
     setMediaPlaying(false);
   }, [previewMediaId]);
 
+  // Space bar during media preview → toggle the media element.
+  const mediaToggleCount = useEditorUiStore((s) => s.mediaPreviewToggleRequest);
+  useEffect(() => {
+    if (mediaToggleCount > 0 && previewing) {
+      togglePlay();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mediaToggleCount]);
+
   const previewing = previewItem !== null;
   // Timeline composite preview (#47): on the Timeline tab, paint the GPU-
   // composited frame for the current playhead (replacing the black placeholder).
@@ -62,11 +83,25 @@ export function Preview() {
   // playback the request rate is capped (~11fps) to bound ffmpeg/PNG churn until
   // the streaming engine (#53) lands; paused/scrub stays immediate.
   const timelineTotal = totalFrames(timeline);
-  const timelineFrameUrl = useTimelineFrame(
+  // During playback `<TimelinePlayback>` plays the real media elements, so the
+  // GPU composite is fetched only when PAUSED/scrubbing (accurate text/effects,
+  // and no per-frame ffmpeg/PNG churn while playing).
+  const timelineHasContent = !previewing && timeline.tracks.length > 0;
+  // Debounce the composited frame: each composite is a separate ffmpeg decode +
+  // wgpu pass + PNG + base64, so firing one per scrubbed frame spawns a storm of
+  // subprocess + GPU work that can lock up the whole machine (reported freeze).
+  // The playhead still moves instantly; the composite is fetched only once the
+  // playhead has settled for ~140ms (i.e. you stop scrubbing). See the perf
+  // issue for the proper fix (a streaming playback/scrub engine).
+  const composeFrame = useDebounced(
     Math.min(Math.round(activeFrame), Math.max(0, timelineTotal - 1)),
-    !previewing && timeline.tracks.length > 0,
+    140,
+  );
+  const timelineFrameUrl = useTimelineFrame(
+    composeFrame,
+    !previewing && timeline.tracks.length > 0 && !isPlaying,
     timeline,
-    isPlaying ? 90 : 0,
+    0,
   );
   const fps = timeline.fps;
   const total = previewing
@@ -92,34 +127,15 @@ export function Preview() {
       if (el.paused) void el.play();
       else el.pause();
     } else {
-      setPlaying(!isPlaying);
+      // Rewinds from the parked end frame on replay (see store togglePlay).
+      togglePlayTimeline();
     }
   };
 
-  const stageRef = useRef<HTMLDivElement>(null);
-  const [fit, setFit] = useState({ w: 0, h: 0 });
-
-  useLayoutEffect(() => {
-    const el = stageRef.current;
-    if (!el) return;
-    const update = () => {
-      const cw = el.clientWidth;
-      const ch = el.clientHeight;
-      let w = cw;
-      let h = cw / aspect;
-      if (h > ch) {
-        h = ch;
-        w = ch * aspect;
-      }
-      // Round to whole pixels so the canvas box never renders a sub-pixel torn
-      // edge (the "preview looks missing/glitchy" report).
-      setFit({ w: Math.round(w * canvasZoom), h: Math.round(h * canvasZoom) });
-    };
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [aspect, canvasZoom]);
+  // Aspect-fit is done in pure CSS (intrinsic media size + max-width/height,
+  // centered by the stage's flexbox) — no JS measurement, so there's no stale /
+  // zero-size race that could render the frame tiny or off-center.
+  void aspect;
 
   return (
     <>
@@ -127,9 +143,10 @@ export function Preview() {
         <PreviewTabs item={previewItem} />
       </PanelHeaderBar>
 
-      {/* Canvas stage */}
+      {/* Canvas stage: a flex-centered area; the media inside aspect-fits via
+          intrinsic size + max-width/height, so it always fills the largest 16:9
+          box and stays centered. */}
       <div
-        ref={stageRef}
         style={{
           flex: 1,
           minHeight: 0,
@@ -138,47 +155,58 @@ export function Preview() {
           alignItems: "center",
           justifyContent: "center",
           overflow: "hidden",
+          padding: 8,
         }}
       >
-        <div
-          style={{
-            width: fit.w,
-            height: fit.h,
-            background: "var(--bg-preview-canvas)",
-            // Always outline the canvas surface so the preview area is visibly
-            // present even when the composite is black (empty/end frame).
-            border:
-              canvasZoom < 1
-                ? "1px solid rgba(255,255,255,0.25)"
-                : "1px solid rgba(255,255,255,0.08)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "var(--text-muted)",
-            fontSize: "var(--fs-xs)",
-            overflow: "hidden",
-          }}
-        >
-          {previewItem ? (
-            <MediaPreview
-              item={previewItem}
-              mediaRef={mediaRef}
-              onTime={setMediaTime}
-              onDuration={setMediaDuration}
-              onPlayingChange={setMediaPlaying}
-            />
-          ) : timelineFrameUrl ? (
-            // Rust GPU composite of the timeline at the current playhead (#47).
-            <img
-              src={timelineFrameUrl}
-              alt=""
-              draggable={false}
-              style={{ width: "100%", height: "100%", objectFit: "contain" }}
-            />
-          ) : (
-            <span>{timeline.tracks.length === 0 ? t("preview.noMedia") : `${timeline.width}×${timeline.height}`}</span>
-          )}
-        </div>
+        {/* Layer: TimelinePlayback lives here when there are tracks —
+             it stays mounted even when paused so audio/video elements
+             survive the pause→play transition (upstream VideoEngine model). */}
+        {!previewItem && timelineHasContent && (
+          <TimelinePlayback timeline={timeline} fps={fps} playing={isPlaying} />
+        )}
+        {previewItem ? (
+          <MediaPreview
+            item={previewItem}
+            mediaRef={mediaRef}
+            onTime={setMediaTime}
+            onDuration={setMediaDuration}
+            onPlayingChange={setMediaPlaying}
+          />
+        ) : isPlaying ? null : timelineFrameUrl ? (
+          // Rust GPU composite of the timeline at the current playhead (#47).
+          <img
+            src={timelineFrameUrl}
+            alt=""
+            draggable={false}
+            style={{
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+              objectFit: "contain",
+              display: "block",
+            }}
+          />
+        ) : (
+          // Empty / no-frame: a framed 16:9 canvas surface placeholder.
+          <div
+            style={{
+              aspectRatio: `${timeline.width} / ${timeline.height}`,
+              height: "100%",
+              maxWidth: "100%",
+              maxHeight: "100%",
+              background: "var(--bg-preview-canvas)",
+              border: "1px solid rgba(255,255,255,0.08)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "var(--text-muted)",
+              fontSize: "var(--fs-xs)",
+            }}
+          >
+            {timeline.tracks.length === 0 ? t("preview.noMedia") : `${timeline.width}×${timeline.height}`}
+          </div>
+        )}
       </div>
 
       {/* The app's scrub + transport are the single control surface — they drive
@@ -249,7 +277,12 @@ function MediaPreview({
 }) {
   const t = useT();
   const url = assetUrl(item.path);
-  const box: React.CSSProperties = { width: "100%", height: "100%", objectFit: "contain" };
+  const box: React.CSSProperties = {
+    maxWidth: "100%",
+    maxHeight: "100%",
+    objectFit: "contain",
+    display: "block",
+  };
 
   if (!url) {
     return <span>{t("preview.unavailable")}</span>;
@@ -373,7 +406,6 @@ function ScrubBar({ frame, total, onSeek }: { frame: number; total: number; onSe
     >
       <div
         style={{
-          position: "relative",
           flex: 1,
           height: hover ? 4 : 3,
           background: "rgba(255,255,255,0.1)",

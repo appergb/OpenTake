@@ -18,13 +18,27 @@ const PREFIX: Record<ClipType, string> = {
   lottie: "L",
 };
 
-/** "V1"/"A1"/... label for a track. Counts tracks of the same kind up to i. */
+/**
+ * "V1"/"A1"/... label for a track (1:1 with `timelineTrackDisplayLabel`).
+ * Audio counts top-down (top audio = A1). Visual tracks count from this track
+ * DOWN to the first audio track, so the TOPMOST visual track gets the highest
+ * number and the bottom one gets 1 — matching upstream's stacking order.
+ */
 export function trackDisplayLabel(timeline: Timeline, i: number): string {
   if (i < 0 || i >= timeline.tracks.length) return "";
   const kind = timeline.tracks[i].type;
   let n = 0;
-  for (let k = 0; k <= i; k++) {
-    if (timeline.tracks[k].type === kind) n++;
+  if (kind === "audio") {
+    for (let k = 0; k <= i; k++) {
+      if (timeline.tracks[k].type === kind) n++;
+    }
+  } else {
+    const fa = firstAudioIndex(timeline);
+    const visualEnd = fa >= 0 ? fa : timeline.tracks.length;
+    const end = Math.max(i + 1, visualEnd);
+    for (let k = i; k < end; k++) {
+      if (timeline.tracks[k].type === kind) n++;
+    }
   }
   return `${PREFIX[kind]}${n}`;
 }

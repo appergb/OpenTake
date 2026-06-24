@@ -49,6 +49,34 @@ export async function importFolderViaDialog(): Promise<void> {
   }
 }
 
+/**
+ * Relink an offline asset: pick the file it should now point at and hand it to
+ * the Rust `relink_media` command, which keeps the SAME asset id so every clip
+ * referencing it recovers (re-importing would mint a new id and strand them).
+ * Rust emits `media_changed`; we also refresh so the offline wash clears at once.
+ */
+export async function relinkMediaViaDialog(mediaRef: string): Promise<void> {
+  const open = await openDialog();
+  if (!open) return;
+  const store = useMediaStore.getState();
+  store.setError(null);
+  try {
+    const selected = await open({
+      directory: false,
+      multiple: false,
+      defaultPath: useSettingsStore.getState().defaultImportFolder ?? undefined,
+      filters: [
+        { name: "Media", extensions: [...VIDEO_EXTS, ...AUDIO_EXTS, ...IMAGE_EXTS] },
+      ],
+    });
+    if (typeof selected !== "string") return; // cancelled
+    await api.relinkMedia(mediaRef, selected);
+    await refreshMedia();
+  } catch (error: unknown) {
+    store.setError(getErrorMessage(error));
+  }
+}
+
 /** Pick one or more media files and import them. */
 export async function importFilesViaDialog(): Promise<void> {
   const open = await openDialog();

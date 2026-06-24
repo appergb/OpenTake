@@ -9,13 +9,21 @@ import { isTauri } from "../lib/api";
 import { forceRefresh } from "./sync";
 import { useEditorUiStore } from "./uiStore";
 import { useProjectStore } from "./projectStore";
+import { trimToPlayheadEdits } from "../lib/clip";
 import type {
+  Clip,
   ClipEntryReq,
   ClipMoveReq,
   ClipPropertiesReq,
   ClipType,
+  FrameRangeReq,
+  Interpolation,
+  KeyframePayloadReq,
+  KeyframeProperty,
   MediaItem,
+  TextEntryReq,
   Timeline,
+  Transform,
   TrimEditReq,
 } from "../lib/types";
 
@@ -71,16 +79,74 @@ export async function unlinkClips(clipIds: string[]) {
   await applyAndRefresh({ type: "unlink", clipIds });
 }
 
-/** Create a new folder under `parentFolderId` (or at the root when null). The
- *  backend appends to the manifest and emits `media_changed`; the panel
- *  re-fetches via `refreshMedia`. */
-export async function createFolder(name: string, parentFolderId: string | null) {
+/** Toggle a track head's mute / hide / sync-lock. Omitted fields are unchanged. */
+export async function setTrackProps(
+  trackIndex: number,
+  props: { muted?: boolean; hidden?: boolean; syncLocked?: boolean },
+) {
+  await applyAndRefresh({ type: "setTrackProps", trackIndex, ...props });
+}
+
+/** Replace (or clear) a clip's keyframe track for one property. */
+export async function setKeyframes(
+  clipId: string,
+  property: KeyframeProperty,
+  payload: KeyframePayloadReq,
+) {
+  await applyAndRefresh({ type: "setKeyframes", clipId, property, payload });
+}
+
+/** Stamp a keyframe at `frame` using the clip's current sampled value. */
+export async function stampKeyframe(
+  clipId: string,
+  property: KeyframeProperty,
+  frame: number,
+) {
+  await applyAndRefresh({ type: "stampKeyframe", clipId, property, frame });
+}
+
+/** Remove the keyframe at `frame`. */
+export async function removeKeyframe(
+  clipId: string,
+  property: KeyframeProperty,
+  frame: number,
+) {
+  await applyAndRefresh({ type: "removeKeyframe", clipId, property, frame });
+}
+
+/** Move a keyframe from `fromFrame` to `toFrame`. */
+export async function moveKeyframe(
+  clipId: string,
+  property: KeyframeProperty,
+  fromFrame: number,
+  toFrame: number,
+) {
+  await applyAndRefresh({ type: "moveKeyframe", clipId, property, fromFrame, toFrame });
+}
+
+/** Change the interpolation mode of the keyframe at `frame`. */
+export async function setKeyframeInterpolation(
+  clipId: string,
+  property: KeyframeProperty,
+  frame: number,
+  interpolation: Interpolation,
+) {
+  await applyAndRefresh({ type: "setKeyframeInterpolation", clipId, property, frame, interpolation });
+}
+
+/** Ripple-delete project-frame ranges on a track, closing the gaps. */
+export async function rippleDeleteRanges(trackIndex: number, ranges: FrameRangeReq[]) {
+  if (ranges.length === 0) return;
+  await applyAndRefresh({ type: "rippleDeleteRanges", trackIndex, ranges });
+}
+
+/** Create a media-library folder (optionally nested under `parentFolderId`). */
+export async function createFolder(name: string, parentFolderId?: string) {
   await applyAndRefresh({ type: "createFolder", name, parentFolderId });
 }
 
-/** Move one or more assets into `folderId` (or to the root when null). Used by
- *  the in-library drag flow (asset -> folder, folder -> folder). */
-export async function moveToFolder(assetIds: string[], folderId: string | null) {
+/** Move media assets into a folder (or to root with no `folderId`). */
+export async function moveToFolder(assetIds: string[], folderId?: string) {
   if (assetIds.length === 0) return;
   await applyAndRefresh({ type: "moveToFolder", assetIds, folderId });
 }
@@ -95,14 +161,61 @@ export async function redo() {
   if (!isTauri) await forceRefresh();
 }
 
-/** Split at the current playhead for the selected clip (Toolbar / ⌘K). */
+/** Split at the current playhead (Toolbar / ⌘K). Splits the SELECTED clips the
+ *  playhead intersects; if nothing is selected, splits every clip under the
+ *  playhead (so split works without first selecting — matches editor norms).
+ *  A clip the playhead doesn't intersect is a no-op in the core. */
 export async function splitAtPlayhead() {
   const ui = useEditorUiStore.getState();
-  const frame = ui.activeFrame;
+  const frame = Math.round(ui.activeFrame);
   const selected = [...ui.selectedClipIds];
-  if (selected.length === 1) {
-    await splitClip(selected[0], frame);
+  let ids = selected;
+  if (ids.length === 0) {
+    // No selection: target every clip the playhead currently intersects.
+    const timeline = useProjectStore.getState().timeline;
+    ids = [];
+    for (const track of timeline.tracks) {
+      for (const c of track.clips) {
+        if (frame > c.startFrame && frame < c.startFrame + c.durationFrames) ids.push(c.id);
+      }
+    }
   }
+  for (const id of ids) {
+    await splitClip(id, frame);
+  }
+}
+
+/** Clips the playhead is strictly inside, restricted to the selection when one
+ *  exists (else all clips under the playhead) — the target set for trim-to-
+ *  playhead, matching `splitAtPlayhead`'s "act on what's under the playhead". */
+function clipsUnderPlayhead(): Clip[] {
+  const ui = useEditorUiStore.getState();
+  const frame = Math.round(ui.activeFrame);
+  const selected = new Set(ui.selectedClipIds);
+  const restrict = selected.size > 0;
+  const out: Clip[] = [];
+  for (const track of useProjectStore.getState().timeline.tracks) {
+    for (const c of track.clips) {
+      if (frame <= c.startFrame || frame >= c.startFrame + c.durationFrames) continue;
+      if (restrict && !selected.has(c.id)) continue;
+      out.push(c);
+    }
+  }
+  return out;
+}
+
+/** Trim each target clip's IN point to the playhead (Q / Toolbar `[` — 剪映
+ *  "删除播放头左侧"). The right edge stays put; the left part is removed. */
+export async function trimStartToPlayhead() {
+  const frame = Math.round(useEditorUiStore.getState().activeFrame);
+  await trimClips(trimToPlayheadEdits(clipsUnderPlayhead(), frame, "left"));
+}
+
+/** Trim each target clip's OUT point to the playhead (W / Toolbar `]` — 剪映
+ *  "删除播放头右侧"). The left edge stays put; the right part is removed. */
+export async function trimEndToPlayhead() {
+  const frame = Math.round(useEditorUiStore.getState().activeFrame);
+  await trimClips(trimToPlayheadEdits(clipsUnderPlayhead(), frame, "right"));
 }
 
 /** Delete selected clips (⌫ / menu). */
@@ -113,6 +226,16 @@ export async function deleteSelectedClips() {
     await removeClips(ids);
     ui.clearSelection();
   }
+}
+
+/** Ripple-delete selected clips (⇧⌫): remove and close the gaps, shifting
+ *  sync-locked followers (the core refuses if a follower would collide). */
+export async function rippleDeleteSelectedClips() {
+  const ui = useEditorUiStore.getState();
+  const ids = [...ui.selectedClipIds];
+  if (ids.length === 0) return;
+  await applyAndRefresh({ type: "rippleDeleteClips", clipIds: ids });
+  ui.clearSelection();
 }
 
 // MARK: - Media -> timeline (drag and drop)
@@ -207,4 +330,62 @@ async function addMediaToTimelineInner(item: MediaItem): Promise<void> {
   // position from a mirror that already includes this clip. (Browser mode
   // already refreshed inside `applyAndRefresh` — guard to avoid a double fetch.)
   if (isTauri) await forceRefresh();
+}
+
+// MARK: - Text tool (Toolbar "T" button, SPEC §4)
+
+/** Default text clip duration: 3 seconds at the timeline's fps. */
+const DEFAULT_TEXT_SECONDS = 3;
+
+/** Default transform for a newly created text clip (centered, unit size). */
+const DEFAULT_TEXT_TRANSFORM: Transform = {
+  centerX: 0.5,
+  centerY: 0.5,
+  width: 1,
+  height: 1,
+  rotation: 0,
+  flipHorizontal: false,
+  flipVertical: false,
+};
+
+/** Find the first visual track (video/image/text/lottie) index, or null. */
+function firstVisualTrackIndex(timeline: Timeline): number | null {
+  for (let i = 0; i < timeline.tracks.length; i++) {
+    const t = timeline.tracks[i].type;
+    if (t === "video" || t === "image" || t === "text" || t === "lottie") return i;
+  }
+  return null;
+}
+
+/** Add a text clip at the playhead on the first visual track (creating one if
+ *  none exists). Selects the new clip afterwards so the Inspector opens its
+ *  Text tab. Used by the Toolbar "T" button. */
+export async function addTextClip() {
+  const ui = useEditorUiStore.getState();
+  const startFrame = ui.activeFrame;
+  let timeline = useProjectStore.getState().timeline;
+
+  let trackIndex = firstVisualTrackIndex(timeline);
+  if (trackIndex === null) {
+    await insertTrack("video");
+    await forceRefresh();
+    timeline = useProjectStore.getState().timeline;
+    trackIndex = firstVisualTrackIndex(timeline);
+    if (trackIndex === null) return;
+  }
+
+  const durationFrames = Math.max(1, Math.round(DEFAULT_TEXT_SECONDS * timeline.fps));
+  const entry: TextEntryReq = {
+    trackIndex,
+    startFrame,
+    durationFrames,
+    content: "",
+    textStyle: {},
+    transform: DEFAULT_TEXT_TRANSFORM,
+  };
+
+  const res = await applyAndRefresh({ type: "addTexts", entries: [entry] });
+  if (res && res.affectedClipIds.length > 0) {
+    ui.selectClips(new Set(res.affectedClipIds));
+  }
 }

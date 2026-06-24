@@ -358,8 +358,15 @@ impl Compositor {
                 affine1_nat: [
                     draw.affine[4] as f32,
                     draw.affine[5] as f32,
-                    tex.width as f32,
-                    tex.height as f32,
+                    // Source natural size the affine was built with — NOT the
+                    // decoded texture resolution. The preview decodes at a
+                    // downscaled max_size, so `tex.width/height` here mismatched
+                    // the affine's nat and rendered the layer shrunk into the
+                    // bottom-left corner, jittering as the texture size varied
+                    // (#125). UV (crop_uv) samples the texture 0..1, so its actual
+                    // pixel size is irrelevant to geometry.
+                    draw.nat_size.0 as f32,
+                    draw.nat_size.1 as f32,
                 ],
                 canvas_op_flags: [
                     size.width as f32,
