@@ -478,8 +478,11 @@ export function TimelineContainer() {
         let deltaFrames = rawFrame - d.grabFrame;
         // Snap: probe every companion's start+end (multi-probe, SPEC §5.8) and
         // keep the snap engaged across moves via snapStateRef (sticky band).
+        // Pass `null` for the playhead so a move drag never snaps to the
+        // playhead — that would feel like the clips are "pinned" to it (the
+        // PR #120 review request-changes fix).
         const excluded = new Set(d.companions);
-        const targets = collectTargets(timeline, excluded, activeFrame);
+        const targets = collectTargets(timeline, excluded, null);
         const leadStart = d.hit.clip.startFrame;
         const probes: number[] = [];
         const probeOffsets: number[] = [];
