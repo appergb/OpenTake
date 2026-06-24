@@ -46,7 +46,7 @@ export function Preview() {
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
   const setCurrentFrame = useEditorUiStore((s) => s.setCurrentFrame);
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
-  const setPlaying = useEditorUiStore((s) => s.setPlaying);
+  const togglePlayTimeline = useEditorUiStore((s) => s.togglePlay);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
   const previewItem = useMediaStore((s) =>
     previewMediaId ? s.items.find((m) => m.id === previewMediaId) ?? null : null,
@@ -118,7 +118,8 @@ export function Preview() {
       if (el.paused) void el.play();
       else el.pause();
     } else {
-      setPlaying(!isPlaying);
+      // Rewinds from the parked end frame on replay (see store togglePlay).
+      togglePlayTimeline();
     }
   };
 

@@ -82,7 +82,10 @@ export function useTimelineFrame(
 
   useEffect(() => {
     if (!enabled || !isTauri) {
-      setDataUrl(null);
+      // Keep the last composited frame rather than clearing to null. Clearing
+      // made the preview flash to a black placeholder on every play→pause switch
+      // (enabled goes false during playback) until the next composite resolved.
+      // The frame is refreshed when re-enabled (pause) / the timeline changes.
       return;
     }
     schedule.current(frame);
