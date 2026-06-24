@@ -13,6 +13,11 @@
   --bg-prominent: rgb(44, 44, 44);
   --bg-placeholder: rgb(30, 30, 30);
   --bg-preview-canvas: #000;
+  /* Elevated surfaces: popovers / context menus / toasts. Without these defined,
+     `var(--bg-elevated)` fell back to transparent and read as a WHITE popup over
+     the dark UI (right-click clip menu, toast, text panel). */
+  --bg-elevated: rgb(38, 38, 38);
+  --bg-hover: rgba(255, 255, 255, 0.08);
 
   /* §1.2 Border (AppTheme.swift:27-43) */
   --border-primary: rgba(255, 255, 255, 0.16);

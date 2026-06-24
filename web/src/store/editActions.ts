@@ -278,15 +278,22 @@ function liveSelectedClipIds(): string[] {
   return [...useEditorUiStore.getState().selectedClipIds].filter((id) => live.has(id));
 }
 
-/** Delete selected clips (⌫ / menu). */
+/** Delete selected clips (⌫ / menu). Wrapped in try/catch so that even if the
+ *  backend RemoveClips rejects (IPC error, an edge the live-id filter missed),
+ *  the selection is still cleared and the failure is surfaced as a toast instead
+ *  of silently doing nothing (the reported "delete does nothing"). */
 export async function deleteSelectedClips() {
   const ui = useEditorUiStore.getState();
   const ids = liveSelectedClipIds();
   if (ids.length > 0) {
-    await removeClips(ids);
-    // Tauri normally refreshes via the timeline_changed event; force it too so a
-    // missed/raced event can't leave the just-deleted clip painted on screen.
-    if (isTauri) await forceRefresh();
+    try {
+      await removeClips(ids);
+      // Tauri normally refreshes via the timeline_changed event; force it too so
+      // a missed/raced event can't leave the just-deleted clip painted on screen.
+      if (isTauri) await forceRefresh();
+    } catch (err) {
+      ui.pushToast(`删除失败 / Delete failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
   ui.clearSelection();
 }
@@ -297,8 +304,12 @@ export async function rippleDeleteSelectedClips() {
   const ui = useEditorUiStore.getState();
   const ids = liveSelectedClipIds();
   if (ids.length > 0) {
-    await applyAndRefresh({ type: "rippleDeleteClips", clipIds: ids });
-    if (isTauri) await forceRefresh();
+    try {
+      await applyAndRefresh({ type: "rippleDeleteClips", clipIds: ids });
+      if (isTauri) await forceRefresh();
+    } catch (err) {
+      ui.pushToast(`删除失败 / Delete failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
   ui.clearSelection();
 }

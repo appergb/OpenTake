@@ -176,6 +176,13 @@ export function TimelinePlayback({ timeline, fps, playing }: { timeline: Timelin
 
     const tick = (ts: number) => {
       const ui = useEditorUiStore.getState();
+      // A rAF tick can still be queued after Pause flips isPlaying=false (the
+      // effect cleanup that cancels it is a passive/async effect, so it runs a
+      // beat later). Without this guard that straggler tick reads the still-
+      // advancing audio master's currentTime and writes a FUTURE frame into the
+      // playhead — that is the "pause jumps back to a random time" bug. Bail
+      // before any setActiveFrame so the playhead stays frozen at the pause frame.
+      if (!ui.isPlaying) return;
       const tl = tlRef.current;
       const safeFps = fpsRef.current > 0 ? fpsRef.current : 30;
       const last = Math.max(0, totalFrames(tl) - 1);
