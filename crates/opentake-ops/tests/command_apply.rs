@@ -1011,3 +1011,46 @@ fn advanced_effect_commands_reject_empty_and_missing() {
     ));
     assert_eq!(st.version(), 0);
 }
+
+// ---- ripple_delete_clips --------------------------------------------------
+
+#[test]
+fn ripple_delete_clips_closes_the_gap() {
+    // Two back-to-back clips; deleting the first ripples the second to frame 0.
+    let v = video_track("v", false, vec![clip("a", 0, 50), clip("b", 50, 50)]);
+    let mut st = state(vec![v]);
+    let g = SeqIdGen::default();
+
+    let res = apply(
+        &mut st,
+        EditCommand::RippleDeleteClips {
+            clip_ids: vec!["a".into()],
+        },
+        &g,
+    )
+    .unwrap();
+    assert!(res.changed);
+    let clips = &st.timeline.tracks[0].clips;
+    assert_eq!(clips.len(), 1);
+    assert_eq!(clips[0].id, "b");
+    assert_eq!(clips[0].start_frame, 0); // gap closed
+    assert!(st.can_undo());
+}
+
+#[test]
+fn ripple_delete_clips_rejects_unknown_clip() {
+    let v = video_track("v", false, vec![clip("a", 0, 50)]);
+    let mut st = state(vec![v]);
+    let g = SeqIdGen::default();
+    assert!(matches!(
+        apply(
+            &mut st,
+            EditCommand::RippleDeleteClips {
+                clip_ids: vec!["missing".into()],
+            },
+            &g,
+        ),
+        Err(EditError::Invalid(_))
+    ));
+    assert_eq!(st.version(), 0);
+}

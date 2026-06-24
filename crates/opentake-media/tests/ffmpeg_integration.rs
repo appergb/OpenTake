@@ -236,6 +236,33 @@ fn waveform_has_expected_bucket_count() {
 }
 
 #[test]
+fn waveform_decodes_audio_from_mp4_video_container() {
+    // Regression guard: the waveform path must decode the audio track that lives
+    // INSIDE a video container (the common case — a clip's `media_ref` points at
+    // the video file, and its linked audio reuses that ref). The earlier
+    // pure-Rust decoder failed on many such containers while ffmpeg probe/thumb
+    // succeeded, so the audio clip rendered as a flat band with no waveform.
+    if !ffmpeg_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let av = dir.path().join("av.mp4"); // H.264 video + AAC audio
+    if !make_av(&av) {
+        return;
+    }
+    // 2 s → max(4000, 2*150) = 4000 buckets, values in [0,1].
+    let wf = waveform(&av, 2.0).unwrap();
+    assert_eq!(wf.len(), 4000);
+    assert!(wf.iter().all(|&v| (0.0..=1.0).contains(&v)));
+    // The 440 Hz sine track is loud → some buckets well below 1 (not silence).
+    let min = wf.iter().copied().fold(f32::INFINITY, f32::min);
+    assert!(
+        min < 0.5,
+        "expected loud buckets from the AAC track, min={min}"
+    );
+}
+
+#[test]
 fn video_thumbnails_generates_and_caches() {
     if !ffmpeg_available() {
         return;

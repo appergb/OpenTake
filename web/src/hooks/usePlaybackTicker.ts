@@ -8,6 +8,7 @@
 import { useEffect, useRef } from "react";
 import { useEditorUiStore } from "../store/uiStore";
 import { useProjectStore } from "../store/projectStore";
+import { mediaClock } from "../components/preview/playbackClock";
 
 export function usePlaybackTicker() {
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
@@ -20,6 +21,14 @@ export function usePlaybackTicker() {
     }
     let raf = 0;
     const tick = (ts: number) => {
+      // Yield while `<TimelinePlayback>` drives the playhead from real media
+      // elements (audio/video) — this fallback only advances through gaps or
+      // when the preview is unmounted. Keep looping so it resumes if released.
+      if (mediaClock.active) {
+        lastTsRef.current = null;
+        raf = requestAnimationFrame(tick);
+        return;
+      }
       const ui = useEditorUiStore.getState();
       const tl = useProjectStore.getState().timeline;
       const fps = tl.fps > 0 ? tl.fps : 30;

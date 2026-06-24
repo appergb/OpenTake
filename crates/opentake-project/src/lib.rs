@@ -40,12 +40,14 @@
 pub mod archive;
 pub mod bundle;
 pub mod error;
+pub mod fcpxml;
 pub mod gen_log;
 pub mod layout;
 
 pub use archive::{archive, ArchiveReport, MissingMedia};
 pub use bundle::Project;
 pub use error::{ProjectError, Result};
+pub use fcpxml::export_xmeml;
 pub use gen_log::{GenerationLog, GenerationLogEntry};
 
 // Re-export the domain types a caller needs to construct/inspect a project, so

@@ -12,4 +12,5 @@
 pub mod convert;
 pub mod core_handle;
 pub mod dispatch;
+pub mod gen_catalog;
 pub mod server;
