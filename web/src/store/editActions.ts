@@ -152,29 +152,14 @@ export async function moveToFolder(assetIds: string[], folderId?: string) {
 }
 
 /** Replace a clip's media source in place, preserving all editing attributes
- *  (transform / crop / keyframe tracks / grade / masks / effects / fade). When
- *  the new media is shorter than the clip's current duration, the backend
- *  truncates the duration and clamps `trim_end_frame` to fit. `mediaType`, when
- *  set, also implies `sourceClipType` unless `sourceClipType` is explicit. */
-export async function swapMedia(
-  clipId: string,
-  mediaRef: string,
-  options?: {
-    mediaType?: ClipType;
-    sourceClipType?: ClipType;
-    durationFrames?: number;
-    trimStartFrame?: number;
-  },
-) {
-  await applyAndRefresh({
-    type: "swapMedia",
-    clipId,
-    mediaRef,
-    mediaType: options?.mediaType,
-    sourceClipType: options?.sourceClipType,
-    durationFrames: options?.durationFrames,
-    trimStartFrame: options?.trimStartFrame,
-  });
+ *  (transform / crop / keyframe tracks / grade / masks / effects / fade / trim /
+ *  speed / start / duration). 1:1 port of upstream
+ *  `replaceClipMediaRef(resetTrim: false)`. The backend enforces a strict type
+ *  match (`clip.mediaType == asset.type`) and cascades the swap across the
+ *  link-group members that share the same old `mediaRef`; callers only need to
+ *  pass the seed clip id and the candidate asset id. */
+export async function swapMedia(clipId: string, mediaRef: string) {
+  await applyAndRefresh({ type: "swapMedia", clipId, mediaRef });
 }
 
 export async function undo() {

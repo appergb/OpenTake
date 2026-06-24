@@ -177,15 +177,7 @@ export type EditRequest =
     }
   | { type: "createFolder"; name: string; parentFolderId?: string }
   | { type: "moveToFolder"; assetIds: string[]; folderId?: string }
-  | {
-      type: "swapMedia";
-      clipId: string;
-      mediaRef: string;
-      mediaType?: ClipType;
-      sourceClipType?: ClipType;
-      durationFrames?: number;
-      trimStartFrame?: number;
-    };
+  | { type: "swapMedia"; clipId: string; mediaRef: string };
 
 export interface TextEntryReq {
   trackIndex: number;

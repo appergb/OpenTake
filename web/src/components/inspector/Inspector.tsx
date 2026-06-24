@@ -153,19 +153,23 @@ function mediaTypeLabel(type: MediaItem["type"]): string {
 }
 
 /** "替换媒体" section: opens an inline media picker that lists every library
- *  asset except the clip's current `mediaRef`. Selecting one fires
- *  `edit.swapMedia`, which preserves all editing attributes and truncates the
- *  duration when the new media is shorter. Text clips don't render this section
- *  (they have no source media to swap). */
+ *  asset of the SAME type as the clip (strict type match, no isVisual leniency).
+ *  Selecting one fires `edit.swapMedia`, which preserves all editing attributes
+ *  (resetTrim=false: trim / speed / start / duration are untouched). Text clips
+ *  don't render this section (they have no source media to swap), and the
+ *  backend refuses type mismatches. */
 function SwapMediaSection({ clip, t }: { clip: Clip; t: TFunction }) {
   const [open, setOpen] = useState(false);
   const items = useMediaStore((s) => s.items);
 
-  // Exclude the current media source; text items aren't swappable targets.
-  const candidates = items.filter((m) => m.id !== clip.mediaRef && m.type !== "text");
+  // Exclude the current media source; only assets of the SAME type are
+  // candidates (the backend will refuse any other kind anyway).
+  const candidates = items.filter(
+    (m) => m.id !== clip.mediaRef && m.type === clip.mediaType,
+  );
 
   const handlePick = (item: MediaItem) => {
-    void edit.swapMedia(clip.id, item.id, { mediaType: item.type });
+    void edit.swapMedia(clip.id, item.id);
     setOpen(false);
   };
 

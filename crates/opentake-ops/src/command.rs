@@ -282,18 +282,24 @@ pub enum EditCommand {
     /// clips referencing any deleted asset.
     DeleteFolder { folder_ids: Vec<String> },
     /// Replace a clip's `media_ref` in place, preserving all editing attributes
-    /// (transform / crop / keyframe tracks / grade / masks / effects / fade).
-    /// When the new media is shorter than the clip's current duration, the
-    /// duration is truncated and `trim_end_frame` is clamped to fit. Optional
-    /// fields override the inferred defaults; `media_type` (when set) also
-    /// implies `source_clip_type` unless `source_clip_type` is explicitly given.
+    /// (transform / crop / keyframe tracks / grade / masks / effects / fade /
+    /// trim / speed / start / duration). 1:1 port of upstream
+    /// `replaceClipMediaRef(resetTrim: false)`:
+    ///
+    /// * **Type-must-match**: the candidate asset's `kind` must strictly equal
+    ///   the clip's `media_type` (no `isVisual` leniency, no `media_type`
+    ///   override). A mismatch is refused without mutating state.
+    /// * **Link-group cascade**: clips that share the seed clip's link group
+    ///   AND its old `media_ref` are swapped together, so a linked audio/video
+    ///   pair pointing at the same file stays in sync.
+    /// * **No-op on identical ref**: swapping to the same `media_ref` returns
+    ///   `changed = false` (no undo entry, no version bump).
+    /// * **No trim/duration rewrites**: trim / speed / start / duration are
+    ///   kept verbatim. The render layer is responsible for any overshoot
+    ///   sampling when the new media is shorter.
     SwapMedia {
         clip_id: String,
         media_ref: String,
-        media_type: Option<ClipType>,
-        source_clip_type: Option<ClipType>,
-        duration_frames: Option<i32>,
-        trim_start_frame: Option<i32>,
     },
     /// Undo the last committed command.
     Undo,
@@ -417,19 +423,7 @@ pub fn apply(
         EditCommand::SwapMedia {
             clip_id,
             media_ref,
-            media_type,
-            source_clip_type,
-            duration_frames,
-            trim_start_frame,
-        } => swap_media(
-            state,
-            clip_id,
-            media_ref,
-            media_type,
-            source_clip_type,
-            duration_frames,
-            trim_start_frame,
-        ),
+        } => swap_media(state, clip_id, media_ref),
     }
 }
 
@@ -1773,116 +1767,116 @@ fn delete_folder(
 }
 
 /// Replace a clip's `media_ref` in place, preserving every editing attribute
-/// (transform / crop / keyframe tracks / grade / masks / effects / fade / text).
-/// The new `media_ref` must exist in the manifest; when the new media is shorter
-/// than the clip's current duration, the duration is truncated and
-/// `trim_end_frame` is clamped so the source span fits. `media_type`, when set,
-/// also implies `source_clip_type` unless `source_clip_type` is explicitly given
-/// (matches the spec's "sync media_type" scenario).
+/// (transform / crop / keyframe tracks / grade / masks / effects / fade / text
+/// / trim / speed / start / duration). 1:1 port of upstream
+/// `replaceClipMediaRef(resetTrim: false)`:
+///
+/// 1. Validate the seed clip exists and the candidate asset exists in the
+///    manifest, then refuse unless `clip.media_type == asset.kind` (strict
+///    equality — no `isVisual` leniency). A video clip can only be swapped to
+///    a video asset, an audio clip only to an audio asset, etc.
+/// 2. Walk the seed clip's link group, picking every clip that shares the
+///    same `media_ref`. Each one is updated to the new ref in the same
+///    transaction, so a linked audio/video pair pointing at the same file
+///    stays in sync (and `Undo` restores every old ref atomically).
+/// 3. **No** trim / duration / start rewrites — `resetTrim: false`. The render
+///    layer is responsible for any overshoot sampling when the new media is
+///    shorter.
+/// 4. Same `media_ref` is a no-op (`changed = false`, no undo entry, no
+///    version bump).
 fn swap_media(
     state: &mut EditorState,
     clip_id: String,
     media_ref: String,
-    media_type: Option<ClipType>,
-    source_clip_type: Option<ClipType>,
-    duration_frames: Option<i32>,
-    trim_start_frame: Option<i32>,
 ) -> Result<EditResult, EditError> {
-    // 1. Validate clip exists.
-    let loc = state
+    // 1. Seed clip must exist.
+    let seed_loc = state
         .find_clip(&clip_id)
         .ok_or_else(|| EditError::Invalid(format!("Clip not found: {clip_id}")))?;
 
-    // 2. Validate media_ref exists in manifest; read its duration (seconds).
+    // 2. Candidate asset must exist in the manifest.
     let new_asset = state
         .manifest
         .entries
         .iter()
         .find(|e| e.id == media_ref)
-        .ok_or_else(|| EditError::Invalid(format!("media not found: {media_ref}")))?;
+        .ok_or_else(|| EditError::Invalid(format!("Media not found: {media_ref}")))?;
 
-    // 3. Convert new media duration (seconds) -> frames using the timeline fps.
-    let fps = state.timeline.fps;
-    let new_media_duration_frames = ((new_asset.duration * fps as f64).round() as i32).max(1);
+    // 3. Strict type-match: clip.media_type == asset.kind. No isVisual leniency,
+    //    no media_type override. A video clip can only swap to a video asset,
+    //    an audio clip only to an audio asset.
+    let seed_media_type = state.timeline.tracks[seed_loc.track_index].clips[seed_loc.clip_index]
+        .media_type;
+    if seed_media_type != new_asset.kind {
+        return Err(EditError::Refused(format!(
+            "Type mismatch: clip is {:?}, asset is {:?}",
+            seed_media_type, new_asset.kind
+        )));
+    }
 
-    // 4. Snapshot the current clip's timing fields for validation.
-    let clip = &state.timeline.tracks[loc.track_index].clips[loc.clip_index];
-    let current_duration = clip.duration_frames;
-    let current_trim_start = clip.trim_start_frame;
-    let current_trim_end = clip.trim_end_frame;
-    let speed = clip.speed;
+    // 4. No-op when the seed already references the new media.
+    let seed_old_ref = state.timeline.tracks[seed_loc.track_index].clips[seed_loc.clip_index]
+        .media_ref
+        .clone();
+    if seed_old_ref == media_ref {
+        let version = state.version();
+        return Ok(EditResult {
+            changed: false,
+            action_name: "Swap Media".to_string(),
+            affected_clip_ids: vec![clip_id.clone()],
+            timeline_version: version,
+            summary: format!("No-op: {clip_id} already references {media_ref}"),
+        });
+    }
 
-    // 5. Validate an explicitly-provided duration.
-    if let Some(d) = duration_frames {
-        if d < 1 {
-            return Err(EditError::Invalid(format!(
-                "durationFrames must be >= 1 (got {d})"
-            )));
+    // 5. Collect every link-group partner that also references the old ref.
+    //    `expand_to_link_group` returns the whole group; we then keep only
+    //    the members whose `media_ref` matches the seed's old ref.
+    let link_group = ops::expand_to_link_group(&state.timeline, &{
+        let mut s = HashSet::new();
+        s.insert(clip_id.clone());
+        s
+    });
+    let mut targets: Vec<String> = Vec::new();
+    for member_id in &link_group {
+        if let Some(loc) = state.find_clip(member_id) {
+            let c = &state.timeline.tracks[loc.track_index].clips[loc.clip_index];
+            if c.media_ref == seed_old_ref {
+                targets.push(member_id.clone());
+            }
         }
     }
-
-    // 6. Resolve final trim_start (explicit override or current value).
-    let final_trim_start = trim_start_frame.unwrap_or(current_trim_start);
-    if final_trim_start < 0 {
-        return Err(EditError::Invalid(format!(
-            "trimStartFrame must be >= 0 (got {final_trim_start})"
-        )));
-    }
-    if final_trim_start >= new_media_duration_frames {
-        return Err(EditError::Invalid(format!(
-            "trimStartFrame {final_trim_start} must be < new media duration ({new_media_duration_frames})"
-        )));
+    if !targets.iter().any(|id| id == &clip_id) {
+        // Defensive: the seed itself must always be in the target set.
+        targets.push(clip_id.clone());
     }
 
-    // 7. Determine final duration: explicit > truncate-to-fit > keep current.
-    let final_duration = if let Some(d) = duration_frames {
-        d
-    } else if new_media_duration_frames < current_duration {
-        // New media is shorter: fit the clip into the available source span.
-        let available = (new_media_duration_frames - final_trim_start).max(1);
-        ((available as f64 / speed.max(0.0001)).round() as i32).max(1)
-    } else {
-        current_duration
-    };
-
-    // 8. Clamp trim_end so the total source span fits the new media.
-    let consumed = (final_duration as f64 * speed).round() as i32;
-    let max_trim_end = (new_media_duration_frames - final_trim_start - consumed).max(0);
-    let final_trim_end = current_trim_end.min(max_trim_end);
-
-    // 9. media_type implies source_clip_type when the latter is not explicit.
-    let final_media_type = media_type;
-    let final_source_clip_type = source_clip_type.or(media_type);
-
-    let summary_media_ref = media_ref.clone();
-    let summary_clip_id = clip_id.clone();
+    let summary_old = seed_old_ref;
+    let summary_new = media_ref.clone();
+    let target_count = targets.len();
     transact(
         state,
         "Swap Media",
-        move |_| {
-            format!(
-                "Swapped media on {} to {}",
-                summary_clip_id, summary_media_ref
-            )
+        move |affected| {
+            if affected.len() <= 1 {
+                format!("Swapped {clip_id}: {summary_old} -> {summary_new}")
+            } else {
+                format!(
+                    "Swapped {n} linked clips: {summary_old} -> {summary_new}",
+                    n = affected.len()
+                )
+            }
         },
         move |st| {
-            let loc = st.find_clip(&clip_id).expect("validated above");
-            let clip = &mut st.timeline.tracks[loc.track_index].clips[loc.clip_index];
-            clip.media_ref = media_ref.clone();
-            if let Some(mt) = final_media_type {
-                clip.media_type = mt;
+            let mut affected = Vec::with_capacity(target_count);
+            for tid in &targets {
+                if let Some(loc) = st.find_clip(tid) {
+                    st.timeline.tracks[loc.track_index].clips[loc.clip_index].media_ref =
+                        media_ref.clone();
+                    affected.push(tid.clone());
+                }
             }
-            if let Some(sct) = final_source_clip_type {
-                clip.source_clip_type = sct;
-            }
-            if clip.duration_frames != final_duration {
-                clip.duration_frames = final_duration;
-                clip.clamp_keyframes_to_duration();
-                clip.clamp_fades_to_duration();
-            }
-            clip.trim_start_frame = final_trim_start;
-            clip.trim_end_frame = final_trim_end;
-            Ok(vec![clip_id.clone()])
+            Ok(affected)
         },
     )
 }
