@@ -16,7 +16,7 @@
  * past a generous drift threshold so normal playback stays smooth.
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
 import { assetUrl } from "../../lib/asset";
@@ -52,6 +52,7 @@ export function TimelinePlayback({ timeline, fps, playing }: { timeline: Timelin
 
   const visuals = activeVisualClips(timeline, frame);
   const audios = activeAudioClips(timeline, frame);
+  const [readyVisuals, setReadyVisuals] = useState<Set<string>>(() => new Set());
 
   const urlFor = (mediaRef: string): string | null =>
     assetUrl(items.find((m) => m.id === mediaRef)?.path);
@@ -84,6 +85,24 @@ export function TimelinePlayback({ timeline, fps, playing }: { timeline: Timelin
       cbCache.current.set(id, cb);
     }
     return cb;
+  };
+
+  const markVisualReady = (id: string) => {
+    setReadyVisuals((prev) => {
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+  };
+
+  const markVisualPending = (id: string) => {
+    setReadyVisuals((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
   };
 
   // Latest model in refs so the once-mounted clock reads current values.
@@ -227,7 +246,13 @@ export function TimelinePlayback({ timeline, fps, playing }: { timeline: Timelin
   // instead of the source's frame 0.
   const seekOnLoad = (clip: Clip) => (e: React.SyntheticEvent<HTMLMediaElement>) => {
     const f = Math.round(useEditorUiStore.getState().activeFrame);
-    e.currentTarget.currentTime = sourceTimeSec(clip, f, fpsRef.current > 0 ? fpsRef.current : 30);
+    const target = sourceTimeSec(clip, f, fpsRef.current > 0 ? fpsRef.current : 30);
+    if (Math.abs(e.currentTarget.currentTime - target) > 0.03) {
+      markVisualPending(clip.id);
+      e.currentTarget.currentTime = target;
+    } else {
+      markVisualReady(clip.id);
+    }
   };
 
   return (
@@ -235,12 +260,16 @@ export function TimelinePlayback({ timeline, fps, playing }: { timeline: Timelin
       style={{
         width: "100%",
         height: "100%",
-        position: "relative",
+        position: "absolute",
+        inset: 0,
         overflow: "hidden",
+        pointerEvents: "none",
+        zIndex: 1,
       }}
     >
       {visuals.map((visual, index) => {
         const visualUrl = urlFor(visual.clip.mediaRef);
+        const isReady = visual.clip.mediaType !== "video" || readyVisuals.has(visual.clip.id);
         const layerStyle: React.CSSProperties = {
           ...fill,
           position: "absolute",
@@ -248,7 +277,7 @@ export function TimelinePlayback({ timeline, fps, playing }: { timeline: Timelin
           width: "100%",
           height: "100%",
           margin: "auto",
-          opacity: playing ? clipOpacity(visual.clip) : 0,
+          opacity: playing && isReady ? clipOpacity(visual.clip) : 0,
           zIndex: index,
         };
         if (!visualUrl) return null;
@@ -260,7 +289,10 @@ export function TimelinePlayback({ timeline, fps, playing }: { timeline: Timelin
             muted
             playsInline
             preload="auto"
+            onLoadStart={() => markVisualPending(visual.clip.id)}
             onLoadedData={seekOnLoad(visual.clip)}
+            onSeeking={() => markVisualPending(visual.clip.id)}
+            onSeeked={() => markVisualReady(visual.clip.id)}
             style={layerStyle}
           />
         ) : (

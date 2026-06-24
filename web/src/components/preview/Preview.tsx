@@ -159,12 +159,6 @@ export function Preview() {
           padding: 8,
         }}
       >
-        {/* Layer: TimelinePlayback lives here when there are tracks —
-             it stays mounted even when paused so audio/video elements
-             survive the pause→play transition (upstream VideoEngine model). */}
-        {!previewItem && timelineHasContent && (
-          <TimelinePlayback timeline={timeline} fps={fps} playing={isPlaying} />
-        )}
         {previewItem ? (
           <MediaPreview
             item={previewItem}
@@ -173,8 +167,10 @@ export function Preview() {
             onDuration={setMediaDuration}
             onPlayingChange={setMediaPlaying}
           />
-        ) : isPlaying ? null : timelineFrameUrl ? (
+        ) : timelineFrameUrl ? (
           // Rust GPU composite of the timeline at the current playhead (#47).
+          // Keep the last frame visible under live media while playing so a
+          // resume never flashes through to the black stage while media seeks.
           <img
             src={timelineFrameUrl}
             alt=""
@@ -186,6 +182,7 @@ export function Preview() {
               height: "100%",
               objectFit: "contain",
               display: "block",
+              zIndex: 0,
             }}
           />
         ) : (
@@ -203,10 +200,16 @@ export function Preview() {
               justifyContent: "center",
               color: "var(--text-muted)",
               fontSize: "var(--fs-xs)",
+              zIndex: 0,
             }}
           >
             {timeline.tracks.length === 0 ? t("preview.noMedia") : `${timeline.width}×${timeline.height}`}
           </div>
+        )}
+        {/* Layer: TimelinePlayback stays mounted when paused so media elements
+            survive the pause→play transition (upstream VideoEngine model). */}
+        {!previewItem && timelineHasContent && (
+          <TimelinePlayback timeline={timeline} fps={fps} playing={isPlaying} />
         )}
       </div>
 
@@ -373,7 +376,7 @@ function PreviewTabs({ item }: { item: MediaItem | null }) {
 function ScrubBar({ frame, total, onSeek }: { frame: number; total: number; onSeek: (f: number) => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState(false);
-  const progress = total > 0 ? frame / total : 0;
+  const progress = total > 0 ? Math.max(0, Math.min(1, frame / total)) : 0;
 
   const seekFromEvent = (clientX: number) => {
     const el = ref.current;
@@ -389,7 +392,7 @@ function ScrubBar({ frame, total, onSeek }: { frame: number; total: number; onSe
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       onPointerDown={(e) => {
-        (e.target as HTMLElement).setPointerCapture(e.pointerId);
+        e.currentTarget.setPointerCapture(e.pointerId);
         seekFromEvent(e.clientX);
       }}
       onPointerMove={(e) => {
@@ -409,6 +412,7 @@ function ScrubBar({ frame, total, onSeek }: { frame: number; total: number; onSe
         style={{
           flex: 1,
           height: hover ? 4 : 3,
+          position: "relative",
           background: "rgba(255,255,255,0.1)",
           borderRadius: 2,
         }}
