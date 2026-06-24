@@ -96,7 +96,7 @@ export function TimelinePlayback({ timeline, fps, playing }: { timeline: Timelin
     if (!playing) {
       // Paused: keep elements in DOM but silence the clock and media.
       mediaClock.release();
-      
+
       for (const el of els.current.values()) el.pause();
       return;
     }
