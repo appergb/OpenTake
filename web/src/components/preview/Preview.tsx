@@ -3,6 +3,12 @@
  * bar with project-setting badges. The canvas displays Rust composite frames via
  * the `preview_frame` event (SPEC §11.2) — not yet wired, so it shows the canvas
  * background + a centered placeholder. Transport drives the local playhead.
+ *
+ * ⚠️ The TIMELINE path's <img> composite ⇄ <video> switch + the 140ms scrub
+ * debounce below are the two-surface stopgap that makes scrub non-live and pause
+ * jittery. Rewrite per upstream's single surface (issue #142 / streaming engine
+ * #53). The single-MEDIA preview path (MediaPreview) is fine and is the behaviour
+ * the timeline path should match.
  */
 
 import { useEffect, useRef, useState } from "react";

@@ -1,4 +1,11 @@
 /**
+ * ⚠️ REWRITE-PER-UPSTREAM (issue #142): this two-surface model (DOM <video> while
+ * playing + GPU composite <img> when paused, with a homegrown rAF/audio-master
+ * clock) is NOT how upstream works and causes the pause-stutter / scrub-lag. The
+ * faithful target is upstream's single render surface (VideoEngine.swift /
+ * PreviewView.swift) — equivalently the single-<canvas> streaming engine #53
+ * (#63 cpal + #64 MJPEG). Do NOT band-aid further; replace per #142.
+ *
  * Real-time timeline playback (#53). While the timeline is PLAYING this mounts
  * the actual `<video>`/`<audio>` elements for the clips under the playhead and
  * plays them — smooth motion WITH sound — instead of the throttled GPU
