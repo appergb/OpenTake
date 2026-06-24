@@ -308,7 +308,7 @@ function ClipInspector({
                 </>
               ) : (
                 <ScrubbableNumberField
-                  value={sampledVolume}
+                  value={clip.volume}
                   min={0}
                   max={4}
                   sensitivity={0.01}
@@ -376,7 +376,7 @@ function ClipInspector({
                   </>
                 ) : (
                   <ScrubbableNumberField
-                    value={sampledOpacity}
+                    value={clip.opacity}
                     min={0}
                     max={1}
                     sensitivity={0.005}
