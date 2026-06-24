@@ -409,6 +409,7 @@ function drawKeyframeMarkers(ctx: CanvasRenderingContext2D, clip: Clip, rect: Cl
     clip.scaleTrack,
     clip.rotationTrack,
     clip.cropTrack,
+    clip.volumeTrack,
   ];
   const frames = new Set<number>();
   for (const t of tracks) {

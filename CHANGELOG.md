@@ -19,12 +19,14 @@
 - **导出线性音频混音**（Phase 5,PR #117）:`crates/opentake-media/src/encode/mix.rs` 逐 clip 单声道 PCM 按帧偏移铺放 + `volume_at` 增益包络 + 叠加 + 硬限幅;`VideoEncoder::finish()` 第二趟 ffmpeg mux AAC（`-c:v copy`/`-shortest`,mux 失败回退视频-only),真接通原 dead `push_audio`;含 AAC 轨 + 视频-only 不漏音轨 + 临时件清理集成测试。无音频时仍产出与 #112 相同视频-only 文件。
 - **`list_models` 工具接线**（#9/#10 切片,PR #111）:`opentake-agent` 从存根接 `opentake-gen` 内置静态 catalog,`?type=` 过滤 + `{ models, loaded }` JSON,纯本地无网络/BYOK。
 - **caption-group 样式批量同步纯逻辑**（#29 切片,PR #113）:`crates/opentake-domain/src/caption_sync.rs` 把某 `text_style` 批量套到同一 `caption_group_id` 的所有字幕 clip（不可变 / 跨组隔离 / legacy 安全,12 单测）。接 UI/命令留后续。
+- **关键帧编辑**（#95,PR #119）:后端 4 个细粒度 EditCommand（`StampKeyframe`/`RemoveKeyframe`/`MoveKeyframe`/`SetKeyframeInterpolation`,clip 相对帧 + 半开区间校验 + move 占用/越界守卫,12 单测）+ 前端 Inspector `KeyframesPanel`/`KeyframesLaneRow` 菱形可拖编辑（每属性一行、拖动/删除/盖章/改插值）。**确立关键帧『后端命令』路线**（优于纯前端 read-modify-write,更接近上游 1:1 + 走真命令/undo）。
 
 ### 审核处置（本轮）
 
 | PR | 处置 | 说明 |
 |---|---|---|
-| #104 #106 #107 #110 #111 #112 #113 #115 #117 | **已合并** | CI 双绿 + 审核通过（对抗验证 CONFIRM / 主控亲审）的纯新增项;**#115 收口 #37 全局库 epic**;#117 导出加音频混音 |
+| #104 #106 #107 #110 #111 #112 #113 #115 #117 #119 | **已合并** | CI 双绿 + 审核通过（对抗验证 CONFIRM / 主控亲审）的纯新增项;**#115 收口 #37 全局库 epic**;#117 导出加音频混音;#119 关键帧编辑（确立后端命令路线）|
+| #120 #121 #122 #123 | **请修改（@作者）** | 与 #119 同批的时间线/Inspector PR:#120 关键帧段与 #119 路线冲突需让位;#121 SwapMedia 违 1:1（缺类型校验/自创时长改动/缺链接级联）;#122 Inspector 可编辑字段误用 fade 采样值（写坏静态属性）+ 缺 live 预览;#123 duplicate 未重映射 link_group。合 #119 后均需 rebase |
 | #76 | **已关闭** | bundle id 改名冗余（main 已是 `com.opentake.desktop`,#74 已合） |
 | #77 #78 #79 #105 #108 | **请修改（@作者）** | 详见下「待审 PR」 |
 
