@@ -8,6 +8,8 @@
 import { useEffect } from "react";
 import { useEditorUiStore } from "../store/uiStore";
 import { useProjectStore } from "../store/projectStore";
+import { useClipboardStore } from "../store/clipboardStore";
+import { t } from "../i18n";
 import * as edit from "../store/editActions";
 import { saveCurrentProject } from "../store/projectActions";
 import { ZOOM } from "../lib/theme";
@@ -101,6 +103,22 @@ export function useKeyboardShortcuts() {
               ui.toggleAgentPanel();
               return;
             }
+            return;
+          case "KeyC":
+            e.preventDefault();
+            edit.copyClips();
+            return;
+          case "KeyX":
+            e.preventDefault();
+            void edit.cutClips();
+            return;
+          case "KeyV":
+            e.preventDefault();
+            if (!useClipboardStore.getState().hasContent) {
+              useEditorUiStore.getState().pushToast(t("edit.clipboardEmpty"));
+              return;
+            }
+            void edit.pasteClipsAtPlayhead();
             return;
         }
         return;

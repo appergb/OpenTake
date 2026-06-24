@@ -103,6 +103,7 @@ interface UiState {
 
   // Media panel navigation
   mediaPanelCurrentFolderId: string | null;
+  setMediaPanelCurrentFolderId: (id: string | null) => void;
 
   // Actions
   setActiveFrame: (frame: number) => void;
@@ -143,6 +144,11 @@ interface UiState {
   setMediaTab: (tab: MediaTabId) => void;
   setMediaSubTab: (tab: MediaSubTabId) => void;
   setInspectorTab: (tab: InspectorTabId) => void;
+
+  // Toast (transient message)
+  toast: { message: string; id: number } | null;
+  pushToast: (message: string) => void;
+  clearToast: () => void;
 }
 
 export const useEditorUiStore = create<UiState>((set, get) => ({
@@ -185,6 +191,7 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   previewActiveTabId: "timeline",
 
   mediaPanelCurrentFolderId: null,
+  setMediaPanelCurrentFolderId: (mediaPanelCurrentFolderId) => set({ mediaPanelCurrentFolderId }),
 
   setActiveFrame: (activeFrame) => set({ activeFrame }),
   setCurrentFrame: (currentFrame) => set({ currentFrame, activeFrame: currentFrame }),
@@ -272,4 +279,8 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   setMediaTab: (mediaTab) => set({ mediaTab }),
   setMediaSubTab: (mediaSubTab) => set({ mediaSubTab }),
   setInspectorTab: (inspectorTab) => set({ inspectorTab }),
+
+  toast: null,
+  pushToast: (message) => set({ toast: { message, id: Date.now() } }),
+  clearToast: () => set({ toast: null }),
 }));

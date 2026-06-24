@@ -14,29 +14,63 @@ import {
   frameAt,
   totalFrames,
   trackAt,
+  trackY,
 } from "../../lib/geometry";
 import { firstAudioIndex } from "../../lib/zones";
 import { clampTrimDeltaFrames, trimSourceValues } from "../../lib/clip";
-import { collectTargets, findSnap } from "../../lib/snap";
+import { collectTargets, findSnap, findSnapDelta } from "../../lib/snap";
 import { paintTimeline, type DragPaint } from "./timelineCanvas";
 import { useT } from "../../i18n";
 import { paintRuler } from "./rulerCanvas";
 import { TrackHeaderColumn } from "./TrackHeaderColumn";
 import { Playhead } from "./Playhead";
 import { SnapIndicator } from "./SnapIndicator";
-import { hitTestClip, expandLinkGroup, clipsInRect, type ClipHit } from "./hitTest";
+import { hitTestClip, expandLinkGroup, clipsInRect, audioVolumeKfHit, type ClipHit } from "./hitTest";
+import { ClipContextMenu } from "./ClipContextMenu";
+import { MEDIA_DND_TYPE } from "../media/MediaPanel";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
 import * as edit from "../../store/editActions";
+import { forceRefresh } from "../../store/sync";
+import { isTauri } from "../../lib/api";
 import { getWaveform } from "../../lib/api";
+import type { ClipType } from "../../lib/types";
+
+/** Where a move/duplicate drag will land. `newTrack` creates a fresh track of
+ *  `trackType` below the last existing one (upstream `placeClip` auto-track-
+ *  creation), so dragging into the empty area below the track region still
+ *  produces a clip. */
+type DropTarget =
+  | { kind: "existing"; trackIndex: number }
+  | { kind: "newTrack"; trackType: ClipType };
 
 type DragState =
   | { kind: "scrub" }
-  | { kind: "move"; hit: ClipHit; grabFrame: number; deltaFrames: number; startTrack: number; targetTrack: number; companions: string[] }
+  | {
+      kind: "move";
+      hit: ClipHit;
+      grabFrame: number;
+      deltaFrames: number;
+      startTrack: number;
+      targetTrack: number;
+      companions: string[];
+      /** Option/Alt held at pointer-down: duplicate instead of move. */
+      isDuplicate: boolean;
+      /** Where the drag will land (existing track or a new track below). */
+      dropTarget: DropTarget;
+    }
   | { kind: "trimLeft" | "trimRight"; hit: ClipHit; startTrim: number; deltaFrames: number }
   | { kind: "marquee"; startDocX: number; startDocY: number; curDocX: number; curDocY: number }
+  | { kind: "audioVolumeKf"; clipId: string; fromFrame: number; ghostFrame: number }
   | null;
+
+/** New-track kind for a dragged clip: audio clips → "audio", everything else
+ *  → "video" (visual types share the video zone, matching `addMediaToTimeline`
+ *  and upstream `placeClip`). */
+function newTrackTypeFor(clip: { mediaType: ClipType }): ClipType {
+  return clip.mediaType === "audio" ? "audio" : "video";
+}
 
 export function TimelineContainer() {
   const timeline = useProjectStore((s) => s.timeline);
@@ -70,8 +104,13 @@ export function TimelineContainer() {
   const rulerCanvasRef = useRef<HTMLCanvasElement>(null);
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
   const dragRef = useRef<DragState>(null);
+  // Snap hysteresis: keeps the snapped {frame, probeOffset} across pointer
+  // events so the sticky band (1.5x threshold) holds the clip on its target
+  // instead of jittering at the edge (SPEC §5.7). Cleared on pointerUp.
+  const snapStateRef = useRef<{ frame: number; probeOffset: number } | null>(null);
   const [snapFrame, setSnapFrame] = useState<number | null>(null);
   const [dragTick, forceTick] = useState(0);
+  const [menu, setMenu] = useState<{ clipId: string; x: number; y: number } | null>(null);
   const t = useT();
   // Waveform sample cache (media id → buckets), loaded on demand from Rust.
   const waveformsRef = useRef<Map<string, number[]>>(new Map());
@@ -156,6 +195,8 @@ export function TimelineContainer() {
         ids: new Set(d.companions),
         deltaFrames: d.deltaFrames,
         trackDelta: d.targetTrack - d.startTrack,
+        isDuplicate: d.isDuplicate,
+        newTrackType: d.dropTarget.kind === "newTrack" ? d.dropTarget.trackType : undefined,
       };
     } else if (d?.kind === "trimLeft" || d?.kind === "trimRight") {
       drag = {
@@ -163,6 +204,13 @@ export function TimelineContainer() {
         clipId: d.hit.clip.id,
         edge: d.kind === "trimLeft" ? "left" : "right",
         deltaFrames: d.deltaFrames,
+      };
+    } else if (d?.kind === "audioVolumeKf") {
+      drag = {
+        kind: "volumeKf",
+        clipId: d.clipId,
+        fromFrame: d.fromFrame,
+        ghostFrame: d.ghostFrame,
       };
     }
     paintTimeline(ctx, {
@@ -273,16 +321,18 @@ export function TimelineContainer() {
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         const { docX } = toDoc(e);
-        const anchorFrame = docX / zoomScale;
-        const factor = Math.exp(e.deltaY * ZOOM.scrollSensitivity);
+        const pointerViewX = docX - scrollLeft;
+        const hasPointerAnchor = pointerViewX >= 0 && pointerViewX <= viewport.width;
+        const anchorFrame = hasPointerAnchor ? docX / zoomScale : activeFrame;
+        const viewX = hasPointerAnchor ? pointerViewX : activeFrame * zoomScale - scrollLeft;
+        const factor = Math.exp(-e.deltaY * ZOOM.scrollSensitivity);
         const newScale = Math.max(
           useEditorUiStore.getState().minZoomScale,
           Math.min(ZOOM.max, zoomScale * factor),
         );
         setZoomScale(newScale);
-        // Keep the frame under the cursor stationary.
+        // Keep the frame under the cursor/playhead stationary.
         const newDocX = anchorFrame * newScale;
-        const viewX = docX - scrollLeft;
         setScroll(Math.max(0, newDocX - viewX), scrollTop);
       } else if (e.altKey) {
         e.preventDefault();
@@ -304,7 +354,7 @@ export function TimelineContainer() {
         );
       }
     },
-    [toDoc, zoomScale, scrollLeft, scrollTop, setZoomScale, setScroll, docWidth, docHeight, viewport],
+    [toDoc, zoomScale, activeFrame, scrollLeft, scrollTop, setZoomScale, setScroll, docWidth, docHeight, viewport],
   );
 
   // Attach the wheel handler natively with { passive: false }. React's onWheel
@@ -329,8 +379,7 @@ export function TimelineContainer() {
       const { docX, docY, inRuler } = toDoc(e);
       (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
 
-      // Ruler -> scrub playhead. Scrubbing routes the preview through the live
-      // <video> surface (issue #142) instead of the settled GPU composite.
+      // Ruler -> scrub playhead.
       if (inRuler) {
         dragRef.current = { kind: "scrub" };
         setScrubbing(true);
@@ -346,9 +395,43 @@ export function TimelineContainer() {
       // clip's own edge is a backend no-op, which is fine).
       if (toolMode === "razor" && hit) {
         const raw = frameAt(docX, zoomScale);
-        const targets = collectTargets(timeline, new Set(), activeFrame);
+        const targets = collectTargets(timeline, new Set(), activeFrame, true);
         const snap = findSnap(raw, targets, zoomScale, null);
         void edit.splitClip(hit.clip.id, snap ? snap.frame : raw);
+        dragRef.current = null;
+        return;
+      }
+
+      // Volume-keyframe dot drag (non-Cmd, non-shift): grab a volume kf dot to
+      // move it (SPEC §5.4 volume envelope). Checked before the clip-body hit so
+      // a dot click drags the kf instead of starting a clip move.
+      if (!e.metaKey && !e.shiftKey) {
+        const kfHit = audioVolumeKfHit(timeline, docX, docY, zoomScale, trackHeights);
+        if (kfHit) {
+          selectClips(new Set([kfHit.clipId]));
+          dragRef.current = {
+            kind: "audioVolumeKf",
+            clipId: kfHit.clipId,
+            fromFrame: kfHit.frame,
+            ghostFrame: kfHit.frame,
+          };
+          return;
+        }
+      }
+
+      // Cmd+click on an audio clip's volume line (not a kf dot) → stamp a new
+      // volume keyframe at the clicked frame (SPEC §5.4). A click landing on an
+      // existing dot is a no-op (the kf already exists there).
+      if (e.metaKey && hit && hit.clip.mediaType === "audio") {
+        const onDot = audioVolumeKfHit(timeline, docX, docY, zoomScale, trackHeights) !== null;
+        if (!onDot) {
+          const clipFrame = Math.max(
+            0,
+            Math.min(hit.clip.durationFrames, frameAt(docX, zoomScale) - hit.clip.startFrame),
+          );
+          void edit.stampKeyframe(hit.clip.id, "volume", clipFrame);
+        }
+        selectClips(new Set([hit.clip.id]));
         dragRef.current = null;
         return;
       }
@@ -401,6 +484,8 @@ export function TimelineContainer() {
             startTrack: hit.trackIndex,
             targetTrack: hit.trackIndex,
             companions: [...nextSel],
+            isDuplicate: e.altKey,
+            dropTarget: { kind: "existing", trackIndex: hit.trackIndex },
           };
         }
         return;
@@ -427,35 +512,104 @@ export function TimelineContainer() {
 
       if (d.kind === "scrub") {
         setCurrentFrame(frameAt(docX, zoomScale));
+        setScrubbing(false);
         return;
       }
 
       if (d.kind === "move") {
         const rawFrame = frameAt(docX, zoomScale);
         let deltaFrames = rawFrame - d.grabFrame;
-        // Snap: probe the moved clip's edges.
+        // Snap: probe every companion's start+end (multi-probe, SPEC §5.8) and
+        // keep the snap engaged across moves via snapStateRef (sticky band).
         const excluded = new Set(d.companions);
         const targets = collectTargets(timeline, excluded, activeFrame);
-        const movedStart = d.hit.clip.startFrame + deltaFrames;
-        const movedEnd = movedStart + d.hit.clip.durationFrames;
-        const snapStart = findSnap(movedStart, targets, zoomScale, null);
-        const snapEnd = findSnap(movedEnd, targets, zoomScale, null);
+        const leadStart = d.hit.clip.startFrame;
+        const probes: number[] = [];
+        const probeOffsets: number[] = [];
+        for (const id of d.companions) {
+          const loc = findClipLoc(timeline, id);
+          if (!loc) continue;
+          const c = timeline.tracks[loc[0]].clips[loc[1]];
+          const startOff = c.startFrame - leadStart;
+          const endOff = startOff + c.durationFrames;
+          // Moved absolute frame = lead's moved start + this probe's offset.
+          probes.push(leadStart + deltaFrames + startOff);
+          probeOffsets.push(startOff);
+          probes.push(leadStart + deltaFrames + endOff);
+          probeOffsets.push(endOff);
+        }
+        const snap = findSnapDelta(
+          probes,
+          targets,
+          zoomScale,
+          snapStateRef.current,
+          probeOffsets,
+        );
         let snapped: number | null = null;
-        if (snapStart && (!snapEnd || Math.abs(snapStart.frame - movedStart) <= Math.abs(snapEnd.frame - movedEnd))) {
-          deltaFrames += snapStart.frame - movedStart;
-          snapped = snapStart.frame;
-        } else if (snapEnd) {
-          deltaFrames += snapEnd.frame - movedEnd;
-          snapped = snapEnd.frame;
+        if (snap) {
+          deltaFrames += snap.delta;
+          snapStateRef.current = { frame: snap.snappedFrame, probeOffset: snap.probeOffset };
+          snapped = snap.snappedFrame;
+        } else {
+          snapStateRef.current = null;
         }
         // Clamp so the clip can't go before frame 0.
         if (d.hit.clip.startFrame + deltaFrames < 0) {
           deltaFrames = -d.hit.clip.startFrame;
           snapped = null;
+          snapStateRef.current = null;
         }
-        const targetTrack = trackAt(timeline, docY, trackHeights) ?? d.startTrack;
-        dragRef.current = { ...d, deltaFrames, targetTrack };
+        // Drop target: existing track under the cursor, or a new track when the
+        // pointer is below the last track's bottom (upstream `placeClip` auto-
+        // track-creation). `trackAt` returns null both above and below the track
+        // region; only treat the below-last-track case as a new-track drop.
+        const hovered = trackAt(timeline, docY, trackHeights);
+        let targetTrack: number;
+        let dropTarget: DropTarget;
+        if (hovered !== null) {
+          targetTrack = hovered;
+          dropTarget = { kind: "existing", trackIndex: hovered };
+        } else {
+          const lastTrackBottom =
+            timeline.tracks.length > 0
+              ? trackY(timeline, timeline.tracks.length, trackHeights)
+              : LAYOUT.rulerHeight + LAYOUT.dropZoneHeight;
+          if (docY >= lastTrackBottom) {
+            // Below the last track → create a new track on drop.
+            const trackType = newTrackTypeFor(d.hit.clip);
+            dropTarget = { kind: "newTrack", trackType };
+            // Clamp the ghost to the last existing track for rendering; the
+            // actual new track is created on pointer-up.
+            targetTrack = Math.max(0, timeline.tracks.length - 1);
+          } else {
+            // Above the first track (ruler/drop zone) → keep the previous target.
+            targetTrack = d.targetTrack;
+            dropTarget = d.dropTarget;
+          }
+        }
+        dragRef.current = { ...d, deltaFrames, targetTrack, dropTarget };
         setSnapFrame(snapped);
+        forceTick((n) => n + 1);
+        return;
+      }
+
+      if (d.kind === "audioVolumeKf") {
+        const loc = findClipLoc(timeline, d.clipId);
+        if (!loc) return;
+        const clip = timeline.tracks[loc[0]].clips[loc[1]];
+        // Cursor → clip-relative frame, clamped to the clip's span.
+        let ghostFrame = frameAt(docX, zoomScale) - clip.startFrame;
+        // Snap to the playhead (±5 frames, clip-relative) so a kf can be parked
+        // exactly on the playhead for precise editing.
+        const playheadRel = activeFrame - clip.startFrame;
+        if (Math.abs(ghostFrame - playheadRel) <= 5) {
+          ghostFrame = playheadRel;
+          setSnapFrame(activeFrame);
+        } else {
+          setSnapFrame(null);
+        }
+        ghostFrame = Math.max(0, Math.min(clip.durationFrames, ghostFrame));
+        dragRef.current = { ...d, ghostFrame };
         forceTick((n) => n + 1);
         return;
       }
@@ -503,25 +657,27 @@ export function TimelineContainer() {
     setScrubbing(false);
     const el = e.currentTarget as HTMLElement;
     if (el.hasPointerCapture?.(e.pointerId)) el.releasePointerCapture(e.pointerId);
-  }, [setScrubbing]);
+  }, []);
 
   const onPointerUp = useCallback(
     (e: React.PointerEvent) => {
       const d = dragRef.current;
       dragRef.current = null;
+      snapStateRef.current = null;
       setSnapFrame(null);
+    setScrubbing(false);
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
       if (!d) return;
 
-      // Scrub end: commit the playhead and drop back to the settled GPU
-      // composite (issue #142). The moves already set currentFrame.
-      if (d.kind === "scrub") {
-        setScrubbing(false);
-        return;
-      }
-
       if (d.kind === "move") {
-        if (d.deltaFrames === 0 && d.targetTrack === d.startTrack) return; // no-op
+        // No-op: no movement, no track change, and not dropping on a new track.
+        if (
+          d.deltaFrames === 0 &&
+          d.dropTarget.kind === "existing" &&
+          d.dropTarget.trackIndex === d.startTrack
+        ) {
+          return;
+        }
         // Resolve every dragged clip's current location.
         const locs = d.companions
           .map((id) => {
@@ -538,9 +694,41 @@ export function TimelineContainer() {
         const minStart = Math.min(...locs.map((l) => l.clip.startFrame));
         const frameDelta = Math.max(d.deltaFrames, -minStart);
 
+        // Drop below the last track → create a new track first, then move/dup.
+        if (d.dropTarget.kind === "newTrack") {
+          const trackType = d.dropTarget.trackType;
+          const isDup = d.isDuplicate;
+          const locSnapshot = locs.map((l) => ({ id: l.id, ti: l.ti, startFrame: l.clip.startFrame }));
+          void (async () => {
+            await edit.insertTrack(trackType);
+            // Ensure the mirror reflects the new track before computing the
+            // target index (Tauri's timeline_changed is async; browser mode
+            // already refreshed inside applyAndRefresh).
+            if (isTauri) await forceRefresh();
+            const tl = useProjectStore.getState().timeline;
+            const newTrackIndex = tl.tracks.length - 1; // appended at end
+            if (isDup) {
+              await edit.duplicateClips(
+                locSnapshot.map((l) => l.id),
+                frameDelta,
+                locSnapshot.map(() => newTrackIndex),
+              );
+            } else {
+              await edit.moveClips(
+                locSnapshot.map((l) => ({
+                  clipId: l.id,
+                  toTrack: newTrackIndex,
+                  toFrame: l.startFrame + frameDelta,
+                })),
+              );
+            }
+          })();
+          return;
+        }
+
         // One group TRACK delta: step toward 0 until every clip stays in-bounds
         // and lands on a type-compatible track (rigid group, not per-clip clamp).
-        const rawTrackDelta = d.targetTrack - d.startTrack;
+        const rawTrackDelta = d.dropTarget.trackIndex - d.startTrack;
         let trackDelta = rawTrackDelta;
         const step = rawTrackDelta > 0 ? -1 : 1;
         while (trackDelta !== 0) {
@@ -553,12 +741,34 @@ export function TimelineContainer() {
         }
 
         if (frameDelta === 0 && trackDelta === 0) return; // nothing actually moves
-        const moves = locs.map((l) => ({
-          clipId: l.id,
-          toTrack: l.ti + trackDelta,
-          toFrame: l.clip.startFrame + frameDelta,
-        }));
-        void edit.moveClips(moves);
+        if (d.isDuplicate) {
+          // Option/Alt-drag duplicate: deep-copy each clip to its target. The
+          // backend mints fresh ids, shifts start_frame by offsetFrames, and
+          // clears link_group_id (copies aren't linked to the originals).
+          void edit.duplicateClips(
+            locs.map((l) => l.id),
+            frameDelta,
+            locs.map((l) => l.ti + trackDelta),
+          );
+        } else {
+          const moves = locs.map((l) => ({
+            clipId: l.id,
+            toTrack: l.ti + trackDelta,
+            toFrame: l.clip.startFrame + frameDelta,
+          }));
+          void edit.moveClips(moves);
+        }
+        return;
+      }
+
+      if (d.kind === "audioVolumeKf") {
+        // Commit the keyframe move only when the frame actually changed (a bare
+        // click on a dot is a no-op). The backend `moveKeyframe` is idempotent
+        // for fromFrame === toFrame, but skipping the round-trip avoids an
+        // unnecessary history entry.
+        if (d.ghostFrame !== d.fromFrame) {
+          void edit.moveKeyframe(d.clipId, "volume", d.fromFrame, d.ghostFrame);
+        }
         return;
       }
 
@@ -587,10 +797,54 @@ export function TimelineContainer() {
   // Ghost preview offsets for the active drag (read from dragRef during render).
   const drag = dragRef.current;
 
+  // Right-click on a clip -> context menu.
+  const onContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      const { docX, docY } = toDoc(e);
+      const hit = hitTestClip(timeline, docX, docY, zoomScale, trackHeights);
+      if (!hit) return; // empty space: keep the default (suppressed) menu
+      e.preventDefault();
+      // If the clip isn't already selected, select just it so menu actions
+      // target the right clip.
+      if (!selectedClipIds.has(hit.clip.id)) {
+        selectClips(new Set([hit.clip.id]));
+      }
+      setMenu({ clipId: hit.clip.id, x: e.clientX, y: e.clientY });
+    },
+    [toDoc, timeline, zoomScale, trackHeights, selectedClipIds, selectClips],
+  );
+
+  // Media dropped from the panel lands AT the cursor: its start frame = the drop
+  // X, on the track under the drop Y. `addMediaToTimelineAt` skips tracks where it
+  // would overlap an existing clip (and makes a new track if none is free), so a
+  // drop onto an occupied audio lane opens a second lane instead of overwriting.
+  const onMediaDragOver = useCallback((e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes(MEDIA_DND_TYPE)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  }, []);
+
+  const onMediaDrop = useCallback(
+    (e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes(MEDIA_DND_TYPE)) return;
+      e.preventDefault();
+      const id = e.dataTransfer.getData(MEDIA_DND_TYPE);
+      const item = useMediaStore.getState().items.find((m) => m.id === id);
+      if (!item) return;
+      const { docX, docY } = toDoc(e);
+      const startFrame = Math.max(0, Math.round(frameAt(docX, zoomScale)));
+      const preferredTrackIndex = trackAt(timeline, docY, trackHeights);
+      void edit.addMediaToTimelineAt(item, startFrame, preferredTrackIndex);
+    },
+    [toDoc, zoomScale, timeline, trackHeights],
+  );
+
   return (
     <div
       ref={viewportRef}
       style={{ position: "relative", width: "100%", height: "100%", overflow: "hidden" }}
+      onDragOver={onMediaDragOver}
+      onDrop={onMediaDrop}
     >
       {/* Content canvas (clips + backgrounds), positioned right of header column. */}
       <canvas
@@ -598,6 +852,7 @@ export function TimelineContainer() {
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onContextMenu={onContextMenu}
         onPointerCancel={endDrag}
         onLostPointerCapture={endDrag}
         style={{
@@ -641,6 +896,16 @@ export function TimelineContainer() {
       {/* Marquee box. */}
       {drag?.kind === "marquee" && (
         <MarqueeBox drag={drag} scrollLeft={scrollLeft} scrollTop={scrollTop} />
+      )}
+
+      {/* Clip right-click context menu. */}
+      {menu && (
+        <ClipContextMenu
+          clipId={menu.clipId}
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+        />
       )}
 
       {/* Horizontal scrollbar proxy (thin) — drag handled via wheel; kept minimal. */}
