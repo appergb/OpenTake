@@ -32,7 +32,6 @@ export function Preview() {
   const t = useT();
   const timeline = useProjectStore((s) => s.timeline);
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
-  const currentFrame = useEditorUiStore((s) => s.currentFrame);
   const setCurrentFrame = useEditorUiStore((s) => s.setCurrentFrame);
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
   const isScrubbing = useEditorUiStore((s) => s.isScrubbing);
@@ -75,8 +74,16 @@ export function Preview() {
   // per-frame ffmpeg/PNG churn. Clamped to the last DRAWABLE frame (total-1;
   // clips are half-open [start,end)) so parking at the end isn't black.
   const live = isPlaying || isScrubbing;
-  const composeFrame = Math.min(Math.round(currentFrame), Math.max(0, timelineTotal - 1));
-  const timelineFrameUrl = useTimelineFrame(composeFrame, timelineHasContent && !live, timeline);
+  // activeFrame is the live playhead (the engine advances it during play); pausing
+  // leaves it at the pause position, so the settled composite targets the frame
+  // you actually stopped on — NOT the frozen currentFrame, which stays at the
+  // play-start frame and made pause jump back to the start.
+  const composeFrame = Math.min(Math.round(activeFrame), Math.max(0, timelineTotal - 1));
+  const timelineFrame = useTimelineFrame(composeFrame, timelineHasContent && !live, timeline);
+  // Display the composite only once it has decoded the CURRENT frame; until then
+  // the <video> backdrop holds the right frame, so pausing never flashes a stale
+  // composite / jumps to the start (issue #142).
+  const compositeFresh = timelineFrame.url !== null && timelineFrame.frame === composeFrame;
   const fps = timeline.fps;
   const total = previewing
     ? Math.max(0, Math.round(mediaDuration * fps))
@@ -146,23 +153,8 @@ export function Preview() {
             onDuration={setMediaDuration}
             onPlayingChange={setMediaPlaying}
           />
-        ) : live ? null : timelineFrameUrl ? (
-          // Rust GPU composite of the timeline at the current playhead (#47).
-          <img
-            src={timelineFrameUrl}
-            alt=""
-            draggable={false}
-            style={{
-              position: "absolute",
-              inset: 0,
-              width: "100%",
-              height: "100%",
-              objectFit: "contain",
-              display: "block",
-            }}
-          />
-        ) : (
-          // Empty / no-frame: a framed 16:9 canvas surface placeholder.
+        ) : !timelineHasContent ? (
+          // Empty timeline: a framed 16:9 canvas surface placeholder.
           <div
             style={{
               aspectRatio: `${timeline.width} / ${timeline.height}`,
@@ -178,9 +170,27 @@ export function Preview() {
               fontSize: "var(--fs-xs)",
             }}
           >
-            {timeline.tracks.length === 0 ? t("preview.noMedia") : `${timeline.width}×${timeline.height}`}
+            {t("preview.noMedia")}
           </div>
-        )}
+        ) : !live && compositeFresh && timelineFrame.url ? (
+          // Settled and the composite has decoded THIS frame: paint the high-
+          // fidelity Rust GPU composite (text/effects) over the <video> backdrop.
+          // While playing/scrubbing or still decoding, this is null and the
+          // <TimelinePlayback> surface above shows the frame (issue #142).
+          <img
+            src={timelineFrame.url}
+            alt=""
+            draggable={false}
+            style={{
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+              objectFit: "contain",
+              display: "block",
+            }}
+          />
+        ) : null}
       </div>
 
       {/* The app's scrub + transport are the single control surface — they drive
@@ -400,6 +410,10 @@ function ScrubBar({
     >
       <div
         style={{
+          // position:relative confines the absolute progress fill + handle below.
+          // Without it they escape to the nearest positioned ancestor (the preview
+          // panel) and render as a tall cream bar down the left edge.
+          position: "relative",
           flex: 1,
           height: hover ? 4 : 3,
           background: "rgba(255,255,255,0.1)",

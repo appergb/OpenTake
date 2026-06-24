@@ -12,19 +12,29 @@
  *
  * `enabled` gates fetching (Timeline tab active, not single-media preview).
  * `refreshKey` forces a refetch when the document changes (pass the timeline
- * snapshot). Returns null outside Tauri and before the first frame resolves.
+ * snapshot). Returns `{ url, frame }` where `frame` is the frame the current
+ * `url` was rendered for — callers display the composite only once `frame`
+ * matches the requested frame, so a stale composite never flashes during the
+ * decode of a new one (issue #142). `url` is null outside Tauri / before the
+ * first frame resolves.
  */
 
 import { useEffect, useRef, useState } from "react";
 import { compositeFrame, isTauri } from "../../lib/api";
+
+export interface TimelineFrame {
+  url: string | null;
+  frame: number | null;
+}
 
 export function useTimelineFrame(
   frame: number,
   enabled: boolean,
   refreshKey: unknown,
   minIntervalMs = 0,
-): string | null {
+): TimelineFrame {
   const [dataUrl, setDataUrl] = useState<string | null>(null);
+  const [resolvedFrame, setResolvedFrame] = useState<number | null>(null);
   const inFlight = useRef(false);
   const pending = useRef<number | null>(null);
   const lastStart = useRef(0);
@@ -44,7 +54,10 @@ export function useTimelineFrame(
     lastStart.current = performance.now();
     void compositeFrame(f)
       .then((res) => {
-        if (res && enabledRef.current) setDataUrl(res.dataUrl);
+        if (res && enabledRef.current) {
+          setDataUrl(res.dataUrl);
+          setResolvedFrame(f);
+        }
       })
       .catch(() => {
         // A failed composite leaves the last good frame.
@@ -99,5 +112,5 @@ export function useTimelineFrame(
     [],
   );
 
-  return dataUrl;
+  return { url: dataUrl, frame: resolvedFrame };
 }

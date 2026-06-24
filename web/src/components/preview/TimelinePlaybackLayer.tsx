@@ -6,11 +6,13 @@
  * mirroring upstream's split of an app-level VideoEngine driving a passive
  * PreviewView.
  *
- * This surface is visible while PLAYING or SCRUBBING (the cheap, live path the
- * single-media preview already uses); when settled it goes transparent so the
- * high-fidelity Rust GPU composite shows through. We can't GPU-composite live in
- * the WebView, so transform/crop/text during playback await the streaming engine
- * (#53); this surface shows raw decoded frames (opacity + track order).
+ * This surface stays visible as the backdrop: while PLAYING/SCRUBBING it shows
+ * the live frame, and while paused it holds the element frozen on the pause
+ * frame — so the picture is correct the instant you pause, before the settled
+ * Rust GPU composite (text/effects) decodes and paints over it (issue #142). We
+ * can't GPU-composite live in the WebView, so transform/crop/text during
+ * playback await the streaming engine (#53); this surface shows raw decoded
+ * frames (opacity + track order).
  */
 
 import { useEditorUiStore } from "../../store/uiStore";
@@ -27,14 +29,10 @@ import type { Clip, Timeline } from "../../lib/types";
 import { useRef } from "react";
 
 export function TimelinePlayback({ timeline, fps }: { timeline: Timeline; fps: number }) {
-  // Subscribe to activeFrame so the right clips stay mounted as the playhead
-  // moves; subscribe to play/scrub state so the surface shows only then.
+  // Subscribe to activeFrame so the right clips stay mounted as the playhead moves.
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
-  const isPlaying = useEditorUiStore((s) => s.isPlaying);
-  const isScrubbing = useEditorUiStore((s) => s.isScrubbing);
   const items = useMediaStore((s) => s.items);
   const frame = Math.round(activeFrame);
-  const live = isPlaying || isScrubbing;
 
   const visual = activeVisualClip(timeline, frame);
   const audios = activeAudioClips(timeline, frame);
@@ -102,7 +100,7 @@ export function TimelinePlayback({ timeline, fps }: { timeline: Timeline; fps: n
           playsInline
           preload="auto"
           onLoadedData={seekOnLoad(visual.clip)}
-          style={{ ...fill, opacity: live ? clipOpacity(visual.clip) : 0 }}
+          style={{ ...fill, opacity: clipOpacity(visual.clip) }}
         />
       )}
       {visual && visualUrl && visual.clip.mediaType === "image" && (
@@ -111,7 +109,7 @@ export function TimelinePlayback({ timeline, fps }: { timeline: Timeline; fps: n
           src={visualUrl}
           alt=""
           draggable={false}
-          style={{ ...fill, opacity: live ? clipOpacity(visual.clip) : 0 }}
+          style={{ ...fill, opacity: clipOpacity(visual.clip) }}
         />
       )}
       {audios.map((a) => {
