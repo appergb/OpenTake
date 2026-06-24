@@ -17,7 +17,7 @@ import type {
   ClipPropertiesReq,
   ClipType,
   FrameRangeReq,
-  Keyframe,
+  Interpolation,
   KeyframePayloadReq,
   KeyframeProperty,
   MediaItem,
@@ -96,103 +96,42 @@ export async function setKeyframes(
   await applyAndRefresh({ type: "setKeyframes", clipId, property, payload });
 }
 
-/** Whether `property` is a scalar (number-valued) keyframe track — the only kind
- *  the move/stamp wrappers below handle. Pair (position/scale) and crop stay on
- *  the full-track `setKeyframes` path. */
-function isScalarProperty(property: KeyframeProperty): boolean {
-  return property === "volume" || property === "opacity" || property === "rotation";
+/** Stamp a keyframe at `frame` using the clip's current sampled value. */
+export async function stampKeyframe(
+  clipId: string,
+  property: KeyframeProperty,
+  frame: number,
+) {
+  await applyAndRefresh({ type: "stampKeyframe", clipId, property, frame });
 }
 
-/** The scalar keyframe array for `property` on `clip` (empty when no track yet). */
-function scalarKfs(clip: Clip, property: KeyframeProperty): Keyframe<number>[] {
-  if (property === "volume") return clip.volumeTrack?.keyframes ?? [];
-  if (property === "opacity") return clip.opacityTrack?.keyframes ?? [];
-  if (property === "rotation") return clip.rotationTrack?.keyframes ?? [];
-  return [];
+/** Remove the keyframe at `frame`. */
+export async function removeKeyframe(
+  clipId: string,
+  property: KeyframeProperty,
+  frame: number,
+) {
+  await applyAndRefresh({ type: "removeKeyframe", clipId, property, frame });
 }
 
-/** Default scalar value for a property (used when stamping the first kf). */
-function scalarDefault(clip: Clip, property: KeyframeProperty): number {
-  if (property === "volume") return clip.volume;
-  if (property === "opacity") return clip.opacity;
-  return 0; // rotation
-}
-
-/** Linear-interpolate a scalar track at `frame` (flat outside the kf range) so a
- *  stamped keyframe captures the currently-rendered value without jumping. */
-function sampleScalar(kfs: Keyframe<number>[], frame: number, fallback: number): number {
-  if (kfs.length === 0) return fallback;
-  const sorted = [...kfs].sort((a, b) => a.frame - b.frame);
-  if (frame <= sorted[0].frame) return sorted[0].value;
-  if (frame >= sorted[sorted.length - 1].frame) return sorted[sorted.length - 1].value;
-  for (let i = 0; i < sorted.length - 1; i++) {
-    const a = sorted[i];
-    const b = sorted[i + 1];
-    if (frame >= a.frame && frame <= b.frame) {
-      const span = b.frame - a.frame;
-      return span <= 0 ? b.value : a.value + (b.value - a.value) * ((frame - a.frame) / span);
-    }
-  }
-  return fallback;
-}
-
-/** Find a clip by id in the current timeline mirror. */
-function findClipInTimeline(clipId: string): Clip | null {
-  for (const track of useProjectStore.getState().timeline.tracks) {
-    for (const c of track.clips) {
-      if (c.id === clipId) return c;
-    }
-  }
-  return null;
-}
-
-/**
- * Move a single keyframe from `fromFrame` to `toFrame`. Implemented as a
- * read-modify-write over `setKeyframes` (the only keyframe command the backend
- * currently exposes), keeping this a pure-frontend feature. A no-op when the
- * source kf is missing or the target frame is already occupied (matches
- * upstream `move_keyframe` semantics). Only scalar properties are supported
- * here — pair/crop tracks use `setKeyframes` directly.
- */
+/** Move a keyframe from `fromFrame` to `toFrame`. */
 export async function moveKeyframe(
   clipId: string,
   property: KeyframeProperty,
   fromFrame: number,
   toFrame: number,
 ) {
-  if (fromFrame === toFrame) return;
-  if (!isScalarProperty(property)) return;
-  const clip = findClipInTimeline(clipId);
-  if (!clip) return;
-  const kfs = scalarKfs(clip, property);
-  if (!kfs.some((k) => k.frame === fromFrame)) return; // source missing
-  if (kfs.some((k) => k.frame === toFrame)) return; // target occupied
-  const newKfs = kfs
-    .map((k) => (k.frame === fromFrame ? { ...k, frame: toFrame } : k))
-    .sort((a, b) => a.frame - b.frame);
-  await setKeyframes(clipId, property, { kind: "scalar", keyframes: newKfs });
+  await applyAndRefresh({ type: "moveKeyframe", clipId, property, fromFrame, toFrame });
 }
 
-/**
- * Stamp a keyframe at `frame` using the clip's current sampled value, so the
- * curve doesn't jump. Implemented as a read-modify-write over `setKeyframes`.
- * A no-op when a kf already exists at `frame`. Only scalar properties are
- * supported here.
- */
-export async function stampKeyframe(
+/** Change the interpolation mode of the keyframe at `frame`. */
+export async function setKeyframeInterpolation(
   clipId: string,
   property: KeyframeProperty,
   frame: number,
+  interpolation: Interpolation,
 ) {
-  if (!isScalarProperty(property)) return;
-  const clip = findClipInTimeline(clipId);
-  if (!clip) return;
-  const kfs = scalarKfs(clip, property);
-  if (kfs.some((k) => k.frame === frame)) return; // already stamped
-  const value = sampleScalar(kfs, frame, scalarDefault(clip, property));
-  const newKf: Keyframe<number> = { frame, value, interpolationOut: "smooth" };
-  const newKfs = [...kfs, newKf].sort((a, b) => a.frame - b.frame);
-  await setKeyframes(clipId, property, { kind: "scalar", keyframes: newKfs });
+  await applyAndRefresh({ type: "setKeyframeInterpolation", clipId, property, frame, interpolation });
 }
 
 /** Ripple-delete project-frame ranges on a track, closing the gaps. */
