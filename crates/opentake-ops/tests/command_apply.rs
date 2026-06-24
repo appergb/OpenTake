@@ -228,6 +228,40 @@ fn split_linked_pair_splits_partner_and_regroups() {
 }
 
 #[test]
+fn duplicate_linked_pair_keeps_copies_linked() {
+    // Option/Alt-drag duplicating an A/V linked pair must keep the copies linked
+    // to each other under a fresh group id (groupCounts/groupRemap semantics).
+    let mut st = linked_av_state();
+    let g = SeqIdGen::default();
+    let res = apply(
+        &mut st,
+        EditCommand::DuplicateClips {
+            clip_ids: vec!["v1".into(), "a1".into()],
+            offset_frames: 200,
+            target_track_indexes: vec![0, 1],
+        },
+        &g,
+    )
+    .unwrap();
+    assert_eq!(res.affected_clip_ids.len(), 2);
+
+    // The copies share a NEW link_group_id (same as each other, different from
+    // the source "g1") — the A/V link survives the duplicate.
+    let vc = find_clip(&st, &res.affected_clip_ids[0]);
+    let ac = find_clip(&st, &res.affected_clip_ids[1]);
+    assert_eq!(vc.link_group_id, ac.link_group_id);
+    assert_ne!(vc.link_group_id.as_deref(), Some("g1"));
+    assert!(
+        vc.link_group_id.is_some(),
+        "linked pair copies must stay linked"
+    );
+
+    // Originals keep "g1".
+    assert_eq!(find_clip(&st, "v1").link_group_id.as_deref(), Some("g1"));
+    assert_eq!(find_clip(&st, "a1").link_group_id.as_deref(), Some("g1"));
+}
+
+#[test]
 fn remove_clips_expands_to_linked_partner() {
     let mut st = linked_av_state();
     let g = SeqIdGen::default();
