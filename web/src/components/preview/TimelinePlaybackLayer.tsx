@@ -84,6 +84,9 @@ export function TimelinePlayback({ timeline, fps }: { timeline: Timeline; fps: n
   return (
     <div
       style={{
+        // Display-only playback surface: never intercept pointer events, so it
+        // can't swallow clicks meant for the transport/scrub controls (#142).
+        pointerEvents: "none",
         width: "100%",
         height: "100%",
         display: "flex",

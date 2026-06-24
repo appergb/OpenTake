@@ -189,6 +189,10 @@ export function Preview() {
               height: "100%",
               objectFit: "contain",
               display: "block",
+              // Display-only overlay: never intercept pointer events, or it
+              // swallows clicks meant for the transport/scrub controls below
+              // (the "play button can't be pressed" bug). #142.
+              pointerEvents: "none",
             }}
           />
         ) : null}
