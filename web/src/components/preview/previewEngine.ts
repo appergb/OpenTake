@@ -97,6 +97,22 @@ export function useTimelinePlaybackEngine(): void {
   useEffect(() => {
     if (!isPlaying && !isScrubbing) {
       for (const el of elements.values()) el.pause();
+      // Snap the playhead to the frame the visual <video> actually FROZE on. The
+      // engine's activeFrame lags the element's real-time decode clock by up to a
+      // tick, so without this the settled GPU composite is requested for an
+      // earlier frame and, when it paints over the frozen video, the picture
+      // twitches back. Snapping makes composeFrame === the frozen frame, so the
+      // composite paints the same picture — no jump (#149).
+      const tl = useProjectStore.getState().timeline;
+      const fps = tl.fps > 0 ? tl.fps : 30;
+      const v = activeVisualClip(tl, Math.round(useEditorUiStore.getState().activeFrame));
+      if (v && v.clip.mediaType === "video") {
+        const el = elements.get(v.clip.id);
+        if (el) {
+          const f = frameForSourceTime(v.clip, el.currentTime, fps);
+          if (Number.isFinite(f)) useEditorUiStore.getState().setActiveFrame(Math.max(0, Math.round(f)));
+        }
+      }
       return;
     }
 
