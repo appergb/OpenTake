@@ -38,6 +38,7 @@ function defaultXmlName(projectPath: string | null): string {
 
 export function TitleBar() {
   const setView = useEditorUiStore((s) => s.setView);
+  const setSettingsOpen = useEditorUiStore((s) => s.setSettingsOpen);
   const projectPath = useProjectStore((s) => s.projectPath);
   const t = useT();
 
@@ -94,6 +95,8 @@ export function TitleBar() {
           alignItems: "center",
           justifyContent: "center",
           color: "var(--text-secondary)",
+          position: "relative",
+          top: -2,
         }}
       >
         <Icon icon={Home} size={13} />
@@ -102,7 +105,7 @@ export function TitleBar() {
       {/* §2.9 menu entry point (hosts Layout presets + Agent panel + visibility). */}
       <ViewMenu />
 
-      <div style={{ flex: 1 }} />
+      <div data-tauri-drag-region style={{ flex: 1 }} />
 
       {/* Trailing: Library + Settings + Export. */}
       <button
@@ -117,6 +120,8 @@ export function TitleBar() {
           alignItems: "center",
           justifyContent: "center",
           color: "var(--text-secondary)",
+          position: "relative",
+          top: -2,
         }}
       >
         <Icon icon={Library} size={13} />
@@ -124,7 +129,7 @@ export function TitleBar() {
       <button
         title={t("title.settings")}
         aria-label={t("title.settings")}
-        onClick={() => setView("settings")}
+        onClick={() => setSettingsOpen(true)}
         className="hover-area"
         style={{
           width: 26,
@@ -133,6 +138,8 @@ export function TitleBar() {
           alignItems: "center",
           justifyContent: "center",
           color: "var(--text-secondary)",
+          position: "relative",
+          top: -2,
         }}
       >
         <Icon icon={SettingsIcon} size={13} />
@@ -151,6 +158,8 @@ export function TitleBar() {
           color: "var(--text-secondary)",
           fontSize: "var(--fs-sm)",
           fontWeight: "var(--fw-medium)",
+          position: "relative",
+          top: -2,
         }}
       >
         <Icon icon={Upload} size={13} />
