@@ -4,6 +4,7 @@
 //! in place, and the command layer snapshots/commits around them.
 
 pub mod clear_region;
+pub mod duplicate;
 pub mod folders;
 pub mod linking;
 pub mod move_clips;
@@ -14,6 +15,7 @@ pub mod tracks;
 pub mod trim;
 
 pub use clear_region::clear_region;
+pub use duplicate::duplicate_clips;
 pub use folders::{
     create_folder, delete_folder, delete_media, move_to_folder, rename_folder, rename_media,
 };
