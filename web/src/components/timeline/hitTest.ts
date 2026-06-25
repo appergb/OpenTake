@@ -5,7 +5,7 @@
  * (already offset for the header column and scroll by the caller).
  */
 
-import { TRIM } from "../../lib/theme";
+import { TRIM, CLIP } from "../../lib/theme";
 import { clipRect } from "../../lib/geometry";
 import type { Timeline, Clip } from "../../lib/types";
 
@@ -94,4 +94,59 @@ export function clipsInRect(
     }
   }
   return out;
+}
+
+/** Hit radius (px) for a volume-keyframe dot — the dot is drawn at 5px radius,
+ *  plus 3px of grab tolerance so a fast click still grabs it. */
+const VOLUME_KF_HIT_RADIUS = 8;
+
+/** Result of hitting a draggable volume-keyframe dot. `frame` is clip-relative
+ *  (0 = clip start), matching `Keyframe.frame` storage. */
+export interface VolumeKfHit {
+  clipId: string;
+  /** Clip-relative keyframe frame. */
+  frame: number;
+}
+
+/**
+ * Hit-test the draggable volume-keyframe dots drawn by `drawVolumeEnvelope`
+ * (SPEC §5.4). Returns the first audio clip's volume kf within the grab radius,
+ * or null. The dot position math mirrors `drawVolumeEnvelope` exactly so a
+ * visible dot is always grabbable. `docX`/`docY` are document-space (already
+ * scroll-adjusted by the caller, same convention as `hitTestClip`).
+ */
+export function audioVolumeKfHit(
+  timeline: Timeline,
+  docX: number,
+  docY: number,
+  pixelsPerFrame: number,
+  trackHeights: Record<string, number>,
+): VolumeKfHit | null {
+  for (let ti = 0; ti < timeline.tracks.length; ti++) {
+    const track = timeline.tracks[ti];
+    for (const clip of track.clips) {
+      if (clip.mediaType !== "audio") continue;
+      const track2 = clip.volumeTrack;
+      if (!track2 || track2.keyframes.length === 0) continue;
+      const rect = clipRect(timeline, ti, clip, pixelsPerFrame, trackHeights);
+      if (clip.durationFrames <= 0) continue;
+      const ppf = (rect.width - 2 * TRIM.handleWidth) / clip.durationFrames;
+      if (ppf <= 0) continue;
+      const baseX = rect.x + TRIM.handleWidth;
+      const bodyTop = rect.y + CLIP.labelBarHeight;
+      const bodyH = rect.height - CLIP.labelBarHeight;
+      for (const kf of track2.keyframes) {
+        if (kf.frame < 0 || kf.frame > clip.durationFrames) continue;
+        const kx = baseX + kf.frame * ppf;
+        const c = Math.max(0, Math.min(1, kf.value));
+        const ky = bodyTop + bodyH * (1 - c);
+        const dx = docX - kx;
+        const dy = docY - ky;
+        if (dx * dx + dy * dy <= VOLUME_KF_HIT_RADIUS * VOLUME_KF_HIT_RADIUS) {
+          return { clipId: clip.id, frame: kf.frame };
+        }
+      }
+    }
+  }
+  return null;
 }

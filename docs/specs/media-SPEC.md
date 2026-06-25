@@ -1,8 +1,8 @@
 # opentake-media 实现就绪规格 (Issue #8)
 
-> 范围:`crates/opentake-media`。把上游基于 AVFoundation / DSWaveformImage / macOS 26 Speech / CoreML 的媒体读取层,移植为跨平台 Rust:**ffmpeg-next 解码/编码/缩略图/抽 PCM、Symphonia 波形、whisper-rs 转写、candle/ort + SigLIP2 语义搜索、ort 通用推理 worker**。本 crate 是媒体**读取与离线分析**层,不含 wgpu 帧合成器(那在 `opentake-render`,见 §9 边界)。
+> 范围:`crates/opentake-media`。把上游基于 AVFoundation / DSWaveformImage / macOS 26 Speech / CoreML 的媒体读取层,移植为跨平台 Rust:**ffmpeg-sidecar 解码/编码/缩略图/抽 PCM、Symphonia 波形、whisper-rs 转写、ort + SigLIP2 + tokenizers 语义搜索、ort 通用推理 worker**。本 crate 是媒体**读取与离线分析**层,不含 wgpu 帧合成器(那在 `opentake-render`,见 §9 边界)。candle 仅作可选备选后端。
 >
-> 状态:设计规格。对应 ROADMAP **Phase 2**(缩略图/波形,易)与 **Phase 8**(转写/语义搜索/进阶 AI worker)。本 crate 在 workspace 已有空壳 `crates/opentake-media/{Cargo.toml,src/lib.rs}`(`crate_compiles` 占位测试)。
+> 状态:设计规格。对应 ROADMAP **Phase 2**(缩略图/波形,易)与 **Phase 8**(转写/语义搜索/进阶 AI worker)。本 crate 在 workspace 已有 `src/lib.rs` 的 `MediaEngine` facade 与基础 smoke tests,不是空壳。
 >
 > 真理来源(均为只读上游,绝对路径):
 > - 解码/编码/缩略图/PCM:`palmier-pro-upstream/Sources/PalmierPro/Preview/{ImageVideoGenerator,AlphaVideoNormalizer,TimelineRenderer}.swift`、`Transcription/Transcription.swift`(`extractAudioTrack`)、`Timeline/MediaVisualCache.swift`(缩略图 sprite + 波形 + 磁盘缓存)。
@@ -23,7 +23,7 @@
 3. **缓存键与磁盘格式逐字节复刻**:`SHA256("path|mtime_unix_f64|size")` 取前 N hex、`PALMEMB1` 二进制布局、`.waveform`/`.thumbs.jpg`+`.thumbs.json` sidecar、转写 JSON。理由:让 OpenTake 与上游/旧工程的缓存目录**可互读**(同机迁移),并保证幂等判定一致。
 4. **错误用 `thiserror` 定义本 crate 错误,内部传播用 `anyhow`,边界返回 `Result<T, MediaError>`**;`opentake-domain` 零依赖,本 crate 是第一层允许 IO 的 crate。
 5. **不可变 / 纯函数优先**:排名(`VisualSearch`)、波形降采样、采样判定、转写过滤等都是无副作用纯函数,可全单测;有状态的只有索引调度器(§7.7)与模型加载器(§5.6)。
-6. **后端推理可插拔**:`Embedder` / `Transcriber` / `OrtWorker` 定义为 trait,默认实现走 ort 或 candle;测试注入 mock(协议化 DI)。
+6. **后端推理可插拔**:`Embedder` / `Transcriber` / `OrtWorker` 定义为 trait,默认实现走 ort;测试注入 mock(协议化 DI)。candle 只作为可选回退后端存在。
 7. **导出期让路**:任何后台任务(索引/缩略图/波形)在导出活跃时暂停。证据:上游 `ExportService.isExporting.didSet → SearchIndexCoordinator.exportDidBegin/End`(`MODULE-PORT-MAP` L457)、`SearchIndexCoordinator.waitWhileExportActive`(`SearchIndexCoordinator.swift:49`)。
 8. **L2 归一化对齐风险**:上游裸点积 `cblas_sgemv` 是否等价余弦,取决于导出模型是否在图内 L2 归一化(`MODULE-PORT-MAP` L860)。本 crate **必须复用上游同一份权重转 ONNX**,并在 `Embedder::encode` 后做一次**条件 L2 归一化开关**(`Spec.normalized: bool`),默认 false 以匹配上游(模型内已归一化)——除非验证证明需要外部归一化。
 
@@ -98,7 +98,7 @@ tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 unicode-normalization = "0.1" # TranscriptSearch 变音不敏感(NFD)
 
 # 媒体编解码
-ffmpeg-next = "7"       # libav*(解码/编码/缩略图/抽 PCM);构建依赖系统 FFmpeg
+ffmpeg-sidecar          # 调用系统 ffmpeg/ffprobe;不直接链接 libav*
 # 波形
 symphonia = { version = "0.5", features = ["all-codecs", "all-formats"] }
 # 转写
@@ -121,7 +121,7 @@ serde_json = { workspace = true }
 tempfile = "3"
 ```
 
-依据 `docs/_analysis/02` 成熟度判断:ffmpeg-next/symphonia/whisper-rs/ort 全部「成熟、机械移植」,blocker 不在本 crate(blocker 是 `opentake-render` 的 wgpu 合成器)。
+依据 `docs/_analysis/02` 成熟度判断:ffmpeg-sidecar/symphonia/whisper-rs/ort 全部「成熟、机械移植」,blocker 不在本 crate(blocker 是 `opentake-render` 的 wgpu 合成器)。
 
 ### 1.3 顶层错误类型
 
@@ -164,7 +164,7 @@ pub fn file_identity_key(path: &Path, prefix_chars: usize) -> Option<String>;
 
 ---
 
-## 2. ffmpeg-next:解码 / 编码 / 缩略图(seek 解帧)/ 抽 PCM
+## 2. ffmpeg-sidecar:解码 / 编码 / 缩略图(seek 解帧)/ 抽 PCM
 
 ### 2.1 媒体探测 `MediaProbe`(替 `MediaAsset.loadMetadata` 的视频/音频分支)
 
@@ -387,7 +387,7 @@ pub fn save_waveform(cache_root: &Path, key: &str, samples: &[f32]) -> Result<()
 
 ---
 
-## 5. candle/ort + SigLIP2 视觉/口语搜索
+## 5. ort + SigLIP2 + tokenizers 视觉/口语搜索
 
 > 「口语搜索」= 转写关键词检索(§6.4,`TranscriptSearch`)。本节聚焦**视觉语义搜索**(SigLIP2 双编码器),完整复刻 `Search/` 子树。模型:`siglip2-base-patch16-256`,dim=768,imageSize=256,contextLength=64(`SearchIndexConfig.swift:22-45`)。
 
@@ -545,9 +545,9 @@ count 行,每行 rowBytes = 3*8 + dim*2 = 24 + dim*2:
 - `is_current`:`header.model==model && model_version==mv && sampler_version==sv`(`:58-61`);任一不符即需重索引。
 - 内存向量 f32 连续(供 §5.8 矩阵·向量),落盘 f16(`AssetIndex` 注释 `:24`)。
 
-### 5.7 推理后端实现(ort 默认 / candle 备选)
+### 5.7 推理后端实现(ort 默认 / candle 仅备选)
 
-`VisualEmbedder` 用 CoreML(`VisualEmbedder.swift:1/29-35`),跨平台不可移植 → `docs/_analysis/02` 表 L80 / MODULE-PORT-MAP L881:**ort(ONNX Runtime)或 candle**。
+`VisualEmbedder` 用 CoreML(`VisualEmbedder.swift:1/29-35`),跨平台不可移植 → `docs/_analysis/02` 表 L80 / MODULE-PORT-MAP L881:**ort(ONNX Runtime)+ tokenizers**,candle 仅作可选回退。
 
 ```rust
 // search/embedder.rs(默认实现)
@@ -912,7 +912,7 @@ impl MediaEngine {
 ### Phase 2 子集(基础媒体,先做)
 
 - **T2.1 cache_key + error**:`file_identity_key`(SHA256 path|mtime|size,前 16 字节 32 hex)+ `MediaError`。验收:同输入稳定、不同 mtime/size 变 key、缺文件 None。
-- **T2.2 probe**:ffmpeg-next 读时长/旋转校正宽高/fps/has_audio。验收:对一组样本(横屏/竖屏/旋转 90°/纯音频/无音轨视频)字段正确;旋转视频宽高已交换;与 `ffprobe` 交叉核对。
+- **T2.2 probe**:ffmpeg-sidecar 读时长/旋转校正宽高/fps/has_audio。验收:对一组样本(横屏/竖屏/旋转 90°/纯音频/无音轨视频)字段正确;旋转视频宽高已交换;与 `ffprobe` 交叉核对。
 - **T2.3 decode_frame_at / decode_frames_at**:seek+tolerance+缩放(保宽高比)+ `t>lastTime` 去重。验收:指定秒取到最近帧、实际时间单调、越界 Err;批量去重生效。
 - **T2.4 extract_pcm**:解音轨 → 16k mono f32,支持 range。验收:输出采样率/声道/长度正确;range `(a,b)` 长度≈`(b-a)*16000`;无音轨 `NoTrack`。
 - **T2.5 thumbnail + sprite**:`videoThumbnailTimes` 公式、120×68、渐进回调、sprite 网格 + JSON sidecar(camelCase 字段)+ 原子写 + 读校验。验收:时间点序列与公式逐一相符;**写出的 `.thumbs.jpg/.json` 能被上游 `MediaVisualCache.loadThumbnails` 读回**(字段名/列数/tile 尺寸/times 一致);坏文件返回 None。

@@ -112,11 +112,11 @@ Built-in Agent chat panel shares tool definitions and system prompt with MCP.
 
 | Capability | Technology |
 |:--|:--|
-| Codec | FFmpeg (`ffmpeg-next`) — battle-tested Rust bindings |
+| Codec | ffmpeg-sidecar (system ffmpeg/ffprobe) |
 | Compositor | wgpu custom compositor — multi-track layering + per-frame property sampling + affine/crop/blend |
 | Audio Playback | cpal |
 | Transcription | whisper-rs (word/segment timestamps) |
-| Semantic Search | candle / ort + SigLIP2 dual-encoder |
+| Semantic Search | ort + SigLIP2 + tokenizers |
 
 ### 🌐 BYOK AI Generation
 
@@ -273,7 +273,7 @@ cd web && pnpm install && pnpm build
 cd .. && cargo tauri dev
 ```
 
-> ⚠️ **Current Status**: Early design phase. Architecture, roadmap, and module port maps are complete; code implementation in progress.
+> ⚠️ **Current Status**: Active implementation. The Rust workspace, Tauri shell, React UI, MCP/Agent layer, and core docs are in place; the roadmap now tracks the remaining parity gaps and hard blockers.
 
 The sibling directory `palmier-pro-upstream/` contains upstream Swift sources for reference during porting.
 
@@ -283,7 +283,7 @@ The sibling directory `palmier-pro-upstream/` contains upstream Swift sources fo
 
 | Version | Date | Milestone |
 |:--|:--|:--|
-| `0.1.0-dev` | 2026-06 | Phase 0+1: Cargo workspace + Domain models + Edit ops + Tauri scaffold |
+| `0.1.0-dev` | 2026-06 | Active development snapshot: workspace, core crates, Tauri shell, React UI, and MCP/Agent surface |
 | *(planned)* `0.2.0` | TBD | Phase 2: Persistence + Media import + Thumbnails + Waveform |
 | *(planned)* `0.3.0` | TBD | Phase 3: Timeline UI + Preview + MCP Server |
 | *(planned)* `0.4.0` | TBD | Phase 4: GPU Compositor (wgpu) + Text rasterization |

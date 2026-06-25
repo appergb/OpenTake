@@ -63,7 +63,7 @@
 - **进度**:`list_models` 工具已从存根接到 `opentake-gen` 内置静态 catalog(#111,`?type=` 过滤 + `{ models, loaded }`,纯本地无网络/BYOK);`generate_*`/`upscale_media` 仍待 async + ProviderRegistry + BYOK。
 
 ## Phase 8 — 文字/字幕渲染 + 转写 + 语义搜索
-- **做**:cosmic-text + tiny-skia/Vello 文字渲染(阴影/描边/背景/对齐/换行,逐帧 opacity)接入合成器;whisper-rs 转写(word/segment 时间戳,`TranscriptionResult` 模型复用);candle/ort 跑 SigLIP2 + tokenizers 做视觉/口语搜索。
+- **做**:cosmic-text + tiny-skia/Vello 文字渲染(阴影/描边/背景/对齐/换行,逐帧 opacity)接入合成器;whisper-rs 转写(word/segment 时间戳,`TranscriptionResult` 模型复用);ort + SigLIP2 + tokenizers 做视觉/口语搜索。
 - **验证**:字幕静态渲染像素对齐上游;转写时间码映射正确;`search_media` 视觉/口语命中合理。
 - **进度**:SRT/VTT 字幕**导出纯逻辑**已落地(#110,`crates/opentake-domain/src/subtitle_export.rs`,按 `caption_group_id` 分组序列化,16 单测);剩接导出层 + `export_captions` agent 工具 + 前端导出对话框。
 - **进阶扩展(ADVANCED-FEATURES B/C/D 层)**:

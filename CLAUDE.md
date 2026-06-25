@@ -35,7 +35,7 @@
 
 ## 0. 项目身份
 - OpenTake = [palmier-io/palmier-pro](https://github.com/palmier-io/palmier-pro)(Swift 原生 macOS 视频编辑器,GPL-3.0)的**跨平台社区分支**。**忠实 1:1 复刻其编辑逻辑与 UI**(用户反复强调:别自己发明,照上游源码复刻;除登录/账号外都对齐),再加更强 Agent 能力。
-- 栈:Tauri 2 + Rust workspace + React/TS;媒体 = FFmpeg(sidecar)+ wgpu(合成)+ cpal + whisper-rs + candle/ort。
+- 栈:Tauri 2 + Rust workspace + React/TS;媒体 = ffmpeg-sidecar + wgpu(合成)+ cpal + whisper-rs + ort/SigLIP2。
 - GitHub `appergb/OpenTake`(Public,main 受保护)。许可 GPL-3.0。
 
 ## 1. 目录

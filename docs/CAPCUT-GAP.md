@@ -1,6 +1,7 @@
 # OpenTake vs 剪映 特性差距报告(模块 1–5)
 
 > 由 5 个 max-思考子 Agent 对照 OpenTake 设计稿 + 上游源码逐特性核对。状态:has=已覆盖 / partial=部分 / missing=缺失。已排除剪映模块 6(自然语言交互/语音助手,OpenTake 已有 Agent)与模块 7(云生态/企业协作)。
+> 注: 这是能力差距与路线分析,不是当前运行时配置。OpenTake 现有实现的媒体 IO 以 `ffmpeg-sidecar` 为基线,语义搜索以 `ort + SigLIP2 + tokenizers` 为基线;文中 `candle` 只是在讨论历史候选/备选实现。
 
 ## 模块1:基础剪辑与时间线管理
 
@@ -85,8 +86,8 @@
 ### 视频防抖(stabilization) — `missing` · 难度 medium · 优先级 p2
 - **判定依据**:上游零实现:全目录 grep 不到 stabiliz/stabilis/VNDetectTrajectories/opticalFlow/任何防抖逻辑;无 Vision 框架引用。无运动估计基础设施。
 - **落点(crate/层)**:opentake-media(防抖 worker:两遍分析——估计逐帧全局运动→平滑相机轨迹→反向补偿)+ opentake-domain(把补偿写成 position/scale/rotation 关键帧,或标记 stabilize 参数由 render 应用)
-- **实现方案**:成熟开源算法可移植,本地、无需重型 AI、难度中。① 最省力路线:直接复用 FFmpeg vidstab(vidstabdetect + vidstabtransform 两遍),OpenTake 已绑 ffmpeg-next(ARCHITECTURE §10),导出路径几乎零成本接入;实时预览可先用降采样代理。② 自研路线(更可控):光流/特征点(KLT)估全局仿射运动 → 用低通/高斯平滑相机路径 → 反向仿射补偿 + 自动裁掉边缘黑边(轻微放大)。补偿量可烘焙进现有 transform 关键帧轨,复用既有合成,无需新合成原语。③ 平滑强度/裁切比例作为可调参数。④ 可选 AI 增强(深度学习防抖如 DUT)作为远期 p3,默认经典算法已够用。
-- **前置依赖**:FFmpeg vidstab 路线仅依赖 ffmpeg-next(已有);自研路线依赖光流(与追踪共用);补偿应用依赖关键帧引擎/wgpu
+- **实现方案**:成熟开源算法可移植,本地、无需重型 AI、难度中。① 最省力路线:直接复用 FFmpeg vidstab(vidstabdetect + vidstabtransform 两遍),OpenTake 已改为 ffmpeg-sidecar(ARCHITECTURE §10),导出路径几乎零成本接入;实时预览可先用降采样代理。② 自研路线(更可控):光流/特征点(KLT)估全局仿射运动 → 用低通/高斯平滑相机路径 → 反向仿射补偿 + 自动裁掉边缘黑边(轻微放大)。补偿量可烘焙进现有 transform 关键帧轨,复用既有合成,无需新合成原语。③ 平滑强度/裁切比例作为可调参数。④ 可选 AI 增强(深度学习防抖如 DUT)作为远期 p3,默认经典算法已够用。
+- **前置依赖**:FFmpeg vidstab 路线仅依赖 ffmpeg-sidecar(已有);自研路线依赖光流(与追踪共用);补偿应用依赖关键帧引擎/wgpu
 
 ### 画质超清修复(super-resolution / enhance) — `partial` · 难度 medium · 优先级 p1
 - **判定依据**:上游有『Upscale』入口但纯云端、且仅放大不修复:AIEditTab『AI Enhance / Upscale / Enhance resolution with AI』(Inspector/AIEditTab.swift:31-36)、UpscaleModelConfig 从 Convex ModelCatalog 拉取(Generation/Catalog/UpscaleModelConfig.swift)、EditSubmitter.submitUpscale 把 sourceURL+durationSeconds 发后端(UpscaleModelConfig.swift:3-15)、需登录订阅否则禁用(ToolExecutor+Generate.swift:320)、video 仅 <2160 可放大(MODULE-PORT-MAP.md:528)。本地零推理。OpenTake 设计稿 Generation 章把它归为 cloud-rebuild,未规划本地超分实现(MODULE-PORT-MAP.md:231、ARCHITECTURE §8 只讲生成代理双模,未列本地 SR)。
@@ -233,4 +234,3 @@
 - **落点(crate/层)**:opentake-gen(扩展 AudioGenerationParams 增加 referenceAudioURL/voiceId 字段 + provider adapter)+ services/opentake-gen-proxy(对接 ElevenLabs voice-clone / fal / MiniMax 等)+ 音色库管理(可存于 .opentake 工程或账户级)+ keyring 存厂商 key。
 - **实现方案**:本地无法稳定实现高质量克隆(需说话人编码+声码器大模型),走外部 API 最务实。两步:① 创建音色:用户提供参考音频样本→预签名上传→调 ElevenLabs Instant Voice Cloning / MiniMax voice clone 等→拿回一个 voiceId,存入音色库。② 使用:把该 voiceId 当作 TTS 的 voice 传入现有 generate_audio 流水线即可复用全部落轨逻辑。需扩展 OpenTake 既有的 AudioGenerationParams 联合类型(report03 已设计该 enum)加 referenceAudioURL/clonedVoiceId 字段,catalog 用 caps 标注"该模型支持克隆"。合规上需加"声音授权确认"。若坚持本地路线,可评估 OpenVoice/XTTS(candle/ort 跑)做轻量零样本音色迁移,但质量与多语稳定性远逊云端,定位为可选实验功能。
 - **前置依赖**:依赖 opentake-gen 生成后端 + 上传预签名 + keyring 密钥存储先就绪;依赖支持克隆的外部 provider;与 TTS(图文成片配音)、数字人驱动音频可串联复用。
-

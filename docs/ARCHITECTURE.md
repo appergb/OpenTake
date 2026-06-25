@@ -71,7 +71,7 @@ OpenTake/
 │   ├── opentake-ops/         # 编辑算法:OverwriteEngine/RippleEngine/SnapEngine(纯函数)+ EditCommand::apply + UndoStack
 │   ├── opentake-project/     # .opentake 目录包读写(serde,#[serde(default)] 容错)+ 媒体清单/归档
 │   ├── opentake-render/      # RenderPlan(Timeline→每帧合成指令,纯函数)+ wgpu 合成器 + ffmpeg 编解码后端
-│   ├── opentake-media/       # 解码/缩略图/波形/转写/语义搜索(ffmpeg-next/symphonia/whisper-rs/ort)
+│   ├── opentake-media/       # 解码/缩略图/波形/转写/语义搜索(ffmpeg-sidecar/symphonia/whisper-rs/ort)
 │   ├── opentake-agent/       # 工具层(=ToolExecutor)+ MCP server(rmcp)+ 应用内 chat 客户端 + 短ID + 系统提示词
 │   ├── opentake-gen/         # 生成后端客户端(BYOK 直连 / 自建代理),复刻 GenerationParams 联合类型
 │   └── opentake-core/        # 组装:EditorState(持有 timeline+manifest)、command 路由、事件总线
@@ -134,14 +134,14 @@ struct EditResult { changed: bool, action_name: String, affected_clip_ids: Vec<S
 | 能力 | OpenTake | 风险 |
 |---|---|---|
 | 合成器(关键帧 ramp/transform/crop) | **wgpu 自写**(语义照搬上游公式) | 🔴 blocker |
-| 解码/读帧 | ffmpeg-next | 中(成熟) |
-| 编码/导出 | ffmpeg-next(x264/x265/ProRes) | 中(预设需对齐) |
+| 解码/读帧 | ffmpeg-sidecar | 中(成熟) |
+| 编码/导出 | ffmpeg-sidecar(x264/x265/ProRes via system ffmpeg) | 中(预设需对齐) |
 | 播放 | 自建(ffmpeg+wgpu+cpal,自写同步/seek) | 🔴 blocker |
 | 字幕/文字 | cosmic-text + tiny-skia/Vello → 纹理 | 🟠 |
 | 缩略图 | ffmpeg seek + image crate(sprite 网格缓存照搬) | 低 |
 | 波形 | Symphonia 解 PCM + RMS 降采样 | 低 |
 | 转写 | whisper-rs(word/segment 时间戳)| 中 |
-| 语义搜索(CLIP) | candle/ort 跑 SigLIP2 + tokenizers | 中 |
+| 语义搜索(CLIP) | ort 跑 SigLIP2 + tokenizers | 中 |
 | Lottie | rlottie FFI / velato → 纹理 | 中 |
 | 字体 | fontdb + cosmic-text | 低 |
 
@@ -185,13 +185,13 @@ MyProject.opentake/
 | 桌面外壳 | Tauri 2 |
 | 前端 | React + TypeScript + Vite;状态 Zustand |
 | 核心语言 | Rust(workspace,多 crate) |
-| 编解码 | ffmpeg-next(libav*) |
+| 编解码 | ffmpeg-sidecar（调用系统 ffmpeg/ffprobe） |
 | 合成 | wgpu(自写帧合成器) |
 | 音频播放 | cpal |
 | 2D 光栅/文字 | cosmic-text + tiny-skia 或 Vello;字体 fontdb |
 | 波形 | symphonia |
 | 转写 | whisper-rs(whisper.cpp) |
-| 语义搜索 | candle 或 ort(onnxruntime)+ tokenizers,模型 SigLIP2 |
+| 语义搜索 | ort(onnxruntime)+ tokenizers,模型 SigLIP2 |
 | MCP | rmcp(streamable-http-server) |
 | LLM 客户端 | reqwest + eventsource-stream(SSE) |
 | 生成代理(可选) | axum 单二进制 |

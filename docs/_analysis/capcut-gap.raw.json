@@ -129,9 +129,9 @@
             "status": "missing",
             "evidence": "上游零实现:全目录 grep 不到 stabiliz/stabilis/VNDetectTrajectories/opticalFlow/任何防抖逻辑;无 Vision 框架引用。无运动估计基础设施。",
             "openTakeFit": "opentake-media(防抖 worker:两遍分析——估计逐帧全局运动→平滑相机轨迹→反向补偿)+ opentake-domain(把补偿写成 position/scale/rotation 关键帧,或标记 stabilize 参数由 render 应用)",
-            "approach": "成熟开源算法可移植,本地、无需重型 AI、难度中。① 最省力路线:直接复用 FFmpeg vidstab(vidstabdetect + vidstabtransform 两遍),OpenTake 已绑 ffmpeg-next(ARCHITECTURE §10),导出路径几乎零成本接入;实时预览可先用降采样代理。② 自研路线(更可控):光流/特征点(KLT)估全局仿射运动 → 用低通/高斯平滑相机路径 → 反向仿射补偿 + 自动裁掉边缘黑边(轻微放大)。补偿量可烘焙进现有 transform 关键帧轨,复用既有合成,无需新合成原语。③ 平滑强度/裁切比例作为可调参数。④ 可选 AI 增强(深度学习防抖如 DUT)作为远期 p3,默认经典算法已够用。",
+            "approach": "成熟开源算法可移植,本地、无需重型 AI、难度中。① 最省力路线:直接复用 FFmpeg vidstab(vidstabdetect + vidstabtransform 两遍),OpenTake 已绑 ffmpeg-sidecar(ARCHITECTURE §10),导出路径几乎零成本接入;实时预览可先用降采样代理。② 自研路线(更可控):光流/特征点(KLT)估全局仿射运动 → 用低通/高斯平滑相机路径 → 反向仿射补偿 + 自动裁掉边缘黑边(轻微放大)。补偿量可烘焙进现有 transform 关键帧轨,复用既有合成,无需新合成原语。③ 平滑强度/裁切比例作为可调参数。④ 可选 AI 增强(深度学习防抖如 DUT)作为远期 p3,默认经典算法已够用。",
             "difficulty": "medium",
-            "dependencies": "FFmpeg vidstab 路线仅依赖 ffmpeg-next(已有);自研路线依赖光流(与追踪共用);补偿应用依赖关键帧引擎/wgpu",
+            "dependencies": "FFmpeg vidstab 路线仅依赖 ffmpeg-sidecar(已有);自研路线依赖光流(与追踪共用);补偿应用依赖关键帧引擎/wgpu",
             "priority": "p2"
           },
           {
