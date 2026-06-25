@@ -522,7 +522,8 @@ export function TimelineContainer() {
         // Snap: probe every companion's start+end (multi-probe, SPEC §5.8) and
         // keep the snap engaged across moves via snapStateRef (sticky band).
         const excluded = new Set(d.companions);
-        const targets = collectTargets(timeline, excluded, activeFrame);
+<<<<<<< HEAD
+        const targets = collectTargets(timeline, excluded, activeFrame, true);
         const leadStart = d.hit.clip.startFrame;
         const probes: number[] = [];
         const probeOffsets: number[] = [];
@@ -545,6 +546,13 @@ export function TimelineContainer() {
           snapStateRef.current,
           probeOffsets,
         );
+=======
+        const targets = collectTargets(timeline, excluded, activeFrame, true);
+        const movedStart = d.hit.clip.startFrame + deltaFrames;
+        const movedEnd = movedStart + d.hit.clip.durationFrames;
+        const snapStart = findSnap(movedStart, targets, zoomScale, null);
+        const snapEnd = findSnap(movedEnd, targets, zoomScale, null);
+>>>>>>> H-Chris233/fix/snap-include-playhead-86
         let snapped: number | null = null;
         if (snap) {
           deltaFrames += snap.delta;
@@ -618,7 +626,7 @@ export function TimelineContainer() {
         const rawFrame = frameAt(docX, zoomScale);
         const edge = d.kind === "trimLeft" ? d.hit.clip.startFrame : d.hit.clip.startFrame + d.hit.clip.durationFrames;
         let deltaFrames = rawFrame - edge;
-        const targets = collectTargets(timeline, new Set([d.hit.clip.id]), activeFrame);
+        const targets = collectTargets(timeline, new Set([d.hit.clip.id]), activeFrame, true);
         const snap = findSnap(rawFrame, targets, zoomScale, null);
         if (snap) {
           deltaFrames = snap.frame - edge;
