@@ -117,6 +117,12 @@ pub fn edit_apply(core: State<'_, AppCore>, command: EditRequest) -> Result<Edit
     handle_edit_apply(&core, cmd).map_err(msg)
 }
 
+/// `check_path_exists`: checks if a path (e.g. project bundle folder) exists on disk.
+#[tauri::command]
+pub fn check_path_exists(path: String) -> bool {
+    std::path::Path::new(&path).exists()
+}
+
 fn msg(e: CmdError) -> String {
     e.message
 }

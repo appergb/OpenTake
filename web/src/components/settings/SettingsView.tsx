@@ -30,6 +30,7 @@ import {
   useSettingsStore,
   type Theme,
   type ByokProvider,
+  type WindowSizeOpt,
 } from "../../store/settingsStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { openDialog } from "../../lib/dialog";
@@ -80,7 +81,10 @@ export function SettingsView() {
           borderBottom: "var(--bw-thin) solid var(--border-primary)",
         }}
       >
-        <span style={{ fontSize: "var(--fs-md)", fontWeight: "var(--fw-semibold)" }}>
+        <span
+          data-tauri-drag-region
+          style={{ fontSize: "var(--fs-md)", fontWeight: "var(--fw-semibold)" }}
+        >
           {t("settings.title")}
         </span>
         <div style={{ flex: 1 }} />
@@ -348,6 +352,9 @@ function AppearancePane() {
   const t = useT();
   const theme = useSettingsStore((s) => s.theme);
   const setTheme = useSettingsStore((s) => s.setTheme);
+  const windowSize = useSettingsStore((s) => s.windowSize);
+  const setWindowSize = useSettingsStore((s) => s.setWindowSize);
+
   return (
     <Section title={t("settings.section.appearance")}>
       <Field
@@ -361,6 +368,20 @@ function AppearancePane() {
               { id: "light", label: t("settings.theme.light") },
             ]}
             onChange={setTheme}
+          />
+        }
+      />
+      <Field
+        label={t("settings.windowSize")}
+        description={t("settings.windowSizeDesc")}
+        control={
+          <Segmented<WindowSizeOpt>
+            value={windowSize}
+            options={[
+              { id: "standard", label: t("settings.windowSize.standard") },
+              { id: "compact", label: t("settings.windowSize.compact") },
+            ]}
+            onChange={setWindowSize}
           />
         }
       />
