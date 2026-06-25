@@ -76,6 +76,36 @@ describe("drawClip missing wash", () => {
   });
 });
 
+describe("drawClip linkOffset badge", () => {
+  const rect = { x: 0, y: 0, width: 200, height: 60 };
+
+  it("draws the red offset badge when linkOffset is nonzero", () => {
+    const { ctx, fills } = makeCtx();
+    drawClip(ctx, testClip, rect, { isSelected: false, fps: 30, linkOffset: 5 });
+    expect(fills).toContain("rgb(255, 71, 71)");
+  });
+
+  it("skips the badge when linkOffset is zero", () => {
+    const { ctx, fills } = makeCtx();
+    drawClip(ctx, testClip, rect, { isSelected: false, fps: 30, linkOffset: 0 });
+    expect(fills).not.toContain("rgb(255, 71, 71)");
+  });
+
+  it("skips the badge when linkOffset is undefined", () => {
+    const { ctx, fills } = makeCtx();
+    drawClip(ctx, testClip, rect, { isSelected: false, fps: 30 });
+    expect(fills).not.toContain("rgb(255, 71, 71)");
+  });
+
+  it("skips the badge on narrow clips (badge would overlap trim handle)", () => {
+    const narrow = { x: 0, y: 0, width: 30, height: 40 };
+    const { ctx, fills } = makeCtx();
+    drawClip(ctx, testClip, narrow, { isSelected: false, fps: 30, linkOffset: 5 });
+    // The guard bx <= rect.x + 6 should suppress the badge on 30px-wide clips.
+    expect(fills).not.toContain("rgb(255, 71, 71)");
+  });
+});
+
 describe("dbFromLinear", () => {
   it("maps unity to 0 dB", () => {
     expect(dbFromLinear(1)).toBeCloseTo(0);
