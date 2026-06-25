@@ -105,6 +105,13 @@ interface UiState {
   mediaPanelCurrentFolderId: string | null;
   setMediaPanelCurrentFolderId: (id: string | null) => void;
 
+  /** Pending Swap Media flow (SPEC §5.10). When set, a media-picker modal is
+   *  shown for the clip with this id; the picker pre-filters candidates by
+   *  `item.type === clip.mediaType` (strict, mirroring backend
+   *  `isAssetCompatibleWithPendingSwap`). `null` = no swap in flight. */
+  pendingSwapClipId: string | null;
+  setPendingSwapClipId: (id: string | null) => void;
+
   // Actions
   setActiveFrame: (frame: number) => void;
   setCurrentFrame: (frame: number) => void;
@@ -192,6 +199,9 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
 
   mediaPanelCurrentFolderId: null,
   setMediaPanelCurrentFolderId: (mediaPanelCurrentFolderId) => set({ mediaPanelCurrentFolderId }),
+
+  pendingSwapClipId: null,
+  setPendingSwapClipId: (pendingSwapClipId) => set({ pendingSwapClipId }),
 
   setActiveFrame: (activeFrame) => set({ activeFrame }),
   setCurrentFrame: (currentFrame) => set({ currentFrame, activeFrame: currentFrame }),
