@@ -8,7 +8,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { Check, FolderOpen, Trash2 } from "lucide-react";
+import { Check, FolderOpen, Trash2, X } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { Dropdown } from "../ui/Dropdown";
 import { useT, useI18nStore, LOCALES } from "../../i18n";
@@ -25,72 +25,117 @@ import type { SecretStatus } from "../../lib/types";
 
 export function SettingsView() {
   const t = useT();
-  const setView = useEditorUiStore((s) => s.setView);
+  const setSettingsOpen = useEditorUiStore((s) => s.setSettingsOpen);
 
   return (
     <div
       style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        background: "rgba(0, 0, 0, 0.65)",
+        backdropFilter: "blur(12px)",
+        WebkitBackdropFilter: "blur(12px)",
         display: "flex",
-        flexDirection: "column",
-        height: "100%",
-        width: "100%",
-        background: "var(--bg-surface)",
-        color: "var(--text-primary)",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 1000,
       }}
     >
-      <header
-        data-tauri-drag-region
+      <style>{`
+        @keyframes scaleIn {
+          from { opacity: 0; transform: scale(0.96); }
+          to { opacity: 1; transform: scale(1); }
+        }
+      `}</style>
+      <div
         style={{
-          height: 38,
-          flex: "0 0 auto",
+          width: 580,
+          height: 520,
+          background: "var(--bg-raised)",
+          border: "var(--bw-thin) solid var(--border-primary)",
+          borderRadius: "var(--radius-lg)",
+          boxShadow: "var(--shadow-lg)",
           display: "flex",
-          alignItems: "center",
-          gap: "var(--space-sm)",
-          padding: "0 var(--space-md) 0 var(--titlebar-safe-left)",
-          background: "var(--bg-base)",
-          borderBottom: "var(--bw-thin) solid var(--border-primary)",
+          flexDirection: "column",
+          overflow: "hidden",
+          position: "relative",
+          animation: "scaleIn 0.2s var(--ease-out)",
         }}
       >
-        <span
+        <header
           data-tauri-drag-region
-          style={{ fontSize: "var(--fs-md)", fontWeight: "var(--fw-semibold)" }}
-        >
-          {t("settings.title")}
-        </span>
-        <div style={{ flex: 1 }} />
-        <button
-          type="button"
-          onClick={() => setView("home")}
-          className="hover-area"
           style={{
-            height: 26,
-            padding: "0 var(--space-md)",
-            borderRadius: "var(--radius-sm)",
-            color: "var(--text-secondary)",
-            fontSize: "var(--fs-sm)",
-            fontWeight: "var(--fw-medium)",
-          }}
-        >
-          {t("settings.done")}
-        </button>
-      </header>
-
-      <div style={{ flex: 1, overflowY: "auto" }}>
-        <div
-          style={{
-            maxWidth: 640,
-            margin: "0 auto",
-            padding: "var(--space-xl) var(--space-xl-xxl) var(--space-xxl)",
+            height: 48,
+            flex: "0 0 auto",
             display: "flex",
-            flexDirection: "column",
-            gap: "var(--space-xl-xxl)",
+            alignItems: "center",
+            padding: "0 var(--space-lg)",
+            background: "var(--bg-base)",
+            borderBottom: "var(--bw-thin) solid var(--border-primary)",
           }}
         >
-          <GeneralPane />
-          <AppearancePane />
-          <ImportPane />
-          <AiPane />
-          <AboutPane />
+          <span
+            data-tauri-drag-region
+            style={{ fontSize: "var(--fs-md-lg)", fontWeight: "var(--fw-semibold)", flex: 1 }}
+          >
+            {t("settings.title")}
+          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: "var(--space-md)" }}>
+            <button
+              type="button"
+              onClick={() => setSettingsOpen(false)}
+              className="hover-area"
+              style={{
+                height: 28,
+                padding: "0 var(--space-lg)",
+                borderRadius: "var(--radius-sm)",
+                color: "var(--text-primary)",
+                background: "var(--bg-prominent)",
+                fontSize: "var(--fs-sm-md)",
+                fontWeight: "var(--fw-medium)",
+              }}
+            >
+              {t("settings.done")}
+            </button>
+            <button
+              type="button"
+              title="Close"
+              aria-label="Close"
+              onClick={() => setSettingsOpen(false)}
+              className="hover-area"
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: "var(--radius-sm)",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "var(--text-secondary)",
+              }}
+            >
+              <Icon icon={X} size={15} />
+            </button>
+          </div>
+        </header>
+
+        <div style={{ flex: 1, overflowY: "auto" }}>
+          <div
+            style={{
+              padding: "var(--space-lg) var(--space-lg) var(--space-xl)",
+              display: "flex",
+              flexDirection: "column",
+              gap: "var(--space-xl)",
+            }}
+          >
+            <GeneralPane />
+            <AppearancePane />
+            <ImportPane />
+            <AiPane />
+            <AboutPane />
+          </div>
         </div>
       </div>
     </div>

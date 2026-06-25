@@ -64,6 +64,8 @@ export function ViewMenu() {
           justifyContent: "center",
           color: "var(--text-secondary)",
           opacity: open ? 1 : 0.7,
+          position: "relative",
+          top: -2,
         }}
       >
         <Icon icon={Menu} size={13} />

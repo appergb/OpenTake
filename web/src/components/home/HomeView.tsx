@@ -99,6 +99,7 @@ export function HomeView() {
 function Sidebar() {
   const t = useT();
   const setView = useEditorUiStore((s) => s.setView);
+  const setSettingsOpen = useEditorUiStore((s) => s.setSettingsOpen);
   const [opening, setOpening] = useState(false);
 
   const handleOpen = async () => {
@@ -149,7 +150,7 @@ function Sidebar() {
 
       <div style={{ flex: 1 }} />
 
-      <SidebarRow icon={SettingsIcon} label={t("home.settings")} onClick={() => setView("settings")} />
+      <SidebarRow icon={SettingsIcon} label={t("home.settings")} onClick={() => setSettingsOpen(true)} />
     </aside>
   );
 }

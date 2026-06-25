@@ -24,6 +24,7 @@ export default function App() {
   useAutosave();
 
   const view = useEditorUiStore((s) => s.view);
+  const settingsOpen = useEditorUiStore((s) => s.settingsOpen);
 
   useEffect(() => {
     initI18n();
@@ -56,16 +57,21 @@ export default function App() {
     };
   }, []);
 
-  if (view === "home") return <HomeView />;
-  if (view === "settings") return <SettingsView />;
-  if (view === "library") return <LibraryView />;
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", width: "100%" }}>
-      <TitleBar />
-      <div style={{ flex: 1, minHeight: 0 }}>
-        <EditorSplit />
-      </div>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", width: "100%", position: "relative" }}>
+      {view === "home" ? (
+        <HomeView />
+      ) : view === "library" ? (
+        <LibraryView />
+      ) : (
+        <>
+          <TitleBar />
+          <div style={{ flex: 1, minHeight: 0 }}>
+            <EditorSplit />
+          </div>
+        </>
+      )}
+      {settingsOpen && <SettingsView />}
     </div>
   );
 }

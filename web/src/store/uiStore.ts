@@ -56,6 +56,8 @@ interface UiState {
   // Top-level navigation
   view: AppView;
   setView: (view: AppView) => void;
+  settingsOpen: boolean;
+  setSettingsOpen: (open: boolean) => void;
 
   // Playback / playhead
   currentFrame: number;
@@ -148,6 +150,8 @@ interface UiState {
 export const useEditorUiStore = create<UiState>((set, get) => ({
   view: "home",
   setView: (view) => set({ view }),
+  settingsOpen: false,
+  setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
 
   currentFrame: 0,
   activeFrame: 0,
