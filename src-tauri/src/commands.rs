@@ -479,6 +479,20 @@ pub struct ClipPropertiesDto {
     pub transform: Option<Transform>,
     #[serde(default)]
     pub text_content: Option<String>,
+    #[serde(default)]
+    pub crop: Option<Crop>,
+    #[serde(default)]
+    pub fade_in_frames: Option<i32>,
+    #[serde(default)]
+    pub fade_out_frames: Option<i32>,
+    #[serde(default)]
+    pub fade_in_interpolation: Option<Interpolation>,
+    #[serde(default)]
+    pub fade_out_interpolation: Option<Interpolation>,
+    #[serde(default)]
+    pub flip_horizontal: Option<bool>,
+    #[serde(default)]
+    pub flip_vertical: Option<bool>,
 }
 
 impl ClipPropertiesDto {
@@ -492,6 +506,13 @@ impl ClipPropertiesDto {
             opacity: self.opacity,
             transform: self.transform,
             text_content: self.text_content,
+            crop: self.crop,
+            fade_in_frames: self.fade_in_frames,
+            fade_out_frames: self.fade_out_frames,
+            fade_in_interpolation: self.fade_in_interpolation,
+            fade_out_interpolation: self.fade_out_interpolation,
+            flip_horizontal: self.flip_horizontal,
+            flip_vertical: self.flip_vertical,
         }
     }
 }
