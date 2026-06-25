@@ -14,6 +14,38 @@ import { initI18n } from "./i18n";
 import { initTheme } from "./store/settingsStore";
 import { onGoHome } from "./lib/api";
 
+function Toast() {
+  const toast = useEditorUiStore((s) => s.toast);
+  const clearToast = useEditorUiStore((s) => s.clearToast);
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(clearToast, 2000);
+    return () => clearTimeout(timer);
+  }, [toast, clearToast]);
+  if (!toast) return null;
+  return (
+    <div
+      style={{
+        position: "fixed",
+        bottom: 24,
+        left: "50%",
+        transform: "translateX(-50%)",
+        padding: "8px 16px",
+        background: "var(--bg-elevated)",
+        border: "var(--bw-thin) solid var(--border-primary)",
+        borderRadius: 6,
+        boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+        fontSize: "var(--fs-sm)",
+        color: "var(--text-primary)",
+        zIndex: 9999,
+        pointerEvents: "none",
+      }}
+    >
+      {toast.message}
+    </div>
+  );
+}
+
 export default function App() {
   // Editor-only hooks are safe to keep mounted across views: they only act on
   // editor state/events and the keyboard handler is a no-op until the editor is
@@ -65,6 +97,7 @@ export default function App() {
       <div style={{ flex: 1, minHeight: 0 }}>
         <EditorSplit />
       </div>
+      <Toast />
     </div>
   );
 }

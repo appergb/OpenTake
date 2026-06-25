@@ -10,6 +10,7 @@ import { forceRefresh } from "./sync";
 import { useEditorUiStore } from "./uiStore";
 import { useProjectStore } from "./projectStore";
 import { trimToPlayheadEdits } from "../lib/clip";
+import { useClipboardStore } from "./clipboardStore";
 import type {
   Clip,
   ClipEntryReq,
@@ -37,7 +38,7 @@ async function applyAndRefresh(cmd: Parameters<typeof api.editApply>[0]) {
 
 export async function addClips(entries: ClipEntryReq[]) {
   if (entries.length === 0) return;
-  await applyAndRefresh({ type: "addClips", entries });
+  return applyAndRefresh({ type: "addClips", entries });
 }
 
 export async function moveClips(moves: ClipMoveReq[]) {
@@ -397,4 +398,111 @@ export async function addTextClip() {
   if (res && res.affectedClipIds.length > 0) {
     ui.selectClips(new Set(res.affectedClipIds));
   }
+}
+
+// MARK: - Clipboard (copy / cut / paste, Issue #94)
+//
+// Front-end paste buffer: copy snapshots the selected clips; paste re-places
+// them at the playhead with a fresh `linkGroupId` (cleared so the backend
+// re-assigns, mirroring upstream `pasteClipsAtPlayhead` link re-reflection).
+// Track placement is preserved (clip stays on its original track index); if
+// the target track no longer exists the clip is skipped.
+
+/** Collect selected clips with their track index into the clipboard store.
+ *  If any selected clip belongs to a link group, the entire group is copied
+ *  (mirrors upstream `copyClips` which expands the selection to include
+ *  linked companions, so a paste reproduces the video+audio pair). */
+export function copyClips() {
+  const ui = useEditorUiStore.getState();
+  const tl = useProjectStore.getState().timeline;
+  const ids = ui.selectedClipIds;
+  if (ids.size === 0) return;
+  // Expand selection to include linked companions.
+  const expanded = new Set<string>(ids);
+  for (let ti = 0; ti < tl.tracks.length; ti++) {
+    for (const clip of tl.tracks[ti].clips) {
+      if (ids.has(clip.id) && clip.linkGroupId) {
+        for (let tj = 0; tj < tl.tracks.length; tj++) {
+          for (const c2 of tl.tracks[tj].clips) {
+            if (c2.linkGroupId === clip.linkGroupId) expanded.add(c2.id);
+          }
+        }
+      }
+    }
+  }
+  const entries: { clip: Clip; sourceTrackIndex: number }[] = [];
+  for (let ti = 0; ti < tl.tracks.length; ti++) {
+    for (const clip of tl.tracks[ti].clips) {
+      if (expanded.has(clip.id)) entries.push({ clip, sourceTrackIndex: ti });
+    }
+  }
+  if (entries.length === 0) return;
+  const sourceFirstFrame = entries.reduce(
+    (min, e) => Math.min(min, e.clip.startFrame),
+    Number.POSITIVE_INFINITY,
+  );
+  useClipboardStore.getState().set(entries, sourceFirstFrame);
+}
+
+/** Copy then delete — the standard cut semantics. */
+export async function cutClips() {
+  copyClips();
+  await deleteSelectedClips();
+}
+
+/** Paste clipboard entries at the current playhead. Each clip's `startFrame`
+ *  is offset by `activeFrame - sourceFirstFrame`. After the clips are created,
+ *  link groups are re-established: clips that shared a `linkGroupId` in the
+ *  clipboard are re-linked via `linkClips` so the paste preserves video+audio
+ *  linkage. Clips whose source track no longer exists are silently skipped
+ *  (upstream drops them too). */
+export async function pasteClipsAtPlayhead() {
+  const cb = useClipboardStore.getState();
+  if (!cb.hasContent || cb.entries.length === 0) return;
+  const ui = useEditorUiStore.getState();
+  const tl = useProjectStore.getState().timeline;
+  const offset = ui.activeFrame - cb.sourceFirstFrame;
+  const entries: ClipEntryReq[] = [];
+  const sourceLinkGroups: (string | undefined)[] = [];
+  for (const e of cb.entries) {
+    if (e.sourceTrackIndex >= tl.tracks.length) continue;
+    const startFrame = Math.max(0, e.clip.startFrame + offset);
+    entries.push({
+      mediaRef: e.clip.mediaRef,
+      mediaType: e.clip.mediaType,
+      sourceClipType: e.clip.sourceClipType,
+      trackIndex: e.sourceTrackIndex,
+      startFrame,
+      durationFrames: e.clip.durationFrames,
+      trimStartFrame: e.clip.trimStartFrame,
+      trimEndFrame: e.clip.trimEndFrame,
+      hasAudio: e.clip.mediaType === "audio" || e.clip.mediaType === "video",
+      // Don't auto-create a linked audio: the linked audio clip is already in
+      // the clipboard (copyClips expands link groups) and will be pasted as
+      // its own entry; addLinkedAudio=true would create a duplicate.
+      addLinkedAudio: false,
+    });
+    sourceLinkGroups.push(e.clip.linkGroupId);
+  }
+  if (entries.length === 0) return;
+  const res = await addClips(entries);
+  if (!res || res.affectedClipIds.length === 0) return;
+
+  // Re-establish link groups: map each old linkGroupId to the set of newly
+  // created clip ids, then call linkClips for each group.
+  const newGroupMap = new Map<string, string[]>();
+  for (let i = 0; i < res.affectedClipIds.length && i < sourceLinkGroups.length; i++) {
+    const oldGroup = sourceLinkGroups[i];
+    if (!oldGroup) continue;
+    const newId = res.affectedClipIds[i];
+    const arr = newGroupMap.get(oldGroup);
+    if (arr) arr.push(newId);
+    else newGroupMap.set(oldGroup, [newId]);
+  }
+  for (const ids of newGroupMap.values()) {
+    if (ids.length >= 2) await linkClips(ids);
+  }
+
+  // Select the freshly pasted clips so the user can immediately move/trim them.
+  ui.selectClips(new Set(res.affectedClipIds));
 }
