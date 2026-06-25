@@ -207,9 +207,16 @@ crates/
 | [AGENT-CONTEXT-SIGNAL.md](docs/AGENT-CONTEXT-SIGNAL.md) | Agent Context Signal system design |
 | [WORKFLOW-PLUGIN-SYSTEM.md](docs/WORKFLOW-PLUGIN-SYSTEM.md) | Workflow Plugin System (JSON + Markdown) |
 | [ADVANCED-FEATURES.md](docs/ADVANCED-FEATURES.md) | Advanced features vs CapCut |
-| [CAPCUT-GAP.md](docs/CAPCUT-GAP.md) | 33-item gap analysis vs CapCut |
 | [DECISIONS.md](DECISIONS.md) | Tech stack / license / branding ADRs |
-| [PORT-1TO1-GAP.md](docs/PORT-1TO1-GAP.md) | 1:1 port gap analysis |
+| [specs/gen-SPEC.md](docs/specs/gen-SPEC.md) | Generative AI client spec |
+| [specs/core-SPEC.md](docs/specs/core-SPEC.md) | Core orchestration layer spec |
+| [specs/render-SPEC.md](docs/specs/render-SPEC.md) | wgpu compositor spec |
+| [specs/media-SPEC.md](docs/specs/media-SPEC.md) | Media engine spec |
+| [specs/agent-SPEC.md](docs/specs/agent-SPEC.md) | Agent/MCP server spec |
+| [specs/frontend-UI-1to1-SPEC.md](docs/specs/frontend-UI-1to1-SPEC.md) | Frontend UI 1:1 spec |
+| [MOTION-GRAPHICS-PLUGIN.md](docs/MOTION-GRAPHICS-PLUGIN.md) | Motion graphics plugin |
+| [需求与问题汇总.md](docs/需求与问题汇总.md) | Requirements & issues log |
+| [_analysis/README.md](docs/_analysis/README.md) | Upstream analysis reports |
 
 ---
 ---

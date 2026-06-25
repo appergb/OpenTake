@@ -188,9 +188,16 @@ crates/
 | [AGENT-CONTEXT-SIGNAL.md](docs/AGENT-CONTEXT-SIGNAL.md) | Agent 上下文信号系统设计 |
 | [WORKFLOW-PLUGIN-SYSTEM.md](docs/WORKFLOW-PLUGIN-SYSTEM.md) | 工作流插件系统 (JSON + Markdown) |
 | [ADVANCED-FEATURES.md](docs/ADVANCED-FEATURES.md) | 对标剪映的进阶能力设计 |
-| [CAPCUT-GAP.md](docs/CAPCUT-GAP.md) | 与剪映的 33 项特性差距分析 |
 | [DECISIONS.md](DECISIONS.md) | 技术栈 / 许可 / 品牌决策记录 (ADR) |
-| [PORT-1TO1-GAP.md](docs/PORT-1TO1-GAP.md) | 1:1 端口差距分析 |
+| [specs/gen-SPEC.md](docs/specs/gen-SPEC.md) | 生成式 AI 客户端规格 |
+| [specs/core-SPEC.md](docs/specs/core-SPEC.md) | 核心编排层规格 |
+| [specs/render-SPEC.md](docs/specs/render-SPEC.md) | wgpu 帧合成器规格 |
+| [specs/media-SPEC.md](docs/specs/media-SPEC.md) | 媒体引擎规格 |
+| [specs/agent-SPEC.md](docs/specs/agent-SPEC.md) | Agent/MCP server 规格 |
+| [specs/frontend-UI-1to1-SPEC.md](docs/specs/frontend-UI-1to1-SPEC.md) | 前端 UI 1:1 复刻规格 |
+| [MOTION-GRAPHICS-PLUGIN.md](docs/MOTION-GRAPHICS-PLUGIN.md) | 动效/图形插件 |
+| [需求与问题汇总.md](docs/需求与问题汇总.md) | 需求与问题汇总 |
+| [_analysis/README.md](docs/_analysis/README.md) | 上游拆解分析报告 |
 
 ---
 ---

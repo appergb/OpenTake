@@ -29,6 +29,17 @@ PRIMARY-CN/
 | 移植某个上游模块 | [docs/MODULE-PORT-MAP.md](docs/MODULE-PORT-MAP.md) |
 | 了解为何选了 Rust / Tauri / GPL-3.0 | [DECISIONS.md](DECISIONS.md) |
 | 查找某个上游模块的源码 | `palmier-pro-upstream/Sources/PalmierPro/` |
+| 前端 UI 1:1 复刻规格 | [docs/specs/frontend-UI-1to1-SPEC.md](docs/specs/frontend-UI-1to1-SPEC.md) |
+| Agent/MCP server 规格 | [docs/specs/agent-SPEC.md](docs/specs/agent-SPEC.md) |
+| 媒体引擎规格 (ffmpeg/缩略图/波形/搜索/转写) | [docs/specs/media-SPEC.md](docs/specs/media-SPEC.md) |
+| wgpu 帧合成器规格 | [docs/specs/render-SPEC.md](docs/specs/render-SPEC.md) |
+| 核心编排层规格 | [docs/specs/core-SPEC.md](docs/specs/core-SPEC.md) |
+| 生成式 AI 客户端规格 | [docs/specs/gen-SPEC.md](docs/specs/gen-SPEC.md) |
+| 工作流插件系统 | [docs/WORKFLOW-PLUGIN-SYSTEM.md](docs/WORKFLOW-PLUGIN-SYSTEM.md) |
+| 动效/图形插件 | [docs/MOTION-GRAPHICS-PLUGIN.md](docs/MOTION-GRAPHICS-PLUGIN.md) |
+| 进阶能力 (对标剪映) | [docs/ADVANCED-FEATURES.md](docs/ADVANCED-FEATURES.md) |
+| 上游拆解分析 | [docs/_analysis/README.md](docs/_analysis/README.md) |
+| 需求与问题汇总 | [docs/需求与问题汇总.md](docs/需求与问题汇总.md) |
 
 ## 核心设计原则（来自上游拆解）
 

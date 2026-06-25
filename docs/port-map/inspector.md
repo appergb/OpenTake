@@ -1,0 +1,62 @@
+# Inspector 移植规格
+
+**职责**:
+- 根据选区类型(可视clip/音频clip/纯文字clip/媒体资产/空)解析可用标签页与当前激活标签页(availableTabs/activeTab/resolvePreferredTab)
+- 渲染并驱动变换区：位置(X/Y, 归一化topLeft)、缩放(%)、旋转(°)、不透明度(%)、裁剪(开关+宽高比预设菜单+画布编辑)、水平/垂直翻转、Reset Transform
+- 渲染并驱动播放速度(0.25x–4x)、音量(dB, -∞..+15)、淡入/淡出(秒)
+- 纯文字 clip 的文字检查器：内容多行输入、字体选择(NSMenu)、字号、颜色/背景/边框/阴影(NSColorPanel)、对齐、不透明度、位置
+- 每个可动画属性行附带关键帧控制：上一/下一关键帧跳转、打点/删点(diamond)、范围内禁用判断
+- 右侧关键帧小面板(KeyframesPanel)：ruler+clip条+每属性lane，菱形关键帧绘制、拖动移动(带吸附)、右键改插值/删点、红色playhead与黄色吸附虚线
+- 媒体资产详情：文件信息(类型/尺寸/时长/大小/路径)、AI 生成元数据(模型/宽高比/分辨率/时长/prompt)、生成引用缩略图条
+- AI Edit 标签：放大/编辑/重跑/图生视频/视频配乐/音效入口，作用域开关(替换clip源、仅用裁剪段、放到时间线)，成本估算展示
+- ScrubbableNumberField：可拖拽数字输入(拖动改值/点击键入)，shift x10、command x0.1 精度修饰
+- 只读展示工程元数据(分辨率/帧率/宽高比/时长)与多选数量汇总
+
+**核心类型**:
+- `InspectorView` (struct) — 检查器根视图。负责选区→标签页路由、变换/速度/音量/淡变各区的组装,以及 apply(实时)/commit(落undo)两段式属性写入的调度。内含 VolumeScale(dB↔线性换算)与 PromptCopyButton。
+- `KeyframesPanel / KeyframesLaneRow / ClipRulerBlock` (struct) — 关键帧小面板族。KeyframesMetrics 提供 frame↔x 像素映射;LaneRow 用 Canvas 画菱形、处理拖动移动关键帧并调用 SnapEngine 吸附;RulerView 用 NSViewRepresentable 复用主时间线 TimelineRuler 绘制。
+- `AIEditTab` (struct) — AI 编辑标签视图。计算各 EditAction 的可用性与禁用原因,管理作用域开关状态,通过 EditSubmitter / editor.seedGenerationPanel 把生成请求送往(闭源)生成服务,并在完成回调里替换 clip 源。
+- `TextTab` (struct) — 纯文字 clip 的样式检查器,所有改动经 editor.applyTextStyle/commitTextStyle/debouncedCommitTextStyle,并在内容/字体/字号变化后调用 fitTextClipToContent 自适应包围盒。
+- `ScrubbableNumberField` (struct) — 核心交互控件:可横向拖拽的数字字段。含 displayMultiplier/format/suffix/dragSensitivity,内部用 AppKit ScrubMouseArea 做鼠标跟踪(>3px 判定拖动),修饰键调精度,mixed(多选不一致)显示‘—’。
+- `ColorField / ColorPanelBridge` (struct) — 色板控件+NSColorPanel 单例桥。用 colorDidChangeNotification 在拖动中实时回调(SwiftUI ColorPicker 仅 mouseUp 才回调),设初值时抑制一次回调避免回环。
+- `FontPickerField` (struct) — 字体选择:用原生 NSMenu 列出 Featured(BundledFonts)+全部系统字族,高亮时实时预览(onPreview),关闭未选则 onCancel 回滚。
+- `GenerationReferencesStrip` (struct) — AI 生成引用缩略图条。按模型类型把 GenerationInput 里的各类引用 assetId 解析为带语义标签(Source/First Frame/Reference/Image Ref...)的缩略图。
+- `InspectorSection / InspectorRow / InspectorPositionFields / TextContentField` (struct) — 复用小组件:分区标题、图标+标签+尾随控件行、XY 位置双字段(displayMultiplier=画布宽高把归一化坐标显示为像素)、NSTextView 包装的多行文本框(规避 SwiftUI TextEditor 丢键问题)。
+
+**核心算法/逻辑(供 Rust 复刻)**:
+- 【单位约定】时间一律整数帧;秒=帧/fps。Clip 关键帧在存储中是 clip 相对偏移(timelineFrame - startFrame),对外 API 用绝对帧。endFrame = startFrame + durationFrames;contains(frame) 判定为 frame>=startFrame && frame<endFrame(右开)。
+- 【两段式编辑+撤销】所有连续控件遵循 apply(拖动中,只改 timeline 不落 undo,首帧用 dragBefore[clipId] 存快照) 然后 commit(松手,注册一次双向 undo/redo swap,setActionName)。多 clip 编辑用 beginUndoGrouping/endUndoGrouping 合成一条。ScrubbableNumberField 的 onChanged→apply、onCommit→commit;ColorPicker 类无松手事件,改用 debouncedCommit(先 apply,400ms 静默后 commit)。Rust 复刻:命令模式,每次提交生成一个可逆 Command(before/after 全 clip 快照或字段差),压入 undo 栈;拖动期只改状态不入栈。
+- 【缩放写入】scaleScrubField 的 value 取 sizeAt(frame).width,range 0.01..∞,显示 x100 取整成%。写入(writeScale):aspect = mediaCanvasAspect(for:clip) ?? 1.0;w=newScale, h=newScale/aspect(即用户拖的是宽度比例,高度按‘源像素宽高比/画布宽高比’联动保持源不变形)。mediaCanvasAspect = (源宽/源高)/(画布宽/画布高);源尺寸未知则 nil→aspect=1。若 scaleTrack 激活则写关键帧,否则直接写 transform.width/height。
+- 【位置写入】InspectorPositionFields 的 X/Y = topLeftAt(frame)(归一化画布坐标),displayMultiplier=画布宽/高把它显示为像素整数,range -10..10。writePosition:newX/newY 缺省取当前 topLeft;sz=sizeAt(frame);若 positionTrack 激活则 upsert positionTrack=AnimPair(newX,newY);并始终把 transform.centerX=newX+sz.w/2, centerY=newY+sz.h/2(中心=左上+半尺寸)。
+- 【旋转写入】value=rotationAt(frame),range -3600..3600,单位度,正=顺时针。激活 rotationTrack 则写关键帧,否则 transform.rotation=值。
+- 【不透明度写入】value=rawOpacityAt(frame)(不含淡变包络),range 0..1 显示 x100%。激活 opacityTrack 写关键帧,否则 clip.opacity。注意渲染用 opacityAt=rawOpacity*fadeMultiplier(仅非音频且有淡变时)。
+- 【音量/分贝换算(VolumeScale)】floorDb=-60, ceilingDb=+15。dbFromLinear(l)= l<=0?-60: clamp(20*log10(l), -60, 15);linearFromDb(db)= db<=-60?0: pow(10, min(db,15)/20)。UI 显示:db<=-60 渲染‘-∞ dB’。value 取 liveVolumeKfDb(at:frame)(有激活 volumeTrack 且 playhead 在范围内时为该帧采样 dB)否则 dbFromLinear(clip.volume)。写入(writeVolume):若该帧有激活 volume 关键帧则把 dB 直接 upsert 进 volumeTrack(关键帧值存的是 dB),否则 clip.volume = linearFromDb(db)。最终 volumeAt = volume * linearFromDb(kf采样dB) * fadeMultiplier。
+- 【淡入淡出】fadeRow 显示秒(帧/fps),range 0..(单选时 duration/fps,否则60),写入时 frames=round(seconds*fps)。setFade 后 clampFadesToDuration:fadeIn=clamp(0..duration);fadeOut=clamp(0..(duration-fadeIn))(头+尾不得超过时长,头优先)。fadeMultiplier(rel=frame-start, 需 0<=rel<=duration 否则0):inMul = fadeIn>0 ? f(min(1, rel/fadeIn)) : 1;outRem=duration-rel;outMul = fadeOut>0 ? f(min(1, outRem/fadeOut)) :1;f = smooth?smoothstep:linear;返回 min(inMul,outMul)。淡变插值默认 linear。
+- 【关键帧数据结构】每属性一个 KeyframeTrack<V>?(nil=无动画)。Keyframe{frame(相对), value, interpolationOut(默认.smooth)}。属性→值类型:opacity/rotation/volume=Double, position/scale=AnimPair(a,b), crop=Crop(left,top,right,bottom)。upsert:同帧覆盖,否则按 frame 升序插入(找第一个 frame>新帧的位置)。remove 删同帧;空轨道置 nil。move(from,to):目标帧已存在(且!=源)则放弃;否则取出改 frame 再 upsert。
+- 【关键帧采样 sample(at frame, fallback)】空→fallback;1个→该值;frame<=首帧→首值;frame>=末帧→末值;否则取第一个 frame>查询帧的 b,a=b前一个,raw=(frame-a.frame)/(b.frame-a.frame),按 a.interpolationOut:hold→a.value;linear→lerp(a,b,raw);smooth→lerp(a,b,smoothstep(raw))。smoothstep(t)=t*t*(3-2*t)。lerp 对 Double 是 a+(b-a)t,对 AnimPair/Crop 是逐分量 lerp。
+- 【打点 stampKeyframe】仅当 playhead 在 clip 范围内。各属性把‘当前采样值’固化为关键帧:opacity=rawOpacityAt;position=topLeftAt→AnimPair;scale=sizeAt→AnimPair;rotation=rotationAt;crop=cropAt;volume=当前 volumeTrack 采样 dB(无则0)。删点 removeKeyframe;清空 clearKeyframes 整轨置 nil。setInterpolation 改某帧 interpolationOut(linear/smooth/hold)。导航:previous=所有关键帧绝对帧中<当前帧的最大值,next=>当前帧的最小值。
+- 【关键帧拖动移动(KeyframesLaneRow)】命中容差 hitTolerance=7px;按下找最近关键帧(<=7px 且最近)进入拖动,否则空白处=seek。拖动中:pxPerFrame=max(1e-4, width/span);raw=frameAt(x);经 SnapEngine 吸附后 clamp 到 [clipStart,clipEnd];若变化则 applyMoveKeyframe(from current→snapped),并核对该帧是否仍在(被占则不推进 currentFrame)。松手:若 current!=original 则 commitMoveKeyframe(一条 undo),否则 revertClipProperty(清快照)。span=max(1,endFrame-startFrame)。
+- 【lane 吸附目标 & SnapEngine】lane 吸附阈值 baseThreshold=4px;目标=范围内 playhead(kind .playhead)+clip 两端(.clipEdge)+本 clip 其它属性的所有关键帧(.clipEdge)。SnapEngine.findSnap:baseFrameThreshold=baseThreshold/pxPerFrame;sticky:已吸附且 |probe-snapped|<=baseFrameThreshold*1.5(stickyMultiplier) 且该目标仍存在,则保持;否则解除。否则遍历 probe×target 取最近(playhead 阈值再 x1.5=playheadMultiplier;clipEdge 用基础阈值),命中触发对齐触感反馈并记 sticky 状态。命中且 clamp 后未变才显示黄色虚线吸附指示(snapX)。注意主时间线 Snap.thresholdPixels=8,lane 内部用 4。
+- 【裁剪 Crop】Crop 是源归一化(0–1)四边内缩 {left,top,right,bottom};isIdentity=全0;可见宽=max(0,1-left-right)。宽高比预设(CropAspectLock):free=不改(用户自由拖),original=Crop()清零,具体比例→cropFittingAspect:source=源宽/源高,|source-target|<1e-4 则 Crop();source>target(源更宽)→水平内缩 inset=(1-target/source)/2 左右各 inset;否则垂直内缩 inset=(1-source/target)/2 上下各 inset(即在源内取最大居中目标比例区域)。pixelAspect 表:16:9=16/9,9:16,1:1,4:3,3:4,21:9。裁剪有关键帧则写 cropTrack 否则 clip.crop。
+- 【Reset Transform】把 transform 置默认 Transform()(center 0.5,0.5 / w=h=1 / rot=0 / 不翻转)、opacity=1、清空 opacity/position/scale/rotation 四个 track、fadeIn/Out=0、淡变插值=linear(注意不清 cropTrack/volumeTrack)。
+- 【翻转】flipHorizontal/flipVertical 为 transform 上的布尔,取选区首个 clip 的值做显示,toggle 后对全选区 commit(各 clip 独立提交,合成一条 undo)。翻转不进关键帧。
+- 【文字自适应 fitTextClipToContent】用 TextLayout.naturalSize(content, style, maxWidth=画布宽*0.9, canvasHeight) 得自然像素尺寸→归一化 needW=natural.w/画布宽, needH/画布高;与当前 transform.w/h 差<1e-4 则跳过。保持垂直中心 cy=topLeft.y+curH/2;水平锚点按对齐:left→cx=tl.x+needW/2,right→cx=(tl.x+curW)-needW/2,center→cx=tl.x+curW/2;写 transform=Transform(center:(cx,cy),w:needW,h:needH)。内容/字号/字体改动后都会调用。
+- 【Transform 表示与遗留迁移】Transform 以 centerX/centerY + width/height(均画布归一化)+rotation(度,顺时针)+flip 表示;topLeft=center-尺寸/2。解码兼容旧 x/y 键:centerX=oldX+w-0.5(同理 y)。提供 snapToCanvasEdges(阈值内把边吸到0/1)与 snapCenterToCanvasCenter(中心吸到0.5)供画布拖拽用(Inspector 不直接用,但属同模型)。
+- 【拆分时关键帧处理(被 Inspector 行为间接依赖)】splitClip 在 atFrame 处:左 trimEnd+=右侧源帧、fadeOut=0;右 trimStart+=左侧源帧、fadeIn=0;源帧换算=round(offset*speed)。每条 track 用 splitKeyframeTrack:在切点采样插入边界关键帧保证两侧曲线连续,右侧帧整体减 splitOffset 重基。clamp/rescale 关键帧:改时长后丢弃 frame<0 或 >duration 的帧;变速 rescaleKeyframes 按 scale 缩放帧号(round)。
+- 【ScrubbableNumberField 数值解析】拖动:next=clamp(dragStartValue + dx*sens/mult, range),sens 受 shift(*10)/command(*0.1) 调节,mult=displayMultiplier(0当1)。键入提交:去尾随单位后缀、去空白、逗号→点,Double 解析失败放弃;raw=clamp(parsed/mult, range)。mixed(多选值不一致,value==nil)显示‘—’且禁拖。sharedClipValue:多 clip 取值,全相等返回该值否则 nil(驱动 mixed)。
+- 【AI 标签可用性 EditAction.availability(纯本地判断,不联网)】upscale:仅 video/image;video 需 sourceHeight>0 且 <2160(否则‘已4K’);已是放大结果/正在生成→禁用。edit:video 需有效时长且<=10s(editMaxDurationSeconds),image 无时长限制,audio/text/lottie 不支持。createVideo:仅 image。rerun:需 isGenerated 且模型仍存在于 ModelRegistry。generateMusic/SFX:仅 video,经对应模型 validate(spanSeconds)。effectiveDuration 优先 AVAsset 时长,回退到记录的生成时长。AIEditTab 用 trimmedSource.durationSeconds 覆盖时长做可用性判断。
+- 【裁剪段时长(TrimmedSource)】durationSeconds = sourceFramesConsumed/max(1,fps);sourceFramesConsumed = round(durationFrames*speed)。‘仅用裁剪段’开关开时,可用性与放大成本均用此覆盖。视频配乐放到时间线的 PendingAudioPlacement.spanSeconds = 裁剪段时长 ?? (asset.duration>0?asset.duration: durationFrames/fps),且不小于 1/fps。
+
+**苹果框架使用**:
+- SwiftUI [high] — 整个检查器的视图层:VStack/HStack/ScrollView/Canvas/Menu/Picker/Toggle/Button、@Environment/@State/@Bindable、GeometryReader、DragGesture、contextMenu、alert 等。
+- AppKit [medium] — ScrubbableNumberField 的 NSView 鼠标跟踪(mouseDown/Dragged/Up + resizeLeftRight 光标);ColorField 的 NSColorPanel + colorDidChangeNotification 桥;FontPickerField 的 NSMenu/NSMenuItem 弹出与字体预览;TextContentField 的 NSScrollView+NSTextView;关键帧 ruler 用 NSViewRepresentable 复用 TimelineRuler;NSPasteboard(复制 prompt);ByteCountFormatter(文件大小);NSHapticFeedbackManager(吸附触感)。
+- CoreText / CoreGraphics [medium] — NSFont 解析字体与 familyName、字体菜单预览;NSColor sRGB 分量读写(颜色面板/RGBA 互转);CGPath/Canvas 绘制菱形关键帧、playhead 三角、吸附虚线;TextStyle 提供 NSParagraphStyle/CATextLayerAlignmentMode(文字渲染在别处)。
+- Combine [low] — AccountService 用 AnyCancellable 订阅 Convex 账户/套餐流;Inspector 仅读取其派生布尔(aiAllowed/isMisconfigured),不直接用 Combine。
+- AVFoundation [low] — 仅经 MediaAsset.duration / sourceWidth/Height 与 TrimmedSource 间接出现(放大/编辑时长、裁剪段秒数),Inspector 本身不调 AV API。
+
+**闭源云**:Inspector 不直接发起网络请求,但 AI Edit 标签是闭源云的入口:1) 标签可见性由 AccountService.shared.isMisconfigured / aiAllowed 门控,而 AccountService 通过 ClerkKit(登录)+ ConvexMobile(account:get / billing:* / users:upsertFromAuth)访问闭源后端;2) 所有放大/编辑/重跑/图生视频/视频配乐动作经 EditSubmitter → editor.generationService.generate 或 editor.seedGenerationPanel,最终走闭源生成式 AI 云(上传素材并调用各模型);3) 资产详情页用 ModelRegistry.displayName,模型目录由 ModelCatalog 经 ConvexMobile 拉取;CostEstimator 仅本地按拉取到的费率算 credits。变换/速度/音量/淡变/文字/关键帧等纯编辑功能完全本地、无云。
+
+**移植策略**:Inspector 是 UI 外壳,用 React/TS 重建面板与交互,真正的算法下沉到 Rust core 一比一复刻。分层建议:(A) Rust core 复刻领域逻辑——Clip/Track/Timeline/Transform/Crop、KeyframeTrack 的 upsert/remove/move/sample(linear/smooth=smoothstep/hold)、VolumeScale(dB↔线性, floor-60→0, ceil+15)、fadeMultiplier、writeScale/Position/Rotation/Opacity/Volume/Crop 的‘有关键帧则写帧否则写静态值’规则、cropFittingAspect、fitTextClipToContent(配合下述文字测量)、split/clamp/rescale 关键帧、SnapEngine(sticky1.5x/playhead1.5x, 阈值 lane4px/timeline8px);全部用整数帧,秒=帧/fps,所有提交走命令模式 undo 栈(before/after 快照),拖动期不入栈。(B) 前端 React 组件:ScrubbableNumberField(指针拖拽改值、shift*10/cmd*0.1、点击转输入、多选‘—’)、ColorField(改用浏览器取色或自绘 HSV 面板,拖动实时回调,无 NSColorPanel)、FontPickerField(查询系统/打包字体列表,Tauri 端枚举字体)、KeyframesPanel(用 Canvas/SVG 画菱形/playhead/吸附虚线,frame↔x 用 KeyframesMetrics 公式)、TextContentField(<textarea>)。(C) 替换点与坑:NSColorPanel→自绘/原生 input[type=color](注意它只在提交时回调,需自绘才能拿到拖动中变化以复刻 debounced commit);NSFont familyName/字体测量→Tauri 调用系统(Rust 端 font-kit/cosmic-text)做 TextLayout.naturalSize(maxWidth=画布宽*0.9),否则文字自适应包围盒会与上游不一致;NSHapticFeedbackManager→桌面无触感,吸附改为视觉虚线+可选音效;ByteCountFormatter→Rust humansize;TimelineRuler 复用→需在 Rust/Canvas 统一刻度算法。(D) AI Edit 标签属闭源云,单独按 cloud-rebuild 处理:可保留‘可用性判断(EditAction 规则,纯本地)+成本估算’逻辑,但把 Clerk/Convex/生成服务替换为自有后端或开放模型 API;若 OpenTake 不接生成式云,可整块 drop 仅保留放大可选。媒体时长/源尺寸由 FFmpeg 探测填充 MediaAsset(替代 AVAsset)。
+
+**关键文件**:/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/palmier-pro-upstream/Sources/PalmierPro/Inspector/InspectorView.swift、/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/palmier-pro-upstream/Sources/PalmierPro/Inspector/Keyframes/KeyframesLane.swift、/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/palmier-pro-upstream/Sources/PalmierPro/Inspector/AIEditTab.swift、/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/palmier-pro-upstream/Sources/PalmierPro/Inspector/TextTab.swift、/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/palmier-pro-upstream/Sources/PalmierPro/Inspector/Components/ScrubbableNumberField.swift、/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/palmier-pro-upstream/Sources/PalmierPro/Inspector/Components/ColorField.swift
+

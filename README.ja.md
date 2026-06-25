@@ -178,9 +178,14 @@ crates/
 | [AGENT-CONTEXT-SIGNAL.md](docs/AGENT-CONTEXT-SIGNAL.md) | Agent Context Signal 設計 |
 | [WORKFLOW-PLUGIN-SYSTEM.md](docs/WORKFLOW-PLUGIN-SYSTEM.md) | ワークフロープラグインシステム |
 | [ADVANCED-FEATURES.md](docs/ADVANCED-FEATURES.md) | CapCut対比の高度機能 |
-| [CAPCUT-GAP.md](docs/CAPCUT-GAP.md) | CapCutとの33項目ギャップ分析 |
 | [DECISIONS.md](DECISIONS.md) | 技術選定 / ライセンス ADR |
-| [PORT-1TO1-GAP.md](docs/PORT-1TO1-GAP.md) | 1:1移植ギャップ分析 |
+| [specs/gen-SPEC.md](docs/specs/gen-SPEC.md) | 生成AIクライアント仕様 |
+| [specs/core-SPEC.md](docs/specs/core-SPEC.md) | コアオーケストレーション仕様 |
+| [specs/render-SPEC.md](docs/specs/render-SPEC.md) | wgpu コンポジター仕様 |
+| [specs/media-SPEC.md](docs/specs/media-SPEC.md) | メディアエンジン仕様 |
+| [specs/agent-SPEC.md](docs/specs/agent-SPEC.md) | Agent/MCP server 仕様 |
+| [specs/frontend-UI-1to1-SPEC.md](docs/specs/frontend-UI-1to1-SPEC.md) | フロントエンド UI 仕様 |
+| [MOTION-GRAPHICS-PLUGIN.md](docs/MOTION-GRAPHICS-PLUGIN.md) | モーショングラフィックスプラグイン |
 
 ---
 ---
