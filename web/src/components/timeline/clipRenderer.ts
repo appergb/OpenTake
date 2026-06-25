@@ -30,6 +30,10 @@ interface DrawOpts {
    *  a ghost dot is drawn at `ghostFrame` (same value) so the grabbed keyframe
    *  follows the cursor (SPEC §5.4). Only set on the dragged clip. */
   volumeKfGhost?: { fromFrame: number; ghostFrame: number };
+  /** This ghost is an Option/Alt-drag duplicate preview (issue #98): draws a
+   *  "+" badge in the top-right corner so the user sees the gesture will copy
+   *  rather than move. Only meaningful when `ghost` is true. */
+  isDuplicate?: boolean;
 }
 
 /** Radius of the draggable volume-keyframe dots drawn by `drawVolumeEnvelope`.
@@ -232,6 +236,41 @@ export function drawClip(
   ctx.fillRect(x, y, TRIM.handleWidth, height);
   ctx.fillRect(x + width - TRIM.handleWidth, y, TRIM.handleWidth, height);
 
+  // 11. Duplicate badge (issue #98): when this ghost is an Option/Alt-drag
+  //     duplicate preview, draw a "+" badge in the top-right corner so the
+  //     user sees the gesture will copy rather than move. Mirrors the
+  //     upstream `+` overlay on option-drag ghosts.
+  if (opts.ghost && opts.isDuplicate) {
+    drawDuplicateBadge(ctx, x, y, width);
+  }
+
+  ctx.restore();
+}
+
+/** Draw a "+" duplicate badge in the top-right corner of a ghost clip (issue #98).
+ *  Yellow circle with a black "+" — high contrast against any track color, and
+ *  matches the systemYellow used for keyframe diamonds so it reads as "active". */
+function drawDuplicateBadge(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+) {
+  const radius = 7;
+  const cx = x + width - radius - 2;
+  const cy = y + radius + 2;
+  ctx.save();
+  // Solid yellow disc.
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.fillStyle = ACCENT.systemYellow;
+  ctx.fill();
+  // Black "+" glyph, centered.
+  ctx.fillStyle = "rgba(0,0,0,0.9)";
+  ctx.font = `700 11px ${cssFontStack()}`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("+", cx, cy + 0.5);
   ctx.restore();
 }
 
