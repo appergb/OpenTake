@@ -348,6 +348,46 @@ pub fn get_media(core: State<'_, AppCore>) -> MediaListDto {
     MediaListDto::from_core(&core)
 }
 
+/// `extract_audio`: extract the audio track from a media asset into a
+/// self-contained audio file (`.m4a` / `.mp3` / `.wav`). The output path is
+/// chosen by the caller via a native save dialog; the codec falls out of the
+/// extension. Used by the media panel's per-card "extract audio" action
+/// (Issue #39).
+///
+/// Returns the output path on success. Errors when the asset is unknown, the
+/// source path cannot be resolved or found, or ffmpeg fails (missing binary,
+/// non-zero exit, unsupported extension).
+#[tauri::command]
+pub fn extract_audio(
+    core: State<'_, AppCore>,
+    media: State<'_, MediaState>,
+    media_id: String,
+    out_path: String,
+) -> Result<String, String> {
+    let manifest = core.media();
+    let entry = manifest
+        .entries
+        .iter()
+        .find(|e| e.id == media_id)
+        .ok_or_else(|| format!("unknown media id: {media_id}"))?;
+    let input = match &entry.source {
+        MediaSource::External { absolute_path } => PathBuf::from(absolute_path),
+        MediaSource::Project { relative_path } => match core.project_dir() {
+            Some(base) => base.join(relative_path),
+            None => return Err("project not saved; cannot resolve media path".into()),
+        },
+    };
+    if !input.is_file() {
+        return Err(format!("source file not found: {}", input.display()));
+    }
+    let output = PathBuf::from(&out_path);
+    media
+        .engine()
+        .extract_audio(&input, &output)
+        .map(|p| p.to_string_lossy().into_owned())
+        .map_err(|e| e.to_string())
+}
+
 /// `relink_media`: point a missing/offline asset at a newly chosen file, KEEPING
 /// the same asset id so every clip that references it recovers in place. This is
 /// the fix for "lost media stays red after re-selecting the path": the old flow
