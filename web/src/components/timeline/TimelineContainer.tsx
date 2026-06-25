@@ -522,7 +522,6 @@ export function TimelineContainer() {
         // Snap: probe every companion's start+end (multi-probe, SPEC §5.8) and
         // keep the snap engaged across moves via snapStateRef (sticky band).
         const excluded = new Set(d.companions);
-<<<<<<< HEAD
         const targets = collectTargets(timeline, excluded, activeFrame, true);
         const leadStart = d.hit.clip.startFrame;
         const probes: number[] = [];
@@ -546,13 +545,6 @@ export function TimelineContainer() {
           snapStateRef.current,
           probeOffsets,
         );
-=======
-        const targets = collectTargets(timeline, excluded, activeFrame, true);
-        const movedStart = d.hit.clip.startFrame + deltaFrames;
-        const movedEnd = movedStart + d.hit.clip.durationFrames;
-        const snapStart = findSnap(movedStart, targets, zoomScale, null);
-        const snapEnd = findSnap(movedEnd, targets, zoomScale, null);
->>>>>>> H-Chris233/fix/snap-include-playhead-86
         let snapped: number | null = null;
         if (snap) {
           deltaFrames += snap.delta;
