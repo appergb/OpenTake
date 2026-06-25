@@ -11,7 +11,7 @@ import { startSync } from "./store/sync";
 import { startMediaSync } from "./store/mediaStore";
 import { useEditorUiStore } from "./store/uiStore";
 import { initI18n } from "./i18n";
-import { initTheme } from "./store/settingsStore";
+import { initTheme, initWindowSize } from "./store/settingsStore";
 import { onGoHome } from "./lib/api";
 
 export default function App() {
@@ -28,6 +28,7 @@ export default function App() {
   useEffect(() => {
     initI18n();
     initTheme();
+    initWindowSize();
     void startSync();
     void startMediaSync();
     // Window closed → app stays resident; return to the launcher (so a

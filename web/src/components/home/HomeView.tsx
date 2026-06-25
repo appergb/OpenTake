@@ -7,7 +7,7 @@
  * editor's dark surface.
  */
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Plus, FolderOpen, Settings as SettingsIcon, Film, Trash2, Library } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { useT } from "../../i18n";
@@ -21,6 +21,12 @@ import {
 
 export function HomeView() {
   const t = useT();
+
+  // Validate recent projects on mount to filter out folders deleted on disk
+  useEffect(() => {
+    void useRecentStore.getState().validateRecents();
+  }, []);
+
   return (
     <div
       style={{
@@ -45,10 +51,11 @@ export function HomeView() {
         <header
           data-tauri-drag-region
           style={{
-            padding: "var(--space-xxl) var(--space-xl-xxl) var(--space-xl)",
+            padding: "calc(var(--titlebar-safe-top) + var(--space-md)) var(--space-xl-xxl) var(--space-lg)",
           }}
         >
           <h1
+            data-tauri-drag-region
             style={{
               margin: 0,
               fontSize: "var(--fs-title2)",
@@ -60,6 +67,7 @@ export function HomeView() {
             {t("home.welcome")}
           </h1>
           <p
+            data-tauri-drag-region
             style={{
               margin: "var(--space-sm) 0 0",
               fontSize: "var(--fs-sm-md)",
@@ -104,8 +112,9 @@ function Sidebar() {
 
   return (
     <aside
+      data-tauri-drag-region
       style={{
-        width: 220,
+        width: 200,
         flex: "0 0 auto",
         display: "flex",
         flexDirection: "column",
@@ -115,6 +124,7 @@ function Sidebar() {
       }}
     >
       <div
+        data-tauri-drag-region
         style={{
           padding: "0 var(--space-sm) var(--space-xl)",
           fontSize: "var(--fs-md-lg)",
@@ -181,9 +191,26 @@ function SidebarRow({
 function ProjectGrid() {
   const t = useT();
   const recents = useRecentStore((s) => s.recents);
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+
+  // Listen to KeyDown to open project when selected + Enter is pressed
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Enter" && selectedPath) {
+        if (selectedPath === "new") {
+          void newProjectAndEnter();
+        } else {
+          void openProjectPath(selectedPath);
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedPath]);
 
   return (
     <div
+      onClick={() => setSelectedPath(null)}
       style={{
         flex: 1,
         overflowY: "auto",
@@ -200,9 +227,25 @@ function ProjectGrid() {
           alignContent: "start",
         }}
       >
-        <NewProjectCard onClick={() => void newProjectAndEnter()} />
+        <NewProjectCard
+          selected={selectedPath === "new"}
+          onClick={(e) => {
+            e.stopPropagation();
+            setSelectedPath("new");
+          }}
+          onDoubleClick={() => void newProjectAndEnter()}
+        />
         {recents.map((entry) => (
-          <ProjectCard key={entry.path} entry={entry} />
+          <ProjectCard
+            key={entry.path}
+            entry={entry}
+            selected={selectedPath === entry.path}
+            onClick={(e) => {
+              e.stopPropagation();
+              setSelectedPath(entry.path);
+            }}
+            onDoubleClick={() => void openProjectPath(entry.path)}
+          />
         ))}
       </div>
       {recents.length === 0 && (
@@ -220,23 +263,70 @@ function ProjectGrid() {
   );
 }
 
-function NewProjectCard({ onClick }: { onClick: () => void }) {
+function NewProjectCard({
+  selected,
+  onClick,
+  onDoubleClick,
+}: {
+  selected: boolean;
+  onClick: (e: React.MouseEvent) => void;
+  onDoubleClick: () => void;
+}) {
   const t = useT();
   const [hovered, setHovered] = useState(false);
+  const [tilt, setTilt] = useState({ x: 0, y: 0 });
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width - 0.5;
+    const y = (e.clientY - rect.top) / rect.height - 0.5;
+    setTilt({ x, y });
+  };
+
+  const handleMouseLeave = () => {
+    setHovered(false);
+    setTilt({ x: 0, y: 0 });
+  };
+
+  const rotateX = -tilt.y * 14;
+  const rotateY = tilt.x * 14;
+  const shiftX = tilt.x * 6;
+  const shiftY = tilt.y * 6;
+
+  const transform = hovered
+    ? `perspective(1000px) rotateX(${rotateX}deg) rotateY(${rotateY}deg) translate3d(${shiftX}px, ${shiftY}px, 0) scale3d(1.04, 1.04, 1.04)`
+    : selected
+    ? `perspective(1000px) rotateX(0deg) rotateY(0deg) translate3d(0, 0, 0) scale3d(1.02, 1.02, 1.02)`
+    : `perspective(1000px) rotateX(0deg) rotateY(0deg) translate3d(0, 0, 0) scale3d(1, 1, 1)`;
+
+  const transition = hovered
+    ? "transform 0.08s ease-out, box-shadow 0.08s ease-out"
+    : "transform 0.4s cubic-bezier(0.25, 1, 0.5, 1), box-shadow 0.4s cubic-bezier(0.25, 1, 0.5, 1)";
+
+  const shadowX = -tilt.x * 12;
+  const shadowY = -tilt.y * 12;
+  const boxShadow = hovered
+    ? `${shadowX}px ${shadowY}px 20px rgba(0, 0, 0, 0.45)`
+    : selected
+    ? "0 0 12px rgba(242, 153, 51, 0.35), var(--shadow-lg)"
+    : "var(--shadow-md)";
+
   return (
-    <button
-      type="button"
+    <div
       onClick={onClick}
+      onDoubleClick={onDoubleClick}
       onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
+      onMouseLeave={handleMouseLeave}
+      onMouseMove={handleMouseMove}
       style={{
         display: "block",
         width: "100%",
         textAlign: "left",
         position: "relative",
         zIndex: hovered ? 2 : 1,
-        transform: hovered ? "scale(1.02)" : "scale(1)",
-        transition: "transform var(--anim-transition) var(--ease-out)",
+        transform,
+        transition,
+        cursor: "default",
       }}
     >
       <div
@@ -245,82 +335,174 @@ function NewProjectCard({ onClick }: { onClick: () => void }) {
           aspectRatio: "5 / 4",
           borderRadius: "var(--radius-md-lg)",
           background: "var(--bg-placeholder)",
-          border: `var(--bw-thin) solid ${hovered ? "var(--border-divider)" : "var(--border-primary)"}`,
-          boxShadow: hovered ? "var(--shadow-lg)" : "var(--shadow-md)",
+          border: selected
+            ? "2px solid var(--accent-timecode)"
+            : hovered
+            ? "1px solid var(--border-divider)"
+            : "1px solid var(--border-primary)",
+          boxShadow,
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
           color: "var(--text-muted)",
           overflow: "hidden",
+          transition: "border-color 0.2s ease",
         }}
       >
         <Icon icon={Plus} size={30} strokeWidth={1.4} />
+        {hovered && (
+          <div
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              background: `radial-gradient(circle 100px at ${(tilt.x + 0.5) * 100}% ${(tilt.y + 0.5) * 100}%, rgba(255, 255, 255, 0.12), transparent)`,
+              pointerEvents: "none",
+              zIndex: 3,
+            }}
+          />
+        )}
       </div>
       <div
         style={{
           marginTop: "var(--space-sm)",
           fontSize: "var(--fs-sm-md)",
-          color: "var(--text-secondary)",
+          color: selected ? "var(--accent-timecode)" : "var(--text-secondary)",
+          fontWeight: selected ? "var(--fw-semibold)" : "normal",
+          transition: "color 0.2s ease",
         }}
       >
         {t("home.untitled")}
       </div>
-    </button>
+    </div>
   );
 }
 
-function ProjectCard({ entry }: { entry: RecentProject }) {
+function ProjectCard({
+  entry,
+  selected,
+  onClick,
+  onDoubleClick,
+}: {
+  entry: RecentProject;
+  selected: boolean;
+  onClick: (e: React.MouseEvent) => void;
+  onDoubleClick: () => void;
+}) {
   const t = useT();
   const remove = useRecentStore((s) => s.remove);
   const [hovered, setHovered] = useState(false);
+  const [tilt, setTilt] = useState({ x: 0, y: 0 });
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width - 0.5;
+    const y = (e.clientY - rect.top) / rect.height - 0.5;
+    setTilt({ x, y });
+  };
+
+  const handleMouseLeave = () => {
+    setHovered(false);
+    setTilt({ x: 0, y: 0 });
+  };
+
+  const rotateX = -tilt.y * 14;
+  const rotateY = tilt.x * 14;
+  const shiftX = tilt.x * 6;
+  const shiftY = tilt.y * 6;
+
+  const transform = hovered
+    ? `perspective(1000px) rotateX(${rotateX}deg) rotateY(${rotateY}deg) translate3d(${shiftX}px, ${shiftY}px, 0) scale3d(1.04, 1.04, 1.04)`
+    : selected
+    ? `perspective(1000px) rotateX(0deg) rotateY(0deg) translate3d(0, 0, 0) scale3d(1.02, 1.02, 1.02)`
+    : `perspective(1000px) rotateX(0deg) rotateY(0deg) translate3d(0, 0, 0) scale3d(1, 1, 1)`;
+
+  const transition = hovered
+    ? "transform 0.08s ease-out, box-shadow 0.08s ease-out"
+    : "transform 0.4s cubic-bezier(0.25, 1, 0.5, 1), box-shadow 0.4s cubic-bezier(0.25, 1, 0.5, 1)";
+
+  const shadowX = -tilt.x * 12;
+  const shadowY = -tilt.y * 12;
+  const boxShadow = hovered
+    ? `${shadowX}px ${shadowY}px 20px rgba(0, 0, 0, 0.45)`
+    : selected
+    ? "0 0 12px rgba(242, 153, 51, 0.35), var(--shadow-lg)"
+    : "var(--shadow-md)";
+
+  // Make display path compact by replacing user home dir with ~
+  const cleanDisplayPath = entry.path.replace(/^\/Users\/[^\/]+/, "~");
 
   return (
     <div
+      onClick={onClick}
+      onDoubleClick={onDoubleClick}
       onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
+      onMouseLeave={handleMouseLeave}
+      onMouseMove={handleMouseMove}
       style={{
         position: "relative",
         zIndex: hovered ? 2 : 1,
-        transform: hovered ? "scale(1.02)" : "scale(1)",
-        transition: "transform var(--anim-transition) var(--ease-out)",
+        transform,
+        transition,
+        cursor: "default",
       }}
     >
-      <button
-        type="button"
-        onClick={() => void openProjectPath(entry.path)}
-        style={{ display: "block", width: "100%", textAlign: "left" }}
-      >
+      <div style={{ display: "block", width: "100%", textAlign: "left" }}>
         <div
           style={{
             position: "relative",
             aspectRatio: "5 / 4",
             borderRadius: "var(--radius-md-lg)",
             background: "var(--bg-placeholder)",
-            border: `var(--bw-thin) solid ${hovered ? "var(--border-divider)" : "var(--border-primary)"}`,
-            boxShadow: hovered ? "var(--shadow-lg)" : "var(--shadow-md)",
+            border: selected
+              ? "2px solid var(--accent-timecode)"
+              : hovered
+              ? "1px solid var(--border-divider)"
+              : "1px solid var(--border-primary)",
+            boxShadow,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             color: "var(--text-muted)",
             overflow: "hidden",
+            transition: "border-color 0.2s ease",
           }}
         >
           <Icon icon={Film} size={28} strokeWidth={1.4} />
+          {hovered && (
+            <div
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                background: `radial-gradient(circle 100px at ${(tilt.x + 0.5) * 100}% ${(tilt.y + 0.5) * 100}%, rgba(255, 255, 255, 0.12), transparent)`,
+                pointerEvents: "none",
+                zIndex: 3,
+              }}
+            />
+          )}
         </div>
         <div
           style={{
             marginTop: "var(--space-sm)",
             fontSize: "var(--fs-sm-md)",
-            color: "var(--text-primary)",
+            color: selected ? "var(--accent-timecode)" : "var(--text-primary)",
+            fontWeight: selected ? "var(--fw-semibold)" : "normal",
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
+            transition: "color 0.2s ease",
           }}
         >
           {entry.name}
         </div>
         <div
           className="tabular"
+          title={entry.path}
           style={{
             fontSize: "var(--fs-xs)",
             color: "var(--text-muted)",
@@ -329,16 +511,19 @@ function ProjectCard({ entry }: { entry: RecentProject }) {
             whiteSpace: "nowrap",
           }}
         >
-          {entry.path}
+          {cleanDisplayPath}
         </div>
-      </button>
+      </div>
 
       {hovered && (
         <button
           type="button"
           title={t("home.remove")}
           aria-label={t("home.remove")}
-          onClick={() => remove(entry.path)}
+          onClick={(e) => {
+            e.stopPropagation();
+            remove(entry.path);
+          }}
           className="hover-area"
           style={{
             position: "absolute",
@@ -352,6 +537,7 @@ function ProjectCard({ entry }: { entry: RecentProject }) {
             borderRadius: "var(--radius-sm)",
             background: "rgba(0,0,0,0.55)",
             color: "var(--status-error)",
+            zIndex: 4,
           }}
         >
           <Icon icon={Trash2} size={14} />

@@ -8,14 +8,17 @@
  */
 
 import { create } from "zustand";
+import { isTauri } from "../lib/api";
 
 export type Theme = "dark" | "light";
 export type ByokProvider = "anthropic" | "openai" | "google";
+export type WindowSizeOpt = "standard" | "compact";
 
 const LS = {
   theme: "theme",
   defaultImportFolder: "defaultImportFolder",
   byokProvider: "byokProvider",
+  windowSize: "windowSize",
 } as const;
 
 function loadTheme(): Theme {
@@ -30,6 +33,10 @@ function loadProvider(): ByokProvider {
   const v = loadString(LS.byokProvider);
   return v === "openai" || v === "google" ? v : "anthropic";
 }
+function loadWindowSize(): WindowSizeOpt {
+  if (typeof localStorage === "undefined") return "standard";
+  return localStorage.getItem(LS.windowSize) === "compact" ? "compact" : "standard";
+}
 function persist(key: string, value: string | null) {
   if (typeof localStorage === "undefined") return;
   if (value === null) localStorage.removeItem(key);
@@ -40,15 +47,18 @@ interface SettingsState {
   theme: Theme;
   defaultImportFolder: string | null;
   byokProvider: ByokProvider;
+  windowSize: WindowSizeOpt;
   setTheme: (theme: Theme) => void;
   setDefaultImportFolder: (path: string | null) => void;
   setByokProvider: (provider: ByokProvider) => void;
+  setWindowSize: (size: WindowSizeOpt) => void;
 }
 
 export const useSettingsStore = create<SettingsState>((set) => ({
   theme: loadTheme(),
   defaultImportFolder: loadString(LS.defaultImportFolder),
   byokProvider: loadProvider(),
+  windowSize: loadWindowSize(),
   setTheme: (theme) => {
     persist(LS.theme, theme);
     applyTheme(theme);
@@ -62,6 +72,11 @@ export const useSettingsStore = create<SettingsState>((set) => ({
     persist(LS.byokProvider, byokProvider);
     set({ byokProvider });
   },
+  setWindowSize: (windowSize) => {
+    persist(LS.windowSize, windowSize);
+    void applyWindowSize(windowSize);
+    set({ windowSize });
+  },
 }));
 
 /** Reflect the theme onto the document root so tokens can switch on it. */
@@ -71,7 +86,42 @@ export function applyTheme(theme: Theme): void {
   }
 }
 
-/** Apply the persisted theme at startup. */
+/** Apply the window size (width: 1600x1000 or 1066x666 centered) dynamically in Tauri. */
+export async function applyWindowSize(size: WindowSizeOpt): Promise<void> {
+  if (!isTauri) return;
+  try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    const { LogicalSize, LogicalPosition } = await import("@tauri-apps/api/dpi");
+    const win = getCurrentWindow();
+    const factor = await win.scaleFactor();
+    
+    const targetWidth = size === "compact" ? 1066 : 1600;
+    const targetHeight = size === "compact" ? 666 : 1000;
+    
+    const physicalSize = await win.innerSize();
+    const logicalSize = physicalSize.toLogical(factor);
+    
+    const physicalPos = await win.outerPosition();
+    const logicalPos = physicalPos.toLogical(factor);
+    
+    const dw = logicalSize.width - targetWidth;
+    const dh = logicalSize.height - targetHeight;
+    
+    const newX = logicalPos.x + dw / 2;
+    const newY = logicalPos.y + dh / 2;
+    
+    await win.setPosition(new LogicalPosition(newX, newY));
+    await win.setSize(new LogicalSize(targetWidth, targetHeight));
+  } catch (e) {
+    console.error("Failed to apply window size:", e);
+  }
+}
+
+/** Apply the persisted theme and window size at startup. */
 export function initTheme(): void {
   applyTheme(useSettingsStore.getState().theme);
+}
+
+export function initWindowSize(): void {
+  void applyWindowSize(useSettingsStore.getState().windowSize);
 }
