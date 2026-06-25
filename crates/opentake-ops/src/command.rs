@@ -281,6 +281,23 @@ pub enum EditCommand {
     /// Delete folders recursively (subfolders + their assets) and cascade-remove
     /// clips referencing any deleted asset.
     DeleteFolder { folder_ids: Vec<String> },
+    /// Replace a clip's `media_ref` in place, preserving all editing attributes
+    /// (transform / crop / keyframe tracks / grade / masks / effects / fade /
+    /// trim / speed / start / duration). 1:1 port of upstream
+    /// `replaceClipMediaRef(resetTrim: false)`:
+    ///
+    /// * **Type-must-match**: the candidate asset's `kind` must strictly equal
+    ///   the clip's `media_type` (no `isVisual` leniency, no `media_type`
+    ///   override). A mismatch is refused without mutating state.
+    /// * **Link-group cascade**: clips that share the seed clip's link group
+    ///   AND its old `media_ref` are swapped together, so a linked audio/video
+    ///   pair pointing at the same file stays in sync.
+    /// * **No-op on identical ref**: swapping to the same `media_ref` returns
+    ///   `changed = false` (no undo entry, no version bump).
+    /// * **No trim/duration rewrites**: trim / speed / start / duration are
+    ///   kept verbatim. The render layer is responsible for any overshoot
+    ///   sampling when the new media is shorter.
+    SwapMedia { clip_id: String, media_ref: String },
     /// Undo the last committed command.
     Undo,
     /// Redo the last undone command.
@@ -400,6 +417,7 @@ pub fn apply(
         EditCommand::RenameFolder { entries } => rename_folder(state, entries),
         EditCommand::DeleteMedia { asset_ids } => delete_media(state, asset_ids),
         EditCommand::DeleteFolder { folder_ids } => delete_folder(state, folder_ids),
+        EditCommand::SwapMedia { clip_id, media_ref } => swap_media(state, clip_id, media_ref),
     }
 }
 
@@ -1738,6 +1756,121 @@ fn delete_folder(
             let set: HashSet<String> = folder_ids.iter().cloned().collect();
             ops::delete_folder(&mut st.timeline, &mut st.manifest, &set);
             Ok(Vec::new())
+        },
+    )
+}
+
+/// Replace a clip's `media_ref` in place, preserving every editing attribute
+/// (transform / crop / keyframe tracks / grade / masks / effects / fade / text
+/// / trim / speed / start / duration). 1:1 port of upstream
+/// `replaceClipMediaRef(resetTrim: false)`:
+///
+/// 1. Validate the seed clip exists and the candidate asset exists in the
+///    manifest, then refuse unless `clip.media_type == asset.kind` (strict
+///    equality — no `isVisual` leniency). A video clip can only be swapped to
+///    a video asset, an audio clip only to an audio asset, etc.
+/// 2. Walk the seed clip's link group, picking every clip that shares the
+///    same `media_ref`. Each one is updated to the new ref in the same
+///    transaction, so a linked audio/video pair pointing at the same file
+///    stays in sync (and `Undo` restores every old ref atomically).
+/// 3. **No** trim / duration / start rewrites — `resetTrim: false`. The render
+///    layer is responsible for any overshoot sampling when the new media is
+///    shorter.
+/// 4. Same `media_ref` is a no-op (`changed = false`, no undo entry, no
+///    version bump).
+fn swap_media(
+    state: &mut EditorState,
+    clip_id: String,
+    media_ref: String,
+) -> Result<EditResult, EditError> {
+    // 1. Seed clip must exist.
+    let seed_loc = state
+        .find_clip(&clip_id)
+        .ok_or_else(|| EditError::Invalid(format!("Clip not found: {clip_id}")))?;
+
+    // 2. Candidate asset must exist in the manifest.
+    let new_asset = state
+        .manifest
+        .entries
+        .iter()
+        .find(|e| e.id == media_ref)
+        .ok_or_else(|| EditError::Invalid(format!("Media not found: {media_ref}")))?;
+
+    // 3. Strict type-match: clip.media_type == asset.kind. No isVisual leniency,
+    //    no media_type override. A video clip can only swap to a video asset,
+    //    an audio clip only to an audio asset.
+    let seed_media_type =
+        state.timeline.tracks[seed_loc.track_index].clips[seed_loc.clip_index].media_type;
+    if seed_media_type != new_asset.kind {
+        return Err(EditError::Refused(format!(
+            "Type mismatch: clip is {:?}, asset is {:?}",
+            seed_media_type, new_asset.kind
+        )));
+    }
+
+    // 4. No-op when the seed already references the new media.
+    let seed_old_ref = state.timeline.tracks[seed_loc.track_index].clips[seed_loc.clip_index]
+        .media_ref
+        .clone();
+    if seed_old_ref == media_ref {
+        let version = state.version();
+        return Ok(EditResult {
+            changed: false,
+            action_name: "Swap Media".to_string(),
+            affected_clip_ids: vec![clip_id.clone()],
+            timeline_version: version,
+            summary: format!("No-op: {clip_id} already references {media_ref}"),
+        });
+    }
+
+    // 5. Collect every link-group partner that also references the old ref.
+    //    `expand_to_link_group` returns the whole group; we then keep only
+    //    the members whose `media_ref` matches the seed's old ref.
+    let link_group = ops::expand_to_link_group(&state.timeline, &{
+        let mut s = HashSet::new();
+        s.insert(clip_id.clone());
+        s
+    });
+    let mut targets: Vec<String> = Vec::new();
+    for member_id in &link_group {
+        if let Some(loc) = state.find_clip(member_id) {
+            let c = &state.timeline.tracks[loc.track_index].clips[loc.clip_index];
+            if c.media_ref == seed_old_ref {
+                targets.push(member_id.clone());
+            }
+        }
+    }
+    if !targets.iter().any(|id| id == &clip_id) {
+        // Defensive: the seed itself must always be in the target set.
+        targets.push(clip_id.clone());
+    }
+
+    let summary_old = seed_old_ref;
+    let summary_new = media_ref.clone();
+    let target_count = targets.len();
+    transact(
+        state,
+        "Swap Media",
+        move |affected| {
+            if affected.len() <= 1 {
+                format!("Swapped {clip_id}: {summary_old} -> {summary_new}")
+            } else {
+                format!(
+                    "Swapped {n} linked clips: {summary_old} -> {summary_new}",
+                    n = affected.len()
+                )
+            }
+        },
+        move |st| {
+            let mut affected = Vec::with_capacity(target_count);
+            for tid in &targets {
+                if let Some(loc) = st.find_clip(tid) {
+                    st.timeline.tracks[loc.track_index].clips[loc.clip_index].media_ref =
+                        media_ref.clone();
+                    affected.push(tid.clone());
+                }
+            }
+            Ok(affected)
         },
     )
 }

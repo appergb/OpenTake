@@ -5,7 +5,9 @@
 
 use opentake_domain::{AnimPair, Interpolation, Keyframe, KeyframeTrack};
 use opentake_domain::{ChromaKey, ColorGrade, Effect, Mask, MaskShape, Point2};
-use opentake_domain::{Clip, ClipType, MediaManifest, Timeline, Track, Transform};
+use opentake_domain::{
+    Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track, Transform,
+};
 use opentake_ops::{
     apply, ClipEntry, ClipMove, ClipProperties, EditCommand, EditError, EditorState, FrameRange,
     KeyframePayload, KeyframeProperty, SeqIdGen, TextEntry,
@@ -1053,4 +1055,356 @@ fn ripple_delete_clips_rejects_unknown_clip() {
         Err(EditError::Invalid(_))
     ));
     assert_eq!(st.version(), 0);
+}
+
+// ---- swap_media ------------------------------------------------------------
+
+/// Build a manifest entry with `duration` in seconds and an External source.
+fn media_entry(id: &str, kind: ClipType, duration_secs: f64) -> MediaManifestEntry {
+    MediaManifestEntry {
+        id: id.into(),
+        name: id.into(),
+        kind,
+        source: MediaSource::External {
+            absolute_path: format!("/abs/{id}"),
+        },
+        duration: duration_secs,
+        generation_input: None,
+        source_width: None,
+        source_height: None,
+        source_fps: None,
+        has_audio: None,
+        folder_id: None,
+        cached_remote_url: None,
+        cached_remote_url_expires_at: None,
+    }
+}
+
+/// Build a state with the given tracks and manifest entries (fps defaults to 30).
+fn state_with_media(tracks: Vec<Track>, entries: Vec<MediaManifestEntry>) -> EditorState {
+    let mut tl = Timeline::new();
+    tl.tracks = tracks;
+    let mut manifest = MediaManifest::new();
+    manifest.entries = entries;
+    EditorState::new(tl, manifest)
+}
+
+#[test]
+fn swap_media_replaces_ref_and_preserves_attributes() {
+    // Clip duration 100 frames (fps=30 -> 100/30 secs). New media same length.
+    let mut c = clip("c", 0, 100);
+    c.opacity = 0.7;
+    c.transform = Transform {
+        center_x: 0.3,
+        center_y: 0.4,
+        width: 0.5,
+        height: 0.6,
+        rotation: 15.0,
+        flip_horizontal: true,
+        flip_vertical: false,
+    };
+    c.trim_start_frame = 5;
+    c.trim_end_frame = 7;
+    c.speed = 1.5;
+    let v = video_track("v", true, vec![c]);
+    let entries = vec![
+        media_entry("old", ClipType::Video, 100.0 / 30.0),
+        media_entry("new", ClipType::Video, 100.0 / 30.0),
+    ];
+    let mut st = state_with_media(vec![v], entries);
+    let g = SeqIdGen::default();
+
+    let res = apply(
+        &mut st,
+        EditCommand::SwapMedia {
+            clip_id: "c".into(),
+            media_ref: "new".into(),
+        },
+        &g,
+    )
+    .unwrap();
+
+    assert!(res.changed);
+    assert_eq!(res.action_name, "Swap Media");
+    assert_eq!(res.affected_clip_ids, vec!["c".to_string()]);
+    let clip = &st.timeline.tracks[0].clips[0];
+    assert_eq!(clip.media_ref, "new");
+    assert_eq!(clip.duration_frames, 100); // unchanged
+                                           // Preserved editing attributes
+    assert!((clip.opacity - 0.7).abs() < 1e-9);
+    assert!((clip.transform.center_x - 0.3).abs() < 1e-9);
+    assert!((clip.transform.rotation - 15.0).abs() < 1e-9);
+    assert!(clip.transform.flip_horizontal);
+    // trim / speed untouched (resetTrim=false)
+    assert_eq!(clip.trim_start_frame, 5);
+    assert_eq!(clip.trim_end_frame, 7);
+    assert!((clip.speed - 1.5).abs() < 1e-9);
+}
+
+#[test]
+fn swap_media_does_not_truncate_when_new_media_shorter() {
+    // resetTrim=false: clip duration is preserved even when the new media is
+    // shorter. The render layer is responsible for any overshoot sampling.
+    let mut c = clip("c", 0, 100);
+    c.start_frame = 20;
+    c.trim_start_frame = 2;
+    c.trim_end_frame = 3;
+    let v = video_track("v", true, vec![c]);
+    let entries = vec![
+        media_entry("old", ClipType::Video, 100.0 / 30.0),
+        media_entry("short", ClipType::Video, 50.0 / 30.0),
+    ];
+    let mut st = state_with_media(vec![v], entries);
+    let g = SeqIdGen::default();
+
+    let res = apply(
+        &mut st,
+        EditCommand::SwapMedia {
+            clip_id: "c".into(),
+            media_ref: "short".into(),
+        },
+        &g,
+    )
+    .unwrap();
+
+    assert!(res.changed);
+    let clip = &st.timeline.tracks[0].clips[0];
+    assert_eq!(clip.media_ref, "short");
+    // Start / duration / trim all untouched.
+    assert_eq!(clip.start_frame, 20);
+    assert_eq!(clip.duration_frames, 100);
+    assert_eq!(clip.trim_start_frame, 2);
+    assert_eq!(clip.trim_end_frame, 3);
+}
+
+#[test]
+fn swap_media_rejects_missing_media_ref() {
+    let v = video_track("v", true, vec![clip("c", 0, 100)]);
+    let entries = vec![media_entry("old", ClipType::Video, 100.0 / 30.0)];
+    let mut st = state_with_media(vec![v], entries);
+    let g = SeqIdGen::default();
+
+    let err = apply(
+        &mut st,
+        EditCommand::SwapMedia {
+            clip_id: "c".into(),
+            media_ref: "nonexistent".into(),
+        },
+        &g,
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, EditError::Invalid(_)));
+    assert_eq!(st.version(), 0); // unchanged
+                                 // Original media_ref preserved.
+    assert_eq!(st.timeline.tracks[0].clips[0].media_ref, "asset");
+}
+
+#[test]
+fn swap_media_rejects_type_mismatch() {
+    // Clip is video; asset is audio. Must refuse (no isVisual leniency).
+    let mut c = clip("c", 0, 100);
+    c.media_type = ClipType::Video;
+    c.source_clip_type = ClipType::Video;
+    let v = video_track("v", true, vec![c]);
+    let entries = vec![
+        media_entry("old", ClipType::Video, 100.0 / 30.0),
+        media_entry("audio1", ClipType::Audio, 100.0 / 30.0),
+    ];
+    let mut st = state_with_media(vec![v], entries);
+    let g = SeqIdGen::default();
+
+    let err = apply(
+        &mut st,
+        EditCommand::SwapMedia {
+            clip_id: "c".into(),
+            media_ref: "audio1".into(),
+        },
+        &g,
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, EditError::Refused(_)));
+    assert_eq!(st.version(), 0); // unchanged
+                                 // Original media_ref preserved.
+    assert_eq!(st.timeline.tracks[0].clips[0].media_ref, "asset");
+    assert_eq!(st.timeline.tracks[0].clips[0].media_type, ClipType::Video);
+}
+
+#[test]
+fn swap_media_rejects_missing_clip() {
+    let v = video_track("v", true, vec![]);
+    let entries = vec![media_entry("new", ClipType::Video, 100.0 / 30.0)];
+    let mut st = state_with_media(vec![v], entries);
+    let g = SeqIdGen::default();
+
+    let err = apply(
+        &mut st,
+        EditCommand::SwapMedia {
+            clip_id: "missing".into(),
+            media_ref: "new".into(),
+        },
+        &g,
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, EditError::Invalid(_)));
+    assert_eq!(st.version(), 0);
+}
+
+#[test]
+fn swap_media_no_op_on_same_ref() {
+    // Seed clip references "asset" (builder default); swapping to "asset" must
+    // be a no-op (no undo entry, no version bump).
+    let v = video_track("v", true, vec![clip("c", 0, 100)]);
+    let entries = vec![media_entry("asset", ClipType::Video, 100.0 / 30.0)];
+    let mut st = state_with_media(vec![v], entries);
+    let g = SeqIdGen::default();
+    let version_before = st.version();
+
+    let res = apply(
+        &mut st,
+        EditCommand::SwapMedia {
+            clip_id: "c".into(),
+            media_ref: "asset".into(),
+        },
+        &g,
+    )
+    .unwrap();
+
+    assert!(!res.changed);
+    assert_eq!(st.version(), version_before);
+    assert!(!st.can_undo());
+    assert_eq!(st.timeline.tracks[0].clips[0].media_ref, "asset");
+}
+
+#[test]
+fn swap_media_is_undoable() {
+    let v = video_track("v", true, vec![clip("c", 0, 100)]);
+    let entries = vec![
+        media_entry("old", ClipType::Video, 100.0 / 30.0),
+        media_entry("new", ClipType::Video, 100.0 / 30.0),
+    ];
+    let mut st = state_with_media(vec![v], entries);
+    let g = SeqIdGen::default();
+
+    apply(
+        &mut st,
+        EditCommand::SwapMedia {
+            clip_id: "c".into(),
+            media_ref: "new".into(),
+        },
+        &g,
+    )
+    .unwrap();
+    assert_eq!(st.timeline.tracks[0].clips[0].media_ref, "new");
+    assert!(st.can_undo());
+
+    // Undo via the command (undo() is pub(crate), so we route through apply).
+    apply(&mut st, EditCommand::Undo, &g).unwrap();
+    assert_eq!(st.timeline.tracks[0].clips[0].media_ref, "asset"); // restored
+}
+
+#[test]
+fn swap_media_cascades_to_link_group_with_same_ref() {
+    // A linked V1/A1 pair both reference "old". Swapping the video clip must
+    // also swap the audio clip's ref so the pair stays in sync.
+    let mut vc = clip("v", 0, 100);
+    vc.media_type = ClipType::Video;
+    vc.source_clip_type = ClipType::Video;
+    vc.link_group_id = Some("g1".into());
+    let mut ac = clip("a", 0, 100);
+    ac.media_type = ClipType::Audio;
+    ac.source_clip_type = ClipType::Audio;
+    ac.link_group_id = Some("g1".into());
+    let v = video_track("v", true, vec![vc]);
+    let a = audio_track("a", true, vec![ac]);
+    let entries = vec![
+        media_entry("old", ClipType::Video, 100.0 / 30.0),
+        media_entry("new_v", ClipType::Video, 100.0 / 30.0),
+    ];
+    let mut st = state_with_media(vec![v, a], entries);
+    let g = SeqIdGen::default();
+
+    let res = apply(
+        &mut st,
+        EditCommand::SwapMedia {
+            clip_id: "v".into(),
+            media_ref: "new_v".into(),
+        },
+        &g,
+    )
+    .unwrap();
+
+    assert!(res.changed);
+    // Both V1 and A1 updated.
+    let v_clip = st
+        .find_clip("v")
+        .map(|l| &st.timeline.tracks[l.track_index].clips[l.clip_index])
+        .unwrap();
+    let a_clip = st
+        .find_clip("a")
+        .map(|l| &st.timeline.tracks[l.track_index].clips[l.clip_index])
+        .unwrap();
+    assert_eq!(v_clip.media_ref, "new_v");
+    assert_eq!(a_clip.media_ref, "new_v");
+
+    // Undo restores both.
+    apply(&mut st, EditCommand::Undo, &g).unwrap();
+    let v_clip = st
+        .find_clip("v")
+        .map(|l| &st.timeline.tracks[l.track_index].clips[l.clip_index])
+        .unwrap();
+    let a_clip = st
+        .find_clip("a")
+        .map(|l| &st.timeline.tracks[l.track_index].clips[l.clip_index])
+        .unwrap();
+    assert_eq!(v_clip.media_ref, "asset");
+    assert_eq!(a_clip.media_ref, "asset");
+}
+
+#[test]
+fn swap_media_does_not_cascade_to_link_group_with_different_ref() {
+    // V1 references "old", A1 (its linked partner) references a DIFFERENT
+    // asset. Swapping V1 must NOT touch A1 — the swap is only meant to
+    // update clips that share the old ref.
+    let mut vc = clip("v", 0, 100);
+    vc.media_type = ClipType::Video;
+    vc.source_clip_type = ClipType::Video;
+    vc.link_group_id = Some("g1".into());
+    let mut ac = clip("a", 0, 100);
+    ac.media_type = ClipType::Audio;
+    ac.source_clip_type = ClipType::Audio;
+    ac.link_group_id = Some("g1".into());
+    ac.media_ref = "other".into();
+    let v = video_track("v", true, vec![vc]);
+    let a = audio_track("a", true, vec![ac]);
+    let entries = vec![
+        media_entry("old", ClipType::Video, 100.0 / 30.0),
+        media_entry("other", ClipType::Audio, 100.0 / 30.0),
+        media_entry("new_v", ClipType::Video, 100.0 / 30.0),
+    ];
+    let mut st = state_with_media(vec![v, a], entries);
+    let g = SeqIdGen::default();
+
+    apply(
+        &mut st,
+        EditCommand::SwapMedia {
+            clip_id: "v".into(),
+            media_ref: "new_v".into(),
+        },
+        &g,
+    )
+    .unwrap();
+
+    let v_clip = st
+        .find_clip("v")
+        .map(|l| &st.timeline.tracks[l.track_index].clips[l.clip_index])
+        .unwrap();
+    let a_clip = st
+        .find_clip("a")
+        .map(|l| &st.timeline.tracks[l.track_index].clips[l.clip_index])
+        .unwrap();
+    assert_eq!(v_clip.media_ref, "new_v");
+    assert_eq!(a_clip.media_ref, "other"); // untouched
 }

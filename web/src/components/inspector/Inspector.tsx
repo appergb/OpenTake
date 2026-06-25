@@ -11,6 +11,7 @@ import { Icon } from "../ui/Icon";
 import { ScrubbableNumberField } from "./ScrubbableNumberField";
 import { TextTab } from "./TextTab";
 import { KeyframesPanel } from "./KeyframesPanel";
+import { SwapMediaSection } from "./SwapMediaSection";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import * as edit from "../../store/editActions";
@@ -192,6 +193,7 @@ function ClipInspector({
       )}
 
       <div style={{ padding: "var(--space-lg)", display: "flex", flexDirection: "column", gap: "var(--space-lg)" }}>
+        {clip.mediaType !== "text" && <SwapMediaSection clip={clip} t={t} />}
         {activeTab === "text" ? (
           <TextTab clip={clip} t={t} />
         ) : activeTab === "audio" ? (

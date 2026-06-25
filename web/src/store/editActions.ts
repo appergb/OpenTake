@@ -153,10 +153,12 @@ export async function moveToFolder(assetIds: string[], folderId?: string) {
 }
 
 /** Replace a clip's media source in place, preserving all editing attributes
- *  (trim / speed / keyframes / transform / crop / grade / masks / effects /
- *  fade). 1:1 with upstream `replaceClipMediaRef(resetTrim: false)`: the backend
- *  strictly checks `clip.mediaType == asset.kind` (refuses on mismatch), no-ops
- *  on same mediaRef, and cascades to linked clips sharing the same old media. */
+ *  (transform / crop / keyframe tracks / grade / masks / effects / fade / trim /
+ *  speed / start / duration). 1:1 port of upstream
+ *  `replaceClipMediaRef(resetTrim: false)`. The backend enforces a strict type
+ *  match (`clip.mediaType == asset.type`) and cascades the swap across the
+ *  link-group members that share the same old `mediaRef`; callers only need to
+ *  pass the seed clip id and the candidate asset id. */
 export async function swapMedia(clipId: string, mediaRef: string) {
   await applyAndRefresh({ type: "swapMedia", clipId, mediaRef });
 }

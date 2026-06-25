@@ -131,7 +131,9 @@ fn msg(e: CmdError) -> String {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum EditRequest {
     #[serde(rename_all = "camelCase")]
-    AddClips { entries: Vec<ClipEntryDto> },
+    AddClips {
+        entries: Vec<ClipEntryDto>,
+    },
     #[serde(rename_all = "camelCase")]
     InsertClips {
         track_index: usize,
@@ -139,13 +141,22 @@ pub enum EditRequest {
         entries: Vec<ClipEntryDto>,
     },
     #[serde(rename_all = "camelCase")]
-    MoveClips { moves: Vec<ClipMoveDto> },
+    MoveClips {
+        moves: Vec<ClipMoveDto>,
+    },
     #[serde(rename_all = "camelCase")]
-    RemoveClips { clip_ids: Vec<String> },
+    RemoveClips {
+        clip_ids: Vec<String>,
+    },
     #[serde(rename_all = "camelCase")]
-    SplitClip { clip_id: String, at_frame: i32 },
+    SplitClip {
+        clip_id: String,
+        at_frame: i32,
+    },
     #[serde(rename_all = "camelCase")]
-    TrimClips { edits: Vec<TrimEditDto> },
+    TrimClips {
+        edits: Vec<TrimEditDto>,
+    },
     #[serde(rename_all = "camelCase")]
     SetClipProperties {
         clip_ids: Vec<String>,
@@ -189,17 +200,29 @@ pub enum EditRequest {
         ranges: Vec<FrameRangeDto>,
     },
     #[serde(rename_all = "camelCase")]
-    RippleDeleteClips { clip_ids: Vec<String> },
+    RippleDeleteClips {
+        clip_ids: Vec<String>,
+    },
     #[serde(rename_all = "camelCase")]
-    AddTexts { entries: Vec<TextEntryDto> },
+    AddTexts {
+        entries: Vec<TextEntryDto>,
+    },
     #[serde(rename_all = "camelCase")]
-    Link { clip_ids: Vec<String> },
+    Link {
+        clip_ids: Vec<String>,
+    },
     #[serde(rename_all = "camelCase")]
-    Unlink { clip_ids: Vec<String> },
+    Unlink {
+        clip_ids: Vec<String>,
+    },
     #[serde(rename_all = "camelCase")]
-    RemoveTracks { track_indexes: Vec<usize> },
+    RemoveTracks {
+        track_indexes: Vec<usize>,
+    },
     #[serde(rename_all = "camelCase")]
-    InsertTrack { kind: ClipType },
+    InsertTrack {
+        kind: ClipType,
+    },
     #[serde(rename_all = "camelCase")]
     SetTrackProps {
         track_index: usize,
@@ -216,6 +239,10 @@ pub enum EditRequest {
     MoveToFolder {
         asset_ids: Vec<String>,
         folder_id: Option<String>,
+    },
+    SwapMedia {
+        clip_id: String,
+        media_ref: String,
     },
 }
 
@@ -344,6 +371,9 @@ impl EditRequest {
                 asset_ids,
                 folder_id,
             },
+            EditRequest::SwapMedia { clip_id, media_ref } => {
+                EditCommand::SwapMedia { clip_id, media_ref }
+            }
         })
     }
 }
