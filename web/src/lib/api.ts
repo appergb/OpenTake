@@ -1,0 +1,311 @@
+/**
+ * Tauri bridge. All editing goes through `edit_apply`; the mirror is fetched via
+ * `get_timeline` and refreshed on the `timeline_changed` event (SPEC §11).
+ *
+ * Degrades gracefully when not running inside Tauri (plain `vite dev` /
+ * `vite preview` in a browser): `isTauri` is false and commands resolve against
+ * a local in-memory fallback so the UI shell is still explorable. The real
+ * editing truth always lives in Rust when running under Tauri.
+ */
+
+import type {
+  EditRequest,
+  EditResult,
+  MediaList,
+  SecretStatus,
+  TimelineSnapshot,
+} from "./types";
+
+// Tauri injects `__TAURI_INTERNALS__` on the window when running in the shell.
+export const isTauri =
+  typeof window !== "undefined" &&
+  "__TAURI_INTERNALS__" in (window as unknown as Record<string, unknown>);
+
+type InvokeFn = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
+type ListenFn = (
+  event: string,
+  handler: (e: { payload: unknown }) => void,
+) => Promise<() => void>;
+
+let invokeImpl: InvokeFn | null = null;
+let listenImpl: ListenFn | null = null;
+
+async function ensureTauri(): Promise<void> {
+  if (!isTauri || invokeImpl) return;
+  const core = await import("@tauri-apps/api/core");
+  const ev = await import("@tauri-apps/api/event");
+  invokeImpl = core.invoke as InvokeFn;
+  listenImpl = ev.listen as unknown as ListenFn;
+}
+
+// MARK: - Commands
+
+export async function getTimeline(): Promise<TimelineSnapshot> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<TimelineSnapshot>("get_timeline");
+  return fallback.getTimeline();
+}
+
+export async function editApply(command: EditRequest): Promise<EditResult> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<EditResult>("edit_apply", { command });
+  return fallback.editApply(command);
+}
+
+export async function undo(): Promise<EditResult> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<EditResult>("undo");
+  return fallback.noop("Undo");
+}
+
+export async function redo(): Promise<EditResult> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<EditResult>("redo");
+  return fallback.noop("Redo");
+}
+
+export async function canUndo(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("can_undo");
+  return false;
+}
+
+export async function canRedo(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("can_redo");
+  return false;
+}
+
+export async function projectNew(): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) {
+    await invokeImpl<void>("project_new");
+    return;
+  }
+  fallback.reset();
+}
+
+export async function projectOpen(path: string): Promise<TimelineSnapshot> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<TimelineSnapshot>("project_open", { path });
+  return fallback.getTimeline();
+}
+
+export async function projectSave(path: string | null): Promise<string> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<string>("project_save", { path });
+  return path ?? "";
+}
+
+/** The default folder new projects save into (`~/Documents/OpenTake`). Empty
+ *  string outside Tauri (where the save dialog is unavailable anyway). */
+export async function getDefaultProjectDir(): Promise<string> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<string>("get_default_project_dir");
+  return "";
+}
+
+/**
+ * Export the current timeline to `path` as Final Cut Pro 7 XML (XMEML, `.xml`)
+ * so it opens in Premiere / DaVinci Resolve / FCP. The command name says
+ * "fcpxml" (the F4 contract) but the produced format is XMEML — Premiere doesn't
+ * read FCPXML natively, so upstream exports XMEML; DaVinci/FCP still import it.
+ * No-op outside Tauri (no Rust core / no file system).
+ */
+export async function exportFcpxml(path: string): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) {
+    await invokeImpl<void>("export_fcpxml", { path });
+  }
+}
+
+// MARK: - Media commands
+//
+// `import_folder` scans a directory for white-listed media and imports each;
+// `import_media` imports an explicit file list; `get_media` returns the current
+// catalog. All three are no-ops outside Tauri (no Rust core / no file system),
+// returning an empty catalog so the browser shell degrades gracefully.
+
+export async function importFolder(
+  path: string,
+  recursive = false,
+): Promise<MediaList> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MediaList>("import_folder", { path, recursive });
+  return { items: [], folders: [] };
+}
+
+export async function importMedia(paths: string[]): Promise<MediaList> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MediaList>("import_media", { paths });
+  return { items: [], folders: [] };
+}
+
+export async function getMedia(): Promise<MediaList> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MediaList>("get_media");
+  return { items: [], folders: [] };
+}
+
+/**
+ * `extract_audio`: extract the audio track from a media asset into a
+ * self-contained audio file. `outPath`'s extension picks the codec
+ * (`.m4a` -> AAC, `.mp3` -> libmp3lame, `.wav` -> PCM s16le). Returns the
+ * output path on success. Outside Tauri there is no ffmpeg, so this rejects
+ * with a friendly error.
+ */
+export async function extractAudio(mediaId: string, outPath: string): Promise<string> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<string>("extract_audio", { mediaId, outPath });
+  throw new Error("audio extraction requires the desktop app (ffmpeg)");
+}
+
+/**
+ * Relink an offline asset to a newly chosen file, KEEPING its id so every clip
+ * that references it recovers in place (the fix for "lost media stays red after
+ * re-selecting the path" — re-importing would mint a new id and strand the old
+ * clips). The new file's type must match the original. Returns the refreshed
+ * catalog (the asset's `missing` is recomputed → `false`).
+ */
+export async function relinkMedia(mediaRef: string, newPath: string): Promise<MediaList> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MediaList>("relink_media", { mediaRef, newPath });
+  return { items: [], folders: [] };
+}
+
+// MARK: - Timeline composite preview (#47)
+//
+// `composite_frame` renders the timeline at a frame on the GPU (wgpu compositor)
+// and returns a PNG data URL the Preview paints onto a <canvas>. `maxSize` caps
+// the longest side (px); omit for the backend default. Outside Tauri there is no
+// GPU/core, so this returns null and the Preview keeps its placeholder.
+
+/** One composited timeline frame: a PNG data URL plus its pixel size. */
+export interface CompositeFrame {
+  width: number;
+  height: number;
+  dataUrl: string;
+}
+
+export async function compositeFrame(
+  frame: number,
+  maxSize?: number,
+): Promise<CompositeFrame | null> {
+  await ensureTauri();
+  // The backend command takes an `i32`; the playhead accumulates as a float
+  // during playback, so floor to the current frame before invoking (a
+  // non-integer is rejected/coerced inconsistently by Tauri's deserializer).
+  if (invokeImpl)
+    return invokeImpl<CompositeFrame>("composite_frame", {
+      frame: Math.floor(frame),
+      maxSize,
+    });
+  return null;
+}
+
+/**
+ * Normalized waveform buckets (`0 = loud, 1 = silence`) for a media asset,
+ * computed/cached by the Rust media engine (`get_waveform`). The array spans the
+ * WHOLE source; the timeline renderer maps the clip's trimmed sub-range into it.
+ * Returns null outside Tauri (no media engine).
+ */
+export async function getWaveform(mediaRef: string): Promise<number[] | null> {
+  await ensureTauri();
+  if (invokeImpl) {
+    try {
+      return await invokeImpl<number[]>("get_waveform", { mediaRef });
+    } catch (e) {
+      // No audio track / decode failure: the caller renders nothing. Surface
+      // the reason — a silent swallow here is what masked the waveform decode
+      // backend failing for whole categories of source files.
+      console.warn(`get_waveform failed for ${mediaRef}:`, e);
+      return null;
+    }
+  }
+  return null;
+}
+
+// MARK: - BYOK secret store
+//
+// API keys are stored in the OS keychain by the Rust backend (`secret_*`
+// commands wrapping `opentake-gen`'s `KeyringStore`). The plaintext key is sent
+// only on save; every command returns a masked `SecretStatus`, so the key never
+// lives in JS memory or localStorage. Outside Tauri there is no keychain, so the
+// fallback reports "no key" — the form renders but cannot persist.
+
+const NO_SECRET: SecretStatus = { hasKey: false, masked: "" };
+
+export async function secretSave(
+  provider: string,
+  key: string,
+): Promise<SecretStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<SecretStatus>("secret_save", { provider, key });
+  return NO_SECRET;
+}
+
+export async function secretLoad(provider: string): Promise<SecretStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<SecretStatus>("secret_load", { provider });
+  return NO_SECRET;
+}
+
+export async function secretDelete(provider: string): Promise<SecretStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<SecretStatus>("secret_delete", { provider });
+  return NO_SECRET;
+}
+
+// MARK: - Events
+
+/** Subscribe to `timeline_changed`. Returns an unlisten function. No-op (and a
+ *  no-op unlisten) when not in Tauri. */
+export async function onTimelineChanged(
+  handler: (version: number) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("timeline_changed", (e) => {
+    const payload = e.payload as { version?: number } | undefined;
+    if (payload && typeof payload.version === "number") handler(payload.version);
+  });
+}
+
+export async function onProjectOpened(
+  handler: (path: string, version: number) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("project_opened", (e) => {
+    const p = e.payload as { path?: string; version?: number } | undefined;
+    if (p) handler(p.path ?? "", p.version ?? 0);
+  });
+}
+
+/** Subscribe to `media_changed` (manifest mutated by an import). The payload
+ *  carries a version; the handler just needs to know it fired so it can re-fetch
+ *  `get_media`. No-op outside Tauri. */
+export async function onMediaChanged(handler: () => void): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("media_changed", () => handler());
+}
+
+/** Subscribe to `go_home` (emitted when the window is closed/hidden so the app
+ *  keeps running in the background — the front end returns to the launcher so a
+ *  Dock-reopen shows Home, mirroring upstream "close window → Home"). No-op
+ *  outside Tauri. */
+export async function onGoHome(handler: () => void): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("go_home", () => handler());
+}
+
+// MARK: - Browser fallback (mirror, not authoritative)
+//
+// When running outside Tauri there is no Rust core; provide a small in-memory
+// timeline so the shell renders something. This is intentionally minimal — it
+// is a preview aid, not a second editing engine.
+
+import { createFallbackStore } from "./fallback";
+const fallback = createFallbackStore();

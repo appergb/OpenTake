@@ -1,0 +1,153 @@
+/*
+ * Design tokens — 1:1 transcription of upstream `UI/AppTheme.swift`
+ * (see docs/specs/frontend-UI-1to1-SPEC.md §1). Components reference these
+ * variables only; raw values are never hardcoded in component CSS.
+ * Dark theme is the only theme upstream ships.
+ */
+
+:root {
+  /* §1.1 Background (AppTheme.swift:8-23) */
+  --bg-base: rgb(10, 10, 10);
+  --bg-surface: rgb(22, 22, 22);
+  --bg-raised: rgb(30, 30, 30);
+  --bg-prominent: rgb(44, 44, 44);
+  --bg-placeholder: rgb(30, 30, 30);
+  --bg-preview-canvas: #000;
+
+  /* §1.2 Border (AppTheme.swift:27-43) */
+  --border-primary: rgba(255, 255, 255, 0.16);
+  --border-subtle: rgba(255, 255, 255, 0.12);
+  --border-divider: rgba(255, 255, 255, 0.44);
+  --bw-hairline: 0.5px;
+  --bw-thin: 1px;
+  --bw-medium: 1.5px;
+  --bw-thick: 2px;
+
+  /* §1.3 Text (AppTheme.swift:104-114) */
+  --text-primary: rgba(255, 255, 255, 1);
+  --text-secondary: rgba(255, 255, 255, 0.8);
+  --text-tertiary: rgba(255, 255, 255, 0.62);
+  --text-muted: rgba(255, 255, 255, 0.34);
+
+  /* §1.4 Accent / status / glass (AppTheme.swift:47-100) */
+  --accent-timecode: rgb(242, 153, 51);
+  --accent-primary: rgb(245, 239, 228);
+  --accent-spotlight: rgb(255, 69, 69);
+  --status-error: rgb(229, 79, 79);
+  --glass-tint: rgba(245, 239, 228, 0.05);
+  --ai-gradient: linear-gradient(135deg, #fff 0%, #c7c7c7 45%, #999 55%, #fff 100%);
+  --spotlight-gradient: linear-gradient(135deg, rgb(255, 87, 77), rgb(242, 38, 71), rgb(255, 122, 56));
+
+  /* §1.5 Track colors (AppTheme.swift:133-139, ClipType.themeColor 307-317) */
+  --track-video: rgb(0, 145, 194);
+  --track-audio: rgb(88, 168, 34);
+  --track-image: rgb(183, 45, 210);
+  --track-text: rgb(183, 45, 210);
+  --track-lottie: rgb(224, 168, 0);
+
+  /* §1.6 Radius (AppTheme.swift:143-155) */
+  --radius-xs: 3px;
+  --radius-xs-sm: 4px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-md-lg: 12px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+
+  /* §1.7 Spacing (AppTheme.swift:159-171) */
+  --space-xxs: 2px;
+  --space-xs: 4px;
+  --space-sm: 6px;
+  --space-sm-md: 8px;
+  --space-md: 10px;
+  --space-md-lg: 12px;
+  --space-lg: 14px;
+  --space-lg-xl: 16px;
+  --space-xl: 20px;
+  --space-xl-xxl: 24px;
+  --space-xxl: 28px;
+
+  /* §1.8 Font size (AppTheme.swift:175-188) */
+  --fs-micro: 8px;
+  --fs-xxs: 9px;
+  --fs-xs: 10px;
+  --fs-sm: 11px;
+  --fs-sm-md: 12px;
+  --fs-md: 13px;
+  --fs-md-lg: 14px;
+  --fs-lg: 15px;
+  --fs-xl: 18px;
+  --fs-title1: 22px;
+  --fs-title2: 28px;
+  --fs-display: 36px;
+
+  /* §1.8 Font weights */
+  --fw-light: 300;
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --fw-bold: 700;
+
+  /* §1.8 Tracking */
+  --tracking-tight: -0.5px;
+  --tracking-normal: 0;
+  --tracking-wide: 1.5px;
+
+  /* §1.8 Font families */
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", system-ui, sans-serif;
+  --font-serif: ui-serif, "New York", "Times New Roman", Georgia, serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* §1.9 Icon sizes (AppTheme.swift:210-220) */
+  --icon-xxs: 12px;
+  --icon-xs: 14px;
+  --icon-sm: 18px;
+  --icon-sm-md: 20px;
+  --icon-md: 22px;
+  --icon-md-lg: 24px;
+  --icon-lg: 26px;
+  --icon-lg-xl: 28px;
+  --icon-xl: 30px;
+
+  /* §1.10 Opacity (AppTheme.swift:118-129) */
+  --op-opaque: 1;
+  --op-subtle: 0.04;
+  --op-hint: 0.06;
+  --op-faint: 0.08;
+  --op-soft: 0.1;
+  --op-muted: 0.15;
+  --op-moderate: 0.25;
+  --op-medium: 0.35;
+  --op-strong: 0.55;
+  --op-prominent: 0.8;
+
+  /* §1.11 Shadow (AppTheme.swift:274-278) */
+  --shadow-sm: 0 0.5px 1px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.25);
+
+  /* Window chrome: macOS traffic-light safe area for the Overlay title bar
+     (titleBarStyle:Overlay keeps the close/min/zoom buttons floating over the
+     top-left of the content). Top-of-window UI must clear this region. */
+  --titlebar-safe-left: 82px;
+  --titlebar-safe-top: 44px;
+
+  /* §1.12 Animation (AppTheme.swift:282-285) */
+  --anim-hover: 150ms;
+  --anim-transition: 200ms;
+  --ease-out: cubic-bezier(0, 0, 0.58, 1);
+  --ease-in-out: cubic-bezier(0.42, 0, 0.58, 1);
+
+  /* §1.13 Composite / layout constants (Constants.swift) */
+  --panel-header-height: 28px;
+  --toolbar-height: 38px;
+  --panel-gap: 5px;
+  --tab-rail-width: 38px;
+  --context-row-height: 22px;
+
+  /* §5.2 Timeline geometry constants */
+  --ruler-height: 24px;
+  --drop-zone-height: 60px;
+  --track-header-width: 100px;
+}

@@ -1,0 +1,46 @@
+# OpenTake desktop shell (Tauri 2). Thin `#[tauri::command]` wrappers over
+# `opentake-core`'s DTO handlers + a `CoreEvent` -> Tauri-event forwarder.
+# See docs/ARCHITECTURE.md §2 and ../web for the React front end.
+
+[package]
+name = "opentake-tauri"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OpenTake desktop shell (Tauri 2)."
+
+[lib]
+name = "opentake_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "opentake"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+opentake-core = { workspace = true }
+opentake-project = { workspace = true }
+opentake-ops = { workspace = true }
+opentake-domain = { workspace = true }
+opentake-media = { workspace = true }
+opentake-render = { workspace = true }
+opentake-gen = { workspace = true }
+opentake-agent = { workspace = true }
+# Preview composite frames are returned to the WebView as a base64 PNG data URL.
+image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+# this feature is used for production builds or when `devUrl` is not set
+custom-protocol = ["tauri/custom-protocol"]

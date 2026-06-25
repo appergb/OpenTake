@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/opentake-domain",
+    "crates/opentake-ops",
+    "crates/opentake-project",
+    "crates/opentake-render",
+    "crates/opentake-media",
+    "crates/opentake-motion",
+    "crates/opentake-agent",
+    "crates/opentake-gen",
+    "crates/opentake-core",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.5"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/appergb/OpenTake"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+opentake-domain = { path = "crates/opentake-domain" }
+opentake-ops = { path = "crates/opentake-ops" }
+opentake-project = { path = "crates/opentake-project" }
+opentake-render = { path = "crates/opentake-render" }
+opentake-media = { path = "crates/opentake-media" }
+opentake-motion = { path = "crates/opentake-motion" }
+opentake-agent = { path = "crates/opentake-agent" }
+opentake-gen = { path = "crates/opentake-gen" }
+opentake-core = { path = "crates/opentake-core" }

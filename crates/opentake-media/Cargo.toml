@@ -1,0 +1,90 @@
+[package]
+name = "opentake-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Decode/probe/thumbnail/waveform/transcribe/semantic-search (ffmpeg-sidecar CLI / whisper-rs / ort)."
+
+[dependencies]
+opentake-domain = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = "2"
+anyhow = "1"
+sha2 = "0.10"
+dirs = "6"
+half = "2"
+byteorder = "1"
+ndarray = "0.16"
+tracing = "0.1"
+unicode-normalization = "0.1"
+
+# Media IO. We drive the system ffmpeg/ffprobe over the CLI rather than linking
+# libav*: the local toolchain is ffmpeg 8.1 (libavcodec 62), which the C-binding
+# crates (ffmpeg-next / ffmpeg-the-third) do not support, and pkg-config is not
+# installed. ffmpeg-sidecar shells out to the binaries on PATH — zero native
+# linkage, and it never auto-downloads here (we only use its command/parse API).
+# `default-features = false` drops the `download_ffmpeg` feature, whose ureq +
+# rustls + zip/tar/xz2 stack is the crate's only HTTP/TLS dependency and is dead
+# weight for us; the FfmpegCommand command/parse API lives in the always-on core.
+ffmpeg-sidecar = { version = "2", default-features = false }
+
+# Image decode/scale + JPEG sprite encode (image thumbnails, sprite cache,
+# SigLIP squash-resize). Default features pull readers we do not need; keep it lean.
+image = { version = "0.25", default-features = false, features = [
+    "jpeg",
+    "png",
+    "webp",
+    "tiff",
+    "bmp",
+    "gif",
+] }
+
+# SigLIP text tokenizer (same lineage as swift-transformers). onig regex backend
+# matches the HF reference; no network at runtime (loads a local tokenizer.json).
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+
+[features]
+# Default build/test must stay offline and must NOT link onnxruntime or compile
+# whisper.cpp. The heavy ML backends sit behind features; tests use mock impls.
+default = []
+# Real SigLIP2 inference via ONNX Runtime. `download-binaries` lets ort fetch a
+# prebuilt onnxruntime *when this feature is explicitly enabled* — it is off by
+# default, so plain `cargo build`/`cargo test` never touch the network.
+ort-backend = ["dep:ort"]
+# Real on-device transcription via whisper.cpp (compiles native C++ on enable).
+whisper-backend = ["dep:whisper-rs"]
+# Model weight download/verify/unzip (reqwest + zip). Off by default so the
+# default dependency tree carries no HTTP/TLS stack.
+model-download = ["dep:reqwest", "dep:zip", "dep:futures-util"]
+
+[dependencies.ort]
+version = "=2.0.0-rc.10"
+default-features = false
+features = ["std", "ndarray", "download-binaries"]
+optional = true
+
+[dependencies.whisper-rs]
+version = "0.14"
+default-features = false
+optional = true
+
+[dependencies.reqwest]
+version = "0.12"
+default-features = false
+features = ["stream", "rustls-tls"]
+optional = true
+
+[dependencies.zip]
+version = "4"
+default-features = false
+features = ["deflate"]
+optional = true
+
+[dependencies.futures-util]
+version = "0.3"
+optional = true
+
+[dev-dependencies]
+tempfile = "3"

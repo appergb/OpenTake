@@ -1,0 +1,38 @@
+[package]
+name = "opentake-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tool layer (= ToolExecutor) + MCP server (rmcp) + in-app chat client + short-id + system prompts."
+
+[dependencies]
+opentake-domain = { workspace = true }
+opentake-ops = { workspace = true }
+opentake-core = { workspace = true }
+opentake-gen = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_path_to_error = "0.1"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+regex = "1"
+async-trait = "0.1"
+futures = "0.3"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "net", "time"] }
+
+# MCP server transport (Streamable HTTP over axum/hyper) + in-app chat HTTP.
+rmcp = { version = "=0.7.0", features = [
+    "server",
+    "transport-streamable-http-server",
+    "transport-streamable-http-server-session",
+] }
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
+http = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+keyring = "3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "net", "time", "test-util"] }

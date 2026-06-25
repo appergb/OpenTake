@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "opentake-web",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["-C", "web", "dev", "--port", "4318", "--strictPort"],
+      "port": 4318
+    }
+  ]
+}

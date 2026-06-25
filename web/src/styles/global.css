@@ -1,0 +1,106 @@
+/* Global base. Imports tokens first so variables exist everywhere. */
+@import "./tokens.css";
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+  cursor: default;
+}
+
+/* Numeric fields and timecodes use tabular figures (SPEC §1.8). */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* HoverHighlight base (SPEC §9.7): faint background that fades in on hover. */
+.hover-area {
+  border-radius: var(--radius-sm);
+  transition: background-color var(--anim-hover) var(--ease-out);
+}
+.hover-area:hover {
+  background-color: rgba(255, 255, 255, var(--op-faint));
+}
+.hover-area.is-active {
+  background-color: rgba(255, 255, 255, var(--op-soft));
+}
+.hover-area.is-active:hover {
+  background-color: rgba(255, 255, 255, var(--op-muted));
+}
+
+button {
+  font-family: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: default;
+}
+
+input,
+textarea {
+  font-family: inherit;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Zoom slider (SPEC §4.3): mini track tinted accent.primary. */
+.zoom-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 2px;
+  outline: none;
+}
+.zoom-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent-primary);
+  cursor: pointer;
+}
+.zoom-slider::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent-primary);
+  cursor: pointer;
+}

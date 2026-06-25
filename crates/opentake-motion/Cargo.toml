@@ -1,0 +1,35 @@
+[package]
+name = "opentake-motion"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Web motion-graphics module: deterministic headless rendering of HTML/CSS/JS animations to RGBA frames (content-hash cached) that feed the wgpu compositor as a clip source. Issue #14 / docs/MOTION-GRAPHICS-PLUGIN.md."
+
+[dependencies]
+opentake-domain = { workspace = true }
+# DecodedFrame / SourceMetrics / FrameProvider — the render crate DEFINES the
+# clip-source contracts; we IMPLEMENT them so a motion clip is just another
+# texture source to the compositor (zero special handling).
+opentake-render = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Content-hash cache key over (source + params + fps + size). sha2 0.10 + hex are
+# already vendored in Cargo.lock, so the build/test path stays fully offline.
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "1"
+
+[dev-dependencies]
+# Offline PNG round-trip for the stub renderer's frame-file checks (mirrors the
+# render crate's dev-dep; no network, no assets).
+image = { version = "0.25", default-features = false, features = ["png"] }
+tempfile = "3"
+
+[features]
+default = []
+# Gates the real headless-Chromium (CDP) backend behind a feature so neither the
+# default build nor CI tests require a Chromium binary. The skeleton compiles
+# unconditionally; only the live CDP wiring is feature-gated (see renderer.rs).
+chromium = []
