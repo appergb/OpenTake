@@ -8,7 +8,7 @@
  */
 
 import { useState } from "react";
-import { Plus, FolderOpen, Settings as SettingsIcon, Film, Trash2, Library } from "lucide-react";
+import { Plus, FolderOpen, Settings as SettingsIcon, Film, Trash2, Library, LogIn, LogOut, FileQuestion, Sparkles } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { useT, type TFunction } from "../../i18n";
 import { useEditorUiStore } from "../../store/uiStore";
@@ -21,6 +21,23 @@ import {
 
 export function HomeView() {
   const t = useT();
+  const [signedIn, setSignedIn] = useState(false);
+  const [seenWelcome, setSeenWelcome] = useState(
+    () => typeof localStorage !== "undefined" && localStorage.getItem("seenWelcome") === "true",
+  );
+  const [seenBadge, setSeenBadge] = useState(
+    () => typeof localStorage !== "undefined" && localStorage.getItem("seenVersionBadge") === __APP_VERSION__,
+  );
+
+  const dismissWelcome = () => {
+    localStorage.setItem("seenWelcome", "true");
+    setSeenWelcome(true);
+  };
+  const dismissBadge = () => {
+    localStorage.setItem("seenVersionBadge", __APP_VERSION__);
+    setSeenBadge(true);
+  };
+
   return (
     <div
       style={{
@@ -29,9 +46,10 @@ export function HomeView() {
         width: "100%",
         background: "var(--bg-base)",
         color: "var(--text-primary)",
+        position: "relative",
       }}
     >
-      <Sidebar />
+      <Sidebar signedIn={signedIn} onToggleSignIn={() => setSignedIn((v) => !v)} />
       <main
         style={{
           flex: 1,
@@ -46,6 +64,7 @@ export function HomeView() {
           data-tauri-drag-region
           style={{
             padding: "var(--space-xxl) var(--space-xl-xxl) var(--space-xl)",
+            position: "relative",
           }}
         >
           <h1
@@ -69,6 +88,32 @@ export function HomeView() {
           >
             {t("app.tagline")}
           </p>
+          {!seenBadge && (
+            <button
+              type="button"
+              onClick={dismissBadge}
+              style={{
+                position: "absolute",
+                top: "var(--space-xl)",
+                right: "var(--space-xl-xxl)",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                height: 26,
+                padding: "0 var(--space-md)",
+                borderRadius: "var(--radius-lg)",
+                background: "var(--accent-primary)",
+                color: "#fff",
+                fontSize: "var(--fs-xs)",
+                fontWeight: "var(--fw-semibold)",
+                border: "none",
+                cursor: "pointer",
+              }}
+            >
+              <Icon icon={Sparkles} size={12} />
+              {t("home.newInVersion", { version: __APP_VERSION__ })}
+            </button>
+          )}
         </header>
 
         <h2
@@ -80,15 +125,91 @@ export function HomeView() {
             color: "var(--text-secondary)",
           }}
         >
+          {t("home.samples")}
+        </h2>
+        <SampleProjectsStrip t={t} />
+
+        <h2
+          style={{
+            margin: 0,
+            padding: "var(--space-lg) var(--space-xl-xxl) var(--space-sm)",
+            fontSize: "var(--fs-md)",
+            fontWeight: "var(--fw-semibold)",
+            color: "var(--text-secondary)",
+          }}
+        >
           {t("home.myProjects")}
         </h2>
         <ProjectGrid />
       </main>
+
+      {/* Welcome overlay — first launch only */}
+      {!seenWelcome && (
+        <div
+          onClick={dismissWelcome}
+          style={{
+            position: "absolute",
+            inset: 0,
+            zIndex: 100,
+            background: "rgba(0,0,0,0.65)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "var(--bg-raised)",
+              border: "var(--bw-thin) solid var(--border-primary)",
+              borderRadius: "var(--radius-lg)",
+              padding: "var(--space-xl-xxl)",
+              maxWidth: 400,
+              textAlign: "center",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: "var(--space-lg)",
+            }}
+          >
+            <Icon icon={Film} size={40} strokeWidth={1.2} />
+            <h2 style={{ margin: 0, fontSize: "var(--fs-title2)", fontWeight: "var(--fw-light)" }}>
+              {t("home.welcomeOverlayTitle")}
+            </h2>
+            <p style={{ margin: 0, fontSize: "var(--fs-sm-md)", color: "var(--text-tertiary)" }}>
+              {t("home.welcomeOverlayBody")}
+            </p>
+            <button
+              type="button"
+              onClick={dismissWelcome}
+              style={{
+                height: 34,
+                padding: "0 var(--space-xl)",
+                borderRadius: "var(--radius-sm)",
+                background: "var(--accent-primary)",
+                color: "#fff",
+                fontSize: "var(--fs-md)",
+                fontWeight: "var(--fw-semibold)",
+                border: "none",
+                cursor: "pointer",
+              }}
+            >
+              {t("home.welcomeOverlayStart")}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function Sidebar() {
+function Sidebar({
+  signedIn,
+  onToggleSignIn,
+}: {
+  signedIn: boolean;
+  onToggleSignIn: () => void;
+}) {
   const t = useT();
   const setView = useEditorUiStore((s) => s.setView);
   const [opening, setOpening] = useState(false);
@@ -140,6 +261,11 @@ function Sidebar() {
       <div style={{ flex: 1 }} />
 
       <SidebarRow icon={SettingsIcon} label={t("home.settings")} onClick={() => setView("settings")} />
+      <SidebarRow
+        icon={signedIn ? LogOut : LogIn}
+        label={signedIn ? t("home.signOut") : t("home.signIn")}
+        onClick={onToggleSignIn}
+      />
     </aside>
   );
 }
@@ -175,6 +301,53 @@ function SidebarRow({
       <Icon icon={icon} size={15} />
       <span>{label}</span>
     </button>
+  );
+}
+
+/** Strip of sample projects (Issue #40 review — "SampleProjectsStrip 示例区"). */
+function SampleProjectsStrip({ t }: { t: TFunction }) {
+  const samples = [
+    { key: "demo", label: t("home.sampleDemo") },
+    { key: "tutorial", label: t("home.sampleTutorial") },
+    { key: "template", label: t("home.sampleTemplate") },
+    { key: "more", label: "…" },
+  ];
+
+  return (
+    <div
+      style={{
+        padding: "0 var(--space-xl-xxl) var(--space-md)",
+        display: "flex",
+        gap: "var(--space-md)",
+        overflowX: "auto",
+      }}
+    >
+      {samples.map((s) => (
+        <button
+          key={s.key}
+          type="button"
+          onClick={() => alert(t("home.sampleComingSoon"))}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            height: 80,
+            minWidth: 140,
+            borderRadius: "var(--radius-md)",
+            background: "var(--bg-raised)",
+            border: "var(--bw-thin) solid var(--border-primary)",
+            color: "var(--text-secondary)",
+            fontSize: "var(--fs-sm-md)",
+            fontWeight: "var(--fw-medium)",
+            cursor: "pointer",
+            whiteSpace: "nowrap",
+          }}
+        >
+          <Icon icon={Film} size={18} strokeWidth={1.4} />
+          <span style={{ marginLeft: "var(--space-sm)" }}>{s.label}</span>
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -290,6 +463,15 @@ function ProjectCard({ entry }: { entry: RecentProject }) {
   const t = useT();
   const remove = useRecentStore((s) => s.remove);
   const [hovered, setHovered] = useState(false);
+  const [missing, setMissing] = useState(false);
+
+  const handleOpen = async () => {
+    try {
+      await openProjectPath(entry.path);
+    } catch {
+      setMissing(true);
+    }
+  };
 
   return (
     <div
@@ -304,7 +486,7 @@ function ProjectCard({ entry }: { entry: RecentProject }) {
     >
       <button
         type="button"
-        onClick={() => void openProjectPath(entry.path)}
+        onClick={() => void handleOpen()}
         style={{ display: "block", width: "100%", textAlign: "left" }}
       >
         <div
@@ -354,6 +536,26 @@ function ProjectCard({ entry }: { entry: RecentProject }) {
               {entry.name}
             </span>
           </div>
+          {/* File missing overlay (Issue #40 review) */}
+          {missing && (
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                background: "rgba(0,0,0,0.55)",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: "var(--space-xs)",
+                color: "var(--text-muted)",
+                pointerEvents: "none",
+              }}
+            >
+              <Icon icon={FileQuestion} size={22} strokeWidth={1.4} />
+              <span style={{ fontSize: "var(--fs-xs)" }}>{t("home.fileMissing")}</span>
+            </div>
+          )}
         </div>
         <div
           className="tabular"

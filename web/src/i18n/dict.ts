@@ -197,6 +197,10 @@ const zh: Dict = {
   "settings.section.mcp": "MCP 说明",
   "settings.section.storage": "存储",
   "settings.section.notifications": "通知",
+  "settings.section.models": "模型",
+  "settings.section.privacy": "隐私",
+  "settings.section.shortcuts": "快捷键",
+  "settings.section.account": "账户",
 
   // MCP Instructions pane
   "mcp.title": "MCP 服务器连接说明",
@@ -232,6 +236,48 @@ const zh: Dict = {
   "notifications.generation": "生成完成通知",
   "notifications.generationDesc": "当 AI 生成任务完成时显示系统通知。",
   "notifications.restartHint": "更改将在下次启动应用时生效。",
+
+  // Storage extra
+  "storage.clearCacheUnavailable": "清除缓存功能将在后续版本上线。",
+
+  // Models pane
+  "settings.modelsDesc": "选择 AI 生成使用的模型。",
+  "settings.modelsProviderModel": "模型",
+  "settings.modelsModelDesc": "当前服务商可用的模型。",
+
+  // Privacy pane
+  "settings.privacyTelemetry": "发送匿名使用统计",
+  "settings.privacyTelemetryDesc": "帮助我们改进 OpenTake。不会发送任何项目内容。",
+  "settings.privacyCrash": "发送崩溃报告",
+  "settings.privacyCrashDesc": "应用崩溃时自动发送报告。",
+
+  // Shortcuts pane
+  "settings.shortcutsPlay": "播放/暂停",
+  "settings.shortcutsUndo": "撤销",
+  "settings.shortcutsRedo": "重做",
+  "settings.shortcutsDelete": "删除片段",
+  "settings.shortcutsSave": "保存",
+  "settings.shortcutsNew": "新建",
+
+  // Account pane
+  "settings.accountSignIn": "使用 Google 登录",
+  "settings.accountSignOut": "退出登录",
+  "settings.accountSignedInAs": "已登录为",
+  "settings.accountNotSignedIn": "未登录",
+
+  // Home extended
+  "home.signIn": "登录",
+  "home.signOut": "退出",
+  "home.fileMissing": "文件缺失",
+  "home.samples": "示例项目",
+  "home.sampleDemo": "产品演示",
+  "home.sampleTutorial": "快速教程",
+  "home.sampleTemplate": "模板项目",
+  "home.sampleComingSoon": "示例项目即将上线",
+  "home.newInVersion": "v{version} 新功能",
+  "home.welcomeOverlayTitle": "欢迎使用 OpenTake",
+  "home.welcomeOverlayBody": "点击「新建」开始你的第一个项目。",
+  "home.welcomeOverlayStart": "开始",
 
   // Home relative time
   "home.relative.today": "今天",
@@ -437,6 +483,10 @@ const en: Dict = {
   "settings.section.mcp": "MCP Instructions",
   "settings.section.storage": "Storage",
   "settings.section.notifications": "Notifications",
+  "settings.section.models": "Models",
+  "settings.section.privacy": "Privacy",
+  "settings.section.shortcuts": "Shortcuts",
+  "settings.section.account": "Account",
 
   // MCP Instructions pane
   "mcp.title": "MCP Server Connection Guide",
@@ -472,6 +522,48 @@ const en: Dict = {
   "notifications.generation": "Generation-complete notifications",
   "notifications.generationDesc": "Show a system notification when an AI generation task finishes.",
   "notifications.restartHint": "Changes take effect on the next app launch.",
+
+  // Storage extra
+  "storage.clearCacheUnavailable": "Cache clearing will arrive in a later release.",
+
+  // Models pane
+  "settings.modelsDesc": "Select the model for AI generation.",
+  "settings.modelsProviderModel": "Model",
+  "settings.modelsModelDesc": "Available models for the current provider.",
+
+  // Privacy pane
+  "settings.privacyTelemetry": "Anonymous usage telemetry",
+  "settings.privacyTelemetryDesc": "Help us improve OpenTake. No project content is ever sent.",
+  "settings.privacyCrash": "Crash reports",
+  "settings.privacyCrashDesc": "Automatically send reports when the app crashes.",
+
+  // Shortcuts pane
+  "settings.shortcutsPlay": "Play/Pause",
+  "settings.shortcutsUndo": "Undo",
+  "settings.shortcutsRedo": "Redo",
+  "settings.shortcutsDelete": "Delete clip",
+  "settings.shortcutsSave": "Save",
+  "settings.shortcutsNew": "New",
+
+  // Account pane
+  "settings.accountSignIn": "Sign in with Google",
+  "settings.accountSignOut": "Sign out",
+  "settings.accountSignedInAs": "Signed in as",
+  "settings.accountNotSignedIn": "Not signed in",
+
+  // Home extended
+  "home.signIn": "Sign in",
+  "home.signOut": "Sign out",
+  "home.fileMissing": "File missing",
+  "home.samples": "Sample projects",
+  "home.sampleDemo": "Product demo",
+  "home.sampleTutorial": "Quick tutorial",
+  "home.sampleTemplate": "Template project",
+  "home.sampleComingSoon": "Sample projects coming soon",
+  "home.newInVersion": "New in v{version}",
+  "home.welcomeOverlayTitle": "Welcome to OpenTake",
+  "home.welcomeOverlayBody": "Click \"New Project\" to start your first project.",
+  "home.welcomeOverlayStart": "Get started",
 
   // Home relative time
   "home.relative.today": "Today",
