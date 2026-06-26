@@ -11,10 +11,9 @@ import { LAYOUT, ZOOM } from "../../lib/theme";
 import {
   contentHeight,
   contentWidth,
+  dropTargetAt,
   frameAt,
   totalFrames,
-  trackAt,
-  trackY,
 } from "../../lib/geometry";
 import { firstAudioIndex } from "../../lib/zones";
 import { clampTrimDeltaFrames, trimSourceValues } from "../../lib/clip";
@@ -25,7 +24,16 @@ import { paintRuler } from "./rulerCanvas";
 import { TrackHeaderColumn } from "./TrackHeaderColumn";
 import { Playhead } from "./Playhead";
 import { SnapIndicator } from "./SnapIndicator";
-import { hitTestClip, expandLinkGroup, clipsInRect, audioVolumeKfHit, type ClipHit } from "./hitTest";
+import {
+  hitTestClip,
+  expandLinkGroup,
+  clipsInRect,
+  audioVolumeKfHit,
+  fadeKneeHit,
+  fadeFramesForDrag,
+  type ClipHit,
+  type FadeEdge,
+} from "./hitTest";
 import { ClipContextMenu } from "./ClipContextMenu";
 import { MEDIA_DND_TYPE } from "../media/MediaPanel";
 import { useProjectStore } from "../../store/projectStore";
@@ -35,15 +43,13 @@ import * as edit from "../../store/editActions";
 import { forceRefresh } from "../../store/sync";
 import { isTauri } from "../../lib/api";
 import { getWaveform } from "../../lib/api";
-import type { ClipType } from "../../lib/types";
+import type { ClipType, Timeline } from "../../lib/types";
 
-/** Where a move/duplicate drag will land. `newTrack` creates a fresh track of
- *  `trackType` below the last existing one (upstream `placeClip` auto-track-
- *  creation), so dragging into the empty area below the track region still
- *  produces a clip. */
+/** Where a move/duplicate drag will land. `newTrack` inserts before `index`
+ *  (upstream `newTrackAt(index)`), clamped into visual/audio zones by the core. */
 type DropTarget =
   | { kind: "existing"; trackIndex: number }
-  | { kind: "newTrack"; trackType: ClipType };
+  | { kind: "newTrack"; index: number; trackType: ClipType };
 
 type DragState =
   | { kind: "scrub" }
@@ -63,6 +69,14 @@ type DragState =
   | { kind: "trimLeft" | "trimRight"; hit: ClipHit; startTrim: number; deltaFrames: number }
   | { kind: "marquee"; startDocX: number; startDocY: number; curDocX: number; curDocY: number }
   | { kind: "audioVolumeKf"; clipId: string; fromFrame: number; ghostFrame: number }
+  | {
+      kind: "fadeKnee";
+      clipId: string;
+      edge: FadeEdge;
+      originalFrames: number;
+      grabFrame: number;
+      currentFrames: number;
+    }
   | null;
 
 /** New-track kind for a dragged clip: audio clips → "audio", everything else
@@ -70,6 +84,14 @@ type DragState =
  *  and upstream `placeClip`). */
 function newTrackTypeFor(clip: { mediaType: ClipType }): ClipType {
   return clip.mediaType === "audio" ? "audio" : "video";
+}
+
+export function collectMoveSnapTargets(
+  timeline: Timeline,
+  excluded: Set<string>,
+  _activeFrame: number,
+) {
+  return collectTargets(timeline, excluded, null);
 }
 
 export function TimelineContainer() {
@@ -110,7 +132,9 @@ export function TimelineContainer() {
   const snapStateRef = useRef<{ frame: number; probeOffset: number } | null>(null);
   const [snapFrame, setSnapFrame] = useState<number | null>(null);
   const [dragTick, forceTick] = useState(0);
-  const [menu, setMenu] = useState<{ clipId: string; x: number; y: number } | null>(null);
+  const [menu, setMenu] = useState<{ clipId: string; x: number; y: number; fadeEdge?: FadeEdge } | null>(
+    null,
+  );
   const t = useT();
   // Waveform sample cache (media id → buckets), loaded on demand from Rust.
   const waveformsRef = useRef<Map<string, number[]>>(new Map());
@@ -197,6 +221,7 @@ export function TimelineContainer() {
         trackDelta: d.targetTrack - d.startTrack,
         isDuplicate: d.isDuplicate,
         newTrackType: d.dropTarget.kind === "newTrack" ? d.dropTarget.trackType : undefined,
+        newTrackIndex: d.dropTarget.kind === "newTrack" ? d.dropTarget.index : undefined,
       };
     } else if (d?.kind === "trimLeft" || d?.kind === "trimRight") {
       drag = {
@@ -211,6 +236,13 @@ export function TimelineContainer() {
         clipId: d.clipId,
         fromFrame: d.fromFrame,
         ghostFrame: d.ghostFrame,
+      };
+    } else if (d?.kind === "fadeKnee") {
+      drag = {
+        kind: "fadeKnee",
+        clipId: d.clipId,
+        edge: d.edge,
+        currentFrames: d.currentFrames,
       };
     }
     paintTimeline(ctx, {
@@ -389,6 +421,10 @@ export function TimelineContainer() {
       }
 
       const hit = hitTestClip(timeline, docX, docY, zoomScale, trackHeights);
+      const fadeHit =
+        !e.metaKey && !e.shiftKey
+          ? fadeKneeHit(timeline, docX, docY, zoomScale, trackHeights)
+          : null;
 
       // Razor tool + clip -> split at the (snapped) click frame. Snapping to
       // clip edges / playhead matches upstream's razor (a cut landing on the
@@ -459,8 +495,18 @@ export function TimelineContainer() {
         }
         selectClips(nextSel);
 
-        // Sub-region: trim handles before body move.
-        if (hit.region === "trimLeft" && !e.altKey) {
+        // Fade knees sit in a 14px upstream hit square that can overlap the 4px
+        // trim handle, so they win before trim/body routing.
+        if (fadeHit && fadeHit.clipId === hit.clip.id && !e.altKey) {
+          dragRef.current = {
+            kind: "fadeKnee",
+            clipId: hit.clip.id,
+            edge: fadeHit.edge,
+            originalFrames: fadeHit.currentFrames,
+            grabFrame: frameAt(docX, zoomScale),
+            currentFrames: fadeHit.currentFrames,
+          };
+        } else if (hit.region === "trimLeft" && !e.altKey) {
           dragRef.current = {
             kind: "trimLeft",
             hit,
@@ -522,7 +568,7 @@ export function TimelineContainer() {
         // Snap: probe every companion's start+end (multi-probe, SPEC §5.8) and
         // keep the snap engaged across moves via snapStateRef (sticky band).
         const excluded = new Set(d.companions);
-        const targets = collectTargets(timeline, excluded, activeFrame, true);
+        const targets = collectMoveSnapTargets(timeline, excluded, activeFrame);
         const leadStart = d.hit.clip.startFrame;
         const probes: number[] = [];
         const probeOffsets: number[] = [];
@@ -559,33 +605,18 @@ export function TimelineContainer() {
           snapped = null;
           snapStateRef.current = null;
         }
-        // Drop target: existing track under the cursor, or a new track when the
-        // pointer is below the last track's bottom (upstream `placeClip` auto-
-        // track-creation). `trackAt` returns null both above and below the track
-        // region; only treat the below-last-track case as a new-track drop.
-        const hovered = trackAt(timeline, docY, trackHeights);
+        // Drop target: upstream insert zones can create a new track above,
+        // between, or below existing tracks.
+        const hovered = dropTargetAt(timeline, docY, trackHeights);
         let targetTrack: number;
         let dropTarget: DropTarget;
-        if (hovered !== null) {
-          targetTrack = hovered;
-          dropTarget = { kind: "existing", trackIndex: hovered };
+        if (hovered.kind === "existing") {
+          targetTrack = hovered.trackIndex;
+          dropTarget = { kind: "existing", trackIndex: hovered.trackIndex };
         } else {
-          const lastTrackBottom =
-            timeline.tracks.length > 0
-              ? trackY(timeline, timeline.tracks.length, trackHeights)
-              : LAYOUT.rulerHeight + LAYOUT.dropZoneHeight;
-          if (docY >= lastTrackBottom) {
-            // Below the last track → create a new track on drop.
-            const trackType = newTrackTypeFor(d.hit.clip);
-            dropTarget = { kind: "newTrack", trackType };
-            // Clamp the ghost to the last existing track for rendering; the
-            // actual new track is created on pointer-up.
-            targetTrack = Math.max(0, timeline.tracks.length - 1);
-          } else {
-            // Above the first track (ruler/drop zone) → keep the previous target.
-            targetTrack = d.targetTrack;
-            dropTarget = d.dropTarget;
-          }
+          const trackType = newTrackTypeFor(d.hit.clip);
+          dropTarget = { kind: "newTrack", index: hovered.index, trackType };
+          targetTrack = Math.max(0, Math.min(timeline.tracks.length - 1, hovered.index));
         }
         dragRef.current = { ...d, deltaFrames, targetTrack, dropTarget };
         setSnapFrame(snapped);
@@ -610,6 +641,22 @@ export function TimelineContainer() {
         }
         ghostFrame = Math.max(0, Math.min(clip.durationFrames, ghostFrame));
         dragRef.current = { ...d, ghostFrame };
+        forceTick((n) => n + 1);
+        return;
+      }
+
+      if (d.kind === "fadeKnee") {
+        const loc = findClipLoc(timeline, d.clipId);
+        if (!loc) return;
+        const clip = timeline.tracks[loc[0]].clips[loc[1]];
+        const currentFrames = fadeFramesForDrag(
+          clip,
+          d.edge,
+          d.originalFrames,
+          d.grabFrame,
+          frameAt(docX, zoomScale),
+        );
+        dragRef.current = { ...d, currentFrames };
         forceTick((n) => n + 1);
         return;
       }
@@ -694,19 +741,27 @@ export function TimelineContainer() {
         const minStart = Math.min(...locs.map((l) => l.clip.startFrame));
         const frameDelta = Math.max(d.deltaFrames, -minStart);
 
-        // Drop below the last track → create a new track first, then move/dup.
+        // Drop on an insert zone → create a new track first, then move/dup.
         if (d.dropTarget.kind === "newTrack") {
           const trackType = d.dropTarget.trackType;
+          const dropIndex = d.dropTarget.index;
           const isDup = d.isDuplicate;
           const locSnapshot = locs.map((l) => ({ id: l.id, ti: l.ti, startFrame: l.clip.startFrame }));
           void (async () => {
-            await edit.insertTrack(trackType);
+            const insertResult = await edit.insertTrack(trackType, dropIndex);
             // Ensure the mirror reflects the new track before computing the
             // target index (Tauri's timeline_changed is async; browser mode
             // already refreshed inside applyAndRefresh).
             if (isTauri) await forceRefresh();
             const tl = useProjectStore.getState().timeline;
-            const newTrackIndex = tl.tracks.length - 1; // appended at end
+            const insertedTrackId = insertResult?.affectedClipIds[0];
+            const insertedIndex = insertedTrackId
+              ? tl.tracks.findIndex((track) => track.id === insertedTrackId)
+              : -1;
+            const newTrackIndex =
+              insertedIndex >= 0
+                ? insertedIndex
+                : Math.max(0, Math.min(dropIndex, tl.tracks.length - 1));
             if (isDup) {
               await edit.duplicateClips(
                 locSnapshot.map((l) => l.id),
@@ -772,6 +827,17 @@ export function TimelineContainer() {
         return;
       }
 
+      if (d.kind === "fadeKnee") {
+        if (d.currentFrames !== d.originalFrames) {
+          const properties =
+            d.edge === "left"
+              ? { fadeInFrames: d.currentFrames }
+              : { fadeOutFrames: d.currentFrames };
+          void edit.setClipProperties([d.clipId], properties);
+        }
+        return;
+      }
+
       if (d.kind === "trimLeft" || d.kind === "trimRight") {
         if (d.deltaFrames === 0) return;
         const edge = d.kind === "trimLeft" ? "left" : "right";
@@ -804,6 +870,11 @@ export function TimelineContainer() {
       const hit = hitTestClip(timeline, docX, docY, zoomScale, trackHeights);
       if (!hit) return; // empty space: keep the default (suppressed) menu
       e.preventDefault();
+      const fadeHit = fadeKneeHit(timeline, docX, docY, zoomScale, trackHeights);
+      if (fadeHit?.clipId === hit.clip.id) {
+        setMenu({ clipId: hit.clip.id, fadeEdge: fadeHit.edge, x: e.clientX, y: e.clientY });
+        return;
+      }
       // If the clip isn't already selected, select just it so menu actions
       // target the right clip.
       if (!selectedClipIds.has(hit.clip.id)) {
@@ -821,6 +892,7 @@ export function TimelineContainer() {
   const onMediaDragOver = useCallback((e: React.DragEvent) => {
     if (!e.dataTransfer.types.includes(MEDIA_DND_TYPE)) return;
     e.preventDefault();
+    e.stopPropagation();
     e.dataTransfer.dropEffect = "copy";
   }, []);
 
@@ -828,13 +900,16 @@ export function TimelineContainer() {
     (e: React.DragEvent) => {
       if (!e.dataTransfer.types.includes(MEDIA_DND_TYPE)) return;
       e.preventDefault();
+      e.stopPropagation();
       const id = e.dataTransfer.getData(MEDIA_DND_TYPE);
       const item = useMediaStore.getState().items.find((m) => m.id === id);
       if (!item) return;
       const { docX, docY } = toDoc(e);
       const startFrame = Math.max(0, Math.round(frameAt(docX, zoomScale)));
-      const preferredTrackIndex = trackAt(timeline, docY, trackHeights);
-      void edit.addMediaToTimelineAt(item, startFrame, preferredTrackIndex);
+      const target = dropTargetAt(timeline, docY, trackHeights);
+      const preferredTrackIndex = target.kind === "existing" ? target.trackIndex : null;
+      const insertTrackAt = target.kind === "newTrack" ? target.index : undefined;
+      void edit.addMediaToTimelineAt(item, startFrame, preferredTrackIndex, insertTrackAt);
     },
     [toDoc, zoomScale, timeline, trackHeights],
   );
@@ -902,6 +977,7 @@ export function TimelineContainer() {
       {menu && (
         <ClipContextMenu
           clipId={menu.clipId}
+          fadeEdge={menu.fadeEdge}
           x={menu.x}
           y={menu.y}
           onClose={() => setMenu(null)}

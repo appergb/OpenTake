@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { clampTrimDeltaFrames, trimSourceValues, trimToPlayheadEdits } from "./clip";
+import {
+  clampTrimDeltaFrames,
+  fitTransformForMedia,
+  mediaCanvasAspect,
+  resizeTransformKeepingSourceAspect,
+  trimSourceValues,
+  trimToPlayheadEdits,
+} from "./clip";
 import type { Clip, ClipType } from "./types";
 
 function tc(over: Partial<{ durationFrames: number; speed: number; trimStartFrame: number; trimEndFrame: number; mediaType: ClipType }> = {}) {
@@ -83,5 +90,78 @@ describe("trimToPlayheadEdits", () => {
     expect(trimToPlayheadEdits([c], 200, "right")).toEqual([]); // exactly at end
     expect(trimToPlayheadEdits([c], 40, "left")).toEqual([]); // before the clip
     expect(trimToPlayheadEdits([c], 999, "right")).toEqual([]); // after the clip
+  });
+});
+
+describe("media aspect transform helpers", () => {
+  it("fits 16:9 media to a 16:9 canvas without changing normalized size", () => {
+    expect(fitTransformForMedia(1920, 1080, 1920, 1080)).toMatchObject({
+      width: 1,
+      height: 1,
+    });
+    expect(mediaCanvasAspect(1920, 1080, 1920, 1080)).toBeCloseTo(1);
+  });
+
+  it("fits vertical media inside a horizontal canvas like upstream fitTransform", () => {
+    const fitted = fitTransformForMedia(1080, 1920, 1920, 1080);
+
+    expect(fitted.width).toBeCloseTo(0.31640625);
+    expect(fitted.height).toBe(1);
+    expect(fitted.centerX).toBe(0.5);
+    expect(fitted.centerY).toBe(0.5);
+    expect(mediaCanvasAspect(1080, 1920, 1920, 1080)).toBeCloseTo(0.31640625);
+  });
+
+  it("uses upstream's loose aspect tolerance for nearly matching media", () => {
+    expect(fitTransformForMedia(1910, 1080, 1920, 1080)).toMatchObject({
+      width: 1,
+      height: 1,
+    });
+  });
+
+  it("resizes by width while preserving source aspect relative to the canvas", () => {
+    const resized = resizeTransformKeepingSourceAspect(
+      {
+        centerX: 0.5,
+        centerY: 0.5,
+        width: 0.31640625,
+        height: 1,
+        rotation: 0,
+        flipHorizontal: false,
+        flipVertical: false,
+      },
+      0.5,
+      mediaCanvasAspect(1080, 1920, 1920, 1080),
+    );
+
+    expect(resized.width).toBeCloseTo(0.5);
+    expect(resized.height).toBeCloseTo(1.5802469);
+    expect(resized.centerX).toBe(0.5);
+    expect(resized.centerY).toBe(0.5);
+  });
+
+  it("keeps current transform aspect when source dimensions are unavailable", () => {
+    const resized = resizeTransformKeepingSourceAspect(
+      {
+        centerX: 0.4,
+        centerY: 0.6,
+        width: 0.8,
+        height: 0.2,
+        rotation: 12,
+        flipHorizontal: true,
+        flipVertical: false,
+      },
+      0.5,
+      null,
+    );
+
+    expect(resized).toMatchObject({
+      centerX: 0.4,
+      centerY: 0.6,
+      width: 0.5,
+      height: 0.125,
+      rotation: 12,
+      flipHorizontal: true,
+    });
   });
 });

@@ -2,9 +2,9 @@
 //! it (`MotionRenderRequest`), and the result handle (`RenderedClip`).
 //!
 //! These are pure, serializable, and fully unit-testable — no renderer, no IO.
-//! `MotionSource` is what the domain's `MediaSource` gains a `Motion { .. }` arm
-//! for (docs/MOTION-GRAPHICS-PLUGIN.md §2); keeping it here lets the domain crate
-//! stay dependency-free while this crate owns the web-engine specifics.
+//! In the Motion Canvas v1 plan, rendered videos are imported as ordinary media;
+//! these types remain for the later native fallback/frame-sequence path so the
+//! domain crate can stay dependency-free while this crate owns web-engine details.
 
 use std::collections::BTreeMap;
 
@@ -14,7 +14,7 @@ use crate::error::{MotionError, MotionResult};
 
 /// Hard caps on a render request, expressed as types so out-of-range inputs are
 /// rejected at the boundary rather than melting an offscreen engine. These mirror
-/// the "资源/时长上限" requirement in docs/MOTION-GRAPHICS-PLUGIN.md §5.
+/// the fallback renderer's resource/time-budget requirements.
 pub mod limits {
     /// Max frames in one render (e.g. 60 fps × 60 s). A motion graphic is an
     /// overlay/title, not a feature film — long durations belong on the timeline
@@ -61,10 +61,12 @@ impl ParamValue {
     }
 }
 
-/// Where a motion graphic's animation comes from. The two arms map 1:1 to the
-/// two usage levels in docs/MOTION-GRAPHICS-PLUGIN.md §4:
-/// - `Code` — the agent writes a self-contained HTML/CSS/JS animation inline
-///   ("即兴模式").
+/// Where a native fallback motion graphic's animation comes from. These two
+/// arms are retained for the later HTML/CSS/frame-cache path documented in
+/// docs/MOTION-GRAPHICS-PLUGIN.md:
+/// - `Code` — the native fallback path stores a self-contained HTML/CSS/JS
+///   animation inline ("即兴模式"). The v1 Motion Canvas plugin stores its own
+///   project metadata outside this enum and imports a rendered video instead.
 /// - `Template` — instantiate a registered plugin by id with bound params
 ///   ("模板/插件模式").
 ///
@@ -77,7 +79,7 @@ pub enum MotionSource {
     /// renderer (see [`crate::renderer`]); authors animate against
     /// `OpenTake.seek(seconds)` / `document.timeline.currentTime`.
     Code {
-        /// The HTML/CSS/JS document text.
+        /// The HTML/CSS/JS document text for the native fallback path.
         html_css_js: String,
     },
     /// Instantiate a registered template by id with concrete parameter bindings.

@@ -13,18 +13,58 @@ import { t } from "../i18n";
 import * as edit from "../store/editActions";
 import { saveCurrentProject } from "../store/projectActions";
 import { ZOOM } from "../lib/theme";
+import type { AppView } from "../store/uiStore";
 
 /** Per-keypress zoom step for ⌘+ / ⌘- (剪映: Cmd + +/-). */
 const ZOOM_KEY_STEP = 1.3;
 
 function isTextEntry(target: EventTarget | null): boolean {
+  if (typeof HTMLElement === "undefined") return false;
   if (!(target instanceof HTMLElement)) return false;
   const tag = target.tagName;
   return tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable;
 }
 
+export function shouldHandleTransportSpaceKey(e: KeyboardEvent, view: AppView): boolean {
+  return (
+    view === "editor" &&
+    e.code === "Space" &&
+    !e.metaKey &&
+    !e.ctrlKey &&
+    !e.altKey &&
+    !isTextEntry(e.target)
+  );
+}
+
+interface TransportSpaceUi {
+  view: AppView;
+  previewMediaId: string | null;
+  requestMediaPreviewToggle: () => void;
+  togglePlay: () => void;
+}
+
+export function handleTransportSpaceKeyDown(
+  e: KeyboardEvent,
+  ui: TransportSpaceUi,
+): boolean {
+  if (!shouldHandleTransportSpaceKey(e, ui.view)) return false;
+  e.preventDefault();
+  e.stopPropagation();
+  if (e.repeat) return true;
+  if (ui.previewMediaId) {
+    ui.requestMediaPreviewToggle();
+  } else {
+    ui.togglePlay(); // rewinds from the parked end frame on replay
+  }
+  return true;
+}
+
 export function useKeyboardShortcuts() {
   useEffect(() => {
+    const handleSpaceKeyDown = (e: KeyboardEvent) => {
+      const ui = useEditorUiStore.getState();
+      handleTransportSpaceKeyDown(e, ui);
+    };
     const handler = (e: KeyboardEvent) => {
       if (isTextEntry(e.target)) return;
       const ui = useEditorUiStore.getState();
@@ -126,14 +166,6 @@ export function useKeyboardShortcuts() {
 
       // Unmodified keys.
       switch (e.code) {
-        case "Space":
-          e.preventDefault();
-          if (ui.previewMediaId) {
-            ui.requestMediaPreviewToggle();
-          } else {
-            ui.togglePlay(); // rewinds from the parked end frame on replay
-          }
-          return;
         case "ArrowLeft":
           e.preventDefault();
           ui.setCurrentFrame(Math.max(0, ui.activeFrame - (e.shiftKey ? 5 : 1)));
@@ -193,7 +225,11 @@ export function useKeyboardShortcuts() {
       }
     };
 
+    window.addEventListener("keydown", handleSpaceKeyDown, true);
     window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
+    return () => {
+      window.removeEventListener("keydown", handleSpaceKeyDown, true);
+      window.removeEventListener("keydown", handler);
+    };
   }, []);
 }

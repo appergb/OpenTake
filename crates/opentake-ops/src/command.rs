@@ -79,6 +79,7 @@ pub struct ClipEntry {
     pub trim_end_frame: Option<i32>,
     pub has_audio: bool,
     pub add_linked_audio: bool,
+    pub transform: Option<Transform>,
 }
 
 impl ClipEntry {
@@ -93,6 +94,7 @@ impl ClipEntry {
             trim_end_frame: self.trim_end_frame,
             has_audio: self.has_audio,
             add_linked_audio: self.add_linked_audio,
+            transform: self.transform,
         }
     }
 }
@@ -278,7 +280,7 @@ pub enum EditCommand {
     /// flow create a track on demand when the timeline has no compatible one
     /// (upstream `placeClip` / `add_clips` with omitted `trackIndex` 鈫?
     /// `insertTrack`), so dragging media onto an empty timeline produces a clip.
-    InsertTrack { kind: ClipType },
+    InsertTrack { kind: ClipType, at: Option<usize> },
     /// Toggle track-head properties (mute / hide / sync-lock). `None` leaves a
     /// field unchanged. 1:1 with the upstream track-header toggles.
     SetTrackProps {
@@ -429,7 +431,7 @@ pub fn apply(
         EditCommand::Link { clip_ids } => link(state, clip_ids, ids),
         EditCommand::Unlink { clip_ids } => unlink(state, clip_ids),
         EditCommand::RemoveTracks { track_indexes } => remove_tracks(state, track_indexes),
-        EditCommand::InsertTrack { kind } => insert_track_cmd(state, kind, ids),
+        EditCommand::InsertTrack { kind, at } => insert_track_cmd(state, kind, at, ids),
         EditCommand::SetTrackProps {
             track_index,
             muted,
@@ -543,6 +545,7 @@ fn add_clips(
 fn insert_track_cmd(
     state: &mut EditorState,
     kind: ClipType,
+    at: Option<usize>,
     ids: &dyn IdGen,
 ) -> Result<EditResult, EditError> {
     transact(
@@ -550,10 +553,8 @@ fn insert_track_cmd(
         "Insert Track",
         |added| format!("Inserted track: {}", added.join(", ")),
         |st| {
-            // Append at the end; `insert_track` clamps into the kind's zone
-            // (visual above audio).
-            let at = st.timeline.tracks.len();
-            let idx = ops::insert_track(&mut st.timeline, at, kind, ids);
+            let requested = at.unwrap_or(st.timeline.tracks.len());
+            let idx = ops::insert_track(&mut st.timeline, requested, kind, ids);
             Ok(vec![st.timeline.tracks[idx].id.clone()])
         },
     )
@@ -2117,6 +2118,7 @@ mod insert_track_tests {
             &mut state,
             EditCommand::InsertTrack {
                 kind: ClipType::Video,
+                at: None,
             },
             &ids,
         )
@@ -2130,12 +2132,53 @@ mod insert_track_tests {
             &mut state,
             EditCommand::InsertTrack {
                 kind: ClipType::Audio,
+                at: None,
             },
             &ids,
         )
         .unwrap();
         assert_eq!(state.timeline.tracks.len(), 2);
         assert_eq!(state.timeline.tracks[1].kind, ClipType::Audio);
+    }
+
+    #[test]
+    fn insert_track_honors_requested_index() {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+
+        apply(
+            &mut state,
+            EditCommand::InsertTrack {
+                kind: ClipType::Video,
+                at: None,
+            },
+            &ids,
+        )
+        .unwrap();
+        let first_id = state.timeline.tracks[0].id.clone();
+        apply(
+            &mut state,
+            EditCommand::InsertTrack {
+                kind: ClipType::Audio,
+                at: None,
+            },
+            &ids,
+        )
+        .unwrap();
+
+        apply(
+            &mut state,
+            EditCommand::InsertTrack {
+                kind: ClipType::Video,
+                at: Some(0),
+            },
+            &ids,
+        )
+        .unwrap();
+
+        assert_eq!(state.timeline.tracks[1].id, first_id);
+        assert_eq!(state.timeline.tracks[0].kind, ClipType::Video);
+        assert_eq!(state.timeline.tracks[2].kind, ClipType::Audio);
     }
 
     #[test]
@@ -2146,6 +2189,7 @@ mod insert_track_tests {
             &mut state,
             EditCommand::InsertTrack {
                 kind: ClipType::Audio,
+                at: None,
             },
             &ids,
         )
@@ -2201,6 +2245,7 @@ mod keyframe_edit_tests {
             &mut state,
             EditCommand::InsertTrack {
                 kind: ClipType::Video,
+                at: None,
             },
             &ids,
         )

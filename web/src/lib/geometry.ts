@@ -15,6 +15,10 @@ export interface ClipRect {
   height: number;
 }
 
+export type TrackDropTarget =
+  | { kind: "existing"; trackIndex: number }
+  | { kind: "newTrack"; index: number };
+
 /** displayHeight resolver: UI-only per-track height (default 50, clamped). */
 export function trackDisplayHeight(
   track: Track,
@@ -113,6 +117,40 @@ export function trackAt(
     if (y < acc) return i;
   }
   return null;
+}
+
+/** dropTargetAt(y): upstream insert-zone hit test for drag/drop. */
+export function dropTargetAt(
+  timeline: Timeline,
+  y: number,
+  heights: Record<string, number>,
+): TrackDropTarget {
+  const trackCount = timeline.tracks.length;
+  if (trackCount === 0) return { kind: "newTrack", index: 0 };
+
+  const firstTop = trackY(timeline, 0, heights);
+  if (y < firstTop) return { kind: "newTrack", index: 0 };
+
+  const threshold = LAYOUT.insertThreshold;
+  for (let i = 0; i < trackCount - 1; i++) {
+    const bottomOfTrack = trackY(timeline, i, heights) + trackDisplayHeight(timeline.tracks[i], heights);
+    const topOfNext = trackY(timeline, i + 1, heights);
+    if (y >= bottomOfTrack - threshold && y <= topOfNext + threshold) {
+      return { kind: "newTrack", index: i + 1 };
+    }
+  }
+
+  const lastTrackBottom =
+    trackY(timeline, trackCount - 1, heights) +
+    trackDisplayHeight(timeline.tracks[trackCount - 1], heights);
+  if (y >= lastTrackBottom) return { kind: "newTrack", index: trackCount };
+
+  for (let i = 0; i < trackCount; i++) {
+    if (y < trackY(timeline, i, heights) + trackDisplayHeight(timeline.tracks[i], heights)) {
+      return { kind: "existing", trackIndex: i };
+    }
+  }
+  return { kind: "existing", trackIndex: Math.max(0, trackCount - 1) };
 }
 
 /** end frame (exclusive). */

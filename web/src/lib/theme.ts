@@ -145,3 +145,11 @@ export const CLIP = {
   keyframeDiamondRadius: 3,
   minWidthForLabel: 20,
 } as const;
+
+/** §5.4 Fade-knee handle geometry (ClipRenderer.swift:7-14, TimelineGeometry.swift:156-166). */
+export const FADE = {
+  kneeTopInset: 4,
+  edgeInset: 6,
+  kneeSize: 7,
+  hitSize: 14,
+} as const;

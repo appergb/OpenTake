@@ -5,7 +5,7 @@
  * (SPEC §5.11), painted by the container.
  */
 
-import { BG, BORDER, TEXT } from "../../lib/theme";
+import { BG, BORDER, TEXT, LAYOUT, TRACK_SIZE } from "../../lib/theme";
 import { clipRect, trackDisplayHeight, trackY } from "../../lib/geometry";
 import { linkOffsetForClip } from "../../lib/clip";
 import { drawClip } from "./clipRenderer";
@@ -50,13 +50,14 @@ export type DragPaint =
       trackDelta: number;
       /** Option/Alt-drag duplicate: ghost renders with a "+" badge. */
       isDuplicate?: boolean;
-      /** Dropping below the last track creates a new track of this type; the
-       *  ghost renders at the new-track position and a dashed indicator is
-       *  drawn below the last track. `undefined` = drop on an existing track. */
+      /** Dropping on an insert zone creates a new track of this type. */
       newTrackType?: ClipType;
+      /** Upstream `newTrackAt(index)` insertion index for the new-track drop. */
+      newTrackIndex?: number;
     }
   | { kind: "trim"; clipId: string; edge: "left" | "right"; deltaFrames: number }
-  | { kind: "volumeKf"; clipId: string; fromFrame: number; ghostFrame: number };
+  | { kind: "volumeKf"; clipId: string; fromFrame: number; ghostFrame: number }
+  | { kind: "fadeKnee"; clipId: string; edge: "left" | "right"; currentFrames: number };
 
 export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
   const { timeline, pixelsPerFrame, trackHeights, width, dpr, scrollLeft, scrollTop } = s;
@@ -90,11 +91,16 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
   // 3. Clips (skip those fully outside the visible window). A clip being dragged
   // is drawn at its live (offset) position as a ghost so it follows the cursor.
   const drag = s.drag;
-  // New-track drop indicator: a dashed zone below the last track showing where
-  // the new track will be created (upstream `placeClip` auto-track-creation).
+  const insertionLineY = (index: number): number => {
+    if (timeline.tracks.length === 0) return LAYOUT.rulerHeight + LAYOUT.dropZoneHeight;
+    if (index <= 0) return trackY(timeline, 0, trackHeights);
+    if (index >= timeline.tracks.length) return trackY(timeline, timeline.tracks.length, trackHeights);
+    return trackY(timeline, index, trackHeights);
+  };
+  // New-track drop indicator: dashed zone at the upstream insertion index.
   if (drag?.kind === "move" && drag.newTrackType && timeline.tracks.length > 0) {
-    const newTrackY = trackY(timeline, timeline.tracks.length, trackHeights);
-    const newTrackH = trackDisplayHeight(timeline.tracks[0], trackHeights); // default height
+    const newTrackY = insertionLineY(drag.newTrackIndex ?? timeline.tracks.length);
+    const newTrackH = trackDisplayHeight(timeline.tracks[0], trackHeights) || TRACK_SIZE.defaultHeight;
     if (newTrackY + newTrackH > scrollTop && newTrackY < scrollTop + s.viewHeight) {
       ctx.fillStyle = "rgba(255,255,255,0.04)";
       ctx.fillRect(scrollLeft, newTrackY, s.viewWidth, newTrackH);
@@ -113,10 +119,8 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
       let isDuplicate = false;
       if (drag?.kind === "move" && drag.ids.has(clip.id)) {
         if (drag.newTrackType) {
-          // Dropping on a new track: render the ghost at the new-track Y
-          // (below the last existing track) using a default track height.
-          const newTrackY = trackY(timeline, timeline.tracks.length, trackHeights);
-          const ghostH = trackDisplayHeight(timeline.tracks[0], trackHeights) - 4;
+          const newTrackY = insertionLineY(drag.newTrackIndex ?? timeline.tracks.length);
+          const ghostH = (trackDisplayHeight(timeline.tracks[0], trackHeights) || TRACK_SIZE.defaultHeight) - 4;
           rect = {
             x: (clip.startFrame + drag.deltaFrames) * pixelsPerFrame,
             y: newTrackY + 2,
@@ -151,7 +155,15 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
         drag?.kind === "volumeKf" && drag.clipId === clip.id
           ? { fromFrame: drag.fromFrame, ghostFrame: drag.ghostFrame }
           : undefined;
-      drawClip(ctx, clip, rect, {
+      const paintClip =
+        drag?.kind === "fadeKnee" && drag.clipId === clip.id
+          ? {
+              ...clip,
+              fadeInFrames: drag.edge === "left" ? drag.currentFrames : clip.fadeInFrames,
+              fadeOutFrames: drag.edge === "right" ? drag.currentFrames : clip.fadeOutFrames,
+            }
+          : clip;
+      drawClip(ctx, paintClip, rect, {
         isSelected: s.selectedClipIds.has(clip.id),
         fps: timeline.fps,
         waveform: clip.mediaType === "audio" ? s.waveforms.get(clip.mediaRef) : undefined,

@@ -88,8 +88,6 @@ impl RenderState {
 /// Resolvable info for one media asset, projected from the manifest.
 struct MediaInfo {
     path: PathBuf,
-    /// Source frames-per-second (`0.0` when unknown → resolver falls back to 30).
-    fps: f64,
 }
 
 /// A text clip projected from the timeline, keyed by clip id. The box's width /
@@ -122,6 +120,7 @@ struct MediaResolver<'d> {
     queue: &'d wgpu::Queue,
     cache: TextureCache,
     media: &'d HashMap<String, MediaInfo>,
+    timeline_fps: i32,
     /// Text clips by id (content + style + box) for on-demand rasterization.
     text: &'d HashMap<String, TextInfo>,
     /// cosmic-text rasterizer (system fonts) for text layers.
@@ -176,8 +175,7 @@ impl TextureResolver for MediaResolver<'_> {
         let time_secs = if is_image {
             0.0
         } else {
-            let fps = if info.fps > 0.0 { info.fps } else { 30.0 };
-            (source_frame.max(0) as f64) / fps
+            project_frame_time_secs(source_frame, self.timeline_fps)
         };
 
         let req = FrameRequest {
@@ -299,13 +297,7 @@ pub fn composite_frame(
                 sizes.insert(entry.id.clone(), (w as u32, h as u32));
             }
         }
-        media.insert(
-            entry.id.clone(),
-            MediaInfo {
-                path,
-                fps: entry.source_fps.unwrap_or(0.0),
-            },
-        );
+        media.insert(entry.id.clone(), MediaInfo { path });
     }
 
     let render_size = preview_render_size(
@@ -341,6 +333,7 @@ pub fn composite_frame(
         queue: &ctx.queue,
         cache: TextureCache::new(TEXTURE_CACHE_CAP),
         media: &media,
+        timeline_fps: plan.fps,
         text: &text,
         text_rasterizer: &ctx.text_rasterizer,
         preview_box: (render_size.width, render_size.height),
@@ -364,9 +357,25 @@ pub fn composite_frame(
     })
 }
 
+fn project_frame_time_secs(source_frame: i64, timeline_fps: i32) -> f64 {
+    let fps = if timeline_fps > 0 {
+        timeline_fps as f64
+    } else {
+        30.0
+    };
+    (source_frame.max(0) as f64) / fps
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_frame_time_uses_timeline_fps_not_source_fps() {
+        // A 59.94fps source on a 30fps timeline still uses the project-frame
+        // timebase, matching Swift CompositionBuilder's CMTime(timescale: fps).
+        assert!((project_frame_time_secs(155, 30) - 5.1666666667).abs() < 0.0001);
+    }
 
     #[test]
     fn preview_size_even_izes_without_cap() {

@@ -6,7 +6,7 @@
  * here (Rust media cache, SPEC §11.3) — drawn as a tinted band + type hint.
  */
 
-import { ACCENT, CLIP, TEXT, TRIM, BORDER } from "../../lib/theme";
+import { ACCENT, CLIP, FADE, TEXT, TRIM, BORDER } from "../../lib/theme";
 import { trackColor, clipLabel, isLinked } from "../../lib/clip";
 import type { ClipRect } from "../../lib/geometry";
 import type { Clip } from "../../lib/types";
@@ -28,7 +28,7 @@ interface DrawOpts {
    *  live position so it follows the cursor. */
   ghost?: boolean;
   /** Link-group frame offset vs the lead clip (null = unlinked or is lead).
-   *  When non-null/non-zero, a red badge "+N"/"-N" is drawn at the top-left. */
+   *  When non-null/non-zero, a red badge "+N"/"-N" is drawn at the top-right. */
   linkOffset?: number | null;
   /** Volume-keyframe drag ghost: when set, the dot at `fromFrame` is hidden and
    *  a ghost dot is drawn at `ghostFrame` (same value) so the grabbed keyframe
@@ -227,10 +227,11 @@ export function drawClip(
     drawVolumeEnvelope(ctx, clip, rect, opts.volumeKfGhost);
   }
 
-  // 8b. Link-offset badge: red "+N"/"-N" at the top-left when this clip is out
+  // 8b. Link-offset badge: red "+N"/"-N" at the top-right when this clip is out
   //     of step with its link-group lead (SPEC §5.4 linked-offset indicator).
+  let offsetBadgeRect: ClipRect | null = null;
   if (opts.linkOffset != null && opts.linkOffset !== 0) {
-    drawOffsetBadge(ctx, opts.linkOffset, rect);
+    offsetBadgeRect = drawOffsetBadge(ctx, opts.linkOffset, rect);
   }
 
   // 9. Keyframe diamonds along the bottom (ClipRenderer:163-191), y = maxY-5.
@@ -246,7 +247,8 @@ export function drawClip(
   //     user sees the gesture will copy rather than move. Mirrors the
   //     upstream `+` overlay on option-drag ghosts.
   if (opts.ghost && opts.isDuplicate) {
-    drawDuplicateBadge(ctx, x, y, width);
+    const rightLimit = offsetBadgeRect ? offsetBadgeRect.x - 2 : x + width - 2;
+    drawDuplicateBadge(ctx, x, y, width, rightLimit);
   }
 
   ctx.restore();
@@ -260,9 +262,13 @@ function drawDuplicateBadge(
   x: number,
   y: number,
   width: number,
+  rightLimit = x + width - 2,
 ) {
   const radius = 7;
-  const cx = x + width - radius - 2;
+  const minCx = x + radius + 2;
+  const maxCx = rightLimit - radius;
+  if (maxCx < minCx) return;
+  const cx = maxCx;
   const cy = y + radius + 2;
   ctx.save();
   // Solid yellow disc.
@@ -327,10 +333,6 @@ function drawWaveform(
     ctx.fillRect(x + i, y + h - barHeight - 1, 1, barHeight);
   }
 }
-
-const FADE_KNEE_TOP_INSET = 4;
-const FADE_EDGE_INSET = 6;
-const FADE_KNEE_SIZE = 7;
 
 /** Standard smoothstep (matches the shader + upstream `smoothstep`). */
 function smoothstep(t: number): number {
@@ -397,19 +399,23 @@ function drawFades(ctx: CanvasRenderingContext2D, clip: Clip, rect: ClipRect, is
   const ppf = width / clip.durationFrames;
   const bodyMinY = y + CLIP.labelBarHeight;
   const bodyMaxY = y + height - 1;
-  const kneeY = bodyMinY + FADE_KNEE_TOP_INSET;
+  const kneeY = bodyMinY + FADE.kneeTopInset;
   const alpha = isSelected ? 0.95 : 0.75;
   const fadeColor = `rgba(255,255,255,${alpha * 0.7})`;
-  const kneeX = (offsetFrames: number) =>
-    Math.max(x + FADE_EDGE_INSET, Math.min(x + width - FADE_EDGE_INSET, x + offsetFrames * ppf));
+  const kneeX = (offsetFrames: number, edge: "left" | "right") => {
+    const actual = x + offsetFrames * ppf;
+    return edge === "left"
+      ? Math.max(x + FADE.edgeInset, actual)
+      : Math.min(x + width - FADE.edgeInset, actual);
+  };
 
   ctx.save();
   if (clip.fadeInFrames > 0) {
-    const lx = kneeX(Math.min(clip.fadeInFrames, clip.durationFrames));
+    const lx = kneeX(Math.min(clip.fadeInFrames, clip.durationFrames), "left");
     drawFadeWedge(ctx, [x, bodyMaxY], [lx, kneeY], clip.fadeInInterpolation, bodyMinY, 0.6, fadeColor);
   }
   if (clip.fadeOutFrames > 0) {
-    const rx = kneeX(Math.max(0, clip.durationFrames - clip.fadeOutFrames));
+    const rx = kneeX(Math.max(0, clip.durationFrames - clip.fadeOutFrames), "right");
     drawFadeWedge(ctx, [x + width, bodyMaxY], [rx, kneeY], clip.fadeOutInterpolation, bodyMinY, 0.6, fadeColor);
   }
   // Draggable knee handles (visual indicators) when selected.
@@ -417,17 +423,13 @@ function drawFades(ctx: CanvasRenderingContext2D, clip: Clip, rect: ClipRect, is
     ctx.fillStyle = `rgba(255,255,255,${alpha})`;
     ctx.strokeStyle = "rgba(0,0,0,0.5)";
     ctx.lineWidth = 0.5;
-    const half = FADE_KNEE_SIZE / 2;
-    if (clip.fadeInFrames > 0) {
-      const lx = kneeX(Math.min(clip.fadeInFrames, clip.durationFrames));
-      ctx.fillRect(lx - half, kneeY - half, FADE_KNEE_SIZE, FADE_KNEE_SIZE);
-      ctx.strokeRect(lx - half, kneeY - half, FADE_KNEE_SIZE, FADE_KNEE_SIZE);
-    }
-    if (clip.fadeOutFrames > 0) {
-      const rx = kneeX(Math.max(0, clip.durationFrames - clip.fadeOutFrames));
-      ctx.fillRect(rx - half, kneeY - half, FADE_KNEE_SIZE, FADE_KNEE_SIZE);
-      ctx.strokeRect(rx - half, kneeY - half, FADE_KNEE_SIZE, FADE_KNEE_SIZE);
-    }
+    const half = FADE.kneeSize / 2;
+    const lx = kneeX(Math.min(clip.fadeInFrames, clip.durationFrames), "left");
+    const rx = kneeX(Math.max(0, clip.durationFrames - clip.fadeOutFrames), "right");
+    ctx.fillRect(lx - half, kneeY - half, FADE.kneeSize, FADE.kneeSize);
+    ctx.strokeRect(lx - half, kneeY - half, FADE.kneeSize, FADE.kneeSize);
+    ctx.fillRect(rx - half, kneeY - half, FADE.kneeSize, FADE.kneeSize);
+    ctx.strokeRect(rx - half, kneeY - half, FADE.kneeSize, FADE.kneeSize);
   }
   ctx.restore();
 }
@@ -559,12 +561,12 @@ function drawVolumeEnvelope(
 }
 
 /**
- * Link-offset badge: a small red rounded pill at the clip's top-left showing the
+ * Link-offset badge: a small red rounded pill at the clip's top-right showing the
  * frame offset vs the link-group lead ("+N" when this clip trails, "-N" when it
- * leads in time beyond the lead start). Drawn inside the body so it doesn't
- * overlap the label bar (SPEC §5.4 linked-offset indicator).
+ * leads in time beyond the lead start). Matches upstream's right-edge placement
+ * before the trim handle (SPEC §5.4 linked-offset indicator).
  */
-function drawOffsetBadge(ctx: CanvasRenderingContext2D, offsetFrames: number, rect: ClipRect) {
+function drawOffsetBadge(ctx: CanvasRenderingContext2D, offsetFrames: number, rect: ClipRect): ClipRect | null {
   const n = Math.abs(offsetFrames);
   const sign = offsetFrames > 0 ? "+" : "-";
   const label = `${sign}${n}`;
@@ -577,12 +579,12 @@ function drawOffsetBadge(ctx: CanvasRenderingContext2D, offsetFrames: number, re
   const badgeH = 13;
   const badgeW = Math.ceil(textW + padX * 2);
   // Skip when the clip is too small to legibly hold the badge.
-  if (rect.width < badgeW + CLIP.stripWidth + 4 || rect.height < CLIP.labelBarHeight + badgeH + 2) {
+  if (rect.width <= badgeW + TRIM.handleWidth * 2 + 4 || rect.height < badgeH + 4) {
     ctx.restore();
-    return;
+    return null;
   }
-  const bx = rect.x + CLIP.stripWidth + 3;
-  const by = rect.y + CLIP.labelBarHeight + 2;
+  const bx = rect.x + rect.width - TRIM.handleWidth - badgeW - 2;
+  const by = rect.y + 2;
   roundRectPath(ctx, bx, by, badgeW, badgeH, 3);
   ctx.fillStyle = ACCENT.offsetBadge;
   ctx.fill();
@@ -592,4 +594,5 @@ function drawOffsetBadge(ctx: CanvasRenderingContext2D, offsetFrames: number, re
   ctx.fillStyle = "rgba(255,255,255,1)";
   ctx.fillText(label, bx + padX, by + badgeH / 2 + 0.5);
   ctx.restore();
+  return { x: bx, y: by, width: badgeW, height: badgeH };
 }

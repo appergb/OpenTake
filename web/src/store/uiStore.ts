@@ -52,6 +52,10 @@ function persist(key: string, value: string) {
   if (typeof localStorage !== "undefined") localStorage.setItem(key, value);
 }
 
+function settledFrame(frame: number): number {
+  return Math.max(0, Math.round(frame));
+}
+
 interface UiState {
   // Top-level navigation
   view: AppView;
@@ -209,11 +213,19 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
 
   setActiveFrame: (activeFrame) => set({ activeFrame }),
   setCurrentFrame: (currentFrame) => set({ currentFrame, activeFrame: currentFrame }),
-  setPlaying: (isPlaying) => set({ isPlaying }),
+  setPlaying: (isPlaying) => {
+    if (isPlaying) {
+      set({ isPlaying: true, isScrubbing: false });
+      return;
+    }
+    const frame = settledFrame(get().activeFrame);
+    set({ currentFrame: frame, activeFrame: frame, isPlaying: false, isScrubbing: false });
+  },
   togglePlay: () => {
     const { isPlaying, activeFrame } = get();
     if (isPlaying) {
-      set({ isPlaying: false });
+      const frame = settledFrame(activeFrame);
+      set({ currentFrame: frame, activeFrame: frame, isPlaying: false, isScrubbing: false });
       return;
     }
     // Starting playback: if parked at/after the last drawable frame (where the
@@ -221,9 +233,9 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
     // very first tick and stall play. Without media there's nothing to rewind.
     const last = Math.max(0, totalFrames(useProjectStore.getState().timeline) - 1);
     if (activeFrame >= last) {
-      set({ currentFrame: 0, activeFrame: 0, isPlaying: true });
+      set({ currentFrame: 0, activeFrame: 0, isPlaying: true, isScrubbing: false });
     } else {
-      set({ isPlaying: true });
+      set({ isPlaying: true, isScrubbing: false });
     }
   },
   setScrubbing: (isScrubbing) => set({ isScrubbing }),

@@ -430,13 +430,13 @@ impl ToolArgs for ApplyEffectArgs {
     const ALLOWED_KEYS: &'static [&'static str] = &["clipIds", "effects"];
 }
 
-// --- Web motion graphics (docs/MOTION-GRAPHICS-PLUGIN.md, Issue #14) ---
+// --- Motion Canvas graphics (docs/MOTION-GRAPHICS-PLUGIN.md, Issue #34) ---
 
 /// The `source` object on `add_motion_graphic` — exactly one of `code` or
-/// `templateId` set (mutual-exclusion is a business-level guard in the motion
-/// dispatch path, like `import_media`'s source). `params` only applies with a
-/// template; values are kept as raw JSON so the dispatch layer converts them to
-/// `opentake_motion::ParamValue` without coupling the tool layer to that crate.
+/// `templateId` set. In the Motion Canvas v1 path, `code` is a TS/TSX scene
+/// snippet or project source, while `templateId` instantiates a vetted template.
+/// `params` only applies with a template; values stay raw JSON so the dispatch
+/// layer can pass them to the plugin without coupling this tool layer to Node.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MotionSourceArg {
@@ -1086,12 +1086,12 @@ mod tests {
         );
     }
 
-    // --- Web motion-graphic args ---
+    // --- Motion Canvas graphic args ---
 
     #[test]
     fn add_motion_graphic_decodes_code_source() {
         let v = serde_json::json!({
-            "source": {"code": "<h1>Title</h1>"},
+            "source": {"code": "export default makeScene2D(function* (view) { /* title */ });"},
             "startFrame": 30,
             "durationFrames": 90,
             "transparent": true
@@ -1103,7 +1103,10 @@ mod tests {
         assert!(a.track_index.is_none());
         // The nested source decodes with its own per-object unknown-key guard.
         let src: MotionSourceArg = decode_tool_args(&a.source, "source").unwrap();
-        assert_eq!(src.code.as_deref(), Some("<h1>Title</h1>"));
+        assert_eq!(
+            src.code.as_deref(),
+            Some("export default makeScene2D(function* (view) { /* title */ });")
+        );
         assert!(src.template_id.is_none());
     }
 
@@ -1158,10 +1161,10 @@ mod tests {
 
     #[test]
     fn edit_motion_graphic_decodes_and_requires_clip_id() {
-        let ok = serde_json::json!({"clipId": "c1", "code": "<b>new</b>"});
+        let ok = serde_json::json!({"clipId": "c1", "code": "export default scene;"});
         let a: EditMotionGraphicArgs = decode_tool_args(&ok, "").unwrap();
         assert_eq!(a.clip_id, "c1");
-        assert_eq!(a.code.as_deref(), Some("<b>new</b>"));
+        assert_eq!(a.code.as_deref(), Some("export default scene;"));
         assert!(a.params.is_none());
 
         let missing = serde_json::json!({"code": "x"});

@@ -4,12 +4,10 @@
  * `currentTime` must sit — the data the `<TimelinePlayback>` component feeds to
  * `<video>`/`<audio>` elements.
  *
- * Faithful to upstream's model: a single clock plays the composition (video +
- * audio mix) in real time (VideoEngine.swift). We can't GPU-composite live in
- * the WebView, so during playback we play the underlying media elements directly
- * (smooth, with sound) and fall back to the GPU composite when paused (accurate
- * text/effects). These functions are the seam between the timeline model and the
- * DOM media elements; they hold no state and are unit-tested.
+ * Faithful to upstream's model: one composition clock plays the timeline
+ * (VideoEngine.swift). In the WebView the DOM media elements are followers of
+ * that clock, not authorities over it; pausing keeps them frozen on the current
+ * frame instead of switching to a separate ffmpeg/PNG render path.
  */
 
 import type { Clip, Timeline, Track } from "../../lib/types";
@@ -37,19 +35,27 @@ function clipAt(track: Track, frame: number): Clip | null {
 /**
  * Top-most VISUAL clip (video or image) at `frame`. Higher track index draws on
  * top (matches the render plan's ascending-track blend order), so the last
- * matching track wins. Text / Lottie have no DOM media element and are left to
- * the paused composite, so they're skipped here.
+ * matching track wins. Kept for master-clock selection.
  */
 export function activeVisualClip(timeline: Timeline, frame: number): ActiveMedia | null {
-  let best: ActiveMedia | null = null;
+  const clips = activeVisualClips(timeline, frame);
+  return clips.length > 0 ? clips[clips.length - 1] : null;
+}
+
+/**
+ * Every visible VISUAL clip at `frame`, ordered bottom -> top by track index.
+ * This is the DOM equivalent of upstream's video-composition layer list.
+ */
+export function activeVisualClips(timeline: Timeline, frame: number): ActiveMedia[] {
+  const out: ActiveMedia[] = [];
   timeline.tracks.forEach((track, trackIndex) => {
     if (track.hidden || track.type === "audio") return;
     const clip = clipAt(track, frame);
     if (!clip) return;
     if (clip.mediaType !== "video" && clip.mediaType !== "image") return;
-    best = { clip, track, trackIndex };
+    out.push({ clip, track, trackIndex });
   });
-  return best;
+  return out;
 }
 
 /**
@@ -118,29 +124,20 @@ export function visualAudioIsDuplicated(
   return audios.some((a) => a.clip.mediaRef === visual.clip.mediaRef);
 }
 
-/** A just-mounted/seeked master element whose clock is this far (frames) from the
- *  playhead isn't aligned yet (e.g. starting playback mid-timeline); advance by
- *  dt and nudge it into place rather than snapping the playhead to it. */
-export const MASTER_ALIGN_FRAMES = 15;
-
 /**
  * Next playhead frame for one engine tick (pure; the seam upstream calls the
- * periodic time observer, VideoEngine.swift). With a master element whose clock
- * (`masterFrame` = {@link frameForSourceTime}) is aligned, the playhead follows
- * it exactly; otherwise (no master, or a master not yet aligned) it advances by
- * elapsed wall-clock `dtSec * fps`. The result is pre-clamp — the caller clamps
- * to the last drawable frame and stops at the end.
+ * periodic time observer, VideoEngine.swift). The browser has separate source
+ * elements rather than a single AVPlayer composition, so DOM media clocks are
+ * treated as followers; a stale source clock must never pull the timeline
+ * backward or across clip boundaries. The result is pre-clamp — the caller
+ * clamps to the last drawable frame and stops at the end.
  */
 export function advancePlayhead(args: {
   currentFrame: number;
-  masterFrame: number | null;
   dtSec: number;
   fps: number;
 }): number {
-  const { currentFrame, masterFrame, dtSec } = args;
+  const { currentFrame, dtSec } = args;
   const safeFps = args.fps > 0 ? args.fps : 30;
-  if (masterFrame === null || Math.abs(masterFrame - currentFrame) > MASTER_ALIGN_FRAMES) {
-    return currentFrame + dtSec * safeFps;
-  }
-  return masterFrame;
+  return currentFrame + dtSec * safeFps;
 }

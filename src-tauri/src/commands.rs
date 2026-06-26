@@ -211,7 +211,7 @@ pub enum EditRequest {
     #[serde(rename_all = "camelCase")]
     RemoveTracks { track_indexes: Vec<usize> },
     #[serde(rename_all = "camelCase")]
-    InsertTrack { kind: ClipType },
+    InsertTrack { kind: ClipType, at: Option<usize> },
     #[serde(rename_all = "camelCase")]
     SetTrackProps {
         track_index: usize,
@@ -339,7 +339,7 @@ impl EditRequest {
             EditRequest::RemoveTracks { track_indexes } => {
                 EditCommand::RemoveTracks { track_indexes }
             }
-            EditRequest::InsertTrack { kind } => EditCommand::InsertTrack { kind },
+            EditRequest::InsertTrack { kind, at } => EditCommand::InsertTrack { kind, at },
             EditRequest::SetTrackProps {
                 track_index,
                 muted,
@@ -386,6 +386,8 @@ pub struct ClipEntryDto {
     pub has_audio: bool,
     #[serde(default)]
     pub add_linked_audio: bool,
+    #[serde(default)]
+    pub transform: Option<Transform>,
 }
 
 impl ClipEntryDto {
@@ -401,6 +403,7 @@ impl ClipEntryDto {
             trim_end_frame: self.trim_end_frame,
             has_audio: self.has_audio,
             add_linked_audio: self.add_linked_audio,
+            transform: self.transform,
         }
     }
 }

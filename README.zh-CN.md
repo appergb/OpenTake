@@ -138,11 +138,18 @@ crates/
 ├── opentake-project    # 项目持久化 / bundle / archive / export
 ├── opentake-media      # FFmpeg 编解码 / 缩略图 / 波形 / 转写 / 语义搜索
 ├── opentake-render     # wgpu 帧合成器 + 文字光栅化
-├── opentake-motion     # Lottie / Web 动效渲染
+├── opentake-motion     # 原生动效 fallback:RGBA 帧缓存 / alpha source scaffold
 ├── opentake-agent      # MCP Server + Agent chat + 上下文信号系统
 ├── opentake-gen        # 生成式 AI 客户端 (fal.ai / Replicate / OpenAI)
 ├── opentake-core       # 会话管理 / 依赖注入 / 事件总线
 └── src-tauri           # Tauri 2 桌面外壳
+```
+
+计划中的外部插件:
+
+```
+plugins/
+└── motion-canvas-studio # Motion Canvas(MIT) fork/plugin,用于 AI 动画视频输出
 ```
 
 ---

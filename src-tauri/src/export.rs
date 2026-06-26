@@ -164,8 +164,6 @@ fn resolve_preset(
 /// Resolvable info for one media asset, projected from the manifest.
 struct MediaInfo {
     path: PathBuf,
-    /// Source frames-per-second (`0.0` when unknown → resolver falls back to 30).
-    fps: f64,
 }
 
 /// A text clip projected from the timeline, keyed by clip id.
@@ -196,6 +194,7 @@ struct MediaResolver<'d> {
     queue: &'d opentake_render::wgpu::Queue,
     cache: TextureCache,
     media: &'d HashMap<String, MediaInfo>,
+    timeline_fps: i32,
     text: &'d HashMap<String, TextInfo>,
     text_rasterizer: &'d CosmicTextRasterizer,
     /// Decode/raster box for source frames (matches the export render size).
@@ -241,8 +240,7 @@ impl TextureResolver for MediaResolver<'_> {
         let time_secs = if is_image {
             0.0
         } else {
-            let fps = if info.fps > 0.0 { info.fps } else { 30.0 };
-            (source_frame.max(0) as f64) / fps
+            project_frame_time_secs(source_frame, self.timeline_fps)
         };
 
         let req = FrameRequest {
@@ -308,13 +306,7 @@ fn project_media(
                 sizes.insert(entry.id.clone(), (w as u32, h as u32));
             }
         }
-        media.insert(
-            entry.id.clone(),
-            MediaInfo {
-                path,
-                fps: entry.source_fps.unwrap_or(0.0),
-            },
-        );
+        media.insert(entry.id.clone(), MediaInfo { path });
     }
     (sizes, media)
 }
@@ -347,20 +339,9 @@ fn project_clip_audio(
         return Ok(None);
     };
 
-    // Source window in seconds: the clip's trim start through the frames it
-    // consumes, at the *source* fps. Falls back to the timeline fps when the
-    // source rate is unknown (audio-only assets often report no fps).
-    let src_fps = if info.fps > 0.0 {
-        info.fps
-    } else {
-        timeline_fps as f64
-    };
-    let lo = clip.trim_start_frame.max(0) as f64 / src_fps;
-    let consumed = clip.source_frames_consumed().max(0);
-    if consumed == 0 {
+    let Some((lo, hi)) = clip_source_window_secs(clip, timeline_fps) else {
         return Ok(None);
-    }
-    let hi = lo + consumed as f64 / src_fps;
+    };
 
     let pcm = match extract_pcm(&info.path, &AUDIO_DECODE_SPEC, Some((lo, hi))) {
         Ok(p) => p,
@@ -503,6 +484,7 @@ pub fn run_export(
             queue: &dev.queue,
             cache: TextureCache::new(TEXTURE_CACHE_CAP),
             media: &media,
+            timeline_fps: plan.fps,
             text: &text,
             text_rasterizer: &text_rasterizer,
             render_box: (render_size.width, render_size.height),
@@ -542,6 +524,28 @@ pub fn run_export(
         fps: plan.fps,
         frame_count: plan.total_frames,
     })
+}
+
+fn project_frame_time_secs(source_frame: i64, timeline_fps: i32) -> f64 {
+    let fps = if timeline_fps > 0 {
+        timeline_fps as f64
+    } else {
+        30.0
+    };
+    (source_frame.max(0) as f64) / fps
+}
+
+fn clip_source_window_secs(clip: &Clip, timeline_fps: i32) -> Option<(f64, f64)> {
+    if clip.duration_frames <= 0 || timeline_fps <= 0 {
+        return None;
+    }
+    let fps = timeline_fps as f64;
+    let lo = clip.trim_start_frame.max(0) as f64 / fps;
+    let consumed = clip.source_frames_consumed().max(0);
+    if consumed == 0 {
+        return None;
+    }
+    Some((lo, lo + consumed as f64 / fps))
 }
 
 #[cfg(test)]
@@ -640,6 +644,18 @@ mod tests {
     use opentake_domain::{Timeline, Track};
 
     #[test]
+    fn clip_source_window_uses_timeline_fps_not_media_source_fps() {
+        let mut clip = Clip::new("c1", "asset-1", 0, 60);
+        clip.trim_start_frame = 15;
+        clip.speed = 1.0;
+
+        let (lo, hi) = clip_source_window_secs(&clip, 30).expect("window");
+
+        assert!((lo - 0.5).abs() < 0.0001);
+        assert!((hi - 2.5).abs() < 0.0001);
+    }
+
+    #[test]
     fn project_clip_audio_skips_clip_with_no_media_entry() {
         // No matching manifest entry → no audio contribution, no decode attempt.
         let clip = Clip::new("c1", "missing-asset", 0, 30);
@@ -656,7 +672,6 @@ mod tests {
             "asset-1".into(),
             MediaInfo {
                 path: PathBuf::from("/nonexistent.wav"),
-                fps: 0.0,
             },
         );
         // duration 0 short-circuits before any decode is attempted.
@@ -693,7 +708,6 @@ mod tests {
             "asset-1".into(),
             MediaInfo {
                 path: PathBuf::from("/nonexistent.wav"),
-                fps: 0.0,
             },
         );
         assert!(mix_timeline_audio(&tl, &media).expect("ok").is_none());

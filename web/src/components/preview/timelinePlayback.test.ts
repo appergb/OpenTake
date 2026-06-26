@@ -3,12 +3,12 @@ import type { Clip, ClipType, Timeline, Track } from "../../lib/types";
 import {
   activeAudioClips,
   activeVisualClip,
+  activeVisualClips,
   advancePlayhead,
   clipCoversFrame,
   clipOpacity,
   clipVolume,
   frameForSourceTime,
-  MASTER_ALIGN_FRAMES,
   sourceTimeSec,
   visualAudioIsDuplicated,
 } from "./timelinePlayback";
@@ -84,6 +84,15 @@ describe("activeVisualClip", () => {
       track({ id: "v2", type: "video", clips: [clip({ id: "high", mediaType: "image" })] }),
     ]);
     expect(activeVisualClip(tl, 10)?.clip.id).toBe("high");
+  });
+
+  it("returns every visible visual clip in bottom-to-top track order", () => {
+    const tl = timeline([
+      track({ id: "v1", type: "video", clips: [clip({ id: "low", mediaType: "video" })] }),
+      track({ id: "v2", type: "video", clips: [clip({ id: "high", mediaType: "image" })] }),
+    ]);
+
+    expect(activeVisualClips(tl, 10).map((v) => v.clip.id)).toEqual(["low", "high"]);
   });
 
   it("skips hidden tracks and audio/text", () => {
@@ -162,24 +171,16 @@ describe("visualAudioIsDuplicated", () => {
 });
 
 describe("advancePlayhead", () => {
-  it("advances by dt*fps when there is no master element", () => {
+  it("advances by dt*fps", () => {
     // 0.5s elapsed at 30fps -> +15 frames.
-    expect(advancePlayhead({ currentFrame: 100, masterFrame: null, dtSec: 0.5, fps: 30 })).toBeCloseTo(115);
+    expect(advancePlayhead({ currentFrame: 100, dtSec: 0.5, fps: 30 })).toBeCloseTo(115);
   });
 
-  it("follows an aligned master exactly (ignores dt)", () => {
-    // Master is within MASTER_ALIGN_FRAMES of the playhead -> snap to it.
-    expect(advancePlayhead({ currentFrame: 100, masterFrame: 105, dtSec: 1, fps: 30 })).toBe(105);
-  });
-
-  it("does not snap to a master that hasn't aligned yet", () => {
-    // Master clock is > MASTER_ALIGN_FRAMES away (just mounted/seeked): advance by
-    // dt instead of jumping the playhead to the stale element time.
-    const masterFrame = 100 + MASTER_ALIGN_FRAMES + 50;
-    expect(advancePlayhead({ currentFrame: 100, masterFrame, dtSec: 0.5, fps: 30 })).toBeCloseTo(115);
+  it("does not read a DOM media clock as timeline authority", () => {
+    expect(advancePlayhead({ currentFrame: 100, dtSec: 0.25, fps: 30 })).toBeCloseTo(107.5);
   });
 
   it("falls back to 30fps when fps is non-positive", () => {
-    expect(advancePlayhead({ currentFrame: 0, masterFrame: null, dtSec: 1, fps: 0 })).toBeCloseTo(30);
+    expect(advancePlayhead({ currentFrame: 0, dtSec: 1, fps: 0 })).toBeCloseTo(30);
   });
 });

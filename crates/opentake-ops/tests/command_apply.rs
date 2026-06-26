@@ -51,6 +51,7 @@ fn entry(track_index: usize, media_type: ClipType, start: i32, dur: i32) -> Clip
         trim_end_frame: None,
         has_audio: false,
         add_linked_audio: false,
+        transform: None,
     }
 }
 
@@ -84,6 +85,28 @@ fn add_clips_overwrites_overlapping_clip() {
         .collect();
     spans.sort();
     assert_eq!(spans, vec![(0, 40), (40, 80), (80, 100)]);
+}
+
+#[test]
+fn add_clips_applies_supplied_transform() {
+    let mut st = state(vec![video_track("v", true, vec![])]);
+    let g = SeqIdGen::new("n-");
+    let mut e = entry(0, ClipType::Video, 0, 30);
+    e.transform = Some(Transform {
+        center_x: 0.5,
+        center_y: 0.5,
+        width: 0.31640625,
+        height: 1.0,
+        rotation: 0.0,
+        flip_horizontal: false,
+        flip_vertical: false,
+    });
+
+    apply(&mut st, EditCommand::AddClips { entries: vec![e] }, &g).unwrap();
+
+    let placed = &st.timeline.tracks[0].clips[0];
+    assert_eq!(placed.transform.width, 0.31640625);
+    assert_eq!(placed.transform.height, 1.0);
 }
 
 #[test]

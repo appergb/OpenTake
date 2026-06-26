@@ -13,6 +13,7 @@ import type {
   Crop,
   KeyframeTrack,
   Timeline,
+  Transform,
   TrimEditReq,
 } from "./types";
 
@@ -37,6 +38,237 @@ export function clipLabel(clip: Clip, fps: number): string {
 
 export function isLinked(clip: Clip): boolean {
   return clip.linkGroupId != null;
+}
+
+const ASPECT_TOLERANCE = 0.02;
+
+function positiveFinite(value: number): boolean {
+  return Number.isFinite(value) && value > 0;
+}
+
+function defaultTransform(): Transform {
+  return {
+    centerX: 0.5,
+    centerY: 0.5,
+    width: 1,
+    height: 1,
+    rotation: 0,
+    flipHorizontal: false,
+    flipVertical: false,
+  };
+}
+
+/** Source aspect ratio relative to the timeline canvas, matching upstream
+ *  `EditorViewModel.mediaCanvasAspect(for:)`. */
+export function mediaCanvasAspect(
+  sourceWidth: number | null | undefined,
+  sourceHeight: number | null | undefined,
+  canvasWidth: number,
+  canvasHeight: number,
+): number | null {
+  if (
+    !positiveFinite(sourceWidth ?? NaN) ||
+    !positiveFinite(sourceHeight ?? NaN) ||
+    !positiveFinite(canvasWidth) ||
+    !positiveFinite(canvasHeight)
+  ) {
+    return null;
+  }
+  const canvasAspect = canvasWidth / canvasHeight;
+  return ((sourceWidth as number) / (sourceHeight as number)) / canvasAspect;
+}
+
+/** Initial aspect-fit transform for a media asset on the canvas. This is a 1:1
+ *  port of upstream `fitTransform(for:canvasWidth:canvasHeight:)`. */
+export function fitTransformForMedia(
+  sourceWidth: number | null | undefined,
+  sourceHeight: number | null | undefined,
+  canvasWidth: number,
+  canvasHeight: number,
+): Transform {
+  if (
+    !positiveFinite(sourceWidth ?? NaN) ||
+    !positiveFinite(sourceHeight ?? NaN) ||
+    !positiveFinite(canvasWidth) ||
+    !positiveFinite(canvasHeight)
+  ) {
+    return defaultTransform();
+  }
+  const canvasAspect = canvasWidth / canvasHeight;
+  const sourceAspect = (sourceWidth as number) / (sourceHeight as number);
+  if (Math.abs(canvasAspect - sourceAspect) < ASPECT_TOLERANCE) return defaultTransform();
+  if (sourceAspect > canvasAspect) {
+    return { ...defaultTransform(), width: 1, height: canvasAspect / sourceAspect };
+  }
+  return { ...defaultTransform(), width: sourceAspect / canvasAspect, height: 1 };
+}
+
+/** Inspector scale edits use normalized canvas width as the displayed scale.
+ *  Height is derived from the source/canvas aspect so resizing never changes
+ *  the media's pixel aspect, matching upstream `writeScale(into:newScale:)`.
+ *  If source metadata is unavailable, preserve the clip's current transform
+ *  aspect instead of collapsing to a square. */
+export function resizeTransformKeepingSourceAspect(
+  transform: Transform,
+  width: number,
+  aspect: number | null,
+): Transform {
+  const nextWidth = positiveFinite(width) ? width : transform.width;
+  const currentAspect =
+    positiveFinite(transform.width) && positiveFinite(transform.height)
+      ? transform.width / transform.height
+      : 1;
+  const effectiveAspect = aspect !== null && positiveFinite(aspect) ? aspect : currentAspect;
+  return {
+    ...transform,
+    width: nextWidth,
+    height: nextWidth / effectiveAspect,
+  };
+}
+
+export type TransformResizeCorner = "topLeft" | "topRight" | "bottomLeft" | "bottomRight";
+
+function topLeftForTransform(transform: Transform): { x: number; y: number } {
+  return {
+    x: transform.centerX - transform.width / 2,
+    y: transform.centerY - transform.height / 2,
+  };
+}
+
+function transformFromTopLeft(
+  start: Transform,
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+): Transform {
+  return {
+    ...start,
+    centerX: left + width / 2,
+    centerY: top + height / 2,
+    width,
+    height,
+  };
+}
+
+function snapToBoundary(value: number, threshold: number): number {
+  if (Math.abs(value) < threshold) return 0;
+  if (Math.abs(value - 1) < threshold) return 1;
+  return value;
+}
+
+/** Upstream TransformOverlayView resizedTransform port. Dragging a corner moves
+ *  that corner, keeps the opposite corner anchored, clamps at 0.05 normalized
+ *  size, preserves media aspect when known, and skips canvas-edge snap under
+ *  rotation. */
+export function resizeTransformFromCorner(
+  start: Transform,
+  corner: TransformResizeCorner,
+  translationPx: { width: number; height: number },
+  canvasPx: { width: number; height: number },
+  mediaCanvasAspect: number | null,
+  rotated: boolean,
+  snapThresholdPx = 0,
+): Transform {
+  if (!positiveFinite(canvasPx.width) || !positiveFinite(canvasPx.height)) return start;
+  const minSize = 0.05;
+  const dx = translationPx.width / canvasPx.width;
+  const dy = translationPx.height / canvasPx.height;
+  const tl = topLeftForTransform(start);
+  let left = tl.x;
+  let top = tl.y;
+  let right = left + start.width;
+  let bottom = top + start.height;
+
+  switch (corner) {
+    case "topLeft":
+      left += dx;
+      top += dy;
+      break;
+    case "topRight":
+      right += dx;
+      top += dy;
+      break;
+    case "bottomLeft":
+      left += dx;
+      bottom += dy;
+      break;
+    case "bottomRight":
+      right += dx;
+      bottom += dy;
+      break;
+  }
+
+  switch (corner) {
+    case "topLeft":
+      left = Math.min(left, right - minSize);
+      top = Math.min(top, bottom - minSize);
+      break;
+    case "topRight":
+      right = Math.max(right, left + minSize);
+      top = Math.min(top, bottom - minSize);
+      break;
+    case "bottomLeft":
+      left = Math.min(left, right - minSize);
+      bottom = Math.max(bottom, top + minSize);
+      break;
+    case "bottomRight":
+      right = Math.max(right, left + minSize);
+      bottom = Math.max(bottom, top + minSize);
+      break;
+  }
+
+  const aspect =
+    mediaCanvasAspect !== null && positiveFinite(mediaCanvasAspect) ? mediaCanvasAspect : null;
+  if (aspect !== null) {
+    const w = right - left;
+    const h = bottom - top;
+    const widthFromHeight = h * aspect;
+    if (w >= widthFromHeight) {
+      const adjustedH = w / aspect;
+      if (corner === "topLeft" || corner === "topRight") top = bottom - adjustedH;
+      else bottom = top + adjustedH;
+    } else {
+      const adjustedW = h * aspect;
+      if (corner === "topLeft" || corner === "bottomLeft") left = right - adjustedW;
+      else right = left + adjustedW;
+    }
+  }
+
+  if (!rotated && snapThresholdPx > 0) {
+    const snapH = snapThresholdPx / canvasPx.width;
+    const snapV = snapThresholdPx / canvasPx.height;
+    const movesLeft = corner === "topLeft" || corner === "bottomLeft";
+    const movesTop = corner === "topLeft" || corner === "topRight";
+    const hEdge = movesLeft ? left : right;
+    const vEdge = movesTop ? top : bottom;
+    const snappedH = snapToBoundary(hEdge, snapH);
+    const snappedV = snapToBoundary(vEdge, snapV);
+
+    if (snappedH !== hEdge) {
+      if (movesLeft) left = snappedH;
+      else right = snappedH;
+      if (aspect !== null) {
+        if (movesTop) top = bottom - (right - left) / aspect;
+        else bottom = top + (right - left) / aspect;
+      }
+    } else if (snappedV !== vEdge) {
+      if (movesTop) top = snappedV;
+      else bottom = snappedV;
+      if (aspect !== null) {
+        if (movesLeft) left = right - (bottom - top) * aspect;
+        else right = left + (bottom - top) * aspect;
+      }
+    }
+  }
+
+  return transformFromTopLeft(
+    start,
+    left,
+    top,
+    Math.max(minSize, right - left),
+    Math.max(minSize, bottom - top),
+  );
 }
 
 /** Which edge a trim drag grabs. */

@@ -39,8 +39,8 @@ pub trait MotionRenderer {
     fn render(&self, req: &MotionRenderRequest) -> MotionResult<RenderedClip>;
 }
 
-/// The deterministic clock contract injected into every rendered document
-/// (docs/MOTION-GRAPHICS-PLUGIN.md §3). It:
+/// The deterministic clock contract injected into every native fallback
+/// rendered document. It:
 /// 1. Pauses CSS/Web animations by pinning `document.timeline.currentTime`.
 /// 2. Exposes `window.OpenTake.seek(seconds)` so the host advances time per
 ///    frame deterministically instead of relying on the wall clock.
@@ -274,8 +274,7 @@ impl Crc32 {
 
 /// The real headless-Chromium backend (skeleton).
 ///
-/// The deterministic flow this implements (docs/MOTION-GRAPHICS-PLUGIN.md §3),
-/// step by step, is:
+/// The deterministic fallback flow this skeleton documents, step by step, is:
 /// 1. Launch an offscreen Chromium with no network, an empty profile, and no
 ///    filesystem access beyond the served document — applying [`SandboxPolicy`].
 /// 2. `Emulation.setDeviceMetricsOverride` to the requested `width`×`height`.
@@ -295,7 +294,7 @@ impl Crc32 {
 /// the default build nor CI needs a browser. Without the feature, [`render`]
 /// returns [`MotionError::RendererUnavailable`].
 ///
-/// TODO(#14, chromium integration): implement the steps above against a CDP
+/// TODO(#34, native fallback): implement the steps above against a CDP
 /// client (e.g. `chromiumoxide`) under `#[cfg(feature = "chromium")]`, including:
 ///   - locating/launching the browser binary and surfacing a clear error if absent,
 ///   - enforcing the network allowlist via `Fetch.enable` + request interception,
@@ -356,12 +355,12 @@ impl MotionRenderer for HeadlessChromiumRenderer {
 
         #[cfg(feature = "chromium")]
         {
-            // TODO(#14): real CDP render. Until implemented, fail loudly rather
+            // TODO(#34): real CDP render. Until implemented, fail loudly rather
             // than silently — a half-done browser path must never masquerade as
             // a successful render.
             let _ = (&self.cache, Self::frame_time_grid(req));
             Err(MotionError::renderer_unavailable(
-                "headless-Chromium backend is enabled but not yet implemented (Issue #14 TODO)",
+                "headless-Chromium backend is enabled but not yet implemented (Issue #34 native fallback TODO)",
             ))
         }
         #[cfg(not(feature = "chromium"))]

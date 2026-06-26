@@ -74,7 +74,10 @@ OpenTake/
 │   ├── opentake-media/       # 解码/缩略图/波形/转写/语义搜索(ffmpeg-next/symphonia/whisper-rs/ort)
 │   ├── opentake-agent/       # 工具层(=ToolExecutor)+ MCP server(rmcp)+ 应用内 chat 客户端 + 短ID + 系统提示词
 │   ├── opentake-gen/         # 生成后端客户端(BYOK 直连 / 自建代理),复刻 GenerationParams 联合类型
+│   ├── opentake-motion/      # 原生 motion fallback:RGBA frame cache / sandbox / StubRenderer / 后续 alpha source
 │   └── opentake-core/        # 组装:EditorState(持有 timeline+manifest)、command 路由、事件总线
+├── plugins/
+│   └── motion-canvas-studio/ # 待新增:Motion Canvas(MIT) fork/plugin,渲染 mp4 后导入落轨
 ├── src-tauri/                # Tauri 2 app:#[tauri::command] 薄封装 + 窗口/菜单/生命周期
 ├── web/                      # React + TS 前端(Vite)
 ├── services/
@@ -84,7 +87,7 @@ OpenTake/
 
 依赖法则(经上游验证):`domain` 零依赖叶子;`ops` 只依赖 `domain`;`command` 是唯一编辑入口;UI/Agent/MCP 是命令层三个对等客户端。
 
-> 后期新增 `crates/opentake-motion/`(Web 动效模块 / 插件宿主,Agent 用 HTML/CSS/JS 写动画,见 [MOTION-GRAPHICS-PLUGIN.md](MOTION-GRAPHICS-PLUGIN.md))。它只是「又一个片段源」接入 `opentake-render`,不改动上述 8 个核心 crate 的边界。
+> Motion / AI Video 主线改为 `plugins/motion-canvas-studio/`:fork Motion Canvas(MIT),渲染 materialized mp4 后由 OpenTake 当普通媒体导入并落轨。`crates/opentake-motion/` 已有 scaffold 保留为后续透明 alpha / PNG sequence / HTML-CSS fallback,不作为 v1 主渲染器 blocker。
 
 ## 4. 领域模型(可直接复刻,见 MODULE-PORT-MAP.md「Models」)
 
