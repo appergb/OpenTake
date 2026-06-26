@@ -77,11 +77,11 @@
 - **验证**:BYOK 下能用自己的 fal key 生图/生视频并落回时间线;模型目录数据驱动 UI;托管代理可自部署。
 - **进阶扩展 · AIGC 编排(ADVANCED-FEATURES E 层)**:智能剪口播(本地词级转写+静音检测→Rust 内算 ripple,高阶工具 `remove_filler_words`/`tighten_silences`)、图文成片(agent 编排既有工具+SigLIP2 选素材)、音色克隆(ElevenLabs 等)、虚拟数字人(HeyGen/fal,新增 catalog kind)、多语种字幕翻译(MT/LLM,保时码)。
 
-## Phase 10 —(新)Web 动效模块与插件系统
-对应新 crate `opentake-motion`。详见 [MOTION-GRAPHICS-PLUGIN.md](MOTION-GRAPHICS-PLUGIN.md)。
-- **做**:Agent 用 HTML/CSS/JS(类 Emotion)编写动效 → 无头 Chromium + CDP 虚拟时间**确定性逐帧渲染**(带 alpha)→ content-hash 缓存 → 作为一层喂 wgpu 合成器;插件化的动效模板(manifest + 参数 schema)+ 渲染沙箱(禁网/CSP/超时);MCP 工具 `add_motion_graphic`/`edit_motion_graphic`。
-- **验证**:同一动效代码每帧可复现、预览=导出;透明叠加正确;沙箱不越权;模板参数化实例化可用。
-- **时机**:后期能力,依赖 wgpu 合成器(Phase 3)与媒体物化链路就绪,不阻塞核心管线。
+## Phase 10 —(新)Motion Canvas 动效 / AI Video 插件
+对应 `plugins/motion-canvas-studio`(待新增)+ `opentake-motion` fallback。详见 [MOTION-GRAPHICS-PLUGIN.md](MOTION-GRAPHICS-PLUGIN.md)。
+- **做**:沿 issue #34,优先 fork / vendor Motion Canvas(MIT),作为独立 Motion / AI Video 插件。Agent 或 Motion Panel 生成 Motion Canvas scene/template → 插件渲染 `output.mp4` → OpenTake probe 并导入 media manifest → 单步落轨。`crates/opentake-motion` 现有 scaffold 保留为后续 PNG sequence / transparent alpha / HTML-CSS fallback,不再作为 v1 主渲染器 blocker。
+- **验证**:Motion Canvas sample template 能生成 mp4;OpenTake 自动导入并创建 timeline clip;`composite_frame` 和 `export_video` 都包含该片段;失败不污染 manifest/timeline;README/NOTICE 保留 Motion Canvas MIT license 与修改说明。
+- **时机**:v1 可复用普通视频导入/预览/导出链路,不阻塞 native alpha overlay。透明动效与 `ClipType::Motion`/frame sequence 放后续。
 
 ---
 

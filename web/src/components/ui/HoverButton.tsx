@@ -43,7 +43,7 @@ export function HoverButton({
         flex: "0 0 auto",
         color: active ? "var(--text-primary)" : "var(--text-secondary)",
         opacity: disabled ? 0.35 : 1,
-        cursor: disabled ? "default" : "default",
+        cursor: disabled ? "default" : "pointer",
         ...style,
       }}
     >

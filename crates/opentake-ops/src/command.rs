@@ -2,7 +2,7 @@
 //!
 //! UI gestures, the in-app agent, and the external MCP server all funnel through
 //! one command enum, so undo / validation / versioning are written once
-//! (`ARCHITECTURE.md §5`, upstream `ToolExecutor`).
+//! (`ARCHITECTURE.md 搂5`, upstream `ToolExecutor`).
 //!
 //! `apply` is the `withTimelineSwap` transaction, generalized to the whole
 //! document (timeline + manifest):
@@ -18,7 +18,9 @@
 
 use std::collections::HashSet;
 
-use opentake_domain::{ChromaKey, ClipType, ColorGrade, Effect, Mask, Timeline, Transform};
+use opentake_domain::{
+    ChromaKey, ClipType, ColorGrade, Crop, Effect, Interpolation, Mask, Timeline, Transform,
+};
 
 use crate::editor_state::EditorState;
 use crate::engines::FrameRange;
@@ -49,7 +51,7 @@ impl std::fmt::Display for EditError {
 
 impl std::error::Error for EditError {}
 
-/// Outcome of a successfully-attempted command. 1:1 shape from `ARCHITECTURE.md §5`.
+/// Outcome of a successfully-attempted command. 1:1 shape from `ARCHITECTURE.md 搂5`.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct EditResult {
     /// Whether the document actually changed (drives undo-stack push + version bump).
@@ -77,6 +79,7 @@ pub struct ClipEntry {
     pub trim_end_frame: Option<i32>,
     pub has_audio: bool,
     pub add_linked_audio: bool,
+    pub transform: Option<Transform>,
 }
 
 impl ClipEntry {
@@ -91,6 +94,7 @@ impl ClipEntry {
             trim_end_frame: self.trim_end_frame,
             has_audio: self.has_audio,
             add_linked_audio: self.add_linked_audio,
+            transform: self.transform,
         }
     }
 }
@@ -130,6 +134,20 @@ pub struct ClipProperties {
     pub opacity: Option<f64>,
     pub transform: Option<Transform>,
     pub text_content: Option<String>,
+    /// Per-clip crop insets (normalized 0–1). Setting this clears `crop_track`.
+    pub crop: Option<Crop>,
+    /// Fade-in length in frames. Setting this clamps to the clip duration.
+    pub fade_in_frames: Option<i32>,
+    /// Fade-out length in frames. Setting this clamps to the clip duration.
+    pub fade_out_frames: Option<i32>,
+    /// Fade-in interpolation mode.
+    pub fade_in_interpolation: Option<Interpolation>,
+    /// Fade-out interpolation mode.
+    pub fade_out_interpolation: Option<Interpolation>,
+    /// Horizontal flip flag (writes to `transform.flip_horizontal`).
+    pub flip_horizontal: Option<bool>,
+    /// Vertical flip flag (writes to `transform.flip_vertical`).
+    pub flip_vertical: Option<bool>,
 }
 
 /// Which keyframe track [`EditCommand::SetKeyframes`] targets.
@@ -165,6 +183,16 @@ pub enum EditCommand {
     },
     /// Move clips (expanded to linked partners by the caller) to new tracks/frames.
     MoveClips { moves: Vec<ClipMove> },
+    /// Deep-copy clips (Option/Alt-drag duplicate) to new positions. Each clip
+    /// is cloned with all its fields (keyframe tracks / grade / chroma / masks /
+    /// effects / text / transform / crop / fades), gets a fresh id, is shifted
+    /// by `offset_frames`, lands on `target_track_indexes[i]`, and has its
+    /// `link_group_id` cleared (a copy is not linked to the original's group).
+    DuplicateClips {
+        clip_ids: Vec<String>,
+        offset_frames: i32,
+        target_track_indexes: Vec<usize>,
+    },
     /// Remove clips (expanded to linked partners), pruning emptied tracks.
     RemoveClips { clip_ids: Vec<String> },
     /// Split a clip at a frame (splits linked partners too).
@@ -250,9 +278,9 @@ pub enum EditCommand {
     RemoveTracks { track_indexes: Vec<usize> },
     /// Insert a new empty track of `kind` (clamped into its zone). Lets the drop
     /// flow create a track on demand when the timeline has no compatible one
-    /// (upstream `placeClip` / `add_clips` with omitted `trackIndex` →
+    /// (upstream `placeClip` / `add_clips` with omitted `trackIndex` 鈫?
     /// `insertTrack`), so dragging media onto an empty timeline produces a clip.
-    InsertTrack { kind: ClipType },
+    InsertTrack { kind: ClipType, at: Option<usize> },
     /// Toggle track-head properties (mute / hide / sync-lock). `None` leaves a
     /// field unchanged. 1:1 with the upstream track-header toggles.
     SetTrackProps {
@@ -281,6 +309,23 @@ pub enum EditCommand {
     /// Delete folders recursively (subfolders + their assets) and cascade-remove
     /// clips referencing any deleted asset.
     DeleteFolder { folder_ids: Vec<String> },
+    /// Replace a clip's `media_ref` in place, preserving all editing attributes
+    /// (transform / crop / keyframe tracks / grade / masks / effects / fade /
+    /// trim / speed / start / duration). 1:1 port of upstream
+    /// `replaceClipMediaRef(resetTrim: false)`:
+    ///
+    /// * **Type-must-match**: the candidate asset's `kind` must strictly equal
+    ///   the clip's `media_type` (no `isVisual` leniency, no `media_type`
+    ///   override). A mismatch is refused without mutating state.
+    /// * **Link-group cascade**: clips that share the seed clip's link group
+    ///   AND its old `media_ref` are swapped together, so a linked audio/video
+    ///   pair pointing at the same file stays in sync.
+    /// * **No-op on identical ref**: swapping to the same `media_ref` returns
+    ///   `changed = false` (no undo entry, no version bump).
+    /// * **No trim/duration rewrites**: trim / speed / start / duration are
+    ///   kept verbatim. The render layer is responsible for any overshoot
+    ///   sampling when the new media is shorter.
+    SwapMedia { clip_id: String, media_ref: String },
     /// Undo the last committed command.
     Undo,
     /// Redo the last undone command.
@@ -331,6 +376,11 @@ pub fn apply(
             entries,
         } => insert_clips(state, track_index, at_frame, entries, ids),
         EditCommand::MoveClips { moves } => move_clips(state, moves, ids),
+        EditCommand::DuplicateClips {
+            clip_ids,
+            offset_frames,
+            target_track_indexes,
+        } => duplicate_clips_cmd(state, clip_ids, offset_frames, target_track_indexes, ids),
         EditCommand::RemoveClips { clip_ids } => remove_clips(state, clip_ids),
         EditCommand::SplitClip { clip_id, at_frame } => split(state, clip_id, at_frame, ids),
         EditCommand::TrimClips { edits } => trim(state, edits),
@@ -381,7 +431,7 @@ pub fn apply(
         EditCommand::Link { clip_ids } => link(state, clip_ids, ids),
         EditCommand::Unlink { clip_ids } => unlink(state, clip_ids),
         EditCommand::RemoveTracks { track_indexes } => remove_tracks(state, track_indexes),
-        EditCommand::InsertTrack { kind } => insert_track_cmd(state, kind, ids),
+        EditCommand::InsertTrack { kind, at } => insert_track_cmd(state, kind, at, ids),
         EditCommand::SetTrackProps {
             track_index,
             muted,
@@ -400,6 +450,7 @@ pub fn apply(
         EditCommand::RenameFolder { entries } => rename_folder(state, entries),
         EditCommand::DeleteMedia { asset_ids } => delete_media(state, asset_ids),
         EditCommand::DeleteFolder { folder_ids } => delete_folder(state, folder_ids),
+        EditCommand::SwapMedia { clip_id, media_ref } => swap_media(state, clip_id, media_ref),
     }
 }
 
@@ -494,6 +545,7 @@ fn add_clips(
 fn insert_track_cmd(
     state: &mut EditorState,
     kind: ClipType,
+    at: Option<usize>,
     ids: &dyn IdGen,
 ) -> Result<EditResult, EditError> {
     transact(
@@ -501,10 +553,8 @@ fn insert_track_cmd(
         "Insert Track",
         |added| format!("Inserted track: {}", added.join(", ")),
         |st| {
-            // Append at the end; `insert_track` clamps into the kind's zone
-            // (visual above audio).
-            let at = st.timeline.tracks.len();
-            let idx = ops::insert_track(&mut st.timeline, at, kind, ids);
+            let requested = at.unwrap_or(st.timeline.tracks.len());
+            let idx = ops::insert_track(&mut st.timeline, requested, kind, ids);
             Ok(vec![st.timeline.tracks[idx].id.clone()])
         },
     )
@@ -621,6 +671,54 @@ fn move_clips(
         |st| {
             ops::move_clips(&mut st.timeline, &moves, ids);
             Ok(moves.iter().map(|m| m.clip_id.clone()).collect())
+        },
+    )
+}
+
+/// Option/Alt-drag duplicate: deep-copy each clip to a new position. See
+/// [`EditCommand::DuplicateClips`].
+fn duplicate_clips_cmd(
+    state: &mut EditorState,
+    clip_ids: Vec<String>,
+    offset_frames: i32,
+    target_track_indexes: Vec<usize>,
+    ids: &dyn IdGen,
+) -> Result<EditResult, EditError> {
+    if clip_ids.is_empty() {
+        return Err(EditError::Invalid(
+            "Missing or empty 'clipIds' array".into(),
+        ));
+    }
+    if target_track_indexes.len() != clip_ids.len() {
+        return Err(EditError::Invalid(format!(
+            "targetTrackIndexes length ({}) must match clipIds length ({})",
+            target_track_indexes.len(),
+            clip_ids.len()
+        )));
+    }
+    for id in &clip_ids {
+        if state.find_clip(id).is_none() {
+            return Err(EditError::Invalid(format!("Clip not found: {id}")));
+        }
+    }
+    let action_name = if clip_ids.len() == 1 {
+        "Duplicate Clip"
+    } else {
+        "Duplicate Clips"
+    };
+    let n = clip_ids.len();
+    transact(
+        state,
+        action_name,
+        move |_| format!("Duplicated {n} clip(s)"),
+        |st| {
+            Ok(ops::duplicate_clips(
+                &mut st.timeline,
+                &clip_ids,
+                offset_frames,
+                &target_track_indexes,
+                ids,
+            ))
         },
     )
 }
@@ -831,6 +929,30 @@ fn apply_property_changes(
     }
     if let Some(t) = props.transform {
         clip.transform = t;
+    }
+    if let Some(c) = props.crop {
+        clip.crop = c;
+        clip.crop_track = None;
+    }
+    if let Some(v) = props.fade_in_frames {
+        clip.fade_in_frames = v.max(0);
+        clip.clamp_fades_to_duration();
+    }
+    if let Some(v) = props.fade_out_frames {
+        clip.fade_out_frames = v.max(0);
+        clip.clamp_fades_to_duration();
+    }
+    if let Some(i) = props.fade_in_interpolation {
+        clip.fade_in_interpolation = i;
+    }
+    if let Some(i) = props.fade_out_interpolation {
+        clip.fade_out_interpolation = i;
+    }
+    if let Some(f) = props.flip_horizontal {
+        clip.transform.flip_horizontal = f;
+    }
+    if let Some(f) = props.flip_vertical {
+        clip.transform.flip_vertical = f;
     }
     if let Some(c) = &props.text_content {
         clip.text_content = Some(c.clone());
@@ -1311,7 +1433,7 @@ fn ripple_delete_ranges(
     match outcome {
         RippleOutcome::Refused(reason) => {
             // Restore in case clear_region partially mutated before a later refusal
-            // (it can't here — refusal is dry-run first — but keep it airtight).
+            // (it can't here 鈥?refusal is dry-run first 鈥?but keep it airtight).
             state.restore(before);
             Err(EditError::Refused(reason))
         }
@@ -1742,6 +1864,121 @@ fn delete_folder(
     )
 }
 
+/// Replace a clip's `media_ref` in place, preserving every editing attribute
+/// (transform / crop / keyframe tracks / grade / masks / effects / fade / text
+/// / trim / speed / start / duration). 1:1 port of upstream
+/// `replaceClipMediaRef(resetTrim: false)`:
+///
+/// 1. Validate the seed clip exists and the candidate asset exists in the
+///    manifest, then refuse unless `clip.media_type == asset.kind` (strict
+///    equality — no `isVisual` leniency). A video clip can only be swapped to
+///    a video asset, an audio clip only to an audio asset, etc.
+/// 2. Walk the seed clip's link group, picking every clip that shares the
+///    same `media_ref`. Each one is updated to the new ref in the same
+///    transaction, so a linked audio/video pair pointing at the same file
+///    stays in sync (and `Undo` restores every old ref atomically).
+/// 3. **No** trim / duration / start rewrites — `resetTrim: false`. The render
+///    layer is responsible for any overshoot sampling when the new media is
+///    shorter.
+/// 4. Same `media_ref` is a no-op (`changed = false`, no undo entry, no
+///    version bump).
+fn swap_media(
+    state: &mut EditorState,
+    clip_id: String,
+    media_ref: String,
+) -> Result<EditResult, EditError> {
+    // 1. Seed clip must exist.
+    let seed_loc = state
+        .find_clip(&clip_id)
+        .ok_or_else(|| EditError::Invalid(format!("Clip not found: {clip_id}")))?;
+
+    // 2. Candidate asset must exist in the manifest.
+    let new_asset = state
+        .manifest
+        .entries
+        .iter()
+        .find(|e| e.id == media_ref)
+        .ok_or_else(|| EditError::Invalid(format!("Media not found: {media_ref}")))?;
+
+    // 3. Strict type-match: clip.media_type == asset.kind. No isVisual leniency,
+    //    no media_type override. A video clip can only swap to a video asset,
+    //    an audio clip only to an audio asset.
+    let seed_media_type =
+        state.timeline.tracks[seed_loc.track_index].clips[seed_loc.clip_index].media_type;
+    if seed_media_type != new_asset.kind {
+        return Err(EditError::Refused(format!(
+            "Type mismatch: clip is {:?}, asset is {:?}",
+            seed_media_type, new_asset.kind
+        )));
+    }
+
+    // 4. No-op when the seed already references the new media.
+    let seed_old_ref = state.timeline.tracks[seed_loc.track_index].clips[seed_loc.clip_index]
+        .media_ref
+        .clone();
+    if seed_old_ref == media_ref {
+        let version = state.version();
+        return Ok(EditResult {
+            changed: false,
+            action_name: "Swap Media".to_string(),
+            affected_clip_ids: vec![clip_id.clone()],
+            timeline_version: version,
+            summary: format!("No-op: {clip_id} already references {media_ref}"),
+        });
+    }
+
+    // 5. Collect every link-group partner that also references the old ref.
+    //    `expand_to_link_group` returns the whole group; we then keep only
+    //    the members whose `media_ref` matches the seed's old ref.
+    let link_group = ops::expand_to_link_group(&state.timeline, &{
+        let mut s = HashSet::new();
+        s.insert(clip_id.clone());
+        s
+    });
+    let mut targets: Vec<String> = Vec::new();
+    for member_id in &link_group {
+        if let Some(loc) = state.find_clip(member_id) {
+            let c = &state.timeline.tracks[loc.track_index].clips[loc.clip_index];
+            if c.media_ref == seed_old_ref {
+                targets.push(member_id.clone());
+            }
+        }
+    }
+    if !targets.iter().any(|id| id == &clip_id) {
+        // Defensive: the seed itself must always be in the target set.
+        targets.push(clip_id.clone());
+    }
+
+    let summary_old = seed_old_ref;
+    let summary_new = media_ref.clone();
+    let target_count = targets.len();
+    transact(
+        state,
+        "Swap Media",
+        move |affected| {
+            if affected.len() <= 1 {
+                format!("Swapped {clip_id}: {summary_old} -> {summary_new}")
+            } else {
+                format!(
+                    "Swapped {n} linked clips: {summary_old} -> {summary_new}",
+                    n = affected.len()
+                )
+            }
+        },
+        move |st| {
+            let mut affected = Vec::with_capacity(target_count);
+            for tid in &targets {
+                if let Some(loc) = st.find_clip(tid) {
+                    st.timeline.tracks[loc.track_index].clips[loc.clip_index].media_ref =
+                        media_ref.clone();
+                    affected.push(tid.clone());
+                }
+            }
+            Ok(affected)
+        },
+    )
+}
+
 // MARK: - Small local helpers
 
 fn validate_entry(state: &EditorState, e: &ClipEntry, i: usize) -> Result<(), EditError> {
@@ -1881,6 +2118,7 @@ mod insert_track_tests {
             &mut state,
             EditCommand::InsertTrack {
                 kind: ClipType::Video,
+                at: None,
             },
             &ids,
         )
@@ -1894,12 +2132,53 @@ mod insert_track_tests {
             &mut state,
             EditCommand::InsertTrack {
                 kind: ClipType::Audio,
+                at: None,
             },
             &ids,
         )
         .unwrap();
         assert_eq!(state.timeline.tracks.len(), 2);
         assert_eq!(state.timeline.tracks[1].kind, ClipType::Audio);
+    }
+
+    #[test]
+    fn insert_track_honors_requested_index() {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+
+        apply(
+            &mut state,
+            EditCommand::InsertTrack {
+                kind: ClipType::Video,
+                at: None,
+            },
+            &ids,
+        )
+        .unwrap();
+        let first_id = state.timeline.tracks[0].id.clone();
+        apply(
+            &mut state,
+            EditCommand::InsertTrack {
+                kind: ClipType::Audio,
+                at: None,
+            },
+            &ids,
+        )
+        .unwrap();
+
+        apply(
+            &mut state,
+            EditCommand::InsertTrack {
+                kind: ClipType::Video,
+                at: Some(0),
+            },
+            &ids,
+        )
+        .unwrap();
+
+        assert_eq!(state.timeline.tracks[1].id, first_id);
+        assert_eq!(state.timeline.tracks[0].kind, ClipType::Video);
+        assert_eq!(state.timeline.tracks[2].kind, ClipType::Audio);
     }
 
     #[test]
@@ -1910,6 +2189,7 @@ mod insert_track_tests {
             &mut state,
             EditCommand::InsertTrack {
                 kind: ClipType::Audio,
+                at: None,
             },
             &ids,
         )
@@ -1965,6 +2245,7 @@ mod keyframe_edit_tests {
             &mut state,
             EditCommand::InsertTrack {
                 kind: ClipType::Video,
+                at: None,
             },
             &ids,
         )
@@ -2037,7 +2318,7 @@ mod keyframe_edit_tests {
             EditCommand::StampKeyframe {
                 clip_id: clip_id.clone(),
                 property: KeyframeProperty::Opacity,
-                frame: 110, // rel 10 — same as existing kf
+                frame: 110, // rel 10 閳?same as existing kf
             },
             &ids,
         )
@@ -2115,7 +2396,7 @@ mod keyframe_edit_tests {
             EditCommand::RemoveKeyframe {
                 clip_id,
                 property: KeyframeProperty::Opacity,
-                frame: 110, // rel 10 — no kf here
+                frame: 110, // rel 10 閳?no kf here
             },
             &ids,
         );
@@ -2161,7 +2442,7 @@ mod keyframe_edit_tests {
                 clip_id,
                 property: KeyframeProperty::Opacity,
                 from_frame: 100, // rel 0
-                to_frame: 110,   // rel 10 — occupied
+                to_frame: 110,   // rel 10 閳?occupied
             },
             &ids,
         );
@@ -2178,7 +2459,7 @@ mod keyframe_edit_tests {
             EditCommand::MoveKeyframe {
                 clip_id,
                 property: KeyframeProperty::Opacity,
-                from_frame: 115, // rel 15 — no kf
+                from_frame: 115, // rel 15 閳?no kf
                 to_frame: 120,   // rel 20
             },
             &ids,
@@ -2242,7 +2523,7 @@ mod keyframe_edit_tests {
             EditCommand::SetKeyframeInterpolation {
                 clip_id,
                 property: KeyframeProperty::Opacity,
-                frame: 115, // rel 15 — no kf
+                frame: 115, // rel 15 閳?no kf
                 interpolation: Interpolation::Linear,
             },
             &ids,
@@ -2252,5 +2533,173 @@ mod keyframe_edit_tests {
 
     fn approx(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-9, "{a} != {b}");
+    }
+}
+
+#[cfg(test)]
+mod duplicate_clips_tests {
+    use super::*;
+    use crate::id::SeqIdGen;
+    use opentake_domain::{Clip, ClipType, Keyframe, KeyframeTrack, Track};
+
+    fn state_with_clip() -> EditorState {
+        let mut tl = Timeline::new();
+        let mut t = Track::new("v1", ClipType::Video);
+        t.clips.push(Clip::new("c1", "asset", 0, 30));
+        tl.tracks.push(t);
+        EditorState::from_timeline(tl)
+    }
+
+    #[test]
+    fn duplicate_clips_creates_copy_with_new_id() {
+        let mut state = state_with_clip();
+        let ids = SeqIdGen::new("d-");
+        let res = apply(
+            &mut state,
+            EditCommand::DuplicateClips {
+                clip_ids: vec!["c1".into()],
+                offset_frames: 100,
+                target_track_indexes: vec![0],
+            },
+            &ids,
+        )
+        .unwrap();
+        assert!(res.changed);
+        assert_eq!(res.action_name, "Duplicate Clip");
+        assert_eq!(res.affected_clip_ids.len(), 1);
+        // Original retained, copy present at frame 100.
+        assert!(state.timeline.tracks[0].clips.iter().any(|c| c.id == "c1"));
+        let copy = state.timeline.tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == res.affected_clip_ids[0])
+            .unwrap();
+        assert_eq!(copy.start_frame, 100);
+        assert_ne!(copy.id, "c1");
+    }
+
+    #[test]
+    fn duplicate_clips_deep_copies_keyframe_tracks() {
+        let mut state = state_with_clip();
+        state.timeline.tracks[0].clips[0].opacity_track =
+            Some(KeyframeTrack::from_keyframes(vec![
+                Keyframe::new(0, 0.0),
+                Keyframe::new(30, 1.0),
+            ]));
+        let ids = SeqIdGen::default();
+        let res = apply(
+            &mut state,
+            EditCommand::DuplicateClips {
+                clip_ids: vec!["c1".into()],
+                offset_frames: 100,
+                target_track_indexes: vec![0],
+            },
+            &ids,
+        )
+        .unwrap();
+        let copy = state.timeline.tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == res.affected_clip_ids[0])
+            .unwrap();
+        let op = copy.opacity_track.as_ref().unwrap();
+        assert_eq!(
+            op.keyframes.iter().map(|k| k.frame).collect::<Vec<_>>(),
+            vec![0, 30]
+        );
+    }
+
+    #[test]
+    fn duplicate_clips_clears_link_group_id() {
+        let mut state = state_with_clip();
+        state.timeline.tracks[0].clips[0].link_group_id = Some("grp".into());
+        let ids = SeqIdGen::default();
+        let res = apply(
+            &mut state,
+            EditCommand::DuplicateClips {
+                clip_ids: vec!["c1".into()],
+                offset_frames: 50,
+                target_track_indexes: vec![0],
+            },
+            &ids,
+        )
+        .unwrap();
+        let copy = state.timeline.tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == res.affected_clip_ids[0])
+            .unwrap();
+        assert!(copy.link_group_id.is_none());
+    }
+
+    #[test]
+    fn duplicate_clips_missing_clip_errors() {
+        let mut state = state_with_clip();
+        let ids = SeqIdGen::default();
+        let err = apply(
+            &mut state,
+            EditCommand::DuplicateClips {
+                clip_ids: vec!["nope".into()],
+                offset_frames: 100,
+                target_track_indexes: vec![0],
+            },
+            &ids,
+        );
+        assert!(matches!(err, Err(EditError::Invalid(_))));
+    }
+
+    #[test]
+    fn duplicate_clips_length_mismatch_errors() {
+        let mut state = state_with_clip();
+        let ids = SeqIdGen::default();
+        let err = apply(
+            &mut state,
+            EditCommand::DuplicateClips {
+                clip_ids: vec!["c1".into()],
+                offset_frames: 100,
+                target_track_indexes: vec![0, 1], // wrong length
+            },
+            &ids,
+        );
+        assert!(matches!(err, Err(EditError::Invalid(_))));
+    }
+
+    #[test]
+    fn duplicate_clips_empty_ids_errors() {
+        let mut state = state_with_clip();
+        let ids = SeqIdGen::default();
+        let err = apply(
+            &mut state,
+            EditCommand::DuplicateClips {
+                clip_ids: vec![],
+                offset_frames: 100,
+                target_track_indexes: vec![],
+            },
+            &ids,
+        );
+        assert!(matches!(err, Err(EditError::Invalid(_))));
+    }
+
+    #[test]
+    fn duplicate_clips_is_undoable() {
+        let mut state = state_with_clip();
+        let ids = SeqIdGen::default();
+        let version_before = state.version();
+        apply(
+            &mut state,
+            EditCommand::DuplicateClips {
+                clip_ids: vec!["c1".into()],
+                offset_frames: 100,
+                target_track_indexes: vec![0],
+            },
+            &ids,
+        )
+        .unwrap();
+        assert_eq!(state.timeline.tracks[0].clips.len(), 2);
+        assert!(state.can_undo());
+        apply(&mut state, EditCommand::Undo, &ids).unwrap();
+        assert_eq!(state.timeline.tracks[0].clips.len(), 1);
+        assert_eq!(state.timeline.tracks[0].clips[0].id, "c1");
+        assert_eq!(state.version(), version_before + 2); // commit + undo
     }
 }

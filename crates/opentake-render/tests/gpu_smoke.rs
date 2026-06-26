@@ -183,7 +183,7 @@ fn two_tracks_top_layer_wins_when_opaque() {
     let Some(dev) = device_or_skip("two_tracks_top_layer_wins_when_opaque") else {
         return;
     };
-    // Bottom track + top track, both full-canvas opaque. Top must win.
+    // Two full-canvas opaque tracks. Upstream visual track 0 is topmost.
     let mut tl = Timeline::new();
     tl.fps = 30;
     tl.width = 16;
@@ -194,9 +194,9 @@ fn two_tracks_top_layer_wins_when_opaque() {
         c
     };
     let mut t0 = Track::new("t0", ClipType::Video);
-    t0.clips.push(mk("bottom"));
+    t0.clips.push(mk("top"));
     let mut t1 = Track::new("t1", ClipType::Video);
-    t1.clips.push(mk("top"));
+    t1.clips.push(mk("bottom"));
     tl.tracks.push(t0);
     tl.tracks.push(t1);
 

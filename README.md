@@ -152,11 +152,18 @@ crates/
 ├── opentake-project    # Project persistence / bundle / archive / export
 ├── opentake-media      # FFmpeg codec / thumbnails / waveform / transcription / semantic search
 ├── opentake-render     # wgpu compositor + text rasterizer
-├── opentake-motion     # Lottie / web motion graphics rendering
+├── opentake-motion     # Native motion fallback: RGBA frame cache / alpha source scaffold
 ├── opentake-agent      # MCP Server + Agent chat + context signal system
 ├── opentake-gen        # Generative AI clients (fal.ai / Replicate / OpenAI)
 ├── opentake-core       # Session management / DI / event bus
 └── src-tauri           # Tauri 2 desktop shell
+```
+
+Planned external plugin:
+
+```
+plugins/
+└── motion-canvas-studio # Motion Canvas (MIT) fork/plugin for AI animation video output
 ```
 
 ```bash

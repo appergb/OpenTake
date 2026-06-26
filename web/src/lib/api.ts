@@ -148,6 +148,19 @@ export async function getMedia(): Promise<MediaList> {
 }
 
 /**
+ * `extract_audio`: extract the audio track from a media asset into a
+ * self-contained audio file. `outPath`'s extension picks the codec
+ * (`.m4a` -> AAC, `.mp3` -> libmp3lame, `.wav` -> PCM s16le). Returns the
+ * output path on success. Outside Tauri there is no ffmpeg, so this rejects
+ * with a friendly error.
+ */
+export async function extractAudio(mediaId: string, outPath: string): Promise<string> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<string>("extract_audio", { mediaId, outPath });
+  throw new Error("audio extraction requires the desktop app (ffmpeg)");
+}
+
+/**
  * Relink an offline asset to a newly chosen file, KEEPING its id so every clip
  * that references it recovers in place (the fix for "lost media stays red after
  * re-selecting the path" — re-importing would mint a new id and strand the old

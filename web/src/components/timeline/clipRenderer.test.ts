@@ -7,6 +7,10 @@ import type { Clip } from "../../lib/types";
 function makeCtx() {
   const fills: string[] = [];
   const strokes: string[] = [];
+  const filledPaths: Array<{ fillStyle: string; firstMoveTo: [number, number] | null }> = [];
+  const fillRects: Array<{ fillStyle: string; x: number; y: number; width: number; height: number }> = [];
+  const arcs: Array<{ x: number; y: number; radius: number }> = [];
+  let firstMoveTo: [number, number] | null = null;
   const ctx = {
     fillStyle: "",
     strokeStyle: "",
@@ -15,9 +19,16 @@ function makeCtx() {
     textBaseline: "",
     save() {},
     restore() {},
-    beginPath() {},
-    moveTo() {},
+    beginPath() {
+      firstMoveTo = null;
+    },
+    moveTo(x: number, y: number) {
+      if (!firstMoveTo) firstMoveTo = [x, y];
+    },
     lineTo() {},
+    arc(x: number, y: number, radius: number) {
+      arcs.push({ x, y, radius });
+    },
     arcTo() {},
     closePath() {},
     clip() {},
@@ -28,15 +39,21 @@ function makeCtx() {
     },
     fill() {
       fills.push(String(this.fillStyle));
+      filledPaths.push({ fillStyle: String(this.fillStyle), firstMoveTo });
+      firstMoveTo = null;
     },
     stroke() {
       strokes.push(String(this.strokeStyle));
     },
-    fillRect() {
+    fillRect(x: number, y: number, width: number, height: number) {
       fills.push(String(this.fillStyle));
+      fillRects.push({ fillStyle: String(this.fillStyle), x, y, width, height });
+    },
+    strokeRect() {
+      strokes.push(String(this.strokeStyle));
     },
   };
-  return { ctx: ctx as unknown as CanvasRenderingContext2D, fills, strokes };
+  return { ctx: ctx as unknown as CanvasRenderingContext2D, fills, strokes, filledPaths, fillRects, arcs };
 }
 
 const testClip = {
@@ -73,6 +90,124 @@ describe("drawClip missing wash", () => {
     const { ctx, fills } = makeCtx();
     drawClip(ctx, testClip, rect, { isSelected: false, fps: 30 });
     expect(fills).not.toContain("rgba(255,59,48,0.35)");
+  });
+});
+
+describe("drawClip linkOffset badge", () => {
+  const rect = { x: 0, y: 0, width: 200, height: 60 };
+
+  it("draws the red offset badge when linkOffset is nonzero", () => {
+    const { ctx, fills } = makeCtx();
+    drawClip(ctx, testClip, rect, { isSelected: false, fps: 30, linkOffset: 5 });
+    expect(fills).toContain("rgb(255,71,71)");
+  });
+
+  it("positions the red offset badge at the clip top-right", () => {
+    const { ctx, filledPaths } = makeCtx();
+    drawClip(ctx, testClip, rect, { isSelected: false, fps: 30, linkOffset: 5 });
+
+    const badgePath = filledPaths.find((p) => p.fillStyle === "rgb(255,71,71)");
+    expect(badgePath?.firstMoveTo?.[0]).toBeGreaterThan(170);
+    expect(badgePath?.firstMoveTo?.[1]).toBeLessThan(10);
+  });
+
+  it("skips the badge when linkOffset is zero", () => {
+    const { ctx, fills } = makeCtx();
+    drawClip(ctx, testClip, rect, { isSelected: false, fps: 30, linkOffset: 0 });
+    expect(fills).not.toContain("rgb(255,71,71)");
+  });
+
+  it("skips the badge when linkOffset is undefined", () => {
+    const { ctx, fills } = makeCtx();
+    drawClip(ctx, testClip, rect, { isSelected: false, fps: 30 });
+    expect(fills).not.toContain("rgb(255,71,71)");
+  });
+
+  it("skips the badge on narrow clips (badge would overlap trim handle)", () => {
+    const narrow = { x: 0, y: 0, width: 30, height: 40 };
+    const { ctx, fills } = makeCtx();
+    drawClip(ctx, testClip, narrow, { isSelected: false, fps: 30, linkOffset: 5 });
+    // The width guard suppresses badges that would collide with both trim handles.
+    expect(fills).not.toContain("rgb(255,71,71)");
+  });
+
+  it("keeps the duplicate ghost badge from covering the link-offset badge", () => {
+    const { ctx, filledPaths, arcs } = makeCtx();
+    drawClip(ctx, testClip, rect, {
+      isSelected: false,
+      fps: 30,
+      ghost: true,
+      isDuplicate: true,
+      linkOffset: 5,
+    });
+
+    const offsetBadge = filledPaths.find((p) => p.fillStyle === "rgb(255,71,71)");
+    const duplicateBadge = arcs[0];
+    expect(offsetBadge?.firstMoveTo).toBeDefined();
+    expect(duplicateBadge).toBeDefined();
+    expect(duplicateBadge.x + duplicateBadge.radius).toBeLessThan(offsetBadge!.firstMoveTo![0]);
+  });
+
+  it("skips the duplicate ghost badge when the offset badge leaves no room", () => {
+    const barelyOffsetEligible = { x: 0, y: 0, width: 31, height: 40 };
+    const { ctx, filledPaths, arcs } = makeCtx();
+    drawClip(ctx, testClip, barelyOffsetEligible, {
+      isSelected: false,
+      fps: 30,
+      ghost: true,
+      isDuplicate: true,
+      linkOffset: 5,
+    });
+
+    expect(filledPaths.some((p) => p.fillStyle === "rgb(255,71,71)")).toBe(true);
+    expect(arcs).toHaveLength(0);
+  });
+});
+
+describe("drawClip fade knees", () => {
+  const rect = { x: 0, y: 0, width: 200, height: 60 };
+  const visualClip = {
+    ...testClip,
+    mediaType: "video",
+    sourceClipType: "video",
+  } as Clip;
+
+  it("draws both selected knee handles even when fade lengths are zero", () => {
+    const { ctx, fillRects } = makeCtx();
+    drawClip(ctx, visualClip, rect, { isSelected: true, fps: 30 });
+
+    const kneeRects = fillRects.filter(
+      (r) => r.fillStyle === "rgba(255,255,255,0.95)" && r.width === 7 && r.height === 7,
+    );
+    expect(kneeRects).toHaveLength(2);
+    expect(kneeRects[0].x).toBeCloseTo(2.5);
+    expect(kneeRects[1].x).toBeCloseTo(190.5);
+  });
+
+  it("draws full-length fade handles at upstream edge-specific centers", () => {
+    const { ctx: inCtx, fillRects: inRects } = makeCtx();
+    drawClip(
+      inCtx,
+      { ...visualClip, fadeInFrames: 100 },
+      rect,
+      { isSelected: true, fps: 30 },
+    );
+    const fullInKnees = inRects.filter(
+      (r) => r.fillStyle === "rgba(255,255,255,0.95)" && r.width === 7 && r.height === 7,
+    );
+    expect(fullInKnees[0].x).toBeCloseTo(196.5);
+
+    const { ctx: outCtx, fillRects: outRects } = makeCtx();
+    drawClip(
+      outCtx,
+      { ...visualClip, fadeOutFrames: 100 },
+      rect,
+      { isSelected: true, fps: 30 },
+    );
+    const fullOutKnees = outRects.filter(
+      (r) => r.fillStyle === "rgba(255,255,255,0.95)" && r.width === 7 && r.height === 7,
+    );
+    expect(fullOutKnees[1].x).toBeCloseTo(-3.5);
   });
 });
 

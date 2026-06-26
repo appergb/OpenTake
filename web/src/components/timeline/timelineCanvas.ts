@@ -5,10 +5,11 @@
  * (SPEC §5.11), painted by the container.
  */
 
-import { BG, BORDER, TEXT } from "../../lib/theme";
+import { BG, BORDER, TEXT, LAYOUT, TRACK_SIZE } from "../../lib/theme";
 import { clipRect, trackDisplayHeight, trackY } from "../../lib/geometry";
+import { linkOffsetForClip } from "../../lib/clip";
 import { drawClip } from "./clipRenderer";
-import type { Timeline } from "../../lib/types";
+import type { Timeline, ClipType } from "../../lib/types";
 
 export interface PaintState {
   timeline: Timeline;
@@ -42,8 +43,21 @@ export interface PaintState {
 
 /** A live move/trim, projected for ghost rendering. */
 export type DragPaint =
-  | { kind: "move"; ids: Set<string>; deltaFrames: number; trackDelta: number }
-  | { kind: "trim"; clipId: string; edge: "left" | "right"; deltaFrames: number };
+  | {
+      kind: "move";
+      ids: Set<string>;
+      deltaFrames: number;
+      trackDelta: number;
+      /** Option/Alt-drag duplicate: ghost renders with a "+" badge. */
+      isDuplicate?: boolean;
+      /** Dropping on an insert zone creates a new track of this type. */
+      newTrackType?: ClipType;
+      /** Upstream `newTrackAt(index)` insertion index for the new-track drop. */
+      newTrackIndex?: number;
+    }
+  | { kind: "trim"; clipId: string; edge: "left" | "right"; deltaFrames: number }
+  | { kind: "volumeKf"; clipId: string; fromFrame: number; ghostFrame: number }
+  | { kind: "fadeKnee"; clipId: string; edge: "left" | "right"; currentFrames: number };
 
 export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
   const { timeline, pixelsPerFrame, trackHeights, width, dpr, scrollLeft, scrollTop } = s;
@@ -77,21 +91,54 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
   // 3. Clips (skip those fully outside the visible window). A clip being dragged
   // is drawn at its live (offset) position as a ghost so it follows the cursor.
   const drag = s.drag;
+  const insertionLineY = (index: number): number => {
+    if (timeline.tracks.length === 0) return LAYOUT.rulerHeight + LAYOUT.dropZoneHeight;
+    if (index <= 0) return trackY(timeline, 0, trackHeights);
+    if (index >= timeline.tracks.length) return trackY(timeline, timeline.tracks.length, trackHeights);
+    return trackY(timeline, index, trackHeights);
+  };
+  // New-track drop indicator: dashed zone at the upstream insertion index.
+  if (drag?.kind === "move" && drag.newTrackType && timeline.tracks.length > 0) {
+    const newTrackY = insertionLineY(drag.newTrackIndex ?? timeline.tracks.length);
+    const newTrackH = trackDisplayHeight(timeline.tracks[0], trackHeights) || TRACK_SIZE.defaultHeight;
+    if (newTrackY + newTrackH > scrollTop && newTrackY < scrollTop + s.viewHeight) {
+      ctx.fillStyle = "rgba(255,255,255,0.04)";
+      ctx.fillRect(scrollLeft, newTrackY, s.viewWidth, newTrackH);
+      ctx.strokeStyle = "rgba(255,255,255,0.3)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeRect(scrollLeft + 0.5, newTrackY + 0.5, s.viewWidth - 1, newTrackH - 1);
+      ctx.setLineDash([]);
+    }
+  }
   for (let ti = 0; ti < timeline.tracks.length; ti++) {
     const track = timeline.tracks[ti];
     for (const clip of track.clips) {
       let rect = clipRect(timeline, ti, clip, pixelsPerFrame, trackHeights);
       let ghost = false;
+      let isDuplicate = false;
       if (drag?.kind === "move" && drag.ids.has(clip.id)) {
-        const nti = Math.max(0, Math.min(timeline.tracks.length - 1, ti + drag.trackDelta));
-        rect = clipRect(
-          timeline,
-          nti,
-          { ...clip, startFrame: clip.startFrame + drag.deltaFrames },
-          pixelsPerFrame,
-          trackHeights,
-        );
+        if (drag.newTrackType) {
+          const newTrackY = insertionLineY(drag.newTrackIndex ?? timeline.tracks.length);
+          const ghostH = (trackDisplayHeight(timeline.tracks[0], trackHeights) || TRACK_SIZE.defaultHeight) - 4;
+          rect = {
+            x: (clip.startFrame + drag.deltaFrames) * pixelsPerFrame,
+            y: newTrackY + 2,
+            width: clip.durationFrames * pixelsPerFrame,
+            height: ghostH,
+          };
+        } else {
+          const nti = Math.max(0, Math.min(timeline.tracks.length - 1, ti + drag.trackDelta));
+          rect = clipRect(
+            timeline,
+            nti,
+            { ...clip, startFrame: clip.startFrame + drag.deltaFrames },
+            pixelsPerFrame,
+            trackHeights,
+          );
+        }
         ghost = true;
+        isDuplicate = drag.isDuplicate === true;
       } else if (drag?.kind === "trim" && drag.clipId === clip.id) {
         const dx = drag.deltaFrames * pixelsPerFrame;
         rect =
@@ -101,7 +148,22 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
         ghost = true;
       }
       if (rect.x + rect.width < scrollLeft || rect.x > visRight) continue;
-      drawClip(ctx, clip, rect, {
+      // Volume-kf drag ghost: when this clip is the one being dragged, tell the
+      // renderer to draw the grabbed dot at its ghost frame instead of the
+      // original, so the dot follows the cursor (SPEC §5.4).
+      const volumeKfGhost =
+        drag?.kind === "volumeKf" && drag.clipId === clip.id
+          ? { fromFrame: drag.fromFrame, ghostFrame: drag.ghostFrame }
+          : undefined;
+      const paintClip =
+        drag?.kind === "fadeKnee" && drag.clipId === clip.id
+          ? {
+              ...clip,
+              fadeInFrames: drag.edge === "left" ? drag.currentFrames : clip.fadeInFrames,
+              fadeOutFrames: drag.edge === "right" ? drag.currentFrames : clip.fadeOutFrames,
+            }
+          : clip;
+      drawClip(ctx, paintClip, rect, {
         isSelected: s.selectedClipIds.has(clip.id),
         fps: timeline.fps,
         waveform: clip.mediaType === "audio" ? s.waveforms.get(clip.mediaRef) : undefined,
@@ -109,6 +171,9 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
         // asset's file is offline.
         missing: clip.mediaType !== "text" && s.missingMediaRefs.has(clip.mediaRef),
         ghost,
+        linkOffset: linkOffsetForClip(timeline, clip.id),
+        volumeKfGhost,
+        isDuplicate,
       });
     }
   }

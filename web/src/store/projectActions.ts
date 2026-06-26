@@ -11,6 +11,7 @@ import { forceRefresh } from "./sync";
 import { useEditorUiStore } from "./uiStore";
 import { useProjectStore } from "./projectStore";
 import { useRecentStore } from "./recentStore";
+import { refreshMedia } from "./mediaStore";
 import { openDialog, saveDialog } from "../lib/dialog";
 import { t } from "../i18n";
 
@@ -89,6 +90,7 @@ export async function openProjectPath(path: string): Promise<void> {
   useProjectStore.getState().setProjectPath(path);
   useProjectStore.getState().markSaved();
   useRecentStore.getState().add(path);
+  await refreshMedia();
   useEditorUiStore.getState().setView("editor");
 }
 

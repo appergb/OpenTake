@@ -22,11 +22,13 @@ export interface SnapResult {
 }
 
 /** Collect snap targets: every clip start/end (excluding dragged clips) plus an
- *  optional playhead (SnapEngine.swift:31-48). */
+ *  optional playhead (SnapEngine.swift:31-48). `includePlayhead` defaults false
+ *  to match upstream: only callers that explicitly opt in get playhead snap. */
 export function collectTargets(
   timeline: Timeline,
   excludeClipIds: Set<string>,
   playheadFrame: number | null,
+  includePlayhead = false,
 ): SnapTarget[] {
   const targets: SnapTarget[] = [];
   for (const track of timeline.tracks) {
@@ -36,7 +38,7 @@ export function collectTargets(
       targets.push({ frame: endFrame(clip), kind: "clipEdge" });
     }
   }
-  if (playheadFrame !== null) {
+  if (playheadFrame !== null && includePlayhead) {
     targets.push({ frame: playheadFrame, kind: "playhead" });
   }
   return targets;
@@ -85,21 +87,54 @@ export function findSnap(
  * Multi-probe snap (SPEC §5.8 `findSnap probeOffsets`): for a set of probe
  * offsets (e.g. start + end edges of all selected clips), find the snap that
  * yields the smallest correction, returning the delta to apply.
+ *
+ * `currentlySnapped` carries the previously snapped `{frame, probeOffset}` so
+ * the sticky band (1.5x) keeps the same probe engaged across pointer events
+ * (SnapEngine.swift:64-93) — without it, the snap would toggle off/on near the
+ * threshold edge and the clip would jitter. `probeOffsets` is a parallel array
+ * of stable per-probe identifiers (e.g. the frame offset from the lead clip's
+ * start); when omitted the probe index is used. The snapped `probeOffset` is
+ * returned so the caller can feed it back in on the next move.
  */
 export function findSnapDelta(
   probeFrames: number[],
   targets: SnapTarget[],
   pixelsPerFrame: number,
-): { delta: number; snappedFrame: number } | null {
-  let best: { delta: number; snappedFrame: number } | null = null;
+  currentlySnapped: { frame: number; probeOffset: number } | null = null,
+  probeOffsets?: number[],
+): { delta: number; snappedFrame: number; probeOffset: number } | null {
+  if (probeFrames.length === 0) return null;
+  const offsets = probeOffsets ?? probeFrames.map((_, i) => i);
+  const baseThresholdFrames = SNAP.thresholdPixels / pixelsPerFrame;
+  const stickyBand = baseThresholdFrames * SNAP.stickyMultiplier;
+
+  // Sticky: keep the held target engaged while its owning probe stays within
+  // the sticky band (1.5x). This mirrors findSnap's sticky branch but tracks
+  // WHICH probe was snapped via probeOffset.
+  if (currentlySnapped !== null) {
+    const idx = offsets.indexOf(currentlySnapped.probeOffset);
+    if (idx >= 0) {
+      const probe = probeFrames[idx];
+      if (Math.abs(probe - currentlySnapped.frame) <= stickyBand) {
+        return {
+          delta: currentlySnapped.frame - probe,
+          snappedFrame: currentlySnapped.frame,
+          probeOffset: currentlySnapped.probeOffset,
+        };
+      }
+    }
+  }
+
+  let best: { delta: number; snappedFrame: number; probeOffset: number } | null = null;
   let bestDist = Number.POSITIVE_INFINITY;
-  for (const probe of probeFrames) {
+  for (let i = 0; i < probeFrames.length; i++) {
+    const probe = probeFrames[i];
     const res = findSnap(probe, targets, pixelsPerFrame, null);
     if (!res) continue;
     const dist = Math.abs(res.frame - probe);
     if (dist < bestDist) {
       bestDist = dist;
-      best = { delta: res.frame - probe, snappedFrame: res.frame };
+      best = { delta: res.frame - probe, snappedFrame: res.frame, probeOffset: offsets[i] };
     }
   }
   return best;

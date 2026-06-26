@@ -117,6 +117,12 @@ pub fn edit_apply(core: State<'_, AppCore>, command: EditRequest) -> Result<Edit
     handle_edit_apply(&core, cmd).map_err(msg)
 }
 
+/// `check_path_exists`: checks if a path (e.g. project bundle folder) exists on disk.
+#[tauri::command]
+pub fn check_path_exists(path: String) -> bool {
+    std::path::Path::new(&path).exists()
+}
+
 fn msg(e: CmdError) -> String {
     e.message
 }
@@ -140,6 +146,12 @@ pub enum EditRequest {
     },
     #[serde(rename_all = "camelCase")]
     MoveClips { moves: Vec<ClipMoveDto> },
+    #[serde(rename_all = "camelCase")]
+    DuplicateClips {
+        clip_ids: Vec<String>,
+        offset_frames: i32,
+        target_track_indexes: Vec<usize>,
+    },
     #[serde(rename_all = "camelCase")]
     RemoveClips { clip_ids: Vec<String> },
     #[serde(rename_all = "camelCase")]
@@ -199,7 +211,7 @@ pub enum EditRequest {
     #[serde(rename_all = "camelCase")]
     RemoveTracks { track_indexes: Vec<usize> },
     #[serde(rename_all = "camelCase")]
-    InsertTrack { kind: ClipType },
+    InsertTrack { kind: ClipType, at: Option<usize> },
     #[serde(rename_all = "camelCase")]
     SetTrackProps {
         track_index: usize,
@@ -217,6 +229,8 @@ pub enum EditRequest {
         asset_ids: Vec<String>,
         folder_id: Option<String>,
     },
+    #[serde(rename_all = "camelCase")]
+    SwapMedia { clip_id: String, media_ref: String },
 }
 
 impl EditRequest {
@@ -236,6 +250,15 @@ impl EditRequest {
             },
             EditRequest::MoveClips { moves } => EditCommand::MoveClips {
                 moves: moves.into_iter().map(ClipMoveDto::into_move).collect(),
+            },
+            EditRequest::DuplicateClips {
+                clip_ids,
+                offset_frames,
+                target_track_indexes,
+            } => EditCommand::DuplicateClips {
+                clip_ids,
+                offset_frames,
+                target_track_indexes,
             },
             EditRequest::RemoveClips { clip_ids } => EditCommand::RemoveClips { clip_ids },
             EditRequest::SplitClip { clip_id, at_frame } => {
@@ -318,7 +341,7 @@ impl EditRequest {
             EditRequest::RemoveTracks { track_indexes } => {
                 EditCommand::RemoveTracks { track_indexes }
             }
-            EditRequest::InsertTrack { kind } => EditCommand::InsertTrack { kind },
+            EditRequest::InsertTrack { kind, at } => EditCommand::InsertTrack { kind, at },
             EditRequest::SetTrackProps {
                 track_index,
                 muted,
@@ -344,6 +367,9 @@ impl EditRequest {
                 asset_ids,
                 folder_id,
             },
+            EditRequest::SwapMedia { clip_id, media_ref } => {
+                EditCommand::SwapMedia { clip_id, media_ref }
+            }
         })
     }
 }
@@ -365,6 +391,8 @@ pub struct ClipEntryDto {
     pub has_audio: bool,
     #[serde(default)]
     pub add_linked_audio: bool,
+    #[serde(default)]
+    pub transform: Option<Transform>,
 }
 
 impl ClipEntryDto {
@@ -380,6 +408,7 @@ impl ClipEntryDto {
             trim_end_frame: self.trim_end_frame,
             has_audio: self.has_audio,
             add_linked_audio: self.add_linked_audio,
+            transform: self.transform,
         }
     }
 }
@@ -449,6 +478,20 @@ pub struct ClipPropertiesDto {
     pub transform: Option<Transform>,
     #[serde(default)]
     pub text_content: Option<String>,
+    #[serde(default)]
+    pub crop: Option<Crop>,
+    #[serde(default)]
+    pub fade_in_frames: Option<i32>,
+    #[serde(default)]
+    pub fade_out_frames: Option<i32>,
+    #[serde(default)]
+    pub fade_in_interpolation: Option<Interpolation>,
+    #[serde(default)]
+    pub fade_out_interpolation: Option<Interpolation>,
+    #[serde(default)]
+    pub flip_horizontal: Option<bool>,
+    #[serde(default)]
+    pub flip_vertical: Option<bool>,
 }
 
 impl ClipPropertiesDto {
@@ -462,6 +505,13 @@ impl ClipPropertiesDto {
             opacity: self.opacity,
             transform: self.transform,
             text_content: self.text_content,
+            crop: self.crop,
+            fade_in_frames: self.fade_in_frames,
+            fade_out_frames: self.fade_out_frames,
+            fade_in_interpolation: self.fade_in_interpolation,
+            fade_out_interpolation: self.fade_out_interpolation,
+            flip_horizontal: self.flip_horizontal,
+            flip_vertical: self.flip_vertical,
         }
     }
 }
@@ -591,6 +641,7 @@ impl KeyframePayloadDto {
 #[cfg(test)]
 mod edit_request_serde_tests {
     use super::EditRequest;
+    use opentake_core::EditCommand;
 
     // Regression: the front end sends camelCase keys (clipIds/clipId/atFrame…).
     // serde's enum-level `rename_all` does NOT rename struct-variant fields, so
@@ -609,5 +660,21 @@ mod edit_request_serde_tests {
         .expect("insertClips camelCase");
         serde_json::from_str::<EditRequest>(r#"{"type":"rippleDeleteClips","clipIds":["a"]}"#)
             .expect("rippleDeleteClips camelCase");
+    }
+
+    #[test]
+    fn deserializes_swap_media_and_maps_to_command() {
+        let request = serde_json::from_str::<EditRequest>(
+            r#"{"type":"swapMedia","clipId":"clip-1","mediaRef":"asset-2"}"#,
+        )
+        .expect("swapMedia camelCase");
+
+        match request.into_command().expect("swapMedia command") {
+            EditCommand::SwapMedia { clip_id, media_ref } => {
+                assert_eq!(clip_id, "clip-1");
+                assert_eq!(media_ref, "asset-2");
+            }
+            other => panic!("expected SwapMedia, got {other:?}"),
+        }
     }
 }

@@ -75,6 +75,11 @@ const zh: Dict = {
   "media.importing": "正在导入…",
   "media.importFailed": "导入失败:{error}",
   "media.dropToAdd": "松开以添加到时间线",
+  "media.extractAudio": "提取音频",
+  "media.extractAudioHint": "提取音频轨到本地文件",
+  "media.extractAudioSuccess": "音频已保存：{path}",
+  "media.extractAudioFailed": "提取失败：{error}",
+  "media.extractAudioNoAudio": "此媒体没有音频轨",
   "media.offline": "媒体离线",
   "media.relink": "重新链接",
 
@@ -91,6 +96,10 @@ const zh: Dict = {
   "inspector.section.playback": "播放",
   "inspector.section.format": "格式",
   "inspector.section.text": "文本内容",
+  "inspector.section.position": "位置",
+  "inspector.section.crop": "裁剪",
+  "inspector.section.flip": "翻转",
+  "inspector.section.fade": "淡入淡出",
   "inspector.field.volume": "音量",
   "inspector.field.scale": "缩放",
   "inspector.field.rotation": "旋转",
@@ -100,6 +109,22 @@ const zh: Dict = {
   "inspector.field.frameRate": "帧率",
   "inspector.field.aspectRatio": "宽高比",
   "inspector.field.duration": "时长",
+  "inspector.field.positionX": "X 位置",
+  "inspector.field.positionY": "Y 位置",
+  "inspector.field.cropLeft": "左侧",
+  "inspector.field.cropTop": "顶部",
+  "inspector.field.cropRight": "右侧",
+  "inspector.field.cropBottom": "底部",
+  "inspector.field.flipHorizontal": "水平翻转",
+  "inspector.field.flipVertical": "垂直翻转",
+  "inspector.field.fadeInFrames": "淡入帧数",
+  "inspector.field.fadeOutFrames": "淡出帧数",
+  "inspector.field.fadeInInterpolation": "淡入插值",
+  "inspector.field.fadeOutInterpolation": "淡出插值",
+  "inspector.interpolation.linear": "线性",
+  "inspector.interpolation.hold": "保持",
+  "inspector.interpolation.smooth": "平滑",
+  "inspector.animatedHint": "已在关键帧面板动画化",
   "inspector.keyframes": "关键帧",
   "inspector.keyframes.stamp": "在播放头处盖章",
   "inspector.keyframes.clear": "清除动画",
@@ -116,6 +141,10 @@ const zh: Dict = {
   "inspector.keyframes.property.volume": "音量",
   "inspector.keyframes.empty": "无关键帧",
   "inspector.textPlaceholder": "输入文本…",
+  "inspector.swapMedia": "替换媒体",
+  "inspector.swapMediaTitle": "选择新媒体",
+  "inspector.swapMediaEmpty": "媒体库为空，请先导入媒体。",
+  "inspector.swapMediaCurrent": "当前",
 
   // Toolbar
   "toolbar.undo": "撤销 (⌘Z)",
@@ -133,6 +162,17 @@ const zh: Dict = {
   "timeline.hide": "隐藏",
   "timeline.syncLock": "同步锁定",
   "timeline.dropHint": "将媒体拖到此处开始",
+
+  // Clip context menu (right-click)
+  "contextMenu.split": "在播放头处分割",
+  "contextMenu.delete": "删除",
+  "contextMenu.link": "链接",
+  "contextMenu.unlink": "取消链接",
+  // Disabled placeholders (issue #93 acceptance: menu must list these even if stub)
+  "contextMenu.swapMedia": "替换媒体",
+  "contextMenu.saveAsMedia": "另存为媒体",
+  "contextMenu.extractAudio": "提取音频",
+  "swapMedia.noCandidates": "没有同类型素材可替换",
 
   // Preview
   "preview.fit": "适应",
@@ -174,6 +214,10 @@ const zh: Dict = {
   "settings.themeDesc": "应用配色方案。",
   "settings.theme.dark": "深色",
   "settings.theme.light": "浅色",
+  "settings.windowSize": "窗口大小",
+  "settings.windowSizeDesc": "应用窗口尺寸（缩小至 2/3 大小更适合小屏）。",
+  "settings.windowSize.standard": "标准 (1600x1000)",
+  "settings.windowSize.compact": "紧凑 (1066x666)",
   "settings.defaultImportFolder": "默认导入文件夹",
   "settings.defaultImportFolderDesc": "导入对话框默认打开的位置。",
   "settings.chooseFolder": "选择…",
@@ -193,9 +237,62 @@ const zh: Dict = {
   "settings.aboutLicense": "许可",
   "settings.aboutDesc": "OpenTake 是 Palmier Pro 的开源跨平台分支。",
 
+  // Settings panes (sidebar labels)
+  "settings.section.mcp": "MCP 说明",
+  "settings.section.storage": "存储",
+  "settings.section.notifications": "通知",
+
+  // MCP Instructions pane
+  "mcp.title": "MCP 服务器连接说明",
+  "mcp.overview":
+    "OpenTake 内置一个 MCP (Model Context Protocol) 服务器，将当前项目暴露给外部 AI 客户端。启用后，AI 助手可以直接读取时间线、添加片段、执行工作流。",
+  "mcp.serverUrl": "服务器地址",
+  "mcp.serverUrlDesc": "在支持的客户端中粘贴此地址，或使用下方一键命令。",
+  "mcp.copy": "复制",
+  "mcp.copied": "已复制",
+  "mcp.cursor": "Cursor",
+  "mcp.cursorInstall": "一键安装到 Cursor",
+  "mcp.cursorManual": "手动配置（settings.json 的 mcpServers 字段）",
+  "mcp.claudeCode": "Claude Code",
+  "mcp.claudeCodeCmd": "在终端运行",
+  "mcp.codex": "Codex",
+  "mcp.codexCmd": "在终端运行",
+  "mcp.claudeDesktop": "Claude Desktop",
+  "mcp.claudeDesktopManual": "手动配置（claude_desktop_config.json 的 mcpServers 字段）",
+  "mcp.note": "服务器仅在应用运行时可用，绑定 127.0.0.1，不接受外部连接。",
+
+  // Storage pane
+  "storage.cache": "缓存",
+  "storage.cacheDesc": "导入与生成过程中产生的临时文件缓存。",
+  "storage.cachePath": "缓存位置",
+  "storage.clearCache": "清除缓存",
+  "storage.clearCacheConfirm": "确定清除缓存？这不会影响已导入的媒体。",
+  "storage.cacheCleared": "缓存已清除。",
+  "storage.searchIndex": "搜索索引",
+  "storage.searchIndexDesc": "媒体库的语义搜索索引（如启用）。",
+  "storage.placeholder": "暂未提供运行时统计，将在后续版本补齐。",
+
+  // Notifications pane
+  "notifications.generation": "生成完成通知",
+  "notifications.generationDesc": "当 AI 生成任务完成时显示系统通知。",
+  "notifications.restartHint": "更改将在下次启动应用时生效。",
+
+  // Home relative time
+  "home.relative.today": "今天",
+  "home.relative.yesterday": "昨天",
+  "home.relative.daysAgo": "{count} 天前",
+  "home.relative.weeksAgo": "{count} 周前",
+  "home.relative.monthsAgo": "{count} 个月前",
+
   // Common
   "common.cancel": "取消",
   "common.open": "打开",
+
+  // Edit (copy / cut / paste, Issue #94)
+  "edit.copy": "复制 (⌘C)",
+  "edit.cut": "剪切 (⌘X)",
+  "edit.paste": "粘贴 (⌘V)",
+  "edit.clipboardEmpty": "剪贴板为空",
 
   // Global asset library (#56)
   "library.title": "素材库",
@@ -275,9 +372,15 @@ const en: Dict = {
   "media.importing": "Importing…",
   "media.importFailed": "Import failed: {error}",
   "media.dropToAdd": "Release to add to the timeline",
+  "media.extractAudio": "Extract Audio",
+  "media.extractAudioHint": "Extract the audio track to a local file",
+  "media.extractAudioSuccess": "Audio saved: {path}",
+  "media.extractAudioFailed": "Extract failed: {error}",
+  "media.extractAudioNoAudio": "No audio track in this media",
   "media.offline": "Media Offline",
   "media.relink": "Relink",
 
+  // Inspector
   "inspector.title": "Inspector",
   "inspector.timeline": "Timeline",
   "inspector.selectedCount": "{count} selected",
@@ -290,6 +393,10 @@ const en: Dict = {
   "inspector.section.playback": "Playback",
   "inspector.section.format": "Format",
   "inspector.section.text": "Text Content",
+  "inspector.section.position": "Position",
+  "inspector.section.crop": "Crop",
+  "inspector.section.flip": "Flip",
+  "inspector.section.fade": "Fade",
   "inspector.field.volume": "Volume",
   "inspector.field.scale": "Scale",
   "inspector.field.rotation": "Rotation",
@@ -299,6 +406,22 @@ const en: Dict = {
   "inspector.field.frameRate": "Frame Rate",
   "inspector.field.aspectRatio": "Aspect Ratio",
   "inspector.field.duration": "Duration",
+  "inspector.field.positionX": "X Position",
+  "inspector.field.positionY": "Y Position",
+  "inspector.field.cropLeft": "Left",
+  "inspector.field.cropTop": "Top",
+  "inspector.field.cropRight": "Right",
+  "inspector.field.cropBottom": "Bottom",
+  "inspector.field.flipHorizontal": "Flip Horizontal",
+  "inspector.field.flipVertical": "Flip Vertical",
+  "inspector.field.fadeInFrames": "Fade In Frames",
+  "inspector.field.fadeOutFrames": "Fade Out Frames",
+  "inspector.field.fadeInInterpolation": "Fade In Interpolation",
+  "inspector.field.fadeOutInterpolation": "Fade Out Interpolation",
+  "inspector.interpolation.linear": "Linear",
+  "inspector.interpolation.hold": "Hold",
+  "inspector.interpolation.smooth": "Smooth",
+  "inspector.animatedHint": "Animated in the keyframes panel",
   "inspector.keyframes": "Keyframes",
   "inspector.keyframes.stamp": "Stamp at Playhead",
   "inspector.keyframes.clear": "Clear Animation",
@@ -315,6 +438,10 @@ const en: Dict = {
   "inspector.keyframes.property.volume": "Volume",
   "inspector.keyframes.empty": "No keyframes",
   "inspector.textPlaceholder": "Enter text…",
+  "inspector.swapMedia": "Swap Media",
+  "inspector.swapMediaTitle": "Select New Media",
+  "inspector.swapMediaEmpty": "Media library is empty. Import media first.",
+  "inspector.swapMediaCurrent": "Current",
 
   "toolbar.undo": "Undo (⌘Z)",
   "toolbar.redo": "Redo (⇧⌘Z)",
@@ -330,6 +457,17 @@ const en: Dict = {
   "timeline.hide": "Hide",
   "timeline.syncLock": "Sync lock",
   "timeline.dropHint": "Drop media here to start",
+
+  // Clip context menu (right-click)
+  "contextMenu.split": "Split at Playhead",
+  "contextMenu.delete": "Delete",
+  "contextMenu.link": "Link",
+  "contextMenu.unlink": "Unlink",
+  // Disabled placeholders (issue #93 acceptance: menu must list these even if stub)
+  "contextMenu.swapMedia": "Swap Media",
+  "contextMenu.saveAsMedia": "Save as Media",
+  "contextMenu.extractAudio": "Extract Audio",
+  "swapMedia.noCandidates": "No compatible media to swap",
 
   "preview.fit": "Fit",
   "preview.timelineTab": "Timeline",
@@ -367,6 +505,10 @@ const en: Dict = {
   "settings.themeDesc": "Application color scheme.",
   "settings.theme.dark": "Dark",
   "settings.theme.light": "Light",
+  "settings.windowSize": "Window Size",
+  "settings.windowSizeDesc": "Application window dimension (shrink to 2/3 for smaller screens).",
+  "settings.windowSize.standard": "Standard (1600x1000)",
+  "settings.windowSize.compact": "Compact (1066x666)",
   "settings.defaultImportFolder": "Default Import Folder",
   "settings.defaultImportFolderDesc": "Location the import dialog opens to by default.",
   "settings.chooseFolder": "Choose…",
@@ -386,8 +528,61 @@ const en: Dict = {
   "settings.aboutLicense": "License",
   "settings.aboutDesc": "OpenTake is the open-source, cross-platform fork of Palmier Pro.",
 
+  // Settings panes (sidebar labels)
+  "settings.section.mcp": "MCP Instructions",
+  "settings.section.storage": "Storage",
+  "settings.section.notifications": "Notifications",
+
+  // MCP Instructions pane
+  "mcp.title": "MCP Server Connection Guide",
+  "mcp.overview":
+    "OpenTake ships a built-in MCP (Model Context Protocol) server that exposes the current project to external AI clients. Once connected, an AI assistant can read the timeline, add clips, and run workflows.",
+  "mcp.serverUrl": "Server URL",
+  "mcp.serverUrlDesc": "Paste this URL into a supported client, or use one of the one-line commands below.",
+  "mcp.copy": "Copy",
+  "mcp.copied": "Copied",
+  "mcp.cursor": "Cursor",
+  "mcp.cursorInstall": "Install in Cursor",
+  "mcp.cursorManual": "Manual config (mcpServers field of settings.json)",
+  "mcp.claudeCode": "Claude Code",
+  "mcp.claudeCodeCmd": "Run in terminal",
+  "mcp.codex": "Codex",
+  "mcp.codexCmd": "Run in terminal",
+  "mcp.claudeDesktop": "Claude Desktop",
+  "mcp.claudeDesktopManual": "Manual config (mcpServers field of claude_desktop_config.json)",
+  "mcp.note": "The server is only available while the app is running, bound to 127.0.0.1, and does not accept external connections.",
+
+  // Storage pane
+  "storage.cache": "Cache",
+  "storage.cacheDesc": "Temporary files produced during import and generation.",
+  "storage.cachePath": "Cache location",
+  "storage.clearCache": "Clear cache",
+  "storage.clearCacheConfirm": "Clear the cache? This does not affect imported media.",
+  "storage.cacheCleared": "Cache cleared.",
+  "storage.searchIndex": "Search index",
+  "storage.searchIndexDesc": "Semantic search index for the media library (if enabled).",
+  "storage.placeholder": "Runtime statistics are not yet available; they will arrive in a later release.",
+
+  // Notifications pane
+  "notifications.generation": "Generation-complete notifications",
+  "notifications.generationDesc": "Show a system notification when an AI generation task finishes.",
+  "notifications.restartHint": "Changes take effect on the next app launch.",
+
+  // Home relative time
+  "home.relative.today": "Today",
+  "home.relative.yesterday": "Yesterday",
+  "home.relative.daysAgo": "{count} days ago",
+  "home.relative.weeksAgo": "{count} weeks ago",
+  "home.relative.monthsAgo": "{count} months ago",
+
   "common.cancel": "Cancel",
   "common.open": "Open",
+
+  // Edit (copy / cut / paste, Issue #94)
+  "edit.copy": "Copy (⌘C)",
+  "edit.cut": "Cut (⌘X)",
+  "edit.paste": "Paste (⌘V)",
+  "edit.clipboardEmpty": "Clipboard is empty",
 
   // Global asset library (#56)
   "library.title": "Library",

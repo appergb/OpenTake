@@ -52,10 +52,16 @@ function persist(key: string, value: string) {
   if (typeof localStorage !== "undefined") localStorage.setItem(key, value);
 }
 
+function settledFrame(frame: number): number {
+  return Math.max(0, Math.round(frame));
+}
+
 interface UiState {
   // Top-level navigation
   view: AppView;
   setView: (view: AppView) => void;
+  settingsOpen: boolean;
+  setSettingsOpen: (open: boolean) => void;
 
   // Playback / playhead
   currentFrame: number;
@@ -103,6 +109,14 @@ interface UiState {
 
   // Media panel navigation
   mediaPanelCurrentFolderId: string | null;
+  setMediaPanelCurrentFolderId: (id: string | null) => void;
+
+  /** Pending Swap Media flow (SPEC §5.10). When set, a media-picker modal is
+   *  shown for the clip with this id; the picker pre-filters candidates by
+   *  `item.type === clip.mediaType` (strict, mirroring backend
+   *  `isAssetCompatibleWithPendingSwap`). `null` = no swap in flight. */
+  pendingSwapClipId: string | null;
+  setPendingSwapClipId: (id: string | null) => void;
 
   // Actions
   setActiveFrame: (frame: number) => void;
@@ -143,11 +157,18 @@ interface UiState {
   setMediaTab: (tab: MediaTabId) => void;
   setMediaSubTab: (tab: MediaSubTabId) => void;
   setInspectorTab: (tab: InspectorTabId) => void;
+
+  // Toast (transient message)
+  toast: { message: string; id: number } | null;
+  pushToast: (message: string) => void;
+  clearToast: () => void;
 }
 
 export const useEditorUiStore = create<UiState>((set, get) => ({
   view: "home",
   setView: (view) => set({ view }),
+  settingsOpen: false,
+  setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
 
   currentFrame: 0,
   activeFrame: 0,
@@ -185,14 +206,26 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   previewActiveTabId: "timeline",
 
   mediaPanelCurrentFolderId: null,
+  setMediaPanelCurrentFolderId: (mediaPanelCurrentFolderId) => set({ mediaPanelCurrentFolderId }),
+
+  pendingSwapClipId: null,
+  setPendingSwapClipId: (pendingSwapClipId) => set({ pendingSwapClipId }),
 
   setActiveFrame: (activeFrame) => set({ activeFrame }),
   setCurrentFrame: (currentFrame) => set({ currentFrame, activeFrame: currentFrame }),
-  setPlaying: (isPlaying) => set({ isPlaying }),
+  setPlaying: (isPlaying) => {
+    if (isPlaying) {
+      set({ isPlaying: true, isScrubbing: false });
+      return;
+    }
+    const frame = settledFrame(get().activeFrame);
+    set({ currentFrame: frame, activeFrame: frame, isPlaying: false, isScrubbing: false });
+  },
   togglePlay: () => {
     const { isPlaying, activeFrame } = get();
     if (isPlaying) {
-      set({ isPlaying: false });
+      const frame = settledFrame(activeFrame);
+      set({ currentFrame: frame, activeFrame: frame, isPlaying: false, isScrubbing: false });
       return;
     }
     // Starting playback: if parked at/after the last drawable frame (where the
@@ -200,9 +233,9 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
     // very first tick and stall play. Without media there's nothing to rewind.
     const last = Math.max(0, totalFrames(useProjectStore.getState().timeline) - 1);
     if (activeFrame >= last) {
-      set({ currentFrame: 0, activeFrame: 0, isPlaying: true });
+      set({ currentFrame: 0, activeFrame: 0, isPlaying: true, isScrubbing: false });
     } else {
-      set({ isPlaying: true });
+      set({ isPlaying: true, isScrubbing: false });
     }
   },
   setScrubbing: (isScrubbing) => set({ isScrubbing }),
@@ -272,4 +305,8 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   setMediaTab: (mediaTab) => set({ mediaTab }),
   setMediaSubTab: (mediaSubTab) => set({ mediaSubTab }),
   setInspectorTab: (inspectorTab) => set({ inspectorTab }),
+
+  toast: null,
+  pushToast: (message) => set({ toast: { message, id: Date.now() } }),
+  clearToast: () => set({ toast: null }),
 }));

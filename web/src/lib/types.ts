@@ -100,6 +100,7 @@ export interface ClipEntryReq {
   trimEndFrame?: number;
   hasAudio?: boolean;
   addLinkedAudio?: boolean;
+  transform?: Transform;
 }
 
 export interface ClipMoveReq {
@@ -123,6 +124,18 @@ export interface ClipPropertiesReq {
   opacity?: number;
   transform?: Transform;
   textContent?: string;
+  /** Per-clip crop insets (normalized 0–1). Clears `cropTrack` on the backend. */
+  crop?: Crop;
+  /** Fade-in length in frames. Clamped to clip duration on the backend. */
+  fadeInFrames?: number;
+  /** Fade-out length in frames. Clamped to clip duration on the backend. */
+  fadeOutFrames?: number;
+  fadeInInterpolation?: Interpolation;
+  fadeOutInterpolation?: Interpolation;
+  /** Writes to `transform.flipHorizontal` on the backend. */
+  flipHorizontal?: boolean;
+  /** Writes to `transform.flipVertical` on the backend. */
+  flipVertical?: boolean;
 }
 
 /** Which property a keyframe track targets (mirror of `KeyframeProperty`). */
@@ -152,6 +165,12 @@ export type EditRequest =
   | { type: "addClips"; entries: ClipEntryReq[] }
   | { type: "insertClips"; trackIndex: number; atFrame: number; entries: ClipEntryReq[] }
   | { type: "moveClips"; moves: ClipMoveReq[] }
+  | {
+      type: "duplicateClips";
+      clipIds: string[];
+      offsetFrames: number;
+      targetTrackIndexes: number[];
+    }
   | { type: "removeClips"; clipIds: string[] }
   | { type: "splitClip"; clipId: string; atFrame: number }
   | { type: "trimClips"; edits: TrimEditReq[] }
@@ -167,16 +186,25 @@ export type EditRequest =
   | { type: "link"; clipIds: string[] }
   | { type: "unlink"; clipIds: string[] }
   | { type: "removeTracks"; trackIndexes: number[] }
-  | { type: "insertTrack"; kind: ClipType }
+  | { type: "insertTrack"; kind: ClipType; at?: number }
   | {
       type: "setTrackProps";
       trackIndex: number;
       muted?: boolean;
       hidden?: boolean;
       syncLocked?: boolean;
-    }
+     }
   | { type: "createFolder"; name: string; parentFolderId?: string }
-  | { type: "moveToFolder"; assetIds: string[]; folderId?: string };
+  | { type: "moveToFolder"; assetIds: string[]; folderId?: string }
+  | {
+      type: "swapMedia";
+      clipId: string;
+      mediaRef: string;
+      mediaType?: ClipType;
+      sourceClipType?: ClipType;
+      durationFrames?: number;
+      trimStartFrame?: number;
+    };
 
 export interface TextEntryReq {
   trackIndex: number;

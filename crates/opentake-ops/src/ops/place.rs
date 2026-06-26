@@ -4,10 +4,10 @@
 //! Difference from upstream: upstream `placeClip` derives the visual transform
 //! from the asset's source dimensions (`fitTransform`). That needs media
 //! metadata, which is a media-layer concern — this leaf crate never resolves
-//! media. So callers pass a fully-formed [`PlaceSpec`] (the agent `add_clips`
-//! tool already supplies explicit `durationFrames` / `trim*`), and the placed
-//! clip's transform stays `Transform::default()`; a higher layer with asset
-//! metadata can fit it. The link / audio-routing / sort behavior is preserved.
+//! media. So callers pass a fully-formed [`PlaceSpec`] (including an optional
+//! media-aware transform); when no transform is supplied, placement falls back
+//! to `Transform::default()`. The link / audio-routing / sort behavior is
+//! preserved.
 
 use opentake_domain::{Clip, ClipType, Timeline, Transform};
 
@@ -31,6 +31,8 @@ pub struct PlaceSpec {
     pub has_audio: bool,
     /// Whether to auto-create a linked audio partner for video-with-audio.
     pub add_linked_audio: bool,
+    /// Optional media-aware visual transform supplied by a higher layer.
+    pub transform: Option<Transform>,
 }
 
 impl PlaceSpec {
@@ -52,6 +54,7 @@ impl PlaceSpec {
             trim_end_frame: None,
             has_audio: false,
             add_linked_audio: false,
+            transform: None,
         }
     }
 }
@@ -93,7 +96,7 @@ pub fn place_clip(
     );
     clip.media_type = spec.media_type;
     clip.source_clip_type = spec.source_clip_type;
-    clip.transform = Transform::default();
+    clip.transform = spec.transform.unwrap_or_default();
     clip.link_group_id = link_group_id.clone();
     if let Some(t) = spec.trim_start_frame {
         clip.trim_start_frame = t;
@@ -176,6 +179,28 @@ mod tests {
         let c = &tl.tracks[0].clips[0];
         assert_eq!(c.trim_start_frame, 5);
         assert_eq!(c.trim_end_frame, 7);
+    }
+
+    #[test]
+    fn place_clip_applies_supplied_transform() {
+        let mut tl = tl_v_a();
+        let g = SeqIdGen::default();
+        let mut spec = PlaceSpec::new("m", ClipType::Video, 0, 30);
+        spec.transform = Some(Transform {
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.31640625,
+            height: 1.0,
+            rotation: 0.0,
+            flip_horizontal: false,
+            flip_vertical: false,
+        });
+
+        place_clip(&mut tl, &spec, 0, None, &g);
+
+        let c = &tl.tracks[0].clips[0];
+        assert_eq!(c.transform.width, 0.31640625);
+        assert_eq!(c.transform.height, 1.0);
     }
 
     #[test]

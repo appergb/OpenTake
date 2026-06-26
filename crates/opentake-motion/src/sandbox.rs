@@ -1,9 +1,9 @@
 //! Security sandbox policy for rendering untrusted motion-graphic code.
 //!
-//! Motion code is authored by the agent or, worse, pulled from a community
-//! template. It is rendered in an isolated offscreen engine. docs/
-//! MOTION-GRAPHICS-PLUGIN.md §5 spells out the requirements; this module makes
-//! them *types* so a renderer can't forget to apply one:
+//! Native fallback motion code may be authored by the agent or pulled from a
+//! community template. It is rendered in an isolated offscreen engine. The
+//! fallback/sandbox requirements in docs/MOTION-GRAPHICS-PLUGIN.md are modeled
+//! here as *types* so a renderer can't forget to apply one:
 //!
 //! - **Network is denied by default.** Only an explicit allowlist of origins is
 //!   reachable, and (per web/security.md) those should be pinned with SRI and a

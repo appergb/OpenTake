@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Web motion-graphics module: deterministic headless rendering of HTML/CSS/JS animations to RGBA frames (content-hash cached) that feed the wgpu compositor as a clip source. Issue #14 / docs/MOTION-GRAPHICS-PLUGIN.md."
+description = "Native motion fallback: deterministic RGBA frame cache, sandbox, stub renderer, and future alpha/HTML fallback for the Motion Canvas plugin plan. Issue #34 / docs/MOTION-GRAPHICS-PLUGIN.md."
 
 [dependencies]
 opentake-domain = { workspace = true }

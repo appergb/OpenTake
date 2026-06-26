@@ -1,13 +1,13 @@
-//! opentake-motion — the Web motion-graphics module (Issue #14,
+//! opentake-motion — native motion fallback primitives (Issue #34,
 //! docs/MOTION-GRAPHICS-PLUGIN.md).
 //!
-//! The agent (or a community template) authors an animation in HTML/CSS/JS; this
-//! crate renders it **deterministically** to a sequence of RGBA frames (with
-//! alpha), content-hash caches the result, and exposes it as an ordinary clip
-//! source so the `opentake-render` wgpu compositor blends it like any other
-//! texture layer.
+//! The v1 motion/AI-video plan uses a forked Motion Canvas plugin to render a
+//! materialized video file that OpenTake imports as ordinary media. This crate is
+//! kept as the native fallback layer for later work: RGBA frame sequences,
+//! transparent alpha overlays, content-hash caches, and an optional HTML/CSS
+//! renderer.
 //!
-//! ## Pipeline
+//! ## Fallback pipeline
 //!
 //! ```text
 //! MotionSource (Code | Template+params)
@@ -18,7 +18,7 @@
 //!                  └─ HeadlessChromiumRenderer (CDP virtual-time; behind `chromium`)
 //!                       └─ RenderedClip (on-disk RGBA PNG frames)
 //!                            └─ MotionClipSource: impl SourceMetrics + FrameProvider
-//!                                 └─ opentake-render compositor (one texture layer)
+//!                                 └─ opentake-render compositor (future texture layer)
 //! ```
 //!
 //! ## Determinism & caching
@@ -29,9 +29,9 @@
 //!
 //! ## Security
 //!
-//! Untrusted motion code runs under a [`sandbox::SandboxPolicy`]: network denied
-//! by default (explicit allowlist only), a render timeout fuse, and a document
-//! size ceiling. See [`sandbox`].
+//! Untrusted native fallback code runs under a [`sandbox::SandboxPolicy`]:
+//! network denied by default (explicit allowlist only), a render timeout fuse,
+//! and a document size ceiling. See [`sandbox`].
 //!
 //! ## Module map
 //! - [`source`]   — value types: [`MotionSource`], [`MotionRenderRequest`], [`RenderedClip`].

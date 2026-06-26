@@ -1,8 +1,6 @@
 /**
  * Preview (SPEC §8). Tab bar + aspect-fit canvas area + scrub bar + transport
- * bar with project-setting badges. The canvas displays Rust composite frames via
- * the `preview_frame` event (SPEC §11.2) — not yet wired, so it shows the canvas
- * background + a centered placeholder. Transport drives the local playhead.
+ * bar with project-setting badges. Transport drives the local playhead.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -23,22 +21,10 @@ import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
 import { formatTimecode, totalFrames } from "../../lib/geometry";
 import { assetUrl } from "../../lib/asset";
-import { useTimelineFrame } from "./useTimelineFrame";
 import { TimelinePlayback } from "./TimelinePlaybackLayer";
+import { aspectFitBox, timelinePreviewCanvasStyle } from "./previewLayerStyles";
 import { useT } from "../../i18n";
 import type { MediaItem } from "../../lib/types";
-
-/** A value that only updates after it has been stable for `ms` (trailing
- *  debounce). Used to defer the expensive timeline composite until the playhead
- *  stops moving, so scrubbing doesn't spawn a per-frame ffmpeg/GPU storm. */
-function useDebounced<T>(value: T, ms: number): T {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const id = window.setTimeout(() => setDebounced(value), ms);
-    return () => window.clearTimeout(id);
-  }, [value, ms]);
-  return debounced;
-}
 
 export function Preview() {
   const t = useT();
@@ -46,6 +32,7 @@ export function Preview() {
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
   const setCurrentFrame = useEditorUiStore((s) => s.setCurrentFrame);
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
+  const setScrubbing = useEditorUiStore((s) => s.setScrubbing);
   const togglePlayTimeline = useEditorUiStore((s) => s.togglePlay);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
   const previewItem = useMediaStore((s) =>
@@ -59,11 +46,28 @@ export function Preview() {
   const [mediaTime, setMediaTime] = useState(0);
   const [mediaDuration, setMediaDuration] = useState(0);
   const [mediaPlaying, setMediaPlaying] = useState(false);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   useEffect(() => {
     setMediaTime(0);
     setMediaDuration(0);
     setMediaPlaying(false);
   }, [previewMediaId]);
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(([entry]) => {
+      if (!entry) return;
+      const { width, height } = entry.contentRect;
+      setStageSize((prev) =>
+        Math.abs(prev.width - width) < 0.5 && Math.abs(prev.height - height) < 0.5
+          ? prev
+          : { width, height },
+      );
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // Space bar during media preview → toggle the media element.
   const mediaToggleCount = useEditorUiStore((s) => s.mediaPreviewToggleRequest);
@@ -75,41 +79,13 @@ export function Preview() {
   }, [mediaToggleCount]);
 
   const previewing = previewItem !== null;
-  // Timeline composite preview (#47): on the Timeline tab, paint the GPU-
-  // composited frame for the current playhead (replacing the black placeholder).
-  // `timeline` identity changes on every `timeline_changed`, forcing a refetch.
-  // The frame is clamped to the last DRAWABLE frame (total-1; clips are half-open
-  // [start,end)) so parking at the very end doesn't composite to black. During
-  // playback the request rate is capped (~11fps) to bound ffmpeg/PNG churn until
-  // the streaming engine (#53) lands; paused/scrub stays immediate.
-  const timelineTotal = totalFrames(timeline);
-  // During playback `<TimelinePlayback>` plays the real media elements, so the
-  // GPU composite is fetched only when PAUSED/scrubbing (accurate text/effects,
-  // and no per-frame ffmpeg/PNG churn while playing).
   const timelineHasContent = !previewing && timeline.tracks.length > 0;
-  // Debounce the composited frame: each composite is a separate ffmpeg decode +
-  // wgpu pass + PNG + base64, so firing one per scrubbed frame spawns a storm of
-  // subprocess + GPU work that can lock up the whole machine (reported freeze).
-  // The playhead still moves instantly; the composite is fetched only once the
-  // playhead has settled for ~140ms (i.e. you stop scrubbing). See the perf
-  // issue for the proper fix (a streaming playback/scrub engine).
-  const composeFrame = useDebounced(
-    Math.min(Math.round(activeFrame), Math.max(0, timelineTotal - 1)),
-    140,
-  );
-  const timelineFrameUrl = useTimelineFrame(
-    composeFrame,
-    !previewing && timeline.tracks.length > 0 && !isPlaying,
-    timeline,
-    0,
-  );
   const fps = timeline.fps;
   const total = previewing
     ? Math.max(0, Math.round(mediaDuration * fps))
     : totalFrames(timeline);
   const activeShownFrame = previewing ? Math.round(mediaTime * fps) : activeFrame;
   const playing = previewing ? mediaPlaying : isPlaying;
-  const aspect = timeline.width / timeline.height;
 
   const seekTo = (frame: number) => {
     const clamped = Math.max(0, Math.min(total, frame));
@@ -132,10 +108,13 @@ export function Preview() {
     }
   };
 
-  // Aspect-fit is done in pure CSS (intrinsic media size + max-width/height,
-  // centered by the stage's flexbox) — no JS measurement, so there's no stale /
-  // zero-size race that could render the frame tiny or off-center.
-  void aspect;
+  const fittedCanvas = aspectFitBox(stageSize.width, stageSize.height, timeline.width, timeline.height);
+  const timelineCanvasStyle = {
+    ...timelinePreviewCanvasStyle(timeline.width, timeline.height),
+    ...(fittedCanvas
+      ? { width: fittedCanvas.width, height: fittedCanvas.height, flex: "0 0 auto" }
+      : {}),
+  };
 
   return (
     <>
@@ -147,10 +126,12 @@ export function Preview() {
           intrinsic size + max-width/height, so it always fills the largest 16:9
           box and stays centered. */}
       <div
+        ref={stageRef}
         style={{
           flex: 1,
           minHeight: 0,
           background: "var(--bg-surface)",
+          position: "relative",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -158,12 +139,6 @@ export function Preview() {
           padding: 8,
         }}
       >
-        {/* Layer: TimelinePlayback lives here when there are tracks —
-             it stays mounted even when paused so audio/video elements
-             survive the pause→play transition (upstream VideoEngine model). */}
-        {!previewItem && timelineHasContent && (
-          <TimelinePlayback timeline={timeline} fps={fps} playing={isPlaying} />
-        )}
         {previewItem ? (
           <MediaPreview
             item={previewItem}
@@ -172,39 +147,30 @@ export function Preview() {
             onDuration={setMediaDuration}
             onPlayingChange={setMediaPlaying}
           />
-        ) : isPlaying ? null : timelineFrameUrl ? (
-          // Rust GPU composite of the timeline at the current playhead (#47).
-          <img
-            src={timelineFrameUrl}
-            alt=""
-            draggable={false}
-            style={{
-              position: "absolute",
-              inset: 0,
-              width: "100%",
-              height: "100%",
-              objectFit: "contain",
-              display: "block",
-            }}
-          />
         ) : (
-          // Empty / no-frame: a framed 16:9 canvas surface placeholder.
-          <div
-            style={{
-              aspectRatio: `${timeline.width} / ${timeline.height}`,
-              height: "100%",
-              maxWidth: "100%",
-              maxHeight: "100%",
-              background: "var(--bg-preview-canvas)",
-              border: "1px solid rgba(255,255,255,0.08)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: "var(--text-muted)",
-              fontSize: "var(--fs-xs)",
-            }}
-          >
-            {timeline.tracks.length === 0 ? t("preview.noMedia") : `${timeline.width}×${timeline.height}`}
+          <div style={timelineCanvasStyle}>
+            {timelineHasContent ? (
+              // Layer: TimelinePlayback stays mounted when paused, matching
+              // upstream's single AVPlayerLayer. Pausing freezes the current
+              // browser-decoded video frame; no ffmpeg/Rust PNG is swapped in.
+              <TimelinePlayback timeline={timeline} fps={fps} />
+            ) : (
+              // Empty timeline: a framed 16:9 canvas surface placeholder.
+              <div
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: "var(--text-muted)",
+                  fontSize: "var(--fs-xs)",
+                }}
+              >
+                {t("preview.noMedia")}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -212,7 +178,12 @@ export function Preview() {
       {/* The app's scrub + transport are the single control surface — they drive
           both the timeline composite and (via mediaRef) single-media preview, so
           the <video>/<audio> renders without its native controls. */}
-      <ScrubBar frame={activeShownFrame} total={total} onSeek={seekTo} />
+      <ScrubBar
+        frame={activeShownFrame}
+        total={total}
+        onSeek={seekTo}
+        onScrubbingChange={previewing ? undefined : setScrubbing}
+      />
 
       {/* Transport bar */}
       <div
@@ -282,6 +253,7 @@ function MediaPreview({
     maxHeight: "100%",
     objectFit: "contain",
     display: "block",
+    pointerEvents: "none",
   };
 
   if (!url) {
@@ -369,7 +341,19 @@ function PreviewTabs({ item }: { item: MediaItem | null }) {
   );
 }
 
-function ScrubBar({ frame, total, onSeek }: { frame: number; total: number; onSeek: (f: number) => void }) {
+function ScrubBar({
+  frame,
+  total,
+  onSeek,
+  onScrubbingChange,
+}: {
+  frame: number;
+  total: number;
+  onSeek: (f: number) => void;
+  /** Toggled while the user drags the bar, so the engine drives the live
+   *  <video> scrub (issue #142) and the GPU composite stays settled-only. */
+  onScrubbingChange?: (scrubbing: boolean) => void;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState(false);
   const progress = total > 0 ? frame / total : 0;
@@ -389,11 +373,14 @@ function ScrubBar({ frame, total, onSeek }: { frame: number; total: number; onSe
       onMouseLeave={() => setHover(false)}
       onPointerDown={(e) => {
         (e.target as HTMLElement).setPointerCapture(e.pointerId);
+        onScrubbingChange?.(true);
         seekFromEvent(e.clientX);
       }}
       onPointerMove={(e) => {
         if (e.buttons === 1) seekFromEvent(e.clientX);
       }}
+      onPointerUp={() => onScrubbingChange?.(false)}
+      onLostPointerCapture={() => onScrubbingChange?.(false)}
       style={{
         height: 18,
         flex: "0 0 auto",
@@ -406,6 +393,10 @@ function ScrubBar({ frame, total, onSeek }: { frame: number; total: number; onSe
     >
       <div
         style={{
+          // position:relative confines the absolute progress fill + handle below.
+          // Without it they escape to the nearest positioned ancestor (the preview
+          // panel) and render as a tall cream bar down the left edge.
+          position: "relative",
           flex: 1,
           height: hover ? 4 : 3,
           background: "rgba(255,255,255,0.1)",

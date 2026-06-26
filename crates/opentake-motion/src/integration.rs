@@ -1,7 +1,6 @@
 //! The bridge into `opentake-render`: a rendered motion clip exposed as an
-//! ordinary clip source so the wgpu compositor treats it like any other texture
-//! (docs/MOTION-GRAPHICS-PLUGIN.md §2 — "对合成器而言它只是又一个纹理来源,零特殊
-//! 处理").
+//! ordinary clip source so the wgpu compositor can treat a future native
+//! frame-sequence/alpha clip like any other texture.
 //!
 //! `opentake-render` *defines* the [`SourceMetrics`] / [`FrameProvider`] traits
 //! and the [`DecodedFrame`] type; this module *implements* them over a
@@ -12,8 +11,9 @@
 //!
 //! Decoding a frame file back to RGBA is deliberately *not* hard-wired to a PNG
 //! library here. Frames may be produced by the [`StubRenderer`](crate::renderer)
-//! (our tiny stored-block PNG) or, in production, by real headless Chromium
-//! (standard PNG) or a future raw-RGBA fast path. So [`MotionClipSource`] takes a
+//! (our tiny stored-block PNG), by the later native headless-Chromium fallback
+//! (standard PNG), by Motion Canvas image-sequence output, or by a future
+//! raw-RGBA fast path. So [`MotionClipSource`] takes a
 //! `FrameDecoder` — a `Fn(&Path) -> Option<DecodedFrame>` — supplied by the
 //! integrating layer (which already owns an image/codec stack). Tests inject the
 //! stub's own decoder; the app injects `image`/ffmpeg. This keeps this crate's

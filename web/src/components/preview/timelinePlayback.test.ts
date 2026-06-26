@@ -3,10 +3,13 @@ import type { Clip, ClipType, Timeline, Track } from "../../lib/types";
 import {
   activeAudioClips,
   activeVisualClip,
+  activeVisualClips,
+  advancePlayhead,
   clipCoversFrame,
   clipOpacity,
   clipVolume,
   frameForSourceTime,
+  playbackFrameFromActiveFrame,
   sourceTimeSec,
   visualAudioIsDuplicated,
 } from "./timelinePlayback";
@@ -67,6 +70,14 @@ describe("clipCoversFrame", () => {
   });
 });
 
+describe("playbackFrameFromActiveFrame", () => {
+  it("buckets fractional RAF playhead updates to the rendered source frame", () => {
+    expect(playbackFrameFromActiveFrame(12.1)).toBe(12);
+    expect(playbackFrameFromActiveFrame(12.49)).toBe(12);
+    expect(playbackFrameFromActiveFrame(12.5)).toBe(13);
+  });
+});
+
 describe("activeVisualClip", () => {
   it("returns the video under the playhead", () => {
     const tl = timeline([
@@ -76,12 +87,21 @@ describe("activeVisualClip", () => {
     expect(activeVisualClip(tl, 60)).toBeNull();
   });
 
-  it("prefers the higher track (drawn on top)", () => {
+  it("prefers the lowest visual track index because upstream track 0 is topmost", () => {
     const tl = timeline([
-      track({ id: "v1", type: "video", clips: [clip({ id: "low", mediaType: "video" })] }),
-      track({ id: "v2", type: "video", clips: [clip({ id: "high", mediaType: "image" })] }),
+      track({ id: "v1", type: "video", clips: [clip({ id: "top", mediaType: "video" })] }),
+      track({ id: "v2", type: "video", clips: [clip({ id: "bottom", mediaType: "image" })] }),
     ]);
-    expect(activeVisualClip(tl, 10)?.clip.id).toBe("high");
+    expect(activeVisualClip(tl, 10)?.clip.id).toBe("top");
+  });
+
+  it("returns every visible visual clip in bottom-to-top track order", () => {
+    const tl = timeline([
+      track({ id: "v1", type: "video", clips: [clip({ id: "top", mediaType: "video" })] }),
+      track({ id: "v2", type: "video", clips: [clip({ id: "bottom", mediaType: "image" })] }),
+    ]);
+
+    expect(activeVisualClips(tl, 10).map((v) => v.clip.id)).toEqual(["bottom", "top"]);
   });
 
   it("skips hidden tracks and audio/text", () => {
@@ -156,5 +176,20 @@ describe("visualAudioIsDuplicated", () => {
     const visual = { clip: clip({ id: "v", mediaType: "video", mediaRef: "m1" }), track: track({ id: "v1", type: "video", clips: [] }), trackIndex: 0 };
     const audios = [{ clip: clip({ id: "a", mediaType: "audio", mediaRef: "music" }), track: track({ id: "a1", type: "audio", clips: [] }), trackIndex: 1 }];
     expect(visualAudioIsDuplicated(visual, audios)).toBe(false);
+  });
+});
+
+describe("advancePlayhead", () => {
+  it("advances by dt*fps", () => {
+    // 0.5s elapsed at 30fps -> +15 frames.
+    expect(advancePlayhead({ currentFrame: 100, dtSec: 0.5, fps: 30 })).toBeCloseTo(115);
+  });
+
+  it("does not read a DOM media clock as timeline authority", () => {
+    expect(advancePlayhead({ currentFrame: 100, dtSec: 0.25, fps: 30 })).toBeCloseTo(107.5);
+  });
+
+  it("falls back to 30fps when fps is non-positive", () => {
+    expect(advancePlayhead({ currentFrame: 0, dtSec: 1, fps: 0 })).toBeCloseTo(30);
   });
 });

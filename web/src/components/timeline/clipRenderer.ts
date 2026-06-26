@@ -6,10 +6,14 @@
  * here (Rust media cache, SPEC §11.3) — drawn as a tinted band + type hint.
  */
 
-import { ACCENT, CLIP, TEXT, TRIM, BORDER } from "../../lib/theme";
+import { ACCENT, CLIP, FADE, TEXT, TRIM, BORDER } from "../../lib/theme";
 import { trackColor, clipLabel, isLinked } from "../../lib/clip";
 import type { ClipRect } from "../../lib/geometry";
 import type { Clip } from "../../lib/types";
+
+/** Selection outline colour: a vivid blue that stays obvious on any clip body
+ *  (the previous near-white border read as grey and was easy to miss). */
+const SELECTION_BLUE = "rgba(56,139,253,1)";
 
 interface DrawOpts {
   isSelected: boolean;
@@ -23,7 +27,22 @@ interface DrawOpts {
   /** This clip is being dragged (move/trim ghost): drawn semi-transparent at its
    *  live position so it follows the cursor. */
   ghost?: boolean;
+  /** Link-group frame offset vs the lead clip (null = unlinked or is lead).
+   *  When non-null/non-zero, a red badge "+N"/"-N" is drawn at the top-right. */
+  linkOffset?: number | null;
+  /** Volume-keyframe drag ghost: when set, the dot at `fromFrame` is hidden and
+   *  a ghost dot is drawn at `ghostFrame` (same value) so the grabbed keyframe
+   *  follows the cursor (SPEC §5.4). Only set on the dragged clip. */
+  volumeKfGhost?: { fromFrame: number; ghostFrame: number };
+  /** This ghost is an Option/Alt-drag duplicate preview (issue #98): draws a
+   *  "+" badge in the top-right corner so the user sees the gesture will copy
+   *  rather than move. Only meaningful when `ghost` is true. */
+  isDuplicate?: boolean;
 }
+
+/** Radius of the draggable volume-keyframe dots drawn by `drawVolumeEnvelope`.
+ *  Kept in sync with the hit-test tolerance in `hitTest.ts` (8px incl. tol). */
+export const VOLUME_KF_DOT_RADIUS = 5;
 
 /** Linear amplitude → dB, clamped to the volume slider range. 1:1 port of
  *  `VolumeScale.dbFromLinear` (opentake-domain clip.rs). */
@@ -148,11 +167,12 @@ export function drawClip(
   ctx.fillRect(x, y, CLIP.stripWidth, height);
   ctx.restore();
 
-  // 5. Border (ClipRenderer:121-132). Selected = a clear blue 2px outline (the
-  //    old near-white border read as grey on the clip body and was easy to miss).
+  // 5. Border (ClipRenderer:121-132). Selected clips get a clear blue 2px outline
+  //    (the old white border read as grey on the clip body and was easy to miss);
+  //    blue is the unambiguous "this is selected" cue.
   roundRectPath(ctx, x, y, width, height, r);
   if (opts.isSelected) {
-    ctx.strokeStyle = "rgba(56,139,253,1)";
+    ctx.strokeStyle = SELECTION_BLUE;
     ctx.lineWidth = 2;
   } else {
     ctx.strokeStyle = BORDER.primary;
@@ -200,6 +220,20 @@ export function drawClip(
     ctx.restore();
   }
 
+  // 8. Volume envelope (audio only): a rubber-band polyline over the body plus
+  //    draggable keyframe dots (SPEC §5.4 volume envelope). Drawn before the
+  //    bottom keyframe diamonds so the dots sit above the waveform fill.
+  if (clip.mediaType === "audio") {
+    drawVolumeEnvelope(ctx, clip, rect, opts.volumeKfGhost);
+  }
+
+  // 8b. Link-offset badge: red "+N"/"-N" at the top-right when this clip is out
+  //     of step with its link-group lead (SPEC §5.4 linked-offset indicator).
+  let offsetBadgeRect: ClipRect | null = null;
+  if (opts.linkOffset != null && opts.linkOffset !== 0) {
+    offsetBadgeRect = drawOffsetBadge(ctx, opts.linkOffset, rect);
+  }
+
   // 9. Keyframe diamonds along the bottom (ClipRenderer:163-191), y = maxY-5.
   drawKeyframeMarkers(ctx, clip, rect);
 
@@ -208,6 +242,46 @@ export function drawClip(
   ctx.fillRect(x, y, TRIM.handleWidth, height);
   ctx.fillRect(x + width - TRIM.handleWidth, y, TRIM.handleWidth, height);
 
+  // 11. Duplicate badge (issue #98): when this ghost is an Option/Alt-drag
+  //     duplicate preview, draw a "+" badge in the top-right corner so the
+  //     user sees the gesture will copy rather than move. Mirrors the
+  //     upstream `+` overlay on option-drag ghosts.
+  if (opts.ghost && opts.isDuplicate) {
+    const rightLimit = offsetBadgeRect ? offsetBadgeRect.x - 2 : x + width - 2;
+    drawDuplicateBadge(ctx, x, y, width, rightLimit);
+  }
+
+  ctx.restore();
+}
+
+/** Draw a "+" duplicate badge in the top-right corner of a ghost clip (issue #98).
+ *  Yellow circle with a black "+" — high contrast against any track color, and
+ *  matches the systemYellow used for keyframe diamonds so it reads as "active". */
+function drawDuplicateBadge(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  rightLimit = x + width - 2,
+) {
+  const radius = 7;
+  const minCx = x + radius + 2;
+  const maxCx = rightLimit - radius;
+  if (maxCx < minCx) return;
+  const cx = maxCx;
+  const cy = y + radius + 2;
+  ctx.save();
+  // Solid yellow disc.
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.fillStyle = ACCENT.systemYellow;
+  ctx.fill();
+  // Black "+" glyph, centered.
+  ctx.fillStyle = "rgba(0,0,0,0.9)";
+  ctx.font = `700 11px ${cssFontStack()}`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("+", cx, cy + 0.5);
   ctx.restore();
 }
 
@@ -259,10 +333,6 @@ function drawWaveform(
     ctx.fillRect(x + i, y + h - barHeight - 1, 1, barHeight);
   }
 }
-
-const FADE_KNEE_TOP_INSET = 4;
-const FADE_EDGE_INSET = 6;
-const FADE_KNEE_SIZE = 7;
 
 /** Standard smoothstep (matches the shader + upstream `smoothstep`). */
 function smoothstep(t: number): number {
@@ -329,19 +399,23 @@ function drawFades(ctx: CanvasRenderingContext2D, clip: Clip, rect: ClipRect, is
   const ppf = width / clip.durationFrames;
   const bodyMinY = y + CLIP.labelBarHeight;
   const bodyMaxY = y + height - 1;
-  const kneeY = bodyMinY + FADE_KNEE_TOP_INSET;
+  const kneeY = bodyMinY + FADE.kneeTopInset;
   const alpha = isSelected ? 0.95 : 0.75;
   const fadeColor = `rgba(255,255,255,${alpha * 0.7})`;
-  const kneeX = (offsetFrames: number) =>
-    Math.max(x + FADE_EDGE_INSET, Math.min(x + width - FADE_EDGE_INSET, x + offsetFrames * ppf));
+  const kneeX = (offsetFrames: number, edge: "left" | "right") => {
+    const actual = x + offsetFrames * ppf;
+    return edge === "left"
+      ? Math.max(x + FADE.edgeInset, actual)
+      : Math.min(x + width - FADE.edgeInset, actual);
+  };
 
   ctx.save();
   if (clip.fadeInFrames > 0) {
-    const lx = kneeX(Math.min(clip.fadeInFrames, clip.durationFrames));
+    const lx = kneeX(Math.min(clip.fadeInFrames, clip.durationFrames), "left");
     drawFadeWedge(ctx, [x, bodyMaxY], [lx, kneeY], clip.fadeInInterpolation, bodyMinY, 0.6, fadeColor);
   }
   if (clip.fadeOutFrames > 0) {
-    const rx = kneeX(Math.max(0, clip.durationFrames - clip.fadeOutFrames));
+    const rx = kneeX(Math.max(0, clip.durationFrames - clip.fadeOutFrames), "right");
     drawFadeWedge(ctx, [x + width, bodyMaxY], [rx, kneeY], clip.fadeOutInterpolation, bodyMinY, 0.6, fadeColor);
   }
   // Draggable knee handles (visual indicators) when selected.
@@ -349,17 +423,13 @@ function drawFades(ctx: CanvasRenderingContext2D, clip: Clip, rect: ClipRect, is
     ctx.fillStyle = `rgba(255,255,255,${alpha})`;
     ctx.strokeStyle = "rgba(0,0,0,0.5)";
     ctx.lineWidth = 0.5;
-    const half = FADE_KNEE_SIZE / 2;
-    if (clip.fadeInFrames > 0) {
-      const lx = kneeX(Math.min(clip.fadeInFrames, clip.durationFrames));
-      ctx.fillRect(lx - half, kneeY - half, FADE_KNEE_SIZE, FADE_KNEE_SIZE);
-      ctx.strokeRect(lx - half, kneeY - half, FADE_KNEE_SIZE, FADE_KNEE_SIZE);
-    }
-    if (clip.fadeOutFrames > 0) {
-      const rx = kneeX(Math.max(0, clip.durationFrames - clip.fadeOutFrames));
-      ctx.fillRect(rx - half, kneeY - half, FADE_KNEE_SIZE, FADE_KNEE_SIZE);
-      ctx.strokeRect(rx - half, kneeY - half, FADE_KNEE_SIZE, FADE_KNEE_SIZE);
-    }
+    const half = FADE.kneeSize / 2;
+    const lx = kneeX(Math.min(clip.fadeInFrames, clip.durationFrames), "left");
+    const rx = kneeX(Math.max(0, clip.durationFrames - clip.fadeOutFrames), "right");
+    ctx.fillRect(lx - half, kneeY - half, FADE.kneeSize, FADE.kneeSize);
+    ctx.strokeRect(lx - half, kneeY - half, FADE.kneeSize, FADE.kneeSize);
+    ctx.fillRect(rx - half, kneeY - half, FADE.kneeSize, FADE.kneeSize);
+    ctx.strokeRect(rx - half, kneeY - half, FADE.kneeSize, FADE.kneeSize);
   }
   ctx.restore();
 }
@@ -407,4 +477,122 @@ function drawKeyframeMarkers(ctx: CanvasRenderingContext2D, clip: Clip, rect: Cl
 
 function cssFontStack(): string {
   return '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", system-ui, sans-serif';
+}
+
+/**
+ * Volume-envelope rubber band for audio clips (SPEC §5.4). Draws a polyline
+ * through `clip.volumeTrack` keyframes (linear amplitude → body y), with a
+ * draggable dot at each keyframe. When no track exists, a flat line at
+ * `clip.volume` is drawn so the user still sees the static level. Frames are
+ * clip-relative (0 = clip start); x mapping matches `drawKeyframeMarkers` so the
+ * envelope dots align vertically with the bottom keyframe diamonds.
+ */
+function drawVolumeEnvelope(
+  ctx: CanvasRenderingContext2D,
+  clip: Clip,
+  rect: ClipRect,
+  ghost?: { fromFrame: number; ghostFrame: number },
+) {
+  if (clip.durationFrames <= 0) return;
+  const ppf = (rect.width - 2 * TRIM.handleWidth) / clip.durationFrames;
+  if (ppf <= 0) return;
+  const baseX = rect.x + TRIM.handleWidth;
+  const bodyTop = rect.y + CLIP.labelBarHeight;
+  const bodyH = rect.height - CLIP.labelBarHeight;
+  if (bodyH <= 6) return;
+  // Map linear volume [0,1] → body [bottom, top]; clamp for display only.
+  const yForVol = (v: number) => {
+    const c = Math.max(0, Math.min(1, v));
+    return bodyTop + bodyH * (1 - c);
+  };
+  const track = clip.volumeTrack;
+  const kfs = track ? [...track.keyframes].sort((a, b) => a.frame - b.frame) : [];
+  ctx.save();
+  ctx.beginPath();
+  if (kfs.length === 0) {
+    const y = yForVol(clip.volume);
+    ctx.moveTo(baseX, y);
+    ctx.lineTo(baseX + clip.durationFrames * ppf, y);
+  } else {
+    // Extend the first/last keyframe value across the clip's full span so the
+    // line spans edge to edge (matches upstream's sampled envelope).
+    ctx.moveTo(baseX, yForVol(kfs[0].value));
+    for (const kf of kfs) {
+      const f = Math.max(0, Math.min(clip.durationFrames, kf.frame));
+      ctx.lineTo(baseX + f * ppf, yForVol(kf.value));
+    }
+    ctx.lineTo(baseX + clip.durationFrames * ppf, yForVol(kfs[kfs.length - 1].value));
+  }
+  ctx.strokeStyle = "rgba(255,255,255,0.85)";
+  ctx.lineWidth = 1.25;
+  ctx.stroke();
+  // Draggable keyframe dots. While dragging (ghost set), hide the original dot
+  // at fromFrame and draw a ghost dot at ghostFrame (same value) so the grabbed
+  // keyframe follows the cursor without leaving a stale dot behind.
+  if (kfs.length > 0) {
+    const fromKf = ghost ? kfs.find((k) => k.frame === ghost.fromFrame) : undefined;
+    for (const kf of kfs) {
+      if (ghost && kf.frame === ghost.fromFrame) continue; // hidden — drawn as ghost below
+      if (kf.frame < 0 || kf.frame > clip.durationFrames) continue;
+      const kx = baseX + kf.frame * ppf;
+      const ky = yForVol(kf.value);
+      ctx.beginPath();
+      ctx.arc(kx, ky, VOLUME_KF_DOT_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = ACCENT.systemYellow;
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,0.95)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    if (ghost && fromKf) {
+      const gf = Math.max(0, Math.min(clip.durationFrames, ghost.ghostFrame));
+      const gx = baseX + gf * ppf;
+      const gy = yForVol(fromKf.value);
+      ctx.beginPath();
+      ctx.arc(gx, gy, VOLUME_KF_DOT_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = ACCENT.systemOrange;
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,1)";
+      ctx.lineWidth = 1.25;
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+/**
+ * Link-offset badge: a small red rounded pill at the clip's top-right showing the
+ * frame offset vs the link-group lead ("+N" when this clip trails, "-N" when it
+ * leads in time beyond the lead start). Matches upstream's right-edge placement
+ * before the trim handle (SPEC §5.4 linked-offset indicator).
+ */
+function drawOffsetBadge(ctx: CanvasRenderingContext2D, offsetFrames: number, rect: ClipRect): ClipRect | null {
+  const n = Math.abs(offsetFrames);
+  const sign = offsetFrames > 0 ? "+" : "-";
+  const label = `${sign}${n}`;
+  ctx.save();
+  ctx.font = `600 9px ${cssFontStack()}`;
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+  const textW = ctx.measureText(label).width;
+  const padX = 4;
+  const badgeH = 13;
+  const badgeW = Math.ceil(textW + padX * 2);
+  // Skip when the clip is too small to legibly hold the badge.
+  if (rect.width <= badgeW + TRIM.handleWidth * 2 + 4 || rect.height < badgeH + 4) {
+    ctx.restore();
+    return null;
+  }
+  const bx = rect.x + rect.width - TRIM.handleWidth - badgeW - 2;
+  const by = rect.y + 2;
+  roundRectPath(ctx, bx, by, badgeW, badgeH, 3);
+  ctx.fillStyle = ACCENT.offsetBadge;
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.85)";
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
+  ctx.fillStyle = "rgba(255,255,255,1)";
+  ctx.fillText(label, bx + padX, by + badgeH / 2 + 0.5);
+  ctx.restore();
+  return { x: bx, y: by, width: badgeW, height: badgeH };
 }
