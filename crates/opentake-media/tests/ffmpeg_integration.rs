@@ -217,6 +217,34 @@ fn extract_pcm_no_audio_track_errors() {
 }
 
 #[test]
+fn extract_pcm_empty_stdout_errors_not_silent_buffer() {
+    // Regression for the "ffmpeg exits 0 but emits no PCM" case: a range window
+    // entirely past the media end seeks past EOF, so ffmpeg succeeds yet writes
+    // zero bytes. extract_pcm must surface NoTrack rather than return an empty
+    // buffer — an empty buffer downstream poisons the waveform cache with an
+    // all-1.0 flat band.
+    if !ffmpeg_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let av = dir.path().join("av.mp4");
+    if !make_av(&av) {
+        return;
+    }
+    let spec = PcmSpec {
+        sample_rate: 16_000,
+        channels: 1,
+        format: PcmFormat::F32,
+    };
+    // The clip is ~2 s long; ask for [5.0, 6.0) → past EOF → empty stdout.
+    let res = extract_pcm(&av, &spec, Some((5.0, 6.0)));
+    assert!(
+        res.is_err(),
+        "expected an error for an empty PCM window, not a silent buffer"
+    );
+}
+
+#[test]
 fn waveform_has_expected_bucket_count() {
     if !ffmpeg_available() {
         return;
