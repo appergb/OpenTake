@@ -1,8 +1,6 @@
 /**
  * Preview (SPEC §8). Tab bar + aspect-fit canvas area + scrub bar + transport
- * bar with project-setting badges. The canvas displays Rust composite frames via
- * the `preview_frame` event (SPEC §11.2) — not yet wired, so it shows the canvas
- * background + a centered placeholder. Transport drives the local playhead.
+ * bar with project-setting badges. Transport drives the local playhead.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -25,7 +23,6 @@ import { formatTimecode, totalFrames } from "../../lib/geometry";
 import { assetUrl } from "../../lib/asset";
 import { TimelinePlayback } from "./TimelinePlaybackLayer";
 import { aspectFitBox, timelinePreviewCanvasStyle } from "./previewLayerStyles";
-import { useTimelineFrame } from "./useTimelineFrame";
 import { useT } from "../../i18n";
 import type { MediaItem } from "../../lib/types";
 
@@ -35,7 +32,6 @@ export function Preview() {
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
   const setCurrentFrame = useEditorUiStore((s) => s.setCurrentFrame);
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
-  const isScrubbing = useEditorUiStore((s) => s.isScrubbing);
   const setScrubbing = useEditorUiStore((s) => s.setScrubbing);
   const togglePlayTimeline = useEditorUiStore((s) => s.togglePlay);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
@@ -90,18 +86,6 @@ export function Preview() {
     : totalFrames(timeline);
   const activeShownFrame = previewing ? Math.round(mediaTime * fps) : activeFrame;
   const playing = previewing ? mediaPlaying : isPlaying;
-  const aspect = timeline.width / timeline.height;
-  const timelineFrame = useTimelineFrame(
-    activeFrame,
-    timelineHasContent && !isPlaying && !isScrubbing,
-    timeline,
-    0,
-  );
-  const showCompositeFrame =
-    timelineFrame.url !== null &&
-    timelineFrame.frame === Math.round(activeFrame) &&
-    !isPlaying &&
-    !isScrubbing;
 
   const seekTo = (frame: number) => {
     const clamped = Math.max(0, Math.min(total, frame));
@@ -131,7 +115,6 @@ export function Preview() {
       ? { width: fittedCanvas.width, height: fittedCanvas.height, flex: "0 0 auto" }
       : {}),
   };
-  void aspect;
 
   return (
     <>
@@ -167,24 +150,7 @@ export function Preview() {
         ) : (
           <div style={timelineCanvasStyle}>
             {timelineHasContent ? (
-              <>
-                <TimelinePlayback timeline={timeline} fps={fps} />
-                {showCompositeFrame && (
-                  <img
-                    src={timelineFrame.url ?? undefined}
-                    alt=""
-                    draggable={false}
-                    style={{
-                      position: "absolute",
-                      inset: 0,
-                      width: "100%",
-                      height: "100%",
-                      objectFit: "fill",
-                      pointerEvents: "none",
-                    }}
-                  />
-                )}
-              </>
+              <TimelinePlayback timeline={timeline} fps={fps} />
             ) : (
               // Empty timeline: a framed 16:9 canvas surface placeholder.
               <div

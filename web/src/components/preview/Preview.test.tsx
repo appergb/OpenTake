@@ -27,10 +27,6 @@ const store = vi.hoisted(() => ({
       path: string;
     }>,
   },
-  timelineFrame: {
-    url: "data:image/png;base64,current-paused-composite",
-    frame: 42 as number | null,
-  },
 }));
 
 vi.mock("../../store/projectStore", () => ({
@@ -53,10 +49,6 @@ vi.mock("../../store/mediaStore", () => ({
 
 vi.mock("../../lib/asset", () => ({
   assetUrl: (path: string | null | undefined) => (path ? `asset://${path}` : null),
-}));
-
-vi.mock("./useTimelineFrame", () => ({
-  useTimelineFrame: () => store.timelineFrame,
 }));
 
 import { Preview } from "./Preview";
@@ -124,7 +116,7 @@ describe("Preview timeline rendering", () => {
     ];
   });
 
-  it("overlays the current paused Rust composite without unmounting DOM video", () => {
+  it("keeps paused timeline on DOM video without a composite image overlay", () => {
     store.timeline = timeline([
       track({
         id: "v1",
@@ -136,26 +128,8 @@ describe("Preview timeline rendering", () => {
     const html = renderToStaticMarkup(<Preview />);
 
     expect(html).toContain("<video");
-    expect(html).toContain("current-paused-composite");
-  });
-
-  it("does not show a stale Rust composite for a different frame", () => {
-    store.timelineFrame = {
-      url: "data:image/png;base64,stale-paused-composite",
-      frame: 41,
-    };
-    store.timeline = timeline([
-      track({
-        id: "v1",
-        type: "video",
-        clips: [clip({ id: "base-clip", mediaRef: "base", mediaType: "video" })],
-      }),
-    ]);
-
-    const html = renderToStaticMarkup(<Preview />);
-
-    expect(html).toContain("<video");
-    expect(html).not.toContain("stale-paused-composite");
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("data:image/png");
   });
 
   it("renders every visible visual layer on the shared timeline canvas", () => {
