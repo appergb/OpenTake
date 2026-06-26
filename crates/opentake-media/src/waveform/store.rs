@@ -34,6 +34,11 @@ pub fn load_waveform(cache_root: &Path, key: &str) -> Option<Vec<f32>> {
     while let Ok(v) = cursor.read_f32::<LittleEndian>() {
         out.push(v);
     }
+    // Reject poison files: every bucket == 1.0 silence is what an older build
+    // cached when extract_pcm returned an empty Vec. Force regeneration.
+    if !out.is_empty() && out.iter().all(|&v| v == 1.0) {
+        return None;
+    }
     Some(out)
 }
 

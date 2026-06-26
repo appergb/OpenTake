@@ -147,6 +147,12 @@ pub fn extract_pcm(path: &Path, spec: &PcmSpec, range: Option<(f64, f64)>) -> Re
     if !status.success() && raw.is_empty() {
         return Err(MediaError::no_track("audio", path));
     }
+    // ffmpeg can exit 0 with empty stdout when metadata says audio exists but
+    // no decodable samples: treat as no audio track so the waveform cache
+    // isn't poisoned with all-1.0 silence.
+    if raw.is_empty() {
+        return Err(MediaError::no_track("audio", path));
+    }
 
     let samples = raw_to_mono_f32(&raw, spec);
     Ok(PcmBuffer {
