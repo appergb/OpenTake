@@ -436,7 +436,7 @@ impl Dispatcher {
     ) -> Result<ToolResult, ToolError> {
         let a: SetClipPropertiesArgs = decode_tool_args(args, "")?;
         let clip_ids = a.clip_ids.clone();
-        let mut properties = ClipProperties {
+        let properties = ClipProperties {
             duration_frames: a.duration_frames,
             trim_start_frame: a.trim_start_frame,
             trim_end_frame: a.trim_end_frame,
