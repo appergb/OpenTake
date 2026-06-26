@@ -455,21 +455,27 @@ impl Dispatcher {
             return Ok(ToolResult::ok(res.summary));
         };
 
-        let mut summaries = Vec::new();
-        for clip_id in clip_ids {
-            let clip = find_clip(before, &clip_id).ok_or_else(|| {
+        let mut per_clip = Vec::new();
+        for clip_id in &clip_ids {
+            let clip = find_clip(before, clip_id).ok_or_else(|| {
                 ToolError::new(format!("set_clip_properties: clip not found: {clip_id}"))
             })?;
             let aspect = media_canvas_aspect(before, manifest, clip)
                 .or_else(|| current_transform_aspect(clip.transform));
-            properties.transform = Some(merge_transform_arg(
+            let mut clip_properties = properties.clone();
+            clip_properties.transform = Some(merge_transform_arg(
                 clip.transform,
                 transform_patch.clone(),
                 aspect,
             ));
+            per_clip.push((clip_id.clone(), clip_properties));
+        }
+
+        let mut summaries = Vec::new();
+        for (clip_id, clip_properties) in per_clip {
             let res = self.apply(EditCommand::SetClipProperties {
                 clip_ids: vec![clip_id],
-                properties: properties.clone(),
+                properties: clip_properties,
             })?;
             summaries.push(res.summary);
         }
@@ -1531,6 +1537,37 @@ mod tests {
         let c = &h.timeline().tracks[0].clips[0];
         assert!((c.transform.width - 0.2).abs() < 1e-9);
         assert!((c.transform.height - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn set_clip_properties_partial_transform_missing_clip_is_rejected_without_mutation() {
+        let h = seeded_transform_handle(
+            Transform {
+                width: 0.4,
+                height: 0.2,
+                ..Transform::default()
+            },
+            None,
+        );
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "set_clip_properties",
+            serde_json::json!({
+                "clipIds": ["clip-1", "ghost"],
+                "transform": { "height": 0.1 }
+            }),
+        );
+
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("clip not found"),
+            "{}",
+            r.text_joined()
+        );
+        let c = &h.timeline().tracks[0].clips[0];
+        assert!((c.transform.width - 0.4).abs() < 1e-9);
+        assert!((c.transform.height - 0.2).abs() < 1e-9);
     }
 
     // MARK: - Workflow plugin (Skills) tools

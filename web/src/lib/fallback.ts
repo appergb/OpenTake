@@ -358,6 +358,8 @@ export function createFallbackStore() {
             if (p.volume !== undefined) (c.volume = p.volume), (changed = true);
             if (p.speed !== undefined) (c.speed = p.speed), (changed = true);
             if (p.transform !== undefined) (c.transform = p.transform), (changed = true);
+            if (p.fadeInFrames !== undefined) (c.fadeInFrames = p.fadeInFrames), (changed = true);
+            if (p.fadeOutFrames !== undefined) (c.fadeOutFrames = p.fadeOutFrames), (changed = true);
             if (p.fadeInInterpolation !== undefined)
               (c.fadeInInterpolation = p.fadeInInterpolation), (changed = true);
             if (p.fadeOutInterpolation !== undefined)

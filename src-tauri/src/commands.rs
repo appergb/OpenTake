@@ -117,6 +117,12 @@ pub fn edit_apply(core: State<'_, AppCore>, command: EditRequest) -> Result<Edit
     handle_edit_apply(&core, cmd).map_err(msg)
 }
 
+/// `check_path_exists`: checks if a path (e.g. project bundle folder) exists on disk.
+#[tauri::command]
+pub fn check_path_exists(path: String) -> bool {
+    std::path::Path::new(&path).exists()
+}
+
 fn msg(e: CmdError) -> String {
     e.message
 }
@@ -223,6 +229,8 @@ pub enum EditRequest {
         asset_ids: Vec<String>,
         folder_id: Option<String>,
     },
+    #[serde(rename_all = "camelCase")]
+    SwapMedia { clip_id: String, media_ref: String },
 }
 
 impl EditRequest {
@@ -359,6 +367,9 @@ impl EditRequest {
                 asset_ids,
                 folder_id,
             },
+            EditRequest::SwapMedia { clip_id, media_ref } => {
+                EditCommand::SwapMedia { clip_id, media_ref }
+            }
         })
     }
 }
@@ -630,6 +641,7 @@ impl KeyframePayloadDto {
 #[cfg(test)]
 mod edit_request_serde_tests {
     use super::EditRequest;
+    use opentake_core::EditCommand;
 
     // Regression: the front end sends camelCase keys (clipIds/clipId/atFrame…).
     // serde's enum-level `rename_all` does NOT rename struct-variant fields, so
@@ -648,5 +660,21 @@ mod edit_request_serde_tests {
         .expect("insertClips camelCase");
         serde_json::from_str::<EditRequest>(r#"{"type":"rippleDeleteClips","clipIds":["a"]}"#)
             .expect("rippleDeleteClips camelCase");
+    }
+
+    #[test]
+    fn deserializes_swap_media_and_maps_to_command() {
+        let request = serde_json::from_str::<EditRequest>(
+            r#"{"type":"swapMedia","clipId":"clip-1","mediaRef":"asset-2"}"#,
+        )
+        .expect("swapMedia camelCase");
+
+        match request.into_command().expect("swapMedia command") {
+            EditCommand::SwapMedia { clip_id, media_ref } => {
+                assert_eq!(clip_id, "clip-1");
+                assert_eq!(media_ref, "asset-2");
+            }
+            other => panic!("expected SwapMedia, got {other:?}"),
+        }
     }
 }

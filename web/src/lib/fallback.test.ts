@@ -262,13 +262,15 @@ describe("browser fallback edit store", () => {
     expect(originalVideo?.linkGroupId).toBe(originalAudio?.linkGroupId);
   });
 
-  it("persists fade interpolation properties", () => {
+  it("persists fade length and interpolation properties", () => {
     const fallback = createFallbackStore();
 
     const result = fallback.editApply({
       type: "setClipProperties",
       clipIds: ["c1"],
       properties: {
+        fadeInFrames: 7,
+        fadeOutFrames: 9,
         fadeInInterpolation: "smooth",
         fadeOutInterpolation: "smooth",
       },
@@ -280,6 +282,8 @@ describe("browser fallback edit store", () => {
       .find((candidate) => candidate.id === "c1");
 
     expect(result.changed).toBe(true);
+    expect(clip?.fadeInFrames).toBe(7);
+    expect(clip?.fadeOutFrames).toBe(9);
     expect(clip?.fadeInInterpolation).toBe("smooth");
     expect(clip?.fadeOutInterpolation).toBe("smooth");
   });

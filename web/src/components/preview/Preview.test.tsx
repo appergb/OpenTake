@@ -51,13 +51,6 @@ vi.mock("../../lib/asset", () => ({
   assetUrl: (path: string | null | undefined) => (path ? `asset://${path}` : null),
 }));
 
-vi.mock("./useTimelineFrame", () => ({
-  useTimelineFrame: () => ({
-    url: "data:image/png;base64,stale-paused-composite",
-    frame: 42,
-  }),
-}));
-
 import { Preview } from "./Preview";
 import { TimelinePlayback } from "./TimelinePlaybackLayer";
 
@@ -123,7 +116,7 @@ describe("Preview timeline rendering", () => {
     ];
   });
 
-  it("does not replace the paused DOM video frame with a Rust composite image", () => {
+  it("keeps paused timeline on DOM video without a composite image overlay", () => {
     store.timeline = timeline([
       track({
         id: "v1",
@@ -135,7 +128,8 @@ describe("Preview timeline rendering", () => {
     const html = renderToStaticMarkup(<Preview />);
 
     expect(html).toContain("<video");
-    expect(html).not.toContain("stale-paused-composite");
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("data:image/png");
   });
 
   it("renders every visible visual layer on the shared timeline canvas", () => {

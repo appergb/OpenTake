@@ -1,8 +1,6 @@
 /**
  * Preview (SPEC §8). Tab bar + aspect-fit canvas area + scrub bar + transport
- * bar with project-setting badges. The canvas displays Rust composite frames via
- * the `preview_frame` event (SPEC §11.2) — not yet wired, so it shows the canvas
- * background + a centered placeholder. Transport drives the local playhead.
+ * bar with project-setting badges. Transport drives the local playhead.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -88,7 +86,6 @@ export function Preview() {
     : totalFrames(timeline);
   const activeShownFrame = previewing ? Math.round(mediaTime * fps) : activeFrame;
   const playing = previewing ? mediaPlaying : isPlaying;
-  const aspect = timeline.width / timeline.height;
 
   const seekTo = (frame: number) => {
     const clamped = Math.max(0, Math.min(total, frame));
@@ -118,7 +115,6 @@ export function Preview() {
       ? { width: fittedCanvas.width, height: fittedCanvas.height, flex: "0 0 auto" }
       : {}),
   };
-  void aspect;
 
   return (
     <>
