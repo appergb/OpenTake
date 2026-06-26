@@ -204,11 +204,11 @@ pub fn build_render_plan(
         }
     }
 
-    // Final blend order: (track_index, start_frame). Within a track there are no
-    // overlaps, so this fully determines the alpha-over stacking (SPEC §1.5).
+    // Final blend order: bottom-to-top. Upstream keeps visual track 0 topmost,
+    // so higher track indexes draw first and lower indexes draw last.
     clip_plans.sort_by(|a, b| {
-        a.track_index
-            .cmp(&b.track_index)
+        b.track_index
+            .cmp(&a.track_index)
             .then(a.start_frame.cmp(&b.start_frame))
     });
 

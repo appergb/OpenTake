@@ -286,26 +286,26 @@ fn zero_duration_clip_skipped() {
     assert!(plan.clip_plans.is_empty());
 }
 
-// --- Multi-track blend order: track 0 below track 1 ---
+// --- Multi-track blend order: upstream visual track 0 is topmost ---
 
 #[test]
-fn multitrack_blend_order_track0_below_track1() {
+fn multitrack_blend_order_track0_above_track1() {
     let mut tl = Timeline::new();
     tl.fps = 30;
     let mut t0 = Track::new("t0", ClipType::Video);
-    t0.clips.push(video_clip("bottom", 0, 30));
+    t0.clips.push(video_clip("top", 0, 30));
     let mut t1 = Track::new("t1", ClipType::Video);
-    t1.clips.push(video_clip("top", 0, 30));
+    t1.clips.push(video_clip("bottom", 0, 30));
     tl.tracks.push(t0);
     tl.tracks.push(t1);
 
     let plan = build_render_plan(&tl, RS, &TestMetrics::default());
-    // clip_plans ordered by (track_index, start): bottom first, top second.
+    // Draw order is bottom-to-top; upstream keeps visual track 0 topmost.
     assert_eq!(plan.clip_plans[0].clip_id, "bottom");
     assert_eq!(plan.clip_plans[1].clip_id, "top");
 
     let fp = plan.frame(&tl, 0);
-    // draws preserve plan order: index 0 bottom, last on top.
+    // Draws preserve plan order: first bottom, last top.
     assert_eq!(fp.draws[0].clip_id, "bottom");
     assert_eq!(fp.draws[1].clip_id, "top");
 }

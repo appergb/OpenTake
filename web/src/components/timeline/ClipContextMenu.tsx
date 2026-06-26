@@ -10,14 +10,49 @@ import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import * as edit from "../../store/editActions";
 import { useT } from "../../i18n";
+import type { Clip, ClipPropertiesReq, Interpolation } from "../../lib/types";
+import type { FadeEdge } from "./hitTest";
+
+type MenuItem = {
+  label: string;
+  action: () => void;
+  danger?: boolean;
+  checked?: boolean;
+};
+
+type FadeInterpolation = Extract<Interpolation, "linear" | "smooth">;
+
+const FADE_INTERPOLATIONS: Array<{ label: string; value: FadeInterpolation }> = [
+  { label: "Linear", value: "linear" },
+  { label: "Smooth", value: "smooth" },
+];
+const CHECKMARK = "\u2713";
+
+export function fadeInterpolationMenuItems(
+  clip: Clip,
+  edge: FadeEdge,
+  apply: (properties: ClipPropertiesReq) => void,
+  labels: Partial<Record<FadeInterpolation, string>> = {},
+): MenuItem[] {
+  const current = edge === "left" ? clip.fadeInInterpolation : clip.fadeOutInterpolation;
+  return FADE_INTERPOLATIONS.map(({ label, value }) => ({
+    label: labels[value] ?? label,
+    checked: current === value,
+    action: () => {
+      apply(edge === "left" ? { fadeInInterpolation: value } : { fadeOutInterpolation: value });
+    },
+  }));
+}
 
 export function ClipContextMenu({
   clipId,
+  fadeEdge,
   x,
   y,
   onClose,
 }: {
   clipId: string;
+  fadeEdge?: FadeEdge;
   x: number;
   y: number;
   onClose: () => void;
@@ -29,8 +64,8 @@ export function ClipContextMenu({
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ left: x, top: y });
 
-  // Locate the clip to read linkGroupId.
-  let clip: { linkGroupId?: string } | null = null;
+  // Locate the full clip for link state and fade interpolation state.
+  let clip: Clip | null = null;
   for (const track of timeline.tracks) {
     const found = track.clips.find((c) => c.id === clipId);
     if (found) {
@@ -84,43 +119,58 @@ export function ClipContextMenu({
     if (!isSelected) selectClips(new Set([clipId]));
   };
 
-  const items: Array<{ label: string; action: () => void; danger?: boolean }> = [
-    {
-      label: t("contextMenu.split"),
-      action: () => {
-        ensureSelected();
-        void edit.splitAtPlayhead();
+  let items: MenuItem[];
+  if (fadeEdge) {
+    items = fadeInterpolationMenuItems(
+      clip!,
+      fadeEdge,
+      (properties) => {
+        void edit.setClipProperties([clipId], properties);
       },
-    },
-    {
-      label: t("contextMenu.delete"),
-      action: () => {
-        ensureSelected();
-        void edit.deleteSelectedClips();
+      {
+        linear: t("inspector.interpolation.linear"),
+        smooth: t("inspector.interpolation.smooth"),
       },
-      danger: true,
-    },
-  ];
-
-  // Link/Unlink: operate on the full selection (>= 2 clips to link).
-  if (clip!.linkGroupId) {
-    items.push({
-      label: t("contextMenu.unlink"),
-      action: () => {
-        ensureSelected();
-        const ids = [...useEditorUiStore.getState().selectedClipIds];
-        if (ids.length > 0) void edit.unlinkClips(ids);
-      },
-    });
+    );
   } else {
-    items.push({
-      label: t("contextMenu.link"),
-      action: () => {
-        ensureSelected();
-        const ids = [...useEditorUiStore.getState().selectedClipIds];
-        if (ids.length >= 2) void edit.linkClips(ids);
+    items = [
+      {
+        label: t("contextMenu.split"),
+        action: () => {
+          ensureSelected();
+          void edit.splitAtPlayhead();
+        },
       },
-    });
+      {
+        label: t("contextMenu.delete"),
+        action: () => {
+          ensureSelected();
+          void edit.deleteSelectedClips();
+        },
+        danger: true,
+      },
+    ];
+
+    // Link/Unlink: operate on the full selection (>= 2 clips to link).
+    if (clip!.linkGroupId) {
+      items.push({
+        label: t("contextMenu.unlink"),
+        action: () => {
+          ensureSelected();
+          const ids = [...useEditorUiStore.getState().selectedClipIds];
+          if (ids.length > 0) void edit.unlinkClips(ids);
+        },
+      });
+    } else {
+      items.push({
+        label: t("contextMenu.link"),
+        action: () => {
+          ensureSelected();
+          const ids = [...useEditorUiStore.getState().selectedClipIds];
+          if (ids.length >= 2) void edit.linkClips(ids);
+        },
+      });
+    }
   }
 
   return (
@@ -139,6 +189,7 @@ export function ClipContextMenu({
         boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
         fontSize: "var(--fs-sm)",
       }}
+      role="menu"
     >
       {items.map((item, i) => (
         <button
@@ -159,6 +210,8 @@ export function ClipContextMenu({
             fontFamily: "var(--font-sans)",
             fontSize: "var(--fs-sm)",
           }}
+          role={item.checked === undefined ? "menuitem" : "menuitemradio"}
+          aria-checked={item.checked ?? undefined}
           onMouseEnter={(e) => {
             (e.currentTarget as HTMLElement).style.background = "var(--bg-hover, rgba(255,255,255,0.08))";
           }}
@@ -166,7 +219,7 @@ export function ClipContextMenu({
             (e.currentTarget as HTMLElement).style.background = "transparent";
           }}
         >
-          {item.label}
+          {item.checked === undefined ? item.label : `${item.checked ? `${CHECKMARK} ` : "  "}${item.label}`}
         </button>
       ))}
     </div>

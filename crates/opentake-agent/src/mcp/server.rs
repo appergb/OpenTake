@@ -230,6 +230,7 @@ mod tests {
             let core = AppCore::new();
             core.apply(EditCommand::InsertTrack {
                 kind: ClipType::Video,
+                at: None,
             })
             .unwrap();
             TestHandle { core }

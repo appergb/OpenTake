@@ -194,6 +194,7 @@ mod tests {
                 trim_end_frame: None,
                 has_audio: false,
                 add_linked_audio: false,
+                transform: None,
             }],
         }
     }

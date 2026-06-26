@@ -52,7 +52,7 @@ pub enum ToolName {
     ChromaKey,
     SetMask,
     ApplyEffect,
-    // --- OpenTake Web motion graphics (docs/MOTION-GRAPHICS-PLUGIN.md, Issue #14) ---
+    // --- OpenTake Motion Canvas graphics (docs/MOTION-GRAPHICS-PLUGIN.md, Issue #34) ---
     AddMotionGraphic,
     EditMotionGraphic,
 }

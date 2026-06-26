@@ -14,11 +14,14 @@ import { KeyframesPanel } from "./KeyframesPanel";
 import { SwapMediaSection } from "./SwapMediaSection";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
+import { useMediaStore } from "../../store/mediaStore";
 import * as edit from "../../store/editActions";
 import { formatTimecode } from "../../lib/geometry";
 import {
   cropAt,
+  mediaCanvasAspect,
   opacityAt,
+  resizeTransformKeepingSourceAspect,
   rotationAt,
   sizeAt,
   topLeftAt,
@@ -244,6 +247,14 @@ function ClipInspector({
   // Live sampling: read the current playhead frame so every numeric field shows
   // the value at the playhead (upstream `InspectorView.livePreview`).
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
+  const timeline = useProjectStore((s) => s.timeline);
+  const mediaItem = useMediaStore((s) => s.items.find((m) => m.id === clip.mediaRef) ?? null);
+  const aspect = mediaCanvasAspect(
+    mediaItem?.width,
+    mediaItem?.height,
+    timeline.width,
+    timeline.height,
+  );
 
   const commit = (props: Parameters<typeof edit.setClipProperties>[1]) =>
     edit.setClipProperties([clip.id], props);
@@ -346,7 +357,9 @@ function ClipInspector({
                     suffix="%"
                     width={56}
                     onCommit={(v) =>
-                      commit({ transform: { ...clip.transform, width: v, height: v } })
+                      commit({
+                        transform: resizeTransformKeepingSourceAspect(clip.transform, v, aspect),
+                      })
                     }
                   />
                 )}

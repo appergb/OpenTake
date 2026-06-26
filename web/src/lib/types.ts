@@ -100,6 +100,7 @@ export interface ClipEntryReq {
   trimEndFrame?: number;
   hasAudio?: boolean;
   addLinkedAudio?: boolean;
+  transform?: Transform;
 }
 
 export interface ClipMoveReq {
@@ -185,7 +186,7 @@ export type EditRequest =
   | { type: "link"; clipIds: string[] }
   | { type: "unlink"; clipIds: string[] }
   | { type: "removeTracks"; trackIndexes: number[] }
-  | { type: "insertTrack"; kind: ClipType }
+  | { type: "insertTrack"; kind: ClipType; at?: number }
   | {
       type: "setTrackProps";
       trackIndex: number;

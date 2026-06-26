@@ -863,7 +863,7 @@ impl IndexCoordinator {
 ### 8.3 媒体物化(图片/Lottie → 纹理)的归属
 
 上游用 `ImageVideoGenerator`(图片烧静止视频)、`LottieVideoGenerator`(Lottie 烧 ProRes)、`AlphaVideoNormalizer`(直 alpha 预乘)绕开 AVPlayer 限制。`docs/_analysis/02` 表 L74/L75/L81 与 `docs/ARCHITECTURE.md` §6 L130:**自建 wgpu 合成器后,这三类 hack 整类消失**——图片/Lottie 在合成前**物化为纹理**(content-hash 缓存),由 `opentake-render` 负责。
-- 本 crate **提供**:图片解码 → `RgbaFrame`(§3.2 / `image` crate);(可选)Lottie 解码用 `rlottie` FFI 或 `velato`(`docs/_analysis/02` 表 L81),渲成 `RgbaFrame` 序列。**建议** Lottie 放 render 的物化层或独立 `opentake-motion`(Phase 10),本 crate 仅暴露图片解码;Lottie 列为**有意暂不归本 crate**。
+- 本 crate **提供**:图片解码 → `RgbaFrame`(§3.2 / `image` crate);(可选)Lottie 解码用 `rlottie` FFI 或 `velato`(`docs/_analysis/02` 表 L81),渲成 `RgbaFrame` 序列。**建议** Lottie 放 render 的物化层或独立 `opentake-motion` fallback。Motion Canvas v1 输出 mp4 后走普通视频 import,不归本 crate。
 - 本 crate **不提供**:静止视频烧制、ProRes 烧制、alpha 预乘转码(整类删除)。
 
 ### 8.4 facade `MediaEngine`(供 `opentake-core` 调用)
@@ -948,7 +948,7 @@ impl MediaEngine {
 |---|---|---|
 | `ImageVideoGenerator`(图片烧静止视频) | **整类删除**;图片在 render 物化为纹理 | `docs/_analysis/02` 表 L74;ARCHITECTURE §6 L130 |
 | `AlphaVideoNormalizer`(直 alpha 预乘转码) | **整类删除**;wgpu 着色器内处理 premultiplied alpha | `docs/_analysis/02` 表 L75 |
-| `LottieVideoGenerator`(Lottie 烧 ProRes) | 暂不归本 crate;render 物化层或 `opentake-motion`(Phase 10) | ROADMAP Phase 10;§8.3 |
+| `LottieVideoGenerator`(Lottie 烧 ProRes) | 暂不归本 crate;render 物化层或 `opentake-motion` fallback | ROADMAP Phase 10;§8.3 |
 | `CompositionBuilder` / `VideoEngine` / wgpu 合成 / RenderPlan / 关键帧 ramp / renderSize 偶数化 / BT.709 instruction | **属 `opentake-render`** | ARCHITECTURE §6;ROADMAP Phase 3/4/5 |
 | `MediaVisualCache` 的 @MainActor 内存表 + `needsDisplay` 触发重绘 | 内存镜像/事件推送属 `opentake-core`/前端;本 crate 只做纯生成 + 磁盘缓存 | §3.5 |
 | `VisualModelLoader` 的 `@Observable` UI 状态机 | UI 镜像属上层;本 crate 提供 `installed/install/load` + warm-up | §5.6;`VisualModelLoader.swift` |

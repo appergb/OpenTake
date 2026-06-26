@@ -9,7 +9,7 @@ import { isTauri } from "../lib/api";
 import { forceRefresh } from "./sync";
 import { useEditorUiStore } from "./uiStore";
 import { useProjectStore } from "./projectStore";
-import { trimToPlayheadEdits } from "../lib/clip";
+import { fitTransformForMedia, trimToPlayheadEdits } from "../lib/clip";
 import { useClipboardStore } from "./clipboardStore";
 import type {
   Clip,
@@ -92,8 +92,8 @@ export async function linkClips(clipIds: string[]) {
 /** Insert a new empty track of `kind` (clamped into its zone by the core). Used
  *  by the drop flow to create a track on demand when the timeline has none
  *  compatible. */
-export async function insertTrack(kind: ClipType) {
-  await applyAndRefresh({ type: "insertTrack", kind });
+export async function insertTrack(kind: ClipType, at?: number) {
+  return applyAndRefresh({ type: "insertTrack", kind, at });
 }
 
 export async function unlinkClips(clipIds: string[]) {
@@ -396,6 +396,7 @@ function entryForMedia(timeline: Timeline, item: MediaItem): ClipEntryReq | null
     durationFrames,
     hasAudio: item.hasAudio,
     addLinkedAudio: item.type === "video" && item.hasAudio,
+    transform: fitTransformForMedia(item.width, item.height, timeline.width, timeline.height),
   };
 }
 
@@ -424,6 +425,7 @@ function entryForMediaAt(
     durationFrames,
     hasAudio: item.hasAudio,
     addLinkedAudio: item.type === "video" && item.hasAudio,
+    transform: fitTransformForMedia(item.width, item.height, timeline.width, timeline.height),
   };
 }
 
@@ -457,8 +459,9 @@ export function addMediaToTimelineAt(
   item: MediaItem,
   startFrame: number,
   preferredTrackIndex: number | null,
+  insertTrackAt?: number,
 ): Promise<void> {
-  return enqueueMediaAdd(() => addMediaToTimelineAtInner(item, startFrame, preferredTrackIndex));
+  return enqueueMediaAdd(() => addMediaToTimelineAtInner(item, startFrame, preferredTrackIndex, insertTrackAt));
 }
 
 async function addMediaToTimelineInner(item: MediaItem): Promise<void> {
@@ -484,13 +487,34 @@ async function addMediaToTimelineAtInner(
   item: MediaItem,
   startFrame: number,
   preferredTrackIndex: number | null,
+  insertTrackAt?: number,
 ): Promise<void> {
   let timeline = useProjectStore.getState().timeline;
-  let entry = entryForMediaAt(timeline, item, Math.max(0, startFrame), preferredTrackIndex);
-  if (!entry) {
-    await insertTrack(item.type === "audio" ? "audio" : "video");
+  if (insertTrackAt !== undefined) {
+    const res = await insertTrack(item.type === "audio" ? "audio" : "video", insertTrackAt);
     await forceRefresh();
     timeline = useProjectStore.getState().timeline;
+    const insertedTrackId = res?.affectedClipIds[0];
+    const insertedIndex = insertedTrackId
+      ? timeline.tracks.findIndex((track) => track.id === insertedTrackId)
+      : -1;
+    if (insertedIndex >= 0) preferredTrackIndex = insertedIndex;
+  }
+  let entry = entryForMediaAt(timeline, item, Math.max(0, startFrame), preferredTrackIndex);
+  if (!entry) {
+    const fallbackInsertAt = preferredTrackIndex ?? undefined;
+    const res = await insertTrack(item.type === "audio" ? "audio" : "video", fallbackInsertAt);
+    await forceRefresh();
+    timeline = useProjectStore.getState().timeline;
+    const insertedTrackId = res?.affectedClipIds[0];
+    const insertedIndex = insertedTrackId
+      ? timeline.tracks.findIndex((track) => track.id === insertedTrackId)
+      : -1;
+    if (insertedIndex >= 0) {
+      preferredTrackIndex = insertedIndex;
+    } else if (fallbackInsertAt !== undefined) {
+      preferredTrackIndex = Math.max(0, Math.min(fallbackInsertAt, timeline.tracks.length - 1));
+    }
     entry = entryForMediaAt(timeline, item, Math.max(0, startFrame), preferredTrackIndex);
   }
   if (!entry) return;
@@ -636,6 +660,7 @@ export async function pasteClipsAtPlayhead() {
       trimStartFrame: e.clip.trimStartFrame,
       trimEndFrame: e.clip.trimEndFrame,
       hasAudio: e.clip.mediaType === "audio" || e.clip.mediaType === "video",
+      transform: e.clip.transform,
       // Don't auto-create a linked audio: the linked audio clip is already in
       // the clipboard (copyClips expands link groups) and will be pasted as
       // its own entry; addLinkedAudio=true would create a duplicate.
@@ -664,4 +689,5 @@ export async function pasteClipsAtPlayhead() {
 
   // Select the freshly pasted clips so the user can immediately move/trim them.
   ui.selectClips(new Set(res.affectedClipIds));
+  if (isTauri) await forceRefresh();
 }

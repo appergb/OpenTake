@@ -31,7 +31,7 @@ pub enum MotionError {
     #[error("renderer unavailable: {0}")]
     RendererUnavailable(String),
 
-    /// The render exceeded its time budget (sandbox fuse, docs §5).
+    /// The render exceeded its time budget (sandbox fuse).
     #[error("render timed out after {0:?}")]
     Timeout(std::time::Duration),
 

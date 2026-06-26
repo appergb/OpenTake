@@ -151,7 +151,7 @@ impl Dispatcher {
             ToolName::AddTexts => self.add_texts(args),
             ToolName::CreateFolder => self.create_folder(args),
             ToolName::MoveToFolder => self.move_to_folder(args),
-            ToolName::SetClipProperties => self.set_clip_properties(args),
+            ToolName::SetClipProperties => self.set_clip_properties(args, before, manifest),
             ToolName::SetColorGrade => self.set_color_grade(args),
             ToolName::ChromaKey => self.chroma_key(args),
             ToolName::SetMask => self.set_mask(args),
@@ -171,8 +171,9 @@ impl Dispatcher {
             // --- Not yet implementable in this phase (honest stubs) ---
             // Media reads (inspect/transcript/search) + import need the media
             // backend via a widened CoreHandle; generation/upscale need the async
-            // GenClient + BYOK auth; inspect_timeline needs the render+text path;
-            // motion graphics is #34. Each is wired in a later batch.
+            // GenClient + BYOK auth; inspect_timeline needs the render+text path.
+            // Motion graphics (#34) now routes through the planned Motion Canvas
+            // plugin: render mp4 -> import media -> place clip.
             ToolName::InspectMedia
             | ToolName::GetTranscript
             | ToolName::InspectTimeline
@@ -231,6 +232,7 @@ impl Dispatcher {
                 trim_end_frame: e.trim_end_frame,
                 has_audio,
                 add_linked_audio: false,
+                transform: None,
             });
         }
         op.added_media_refs = media_refs;
@@ -260,6 +262,7 @@ impl Dispatcher {
                 trim_end_frame: e.trim_end_frame,
                 has_audio,
                 add_linked_audio: false,
+                transform: None,
             });
         }
         let res = self.apply(EditCommand::InsertClips {
@@ -425,25 +428,52 @@ impl Dispatcher {
         Ok(ToolResult::ok(res.summary))
     }
 
-    fn set_clip_properties(&self, args: &Value) -> Result<ToolResult, ToolError> {
+    fn set_clip_properties(
+        &self,
+        args: &Value,
+        before: &Timeline,
+        manifest: &MediaManifest,
+    ) -> Result<ToolResult, ToolError> {
         let a: SetClipPropertiesArgs = decode_tool_args(args, "")?;
         let clip_ids = a.clip_ids.clone();
-        let properties = ClipProperties {
+        let mut properties = ClipProperties {
             duration_frames: a.duration_frames,
             trim_start_frame: a.trim_start_frame,
             trim_end_frame: a.trim_end_frame,
             speed: a.speed,
             volume: a.volume,
             opacity: a.opacity,
-            transform: a.transform.map(transform_from_arg),
+            transform: None,
             text_content: a.content.clone(),
             ..Default::default()
         };
-        let res = self.apply(EditCommand::SetClipProperties {
-            clip_ids,
-            properties,
-        })?;
-        Ok(ToolResult::ok(res.summary))
+        let Some(transform_patch) = a.transform else {
+            let res = self.apply(EditCommand::SetClipProperties {
+                clip_ids,
+                properties,
+            })?;
+            return Ok(ToolResult::ok(res.summary));
+        };
+
+        let mut summaries = Vec::new();
+        for clip_id in clip_ids {
+            let clip = find_clip(before, &clip_id).ok_or_else(|| {
+                ToolError::new(format!("set_clip_properties: clip not found: {clip_id}"))
+            })?;
+            let aspect = media_canvas_aspect(before, manifest, clip)
+                .or_else(|| current_transform_aspect(clip.transform));
+            properties.transform = Some(merge_transform_arg(
+                clip.transform,
+                transform_patch.clone(),
+                aspect,
+            ));
+            let res = self.apply(EditCommand::SetClipProperties {
+                clip_ids: vec![clip_id],
+                properties: properties.clone(),
+            })?;
+            summaries.push(res.summary);
+        }
+        Ok(ToolResult::ok(summaries.join("; ")))
     }
 
     fn set_color_grade(&self, args: &Value) -> Result<ToolResult, ToolError> {
@@ -733,6 +763,66 @@ fn transform_from_arg(t: args::TransformArg) -> Transform {
         flip_horizontal: t.flip_horizontal.unwrap_or(base.flip_horizontal),
         flip_vertical: t.flip_vertical.unwrap_or(base.flip_vertical),
     }
+}
+
+fn merge_transform_arg(
+    base: Transform,
+    patch: args::TransformArg,
+    media_canvas_aspect: Option<f64>,
+) -> Transform {
+    let aspect = media_canvas_aspect
+        .filter(|a| a.is_finite() && *a > 0.0)
+        .unwrap_or_else(|| current_transform_aspect(base).unwrap_or(1.0));
+    let (width, height) = match (patch.width, patch.height) {
+        (Some(w), Some(h)) => (w, h),
+        (Some(w), None) => (w, w / aspect),
+        (None, Some(h)) => (h * aspect, h),
+        (None, None) => (base.width, base.height),
+    };
+    Transform {
+        center_x: patch.center_x.unwrap_or(base.center_x),
+        center_y: patch.center_y.unwrap_or(base.center_y),
+        width,
+        height,
+        rotation: base.rotation,
+        flip_horizontal: patch.flip_horizontal.unwrap_or(base.flip_horizontal),
+        flip_vertical: patch.flip_vertical.unwrap_or(base.flip_vertical),
+    }
+}
+
+fn current_transform_aspect(t: Transform) -> Option<f64> {
+    if t.width.is_finite() && t.height.is_finite() && t.width > 0.0 && t.height > 0.0 {
+        Some(t.width / t.height)
+    } else {
+        None
+    }
+}
+
+fn find_clip<'a>(timeline: &'a Timeline, clip_id: &str) -> Option<&'a opentake_domain::Clip> {
+    timeline
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .find(|clip| clip.id == clip_id)
+}
+
+fn media_canvas_aspect(
+    timeline: &Timeline,
+    manifest: &MediaManifest,
+    clip: &opentake_domain::Clip,
+) -> Option<f64> {
+    let entry = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.id == clip.media_ref)?;
+    let sw = entry.source_width?;
+    let sh = entry.source_height?;
+    if sw <= 0 || sh <= 0 || timeline.width <= 0 || timeline.height <= 0 {
+        return None;
+    }
+    let source_aspect = sw as f64 / sh as f64;
+    let canvas_aspect = timeline.width as f64 / timeline.height as f64;
+    Some(source_aspect / canvas_aspect)
 }
 
 /// Build a [`TextStyle`] from `add_texts` scalar fields, leaving unspecified
@@ -1029,6 +1119,7 @@ mod tests {
             // Seed a video track via the editing entry point.
             core.apply(EditCommand::InsertTrack {
                 kind: ClipType::Video,
+                at: None,
             })
             .unwrap();
             TestHandle { core }
@@ -1298,6 +1389,13 @@ mod tests {
         }
     }
 
+    fn entry_with_size(id: &str, name: &str, width: i32, height: i32) -> MediaManifestEntry {
+        let mut e = entry(id, name);
+        e.source_width = Some(width);
+        e.source_height = Some(height);
+        e
+    }
+
     /// One video track with `clip-1` referencing `asset-1`, and `asset-1` in the
     /// manifest named "Old Name".
     fn seeded_handle() -> Arc<StateHandle> {
@@ -1307,6 +1405,24 @@ mod tests {
         tl.tracks.push(t);
         let mut m = MediaManifest::new();
         m.entries.push(entry("asset-1", "Old Name"));
+        Arc::new(StateHandle::new(tl, m))
+    }
+
+    fn seeded_transform_handle(
+        transform: Transform,
+        media_size: Option<(i32, i32)>,
+    ) -> Arc<StateHandle> {
+        let mut tl = Timeline::new();
+        let mut t = Track::new("track-1", ClipType::Video);
+        let mut clip = Clip::new("clip-1", "asset-1", 0, 30);
+        clip.transform = transform;
+        t.clips.push(clip);
+        tl.tracks.push(t);
+        let mut m = MediaManifest::new();
+        m.entries.push(match media_size {
+            Some((w, h)) => entry_with_size("asset-1", "Hero", w, h),
+            None => entry("asset-1", "Hero"),
+        });
         Arc::new(StateHandle::new(tl, m))
     }
 
@@ -1345,6 +1461,76 @@ mod tests {
         let r = d.dispatch("delete_media", serde_json::json!({"assetIds": ["ghost"]}));
         assert!(r.is_error);
         assert!(r.text_joined().contains("not found"), "{}", r.text_joined());
+    }
+
+    #[test]
+    fn set_clip_properties_partial_transform_width_preserves_media_aspect() {
+        let h = seeded_transform_handle(Transform::default(), Some((3840, 2160)));
+        let d = dispatcher_with(h.clone());
+        let r = d.dispatch(
+            "set_clip_properties",
+            serde_json::json!({
+                "clipIds": ["clip-1"],
+                "transform": { "width": 0.5 }
+            }),
+        );
+        assert!(!r.is_error, "{}", r.text_joined());
+        let c = &h.timeline().tracks[0].clips[0];
+        assert!((c.transform.width - 0.5).abs() < 1e-9);
+        assert!((c.transform.height - 0.5).abs() < 1e-9);
+        assert!((c.transform.center_x - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn set_clip_properties_partial_transform_center_keeps_size() {
+        let h = seeded_transform_handle(
+            Transform {
+                center_x: 0.3,
+                center_y: 0.4,
+                width: 0.25,
+                height: 0.5,
+                ..Transform::default()
+            },
+            Some((1080, 1920)),
+        );
+        let d = dispatcher_with(h.clone());
+        let r = d.dispatch(
+            "set_clip_properties",
+            serde_json::json!({
+                "clipIds": ["clip-1"],
+                "transform": { "centerY": 0.6 }
+            }),
+        );
+        assert!(!r.is_error, "{}", r.text_joined());
+        let c = &h.timeline().tracks[0].clips[0];
+        assert!((c.transform.center_x - 0.3).abs() < 1e-9);
+        assert!((c.transform.center_y - 0.6).abs() < 1e-9);
+        assert!((c.transform.width - 0.25).abs() < 1e-9);
+        assert!((c.transform.height - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn set_clip_properties_partial_transform_uses_current_aspect_without_media_size() {
+        let h = seeded_transform_handle(
+            Transform {
+                width: 0.4,
+                height: 0.2,
+                ..Transform::default()
+            },
+            None,
+        );
+        let d = dispatcher_with(h.clone());
+        let r = d.dispatch(
+            "set_clip_properties",
+            serde_json::json!({
+                "clipIds": ["clip-1"],
+                "transform": { "height": 0.1 }
+            }),
+        );
+        assert!(!r.is_error, "{}", r.text_joined());
+        let c = &h.timeline().tracks[0].clips[0];
+        assert!((c.transform.width - 0.2).abs() < 1e-9);
+        assert!((c.transform.height - 0.1).abs() < 1e-9);
     }
 
     // MARK: - Workflow plugin (Skills) tools

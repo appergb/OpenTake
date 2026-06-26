@@ -23,8 +23,8 @@ import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
 import { formatTimecode, totalFrames } from "../../lib/geometry";
 import { assetUrl } from "../../lib/asset";
-import { useTimelineFrame } from "./useTimelineFrame";
 import { TimelinePlayback } from "./TimelinePlaybackLayer";
+import { aspectFitBox, timelinePreviewCanvasStyle } from "./previewLayerStyles";
 import { useT } from "../../i18n";
 import type { MediaItem } from "../../lib/types";
 
@@ -34,7 +34,6 @@ export function Preview() {
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
   const setCurrentFrame = useEditorUiStore((s) => s.setCurrentFrame);
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
-  const isScrubbing = useEditorUiStore((s) => s.isScrubbing);
   const setScrubbing = useEditorUiStore((s) => s.setScrubbing);
   const togglePlayTimeline = useEditorUiStore((s) => s.togglePlay);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
@@ -49,11 +48,28 @@ export function Preview() {
   const [mediaTime, setMediaTime] = useState(0);
   const [mediaDuration, setMediaDuration] = useState(0);
   const [mediaPlaying, setMediaPlaying] = useState(false);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   useEffect(() => {
     setMediaTime(0);
     setMediaDuration(0);
     setMediaPlaying(false);
   }, [previewMediaId]);
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(([entry]) => {
+      if (!entry) return;
+      const { width, height } = entry.contentRect;
+      setStageSize((prev) =>
+        Math.abs(prev.width - width) < 0.5 && Math.abs(prev.height - height) < 0.5
+          ? prev
+          : { width, height },
+      );
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // Space bar during media preview → toggle the media element.
   const mediaToggleCount = useEditorUiStore((s) => s.mediaPreviewToggleRequest);
@@ -65,25 +81,7 @@ export function Preview() {
   }, [mediaToggleCount]);
 
   const previewing = previewItem !== null;
-  const timelineTotal = totalFrames(timeline);
   const timelineHasContent = !previewing && timeline.tracks.length > 0;
-  // Surface selection (issue #142), mirroring upstream's exact / interactiveScrub
-  // seek modes: while PLAYING or SCRUBBING the live <video> stack
-  // (<TimelinePlayback>) shows the frame; only when SETTLED do we fetch the
-  // high-fidelity Rust GPU composite — once, at the committed frame, with no
-  // per-frame ffmpeg/PNG churn. Clamped to the last DRAWABLE frame (total-1;
-  // clips are half-open [start,end)) so parking at the end isn't black.
-  const live = isPlaying || isScrubbing;
-  // activeFrame is the live playhead (the engine advances it during play); pausing
-  // leaves it at the pause position, so the settled composite targets the frame
-  // you actually stopped on — NOT the frozen currentFrame, which stays at the
-  // play-start frame and made pause jump back to the start.
-  const composeFrame = Math.min(Math.round(activeFrame), Math.max(0, timelineTotal - 1));
-  const timelineFrame = useTimelineFrame(composeFrame, timelineHasContent && !live, timeline);
-  // Display the composite only once it has decoded the CURRENT frame; until then
-  // the <video> backdrop holds the right frame, so pausing never flashes a stale
-  // composite / jumps to the start (issue #142).
-  const compositeFresh = timelineFrame.url !== null && timelineFrame.frame === composeFrame;
   const fps = timeline.fps;
   const total = previewing
     ? Math.max(0, Math.round(mediaDuration * fps))
@@ -113,9 +111,13 @@ export function Preview() {
     }
   };
 
-  // Aspect-fit is done in pure CSS (intrinsic media size + max-width/height,
-  // centered by the stage's flexbox) — no JS measurement, so there's no stale /
-  // zero-size race that could render the frame tiny or off-center.
+  const fittedCanvas = aspectFitBox(stageSize.width, stageSize.height, timeline.width, timeline.height);
+  const timelineCanvasStyle = {
+    ...timelinePreviewCanvasStyle(timeline.width, timeline.height),
+    ...(fittedCanvas
+      ? { width: fittedCanvas.width, height: fittedCanvas.height, flex: "0 0 auto" }
+      : {}),
+  };
   void aspect;
 
   return (
@@ -128,6 +130,7 @@ export function Preview() {
           intrinsic size + max-width/height, so it always fills the largest 16:9
           box and stays centered. */}
       <div
+        ref={stageRef}
         style={{
           flex: 1,
           minHeight: 0,
@@ -140,12 +143,6 @@ export function Preview() {
           padding: 8,
         }}
       >
-        {/* Layer: TimelinePlayback lives here when there are tracks —
-             it stays mounted even when paused so audio/video elements
-             survive the pause→play transition (upstream VideoEngine model). */}
-        {!previewItem && timelineHasContent && (
-          <TimelinePlayback timeline={timeline} fps={fps} />
-        )}
         {previewItem ? (
           <MediaPreview
             item={previewItem}
@@ -154,48 +151,32 @@ export function Preview() {
             onDuration={setMediaDuration}
             onPlayingChange={setMediaPlaying}
           />
-        ) : !timelineHasContent ? (
-          // Empty timeline: a framed 16:9 canvas surface placeholder.
-          <div
-            style={{
-              aspectRatio: `${timeline.width} / ${timeline.height}`,
-              height: "100%",
-              maxWidth: "100%",
-              maxHeight: "100%",
-              background: "var(--bg-preview-canvas)",
-              border: "1px solid rgba(255,255,255,0.08)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: "var(--text-muted)",
-              fontSize: "var(--fs-xs)",
-            }}
-          >
-            {t("preview.noMedia")}
+        ) : (
+          <div style={timelineCanvasStyle}>
+            {timelineHasContent ? (
+              // Layer: TimelinePlayback stays mounted when paused, matching
+              // upstream's single AVPlayerLayer. Pausing freezes the current
+              // browser-decoded video frame; no ffmpeg/Rust PNG is swapped in.
+              <TimelinePlayback timeline={timeline} fps={fps} />
+            ) : (
+              // Empty timeline: a framed 16:9 canvas surface placeholder.
+              <div
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: "var(--text-muted)",
+                  fontSize: "var(--fs-xs)",
+                }}
+              >
+                {t("preview.noMedia")}
+              </div>
+            )}
           </div>
-        ) : !live && compositeFresh && timelineFrame.url ? (
-          // Settled and the composite has decoded THIS frame: paint the high-
-          // fidelity Rust GPU composite (text/effects) over the <video> backdrop.
-          // While playing/scrubbing or still decoding, this is null and the
-          // <TimelinePlayback> surface above shows the frame (issue #142).
-          <img
-            src={timelineFrame.url}
-            alt=""
-            draggable={false}
-            style={{
-              position: "absolute",
-              inset: 0,
-              width: "100%",
-              height: "100%",
-              objectFit: "contain",
-              display: "block",
-              // Display-only overlay: never intercept pointer events, or it
-              // swallows clicks meant for the transport/scrub controls below
-              // (the "play button can't be pressed" bug). #142.
-              pointerEvents: "none",
-            }}
-          />
-        ) : null}
+        )}
       </div>
 
       {/* The app's scrub + transport are the single control surface — they drive
@@ -276,6 +257,7 @@ function MediaPreview({
     maxHeight: "100%",
     objectFit: "contain",
     display: "block",
+    pointerEvents: "none",
   };
 
   if (!url) {

@@ -5,7 +5,7 @@
  * (already offset for the header column and scroll by the caller).
  */
 
-import { TRIM, CLIP } from "../../lib/theme";
+import { TRIM, CLIP, FADE } from "../../lib/theme";
 import { clipRect } from "../../lib/geometry";
 import type { Timeline, Clip } from "../../lib/types";
 
@@ -29,6 +29,7 @@ export function hitTestClip(
 ): ClipHit | null {
   for (let ti = 0; ti < timeline.tracks.length; ti++) {
     const track = timeline.tracks[ti];
+    if (track.hidden) continue;
     for (let ci = 0; ci < track.clips.length; ci++) {
       const clip = track.clips[ci];
       const rect = clipRect(timeline, ti, clip, pixelsPerFrame, trackHeights);
@@ -83,7 +84,9 @@ export function clipsInRect(
   const maxY = Math.max(y0, y1);
   const out = new Set<string>();
   for (let ti = 0; ti < timeline.tracks.length; ti++) {
-    for (const clip of timeline.tracks[ti].clips) {
+    const track = timeline.tracks[ti];
+    if (track.hidden) continue;
+    for (const clip of track.clips) {
       const rect = clipRect(timeline, ti, clip, pixelsPerFrame, trackHeights);
       const intersects =
         rect.x <= maxX &&
@@ -108,6 +111,15 @@ export interface VolumeKfHit {
   frame: number;
 }
 
+export type FadeEdge = "left" | "right";
+
+export interface FadeKneeHit {
+  clipId: string;
+  trackIndex: number;
+  edge: FadeEdge;
+  currentFrames: number;
+}
+
 /**
  * Hit-test the draggable volume-keyframe dots drawn by `drawVolumeEnvelope`
  * (SPEC §5.4). Returns the first audio clip's volume kf within the grab radius,
@@ -124,6 +136,7 @@ export function audioVolumeKfHit(
 ): VolumeKfHit | null {
   for (let ti = 0; ti < timeline.tracks.length; ti++) {
     const track = timeline.tracks[ti];
+    if (track.hidden) continue;
     for (const clip of track.clips) {
       if (clip.mediaType !== "audio") continue;
       const track2 = clip.volumeTrack;
@@ -149,4 +162,79 @@ export function audioVolumeKfHit(
     }
   }
   return null;
+}
+
+function fadeKneePoint(
+  clip: Clip,
+  rect: { x: number; y: number; width: number; height: number },
+  edge: FadeEdge,
+) {
+  const ppf = clip.durationFrames > 0 ? rect.width / clip.durationFrames : 0;
+  const offset =
+    edge === "left"
+      ? Math.min(clip.fadeInFrames, clip.durationFrames)
+      : Math.max(0, clip.durationFrames - clip.fadeOutFrames);
+  const actualX = rect.x + offset * ppf;
+  const x =
+    edge === "left"
+      ? Math.max(rect.x + FADE.edgeInset, actualX)
+      : Math.min(rect.x + rect.width - FADE.edgeInset, actualX);
+  const y = rect.y + CLIP.labelBarHeight + FADE.kneeTopInset;
+  return { x, y };
+}
+
+/**
+ * Hit-test the draggable opacity fade knees drawn by `drawFades`. The math mirrors
+ * upstream `TimelineGeometry.fadeKneeRect`: a 14px hit square centered on the
+ * fixed fade lane near the clip-body top. Audio fades are intentionally excluded
+ * until their handles are drawn locally; this avoids invisible hit zones over the
+ * audio volume rubber band.
+ */
+export function fadeKneeHit(
+  timeline: Timeline,
+  docX: number,
+  docY: number,
+  pixelsPerFrame: number,
+  trackHeights: Record<string, number>,
+): FadeKneeHit | null {
+  const half = FADE.hitSize / 2;
+  for (let ti = 0; ti < timeline.tracks.length; ti++) {
+    const track = timeline.tracks[ti];
+    if (track.hidden) continue;
+    for (const clip of track.clips) {
+      if (clip.mediaType === "audio" || clip.durationFrames <= 0) continue;
+      const rect = clipRect(timeline, ti, clip, pixelsPerFrame, trackHeights);
+      if (docX < rect.x || docX > rect.x + rect.width || docY < rect.y || docY > rect.y + rect.height) {
+        continue;
+      }
+      for (const edge of ["left", "right"] as const) {
+        const p = fadeKneePoint(clip, rect, edge);
+        if (docX >= p.x - half && docX <= p.x + half && docY >= p.y - half && docY <= p.y + half) {
+          return {
+            clipId: clip.id,
+            trackIndex: ti,
+            edge,
+            currentFrames: edge === "left" ? clip.fadeInFrames : clip.fadeOutFrames,
+          };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/** Port of upstream `applyFadeKneeDrag`: cursor movement changes the grabbed fade
+ * length and clamps against the opposite fade so the two ramps never overlap. */
+export function fadeFramesForDrag(
+  clip: Pick<Clip, "durationFrames" | "fadeInFrames" | "fadeOutFrames">,
+  edge: FadeEdge,
+  originalFrames: number,
+  grabFrame: number,
+  cursorFrame: number,
+): number {
+  const delta = cursorFrame - grabFrame;
+  const proposed = edge === "left" ? originalFrames + delta : originalFrames - delta;
+  const counterFade = edge === "left" ? clip.fadeOutFrames : clip.fadeInFrames;
+  const cap = Math.max(0, clip.durationFrames - counterFade);
+  return Math.max(0, Math.min(cap, proposed));
 }
