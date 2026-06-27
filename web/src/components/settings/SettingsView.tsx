@@ -8,8 +8,8 @@
  * persisted state.
  */
 
-import { useEffect, useState } from "react";
-import { Check, FolderOpen, Trash2, X } from "lucide-react";
+import { useEffect, useState, type CSSProperties } from "react";
+import { Bot, Check, Download, FolderOpen, Info, Palette, Settings as SettingsIcon, Trash2, X } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { Dropdown } from "../ui/Dropdown";
 import { useT, useI18nStore, LOCALES } from "../../i18n";
@@ -24,9 +24,52 @@ import { openDialog } from "../../lib/dialog";
 import { secretSave, secretLoad, secretDelete } from "../../lib/api";
 import type { SecretStatus } from "../../lib/types";
 
+const settingsPanelStyle: CSSProperties = {
+  width: 960,
+  height: 620,
+  background: "var(--bg-base)",
+  borderRadius: "var(--radius-lg)",
+  boxShadow: "var(--shadow-lg)",
+  display: "flex",
+  flexDirection: "column",
+  overflow: "hidden",
+  position: "relative",
+  animation: "scaleIn 0.2s var(--ease-out)",
+};
+
+const settingsSectionStyle: CSSProperties = {
+  padding: "0 var(--space-sm)",
+  display: "flex",
+  flexDirection: "column",
+  gap: "var(--space-lg)",
+};
+
+const settingsControlStyle: CSSProperties = {
+  background: "var(--home-hover)",
+  border: "none",
+};
+
+type SettingsPaneId = "general" | "appearance" | "import" | "ai" | "about";
+
+const SETTINGS_PANES: Array<{ id: SettingsPaneId; icon: typeof SettingsIcon; labelKey: string }> = [
+  { id: "general", icon: SettingsIcon, labelKey: "settings.section.general" },
+  { id: "appearance", icon: Palette, labelKey: "settings.section.appearance" },
+  { id: "import", icon: Download, labelKey: "settings.section.import" },
+  { id: "ai", icon: Bot, labelKey: "settings.section.ai" },
+  { id: "about", icon: Info, labelKey: "settings.section.about" },
+];
+
+const settingsSidebarStyle: CSSProperties = {
+  width: 150,
+  flex: "0 0 auto",
+  padding: "var(--space-xs)",
+  background: "rgba(0, 0, 0, 0.22)",
+};
+
 export function SettingsView() {
   const t = useT();
   const setSettingsOpen = useEditorUiStore((s) => s.setSettingsOpen);
+  const [activePane, setActivePane] = useState<SettingsPaneId>("general");
 
   return (
     <div
@@ -52,19 +95,7 @@ export function SettingsView() {
         }
       `}</style>
       <div
-        style={{
-          width: 580,
-          height: 520,
-          background: "var(--bg-raised)",
-          border: "var(--bw-thin) solid var(--border-primary)",
-          borderRadius: "var(--radius-lg)",
-          boxShadow: "var(--shadow-lg)",
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-          position: "relative",
-          animation: "scaleIn 0.2s var(--ease-out)",
-        }}
+        style={settingsPanelStyle}
       >
         <header
           data-tauri-drag-region
@@ -75,7 +106,6 @@ export function SettingsView() {
             alignItems: "center",
             padding: "0 var(--space-lg)",
             background: "var(--bg-base)",
-            borderBottom: "var(--bw-thin) solid var(--border-primary)",
           }}
         >
           <span
@@ -94,7 +124,7 @@ export function SettingsView() {
                 padding: "0 var(--space-lg)",
                 borderRadius: "var(--radius-sm)",
                 color: "var(--text-primary)",
-                background: "var(--bg-prominent)",
+                background: "var(--home-hover)",
                 fontSize: "var(--fs-sm-md)",
                 fontWeight: "var(--fw-medium)",
               }}
@@ -122,25 +152,82 @@ export function SettingsView() {
           </div>
         </header>
 
-        <div style={{ flex: 1, overflowY: "auto" }}>
+        <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+          <SettingsSidebar activePane={activePane} onSelect={setActivePane} />
           <div
             style={{
-              padding: "var(--space-lg) var(--space-lg) var(--space-xl)",
-              display: "flex",
-              flexDirection: "column",
-              gap: "var(--space-xl)",
+              flex: 1,
+              minWidth: 0,
+              overflowY: "auto",
+              padding: "var(--space-lg) var(--space-xl) var(--space-xl)",
             }}
           >
-            <GeneralPane />
-            <AppearancePane />
-            <ImportPane />
-            <AiPane />
-            <AboutPane />
+            {renderActivePane(activePane)}
           </div>
         </div>
       </div>
     </div>
   );
+}
+
+function SettingsSidebar({
+  activePane,
+  onSelect,
+}: {
+  activePane: SettingsPaneId;
+  onSelect: (pane: SettingsPaneId) => void;
+}) {
+  const t = useT();
+
+  return (
+    <nav style={settingsSidebarStyle} aria-label={t("settings.title")}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xxs)" }}>
+        {SETTINGS_PANES.map((pane) => {
+          const selected = pane.id === activePane;
+          return (
+            <button
+              key={pane.id}
+              type="button"
+              onClick={() => onSelect(pane.id)}
+              className="hover-area"
+              style={{
+                width: "100%",
+                height: 28,
+                display: "flex",
+                alignItems: "center",
+                gap: "var(--space-sm)",
+                padding: "0 var(--space-sm)",
+                borderRadius: "var(--radius-sm)",
+                background: selected ? "var(--home-selected)" : "transparent",
+                color: selected ? "var(--text-primary)" : "var(--text-secondary)",
+                fontSize: "var(--fs-sm)",
+                fontWeight: selected ? "var(--fw-semibold)" : "var(--fw-medium)",
+                textAlign: "left",
+              }}
+            >
+              <Icon icon={pane.icon} size={13} />
+              <span>{t(pane.labelKey)}</span>
+            </button>
+          );
+        })}
+      </div>
+    </nav>
+  );
+}
+
+function renderActivePane(activePane: SettingsPaneId) {
+  switch (activePane) {
+    case "general":
+      return <GeneralPane />;
+    case "appearance":
+      return <AppearancePane />;
+    case "import":
+      return <ImportPane />;
+    case "ai":
+      return <AiPane />;
+    case "about":
+      return <AboutPane />;
+  }
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -159,15 +246,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
         {title}
       </h2>
       <div
-        style={{
-          background: "var(--bg-raised)",
-          border: "var(--bw-thin) solid var(--border-primary)",
-          borderRadius: "var(--radius-md)",
-          padding: "var(--space-md) var(--space-lg)",
-          display: "flex",
-          flexDirection: "column",
-          gap: "var(--space-lg)",
-        }}
+        style={settingsSectionStyle}
       >
         {children}
       </div>
@@ -222,8 +301,7 @@ function Segmented<T extends string>({
         display: "inline-flex",
         padding: 2,
         gap: 2,
-        background: "var(--bg-base)",
-        border: "var(--bw-thin) solid var(--border-primary)",
+        ...settingsControlStyle,
         borderRadius: "var(--radius-sm)",
       }}
     >
@@ -241,7 +319,7 @@ function Segmented<T extends string>({
               height: 24,
               padding: "0 var(--space-md)",
               borderRadius: "var(--radius-xs-sm)",
-              background: active ? "var(--bg-prominent)" : "transparent",
+              background: active ? "var(--home-selected)" : "transparent",
               color: active ? "var(--text-primary)" : "var(--text-tertiary)",
               fontSize: "var(--fs-sm)",
               fontWeight: "var(--fw-medium)",
@@ -349,7 +427,7 @@ function ImportPane() {
                 height: 26,
                 padding: "0 var(--space-md)",
                 borderRadius: "var(--radius-sm)",
-                border: "var(--bw-thin) solid var(--border-primary)",
+                ...settingsControlStyle,
                 color: "var(--text-secondary)",
                 fontSize: "var(--fs-sm)",
                 fontWeight: "var(--fw-medium)",
@@ -484,8 +562,7 @@ function AiPane() {
             style={{
               flex: 1,
               height: 28,
-              background: "var(--bg-base)",
-              border: "var(--bw-thin) solid var(--border-primary)",
+              ...settingsControlStyle,
               borderRadius: "var(--radius-sm)",
               color: "var(--text-primary)",
               fontSize: "var(--fs-sm)",
@@ -502,7 +579,7 @@ function AiPane() {
                 height: 28,
                 padding: "0 var(--space-lg)",
                 borderRadius: "var(--radius-sm)",
-                border: "var(--bw-thin) solid var(--border-primary)",
+                ...settingsControlStyle,
                 color: "var(--text-primary)",
                 fontSize: "var(--fs-sm)",
                 fontWeight: "var(--fw-medium)",
@@ -527,7 +604,7 @@ function AiPane() {
                   width: 28,
                   height: 28,
                   borderRadius: "var(--radius-sm)",
-                  border: "var(--bw-thin) solid var(--border-primary)",
+                  ...settingsControlStyle,
                   color: "var(--text-secondary)",
                   opacity: busy ? 0.4 : 1,
                 }}
