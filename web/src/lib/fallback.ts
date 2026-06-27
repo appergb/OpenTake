@@ -29,6 +29,68 @@ function defaultCrop() {
   return { left: 0, top: 0, right: 0, bottom: 0 };
 }
 
+function defaultRgb() {
+  return { r: 1, g: 1, b: 1 };
+}
+
+function normalizeRgb(input: Partial<ReturnType<typeof defaultRgb>> | undefined, fallback = defaultRgb()) {
+  return {
+    r: input?.r ?? fallback.r,
+    g: input?.g ?? fallback.g,
+    b: input?.b ?? fallback.b,
+  };
+}
+
+function normalizeColorGrade(
+  grade: Extract<EditRequest, { type: "setColorGrade" }>["grade"],
+): NonNullable<Clip["colorGrade"]> | undefined {
+  if (grade == null) return undefined;
+  return {
+    exposure: grade.exposure ?? 0,
+    temperature: grade.temperature ?? 0,
+    tint: grade.tint ?? 0,
+    liftGammaGain: {
+      lift: normalizeRgb(grade.liftGammaGain?.lift, { r: 0, g: 0, b: 0 }),
+      gamma: normalizeRgb(grade.liftGammaGain?.gamma),
+      gain: normalizeRgb(grade.liftGammaGain?.gain),
+    },
+    contrast: grade.contrast ?? 0,
+    saturation: grade.saturation ?? 1,
+  };
+}
+
+function normalizeChromaKey(
+  chromaKey: Extract<EditRequest, { type: "setChromaKey" }>["chromaKey"],
+): NonNullable<Clip["chromaKey"]> | undefined {
+  if (chromaKey == null) return undefined;
+  return {
+    keyColor: normalizeRgb(chromaKey.keyColor, { r: 0, g: 1, b: 0 }),
+    similarity: chromaKey.similarity ?? 0.15,
+    smoothness: chromaKey.smoothness ?? 0.35,
+    spill: chromaKey.spill ?? 0.5,
+  };
+}
+
+function normalizeMask(mask: Extract<EditRequest, { type: "setMasks" }>["masks"][number]): NonNullable<Clip["masks"]>[number] {
+  return {
+    shape: mask.shape ?? {
+      kind: "circle",
+      center: { x: 0.5, y: 0.5 },
+      radius: { x: 1.5, y: 1.5 },
+    },
+    feather: mask.feather ?? 0,
+    invert: mask.invert ?? false,
+  };
+}
+
+function normalizeEffect(effect: Extract<EditRequest, { type: "setEffects" }>["effects"][number]): NonNullable<Clip["effects"]>[number] {
+  return {
+    name: effect.name,
+    params: { ...(effect.params ?? {}) },
+    enabled: effect.enabled ?? true,
+  };
+}
+
 function isVisual(type: Clip["mediaType"]): boolean {
   return type !== "audio";
 }
@@ -136,6 +198,16 @@ export function createFallbackStore() {
       if (ci >= 0) return [ti, ci];
     }
     return null;
+  }
+
+  function findAllClips(ids: string[]): Array<[number, number]> | null {
+    const locations: Array<[number, number]> = [];
+    for (const id of ids) {
+      const loc = findClip(id);
+      if (!loc) return null;
+      locations.push(loc);
+    }
+    return locations;
   }
 
   function insertionIndex(kind: Clip["mediaType"], requested = timeline.tracks.length): number {
@@ -358,6 +430,8 @@ export function createFallbackStore() {
             if (p.volume !== undefined) (c.volume = p.volume), (changed = true);
             if (p.speed !== undefined) (c.speed = p.speed), (changed = true);
             if (p.transform !== undefined) (c.transform = p.transform), (changed = true);
+            if (p.crop !== undefined) (c.crop = p.crop), (changed = true);
+            if (p.textContent !== undefined) (c.textContent = p.textContent), (changed = true);
             if (p.fadeInFrames !== undefined) (c.fadeInFrames = p.fadeInFrames), (changed = true);
             if (p.fadeOutFrames !== undefined) (c.fadeOutFrames = p.fadeOutFrames), (changed = true);
             if (p.fadeInInterpolation !== undefined)
@@ -367,6 +441,70 @@ export function createFallbackStore() {
           }
           return result(changed, "Set Clip Property", cmd.clipIds);
         }
+        case "setColorGrade": {
+          const locations = findAllClips(cmd.clipIds);
+          if (!locations) return result(false, "Set Color Grade", []);
+          const next = normalizeColorGrade(cmd.grade);
+          let changed = false;
+          for (const loc of locations) {
+            const clip = timeline.tracks[loc[0]].clips[loc[1]];
+            if (JSON.stringify(clip.colorGrade) !== JSON.stringify(next)) {
+              clip.colorGrade = next;
+              changed = true;
+            }
+          }
+          return result(changed, "Set Color Grade", cmd.clipIds);
+        }
+        case "setChromaKey": {
+          const locations = findAllClips(cmd.clipIds);
+          if (!locations) return result(false, "Set Chroma Key", []);
+          const next = normalizeChromaKey(cmd.chromaKey);
+          let changed = false;
+          for (const loc of locations) {
+            const clip = timeline.tracks[loc[0]].clips[loc[1]];
+            if (JSON.stringify(clip.chromaKey) !== JSON.stringify(next)) {
+              clip.chromaKey = next;
+              changed = true;
+            }
+          }
+          return result(changed, "Set Chroma Key", cmd.clipIds);
+        }
+        case "setMasks": {
+          const locations = findAllClips(cmd.clipIds);
+          if (!locations) return result(false, "Set Masks", []);
+          const next = cmd.masks.map(normalizeMask);
+          let changed = false;
+          for (const loc of locations) {
+            const clip = timeline.tracks[loc[0]].clips[loc[1]];
+            if (JSON.stringify(clip.masks ?? []) !== JSON.stringify(next)) {
+              clip.masks = structuredClone(next);
+              changed = true;
+            }
+          }
+          return result(changed, "Set Masks", cmd.clipIds);
+        }
+        case "setEffects": {
+          const locations = findAllClips(cmd.clipIds);
+          if (!locations) return result(false, "Set Effects", []);
+          const next = cmd.effects.map(normalizeEffect);
+          let changed = false;
+          for (const loc of locations) {
+            const clip = timeline.tracks[loc[0]].clips[loc[1]];
+            if (JSON.stringify(clip.effects ?? []) !== JSON.stringify(next)) {
+              clip.effects = structuredClone(next);
+              changed = true;
+            }
+          }
+          return result(changed, "Set Effects", cmd.clipIds);
+        }
+        case "swapMedia": {
+          return result(false, "Swap Media", []);
+        }
+        case "renameMedia":
+        case "renameFolder":
+        case "deleteMedia":
+        case "deleteFolder":
+          return result(false, cmd.type, []);
         default:
           return result(false, cmd.type, []);
       }

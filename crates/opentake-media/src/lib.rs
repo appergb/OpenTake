@@ -26,6 +26,7 @@
 
 mod ff;
 
+pub mod analysis;
 pub mod cache_key;
 pub mod decode;
 pub mod encode;

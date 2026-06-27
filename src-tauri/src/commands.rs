@@ -19,11 +19,13 @@ use opentake_core::dto::{
 use opentake_core::{AppCore, CmdError, EditCommand};
 
 use opentake_ops::{
-    ClipEntry, ClipMove, ClipProperties, FrameRange, KeyframePayload, KeyframeProperty, TextEntry,
+    ClipEntry, ClipMove, ClipProperties, FrameRange, KeyframePayload, KeyframeProperty,
+    RenameEntry, TextEntry,
 };
 
 use opentake_domain::{
-    AnimPair, ClipType, Crop, Interpolation, Keyframe, KeyframeTrack, TextStyle, Transform,
+    AnimPair, ChromaKey, ClipType, ColorGrade, Crop, Effect, Interpolation, Keyframe,
+    KeyframeTrack, Mask, TextStyle, Transform,
 };
 
 // MARK: - Read / lifecycle commands (direct DTO passthrough)
@@ -196,6 +198,26 @@ pub enum EditRequest {
         interpolation: Interpolation,
     },
     #[serde(rename_all = "camelCase")]
+    SetColorGrade {
+        clip_ids: Vec<String>,
+        grade: Option<ColorGrade>,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetChromaKey {
+        clip_ids: Vec<String>,
+        chroma_key: Option<ChromaKey>,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetMasks {
+        clip_ids: Vec<String>,
+        masks: Vec<Mask>,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetEffects {
+        clip_ids: Vec<String>,
+        effects: Vec<Effect>,
+    },
+    #[serde(rename_all = "camelCase")]
     RippleDeleteRanges {
         track_index: usize,
         ranges: Vec<FrameRangeDto>,
@@ -229,6 +251,14 @@ pub enum EditRequest {
         asset_ids: Vec<String>,
         folder_id: Option<String>,
     },
+    #[serde(rename_all = "camelCase")]
+    RenameMedia { entries: Vec<RenameEntryDto> },
+    #[serde(rename_all = "camelCase")]
+    RenameFolder { entries: Vec<RenameEntryDto> },
+    #[serde(rename_all = "camelCase")]
+    DeleteMedia { asset_ids: Vec<String> },
+    #[serde(rename_all = "camelCase")]
+    DeleteFolder { folder_ids: Vec<String> },
     #[serde(rename_all = "camelCase")]
     SwapMedia { clip_id: String, media_ref: String },
 }
@@ -323,6 +353,20 @@ impl EditRequest {
                 frame,
                 interpolation,
             },
+            EditRequest::SetColorGrade { clip_ids, grade } => {
+                EditCommand::SetColorGrade { clip_ids, grade }
+            }
+            EditRequest::SetChromaKey {
+                clip_ids,
+                chroma_key,
+            } => EditCommand::SetChromaKey {
+                clip_ids,
+                chroma_key,
+            },
+            EditRequest::SetMasks { clip_ids, masks } => EditCommand::SetMasks { clip_ids, masks },
+            EditRequest::SetEffects { clip_ids, effects } => {
+                EditCommand::SetEffects { clip_ids, effects }
+            }
             EditRequest::RippleDeleteRanges {
                 track_index,
                 ranges,
@@ -367,6 +411,20 @@ impl EditRequest {
                 asset_ids,
                 folder_id,
             },
+            EditRequest::RenameMedia { entries } => EditCommand::RenameMedia {
+                entries: entries
+                    .into_iter()
+                    .map(RenameEntryDto::into_entry)
+                    .collect(),
+            },
+            EditRequest::RenameFolder { entries } => EditCommand::RenameFolder {
+                entries: entries
+                    .into_iter()
+                    .map(RenameEntryDto::into_entry)
+                    .collect(),
+            },
+            EditRequest::DeleteMedia { asset_ids } => EditCommand::DeleteMedia { asset_ids },
+            EditRequest::DeleteFolder { folder_ids } => EditCommand::DeleteFolder { folder_ids },
             EditRequest::SwapMedia { clip_id, media_ref } => {
                 EditCommand::SwapMedia { clip_id, media_ref }
             }
@@ -542,6 +600,22 @@ impl TextEntryDto {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RenameEntryDto {
+    pub id: String,
+    pub name: String,
+}
+
+impl RenameEntryDto {
+    fn into_entry(self) -> RenameEntry {
+        RenameEntry {
+            id: self.id,
+            name: self.name,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum KeyframePropertyDto {
     Opacity,
     Volume,
@@ -676,5 +750,88 @@ mod edit_request_serde_tests {
             }
             other => panic!("expected SwapMedia, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn deserializes_effect_commands_and_maps_to_ops_variants() {
+        let grade = serde_json::from_str::<EditRequest>(
+            r#"{"type":"setColorGrade","clipIds":["clip-1"],"grade":{"exposure":1.0}}"#,
+        )
+        .expect("setColorGrade camelCase");
+        match grade.into_command().expect("setColorGrade command") {
+            EditCommand::SetColorGrade { clip_ids, grade } => {
+                assert_eq!(clip_ids, vec!["clip-1"]);
+                assert_eq!(grade.expect("grade").exposure, 1.0);
+            }
+            other => panic!("expected SetColorGrade, got {other:?}"),
+        }
+
+        let chroma = serde_json::from_str::<EditRequest>(
+            r#"{"type":"setChromaKey","clipIds":["clip-1"],"chromaKey":{"similarity":0.2}}"#,
+        )
+        .expect("setChromaKey camelCase");
+        assert!(matches!(
+            chroma.into_command().expect("setChromaKey command"),
+            EditCommand::SetChromaKey { .. }
+        ));
+
+        let masks = serde_json::from_str::<EditRequest>(
+            r#"{"type":"setMasks","clipIds":["clip-1"],"masks":[]}"#,
+        )
+        .expect("setMasks camelCase");
+        assert!(matches!(
+            masks.into_command().expect("setMasks command"),
+            EditCommand::SetMasks { .. }
+        ));
+
+        let effects = serde_json::from_str::<EditRequest>(
+            r#"{"type":"setEffects","clipIds":["clip-1"],"effects":[{"name":"gaussianBlur","params":{"radius":4.0}}]}"#,
+        )
+        .expect("setEffects camelCase");
+        match effects.into_command().expect("setEffects command") {
+            EditCommand::SetEffects { effects, .. } => {
+                assert_eq!(effects[0].name, "gaussianBlur");
+                assert_eq!(effects[0].param("radius", 0.0), 4.0);
+            }
+            other => panic!("expected SetEffects, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_media_library_commands_and_maps_to_ops_variants() {
+        let rename_media = serde_json::from_str::<EditRequest>(
+            r#"{"type":"renameMedia","entries":[{"id":"asset-1","name":"Hero"}]}"#,
+        )
+        .expect("renameMedia camelCase");
+        assert!(matches!(
+            rename_media.into_command().expect("renameMedia command"),
+            EditCommand::RenameMedia { .. }
+        ));
+
+        let rename_folder = serde_json::from_str::<EditRequest>(
+            r#"{"type":"renameFolder","entries":[{"id":"folder-1","name":"B-roll"}]}"#,
+        )
+        .expect("renameFolder camelCase");
+        assert!(matches!(
+            rename_folder.into_command().expect("renameFolder command"),
+            EditCommand::RenameFolder { .. }
+        ));
+
+        let delete_media =
+            serde_json::from_str::<EditRequest>(r#"{"type":"deleteMedia","assetIds":["asset-1"]}"#)
+                .expect("deleteMedia camelCase");
+        assert!(matches!(
+            delete_media.into_command().expect("deleteMedia command"),
+            EditCommand::DeleteMedia { .. }
+        ));
+
+        let delete_folder = serde_json::from_str::<EditRequest>(
+            r#"{"type":"deleteFolder","folderIds":["folder-1"]}"#,
+        )
+        .expect("deleteFolder camelCase");
+        assert!(matches!(
+            delete_folder.into_command().expect("deleteFolder command"),
+            EditCommand::DeleteFolder { .. }
+        ));
     }
 }

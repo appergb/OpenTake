@@ -3129,6 +3129,7 @@ dependencies = [
  "opentake-core",
  "opentake-domain",
  "opentake-gen",
+ "opentake-media",
  "opentake-ops",
  "regex",
  "reqwest 0.12.28",

@@ -175,6 +175,10 @@ pub enum KeyframePayload {
 pub enum EditCommand {
     /// Overwrite-place clips (clears each destination range first).
     AddClips { entries: Vec<ClipEntry> },
+    /// Overwrite-place clips on fresh shared tracks chosen by media type.
+    /// Visual entries share one new visual track; audio entries share one new
+    /// audio track. Track insertion and placement commit as one transaction.
+    AddClipsAutoTrack { entries: Vec<ClipEntry> },
     /// Ripple-insert clips at `at_frame`, pushing later clips right.
     InsertClips {
         track_index: usize,
@@ -370,6 +374,7 @@ pub fn apply(
         }
 
         EditCommand::AddClips { entries } => add_clips(state, entries, ids),
+        EditCommand::AddClipsAutoTrack { entries } => add_clips_auto_track(state, entries, ids),
         EditCommand::InsertClips {
             track_index,
             at_frame,
@@ -538,6 +543,79 @@ fn add_clips(
             }
             ops::prune_empty_tracks(&mut st.timeline);
             Ok(added)
+        },
+    )
+}
+
+fn add_clips_auto_track(
+    state: &mut EditorState,
+    entries: Vec<ClipEntry>,
+    ids: &dyn IdGen,
+) -> Result<EditResult, EditError> {
+    if entries.is_empty() {
+        return Err(EditError::Invalid(
+            "Missing or empty 'entries' array".into(),
+        ));
+    }
+    for (i, e) in entries.iter().enumerate() {
+        validate_auto_track_entry(e, i)?;
+    }
+    let has_visual = entries
+        .iter()
+        .any(|entry| entry.source_clip_type != ClipType::Audio);
+    let has_audio = entries
+        .iter()
+        .any(|entry| entry.source_clip_type == ClipType::Audio);
+    let action_name = if entries.len() == 1 {
+        "Add Clip"
+    } else {
+        "Add Clips"
+    };
+    transact(
+        state,
+        action_name,
+        |added| format!("Added {} clip(s): {}", added.len(), added.join(", ")),
+        |st| {
+            let visual_track_index = has_visual.then(|| {
+                let at = st.timeline.tracks.len();
+                ops::insert_track(&mut st.timeline, at, ClipType::Video, ids)
+            });
+            let audio_track_index = has_audio.then(|| {
+                let at = st.timeline.tracks.len();
+                ops::insert_track(&mut st.timeline, at, ClipType::Audio, ids)
+            });
+            let mut placed = Vec::new();
+            for entry in &entries {
+                let track_index = if entry.source_clip_type == ClipType::Audio {
+                    audio_track_index
+                } else {
+                    visual_track_index
+                }
+                .expect("validated required track kind above");
+                let mut entry = entry.clone();
+                entry.track_index = track_index;
+                let track_id = st.timeline.tracks[track_index].id.clone();
+                if let Some(ti) = st.track_index(&track_id) {
+                    ops::clear_region(
+                        &mut st.timeline,
+                        ti,
+                        entry.start_frame,
+                        entry.start_frame + entry.duration_frames,
+                        false,
+                        ids,
+                    );
+                }
+                if let Some(ti) = st.track_index(&track_id) {
+                    placed.extend(ops::place_clip(
+                        &mut st.timeline,
+                        &entry.to_spec(),
+                        ti,
+                        None,
+                        ids,
+                    ));
+                }
+            }
+            Ok(placed)
         },
     )
 }
@@ -1992,6 +2070,46 @@ fn validate_entry(state: &EditorState, e: &ClipEntry, i: usize) -> Result<(), Ed
     if !e.source_clip_type.is_compatible(target) {
         return Err(EditError::Invalid(format!(
             "entries[{i}]: asset type is not compatible with the destination track"
+        )));
+    }
+    if e.duration_frames < 1 {
+        return Err(EditError::Invalid(format!(
+            "entries[{i}]: durationFrames must be >= 1 (got {})",
+            e.duration_frames
+        )));
+    }
+    if e.start_frame < 0 {
+        return Err(EditError::Invalid(format!(
+            "entries[{i}]: startFrame must be >= 0 (got {})",
+            e.start_frame
+        )));
+    }
+    if let Some(t) = e.trim_start_frame {
+        if t < 0 {
+            return Err(EditError::Invalid(format!(
+                "entries[{i}]: trimStartFrame must be >= 0 (got {t})"
+            )));
+        }
+    }
+    if let Some(t) = e.trim_end_frame {
+        if t < 0 {
+            return Err(EditError::Invalid(format!(
+                "entries[{i}]: trimEndFrame must be >= 0 (got {t})"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_auto_track_entry(e: &ClipEntry, i: usize) -> Result<(), EditError> {
+    let target = if e.source_clip_type == ClipType::Audio {
+        ClipType::Audio
+    } else {
+        ClipType::Video
+    };
+    if !e.source_clip_type.is_compatible(target) {
+        return Err(EditError::Invalid(format!(
+            "entries[{i}]: asset type is not compatible with an auto-created track"
         )));
     }
     if e.duration_frames < 1 {

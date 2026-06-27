@@ -580,6 +580,85 @@ impl ToolArgs for AddCaptionsArgs {
     ];
 }
 
+// --- detect_beats ---
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectBeatsArgs {
+    pub clip_id: Option<String>,
+    pub media_ref: Option<String>,
+    pub start_frame: Option<i32>,
+    pub end_frame: Option<i32>,
+    pub sensitivity: Option<f64>,
+}
+impl ToolArgs for DetectBeatsArgs {
+    const ALLOWED_KEYS: &'static [&'static str] = &[
+        "clipId",
+        "mediaRef",
+        "startFrame",
+        "endFrame",
+        "sensitivity",
+    ];
+}
+
+// --- auto_cut_to_beats ---
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoCutToBeatsArgs {
+    pub clip_ids: Option<Vec<String>>,
+    pub beat_clip_id: Option<String>,
+    pub beat_media_ref: Option<String>,
+    pub start_frame: Option<i32>,
+    pub end_frame: Option<i32>,
+    pub min_clip_frames: Option<i32>,
+    pub max_clip_frames: Option<i32>,
+    pub align_cuts: Option<bool>,
+}
+impl ToolArgs for AutoCutToBeatsArgs {
+    const ALLOWED_KEYS: &'static [&'static str] = &[
+        "clipIds",
+        "beatClipId",
+        "beatMediaRef",
+        "startFrame",
+        "endFrame",
+        "minClipFrames",
+        "maxClipFrames",
+        "alignCuts",
+    ];
+}
+
+// --- smart_reframe ---
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartReframeArgs {
+    pub clip_ids: Vec<String>,
+    pub aspect_ratio: String,
+    pub subject: Option<String>,
+    pub mode: Option<String>,
+}
+impl ToolArgs for SmartReframeArgs {
+    const ALLOWED_KEYS: &'static [&'static str] = &["clipIds", "aspectRatio", "subject", "mode"];
+}
+
+// --- tighten_silences ---
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TightenSilencesArgs {
+    pub clip_ids: Option<Vec<String>>,
+    pub track_index: Option<usize>,
+    pub threshold_db: Option<f64>,
+    pub min_silence_frames: Option<i32>,
+    pub padding_frames: Option<i32>,
+}
+impl ToolArgs for TightenSilencesArgs {
+    const ALLOWED_KEYS: &'static [&'static str] = &[
+        "clipIds",
+        "trackIndex",
+        "thresholdDb",
+        "minSilenceFrames",
+        "paddingFrames",
+    ];
+}
+
 // --- generate_video ---
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]

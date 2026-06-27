@@ -287,4 +287,38 @@ describe("browser fallback edit store", () => {
     expect(clip?.fadeInInterpolation).toBe("smooth");
     expect(clip?.fadeOutInterpolation).toBe("smooth");
   });
+
+  it("keeps effect setters atomic when any clip id is missing", () => {
+    const fallback = createFallbackStore();
+
+    const result = fallback.editApply({
+      type: "setEffects",
+      clipIds: ["c1", "missing"],
+      effects: [{ name: "gaussianBlur", params: { radius: 4 }, enabled: true }],
+    });
+    const clip = fallback
+      .getTimeline()
+      .timeline.tracks.flatMap((track) => track.clips)
+      .find((candidate) => candidate.id === "c1");
+
+    expect(result.changed).toBe(false);
+    expect(clip?.effects).toBeUndefined();
+  });
+
+  it("does not emulate swapMedia without the Tauri media manifest", () => {
+    const fallback = createFallbackStore();
+
+    const result = fallback.editApply({
+      type: "swapMedia",
+      clipId: "c1",
+      mediaRef: "replacement",
+    });
+    const clip = fallback
+      .getTimeline()
+      .timeline.tracks.flatMap((track) => track.clips)
+      .find((candidate) => candidate.id === "c1");
+
+    expect(result.changed).toBe(false);
+    expect(clip?.mediaRef).toBe("demo-video");
+  });
 });

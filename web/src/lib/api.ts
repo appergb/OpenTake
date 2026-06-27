@@ -52,6 +52,16 @@ export async function editApply(command: EditRequest): Promise<EditResult> {
   return fallback.editApply(command);
 }
 
+/** Sequential automation wrapper: each command still goes through the single
+ * Rust `EditCommand` authority via `edit_apply`. */
+export async function editApplyMany(commands: EditRequest[]): Promise<EditResult[]> {
+  const results: EditResult[] = [];
+  for (const command of commands) {
+    results.push(await editApply(command));
+  }
+  return results;
+}
+
 export async function undo(): Promise<EditResult> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<EditResult>("undo");

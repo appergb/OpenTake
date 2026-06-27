@@ -11,7 +11,8 @@
 use std::path::PathBuf;
 
 use opentake_core::AppCore;
-use opentake_domain::{MediaManifest, Timeline};
+use opentake_domain::{MediaManifest, MediaResolver, Timeline};
+use opentake_media::{extract_pcm, PcmBuffer, PcmSpec};
 use opentake_ops::command::{EditCommand, EditResult};
 
 /// The narrow document surface the dispatch shell needs. `Send + Sync` so a
@@ -32,6 +33,29 @@ pub trait CoreHandle: Send + Sync {
 
     /// The open project's bundle directory, or `None` for an unsaved project.
     fn project_dir(&self) -> Option<PathBuf>;
+
+    /// Resolve an asset id to the local file path that media analysis can read.
+    /// The default implementation mirrors `MediaResolver.expected_path`.
+    fn media_path(&self, media_ref: &str) -> Option<PathBuf> {
+        let manifest = self.media();
+        let project_dir = self.project_dir();
+        MediaResolver::new(&manifest, project_dir.as_deref()).expected_path(media_ref)
+    }
+
+    /// Decode a media asset's first audio track into the PCM format requested by
+    /// an analysis tool. Test handles can override this to inject synthetic PCM
+    /// without invoking ffmpeg.
+    fn extract_analysis_pcm(
+        &self,
+        media_ref: &str,
+        spec: PcmSpec,
+        range: Option<(f64, f64)>,
+    ) -> anyhow::Result<PcmBuffer> {
+        let path = self
+            .media_path(media_ref)
+            .ok_or_else(|| anyhow::anyhow!("media path not found for mediaRef: {media_ref}"))?;
+        extract_pcm(&path, &spec, range).map_err(|e| anyhow::anyhow!("{e}"))
+    }
 }
 
 /// Production [`CoreHandle`] over the authoritative [`AppCore`]. A clone of the

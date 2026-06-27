@@ -1,11 +1,12 @@
 //! Tool-name enum. The 31 upstream tools (`ToolDefinitions.swift:4-36`) plus
-//! the OpenTake workflow-plugin tools (`agent-SPEC.md` §7.4). String values are
-//! 1:1 with upstream; ordering matches `ToolName`.
+//! OpenTake workflow-plugin, analysis, effect, and motion-graphics additions.
+//! String values are 1:1 with upstream where applicable; ordering matches
+//! `ToolName`.
 
 use std::str::FromStr;
 
-/// Every tool the agent layer exposes. The first 31 are the upstream
-/// ToolExecutor set; the last three are OpenTake's workflow-plugin additions.
+/// Every tool the agent layer exposes. The `UPSTREAM` const pins the 31-tool
+/// upstream-compatible set; `ALL` also includes OpenTake additions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ToolName {
     // --- Read / introspect (7) ---
@@ -29,6 +30,10 @@ pub enum ToolName {
     Undo,
     AddTexts,
     AddCaptions,
+    DetectBeats,
+    AutoCutToBeats,
+    SmartReframe,
+    TightenSilences,
     // --- Media generation / import (5) ---
     GenerateVideo,
     GenerateImage,
@@ -80,6 +85,10 @@ impl ToolName {
             ToolName::Undo => "undo",
             ToolName::AddTexts => "add_texts",
             ToolName::AddCaptions => "add_captions",
+            ToolName::DetectBeats => "detect_beats",
+            ToolName::AutoCutToBeats => "auto_cut_to_beats",
+            ToolName::SmartReframe => "smart_reframe",
+            ToolName::TightenSilences => "tighten_silences",
             ToolName::GenerateVideo => "generate_video",
             ToolName::GenerateImage => "generate_image",
             ToolName::GenerateAudio => "generate_audio",
@@ -105,7 +114,7 @@ impl ToolName {
     }
 
     /// All tools in registration order.
-    pub const ALL: [ToolName; 40] = [
+    pub const ALL: [ToolName; 44] = [
         ToolName::GetTimeline,
         ToolName::GetMedia,
         ToolName::InspectMedia,
@@ -125,6 +134,10 @@ impl ToolName {
         ToolName::Undo,
         ToolName::AddTexts,
         ToolName::AddCaptions,
+        ToolName::DetectBeats,
+        ToolName::AutoCutToBeats,
+        ToolName::SmartReframe,
+        ToolName::TightenSilences,
         ToolName::GenerateVideo,
         ToolName::GenerateImage,
         ToolName::GenerateAudio,
@@ -205,8 +218,25 @@ mod tests {
     }
 
     #[test]
-    fn all_set_is_40() {
-        assert_eq!(ToolName::ALL.len(), 40);
+    fn all_set_is_44() {
+        assert_eq!(ToolName::ALL.len(), 44);
+    }
+
+    #[test]
+    fn analysis_tools_have_expected_wire_names() {
+        assert_eq!(ToolName::DetectBeats.as_str(), "detect_beats");
+        assert_eq!(ToolName::AutoCutToBeats.as_str(), "auto_cut_to_beats");
+        assert_eq!(ToolName::SmartReframe.as_str(), "smart_reframe");
+        assert_eq!(ToolName::TightenSilences.as_str(), "tighten_silences");
+        for t in [
+            ToolName::DetectBeats,
+            ToolName::AutoCutToBeats,
+            ToolName::SmartReframe,
+            ToolName::TightenSilences,
+        ] {
+            assert_eq!(ToolName::from_str(t.as_str()), Ok(t));
+            assert!(!ToolName::UPSTREAM.contains(&t));
+        }
     }
 
     #[test]
