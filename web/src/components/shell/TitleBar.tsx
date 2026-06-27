@@ -95,8 +95,6 @@ export function TitleBar() {
           alignItems: "center",
           justifyContent: "center",
           color: "var(--text-secondary)",
-          position: "relative",
-          top: -2,
         }}
       >
         <Icon icon={Home} size={13} />
@@ -120,8 +118,6 @@ export function TitleBar() {
           alignItems: "center",
           justifyContent: "center",
           color: "var(--text-secondary)",
-          position: "relative",
-          top: -2,
         }}
       >
         <Icon icon={Library} size={13} />
@@ -138,8 +134,6 @@ export function TitleBar() {
           alignItems: "center",
           justifyContent: "center",
           color: "var(--text-secondary)",
-          position: "relative",
-          top: -2,
         }}
       >
         <Icon icon={SettingsIcon} size={13} />
@@ -158,8 +152,6 @@ export function TitleBar() {
           color: "var(--text-secondary)",
           fontSize: "var(--fs-sm)",
           fontWeight: "var(--fw-medium)",
-          position: "relative",
-          top: -2,
         }}
       >
         <Icon icon={Upload} size={13} />

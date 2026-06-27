@@ -150,4 +150,18 @@
   --ruler-height: 24px;
   --drop-zone-height: 60px;
   --track-header-width: 100px;
+
+  --home-bg: #0a0a0a;
+  --home-card: #171717;
+  --home-popover: #262626;
+  --home-muted: #262626;
+  --home-border: #282828;
+  --home-foreground: #fafafa;
+  --home-muted-foreground: #a1a1a1;
+  --home-primary: #e5e5e5;
+  --home-primary-foreground: #171717;
+  --home-hover: rgba(255, 255, 255, 0.06);
+  --home-selected: rgba(255, 255, 255, 0.1);
+  --home-panel-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
+  --home-stage-inset: 8px;
 }
