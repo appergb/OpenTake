@@ -327,7 +327,7 @@ export function TimelineContainer() {
       new Map(
         mediaItems.map((m) => [
           m.id,
-          `${m.path ?? ""}|${m.thumbnail ?? ""}|${m.missing ? "missing" : "online"}`,
+          `${m.path ?? ""}|${m.missing ? "missing" : "online"}`,
         ]),
       ),
     [mediaItems],
@@ -356,7 +356,8 @@ export function TimelineContainer() {
   // the resolved-cache `waveformsRef` so a failed/empty fetch can be retried on a
   // later effect run instead of being permanently suppressed by a placeholder (#127).
   const inFlightRef = useRef<Set<string>>(new Set());
-  const thumbnailInFlightRef = useRef<Set<string>>(new Set());
+  const thumbnailPosterInFlightRef = useRef<Set<string>>(new Set());
+  const thumbnailSpriteInFlightRef = useRef<Set<string>>(new Set());
   // Guards `setWaveformVersion` against firing after unmount (the cache write itself
   // is mount-independent and must NOT be discarded on re-render — see #127).
   const mountedRef = useRef(true);
@@ -559,55 +560,86 @@ export function TimelineContainer() {
     if (changed && mountedRef.current) setThumbnailVersion((v) => v + 1);
   }, [thumbnailSourceKeys]);
 
-  // Load visual thumbnail sprites for video/image clips on demand. The decoded
-  // Image element is cached by media id and reused across all clips.
+  // Load visual thumbnails in two phases: a poster first so dropped clips paint
+  // immediately, then a video sprite that upgrades the same cache entry.
   useEffect(() => {
-    const wanted = new Set<string>();
+    const wanted = new Map<string, ClipType>();
     for (const track of timeline.tracks) {
       for (const clip of track.clips) {
         if ((clip.mediaType === "video" || clip.mediaType === "image") && !missingMediaRefs.has(clip.mediaRef)) {
-          wanted.add(clip.mediaRef);
+          if (wanted.get(clip.mediaRef) !== "video") wanted.set(clip.mediaRef, clip.mediaType);
         }
       }
     }
-    for (const ref of wanted) {
-      if (thumbnailsRef.current.has(ref) || thumbnailInFlightRef.current.has(ref)) continue;
-      const sourceKey = thumbnailSourceKeys.get(ref);
-      if (!sourceKey) continue;
-      thumbnailInFlightRef.current.add(ref);
+
+    const storeThumbnail = async (
+      ref: string,
+      sourceKey: string,
+      result: Awaited<ReturnType<typeof generateThumbnail>>,
+      requireSprite: boolean,
+    ): Promise<boolean> => {
+      if (!result) return false;
+      const hasSprite =
+        Boolean(result.spritePath) &&
+        Boolean(result.tileWidth) &&
+        Boolean(result.tileHeight) &&
+        Boolean(result.columns) &&
+        result.times.length > 0;
+      if (requireSprite && !hasSprite) return false;
+      const path = hasSprite ? result.spritePath : result.thumbnailPath;
+      const url = assetUrl(path);
+      if (!url) return false;
+      const image = await loadImageElement(url);
+      const latestSourceKey = latestThumbnailSourceKeysRef.current.get(ref);
+      if (latestSourceKey !== sourceKey) return false;
+      const strip: ClipThumbnailStrip = {
+        image,
+        kind: hasSprite ? "sprite" : "single",
+        tileWidth: result.tileWidth ?? image.naturalWidth,
+        tileHeight: result.tileHeight ?? image.naturalHeight,
+        columns: Math.max(1, result.columns ?? 1),
+        times: result.times,
+      };
+      thumbnailsRef.current.set(ref, strip);
+      thumbnailSourceKeysRef.current.set(ref, sourceKey);
+      if (mountedRef.current) setThumbnailVersion((v) => v + 1);
+      return true;
+    };
+
+    const startSpriteLoad = (ref: string, sourceKey: string) => {
+      if (thumbnailSpriteInFlightRef.current.has(ref)) return;
+      thumbnailSpriteInFlightRef.current.add(ref);
       void generateThumbnail(ref, { includeSprite: true })
-        .then(async (result) => {
-          if (!result) return;
-          const hasSprite =
-            Boolean(result.spritePath) &&
-            Boolean(result.tileWidth) &&
-            Boolean(result.tileHeight) &&
-            Boolean(result.columns) &&
-            result.times.length > 0;
-          const path = hasSprite ? result.spritePath : result.thumbnailPath;
-          const url = assetUrl(path);
-          if (!url) return;
-          const image = await loadImageElement(url);
-          const latestSourceKey = latestThumbnailSourceKeysRef.current.get(ref);
-          if (latestSourceKey !== sourceKey) return;
-          const strip: ClipThumbnailStrip = {
-            image,
-            kind: hasSprite ? "sprite" : "single",
-            tileWidth: result.tileWidth ?? image.naturalWidth,
-            tileHeight: result.tileHeight ?? image.naturalHeight,
-            columns: Math.max(1, result.columns ?? 1),
-            times: result.times,
-          };
-          thumbnailsRef.current.set(ref, strip);
-          thumbnailSourceKeysRef.current.set(ref, sourceKey);
-          if (mountedRef.current) setThumbnailVersion((v) => v + 1);
-        })
+        .then((result) => storeThumbnail(ref, sourceKey, result, true))
         .catch((err) => {
-          console.warn(`thumbnail load failed for ${ref}:`, err);
+          console.warn(`thumbnail sprite load failed for ${ref}:`, err);
         })
         .finally(() => {
-          thumbnailInFlightRef.current.delete(ref);
+          thumbnailSpriteInFlightRef.current.delete(ref);
         });
+    };
+
+    for (const [ref, mediaType] of wanted) {
+      const sourceKey = thumbnailSourceKeys.get(ref);
+      if (!sourceKey) continue;
+      const existing = thumbnailsRef.current.get(ref);
+
+      if (!existing && !thumbnailPosterInFlightRef.current.has(ref)) {
+        thumbnailPosterInFlightRef.current.add(ref);
+        void generateThumbnail(ref, { includeSprite: false })
+          .then(async (result) => {
+            const stored = await storeThumbnail(ref, sourceKey, result, false);
+            if (stored && mediaType === "video") startSpriteLoad(ref, sourceKey);
+          })
+          .catch((err) => {
+            console.warn(`thumbnail poster load failed for ${ref}:`, err);
+          })
+          .finally(() => {
+            thumbnailPosterInFlightRef.current.delete(ref);
+          });
+      } else if (mediaType === "video" && existing && existing.kind !== "sprite") {
+        startSpriteLoad(ref, sourceKey);
+      }
     }
   }, [timeline, missingMediaRefs, thumbnailSourceKeys]);
 
