@@ -2,7 +2,7 @@
  * TypeScript mirror of the Rust domain model (the read-only timeline mirror).
  * Field names match the Rust serde `camelCase` output verbatim
  * (`opentake-domain`), which is also the `project.json` schema. See
- * docs/specs/frontend-UI-1to1-SPEC.md §12.
+ * docs/modules/web/SPEC.md §12.
  */
 
 export type ClipType = "video" | "audio" | "image" | "text" | "lottie";

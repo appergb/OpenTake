@@ -1,7 +1,7 @@
 /**
  * Numeric design constants for canvas drawing (canvas2d cannot read CSS
  * variables). 1:1 with `styles/tokens.css` and upstream `AppTheme.swift` /
- * `Constants.swift`. See docs/specs/frontend-UI-1to1-SPEC.md §1, §5.
+ * `Constants.swift`. See docs/modules/web/SPEC.md §1, §5.
  */
 
 /** §1.1 Background colors (rgb strings for canvas fillStyle). */
