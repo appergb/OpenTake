@@ -130,6 +130,36 @@ export async function exportFcpxml(path: string): Promise<void> {
   }
 }
 
+// MARK: - Subtitle export (#29)
+//
+// `export_subtitles` collects the timeline's caption clips (any clip with a
+// caption group + text) and writes them as a SubRip (`.srt`) or WebVTT (`.vtt`)
+// file. It mirrors the Rust DTO verbatim (lower-case `format` tag matching the
+// extension) and returns the cue count so the caller can tell "wrote N cues"
+// from "timeline has no captions". No-op outside Tauri (no Rust core / no FS) —
+// the summary then reports zero cues so the caller can surface an unavailable
+// state without throwing.
+
+/** Subtitle container. Lower-case tags match the chosen file extension. */
+export type SubtitleFormat = "srt" | "vtt";
+
+/** Summary of a completed subtitle export (mirror of Rust `SubtitleExportSummary`). */
+export interface SubtitleExportSummary {
+  outPath: string;
+  cueCount: number;
+}
+
+export async function exportSubtitles(
+  path: string,
+  format: SubtitleFormat,
+): Promise<SubtitleExportSummary> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<SubtitleExportSummary>("export_subtitles", { path, format });
+  }
+  return { outPath: path, cueCount: 0 };
+}
+
 // MARK: - Video export (#112)
 //
 // `export_video` composites every timeline frame on the GPU and encodes it to a
