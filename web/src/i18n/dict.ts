@@ -72,6 +72,11 @@ const zh: Dict = {
   "media.library": "媒体库",
   "media.itemCount": "{count} 个项目",
   "media.empty": "拖放媒体文件到此处,或使用导入 / 生成。",
+  // 剪映式文件夹浏览：面包屑 / 返回上级 / 文件夹空态
+  "media.folderRoot": "全部",
+  "media.folderBack": "返回上级",
+  "media.folderItemCount": "{count} 项",
+  "media.folderEmpty": "此文件夹为空。",
   "media.importing": "正在导入…",
   "media.importFailed": "导入失败:{error}",
   "media.dropToAdd": "松开以添加到时间线",
@@ -412,6 +417,11 @@ const en: Dict = {
   "media.library": "Library",
   "media.itemCount": "{count} items",
   "media.empty": "Drop media files here, or use Import / Generate.",
+  // CapCut-style folder browser: breadcrumb / go up / folder empty state
+  "media.folderRoot": "All",
+  "media.folderBack": "Up",
+  "media.folderItemCount": "{count} items",
+  "media.folderEmpty": "This folder is empty.",
   "media.importing": "Importing…",
   "media.importFailed": "Import failed: {error}",
   "media.dropToAdd": "Release to add to the timeline",
