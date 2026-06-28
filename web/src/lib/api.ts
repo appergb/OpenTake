@@ -197,13 +197,14 @@ export interface ThumbnailResult {
 
 export async function generateThumbnail(
   mediaRef: string,
-  opts?: { timeSecs?: number; maxFrames?: number },
+  opts?: { timeSecs?: number; maxFrames?: number; includeSprite?: boolean },
 ): Promise<ThumbnailResult | null> {
   await ensureTauri();
   if (invokeImpl) {
     const args: Record<string, unknown> = { mediaRef };
     if (opts?.timeSecs != null) args.timeSecs = opts.timeSecs;
     if (opts?.maxFrames != null) args.maxFrames = opts.maxFrames;
+    if (opts?.includeSprite != null) args.includeSprite = opts.includeSprite;
     try {
       return await invokeImpl<ThumbnailResult>("generate_thumbnail", args);
     } catch (e) {

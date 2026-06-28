@@ -18,7 +18,7 @@ import {
 import { firstAudioIndex } from "../../lib/zones";
 import { clampTrimDeltaFrames, trimSourceValues } from "../../lib/clip";
 import { collectTargets, findSnap, findSnapDelta } from "../../lib/snap";
-import { paintTimeline, type DragPaint } from "./timelineCanvas";
+import { paintTimeline, type DragPaint, type MediaGhostPaint } from "./timelineCanvas";
 import { useT } from "../../i18n";
 import { paintRuler } from "./rulerCanvas";
 import { TrackHeaderColumn } from "./TrackHeaderColumn";
@@ -37,6 +37,7 @@ import {
 import { ClipContextMenu } from "./ClipContextMenu";
 import { SwapMediaPicker } from "./SwapMediaPicker";
 import { MEDIA_DND_TYPE } from "../media/MediaPanel";
+import { getDraggingMedia, setDraggingMedia } from "../../lib/mediaDragState";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
@@ -103,6 +104,10 @@ const VOLUME_KEYFRAME_INTERPOLATIONS: Array<{
   { labelKey: "hold", value: "hold" },
 ];
 const CHECKMARK = "\u2713";
+
+/** Stable empty exclude-set for media-drop snapping (no clip is being dragged,
+ *  so every clip edge is a snap target). Never mutated. */
+const EMPTY_EXCLUDE = new Set<string>();
 
 export function volumeKeyframeMenuItems({
   currentInterpolation,
@@ -327,7 +332,7 @@ export function TimelineContainer() {
       new Map(
         mediaItems.map((m) => [
           m.id,
-          `${m.path ?? ""}|${m.thumbnail ?? ""}|${m.missing ? "missing" : "online"}`,
+          `${m.path ?? ""}|${m.missing ? "missing" : "online"}`,
         ]),
       ),
     [mediaItems],
@@ -338,6 +343,10 @@ export function TimelineContainer() {
   const rulerCanvasRef = useRef<HTMLCanvasElement>(null);
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
   const dragRef = useRef<DragState>(null);
+  // Drop-ghost for a media-panel drag hovering the timeline (null when none).
+  // Read by the paint effect; bumped via `forceTick` on each dragover. Mutually
+  // exclusive with `dragRef` (a clip move/trim and a media drag never overlap).
+  const mediaGhostRef = useRef<MediaGhostPaint | null>(null);
   // Snap hysteresis: keeps the snapped {frame, probeOffset} across pointer
   // events so the sticky band (1.5x threshold) holds the clip on its target
   // instead of jittering at the edge (SPEC §5.7). Cleared on pointerUp.
@@ -356,7 +365,8 @@ export function TimelineContainer() {
   // the resolved-cache `waveformsRef` so a failed/empty fetch can be retried on a
   // later effect run instead of being permanently suppressed by a placeholder (#127).
   const inFlightRef = useRef<Set<string>>(new Set());
-  const thumbnailInFlightRef = useRef<Set<string>>(new Set());
+  const thumbnailPosterInFlightRef = useRef<Set<string>>(new Set());
+  const thumbnailSpriteInFlightRef = useRef<Set<string>>(new Set());
   // Guards `setWaveformVersion` against firing after unmount (the cache write itself
   // is mount-independent and must NOT be discarded on re-render — see #127).
   const mountedRef = useRef(true);
@@ -493,6 +503,7 @@ export function TimelineContainer() {
       missingMediaRefs,
       emptyLabel: t("timeline.dropHint"),
       drag,
+      mediaGhost: mediaGhostRef.current ?? undefined,
     });
   }, [
     timeline,
@@ -559,55 +570,86 @@ export function TimelineContainer() {
     if (changed && mountedRef.current) setThumbnailVersion((v) => v + 1);
   }, [thumbnailSourceKeys]);
 
-  // Load visual thumbnail sprites for video/image clips on demand. The decoded
-  // Image element is cached by media id and reused across all clips.
+  // Load visual thumbnails in two phases: a poster first so dropped clips paint
+  // immediately, then a video sprite that upgrades the same cache entry.
   useEffect(() => {
-    const wanted = new Set<string>();
+    const wanted = new Map<string, ClipType>();
     for (const track of timeline.tracks) {
       for (const clip of track.clips) {
         if ((clip.mediaType === "video" || clip.mediaType === "image") && !missingMediaRefs.has(clip.mediaRef)) {
-          wanted.add(clip.mediaRef);
+          if (wanted.get(clip.mediaRef) !== "video") wanted.set(clip.mediaRef, clip.mediaType);
         }
       }
     }
-    for (const ref of wanted) {
-      if (thumbnailsRef.current.has(ref) || thumbnailInFlightRef.current.has(ref)) continue;
-      const sourceKey = thumbnailSourceKeys.get(ref);
-      if (!sourceKey) continue;
-      thumbnailInFlightRef.current.add(ref);
-      void generateThumbnail(ref)
-        .then(async (result) => {
-          if (!result) return;
-          const hasSprite =
-            Boolean(result.spritePath) &&
-            Boolean(result.tileWidth) &&
-            Boolean(result.tileHeight) &&
-            Boolean(result.columns) &&
-            result.times.length > 0;
-          const path = hasSprite ? result.spritePath : result.thumbnailPath;
-          const url = assetUrl(path);
-          if (!url) return;
-          const image = await loadImageElement(url);
-          const latestSourceKey = latestThumbnailSourceKeysRef.current.get(ref);
-          if (latestSourceKey !== sourceKey) return;
-          const strip: ClipThumbnailStrip = {
-            image,
-            kind: hasSprite ? "sprite" : "single",
-            tileWidth: result.tileWidth ?? image.naturalWidth,
-            tileHeight: result.tileHeight ?? image.naturalHeight,
-            columns: Math.max(1, result.columns ?? 1),
-            times: result.times,
-          };
-          thumbnailsRef.current.set(ref, strip);
-          thumbnailSourceKeysRef.current.set(ref, sourceKey);
-          if (mountedRef.current) setThumbnailVersion((v) => v + 1);
-        })
+
+    const storeThumbnail = async (
+      ref: string,
+      sourceKey: string,
+      result: Awaited<ReturnType<typeof generateThumbnail>>,
+      requireSprite: boolean,
+    ): Promise<boolean> => {
+      if (!result) return false;
+      const hasSprite =
+        Boolean(result.spritePath) &&
+        Boolean(result.tileWidth) &&
+        Boolean(result.tileHeight) &&
+        Boolean(result.columns) &&
+        result.times.length > 0;
+      if (requireSprite && !hasSprite) return false;
+      const path = hasSprite ? result.spritePath : result.thumbnailPath;
+      const url = assetUrl(path);
+      if (!url) return false;
+      const image = await loadImageElement(url);
+      const latestSourceKey = latestThumbnailSourceKeysRef.current.get(ref);
+      if (latestSourceKey !== sourceKey) return false;
+      const strip: ClipThumbnailStrip = {
+        image,
+        kind: hasSprite ? "sprite" : "single",
+        tileWidth: result.tileWidth ?? image.naturalWidth,
+        tileHeight: result.tileHeight ?? image.naturalHeight,
+        columns: Math.max(1, result.columns ?? 1),
+        times: result.times,
+      };
+      thumbnailsRef.current.set(ref, strip);
+      thumbnailSourceKeysRef.current.set(ref, sourceKey);
+      if (mountedRef.current) setThumbnailVersion((v) => v + 1);
+      return true;
+    };
+
+    const startSpriteLoad = (ref: string, sourceKey: string) => {
+      if (thumbnailSpriteInFlightRef.current.has(ref)) return;
+      thumbnailSpriteInFlightRef.current.add(ref);
+      void generateThumbnail(ref, { includeSprite: true })
+        .then((result) => storeThumbnail(ref, sourceKey, result, true))
         .catch((err) => {
-          console.warn(`thumbnail load failed for ${ref}:`, err);
+          console.warn(`thumbnail sprite load failed for ${ref}:`, err);
         })
         .finally(() => {
-          thumbnailInFlightRef.current.delete(ref);
+          thumbnailSpriteInFlightRef.current.delete(ref);
         });
+    };
+
+    for (const [ref, mediaType] of wanted) {
+      const sourceKey = thumbnailSourceKeys.get(ref);
+      if (!sourceKey) continue;
+      const existing = thumbnailsRef.current.get(ref);
+
+      if (!existing && !thumbnailPosterInFlightRef.current.has(ref)) {
+        thumbnailPosterInFlightRef.current.add(ref);
+        void generateThumbnail(ref, { includeSprite: false })
+          .then(async (result) => {
+            const stored = await storeThumbnail(ref, sourceKey, result, false);
+            if (stored && mediaType === "video") startSpriteLoad(ref, sourceKey);
+          })
+          .catch((err) => {
+            console.warn(`thumbnail poster load failed for ${ref}:`, err);
+          })
+          .finally(() => {
+            thumbnailPosterInFlightRef.current.delete(ref);
+          });
+      } else if (mediaType === "video" && existing && existing.kind !== "sprite") {
+        startSpriteLoad(ref, sourceKey);
+      }
     }
   }, [timeline, missingMediaRefs, thumbnailSourceKeys]);
 
@@ -1209,12 +1251,84 @@ export function TimelineContainer() {
   // X, on the track under the drop Y. `addMediaToTimelineAt` skips tracks where it
   // would overlap an existing clip (and makes a new track if none is free), so a
   // drop onto an occupied audio lane opens a second lane instead of overwriting.
-  const onMediaDragOver = useCallback((e: React.DragEvent) => {
-    if (!e.dataTransfer.types.includes(MEDIA_DND_TYPE)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    e.dataTransfer.dropEffect = "copy";
+  // Drop the ghost + snap state when the media drag ends or leaves the timeline.
+  const clearMediaGhost = useCallback(() => {
+    const had = mediaGhostRef.current !== null;
+    mediaGhostRef.current = null;
+    snapStateRef.current = null;
+    setSnapFrame(null);
+    if (had) forceTick((n) => n + 1);
   }, []);
+
+  // While a media item hovers the timeline, paint a gray ghost at the exact
+  // track + frame span it will land on (snapped to clip edges / playhead), so
+  // the drop reads like other NLEs instead of a whole-region highlight. The
+  // dragged item's duration/type come from the shared drag state (dataTransfer
+  // is unreadable during dragover), so a foreign drag simply shows no ghost.
+  const onMediaDragOver = useCallback(
+    (e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes(MEDIA_DND_TYPE)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = "copy";
+      const item = getDraggingMedia();
+      if (!item) return;
+      const { docX, docY } = toDoc(e);
+      const durationFrames = edit.mediaDurationFrames(item, timeline.fps);
+      const rawStart = frameAt(docX, zoomScale);
+      // Snap the start OR end edge to a clip edge / playhead (multi-probe, sticky
+      // — same engine as a clip move), so the ghost clicks onto neighbours.
+      const targets = collectMoveSnapTargets(timeline, EMPTY_EXCLUDE, activeFrame);
+      const snap = findSnapDelta(
+        [rawStart, rawStart + durationFrames],
+        targets,
+        zoomScale,
+        snapStateRef.current,
+        [0, durationFrames],
+      );
+      let startFrame = rawStart;
+      if (snap) {
+        startFrame = rawStart + snap.delta;
+        snapStateRef.current = { frame: snap.snappedFrame, probeOffset: snap.probeOffset };
+      } else {
+        snapStateRef.current = null;
+      }
+      if (startFrame < 0) startFrame = 0;
+      const resolved = edit.resolveMediaDropTrack(
+        timeline,
+        item,
+        startFrame,
+        dropTargetAt(timeline, docY, trackHeights),
+      );
+      const next: MediaGhostPaint = {
+        startFrame,
+        durationFrames,
+        trackIndex: resolved.trackIndex,
+        newTrackIndex: resolved.newTrack ? resolved.newTrack.index : null,
+      };
+      const prev = mediaGhostRef.current;
+      mediaGhostRef.current = next;
+      setSnapFrame(snap ? snap.snappedFrame : null);
+      const changed =
+        !prev ||
+        prev.startFrame !== next.startFrame ||
+        prev.durationFrames !== next.durationFrames ||
+        prev.trackIndex !== next.trackIndex ||
+        prev.newTrackIndex !== next.newTrackIndex;
+      if (changed) forceTick((n) => n + 1);
+    },
+    [toDoc, timeline, zoomScale, trackHeights, activeFrame],
+  );
+
+  const onMediaDragLeave = useCallback(
+    (e: React.DragEvent) => {
+      // Ignore leaves into child elements (canvas/header); only clear when the
+      // pointer truly exits the timeline viewport (mirrors TimelineRegion).
+      if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+      clearMediaGhost();
+    },
+    [clearMediaGhost],
+  );
 
   const onMediaDrop = useCallback(
     (e: React.DragEvent) => {
@@ -1223,7 +1337,19 @@ export function TimelineContainer() {
       e.stopPropagation();
       const id = e.dataTransfer.getData(MEDIA_DND_TYPE);
       const item = useMediaStore.getState().items.find((m) => m.id === id);
+      // Land exactly where the ghost showed: reuse the resolved plan from the
+      // last dragover (drop is always preceded by a dragover at the same point).
+      const plan = mediaGhostRef.current;
+      clearMediaGhost();
+      setDraggingMedia(null);
       if (!item) return;
+      if (plan) {
+        const preferredTrackIndex = plan.newTrackIndex !== null ? null : plan.trackIndex;
+        const insertTrackAt = plan.newTrackIndex !== null ? plan.newTrackIndex : undefined;
+        void edit.addMediaToTimelineAt(item, plan.startFrame, preferredTrackIndex, insertTrackAt);
+        return;
+      }
+      // Fallback (no prior ghost, e.g. a foreign drag): resolve from the point.
       const { docX, docY } = toDoc(e);
       const startFrame = Math.max(0, Math.round(frameAt(docX, zoomScale)));
       const target = dropTargetAt(timeline, docY, trackHeights);
@@ -1231,7 +1357,7 @@ export function TimelineContainer() {
       const insertTrackAt = target.kind === "newTrack" ? target.index : undefined;
       void edit.addMediaToTimelineAt(item, startFrame, preferredTrackIndex, insertTrackAt);
     },
-    [toDoc, zoomScale, timeline, trackHeights],
+    [toDoc, zoomScale, timeline, trackHeights, clearMediaGhost],
   );
 
   return (
@@ -1239,6 +1365,7 @@ export function TimelineContainer() {
       ref={viewportRef}
       style={{ position: "relative", width: "100%", height: "100%", overflow: "hidden" }}
       onDragOver={onMediaDragOver}
+      onDragLeave={onMediaDragLeave}
       onDrop={onMediaDrop}
     >
       {/* Content canvas (clips + backgrounds), positioned right of header column. */}

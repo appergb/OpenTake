@@ -910,6 +910,68 @@ fn remove_tracks_resolves_indexes_before_removal() {
     assert_eq!(st.timeline.tracks[0].id, "v1");
 }
 
+#[test]
+fn swap_tracks_command_undo_restores_order() {
+    let mut st = state(vec![
+        video_track("top", true, vec![clip("overlay", 0, 30)]),
+        video_track("bottom", true, vec![clip("base", 0, 30)]),
+        audio_track("audio", true, vec![clip("voice", 0, 30)]),
+    ]);
+    let g = SeqIdGen::default();
+
+    let res = apply(&mut st, EditCommand::SwapTracks { a: 0, b: 1 }, &g).unwrap();
+
+    assert!(res.changed);
+    assert_eq!(res.action_name, "Swap Tracks");
+    assert_eq!(
+        st.timeline
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str())
+            .collect::<Vec<_>>(),
+        ["bottom", "top", "audio"]
+    );
+    assert_eq!(st.timeline.tracks[0].clips[0].id, "base");
+    assert_eq!(st.timeline.tracks[1].clips[0].id, "overlay");
+    assert!(st.can_undo());
+
+    let undo = apply(&mut st, EditCommand::Undo, &g).unwrap();
+    assert!(undo.changed);
+    assert_eq!(
+        st.timeline
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str())
+            .collect::<Vec<_>>(),
+        ["top", "bottom", "audio"]
+    );
+    assert_eq!(st.timeline.tracks[0].clips[0].id, "overlay");
+    assert_eq!(st.timeline.tracks[1].clips[0].id, "base");
+}
+
+#[test]
+fn swap_tracks_cross_type_is_noop_without_undo_entry() {
+    let mut st = state(vec![
+        video_track("video", true, vec![clip("v", 0, 30)]),
+        audio_track("audio", true, vec![clip("a", 0, 30)]),
+    ]);
+    let g = SeqIdGen::default();
+
+    let res = apply(&mut st, EditCommand::SwapTracks { a: 0, b: 1 }, &g).unwrap();
+
+    assert!(!res.changed);
+    assert_eq!(st.version(), 0);
+    assert!(!st.can_undo());
+    assert_eq!(
+        st.timeline
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str())
+            .collect::<Vec<_>>(),
+        ["video", "audio"]
+    );
+}
+
 // ---- no-change command ----------------------------------------------------
 
 #[test]

@@ -5,10 +5,10 @@
  * (SPEC §5.11), painted by the container.
  */
 
-import { BG, BORDER, TEXT, LAYOUT, TRACK_SIZE } from "../../lib/theme";
+import { BG, BORDER, TEXT, LAYOUT, TRACK_SIZE, TRIM, GHOST } from "../../lib/theme";
 import { clipRect, trackDisplayHeight, trackY } from "../../lib/geometry";
 import { linkOffsetForClip } from "../../lib/clip";
-import { drawClip, type ClipThumbnailStrip } from "./clipRenderer";
+import { drawClip, roundRectPath, type ClipThumbnailStrip } from "./clipRenderer";
 import type { Timeline, ClipType } from "../../lib/types";
 
 export interface PaintState {
@@ -41,6 +41,22 @@ export interface PaintState {
   emptyLabel: string;
   /** Active drag, so clips follow the cursor (ghost). Absent when not dragging. */
   drag?: DragPaint;
+  /** Drag from the media panel hovering the timeline: a gray ghost at the
+   *  resolved track + frame span (and a "new track" lane when the drop creates
+   *  one). Absent when no media drag is over the timeline. */
+  mediaGhost?: MediaGhostPaint;
+}
+
+/** A media-panel drag projected over the timeline, for the drop-ghost preview. */
+export interface MediaGhostPaint {
+  /** Snapped start frame the clip would occupy. */
+  startFrame: number;
+  /** Clip length in frames (== the clip that will land). */
+  durationFrames: number;
+  /** Existing track it will land on, or null when a new track is created. */
+  trackIndex: number | null;
+  /** Insert index of the new track to create, or null for an existing track. */
+  newTrackIndex: number | null;
 }
 
 /** A live move/trim, projected for ghost rendering. */
@@ -190,8 +206,49 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
     }
   }
 
-  // Empty-state hint when no tracks (centered in the visible window).
-  if (timeline.tracks.length === 0) {
+  // Media-panel drop ghost: a gray translucent rect at the resolved track +
+  // frame span so the user sees exactly where the clip will land (like other
+  // NLEs), plus a dashed "new track" lane when the drop will create one.
+  const mg = s.mediaGhost;
+  if (mg) {
+    const ghostX = mg.startFrame * pixelsPerFrame;
+    const ghostW = Math.max(1, mg.durationFrames * pixelsPerFrame);
+    let ghostY: number | null = null;
+    let ghostH = 0;
+    if (mg.newTrackIndex !== null) {
+      const laneY = insertionLineY(mg.newTrackIndex);
+      const laneH =
+        timeline.tracks.length > 0
+          ? trackDisplayHeight(timeline.tracks[0], trackHeights)
+          : TRACK_SIZE.defaultHeight;
+      if (laneY + laneH > scrollTop && laneY < scrollTop + s.viewHeight) {
+        ctx.fillStyle = GHOST.newTrackFill;
+        ctx.fillRect(scrollLeft, laneY, s.viewWidth, laneH);
+        ctx.strokeStyle = GHOST.border;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([6, 4]);
+        ctx.strokeRect(scrollLeft + 0.5, laneY + 0.5, s.viewWidth - 1, laneH - 1);
+        ctx.setLineDash([]);
+      }
+      ghostY = laneY + 2;
+      ghostH = laneH - 4;
+    } else if (mg.trackIndex !== null && mg.trackIndex < timeline.tracks.length) {
+      ghostY = trackY(timeline, mg.trackIndex, trackHeights) + 2;
+      ghostH = trackDisplayHeight(timeline.tracks[mg.trackIndex], trackHeights) - 4;
+    }
+    if (ghostY !== null && ghostH > 0 && ghostX + ghostW >= scrollLeft && ghostX <= visRight) {
+      roundRectPath(ctx, ghostX, ghostY, ghostW, ghostH, TRIM.clipCornerRadius);
+      ctx.fillStyle = GHOST.fill;
+      ctx.fill();
+      ctx.strokeStyle = GHOST.border;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+
+  // Empty-state hint when no tracks (centered in the visible window). Hidden
+  // while a media ghost is shown so the two don't overlap on an empty timeline.
+  if (timeline.tracks.length === 0 && !mg) {
     ctx.fillStyle = TEXT.muted;
     ctx.font = '13px -apple-system, system-ui, sans-serif';
     ctx.textAlign = "center";

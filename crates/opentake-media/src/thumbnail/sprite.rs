@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use image::{ImageBuffer, Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
 
+use super::MAX_VIDEO_THUMBNAILS;
 use crate::error::Result;
 use crate::frame::RgbaFrame;
 use crate::waveform::store::CACHE_SUBDIR;
@@ -150,7 +151,12 @@ pub fn save_sprite(cache_root: &Path, key: &str, thumbs: &[VideoThumb]) -> Resul
 pub fn load_sprite(cache_root: &Path, key: &str) -> Option<Vec<VideoThumb>> {
     let meta_bytes = std::fs::read(json_path(cache_root, key)).ok()?;
     let meta: ThumbnailCacheMeta = serde_json::from_slice(&meta_bytes).ok()?;
-    if meta.tile_width == 0 || meta.tile_height == 0 || meta.columns == 0 || meta.times.is_empty() {
+    if meta.tile_width == 0
+        || meta.tile_height == 0
+        || meta.columns == 0
+        || meta.times.is_empty()
+        || meta.times.len() > MAX_VIDEO_THUMBNAILS
+    {
         return None;
     }
     let sprite = image::open(jpg_path(cache_root, key)).ok()?.to_rgba8();

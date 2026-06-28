@@ -24,6 +24,9 @@ pub const THUMB_TOLERANCE_SECS: f64 = 1.0;
 pub const IMAGE_THUMB_MAX_PIXEL: u32 = 120;
 /// Progressive publish stride (upstream publishes every 50 frames).
 pub const PARTIAL_STRIDE: usize = 50;
+/// Hard cap for one sprite generation. Long sources still get representative
+/// filmstrips without keeping thousands of decoded frames in memory.
+pub const MAX_VIDEO_THUMBNAILS: usize = 240;
 
 /// Callback invoked with the partially-decoded thumbnail list for progressive UI
 /// updates (upstream's every-50-frames publish).
@@ -47,6 +50,13 @@ pub fn video_thumbnail_times(duration: f64) -> Vec<f64> {
     times
 }
 
+fn sprite_thumbnail_times(duration: f64) -> Vec<f64> {
+    video_thumbnail_times(duration)
+        .into_iter()
+        .take(MAX_VIDEO_THUMBNAILS)
+        .collect()
+}
+
 /// Generate a video thumbnail sequence. Returns the disk-cached sequence on a
 /// hit; otherwise decodes, saves the sprite cache, and returns. `on_partial` is
 /// invoked every [`PARTIAL_STRIDE`] frames for progressive UI updates.
@@ -63,7 +73,7 @@ pub fn video_thumbnails(
         }
     }
 
-    let times = video_thumbnail_times(duration_secs);
+    let times = sprite_thumbnail_times(duration_secs);
     if times.is_empty() {
         return Ok(Vec::new());
     }
@@ -158,6 +168,14 @@ mod tests {
         // duration exactly 4 with interval 1 → 0,1,2,3 (not 4).
         let t = video_thumbnail_times(4.0);
         assert_eq!(t, vec![0.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn max_video_thumbnails_caps_long_sprite_generation() {
+        let times = sprite_thumbnail_times(60.0 * 60.0);
+        assert_eq!(times.len(), MAX_VIDEO_THUMBNAILS);
+        assert_eq!(times[0], 0.0);
+        assert_eq!(times[1], 2.0);
     }
 
     #[test]

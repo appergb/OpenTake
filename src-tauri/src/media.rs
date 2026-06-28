@@ -18,8 +18,9 @@
 //! failing the whole batch (a missing/offline file is a recoverable state the
 //! editor already models).
 //!
-//! Thumbnails are generated through `opentake-media` and exposed as local cache
-//! file paths. The WebView turns those into asset-protocol URLs.
+//! Thumbnails are exposed as local cache file paths when they already exist.
+//! Import and list commands never decode frames; the WebView asks for thumbnails
+//! lazily through `generate_thumbnail`.
 
 use std::path::{Path, PathBuf};
 
@@ -31,9 +32,13 @@ use opentake_core::{importable_clip_type, AppCore, EditCommand, ProbedMedia};
 use opentake_domain::{ClipType, MediaManifestEntry, MediaSource};
 use opentake_media::{
     cache_key::{file_identity_key, KEY_HEX_LEN},
-    thumbnail::sprite::grid_geometry,
+    decode_frame_at, decode_frames_at,
+    thumbnail::{
+        save_sprite, sprite::grid_geometry, video_thumbnail_times, ThumbnailCacheMeta, VideoThumb,
+        MAX_VIDEO_THUMBNAILS, THUMB_MAX_SIZE, THUMB_TOLERANCE_SECS,
+    },
     waveform::store::CACHE_SUBDIR,
-    MediaEngine, RgbaFrame,
+    FrameRequest, MediaEngine, RgbaFrame,
 };
 
 /// Managed-state wrapper over the media engine. The engine is read-only here
@@ -98,7 +103,7 @@ impl MediaItemDto {
     fn from_entry(
         entry: &MediaManifestEntry,
         project_dir: Option<&Path>,
-        engine: Option<&MediaEngine>,
+        cache_root: Option<&Path>,
     ) -> Self {
         let resolved = resolve_source_path(entry, project_dir);
         let path = match &entry.source {
@@ -114,19 +119,7 @@ impl MediaItemDto {
             None
         } else {
             resolved.as_deref().and_then(|path| {
-                engine.and_then(
-                    |engine| match thumbnail_path_for_entry(engine, entry, path) {
-                        Ok(path) => path,
-                        Err(e) => {
-                            eprintln!(
-                                "thumbnail generation failed: media_ref={} path={} error={e}",
-                                entry.id,
-                                path.display()
-                            );
-                            None
-                        }
-                    },
-                )
+                cache_root.and_then(|root| cached_thumbnail_path_for_entry(root, entry, path))
             })
         };
         MediaItemDto {
@@ -186,14 +179,14 @@ pub struct MediaListDto {
 
 impl MediaListDto {
     /// Build the list from the core's current manifest snapshot.
-    fn from_core(core: &AppCore, engine: Option<&MediaEngine>) -> Self {
+    fn from_core(core: &AppCore, cache_root: Option<&Path>) -> Self {
         let manifest = core.media();
         let project_dir = core.project_dir();
         MediaListDto {
             items: manifest
                 .entries
                 .iter()
-                .map(|e| MediaItemDto::from_entry(e, project_dir.as_deref(), engine))
+                .map(|e| MediaItemDto::from_entry(e, project_dir.as_deref(), cache_root))
                 .collect(),
             folders: manifest
                 .folders
@@ -258,11 +251,16 @@ fn sprite_path_for(cache_root: &Path, key: &str) -> PathBuf {
     visual_cache_dir(cache_root).join(format!("{key}.thumbs.jpg"))
 }
 
-fn poster_path_for(cache_root: &Path, key: &str, tile_index: Option<usize>) -> PathBuf {
-    match tile_index {
-        Some(i) if i > 0 => visual_cache_dir(cache_root).join(format!("{key}.thumb.{i}.png")),
-        _ => visual_cache_dir(cache_root).join(format!("{key}.thumb.png")),
+fn poster_path_for(cache_root: &Path, key: &str) -> PathBuf {
+    visual_cache_dir(cache_root).join(format!("{key}.thumb.png"))
+}
+
+fn timed_poster_path_for(cache_root: &Path, key: &str, time_secs: f64) -> PathBuf {
+    if time_secs <= 0.0 {
+        return poster_path_for(cache_root, key);
     }
+    let millis = (time_secs * 1000.0).round().max(0.0) as u64;
+    visual_cache_dir(cache_root).join(format!("{key}.thumb.{millis}.png"))
 }
 
 fn write_png(path: &Path, frame: &RgbaFrame) -> Result<(), String> {
@@ -284,25 +282,127 @@ fn write_png(path: &Path, frame: &RgbaFrame) -> Result<(), String> {
     std::fs::write(path, bytes).map_err(|e| e.to_string())
 }
 
-fn nearest_thumb_index(
-    thumbs: &[opentake_media::VideoThumb],
-    time_secs: Option<f64>,
-) -> Option<usize> {
-    if thumbs.is_empty() {
+fn cached_thumbnail_path_for_entry(
+    cache_root: &Path,
+    entry: &MediaManifestEntry,
+    path: &Path,
+) -> Option<String> {
+    if !matches!(entry.kind, ClipType::Video | ClipType::Image) {
         return None;
     }
-    let Some(target) = time_secs.filter(|t| t.is_finite()) else {
-        return Some(0);
+    let key = cache_key_for(path).ok()?;
+    let poster_path = poster_path_for(cache_root, &key);
+    poster_path
+        .is_file()
+        .then(|| poster_path.to_string_lossy().into_owned())
+}
+
+fn poster_target_time(time_secs: Option<f64>) -> f64 {
+    time_secs
+        .filter(|t| t.is_finite() && *t > 0.0)
+        .unwrap_or(0.0)
+}
+
+fn video_poster(
+    engine: &MediaEngine,
+    path: &Path,
+    key: &str,
+    time_secs: Option<f64>,
+) -> Result<(PathBuf, u32, u32, f64), String> {
+    let target = poster_target_time(time_secs);
+    let poster_path = timed_poster_path_for(engine.cache_root(), key, target);
+    if poster_path.exists() {
+        let (width, height) = image::image_dimensions(&poster_path)
+            .map_err(|e| format!("thumbnail dimensions: {e}"))?;
+        return Ok((poster_path, width, height, target));
+    }
+
+    let req = FrameRequest {
+        time_secs: target,
+        max_size: THUMB_MAX_SIZE,
+        tolerance_secs: THUMB_TOLERANCE_SECS,
+        apply_rotation: true,
     };
-    thumbs
-        .iter()
-        .enumerate()
-        .min_by(|(_, a), (_, b)| {
-            let da = (a.time_secs - target).abs();
-            let db = (b.time_secs - target).abs();
-            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|(i, _)| i)
+    let (actual, frame) = decode_frame_at(path, &req).map_err(|e| e.to_string())?;
+    write_png(&poster_path, &frame)?;
+    Ok((poster_path, frame.width, frame.height, actual))
+}
+
+fn sprite_meta_path_for(cache_root: &Path, key: &str) -> PathBuf {
+    visual_cache_dir(cache_root).join(format!("{key}.thumbs.json"))
+}
+
+fn read_cached_sprite_meta(cache_root: &Path, key: &str) -> Option<ThumbnailCacheMeta> {
+    let sprite_path = sprite_path_for(cache_root, key);
+    let meta_path = sprite_meta_path_for(cache_root, key);
+    if !sprite_path.is_file() || !meta_path.is_file() {
+        return None;
+    }
+    let bytes = std::fs::read(meta_path).ok()?;
+    let meta: ThumbnailCacheMeta = serde_json::from_slice(&bytes).ok()?;
+    if meta.tile_width == 0
+        || meta.tile_height == 0
+        || meta.columns == 0
+        || meta.times.is_empty()
+        || meta.times.len() > MAX_VIDEO_THUMBNAILS
+    {
+        return None;
+    }
+    Some(meta)
+}
+
+fn sprite_frame_limit(max_frames: Option<usize>) -> usize {
+    max_frames
+        .unwrap_or(MAX_VIDEO_THUMBNAILS)
+        .clamp(1, MAX_VIDEO_THUMBNAILS)
+}
+
+fn video_sprite(
+    engine: &MediaEngine,
+    entry: &MediaManifestEntry,
+    path: &Path,
+    key: &str,
+    max_frames: Option<usize>,
+) -> Result<Option<ThumbnailCacheMeta>, String> {
+    let limit = sprite_frame_limit(max_frames);
+    if let Some(mut meta) = read_cached_sprite_meta(engine.cache_root(), key) {
+        meta.times.truncate(limit);
+        return Ok(Some(meta));
+    }
+
+    let times: Vec<f64> = video_thumbnail_times(entry.duration)
+        .into_iter()
+        .take(limit)
+        .collect();
+    if times.is_empty() {
+        return Ok(None);
+    }
+
+    let req = FrameRequest {
+        time_secs: 0.0,
+        max_size: THUMB_MAX_SIZE,
+        tolerance_secs: THUMB_TOLERANCE_SECS,
+        apply_rotation: true,
+    };
+    let mut thumbs = Vec::with_capacity(times.len());
+    for result in decode_frames_at(path, &times, &req) {
+        let (actual, frame) = result.map_err(|e| e.to_string())?;
+        thumbs.push(VideoThumb {
+            time_secs: actual,
+            image: frame,
+        });
+    }
+    if thumbs.is_empty() {
+        return Ok(None);
+    }
+    save_sprite(engine.cache_root(), key, &thumbs).map_err(|e| e.to_string())?;
+    let (columns, _) = grid_geometry(thumbs.len());
+    Ok(Some(ThumbnailCacheMeta {
+        tile_width: thumbs[0].image.width,
+        tile_height: thumbs[0].image.height,
+        columns,
+        times: thumbs.iter().map(|t| t.time_secs).collect(),
+    }))
 }
 
 fn generate_thumbnail_for_entry(
@@ -311,6 +411,7 @@ fn generate_thumbnail_for_entry(
     path: &Path,
     time_secs: Option<f64>,
     max_frames: Option<usize>,
+    include_sprite: bool,
 ) -> Result<ThumbnailDto, String> {
     if !path.is_file() {
         return Err(format!("source file not found: {}", path.display()));
@@ -319,33 +420,39 @@ fn generate_thumbnail_for_entry(
     let key = cache_key_for(path)?;
     match entry.kind {
         ClipType::Video => {
-            let thumbs = engine
-                .video_thumbnails(path, entry.duration, None)
-                .map_err(|e| e.to_string())?;
-            let Some(poster_index) = nearest_thumb_index(&thumbs, time_secs) else {
-                return Ok(empty_thumbnail_dto(entry));
+            let (poster_path, poster_w, poster_h, poster_time) =
+                video_poster(engine, path, &key, time_secs)?;
+            let sprite_meta = if include_sprite {
+                video_sprite(engine, entry, path, &key, max_frames)?
+            } else {
+                None
             };
-            let poster_path = poster_path_for(engine.cache_root(), &key, Some(poster_index));
-            write_png(&poster_path, &thumbs[poster_index].image)?;
-
-            let (columns, _) = grid_geometry(thumbs.len());
-            let capped = max_frames.unwrap_or(thumbs.len()).min(thumbs.len());
             let sprite_path = sprite_path_for(engine.cache_root(), &key);
             Ok(ThumbnailDto {
                 media_ref: entry.id.clone(),
                 kind: entry.kind,
                 thumbnail_path: Some(poster_path.to_string_lossy().into_owned()),
-                sprite_path: sprite_path
-                    .is_file()
-                    .then(|| sprite_path.to_string_lossy().into_owned()),
-                tile_width: thumbs.first().map(|t| t.image.width),
-                tile_height: thumbs.first().map(|t| t.image.height),
-                columns: (columns > 0).then_some(columns),
-                times: thumbs.iter().take(capped).map(|t| t.time_secs).collect(),
+                sprite_path: if include_sprite && sprite_path.is_file() {
+                    Some(sprite_path.to_string_lossy().into_owned())
+                } else {
+                    None
+                },
+                tile_width: sprite_meta
+                    .as_ref()
+                    .map(|m| m.tile_width)
+                    .or(Some(poster_w)),
+                tile_height: sprite_meta
+                    .as_ref()
+                    .map(|m| m.tile_height)
+                    .or(Some(poster_h)),
+                columns: sprite_meta.as_ref().map(|m| m.columns).or(Some(1)),
+                times: sprite_meta
+                    .map(|m| m.times)
+                    .unwrap_or_else(|| vec![poster_time]),
             })
         }
         ClipType::Image => {
-            let poster_path = poster_path_for(engine.cache_root(), &key, None);
+            let poster_path = poster_path_for(engine.cache_root(), &key);
             if !poster_path.exists() {
                 let frame = engine.image_thumbnail(path).map_err(|e| e.to_string())?;
                 write_png(&poster_path, &frame)?;
@@ -366,14 +473,6 @@ fn generate_thumbnail_for_entry(
         }
         _ => Ok(empty_thumbnail_dto(entry)),
     }
-}
-
-fn thumbnail_path_for_entry(
-    engine: &MediaEngine,
-    entry: &MediaManifestEntry,
-    path: &Path,
-) -> Result<Option<String>, String> {
-    generate_thumbnail_for_entry(engine, entry, path, None, Some(1)).map(|dto| dto.thumbnail_path)
 }
 
 /// Probe `path` via the engine, mapping ffprobe facts to [`ProbedMedia`]. Probe
@@ -442,7 +541,7 @@ pub fn import_folder(
             let _ = import_one(&core, engine, file);
         }
     }
-    Ok(MediaListDto::from_core(&core, Some(engine)))
+    Ok(MediaListDto::from_core(&core, Some(engine.cache_root())))
 }
 
 /// Recursively mirror `dir` into the library: create a folder for `dir` (nested
@@ -544,13 +643,13 @@ pub fn import_media(
             let _ = import_one(&core, engine, &path);
         }
     }
-    Ok(MediaListDto::from_core(&core, Some(engine)))
+    Ok(MediaListDto::from_core(&core, Some(engine.cache_root())))
 }
 
 /// `get_media`: the current media catalog for the panel. Infallible.
 #[tauri::command]
 pub fn get_media(core: State<'_, AppCore>, media: State<'_, MediaState>) -> MediaListDto {
-    MediaListDto::from_core(&core, Some(media.engine()))
+    MediaListDto::from_core(&core, Some(media.engine().cache_root()))
 }
 
 /// `extract_audio`: extract the audio track from a media asset into a
@@ -633,14 +732,16 @@ pub fn relink_media(
     let probe = probe_media(media.engine(), &new);
     core.relink_media_file(&media_ref, &new, &probe)
         .map_err(|e| e.to_string())?;
-    Ok(MediaListDto::from_core(&core, Some(media.engine())))
+    Ok(MediaListDto::from_core(
+        &core,
+        Some(media.engine().cache_root()),
+    ))
 }
 
-/// `generate_thumbnail`: generate (and disk-cache) a media asset thumbnail. For
-/// video this returns both the first-frame PNG poster and the JPEG sprite grid
-/// used by the timeline filmstrip. `time_secs` selects the poster tile nearest
-/// to that source time; `max_frames` can cap the returned time metadata without
-/// changing the shared on-disk sprite.
+/// `generate_thumbnail`: generate (and disk-cache) a media asset thumbnail.
+/// Video requests decode one poster frame by default. The JPEG sprite grid used
+/// by timeline filmstrips is generated only when `include_sprite` is true, and
+/// is capped so long sources cannot enqueue thousands of decoded frames.
 #[tauri::command]
 pub fn generate_thumbnail(
     core: State<'_, AppCore>,
@@ -648,6 +749,7 @@ pub fn generate_thumbnail(
     media_ref: String,
     time_secs: Option<f64>,
     max_frames: Option<usize>,
+    include_sprite: Option<bool>,
 ) -> Result<ThumbnailDto, String> {
     let manifest = core.media();
     let entry = manifest
@@ -656,7 +758,15 @@ pub fn generate_thumbnail(
         .find(|e| e.id == media_ref)
         .ok_or_else(|| format!("media not found: {media_ref}"))?;
     let path = source_path_for_entry(&core, entry)?;
-    generate_thumbnail_for_entry(media.engine(), entry, &path, time_secs, max_frames).map_err(|e| {
+    generate_thumbnail_for_entry(
+        media.engine(),
+        entry,
+        &path,
+        time_secs,
+        max_frames,
+        include_sprite.unwrap_or(false),
+    )
+    .map_err(|e| {
         eprintln!(
             "generate_thumbnail failed: media_ref={media_ref} path={} error={e}",
             path.display()
@@ -804,6 +914,41 @@ mod tests {
         assert!(json.contains("\"thumbnail\":null"));
         assert!(json.contains("\"folderId\":null"));
         assert!(json.contains("\"missing\":false"));
+    }
+
+    #[test]
+    fn media_item_uses_existing_cached_thumbnail_without_decoding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("clip.mp4");
+        touch(&source);
+        let cache_root = tmp.path().join("cache");
+        let key = cache_key_for(&source).unwrap();
+        let poster = poster_path_for(&cache_root, &key);
+        fs::create_dir_all(poster.parent().unwrap()).unwrap();
+        fs::write(&poster, b"cached").unwrap();
+        let entry = MediaManifestEntry {
+            id: "a".into(),
+            name: "clip".into(),
+            kind: ClipType::Video,
+            source: MediaSource::External {
+                absolute_path: source.to_string_lossy().into_owned(),
+            },
+            duration: 60.0 * 60.0,
+            generation_input: None,
+            source_width: Some(1920),
+            source_height: Some(1080),
+            source_fps: Some(30.0),
+            has_audio: Some(true),
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        };
+
+        let dto = MediaItemDto::from_entry(&entry, None, Some(&cache_root));
+
+        assert!(!dto.missing);
+        let poster_string = poster.to_string_lossy().into_owned();
+        assert_eq!(dto.thumbnail.as_deref(), Some(poster_string.as_str()));
     }
 
     #[test]

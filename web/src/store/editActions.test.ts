@@ -11,7 +11,7 @@
  * exactly like Tauri where the mirror is only updated by the async event.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Clip, ClipType, MediaItem, Timeline, Transform } from "../lib/types";
+import type { Clip, ClipType, MediaItem, Timeline, Track, Transform } from "../lib/types";
 
 const srv = vi.hoisted(() => {
   type SClip = {
@@ -59,6 +59,8 @@ const srv = vi.hoisted(() => {
         trimEndFrame?: number;
         transform?: Transform;
       }>;
+      a?: number;
+      b?: number;
     }): { changed: boolean; affectedClipIds: string[] } {
       if (cmd.type === "insertTrack") {
         const at = Math.max(0, Math.min(state.tracks.length, cmd.at ?? state.tracks.length));
@@ -92,6 +94,16 @@ const srv = vi.hoisted(() => {
         }
         state.version += 1;
         return { changed: true, affectedClipIds };
+      }
+      if (cmd.type === "swapTracks" && cmd.a !== undefined && cmd.b !== undefined) {
+        const first = state.tracks[cmd.a];
+        const second = state.tracks[cmd.b];
+        if (!first || !second || first.type !== second.type || cmd.a === cmd.b) {
+          return { changed: false, affectedClipIds: [] };
+        }
+        [state.tracks[cmd.a], state.tracks[cmd.b]] = [second, first];
+        state.version += 1;
+        return { changed: true, affectedClipIds: [] };
       }
       return { changed: false, affectedClipIds: [] };
     },
@@ -158,7 +170,15 @@ vi.mock("../lib/api", () => ({
 }));
 
 // Imported after the mock is registered (vitest hoists vi.mock above imports).
-import { addMediaToTimeline, addMediaToTimelineAt, insertTrack, pasteClipsAtPlayhead } from "./editActions";
+import {
+  addMediaToTimeline,
+  addMediaToTimelineAt,
+  insertTrack,
+  mediaDurationFrames,
+  pasteClipsAtPlayhead,
+  resolveMediaDropTrack,
+  swapTracks,
+} from "./editActions";
 import { useClipboardStore } from "./clipboardStore";
 import { useEditorUiStore } from "./uiStore";
 import { useProjectStore } from "./projectStore";
@@ -278,5 +298,122 @@ describe("addMediaToTimeline", () => {
     await insertTrack("video", 0);
 
     expect(srv.state.tracks.map((track) => track.id)).toEqual(["t3", "t1", "t2"]);
+  });
+
+  it("forwards swapTracks for whole-track reordering", async () => {
+    await insertTrack("video");
+    await insertTrack("video");
+    await swapTracks(0, 1);
+
+    expect(srv.state.tracks.map((track) => track.id)).toEqual(["t2", "t1"]);
+  });
+});
+
+// The drop ghost must show EXACTLY where the clip will land, so its track
+// resolver has to mirror `addMediaToTimelineAtInner`'s placement rules.
+describe("resolveMediaDropTrack (drop-ghost truthfulness)", () => {
+  function mkClip(id: string, startFrame: number, durationFrames: number, type: ClipType = "video"): Clip {
+    return {
+      id,
+      mediaRef: id,
+      mediaType: type,
+      sourceClipType: type,
+      startFrame,
+      durationFrames,
+      trimStartFrame: 0,
+      trimEndFrame: 0,
+      speed: 1,
+      volume: 1,
+      fadeInFrames: 0,
+      fadeOutFrames: 0,
+      fadeInInterpolation: "linear",
+      fadeOutInterpolation: "linear",
+      opacity: 1,
+      transform: {
+        centerX: 0.5,
+        centerY: 0.5,
+        width: 1,
+        height: 1,
+        rotation: 0,
+        flipHorizontal: false,
+        flipVertical: false,
+      },
+      crop: { left: 0, top: 0, right: 0, bottom: 0 },
+    };
+  }
+  function mkTrack(id: string, type: ClipType, clips: Clip[]): Track {
+    return { id, type, muted: false, hidden: false, syncLocked: true, clips };
+  }
+  function mkTl(tracks: Track[]): Timeline {
+    return { fps: 30, width: 1920, height: 1080, settingsConfigured: true, tracks };
+  }
+  const videoItem: MediaItem = { id: "v", name: "v", type: "video", duration: 2, hasAudio: false };
+  const audioItem: MediaItem = { id: "a", name: "a", type: "audio", duration: 2, hasAudio: true };
+
+  it("lands on the hovered track when it is free", () => {
+    const tl = mkTl([mkTrack("t1", "video", [])]);
+    expect(resolveMediaDropTrack(tl, videoItem, 0, { kind: "existing", trackIndex: 0 })).toEqual({
+      trackIndex: 0,
+      newTrack: null,
+    });
+  });
+
+  it("passes an insert-zone hover through as a new track", () => {
+    const tl = mkTl([mkTrack("t1", "video", [])]);
+    expect(resolveMediaDropTrack(tl, videoItem, 90, { kind: "newTrack", index: 0 })).toEqual({
+      trackIndex: null,
+      newTrack: { index: 0, type: "video" },
+    });
+  });
+
+  it("falls back to a new lane when the only compatible track is occupied at the drop point", () => {
+    // Same scenario the addMediaToTimelineAt overlap test exercises: a clip sits
+    // at [0,60) on the sole video track, so a video dropped at 0 opens a new lane.
+    const tl = mkTl([mkTrack("t1", "video", [mkClip("c", 0, 60)])]);
+    expect(resolveMediaDropTrack(tl, videoItem, 0, { kind: "existing", trackIndex: 0 })).toEqual({
+      trackIndex: null,
+      newTrack: { index: 0, type: "video" },
+    });
+  });
+
+  it("stays on the occupied lane when the drop point itself is free", () => {
+    const tl = mkTl([mkTrack("t1", "video", [mkClip("c", 0, 60)])]);
+    expect(resolveMediaDropTrack(tl, videoItem, 120, { kind: "existing", trackIndex: 0 })).toEqual({
+      trackIndex: 0,
+      newTrack: null,
+    });
+  });
+
+  it("routes audio to a compatible audio lane even when hovering a video track", () => {
+    const tl = mkTl([mkTrack("t1", "video", []), mkTrack("t2", "audio", [])]);
+    expect(resolveMediaDropTrack(tl, audioItem, 0, { kind: "existing", trackIndex: 0 })).toEqual({
+      trackIndex: 1,
+      newTrack: null,
+    });
+  });
+
+  it("creates an audio track when none exists", () => {
+    const tl = mkTl([mkTrack("t1", "video", [])]);
+    expect(resolveMediaDropTrack(tl, audioItem, 0, { kind: "existing", trackIndex: 0 })).toEqual({
+      trackIndex: null,
+      newTrack: { index: 0, type: "audio" },
+    });
+  });
+});
+
+describe("mediaDurationFrames", () => {
+  it("converts source seconds to frames", () => {
+    const item: MediaItem = { id: "v", name: "v", type: "video", duration: 2, hasAudio: false };
+    expect(mediaDurationFrames(item, 30)).toBe(60);
+  });
+
+  it("uses the still-image default for zero-duration items", () => {
+    const item: MediaItem = { id: "i", name: "i", type: "image", duration: 0, hasAudio: false };
+    expect(mediaDurationFrames(item, 30)).toBe(150);
+  });
+
+  it("never returns less than one frame", () => {
+    const item: MediaItem = { id: "v", name: "v", type: "video", duration: 0.001, hasAudio: false };
+    expect(mediaDurationFrames(item, 30)).toBe(1);
   });
 });

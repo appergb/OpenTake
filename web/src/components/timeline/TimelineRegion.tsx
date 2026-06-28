@@ -15,6 +15,7 @@ import { TimelineContainer } from "./TimelineContainer";
 import { MEDIA_DND_TYPE } from "../media/MediaPanel";
 import { useMediaStore } from "../../store/mediaStore";
 import { useEditorUiStore } from "../../store/uiStore";
+import { useProjectStore } from "../../store/projectStore";
 import { addMediaToTimeline } from "../../store/editActions";
 import { useT } from "../../i18n";
 
@@ -22,6 +23,11 @@ export function TimelineRegion() {
   const t = useT();
   const [dragOver, setDragOver] = useState(false);
   const setPreviewMedia = useEditorUiStore((s) => s.setPreviewMedia);
+  // The full-region "drop to add" overlay is only an affordance for an EMPTY
+  // timeline. Once tracks exist, TimelineContainer paints a precise drop ghost
+  // (exact track + frame span), so the whole-region highlight is suppressed to
+  // avoid masking it.
+  const hasTracks = useProjectStore((s) => s.timeline.tracks.length > 0);
 
   const hasMediaPayload = (e: React.DragEvent) =>
     e.dataTransfer.types.includes(MEDIA_DND_TYPE);
@@ -61,7 +67,7 @@ export function TimelineRegion() {
         onDrop={onDrop}
       >
         <TimelineContainer />
-        {dragOver && (
+        {dragOver && !hasTracks && (
           <div
             style={{
               position: "absolute",

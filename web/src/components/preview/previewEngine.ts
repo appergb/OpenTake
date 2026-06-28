@@ -344,7 +344,11 @@ export function useTimelinePlaybackEngine(): void {
       const tl = useProjectStore.getState().timeline;
       const fps = tl.fps > 0 ? tl.fps : 30;
       const f = useEditorUiStore.getState().activeFrame;
-      seekAll(tl, f, fps);
+      // Resume from pause: do NOT force-seek every element. They are already
+      // frozen on the resume frame; re-seeking flushes each <video>'s decode
+      // buffer and causes sustained stutter after resume (timeline-only, with
+      // many elements). syncFollowers re-seeks only on >0.05s drift, then plays —
+      // so an already-correct element just resumes without a buffer flush.
       syncFollowers(tl, f, fps);
       lastSet = f;
     }

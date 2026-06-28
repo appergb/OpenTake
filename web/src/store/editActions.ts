@@ -10,6 +10,7 @@ import { forceRefresh } from "./sync";
 import { useEditorUiStore } from "./uiStore";
 import { useProjectStore } from "./projectStore";
 import { fitTransformForMedia, trimToPlayheadEdits } from "../lib/clip";
+import type { TrackDropTarget } from "../lib/geometry";
 import { useClipboardStore } from "./clipboardStore";
 import type {
   Clip,
@@ -134,6 +135,12 @@ export async function setTrackProps(
   props: { muted?: boolean; hidden?: boolean; syncLocked?: boolean },
 ) {
   await applyAndRefresh({ type: "setTrackProps", trackIndex, ...props });
+}
+
+/** Swap two same-kind tracks as whole rows; cross-kind swaps are a no-op in core. */
+export async function swapTracks(a: number, b: number) {
+  if (a === b) return;
+  await applyAndRefresh({ type: "swapTracks", a, b });
 }
 
 /** Replace (or clear) a clip's keyframe track for one property. */
@@ -376,6 +383,15 @@ export async function rippleDeleteSelectedClips() {
  *  ≈ 5s) since they have no intrinsic length. */
 const DEFAULT_IMAGE_SECONDS = 5;
 
+/** Frame length a media item occupies when placed on the timeline: its source
+ *  duration (seconds → frames), or the still-image default when it has none.
+ *  Shared by the clip-entry builders and the drop-ghost preview so the ghost
+ *  width matches the clip that actually lands. */
+export function mediaDurationFrames(item: MediaItem, fps: number): number {
+  const seconds = item.duration > 0 ? item.duration : DEFAULT_IMAGE_SECONDS;
+  return Math.max(1, Math.round(seconds * fps));
+}
+
 function isVisual(type: MediaItem["type"]): boolean {
   return type === "video" || type === "image" || type === "text" || type === "lottie";
 }
@@ -416,7 +432,7 @@ function trackOverlaps(timeline: Timeline, trackIndex: number, startFrame: numbe
   return timeline.tracks[trackIndex].clips.some((c) => c.startFrame < endFrame && c.startFrame + c.durationFrames > startFrame);
 }
 
-function firstOpenCompatibleTrackIndex(
+export function firstOpenCompatibleTrackIndex(
   timeline: Timeline,
   type: MediaItem["type"],
   startFrame: number,
@@ -441,8 +457,7 @@ function firstOpenCompatibleTrackIndex(
 function entryForMedia(timeline: Timeline, item: MediaItem): ClipEntryReq | null {
   const trackIndex = firstCompatibleTrackIndex(timeline, item.type);
   if (trackIndex === null) return null;
-  const seconds = item.duration > 0 ? item.duration : DEFAULT_IMAGE_SECONDS;
-  const durationFrames = Math.max(1, Math.round(seconds * timeline.fps));
+  const durationFrames = mediaDurationFrames(item, timeline.fps);
   return {
     mediaRef: item.id,
     mediaType: item.type,
@@ -462,8 +477,7 @@ function entryForMediaAt(
   startFrame: number,
   preferredTrackIndex: number | null,
 ): ClipEntryReq | null {
-  const seconds = item.duration > 0 ? item.duration : DEFAULT_IMAGE_SECONDS;
-  const durationFrames = Math.max(1, Math.round(seconds * timeline.fps));
+  const durationFrames = mediaDurationFrames(item, timeline.fps);
   const trackIndex = firstOpenCompatibleTrackIndex(
     timeline,
     item.type,
@@ -483,6 +497,35 @@ function entryForMediaAt(
     addLinkedAudio: item.type === "video" && item.hasAudio,
     transform: fitTransformForMedia(item.width, item.height, timeline.width, timeline.height),
   };
+}
+
+/** Where a media item dropped at `startFrame` over `dropTarget` will actually
+ *  land — the truthful target for the drop-ghost preview. Pure mirror of
+ *  [`addMediaToTimelineAtInner`]'s resolution: an insert-zone hover makes a new
+ *  track; an over-a-track hover lands on the first open compatible track (the
+ *  hovered one when free), and falls back to a fresh track when none is open. */
+export function resolveMediaDropTrack(
+  timeline: Timeline,
+  item: MediaItem,
+  startFrame: number,
+  dropTarget: TrackDropTarget,
+): { trackIndex: number | null; newTrack: { index: number; type: ClipType } | null } {
+  const newType: ClipType = item.type === "audio" ? "audio" : "video";
+  if (dropTarget.kind === "newTrack") {
+    return { trackIndex: null, newTrack: { index: dropTarget.index, type: newType } };
+  }
+  const durationFrames = mediaDurationFrames(item, timeline.fps);
+  const landed = firstOpenCompatibleTrackIndex(
+    timeline,
+    item.type,
+    Math.max(0, startFrame),
+    durationFrames,
+    dropTarget.trackIndex,
+  );
+  if (landed !== null) return { trackIndex: landed, newTrack: null };
+  // No open compatible track under/near the hover: the drop inserts a fresh one
+  // at the hovered index (fallback in `addMediaToTimelineAtInner`).
+  return { trackIndex: null, newTrack: { index: dropTarget.trackIndex, type: newType } };
 }
 
 /** Serialized tail for media -> timeline adds. Both call sites fire-and-forget

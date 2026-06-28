@@ -27,8 +27,6 @@ import { useT } from "../../i18n";
 import { compositeFrame, type CompositeFrame } from "../../lib/api";
 import type { MediaItem } from "../../lib/types";
 
-type SettledCompositeFrame = CompositeFrame & { frame: number };
-
 export function Preview() {
   const t = useT();
   const timeline = useProjectStore((s) => s.timeline);
@@ -36,7 +34,6 @@ export function Preview() {
   const setCurrentFrame = useEditorUiStore((s) => s.setCurrentFrame);
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
   const setScrubbing = useEditorUiStore((s) => s.setScrubbing);
-  const isScrubbing = useEditorUiStore((s) => s.isScrubbing);
   const togglePlayTimeline = useEditorUiStore((s) => s.togglePlay);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
   const pushToast = useEditorUiStore((s) => s.pushToast);
@@ -53,7 +50,6 @@ export function Preview() {
   const [mediaPlaying, setMediaPlaying] = useState(false);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
-  const [settledComposite, setSettledComposite] = useState<SettledCompositeFrame | null>(null);
   useEffect(() => {
     setMediaTime(0);
     setMediaDuration(0);
@@ -92,36 +88,6 @@ export function Preview() {
     : totalFrames(timeline);
   const activeShownFrame = previewing ? Math.round(mediaTime * fps) : activeFrame;
   const playing = previewing ? mediaPlaying : isPlaying;
-  const settledCompositeFrame =
-    timelineHasContent && !isPlaying && !isScrubbing ? Math.max(0, Math.floor(activeFrame)) : null;
-  const visibleComposite =
-    settledCompositeFrame !== null && settledComposite?.frame === settledCompositeFrame
-      ? settledComposite
-      : null;
-
-  useEffect(() => {
-    if (settledCompositeFrame === null) {
-      setSettledComposite(null);
-      return;
-    }
-
-    let cancelled = false;
-    setSettledComposite(null);
-    void compositeFrame(settledCompositeFrame)
-      .then((frame) => {
-        if (cancelled) return;
-        setSettledComposite(frame ? { ...frame, frame: settledCompositeFrame } : null);
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        console.warn("compositeFrame failed:", error);
-        setSettledComposite(null);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [settledCompositeFrame, timeline]);
 
   const seekTo = (frame: number) => {
     const clamped = Math.max(0, Math.min(total, frame));
@@ -148,8 +114,7 @@ export function Preview() {
     if (previewing || !timelineHasContent) return;
     const frame = Math.max(0, Math.floor(activeFrame));
     try {
-      const image =
-        visibleComposite?.frame === frame ? visibleComposite : await compositeFrame(frame, 0);
+      const image: CompositeFrame | null = await compositeFrame(frame, 0);
       if (!image) {
         pushToast(t("preview.captureFrameUnavailable"));
         return;
@@ -204,24 +169,7 @@ export function Preview() {
         ) : (
           <div style={timelineCanvasStyle}>
             {timelineHasContent ? (
-              <>
-                <TimelinePlayback timeline={timeline} fps={fps} />
-                {visibleComposite ? (
-                  <img
-                    src={visibleComposite.dataUrl}
-                    alt=""
-                    draggable={false}
-                    style={{
-                      position: "absolute",
-                      inset: 0,
-                      width: "100%",
-                      height: "100%",
-                      objectFit: "fill",
-                      pointerEvents: "none",
-                    }}
-                  />
-                ) : null}
-              </>
+              <TimelinePlayback timeline={timeline} fps={fps} />
             ) : (
               // Empty timeline: a framed 16:9 canvas surface placeholder.
               <div

@@ -233,6 +233,8 @@ pub enum EditRequest {
     #[serde(rename_all = "camelCase")]
     RemoveTracks { track_indexes: Vec<usize> },
     #[serde(rename_all = "camelCase")]
+    SwapTracks { a: usize, b: usize },
+    #[serde(rename_all = "camelCase")]
     InsertTrack { kind: ClipType, at: Option<usize> },
     #[serde(rename_all = "camelCase")]
     SetTrackProps {
@@ -385,6 +387,7 @@ impl EditRequest {
             EditRequest::RemoveTracks { track_indexes } => {
                 EditCommand::RemoveTracks { track_indexes }
             }
+            EditRequest::SwapTracks { a, b } => EditCommand::SwapTracks { a, b },
             EditRequest::InsertTrack { kind, at } => EditCommand::InsertTrack { kind, at },
             EditRequest::SetTrackProps {
                 track_index,
@@ -749,6 +752,20 @@ mod edit_request_serde_tests {
                 assert_eq!(media_ref, "asset-2");
             }
             other => panic!("expected SwapMedia, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_swap_tracks_and_maps_to_command() {
+        let request = serde_json::from_str::<EditRequest>(r#"{"type":"swapTracks","a":0,"b":2}"#)
+            .expect("swapTracks camelCase");
+
+        match request.into_command().expect("swapTracks command") {
+            EditCommand::SwapTracks { a, b } => {
+                assert_eq!(a, 0);
+                assert_eq!(b, 2);
+            }
+            other => panic!("expected SwapTracks, got {other:?}"),
         }
     }
 

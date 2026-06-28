@@ -344,6 +344,15 @@ export function createFallbackStore() {
           }
           return result(changed, "Remove Clip", cmd.clipIds);
         }
+        case "swapTracks": {
+          const first = timeline.tracks[cmd.a];
+          const second = timeline.tracks[cmd.b];
+          if (!first || !second || first.type !== second.type || cmd.a === cmd.b) {
+            return result(false, "Swap Tracks", []);
+          }
+          [timeline.tracks[cmd.a], timeline.tracks[cmd.b]] = [second, first];
+          return result(true, "Swap Tracks", []);
+        }
         case "moveClips": {
           let changed = false;
           for (const m of cmd.moves) {
