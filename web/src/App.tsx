@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { TitleBar } from "./components/shell/TitleBar";
+import { ExportDialog } from "./components/shell/ExportDialog";
 import { EditorSplit } from "./components/shell/EditorSplit";
 import { HomeView } from "./components/home/HomeView";
 import { SettingsView } from "./components/settings/SettingsView";
@@ -104,6 +105,7 @@ export default function App() {
         </>
       )}
       {settingsOpen && <SettingsView />}
+      <ExportDialog />
       <Toast />
     </div>
   );

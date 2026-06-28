@@ -8,7 +8,7 @@
  * menu, the in-app menu entry point for an environment without a native menu bar.
  */
 
-import { Upload, Home, Settings as SettingsIcon, Library } from "lucide-react";
+import { Upload, Home, Settings as SettingsIcon, Library, Film } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { ViewMenu } from "./ViewMenu";
 import { useEditorUiStore } from "../../store/uiStore";
@@ -39,8 +39,14 @@ function defaultXmlName(projectPath: string | null): string {
 export function TitleBar() {
   const setView = useEditorUiStore((s) => s.setView);
   const setSettingsOpen = useEditorUiStore((s) => s.setSettingsOpen);
+  const setExportDialogOpen = useEditorUiStore((s) => s.setExportDialogOpen);
   const projectPath = useProjectStore((s) => s.projectPath);
+  const tracks = useProjectStore((s) => s.timeline.tracks);
   const t = useT();
+
+  // Video export needs something to render: disable the entry when no track
+  // holds a clip (an empty timeline would only encode black frames).
+  const hasClips = tracks.some((track) => track.clips.length > 0);
 
   /**
    * Export the timeline as Final Cut Pro 7 XML (`.xml`). Mirrors the new-project
@@ -137,6 +143,28 @@ export function TitleBar() {
         }}
       >
         <Icon icon={SettingsIcon} size={13} />
+      </button>
+      <button
+        title={hasClips ? t("title.exportVideoHint") : t("title.exportVideoEmpty")}
+        aria-label={t("title.exportVideo")}
+        disabled={!hasClips}
+        onClick={() => setExportDialogOpen(true)}
+        className={hasClips ? "hover-area" : undefined}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 4,
+          height: 26,
+          padding: "0 var(--space-sm)",
+          color: "var(--text-secondary)",
+          fontSize: "var(--fs-sm)",
+          fontWeight: "var(--fw-medium)",
+          cursor: hasClips ? "pointer" : "default",
+          opacity: hasClips ? 1 : 0.4,
+        }}
+      >
+        <Icon icon={Film} size={13} />
+        {t("title.exportVideo")}
       </button>
       <button
         title={t("title.exportHint")}

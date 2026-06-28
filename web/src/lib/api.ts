@@ -130,6 +130,44 @@ export async function exportFcpxml(path: string): Promise<void> {
   }
 }
 
+// MARK: - Video export (#112)
+//
+// `export_video` composites every timeline frame on the GPU and encodes it to a
+// real file on disk (H.264 / .mp4 in this cut; H.265 / ProRes are accepted by
+// the type but rejected by the backend until wired). The request mirrors the
+// Rust `ExportRequest` DTO verbatim (camelCase `outPath`; lowercase enum tags).
+// Outside Tauri there is no GPU/ffmpeg, so the wrapper rejects with a friendly
+// error rather than silently no-op'ing (an export the user asked for must not
+// quietly do nothing).
+
+/** Output codec. Only `h264` is fully wired; the others are reserved. */
+export type ExportCodec = "h264" | "h265" | "prores";
+
+/** Output short-edge resolution selector. */
+export type ExportQuality = "720p" | "1080p" | "4k";
+
+/** Parameters for a video export (mirror of Rust `ExportRequest`). */
+export interface ExportRequest {
+  outPath: string;
+  codec: ExportCodec;
+  quality: ExportQuality;
+}
+
+/** Summary of a completed export (mirror of Rust `ExportSummary`). */
+export interface ExportSummary {
+  outPath: string;
+  width: number;
+  height: number;
+  fps: number;
+  frameCount: number;
+}
+
+export async function exportVideo(req: ExportRequest): Promise<ExportSummary> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<ExportSummary>("export_video", { req });
+  throw new Error("video export requires the desktop app (GPU + ffmpeg)");
+}
+
 // MARK: - Media commands
 //
 // `import_folder` scans a directory for white-listed media and imports each;
