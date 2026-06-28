@@ -148,3 +148,22 @@ export function advancePlayhead(args: {
   const safeFps = args.fps > 0 ? args.fps : 30;
   return currentFrame + dtSec * safeFps;
 }
+
+/**
+ * During Rust streaming playback the engine drives the playhead one frame at a
+ * time (`playback_frame` → setActiveFrame), recording each as `lastEngineFrame`.
+ * A jump of the store's `activeFrame` AWAY from that (keyboard step, transport
+ * click) is therefore an EXTERNAL seek the engine should be told about via
+ * `playback_seek`. Returns false until the engine has emitted at least one frame
+ * (`lastEngineFrame` null) and for in-tolerance drift (the engine's own per-frame
+ * advance), so a normal tick is never mistaken for a seek. SPEC: integer frames.
+ */
+export function isExternalSeekWhilePlaying(args: {
+  activeFrame: number;
+  lastEngineFrame: number | null;
+  epsilonFrames?: number;
+}): boolean {
+  if (args.lastEngineFrame === null) return false;
+  const eps = args.epsilonFrames ?? 2;
+  return Math.abs(Math.floor(args.activeFrame) - args.lastEngineFrame) > eps;
+}

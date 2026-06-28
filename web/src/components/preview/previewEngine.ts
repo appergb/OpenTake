@@ -25,6 +25,7 @@ import {
   advancePlayhead,
   clipVolume,
   frameForSourceTime,
+  isExternalSeekWhilePlaying,
   sourceTimeSec,
   type ActiveMedia,
 } from "./timelinePlayback";
@@ -36,7 +37,13 @@ import {
   interactiveToleranceSec,
 } from "./interactiveSeek";
 import type { Timeline } from "../../lib/types";
-import { isTauri, onPlaybackFrame, playbackStart, playbackStop } from "../../lib/api";
+import {
+  isTauri,
+  onPlaybackFrame,
+  playbackSeek,
+  playbackStart,
+  playbackStop,
+} from "../../lib/api";
 import { rustEngineEnabled } from "./rustEngine";
 
 // --- Shared element registry ---------------------------------------------
@@ -213,6 +220,10 @@ export function useTimelinePlaybackEngine(): void {
   const isScrubbing = useEditorUiStore((s) => s.isScrubbing);
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
   const previousTransportState = useRef({ isPlaying: false, isScrubbing: false });
+  // Last frame the Rust engine emitted (playback_frame), so the watcher below can
+  // tell an external seek (keyboard / transport) apart from the engine's own
+  // per-frame advance and forward it via playback_seek (#162). null = not driving.
+  const lastEngineFrameRef = useRef<number | null>(null);
 
   useEffect(() => {
     const prev = previousTransportState.current;
@@ -253,6 +264,7 @@ export function useTimelinePlaybackEngine(): void {
       // The Rust stream provides BOTH video (MJPEG <img>) and audio (cpal), so
       // the <video> followers must not also play (double audio + wasted decode).
       pauseAll();
+      lastEngineFrameRef.current = null;
       const startFrame = Math.max(0, Math.floor(useEditorUiStore.getState().activeFrame));
       playbackStart(startFrame).catch((e) => console.warn("playbackStart failed:", e));
 
@@ -260,6 +272,7 @@ export function useTimelinePlaybackEngine(): void {
       let disposed = false;
       void onPlaybackFrame((frame) => {
         if (disposed) return; // cleanup ran before the listener resolved
+        lastEngineFrameRef.current = frame;
         const ui = useEditorUiStore.getState();
         ui.setActiveFrame(frame);
         // Stop at the CURRENT timeline end — re-read so a mid-play edit can't
@@ -410,4 +423,22 @@ export function useTimelinePlaybackEngine(): void {
       pauseAll();
     };
   }, [isPlaying, isScrubbing]);
+
+  // While the Rust engine owns PLAY, an external seek (keyboard step / transport
+  // click) jumps activeFrame away from the engine's per-frame updates. The switch
+  // effect above doesn't depend on activeFrame, so this dedicated watcher tells
+  // the engine to reposition via playback_seek instead of ignoring it (#162).
+  useEffect(() => {
+    if (!(rustEngineEnabled() && isTauri && isPlaying && !isScrubbing)) return;
+    if (
+      isExternalSeekWhilePlaying({
+        activeFrame,
+        lastEngineFrame: lastEngineFrameRef.current,
+      })
+    ) {
+      const f = Math.max(0, Math.floor(activeFrame));
+      lastEngineFrameRef.current = f;
+      void playbackSeek(f).catch((e) => console.warn("playbackSeek failed:", e));
+    }
+  }, [activeFrame, isPlaying, isScrubbing]);
 }
