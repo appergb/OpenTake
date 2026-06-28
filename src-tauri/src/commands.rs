@@ -9,7 +9,7 @@
 //! no serde derives), so the editing entry point takes a local serde-friendly
 //! [`EditRequest`] that maps 1:1 onto the variants the front end issues in v1.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
 use opentake_core::dto::{
@@ -94,6 +94,66 @@ pub fn export_fcpxml(core: State<'_, AppCore>, path: String) -> Result<(), Strin
     let project_dir = core.project_dir();
     let xml = opentake_project::export_xmeml(&timeline, &manifest, project_dir.as_deref());
     std::fs::write(&path, xml).map_err(|e| e.to_string())
+}
+
+/// Requested subtitle container, projected from the front end. Lower-cased serde
+/// tags (`"srt"` / `"vtt"`) match the file extension the user picks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SubtitleFormat {
+    /// SubRip (`.srt`) — `HH:MM:SS,mmm` timestamps, numbered cues.
+    #[default]
+    Srt,
+    /// WebVTT (`.vtt`) — `HH:MM:SS.mmm` timestamps, `WEBVTT` header.
+    Vtt,
+}
+
+/// Summary of a completed subtitle export, returned to the front end. `cueCount`
+/// lets the UI distinguish "wrote N cues" from "timeline has no captions" (in
+/// which case it shows a friendly toast); the file is still written either way —
+/// an empty SRT / header-only VTT is the documented contract of the pure layer.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleExportSummary {
+    /// Absolute path the subtitle file was written to.
+    pub out_path: String,
+    /// Number of caption cues emitted.
+    pub cue_count: usize,
+}
+
+/// `export_subtitles`: write the current timeline's caption clips to `path` as a
+/// SubRip (`.srt`) or WebVTT (`.vtt`) document. Caption cues are collected from
+/// every track via the pure `opentake_domain::subtitle_export` layer (any clip
+/// carrying a `caption_group_id` + non-empty `text_content`), serialized, and
+/// written to disk. Returns the cue count so the UI can report an empty result.
+#[tauri::command]
+pub fn export_subtitles(
+    core: State<'_, AppCore>,
+    path: String,
+    format: SubtitleFormat,
+) -> Result<SubtitleExportSummary, String> {
+    let timeline = core.get_timeline().timeline;
+    write_subtitles(&timeline, path, format)
+}
+
+/// The subtitle export body, decoupled from Tauri/`AppCore` so it can be driven
+/// by a unit test with a hand-built timeline + temp path. The command wrapper
+/// only snapshots the live session and delegates here.
+fn write_subtitles(
+    timeline: &opentake_domain::Timeline,
+    path: String,
+    format: SubtitleFormat,
+) -> Result<SubtitleExportSummary, String> {
+    let cue_count = opentake_domain::collect_caption_cues(timeline).len();
+    let body = match format {
+        SubtitleFormat::Srt => opentake_domain::export_srt(timeline),
+        SubtitleFormat::Vtt => opentake_domain::export_vtt(timeline),
+    };
+    std::fs::write(&path, body).map_err(|e| e.to_string())?;
+    Ok(SubtitleExportSummary {
+        out_path: path,
+        cue_count,
+    })
 }
 
 /// `can_undo` / `can_redo`: enable/disable the toolbar affordances.
@@ -879,5 +939,133 @@ mod edit_request_serde_tests {
             delete_folder.into_command().expect("deleteFolder command"),
             EditCommand::DeleteFolder { .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod subtitle_export_tests {
+    use super::{write_subtitles, SubtitleFormat};
+    use opentake_domain::{Clip, ClipType, Timeline, Track};
+
+    /// Build a caption clip: text + caption_group_id set, media_type Text — the
+    /// two fields `collect_caption_cues` requires to treat a clip as a caption.
+    fn caption(id: &str, group: &str, start: i32, dur: i32, text: &str) -> Clip {
+        let mut c = Clip::new(id, "caption", start, dur);
+        c.media_type = ClipType::Text;
+        c.caption_group_id = Some(group.to_string());
+        c.text_content = Some(text.to_string());
+        c
+    }
+
+    /// A timeline with a single caption track holding `clips`, at the given fps.
+    fn timeline_with(fps: i32, clips: Vec<Clip>) -> Timeline {
+        let mut tl = Timeline::new();
+        tl.fps = fps;
+        let mut t = Track::new("t-cap", ClipType::Text);
+        t.clips = clips;
+        tl.tracks.push(t);
+        tl
+    }
+
+    /// `SubtitleFormat` must deserialize from the lower-case tags the front end
+    /// sends (matching the file extension) and default to SRT for bare payloads.
+    #[test]
+    fn subtitle_format_deserializes_lowercase_tags() {
+        assert_eq!(
+            serde_json::from_str::<SubtitleFormat>(r#""srt""#).expect("srt"),
+            SubtitleFormat::Srt
+        );
+        assert_eq!(
+            serde_json::from_str::<SubtitleFormat>(r#""vtt""#).expect("vtt"),
+            SubtitleFormat::Vtt
+        );
+        assert_eq!(SubtitleFormat::default(), SubtitleFormat::Srt);
+    }
+
+    /// The summary returned to the front end must serialize as camelCase
+    /// (`outPath` / `cueCount`) so the TS mirror lines up.
+    #[test]
+    fn summary_serializes_camel_case() {
+        let summary = super::SubtitleExportSummary {
+            out_path: "/tmp/x.srt".into(),
+            cue_count: 2,
+        };
+        let json = serde_json::to_string(&summary).expect("serialize");
+        assert!(json.contains("\"outPath\""), "got: {json}");
+        assert!(json.contains("\"cueCount\":2"), "got: {json}");
+    }
+
+    /// A timeline carrying caption clips exports a non-empty SRT body with one
+    /// numbered cue per caption, and reports the cue count.
+    #[test]
+    fn exports_non_empty_srt_with_cue_count() {
+        let dir = std::env::temp_dir();
+        let path = dir
+            .join(format!("opentake-subs-{}.srt", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let tl = timeline_with(
+            30,
+            vec![
+                caption("c1", "g1", 30, 30, "Hello"),
+                caption("c2", "g1", 60, 30, "World"),
+            ],
+        );
+
+        let summary =
+            write_subtitles(&tl, path.clone(), SubtitleFormat::Srt).expect("srt export ok");
+        assert_eq!(summary.cue_count, 2);
+        assert_eq!(summary.out_path, path);
+
+        let written = std::fs::read_to_string(&path).expect("read back srt");
+        let _ = std::fs::remove_file(&path);
+        assert!(written.contains("Hello"));
+        assert!(written.contains("World"));
+        // SRT uses comma timestamps and 1-based indices.
+        assert!(written.starts_with("1\n"), "got: {written:?}");
+        assert!(
+            written.contains("00:00:01,000 --> 00:00:02,000"),
+            "got: {written:?}"
+        );
+    }
+
+    /// VTT export always opens with the `WEBVTT` header and uses dot timestamps.
+    #[test]
+    fn exports_vtt_with_header() {
+        let dir = std::env::temp_dir();
+        let path = dir
+            .join(format!("opentake-subs-{}.vtt", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let tl = timeline_with(30, vec![caption("c1", "g1", 30, 30, "Hello")]);
+
+        let summary =
+            write_subtitles(&tl, path.clone(), SubtitleFormat::Vtt).expect("vtt export ok");
+        assert_eq!(summary.cue_count, 1);
+
+        let written = std::fs::read_to_string(&path).expect("read back vtt");
+        let _ = std::fs::remove_file(&path);
+        assert!(written.starts_with("WEBVTT\n\n"), "got: {written:?}");
+        assert!(
+            written.contains("00:00:01.000 --> 00:00:02.000"),
+            "got: {written:?}"
+        );
+    }
+
+    /// A timeline with no caption clips writes a (header-only / empty) file and
+    /// reports `cue_count == 0`, the signal the UI uses for its friendly toast.
+    #[test]
+    fn empty_timeline_reports_zero_cues() {
+        let dir = std::env::temp_dir();
+        let path = dir
+            .join(format!("opentake-subs-empty-{}.srt", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let tl = Timeline::new();
+
+        let summary =
+            write_subtitles(&tl, path.clone(), SubtitleFormat::Srt).expect("empty export ok");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(summary.cue_count, 0);
     }
 }

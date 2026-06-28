@@ -150,6 +150,7 @@ pub fn run() {
             commands::project_save,
             commands::get_default_project_dir,
             commands::export_fcpxml,
+            commands::export_subtitles,
             commands::check_path_exists,
             media::import_folder,
             media::import_media,
