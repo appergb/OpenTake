@@ -562,10 +562,10 @@ fn set_clip_properties_propagates_timing_to_linked_partner() {
         &mut st,
         EditCommand::SetClipProperties {
             clip_ids: vec!["v1".into()],
-            properties: ClipProperties {
+            properties: Box::new(ClipProperties {
                 duration_frames: Some(40),
                 ..Default::default()
-            },
+            }),
         },
         &g,
     )
@@ -593,10 +593,10 @@ fn set_clip_properties_scalar_clears_keyframe_track() {
         &mut st,
         EditCommand::SetClipProperties {
             clip_ids: vec!["c".into()],
-            properties: ClipProperties {
+            properties: Box::new(ClipProperties {
                 opacity: Some(0.5),
                 ..Default::default()
-            },
+            }),
         },
         &g,
     )
@@ -627,7 +627,7 @@ fn set_clip_properties_crop_sets_and_clears_track() {
         &mut st,
         EditCommand::SetClipProperties {
             clip_ids: vec!["c".into()],
-            properties: ClipProperties {
+            properties: Box::new(ClipProperties {
                 crop: Some(opentake_domain::Crop {
                     left: 0.2,
                     top: 0.1,
@@ -635,7 +635,7 @@ fn set_clip_properties_crop_sets_and_clears_track() {
                     bottom: 0.0,
                 }),
                 ..Default::default()
-            },
+            }),
         },
         &g,
     )
@@ -655,13 +655,13 @@ fn set_clip_properties_fade_sets_frames_and_interpolation() {
         &mut st,
         EditCommand::SetClipProperties {
             clip_ids: vec!["c".into()],
-            properties: ClipProperties {
+            properties: Box::new(ClipProperties {
                 fade_in_frames: Some(10),
                 fade_out_frames: Some(15),
                 fade_in_interpolation: Some(Interpolation::Smooth),
                 fade_out_interpolation: Some(Interpolation::Hold),
                 ..Default::default()
-            },
+            }),
         },
         &g,
     )
@@ -683,10 +683,10 @@ fn set_clip_properties_fade_clamps_to_duration() {
         &mut st,
         EditCommand::SetClipProperties {
             clip_ids: vec!["c".into()],
-            properties: ClipProperties {
+            properties: Box::new(ClipProperties {
                 fade_in_frames: Some(100),
                 ..Default::default()
-            },
+            }),
         },
         &g,
     )
@@ -704,11 +704,11 @@ fn set_clip_properties_flip_writes_to_transform() {
         &mut st,
         EditCommand::SetClipProperties {
             clip_ids: vec!["c".into()],
-            properties: ClipProperties {
+            properties: Box::new(ClipProperties {
                 flip_horizontal: Some(true),
                 flip_vertical: Some(true),
                 ..Default::default()
-            },
+            }),
         },
         &g,
     )
@@ -726,7 +726,7 @@ fn set_clip_properties_multiple_fields_at_once() {
         &mut st,
         EditCommand::SetClipProperties {
             clip_ids: vec!["c".into()],
-            properties: ClipProperties {
+            properties: Box::new(ClipProperties {
                 crop: Some(opentake_domain::Crop {
                     left: 0.1,
                     top: 0.2,
@@ -738,7 +738,7 @@ fn set_clip_properties_multiple_fields_at_once() {
                 flip_horizontal: Some(true),
                 opacity: Some(0.8),
                 ..Default::default()
-            },
+            }),
         },
         &g,
     )

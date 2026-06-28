@@ -230,11 +230,11 @@ pub fn plan_smart_reframe(
         "smart_reframe",
         vec![EditCommand::SetClipProperties {
             clip_ids: clip_ids.to_vec(),
-            properties: ClipProperties {
+            properties: Box::new(ClipProperties {
                 crop: Some(crop),
                 transform,
                 ..Default::default()
-            },
+            }),
         }],
     ))
 }

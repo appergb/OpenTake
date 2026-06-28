@@ -134,6 +134,9 @@ pub struct ClipProperties {
     pub opacity: Option<f64>,
     pub transform: Option<Transform>,
     pub text_content: Option<String>,
+    /// Text style for a text clip (font / size / color / alignment / shadow /
+    /// background / border). Replaces the clip's whole `text_style`.
+    pub text_style: Option<opentake_domain::TextStyle>,
     /// Per-clip crop insets (normalized 0–1). Setting this clears `crop_track`.
     pub crop: Option<Crop>,
     /// Fade-in length in frames. Setting this clamps to the clip duration.
@@ -204,9 +207,12 @@ pub enum EditCommand {
     /// Overwrite-style trim: resize clips in place from new source-frame trims.
     TrimClips { edits: Vec<TrimEdit> },
     /// Assign clip properties (timing changes propagate to linked partners).
+    /// `properties` is boxed: it carries a full `TextStyle`, which would
+    /// otherwise make this the dominant `EditCommand` variant (the enum is
+    /// `Clone`d on every undo snapshot path).
     SetClipProperties {
         clip_ids: Vec<String>,
-        properties: ClipProperties,
+        properties: Box<ClipProperties>,
     },
     /// Replace (or clear) a clip's keyframe track for one property.
     SetKeyframes {
@@ -394,7 +400,7 @@ pub fn apply(
         EditCommand::SetClipProperties {
             clip_ids,
             properties,
-        } => set_clip_properties(state, clip_ids, properties),
+        } => set_clip_properties(state, clip_ids, *properties),
         EditCommand::SetKeyframes {
             clip_id,
             property,
@@ -1055,6 +1061,9 @@ fn apply_property_changes(
     }
     if let Some(c) = &props.text_content {
         clip.text_content = Some(c.clone());
+    }
+    if let Some(s) = &props.text_style {
+        clip.text_style = Some(s.clone());
     }
 }
 
@@ -2840,5 +2849,97 @@ mod duplicate_clips_tests {
         assert_eq!(state.timeline.tracks[0].clips.len(), 1);
         assert_eq!(state.timeline.tracks[0].clips[0].id, "c1");
         assert_eq!(state.version(), version_before + 2); // commit + undo
+    }
+}
+
+#[cfg(test)]
+mod text_style_property_tests {
+    use super::*;
+    use crate::id::SeqIdGen;
+    use opentake_domain::{Clip, ClipType, TextAlignment, TextStyle, Track};
+
+    fn state_with_text_clip() -> EditorState {
+        let mut tl = Timeline::new();
+        let mut t = Track::new("v1", ClipType::Video);
+        let mut clip = Clip::new("c1", "", 0, 30);
+        clip.media_type = ClipType::Text;
+        clip.source_clip_type = ClipType::Text;
+        clip.text_content = Some("Hi".into());
+        clip.text_style = Some(TextStyle::default());
+        t.clips.push(clip);
+        tl.tracks.push(t);
+        EditorState::from_timeline(tl)
+    }
+
+    #[test]
+    fn set_text_style_replaces_clip_style_and_is_undoable() {
+        let mut state = state_with_text_clip();
+        let ids = SeqIdGen::default();
+        let version_before = state.version();
+
+        let style = TextStyle {
+            font_name: "Times-Bold".into(),
+            font_size: 48.0,
+            alignment: TextAlignment::Left,
+            ..Default::default()
+        };
+        let res = apply(
+            &mut state,
+            EditCommand::SetClipProperties {
+                clip_ids: vec!["c1".into()],
+                properties: Box::new(ClipProperties {
+                    text_style: Some(style.clone()),
+                    ..Default::default()
+                }),
+            },
+            &ids,
+        )
+        .unwrap();
+
+        assert!(res.changed);
+        let applied = state.timeline.tracks[0].clips[0]
+            .text_style
+            .as_ref()
+            .expect("text_style present");
+        assert_eq!(applied.font_name, "Times-Bold");
+        assert_eq!(applied.font_size, 48.0);
+        assert_eq!(applied.alignment, TextAlignment::Left);
+
+        // Undo restores the original default style.
+        apply(&mut state, EditCommand::Undo, &ids).unwrap();
+        let restored = state.timeline.tracks[0].clips[0]
+            .text_style
+            .as_ref()
+            .expect("text_style present");
+        assert_eq!(restored.font_name, "Helvetica-Bold");
+        assert_eq!(state.version(), version_before + 2); // commit + undo
+    }
+
+    #[test]
+    fn set_text_style_alongside_text_content() {
+        let mut state = state_with_text_clip();
+        let ids = SeqIdGen::default();
+
+        let style = TextStyle {
+            font_size: 120.0,
+            ..Default::default()
+        };
+        apply(
+            &mut state,
+            EditCommand::SetClipProperties {
+                clip_ids: vec!["c1".into()],
+                properties: Box::new(ClipProperties {
+                    text_content: Some("Updated".into()),
+                    text_style: Some(style),
+                    ..Default::default()
+                }),
+            },
+            &ids,
+        )
+        .unwrap();
+
+        let clip = &state.timeline.tracks[0].clips[0];
+        assert_eq!(clip.text_content.as_deref(), Some("Updated"));
+        assert_eq!(clip.text_style.as_ref().unwrap().font_size, 120.0);
     }
 }

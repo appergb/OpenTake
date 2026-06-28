@@ -245,6 +245,9 @@ export interface ClipPropertiesReq {
   opacity?: number;
   transform?: Transform;
   textContent?: string;
+  /** Text style for a text clip (font / size / color / alignment / shadow /
+   *  background / border). Replaces the clip's whole `textStyle`. */
+  textStyle?: TextStyle;
   /** Per-clip crop insets (normalized 0–1). Clears `cropTrack` on the backend. */
   crop?: Crop;
   /** Fade-in length in frames. Clamped to clip duration on the backend. */
