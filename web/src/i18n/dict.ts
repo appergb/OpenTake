@@ -164,12 +164,14 @@ const zh: Dict = {
   "timeline.dropHint": "将媒体拖到此处开始",
 
   // Clip context menu (right-click)
+  "contextMenu.copy": "复制",
+  "contextMenu.paste": "粘贴",
   "contextMenu.split": "在播放头处分割",
   "contextMenu.delete": "删除",
   "contextMenu.link": "链接",
   "contextMenu.unlink": "取消链接",
-  // Disabled placeholders (issue #93 acceptance: menu must list these even if stub)
   "contextMenu.swapMedia": "替换媒体",
+  // Disabled placeholders (issue #93 acceptance: menu must list these even if stub)
   "contextMenu.saveAsMedia": "另存为媒体",
   "contextMenu.extractAudio": "提取音频",
   "swapMedia.noCandidates": "没有同类型素材可替换",
@@ -184,7 +186,10 @@ const zh: Dict = {
   "preview.playPause": "播放/暂停 (空格)",
   "preview.stepForward": "下一帧",
   "preview.jumpEnd": "跳到结尾",
-  "preview.captureFrame": "截取当前帧到媒体",
+  "preview.captureFrame": "下载当前帧",
+  "preview.captureFrameSaved": "当前帧已下载",
+  "preview.captureFrameUnavailable": "当前环境无法生成合成帧",
+  "preview.captureFrameFailed": "截帧失败",
 
   // Agent panel
   "agent.placeholder": "Agent 面板(独立功能)",
@@ -459,12 +464,14 @@ const en: Dict = {
   "timeline.dropHint": "Drop media here to start",
 
   // Clip context menu (right-click)
+  "contextMenu.copy": "Copy",
+  "contextMenu.paste": "Paste",
   "contextMenu.split": "Split at Playhead",
   "contextMenu.delete": "Delete",
   "contextMenu.link": "Link",
   "contextMenu.unlink": "Unlink",
-  // Disabled placeholders (issue #93 acceptance: menu must list these even if stub)
   "contextMenu.swapMedia": "Swap Media",
+  // Disabled placeholders (issue #93 acceptance: menu must list these even if stub)
   "contextMenu.saveAsMedia": "Save as Media",
   "contextMenu.extractAudio": "Extract Audio",
   "swapMedia.noCandidates": "No compatible media to swap",
@@ -478,7 +485,10 @@ const en: Dict = {
   "preview.playPause": "Play/Pause (Space)",
   "preview.stepForward": "Step Forward",
   "preview.jumpEnd": "Jump to End",
-  "preview.captureFrame": "Capture Frame to Media",
+  "preview.captureFrame": "Download Current Frame",
+  "preview.captureFrameSaved": "Frame downloaded",
+  "preview.captureFrameUnavailable": "Composite frame unavailable",
+  "preview.captureFrameFailed": "Capture frame failed",
 
   "agent.placeholder": "Agent panel (separate Issue)",
 

@@ -38,7 +38,7 @@ pub const DEFAULT_ADDR: &str = "127.0.0.1:19789";
 /// One MCP session: owns a [`Dispatcher`] (its own agent-undo stack) and the
 /// system-prompt instructions snapshotted at construction.
 pub struct McpServer {
-    dispatcher: Dispatcher,
+    dispatcher: Arc<Dispatcher>,
     instructions: String,
 }
 
@@ -50,7 +50,7 @@ impl McpServer {
             .map(|r| assemble_system_prompt(&r, "default"))
             .unwrap_or_default();
         McpServer {
-            dispatcher: Dispatcher::new(handle, registry),
+            dispatcher: Arc::new(Dispatcher::new(handle, registry)),
             instructions,
         }
     }
@@ -113,7 +113,15 @@ impl ServerHandler for McpServer {
         request: CallToolRequestParam,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        Ok(self.call(&request.name, request.arguments))
+        let dispatcher = self.dispatcher.clone();
+        let name = request.name.to_string();
+        let args = request
+            .arguments
+            .map(Value::Object)
+            .unwrap_or(Value::Object(Map::new()));
+        tokio::task::spawn_blocking(move || to_call_tool_result(dispatcher.dispatch(&name, args)))
+            .await
+            .map_err(|e| McpError::internal_error(format!("tool dispatch task failed: {e}"), None))
     }
 }
 
@@ -257,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_all_40_tools() {
+    fn lists_all_44_tools() {
         assert_eq!(McpServer::tools().len(), ToolName::ALL.len());
         // Names round-trip to the wire names.
         let names: Vec<String> = McpServer::tools()
@@ -265,6 +273,7 @@ mod tests {
             .map(|t| t.name.to_string())
             .collect();
         assert!(names.contains(&"add_clips".to_string()));
+        assert!(names.contains(&"detect_beats".to_string()));
         assert!(names.contains(&"activate_workflow".to_string()));
     }
 

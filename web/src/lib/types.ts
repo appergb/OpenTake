@@ -2,7 +2,7 @@
  * TypeScript mirror of the Rust domain model (the read-only timeline mirror).
  * Field names match the Rust serde `camelCase` output verbatim
  * (`opentake-domain`), which is also the `project.json` schema. See
- * docs/specs/frontend-UI-1to1-SPEC.md §12.
+ * docs/modules/web/SPEC.md §12.
  */
 
 export type ClipType = "video" | "audio" | "image" | "text" | "lottie";
@@ -40,6 +40,39 @@ export interface AnimPair {
   b: number;
 }
 
+export interface Rgba {
+  r: number;
+  g: number;
+  b: number;
+  a: number;
+}
+
+export type TextAlignment = "left" | "center" | "right";
+
+export interface Shadow {
+  enabled: boolean;
+  color: Rgba;
+  offsetX: number;
+  offsetY: number;
+  blur: number;
+}
+
+export interface Fill {
+  enabled: boolean;
+  color: Rgba;
+}
+
+export interface TextStyle {
+  fontName: string;
+  fontSize: number;
+  fontScale: number;
+  color: Rgba;
+  alignment: TextAlignment;
+  shadow: Shadow;
+  background: Fill;
+  border: Fill;
+}
+
 export interface Transform {
   centerX: number; // default 0.5
   centerY: number; // default 0.5
@@ -55,6 +88,90 @@ export interface Crop {
   top: number;
   right: number;
   bottom: number;
+}
+
+export interface Rgb {
+  r: number;
+  g: number;
+  b: number;
+}
+
+export interface LiftGammaGain {
+  lift: Rgb;
+  gamma: Rgb;
+  gain: Rgb;
+}
+
+export interface ColorGrade {
+  exposure: number;
+  temperature: number;
+  tint: number;
+  liftGammaGain: LiftGammaGain;
+  contrast: number;
+  saturation: number;
+}
+
+export interface ChromaKey {
+  keyColor: Rgb;
+  similarity: number;
+  smoothness: number;
+  spill: number;
+}
+
+export interface Point2 {
+  x: number;
+  y: number;
+}
+
+export type MaskShape =
+  | { kind: "linear"; point: Point2; normal: Point2 }
+  | { kind: "circle"; center: Point2; radius: Point2 }
+  | { kind: "poly"; points: Point2[] };
+
+export interface Mask {
+  shape: MaskShape;
+  feather: number;
+  invert: boolean;
+}
+
+export interface Effect {
+  name: string;
+  params: Record<string, number>;
+  enabled: boolean;
+}
+
+export interface LiftGammaGainInput {
+  lift?: Partial<Rgb>;
+  gamma?: Partial<Rgb>;
+  gain?: Partial<Rgb>;
+}
+
+export interface ColorGradeInput {
+  exposure?: number;
+  temperature?: number;
+  tint?: number;
+  liftGammaGain?: LiftGammaGainInput;
+  contrast?: number;
+  saturation?: number;
+}
+
+export interface ChromaKeyInput {
+  keyColor?: Partial<Rgb>;
+  similarity?: number;
+  smoothness?: number;
+  spill?: number;
+}
+
+export interface MaskInput {
+  shape?: MaskShape;
+  feather?: number;
+  invert?: boolean;
+}
+
+export interface EffectInput {
+  name: string;
+  params?: Record<string, number>;
+  enabled?: boolean;
 }
 
 export interface Clip {
@@ -78,13 +195,17 @@ export interface Clip {
   linkGroupId?: string;
   captionGroupId?: string;
   textContent?: string;
-  textStyle?: unknown;
+  textStyle?: TextStyle;
   opacityTrack?: KeyframeTrack<number>;
   positionTrack?: KeyframeTrack<AnimPair>;
   scaleTrack?: KeyframeTrack<AnimPair>;
   rotationTrack?: KeyframeTrack<number>;
   cropTrack?: KeyframeTrack<Crop>;
   volumeTrack?: KeyframeTrack<number>;
+  colorGrade?: ColorGrade;
+  chromaKey?: ChromaKey;
+  masks?: Mask[];
+  effects?: Effect[];
 }
 
 // MARK: - Command DTOs (mirror src-tauri EditRequest)
@@ -138,6 +259,11 @@ export interface ClipPropertiesReq {
   flipVertical?: boolean;
 }
 
+export interface RenameEntryReq {
+  id: string;
+  name: string;
+}
+
 /** Which property a keyframe track targets (mirror of `KeyframeProperty`). */
 export type KeyframeProperty =
   | "opacity"
@@ -180,6 +306,10 @@ export type EditRequest =
   | { type: "removeKeyframe"; clipId: string; property: KeyframeProperty; frame: number }
   | { type: "moveKeyframe"; clipId: string; property: KeyframeProperty; fromFrame: number; toFrame: number }
   | { type: "setKeyframeInterpolation"; clipId: string; property: KeyframeProperty; frame: number; interpolation: Interpolation }
+  | { type: "setColorGrade"; clipIds: string[]; grade?: ColorGradeInput | null }
+  | { type: "setChromaKey"; clipIds: string[]; chromaKey?: ChromaKeyInput | null }
+  | { type: "setMasks"; clipIds: string[]; masks: MaskInput[] }
+  | { type: "setEffects"; clipIds: string[]; effects: EffectInput[] }
   | { type: "rippleDeleteRanges"; trackIndex: number; ranges: FrameRangeReq[] }
   | { type: "rippleDeleteClips"; clipIds: string[] }
   | { type: "addTexts"; entries: TextEntryReq[] }
@@ -196,22 +326,18 @@ export type EditRequest =
      }
   | { type: "createFolder"; name: string; parentFolderId?: string }
   | { type: "moveToFolder"; assetIds: string[]; folderId?: string }
-  | {
-      type: "swapMedia";
-      clipId: string;
-      mediaRef: string;
-      mediaType?: ClipType;
-      sourceClipType?: ClipType;
-      durationFrames?: number;
-      trimStartFrame?: number;
-    };
+  | { type: "renameMedia"; entries: RenameEntryReq[] }
+  | { type: "renameFolder"; entries: RenameEntryReq[] }
+  | { type: "deleteMedia"; assetIds: string[] }
+  | { type: "deleteFolder"; folderIds: string[] }
+  | { type: "swapMedia"; clipId: string; mediaRef: string };
 
 export interface TextEntryReq {
   trackIndex: number;
   startFrame: number;
   durationFrames: number;
   content: string;
-  textStyle: unknown;
+  textStyle: TextStyle;
   transform: Transform;
 }
 
@@ -232,8 +358,8 @@ export interface TimelineSnapshot {
 
 /** One media-library item as returned by `get_media` / `import_*`. `type` is the
  *  serde-renamed `kind`; `duration` is in seconds; `path` is the resolvable
- *  source path; `thumbnail` is an on-disk thumbnail path (currently always
- *  null — the panel renders a type placeholder). */
+ *  source path; `thumbnail` is an on-disk generated thumbnail path when
+ *  available. */
 export interface MediaItem {
   id: string;
   name: string;

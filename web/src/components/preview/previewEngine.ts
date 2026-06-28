@@ -28,6 +28,13 @@ import {
   sourceTimeSec,
   type ActiveMedia,
 } from "./timelinePlayback";
+import {
+  cancelInteractiveSeek,
+  createInteractiveSeekQueue,
+  enqueueInteractiveSeek,
+  flushPendingInteractiveSeek,
+  interactiveToleranceSec,
+} from "./interactiveSeek";
 import type { Timeline } from "../../lib/types";
 
 // --- Shared element registry ---------------------------------------------
@@ -57,11 +64,13 @@ const DRIFT_SEC = 0.35;
 /** A store `activeFrame` jump beyond this (frames) means an external seek while
  *  playing, so push the new position to the elements instead of reading them. */
 const SEEK_EPSILON_FRAMES = 2;
+const interactiveSeekQueue = createInteractiveSeekQueue();
+let interactiveSeekTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Active clips at `frame`: every visual layer, then every audio clip — the
  *  elements the engine drives. */
 function activeAt(tl: Timeline, frame: number): ActiveMedia[] {
-  const r = Math.round(frame);
+  const r = Math.max(0, Math.floor(frame));
   return [...activeVisualClips(tl, r), ...activeAudioClips(tl, r)];
 }
 
@@ -104,7 +113,7 @@ export function pausedPlayheadFrameFromFrozenVideo(
 ): number | null {
   if (!media || media.clip.mediaType !== "video") return null;
   const frame = frameForSourceTime(media.clip, currentTimeSec, fps);
-  return Number.isFinite(frame) ? Math.max(0, Math.round(frame)) : null;
+  return Number.isFinite(frame) ? Math.max(0, Math.floor(frame)) : null;
 }
 
 export function shouldSeekPlayingFollower(args: {
@@ -122,6 +131,21 @@ function pauseAll(): void {
   for (const el of elements.values()) el.pause();
 }
 
+function nowMs(): number {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+function clearInteractiveSeekTimer(): void {
+  if (interactiveSeekTimer === null) return;
+  clearTimeout(interactiveSeekTimer);
+  interactiveSeekTimer = null;
+}
+
+function cancelPendingInteractiveSeek(): void {
+  clearInteractiveSeekTimer();
+  cancelInteractiveSeek(interactiveSeekQueue);
+}
+
 function syncPausedTo(tl: Timeline, frame: number, fps: number): void {
   for (const m of activeAt(tl, frame)) {
     const el = previewElements.get(previewElementKey(m));
@@ -133,10 +157,7 @@ function syncPausedTo(tl: Timeline, frame: number, fps: number): void {
   }
 }
 
-/** Live scrub: pause every active element and seek it to its source frame so the
- *  preview tracks the drag (the cheap path the single-media preview already
- *  uses). Audio is silenced while scrubbing. */
-function scrubTo(tl: Timeline, frame: number, fps: number): void {
+function performInteractiveSeek(tl: Timeline, frame: number, fps: number): void {
   for (const m of activeAt(tl, frame)) {
     const el = previewElements.get(previewElementKey(m));
     if (!el) continue; // images carry no media element
@@ -144,6 +165,39 @@ function scrubTo(tl: Timeline, frame: number, fps: number): void {
     if (!el.paused) el.pause();
     const desired = sourceTimeSec(m.clip, frame, fps);
     if (Math.abs(el.currentTime - desired) > 0.01) el.currentTime = desired;
+  }
+}
+
+function scheduleInteractiveSeekFlush(delayMs: number): void {
+  if (interactiveSeekTimer !== null) return;
+  interactiveSeekTimer = setTimeout(() => {
+    interactiveSeekTimer = null;
+    const ui = useEditorUiStore.getState();
+    if (!ui.isScrubbing) {
+      cancelInteractiveSeek(interactiveSeekQueue);
+      return;
+    }
+    const tl = useProjectStore.getState().timeline;
+    const fps = tl.fps > 0 ? tl.fps : 30;
+    const pending = flushPendingInteractiveSeek(interactiveSeekQueue, nowMs());
+    if (pending) performInteractiveSeek(tl, pending.frame, fps);
+  }, delayMs);
+}
+
+/** Live scrub: pause every active element and seek it to its source frame so the
+ *  preview tracks the drag (the cheap path the single-media preview already
+ *  uses). Audio is silenced while scrubbing. */
+function scrubTo(tl: Timeline, frame: number, fps: number): void {
+  const scrubFrame = Math.max(0, Math.floor(frame));
+  const request = {
+    frame: scrubFrame,
+    toleranceSec: interactiveToleranceSec(activeVisualClips(tl, scrubFrame).length),
+  };
+  const result = enqueueInteractiveSeek(interactiveSeekQueue, request, nowMs());
+  if (result.kind === "flush") {
+    performInteractiveSeek(tl, result.request.frame, fps);
+  } else {
+    scheduleInteractiveSeekFlush(result.delayMs);
   }
 }
 
@@ -161,11 +215,12 @@ export function useTimelinePlaybackEngine(): void {
   useEffect(() => {
     const prev = previousTransportState.current;
     if (!isPlaying && !isScrubbing) {
+      cancelPendingInteractiveSeek();
       pauseAll();
       const tl = useProjectStore.getState().timeline;
       const fps = tl.fps > 0 ? tl.fps : 30;
       if (prev.isPlaying) {
-        const visual = activeVideoForPausedSnap(tl, Math.round(activeFrame));
+        const visual = activeVideoForPausedSnap(tl, Math.max(0, Math.floor(activeFrame)));
         const el = visual ? previewElements.get(previewElementKey(visual)) : null;
         const pausedFrame = pausedPlayheadFrameFromFrozenVideo(visual, el?.currentTime ?? NaN, fps);
         if (pausedFrame !== null) useEditorUiStore.getState().setActiveFrame(pausedFrame);
@@ -177,7 +232,7 @@ export function useTimelinePlaybackEngine(): void {
           wasScrubbing: prev.isScrubbing,
         })
       ) {
-        syncPausedTo(tl, Math.round(activeFrame), fps);
+        syncPausedTo(tl, Math.max(0, Math.floor(activeFrame)), fps);
       }
     }
     previousTransportState.current = { isPlaying, isScrubbing };
@@ -185,6 +240,7 @@ export function useTimelinePlaybackEngine(): void {
 
   useEffect(() => {
     if (!isPlaying && !isScrubbing) {
+      cancelPendingInteractiveSeek();
       pauseAll();
       return;
     }
@@ -195,7 +251,7 @@ export function useTimelinePlaybackEngine(): void {
     const lastClipByKey = new Map<string, string>();
 
     const syncFollowers = (tl: Timeline, f: number, fps: number) => {
-      const r = Math.round(f);
+      const r = Math.max(0, Math.floor(f));
       const visuals = activeVisualClips(tl, r);
       const auds = activeAudioClips(tl, r);
       const duplicatedVisualAudioRefs = new Set(auds.map((a) => a.clip.mediaRef));
@@ -241,7 +297,7 @@ export function useTimelinePlaybackEngine(): void {
       // SCRUB takes priority over play: live-seek to the scrub frame and never
       // advance the playhead (the user owns it during a drag).
       if (ui.isScrubbing) {
-        scrubTo(tl, Math.round(ui.activeFrame), fps);
+        scrubTo(tl, Math.max(0, Math.floor(ui.activeFrame)), fps);
         lastTs = null;
         lastSet = null;
         raf = requestAnimationFrame(tick);
@@ -296,6 +352,7 @@ export function useTimelinePlaybackEngine(): void {
     raf = requestAnimationFrame(tick);
     return () => {
       cancelAnimationFrame(raf);
+      cancelPendingInteractiveSeek();
       pauseAll();
     };
   }, [isPlaying, isScrubbing]);

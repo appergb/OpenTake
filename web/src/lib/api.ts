@@ -9,6 +9,7 @@
  */
 
 import type {
+  ClipType,
   EditRequest,
   EditResult,
   MediaList,
@@ -50,6 +51,16 @@ export async function editApply(command: EditRequest): Promise<EditResult> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<EditResult>("edit_apply", { command });
   return fallback.editApply(command);
+}
+
+/** Sequential automation wrapper: each command still goes through the single
+ * Rust `EditCommand` authority via `edit_apply`. */
+export async function editApplyMany(commands: EditRequest[]): Promise<EditResult[]> {
+  const results: EditResult[] = [];
+  for (const command of commands) {
+    results.push(await editApply(command));
+  }
+  return results;
 }
 
 export async function undo(): Promise<EditResult> {
@@ -171,6 +182,36 @@ export async function relinkMedia(mediaRef: string, newPath: string): Promise<Me
   await ensureTauri();
   if (invokeImpl) return invokeImpl<MediaList>("relink_media", { mediaRef, newPath });
   return { items: [], folders: [] };
+}
+
+export interface ThumbnailResult {
+  mediaRef: string;
+  type: ClipType;
+  thumbnailPath?: string | null;
+  spritePath?: string | null;
+  tileWidth?: number | null;
+  tileHeight?: number | null;
+  columns?: number | null;
+  times: number[];
+}
+
+export async function generateThumbnail(
+  mediaRef: string,
+  opts?: { timeSecs?: number; maxFrames?: number },
+): Promise<ThumbnailResult | null> {
+  await ensureTauri();
+  if (invokeImpl) {
+    const args: Record<string, unknown> = { mediaRef };
+    if (opts?.timeSecs != null) args.timeSecs = opts.timeSecs;
+    if (opts?.maxFrames != null) args.maxFrames = opts.maxFrames;
+    try {
+      return await invokeImpl<ThumbnailResult>("generate_thumbnail", args);
+    } catch (e) {
+      console.warn(`generate_thumbnail failed for ${mediaRef}:`, e);
+      return null;
+    }
+  }
+  return null;
 }
 
 // MARK: - Timeline composite preview (#47)

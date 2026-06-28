@@ -248,9 +248,9 @@ Track Role 检测规则：
 
 ## 7. 相关文档
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — §7 MCP + Agent 层
-- [ROADMAP.md](ROADMAP.md) — Phase 7 MCP server
+- [ARCHITECTURE.md](../../architecture/ARCHITECTURE.md) — §7 MCP + Agent 层
+- [ROADMAP.md](../../architecture/ROADMAP.md) — Phase 7 MCP server
 - [WORKFLOW-PLUGIN-SYSTEM.md](WORKFLOW-PLUGIN-SYSTEM.md) — 工作流插件系统
-- [MODULE-PORT-MAP.md](MODULE-PORT-MAP.md) — Agent 工具层移植
+- [MODULE-PORT-MAP.md](../../architecture/MODULE-PORT-MAP.md) — Agent 工具层移植
 - `appergb/ClipSkills` — 技能来源，MIT 许可
 

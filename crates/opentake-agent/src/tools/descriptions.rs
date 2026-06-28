@@ -53,6 +53,14 @@ pub fn description(tool: ToolName) -> &'static str {
 
         ToolName::AddCaptions => "Auto-caption spoken audio: transcribes on-device and places styled caption clips on a new track — the same pipeline as the editor's Captions tab. This is the reliable path for 'caption this'; prefer it over hand-placing add_texts from a transcript. Omit clipIds to auto-pick the track with the most speech; pass clipIds to caption specific clips (e.g. only the interview).",
 
+        ToolName::DetectBeats => "Detects musical beat positions for a clip or media asset using lightweight PCM energy/onset analysis. Returns project-frame beat hints and strengths; it does not mutate the timeline.",
+
+        ToolName::AutoCutToBeats => "Plans beat-synced cuts for one or more clips against an audio or music source. Returns beat frames, suggested cut frames, and optional clip placement hints; it does not mutate the timeline. Apply the plan with existing edit tools.",
+
+        ToolName::SmartReframe => "Plans subject-aware reframing for target aspect ratios such as 9:16 or 1:1. The typed surface is present, but MCP frame sampling / vision analysis is not wired yet; calls return a deterministic needs-vision-backend error and do not mutate the timeline.",
+
+        ToolName::TightenSilences => "Plans silence tightening by finding low-energy PCM spans and converting them into ripple_delete_ranges candidate commands. Returns a preview only; it does not mutate the timeline.",
+
         ToolName::GenerateVideo => "Starts an async AI video generation. Returns a placeholder asset ID immediately; generation runs in the background and the asset becomes usable in add_clips once ready. Costs real money and is not undoable.",
 
         ToolName::GenerateImage => "Starts an async AI image generation. Returns a placeholder asset ID immediately; generation runs in the background. Costs real money and is not undoable.",
@@ -338,6 +346,52 @@ pub fn input_schema(tool: ToolName) -> Value {
                 "centerY": {"type": "number", "description": "Optional vertical center 0–1 (default 0.9, near the bottom)."},
                 "textCase": {"type": "string", "enum": ["auto", "upper", "lower"], "description": "Optional letter case (default auto)."},
                 "censorProfanity": {"type": "boolean", "description": "Optional. Mask profanity (default false)."}
+            }),
+            &[],
+        ),
+
+        ToolName::DetectBeats => object(
+            json!({
+                "clipId": {"type": "string", "description": "Optional clip id to analyze. Mutually exclusive with mediaRef."},
+                "mediaRef": {"type": "string", "description": "Optional media asset id to analyze directly."},
+                "startFrame": {"type": "integer", "description": "Optional project-frame window start."},
+                "endFrame": {"type": "integer", "description": "Optional project-frame window end (exclusive)."},
+                "sensitivity": {"type": "number", "description": "Optional beat-picking sensitivity 0.0-1.0."}
+            }),
+            &[],
+        ),
+
+        ToolName::AutoCutToBeats => object(
+            json!({
+                "clipIds": {"type": "array", "items": {"type": "string"}, "description": "Optional visual clips to cut or align."},
+                "beatClipId": {"type": "string", "description": "Optional timeline clip whose audio supplies the beat grid."},
+                "beatMediaRef": {"type": "string", "description": "Optional media asset whose audio supplies the beat grid."},
+                "startFrame": {"type": "integer", "description": "Optional project-frame window start."},
+                "endFrame": {"type": "integer", "description": "Optional project-frame window end (exclusive)."},
+                "minClipFrames": {"type": "integer", "description": "Optional lower bound for generated cut lengths."},
+                "maxClipFrames": {"type": "integer", "description": "Optional upper bound for generated cut lengths."},
+                "alignCuts": {"type": "boolean", "description": "Optional. true means move/split cuts to the detected beat grid."}
+            }),
+            &[],
+        ),
+
+        ToolName::SmartReframe => object(
+            json!({
+                "clipIds": {"type": "array", "items": {"type": "string"}, "description": "Clip ids to reframe."},
+                "aspectRatio": {"type": "string", "description": "Target aspect ratio, e.g. '9:16', '1:1', or '16:9'."},
+                "subject": {"type": "string", "description": "Optional subject hint to keep in frame."},
+                "mode": {"type": "string", "enum": ["plan", "apply"], "description": "Optional future mode. Current phase always returns needs-vision-backend."}
+            }),
+            &["clipIds", "aspectRatio"],
+        ),
+
+        ToolName::TightenSilences => object(
+            json!({
+                "clipIds": {"type": "array", "items": {"type": "string"}, "description": "Optional clip ids to analyze. Omit to analyze the primary spoken track in the future backend."},
+                "trackIndex": {"type": "integer", "description": "Optional track index to analyze."},
+                "thresholdDb": {"type": "number", "description": "Optional silence threshold in dB."},
+                "minSilenceFrames": {"type": "integer", "description": "Optional minimum silence span to cut."},
+                "paddingFrames": {"type": "integer", "description": "Optional context to preserve around each silence."}
             }),
             &[],
         ),

@@ -35,15 +35,17 @@ import {
   type FadeEdge,
 } from "./hitTest";
 import { ClipContextMenu } from "./ClipContextMenu";
+import { SwapMediaPicker } from "./SwapMediaPicker";
 import { MEDIA_DND_TYPE } from "../media/MediaPanel";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
 import * as edit from "../../store/editActions";
 import { forceRefresh } from "../../store/sync";
-import { isTauri } from "../../lib/api";
-import { getWaveform } from "../../lib/api";
-import type { ClipType, Timeline } from "../../lib/types";
+import { generateThumbnail, getWaveform, isTauri } from "../../lib/api";
+import { assetUrl } from "../../lib/asset";
+import type { Clip, ClipType, Interpolation, Timeline } from "../../lib/types";
+import type { ClipThumbnailStrip } from "./clipRenderer";
 
 /** Where a move/duplicate drag will land. `newTrack` inserts before `index`
  *  (upstream `newTrackAt(index)`), clamped into visual/audio zones by the core. */
@@ -79,6 +81,59 @@ type DragState =
     }
   | null;
 
+type TimelineContextMenu =
+  | { kind: "clip"; clipId: string; x: number; y: number; fadeEdge?: FadeEdge }
+  | { kind: "audioVolumeKeyframe"; clipId: string; frame: number; x: number; y: number };
+
+type VolumeKeyframeInterpolation = Extract<Interpolation, "linear" | "smooth" | "hold">;
+
+type VolumeKeyframeMenuItem = {
+  label: string;
+  action: () => void;
+  danger?: boolean;
+  checked?: boolean;
+};
+
+const VOLUME_KEYFRAME_INTERPOLATIONS: Array<{
+  labelKey: "linear" | "smooth" | "hold";
+  value: VolumeKeyframeInterpolation;
+}> = [
+  { labelKey: "linear", value: "linear" },
+  { labelKey: "smooth", value: "smooth" },
+  { labelKey: "hold", value: "hold" },
+];
+const CHECKMARK = "\u2713";
+
+export function volumeKeyframeMenuItems({
+  currentInterpolation,
+  labels,
+  onDelete,
+  onSetInterpolation,
+}: {
+  currentInterpolation?: Interpolation;
+  labels: {
+    delete: string;
+    linear: string;
+    smooth: string;
+    hold: string;
+  };
+  onDelete: () => void;
+  onSetInterpolation: (interpolation: VolumeKeyframeInterpolation) => void;
+}): VolumeKeyframeMenuItem[] {
+  return [
+    {
+      label: labels.delete,
+      action: onDelete,
+      danger: true,
+    },
+    ...VOLUME_KEYFRAME_INTERPOLATIONS.map(({ labelKey, value }) => ({
+      label: labels[labelKey],
+      checked: currentInterpolation === value,
+      action: () => onSetInterpolation(value),
+    })),
+  ];
+}
+
 /** New-track kind for a dragged clip: audio clips → "audio", everything else
  *  → "video" (visual types share the video zone, matching `addMediaToTimeline`
  *  and upstream `placeClip`). */
@@ -86,12 +141,159 @@ function newTrackTypeFor(clip: { mediaType: ClipType }): ClipType {
   return clip.mediaType === "audio" ? "audio" : "video";
 }
 
+function loadImageElement(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.decoding = "async";
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error(`thumbnail image failed to load: ${src}`));
+    img.src = src;
+  });
+}
+
 export function collectMoveSnapTargets(
   timeline: Timeline,
   excluded: Set<string>,
-  _activeFrame: number,
+  activeFrame: number,
 ) {
-  return collectTargets(timeline, excluded, null);
+  return collectTargets(timeline, excluded, activeFrame, true);
+}
+
+export interface MoveParticipant {
+  id: string;
+  trackIndex: number;
+  startFrame: number;
+  clip: Pick<Clip, "mediaType" | "linkGroupId">;
+}
+
+export interface ResolvedMoveTarget {
+  clipId: string;
+  toTrack: number;
+  toFrame: number;
+  pinned: boolean;
+}
+
+function isVisualType(type: ClipType): boolean {
+  return type === "video" || type === "image" || type === "text" || type === "lottie";
+}
+
+function trackCompatibleWithClip(trackType: ClipType | undefined, clipType: ClipType | undefined): boolean {
+  if (!trackType || !clipType) return false;
+  return trackType === clipType || (isVisualType(trackType) && isVisualType(clipType));
+}
+
+export function pinnedMoveCompanionIds(timeline: Timeline, leadClipId: string): Set<string> {
+  const leadLoc = findClipLoc(timeline, leadClipId);
+  if (!leadLoc) return new Set();
+  const leadTrackType = timeline.tracks[leadLoc[0]]?.type;
+  const leadClip = timeline.tracks[leadLoc[0]]?.clips[leadLoc[1]];
+  const leadLink = leadClip?.linkGroupId;
+  const pinned = new Set<string>();
+
+  for (const track of timeline.tracks) {
+    for (const clip of track.clips) {
+      if (clip.id === leadClipId) continue;
+      if (leadLink && clip.linkGroupId === leadLink) {
+        pinned.add(clip.id);
+      } else if (!trackCompatibleWithClip(leadTrackType, clip.mediaType)) {
+        pinned.add(clip.id);
+      }
+    }
+  }
+
+  return pinned;
+}
+
+export function resolveExistingTrackMove(
+  timeline: Timeline,
+  participants: MoveParticipant[],
+  leadClipId: string,
+  proposedTrackDelta: number,
+  frameDelta: number,
+): { trackDelta: number; pinnedIds: Set<string>; targets: ResolvedMoveTarget[] } {
+  const pinnedIds = pinnedMoveCompanionIds(timeline, leadClipId);
+  if (!participants.some((p) => p.id === leadClipId)) {
+    return {
+      trackDelta: 0,
+      pinnedIds,
+      targets: participants.map((p) => ({
+        clipId: p.id,
+        toTrack: p.trackIndex,
+        toFrame: p.startFrame + frameDelta,
+        pinned: pinnedIds.has(p.id),
+      })),
+    };
+  }
+
+  let trackDelta = proposedTrackDelta;
+  const step = proposedTrackDelta >= 0 ? -1 : 1;
+  while (trackDelta !== 0) {
+    const ok = participants
+      .filter((p) => !pinnedIds.has(p.id))
+      .every((p) => {
+        const dest = p.trackIndex + trackDelta;
+        return trackCompatibleWithClip(timeline.tracks[dest]?.type, p.clip.mediaType);
+      });
+    if (ok) break;
+    trackDelta += step;
+  }
+
+  return {
+    trackDelta,
+    pinnedIds,
+    targets: participants.map((p) => {
+      const pinned = pinnedIds.has(p.id);
+      return {
+        clipId: p.id,
+        toTrack: pinned ? p.trackIndex : p.trackIndex + trackDelta,
+        toFrame: p.startFrame + frameDelta,
+        pinned,
+      };
+    }),
+  };
+}
+
+export function resolveNewTrackMove(
+  timeline: Timeline,
+  participants: MoveParticipant[],
+  leadClipId: string,
+  insertedTrackIndex: number,
+  frameDelta: number,
+): { pinnedIds: Set<string>; targets: ResolvedMoveTarget[] } {
+  const pinnedIds = pinnedMoveCompanionIds(timeline, leadClipId);
+  const lead = participants.find((p) => p.id === leadClipId);
+  return {
+    pinnedIds,
+    targets: participants.map((p) => {
+      const pinned = pinnedIds.has(p.id);
+      const hopsToNewTrack = !pinned && lead !== undefined && p.trackIndex === lead.trackIndex;
+      const shiftedTrack = p.trackIndex >= insertedTrackIndex ? p.trackIndex + 1 : p.trackIndex;
+      return {
+        clipId: p.id,
+        toTrack: hopsToNewTrack ? insertedTrackIndex : shiftedTrack,
+        toFrame: p.startFrame + frameDelta,
+        pinned,
+      };
+    }),
+  };
+}
+
+function moveParticipantsForIds(timeline: Timeline, ids: string[]): MoveParticipant[] {
+  const wanted = new Set(ids);
+  const participants: MoveParticipant[] = [];
+  for (let ti = 0; ti < timeline.tracks.length; ti++) {
+    for (const clip of timeline.tracks[ti].clips) {
+      if (wanted.has(clip.id)) {
+        participants.push({
+          id: clip.id,
+          trackIndex: ti,
+          startFrame: clip.startFrame,
+          clip,
+        });
+      }
+    }
+  }
+  return participants;
 }
 
 export function TimelineContainer() {
@@ -120,6 +322,16 @@ export function TimelineContainer() {
     () => new Set(mediaItems.filter((m) => m.missing).map((m) => m.id)),
     [mediaItems],
   );
+  const thumbnailSourceKeys = useMemo(
+    () =>
+      new Map(
+        mediaItems.map((m) => [
+          m.id,
+          `${m.path ?? ""}|${m.thumbnail ?? ""}|${m.missing ? "missing" : "online"}`,
+        ]),
+      ),
+    [mediaItems],
+  );
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const contentCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -132,21 +344,26 @@ export function TimelineContainer() {
   const snapStateRef = useRef<{ frame: number; probeOffset: number } | null>(null);
   const [snapFrame, setSnapFrame] = useState<number | null>(null);
   const [dragTick, forceTick] = useState(0);
-  const [menu, setMenu] = useState<{ clipId: string; x: number; y: number; fadeEdge?: FadeEdge } | null>(
-    null,
-  );
+  const [menu, setMenu] = useState<TimelineContextMenu | null>(null);
   const t = useT();
   // Waveform sample cache (media id → buckets), loaded on demand from Rust.
   const waveformsRef = useRef<Map<string, number[]>>(new Map());
+  // Visual thumbnail cache (media id → decoded sprite/single image).
+  const thumbnailsRef = useRef<Map<string, ClipThumbnailStrip>>(new Map());
+  const thumbnailSourceKeysRef = useRef<Map<string, string>>(new Map());
+  const latestThumbnailSourceKeysRef = useRef(thumbnailSourceKeys);
   // Refs of media whose waveform fetch is currently in flight — kept separate from
   // the resolved-cache `waveformsRef` so a failed/empty fetch can be retried on a
   // later effect run instead of being permanently suppressed by a placeholder (#127).
   const inFlightRef = useRef<Set<string>>(new Set());
+  const thumbnailInFlightRef = useRef<Set<string>>(new Set());
   // Guards `setWaveformVersion` against firing after unmount (the cache write itself
   // is mount-independent and must NOT be discarded on re-render — see #127).
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
   const [waveformVersion, setWaveformVersion] = useState(0);
+  const [thumbnailVersion, setThumbnailVersion] = useState(0);
+  latestThumbnailSourceKeysRef.current = thumbnailSourceKeys;
 
   const total = useMemo(() => totalFrames(timeline), [timeline]);
   const docWidth = useMemo(
@@ -214,11 +431,24 @@ export function TimelineContainer() {
     const d = dragRef.current;
     let drag: DragPaint | undefined;
     if (d?.kind === "move") {
+      const participants = moveParticipantsForIds(timeline, d.companions);
+      const lead = participants.find((p) => p.id === d.hit.clip.id);
+      const proposedTrackDelta =
+        d.dropTarget.kind === "existing" && lead ? d.dropTarget.trackIndex - lead.trackIndex : 0;
+      const resolved = resolveExistingTrackMove(
+        timeline,
+        participants,
+        d.hit.clip.id,
+        proposedTrackDelta,
+        0,
+      );
       drag = {
         kind: "move",
         ids: new Set(d.companions),
         deltaFrames: d.deltaFrames,
-        trackDelta: d.targetTrack - d.startTrack,
+        trackDelta: d.dropTarget.kind === "existing" ? resolved.trackDelta : 0,
+        pinnedIds: resolved.pinnedIds,
+        leadTrackIndex: lead?.trackIndex ?? d.startTrack,
         isDuplicate: d.isDuplicate,
         newTrackType: d.dropTarget.kind === "newTrack" ? d.dropTarget.trackType : undefined,
         newTrackIndex: d.dropTarget.kind === "newTrack" ? d.dropTarget.index : undefined,
@@ -259,6 +489,7 @@ export function TimelineContainer() {
       viewWidth: viewport.width,
       viewHeight: viewport.height,
       waveforms: waveformsRef.current,
+      thumbnails: thumbnailsRef.current,
       missingMediaRefs,
       emptyLabel: t("timeline.dropHint"),
       drag,
@@ -275,6 +506,7 @@ export function TimelineContainer() {
     docHeight,
     firstAudio,
     waveformVersion,
+    thumbnailVersion,
     missingMediaRefs,
     dragTick,
     t,
@@ -312,6 +544,72 @@ export function TimelineContainer() {
         });
     }
   }, [timeline]);
+
+  useEffect(() => {
+    latestThumbnailSourceKeysRef.current = thumbnailSourceKeys;
+    let changed = false;
+    for (const ref of thumbnailsRef.current.keys()) {
+      const sourceKey = thumbnailSourceKeys.get(ref);
+      if (!sourceKey || thumbnailSourceKeysRef.current.get(ref) !== sourceKey) {
+        thumbnailsRef.current.delete(ref);
+        thumbnailSourceKeysRef.current.delete(ref);
+        changed = true;
+      }
+    }
+    if (changed && mountedRef.current) setThumbnailVersion((v) => v + 1);
+  }, [thumbnailSourceKeys]);
+
+  // Load visual thumbnail sprites for video/image clips on demand. The decoded
+  // Image element is cached by media id and reused across all clips.
+  useEffect(() => {
+    const wanted = new Set<string>();
+    for (const track of timeline.tracks) {
+      for (const clip of track.clips) {
+        if ((clip.mediaType === "video" || clip.mediaType === "image") && !missingMediaRefs.has(clip.mediaRef)) {
+          wanted.add(clip.mediaRef);
+        }
+      }
+    }
+    for (const ref of wanted) {
+      if (thumbnailsRef.current.has(ref) || thumbnailInFlightRef.current.has(ref)) continue;
+      const sourceKey = thumbnailSourceKeys.get(ref);
+      if (!sourceKey) continue;
+      thumbnailInFlightRef.current.add(ref);
+      void generateThumbnail(ref)
+        .then(async (result) => {
+          if (!result) return;
+          const hasSprite =
+            Boolean(result.spritePath) &&
+            Boolean(result.tileWidth) &&
+            Boolean(result.tileHeight) &&
+            Boolean(result.columns) &&
+            result.times.length > 0;
+          const path = hasSprite ? result.spritePath : result.thumbnailPath;
+          const url = assetUrl(path);
+          if (!url) return;
+          const image = await loadImageElement(url);
+          const latestSourceKey = latestThumbnailSourceKeysRef.current.get(ref);
+          if (latestSourceKey !== sourceKey) return;
+          const strip: ClipThumbnailStrip = {
+            image,
+            kind: hasSprite ? "sprite" : "single",
+            tileWidth: result.tileWidth ?? image.naturalWidth,
+            tileHeight: result.tileHeight ?? image.naturalHeight,
+            columns: Math.max(1, result.columns ?? 1),
+            times: result.times,
+          };
+          thumbnailsRef.current.set(ref, strip);
+          thumbnailSourceKeysRef.current.set(ref, sourceKey);
+          if (mountedRef.current) setThumbnailVersion((v) => v + 1);
+        })
+        .catch((err) => {
+          console.warn(`thumbnail load failed for ${ref}:`, err);
+        })
+        .finally(() => {
+          thumbnailInFlightRef.current.delete(ref);
+        });
+    }
+  }, [timeline, missingMediaRefs, thumbnailSourceKeys]);
 
   // Paint ruler canvas (sticky top).
   useEffect(() => {
@@ -611,8 +909,17 @@ export function TimelineContainer() {
         let targetTrack: number;
         let dropTarget: DropTarget;
         if (hovered.kind === "existing") {
-          targetTrack = hovered.trackIndex;
-          dropTarget = { kind: "existing", trackIndex: hovered.trackIndex };
+          const participants = moveParticipantsForIds(timeline, d.companions);
+          const lead = participants.find((p) => p.id === d.hit.clip.id);
+          const resolved = resolveExistingTrackMove(
+            timeline,
+            participants,
+            d.hit.clip.id,
+            lead ? hovered.trackIndex - lead.trackIndex : 0,
+            0,
+          );
+          targetTrack = lead ? lead.trackIndex + resolved.trackDelta : hovered.trackIndex;
+          dropTarget = { kind: "existing", trackIndex: targetTrack };
         } else {
           const trackType = newTrackTypeFor(d.hit.clip);
           dropTarget = { kind: "newTrack", index: hovered.index, trackType };
@@ -712,7 +1019,7 @@ export function TimelineContainer() {
       dragRef.current = null;
       snapStateRef.current = null;
       setSnapFrame(null);
-    setScrubbing(false);
+      setScrubbing(false);
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
       if (!d) return;
 
@@ -726,19 +1033,13 @@ export function TimelineContainer() {
           return;
         }
         // Resolve every dragged clip's current location.
-        const locs = d.companions
-          .map((id) => {
-            const loc = findClipLoc(timeline, id);
-            return loc
-              ? { id, ti: loc[0], clip: timeline.tracks[loc[0]].clips[loc[1]] }
-              : null;
-          })
-          .filter((x): x is NonNullable<typeof x> => x !== null);
-        if (locs.length === 0) return;
+        const participants = moveParticipantsForIds(timeline, d.companions);
+        const lead = participants.find((p) => p.id === d.hit.clip.id);
+        if (!lead) return;
 
         // One group-floor FRAME delta so the earliest clip lands at >=0 and the
         // whole selection keeps its relative spacing (not per-clip max(0,...)).
-        const minStart = Math.min(...locs.map((l) => l.clip.startFrame));
+        const minStart = Math.min(...participants.map((p) => p.startFrame));
         const frameDelta = Math.max(d.deltaFrames, -minStart);
 
         // Drop on an insert zone → create a new track first, then move/dup.
@@ -746,7 +1047,12 @@ export function TimelineContainer() {
           const trackType = d.dropTarget.trackType;
           const dropIndex = d.dropTarget.index;
           const isDup = d.isDuplicate;
-          const locSnapshot = locs.map((l) => ({ id: l.id, ti: l.ti, startFrame: l.clip.startFrame }));
+          const participantSnapshot = participants.map((p) => ({
+            id: p.id,
+            trackIndex: p.trackIndex,
+            startFrame: p.startFrame,
+            clip: p.clip,
+          }));
           void (async () => {
             const insertResult = await edit.insertTrack(trackType, dropIndex);
             // Ensure the mirror reflects the new track before computing the
@@ -762,18 +1068,25 @@ export function TimelineContainer() {
               insertedIndex >= 0
                 ? insertedIndex
                 : Math.max(0, Math.min(dropIndex, tl.tracks.length - 1));
+            const resolved = resolveNewTrackMove(
+              timeline,
+              participantSnapshot,
+              d.hit.clip.id,
+              newTrackIndex,
+              frameDelta,
+            );
             if (isDup) {
               await edit.duplicateClips(
-                locSnapshot.map((l) => l.id),
+                resolved.targets.map((target) => target.clipId),
                 frameDelta,
-                locSnapshot.map(() => newTrackIndex),
+                resolved.targets.map((target) => target.toTrack),
               );
             } else {
               await edit.moveClips(
-                locSnapshot.map((l) => ({
-                  clipId: l.id,
-                  toTrack: newTrackIndex,
-                  toFrame: l.startFrame + frameDelta,
+                resolved.targets.map((target) => ({
+                  clipId: target.clipId,
+                  toTrack: target.toTrack,
+                  toFrame: target.toFrame,
                 })),
               );
             }
@@ -781,35 +1094,29 @@ export function TimelineContainer() {
           return;
         }
 
-        // One group TRACK delta: step toward 0 until every clip stays in-bounds
-        // and lands on a type-compatible track (rigid group, not per-clip clamp).
-        const rawTrackDelta = d.dropTarget.trackIndex - d.startTrack;
-        let trackDelta = rawTrackDelta;
-        const step = rawTrackDelta > 0 ? -1 : 1;
-        while (trackDelta !== 0) {
-          const ok = locs.every((l) => {
-            const to = l.ti + trackDelta;
-            return to >= 0 && to < timeline.tracks.length && compatibleTracks(timeline, l.ti, to);
-          });
-          if (ok) break;
-          trackDelta += step;
-        }
+        const resolved = resolveExistingTrackMove(
+          timeline,
+          participants,
+          d.hit.clip.id,
+          d.dropTarget.trackIndex - lead.trackIndex,
+          frameDelta,
+        );
 
-        if (frameDelta === 0 && trackDelta === 0) return; // nothing actually moves
+        if (frameDelta === 0 && resolved.trackDelta === 0) return; // nothing actually moves
         if (d.isDuplicate) {
           // Option/Alt-drag duplicate: deep-copy each clip to its target. The
           // backend mints fresh ids, shifts start_frame by offsetFrames, and
           // clears link_group_id (copies aren't linked to the originals).
           void edit.duplicateClips(
-            locs.map((l) => l.id),
+            resolved.targets.map((target) => target.clipId),
             frameDelta,
-            locs.map((l) => l.ti + trackDelta),
+            resolved.targets.map((target) => target.toTrack),
           );
         } else {
-          const moves = locs.map((l) => ({
-            clipId: l.id,
-            toTrack: l.ti + trackDelta,
-            toFrame: l.clip.startFrame + frameDelta,
+          const moves = resolved.targets.map((target) => ({
+            clipId: target.clipId,
+            toTrack: target.toTrack,
+            toFrame: target.toFrame,
           }));
           void edit.moveClips(moves);
         }
@@ -867,12 +1174,25 @@ export function TimelineContainer() {
   const onContextMenu = useCallback(
     (e: React.MouseEvent) => {
       const { docX, docY } = toDoc(e);
+      const keyframeHit = audioVolumeKfHit(timeline, docX, docY, zoomScale, trackHeights);
+      if (keyframeHit) {
+        e.preventDefault();
+        selectClips(new Set([keyframeHit.clipId]));
+        setMenu({
+          kind: "audioVolumeKeyframe",
+          clipId: keyframeHit.clipId,
+          frame: keyframeHit.frame,
+          x: e.clientX,
+          y: e.clientY,
+        });
+        return;
+      }
       const hit = hitTestClip(timeline, docX, docY, zoomScale, trackHeights);
       if (!hit) return; // empty space: keep the default (suppressed) menu
       e.preventDefault();
       const fadeHit = fadeKneeHit(timeline, docX, docY, zoomScale, trackHeights);
       if (fadeHit?.clipId === hit.clip.id) {
-        setMenu({ clipId: hit.clip.id, fadeEdge: fadeHit.edge, x: e.clientX, y: e.clientY });
+        setMenu({ kind: "clip", clipId: hit.clip.id, fadeEdge: fadeHit.edge, x: e.clientX, y: e.clientY });
         return;
       }
       // If the clip isn't already selected, select just it so menu actions
@@ -880,7 +1200,7 @@ export function TimelineContainer() {
       if (!selectedClipIds.has(hit.clip.id)) {
         selectClips(new Set([hit.clip.id]));
       }
-      setMenu({ clipId: hit.clip.id, x: e.clientX, y: e.clientY });
+      setMenu({ kind: "clip", clipId: hit.clip.id, x: e.clientX, y: e.clientY });
     },
     [toDoc, timeline, zoomScale, trackHeights, selectedClipIds, selectClips],
   );
@@ -974,7 +1294,7 @@ export function TimelineContainer() {
       )}
 
       {/* Clip right-click context menu. */}
-      {menu && (
+      {menu?.kind === "clip" && (
         <ClipContextMenu
           clipId={menu.clipId}
           fadeEdge={menu.fadeEdge}
@@ -984,9 +1304,149 @@ export function TimelineContainer() {
         />
       )}
 
+      {menu?.kind === "audioVolumeKeyframe" && (
+        <AudioVolumeKeyframeContextMenu
+          clipId={menu.clipId}
+          frame={menu.frame}
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+        />
+      )}
+
+      <SwapMediaPicker />
+
       {/* Horizontal scrollbar proxy (thin) — drag handled via wheel; kept minimal. */}
     </div>
   );
+}
+
+function AudioVolumeKeyframeContextMenu({
+  clipId,
+  frame,
+  x,
+  y,
+  onClose,
+}: {
+  clipId: string;
+  frame: number;
+  x: number;
+  y: number;
+  onClose: () => void;
+}) {
+  const t = useT();
+  const timeline = useProjectStore((s) => s.timeline);
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ left: x, top: y });
+  const currentInterpolation = findVolumeKeyframeInterpolation(timeline, clipId, frame);
+
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const { width, height } = el.getBoundingClientRect();
+    const margin = 8;
+    let left = x;
+    let top = y;
+    if (left + width + margin > window.innerWidth) left = Math.max(margin, x - width);
+    if (top + height + margin > window.innerHeight) top = Math.max(margin, y - height);
+    setPos({ left, top });
+  }, [x, y]);
+
+  const items = volumeKeyframeMenuItems({
+    currentInterpolation,
+    labels: {
+      delete: t("inspector.keyframes.delete"),
+      linear: t("inspector.keyframes.interpolation.linear"),
+      smooth: t("inspector.keyframes.interpolation.smooth"),
+      hold: t("inspector.keyframes.interpolation.hold"),
+    },
+    onDelete: () => {
+      void edit.removeKeyframe(clipId, "volume", frame);
+    },
+    onSetInterpolation: (interpolation) => {
+      void edit.setKeyframeInterpolation(clipId, "volume", frame, interpolation);
+    },
+  });
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        position: "fixed",
+        left: pos.left,
+        top: pos.top,
+        zIndex: 1000,
+        minWidth: 160,
+        padding: "4px 0",
+        background: "var(--bg-elevated)",
+        border: "var(--bw-thin) solid var(--border-primary)",
+        borderRadius: 6,
+        boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+        fontSize: "var(--fs-sm)",
+      }}
+      role="menu"
+    >
+      {items.map((item, i) => (
+        <button
+          key={i}
+          onClick={() => {
+            item.action();
+            onClose();
+          }}
+          style={{
+            display: "block",
+            width: "100%",
+            padding: "6px 12px",
+            textAlign: "left",
+            color: item.danger ? "var(--accent-danger, #ff6b6b)" : "var(--text-primary)",
+            background: "transparent",
+            border: "none",
+            cursor: "pointer",
+            fontFamily: "var(--font-sans)",
+            fontSize: "var(--fs-sm)",
+          }}
+          role={item.checked === undefined ? "menuitem" : "menuitemradio"}
+          aria-checked={item.checked ?? undefined}
+          onMouseEnter={(e) => {
+            (e.currentTarget as HTMLElement).style.background = "var(--bg-hover, rgba(255,255,255,0.08))";
+          }}
+          onMouseLeave={(e) => {
+            (e.currentTarget as HTMLElement).style.background = "transparent";
+          }}
+        >
+          {item.checked === undefined ? item.label : `${item.checked ? `${CHECKMARK} ` : "  "}${item.label}`}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function findVolumeKeyframeInterpolation(
+  timeline: Timeline,
+  clipId: string,
+  frame: number,
+): Interpolation | undefined {
+  for (const track of timeline.tracks) {
+    const clip = track.clips.find((c) => c.id === clipId);
+    const keyframe = clip?.volumeTrack?.keyframes.find((kf) => kf.frame === frame);
+    if (keyframe) return keyframe.interpolationOut;
+  }
+  return undefined;
 }
 
 function MarqueeBox({
@@ -1026,16 +1486,4 @@ function findClipLoc(timeline: { tracks: { clips: { id: string }[] }[] }, id: st
     if (ci >= 0) return [ti, ci];
   }
   return null;
-}
-
-function compatibleTracks(
-  timeline: { tracks: { type: string }[] },
-  a: number,
-  b: number,
-): boolean {
-  const ta = timeline.tracks[a]?.type;
-  const tb = timeline.tracks[b]?.type;
-  if (!ta || !tb) return false;
-  const visual = (t: string) => t === "video" || t === "image" || t === "text" || t === "lottie";
-  return ta === tb || (visual(ta) && visual(tb));
 }

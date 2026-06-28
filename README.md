@@ -92,7 +92,7 @@ Every MCP tool response carries a `context_signal`:
 
 Knowledge source: [ClipSkills](https://github.com/appergb/ClipSkills) — 12-volume professional editing knowledge base (MIT-licensed).
 
-📖 [Context Signal Design](docs/AGENT-CONTEXT-SIGNAL.md)
+📖 [Context Signal Design](docs/modules/opentake-agent/AGENT-CONTEXT-SIGNAL.md)
 
 ### 🔌 MCP Server — 31 Tools
 
@@ -126,7 +126,7 @@ Built-in Agent chat panel shares tool definitions and system prompt with MCP.
 
 Community-authored JSON + Markdown plugins per video genre — review / tutorial / gaming / wedding / talking-head — each encapsulating professional editing methodology. Agent activates, methodology loads.
 
-📖 [Workflow Plugin System Design](docs/WORKFLOW-PLUGIN-SYSTEM.md)
+📖 [Workflow Plugin System Design](docs/modules/opentake-agent/WORKFLOW-PLUGIN-SYSTEM.md)
 
 ---
 
@@ -200,7 +200,7 @@ plugins/
 └──────────────────────────────────────────────────────┘
 ```
 
-📖 [Architecture Docs](docs/ARCHITECTURE.md)
+📖 [Architecture Docs](docs/architecture/ARCHITECTURE.md)
 
 ---
 
@@ -208,15 +208,15 @@ plugins/
 
 | Document | Content |
 |:--|:--|
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Target architecture, layering, crate layout, command layer, render pipeline |
-| [ROADMAP.md](docs/ROADMAP.md) | Phase 0–10 roadmap with verification criteria and risk register |
-| [MODULE-PORT-MAP.md](docs/MODULE-PORT-MAP.md) | 20 upstream module port specs with core algorithms |
-| [AGENT-CONTEXT-SIGNAL.md](docs/AGENT-CONTEXT-SIGNAL.md) | Agent Context Signal system design |
-| [WORKFLOW-PLUGIN-SYSTEM.md](docs/WORKFLOW-PLUGIN-SYSTEM.md) | Workflow Plugin System (JSON + Markdown) |
-| [ADVANCED-FEATURES.md](docs/ADVANCED-FEATURES.md) | Advanced features vs CapCut |
-| [CAPCUT-GAP.md](docs/CAPCUT-GAP.md) | 33-item gap analysis vs CapCut |
+| [ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) | Target architecture, layering, crate layout, command layer, render pipeline |
+| [ROADMAP.md](docs/architecture/ROADMAP.md) | Phase 0–10 roadmap with verification criteria and risk register |
+| [MODULE-PORT-MAP.md](docs/architecture/MODULE-PORT-MAP.md) | 20 upstream module port specs with core algorithms |
+| [AGENT-CONTEXT-SIGNAL.md](docs/modules/opentake-agent/AGENT-CONTEXT-SIGNAL.md) | Agent Context Signal system design |
+| [WORKFLOW-PLUGIN-SYSTEM.md](docs/modules/opentake-agent/WORKFLOW-PLUGIN-SYSTEM.md) | Workflow Plugin System (JSON + Markdown) |
+| [ADVANCED-FEATURES.md](docs/architecture/ADVANCED-FEATURES.md) | Advanced features vs CapCut |
+| [CAPCUT-GAP.md](docs/architecture/CAPCUT-GAP.md) | 33-item gap analysis vs CapCut |
 | [DECISIONS.md](DECISIONS.md) | Tech stack / license / branding ADRs |
-| [PORT-1TO1-GAP.md](docs/PORT-1TO1-GAP.md) | 1:1 port gap analysis |
+| [PORT-1TO1-GAP.md](docs/architecture/PORT-1TO1-GAP.md) | 1:1 port gap analysis |
 
 ---
 ---
@@ -296,7 +296,7 @@ The sibling directory `palmier-pro-upstream/` contains upstream Swift sources fo
 | *(planned)* `0.4.0` | TBD | Phase 4: GPU Compositor (wgpu) + Text rasterization |
 | *(planned)* `1.0.0` | TBD | Phase 10: Full release — CapCut parity + deep Agent integration |
 
-📖 [Full Roadmap](docs/ROADMAP.md)
+📖 [Full Roadmap](docs/architecture/ROADMAP.md)
 
 ---
 

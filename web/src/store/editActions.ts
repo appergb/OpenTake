@@ -17,12 +17,20 @@ import type {
   ClipMoveReq,
   ClipPropertiesReq,
   ClipType,
+  ChromaKeyInput,
+  ColorGradeInput,
+  Crop,
+  EffectInput,
+  EditRequest,
   FrameRangeReq,
   Interpolation,
   KeyframePayloadReq,
   KeyframeProperty,
+  MaskInput,
   MediaItem,
+  RenameEntryReq,
   TextEntryReq,
+  TextStyle,
   Timeline,
   Transform,
   TrimEditReq,
@@ -83,6 +91,26 @@ export async function trimClips(edits: TrimEditReq[]) {
 export async function setClipProperties(clipIds: string[], properties: ClipPropertiesReq) {
   if (clipIds.length === 0) return;
   await applyAndRefresh({ type: "setClipProperties", clipIds, properties });
+}
+
+export async function setColorGrade(clipIds: string[], grade: ColorGradeInput | null) {
+  if (clipIds.length === 0) return;
+  await applyAndRefresh({ type: "setColorGrade", clipIds, grade });
+}
+
+export async function setChromaKey(clipIds: string[], chromaKey: ChromaKeyInput | null) {
+  if (clipIds.length === 0) return;
+  await applyAndRefresh({ type: "setChromaKey", clipIds, chromaKey });
+}
+
+export async function setMasks(clipIds: string[], masks: MaskInput[]) {
+  if (clipIds.length === 0) return;
+  await applyAndRefresh({ type: "setMasks", clipIds, masks });
+}
+
+export async function setEffects(clipIds: string[], effects: EffectInput[]) {
+  if (clipIds.length === 0) return;
+  await applyAndRefresh({ type: "setEffects", clipIds, effects });
 }
 
 export async function linkClips(clipIds: string[]) {
@@ -172,30 +200,58 @@ export async function moveToFolder(assetIds: string[], folderId?: string) {
   await applyAndRefresh({ type: "moveToFolder", assetIds, folderId });
 }
 
-/** Replace a clip's media source in place, preserving all editing attributes
- *  (transform / crop / keyframe tracks / grade / masks / effects / fade). When
- *  the new media is shorter than the clip's current duration, the backend
- *  truncates the duration and clamps `trim_end_frame` to fit. `mediaType`, when
- *  set, also implies `sourceClipType` unless `sourceClipType` is explicit. */
-export async function swapMedia(
-  clipId: string,
-  mediaRef: string,
-  options?: {
-    mediaType?: ClipType;
-    sourceClipType?: ClipType;
-    durationFrames?: number;
-    trimStartFrame?: number;
-  },
-) {
-  await applyAndRefresh({
-    type: "swapMedia",
-    clipId,
-    mediaRef,
-    mediaType: options?.mediaType,
-    sourceClipType: options?.sourceClipType,
-    durationFrames: options?.durationFrames,
-    trimStartFrame: options?.trimStartFrame,
-  });
+export async function renameMedia(entries: RenameEntryReq[]) {
+  if (entries.length === 0) return;
+  await applyAndRefresh({ type: "renameMedia", entries });
+}
+
+export async function renameFolder(entries: RenameEntryReq[]) {
+  if (entries.length === 0) return;
+  await applyAndRefresh({ type: "renameFolder", entries });
+}
+
+export async function deleteMedia(assetIds: string[]) {
+  if (assetIds.length === 0) return;
+  await applyAndRefresh({ type: "deleteMedia", assetIds });
+}
+
+export async function deleteFolder(folderIds: string[]) {
+  if (folderIds.length === 0) return;
+  await applyAndRefresh({ type: "deleteFolder", folderIds });
+}
+
+/** Replace a clip's media source in place, preserving all editing attributes.
+ *  The backend intentionally consumes only `clipId` + `mediaRef`; it does not
+ *  rewrite trim, duration, or type metadata. */
+export async function swapMedia(clipId: string, mediaRef: string) {
+  await applyAndRefresh({ type: "swapMedia", clipId, mediaRef });
+}
+
+export async function applyAutomationCommands(commands: EditRequest[]) {
+  if (commands.length === 0) return [];
+  const results = [];
+  for (const command of commands) {
+    results.push(await applyAndRefresh(command));
+  }
+  return results;
+}
+
+export async function applySmartReframe(clipIds: string[], crop: Crop, transform?: Transform) {
+  if (clipIds.length === 0) return;
+  await setClipProperties(clipIds, { crop, transform });
+}
+
+export async function addClipsToBeatFrames(entries: ClipEntryReq[], beatFrames: number[]) {
+  if (entries.length === 0) return;
+  const placed = entries.map((entry, index) => ({
+    ...entry,
+    startFrame: beatFrames[index] ?? entry.startFrame,
+  }));
+  await addClips(placed);
+}
+
+export async function tightenSilenceRanges(trackIndex: number, ranges: FrameRangeReq[]) {
+  await rippleDeleteRanges(trackIndex, ranges);
 }
 
 export async function undo() {
@@ -541,6 +597,29 @@ const DEFAULT_TEXT_TRANSFORM: Transform = {
   flipVertical: false,
 };
 
+const DEFAULT_TEXT_STYLE: TextStyle = {
+  fontName: "Helvetica-Bold",
+  fontSize: 96,
+  fontScale: 1,
+  color: { r: 1, g: 1, b: 1, a: 1 },
+  alignment: "center",
+  shadow: {
+    enabled: true,
+    color: { r: 0, g: 0, b: 0, a: 0.6 },
+    offsetX: 0,
+    offsetY: -2,
+    blur: 6,
+  },
+  background: {
+    enabled: false,
+    color: { r: 0, g: 0, b: 0, a: 0.6 },
+  },
+  border: {
+    enabled: false,
+    color: { r: 0, g: 0, b: 0, a: 1 },
+  },
+};
+
 /** Find the first visual track (video/image/text/lottie) index, or null. */
 function firstVisualTrackIndex(timeline: Timeline): number | null {
   for (let i = 0; i < timeline.tracks.length; i++) {
@@ -573,7 +652,7 @@ export async function addTextClip() {
     startFrame,
     durationFrames,
     content: "",
-    textStyle: {},
+    textStyle: DEFAULT_TEXT_STYLE,
     transform: DEFAULT_TEXT_TRANSFORM,
   };
 

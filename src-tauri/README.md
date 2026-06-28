@@ -4,7 +4,7 @@ The Tauri 2 desktop shell for OpenTake. It is a workspace member
 (`members = [..., "src-tauri"]` in `../Cargo.toml`) and holds the authoritative
 [`opentake_core::AppCore`] as managed state, exposing a thin `#[tauri::command]`
 surface over the core's DTO handlers plus a `CoreEvent` → Tauri-event bridge
-(`docs/ARCHITECTURE.md` §2 — "真相源在 Rust，前端持镜像").
+(`docs/architecture/ARCHITECTURE.md` §2 — "真相源在 Rust，前端持镜像").
 
 ## Commands (`src/commands.rs`)
 

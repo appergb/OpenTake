@@ -3,7 +3,7 @@
 //! Owns the single authoritative [`AppCore`] as Tauri managed state, registers
 //! the `#[tauri::command]` surface ([`commands`]), and bridges the core's
 //! [`CoreEvent`] bus to the WebView: every core event is re-emitted as a Tauri
-//! event so the front-end read-only mirror can re-sync (`docs/ARCHITECTURE.md`
+//! event so the front-end read-only mirror can re-sync (`docs/architecture/ARCHITECTURE.md`
 //! §2 — "真相源在 Rust，前端持镜像").
 
 mod commands;
@@ -138,6 +138,7 @@ pub fn run() {
             media::get_media,
             media::extract_audio,
             media::get_waveform,
+            media::generate_thumbnail,
             render::composite_frame,
             export::export_video,
             secret::secret_save,

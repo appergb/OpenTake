@@ -141,6 +141,34 @@ fn add_clips_rejects_incompatible_type() {
     assert!(matches!(err, EditError::Invalid(_)));
 }
 
+#[test]
+fn add_clips_auto_track_mixed_audio_video_is_one_undoable_transaction() {
+    let mut st = state(vec![]);
+    let g = SeqIdGen::new("n-");
+    let res = apply(
+        &mut st,
+        EditCommand::AddClipsAutoTrack {
+            entries: vec![
+                entry(0, ClipType::Audio, 0, 30),
+                entry(0, ClipType::Video, 10, 20),
+            ],
+        },
+        &g,
+    )
+    .unwrap();
+
+    assert!(res.changed);
+    assert_eq!(st.timeline.tracks.len(), 2);
+    assert_eq!(st.timeline.tracks[0].kind, ClipType::Video);
+    assert_eq!(st.timeline.tracks[1].kind, ClipType::Audio);
+    assert_eq!(st.timeline.tracks[0].clips[0].media_type, ClipType::Video);
+    assert_eq!(st.timeline.tracks[1].clips[0].media_type, ClipType::Audio);
+    assert_eq!(st.undo_depth(), 1);
+
+    apply(&mut st, EditCommand::Undo, &g).unwrap();
+    assert!(st.timeline.tracks.is_empty());
+}
+
 // ---- split + keyframes ----------------------------------------------------
 
 #[test]

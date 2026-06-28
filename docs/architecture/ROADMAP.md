@@ -78,7 +78,7 @@
 - **进阶扩展 · AIGC 编排(ADVANCED-FEATURES E 层)**:智能剪口播(本地词级转写+静音检测→Rust 内算 ripple,高阶工具 `remove_filler_words`/`tighten_silences`)、图文成片(agent 编排既有工具+SigLIP2 选素材)、音色克隆(ElevenLabs 等)、虚拟数字人(HeyGen/fal,新增 catalog kind)、多语种字幕翻译(MT/LLM,保时码)。
 
 ## Phase 10 —(新)Motion Canvas 动效 / AI Video 插件
-对应 `plugins/motion-canvas-studio`(待新增)+ `opentake-motion` fallback。详见 [MOTION-GRAPHICS-PLUGIN.md](MOTION-GRAPHICS-PLUGIN.md)。
+对应 `plugins/motion-canvas-studio`(待新增)+ `opentake-motion` fallback。详见 [MOTION-GRAPHICS-PLUGIN.md](../modules/opentake-motion/MOTION-GRAPHICS-PLUGIN.md)。
 - **做**:沿 issue #34,优先 fork / vendor Motion Canvas(MIT),作为独立 Motion / AI Video 插件。Agent 或 Motion Panel 生成 Motion Canvas scene/template → 插件渲染 `output.mp4` → OpenTake probe 并导入 media manifest → 单步落轨。`crates/opentake-motion` 现有 scaffold 保留为后续 PNG sequence / transparent alpha / HTML-CSS fallback,不再作为 v1 主渲染器 blocker。
 - **验证**:Motion Canvas sample template 能生成 mp4;OpenTake 自动导入并创建 timeline clip;`composite_frame` 和 `export_video` 都包含该片段;失败不污染 manifest/timeline;README/NOTICE 保留 Motion Canvas MIT license 与修改说明。
 - **时机**:v1 可复用普通视频导入/预览/导出链路,不阻塞 native alpha overlay。透明动效与 `ClipType::Motion`/frame sequence 放后续。
@@ -113,7 +113,7 @@
   5. 剪辑规则校验引擎：口播精剪规则（气口三规则、不在词中间切） / B-roll 匹配规则（时长对齐、不重复、成组添加）/ 节奏结构规则（信息密度、时钟理论、波峰制）。
   6. 外部工具能力映射（AI Cut / 剪映 / Pika / Runway → OpenTake 工具）。
 - **验证**：`get_timeline` 返回结果含 `context_signal`;轨道角色标注正确;规则不匹配时产生 warning 信号。
-- **设计文档**：[AGENT-CONTEXT-SIGNAL.md](AGENT-CONTEXT-SIGNAL.md)
+- **设计文档**：[AGENT-CONTEXT-SIGNAL.md](../modules/opentake-agent/AGENT-CONTEXT-SIGNAL.md)
 
 ## Phase W — 工作流插件系统（随 Phase 7 交付）
 
@@ -126,4 +126,4 @@
   4. `workflow.rules` 校验引擎。
   5. 插件 CLI（`opentake plugin create/validate/package`）。
 - **验证**：创建示例插件 → 激活 → Agent 获得插件指引;rules 校验正确。
-- **设计文档**：[WORKFLOW-PLUGIN-SYSTEM.md](WORKFLOW-PLUGIN-SYSTEM.md)
+- **设计文档**：[WORKFLOW-PLUGIN-SYSTEM.md](../modules/opentake-agent/WORKFLOW-PLUGIN-SYSTEM.md)

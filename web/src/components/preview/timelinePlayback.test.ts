@@ -71,10 +71,10 @@ describe("clipCoversFrame", () => {
 });
 
 describe("playbackFrameFromActiveFrame", () => {
-  it("buckets fractional RAF playhead updates to the rendered source frame", () => {
+  it("floors fractional RAF playhead updates to the current rendered frame", () => {
     expect(playbackFrameFromActiveFrame(12.1)).toBe(12);
     expect(playbackFrameFromActiveFrame(12.49)).toBe(12);
-    expect(playbackFrameFromActiveFrame(12.5)).toBe(13);
+    expect(playbackFrameFromActiveFrame(12.99)).toBe(12);
   });
 });
 

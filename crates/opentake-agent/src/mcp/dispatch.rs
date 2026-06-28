@@ -16,6 +16,7 @@
 //! generation / media tools are stubs in this phase and return an honest
 //! "not yet implemented" so the tool table is complete.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use opentake_domain::{AnimPair, Crop, Interpolation, Keyframe, KeyframeTrack};
@@ -23,6 +24,10 @@ use opentake_domain::{
     ChromaKey, ColorGrade, Effect, LiftGammaGain, Mask, MaskShape, MediaManifest, Point2, Rgb,
     Rgba, TextStyle, Timeline, Transform, VideoType,
 };
+use opentake_media::analysis::{
+    detect_beats, detect_silences, BeatDetectionConfig, SilenceDetectionConfig,
+};
+use opentake_media::{PcmFormat, PcmSpec};
 use opentake_ops::{
     ClipEntry, ClipMove, ClipProperties, EditCommand, FrameRange, KeyframePayload,
     KeyframeProperty, RenameEntry, TextEntry,
@@ -147,7 +152,7 @@ impl Dispatcher {
             ToolName::RemoveTracks => self.remove_tracks(args),
             ToolName::SplitClip => self.split_clip(args, before, op),
             ToolName::SetKeyframes => self.set_keyframes(args),
-            ToolName::RippleDeleteRanges => self.ripple_delete_ranges(args, op),
+            ToolName::RippleDeleteRanges => self.ripple_delete_ranges(args, before, op),
             ToolName::AddTexts => self.add_texts(args),
             ToolName::CreateFolder => self.create_folder(args),
             ToolName::MoveToFolder => self.move_to_folder(args),
@@ -167,6 +172,12 @@ impl Dispatcher {
             ToolName::ListWorkflows => self.list_workflows(),
             ToolName::ActivateWorkflow => self.activate_workflow(args),
             ToolName::DeactivateWorkflow => self.deactivate_workflow(),
+
+            // --- Analysis-driven edit surface ---
+            ToolName::DetectBeats => self.detect_beats(args, before),
+            ToolName::AutoCutToBeats => self.auto_cut_to_beats(args, before),
+            ToolName::SmartReframe => self.smart_reframe(args),
+            ToolName::TightenSilences => self.tighten_silences(args, before),
 
             // --- Not yet implementable in this phase (honest stubs) ---
             // Media reads (inspect/transcript/search) + import need the media
@@ -217,9 +228,16 @@ impl Dispatcher {
         let a: AddClipsArgs = decode_tool_args(args, "")?;
         let mut entries = Vec::with_capacity(a.entries.len());
         let mut media_refs = Vec::new();
+        let mut omitted_count = 0usize;
+        let mut explicit_count = 0usize;
         for (i, raw) in a.entries.iter().enumerate() {
             let e: AddClipEntry = decode_tool_args(raw, &format!("entries[{i}]"))?;
             let (media_type, has_audio) = resolve_media_kind(manifest, &e.media_ref);
+            if e.track_index.is_some() {
+                explicit_count += 1;
+            } else {
+                omitted_count += 1;
+            }
             media_refs.push(e.media_ref.clone());
             entries.push(ClipEntry {
                 media_ref: e.media_ref,
@@ -235,9 +253,20 @@ impl Dispatcher {
                 transform: None,
             });
         }
+        if omitted_count > 0 && explicit_count > 0 {
+            return Ok(ToolResult::error(
+                "add_clips: mixing entries with trackIndex and entries without trackIndex is rejected; split into separate calls",
+            ));
+        }
         op.added_media_refs = media_refs;
-        op.track_index = entries.first().map(|e| e.track_index);
-        let res = self.apply(EditCommand::AddClips { entries })?;
+        let command = if omitted_count > 0 {
+            op.track_index = None;
+            EditCommand::AddClipsAutoTrack { entries }
+        } else {
+            op.track_index = entries.first().map(|e| e.track_index);
+            EditCommand::AddClips { entries }
+        };
+        let res = self.apply(command)?;
         Ok(ToolResult::ok(res.summary))
     }
 
@@ -343,23 +372,265 @@ impl Dispatcher {
         Ok(ToolResult::ok(res.summary))
     }
 
+    fn detect_beats(&self, args: &Value, before: &Timeline) -> Result<ToolResult, ToolError> {
+        let a: DetectBeatsArgs = decode_tool_args(args, "")?;
+        let beats = self.detect_beat_hints(
+            before,
+            BeatAnalysisRequest {
+                clip_id: a.clip_id.as_deref(),
+                media_ref: a.media_ref.as_deref(),
+                start_frame: a.start_frame,
+                end_frame: a.end_frame,
+                sensitivity: a.sensitivity,
+                tool_name: "detect_beats",
+            },
+        )?;
+        let payload = serde_json::json!({
+            "applied": false,
+            "beats": beats.iter().map(|beat| serde_json::json!({
+                "frame": beat.frame,
+                "strength": beat.strength,
+            })).collect::<Vec<_>>(),
+            "count": beats.len(),
+        });
+        Ok(ToolResult::ok(round_floats_3dp(payload).to_string()))
+    }
+
+    fn auto_cut_to_beats(&self, args: &Value, before: &Timeline) -> Result<ToolResult, ToolError> {
+        let a: AutoCutToBeatsArgs = decode_tool_args(args, "")?;
+        let beats = self.detect_beat_hints(
+            before,
+            BeatAnalysisRequest {
+                clip_id: a.beat_clip_id.as_deref(),
+                media_ref: a.beat_media_ref.as_deref(),
+                start_frame: a.start_frame,
+                end_frame: a.end_frame,
+                sensitivity: None,
+                tool_name: "auto_cut_to_beats",
+            },
+        )?;
+        let min_gap = a.min_clip_frames.unwrap_or(1).max(1);
+        let max_gap = a.max_clip_frames.unwrap_or(i32::MAX).max(min_gap);
+        let mut cut_frames = Vec::new();
+        let mut last = None;
+        for beat in &beats {
+            if let Some(prev) = last {
+                let gap = beat.frame - prev;
+                if gap < min_gap {
+                    continue;
+                }
+                if gap > max_gap {
+                    cut_frames.push(prev + max_gap);
+                }
+            }
+            cut_frames.push(beat.frame);
+            last = Some(beat.frame);
+        }
+        cut_frames.sort_unstable();
+        cut_frames.dedup();
+
+        let placements = a
+            .clip_ids
+            .unwrap_or_default()
+            .into_iter()
+            .zip(cut_frames.iter().copied())
+            .map(|(clip_id, to_frame)| {
+                serde_json::json!({
+                    "clipId": clip_id,
+                    "toFrame": to_frame,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let payload = serde_json::json!({
+            "applied": false,
+            "alignCuts": a.align_cuts.unwrap_or(false),
+            "beats": beats.iter().map(|beat| serde_json::json!({
+                "frame": beat.frame,
+                "strength": beat.strength,
+            })).collect::<Vec<_>>(),
+            "cutFrames": cut_frames,
+            "placements": placements,
+            "note": "Preview only. Apply returned frames through split_clip/move_clips/ripple_delete_ranges as needed.",
+        });
+        Ok(ToolResult::ok(round_floats_3dp(payload).to_string()))
+    }
+
+    fn smart_reframe(&self, args: &Value) -> Result<ToolResult, ToolError> {
+        let _: SmartReframeArgs = decode_tool_args(args, "")?;
+        Ok(ToolResult::error(
+            "smart_reframe: needs vision analysis backend; CoreHandle does not expose sampled frames or saliency/subject analysis yet",
+        ))
+    }
+
+    fn tighten_silences(&self, args: &Value, before: &Timeline) -> Result<ToolResult, ToolError> {
+        let a: TightenSilencesArgs = decode_tool_args(args, "")?;
+        let targets = silence_targets(before, &a)?;
+        let spec = analysis_pcm_spec();
+        let fps = timeline_fps(before);
+        let mut config = SilenceDetectionConfig::with_window(
+            spec.sample_rate,
+            fps,
+            analysis_window_samples(spec.sample_rate),
+        );
+        config.rms_threshold = threshold_db_to_rms(a.threshold_db.unwrap_or(-40.0));
+        config.min_silence_frames = a.min_silence_frames.unwrap_or(12).max(1) as u64;
+        let padding = a.padding_frames.unwrap_or(3).max(0);
+
+        let mut by_track: BTreeMap<usize, Vec<(i32, i32)>> = BTreeMap::new();
+        let mut clip_payloads = Vec::new();
+        let mut warnings = Vec::new();
+        for target in targets {
+            let source_range = visible_source_range_secs(target.clip, fps);
+            let pcm = match self.handle.extract_analysis_pcm(
+                &target.clip.media_ref,
+                spec,
+                Some(source_range),
+            ) {
+                Ok(pcm) => pcm,
+                Err(e) => {
+                    warnings.push(format!("{}: {e}", target.clip.id));
+                    continue;
+                }
+            };
+            config.sample_rate = pcm.spec.sample_rate;
+            config.window_size_samples = analysis_window_samples(pcm.spec.sample_rate);
+            config.hop_size_samples = (config.window_size_samples / 2).max(1);
+            let ranges = detect_silences(&pcm.samples_f32, config);
+            let mut clip_ranges = Vec::new();
+            for range in ranges {
+                let start_seconds = source_range.0 + range.start_frame as f64 / fps;
+                let end_seconds = source_range.0 + range.end_frame as f64 / fps;
+                let start = source_seconds_to_timeline_frame_clamped(
+                    target.clip,
+                    start_seconds,
+                    before.fps,
+                ) + padding;
+                let end =
+                    source_seconds_to_timeline_frame_clamped(target.clip, end_seconds, before.fps)
+                        - padding;
+                if end <= start {
+                    continue;
+                }
+                by_track
+                    .entry(target.track_index)
+                    .or_default()
+                    .push((start, end));
+                clip_ranges.push(serde_json::json!([start, end]));
+            }
+            clip_payloads.push(serde_json::json!({
+                "clipId": target.clip.id,
+                "trackIndex": target.track_index,
+                "ranges": clip_ranges,
+            }));
+        }
+
+        for ranges in by_track.values_mut() {
+            ranges.sort_unstable();
+            ranges.dedup();
+        }
+        let commands = by_track
+            .iter()
+            .filter(|(_, ranges)| !ranges.is_empty())
+            .map(|(track_index, ranges)| {
+                serde_json::json!({
+                    "tool": "ripple_delete_ranges",
+                    "args": {
+                        "trackIndex": track_index,
+                        "units": "frames",
+                        "ranges": ranges.iter().map(|(start, end)| {
+                            serde_json::json!([start, end])
+                        }).collect::<Vec<_>>(),
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let payload = serde_json::json!({
+            "applied": false,
+            "clips": clip_payloads,
+            "commands": commands,
+            "warnings": warnings,
+            "note": "Preview only. Run each returned ripple_delete_ranges command to apply.",
+        });
+        Ok(ToolResult::ok(round_floats_3dp(payload).to_string()))
+    }
+
+    fn detect_beat_hints(
+        &self,
+        timeline: &Timeline,
+        request: BeatAnalysisRequest<'_>,
+    ) -> Result<Vec<BeatHint>, ToolError> {
+        let target = analysis_target(
+            timeline,
+            &self.handle.media(),
+            request.clip_id,
+            request.media_ref,
+            request.start_frame,
+            request.end_frame,
+            request.tool_name,
+        )?;
+        let spec = analysis_pcm_spec();
+        let pcm = self
+            .handle
+            .extract_analysis_pcm(&target.media_ref, spec, target.source_range)
+            .map_err(|e| ToolError::new(format!("{}: {e}", request.tool_name)))?;
+        let fps = timeline_fps(timeline);
+        let mut config = BeatDetectionConfig::with_window(
+            pcm.spec.sample_rate,
+            fps,
+            analysis_window_samples(pcm.spec.sample_rate),
+        );
+        config.min_onset_strength = sensitivity_to_onset_threshold(request.sensitivity);
+        let beats = detect_beats(&pcm.samples_f32, config)
+            .into_iter()
+            .map(|beat| BeatHint {
+                frame: target.map_relative_frame(beat.frame as i32, timeline.fps),
+                strength: beat.strength,
+            })
+            .collect();
+        Ok(beats)
+    }
+
     fn ripple_delete_ranges(
         &self,
         args: &Value,
+        before: &Timeline,
         op: &mut OpContext,
     ) -> Result<ToolResult, ToolError> {
         let a: RippleDeleteRangesArgs = decode_tool_args(args, "")?;
-        let track_index = a.track_index.unwrap_or(0);
+        let units = parse_range_units(a.units.as_deref())?;
+        let track_index = match (a.track_index, a.clip_id.as_deref()) {
+            (Some(track_index), None) => {
+                if units == RangeUnits::Seconds {
+                    return Ok(ToolResult::error(
+                        "ripple_delete_ranges: units='seconds' is only valid with clipId; trackIndex mode requires units='frames'",
+                    ));
+                }
+                track_index
+            }
+            (None, Some(clip_id)) => {
+                let (track_index, _) = clip_location(before, clip_id);
+                track_index.ok_or_else(|| {
+                    ToolError::new(format!("ripple_delete_ranges: clip not found: {clip_id}"))
+                })?
+            }
+            (Some(_), Some(_)) => {
+                return Ok(ToolResult::error(
+                    "ripple_delete_ranges: pass exactly one of trackIndex or clipId",
+                ));
+            }
+            (None, None) => {
+                return Ok(ToolResult::error(
+                    "ripple_delete_ranges: missing trackIndex or clipId",
+                ));
+            }
+        };
         op.track_index = Some(track_index);
-        let ranges: Vec<FrameRange> = a
-            .ranges
-            .iter()
-            .map(|r| {
-                let start = r.first().copied().unwrap_or(0.0).round() as i32;
-                let end = r.get(1).copied().unwrap_or(0.0).round() as i32;
-                FrameRange::new(start, end)
-            })
-            .collect();
+        if let Some(clip_id) = a.clip_id.as_ref() {
+            op.clip_ids = vec![clip_id.clone()];
+        }
+        let ranges = build_ripple_ranges(before, &a, units)?;
         let res = self.apply(EditCommand::RippleDeleteRanges {
             track_index,
             ranges,
@@ -747,6 +1018,292 @@ fn clip_location(timeline: &Timeline, clip_id: &str) -> (Option<usize>, Option<i
         }
     }
     (None, None)
+}
+
+#[derive(Clone, Debug)]
+struct BeatHint {
+    frame: i32,
+    strength: f32,
+}
+
+struct BeatAnalysisRequest<'a> {
+    clip_id: Option<&'a str>,
+    media_ref: Option<&'a str>,
+    start_frame: Option<i32>,
+    end_frame: Option<i32>,
+    sensitivity: Option<f64>,
+    tool_name: &'a str,
+}
+
+struct AnalysisTarget<'a> {
+    media_ref: String,
+    clip: Option<&'a opentake_domain::Clip>,
+    source_range: Option<(f64, f64)>,
+    source_start_seconds: f64,
+    project_start_frame: i32,
+}
+
+impl AnalysisTarget<'_> {
+    fn map_relative_frame(&self, frame: i32, timeline_fps: i32) -> i32 {
+        match self.clip {
+            Some(clip) => {
+                let fps = timeline_fps.max(1) as f64;
+                let seconds = self.source_start_seconds + frame as f64 / fps;
+                source_seconds_to_timeline_frame_clamped(clip, seconds, timeline_fps)
+            }
+            None => self.project_start_frame + frame,
+        }
+    }
+}
+
+struct SilenceTarget<'a> {
+    track_index: usize,
+    clip: &'a opentake_domain::Clip,
+}
+
+fn analysis_pcm_spec() -> PcmSpec {
+    PcmSpec {
+        sample_rate: 16_000,
+        channels: 1,
+        format: PcmFormat::F32,
+    }
+}
+
+fn timeline_fps(timeline: &Timeline) -> f64 {
+    timeline.fps.max(1) as f64
+}
+
+fn analysis_window_samples(sample_rate: u32) -> usize {
+    ((sample_rate.max(1) as f64) * 0.05).round().max(1.0) as usize
+}
+
+fn sensitivity_to_onset_threshold(sensitivity: Option<f64>) -> f32 {
+    let sensitivity = sensitivity.unwrap_or(0.5).clamp(0.0, 1.0);
+    (0.16 - sensitivity * 0.12).clamp(0.02, 0.20) as f32
+}
+
+fn threshold_db_to_rms(db: f64) -> f32 {
+    let db = db.clamp(-90.0, 0.0);
+    10f64.powf(db / 20.0) as f32
+}
+
+fn analysis_target<'a>(
+    timeline: &'a Timeline,
+    manifest: &MediaManifest,
+    clip_id: Option<&str>,
+    media_ref: Option<&str>,
+    start_frame: Option<i32>,
+    end_frame: Option<i32>,
+    tool_name: &str,
+) -> Result<AnalysisTarget<'a>, ToolError> {
+    match (clip_id, media_ref) {
+        (Some(_), Some(_)) => Err(ToolError::new(format!(
+            "{tool_name}: pass exactly one of clipId or mediaRef"
+        ))),
+        (None, None) => Err(ToolError::new(format!(
+            "{tool_name}: missing clipId or mediaRef"
+        ))),
+        (Some(clip_id), None) => {
+            let clip = find_clip(timeline, clip_id)
+                .ok_or_else(|| ToolError::new(format!("{tool_name}: clip not found: {clip_id}")))?;
+            let project_start = start_frame
+                .unwrap_or(clip.start_frame)
+                .clamp(clip.start_frame, clip.end_frame());
+            let project_end = end_frame
+                .unwrap_or(clip.end_frame())
+                .clamp(clip.start_frame, clip.end_frame());
+            if project_end <= project_start {
+                return Err(ToolError::new(format!(
+                    "{tool_name}: analysis range is empty"
+                )));
+            }
+            let fps = timeline_fps(timeline);
+            let speed = normalized_speed(clip);
+            let source_start_frame =
+                clip.trim_start_frame as f64 + (project_start - clip.start_frame) as f64 * speed;
+            let source_end_frame =
+                clip.trim_start_frame as f64 + (project_end - clip.start_frame) as f64 * speed;
+            let source_range = (source_start_frame / fps, source_end_frame / fps);
+            Ok(AnalysisTarget {
+                media_ref: clip.media_ref.clone(),
+                clip: Some(clip),
+                source_range: Some(source_range),
+                source_start_seconds: source_range.0,
+                project_start_frame: project_start,
+            })
+        }
+        (None, Some(media_ref)) => {
+            let fps = timeline_fps(timeline);
+            let start = start_frame.unwrap_or(0).max(0);
+            let entry = manifest.entries.iter().find(|entry| entry.id == media_ref);
+            let default_end = entry
+                .and_then(|entry| (entry.duration > 0.0).then_some((entry.duration * fps) as i32));
+            let source_range = match (start_frame, end_frame.or(default_end)) {
+                (None, None) => None,
+                (_, Some(end)) if end > start => Some((start as f64 / fps, end as f64 / fps)),
+                _ => {
+                    return Err(ToolError::new(format!(
+                        "{tool_name}: mediaRef analysis range is empty or missing endFrame"
+                    )));
+                }
+            };
+            Ok(AnalysisTarget {
+                media_ref: media_ref.to_string(),
+                clip: None,
+                source_range,
+                source_start_seconds: source_range.map(|range| range.0).unwrap_or(0.0),
+                project_start_frame: start,
+            })
+        }
+    }
+}
+
+fn silence_targets<'a>(
+    timeline: &'a Timeline,
+    args: &TightenSilencesArgs,
+) -> Result<Vec<SilenceTarget<'a>>, ToolError> {
+    match (&args.clip_ids, args.track_index) {
+        (Some(_), Some(_)) => Err(ToolError::new(
+            "tighten_silences: pass clipIds or trackIndex, not both",
+        )),
+        (Some(ids), None) => {
+            if ids.is_empty() {
+                return Err(ToolError::new("tighten_silences: clipIds is empty"));
+            }
+            let mut out = Vec::new();
+            for id in ids {
+                let (track_index, clip) = find_clip_with_track(timeline, id).ok_or_else(|| {
+                    ToolError::new(format!("tighten_silences: clip not found: {id}"))
+                })?;
+                out.push(SilenceTarget { track_index, clip });
+            }
+            Ok(out)
+        }
+        (None, Some(track_index)) => {
+            let track = timeline.tracks.get(track_index).ok_or_else(|| {
+                ToolError::new(format!("tighten_silences: track not found: {track_index}"))
+            })?;
+            Ok(track
+                .clips
+                .iter()
+                .map(|clip| SilenceTarget { track_index, clip })
+                .collect())
+        }
+        (None, None) => timeline
+            .tracks
+            .iter()
+            .enumerate()
+            .find(|(_, track)| track.kind == opentake_domain::ClipType::Audio)
+            .map(|(track_index, track)| {
+                track
+                    .clips
+                    .iter()
+                    .map(|clip| SilenceTarget { track_index, clip })
+                    .collect()
+            })
+            .ok_or_else(|| {
+                ToolError::new("tighten_silences: missing clipIds/trackIndex and no audio track")
+            }),
+    }
+}
+
+fn find_clip_with_track<'a>(
+    timeline: &'a Timeline,
+    clip_id: &str,
+) -> Option<(usize, &'a opentake_domain::Clip)> {
+    timeline
+        .tracks
+        .iter()
+        .enumerate()
+        .find_map(|(track_index, track)| {
+            track
+                .clips
+                .iter()
+                .find(|clip| clip.id == clip_id)
+                .map(|clip| (track_index, clip))
+        })
+}
+
+fn visible_source_range_secs(clip: &opentake_domain::Clip, fps: f64) -> (f64, f64) {
+    let speed = normalized_speed(clip);
+    let start = clip.trim_start_frame as f64 / fps;
+    let end = (clip.trim_start_frame as f64 + clip.duration_frames as f64 * speed) / fps;
+    (start.max(0.0), end.max(start))
+}
+
+fn normalized_speed(clip: &opentake_domain::Clip) -> f64 {
+    if clip.speed.is_finite() && clip.speed > 0.0 {
+        clip.speed
+    } else {
+        1.0
+    }
+}
+
+fn source_seconds_to_timeline_frame_clamped(
+    clip: &opentake_domain::Clip,
+    source_seconds: f64,
+    timeline_fps: i32,
+) -> i32 {
+    let fps = timeline_fps.max(1) as f64;
+    let source_frame = source_seconds * fps;
+    let relative_source = source_frame - clip.trim_start_frame as f64;
+    let frame = clip.start_frame as f64 + relative_source / normalized_speed(clip);
+    (frame.round() as i32).clamp(clip.start_frame, clip.end_frame())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RangeUnits {
+    Frames,
+    Seconds,
+}
+
+fn parse_range_units(units: Option<&str>) -> Result<RangeUnits, ToolError> {
+    match units.unwrap_or("frames") {
+        "frames" => Ok(RangeUnits::Frames),
+        "seconds" => Ok(RangeUnits::Seconds),
+        other => Err(ToolError::new(format!(
+            "units: unknown '{other}'. Allowed: frames, seconds."
+        ))),
+    }
+}
+
+fn build_ripple_ranges(
+    timeline: &Timeline,
+    args: &RippleDeleteRangesArgs,
+    units: RangeUnits,
+) -> Result<Vec<FrameRange>, ToolError> {
+    let clip = args
+        .clip_id
+        .as_deref()
+        .and_then(|clip_id| find_clip(timeline, clip_id));
+    let mut ranges = Vec::with_capacity(args.ranges.len());
+    for (i, row) in args.ranges.iter().enumerate() {
+        if row.len() < 2 {
+            return Err(ToolError::new(format!(
+                "ranges[{i}]: expected [start, end]"
+            )));
+        }
+        let (mut start, mut end) = match units {
+            RangeUnits::Frames => (row[0] as i32, row[1] as i32),
+            RangeUnits::Seconds => {
+                if let Some(clip) = clip {
+                    (
+                        source_seconds_to_timeline_frame_clamped(clip, row[0], timeline.fps),
+                        source_seconds_to_timeline_frame_clamped(clip, row[1], timeline.fps),
+                    )
+                } else {
+                    let fps = timeline.fps.max(1) as f64;
+                    ((row[0] * fps).round() as i32, (row[1] * fps).round() as i32)
+                }
+            }
+        };
+        if let Some(clip) = clip {
+            start = start.clamp(clip.start_frame, clip.end_frame());
+            end = end.clamp(clip.start_frame, clip.end_frame());
+        }
+        ranges.push(FrameRange::new(start, end));
+    }
+    Ok(ranges)
 }
 
 /// Build a domain [`Transform`] from the optional partial `TransformArg`, leaving
@@ -1358,6 +1915,54 @@ mod tests {
         }
     }
 
+    struct AnalysisHandle {
+        timeline: Timeline,
+        manifest: MediaManifest,
+        pcm: opentake_media::PcmBuffer,
+    }
+
+    impl CoreHandle for AnalysisHandle {
+        fn timeline(&self) -> Timeline {
+            self.timeline.clone()
+        }
+        fn media(&self) -> MediaManifest {
+            self.manifest.clone()
+        }
+        fn apply(&self, _cmd: EditCommand) -> anyhow::Result<EditResult> {
+            anyhow::bail!("read-only analysis test handle")
+        }
+        fn project_dir(&self) -> Option<PathBuf> {
+            None
+        }
+        fn extract_analysis_pcm(
+            &self,
+            _media_ref: &str,
+            _spec: opentake_media::PcmSpec,
+            _range: Option<(f64, f64)>,
+        ) -> anyhow::Result<opentake_media::PcmBuffer> {
+            Ok(self.pcm.clone())
+        }
+    }
+
+    fn pcm(samples: Vec<f32>, sample_rate: u32) -> opentake_media::PcmBuffer {
+        opentake_media::PcmBuffer {
+            spec: opentake_media::PcmSpec {
+                sample_rate,
+                channels: 1,
+                format: opentake_media::PcmFormat::F32,
+            },
+            samples_f32: samples,
+        }
+    }
+
+    fn first_json(result: &ToolResult) -> Value {
+        let first = match &result.content[0] {
+            crate::tools::result::Block::Text { text } => text,
+            _ => panic!("expected text block"),
+        };
+        serde_json::from_str(first).unwrap()
+    }
+
     impl CoreHandle for StateHandle {
         fn timeline(&self) -> Timeline {
             self.state.lock().unwrap().timeline.clone()
@@ -1395,6 +2000,16 @@ mod tests {
         }
     }
 
+    fn audio_entry(id: &str, name: &str) -> MediaManifestEntry {
+        let mut e = entry(id, name);
+        e.kind = ClipType::Audio;
+        e.has_audio = Some(true);
+        e.source = MediaSource::External {
+            absolute_path: format!("/{id}.mp3"),
+        };
+        e
+    }
+
     fn entry_with_size(id: &str, name: &str, width: i32, height: i32) -> MediaManifestEntry {
         let mut e = entry(id, name);
         e.source_width = Some(width);
@@ -1430,6 +2045,369 @@ mod tests {
             None => entry("asset-1", "Hero"),
         });
         Arc::new(StateHandle::new(tl, m))
+    }
+
+    fn empty_manifest_handle(entries: Vec<MediaManifestEntry>) -> Arc<StateHandle> {
+        let mut m = MediaManifest::new();
+        m.entries = entries;
+        Arc::new(StateHandle::new(Timeline::new(), m))
+    }
+
+    fn two_track_ripple_handle() -> Arc<StateHandle> {
+        let mut tl = Timeline::new();
+        tl.fps = 30;
+        let mut first = Track::new("track-1", ClipType::Video);
+        first.clips.push(Clip::new("clip-a", "asset-1", 0, 90));
+        let mut second = Track::new("track-2", ClipType::Video);
+        second.clips.push(Clip::new("clip-b", "asset-2", 100, 30));
+        tl.tracks.push(first);
+        tl.tracks.push(second);
+
+        let mut m = MediaManifest::new();
+        m.entries.push(entry("asset-1", "A"));
+        m.entries.push(entry("asset-2", "B"));
+        Arc::new(StateHandle::new(tl, m))
+    }
+
+    #[test]
+    fn add_clips_omitted_track_index_creates_shared_video_track() {
+        let h = empty_manifest_handle(vec![entry("asset-1", "A"), entry("asset-2", "B")]);
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "add_clips",
+            serde_json::json!({
+                "entries": [
+                    {"mediaRef": "asset-1", "startFrame": 0, "durationFrames": 30},
+                    {"mediaRef": "asset-2", "startFrame": 40, "durationFrames": 20}
+                ]
+            }),
+        );
+
+        assert!(!r.is_error, "{}", r.text_joined());
+        let tl = h.timeline();
+        assert_eq!(tl.tracks.len(), 1);
+        assert_eq!(tl.tracks[0].kind, ClipType::Video);
+        assert_eq!(tl.tracks[0].clips.len(), 2);
+        assert_eq!(tl.tracks[0].clips[0].media_ref, "asset-1");
+        assert_eq!(tl.tracks[0].clips[1].media_ref, "asset-2");
+    }
+
+    #[test]
+    fn add_clips_omitted_track_index_creates_shared_audio_track() {
+        let h = empty_manifest_handle(vec![
+            audio_entry("asset-1", "A"),
+            audio_entry("asset-2", "B"),
+        ]);
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "add_clips",
+            serde_json::json!({
+                "entries": [
+                    {"mediaRef": "asset-1", "startFrame": 0, "durationFrames": 30},
+                    {"mediaRef": "asset-2", "startFrame": 40, "durationFrames": 20}
+                ]
+            }),
+        );
+
+        assert!(!r.is_error, "{}", r.text_joined());
+        let tl = h.timeline();
+        assert_eq!(tl.tracks.len(), 1);
+        assert_eq!(tl.tracks[0].kind, ClipType::Audio);
+        assert_eq!(tl.tracks[0].clips.len(), 2);
+    }
+
+    #[test]
+    fn add_clips_omitted_track_index_is_one_undo_step() {
+        let h = empty_manifest_handle(vec![entry("asset-1", "A"), entry("asset-2", "B")]);
+        let d = dispatcher_with(h.clone());
+
+        let add = d.dispatch(
+            "add_clips",
+            serde_json::json!({
+                "entries": [
+                    {"mediaRef": "asset-1", "startFrame": 0, "durationFrames": 30},
+                    {"mediaRef": "asset-2", "startFrame": 40, "durationFrames": 20}
+                ]
+            }),
+        );
+        assert!(!add.is_error, "{}", add.text_joined());
+        assert_eq!(h.timeline().tracks.len(), 1);
+
+        let undo = d.dispatch("undo", serde_json::json!({}));
+        assert!(!undo.is_error, "{}", undo.text_joined());
+        assert!(h.timeline().tracks.is_empty());
+    }
+
+    #[test]
+    fn add_clips_mixed_track_index_presence_is_rejected() {
+        let h = empty_manifest_handle(vec![entry("asset-1", "A"), entry("asset-2", "B")]);
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "add_clips",
+            serde_json::json!({
+                "entries": [
+                    {"mediaRef": "asset-1", "trackIndex": 0, "startFrame": 0, "durationFrames": 30},
+                    {"mediaRef": "asset-2", "startFrame": 40, "durationFrames": 20}
+                ]
+            }),
+        );
+
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("trackIndex"),
+            "{}",
+            r.text_joined()
+        );
+        assert!(h.timeline().tracks.is_empty());
+    }
+
+    #[test]
+    fn add_clips_omitted_track_index_invalid_entry_does_not_create_track() {
+        let h = empty_manifest_handle(vec![entry("asset-1", "A")]);
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "add_clips",
+            serde_json::json!({
+                "entries": [
+                    {"mediaRef": "asset-1", "startFrame": 0, "durationFrames": 0}
+                ]
+            }),
+        );
+
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("durationFrames"),
+            "{}",
+            r.text_joined()
+        );
+        assert!(h.timeline().tracks.is_empty());
+    }
+
+    #[test]
+    fn ripple_delete_ranges_clip_id_seconds_uses_clip_track_and_timeline_fps() {
+        let h = two_track_ripple_handle();
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "ripple_delete_ranges",
+            serde_json::json!({
+                "clipId": "clip-b",
+                "units": "seconds",
+                "ranges": [[0.2, 0.5]]
+            }),
+        );
+
+        assert!(!r.is_error, "{}", r.text_joined());
+        let tl = h.timeline();
+        assert_eq!(tl.tracks[0].clips[0].duration_frames, 90);
+        let spans: Vec<(i32, i32)> = tl.tracks[1]
+            .clips
+            .iter()
+            .map(|clip| (clip.start_frame, clip.duration_frames))
+            .collect();
+        assert_eq!(spans, vec![(100, 6), (106, 15)]);
+    }
+
+    #[test]
+    fn ripple_delete_ranges_clip_id_seconds_rounds_after_speed_mapping() {
+        let mut tl = Timeline::new();
+        tl.fps = 30;
+        let mut track = Track::new("track-1", ClipType::Video);
+        let mut clip = Clip::new("clip-b", "asset-2", 100, 30);
+        clip.speed = 2.0;
+        track.clips.push(clip);
+        tl.tracks.push(track);
+        let mut manifest = MediaManifest::new();
+        manifest.entries.push(entry("asset-2", "B"));
+        let h = Arc::new(StateHandle::new(tl, manifest));
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "ripple_delete_ranges",
+            serde_json::json!({
+                "clipId": "clip-b",
+                "units": "seconds",
+                "ranges": [[0.24, 0.50]]
+            }),
+        );
+
+        assert!(!r.is_error, "{}", r.text_joined());
+        let spans: Vec<(i32, i32)> = h.timeline().tracks[0]
+            .clips
+            .iter()
+            .map(|clip| (clip.start_frame, clip.duration_frames))
+            .collect();
+        assert_eq!(spans, vec![(100, 4), (104, 22)]);
+    }
+
+    #[test]
+    fn ripple_delete_ranges_frames_are_used_without_rounding() {
+        let h = two_track_ripple_handle();
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "ripple_delete_ranges",
+            serde_json::json!({
+                "trackIndex": 1,
+                "units": "frames",
+                "ranges": [[105.9, 110.9]]
+            }),
+        );
+
+        assert!(!r.is_error, "{}", r.text_joined());
+        let tl = h.timeline();
+        let spans: Vec<(i32, i32)> = tl.tracks[1]
+            .clips
+            .iter()
+            .map(|clip| (clip.start_frame, clip.duration_frames))
+            .collect();
+        assert_eq!(spans, vec![(100, 5), (105, 20)]);
+    }
+
+    #[test]
+    fn ripple_delete_ranges_rejects_track_index_with_seconds() {
+        let h = two_track_ripple_handle();
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "ripple_delete_ranges",
+            serde_json::json!({
+                "trackIndex": 1,
+                "units": "seconds",
+                "ranges": [[3.5, 3.8]]
+            }),
+        );
+
+        assert!(r.is_error);
+        assert!(r.text_joined().contains("seconds"), "{}", r.text_joined());
+        assert_eq!(h.timeline(), two_track_ripple_handle().timeline());
+    }
+
+    #[test]
+    fn detect_beats_returns_pcm_frame_hints() {
+        let mut manifest = MediaManifest::new();
+        manifest.entries.push(audio_entry("music-1", "Music"));
+        let mut samples = vec![0.0f32; 1_000];
+        for sample in &mut samples[500..530] {
+            *sample = 1.0;
+        }
+        let mut timeline = Timeline::new();
+        timeline.fps = 10;
+        let h = Arc::new(AnalysisHandle {
+            timeline,
+            manifest,
+            pcm: pcm(samples, 1_000),
+        });
+        let d = dispatcher_with(h);
+
+        let beats = d.dispatch(
+            "detect_beats",
+            serde_json::json!({"mediaRef": "music-1", "sensitivity": 1.0}),
+        );
+        assert!(!beats.is_error, "{}", beats.text_joined());
+        let json = first_json(&beats);
+        let frames: Vec<i64> = json["beats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|beat| beat["frame"].as_i64().unwrap())
+            .collect();
+        assert!(
+            frames.iter().any(|frame| (4..=5).contains(frame)),
+            "{frames:?}"
+        );
+    }
+
+    #[test]
+    fn smart_reframe_reports_needs_vision_backend() {
+        let d = dispatcher_with(empty_manifest_handle(vec![]));
+        let reframe = d.dispatch(
+            "smart_reframe",
+            serde_json::json!({"clipIds": ["clip-a"], "aspectRatio": "9:16"}),
+        );
+        assert!(reframe.is_error);
+        assert!(
+            reframe
+                .text_joined()
+                .contains("needs vision analysis backend")
+                || reframe.text_joined().contains("needs vision backend")
+                || reframe.text_joined().contains("needs vision"),
+            "{}",
+            reframe.text_joined()
+        );
+    }
+
+    #[test]
+    fn tighten_silences_returns_ripple_delete_preview() {
+        let mut timeline = Timeline::new();
+        timeline.fps = 10;
+        let mut track = Track::new("audio-track", ClipType::Audio);
+        track.clips.push(Clip::new("clip-a", "asset-1", 0, 10));
+        timeline.tracks.push(track);
+        let mut manifest = MediaManifest::new();
+        manifest.entries.push(audio_entry("asset-1", "Voice"));
+        let mut samples = vec![0.5f32; 300];
+        samples.extend(std::iter::repeat_n(0.0f32, 400));
+        samples.extend(std::iter::repeat_n(0.5f32, 300));
+        let h = Arc::new(AnalysisHandle {
+            timeline,
+            manifest,
+            pcm: pcm(samples, 1_000),
+        });
+        let d = dispatcher_with(h);
+
+        let result = d.dispatch(
+            "tighten_silences",
+            serde_json::json!({
+                "clipIds": ["clip-a"],
+                "thresholdDb": -40.0,
+                "minSilenceFrames": 2,
+                "paddingFrames": 0
+            }),
+        );
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        let json = first_json(&result);
+        let ranges = json["commands"][0]["args"]["ranges"].as_array().unwrap();
+        assert!(!ranges.is_empty(), "{json}");
+        let first = ranges[0].as_array().unwrap();
+        let start = first[0].as_i64().unwrap();
+        let end = first[1].as_i64().unwrap();
+        assert!(start <= 3, "{json}");
+        assert!(end >= 6, "{json}");
+        assert_eq!(json["applied"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn analysis_tools_reject_unknown_args_before_unsupported_error() {
+        let d = dispatcher_with(empty_manifest_handle(vec![]));
+        let r = d.dispatch(
+            "tighten_silences",
+            serde_json::json!({"clipIds": ["clip-a"], "bogus": true}),
+        );
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("unknown field"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn remove_filler_words_stays_disabled_until_transcript_is_wired() {
+        let d = dispatcher_with(empty_manifest_handle(vec![]));
+        let r = d.dispatch("remove_filler_words", serde_json::json!({}));
+        assert!(r.is_error);
+        assert!(
+            r.text_joined()
+                .contains("Unknown tool: remove_filler_words"),
+            "{}",
+            r.text_joined()
+        );
     }
 
     #[test]

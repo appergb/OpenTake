@@ -332,7 +332,9 @@ function MediaCard({ item }: { item: MediaItem }) {
   const favorite = useIsFavorite(item.id);
   const toggleFavorite = useFavoritesStore((s) => s.toggle);
   // Offline assets shouldn't try to load a (now-missing) thumbnail.
-  const thumb = item.missing ? null : assetUrl(item.path);
+  const thumbPath = item.thumbnail ?? item.path;
+  const thumb = item.missing ? null : assetUrl(thumbPath);
+  const generatedThumb = Boolean(item.thumbnail);
   const [hovered, setHovered] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
 
@@ -383,8 +385,8 @@ function MediaCard({ item }: { item: MediaItem }) {
       title={item.name}
       style={{ display: "flex", flexDirection: "column", gap: 4, cursor: "grab" }}
     >
-      {/* Thumbnail: the original file decoded by the WebView (asset protocol); a
-          type glyph stands in when no resolvable path / outside Tauri. */}
+      {/* Thumbnail: generated cache image first; original file fallback only when
+          no cached thumbnail exists yet. */}
       <div
         style={{
           position: "relative",
@@ -403,7 +405,7 @@ function MediaCard({ item }: { item: MediaItem }) {
             (MEDIA_DND_TYPE) wins instead of a native image/video drag. The
             `#t=0.1` fragment makes the WebView paint the first frame as a video
             poster (a metadata-only <video> otherwise stays blank). */}
-        {thumb && item.type === "image" ? (
+        {thumb && (item.type === "image" || generatedThumb) ? (
           <img
             src={thumb}
             alt={item.name}

@@ -20,6 +20,7 @@ pub mod command;
 pub mod editor_state;
 pub mod engines;
 pub mod id;
+pub mod intent;
 pub mod ops;
 
 // --- Pure engines ---

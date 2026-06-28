@@ -3,6 +3,11 @@
 
 pub mod frame;
 pub mod pcm;
+pub mod stream;
 
 pub use frame::{decode_frame_at, decode_frames_at, fit_within, FrameRequest};
 pub use pcm::{extract_pcm, PcmBuffer, PcmFormat, PcmSpec};
+pub use stream::{
+    spawn_video_stream, StreamDecodeControl, StreamVideoFrame, VideoStream, VideoStreamRequest,
+    DEFAULT_VIDEO_STREAM_QUEUE_CAPACITY,
+};

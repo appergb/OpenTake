@@ -8,7 +8,7 @@
 import { BG, BORDER, TEXT, LAYOUT, TRACK_SIZE } from "../../lib/theme";
 import { clipRect, trackDisplayHeight, trackY } from "../../lib/geometry";
 import { linkOffsetForClip } from "../../lib/clip";
-import { drawClip } from "./clipRenderer";
+import { drawClip, type ClipThumbnailStrip } from "./clipRenderer";
 import type { Timeline, ClipType } from "../../lib/types";
 
 export interface PaintState {
@@ -32,6 +32,8 @@ export interface PaintState {
   /** Normalized waveform buckets per media asset id (`0 = loud, 1 = silence`),
    *  loaded on demand from the Rust media cache. Absent until resolved. */
   waveforms: Map<string, number[]>;
+  /** Loaded visual thumbnail sprites/single images per media asset id. */
+  thumbnails: Map<string, ClipThumbnailStrip>;
   /** Media asset ids whose source file is offline (moved/deleted). Clips that
    *  reference one render with the error wash. */
   missingMediaRefs: Set<string>;
@@ -48,6 +50,8 @@ export type DragPaint =
       ids: Set<string>;
       deltaFrames: number;
       trackDelta: number;
+      pinnedIds?: Set<string>;
+      leadTrackIndex: number;
       /** Option/Alt-drag duplicate: ghost renders with a "+" badge. */
       isDuplicate?: boolean;
       /** Dropping on an insert zone creates a new track of this type. */
@@ -118,7 +122,9 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
       let ghost = false;
       let isDuplicate = false;
       if (drag?.kind === "move" && drag.ids.has(clip.id)) {
-        if (drag.newTrackType) {
+        const isPinned = drag.pinnedIds?.has(clip.id) === true;
+        const onLeadRow = ti === drag.leadTrackIndex;
+        if (drag.newTrackType && !isPinned && onLeadRow) {
           const newTrackY = insertionLineY(drag.newTrackIndex ?? timeline.tracks.length);
           const ghostH = (trackDisplayHeight(timeline.tracks[0], trackHeights) || TRACK_SIZE.defaultHeight) - 4;
           rect = {
@@ -128,7 +134,9 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
             height: ghostH,
           };
         } else {
-          const nti = Math.max(0, Math.min(timeline.tracks.length - 1, ti + drag.trackDelta));
+          const nti = isPinned
+            ? ti
+            : Math.max(0, Math.min(timeline.tracks.length - 1, ti + drag.trackDelta));
           rect = clipRect(
             timeline,
             nti,
@@ -167,6 +175,10 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
         isSelected: s.selectedClipIds.has(clip.id),
         fps: timeline.fps,
         waveform: clip.mediaType === "audio" ? s.waveforms.get(clip.mediaRef) : undefined,
+        thumbnailStrip:
+          clip.mediaType !== "audio" && clip.mediaType !== "text"
+            ? s.thumbnails.get(clip.mediaRef)
+            : undefined,
         // Text clips have no source file; everything else is "missing" when its
         // asset's file is offline.
         missing: clip.mediaType !== "text" && s.missingMediaRefs.has(clip.mediaRef),

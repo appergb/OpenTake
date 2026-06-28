@@ -11,6 +11,7 @@ opentake-domain = { workspace = true }
 opentake-ops = { workspace = true }
 opentake-core = { workspace = true }
 opentake-gen = { workspace = true }
+opentake-media = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_path_to_error = "0.1"

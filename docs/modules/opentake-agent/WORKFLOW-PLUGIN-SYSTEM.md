@@ -152,5 +152,5 @@ opentake plugin package my-workflow/  # 打包分发
 ## 7. 相关文档
 
 - [AGENT-CONTEXT-SIGNAL.md](AGENT-CONTEXT-SIGNAL.md) — Agent 上下文信号系统
-- [ARCHITECTURE.md](ARCHITECTURE.md) — §7 MCP + Agent 层
-- [MOTION-GRAPHICS-PLUGIN.md](MOTION-GRAPHICS-PLUGIN.md) — Motion Canvas 动效 / AI Video 执行层插件。它会运行代码并渲染视频,不同于本文的 JSON+Markdown 工作流插件。
+- [ARCHITECTURE.md](../../architecture/ARCHITECTURE.md) — §7 MCP + Agent 层
+- [MOTION-GRAPHICS-PLUGIN.md](../opentake-motion/MOTION-GRAPHICS-PLUGIN.md) — Motion Canvas 动效 / AI Video 执行层插件。它会运行代码并渲染视频,不同于本文的 JSON+Markdown 工作流插件。

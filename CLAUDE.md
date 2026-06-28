@@ -1,6 +1,6 @@
 # OpenTake — 工作交接 / 状态文档（给压缩上下文后的自己）
 
-> 本文件是 OpenTake 开发的**权威状态 + 操作手册**。每次上下文压缩后先读它,再读 `docs/PORT-1TO1-GAP.md`(1:1 差距与实现计划,批次蓝图)。
+> 本文件是 OpenTake 开发的**权威状态 + 操作手册**。每次上下文压缩后先读它,再读 `docs/architecture/PORT-1TO1-GAP.md`(1:1 差距与实现计划,批次蓝图)。
 > 用户用中文沟通,回复用中文。用户要我**全自主**:自己开子 Agent / workflow,**绝不让用户开 agent / 不向用户提问要他操作**;**自己用真机 computer-use 测试**,做到能用再回报。
 
 > ⚠️ computer-use 点击本机被 Dock 遮挡全局拦截(报"会落在程序坞")。改用 `preview_start` dev server(浏览器 fallback `web/src/lib/fallback.ts` 有 demo 时间线)+ `preview_eval` 注入测量验证布局,绕开真机点击。详见 `memory/opentake-editing-parity.md`。
@@ -40,7 +40,7 @@
 
 ## 1. 目录
 - 仓库根 `OpenTake/`(在此跑 git/cargo/pnpm)。上游只读参考:`../palmier-pro-upstream/Sources/PalmierPro/`(**1:1 复刻唯一权威来源**)。
-- 计划/设计:`docs/PORT-1TO1-GAP.md`(必读)、`docs/`(ARCHITECTURE/ROADMAP/specs/*)。
+- 计划/设计:`docs/architecture/PORT-1TO1-GAP.md`(必读)、`docs/`(ARCHITECTURE/ROADMAP/specs/*)。
 
 ## 2. ✅ 已完成并入 main(CI 全绿)——MVP 编辑闭环已能用
 - 14 模块(domain/ops/project/render/media/agent/gen/core/前端#12/进阶A#13/motion#14)+ PR #41–#46。
@@ -80,4 +80,4 @@
 Streamable-HTTP `http://127.0.0.1:19789/mcp`(loopback+Origin 校验)。`claude mcp add --transport http opentake http://127.0.0.1:19789/mcp`;Cursor/Codex/Claude Desktop 同址。40 工具,返回附 context_signal。
 
 ## 7. 压缩后立即执行
-1. 读本文件 + `docs/PORT-1TO1-GAP.md`。2. `git -C OpenTake pull`(main)。3. 盘点 `gh issue list`,挑最高价值且可完整交付的:**首选 🔴 #53 播放引擎**(大,需专门会话),或 #48 片段编辑收尾、#49/#37 库与文件夹、剩余 MCP 工具 stub。4. 每项走 分支→写→自审→`cargo fmt`+clippy+test→真机/确定性验证→`gh run watch` 双绿→`--admin` 合并。5. 新依赖先读 `~/.cargo/registry/src` 真实源码核实 API(cosmic-text/rmcp 都这么做的),别照猜测写。
+1. 读本文件 + `docs/architecture/PORT-1TO1-GAP.md`。2. `git -C OpenTake pull`(main)。3. 盘点 `gh issue list`,挑最高价值且可完整交付的:**首选 🔴 #53 播放引擎**(大,需专门会话),或 #48 片段编辑收尾、#49/#37 库与文件夹、剩余 MCP 工具 stub。4. 每项走 分支→写→自审→`cargo fmt`+clippy+test→真机/确定性验证→`gh run watch` 双绿→`--admin` 合并。5. 新依赖先读 `~/.cargo/registry/src` 真实源码核实 API(cosmic-text/rmcp 都这么做的),别照猜测写。

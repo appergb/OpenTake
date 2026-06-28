@@ -1,123 +1,64 @@
-# OpenTake 文档索引
+# OpenTake 文档总目录
 
-> 本文档是 OpenTake 项目所有规划文档的索引，使用链接将各文档关联起来。
-> 最后更新：2026-06-26
-
----
-
-## 📋 快速导航
-
-| 你想了解什么 | 文档 |
-|---|---|
-| **项目概览** | [README.zh-CN.md](../README.zh-CN.md) |
-| **总体架构** | [ARCHITECTURE.md](ARCHITECTURE.md) |
-| **当前阶段与路线图** | [ROADMAP.md](ROADMAP.md) |
-| **AI Agent 协作指南** | [AGENTS.md](../AGENTS.md) |
-| **技术选型决策** | [DECISIONS.md](../DECISIONS.md) |
-| **变更历史** | [CHANGELOG.md](../CHANGELOG.md) |
-| **贡献指南** | [CONTRIBUTING.md](../CONTRIBUTING.md) |
-| **Tauri 桌面壳说明** | [src-tauri/README.md](../src-tauri/README.md) |
-| **已知 Bug 与问题** | [BUGS.md](BUGS.md) |
+> 全项目文档的**唯一入口**。文档按「模块」组织成超链接树：
+> **要开发某个模块，只需读该模块的 `OVERVIEW.md`（总览）+ `INDEX.md`（目录）**，目录里再链到该模块的各子系统文档与规格。
 
 ---
 
-## 🏗️ 架构与规划
+## 🧭 如何使用本文档树
 
-| 文档 | 行数 | 内容概要 |
-|---|---|---|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | 213 | 总体架构设计：分层 crate 结构、数据流、领域模型、渲染管线、Agent 集成 |
-| [ROADMAP.md](ROADMAP.md) | 129 | 10 个阶段路线图：Phase 0 脚手架 → Phase 10 Motion Canvas 插件 |
-| [EDITING-ENGINE-PLAN.md](EDITING-ENGINE-PLAN.md) | 73 | 剪辑引擎现况与规划：已 1:1 移植的 ops 层 + 待收口的 gap |
-| [PORT-1TO1-GAP.md](PORT-1TO1-GAP.md) | 198 | 1:1 复刻差距与实现计划：P0/P1/P2 逐项差距 |
-| [ADVANCED-FEATURES.md](ADVANCED-FEATURES.md) | 117 | 进阶能力设计：wgpu 着色器、AI 推理、FFmpeg 音频工程、跨平台特性 |
-| [CAPCUT-GAP.md](CAPCUT-GAP.md) | 236 | OpenTake vs 剪映特性差距报告（逐模块核对） |
-| [BUGS.md](BUGS.md) | — | 实际发现的 Bug 和有问题部分（本文档创建时维护） |
+```
+docs/
+├── INDEX.md            ← 你在这里（总目录）
+├── modules/            ← ★ 按 crate / 前端分的模块文档树
+│   ├── INDEX.md        ← 模块总目录（11 个模块一览）
+│   └── <模块>/
+│       ├── OVERVIEW.md ← 模块总览：职责 / 依赖 / 数据流 / 完成状态 / 对应上游
+│       ├── INDEX.md    ← 模块目录：链到本模块所有子系统文档 + 规格 + 源码
+│       └── *.md        ← 子系统文档（模块/子系统级，不逐函数）
+├── architecture/       ← 跨切面：总体架构 / 路线图 / 移植图 / gap / bug / 编辑自动化 DOS
+└── upstream-analysis/  ← 上游 Palmier Pro 拆解参考
+```
 
-**依赖关系**：ROADMAP → EDITING-ENGINE-PLAN → PORT-1TO1-GAP → BUGS
+**典型路径**：接到「改 X 模块」的活 → 打开 [modules/INDEX.md](modules/INDEX.md) 找到该模块 → 读它的 `OVERVIEW.md` 建立全貌 → 从它的 `INDEX.md` 进入需要的子系统文档 → 需要历史/规划背景时再回 [architecture/](architecture/INDEX.md)。
 
 ---
 
-## 🧩 模块规格文档（specs/）
+## 📦 模块文档树 → [modules/INDEX.md](modules/INDEX.md)
 
-| 文档 | 行数 | 对应 Crate | 内容概要 |
+| 层 | 模块 | 一句话 | 入口 |
 |---|---|---|---|
-| [specs/core-SPEC.md](specs/core-SPEC.md) | 585 | `opentake-core` + `opentake-ops` | 核心引擎规格：Timeline 模型、编辑命令、IPC 协议、撤销/重做 |
-| [specs/media-SPEC.md](specs/media-SPEC.md) | 966 | `opentake-media` | 媒体引擎规格：FFmpeg 编解码、缩略图、波形、转写、语义搜索 |
-| [specs/render-SPEC.md](specs/render-SPEC.md) | 565 | `opentake-render` | 渲染管线规格：RenderPlan、wgpu 合成器、文本栅格化 |
-| [specs/agent-SPEC.md](specs/agent-SPEC.md) | 1,089 | `opentake-agent` | Agent/MCP 规格：31 工具定义、Context Signal、工作流插件 |
-| [specs/gen-SPEC.md](specs/gen-SPEC.md) | 893 | `opentake-gen` | 生成式 AI 规格：BYOK Provider、模型目录、生成参数 |
-| [specs/frontend-UI-1to1-SPEC.md](specs/frontend-UI-1to1-SPEC.md) | 1,340 | `web/` | 前端 UI 1:1 规格：布局系统、时间线、预览、检查器、工具 |
+| 领域 | `opentake-domain` | Timeline/Track/Clip/Keyframe 纯值语义（叶子 crate） | [总览](modules/opentake-domain/OVERVIEW.md) · [目录](modules/opentake-domain/INDEX.md) |
+| 引擎 | `opentake-ops` | 纯引擎(Overwrite/Ripple/Snap) + EditCommand + 撤销栈 | [总览](modules/opentake-ops/OVERVIEW.md) · [目录](modules/opentake-ops/INDEX.md) |
+| 能力 | `opentake-project` | 工程持久化 / bundle / archive / 导出 | [总览](modules/opentake-project/OVERVIEW.md) · [目录](modules/opentake-project/INDEX.md) |
+| 能力 | `opentake-render` | wgpu 合成器 + 文本栅格化（预览/导出共享 RenderPlan） | [总览](modules/opentake-render/OVERVIEW.md) · [目录](modules/opentake-render/INDEX.md) |
+| 能力 | `opentake-media` | FFmpeg 编解码 / 缩略图 / 波形 / 转写 / 语义搜索 | [总览](modules/opentake-media/OVERVIEW.md) · [目录](modules/opentake-media/INDEX.md) |
+| 能力 | `opentake-motion` | Lottie / web 动态图形 | [总览](modules/opentake-motion/OVERVIEW.md) · [目录](modules/opentake-motion/INDEX.md) |
+| 能力 | `opentake-agent` | MCP server(44 工具) + 内置 Agent + Context Signal | [总览](modules/opentake-agent/OVERVIEW.md) · [目录](modules/opentake-agent/INDEX.md) |
+| 能力 | `opentake-gen` | 生成式 AI 客户端(BYOK，无后端) | [总览](modules/opentake-gen/OVERVIEW.md) · [目录](modules/opentake-gen/INDEX.md) |
+| 装配 | `opentake-core` | 会话管理 / DI / 事件总线（命令路由层） | [总览](modules/opentake-core/OVERVIEW.md) · [目录](modules/opentake-core/INDEX.md) |
+| 装配 | `src-tauri` | Tauri 2 桌面壳 + Tauri 命令 | [总览](modules/src-tauri/OVERVIEW.md) · [目录](modules/src-tauri/INDEX.md) |
+| 前端 | `web` | React/TS 前端（只读镜像 + 版本号） | [总览](modules/web/OVERVIEW.md) · [目录](modules/web/INDEX.md) |
 
 ---
 
-## 📐 上游分析参考（_analysis/）
+## 🏗️ 架构与规划 → [architecture/INDEX.md](architecture/INDEX.md)
 
-| 文档 | 行数 | 内容概要 |
-|---|---|---|
-| [_analysis/01-架构与数据流.md](_analysis/01-架构与数据流.md) | 372 | 上游 Palmier Pro 架构全面拆解：应用启动链、三层顶层对象、核心领域模型 |
-| [_analysis/02-苹果框架可移植性.md](_analysis/02-苹果框架可移植性.md) | 153 | Apple 框架 → Rust 可移植性评估：AVFoundation/AppKit/SwiftUI 替代方案 |
-| [_analysis/03-闭源云边界.md](_analysis/03-闭源云边界.md) | 302 | 后端闭源边界分析：Convex+Clerk+Stripe → OpenTake 自建建议 |
-| [_analysis/04-MCP与Agent工具.md](_analysis/04-MCP与Agent工具.md) | 255 | MCP 与 Agent 工具拆解：31 工具全集按域分组 |
+跨切面、不属单一模块的设计/规划/报告：总体架构、路线图、1:1 移植图与差距、剪映 gap、已知 Bug、编辑自动化 DOS。
 
----
+## 📐 上游拆解参考 → [upstream-analysis/README.md](upstream-analysis/README.md)
 
-## 🤖 Agent 相关文档
-
-| 文档 | 行数 | 内容概要 |
-|---|---|---|
-| [AGENT-CONTEXT-SIGNAL.md](AGENT-CONTEXT-SIGNAL.md) | 256 | Agent Context Signal 设计：信号发射时机、数据结构、工作流插件增强 |
-| [WORKFLOW-PLUGIN-SYSTEM.md](WORKFLOW-PLUGIN-SYSTEM.md) | 156 | 工作流插件系统设计：plugin.json schema、规则系统、Agent 集成 |
-| [MOTION-GRAPHICS-PLUGIN.md](MOTION-GRAPHICS-PLUGIN.md) | 280 | Motion Canvas 动效插件规划：技术路线、模块边界、Agent 集成 |
-| [specs/agent-SPEC.md](specs/agent-SPEC.md) | 1,089 | Agent 模块完整规格 |
+上游 Palmier Pro（Swift）的架构、Apple 框架可移植性、闭源云边界、MCP/Agent 工具拆解。
 
 ---
 
-## 🔬 扫描与审查报告
+## 📄 仓库根级文档
 
-| 文档 | 行数 | 内容概要 |
-|---|---|---|
-| [FULL_PROJECT_SCAN_REPORT.md](FULL_PROJECT_SCAN_REPORT.md) | 180 | OpenTake vs palmier-pro-upstream 全项目扫描报告 |
-| [MODULE-PORT-MAP.md](MODULE-PORT-MAP.md) | 1,295 | 逐模块移植地图：20 个模块的上游拆解 + Rust 对应方案 |
-
----
-
-## 🔗 文档引用关系图
-
-```
-README.zh-CN.md ──→ ARCHITECTURE.md ──→ ROADMAP.md
-                      │                    ├── EDITING-ENGINE-PLAN.md
-                      │                    │     └── PORT-1TO1-GAP.md
-                      │                    │           └── BUGS.md
-                      │                    ├── ADVANCED-FEATURES.md
-                      │                    └── CAPCUT-GAP.md
-                      │
-                      ├── specs/
-                      │     ├── core-SPEC.md ←→ crates/opentake-core, opentake-ops
-                      │     ├── media-SPEC.md ←→ crates/opentake-media
-                      │     ├── render-SPEC.md ←→ crates/opentake-render
-                      │     ├── agent-SPEC.md ←→ crates/opentake-agent
-                      │     ├── gen-SPEC.md ←→ crates/opentake-gen
-                      │     └── frontend-UI-1to1-SPEC.md ←→ web/
-                      │
-                      ├── _analysis/
-                      │     └── 01/02/03/04 → 上游反推参考
-                      │
-                      ├── AGENT-CONTEXT-SIGNAL.md → specs/agent-SPEC.md
-                      ├── WORKFLOW-PLUGIN-SYSTEM.md → specs/agent-SPEC.md
-                      └── MOTION-GRAPHICS-PLUGIN.md → specs/render-SPEC.md
-
-AGENTS.md ──→ docs/ARCHITECTURE.md, ROADMAP.md, MODULE-PORT-MAP.md
-DECISIONS.md ──→ LICENSE
-CLAUDE.md ──→ 常用命令、架构大图、移植铁律
-```
-
----
-
-## 📊 文档统计
-
-| 位置 | 文档数 | 总行数 |
-|---|---|---|
-| `docs/`（根目录） | 11 + 索引 | 3,132 |
-| `docs/specs/` | 6 | 5,438 |
-| `docs/_analysis/` | 5 | 1,105 |
-| **总计** | **22** | **9,675** |
+| 文档 | 用途 |
+|---|---|
+| [README.md](../README.md) · [README.zh-CN.md](../README.zh-CN.md) · [README.ja.md](../README.ja.md) | 项目概览（多语言） |
+| [CLAUDE.md](../CLAUDE.md) | 工作交接状态文档（压缩上下文后先读） |
+| [AGENTS.md](../AGENTS.md) | AI Agent 协作指南 |
+| [DECISIONS.md](../DECISIONS.md) | 技术选型决策（为何 Rust/Tauri/GPL-3.0） |
+| [CHANGELOG.md](../CHANGELOG.md) | 变更历史 |
+| [CONTRIBUTING.md](../CONTRIBUTING.md) | 贡献指南 |

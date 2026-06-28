@@ -80,7 +80,7 @@ Agent 操作时间线时，每次工具返回附带 `context_signal`：
 
 知识来源: [ClipSkills](https://github.com/appergb/ClipSkills) — 12 册专业剪辑知识内核（MIT 许可），融合影视飓风等专业课程方法论。
 
-📖 [Context Signal 设计文档](docs/AGENT-CONTEXT-SIGNAL.md)
+📖 [Context Signal 设计文档](docs/modules/opentake-agent/AGENT-CONTEXT-SIGNAL.md)
 
 ### 🔌 MCP Server — 31 个工具
 
@@ -114,7 +114,7 @@ Agent 操作时间线时，每次工具返回附带 `context_signal`：
 
 社区为每种视频类型编写 JSON + Markdown 插件——评测 / 科普 / 游戏 / 婚礼 / 口播——每个插件封装专业剪辑方法论，Agent 激活即用。
 
-📖 [Workflow Plugin System 设计](docs/WORKFLOW-PLUGIN-SYSTEM.md)
+📖 [Workflow Plugin System 设计](docs/modules/opentake-agent/WORKFLOW-PLUGIN-SYSTEM.md)
 
 ---
 
@@ -181,7 +181,7 @@ plugins/
 └──────────────────────────────────────────────────────┘
 ```
 
-📖 [详细架构文档](docs/ARCHITECTURE.md)
+📖 [详细架构文档](docs/architecture/ARCHITECTURE.md)
 
 ---
 
@@ -189,15 +189,15 @@ plugins/
 
 | 文档 | 内容 |
 |:--|:--|
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | 目标架构、分层、crate 布局、命令层、渲染管线 |
-| [ROADMAP.md](docs/ROADMAP.md) | Phase 0–10 路线图，含验证标准与风险登记 |
-| [MODULE-PORT-MAP.md](docs/MODULE-PORT-MAP.md) | 20 个上游模块逐项移植规格、核心算法 |
-| [AGENT-CONTEXT-SIGNAL.md](docs/AGENT-CONTEXT-SIGNAL.md) | Agent 上下文信号系统设计 |
-| [WORKFLOW-PLUGIN-SYSTEM.md](docs/WORKFLOW-PLUGIN-SYSTEM.md) | 工作流插件系统 (JSON + Markdown) |
-| [ADVANCED-FEATURES.md](docs/ADVANCED-FEATURES.md) | 对标剪映的进阶能力设计 |
-| [CAPCUT-GAP.md](docs/CAPCUT-GAP.md) | 与剪映的 33 项特性差距分析 |
+| [ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) | 目标架构、分层、crate 布局、命令层、渲染管线 |
+| [ROADMAP.md](docs/architecture/ROADMAP.md) | Phase 0–10 路线图，含验证标准与风险登记 |
+| [MODULE-PORT-MAP.md](docs/architecture/MODULE-PORT-MAP.md) | 20 个上游模块逐项移植规格、核心算法 |
+| [AGENT-CONTEXT-SIGNAL.md](docs/modules/opentake-agent/AGENT-CONTEXT-SIGNAL.md) | Agent 上下文信号系统设计 |
+| [WORKFLOW-PLUGIN-SYSTEM.md](docs/modules/opentake-agent/WORKFLOW-PLUGIN-SYSTEM.md) | 工作流插件系统 (JSON + Markdown) |
+| [ADVANCED-FEATURES.md](docs/architecture/ADVANCED-FEATURES.md) | 对标剪映的进阶能力设计 |
+| [CAPCUT-GAP.md](docs/architecture/CAPCUT-GAP.md) | 与剪映的 33 项特性差距分析 |
 | [DECISIONS.md](DECISIONS.md) | 技术栈 / 许可 / 品牌决策记录 (ADR) |
-| [PORT-1TO1-GAP.md](docs/PORT-1TO1-GAP.md) | 1:1 端口差距分析 |
+| [PORT-1TO1-GAP.md](docs/architecture/PORT-1TO1-GAP.md) | 1:1 端口差距分析 |
 
 ---
 ---
@@ -272,7 +272,7 @@ cd .. && cargo tauri dev
 | *(planned)* `0.4.0` | TBD | Phase 4: GPU Compositor (wgpu) + Text rasterization |
 | *(planned)* `1.0.0` | TBD | Phase 10: 全功能发布 — 对标剪映 + Agent 深度集成 |
 
-📖 [完整路线图](docs/ROADMAP.md)
+📖 [完整路线图](docs/architecture/ROADMAP.md)
 
 ---
 
