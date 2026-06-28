@@ -38,6 +38,15 @@ opentake-agent = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 base64 = "0.22"
 
+# Streaming playback transport (#53 / #64), behind the `playback-engine` feature.
+# Versions already resolved in the workspace lockfile (via opentake-agent), so
+# enabling these pulls no new third-party crates (cpal arrives in the audio
+# follow-up). `image/jpeg` is enabled by the feature for MJPEG frame encoding.
+axum = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "sync"], optional = true }
+bytes = { version = "1", optional = true }
+futures = { version = "0.3", optional = true }
+
 [dev-dependencies]
 tempfile = "3"
 
@@ -47,4 +56,4 @@ custom-protocol = ["tauri/custom-protocol"]
 # Continuous Rust streaming playback engine (#53). Off by default: PR1 lands the
 # headless core (no commands/UI). PR2 adds cpal + axum/image-jpeg deps under this
 # flag; PR3 flips the front end's runtime toggle.
-playback-engine = []
+playback-engine = ["dep:axum", "dep:tokio", "dep:bytes", "dep:futures", "image/jpeg"]

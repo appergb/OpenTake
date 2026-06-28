@@ -13,9 +13,12 @@
 //! hence the module-scoped `dead_code` allow.
 #![allow(dead_code)]
 
+pub mod audio;
+pub mod commands;
 pub mod engine;
 pub mod project;
 pub mod resolver;
+pub mod transport;
 
 pub use engine::{
     FrameSink, InstantClock, PlaybackClock, PlaybackCmd, PlaybackEngine, PlayheadEmitter,
@@ -23,3 +26,6 @@ pub use engine::{
 };
 pub use project::{project_media, project_text, ManifestMetrics, MediaInfo, TextInfo};
 pub use resolver::{PlaybackResolverState, StreamingResolver};
+
+pub use commands::PlaybackState;
+pub use transport::{MjpegSink, PreviewServer, TauriPlayheadEmitter};
