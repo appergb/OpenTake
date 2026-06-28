@@ -1,13 +1,13 @@
 /**
- * ClipContextMenu (SPEC §5.8). Right-click menu for timeline clips. MVP items:
- * Split at Playhead / Delete / Link or Unlink. Copy/Cut/Paste will be added
- * once the clipboard PR (#94) lands. Appears AT the cursor (`x`/`y`, flipped to
- * stay inside the viewport) and closes on outside click, Escape, or item action.
+ * ClipContextMenu (SPEC §5.8). Right-click menu for timeline clips. Appears AT
+ * the cursor (`x`/`y`, flipped to stay inside the viewport) and closes on
+ * outside click, Escape, or item action.
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
+import { useClipboardStore } from "../../store/clipboardStore";
 import * as edit from "../../store/editActions";
 import { useT } from "../../i18n";
 import type { Clip, ClipPropertiesReq, Interpolation } from "../../lib/types";
@@ -27,6 +27,114 @@ const FADE_INTERPOLATIONS: Array<{ label: string; value: FadeInterpolation }> = 
   { label: "Smooth", value: "smooth" },
 ];
 const CHECKMARK = "\u2713";
+
+type ClipMenuLabels = {
+  copy: string;
+  paste: string;
+  split: string;
+  delete: string;
+  link: string;
+  unlink: string;
+  swapMedia: string;
+};
+
+export function clipContextMenuItems({
+  clip,
+  hasClipboardContent,
+  labels,
+  ensureSelected,
+  selectedClipIds,
+  onCopy,
+  onPaste,
+  onSplit,
+  onDelete,
+  onLink,
+  onUnlink,
+  onSwapMedia,
+}: {
+  clip: Clip;
+  hasClipboardContent: boolean;
+  labels: ClipMenuLabels;
+  ensureSelected: () => void;
+  selectedClipIds: () => string[];
+  onCopy: () => void;
+  onPaste: () => void | Promise<void>;
+  onSplit: () => void | Promise<void>;
+  onDelete: () => void | Promise<void>;
+  onLink: (ids: string[]) => void | Promise<void>;
+  onUnlink: (ids: string[]) => void | Promise<void>;
+  onSwapMedia: () => void;
+}): MenuItem[] {
+  const items: MenuItem[] = [
+    {
+      label: labels.copy,
+      action: () => {
+        ensureSelected();
+        onCopy();
+      },
+    },
+  ];
+
+  if (hasClipboardContent) {
+    items.push({
+      label: labels.paste,
+      action: () => {
+        void onPaste();
+      },
+    });
+  }
+
+  items.push(
+    {
+      label: labels.split,
+      action: () => {
+        ensureSelected();
+        void onSplit();
+      },
+    },
+    {
+      label: labels.delete,
+      action: () => {
+        ensureSelected();
+        void onDelete();
+      },
+      danger: true,
+    },
+  );
+
+  // Link/Unlink: operate on the full selection (>= 2 clips to link).
+  if (clip.linkGroupId) {
+    items.push({
+      label: labels.unlink,
+      action: () => {
+        ensureSelected();
+        const ids = selectedClipIds();
+        if (ids.length > 0) void onUnlink(ids);
+      },
+    });
+  } else {
+    items.push({
+      label: labels.link,
+      action: () => {
+        ensureSelected();
+        const ids = selectedClipIds();
+        if (ids.length >= 2) void onLink(ids);
+      },
+    });
+  }
+
+  if (clip.mediaType === "video" || clip.mediaType === "image") {
+    items.push({
+      label: labels.swapMedia,
+      action: () => {
+        ensureSelected();
+        onSwapMedia();
+      },
+    });
+  }
+
+  return items;
+}
 
 export function fadeInterpolationMenuItems(
   clip: Clip,
@@ -61,6 +169,8 @@ export function ClipContextMenu({
   const timeline = useProjectStore((s) => s.timeline);
   const selectedClipIds = useEditorUiStore((s) => s.selectedClipIds);
   const selectClips = useEditorUiStore((s) => s.selectClips);
+  const setPendingSwapClipId = useEditorUiStore((s) => s.setPendingSwapClipId);
+  const hasClipboardContent = useClipboardStore((s) => s.hasContent);
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ left: x, top: y });
 
@@ -133,44 +243,28 @@ export function ClipContextMenu({
       },
     );
   } else {
-    items = [
-      {
-        label: t("contextMenu.split"),
-        action: () => {
-          ensureSelected();
-          void edit.splitAtPlayhead();
-        },
+    items = clipContextMenuItems({
+      clip: clip!,
+      hasClipboardContent,
+      labels: {
+        copy: t("contextMenu.copy"),
+        paste: t("contextMenu.paste"),
+        split: t("contextMenu.split"),
+        delete: t("contextMenu.delete"),
+        link: t("contextMenu.link"),
+        unlink: t("contextMenu.unlink"),
+        swapMedia: t("contextMenu.swapMedia"),
       },
-      {
-        label: t("contextMenu.delete"),
-        action: () => {
-          ensureSelected();
-          void edit.deleteSelectedClips();
-        },
-        danger: true,
-      },
-    ];
-
-    // Link/Unlink: operate on the full selection (>= 2 clips to link).
-    if (clip!.linkGroupId) {
-      items.push({
-        label: t("contextMenu.unlink"),
-        action: () => {
-          ensureSelected();
-          const ids = [...useEditorUiStore.getState().selectedClipIds];
-          if (ids.length > 0) void edit.unlinkClips(ids);
-        },
-      });
-    } else {
-      items.push({
-        label: t("contextMenu.link"),
-        action: () => {
-          ensureSelected();
-          const ids = [...useEditorUiStore.getState().selectedClipIds];
-          if (ids.length >= 2) void edit.linkClips(ids);
-        },
-      });
-    }
+      ensureSelected,
+      selectedClipIds: () => [...useEditorUiStore.getState().selectedClipIds],
+      onCopy: edit.copyClips,
+      onPaste: edit.pasteClipsAtPlayhead,
+      onSplit: edit.splitAtPlayhead,
+      onDelete: edit.deleteSelectedClips,
+      onLink: edit.linkClips,
+      onUnlink: edit.unlinkClips,
+      onSwapMedia: () => setPendingSwapClipId(clipId),
+    });
   }
 
   return (

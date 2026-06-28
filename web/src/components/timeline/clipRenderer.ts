@@ -2,8 +2,8 @@
  * Clip renderer — port of `Timeline/ClipRenderer.draw` (SPEC §5.4). Draws one
  * clip into its rect following the exact upstream order: base fill, content
  * placeholder, fade wedges, left color strip, border, missing wash, label bar,
- * keyframe diamonds, trim handles. Thumbnail/waveform content is a placeholder
- * here (Rust media cache, SPEC §11.3) — drawn as a tinted band + type hint.
+ * keyframe diamonds, trim handles. Waveforms and visual filmstrips are supplied
+ * by the Rust media cache and drawn into the content band.
  */
 
 import { ACCENT, CLIP, FADE, TEXT, TRIM, BORDER } from "../../lib/theme";
@@ -15,12 +15,23 @@ import type { Clip } from "../../lib/types";
  *  (the previous near-white border read as grey and was easy to miss). */
 const SELECTION_BLUE = "rgba(56,139,253,1)";
 
+export interface ClipThumbnailStrip {
+  image: HTMLImageElement;
+  kind: "sprite" | "single";
+  tileWidth: number;
+  tileHeight: number;
+  columns: number;
+  times: number[];
+}
+
 interface DrawOpts {
   isSelected: boolean;
   fps: number;
   /** Normalized waveform buckets (`0 = loud, 1 = silence`) spanning the WHOLE
    *  source media, or undefined until the Rust `get_waveform` cache resolves. */
   waveform?: number[];
+  /** Loaded visual thumbnail sprite/single image from the Rust thumbnail cache. */
+  thumbnailStrip?: ClipThumbnailStrip;
   /** The clip's source media file is offline (moved/deleted). Draws the error
    *  wash (port of `ClipRenderer` missing state). */
   missing?: boolean;
@@ -148,8 +159,12 @@ export function drawClip(
         ctx.fillRect(contentX, contentY, contentW, contentH);
       }
     } else {
-      ctx.fillStyle = withAlpha(color, 0.12);
-      ctx.fillRect(contentX, contentY, contentW, contentH);
+      if (opts.thumbnailStrip) {
+        drawFilmstrip(ctx, clip, contentX, contentY, contentW, contentH, opts.thumbnailStrip, opts.fps);
+      } else {
+        ctx.fillStyle = withAlpha(color, 0.12);
+        ctx.fillRect(contentX, contentY, contentW, contentH);
+      }
     }
   }
   ctx.restore();
@@ -332,6 +347,96 @@ function drawWaveform(
     const barHeight = Math.max(1, amplitude * (h - 2));
     ctx.fillRect(x + i, y + h - barHeight - 1, 1, barHeight);
   }
+}
+
+function drawFilmstrip(
+  ctx: CanvasRenderingContext2D,
+  clip: Clip,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  strip: ClipThumbnailStrip,
+  fps: number,
+) {
+  if (w <= 2 || h <= 2 || !strip.image.complete) return;
+  const tileW = strip.tileWidth || strip.image.naturalWidth || 1;
+  const tileH = strip.tileHeight || strip.image.naturalHeight || 1;
+  const columns = Math.max(1, strip.columns);
+  if (tileW <= 0 || tileH <= 0) return;
+
+  const aspect = tileW / tileH;
+  const displayW = Math.max(24, Math.min(96, h * aspect));
+  const step = Math.min(displayW, w);
+
+  const fpsSafe = fps > 0 ? fps : 30;
+  const speed = clip.speed > 0 ? clip.speed : 1;
+  const sourceStart = clip.trimStartFrame / fpsSafe;
+  const sourceDuration = Math.max(0.001, Math.round(clip.durationFrames * speed) / fpsSafe);
+
+  ctx.save();
+  ctx.globalAlpha *= 0.82;
+  for (let dx = x; dx < x + w - 0.5; dx += step) {
+    const dw = Math.min(step, x + w - dx);
+    const center = Math.max(0, Math.min(1, (dx - x + dw / 2) / w));
+    const sourceTime = sourceStart + sourceDuration * center;
+    const index =
+      strip.kind === "sprite" && strip.times.length > 0
+        ? nearestTimeIndex(strip.times, sourceTime)
+        : 0;
+    const sx = strip.kind === "sprite" ? (index % columns) * tileW : 0;
+    const sy = strip.kind === "sprite" ? Math.floor(index / columns) * tileH : 0;
+    drawImageCover(ctx, strip.image, sx, sy, tileW, tileH, dx, y, dw, h);
+    if (dw > 8) {
+      ctx.fillStyle = "rgba(255,255,255,0.10)";
+      ctx.fillRect(dx, y, 1, h);
+    }
+  }
+  ctx.globalAlpha /= 0.82;
+  ctx.fillStyle = "rgba(0,0,0,0.16)";
+  ctx.fillRect(x, y, w, h);
+  ctx.restore();
+}
+
+function nearestTimeIndex(times: number[], target: number): number {
+  let best = 0;
+  let bestDelta = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < times.length; i++) {
+    const delta = Math.abs(times[i] - target);
+    if (delta < bestDelta) {
+      best = i;
+      bestDelta = delta;
+    }
+  }
+  return best;
+}
+
+function drawImageCover(
+  ctx: CanvasRenderingContext2D,
+  image: HTMLImageElement,
+  sx: number,
+  sy: number,
+  sw: number,
+  sh: number,
+  dx: number,
+  dy: number,
+  dw: number,
+  dh: number,
+) {
+  const srcAspect = sw / sh;
+  const dstAspect = dw / dh;
+  let cx = sx;
+  let cy = sy;
+  let cw = sw;
+  let ch = sh;
+  if (srcAspect > dstAspect) {
+    cw = sh * dstAspect;
+    cx = sx + (sw - cw) / 2;
+  } else {
+    ch = sw / dstAspect;
+    cy = sy + (sh - ch) / 2;
+  }
+  ctx.drawImage(image, cx, cy, cw, ch, dx, dy, dw, dh);
 }
 
 /** Standard smoothstep (matches the shader + upstream `smoothstep`). */

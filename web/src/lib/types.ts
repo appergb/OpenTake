@@ -358,8 +358,8 @@ export interface TimelineSnapshot {
 
 /** One media-library item as returned by `get_media` / `import_*`. `type` is the
  *  serde-renamed `kind`; `duration` is in seconds; `path` is the resolvable
- *  source path; `thumbnail` is an on-disk thumbnail path (currently always
- *  null — the panel renders a type placeholder). */
+ *  source path; `thumbnail` is an on-disk generated thumbnail path when
+ *  available. */
 export interface MediaItem {
   id: string;
   name: string;

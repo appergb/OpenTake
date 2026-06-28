@@ -21,7 +21,7 @@ export interface ActiveMedia {
 
 /** Bucket the fractional playback clock to the frame the preview actually renders. */
 export function playbackFrameFromActiveFrame(activeFrame: number): number {
-  return Math.round(activeFrame);
+  return Math.max(0, Math.floor(activeFrame));
 }
 
 /** Whether a clip covers `frame` on its track ([start, start+duration)). */
