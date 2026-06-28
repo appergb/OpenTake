@@ -38,6 +38,12 @@ describe("isExternalSeekWhilePlaying", () => {
       isExternalSeekWhilePlaying({ activeFrame: 33.9, lastEngineFrame: 30, epsilonFrames: 5 }),
     ).toBe(false);
   });
+
+  it("treats a delta exactly at epsilon as not-a-seek (boundary)", () => {
+    // delta == 2 (== default eps) → not forwarded; delta == 3 → forwarded.
+    expect(isExternalSeekWhilePlaying({ activeFrame: 32, lastEngineFrame: 30 })).toBe(false);
+    expect(isExternalSeekWhilePlaying({ activeFrame: 33, lastEngineFrame: 30 })).toBe(true);
+  });
 });
 
 function clip(over: Partial<Clip> & { id: string; mediaType: ClipType }): Clip {

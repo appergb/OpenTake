@@ -272,6 +272,10 @@ export function useTimelinePlaybackEngine(): void {
       let disposed = false;
       void onPlaybackFrame((frame) => {
         if (disposed) return; // cleanup ran before the listener resolved
+        // Record the engine frame BEFORE setActiveFrame: the external-seek watcher
+        // (deps include activeFrame) compares the two, so they must update in
+        // lock-step — otherwise it would misfire playback_seek on the engine's own
+        // frames. Do not reorder these two lines.
         lastEngineFrameRef.current = frame;
         const ui = useEditorUiStore.getState();
         ui.setActiveFrame(frame);

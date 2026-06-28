@@ -156,7 +156,10 @@ export function advancePlayhead(args: {
  * click) is therefore an EXTERNAL seek the engine should be told about via
  * `playback_seek`. Returns false until the engine has emitted at least one frame
  * (`lastEngineFrame` null) and for in-tolerance drift (the engine's own per-frame
- * advance), so a normal tick is never mistaken for a seek. SPEC: integer frames.
+ * advance), so a normal tick is never mistaken for a seek. A consequence of the
+ * tolerance: a sub-epsilon external nudge (e.g. a single-frame keyboard step)
+ * during PLAY is NOT forwarded — playback immediately supersedes it, so that is
+ * intentional, not a lost seek. SPEC: integer frames.
  */
 export function isExternalSeekWhilePlaying(args: {
   activeFrame: number;

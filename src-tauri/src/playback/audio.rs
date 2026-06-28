@@ -64,10 +64,13 @@ impl PlaybackClock for AudioClock {
 
     fn seek(&self, frame: i32) {
         let fps = self.fps.max(1);
-        // Match frame()'s float path so a seek round-trips exactly even when the
-        // device rate isn't a multiple of fps (e.g. 44100 Hz @ 24 fps).
-        let pos = (frame.max(0) as f64 / fps as f64 * self.rate as f64) as u64;
-        self.pos.store(pos, Ordering::Relaxed);
+        // Round (consistent with the clip placement in project_clip_audio_stereo)
+        // so a seek round-trips back to the same frame even when the device rate
+        // isn't a multiple of fps (e.g. 44100 Hz @ 24 fps) — plain truncation would
+        // land a half-sample short and frame() would report frame-1.
+        let pos = ((frame.max(0) as f64 / fps as f64) * self.rate as f64).round() as u64;
+        // Release pairs with the callback's AcqRel fetch_add so it observes the seek.
+        self.pos.store(pos, Ordering::Release);
     }
 }
 
@@ -217,7 +220,7 @@ where
                 // Atomically claim this block's start frame and advance the master
                 // clock. A concurrent `seek` (store) is honored on the next
                 // callback; within a block we play from the claimed start.
-                let start = pos.fetch_add(out_frames as u64, Ordering::Relaxed) as usize;
+                let start = pos.fetch_add(out_frames as u64, Ordering::AcqRel) as usize;
                 for (i, frame) in data.chunks_mut(channels).enumerate() {
                     let base = (start + i) * MIX_CHANNELS;
                     let (left, right) = if base + 1 < buffer.len() {
@@ -439,6 +442,22 @@ mod tests {
         // 1600 frames = exactly one video frame.
         clock.pos.store(1_600, Ordering::Relaxed);
         assert_eq!(clock.frame(30), 1);
+    }
+
+    #[test]
+    fn audio_clock_seek_round_trips_at_non_divisible_rate() {
+        // 44100 Hz @ 24 fps: rate/fps = 1837.5 (not integer). seek (round) +
+        // frame (truncate) must still land back on the same frame — a regression
+        // guard for the truncate-only seek that reported frame-1 here.
+        let clock = AudioClock {
+            pos: Arc::new(AtomicU64::new(0)),
+            rate: 44_100,
+            fps: 24,
+        };
+        for f in [1, 7, 23, 100, 511] {
+            clock.seek(f);
+            assert_eq!(clock.frame(24), f, "seek({f}) must round-trip");
+        }
     }
 
     #[test]
