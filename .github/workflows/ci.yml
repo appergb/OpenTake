@@ -53,6 +53,16 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+      # The streaming playback engine (#53) is behind the off-by-default
+      # `playback-engine` feature, so the steps above don't compile it. Lint and
+      # test it explicitly. The GPU+ffmpeg integration tests auto-skip on the
+      # GPU-less CI runner; the unit tests (drain/clock/projection) still run.
+      - name: cargo clippy (playback-engine)
+        run: cargo clippy -p opentake-tauri --features playback-engine --all-targets -- -D warnings
+
+      - name: cargo test (playback-engine)
+        run: cargo test -p opentake-tauri --features playback-engine
+
   web:
     name: Web (install / build)
     runs-on: ubuntu-latest

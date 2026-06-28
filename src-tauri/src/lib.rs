@@ -17,6 +17,13 @@ mod media;
 mod render;
 mod secret;
 
+// Streaming playback engine (#53). Feature-gated (`playback-engine`) and `pub`
+// so the gated GPU+ffmpeg integration test can drive the render loop directly.
+// No `playback_*` commands are registered yet — that lands in PR2 alongside the
+// cpal master clock and the MJPEG transport.
+#[cfg(feature = "playback-engine")]
+pub mod playback;
+
 use opentake_core::{AppCore, CoreEvent};
 use opentake_media::library::LibraryStore;
 use opentake_media::MediaEngine;
