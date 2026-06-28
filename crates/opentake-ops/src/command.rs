@@ -280,6 +280,8 @@ pub enum EditCommand {
     Unlink { clip_ids: Vec<String> },
     /// Remove tracks by index.
     RemoveTracks { track_indexes: Vec<usize> },
+    /// Swap two same-kind tracks as whole rows. OpenTake-only extension.
+    SwapTracks { a: usize, b: usize },
     /// Insert a new empty track of `kind` (clamped into its zone). Lets the drop
     /// flow create a track on demand when the timeline has no compatible one
     /// (upstream `placeClip` / `add_clips` with omitted `trackIndex` 鈫?
@@ -436,6 +438,7 @@ pub fn apply(
         EditCommand::Link { clip_ids } => link(state, clip_ids, ids),
         EditCommand::Unlink { clip_ids } => unlink(state, clip_ids),
         EditCommand::RemoveTracks { track_indexes } => remove_tracks(state, track_indexes),
+        EditCommand::SwapTracks { a, b } => swap_tracks(state, a, b),
         EditCommand::InsertTrack { kind, at } => insert_track_cmd(state, kind, at, ids),
         EditCommand::SetTrackProps {
             track_index,
@@ -665,6 +668,24 @@ fn set_track_props(
             if let Some(s) = sync_locked {
                 track.sync_locked = s;
             }
+            Ok(Vec::new())
+        },
+    )
+}
+
+fn swap_tracks(state: &mut EditorState, a: usize, b: usize) -> Result<EditResult, EditError> {
+    let track_count = state.timeline.tracks.len();
+    if a >= track_count || b >= track_count {
+        return Err(EditError::Invalid(format!(
+            "track index out of range: a={a}, b={b}, timeline has {track_count} track(s)"
+        )));
+    }
+    transact(
+        state,
+        "Swap Tracks",
+        move |_| format!("Swapped tracks {a} and {b}"),
+        |st| {
+            ops::swap_tracks(&mut st.timeline, a, b);
             Ok(Vec::new())
         },
     )

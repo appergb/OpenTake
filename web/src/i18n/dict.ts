@@ -161,6 +161,8 @@ const zh: Dict = {
   "timeline.mute": "静音",
   "timeline.hide": "隐藏",
   "timeline.syncLock": "同步锁定",
+  "timeline.moveTrackUp": "上移轨道",
+  "timeline.moveTrackDown": "下移轨道",
   "timeline.dropHint": "将媒体拖到此处开始",
 
   // Clip context menu (right-click)
@@ -461,6 +463,8 @@ const en: Dict = {
   "timeline.mute": "Mute",
   "timeline.hide": "Hide",
   "timeline.syncLock": "Sync lock",
+  "timeline.moveTrackUp": "Move Track Up",
+  "timeline.moveTrackDown": "Move Track Down",
   "timeline.dropHint": "Drop media here to start",
 
   // Clip context menu (right-click)

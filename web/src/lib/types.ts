@@ -316,6 +316,7 @@ export type EditRequest =
   | { type: "link"; clipIds: string[] }
   | { type: "unlink"; clipIds: string[] }
   | { type: "removeTracks"; trackIndexes: number[] }
+  | { type: "swapTracks"; a: number; b: number }
   | { type: "insertTrack"; kind: ClipType; at?: number }
   | {
       type: "setTrackProps";

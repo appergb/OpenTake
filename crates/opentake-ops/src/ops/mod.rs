@@ -11,6 +11,7 @@ pub mod move_clips;
 pub mod place;
 pub mod ripple;
 pub mod split;
+pub mod swap;
 pub mod tracks;
 pub mod trim;
 
@@ -30,6 +31,7 @@ pub use ripple::{
     RippleOutcome, RippleRangesReport,
 };
 pub use split::{split_clip, split_single_clip};
+pub use swap::swap_tracks;
 pub use tracks::{
     available_audio_track_index, insert_track, prune_empty_tracks, remove_tracks,
     resolve_or_create_audio_track, zones, ZoneLayout,

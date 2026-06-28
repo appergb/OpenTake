@@ -136,6 +136,12 @@ export async function setTrackProps(
   await applyAndRefresh({ type: "setTrackProps", trackIndex, ...props });
 }
 
+/** Swap two same-kind tracks as whole rows; cross-kind swaps are a no-op in core. */
+export async function swapTracks(a: number, b: number) {
+  if (a === b) return;
+  await applyAndRefresh({ type: "swapTracks", a, b });
+}
+
 /** Replace (or clear) a clip's keyframe track for one property. */
 export async function setKeyframes(
   clipId: string,

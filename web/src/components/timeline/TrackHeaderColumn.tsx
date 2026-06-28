@@ -5,7 +5,8 @@
  * UI-only displayHeight (not persisted).
  */
 
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Eye, EyeOff, Volume2, VolumeX, Link, Unlink } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { useT } from "../../i18n";
@@ -14,7 +15,7 @@ import { trackColor } from "../../lib/clip";
 import { trackDisplayLabel, firstAudioIndex } from "../../lib/zones";
 import { trackDisplayHeight } from "../../lib/geometry";
 import { useEditorUiStore } from "../../store/uiStore";
-import { setTrackProps } from "../../store/editActions";
+import { setTrackProps, swapTracks } from "../../store/editActions";
 import type { Timeline } from "../../lib/types";
 
 interface Props {
@@ -82,6 +83,8 @@ export function TrackHeaderColumn({ timeline, scrollTop, totalHeight }: Props) {
               hidden={track.hidden}
               syncLocked={track.syncLocked}
               regionDivider={firstAudio > 0 && i === firstAudio}
+              canSwapUp={i > 0 && timeline.tracks[i - 1].type === track.type}
+              canSwapDown={i + 1 < timeline.tracks.length && timeline.tracks[i + 1].type === track.type}
               onResize={(delta) => {
                 const next = Math.max(
                   TRACK_SIZE.minHeight,
@@ -118,12 +121,15 @@ interface RowProps {
   hidden: boolean;
   syncLocked: boolean;
   regionDivider: boolean;
+  canSwapUp: boolean;
+  canSwapDown: boolean;
   onResize: (delta: number) => void;
 }
 
 function TrackHeaderRow(p: RowProps) {
   const t = useT();
   const dragRef = useRef<{ startY: number } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent) => {
@@ -153,6 +159,10 @@ function TrackHeaderRow(p: RowProps) {
 
   return (
     <div
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setMenu({ x: e.clientX, y: e.clientY });
+      }}
       style={{
         position: "absolute",
         top: p.top,
@@ -214,6 +224,23 @@ function TrackHeaderRow(p: RowProps) {
           <Icon icon={p.syncLocked ? Link : Unlink} size={11} />
         </span>
       </div>
+      {menu &&
+        createPortal(
+          <TrackHeaderContextMenu
+            x={menu.x}
+            y={menu.y}
+            canSwapUp={p.canSwapUp}
+            canSwapDown={p.canSwapDown}
+            onSwapUp={() => void swapTracks(p.index, p.index - 1)}
+            onSwapDown={() => void swapTracks(p.index, p.index + 1)}
+            onClose={() => setMenu(null)}
+            labels={{
+              moveUp: t("timeline.moveTrackUp"),
+              moveDown: t("timeline.moveTrackDown"),
+            }}
+          />,
+          document.body,
+        )}
       {/* Bottom resize grip. */}
       <div
         onPointerDown={onPointerDown}
@@ -228,6 +255,90 @@ function TrackHeaderRow(p: RowProps) {
           cursor: "ns-resize",
         }}
       />
+    </div>
+  );
+}
+
+function TrackHeaderContextMenu({
+  x,
+  y,
+  canSwapUp,
+  canSwapDown,
+  onSwapUp,
+  onSwapDown,
+  onClose,
+  labels,
+}: {
+  x: number;
+  y: number;
+  canSwapUp: boolean;
+  canSwapDown: boolean;
+  onSwapUp: () => void;
+  onSwapDown: () => void;
+  onClose: () => void;
+  labels: { moveUp: string; moveDown: string };
+}) {
+  const items = [
+    { label: labels.moveUp, enabled: canSwapUp, action: onSwapUp },
+    { label: labels.moveDown, enabled: canSwapDown, action: onSwapDown },
+  ];
+  return (
+    <div
+      onMouseDown={onClose}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onClose();
+      }}
+      style={{ position: "fixed", inset: 0, zIndex: 1000 }}
+    >
+      <div
+        style={{
+          position: "fixed",
+          left: x,
+          top: y,
+          minWidth: 136,
+          padding: 4,
+          background: "var(--bg-elevated)",
+          border: "var(--bw-thin) solid var(--border-primary)",
+          borderRadius: 6,
+          boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+          fontSize: "var(--fs-sm)",
+        }}
+        role="menu"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        {items.map((item) => (
+          <button
+            key={item.label}
+            disabled={!item.enabled}
+            onClick={() => {
+              item.action();
+              onClose();
+            }}
+            style={{
+              display: "block",
+              width: "100%",
+              padding: "6px 12px",
+              textAlign: "left",
+              color: item.enabled ? "var(--text-primary)" : "var(--text-muted)",
+              background: "transparent",
+              border: "none",
+              cursor: item.enabled ? "pointer" : "default",
+              fontFamily: "var(--font-sans)",
+              fontSize: "var(--fs-sm)",
+            }}
+            role="menuitem"
+            onMouseEnter={(e) => {
+              if (item.enabled) e.currentTarget.style.background = "var(--bg-hover, rgba(255,255,255,0.08))";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "transparent";
+            }}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

@@ -59,6 +59,8 @@ const srv = vi.hoisted(() => {
         trimEndFrame?: number;
         transform?: Transform;
       }>;
+      a?: number;
+      b?: number;
     }): { changed: boolean; affectedClipIds: string[] } {
       if (cmd.type === "insertTrack") {
         const at = Math.max(0, Math.min(state.tracks.length, cmd.at ?? state.tracks.length));
@@ -92,6 +94,16 @@ const srv = vi.hoisted(() => {
         }
         state.version += 1;
         return { changed: true, affectedClipIds };
+      }
+      if (cmd.type === "swapTracks" && cmd.a !== undefined && cmd.b !== undefined) {
+        const first = state.tracks[cmd.a];
+        const second = state.tracks[cmd.b];
+        if (!first || !second || first.type !== second.type || cmd.a === cmd.b) {
+          return { changed: false, affectedClipIds: [] };
+        }
+        [state.tracks[cmd.a], state.tracks[cmd.b]] = [second, first];
+        state.version += 1;
+        return { changed: true, affectedClipIds: [] };
       }
       return { changed: false, affectedClipIds: [] };
     },
@@ -158,7 +170,7 @@ vi.mock("../lib/api", () => ({
 }));
 
 // Imported after the mock is registered (vitest hoists vi.mock above imports).
-import { addMediaToTimeline, addMediaToTimelineAt, insertTrack, pasteClipsAtPlayhead } from "./editActions";
+import { addMediaToTimeline, addMediaToTimelineAt, insertTrack, pasteClipsAtPlayhead, swapTracks } from "./editActions";
 import { useClipboardStore } from "./clipboardStore";
 import { useEditorUiStore } from "./uiStore";
 import { useProjectStore } from "./projectStore";
@@ -278,5 +290,13 @@ describe("addMediaToTimeline", () => {
     await insertTrack("video", 0);
 
     expect(srv.state.tracks.map((track) => track.id)).toEqual(["t3", "t1", "t2"]);
+  });
+
+  it("forwards swapTracks for whole-track reordering", async () => {
+    await insertTrack("video");
+    await insertTrack("video");
+    await swapTracks(0, 1);
+
+    expect(srv.state.tracks.map((track) => track.id)).toEqual(["t2", "t1"]);
   });
 });

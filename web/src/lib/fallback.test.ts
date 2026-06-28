@@ -52,6 +52,21 @@ describe("browser fallback edit store", () => {
     expect(fallback.getTimeline().timeline.tracks.map((track) => track.id)).toEqual(["t102", "t100", "t101"]);
   });
 
+  it("swaps same-kind tracks without allowing cross-kind swaps", () => {
+    const fallback = createFallbackStore();
+    fallback.reset();
+    fallback.editApply({ type: "insertTrack", kind: "video" });
+    fallback.editApply({ type: "insertTrack", kind: "video" });
+    fallback.editApply({ type: "insertTrack", kind: "audio" });
+
+    const sameKind = fallback.editApply({ type: "swapTracks", a: 0, b: 1 });
+    const crossKind = fallback.editApply({ type: "swapTracks", a: 1, b: 2 });
+
+    expect(sameKind.changed).toBe(true);
+    expect(crossKind.changed).toBe(false);
+    expect(fallback.getTimeline().timeline.tracks.map((track) => track.id)).toEqual(["t101", "t100", "t102"]);
+  });
+
   it("adds linked audio when dropping a video asset with audio", () => {
     const fallback = createFallbackStore();
     fallback.reset();
