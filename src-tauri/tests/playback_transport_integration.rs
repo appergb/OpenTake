@@ -60,8 +60,9 @@ fn start_server() -> Option<std::sync::Arc<PreviewServer>> {
 
 fn get(port: u16, extra_headers: &str) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect loopback");
-    let req =
-        format!("GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra_headers}Connection: close\r\n\r\n");
+    let req = format!(
+        "GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra_headers}Connection: close\r\n\r\n"
+    );
     stream.write_all(req.as_bytes()).expect("write request");
     read_head(&mut stream)
 }
