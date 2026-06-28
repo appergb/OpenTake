@@ -1,24 +1,24 @@
-//! Audio master clock + cpal output for streaming playback (#63).
+//! Audio master clock + cpal output for streaming playback (#63 / #160).
 //!
 //! The acceptance is "audio drives the playhead; video follows (dropping frames
 //! to stay in sync)". [`build_clock`] realises that: when the timeline carries
-//! sound it pre-mixes the whole timeline to one mono buffer at the cpal device
-//! sample rate, plays it through a dedicated cpal output thread, and exposes the
-//! device's sample position as [`AudioClock`] — the master clock the render loop
-//! reads to pick its target frame. A silent timeline falls back to the wall-clock
-//! [`InstantClock`] PR1 ships.
+//! sound it pre-mixes the whole timeline to one **interleaved stereo** buffer at
+//! the cpal device sample rate, plays it through a dedicated cpal output thread,
+//! and exposes the device's frame position as [`AudioClock`] — the master clock
+//! the render loop reads to pick its target video frame. A silent timeline falls
+//! back to the wall-clock [`InstantClock`] PR1 ships.
 //!
 //! ## Why preload-mix (not chunked streaming)
 //! The cpal callback must never block or allocate. Pre-mixing to an immutable
 //! buffer makes the callback a lock-free copy from `buffer[pos..]` (advancing one
 //! `AtomicU64`), which is the simplest correct master clock — no live decode race
-//! in the real-time audio thread. The cost is an up-front decode + memory for the
-//! mix; chunked/stereo streaming for very long timelines is a follow-up.
+//! in the real-time audio thread. The cost is an up-front decode (off the IPC
+//! thread, see `commands.rs`) + memory for the mix; chunked / background-filled
+//! streaming for very long timelines is the remaining half of #160.
 //!
-//! Mono preview audio is intentional for this cut: the clock only needs the
-//! sample *count*, and `extract_pcm` already returns a mono mixdown. Stereo
-//! panning is a follow-up. The mixing math mirrors the proven export mixdown
-//! (`export.rs`), parameterised by the device rate.
+//! Stereo is mixed once and mapped to the device's channel count in the callback
+//! (mono downmix / >2 zero-fill). The mixing math mirrors the proven export
+//! mixdown (`export.rs`), parameterised by the device rate and done per channel.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,8 +30,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 
 use opentake_domain::{Clip, ClipType, Timeline};
-use opentake_media::encode::{mix, ClipAudio};
-use opentake_media::{extract_pcm, PcmFormat, PcmSpec};
+use opentake_media::{decode_pcm_interleaved, PcmFormat, PcmSpec};
 
 use super::engine::{InstantClock, PlaybackClock};
 use super::project::MediaInfo;
@@ -39,13 +38,17 @@ use super::project::MediaInfo;
 /// Default device sample rate when cpal can't report one (no device queried yet).
 const FALLBACK_SAMPLE_RATE: u32 = 48_000;
 
-/// Audio master clock: the playhead derives from the device sample position
-/// (`pos`, in mono output samples), which the cpal callback advances in lock-step
+/// The mix is always interleaved stereo; the callback maps it to the device's
+/// channel count.
+const MIX_CHANNELS: usize = 2;
+
+/// Audio master clock: the playhead derives from the device frame position
+/// (`pos`, in output audio frames), which the cpal callback advances in lock-step
 /// with the sound the user hears — so video genuinely follows audio.
 pub struct AudioClock {
-    /// Mono output samples played so far (shared with the cpal callback).
+    /// Output audio frames played so far (shared with the cpal callback).
     pos: Arc<AtomicU64>,
-    /// Output device sample rate (Hz).
+    /// Output device sample rate (Hz = frames/sec).
     rate: u32,
     /// Project fps (for `seek`, which has no fps argument).
     fps: i32,
@@ -77,9 +80,10 @@ pub struct AudioPlayback {
 }
 
 impl AudioPlayback {
-    /// Start playing `buffer` (mono, at the device rate) from `pos`. Returns
-    /// `Err` if the device/stream can't be set up (caller falls back to the wall
-    /// clock). Blocks until the stream is built so failures surface synchronously.
+    /// Start playing `buffer` (interleaved stereo, at the device rate) from `pos`.
+    /// Returns `Err` if the device/stream can't be set up (caller falls back to
+    /// the wall clock). Blocks until the stream is built so failures surface
+    /// synchronously.
     fn start(buffer: Arc<Vec<f32>>, pos: Arc<AtomicU64>) -> Result<Self, String> {
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
@@ -174,8 +178,26 @@ fn build_stream(
     }
 }
 
-/// Build an output stream whose callback copies the mono mix to every channel and
-/// advances `pos` by the frames written — the lock-free master-clock tick.
+/// Write one interleaved stereo `(left, right)` sample to a device output frame,
+/// mapping to its channel count: mono = average, stereo = L/R, >2 = L/R then
+/// silence. Pure (no I/O) so the mapping is unit-tested.
+fn write_frame<T: cpal::Sample + FromSample<f32>>(frame: &mut [T], left: f32, right: f32) {
+    match frame.len() {
+        0 => {}
+        1 => frame[0] = T::from_sample((left + right) * 0.5),
+        _ => {
+            frame[0] = T::from_sample(left);
+            frame[1] = T::from_sample(right);
+            for sample in frame[2..].iter_mut() {
+                *sample = T::from_sample(0.0f32);
+            }
+        }
+    }
+}
+
+/// Build an output stream whose callback maps the interleaved stereo mix to the
+/// device channels and advances `pos` by the frames written — the lock-free
+/// master-clock tick.
 fn out_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -191,17 +213,19 @@ where
         .build_output_stream(
             config,
             move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-                let frames = data.len() / channels;
-                // Atomically claim this block's mono start index and advance the
-                // master clock. A concurrent `seek` (store) is honored on the next
+                let out_frames = data.len() / channels;
+                // Atomically claim this block's start frame and advance the master
+                // clock. A concurrent `seek` (store) is honored on the next
                 // callback; within a block we play from the claimed start.
-                let start = pos.fetch_add(frames as u64, Ordering::Relaxed) as usize;
+                let start = pos.fetch_add(out_frames as u64, Ordering::Relaxed) as usize;
                 for (i, frame) in data.chunks_mut(channels).enumerate() {
-                    let s = buffer.get(start + i).copied().unwrap_or(0.0);
-                    let value = T::from_sample(s);
-                    for sample in frame.iter_mut() {
-                        *sample = value;
-                    }
+                    let base = (start + i) * MIX_CHANNELS;
+                    let (left, right) = if base + 1 < buffer.len() {
+                        (buffer[base], buffer[base + 1])
+                    } else {
+                        (0.0, 0.0) // past the mix end → silence (video may outlast audio)
+                    };
+                    write_frame(frame, left, right);
                 }
             },
             err_fn,
@@ -233,15 +257,25 @@ fn clip_source_window_secs(clip: &Clip, timeline_fps: i32) -> Option<(f64, f64)>
     Some((lo, lo + consumed as f64 / fps))
 }
 
-/// Decode one clip's visible audio window into a placed [`ClipAudio`] at `rate`
-/// (mono), with its per-sample `volume_at` gain envelope. Mirrors
-/// `export::project_clip_audio`, parameterised by the device sample rate.
-fn project_clip_audio(
+/// One clip's decoded audio, placed on the output timeline as interleaved stereo
+/// at the device rate, with its per-output-frame `volume_at` gain envelope.
+struct StereoClip {
+    /// Output audio-frame offset on the timeline (sample index = ×2).
+    start_frame: usize,
+    /// Interleaved stereo samples (length = 2 × frames).
+    interleaved: Vec<f32>,
+    /// Per-output-frame gain (length = frames; empty = unity throughout).
+    gains: Vec<f32>,
+}
+
+/// Decode one clip's visible audio window into a placed [`StereoClip`] at `rate`
+/// (interleaved stereo). `None` when the clip contributes no audio.
+fn project_clip_audio_stereo(
     clip: &Clip,
     media: &HashMap<String, MediaInfo>,
     timeline_fps: i32,
     rate: u32,
-) -> Option<ClipAudio> {
+) -> Option<StereoClip> {
     if clip.duration_frames <= 0 || timeline_fps <= 0 || rate == 0 {
         return None;
     }
@@ -250,21 +284,22 @@ fn project_clip_audio(
 
     let spec = PcmSpec {
         sample_rate: rate,
-        channels: 1,
+        channels: MIX_CHANNELS as u16,
         format: PcmFormat::F32,
     };
-    let pcm = extract_pcm(&info.path, &spec, Some((lo, hi))).ok()?;
-    if pcm.samples_f32.is_empty() {
+    let interleaved = decode_pcm_interleaved(&info.path, &spec, Some((lo, hi))).ok()?;
+    let frames = interleaved.len() / MIX_CHANNELS;
+    if frames == 0 {
         return None;
     }
 
-    let start_sample =
+    let start_frame =
         ((clip.start_frame.max(0) as f64) / timeline_fps as f64 * rate as f64).round() as usize;
-    let samples_per_frame = rate as f64 / timeline_fps as f64;
-    let mut gains = Vec::with_capacity(pcm.samples_f32.len());
+    let frames_per_tl_frame = rate as f64 / timeline_fps as f64;
+    let mut gains = Vec::with_capacity(frames);
     let mut all_unity = true;
-    for k in 0..pcm.samples_f32.len() {
-        let tl_frame = clip.start_frame + (k as f64 / samples_per_frame).floor() as i32;
+    for k in 0..frames {
+        let tl_frame = clip.start_frame + (k as f64 / frames_per_tl_frame).floor() as i32;
         let g = clip.volume_at(tl_frame) as f32;
         if (g - 1.0).abs() > f32::EPSILON {
             all_unity = false;
@@ -272,16 +307,40 @@ fn project_clip_audio(
         gains.push(g);
     }
 
-    Some(ClipAudio {
-        start_sample,
-        samples: pcm.samples_f32,
+    Some(StereoClip {
+        start_frame,
+        interleaved,
         gains: if all_unity { Vec::new() } else { gains },
     })
 }
 
-/// Pre-mix every audio-bearing clip into one mono buffer at `rate`. Empty when the
-/// timeline has no audio (→ caller uses the wall clock).
-fn mix_timeline_mono(
+/// Sum placed stereo clips into one interleaved buffer, applying per-frame gains
+/// and hard-limiting to [-1, 1] (mirrors the export mixdown, per channel).
+fn mix_stereo(clips: &[StereoClip]) -> Vec<f32> {
+    let total_frames = clips
+        .iter()
+        .map(|c| c.start_frame + c.interleaved.len() / MIX_CHANNELS)
+        .max()
+        .unwrap_or(0);
+    let mut out = vec![0.0f32; total_frames * MIX_CHANNELS];
+    for c in clips {
+        let frames = c.interleaved.len() / MIX_CHANNELS;
+        for k in 0..frames {
+            let g = if c.gains.is_empty() { 1.0 } else { c.gains[k] };
+            let o = (c.start_frame + k) * MIX_CHANNELS;
+            out[o] += c.interleaved[k * MIX_CHANNELS] * g;
+            out[o + 1] += c.interleaved[k * MIX_CHANNELS + 1] * g;
+        }
+    }
+    for v in &mut out {
+        *v = v.clamp(-1.0, 1.0);
+    }
+    out
+}
+
+/// Pre-mix every audio-bearing clip into one interleaved stereo buffer at `rate`.
+/// Empty when the timeline has no audio (→ caller uses the wall clock).
+fn mix_timeline_stereo(
     timeline: &Timeline,
     media: &HashMap<String, MediaInfo>,
     rate: u32,
@@ -289,7 +348,7 @@ fn mix_timeline_mono(
     if timeline.fps <= 0 || rate == 0 {
         return Vec::new();
     }
-    let mut clips_audio: Vec<ClipAudio> = Vec::new();
+    let mut clips: Vec<StereoClip> = Vec::new();
     for track in &timeline.tracks {
         if track.muted {
             continue;
@@ -298,15 +357,15 @@ fn mix_timeline_mono(
             if clip.media_type != ClipType::Audio && clip.media_type != ClipType::Video {
                 continue;
             }
-            if let Some(ca) = project_clip_audio(clip, media, timeline.fps, rate) {
-                clips_audio.push(ca);
+            if let Some(sc) = project_clip_audio_stereo(clip, media, timeline.fps, rate) {
+                clips.push(sc);
             }
         }
     }
-    if clips_audio.is_empty() {
+    if clips.is_empty() {
         return Vec::new();
     }
-    mix::mix_clips(&clips_audio).unwrap_or_default()
+    mix_stereo(&clips)
 }
 
 /// Build the playback clock for a session starting at `start_frame`.
@@ -322,7 +381,7 @@ pub fn build_clock(
     start_frame: i32,
 ) -> (Arc<dyn PlaybackClock>, Option<AudioPlayback>) {
     let rate = default_output_rate().unwrap_or(FALLBACK_SAMPLE_RATE);
-    let mixed = mix_timeline_mono(timeline, media, rate);
+    let mixed = mix_timeline_stereo(timeline, media, rate);
     if mixed.is_empty() {
         return (Arc::new(InstantClock::new(start_frame)), None);
     }
@@ -357,12 +416,12 @@ mod tests {
             rate: 48_000,
             fps: 30,
         };
-        // seek(30) → 30 frames = 1s = 48000 mono samples → frame()==30.
+        // seek(30) → 30 frames = 1s = 48000 output frames → frame()==30.
         clock.seek(30);
         assert_eq!(clock.pos.load(Ordering::Relaxed), 48_000);
         assert_eq!(clock.frame(30), 30);
 
-        // Half a second of samples → frame 15.
+        // Half a second of frames → frame 15.
         clock.pos.store(24_000, Ordering::Relaxed);
         assert_eq!(clock.frame(30), 15);
     }
@@ -374,10 +433,10 @@ mod tests {
             rate: 48_000,
             fps: 30,
         };
-        // 1599 samples @ 48k, 30fps = 0.999 frame → truncates to 0.
+        // 1599 frames @ 48k, 30fps = 0.999 video frame → truncates to 0.
         clock.pos.store(1_599, Ordering::Relaxed);
         assert_eq!(clock.frame(30), 0);
-        // 1600 samples = exactly one frame.
+        // 1600 frames = exactly one video frame.
         clock.pos.store(1_600, Ordering::Relaxed);
         assert_eq!(clock.frame(30), 1);
     }
@@ -393,16 +452,69 @@ mod tests {
     }
 
     #[test]
-    fn project_clip_audio_skips_clip_without_media_entry() {
+    fn project_clip_audio_stereo_skips_clip_without_media_entry() {
         let clip = Clip::new("c1", "missing", 0, 30);
         let media: HashMap<String, MediaInfo> = HashMap::new();
-        assert!(project_clip_audio(&clip, &media, 30, 48_000).is_none());
+        assert!(project_clip_audio_stereo(&clip, &media, 30, 48_000).is_none());
     }
 
     #[test]
-    fn mix_timeline_mono_empty_when_no_audio_clips() {
+    fn mix_timeline_stereo_empty_when_no_audio_clips() {
         let timeline = Timeline::new();
         let media: HashMap<String, MediaInfo> = HashMap::new();
-        assert!(mix_timeline_mono(&timeline, &media, 48_000).is_empty());
+        assert!(mix_timeline_stereo(&timeline, &media, 48_000).is_empty());
+    }
+
+    #[test]
+    fn mix_stereo_sums_placed_clips_and_clamps() {
+        // Clip A at frame 0: 2 stereo frames [(0.6,-0.6),(0.5,0.5)].
+        // Clip B at frame 1: 1 stereo frame (0.6,0.6) → overlaps A's frame 1.
+        let a = StereoClip {
+            start_frame: 0,
+            interleaved: vec![0.6, -0.6, 0.5, 0.5],
+            gains: Vec::new(),
+        };
+        let b = StereoClip {
+            start_frame: 1,
+            interleaved: vec![0.6, 0.6],
+            gains: Vec::new(),
+        };
+        let out = mix_stereo(&[a, b]);
+        assert_eq!(out.len(), 4); // 2 frames × 2 channels
+                                  // frame 0 = A only.
+        assert!((out[0] - 0.6).abs() < 1e-6);
+        assert!((out[1] + 0.6).abs() < 1e-6);
+        // frame 1 = A(0.5,0.5) + B(0.6,0.6) = (1.1,1.1) → clamped to (1.0,1.0).
+        assert!((out[2] - 1.0).abs() < 1e-6);
+        assert!((out[3] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mix_stereo_applies_per_frame_gain() {
+        let c = StereoClip {
+            start_frame: 0,
+            interleaved: vec![1.0, 1.0, 1.0, 1.0],
+            gains: vec![0.5, 0.25],
+        };
+        let out = mix_stereo(&[c]);
+        assert_eq!(out, vec![0.5, 0.5, 0.25, 0.25]);
+    }
+
+    #[test]
+    fn write_frame_maps_to_device_channels() {
+        // Mono device: average L+R.
+        let mut mono = [0.0f32; 1];
+        write_frame(&mut mono, 1.0, -1.0);
+        assert!((mono[0] - 0.0).abs() < 1e-6);
+
+        // Stereo device: L/R passthrough.
+        let mut stereo = [0.0f32; 2];
+        write_frame(&mut stereo, 0.3, -0.4);
+        assert_eq!(stereo, [0.3, -0.4]);
+
+        // Surround device: L, R, then silence on the extra channels.
+        let mut surround = [9.0f32; 4];
+        write_frame(&mut surround, 0.3, -0.4);
+        assert_eq!(surround, [0.3, -0.4, 0.0, 0.0]);
     }
 }
