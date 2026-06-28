@@ -62,6 +62,9 @@ interface UiState {
   setView: (view: AppView) => void;
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
+  /** Whether the video-export dialog (§2.4 / #112) is shown. */
+  exportDialogOpen: boolean;
+  setExportDialogOpen: (open: boolean) => void;
 
   // Playback / playhead
   currentFrame: number;
@@ -169,6 +172,8 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   setView: (view) => set({ view }),
   settingsOpen: false,
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  exportDialogOpen: false,
+  setExportDialogOpen: (exportDialogOpen) => set({ exportDialogOpen }),
 
   currentFrame: 0,
   activeFrame: 0,

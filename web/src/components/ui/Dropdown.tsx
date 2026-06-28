@@ -16,6 +16,8 @@ import { Icon } from "./Icon";
 interface DropdownOption<T extends string> {
   id: T;
   label: string;
+  /** Render the row greyed out and unselectable (e.g. a not-yet-wired choice). */
+  disabled?: boolean;
 }
 
 interface DropdownProps<T extends string> {
@@ -114,17 +116,21 @@ export function Dropdown<T extends string>({
         >
           {options.map((opt) => {
             const active = opt.id === value;
+            const disabled = opt.disabled ?? false;
             return (
               <button
                 key={opt.id}
                 type="button"
                 role="option"
                 aria-selected={active}
+                aria-disabled={disabled}
+                disabled={disabled}
                 onClick={() => {
+                  if (disabled) return;
                   onChange(opt.id);
                   setOpen(false);
                 }}
-                className="hover-area"
+                className={disabled ? undefined : "hover-area"}
                 style={{
                   display: "flex",
                   alignItems: "center",
@@ -133,10 +139,15 @@ export function Dropdown<T extends string>({
                   padding: "0 var(--space-sm)",
                   borderRadius: "var(--radius-xs-sm)",
                   background: active ? "var(--bg-prominent)" : "transparent",
-                  color: active ? "var(--text-primary)" : "var(--text-secondary)",
+                  color: disabled
+                    ? "var(--text-disabled, rgba(255,255,255,0.35))"
+                    : active
+                      ? "var(--text-primary)"
+                      : "var(--text-secondary)",
                   fontSize: "var(--fs-sm)",
                   fontWeight: "var(--fw-medium)",
                   textAlign: "left",
+                  cursor: disabled ? "default" : "pointer",
                 }}
               >
                 <span
