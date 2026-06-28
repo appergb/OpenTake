@@ -7,7 +7,7 @@
  * 时间线（见 `MediaGrid` / `TimelineRegion`）。
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Plus,
   Sparkles,
@@ -15,6 +15,9 @@ import {
   ArrowUpDown,
   LayoutGrid,
   FolderOpen,
+  Folder as FolderIcon,
+  ChevronRight,
+  ChevronLeft,
   FileVideo,
   FileAudio,
   Image as ImageIcon,
@@ -35,11 +38,12 @@ import { useT } from "../../i18n";
 import { formatTimecode } from "../../lib/geometry";
 import { setDraggingMedia } from "../../lib/mediaDragState";
 import { assetUrl } from "../../lib/asset";
+import { childFolders, folderTrail, normalizeFolderId } from "../../lib/folderTree";
 import { useProjectStore } from "../../store/projectStore";
 import { addMediaToTimeline } from "../../store/editActions";
 import { extractAudio, generateThumbnail } from "../../lib/api";
 import { saveDialog } from "../../lib/dialog";
-import type { MediaItem } from "../../lib/types";
+import type { MediaFolder, MediaItem } from "../../lib/types";
 import { MediaTabBar, MediaSubTabBar } from "./MediaTabBar";
 import { useFavoritesStore, useIsFavorite } from "./favorites";
 
@@ -128,22 +132,63 @@ export function MediaPanel() {
 function MediaTab({ kind }: { kind: MediaTabKind }) {
   const t = useT();
   const items = useMediaStore((s) => s.items);
+  const folders = useMediaStore((s) => s.folders);
   const importing = useMediaStore((s) => s.importing);
   const error = useMediaStore((s) => s.error);
   const subTab = useEditorUiStore((s) => s.mediaSubTab);
   const setSubTab = useEditorUiStore((s) => s.setMediaSubTab);
   const favoriteIds = useFavoritesStore((s) => s.ids);
+  const currentFolderId = useEditorUiStore((s) => s.mediaPanelCurrentFolderId);
+  const setCurrentFolderId = useEditorUiStore((s) => s.setMediaPanelCurrentFolderId);
+  const [search, setSearch] = useState("");
 
-  // 过滤管线（全部不可变 filter，不改 store）：
-  // 1) 按主标签——「音频」仅纯音频素材（严格 type==='audio'，不含有声视频，匹配剪映）；
-  //    若日后需含「有音轨的视频」，改为 `item.type === "audio" || item.hasAudio`。
-  //    「素材」显示全部类型。
-  // 2) 按二级标签——「我的」仅星标收藏（命中当前已加载 items）；「导入」显示全部。
-  const filtered = items.filter((item) => {
-    if (kind === "audio" && item.type !== "audio") return false;
-    if (subTab === "mine" && !favoriteIds.has(item.id)) return false;
-    return true;
-  });
+  // Folder navigation only applies to the "import" view (the full library tree).
+  // "我的/favorites" is a flat cross-folder collection, so it ignores folders.
+  const browsing = subTab === "import";
+
+  // Switching the main tab (material↔audio) or to the favorites subtab resets the
+  // folder cursor to root so we never sit inside a folder that the new view hides.
+  // Depends only on kind/subTab on purpose; the setter is store-stable and
+  // currentFolderId must not retrigger this (it would fight manual navigation).
+  const resetFolder = useRef(setCurrentFolderId);
+  resetFolder.current = setCurrentFolderId;
+  useEffect(() => {
+    resetFolder.current(null);
+  }, [kind, subTab]);
+
+  // Effective cursor: favorites view is always flat (root).
+  const folderId = browsing ? currentFolderId : null;
+  const query = search.trim().toLowerCase();
+
+  // Sub-folders shown as tiles in the current level (only while browsing, and
+  // not while a search is active — search flattens to matching files).
+  const visibleFolders = useMemo(
+    () => (browsing && query === "" ? childFolders(folders, folderId) : []),
+    [browsing, query, folders, folderId],
+  );
+
+  // File filter pipeline (all immutable filters; never mutates the store):
+  // 1) main tab — "音频" keeps only pure audio (strict type==='audio', no
+  //    audio-bearing video, matching CapCut). "素材" shows every type.
+  // 2) subtab — "我的" keeps only starred favorites; "导入" shows all.
+  // 3) folder — while browsing without a search, only this folder's direct
+  //    files. A search ignores folder scope and matches names library-wide
+  //    (within the current main/subtab filter).
+  const filteredItems = useMemo(
+    () =>
+      items.filter((item) => {
+        if (kind === "audio" && item.type !== "audio") return false;
+        if (subTab === "mine" && !favoriteIds.has(item.id)) return false;
+        if (query !== "") return item.name.toLowerCase().includes(query);
+        if (browsing && normalizeFolderId(item.folderId) !== folderId) return false;
+        return true;
+      }),
+    [items, kind, subTab, favoriteIds, query, browsing, folderId],
+  );
+
+  const trail = useMemo(() => folderTrail(folders, folderId), [folders, folderId]);
+  const totalCount = visibleFolders.length + filteredItems.length;
+  const isEmpty = totalCount === 0;
 
   return (
     <>
@@ -187,6 +232,8 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
         <div style={{ height: 28, display: "flex", alignItems: "center", gap: "var(--space-xs)" }}>
           <input
             placeholder={t("media.search")}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
             style={{
               flex: 1,
               height: 22,
@@ -208,6 +255,11 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
             <Icon icon={Filter} size={13} />
           </HoverButton>
         </div>
+        {/* Breadcrumb / 返回上级 — only while browsing the library tree and not
+            searching. Root is always clickable; the current folder is plain text. */}
+        {browsing && query === "" && (
+          <FolderBreadcrumb trail={trail} onNavigate={setCurrentFolderId} />
+        )}
         {/* contextBar */}
         <div
           style={{
@@ -220,7 +272,7 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
           }}
         >
           <span>{t("media.library")}</span>
-          <span>{importing ? t("media.importing") : t("media.itemCount", { count: filtered.length })}</span>
+          <span>{importing ? t("media.importing") : t("media.itemCount", { count: totalCount })}</span>
         </div>
         {error && (
           <div style={{ color: "var(--status-error)", fontSize: "var(--fs-xs)" }}>
@@ -229,8 +281,123 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
         )}
       </div>
 
-      {filtered.length === 0 ? <EmptyState subTab={subTab} /> : <MediaGrid items={filtered} />}
+      {isEmpty ? (
+        <EmptyState subTab={subTab} insideFolder={browsing && folderId !== null} />
+      ) : (
+        <MediaGrid
+          folders={visibleFolders}
+          items={filteredItems}
+          onOpenFolder={setCurrentFolderId}
+        />
+      )}
     </>
+  );
+}
+
+/** Breadcrumb row: 全部 / 子文件夹… / 当前。 Every segment except the last is a
+ *  button that jumps to that level; a back chevron pops up one level. */
+function FolderBreadcrumb({
+  trail,
+  onNavigate,
+}: {
+  trail: MediaFolder[];
+  onNavigate: (id: string | null) => void;
+}) {
+  const t = useT();
+  const atRoot = trail.length === 0;
+  const parentId = trail.length >= 2 ? trail[trail.length - 2].id : null;
+
+  const crumbButton = (label: string, target: string | null, isLast: boolean) =>
+    isLast ? (
+      <span
+        key={target ?? "__root__"}
+        style={{
+          color: "var(--text-primary)",
+          fontWeight: "var(--fw-medium)",
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {label}
+      </span>
+    ) : (
+      <button
+        key={target ?? "__root__"}
+        type="button"
+        onClick={() => onNavigate(target)}
+        className="hover-area"
+        style={{
+          background: "transparent",
+          border: "none",
+          padding: "0 2px",
+          color: "var(--text-secondary)",
+          fontSize: "var(--fs-xs)",
+          cursor: "pointer",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {label}
+      </button>
+    );
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 2,
+        minHeight: 22,
+        overflowX: "auto",
+        overflowY: "hidden",
+      }}
+    >
+      {/* 返回上级（仅非根时）。 */}
+      {!atRoot && (
+        <button
+          type="button"
+          title={t("media.folderBack")}
+          aria-label={t("media.folderBack")}
+          onClick={() => onNavigate(parentId)}
+          className="hover-area"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: 20,
+            height: 20,
+            marginRight: 2,
+            borderRadius: "var(--radius-xs)",
+            background: "transparent",
+            border: "none",
+            color: "var(--text-secondary)",
+            cursor: "pointer",
+            flex: "0 0 auto",
+          }}
+        >
+          <Icon icon={ChevronLeft} size={14} />
+        </button>
+      )}
+      {crumbButton(t("media.folderRoot"), null, atRoot)}
+      {trail.map((folder, i) => {
+        const isLast = i === trail.length - 1;
+        return (
+          <span
+            key={folder.id}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 2,
+              color: "var(--text-tertiary)",
+              flex: "0 0 auto",
+            }}
+          >
+            <Icon icon={ChevronRight} size={12} />
+            {crumbButton(folder.name, folder.id, isLast)}
+          </span>
+        );
+      })}
+    </div>
   );
 }
 
@@ -327,8 +494,13 @@ function ImportMenuItem({
   );
 }
 
-function EmptyState({ subTab }: { subTab: MediaSubTabId }) {
+function EmptyState({ subTab, insideFolder }: { subTab: MediaSubTabId; insideFolder: boolean }) {
   const t = useT();
+  const message = insideFolder
+    ? t("media.folderEmpty")
+    : subTab === "mine"
+      ? t("media.empty.mine")
+      : t("media.empty");
   return (
     <div
       style={{
@@ -342,7 +514,7 @@ function EmptyState({ subTab }: { subTab: MediaSubTabId }) {
         textAlign: "center",
       }}
     >
-      {subTab === "mine" ? t("media.empty.mine") : t("media.empty")}
+      {message}
     </div>
   );
 }
@@ -355,7 +527,15 @@ const TYPE_ICON: Record<MediaItem["type"], typeof FileVideo> = {
   lottie: Sparkles,
 };
 
-function MediaGrid({ items }: { items: MediaItem[] }) {
+function MediaGrid({
+  folders,
+  items,
+  onOpenFolder,
+}: {
+  folders: MediaFolder[];
+  items: MediaItem[];
+  onOpenFolder: (id: string) => void;
+}) {
   return (
     <div
       style={{
@@ -368,9 +548,69 @@ function MediaGrid({ items }: { items: MediaItem[] }) {
         alignContent: "start",
       }}
     >
+      {/* Folders first (双击进入), then files. */}
+      {folders.map((folder) => (
+        <FolderTile key={folder.id} folder={folder} onOpen={onOpenFolder} />
+      ))}
       {items.map((item) => (
         <MediaCard key={item.id} item={item} />
       ))}
+    </div>
+  );
+}
+
+/** A folder shown in the grid (剪映式). Single click selects/enters on
+ *  double-click — keeping it consistent with media cards (click=preview,
+ *  double-click=add). Not draggable (folders aren't dropped on the timeline). */
+function FolderTile({
+  folder,
+  onOpen,
+}: {
+  folder: MediaFolder;
+  onOpen: (id: string) => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <div
+      onDoubleClick={() => onOpen(folder.id)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      title={folder.name}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen(folder.id);
+        }
+      }}
+      style={{ display: "flex", flexDirection: "column", gap: 4, cursor: "pointer" }}
+    >
+      <div
+        style={{
+          aspectRatio: "5 / 4",
+          background: hovered ? "var(--bg-raised)" : "var(--bg-placeholder)",
+          border: `var(--bw-thin) solid ${hovered ? "var(--accent-primary)" : "var(--border-primary)"}`,
+          borderRadius: "var(--radius-sm)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: hovered ? "var(--accent-primary)" : "var(--text-secondary)",
+        }}
+      >
+        <Icon icon={FolderIcon} size={30} strokeWidth={1.5} />
+      </div>
+      <span
+        style={{
+          fontSize: "var(--fs-xs)",
+          color: "var(--text-secondary)",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {folder.name}
+      </span>
     </div>
   );
 }

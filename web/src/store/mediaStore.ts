@@ -8,22 +8,28 @@
 
 import { create } from "zustand";
 import * as api from "../lib/api";
-import type { MediaItem } from "../lib/types";
+import type { MediaFolder, MediaItem } from "../lib/types";
 
 interface MediaState {
   items: MediaItem[];
+  /** Library folders (flat list; nest via `parentFolderId`). Drives the
+   *  CapCut-style folder browser in the media panel. */
+  folders: MediaFolder[];
   importing: boolean;
   error: string | null;
   setItems: (items: MediaItem[]) => void;
+  setFolders: (folders: MediaFolder[]) => void;
   setImporting: (importing: boolean) => void;
   setError: (error: string | null) => void;
 }
 
 export const useMediaStore = create<MediaState>((set) => ({
   items: [],
+  folders: [],
   importing: false,
   error: null,
   setItems: (items) => set({ items }),
+  setFolders: (folders) => set({ folders }),
   setImporting: (importing) => set({ importing }),
   setError: (error) => set({ error }),
 }));
@@ -31,10 +37,12 @@ export const useMediaStore = create<MediaState>((set) => ({
 let started = false;
 let unlisten: (() => void) | null = null;
 
-/** Fetch the current catalog into the store. */
+/** Fetch the current catalog into the store (items + folder tree). */
 export async function refreshMedia(): Promise<void> {
   const list = await api.getMedia();
-  useMediaStore.getState().setItems(list.items);
+  const store = useMediaStore.getState();
+  store.setItems(list.items);
+  store.setFolders(list.folders);
 }
 
 /** Idempotent bootstrap: initial fetch + subscribe to `media_changed`. */
