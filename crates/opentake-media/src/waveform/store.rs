@@ -34,6 +34,11 @@ pub fn load_waveform(cache_root: &Path, key: &str) -> Option<Vec<f32>> {
     while let Ok(v) = cursor.read_f32::<LittleEndian>() {
         out.push(v);
     }
+    // Reject poison files: every bucket == 1.0 silence is what an older build
+    // cached when extract_pcm returned an empty Vec. Force regeneration.
+    if !out.is_empty() && out.iter().all(|&v| v == 1.0) {
+        return None;
+    }
     Some(out)
 }
 
@@ -95,6 +100,26 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(sub.join("bad.waveform"), [1u8, 2, 3]).unwrap(); // 3 bytes
         assert!(load_waveform(dir.path(), "bad").is_none());
+    }
+
+    #[test]
+    fn load_all_ones_poison_cache_is_none() {
+        // An older build cached all-1.0 buckets when extract_pcm returned an
+        // empty Vec for a "silent" file; treat such a file as poison so the
+        // waveform is regenerated instead of rendered as a flat green band.
+        let dir = tempfile::tempdir().unwrap();
+        save_waveform(dir.path(), "poison", &[1.0f32; 8]).unwrap();
+        assert!(load_waveform(dir.path(), "poison").is_none());
+    }
+
+    #[test]
+    fn load_mixed_values_with_some_ones_is_kept() {
+        // A real waveform whose peaks happen to reach 1.0 must NOT be discarded;
+        // only an all-1.0 file is poison.
+        let dir = tempfile::tempdir().unwrap();
+        let samples = vec![1.0f32, 0.5, 1.0, 0.0];
+        save_waveform(dir.path(), "real", &samples).unwrap();
+        assert_eq!(load_waveform(dir.path(), "real").unwrap(), samples);
     }
 
     #[test]
