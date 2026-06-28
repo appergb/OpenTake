@@ -163,7 +163,9 @@ pub enum EditRequest {
     #[serde(rename_all = "camelCase")]
     SetClipProperties {
         clip_ids: Vec<String>,
-        properties: ClipPropertiesDto,
+        // Boxed to keep `EditRequest` small: `ClipPropertiesDto` carries a full
+        // `TextStyle`, which would otherwise dominate the enum size.
+        properties: Box<ClipPropertiesDto>,
     },
     #[serde(rename_all = "camelCase")]
     SetKeyframes {
@@ -304,7 +306,7 @@ impl EditRequest {
                 properties,
             } => EditCommand::SetClipProperties {
                 clip_ids,
-                properties: properties.into_properties(),
+                properties: Box::new((*properties).into_properties()),
             },
             EditRequest::SetKeyframes {
                 clip_id,
@@ -540,6 +542,8 @@ pub struct ClipPropertiesDto {
     #[serde(default)]
     pub text_content: Option<String>,
     #[serde(default)]
+    pub text_style: Option<TextStyle>,
+    #[serde(default)]
     pub crop: Option<Crop>,
     #[serde(default)]
     pub fade_in_frames: Option<i32>,
@@ -566,6 +570,7 @@ impl ClipPropertiesDto {
             opacity: self.opacity,
             transform: self.transform,
             text_content: self.text_content,
+            text_style: self.text_style,
             crop: self.crop,
             fade_in_frames: self.fade_in_frames,
             fade_out_frames: self.fade_out_frames,
@@ -737,6 +742,30 @@ mod edit_request_serde_tests {
         .expect("insertClips camelCase");
         serde_json::from_str::<EditRequest>(r#"{"type":"rippleDeleteClips","clipIds":["a"]}"#)
             .expect("rippleDeleteClips camelCase");
+    }
+
+    #[test]
+    fn deserializes_set_clip_properties_with_text_style() {
+        // The Inspector sends camelCase `textStyle` with nested camelCase fields
+        // (fontName/fontSize/…). It must deserialize and map onto the command's
+        // ClipProperties.text_style.
+        let request = serde_json::from_str::<EditRequest>(
+            r#"{"type":"setClipProperties","clipIds":["c1"],"properties":{"textStyle":{"fontName":"Times-Bold","fontSize":48,"alignment":"left"}}}"#,
+        )
+        .expect("setClipProperties with textStyle camelCase");
+
+        match request.into_command().expect("setClipProperties command") {
+            EditCommand::SetClipProperties {
+                clip_ids,
+                properties,
+            } => {
+                assert_eq!(clip_ids, vec!["c1"]);
+                let style = properties.text_style.expect("text_style present");
+                assert_eq!(style.font_name, "Times-Bold");
+                assert_eq!(style.font_size, 48.0);
+            }
+            other => panic!("expected SetClipProperties, got {other:?}"),
+        }
     }
 
     #[test]

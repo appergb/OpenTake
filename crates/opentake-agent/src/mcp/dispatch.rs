@@ -721,7 +721,7 @@ impl Dispatcher {
         let Some(transform_patch) = a.transform else {
             let res = self.apply(EditCommand::SetClipProperties {
                 clip_ids,
-                properties,
+                properties: Box::new(properties),
             })?;
             return Ok(ToolResult::ok(res.summary));
         };
@@ -746,7 +746,7 @@ impl Dispatcher {
         for (clip_id, clip_properties) in per_clip {
             let res = self.apply(EditCommand::SetClipProperties {
                 clip_ids: vec![clip_id],
-                properties: clip_properties,
+                properties: Box::new(clip_properties),
             })?;
             summaries.push(res.summary);
         }
