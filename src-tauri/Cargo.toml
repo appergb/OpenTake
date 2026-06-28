@@ -46,6 +46,10 @@ axum = { version = "0.8", optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "sync"], optional = true }
 bytes = { version = "1", optional = true }
 futures = { version = "0.3", optional = true }
+# Real-time audio output backing the playback master clock (#63). New crate:
+# CoreAudio on macOS, ALSA on Linux (CI installs libasound2-dev for the
+# playback-engine job). Off by default with the rest of the feature.
+cpal = { version = "0.15", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
@@ -56,4 +60,4 @@ custom-protocol = ["tauri/custom-protocol"]
 # Continuous Rust streaming playback engine (#53). Off by default: PR1 lands the
 # headless core (no commands/UI). PR2 adds cpal + axum/image-jpeg deps under this
 # flag; PR3 flips the front end's runtime toggle.
-playback-engine = ["dep:axum", "dep:tokio", "dep:bytes", "dep:futures", "image/jpeg"]
+playback-engine = ["dep:axum", "dep:tokio", "dep:bytes", "dep:futures", "dep:cpal", "image/jpeg"]
