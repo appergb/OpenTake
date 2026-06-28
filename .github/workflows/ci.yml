@@ -16,6 +16,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Free disk space (playback-engine deps are heavy)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android "$AGENT_TOOLSDIRECTORY" /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force || true
+          df -h /
+
       - name: Install Rust toolchain
         run: rustup component add rustfmt clippy
 
@@ -52,6 +58,16 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace
+
+      # The streaming playback engine (#53) is behind the off-by-default
+      # `playback-engine` feature, so the steps above don't compile it. Lint and
+      # test it explicitly. The GPU+ffmpeg integration tests auto-skip on the
+      # GPU-less CI runner; the unit tests (drain/clock/projection) still run.
+      - name: cargo clippy (playback-engine)
+        run: cargo clippy -p opentake-tauri --features playback-engine --all-targets -- -D warnings
+
+      - name: cargo test (playback-engine)
+        run: cargo test -p opentake-tauri --features playback-engine
 
   web:
     name: Web (install / build)

@@ -44,3 +44,7 @@ tempfile = "3"
 [features]
 # this feature is used for production builds or when `devUrl` is not set
 custom-protocol = ["tauri/custom-protocol"]
+# Continuous Rust streaming playback engine (#53). Off by default: PR1 lands the
+# headless core (no commands/UI). PR2 adds cpal + axum/image-jpeg deps under this
+# flag; PR3 flips the front end's runtime toggle.
+playback-engine = []
