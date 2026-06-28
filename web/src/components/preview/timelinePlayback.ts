@@ -148,3 +148,42 @@ export function advancePlayhead(args: {
   const safeFps = args.fps > 0 ? args.fps : 30;
   return currentFrame + dtSec * safeFps;
 }
+
+/**
+ * During Rust streaming playback the engine drives the playhead one frame at a
+ * time (`playback_frame` → setActiveFrame), recording each as `lastEngineFrame`.
+ * A jump of the store's `activeFrame` AWAY from that (keyboard step, transport
+ * click) is therefore an EXTERNAL seek the engine should be told about via
+ * `playback_seek`. Returns false until the engine has emitted at least one frame
+ * (`lastEngineFrame` null) and for in-tolerance drift (the engine's own per-frame
+ * advance), so a normal tick is never mistaken for a seek. A consequence of the
+ * tolerance: a sub-epsilon external nudge (e.g. a single-frame keyboard step)
+ * during PLAY is NOT forwarded — playback immediately supersedes it, so that is
+ * intentional, not a lost seek. SPEC: integer frames.
+ */
+export function isExternalSeekWhilePlaying(args: {
+  activeFrame: number;
+  lastEngineFrame: number | null;
+  epsilonFrames?: number;
+}): boolean {
+  if (args.lastEngineFrame === null) return false;
+  const eps = args.epsilonFrames ?? 2;
+  return Math.abs(Math.floor(args.activeFrame) - args.lastEngineFrame) > eps;
+}
+
+/**
+ * The gate that routes PLAY to the Rust streaming engine instead of the legacy
+ * `<video>` path: the runtime flag is on, we're under Tauri, and we're actively
+ * PLAYING (not scrubbing). Scrub/pause/non-Tauri/flag-off all return false →
+ * legacy path. Pure so the switch condition — shared by the engine switch, the
+ * external-seek watcher, and the MJPEG overlay — lives (and is tested) in one
+ * place instead of being copy-pasted.
+ */
+export function shouldUseRustEngine(args: {
+  rustEnabled: boolean;
+  isTauri: boolean;
+  isPlaying: boolean;
+  isScrubbing: boolean;
+}): boolean {
+  return args.rustEnabled && args.isTauri && args.isPlaying && !args.isScrubbing;
+}

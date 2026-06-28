@@ -9,10 +9,67 @@ import {
   clipOpacity,
   clipVolume,
   frameForSourceTime,
+  isExternalSeekWhilePlaying,
   playbackFrameFromActiveFrame,
+  shouldUseRustEngine,
   sourceTimeSec,
   visualAudioIsDuplicated,
 } from "./timelinePlayback";
+
+describe("isExternalSeekWhilePlaying", () => {
+  it("returns false before the engine has emitted a frame", () => {
+    expect(isExternalSeekWhilePlaying({ activeFrame: 100, lastEngineFrame: null })).toBe(false);
+  });
+
+  it("returns false for the engine's own per-frame advance (within epsilon)", () => {
+    expect(isExternalSeekWhilePlaying({ activeFrame: 31, lastEngineFrame: 30 })).toBe(false);
+    expect(isExternalSeekWhilePlaying({ activeFrame: 30, lastEngineFrame: 30 })).toBe(false);
+  });
+
+  it("detects an external jump beyond epsilon (keyboard step / transport click)", () => {
+    expect(isExternalSeekWhilePlaying({ activeFrame: 300, lastEngineFrame: 30 })).toBe(true);
+    expect(isExternalSeekWhilePlaying({ activeFrame: 0, lastEngineFrame: 120 })).toBe(true);
+  });
+
+  it("floors a fractional activeFrame and honors a custom epsilon", () => {
+    // 33.9 floors to 33; |33 - 30| = 3 > default eps 2 → true.
+    expect(isExternalSeekWhilePlaying({ activeFrame: 33.9, lastEngineFrame: 30 })).toBe(true);
+    // Same delta, eps 5 → false.
+    expect(
+      isExternalSeekWhilePlaying({ activeFrame: 33.9, lastEngineFrame: 30, epsilonFrames: 5 }),
+    ).toBe(false);
+  });
+
+  it("treats a delta exactly at epsilon as not-a-seek (boundary)", () => {
+    // delta == 2 (== default eps) → not forwarded; delta == 3 → forwarded.
+    expect(isExternalSeekWhilePlaying({ activeFrame: 32, lastEngineFrame: 30 })).toBe(false);
+    expect(isExternalSeekWhilePlaying({ activeFrame: 33, lastEngineFrame: 30 })).toBe(true);
+  });
+});
+
+describe("shouldUseRustEngine", () => {
+  const base = { rustEnabled: true, isTauri: true, isPlaying: true, isScrubbing: false };
+
+  it("routes PLAY to Rust when flag on, under Tauri, playing, not scrubbing", () => {
+    expect(shouldUseRustEngine(base)).toBe(true);
+  });
+
+  it("stays on the legacy <video> path when the flag is off", () => {
+    expect(shouldUseRustEngine({ ...base, rustEnabled: false })).toBe(false);
+  });
+
+  it("stays on the legacy path outside Tauri (browser dev server)", () => {
+    expect(shouldUseRustEngine({ ...base, isTauri: false })).toBe(false);
+  });
+
+  it("relinquishes to the legacy scrub path during a scrub", () => {
+    expect(shouldUseRustEngine({ ...base, isScrubbing: true })).toBe(false);
+  });
+
+  it("does not engage while paused", () => {
+    expect(shouldUseRustEngine({ ...base, isPlaying: false })).toBe(false);
+  });
+});
 
 function clip(over: Partial<Clip> & { id: string; mediaType: ClipType }): Clip {
   return {

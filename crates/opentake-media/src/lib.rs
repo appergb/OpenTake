@@ -51,9 +51,9 @@ pub use frame::RgbaFrame;
 pub use probe::{probe, MediaProbe};
 
 pub use decode::{
-    decode_frame_at, decode_frames_at, extract_pcm, FrameRequest, PcmBuffer, PcmFormat, PcmSpec,
-    StreamDecodeControl, StreamVideoFrame, VideoStream, VideoStreamRequest,
-    DEFAULT_VIDEO_STREAM_QUEUE_CAPACITY,
+    decode_frame_at, decode_frames_at, decode_pcm_interleaved, extract_pcm, FrameRequest,
+    PcmBuffer, PcmFormat, PcmSpec, StreamDecodeControl, StreamVideoFrame, VideoStream,
+    VideoStreamRequest, DEFAULT_VIDEO_STREAM_QUEUE_CAPACITY,
 };
 
 pub use encode::{ExportPreset, ExportResolution, VideoCodec, VideoEncoder};

@@ -66,6 +66,15 @@ fn frame_at_elapsed(base_frame: i32, elapsed_secs: f64, fps: i32) -> i32 {
     base_frame + (elapsed_secs.max(0.0) * fps as f64) as i32
 }
 
+/// Clamp the clock's frame to the drawable range and decide whether playback has
+/// reached the end. Returns `(target, done)`: `target` is the frame to render,
+/// `done` is true once the clock hits the last frame (→ auto-stop). Pure so the
+/// loop's termination boundary is unit-tested.
+fn loop_step(clock_frame: i32, total: i32) -> (i32, bool) {
+    let last = total.max(1) - 1;
+    (clock_frame.clamp(0, last), clock_frame >= last)
+}
+
 /// Wall-clock playback clock: the PR1 driver and the no-audio fallback. Advances
 /// the playhead by real elapsed time from the last `seek` (or construction).
 pub struct InstantClock {
@@ -285,8 +294,7 @@ fn run_render_thread(
             }
         }
 
-        let target = clock.frame(fps);
-        let clamped = target.clamp(0, total - 1);
+        let (clamped, done) = loop_step(clock.frame(fps), total);
         match render_loop.render_frame(clamped) {
             Ok(frame) => {
                 sink.push_frame(&frame);
@@ -296,7 +304,7 @@ fn run_render_thread(
         }
 
         // Auto-stop once the clock reaches the final frame (#53: end → stop).
-        if target >= total - 1 {
+        if done {
             return;
         }
         thread::sleep(frame_dur);
@@ -320,6 +328,15 @@ mod tests {
     #[test]
     fn frame_at_elapsed_applies_base_offset() {
         assert_eq!(frame_at_elapsed(100, 1.0, 30), 130);
+    }
+
+    #[test]
+    fn loop_step_clamps_and_flags_end() {
+        assert_eq!(loop_step(5, 100), (5, false));
+        assert_eq!(loop_step(99, 100), (99, true)); // last frame → done
+        assert_eq!(loop_step(150, 100), (99, true)); // past end → clamp + done
+        assert_eq!(loop_step(-5, 100), (0, false)); // negative → clamp to 0
+        assert_eq!(loop_step(0, 1), (0, true)); // single-frame timeline
     }
 
     #[test]

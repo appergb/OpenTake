@@ -13,14 +13,19 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 
 use opentake_domain::{
     Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track,
 };
-use opentake_render::RenderSize;
-use opentake_tauri_lib::playback::{project_media, project_text, RenderLoop};
+use opentake_render::{DecodedFrame, RenderSize};
+use opentake_tauri_lib::playback::{
+    project_media, project_text, FrameSink, InstantClock, PlaybackClock, PlaybackEngine,
+    PlayheadEmitter, RenderLoop,
+};
 
 /// Warm-up budget: the decode worker is a separate thread/process, so the first
 /// `render_frame(target)` can be black until ffmpeg produces that frame. 200 ×
@@ -217,4 +222,81 @@ fn render_loop_composites_two_tracks_concurrently() {
     let composed = render_until_content(&mut rl, 0, w, h)
         .expect("two-track composite should render non-black within the warm-up budget");
     assert!(composed.iter().any(|&b| b != 0));
+}
+
+/// The threaded `PlaybackEngine` end-to-end: spawn it over a real GPU + ffmpeg
+/// with an `InstantClock` and in-memory sink/emitter, let the wall clock advance
+/// the playhead, and assert frames + the playhead reach the traits before `stop`
+/// joins the render thread. Covers the thread loop the RenderLoop tests don't.
+#[test]
+fn playback_engine_thread_streams_frames_to_sink_and_emitter() {
+    if !ffmpeg_ready() {
+        eprintln!("skip: ffmpeg not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.mp4");
+    let (w, h, fps, frames) = (320u32, 240u32, 10u32, 12u32);
+    if !make_video(&src, w, h, fps, frames, 0) {
+        eprintln!("skip: could not generate fixture media");
+        return;
+    }
+
+    let mut tl = Timeline::new();
+    tl.fps = fps as i32;
+    let mut track = Track::new("t1", ClipType::Video);
+    track
+        .clips
+        .push(Clip::new("clip-1", "asset-1", 0, frames as i32));
+    tl.tracks.push(track);
+    let mut manifest = MediaManifest::new();
+    manifest.entries.push(external_entry(
+        "asset-1", &src, w as i32, h as i32, fps as f64,
+    ));
+
+    let size = RenderSize::new(w, h);
+    // Skip when no GPU adapter (the engine thread would otherwise just exit
+    // internally and the assertions below couldn't distinguish that from a bug).
+    if try_render_loop(tl.clone(), &manifest, size).is_none() {
+        return;
+    }
+
+    let (sizes, media) = project_media(&manifest, &None);
+    let text = project_text(&tl);
+
+    let frame_count = Arc::new(AtomicUsize::new(0));
+    let last_emitted = Arc::new(AtomicI32::new(-1));
+
+    struct CountingSink(Arc<AtomicUsize>);
+    impl FrameSink for CountingSink {
+        fn push_frame(&self, _frame: &DecodedFrame) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    struct RecordingEmitter(Arc<AtomicI32>);
+    impl PlayheadEmitter for RecordingEmitter {
+        fn emit(&self, frame: i32) {
+            self.0.store(frame, Ordering::Relaxed);
+        }
+    }
+
+    let clock: Arc<dyn PlaybackClock> = Arc::new(InstantClock::new(0));
+    let sink: Arc<dyn FrameSink> = Arc::new(CountingSink(frame_count.clone()));
+    let emitter: Arc<dyn PlayheadEmitter> = Arc::new(RecordingEmitter(last_emitted.clone()));
+
+    let engine = PlaybackEngine::spawn(tl, media, text, sizes, size, clock, sink, emitter)
+        .expect("engine spawns");
+    // The wall clock advances the playhead; give the render thread time to produce
+    // a few frames, then stop (which joins the thread).
+    sleep(Duration::from_millis(600));
+    engine.stop();
+
+    assert!(
+        frame_count.load(Ordering::Relaxed) > 0,
+        "the engine thread produced no frames"
+    );
+    assert!(
+        last_emitted.load(Ordering::Relaxed) >= 0,
+        "the engine thread emitted no playhead frame"
+    );
 }

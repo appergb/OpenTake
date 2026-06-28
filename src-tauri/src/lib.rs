@@ -124,6 +124,18 @@ pub fn run() {
             app.manage(crate::library::LibraryState::new(library_store));
             // Lazily-acquired GPU context for timeline composite previews (#47).
             app.manage(render::RenderState::new());
+
+            // Streaming playback (#53 / PR2): start the loopback MJPEG transport
+            // on the Tauri async runtime (mirrors the MCP server spawn) and
+            // register the playback session state. Behind the off-by-default
+            // `playback-engine` feature.
+            #[cfg(feature = "playback-engine")]
+            {
+                let preview_server =
+                    tauri::async_runtime::block_on(playback::transport::PreviewServer::start())?;
+                app.manage(preview_server);
+                app.manage(playback::commands::PlaybackState::new());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -158,6 +170,16 @@ pub fn run() {
             library::library_rename,
             library::library_delete,
             library::library_import_to_project,
+            #[cfg(feature = "playback-engine")]
+            playback::commands::playback_start,
+            #[cfg(feature = "playback-engine")]
+            playback::commands::playback_pause,
+            #[cfg(feature = "playback-engine")]
+            playback::commands::playback_stop,
+            #[cfg(feature = "playback-engine")]
+            playback::commands::playback_seek,
+            #[cfg(feature = "playback-engine")]
+            playback::commands::get_preview_endpoint,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
