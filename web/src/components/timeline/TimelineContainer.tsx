@@ -575,7 +575,7 @@ export function TimelineContainer() {
       const sourceKey = thumbnailSourceKeys.get(ref);
       if (!sourceKey) continue;
       thumbnailInFlightRef.current.add(ref);
-      void generateThumbnail(ref)
+      void generateThumbnail(ref, { includeSprite: true })
         .then(async (result) => {
           if (!result) return;
           const hasSprite =

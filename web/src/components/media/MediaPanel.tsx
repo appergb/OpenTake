@@ -36,7 +36,7 @@ import { formatTimecode } from "../../lib/geometry";
 import { assetUrl } from "../../lib/asset";
 import { useProjectStore } from "../../store/projectStore";
 import { addMediaToTimeline } from "../../store/editActions";
-import { extractAudio } from "../../lib/api";
+import { extractAudio, generateThumbnail } from "../../lib/api";
 import { saveDialog } from "../../lib/dialog";
 import type { MediaItem } from "../../lib/types";
 import { MediaTabBar, MediaSubTabBar } from "./MediaTabBar";
@@ -44,6 +44,58 @@ import { useFavoritesStore, useIsFavorite } from "./favorites";
 
 /** MIME-ish type used on dataTransfer when dragging a media item to the timeline. */
 export const MEDIA_DND_TYPE = "application/x-opentake-media";
+const MEDIA_THUMBNAIL_CONCURRENCY = 4;
+
+let activeThumbnailRequests = 0;
+const pendingThumbnailRequests: Array<() => void> = [];
+const mediaThumbnailCache = new Map<string, string | null>();
+const mediaThumbnailInFlight = new Map<string, Promise<string | null>>();
+
+function runNextThumbnailRequest(): void {
+  if (activeThumbnailRequests >= MEDIA_THUMBNAIL_CONCURRENCY) return;
+  const next = pendingThumbnailRequests.shift();
+  if (!next) return;
+  activeThumbnailRequests += 1;
+  next();
+}
+
+function enqueueThumbnailRequest(task: () => Promise<string | null>): Promise<string | null> {
+  return new Promise((resolve, reject) => {
+    pendingThumbnailRequests.push(() => {
+      task()
+        .then(resolve, reject)
+        .finally(() => {
+          activeThumbnailRequests = Math.max(0, activeThumbnailRequests - 1);
+          runNextThumbnailRequest();
+        });
+    });
+    runNextThumbnailRequest();
+  });
+}
+
+function mediaThumbnailKey(item: MediaItem): string {
+  return `${item.id}|${item.path ?? ""}|${item.thumbnail ?? ""}|${item.missing ? "missing" : "online"}`;
+}
+
+function requestMediaCardThumbnail(item: MediaItem): Promise<string | null> {
+  const key = mediaThumbnailKey(item);
+  if (mediaThumbnailCache.has(key)) return Promise.resolve(mediaThumbnailCache.get(key) ?? null);
+  const inFlight = mediaThumbnailInFlight.get(key);
+  if (inFlight) return inFlight;
+  const promise = enqueueThumbnailRequest(async () => {
+    const result = await generateThumbnail(item.id, { includeSprite: false });
+    return result?.thumbnailPath ?? null;
+  })
+    .then((path) => {
+      mediaThumbnailCache.set(key, path);
+      return path;
+    })
+    .finally(() => {
+      mediaThumbnailInFlight.delete(key);
+    });
+  mediaThumbnailInFlight.set(key, promise);
+  return promise;
+}
 
 /** 当前已实现内容的两个主标签；其余标签在 MediaTabBar 中置灰、点不到。 */
 type MediaTabKind = "material" | "audio";
@@ -324,6 +376,7 @@ function MediaGrid({ items }: { items: MediaItem[] }) {
 
 function MediaCard({ item }: { item: MediaItem }) {
   const t = useT();
+  const cardRef = useRef<HTMLDivElement | null>(null);
   const fps = useProjectStore((s) => s.timeline.fps);
   const setPreviewMedia = useEditorUiStore((s) => s.setPreviewMedia);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
@@ -331,12 +384,50 @@ function MediaCard({ item }: { item: MediaItem }) {
   const selected = previewMediaId === item.id;
   const favorite = useIsFavorite(item.id);
   const toggleFavorite = useFavoritesStore((s) => s.toggle);
+  const thumbnailKey = mediaThumbnailKey(item);
+  const [lazyThumbnail, setLazyThumbnail] = useState<string | null>(
+    item.thumbnail ?? mediaThumbnailCache.get(thumbnailKey) ?? null,
+  );
   // Offline assets shouldn't try to load a (now-missing) thumbnail.
-  const thumbPath = item.thumbnail ?? item.path;
-  const thumb = item.missing ? null : assetUrl(thumbPath);
-  const generatedThumb = Boolean(item.thumbnail);
+  const thumb = item.missing ? null : assetUrl(lazyThumbnail);
   const [hovered, setHovered] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLazyThumbnail(item.thumbnail ?? mediaThumbnailCache.get(thumbnailKey) ?? null);
+  }, [item.thumbnail, thumbnailKey]);
+
+  useEffect(() => {
+    if (item.missing || item.thumbnail || (item.type !== "video" && item.type !== "image")) {
+      return;
+    }
+    let cancelled = false;
+    const request = () => {
+      void requestMediaCardThumbnail(item).then((path) => {
+        if (!cancelled && path) setLazyThumbnail(path);
+      });
+    };
+    const el = cardRef.current;
+    if (!el || typeof IntersectionObserver === "undefined") {
+      request();
+      return () => {
+        cancelled = true;
+      };
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry?.isIntersecting) return;
+        observer.disconnect();
+        request();
+      },
+      { root: null, rootMargin: "160px" },
+    );
+    observer.observe(el);
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+    };
+  }, [item, thumbnailKey]);
 
   const onDragStart = (e: React.DragEvent) => {
     e.dataTransfer.setData(MEDIA_DND_TYPE, item.id);
@@ -376,6 +467,7 @@ function MediaCard({ item }: { item: MediaItem }) {
 
   return (
     <div
+      ref={cardRef}
       draggable
       onDragStart={onDragStart}
       onClick={() => setPreviewMedia(item.id)}
@@ -385,8 +477,8 @@ function MediaCard({ item }: { item: MediaItem }) {
       title={item.name}
       style={{ display: "flex", flexDirection: "column", gap: 4, cursor: "grab" }}
     >
-      {/* Thumbnail: generated cache image first; original file fallback only when
-          no cached thumbnail exists yet. */}
+      {/* Thumbnail: generated cache image only. Missing thumbnails are requested
+          lazily as cards enter view, so import/list commands stay cheap. */}
       <div
         style={{
           position: "relative",
@@ -402,22 +494,11 @@ function MediaCard({ item }: { item: MediaItem }) {
         }}
       >
         {/* `draggable={false}` on the inner media so the card's custom drag
-            (MEDIA_DND_TYPE) wins instead of a native image/video drag. The
-            `#t=0.1` fragment makes the WebView paint the first frame as a video
-            poster (a metadata-only <video> otherwise stays blank). */}
-        {thumb && (item.type === "image" || generatedThumb) ? (
+            (MEDIA_DND_TYPE) wins instead of a native image drag. */}
+        {thumb ? (
           <img
             src={thumb}
             alt={item.name}
-            draggable={false}
-            style={{ width: "100%", height: "100%", objectFit: "cover" }}
-          />
-        ) : thumb && item.type === "video" ? (
-          <video
-            src={`${thumb}#t=0.1`}
-            muted
-            playsInline
-            preload="metadata"
             draggable={false}
             style={{ width: "100%", height: "100%", objectFit: "cover" }}
           />
