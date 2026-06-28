@@ -36,6 +36,8 @@ import {
   interactiveToleranceSec,
 } from "./interactiveSeek";
 import type { Timeline } from "../../lib/types";
+import { isTauri, onPlaybackFrame, playbackStart, playbackStop } from "../../lib/api";
+import { rustEngineEnabled } from "./rustEngine";
 
 // --- Shared element registry ---------------------------------------------
 // playback key -> media element, written by <TimelinePlayback> ref callbacks and
@@ -239,6 +241,49 @@ export function useTimelinePlaybackEngine(): void {
   }, [activeFrame, isPlaying, isScrubbing]);
 
   useEffect(() => {
+    // Rust streaming playback owns the PLAY state when the flag is on (under
+    // Tauri). Scrub, pause, non-Tauri, and flag-off all fall through to the
+    // legacy <video> path below — left untouched, so the pause-freeze (74c4c82)
+    // and resume-without-force-seek (5fa3f6f) behaviors are preserved.
+    if (rustEngineEnabled() && isTauri && isPlaying && !isScrubbing) {
+      const startTl = useProjectStore.getState().timeline;
+      const lastFrame = Math.max(0, totalFrames(startTl) - 1);
+      // The Rust stream provides BOTH video (MJPEG <img>) and audio (cpal), so
+      // the <video> followers must not also play (double audio + wasted decode).
+      pauseAll();
+      const startFrame = Math.max(0, Math.floor(useEditorUiStore.getState().activeFrame));
+      void playbackStart(startFrame);
+
+      let unlisten: (() => void) | null = null;
+      let disposed = false;
+      void onPlaybackFrame((frame) => {
+        const ui = useEditorUiStore.getState();
+        ui.setActiveFrame(frame);
+        // End of timeline → stop (parity with the legacy loop's end handling).
+        if (frame >= lastFrame) ui.setPlaying(false);
+      }).then((un) => {
+        if (disposed) un();
+        else unlisten = un;
+      });
+
+      return () => {
+        disposed = true;
+        unlisten?.();
+        void playbackStop();
+        // Seek the <video> followers to the final frame so the OTHER effect's
+        // pause-snap (which reads the topmost <video>'s currentTime) freezes on
+        // the correct frame, not a stale one — and so the legacy path stays
+        // correct if the flag is flipped off mid-session.
+        const tl = useProjectStore.getState().timeline;
+        const fps = tl.fps > 0 ? tl.fps : 30;
+        const f = Math.max(0, Math.floor(useEditorUiStore.getState().activeFrame));
+        for (const m of activeAt(tl, f)) {
+          const el = previewElements.get(previewElementKey(m));
+          if (el) el.currentTime = sourceTimeSec(m.clip, f, fps);
+        }
+      };
+    }
+
     if (!isPlaying && !isScrubbing) {
       cancelPendingInteractiveSeek();
       pauseAll();

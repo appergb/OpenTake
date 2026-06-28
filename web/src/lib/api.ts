@@ -381,6 +381,62 @@ export async function onGoHome(handler: () => void): Promise<() => void> {
   return listenImpl("go_home", () => handler());
 }
 
+// MARK: - Streaming playback engine (#53)
+//
+// Continuous playback runs in Rust (decode → wgpu composite → MJPEG stream) with
+// a cpal audio master clock. During PLAY the front end points an <img> at
+// `get_preview_endpoint` and moves its playhead from `playback_frame` events;
+// scrub/pause stay on the existing <video> path. All no-ops outside Tauri (the
+// browser shell keeps the <video> playback path), and gated behind a runtime flag
+// in the preview engine until verified on a real machine.
+
+/** Start (or restart) Rust streaming playback from `fromFrame` (the current
+ *  playhead). No-op outside Tauri. */
+export async function playbackStart(fromFrame: number): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl)
+    await invokeImpl<void>("playback_start", { fromFrame: Math.floor(fromFrame) });
+}
+
+/** Pause Rust playback: the render thread stops (the front end then freezes the
+ *  <video> on the last frame). No-op outside Tauri. */
+export async function playbackPause(): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) await invokeImpl<void>("playback_pause");
+}
+
+/** Stop Rust playback and tear down the engine. No-op outside Tauri. */
+export async function playbackStop(): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) await invokeImpl<void>("playback_stop");
+}
+
+/** Seek the running Rust engine to `frame` (no-op when not playing / outside Tauri). */
+export async function playbackSeek(frame: number): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) await invokeImpl<void>("playback_seek", { frame: Math.floor(frame) });
+}
+
+/** The MJPEG stream URL to point a playback <img> at, or null outside Tauri. */
+export async function getPreviewEndpoint(): Promise<string | null> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<string>("get_preview_endpoint");
+  return null;
+}
+
+/** Subscribe to `playback_frame` (the Rust master clock's current frame). Returns
+ *  an unlisten function; no-op (no-op unlisten) outside Tauri. */
+export async function onPlaybackFrame(
+  handler: (frame: number) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("playback_frame", (e) => {
+    const payload = e.payload as { frame?: number } | undefined;
+    if (payload && typeof payload.frame === "number") handler(payload.frame);
+  });
+}
+
 // MARK: - Browser fallback (mirror, not authoritative)
 //
 // When running outside Tauri there is no Rust core; provide a small in-memory

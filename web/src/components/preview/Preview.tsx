@@ -24,7 +24,13 @@ import { assetUrl } from "../../lib/asset";
 import { TimelinePlayback } from "./TimelinePlaybackLayer";
 import { aspectFitBox, timelinePreviewCanvasStyle } from "./previewLayerStyles";
 import { useT } from "../../i18n";
-import { compositeFrame, type CompositeFrame } from "../../lib/api";
+import {
+  compositeFrame,
+  getPreviewEndpoint,
+  isTauri,
+  type CompositeFrame,
+} from "../../lib/api";
+import { rustEngineEnabled } from "./rustEngine";
 import type { MediaItem } from "../../lib/types";
 
 export function Preview() {
@@ -167,9 +173,12 @@ export function Preview() {
             onPlayingChange={setMediaPlaying}
           />
         ) : (
-          <div style={timelineCanvasStyle}>
+          <div style={{ ...timelineCanvasStyle, position: "relative" }}>
             {timelineHasContent ? (
-              <TimelinePlayback timeline={timeline} fps={fps} />
+              <>
+                <TimelinePlayback timeline={timeline} fps={fps} />
+                <TimelineRustOverlay />
+              </>
             ) : (
               // Empty timeline: a framed 16:9 canvas surface placeholder.
               <div
@@ -256,6 +265,51 @@ function downloadDataUrl(dataUrl: string, filename: string): void {
   document.body.appendChild(link);
   link.click();
   link.remove();
+}
+
+/**
+ * The Rust streaming-playback surface: an `<img>` pointed at the loopback MJPEG
+ * stream, shown ONLY during PLAY when the Rust engine flag is on (under Tauri).
+ * It overlays `<TimelinePlayback>` (whose `<video>` elements are paused during
+ * Rust play) and fills the aspect-fit canvas. Scrub/pause unmount it, so the
+ * legacy `<video>`/composite surface shows again. No-op (renders nothing) outside
+ * Tauri or with the flag off — the legacy path is untouched.
+ */
+function TimelineRustOverlay() {
+  const isPlaying = useEditorUiStore((s) => s.isPlaying);
+  const isScrubbing = useEditorUiStore((s) => s.isScrubbing);
+  const [endpoint, setEndpoint] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!rustEngineEnabled() || !isTauri) return;
+    let cancelled = false;
+    void getPreviewEndpoint().then((url) => {
+      if (!cancelled) setEndpoint(url);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const active =
+    rustEngineEnabled() && isTauri && isPlaying && !isScrubbing && endpoint !== null;
+  if (!active) return null;
+  return (
+    <img
+      src={endpoint ?? undefined}
+      alt=""
+      draggable={false}
+      style={{
+        position: "absolute",
+        inset: 0,
+        width: "100%",
+        height: "100%",
+        objectFit: "fill",
+        pointerEvents: "none",
+        zIndex: 2,
+      }}
+    />
+  );
 }
 
 /** Renders a single media asset straight from disk via the asset protocol —
