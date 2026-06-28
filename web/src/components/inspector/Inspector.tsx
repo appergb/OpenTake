@@ -5,7 +5,16 @@
  * Text/AI-Edit tabs are scaffolded (TODO: full parity in a later pass).
  */
 
-import { Info, SlidersHorizontal, Diamond } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  CircleDashed,
+  Diamond,
+  Info,
+  Palette,
+  Pipette,
+  SlidersHorizontal,
+  type LucideIcon,
+} from "lucide-react";
 import { PanelHeaderBar } from "../ui/PanelShell";
 import { Icon } from "../ui/Icon";
 import { ScrubbableNumberField } from "./ScrubbableNumberField";
@@ -27,8 +36,19 @@ import {
   topLeftAt,
   volumeAt,
 } from "../../lib/clip";
+import { FS, RADIUS, SPACE } from "../../lib/theme";
 import { useT, type TFunction } from "../../i18n";
-import type { Clip, Crop, Interpolation, Timeline } from "../../lib/types";
+import type {
+  ChromaKey,
+  Clip,
+  ColorGrade,
+  Crop,
+  Interpolation,
+  Mask,
+  MaskShape,
+  Rgb,
+  Timeline,
+} from "../../lib/types";
 
 function gcd(a: number, b: number): number {
   return b === 0 ? a : gcd(b, a % b);
@@ -103,10 +123,14 @@ function MarqueeSummary({ count, t }: { count: number; t: TFunction }) {
   );
 }
 
-function SectionHeader({ label }: { label: string }) {
+function SectionHeader({ label, icon }: { label: string; icon?: LucideIcon }) {
+  const HeaderIcon = icon;
   return (
     <div
       style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "var(--space-xs)",
         fontSize: "var(--fs-xxs)",
         fontWeight: "var(--fw-semibold)",
         letterSpacing: "var(--tracking-wide)",
@@ -115,7 +139,8 @@ function SectionHeader({ label }: { label: string }) {
         marginBottom: "var(--space-sm)",
       }}
     >
-      {label}
+      {HeaderIcon && <Icon icon={HeaderIcon} size={11} />}
+      <span>{label}</span>
     </div>
   );
 }
@@ -131,8 +156,27 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
         gap: "var(--space-sm)",
       }}
     >
-      <span style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)" }}>{label}</span>
-      <span style={{ display: "inline-flex", alignItems: "center", gap: "var(--space-xs)" }}>
+      <span
+        title={label}
+        style={{
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          fontSize: "var(--fs-xs)",
+          color: "var(--text-tertiary)",
+        }}
+      >
+        {label}
+      </span>
+      <span
+        style={{
+          flexShrink: 0,
+          display: "inline-flex",
+          alignItems: "center",
+          gap: "var(--space-xs)",
+        }}
+      >
         {children}
       </span>
     </div>
@@ -439,6 +483,8 @@ function ClipInspector({
                 />
               </Row>
             </section>
+
+            {isVisualEffectClip(clip) && <ShaderEffectsSection clip={clip} t={t} />}
           </>
         )}
       </div>
@@ -677,6 +723,590 @@ function FadeSection({
       </Row>
     </section>
   );
+}
+
+// MARK: - Shader effect sections (color grade / chroma key / masks)
+
+const EFFECT_VALUE_WIDTH = 56;
+const EFFECT_RGB_WIDTH = 42;
+const COLOR_SWATCH_SIZE = SPACE.lgXl;
+
+const controlStyle: React.CSSProperties = {
+  fontSize: FS.sm,
+  color: "var(--accent-primary)",
+  background: "var(--bg-raised)",
+  border: "var(--bw-thin) solid var(--border-primary)",
+  borderRadius: RADIUS.xs,
+  padding: `${SPACE.xxs}px ${SPACE.xs}px`,
+};
+
+const checkboxStyle: React.CSSProperties = {
+  accentColor: "var(--accent-primary)",
+  cursor: "pointer",
+};
+
+function ShaderEffectsSection({ clip, t }: { clip: Clip; t: TFunction }) {
+  return (
+    <>
+      <ColorGradeSection clip={clip} t={t} />
+      <ChromaKeySection clip={clip} t={t} />
+      <MaskSection clip={clip} t={t} />
+    </>
+  );
+}
+
+function ColorGradeSection({ clip, t }: { clip: Clip; t: TFunction }) {
+  const [draft, setDraft] = useState<ColorGrade>(() => completeColorGrade(clip.colorGrade));
+
+  useEffect(() => {
+    setDraft(completeColorGrade(clip.colorGrade));
+  }, [clip.id, clip.colorGrade]);
+
+  const commitGrade = (next: ColorGrade) => {
+    setDraft(next);
+    void edit.setColorGrade([clip.id], next);
+  };
+  const updateField = (field: keyof Omit<ColorGrade, "liftGammaGain">, value: number) =>
+    setDraft((g) => ({ ...g, [field]: value }));
+  const commitField = (field: keyof Omit<ColorGrade, "liftGammaGain">, value: number) =>
+    commitGrade({ ...draft, [field]: value });
+  const updateLgg = (band: keyof ColorGrade["liftGammaGain"], channel: keyof Rgb, value: number) =>
+    setDraft((g) => setLggChannel(g, band, channel, value));
+  const commitLgg = (band: keyof ColorGrade["liftGammaGain"], channel: keyof Rgb, value: number) =>
+    commitGrade(setLggChannel(draft, band, channel, value));
+
+  return (
+    <section>
+      <SectionHeader label={t("inspector.section.colorGrade")} icon={Palette} />
+      <EffectNumberRow
+        label={t("inspector.field.exposure")}
+        value={draft.exposure}
+        min={-5}
+        max={5}
+        sensitivity={0.02}
+        format={(v) => v.toFixed(2)}
+        onChange={(v) => updateField("exposure", v)}
+        onCommit={(v) => commitField("exposure", v)}
+      />
+      <EffectNumberRow
+        label={t("inspector.field.temperature")}
+        value={draft.temperature}
+        min={-1}
+        max={1}
+        sensitivity={0.005}
+        format={(v) => v.toFixed(2)}
+        onChange={(v) => updateField("temperature", v)}
+        onCommit={(v) => commitField("temperature", v)}
+      />
+      <EffectNumberRow
+        label={t("inspector.field.tint")}
+        value={draft.tint}
+        min={-1}
+        max={1}
+        sensitivity={0.005}
+        format={(v) => v.toFixed(2)}
+        onChange={(v) => updateField("tint", v)}
+        onCommit={(v) => commitField("tint", v)}
+      />
+      {(["lift", "gamma", "gain"] as Array<keyof ColorGrade["liftGammaGain"]>).map((band) =>
+        (["r", "g", "b"] as Array<keyof Rgb>).map((channel) => (
+          <EffectNumberRow
+            key={`${band}-${channel}`}
+            label={t(`inspector.field.${band}${channel.toUpperCase()}`)}
+            value={draft.liftGammaGain[band][channel]}
+            min={band === "lift" ? -1 : 0}
+            max={band === "lift" ? 1 : 4}
+            sensitivity={band === "lift" ? 0.005 : 0.01}
+            format={(v) => v.toFixed(2)}
+            width={EFFECT_RGB_WIDTH}
+            onChange={(v) => updateLgg(band, channel, v)}
+            onCommit={(v) => commitLgg(band, channel, v)}
+          />
+        )),
+      )}
+      <EffectNumberRow
+        label={t("inspector.field.contrast")}
+        value={draft.contrast}
+        min={-1}
+        max={2}
+        sensitivity={0.01}
+        format={(v) => v.toFixed(2)}
+        onChange={(v) => updateField("contrast", v)}
+        onCommit={(v) => commitField("contrast", v)}
+      />
+      <EffectNumberRow
+        label={t("inspector.field.saturation")}
+        value={draft.saturation}
+        min={0}
+        max={3}
+        sensitivity={0.01}
+        format={(v) => v.toFixed(2)}
+        onChange={(v) => updateField("saturation", v)}
+        onCommit={(v) => commitField("saturation", v)}
+      />
+    </section>
+  );
+}
+
+function ChromaKeySection({ clip, t }: { clip: Clip; t: TFunction }) {
+  const [enabled, setEnabled] = useState(() => !!clip.chromaKey);
+  const [draft, setDraft] = useState<ChromaKey>(() => completeChromaKey(clip.chromaKey));
+
+  useEffect(() => {
+    setEnabled(!!clip.chromaKey);
+    setDraft(completeChromaKey(clip.chromaKey));
+  }, [clip.id, clip.chromaKey]);
+
+  const commitKey = (next: ChromaKey) => {
+    setDraft(next);
+    if (enabled) void edit.setChromaKey([clip.id], next);
+  };
+  const updateField = (field: keyof Omit<ChromaKey, "keyColor">, value: number) =>
+    setDraft((k) => ({ ...k, [field]: value }));
+  const commitField = (field: keyof Omit<ChromaKey, "keyColor">, value: number) =>
+    commitKey({ ...draft, [field]: value });
+  const setKeyEnabled = (nextEnabled: boolean) => {
+    setEnabled(nextEnabled);
+    if (nextEnabled) {
+      const next = completeChromaKey(clip.chromaKey);
+      setDraft(next);
+      void edit.setChromaKey([clip.id], next);
+    } else {
+      void edit.setChromaKey([clip.id], null);
+    }
+  };
+
+  return (
+    <section>
+      <SectionHeader label={t("inspector.section.chromaKey")} icon={Pipette} />
+      <Row label={t("inspector.field.enabled")}>
+        <input
+          type="checkbox"
+          checked={enabled}
+          style={checkboxStyle}
+          onChange={(e) => setKeyEnabled(e.target.checked)}
+        />
+      </Row>
+      {enabled && (
+        <>
+          <Row label={t("inspector.field.keyColor")}>
+            <input
+              aria-label={t("inspector.field.keyColor")}
+              type="color"
+              value={rgbToHex(draft.keyColor)}
+              onChange={(e) => setDraft((k) => ({ ...k, keyColor: hexToRgb(e.target.value) }))}
+              onBlur={() => commitKey(draft)}
+              style={{
+                width: COLOR_SWATCH_SIZE,
+                height: COLOR_SWATCH_SIZE,
+                padding: 0,
+                border: "var(--bw-thin) solid var(--border-primary)",
+                borderRadius: RADIUS.xs,
+                background: "transparent",
+                cursor: "pointer",
+              }}
+            />
+          </Row>
+          <EffectNumberRow
+            label={t("inspector.field.similarity")}
+            value={draft.similarity}
+            min={0}
+            max={1}
+            sensitivity={0.005}
+            format={(v) => v.toFixed(3)}
+            onChange={(v) => updateField("similarity", v)}
+            onCommit={(v) => commitField("similarity", v)}
+          />
+          <EffectNumberRow
+            label={t("inspector.field.smoothness")}
+            value={draft.smoothness}
+            min={0}
+            max={1}
+            sensitivity={0.005}
+            format={(v) => v.toFixed(3)}
+            onChange={(v) => updateField("smoothness", v)}
+            onCommit={(v) => commitField("smoothness", v)}
+          />
+          <EffectNumberRow
+            label={t("inspector.field.spill")}
+            value={draft.spill}
+            min={0}
+            max={1}
+            sensitivity={0.005}
+            format={(v) => v.toFixed(3)}
+            onChange={(v) => updateField("spill", v)}
+            onCommit={(v) => commitField("spill", v)}
+          />
+        </>
+      )}
+    </section>
+  );
+}
+
+function MaskSection({ clip, t }: { clip: Clip; t: TFunction }) {
+  const [enabled, setEnabled] = useState(() => (clip.masks?.length ?? 0) > 0);
+  const [draft, setDraft] = useState<Mask>(() => completeMask(clip.masks?.[0]));
+
+  useEffect(() => {
+    setEnabled((clip.masks?.length ?? 0) > 0);
+    setDraft(completeMask(clip.masks?.[0]));
+  }, [clip.id, clip.masks]);
+
+  const commitMask = (next: Mask) => {
+    setDraft(next);
+    void edit.setMasks([clip.id], [next, ...(clip.masks?.slice(1) ?? [])]);
+  };
+  const setMaskEnabled = (nextEnabled: boolean) => {
+    setEnabled(nextEnabled);
+    if (nextEnabled) {
+      const next = completeMask(clip.masks?.[0]);
+      setDraft(next);
+      void edit.setMasks([clip.id], [next, ...(clip.masks?.slice(1) ?? [])]);
+    } else {
+      void edit.setMasks([clip.id], []);
+    }
+  };
+  const setShape = (shape: MaskShape) => commitMask({ ...draft, shape });
+  const updateCommon = (field: keyof Omit<Mask, "shape">, value: number | boolean) =>
+    setDraft((m) => ({ ...m, [field]: value }));
+  const commitCommon = (field: keyof Omit<Mask, "shape">, value: number | boolean) =>
+    commitMask({ ...draft, [field]: value });
+
+  return (
+    <section>
+      <SectionHeader label={t("inspector.section.mask")} icon={CircleDashed} />
+      <Row label={t("inspector.field.enabled")}>
+        <input
+          type="checkbox"
+          checked={enabled}
+          style={checkboxStyle}
+          onChange={(e) => setMaskEnabled(e.target.checked)}
+        />
+      </Row>
+      {enabled && (
+        <>
+          <Row label={t("inspector.field.maskType")}>
+            <select
+              value={draft.shape.kind}
+              onChange={(e) => {
+                const kind = e.target.value;
+                if (kind === "circle") setShape(defaultCircleShape());
+                else if (kind === "linear") setShape(defaultLinearShape());
+              }}
+              style={controlStyle}
+            >
+              <option value="circle">{t("inspector.mask.circle")}</option>
+              <option value="linear">{t("inspector.mask.linear")}</option>
+              <option value="poly" disabled>
+                {t("inspector.mask.polyPending")}
+              </option>
+            </select>
+          </Row>
+          {draft.shape.kind === "circle" ? (
+            <CircleMaskFields
+              shape={draft.shape}
+              setShape={setShape}
+              setDraftShape={(shape) => setDraft((m) => ({ ...m, shape }))}
+              t={t}
+            />
+          ) : draft.shape.kind === "linear" ? (
+            <LinearMaskFields
+              shape={draft.shape}
+              setShape={setShape}
+              setDraftShape={(shape) => setDraft((m) => ({ ...m, shape }))}
+              t={t}
+            />
+          ) : null}
+          <EffectNumberRow
+            label={t("inspector.field.feather")}
+            value={draft.feather}
+            min={0}
+            max={1}
+            sensitivity={0.005}
+            format={(v) => v.toFixed(3)}
+            onChange={(v) => updateCommon("feather", v)}
+            onCommit={(v) => commitCommon("feather", v)}
+          />
+          <Row label={t("inspector.field.invert")}>
+            <input
+              type="checkbox"
+              checked={draft.invert}
+              style={checkboxStyle}
+              onChange={(e) => commitCommon("invert", e.target.checked)}
+            />
+          </Row>
+        </>
+      )}
+    </section>
+  );
+}
+
+function CircleMaskFields({
+  shape,
+  setShape,
+  setDraftShape,
+  t,
+}: {
+  shape: Extract<MaskShape, { kind: "circle" }>;
+  setShape: (shape: MaskShape) => void;
+  setDraftShape: (shape: MaskShape) => void;
+  t: TFunction;
+}) {
+  const updatePoint = (field: "center" | "radius", axis: keyof RgbPoint, value: number) =>
+    setDraftShape({ ...shape, [field]: { ...shape[field], [axis]: value } });
+  const commitPoint = (field: "center" | "radius", axis: keyof RgbPoint, value: number) =>
+    setShape({ ...shape, [field]: { ...shape[field], [axis]: value } });
+
+  return (
+    <>
+      <MaskNumberRow
+        label={t("inspector.field.centerX")}
+        value={shape.center.x}
+        onChange={(v) => updatePoint("center", "x", v)}
+        onCommit={(v) => commitPoint("center", "x", v)}
+      />
+      <MaskNumberRow
+        label={t("inspector.field.centerY")}
+        value={shape.center.y}
+        onChange={(v) => updatePoint("center", "y", v)}
+        onCommit={(v) => commitPoint("center", "y", v)}
+      />
+      <MaskNumberRow
+        label={t("inspector.field.radiusX")}
+        value={shape.radius.x}
+        min={0.01}
+        max={3}
+        onChange={(v) => updatePoint("radius", "x", v)}
+        onCommit={(v) => commitPoint("radius", "x", v)}
+      />
+      <MaskNumberRow
+        label={t("inspector.field.radiusY")}
+        value={shape.radius.y}
+        min={0.01}
+        max={3}
+        onChange={(v) => updatePoint("radius", "y", v)}
+        onCommit={(v) => commitPoint("radius", "y", v)}
+      />
+    </>
+  );
+}
+
+function LinearMaskFields({
+  shape,
+  setShape,
+  setDraftShape,
+  t,
+}: {
+  shape: Extract<MaskShape, { kind: "linear" }>;
+  setShape: (shape: MaskShape) => void;
+  setDraftShape: (shape: MaskShape) => void;
+  t: TFunction;
+}) {
+  const updatePoint = (field: "point" | "normal", axis: keyof RgbPoint, value: number) =>
+    setDraftShape({ ...shape, [field]: { ...shape[field], [axis]: value } });
+  const commitPoint = (field: "point" | "normal", axis: keyof RgbPoint, value: number) =>
+    setShape({ ...shape, [field]: { ...shape[field], [axis]: value } });
+
+  return (
+    <>
+      <MaskNumberRow
+        label={t("inspector.field.pointX")}
+        value={shape.point.x}
+        onChange={(v) => updatePoint("point", "x", v)}
+        onCommit={(v) => commitPoint("point", "x", v)}
+      />
+      <MaskNumberRow
+        label={t("inspector.field.pointY")}
+        value={shape.point.y}
+        onChange={(v) => updatePoint("point", "y", v)}
+        onCommit={(v) => commitPoint("point", "y", v)}
+      />
+      <MaskNumberRow
+        label={t("inspector.field.normalX")}
+        value={shape.normal.x}
+        min={-1}
+        max={1}
+        onChange={(v) => updatePoint("normal", "x", v)}
+        onCommit={(v) => commitPoint("normal", "x", v)}
+      />
+      <MaskNumberRow
+        label={t("inspector.field.normalY")}
+        value={shape.normal.y}
+        min={-1}
+        max={1}
+        onChange={(v) => updatePoint("normal", "y", v)}
+        onCommit={(v) => commitPoint("normal", "y", v)}
+      />
+    </>
+  );
+}
+
+function EffectNumberRow({
+  label,
+  value,
+  min,
+  max,
+  sensitivity,
+  format,
+  width = EFFECT_VALUE_WIDTH,
+  onChange,
+  onCommit,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  sensitivity: number;
+  format: (v: number) => string;
+  width?: number;
+  onChange: (v: number) => void;
+  onCommit: (v: number) => void;
+}) {
+  return (
+    <Row label={label}>
+      <ScrubbableNumberField
+        value={value}
+        min={min}
+        max={max}
+        sensitivity={sensitivity}
+        format={format}
+        width={width}
+        onChange={onChange}
+        onCommit={onCommit}
+      />
+    </Row>
+  );
+}
+
+function MaskNumberRow({
+  label,
+  value,
+  min = -1,
+  max = 2,
+  onChange,
+  onCommit,
+}: {
+  label: string;
+  value: number;
+  min?: number;
+  max?: number;
+  onChange: (v: number) => void;
+  onCommit: (v: number) => void;
+}) {
+  return (
+    <EffectNumberRow
+      label={label}
+      value={value}
+      min={min}
+      max={max}
+      sensitivity={0.005}
+      format={(v) => v.toFixed(3)}
+      onChange={onChange}
+      onCommit={onCommit}
+    />
+  );
+}
+
+type RgbPoint = { x: number; y: number };
+
+function isVisualEffectClip(clip: Clip): boolean {
+  return clip.mediaType === "video" || clip.mediaType === "image" || clip.mediaType === "lottie";
+}
+
+function defaultRgb(value = 0): Rgb {
+  return { r: value, g: value, b: value };
+}
+
+function completeColorGrade(grade: ColorGrade | undefined): ColorGrade {
+  return {
+    exposure: grade?.exposure ?? 0,
+    temperature: grade?.temperature ?? 0,
+    tint: grade?.tint ?? 0,
+    liftGammaGain: {
+      lift: { ...defaultRgb(0), ...grade?.liftGammaGain?.lift },
+      gamma: { ...defaultRgb(1), ...grade?.liftGammaGain?.gamma },
+      gain: { ...defaultRgb(1), ...grade?.liftGammaGain?.gain },
+    },
+    contrast: grade?.contrast ?? 0,
+    saturation: grade?.saturation ?? 1,
+  };
+}
+
+function completeChromaKey(chromaKey: ChromaKey | undefined): ChromaKey {
+  return {
+    keyColor: { r: 0, g: 1, b: 0, ...chromaKey?.keyColor },
+    similarity: chromaKey?.similarity ?? 0.15,
+    smoothness: chromaKey?.smoothness ?? 0.35,
+    spill: chromaKey?.spill ?? 0.5,
+  };
+}
+
+function completeMask(mask: Mask | undefined): Mask {
+  return {
+    shape: mask?.shape ?? defaultCircleShape(),
+    feather: mask?.feather ?? 0,
+    invert: mask?.invert ?? false,
+  };
+}
+
+function defaultCircleShape(): Extract<MaskShape, { kind: "circle" }> {
+  return {
+    kind: "circle",
+    center: { x: 0.5, y: 0.5 },
+    radius: { x: 1.5, y: 1.5 },
+  };
+}
+
+function defaultLinearShape(): Extract<MaskShape, { kind: "linear" }> {
+  return {
+    kind: "linear",
+    point: { x: 0.5, y: 0.5 },
+    normal: { x: 1, y: 0 },
+  };
+}
+
+function setLggChannel(
+  grade: ColorGrade,
+  band: keyof ColorGrade["liftGammaGain"],
+  channel: keyof Rgb,
+  value: number,
+): ColorGrade {
+  return {
+    ...grade,
+    liftGammaGain: {
+      ...grade.liftGammaGain,
+      [band]: {
+        ...grade.liftGammaGain[band],
+        [channel]: value,
+      },
+    },
+  };
+}
+
+function rgbToHex(rgb: Rgb): string {
+  const channel = (value: number) => {
+    const clamped = Math.max(0, Math.min(255, Math.round(value * 255)));
+    return clamped.toString(16).padStart(2, "0");
+  };
+  return `#${channel(rgb.r)}${channel(rgb.g)}${channel(rgb.b)}`;
+}
+
+function hexToRgb(hex: string): Rgb {
+  const raw = hex.replace("#", "");
+  const expanded =
+    raw.length === 3
+      ? raw
+          .split("")
+          .map((ch) => ch + ch)
+          .join("")
+      : raw;
+  const parsed = Number.parseInt(expanded, 16);
+  if (!Number.isFinite(parsed)) return { r: 0, g: 1, b: 0 };
+  return {
+    r: ((parsed >> 16) & 0xff) / 255,
+    g: ((parsed >> 8) & 0xff) / 255,
+    b: (parsed & 0xff) / 255,
+  };
 }
 
 function ProjectMetadata({ timeline, t }: { timeline: Timeline; t: TFunction }) {
