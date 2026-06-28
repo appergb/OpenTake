@@ -284,7 +284,9 @@ function TimelineRustOverlay() {
     if (!rustEngineEnabled() || !isTauri) return;
     let cancelled = false;
     void getPreviewEndpoint().then((url) => {
-      if (!cancelled) setEndpoint(url);
+      // Guard against a null/undefined endpoint leaking into state (which would
+      // otherwise activate the overlay with a broken <img>).
+      if (!cancelled && typeof url === "string") setEndpoint(url);
     });
     return () => {
       cancelled = true;

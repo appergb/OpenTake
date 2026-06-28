@@ -13,7 +13,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use opentake_core::AppCore;
 use opentake_render::{even, RenderSize};
@@ -47,16 +47,22 @@ impl PlaybackState {
         PlaybackState::default()
     }
 
-    /// Replace the running session, stopping (and joining) any previous one first.
+    /// Replace the running session, stopping (and joining) any previous one
+    /// AFTER releasing the lock — a slow render-thread join must not block the
+    /// other playback commands (which all take this same lock).
     fn install(&self, engine: PlaybackEngine, audio: Option<super::audio::AudioPlayback>) {
-        let mut guard = self.running.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(old) = guard.take() {
-            old.engine.stop();
+        let old = {
+            let mut guard = self.running.lock().unwrap_or_else(|p| p.into_inner());
+            let old = guard.take();
+            *guard = Some(RunningPlayback {
+                engine,
+                _audio: audio,
+            });
+            old
+        };
+        if let Some(session) = old {
+            session.engine.stop();
         }
-        *guard = Some(RunningPlayback {
-            engine,
-            _audio: audio,
-        });
     }
 
     /// Stop and drop the running session (render thread joined, audio dropped).
@@ -103,30 +109,44 @@ fn playback_render_size(canvas_w: i32, canvas_h: i32, cap: u32) -> RenderSize {
 /// transport and emitting `playback_frame` events. Returns `Err` only on engine
 /// spawn failure; a GPU-less host fails fast here.
 #[tauri::command]
-pub fn playback_start(
-    app: AppHandle,
-    core: State<'_, AppCore>,
-    server: State<'_, Arc<PreviewServer>>,
-    playback: State<'_, PlaybackState>,
-    from_frame: i32,
-) -> Result<(), String> {
-    // Snapshot the session up front; no session lock is held during playback.
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    let project_dir = core.project_dir();
-
-    let (sizes, media) = project_media(&manifest, &project_dir);
-    let text = project_text(&timeline);
-    let render_size = playback_render_size(timeline.width, timeline.height, PLAYBACK_PREVIEW_CAP);
-
-    // Audio master clock when the timeline carries sound; wall-clock otherwise.
-    // The cpal stream handle (if any) is owned by the clock and lives until the
-    // engine is replaced/stopped.
+pub async fn playback_start(app: AppHandle, from_frame: i32) -> Result<(), String> {
+    // Snapshot the session synchronously — no managed-state guard is held across
+    // the await below (Tauri async commands require a Send future).
+    let (timeline, sizes, media, text, render_size, fps, sink, emitter) = {
+        let core = app.state::<AppCore>();
+        let timeline = core.get_timeline().timeline;
+        let manifest = core.media();
+        let project_dir = core.project_dir();
+        let (sizes, media) = project_media(&manifest, &project_dir);
+        let text = project_text(&timeline);
+        let render_size =
+            playback_render_size(timeline.width, timeline.height, PLAYBACK_PREVIEW_CAP);
+        let fps = timeline.fps;
+        let sink: Arc<dyn FrameSink> = Arc::new(app.state::<Arc<PreviewServer>>().sink());
+        let emitter: Arc<dyn PlayheadEmitter> = Arc::new(TauriPlayheadEmitter::new(app.clone()));
+        (
+            timeline,
+            sizes,
+            media,
+            text,
+            render_size,
+            fps,
+            sink,
+            emitter,
+        )
+    };
     let start_at = from_frame.max(0);
-    let (clock, audio) = build_clock(&timeline, &media, timeline.fps, start_at);
 
-    let sink: Arc<dyn FrameSink> = Arc::new(server.sink());
-    let emitter: Arc<dyn PlayheadEmitter> = Arc::new(TauriPlayheadEmitter::new(app));
+    // Decoding + mixing the whole timeline's audio (ffmpeg per clip) can take
+    // seconds on a long project; run it (and cpal setup) off the IPC thread so
+    // the command never freezes the UI.
+    let (clock, audio) = {
+        let timeline = timeline.clone();
+        let media = media.clone();
+        tokio::task::spawn_blocking(move || build_clock(&timeline, &media, fps, start_at))
+            .await
+            .map_err(|e| format!("audio prepare task failed: {e}"))?
+    };
 
     let engine = PlaybackEngine::spawn(
         timeline,
@@ -138,7 +158,7 @@ pub fn playback_start(
         sink,
         emitter,
     )?;
-    playback.install(engine, audio);
+    app.state::<PlaybackState>().install(engine, audio);
     Ok(())
 }
 

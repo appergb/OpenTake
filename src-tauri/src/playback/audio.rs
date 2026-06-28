@@ -61,7 +61,9 @@ impl PlaybackClock for AudioClock {
 
     fn seek(&self, frame: i32) {
         let fps = self.fps.max(1);
-        let pos = (frame.max(0) as u64 * self.rate as u64) / fps as u64;
+        // Match frame()'s float path so a seek round-trips exactly even when the
+        // device rate isn't a multiple of fps (e.g. 44100 Hz @ 24 fps).
+        let pos = (frame.max(0) as f64 / fps as f64 * self.rate as f64) as u64;
         self.pos.store(pos, Ordering::Relaxed);
     }
 }
@@ -154,11 +156,21 @@ fn build_stream(
     buffer: Arc<Vec<f32>>,
     pos: Arc<AtomicU64>,
 ) -> Result<cpal::Stream, String> {
+    // Cover every fixed-size cpal format (all satisfy SizedSample + FromSample<f32>)
+    // so a non-F32 default device (I32 is common on Linux/Windows) still gets audio
+    // instead of silently falling back to the wall clock.
     match format {
         cpal::SampleFormat::F32 => out_stream::<f32>(device, config, buffer, pos),
+        cpal::SampleFormat::F64 => out_stream::<f64>(device, config, buffer, pos),
+        cpal::SampleFormat::I8 => out_stream::<i8>(device, config, buffer, pos),
         cpal::SampleFormat::I16 => out_stream::<i16>(device, config, buffer, pos),
+        cpal::SampleFormat::I32 => out_stream::<i32>(device, config, buffer, pos),
+        cpal::SampleFormat::I64 => out_stream::<i64>(device, config, buffer, pos),
+        cpal::SampleFormat::U8 => out_stream::<u8>(device, config, buffer, pos),
         cpal::SampleFormat::U16 => out_stream::<u16>(device, config, buffer, pos),
-        other => Err(format!("unsupported audio sample format: {other}")),
+        cpal::SampleFormat::U32 => out_stream::<u32>(device, config, buffer, pos),
+        cpal::SampleFormat::U64 => out_stream::<u64>(device, config, buffer, pos),
+        other => Err(format!("unsupported cpal sample format: {other}")),
     }
 }
 

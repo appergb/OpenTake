@@ -221,7 +221,11 @@ export function useTimelinePlaybackEngine(): void {
       pauseAll();
       const tl = useProjectStore.getState().timeline;
       const fps = tl.fps > 0 ? tl.fps : 30;
-      if (prev.isPlaying) {
+      // In Rust-engine mode the playhead is authoritative (driven by
+      // playback_frame and settled by setPlaying), so DON'T derive the paused
+      // frame from a <video> the Rust path wasn't driving — that would read a
+      // stale currentTime. The legacy path (flag off / non-Tauri) is unchanged.
+      if (prev.isPlaying && !(rustEngineEnabled() && isTauri)) {
         const visual = activeVideoForPausedSnap(tl, Math.max(0, Math.floor(activeFrame)));
         const el = visual ? previewElements.get(previewElementKey(visual)) : null;
         const pausedFrame = pausedPlayheadFrameFromFrozenVideo(visual, el?.currentTime ?? NaN, fps);
@@ -246,21 +250,22 @@ export function useTimelinePlaybackEngine(): void {
     // legacy <video> path below — left untouched, so the pause-freeze (74c4c82)
     // and resume-without-force-seek (5fa3f6f) behaviors are preserved.
     if (rustEngineEnabled() && isTauri && isPlaying && !isScrubbing) {
-      const startTl = useProjectStore.getState().timeline;
-      const lastFrame = Math.max(0, totalFrames(startTl) - 1);
       // The Rust stream provides BOTH video (MJPEG <img>) and audio (cpal), so
       // the <video> followers must not also play (double audio + wasted decode).
       pauseAll();
       const startFrame = Math.max(0, Math.floor(useEditorUiStore.getState().activeFrame));
-      void playbackStart(startFrame);
+      playbackStart(startFrame).catch((e) => console.warn("playbackStart failed:", e));
 
       let unlisten: (() => void) | null = null;
       let disposed = false;
       void onPlaybackFrame((frame) => {
+        if (disposed) return; // cleanup ran before the listener resolved
         const ui = useEditorUiStore.getState();
         ui.setActiveFrame(frame);
-        // End of timeline → stop (parity with the legacy loop's end handling).
-        if (frame >= lastFrame) ui.setPlaying(false);
+        // Stop at the CURRENT timeline end — re-read so a mid-play edit can't
+        // stop early/late from a stale closure (parity with the legacy loop).
+        const last = Math.max(0, totalFrames(useProjectStore.getState().timeline) - 1);
+        if (frame >= last) ui.setPlaying(false);
       }).then((un) => {
         if (disposed) un();
         else unlisten = un;
@@ -269,11 +274,11 @@ export function useTimelinePlaybackEngine(): void {
       return () => {
         disposed = true;
         unlisten?.();
-        void playbackStop();
-        // Seek the <video> followers to the final frame so the OTHER effect's
-        // pause-snap (which reads the topmost <video>'s currentTime) freezes on
-        // the correct frame, not a stale one — and so the legacy path stays
-        // correct if the flag is flipped off mid-session.
+        playbackStop().catch((e) => console.warn("playbackStop failed:", e));
+        // Seek the <video> followers to the current frame so the paused display
+        // (the MJPEG <img> overlay unmounts on pause) shows the right frame. The
+        // pause-snap in the other effect now trusts activeFrame directly, so this
+        // no longer relies on cross-effect ordering.
         const tl = useProjectStore.getState().timeline;
         const fps = tl.fps > 0 ? tl.fps : 30;
         const f = Math.max(0, Math.floor(useEditorUiStore.getState().activeFrame));

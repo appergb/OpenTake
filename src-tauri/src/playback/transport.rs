@@ -119,22 +119,29 @@ async fn stream_handler(
     }
 
     let mut rx = tx.subscribe();
-    // Bridge the broadcast receiver to an axum body stream via an unbounded mpsc.
-    let (body_tx, body_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, Infallible>>();
+    // Bridge the broadcast receiver to an axum body stream via a BOUNDED mpsc: a
+    // slow client drops frames (live preview) instead of growing memory without
+    // limit.
+    let (body_tx, body_rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(4);
 
     tauri::async_runtime::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(jpeg) => {
+                    // Pack header + body into ONE multipart part: a part must never
+                    // be split across sends, or a dropped half corrupts the stream.
                     let header = format!(
                         "\r\n--{BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
                         jpeg.len()
                     );
-                    if body_tx.send(Ok(Bytes::from(header))).is_err() {
-                        break; // client disconnected
-                    }
-                    if body_tx.send(Ok(jpeg)).is_err() {
-                        break;
+                    let mut part = Vec::with_capacity(header.len() + jpeg.len());
+                    part.extend_from_slice(header.as_bytes());
+                    part.extend_from_slice(&jpeg);
+                    match body_tx.try_send(Ok(Bytes::from(part))) {
+                        Ok(()) => {}
+                        // Client can't keep up: drop this frame, keep streaming.
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => continue,
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                     }
                 }
                 // Slow consumer: skip the dropped frames and keep going (live preview).
