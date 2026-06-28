@@ -138,6 +138,16 @@ export const ZOOM = {
 /** §5.6 Playhead triangle size (PlayheadOverlay.swift). */
 export const PLAYHEAD_TRIANGLE = 8;
 
+/** Drop ghost shown while dragging a media item from the panel onto the timeline:
+ *  a neutral gray translucent rect at the resolved track + frame span, matching
+ *  the in-timeline move ghost / marquee affordance (white-alpha overlays). */
+export const GHOST = {
+  fill: "rgba(255,255,255,0.16)",
+  border: "rgba(255,255,255,0.55)",
+  /** Faint fill for the "a new track will be created here" lane. */
+  newTrackFill: "rgba(255,255,255,0.05)",
+} as const;
+
 /** §5.4 Clip rendering insets (ClipRenderer.swift). */
 export const CLIP = {
   stripWidth: 3, // left color strip

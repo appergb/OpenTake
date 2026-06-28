@@ -33,6 +33,7 @@ import {
 } from "../../store/mediaActions";
 import { useT } from "../../i18n";
 import { formatTimecode } from "../../lib/geometry";
+import { setDraggingMedia } from "../../lib/mediaDragState";
 import { assetUrl } from "../../lib/asset";
 import { useProjectStore } from "../../store/projectStore";
 import { addMediaToTimeline } from "../../store/editActions";
@@ -432,6 +433,13 @@ function MediaCard({ item }: { item: MediaItem }) {
   const onDragStart = (e: React.DragEvent) => {
     e.dataTransfer.setData(MEDIA_DND_TYPE, item.id);
     e.dataTransfer.effectAllowed = "copy";
+    // Stash the item so the timeline can size its drop ghost during dragover
+    // (dataTransfer payloads are unreadable until drop). Cleared on dragEnd.
+    setDraggingMedia(item);
+  };
+
+  const onDragEnd = () => {
+    setDraggingMedia(null);
   };
 
   /** Extract the audio track into a standalone file via ffmpeg. Opens a native
@@ -470,6 +478,7 @@ function MediaCard({ item }: { item: MediaItem }) {
       ref={cardRef}
       draggable
       onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
       onClick={() => setPreviewMedia(item.id)}
       onDoubleClick={() => void addMediaToTimeline(item)}
       onMouseEnter={() => setHovered(true)}

@@ -95,7 +95,7 @@ function blendWhite(rgb: string, frac: number): string {
   return `rgb(${mix(+m[1])},${mix(+m[2])},${mix(+m[3])})`;
 }
 
-function roundRectPath(
+export function roundRectPath(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
