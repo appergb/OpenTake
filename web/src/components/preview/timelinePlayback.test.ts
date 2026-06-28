@@ -11,6 +11,7 @@ import {
   frameForSourceTime,
   isExternalSeekWhilePlaying,
   playbackFrameFromActiveFrame,
+  shouldUseRustEngine,
   sourceTimeSec,
   visualAudioIsDuplicated,
 } from "./timelinePlayback";
@@ -43,6 +44,30 @@ describe("isExternalSeekWhilePlaying", () => {
     // delta == 2 (== default eps) → not forwarded; delta == 3 → forwarded.
     expect(isExternalSeekWhilePlaying({ activeFrame: 32, lastEngineFrame: 30 })).toBe(false);
     expect(isExternalSeekWhilePlaying({ activeFrame: 33, lastEngineFrame: 30 })).toBe(true);
+  });
+});
+
+describe("shouldUseRustEngine", () => {
+  const base = { rustEnabled: true, isTauri: true, isPlaying: true, isScrubbing: false };
+
+  it("routes PLAY to Rust when flag on, under Tauri, playing, not scrubbing", () => {
+    expect(shouldUseRustEngine(base)).toBe(true);
+  });
+
+  it("stays on the legacy <video> path when the flag is off", () => {
+    expect(shouldUseRustEngine({ ...base, rustEnabled: false })).toBe(false);
+  });
+
+  it("stays on the legacy path outside Tauri (browser dev server)", () => {
+    expect(shouldUseRustEngine({ ...base, isTauri: false })).toBe(false);
+  });
+
+  it("relinquishes to the legacy scrub path during a scrub", () => {
+    expect(shouldUseRustEngine({ ...base, isScrubbing: true })).toBe(false);
+  });
+
+  it("does not engage while paused", () => {
+    expect(shouldUseRustEngine({ ...base, isPlaying: false })).toBe(false);
   });
 });
 

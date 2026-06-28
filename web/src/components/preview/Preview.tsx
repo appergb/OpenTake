@@ -31,6 +31,7 @@ import {
   type CompositeFrame,
 } from "../../lib/api";
 import { rustEngineEnabled } from "./rustEngine";
+import { shouldUseRustEngine } from "./timelinePlayback";
 import type { MediaItem } from "../../lib/types";
 
 export function Preview() {
@@ -294,7 +295,8 @@ function TimelineRustOverlay() {
   }, []);
 
   const active =
-    rustEngineEnabled() && isTauri && isPlaying && !isScrubbing && endpoint !== null;
+    shouldUseRustEngine({ rustEnabled: rustEngineEnabled(), isTauri, isPlaying, isScrubbing }) &&
+    endpoint !== null;
   if (!active) return null;
   return (
     <img

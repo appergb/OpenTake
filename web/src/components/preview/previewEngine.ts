@@ -26,6 +26,7 @@ import {
   clipVolume,
   frameForSourceTime,
   isExternalSeekWhilePlaying,
+  shouldUseRustEngine,
   sourceTimeSec,
   type ActiveMedia,
 } from "./timelinePlayback";
@@ -260,7 +261,7 @@ export function useTimelinePlaybackEngine(): void {
     // Tauri). Scrub, pause, non-Tauri, and flag-off all fall through to the
     // legacy <video> path below — left untouched, so the pause-freeze (74c4c82)
     // and resume-without-force-seek (5fa3f6f) behaviors are preserved.
-    if (rustEngineEnabled() && isTauri && isPlaying && !isScrubbing) {
+    if (shouldUseRustEngine({ rustEnabled: rustEngineEnabled(), isTauri, isPlaying, isScrubbing })) {
       // The Rust stream provides BOTH video (MJPEG <img>) and audio (cpal), so
       // the <video> followers must not also play (double audio + wasted decode).
       pauseAll();
@@ -433,7 +434,8 @@ export function useTimelinePlaybackEngine(): void {
   // effect above doesn't depend on activeFrame, so this dedicated watcher tells
   // the engine to reposition via playback_seek instead of ignoring it (#162).
   useEffect(() => {
-    if (!(rustEngineEnabled() && isTauri && isPlaying && !isScrubbing)) return;
+    if (!shouldUseRustEngine({ rustEnabled: rustEngineEnabled(), isTauri, isPlaying, isScrubbing }))
+      return;
     if (
       isExternalSeekWhilePlaying({
         activeFrame,

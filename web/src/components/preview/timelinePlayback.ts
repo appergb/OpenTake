@@ -170,3 +170,20 @@ export function isExternalSeekWhilePlaying(args: {
   const eps = args.epsilonFrames ?? 2;
   return Math.abs(Math.floor(args.activeFrame) - args.lastEngineFrame) > eps;
 }
+
+/**
+ * The gate that routes PLAY to the Rust streaming engine instead of the legacy
+ * `<video>` path: the runtime flag is on, we're under Tauri, and we're actively
+ * PLAYING (not scrubbing). Scrub/pause/non-Tauri/flag-off all return false →
+ * legacy path. Pure so the switch condition — shared by the engine switch, the
+ * external-seek watcher, and the MJPEG overlay — lives (and is tested) in one
+ * place instead of being copy-pasted.
+ */
+export function shouldUseRustEngine(args: {
+  rustEnabled: boolean;
+  isTauri: boolean;
+  isPlaying: boolean;
+  isScrubbing: boolean;
+}): boolean {
+  return args.rustEnabled && args.isTauri && args.isPlaying && !args.isScrubbing;
+}
