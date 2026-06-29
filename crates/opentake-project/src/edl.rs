@@ -94,10 +94,8 @@ impl Builder<'_> {
             return out;
         }
 
-        let mut event = 1u32;
-        for clip in &clips {
-            self.push_event(&mut out, event, clip, fps, drop_frame);
-            event += 1;
+        for (idx, clip) in clips.iter().enumerate() {
+            self.push_event(&mut out, idx as u32 + 1, clip, fps, drop_frame);
         }
         out
     }
