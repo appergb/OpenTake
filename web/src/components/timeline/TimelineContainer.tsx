@@ -452,6 +452,35 @@ export function TimelineContainer() {
         proposedTrackDelta,
         0,
       );
+      // Single clip crossing onto exactly one existing clip → preview the swap:
+      // the displaced clip will ghost at the slot the lead is vacating. Mirrors
+      // the drop-side decision in `endDrag` so what you see is what you get.
+      let swap: { clipId: string; toTrackIndex: number; toFrame: number } | undefined;
+      if (
+        !d.isDuplicate &&
+        d.dropTarget.kind === "existing" &&
+        participants.length === 1 &&
+        lead &&
+        resolved.trackDelta !== 0
+      ) {
+        const leadDur = timeline.tracks
+          .flatMap((tk) => tk.clips)
+          .find((c) => c.id === d.hit.clip.id)?.durationFrames;
+        const destTrack = timeline.tracks[lead.trackIndex + resolved.trackDelta];
+        if (leadDur && destTrack) {
+          const leadToFrame = lead.startFrame + d.deltaFrames;
+          const leadEnd = leadToFrame + leadDur;
+          const overlap = destTrack.clips.filter(
+            (c) =>
+              c.id !== d.hit.clip.id &&
+              c.startFrame < leadEnd &&
+              c.startFrame + c.durationFrames > leadToFrame,
+          );
+          if (overlap.length === 1) {
+            swap = { clipId: overlap[0].id, toTrackIndex: lead.trackIndex, toFrame: lead.startFrame };
+          }
+        }
+      }
       drag = {
         kind: "move",
         ids: new Set(d.companions),
@@ -462,6 +491,7 @@ export function TimelineContainer() {
         isDuplicate: d.isDuplicate,
         newTrackType: d.dropTarget.kind === "newTrack" ? d.dropTarget.trackType : undefined,
         newTrackIndex: d.dropTarget.kind === "newTrack" ? d.dropTarget.index : undefined,
+        swap,
       };
     } else if (d?.kind === "trimLeft" || d?.kind === "trimRight") {
       drag = {
@@ -1155,6 +1185,35 @@ export function TimelineContainer() {
             resolved.targets.map((target) => target.toTrack),
           );
         } else {
+          // Single clip dragged across tracks onto exactly one existing clip:
+          // swap their places (exchange track + start) instead of overwriting —
+          // so the displaced clip relocates rather than getting swallowed.
+          const leadTarget = resolved.targets.find((t) => t.clipId === d.hit.clip.id);
+          const leadDur = timeline.tracks
+            .flatMap((t) => t.clips)
+            .find((c) => c.id === d.hit.clip.id)?.durationFrames;
+          if (
+            participants.length === 1 &&
+            leadTarget &&
+            leadDur &&
+            leadTarget.toTrack !== lead.trackIndex
+          ) {
+            const destTrack = timeline.tracks[leadTarget.toTrack];
+            const movedIds = new Set(resolved.targets.map((t) => t.clipId));
+            const leadEnd = leadTarget.toFrame + leadDur;
+            const overlap = destTrack
+              ? destTrack.clips.filter(
+                  (c) =>
+                    !movedIds.has(c.id) &&
+                    c.startFrame < leadEnd &&
+                    c.startFrame + c.durationFrames > leadTarget.toFrame,
+                )
+              : [];
+            if (overlap.length === 1) {
+              void edit.swapClips(d.hit.clip.id, overlap[0].id);
+              return;
+            }
+          }
           const moves = resolved.targets.map((target) => ({
             clipId: target.clipId,
             toTrack: target.toTrack,

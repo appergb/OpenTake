@@ -353,6 +353,48 @@ export function createFallbackStore() {
           [timeline.tracks[cmd.a], timeline.tracks[cmd.b]] = [second, first];
           return result(true, "Swap Tracks", []);
         }
+        case "swapClips": {
+          const locA = findClip(cmd.clipA);
+          const locB = findClip(cmd.clipB);
+          if (!locA || !locB || cmd.clipA === cmd.clipB) return result(false, "Swap Clips", []);
+          const [ta, ca] = locA;
+          const [tb, cb] = locB;
+          const clipA = timeline.tracks[ta].clips[ca];
+          const clipB = timeline.tracks[tb].clips[cb];
+          if (
+            !trackCompatible(timeline.tracks[tb], clipA.mediaType) ||
+            !trackCompatible(timeline.tracks[ta], clipB.mediaType)
+          ) {
+            return result(false, "Swap Clips", []);
+          }
+          const aStart = clipA.startFrame;
+          const bStart = clipB.startFrame;
+          // Both clips vacate, so they never block each other; only OTHER clips
+          // on each destination track can refuse the swap (keeps it lossless).
+          const free = (track: Track, start: number, end: number, exclude: string[]) =>
+            !track.clips.some(
+              (c) =>
+                !exclude.includes(c.id) &&
+                c.startFrame < end &&
+                c.startFrame + c.durationFrames > start,
+            );
+          const exclude = [cmd.clipA, cmd.clipB];
+          if (
+            !free(timeline.tracks[tb], bStart, bStart + clipA.durationFrames, exclude) ||
+            !free(timeline.tracks[ta], aStart, aStart + clipB.durationFrames, exclude)
+          ) {
+            return result(false, "Swap Clips", []);
+          }
+          timeline.tracks[ta].clips = timeline.tracks[ta].clips.filter((c) => c.id !== cmd.clipA);
+          timeline.tracks[tb].clips = timeline.tracks[tb].clips.filter((c) => c.id !== cmd.clipB);
+          clipA.startFrame = bStart;
+          clipB.startFrame = aStart;
+          timeline.tracks[tb].clips.push(clipA);
+          timeline.tracks[ta].clips.push(clipB);
+          timeline.tracks[ta].clips.sort((a, b) => a.startFrame - b.startFrame);
+          if (ta !== tb) timeline.tracks[tb].clips.sort((a, b) => a.startFrame - b.startFrame);
+          return result(true, "Swap Clips", [cmd.clipA, cmd.clipB]);
+        }
         case "moveClips": {
           let changed = false;
           for (const m of cmd.moves) {

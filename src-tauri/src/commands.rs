@@ -297,6 +297,8 @@ pub enum EditRequest {
     #[serde(rename_all = "camelCase")]
     SwapTracks { a: usize, b: usize },
     #[serde(rename_all = "camelCase")]
+    SwapClips { clip_a: String, clip_b: String },
+    #[serde(rename_all = "camelCase")]
     InsertTrack { kind: ClipType, at: Option<usize> },
     #[serde(rename_all = "camelCase")]
     SetTrackProps {
@@ -450,6 +452,10 @@ impl EditRequest {
                 EditCommand::RemoveTracks { track_indexes }
             }
             EditRequest::SwapTracks { a, b } => EditCommand::SwapTracks { a, b },
+            EditRequest::SwapClips { clip_a, clip_b } => EditCommand::SwapClips {
+                a: clip_a,
+                b: clip_b,
+            },
             EditRequest::InsertTrack { kind, at } => EditCommand::InsertTrack { kind, at },
             EditRequest::SetTrackProps {
                 track_index,
@@ -855,6 +861,24 @@ mod edit_request_serde_tests {
                 assert_eq!(b, 2);
             }
             other => panic!("expected SwapTracks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_swap_clips_and_maps_to_command() {
+        // camelCase clipA/clipB must deserialize, or the cross-track swap gesture
+        // silently fails at the IPC boundary (the recurring DTO camelCase trap).
+        let request = serde_json::from_str::<EditRequest>(
+            r#"{"type":"swapClips","clipA":"clip-1","clipB":"clip-2"}"#,
+        )
+        .expect("swapClips camelCase");
+
+        match request.into_command().expect("swapClips command") {
+            EditCommand::SwapClips { a, b } => {
+                assert_eq!(a, "clip-1");
+                assert_eq!(b, "clip-2");
+            }
+            other => panic!("expected SwapClips, got {other:?}"),
         }
     }
 

@@ -74,6 +74,10 @@ export type DragPaint =
       newTrackType?: ClipType;
       /** Upstream `newTrackAt(index)` insertion index for the new-track drop. */
       newTrackIndex?: number;
+      /** Cross-track swap preview: the clip being displaced ghosts at the slot
+       *  the lead clip is vacating, so the two visibly trade places before the
+       *  drop. Absent unless the drop would be a single-clip swap. */
+      swap?: { clipId: string; toTrackIndex: number; toFrame: number };
     }
   | { kind: "trim"; clipId: string; edge: "left" | "right"; deltaFrames: number }
   | { kind: "volumeKf"; clipId: string; fromFrame: number; ghostFrame: number }
@@ -117,19 +121,26 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
     if (index >= timeline.tracks.length) return trackY(timeline, timeline.tracks.length, trackHeights);
     return trackY(timeline, index, trackHeights);
   };
-  // New-track drop indicator: dashed zone at the upstream insertion index.
+  // Hint that a new track will be created at `laneY`: a thin dashed insertion
+  // line at the lane's top edge — NOT a full-width fill, which reads as "the
+  // whole row lit up" instead of a position cue. The clip-sized ghost drawn at
+  // this lane is the real "it lands here" indicator.
+  const drawNewTrackHint = (laneY: number, laneH: number): void => {
+    if (laneY + laneH <= scrollTop || laneY >= scrollTop + s.viewHeight) return;
+    ctx.strokeStyle = GHOST.border;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    ctx.moveTo(scrollLeft, laneY + 1);
+    ctx.lineTo(scrollLeft + s.viewWidth, laneY + 1);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  };
+  // New-track drop indicator: insertion line at the upstream insertion index.
   if (drag?.kind === "move" && drag.newTrackType && timeline.tracks.length > 0) {
     const newTrackY = insertionLineY(drag.newTrackIndex ?? timeline.tracks.length);
     const newTrackH = trackDisplayHeight(timeline.tracks[0], trackHeights) || TRACK_SIZE.defaultHeight;
-    if (newTrackY + newTrackH > scrollTop && newTrackY < scrollTop + s.viewHeight) {
-      ctx.fillStyle = "rgba(255,255,255,0.04)";
-      ctx.fillRect(scrollLeft, newTrackY, s.viewWidth, newTrackH);
-      ctx.strokeStyle = "rgba(255,255,255,0.3)";
-      ctx.lineWidth = 1;
-      ctx.setLineDash([6, 4]);
-      ctx.strokeRect(scrollLeft + 0.5, newTrackY + 0.5, s.viewWidth - 1, newTrackH - 1);
-      ctx.setLineDash([]);
-    }
+    drawNewTrackHint(newTrackY, newTrackH);
   }
   for (let ti = 0; ti < timeline.tracks.length; ti++) {
     const track = timeline.tracks[ti];
@@ -163,6 +174,17 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
         }
         ghost = true;
         isDuplicate = drag.isDuplicate === true;
+      } else if (drag?.kind === "move" && drag.swap?.clipId === clip.id) {
+        // The clip being displaced in a cross-track swap: ghost it at the slot
+        // the lead clip is vacating, so the two visibly trade places.
+        rect = clipRect(
+          timeline,
+          drag.swap.toTrackIndex,
+          { ...clip, startFrame: drag.swap.toFrame },
+          pixelsPerFrame,
+          trackHeights,
+        );
+        ghost = true;
       } else if (drag?.kind === "trim" && drag.clipId === clip.id) {
         const dx = drag.deltaFrames * pixelsPerFrame;
         rect =
@@ -221,15 +243,7 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
         timeline.tracks.length > 0
           ? trackDisplayHeight(timeline.tracks[0], trackHeights)
           : TRACK_SIZE.defaultHeight;
-      if (laneY + laneH > scrollTop && laneY < scrollTop + s.viewHeight) {
-        ctx.fillStyle = GHOST.newTrackFill;
-        ctx.fillRect(scrollLeft, laneY, s.viewWidth, laneH);
-        ctx.strokeStyle = GHOST.border;
-        ctx.lineWidth = 1;
-        ctx.setLineDash([6, 4]);
-        ctx.strokeRect(scrollLeft + 0.5, laneY + 0.5, s.viewWidth - 1, laneH - 1);
-        ctx.setLineDash([]);
-      }
+      drawNewTrackHint(laneY, laneH);
       ghostY = laneY + 2;
       ghostH = laneH - 4;
     } else if (mg.trackIndex !== null && mg.trackIndex < timeline.tracks.length) {

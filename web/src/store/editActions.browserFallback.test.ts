@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { projectNew } from "../lib/api";
 import type { MediaItem } from "../lib/types";
-import { addMediaToTimelineAt, insertTrack } from "./editActions";
+import { addMediaToTimelineAt, insertTrack, swapClips } from "./editActions";
 import { useEditorUiStore } from "./uiStore";
 import { useProjectStore } from "./projectStore";
 import { forceRefresh } from "./sync";
@@ -37,5 +37,27 @@ describe("browser fallback edit actions", () => {
     expect(tracks.map((track) => track.type)).toEqual(["video", "video", "audio"]);
     expect(tracks[0].clips).toHaveLength(0);
     expect(tracks[1].clips.map((clip) => clip.mediaRef)).toEqual(["drop"]);
+  });
+
+  it("swaps two clips across tracks without overwriting either", async () => {
+    await insertTrack("video");
+    await forceRefresh();
+    await insertTrack("video");
+    await forceRefresh();
+    await addMediaToTimelineAt(video("top"), 0, 0);
+    await addMediaToTimelineAt(video("bottom"), 0, 1);
+
+    let tracks = useProjectStore.getState().timeline.tracks;
+    const topClip = tracks[0].clips[0];
+    const bottomClip = tracks[1].clips[0];
+    expect(topClip?.mediaRef).toBe("top");
+    expect(bottomClip?.mediaRef).toBe("bottom");
+
+    await swapClips(topClip.id, bottomClip.id);
+
+    // The two trade tracks; neither is swallowed.
+    tracks = useProjectStore.getState().timeline.tracks;
+    expect(tracks[0].clips.map((clip) => clip.mediaRef)).toEqual(["bottom"]);
+    expect(tracks[1].clips.map((clip) => clip.mediaRef)).toEqual(["top"]);
   });
 });
