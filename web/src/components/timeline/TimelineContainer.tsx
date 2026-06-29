@@ -352,6 +352,9 @@ export function TimelineContainer() {
   // events so the sticky band (1.5x threshold) holds the clip on its target
   // instead of jittering at the edge (SPEC §5.7). Cleared on pointerUp.
   const snapStateRef = useRef<{ frame: number; probeOffset: number } | null>(null);
+  // Sticky snap state for the playhead scrub (independent of the clip-move snap
+  // above), so dragging the playhead magnetizes to clip start/end edges.
+  const scrubSnapRef = useRef<{ frame: number; probeOffset: number } | null>(null);
   const [snapFrame, setSnapFrame] = useState<number | null>(null);
   const [dragTick, forceTick] = useState(0);
   const [menu, setMenu] = useState<TimelineContextMenu | null>(null);
@@ -785,9 +788,14 @@ export function TimelineContainer() {
       // Ruler -> scrub playhead.
       if (inRuler) {
         dragRef.current = { kind: "scrub" };
+        scrubSnapRef.current = null;
         setScrubbing(true);
-        const f = frameAt(docX, zoomScale);
-        setCurrentFrame(f);
+        // Snap the playhead to the nearest clip start/end (clip edges only — not
+        // the playhead itself), so scrubbing magnetizes to cut points.
+        const raw = frameAt(docX, zoomScale);
+        const snap = findSnap(raw, collectTargets(timeline, EMPTY_EXCLUDE, null, false), zoomScale, null);
+        setCurrentFrame(Math.max(0, Math.round(snap ? snap.frame : raw)));
+        maybeSnapFeedback(snap ? snap.frame : null);
         return;
       }
 
@@ -928,7 +936,16 @@ export function TimelineContainer() {
       const { docX, docY } = toDoc(e);
 
       if (d.kind === "scrub") {
-        setCurrentFrame(frameAt(docX, zoomScale));
+        // Sticky-snap the dragged playhead to the nearest clip edge so it
+        // magnetizes to cut points without jittering; fire a tick on engage.
+        const raw = frameAt(docX, zoomScale);
+        const targets = collectTargets(timeline, EMPTY_EXCLUDE, null, false);
+        const snap = findSnapDelta([raw], targets, zoomScale, scrubSnapRef.current, [0]);
+        scrubSnapRef.current = snap
+          ? { frame: snap.snappedFrame, probeOffset: snap.probeOffset }
+          : null;
+        setCurrentFrame(Math.max(0, Math.round(snap ? raw + snap.delta : raw)));
+        maybeSnapFeedback(snap ? snap.snappedFrame : null);
         setScrubbing(false);
         return;
       }

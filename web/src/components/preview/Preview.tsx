@@ -20,6 +20,8 @@ import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
 import { formatTimecode, totalFrames } from "../../lib/geometry";
+import { snapFrameToEdge } from "../../lib/snap";
+import { maybeSnapFeedback } from "../../lib/haptic";
 import { assetUrl } from "../../lib/asset";
 import { TimelinePlayback } from "./TimelinePlaybackLayer";
 import { aspectFitBox, timelinePreviewCanvasStyle } from "./previewLayerStyles";
@@ -100,9 +102,14 @@ export function Preview() {
   const seekTo = (frame: number) => {
     const clamped = Math.max(0, Math.min(total, frame));
     if (previewing) {
+      // A single media item has no clip edges to snap to.
       if (mediaRef.current) mediaRef.current.currentTime = clamped / fps;
     } else {
-      setCurrentFrame(clamped);
+      // Magnetize the scrub bar to clip start/end edges (~0.25s threshold) and
+      // tick on engage, like dragging the playhead in the timeline.
+      const snapped = snapFrameToEdge(timeline, clamped, Math.max(2, Math.round(fps * 0.25)));
+      setCurrentFrame(snapped.frame);
+      maybeSnapFeedback(snapped.snappedTo);
     }
   };
 
