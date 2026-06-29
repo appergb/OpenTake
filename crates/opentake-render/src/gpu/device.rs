@@ -30,11 +30,20 @@ impl RenderDevice {
         }))
         .ok_or(RenderError::NoAdapter)?;
 
+        // Request the adapter's REAL limits, not `downlevel_defaults()`. The
+        // downlevel baseline caps `max_texture_dimension_2d` at 2048, which is
+        // fine for the downscaled preview but makes the FULL-resolution export
+        // render target (FHD is borderline, 2K/4K exceed it) fail inside
+        // `Device::create_texture` with an uncaptured wgpu error that panics —
+        // i.e. "export video" aborted the whole app. Native Metal/Vulkan/DX12
+        // report 16384 here, covering every realistic export resolution.
+        let required_limits = adapter.limits();
+
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("opentake-render device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
+                required_limits,
                 memory_hints: wgpu::MemoryHints::Performance,
             },
             None,

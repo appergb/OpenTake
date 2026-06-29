@@ -276,6 +276,58 @@ fn export_full_timeline_produces_playable_mp4() {
     );
 }
 
+/// Regression for "export video crashes the app": the render device was created
+/// with `downlevel_defaults()` limits (max_texture_dimension_2d = 2048), so a
+/// full-resolution export above 2048px (2K / 4K) blew up inside
+/// `Device::create_texture` with an uncaptured wgpu error that panics → SIGABRT.
+/// A 4K-quality export renders a target far beyond 2048px and must now succeed.
+#[test]
+fn export_4k_render_target_clears_downlevel_texture_limit() {
+    if !ffmpeg_ready() {
+        eprintln!("skip: ffmpeg/ffprobe not available");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src4k.mp4");
+    let out = dir.path().join("out4k.mp4");
+
+    let (sw, sh, sfps, frames) = (320, 240, 10, 4);
+    if !make_video(&src, sw, sh, sfps, frames) {
+        eprintln!("skip: could not generate fixture media");
+        return;
+    }
+
+    let timeline = build_timeline(frames as i32, sw as i32, sh as i32, sfps as f64);
+    let manifest = build_manifest(&src, sw as i32, sh as i32, sfps as f64);
+
+    let req = ExportRequest {
+        out_path: out.to_string_lossy().into_owned(),
+        codec: Default::default(),
+        quality: ExportQuality::P4k,
+    };
+
+    let summary = match run_export(&timeline, &manifest, &None, &req) {
+        Ok(s) => s,
+        Err(e) => {
+            if e.contains("no GPU device") {
+                eprintln!("skip: no GPU adapter available ({e})");
+                return;
+            }
+            panic!("export failed: {e}");
+        }
+    };
+
+    assert!(out.exists(), "4K output file should exist");
+    // The render target / encode exceeds the old 2048 cap on at least one axis.
+    assert!(
+        summary.width > 2048 || summary.height > 2048,
+        "4K export should clear the old 2048 texture cap (got {}x{})",
+        summary.width,
+        summary.height
+    );
+}
+
 #[test]
 fn export_with_audio_clip_mux_aac_stream() {
     if !ffmpeg_ready() {
