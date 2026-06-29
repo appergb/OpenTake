@@ -121,20 +121,18 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
     if (index >= timeline.tracks.length) return trackY(timeline, timeline.tracks.length, trackHeights);
     return trackY(timeline, index, trackHeights);
   };
-  // Hint that a new track will be created at `laneY`: a thin dashed insertion
-  // line at the lane's top edge — NOT a full-width fill, which reads as "the
-  // whole row lit up" instead of a position cue. The clip-sized ghost drawn at
-  // this lane is the real "it lands here" indicator.
+  // Hint that a new track will be created at `laneY`: a solid YELLOW insertion
+  // line across the lane's top edge (1:1 with upstream's `NSColor.systemYellow`
+  // line) — NOT a full-width fill, which reads as "the whole row lit up". The
+  // clip-sized ghost drawn at this lane is the "it lands here" indicator.
   const drawNewTrackHint = (laneY: number, laneH: number): void => {
     if (laneY + laneH <= scrollTop || laneY >= scrollTop + s.viewHeight) return;
-    ctx.strokeStyle = GHOST.border;
+    ctx.strokeStyle = GHOST.insertLine;
     ctx.lineWidth = 2;
-    ctx.setLineDash([6, 4]);
     ctx.beginPath();
     ctx.moveTo(scrollLeft, laneY + 1);
     ctx.lineTo(scrollLeft + s.viewWidth, laneY + 1);
     ctx.stroke();
-    ctx.setLineDash([]);
   };
   // New-track drop indicator: insertion line at the upstream insertion index.
   if (drag?.kind === "move" && drag.newTrackType && timeline.tracks.length > 0) {

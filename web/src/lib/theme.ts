@@ -144,6 +144,9 @@ export const PLAYHEAD_TRIANGLE = 8;
 export const GHOST = {
   fill: "rgba(255,255,255,0.20)",
   border: "rgba(255,255,255,0.55)",
+  /** "A new track inserts here" line — solid yellow, matching upstream
+   *  `NSColor.systemYellow` (TimelineView.swift). */
+  insertLine: "rgb(255,204,0)",
 } as const;
 
 /** §5.4 Clip rendering insets (ClipRenderer.swift). */

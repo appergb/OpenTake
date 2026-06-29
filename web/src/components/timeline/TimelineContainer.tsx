@@ -38,6 +38,7 @@ import { ClipContextMenu } from "./ClipContextMenu";
 import { SwapMediaPicker } from "./SwapMediaPicker";
 import { MEDIA_DND_TYPE } from "../media/MediaPanel";
 import { getDraggingMedia, setDraggingMedia } from "../../lib/mediaDragState";
+import { maybeSnapFeedback } from "../../lib/haptic";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
@@ -999,6 +1000,7 @@ export function TimelineContainer() {
         }
         dragRef.current = { ...d, deltaFrames, targetTrack, dropTarget };
         setSnapFrame(snapped);
+        maybeSnapFeedback(snapped);
         forceTick((n) => n + 1);
         return;
       }
@@ -1080,6 +1082,7 @@ export function TimelineContainer() {
   const endDrag = useCallback((e: React.PointerEvent) => {
     dragRef.current = null;
     setSnapFrame(null);
+    maybeSnapFeedback(null); // re-arm snap feedback for the next gesture
     setScrubbing(false);
     const el = e.currentTarget as HTMLElement;
     if (el.hasPointerCapture?.(e.pointerId)) el.releasePointerCapture(e.pointerId);
@@ -1367,7 +1370,9 @@ export function TimelineContainer() {
       };
       const prev = mediaGhostRef.current;
       mediaGhostRef.current = next;
-      setSnapFrame(snap ? snap.snappedFrame : null);
+      const snappedFrame = snap ? snap.snappedFrame : null;
+      setSnapFrame(snappedFrame);
+      maybeSnapFeedback(snappedFrame);
       const changed =
         !prev ||
         prev.startFrame !== next.startFrame ||

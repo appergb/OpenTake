@@ -11,6 +11,7 @@ mod commands;
 // drive the export orchestrator (`export::run_export`) against the library
 // target. The Tauri command itself is registered below like the other modules.
 pub mod export;
+mod haptic;
 mod library;
 mod mcp;
 mod media;
@@ -165,6 +166,7 @@ pub fn run() {
             media::generate_thumbnail,
             media::preview_poster,
             media::preload_media,
+            haptic::snap_haptic,
             render::composite_frame,
             export::export_video,
             secret::secret_save,
