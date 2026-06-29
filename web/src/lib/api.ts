@@ -116,17 +116,68 @@ export async function getDefaultProjectDir(): Promise<string> {
   return "";
 }
 
+// MARK: - Timeline interchange export (XMEML / EDL / OTIO / FCPXML)
+//
+// Four standard editorial-interchange formats, each a thin path-only command
+// that writes the live timeline to disk and returns nothing (or rejects). All
+// no-op outside Tauri (no Rust core / no file system). Pick the format per the
+// target NLE — see each wrapper.
+
 /**
- * Export the current timeline to `path` as Final Cut Pro 7 XML (XMEML, `.xml`)
- * so it opens in Premiere / DaVinci Resolve / FCP. The command name says
- * "fcpxml" (the F4 contract) but the produced format is XMEML — Premiere doesn't
- * read FCPXML natively, so upstream exports XMEML; DaVinci/FCP still import it.
- * No-op outside Tauri (no Rust core / no file system).
+ * Export the current timeline as XMEML 4 (Final Cut Pro 7 XML, `.xml`). This is
+ * the Premiere / DaVinci Resolve / 剪映-importable interchange format (Premiere
+ * does NOT read modern FCPXML; DaVinci/FCP still import FCP7 XML).
  */
-export async function exportFcpxml(path: string): Promise<void> {
+export async function exportXmeml(path: string): Promise<void> {
   await ensureTauri();
   if (invokeImpl) {
-    await invokeImpl<void>("export_fcpxml", { path });
+    await invokeImpl<void>("export_xmeml", { path });
+  }
+}
+
+/**
+ * @deprecated Use {@link exportXmeml}. Historically named "fcpxml" but always
+ * produced XMEML 4 (FCP7 XML). Kept so older callers keep working; for native
+ * Final Cut Pro X FCPXML use {@link exportFcpxmlModern}.
+ */
+export async function exportFcpxml(path: string): Promise<void> {
+  return exportXmeml(path);
+}
+
+/**
+ * Export the current timeline as a CMX3600 EDL (`.edl`) — the classic edit
+ * decision list Premiere / DaVinci / Avid / 剪映 import. Video track only;
+ * effects/transforms/audio are dropped (a CMX3600 limitation).
+ */
+export async function exportEdl(path: string): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) {
+    await invokeImpl<void>("export_edl", { path });
+  }
+}
+
+/**
+ * Export the current timeline as OpenTimelineIO JSON (`.otio`) — the industry
+ * interchange standard `otioview` / DaVinci / Blender read. Preserves track
+ * order/kind, clip placement, source ranges, gaps, and media references.
+ */
+export async function exportOtio(path: string): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) {
+    await invokeImpl<void>("export_otio", { path });
+  }
+}
+
+/**
+ * Export the current timeline as native Final Cut Pro X FCPXML 1.10
+ * (`.fcpxml`). Carries text overlays (`<title>`), transforms, and volume that
+ * XMEML can't. NOTE: Premiere does NOT import FCPXML — use {@link exportXmeml}
+ * for Premiere / DaVinci / 剪映.
+ */
+export async function exportFcpxmlModern(path: string): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) {
+    await invokeImpl<void>("export_fcpxml_modern", { path });
   }
 }
 

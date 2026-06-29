@@ -23,3 +23,23 @@ describe("TitleBar alignment", () => {
     expect(titleBarSource).toContain("var(--titlebar-safe-left)");
   });
 });
+
+describe("TitleBar interchange export menu", () => {
+  it("offers all four interchange formats with their extensions and commands", () => {
+    // Each format must map to the right extension + backend command.
+    for (const [ext, run] of [
+      ["xml", "exportXmeml"],
+      ["fcpxml", "exportFcpxmlModern"],
+      ["otio", "exportOtio"],
+      ["edl", "exportEdl"],
+    ] as const) {
+      expect(titleBarSource).toContain(`ext: "${ext}"`);
+      expect(titleBarSource).toContain(`api.${run}`);
+    }
+  });
+
+  it("renders the export trigger as a popup menu (not a single-format button)", () => {
+    expect(titleBarSource).toContain('aria-haspopup="menu"');
+    expect(titleBarSource).toContain("INTERCHANGE_FORMATS.map");
+  });
+});
