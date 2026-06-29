@@ -255,6 +255,23 @@ fn poster_path_for(cache_root: &Path, key: &str) -> PathBuf {
     visual_cache_dir(cache_root).join(format!("{key}.thumb.png"))
 }
 
+/// Hi-res preview-poster box: the first-frame still shown instantly behind the
+/// `<video>` in the single-media preview. Much larger than the 120×68 grid
+/// thumbnail ([`THUMB_MAX_SIZE`]) so the preview isn't blurry; the asset
+/// protocol streams the real video progressively once metadata loads, so this is
+/// purely the instant placeholder. Downscale-only (never enlarged).
+const PREVIEW_POSTER_MAX_SIZE: (u32, u32) = (1920, 1080);
+
+/// Cache path for a hi-res preview poster. Keyed separately (`.preview…`) from
+/// the small grid poster (`.thumb…`) so the two sizes never clobber each other.
+fn preview_poster_path_for(cache_root: &Path, key: &str, time_secs: f64) -> PathBuf {
+    if time_secs <= 0.0 {
+        return visual_cache_dir(cache_root).join(format!("{key}.preview.png"));
+    }
+    let millis = (time_secs * 1000.0).round().max(0.0) as u64;
+    visual_cache_dir(cache_root).join(format!("{key}.preview.{millis}.png"))
+}
+
 fn timed_poster_path_for(cache_root: &Path, key: &str, time_secs: f64) -> PathBuf {
     if time_secs <= 0.0 {
         return poster_path_for(cache_root, key);
@@ -303,14 +320,17 @@ fn poster_target_time(time_secs: Option<f64>) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn video_poster(
-    engine: &MediaEngine,
+/// Decode (or read from cache) a single poster frame for `path` at `target`,
+/// scaled to fit `max_size`, written to `poster_path`. Shared by the small grid
+/// poster ([`video_poster`]) and the hi-res preview poster
+/// ([`video_preview_poster`]); the two pass different `max_size` + `poster_path`
+/// so their caches never clash. Returns `(path, width, height, actual_time)`.
+fn decode_poster_to(
     path: &Path,
-    key: &str,
-    time_secs: Option<f64>,
+    poster_path: PathBuf,
+    target: f64,
+    max_size: (u32, u32),
 ) -> Result<(PathBuf, u32, u32, f64), String> {
-    let target = poster_target_time(time_secs);
-    let poster_path = timed_poster_path_for(engine.cache_root(), key, target);
     if poster_path.exists() {
         let (width, height) = image::image_dimensions(&poster_path)
             .map_err(|e| format!("thumbnail dimensions: {e}"))?;
@@ -319,13 +339,37 @@ fn video_poster(
 
     let req = FrameRequest {
         time_secs: target,
-        max_size: THUMB_MAX_SIZE,
+        max_size,
         tolerance_secs: THUMB_TOLERANCE_SECS,
         apply_rotation: true,
     };
     let (actual, frame) = decode_frame_at(path, &req).map_err(|e| e.to_string())?;
     write_png(&poster_path, &frame)?;
     Ok((poster_path, frame.width, frame.height, actual))
+}
+
+fn video_poster(
+    engine: &MediaEngine,
+    path: &Path,
+    key: &str,
+    time_secs: Option<f64>,
+) -> Result<(PathBuf, u32, u32, f64), String> {
+    let target = poster_target_time(time_secs);
+    let poster_path = timed_poster_path_for(engine.cache_root(), key, target);
+    decode_poster_to(path, poster_path, target, THUMB_MAX_SIZE)
+}
+
+/// Hi-res first-frame poster for the single-media preview (see
+/// [`PREVIEW_POSTER_MAX_SIZE`]). Cached separately from the grid poster.
+fn video_preview_poster(
+    engine: &MediaEngine,
+    path: &Path,
+    key: &str,
+    time_secs: Option<f64>,
+) -> Result<(PathBuf, u32, u32, f64), String> {
+    let target = poster_target_time(time_secs);
+    let poster_path = preview_poster_path_for(engine.cache_root(), key, target);
+    decode_poster_to(path, poster_path, target, PREVIEW_POSTER_MAX_SIZE)
 }
 
 fn sprite_meta_path_for(cache_root: &Path, key: &str) -> PathBuf {
@@ -775,6 +819,47 @@ pub fn generate_thumbnail(
     })
 }
 
+/// `preview_poster`: decode (and disk-cache) a HI-RES first-frame still for the
+/// single-media preview, returning its on-disk path. This is the instant
+/// placeholder painted behind the `<video>` so a cold preview shows its first
+/// frame immediately (no blank/spinner) and is sharp — the asset protocol then
+/// streams the real video progressively (it honors HTTP Range, so `<video>` does
+/// not download the whole file). Larger than the 120×68 grid thumbnail and
+/// cached separately, so the two never clobber. Returns `None` for non-video
+/// assets (images render straight from disk; audio has no frame). Errors only
+/// when the asset is unknown or its path can't be resolved.
+#[tauri::command]
+pub fn preview_poster(
+    core: State<'_, AppCore>,
+    media: State<'_, MediaState>,
+    media_ref: String,
+    time_secs: Option<f64>,
+) -> Result<Option<String>, String> {
+    let manifest = core.media();
+    let entry = manifest
+        .entries
+        .iter()
+        .find(|e| e.id == media_ref)
+        .ok_or_else(|| format!("media not found: {media_ref}"))?;
+    if entry.kind != ClipType::Video {
+        return Ok(None);
+    }
+    let path = source_path_for_entry(&core, entry)?;
+    if !path.is_file() {
+        return Err(format!("source file not found: {}", path.display()));
+    }
+    let key = cache_key_for(&path)?;
+    let (poster_path, _, _, _) = video_preview_poster(media.engine(), &path, &key, time_secs)
+        .map_err(|e| {
+            eprintln!(
+                "preview_poster failed: media_ref={media_ref} path={} error={e}",
+                path.display()
+            );
+            e
+        })?;
+    Ok(Some(poster_path.to_string_lossy().into_owned()))
+}
+
 /// `get_waveform`: normalized waveform buckets (`0 = loud, 1 = silence`) for the
 /// media asset `media_ref`, computed (and disk-cached) by the media engine. The
 /// returned array spans the WHOLE source; the timeline maps each clip's trimmed
@@ -810,13 +895,18 @@ pub fn get_waveform(
     })
 }
 
-/// `preload_media`: warm the disk caches (poster + timeline filmstrip sprite +
-/// waveform) for `media_ref` so a later preview or timeline drop reads from
-/// cache instead of decoding on the interaction path (which made dropping a long
-/// clip onto the timeline stutter). Meant to be called fire-and-forget when a
-/// media item is selected; it runs on a Tauri worker thread, so it never blocks
-/// the UI, and every warm step is best-effort (a failure just means the cache
+/// `preload_media`: warm ONLY what makes the next preview instant — the hi-res
+/// first-frame poster (video) — so a cold click shows a sharp first frame with
+/// no decode on the interaction path. Meant to be called fire-and-forget when a
+/// media item is selected or drag starts; it runs on a Tauri worker thread, so
+/// it never blocks the UI, and is best-effort (a failure just means the cache
 /// stays cold, never an error to the caller).
+///
+/// Deliberately does NOT warm the 240-frame timeline filmstrip sprite or the
+/// waveform: both are heavy full-source decodes that do nothing to speed actual
+/// `<video>` playback (the asset protocol streams that progressively), and the
+/// sprite/waveform are loaded lazily by their own consumers when a clip is
+/// actually on the timeline.
 #[tauri::command]
 pub fn preload_media(
     core: State<'_, AppCore>,
@@ -827,17 +917,19 @@ pub fn preload_media(
     let Some(entry) = manifest.entries.iter().find(|e| e.id == media_ref) else {
         return Ok(());
     };
+    if entry.kind != ClipType::Video {
+        return Ok(());
+    }
     let Some(path) = resolve_source_path(entry, core.project_dir().as_deref()) else {
         return Ok(());
     };
     if !path.is_file() {
         return Ok(());
     }
-    // Poster + timeline filmstrip sprite (video); cheap no-op for image/audio.
-    let _ = generate_thumbnail_for_entry(media.engine(), entry, &path, None, None, true);
-    // Waveform for assets with an audio track (best-effort; silent media errors
-    // out fast and is ignored).
-    let _ = media.engine().waveform(&path, entry.duration);
+    if let Ok(key) = cache_key_for(&path) {
+        // Hi-res preview poster only (best-effort).
+        let _ = video_preview_poster(media.engine(), &path, &key, None);
+    }
     Ok(())
 }
 
@@ -980,6 +1072,39 @@ mod tests {
         assert!(!dto.missing);
         let poster_string = poster.to_string_lossy().into_owned();
         assert_eq!(dto.thumbnail.as_deref(), Some(poster_string.as_str()));
+    }
+
+    #[test]
+    fn preview_poster_path_is_distinct_from_grid_poster() {
+        // The hi-res preview poster and the small grid poster must never share a
+        // cache file, or one size would clobber the other.
+        let root = Path::new("/cache");
+        let key = "abc123";
+        assert_ne!(
+            preview_poster_path_for(root, key, 0.0),
+            poster_path_for(root, key),
+            "preview poster must not collide with the grid poster"
+        );
+        assert!(preview_poster_path_for(root, key, 0.0)
+            .to_string_lossy()
+            .ends_with("abc123.preview.png"));
+    }
+
+    #[test]
+    fn preview_poster_path_encodes_nonzero_time() {
+        let root = Path::new("/cache");
+        let key = "k";
+        // t=0 → base name; t>0 → millisecond-suffixed, and distinct per time.
+        assert!(preview_poster_path_for(root, key, 0.0)
+            .to_string_lossy()
+            .ends_with("k.preview.png"));
+        assert!(preview_poster_path_for(root, key, 1.5)
+            .to_string_lossy()
+            .ends_with("k.preview.1500.png"));
+        assert_ne!(
+            preview_poster_path_for(root, key, 1.0),
+            preview_poster_path_for(root, key, 2.0)
+        );
     }
 
     #[test]

@@ -334,11 +334,39 @@ export async function generateThumbnail(
   return null;
 }
 
-/** Fire-and-forget cache warm-up for a media asset when it's selected: the
- *  backend decodes its poster, timeline filmstrip sprite, and waveform into the
- *  on-disk cache on a worker thread, so a subsequent preview or timeline drop
- *  reads from cache instead of decoding on the interaction path. No-op in the
- *  browser fallback; errors are swallowed (best-effort). */
+/**
+ * Decode (and disk-cache) a HI-RES first-frame poster for a VIDEO asset and
+ * return its on-disk path (run it through {@link assetUrl} to display). This is
+ * the instant, sharp placeholder painted behind the preview `<video>` so a cold
+ * click shows its first frame immediately instead of a blank/spinner — the asset
+ * protocol then streams the real video progressively (it honors HTTP Range, so
+ * `<video preload="metadata">` never downloads the whole file). Returns null for
+ * non-video assets (images render straight from disk; audio has no frame) and
+ * outside Tauri; decode errors are swallowed (best-effort) so the preview just
+ * has no poster rather than throwing. */
+export async function previewPoster(
+  mediaRef: string,
+  timeSecs?: number,
+): Promise<string | null> {
+  await ensureTauri();
+  if (!invokeImpl) return null;
+  try {
+    const args: Record<string, unknown> = { mediaRef };
+    if (timeSecs != null) args.timeSecs = timeSecs;
+    return await invokeImpl<string | null>("preview_poster", args);
+  } catch (e) {
+    console.warn(`preview_poster failed for ${mediaRef}:`, e);
+    return null;
+  }
+}
+
+/** Fire-and-forget preview warm-up for a media asset when it's selected or drag
+ *  starts: the backend decodes its hi-res first-frame poster into the on-disk
+ *  cache on a worker thread, so a subsequent preview shows a sharp first frame
+ *  with no decode on the interaction path. Deliberately light — it no longer
+ *  warms the heavy 240-frame filmstrip sprite or waveform (which never sped
+ *  actual `<video>` playback). No-op in the browser fallback / for non-video;
+ *  errors are swallowed (best-effort). */
 export async function preloadMedia(mediaRef: string): Promise<void> {
   await ensureTauri();
   if (!invokeImpl) return;
