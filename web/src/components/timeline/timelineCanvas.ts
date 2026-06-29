@@ -150,11 +150,16 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
         const isPinned = drag.pinnedIds?.has(clip.id) === true;
         const onLeadRow = ti === drag.leadTrackIndex;
         if (drag.newTrackType && !isPinned && onLeadRow) {
-          const newTrackY = insertionLineY(drag.newTrackIndex ?? timeline.tracks.length);
+          const newTrackIndex = drag.newTrackIndex ?? timeline.tracks.length;
+          const newTrackY = insertionLineY(newTrackIndex);
           const ghostH = (trackDisplayHeight(timeline.tracks[0], trackHeights) || TRACK_SIZE.defaultHeight) - 4;
+          // Upstream `TimelineGeometry.ghostY`: the new-track ghost sits ABOVE
+          // the insertion line (lineY - height) for every insert except the very
+          // bottom (index >= trackCount), where it sits at the line.
+          const ghostTop = newTrackIndex < timeline.tracks.length ? newTrackY - ghostH - 2 : newTrackY + 2;
           rect = {
             x: (clip.startFrame + drag.deltaFrames) * pixelsPerFrame,
-            y: newTrackY + 2,
+            y: ghostTop,
             width: clip.durationFrames * pixelsPerFrame,
             height: ghostH,
           };
@@ -242,8 +247,11 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
           ? trackDisplayHeight(timeline.tracks[0], trackHeights)
           : TRACK_SIZE.defaultHeight;
       drawNewTrackHint(laneY, laneH);
-      ghostY = laneY + 2;
       ghostH = laneH - 4;
+      // Upstream `ghostY`: above the insertion line for every insert except the
+      // very bottom (index >= trackCount), so a clip dropped to a new track
+      // previews in the lane that opens ABOVE the line.
+      ghostY = mg.newTrackIndex < timeline.tracks.length ? laneY - ghostH - 2 : laneY + 2;
     } else if (mg.trackIndex !== null && mg.trackIndex < timeline.tracks.length) {
       ghostY = trackY(timeline, mg.trackIndex, trackHeights) + 2;
       ghostH = trackDisplayHeight(timeline.tracks[mg.trackIndex], trackHeights) - 4;
