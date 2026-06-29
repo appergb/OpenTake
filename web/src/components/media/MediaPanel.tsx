@@ -41,7 +41,7 @@ import { assetUrl } from "../../lib/asset";
 import { childFolders, folderTrail, normalizeFolderId } from "../../lib/folderTree";
 import { useProjectStore } from "../../store/projectStore";
 import { addMediaToTimeline } from "../../store/editActions";
-import { extractAudio, generateThumbnail } from "../../lib/api";
+import { extractAudio, generateThumbnail, preloadMedia } from "../../lib/api";
 import { saveDialog } from "../../lib/dialog";
 import type { MediaFolder, MediaItem } from "../../lib/types";
 import { MediaTabBar, MediaSubTabBar } from "./MediaTabBar";
@@ -676,6 +676,8 @@ function MediaCard({ item }: { item: MediaItem }) {
     // Stash the item so the timeline can size its drop ghost during dragover
     // (dataTransfer payloads are unreadable until drop). Cleared on dragEnd.
     setDraggingMedia(item);
+    // Warm caches for a dragged-but-not-clicked asset too (best-effort).
+    void preloadMedia(item.id);
   };
 
   const onDragEnd = () => {
@@ -719,7 +721,12 @@ function MediaCard({ item }: { item: MediaItem }) {
       draggable
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
-      onClick={() => setPreviewMedia(item.id)}
+      onClick={() => {
+        setPreviewMedia(item.id);
+        // Warm poster/sprite/waveform caches so preview + a later timeline drop
+        // are instant instead of decoding on the interaction path.
+        void preloadMedia(item.id);
+      }}
       onDoubleClick={() => void addMediaToTimeline(item)}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}

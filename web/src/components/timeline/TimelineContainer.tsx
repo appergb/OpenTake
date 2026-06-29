@@ -1401,6 +1401,12 @@ export function TimelineContainer() {
       const plan = mediaGhostRef.current;
       clearMediaGhost();
       setDraggingMedia(null);
+      // Dropping onto the timeline is an HTML5 `drop` (no pointerdown), so the
+      // media-preview→timeline switch in TimelineRegion's onPointerDownCapture
+      // never fires. Clear the selected media here so the preview shows the
+      // timeline composite at the playhead instead of staying on the dropped
+      // asset's standalone preview.
+      useEditorUiStore.getState().setPreviewMedia(null);
       if (!item) return;
       if (plan) {
         const preferredTrackIndex = plan.newTrackIndex !== null ? null : plan.trackIndex;

@@ -354,6 +354,44 @@ export function TitleBar() {
               boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
             }}
           >
+            {/* Render the timeline to a video file (MP4). Reuses the existing
+                export dialog; disabled (greyed) when the timeline is empty. */}
+            <button
+              role="menuitem"
+              disabled={!hasClips}
+              onClick={() => {
+                setExportMenuOpen(false);
+                setExportDialogOpen(true);
+              }}
+              className={hasClips ? "hover-area" : undefined}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                height: 28,
+                padding: "0 var(--space-sm)",
+                background: "transparent",
+                border: "none",
+                borderRadius: "var(--radius-xs-sm)",
+                color: hasClips ? "var(--text-primary)" : "var(--text-muted)",
+                fontSize: "var(--fs-sm)",
+                fontWeight: "var(--fw-medium)",
+                textAlign: "left",
+                cursor: hasClips ? "pointer" : "default",
+                whiteSpace: "nowrap",
+                opacity: hasClips ? 1 : 0.5,
+              }}
+            >
+              <Icon icon={Film} size={13} />
+              {t("title.exportRenderVideo")}
+            </button>
+            <div
+              style={{
+                height: "var(--bw-thin)",
+                margin: "var(--space-xs) var(--space-sm)",
+                background: "var(--border-subtle)",
+              }}
+            />
             {INTERCHANGE_FORMATS.map((fmt) => (
               <button
                 key={fmt.key}

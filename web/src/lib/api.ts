@@ -334,6 +334,21 @@ export async function generateThumbnail(
   return null;
 }
 
+/** Fire-and-forget cache warm-up for a media asset when it's selected: the
+ *  backend decodes its poster, timeline filmstrip sprite, and waveform into the
+ *  on-disk cache on a worker thread, so a subsequent preview or timeline drop
+ *  reads from cache instead of decoding on the interaction path. No-op in the
+ *  browser fallback; errors are swallowed (best-effort). */
+export async function preloadMedia(mediaRef: string): Promise<void> {
+  await ensureTauri();
+  if (!invokeImpl) return;
+  try {
+    await invokeImpl<void>("preload_media", { mediaRef });
+  } catch (e) {
+    console.warn(`preload_media failed for ${mediaRef}:`, e);
+  }
+}
+
 // MARK: - Timeline composite preview (#47)
 //
 // `composite_frame` renders the timeline at a frame on the GPU (wgpu compositor)

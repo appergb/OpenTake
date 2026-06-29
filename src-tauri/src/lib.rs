@@ -163,6 +163,7 @@ pub fn run() {
             media::extract_audio,
             media::get_waveform,
             media::generate_thumbnail,
+            media::preload_media,
             render::composite_frame,
             export::export_video,
             secret::secret_save,

@@ -810,6 +810,37 @@ pub fn get_waveform(
     })
 }
 
+/// `preload_media`: warm the disk caches (poster + timeline filmstrip sprite +
+/// waveform) for `media_ref` so a later preview or timeline drop reads from
+/// cache instead of decoding on the interaction path (which made dropping a long
+/// clip onto the timeline stutter). Meant to be called fire-and-forget when a
+/// media item is selected; it runs on a Tauri worker thread, so it never blocks
+/// the UI, and every warm step is best-effort (a failure just means the cache
+/// stays cold, never an error to the caller).
+#[tauri::command]
+pub fn preload_media(
+    core: State<'_, AppCore>,
+    media: State<'_, MediaState>,
+    media_ref: String,
+) -> Result<(), String> {
+    let manifest = core.media();
+    let Some(entry) = manifest.entries.iter().find(|e| e.id == media_ref) else {
+        return Ok(());
+    };
+    let Some(path) = resolve_source_path(entry, core.project_dir().as_deref()) else {
+        return Ok(());
+    };
+    if !path.is_file() {
+        return Ok(());
+    }
+    // Poster + timeline filmstrip sprite (video); cheap no-op for image/audio.
+    let _ = generate_thumbnail_for_entry(media.engine(), entry, &path, None, None, true);
+    // Waveform for assets with an audio track (best-effort; silent media errors
+    // out fast and is ignored).
+    let _ = media.engine().waveform(&path, entry.duration);
+    Ok(())
+}
+
 /// Collect importable media files under `root`. Top-level only unless
 /// `recursive`. Sorted by case-insensitive file name so a folder import mints
 /// asset ids in a stable order. Hidden entries (dot-prefixed) are skipped, as

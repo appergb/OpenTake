@@ -13,6 +13,11 @@
   --bg-prominent: rgb(44, 44, 44);
   --bg-placeholder: rgb(30, 30, 30);
   --bg-preview-canvas: #000;
+  /* Opaque surface for floating menus / popovers / dialogs. Referenced widely
+     as var(--bg-elevated); was undefined, so every popover (export / subtitle /
+     clip context menu / swap-media picker) rendered with a transparent
+     background and bled the panel behind it through. */
+  --bg-elevated: rgb(44, 44, 44);
 
   /* §1.2 Border (AppTheme.swift:27-43) */
   --border-primary: rgba(255, 255, 255, 0.16);
