@@ -368,6 +368,14 @@ pub enum EditCommand {
     ///   kept verbatim. The render layer is responsible for any overshoot
     ///   sampling when the new media is shorter.
     SwapMedia { clip_id: String, media_ref: String },
+    /// Reset the transform section back to defaults. 1:1 port of upstream's
+    /// Inspector "Reset transform" button (`InspectorView.transformHeader`):
+    /// sets `transform` to identity (`Transform::default()`, full-canvas
+    /// centered, no rotation/flip), `opacity` to `1.0`, clears the opacity /
+    /// position / scale / rotation keyframe tracks, and zeroes both fades
+    /// (frames + interpolation back to `Linear`). Crop and its keyframe track
+    /// are untouched (a separate Inspector section upstream).
+    ResetTransform { clip_ids: Vec<String> },
     /// Undo the last committed command.
     Undo,
     /// Redo the last undone command.
@@ -502,6 +510,7 @@ pub fn apply(
         EditCommand::DeleteMedia { asset_ids } => delete_media(state, asset_ids),
         EditCommand::DeleteFolder { folder_ids } => delete_folder(state, folder_ids),
         EditCommand::SwapMedia { clip_id, media_ref } => swap_media(state, clip_id, media_ref),
+        EditCommand::ResetTransform { clip_ids } => reset_transform(state, clip_ids),
     }
 }
 
@@ -2232,6 +2241,29 @@ fn swap_media(
     )
 }
 
+/// 1:1 port of upstream's Inspector "Reset transform" button
+/// (`InspectorView.transformHeader`'s `onReset` closure): resets `transform`
+/// to identity, `opacity` to `1.0`, clears the opacity / position / scale /
+/// rotation keyframe tracks, and zeroes both fades back to `Linear`
+/// interpolation. Crop is a separate section upstream and is left untouched.
+fn reset_transform(
+    state: &mut EditorState,
+    clip_ids: Vec<String>,
+) -> Result<EditResult, EditError> {
+    set_clip_effect_field(state, clip_ids, "Reset Transform", |clip| {
+        clip.transform = Transform::default();
+        clip.opacity = 1.0;
+        clip.opacity_track = None;
+        clip.position_track = None;
+        clip.scale_track = None;
+        clip.rotation_track = None;
+        clip.fade_in_frames = 0;
+        clip.fade_out_frames = 0;
+        clip.fade_in_interpolation = Interpolation::Linear;
+        clip.fade_out_interpolation = Interpolation::Linear;
+    })
+}
+
 // MARK: - Small local helpers
 
 fn validate_entry(state: &EditorState, e: &ClipEntry, i: usize) -> Result<(), EditError> {
@@ -3328,5 +3360,234 @@ mod text_style_property_tests {
         let clip = &state.timeline.tracks[0].clips[0];
         assert_eq!(clip.text_content.as_deref(), Some("Updated"));
         assert_eq!(clip.text_style.as_ref().unwrap().font_size, 120.0);
+    }
+}
+
+#[cfg(test)]
+mod reset_transform_tests {
+    use super::*;
+    use crate::id::SeqIdGen;
+    use opentake_domain::{AnimPair, ClipType, Interpolation, Keyframe, KeyframeTrack};
+
+    /// Build a state with one video track and two clips: `clip_id` is fully
+    /// animated (transform / opacity / fades / all four tracks), `other_id` is
+    /// left untouched to prove the reset is scoped to the requested clip.
+    fn make_state_with_animated_clip() -> (EditorState, SeqIdGen, String, String) {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+        apply(
+            &mut state,
+            EditCommand::InsertTrack {
+                kind: ClipType::Video,
+                at: None,
+            },
+            &ids,
+        )
+        .unwrap();
+        let clip_id = ids.next_id();
+        let mut clip = opentake_domain::Clip::new(clip_id.clone(), "asset1", 0, 30);
+        clip.transform = Transform {
+            center_x: 0.25,
+            center_y: 0.75,
+            width: 2.0,
+            height: 3.0,
+            rotation: 45.0,
+            flip_horizontal: true,
+            flip_vertical: true,
+        };
+        clip.opacity = 0.5;
+        clip.opacity_track = Some(KeyframeTrack::from_keyframes(vec![Keyframe::new(0, 0.2)]));
+        clip.position_track = Some(KeyframeTrack::from_keyframes(vec![Keyframe::new(
+            0,
+            AnimPair::new(0.1, 0.1),
+        )]));
+        clip.scale_track = Some(KeyframeTrack::from_keyframes(vec![Keyframe::new(
+            0,
+            AnimPair::new(1.5, 1.5),
+        )]));
+        clip.rotation_track = Some(KeyframeTrack::from_keyframes(vec![Keyframe::new(0, 90.0)]));
+        clip.crop = Crop {
+            left: 0.1,
+            top: 0.1,
+            right: 0.1,
+            bottom: 0.1,
+        };
+        clip.crop_track = Some(KeyframeTrack::from_keyframes(vec![Keyframe::new(
+            0,
+            Crop {
+                left: 0.2,
+                top: 0.2,
+                right: 0.2,
+                bottom: 0.2,
+            },
+        )]));
+        clip.fade_in_frames = 10;
+        clip.fade_out_frames = 10;
+        clip.fade_in_interpolation = Interpolation::Smooth;
+        clip.fade_out_interpolation = Interpolation::Smooth;
+        state.timeline.tracks[0].clips.push(clip);
+
+        let other_id = ids.next_id();
+        let mut other = opentake_domain::Clip::new(other_id.clone(), "asset2", 40, 30);
+        other.transform.rotation = 30.0;
+        other.opacity = 0.7;
+        state.timeline.tracks[0].clips.push(other);
+
+        (state, ids, clip_id, other_id)
+    }
+
+    #[test]
+    fn reset_transform_restores_defaults_and_clears_exactly_the_upstream_tracks() {
+        let (mut state, ids, clip_id, _other_id) = make_state_with_animated_clip();
+        let res = apply(
+            &mut state,
+            EditCommand::ResetTransform {
+                clip_ids: vec![clip_id.clone()],
+            },
+            &ids,
+        )
+        .unwrap();
+        assert!(res.changed);
+        assert_eq!(res.affected_clip_ids, vec![clip_id.clone()]);
+
+        let loc = state.find_clip(&clip_id).unwrap();
+        let clip = &state.timeline.tracks[loc.track_index].clips[loc.clip_index];
+
+        // Transform back to identity (full-canvas centered, no rotate/flip).
+        assert_eq!(clip.transform, Transform::default());
+        assert_eq!(clip.transform.center_x, 0.5);
+        assert_eq!(clip.transform.center_y, 0.5);
+        assert_eq!(clip.transform.width, 1.0);
+        assert_eq!(clip.transform.height, 1.0);
+        assert_eq!(clip.transform.rotation, 0.0);
+        assert!(!clip.transform.flip_horizontal);
+        assert!(!clip.transform.flip_vertical);
+
+        // Opacity back to fully opaque.
+        assert_eq!(clip.opacity, 1.0);
+
+        // Exactly the four animation tracks upstream clears.
+        assert!(clip.opacity_track.is_none());
+        assert!(clip.position_track.is_none());
+        assert!(clip.scale_track.is_none());
+        assert!(clip.rotation_track.is_none());
+
+        // Fades zeroed and interpolation reset to Linear.
+        assert_eq!(clip.fade_in_frames, 0);
+        assert_eq!(clip.fade_out_frames, 0);
+        assert_eq!(clip.fade_in_interpolation, Interpolation::Linear);
+        assert_eq!(clip.fade_out_interpolation, Interpolation::Linear);
+
+        // Crop and its keyframe track are a separate Inspector section
+        // upstream and must survive the reset untouched.
+        assert_eq!(
+            clip.crop,
+            Crop {
+                left: 0.1,
+                top: 0.1,
+                right: 0.1,
+                bottom: 0.1,
+            }
+        );
+        assert!(clip.crop_track.is_some());
+    }
+
+    #[test]
+    fn reset_transform_leaves_other_clips_untouched() {
+        let (mut state, ids, clip_id, other_id) = make_state_with_animated_clip();
+        apply(
+            &mut state,
+            EditCommand::ResetTransform {
+                clip_ids: vec![clip_id],
+            },
+            &ids,
+        )
+        .unwrap();
+
+        let loc = state.find_clip(&other_id).unwrap();
+        let other = &state.timeline.tracks[loc.track_index].clips[loc.clip_index];
+        assert_eq!(other.transform.rotation, 30.0);
+        assert_eq!(other.opacity, 0.7);
+    }
+
+    #[test]
+    fn reset_transform_is_undoable() {
+        let (mut state, ids, clip_id, _other_id) = make_state_with_animated_clip();
+        let version_before = state.version();
+        apply(
+            &mut state,
+            EditCommand::ResetTransform {
+                clip_ids: vec![clip_id.clone()],
+            },
+            &ids,
+        )
+        .unwrap();
+
+        apply(&mut state, EditCommand::Undo, &ids).unwrap();
+        let loc = state.find_clip(&clip_id).unwrap();
+        let clip = &state.timeline.tracks[loc.track_index].clips[loc.clip_index];
+        assert_eq!(clip.transform.rotation, 45.0);
+        assert_eq!(clip.opacity, 0.5);
+        assert!(clip.opacity_track.is_some());
+        assert_eq!(state.version(), version_before + 2); // reset commit + undo
+    }
+
+    #[test]
+    fn reset_transform_missing_clip_errors_with_no_change() {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+        let version_before = state.version();
+
+        let err = apply(
+            &mut state,
+            EditCommand::ResetTransform {
+                clip_ids: vec!["does-not-exist".into()],
+            },
+            &ids,
+        );
+        assert!(err.is_err());
+        assert_eq!(state.version(), version_before);
+    }
+
+    #[test]
+    fn reset_transform_empty_clip_ids_errors() {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+        let err = apply(
+            &mut state,
+            EditCommand::ResetTransform { clip_ids: vec![] },
+            &ids,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn reset_transform_noop_when_already_default_reports_unchanged() {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+        apply(
+            &mut state,
+            EditCommand::InsertTrack {
+                kind: ClipType::Video,
+                at: None,
+            },
+            &ids,
+        )
+        .unwrap();
+        let clip_id = ids.next_id();
+        let clip = opentake_domain::Clip::new(clip_id.clone(), "asset1", 0, 30);
+        state.timeline.tracks[0].clips.push(clip);
+        let version_before = state.version();
+
+        let res = apply(
+            &mut state,
+            EditCommand::ResetTransform {
+                clip_ids: vec![clip_id],
+            },
+            &ids,
+        )
+        .unwrap();
+        assert!(!res.changed);
+        assert_eq!(state.version(), version_before);
     }
 }

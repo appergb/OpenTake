@@ -385,6 +385,8 @@ pub enum EditRequest {
     DeleteFolder { folder_ids: Vec<String> },
     #[serde(rename_all = "camelCase")]
     SwapMedia { clip_id: String, media_ref: String },
+    #[serde(rename_all = "camelCase")]
+    ResetTransform { clip_ids: Vec<String> },
 }
 
 impl EditRequest {
@@ -568,6 +570,7 @@ impl EditRequest {
             EditRequest::SwapMedia { clip_id, media_ref } => {
                 EditCommand::SwapMedia { clip_id, media_ref }
             }
+            EditRequest::ResetTransform { clip_ids } => EditCommand::ResetTransform { clip_ids },
         })
     }
 }
@@ -1082,6 +1085,23 @@ mod edit_request_serde_tests {
                 assert_eq!(effects[0].param("radius", 0.0), 4.0);
             }
             other => panic!("expected SetEffects, got {other:?}"),
+        }
+    }
+
+    /// Guards the IPC boundary (`AGENTS.md` camelCase discipline): the
+    /// multiword `clipIds` field must deserialize on the wire exactly like the
+    /// other multi-clip commands (`setColorGrade` et al.).
+    #[test]
+    fn deserializes_reset_transform_camelcase_and_maps_to_ops_variant() {
+        let req = serde_json::from_str::<EditRequest>(
+            r#"{"type":"resetTransform","clipIds":["clip-1","clip-2"]}"#,
+        )
+        .expect("resetTransform camelCase");
+        match req.into_command().expect("resetTransform command") {
+            EditCommand::ResetTransform { clip_ids } => {
+                assert_eq!(clip_ids, vec!["clip-1", "clip-2"]);
+            }
+            other => panic!("expected ResetTransform, got {other:?}"),
         }
     }
 

@@ -350,7 +350,8 @@ export type EditRequest =
   | { type: "renameFolder"; entries: RenameEntryReq[] }
   | { type: "deleteMedia"; assetIds: string[] }
   | { type: "deleteFolder"; folderIds: string[] }
-  | { type: "swapMedia"; clipId: string; mediaRef: string };
+  | { type: "swapMedia"; clipId: string; mediaRef: string }
+  | { type: "resetTransform"; clipIds: string[] };
 
 export interface TextEntryReq {
   trackIndex: number;

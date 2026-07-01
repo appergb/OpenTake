@@ -123,6 +123,15 @@ export async function setEffects(clipIds: string[], effects: EffectInput[]) {
   await applyAndRefresh({ type: "setEffects", clipIds, effects });
 }
 
+/** Inspector Transform section "Reset" button (upstream `transformHeader`
+ *  onReset). Resets transform to identity, opacity to full, clears the
+ *  opacity/position/scale/rotation keyframe tracks, and zeroes both fades.
+ *  Crop is untouched (a separate Inspector section upstream). */
+export async function resetTransform(clipIds: string[]) {
+  if (clipIds.length === 0) return;
+  await applyAndRefresh({ type: "resetTransform", clipIds });
+}
+
 export async function linkClips(clipIds: string[]) {
   await applyAndRefresh({ type: "link", clipIds });
 }
