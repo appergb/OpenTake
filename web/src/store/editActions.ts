@@ -27,6 +27,7 @@ import type {
   Interpolation,
   KeyframePayloadReq,
   KeyframeProperty,
+  KeyframeValueReq,
   MaskInput,
   MediaItem,
   RenameEntryReq,
@@ -167,6 +168,18 @@ export async function stampKeyframe(
   frame: number,
 ) {
   await applyAndRefresh({ type: "stampKeyframe", clipId, property, frame });
+}
+
+/** Upsert a keyframe at `frame` with an EXPLICIT value (not the sampled value —
+ *  that's `stampKeyframe`). The write path for editing an animated property's
+ *  value at the playhead, mirroring upstream `write<Property>`'s upsert branch. */
+export async function upsertKeyframe(
+  clipId: string,
+  property: KeyframeProperty,
+  frame: number,
+  value: KeyframeValueReq,
+) {
+  await applyAndRefresh({ type: "upsertKeyframe", clipId, property, frame, value });
 }
 
 /** Remove the keyframe at `frame`. */
