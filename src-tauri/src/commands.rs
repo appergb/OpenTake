@@ -20,7 +20,7 @@ use opentake_core::{AppCore, CmdError, EditCommand};
 
 use opentake_ops::{
     ClipEntry, ClipMove, ClipProperties, FrameRange, KeyframePayload, KeyframeProperty,
-    RenameEntry, TextEntry,
+    KeyframeValue, RenameEntry, TextEntry,
 };
 
 use opentake_domain::{
@@ -291,6 +291,13 @@ pub enum EditRequest {
         frame: i32,
     },
     #[serde(rename_all = "camelCase")]
+    UpsertKeyframe {
+        clip_id: String,
+        property: KeyframePropertyDto,
+        frame: i32,
+        value: KeyframeValueDto,
+    },
+    #[serde(rename_all = "camelCase")]
     RemoveKeyframe {
         clip_id: String,
         property: KeyframePropertyDto,
@@ -438,6 +445,17 @@ impl EditRequest {
                 clip_id,
                 property: property.into(),
                 frame,
+            },
+            EditRequest::UpsertKeyframe {
+                clip_id,
+                property,
+                frame,
+                value,
+            } => EditCommand::UpsertKeyframe {
+                clip_id,
+                property: property.into(),
+                frame,
+                value: value.into_value(),
             },
             EditRequest::RemoveKeyframe {
                 clip_id,
@@ -837,6 +855,27 @@ impl KeyframePayloadDto {
     }
 }
 
+/// An explicit single-value payload for [`EditRequest::UpsertKeyframe`]. Mirrors
+/// [`KeyframePayloadDto`]'s `kind`-tagging, but carries one value (not a whole
+/// replacement track) to upsert at the command's `frame`.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum KeyframeValueDto {
+    Scalar { value: f64 },
+    Pair { value: AnimPair },
+    Crop { value: Crop },
+}
+
+impl KeyframeValueDto {
+    fn into_value(self) -> KeyframeValue {
+        match self {
+            KeyframeValueDto::Scalar { value } => KeyframeValue::Scalar(value),
+            KeyframeValueDto::Pair { value } => KeyframeValue::Pair(value),
+            KeyframeValueDto::Crop { value } => KeyframeValue::Crop(value),
+        }
+    }
+}
+
 #[cfg(test)]
 mod edit_request_serde_tests {
     use super::EditRequest;
@@ -930,6 +969,74 @@ mod edit_request_serde_tests {
                 assert_eq!(b, "clip-2");
             }
             other => panic!("expected SwapClips, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_upsert_keyframe_scalar_and_maps_to_command() {
+        // camelCase clipId/frame must deserialize (the recurring DTO camelCase
+        // trap), and the "scalar" kind must map onto KeyframeValue::Scalar.
+        let request = serde_json::from_str::<EditRequest>(
+            r#"{"type":"upsertKeyframe","clipId":"clip-1","property":"opacity","frame":110,"value":{"kind":"scalar","value":0.25}}"#,
+        )
+        .expect("upsertKeyframe scalar camelCase");
+
+        match request.into_command().expect("upsertKeyframe command") {
+            EditCommand::UpsertKeyframe {
+                clip_id,
+                property,
+                frame,
+                value,
+            } => {
+                assert_eq!(clip_id, "clip-1");
+                assert_eq!(property, opentake_ops::KeyframeProperty::Opacity);
+                assert_eq!(frame, 110);
+                assert!(matches!(value, opentake_ops::KeyframeValue::Scalar(v) if v == 0.25));
+            }
+            other => panic!("expected UpsertKeyframe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_upsert_keyframe_pair_and_crop_and_maps_to_command() {
+        let pair_request = serde_json::from_str::<EditRequest>(
+            r#"{"type":"upsertKeyframe","clipId":"clip-1","property":"position","frame":10,"value":{"kind":"pair","value":{"a":0.3,"b":0.7}}}"#,
+        )
+        .expect("upsertKeyframe pair camelCase");
+        match pair_request
+            .into_command()
+            .expect("upsertKeyframe pair command")
+        {
+            EditCommand::UpsertKeyframe {
+                property, value, ..
+            } => {
+                assert_eq!(property, opentake_ops::KeyframeProperty::Position);
+                match value {
+                    opentake_ops::KeyframeValue::Pair(p) => {
+                        assert_eq!(p.a, 0.3);
+                        assert_eq!(p.b, 0.7);
+                    }
+                    other => panic!("expected Pair value, got {other:?}"),
+                }
+            }
+            other => panic!("expected UpsertKeyframe, got {other:?}"),
+        }
+
+        let crop_request = serde_json::from_str::<EditRequest>(
+            r#"{"type":"upsertKeyframe","clipId":"clip-1","property":"crop","frame":10,"value":{"kind":"crop","value":{"left":0.1,"top":0.2,"right":0.3,"bottom":0.4}}}"#,
+        )
+        .expect("upsertKeyframe crop camelCase");
+        match crop_request
+            .into_command()
+            .expect("upsertKeyframe crop command")
+        {
+            EditCommand::UpsertKeyframe {
+                property, value, ..
+            } => {
+                assert_eq!(property, opentake_ops::KeyframeProperty::Crop);
+                assert!(matches!(value, opentake_ops::KeyframeValue::Crop(_)));
+            }
+            other => panic!("expected UpsertKeyframe, got {other:?}"),
         }
     }
 
