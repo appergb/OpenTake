@@ -22,6 +22,7 @@ import { useMediaStore } from "../../store/mediaStore";
 import { formatTimecode, totalFrames } from "../../lib/geometry";
 import { assetUrl } from "../../lib/asset";
 import { TimelinePlayback } from "./TimelinePlaybackLayer";
+import { TransformOverlay } from "./TransformOverlay";
 import { aspectFitBox, timelinePreviewCanvasStyle } from "./previewLayerStyles";
 import { useT } from "../../i18n";
 import {
@@ -32,6 +33,7 @@ import {
 } from "../../lib/api";
 import { rustEngineEnabled } from "./rustEngine";
 import { shouldUseRustEngine } from "./timelinePlayback";
+import { findSelectedVisualClip, mediaCanvasAspect } from "../../lib/clip";
 import type { MediaItem } from "../../lib/types";
 
 export function Preview() {
@@ -43,9 +45,26 @@ export function Preview() {
   const setScrubbing = useEditorUiStore((s) => s.setScrubbing);
   const togglePlayTimeline = useEditorUiStore((s) => s.togglePlay);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
+  const selectedClipIds = useEditorUiStore((s) => s.selectedClipIds);
   const pushToast = useEditorUiStore((s) => s.pushToast);
   const previewItem = useMediaStore((s) =>
     previewMediaId ? s.items.find((m) => m.id === previewMediaId) ?? null : null,
+  );
+  // The Transform overlay's target clip + media aspect (Inspector.tsx:295-301's
+  // same mediaCanvasAspect lookup pattern, reused so both surfaces agree on
+  // aspect-preserving resize). `transformClip` is null whenever upstream's
+  // TransformOverlayView.selectedClip would also be nil (see clip.ts's
+  // findSelectedVisualClip doc comment) — resolved unconditionally here (cheap)
+  // and gated at render time alongside the timeline-tab / has-content checks.
+  const transformClip = findSelectedVisualClip(timeline, selectedClipIds);
+  const transformMediaItem = useMediaStore((s) =>
+    transformClip ? s.items.find((m) => m.id === transformClip.mediaRef) ?? null : null,
+  );
+  const transformMediaAspect = mediaCanvasAspect(
+    transformMediaItem?.width,
+    transformMediaItem?.height,
+    timeline.width,
+    timeline.height,
   );
 
   // Media-preview playback is driven by the app transport (more capable than the
@@ -179,6 +198,13 @@ export function Preview() {
               <>
                 <TimelinePlayback timeline={timeline} fps={fps} />
                 <TimelineRustOverlay />
+                {transformClip && fittedCanvas && (
+                  <TransformOverlay
+                    clip={transformClip}
+                    canvasPx={fittedCanvas}
+                    mediaAspect={transformMediaAspect}
+                  />
+                )}
               </>
             ) : (
               // Empty timeline: a framed 16:9 canvas surface placeholder.
