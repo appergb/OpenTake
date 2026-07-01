@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { linearFromDb } from "../../lib/clip";
 import type { Clip, ClipType, Timeline, Track } from "../../lib/types";
 import {
   activeAudioClips,
@@ -8,6 +9,7 @@ import {
   clipCoversFrame,
   clipOpacity,
   clipVolume,
+  clipVolumeAt,
   frameForSourceTime,
   isExternalSeekWhilePlaying,
   playbackFrameFromActiveFrame,
@@ -219,6 +221,65 @@ describe("clipVolume / clipOpacity", () => {
     const t = track({ id: "a", type: "audio", clips: [] });
     expect(clipVolume(t, clip({ id: "c", mediaType: "audio", volume: 2 }))).toBe(1);
     expect(clipOpacity(clip({ id: "c", mediaType: "video", opacity: -1 }))).toBe(0);
+  });
+});
+
+describe("clipVolumeAt (frame-aware envelope + fade, T2-7)", () => {
+  it("zeroes gain on a muted track regardless of the clip's envelope", () => {
+    const t = track({ id: "a", type: "audio", muted: true, clips: [] });
+    const c = clip({ id: "c", mediaType: "audio", volume: 1 });
+    expect(clipVolumeAt(t, c, 50)).toBe(0);
+  });
+
+  it("passes through the static volume when there is no keyframe track or fade", () => {
+    const t = track({ id: "a", type: "audio", clips: [] });
+    const c = clip({ id: "c", mediaType: "audio", volume: 0.5, startFrame: 0, durationFrames: 100 });
+    expect(clipVolumeAt(t, c, 50)).toBeCloseTo(0.5);
+  });
+
+  it("follows a dB volume keyframe via linearFromDb at a sampled frame", () => {
+    const t = track({ id: "a", type: "audio", clips: [] });
+    const c = clip({
+      id: "c",
+      mediaType: "audio",
+      volume: 1,
+      startFrame: 0,
+      durationFrames: 100,
+      volumeTrack: {
+        keyframes: [{ frame: 0, value: -6, interpolationOut: "hold" }],
+      },
+    });
+    // hold interpolation -> flat -6dB across the clip; gain = 1 * linearFromDb(-6).
+    expect(clipVolumeAt(t, c, 50)).toBeCloseTo(linearFromDb(-6));
+    expect(clipVolumeAt(t, c, 50)).toBeLessThan(1);
+  });
+
+  it("ramps 0 -> full gain across fadeInFrames", () => {
+    const t = track({ id: "a", type: "audio", clips: [] });
+    const c = clip({
+      id: "c",
+      mediaType: "audio",
+      volume: 1,
+      startFrame: 0,
+      durationFrames: 100,
+      fadeInFrames: 10,
+      fadeInInterpolation: "linear",
+    });
+    expect(clipVolumeAt(t, c, 0)).toBeCloseTo(0);
+    expect(clipVolumeAt(t, c, 5)).toBeCloseTo(0.5);
+    expect(clipVolumeAt(t, c, 10)).toBeCloseTo(1);
+  });
+
+  it("preserves a >1 static-volume boost pre-clamp (the [0,1] clamp is the caller's job)", () => {
+    const t = track({ id: "a", type: "audio", clips: [] });
+    const c = clip({ id: "c", mediaType: "audio", volume: 4, startFrame: 0, durationFrames: 100 });
+    expect(clipVolumeAt(t, c, 50)).toBeCloseTo(4);
+  });
+
+  it("falls back to 1 for a non-finite gain", () => {
+    const t = track({ id: "a", type: "audio", clips: [] });
+    const c = clip({ id: "c", mediaType: "audio", volume: NaN, startFrame: 0, durationFrames: 100 });
+    expect(clipVolumeAt(t, c, 50)).toBe(1);
   });
 });
 
