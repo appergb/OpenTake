@@ -1,12 +1,12 @@
 /**
  * ExportDialog (SPEC §2.4 / #112). Modal shown from the title bar to render the
  * whole timeline to a real video file via the `export_video` backend command
- * (per-frame GPU composite → ffmpeg H.264 / .mp4 + AAC mux).
+ * (per-frame GPU composite → ffmpeg + AAC/LPCM mux).
  *
- * Scope mirrors the backend's first cut:
- *  - Format: H.264 / .mp4 is the only wired path; H.265 / ProRes are shown
- *    disabled with a "not wired yet" note (the backend `resolve_preset` rejects
- *    them, so we never let the user pick one and hit a server error).
+ * Scope mirrors the backend:
+ *  - Format: H.264 / H.265 (`.mp4`) and ProRes 422 (`.mov`). The output path's
+ *    extension tracks the selected codec so it always matches what the
+ *    backend's `resolve_preset` requires (see `extForCodec`/`withExt` below).
  *  - Resolution: 720p / 1080p / 4K short-edge presets. The default pre-selects
  *    the preset matching the timeline's own shorter edge so a standard project
  *    round-trips its native size; it falls back to 1080p (the backend default).
@@ -29,22 +29,39 @@ import type { ExportCodec, ExportQuality } from "../../lib/api";
 import { saveDialog } from "../../lib/dialog";
 
 const MP4_EXT = "mp4";
+const MOV_EXT = "mov";
+
+/** The container extension the backend's `resolve_preset` requires for a codec. */
+export function extForCodec(codec: ExportCodec): typeof MP4_EXT | typeof MOV_EXT {
+  return codec === "prores" ? MOV_EXT : MP4_EXT;
+}
+
+/** Ensure a chosen path carries the given extension (does not strip a wrong one). */
+export function withExt(path: string, ext: string): string {
+  return path.toLowerCase().endsWith(`.${ext}`) ? path : `${path}.${ext}`;
+}
 
 /** Ensure a chosen path carries the `.mp4` extension (the H.264 container). */
 export function withMp4Ext(path: string): string {
-  return path.toLowerCase().endsWith(`.${MP4_EXT}`) ? path : `${path}.${MP4_EXT}`;
+  return withExt(path, MP4_EXT);
 }
 
 /**
- * Default export filename: the open project's base name with `.mp4`, falling
- * back to "Timeline.mp4" for an unsaved project. The bundle path ends in
- * `…/Name.opentake`, so strip the directory and the `.opentake` suffix.
+ * Default export filename: the open project's base name with the codec's
+ * container extension, falling back to "Timeline.<ext>" for an unsaved
+ * project. The bundle path ends in `…/Name.opentake`, so strip the directory
+ * and the `.opentake` suffix.
  */
-export function defaultMp4Name(projectPath: string | null): string {
-  if (!projectPath) return `Timeline.${MP4_EXT}`;
+export function defaultExportName(projectPath: string | null, ext: string): string {
+  if (!projectPath) return `Timeline.${ext}`;
   const base = projectPath.split(/[\\/]/).pop() ?? projectPath;
   const stem = base.replace(/\.opentake$/i, "");
-  return `${stem || "Timeline"}.${MP4_EXT}`;
+  return `${stem || "Timeline"}.${ext}`;
+}
+
+/** Default export filename for the `.mp4` container (H.264 / H.265). */
+export function defaultMp4Name(projectPath: string | null): string {
+  return defaultExportName(projectPath, MP4_EXT);
 }
 
 /** Pick the preset whose short edge best matches the timeline's shorter side. */
@@ -89,8 +106,8 @@ export function ExportDialog() {
   const codecOptions = useMemo(
     () => [
       { id: "h264" as const, label: t("export.codec.h264") },
-      { id: "h265" as const, label: t("export.codec.h265"), disabled: true },
-      { id: "prores" as const, label: t("export.codec.prores"), disabled: true },
+      { id: "h265" as const, label: t("export.codec.h265") },
+      { id: "prores" as const, label: t("export.codec.prores") },
     ],
     [t],
   );
@@ -116,26 +133,32 @@ export function ExportDialog() {
       pushToast(t("export.unavailable"));
       return;
     }
+    const ext = extForCodec(codec);
     const projectPath = useProjectStore.getState().projectPath;
     const dir = projectPath
       ? projectPath.replace(/[\\/][^\\/]*$/, "")
       : await api.getDefaultProjectDir().catch(() => "");
     const sep = dir && !dir.endsWith("/") ? "/" : "";
     const defaultPath = dir
-      ? `${dir}${sep}${defaultMp4Name(projectPath)}`
+      ? `${dir}${sep}${defaultExportName(projectPath, ext)}`
       : undefined;
 
     const chosen = await save({
       title: t("export.saveDialog"),
       defaultPath,
-      filters: [{ name: t("export.saveFilter"), extensions: [MP4_EXT] }],
+      filters: [
+        {
+          name: t(ext === MOV_EXT ? "export.saveFilterMov" : "export.saveFilter"),
+          extensions: [ext],
+        },
+      ],
     });
     if (typeof chosen !== "string") return; // cancelled
 
     setBusy(true);
     try {
       const summary = await api.exportVideo({
-        outPath: withMp4Ext(chosen),
+        outPath: withExt(chosen, ext),
         codec,
         quality,
       });

@@ -7,8 +7,7 @@
 //! (`opentake_media::VideoEncoder`) to produce a real `.mp4` on disk.
 //!
 //! Scope of this first cut (SPEC §2.4 / §8.2):
-//! - **H.264 / .mp4** only. The encoder already supports H.265 / ProRes presets;
-//!   those land in a follow-up so this slice stays a clean, verifiable spine.
+//! - **H.264 / .mp4**, **H.265 / .mp4**, and **ProRes 422 / .mov** are wired.
 //! - **Linear audio mixdown**: every audio-bearing clip's source window is
 //!   decoded to mono f32 at the mix rate, placed at its frame-derived sample
 //!   offset, scaled by its `volume_at` envelope, summed, hard-limited, and mux'd
@@ -51,18 +50,16 @@ use opentake_render::{
 /// frames. Bounds VRAM during the export loop.
 const TEXTURE_CACHE_CAP: usize = 64;
 
-/// Requested output codec, projected from the front-end. Only H.264 is wired in
-/// this slice; the other variants are accepted by the type but rejected with a
-/// clear error until their container/preset branches land.
+/// Requested output codec, projected from the front-end.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ExportCodec {
-    /// H.264 / `.mp4` (the only fully-wired path in this cut).
+    /// H.264 / `.mp4`.
     #[default]
     H264,
-    /// H.265 / `.mp4` (reserved — not yet wired).
+    /// H.265 / `.mp4`.
     H265,
-    /// Apple ProRes 422 / `.mov` (reserved — not yet wired).
+    /// Apple ProRes 422 / `.mov`.
     Prores,
 }
 
@@ -130,9 +127,8 @@ pub struct ExportSummary {
     pub frame_count: i32,
 }
 
-/// Resolve the requested codec to an ffmpeg [`ExportPreset`], rejecting the
-/// not-yet-wired branches with a clear error. Also validates the output
-/// extension matches the codec's container.
+/// Resolve the requested codec to an ffmpeg [`ExportPreset`], validating that
+/// the output extension matches the codec's container.
 fn resolve_preset(
     codec: ExportCodec,
     quality: ExportQuality,
@@ -152,12 +148,24 @@ fn resolve_preset(
                 quality.encode_resolution(),
             ))
         }
-        // TODO(#export): wire H.265 (.mp4) and ProRes 422 (.mov) once their
-        // container/preset branches are validated end-to-end. The encoder
-        // already builds correct args for both; this command just hasn't opted
-        // them in yet, so the export surface stays minimal and verifiable.
-        ExportCodec::H265 => Err("H.265 export is not wired yet (TODO)".to_string()),
-        ExportCodec::Prores => Err("ProRes export is not wired yet (TODO)".to_string()),
+        ExportCodec::H265 => {
+            if ext.as_deref() != Some("mp4") {
+                return Err("H.265 export requires an .mp4 output path".to_string());
+            }
+            Ok(ExportPreset::new(
+                VideoCodec::H265,
+                quality.encode_resolution(),
+            ))
+        }
+        ExportCodec::Prores => {
+            if ext.as_deref() != Some("mov") {
+                return Err("ProRes export requires a .mov output path".to_string());
+            }
+            Ok(ExportPreset::new(
+                VideoCodec::ProRes422,
+                quality.encode_resolution(),
+            ))
+        }
     }
 }
 
@@ -421,9 +429,9 @@ fn mix_timeline_audio(
 /// `export_video`: render the whole timeline to a video file on disk.
 ///
 /// Composites every frame at the full export resolution and encodes them to
-/// `req.out_path` (H.264 / .mp4 in this cut). An empty timeline still produces a
-/// valid (possibly zero-frame) file — out-of-range frames composite to opaque
-/// black, which is the correct clear color, not an error.
+/// `req.out_path` per the requested codec/container. An empty timeline still
+/// produces a valid (possibly zero-frame) file — out-of-range frames composite
+/// to opaque black, which is the correct clear color, not an error.
 ///
 /// GPU acquisition / decode / encode failures surface to the front-end as
 /// `Err(String)` (the Tauri boundary contract).
@@ -605,21 +613,57 @@ mod tests {
     }
 
     #[test]
-    fn resolve_preset_rejects_unwired_codecs() {
-        assert!(resolve_preset(
+    fn resolve_preset_accepts_h265_mp4() {
+        let preset = resolve_preset(
             ExportCodec::H265,
             ExportQuality::P1080,
-            Path::new("/out.mp4")
+            Path::new("/out.mp4"),
         )
-        .unwrap_err()
-        .contains("H.265"));
-        assert!(resolve_preset(
+        .expect("h265 mp4 should resolve");
+        assert_eq!(preset.codec, VideoCodec::H265);
+        assert_eq!(preset.resolution, EncodeResolution::P1080);
+    }
+
+    #[test]
+    fn resolve_preset_rejects_wrong_extension_for_h265() {
+        let err = resolve_preset(
+            ExportCodec::H265,
+            ExportQuality::P1080,
+            Path::new("/out.mov"),
+        )
+        .unwrap_err();
+        assert!(err.contains(".mp4"), "got: {err}");
+
+        let err = resolve_preset(
+            ExportCodec::H265,
+            ExportQuality::P1080,
+            Path::new("/out.png"),
+        )
+        .unwrap_err();
+        assert!(err.contains(".mp4"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_preset_accepts_prores_mov() {
+        let preset = resolve_preset(
             ExportCodec::Prores,
             ExportQuality::P1080,
-            Path::new("/out.mov")
+            Path::new("/out.mov"),
         )
-        .unwrap_err()
-        .contains("ProRes"));
+        .expect("prores mov should resolve");
+        assert_eq!(preset.codec, VideoCodec::ProRes422);
+        assert_eq!(preset.resolution, EncodeResolution::P1080);
+    }
+
+    #[test]
+    fn resolve_preset_rejects_wrong_extension_for_prores() {
+        let err = resolve_preset(
+            ExportCodec::Prores,
+            ExportQuality::P1080,
+            Path::new("/out.mp4"),
+        )
+        .unwrap_err();
+        assert!(err.contains(".mov"), "got: {err}");
     }
 
     #[test]
