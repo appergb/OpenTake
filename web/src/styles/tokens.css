@@ -34,6 +34,9 @@
   --accent-primary: rgb(245, 239, 228);
   --accent-spotlight: rgb(255, 69, 69);
   --status-error: rgb(229, 79, 79);
+  /* SwiftUI .yellow (matches ACCENT.systemYellow in theme.ts / the main
+     timeline's SnapIndicator dashed snap-guide line) */
+  --status-warning: rgb(255, 204, 0);
   --glass-tint: rgba(245, 239, 228, 0.05);
   --ai-gradient: linear-gradient(135deg, #fff 0%, #c7c7c7 45%, #999 55%, #fff 100%);
   --spotlight-gradient: linear-gradient(135deg, rgb(255, 87, 77), rgb(242, 38, 71), rgb(255, 122, 56));
