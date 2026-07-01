@@ -1,8 +1,11 @@
 /**
  * Inspector (SPEC §6). Title bar + one of four content states: marquee summary,
  * clip inspector (with Video/Audio tabs), media-asset source, or project
- * metadata. Editable fields commit via SetClipProperties. The keyframe lane and
- * Text/AI-Edit tabs are scaffolded (TODO: full parity in a later pass).
+ * metadata. Editable fields commit via SetClipProperties; a field whose
+ * property already has an active keyframe track stays editable but commits
+ * via UpsertKeyframe at the playhead instead (see `../../lib/keyframeValue`).
+ * The keyframe lane and Text/AI-Edit tabs are scaffolded (TODO: full parity
+ * in a later pass).
  */
 
 import { useEffect, useState } from "react";
@@ -28,14 +31,23 @@ import * as edit from "../../store/editActions";
 import { formatTimecode } from "../../lib/geometry";
 import {
   cropAt,
+  liveVolumeKfLinearAt,
   mediaCanvasAspect,
-  opacityAt,
+  rawOpacityAt,
   resizeTransformKeepingSourceAspect,
   rotationAt,
   sizeAt,
   topLeftAt,
-  volumeAt,
 } from "../../lib/clip";
+import {
+  cropEdgeKeyframeValue,
+  opacityKeyframeValue,
+  positionXKeyframeValue,
+  positionYKeyframeValue,
+  rotationKeyframeValue,
+  scaleKeyframeValue,
+  volumeKeyframeValue,
+} from "../../lib/keyframeValue";
 import { FS, RADIUS, SPACE } from "../../lib/theme";
 import { useT, type TFunction } from "../../i18n";
 import type {
@@ -183,27 +195,9 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
-/** A non-interactive numeric value shown when a property is keyframe-animated.
- *  Mirrors ScrubbableNumberField's typography but without drag/click handlers. */
-function ReadOnlyValue({ text, width = 56 }: { text: string; width?: number }) {
-  return (
-    <span
-      className="tabular"
-      style={{
-        width,
-        display: "inline-block",
-        textAlign: "right",
-        color: "var(--text-tertiary)",
-        fontSize: "var(--fs-sm)",
-        userSelect: "text",
-      }}
-    >
-      {text}
-    </span>
-  );
-}
-
-/** Inline hint shown beside a read-only field when a property is animated. */
+/** Inline hint shown beside an animated field's editable control, signaling
+ *  that committing a value here upserts a keyframe at the playhead rather
+ *  than setting the clip's static property. */
 function AnimatedHint({ t }: { t: TFunction }) {
   return (
     <span
@@ -312,8 +306,8 @@ function ClipInspector({
   const cropAnimated = !!clip.cropTrack && clip.cropTrack.keyframes.length > 0;
 
   // Sampled values at the playhead.
-  const sampledOpacity = opacityAt(clip, activeFrame);
-  const sampledVolume = volumeAt(clip, activeFrame);
+  const sampledOpacity = rawOpacityAt(clip, activeFrame);
+  const sampledVolume = liveVolumeKfLinearAt(clip, activeFrame) ?? clip.volume;
   const sampledRotation = rotationAt(clip, activeFrame);
   const sampledScale = sizeAt(clip, activeFrame)[0];
   const sampledTopLeft = topLeftAt(clip, activeFrame);
@@ -356,26 +350,22 @@ function ClipInspector({
           <section>
             <SectionHeader label={t("inspector.section.levels")} />
             <Row label={t("inspector.field.volume")}>
-              {volumeAnimated ? (
-                <>
-                  <ReadOnlyValue
-                    text={(20 * Math.log10(Math.max(1e-6, sampledVolume))).toFixed(1) + " dB"}
-                  />
-                  <AnimatedHint t={t} />
-                </>
-              ) : (
-                <ScrubbableNumberField
-                  value={clip.volume}
-                  min={0}
-                  max={4}
-                  sensitivity={0.01}
-                  format={(v) => (20 * Math.log10(Math.max(1e-6, v))).toFixed(1)}
-                  suffix=" dB"
-                  width={56}
-                  displayTextOverride={(v) => (v <= 0 ? "-∞ dB" : null)}
-                  onCommit={(v) => commit({ volume: v })}
-                />
-              )}
+              <ScrubbableNumberField
+                value={volumeAnimated ? sampledVolume : clip.volume}
+                min={0}
+                max={4}
+                sensitivity={0.01}
+                format={(v) => (20 * Math.log10(Math.max(1e-6, v))).toFixed(1)}
+                suffix=" dB"
+                width={56}
+                displayTextOverride={(v) => (v <= 0 ? "-∞ dB" : null)}
+                onCommit={(v) =>
+                  volumeAnimated
+                    ? edit.upsertKeyframe(clip.id, "volume", activeFrame, volumeKeyframeValue(v))
+                    : commit({ volume: v })
+                }
+              />
+              {volumeAnimated && <AnimatedHint t={t} />}
             </Row>
             <FadeSection clip={clip} commit={commit} t={t} />
           </section>
@@ -386,65 +376,67 @@ function ClipInspector({
                 <SectionHeader label={t("inspector.section.transform")} />
               </div>
               <Row label={t("inspector.field.scale")}>
-                {scaleAnimated ? (
-                  <>
-                    <ReadOnlyValue text={Math.round(sampledScale * 100) + "%"} />
-                    <AnimatedHint t={t} />
-                  </>
-                ) : (
-                  <ScrubbableNumberField
-                    value={sampledScale}
-                    min={0.01}
-                    max={10}
-                    sensitivity={0.005}
-                    format={(v) => Math.round(v * 100).toString()}
-                    suffix="%"
-                    width={56}
-                    onCommit={(v) =>
-                      commit({
-                        transform: resizeTransformKeepingSourceAspect(clip.transform, v, aspect),
-                      })
-                    }
-                  />
-                )}
+                <ScrubbableNumberField
+                  value={sampledScale}
+                  min={0.01}
+                  max={10}
+                  sensitivity={0.005}
+                  format={(v) => Math.round(v * 100).toString()}
+                  suffix="%"
+                  width={56}
+                  onCommit={(v) =>
+                    scaleAnimated
+                      ? edit.upsertKeyframe(
+                          clip.id,
+                          "scale",
+                          activeFrame,
+                          scaleKeyframeValue(clip.transform, v, aspect),
+                        )
+                      : commit({
+                          transform: resizeTransformKeepingSourceAspect(clip.transform, v, aspect),
+                        })
+                  }
+                />
+                {scaleAnimated && <AnimatedHint t={t} />}
               </Row>
               <Row label={t("inspector.field.rotation")}>
-                {rotationAnimated ? (
-                  <>
-                    <ReadOnlyValue text={sampledRotation.toFixed(0) + "°"} />
-                    <AnimatedHint t={t} />
-                  </>
-                ) : (
-                  <ScrubbableNumberField
-                    value={sampledRotation}
-                    min={-3600}
-                    max={3600}
-                    sensitivity={0.5}
-                    format={(v) => v.toFixed(0)}
-                    suffix="°"
-                    width={56}
-                    onCommit={(v) => commit({ transform: { ...clip.transform, rotation: v } })}
-                  />
-                )}
+                <ScrubbableNumberField
+                  value={sampledRotation}
+                  min={-3600}
+                  max={3600}
+                  sensitivity={0.5}
+                  format={(v) => v.toFixed(0)}
+                  suffix="°"
+                  width={56}
+                  onCommit={(v) =>
+                    rotationAnimated
+                      ? edit.upsertKeyframe(clip.id, "rotation", activeFrame, rotationKeyframeValue(v))
+                      : commit({ transform: { ...clip.transform, rotation: v } })
+                  }
+                />
+                {rotationAnimated && <AnimatedHint t={t} />}
               </Row>
               <Row label={t("inspector.field.opacity")}>
-                {opacityAnimated ? (
-                  <>
-                    <ReadOnlyValue text={Math.round(sampledOpacity * 100) + "%"} />
-                    <AnimatedHint t={t} />
-                  </>
-                ) : (
-                  <ScrubbableNumberField
-                    value={clip.opacity}
-                    min={0}
-                    max={1}
-                    sensitivity={0.005}
-                    format={(v) => Math.round(v * 100).toString()}
-                    suffix="%"
-                    width={56}
-                    onCommit={(v) => commit({ opacity: v })}
-                  />
-                )}
+                <ScrubbableNumberField
+                  value={opacityAnimated ? sampledOpacity : clip.opacity}
+                  min={0}
+                  max={1}
+                  sensitivity={0.005}
+                  format={(v) => Math.round(v * 100).toString()}
+                  suffix="%"
+                  width={56}
+                  onCommit={(v) =>
+                    opacityAnimated
+                      ? edit.upsertKeyframe(
+                          clip.id,
+                          "opacity",
+                          activeFrame,
+                          opacityKeyframeValue(v * 100),
+                        )
+                      : commit({ opacity: v })
+                  }
+                />
+                {opacityAnimated && <AnimatedHint t={t} />}
               </Row>
             </section>
 
@@ -452,6 +444,7 @@ function ClipInspector({
               clip={clip}
               sampledTopLeft={sampledTopLeft}
               animated={positionAnimated}
+              activeFrame={activeFrame}
               commit={commit}
               t={t}
             />
@@ -460,6 +453,7 @@ function ClipInspector({
               clip={clip}
               sampledCrop={sampledCrop}
               animated={cropAnimated}
+              activeFrame={activeFrame}
               commit={commit}
               t={t}
             />
@@ -524,12 +518,14 @@ function PositionSection({
   clip,
   sampledTopLeft,
   animated,
+  activeFrame,
   commit,
   t,
 }: {
   clip: Clip;
   sampledTopLeft: { x: number; y: number };
   animated: boolean;
+  activeFrame: number;
   commit: (props: Parameters<typeof edit.setClipProperties>[1]) => void;
   t: TFunction;
 }) {
@@ -540,44 +536,46 @@ function PositionSection({
     <section>
       <SectionHeader label={t("inspector.section.position")} />
       <Row label={t("inspector.field.positionX")}>
-        {animated ? (
-          <>
-            <ReadOnlyValue text={sampledTopLeft.x.toFixed(3)} />
-            <AnimatedHint t={t} />
-          </>
-        ) : (
-          <ScrubbableNumberField
-            value={sampledTopLeft.x}
-            min={-2}
-            max={2}
-            sensitivity={0.005}
-            format={(v) => v.toFixed(3)}
-            width={56}
-            onCommit={(v) =>
-              commit({ transform: { ...clip.transform, centerX: v + w / 2 } })
-            }
-          />
-        )}
+        <ScrubbableNumberField
+          value={sampledTopLeft.x}
+          min={-2}
+          max={2}
+          sensitivity={0.005}
+          format={(v) => v.toFixed(3)}
+          width={56}
+          onCommit={(v) =>
+            animated
+              ? edit.upsertKeyframe(
+                  clip.id,
+                  "position",
+                  activeFrame,
+                  positionXKeyframeValue(v, sampledTopLeft.y),
+                )
+              : commit({ transform: { ...clip.transform, centerX: v + w / 2 } })
+          }
+        />
+        {animated && <AnimatedHint t={t} />}
       </Row>
       <Row label={t("inspector.field.positionY")}>
-        {animated ? (
-          <>
-            <ReadOnlyValue text={sampledTopLeft.y.toFixed(3)} />
-            <AnimatedHint t={t} />
-          </>
-        ) : (
-          <ScrubbableNumberField
-            value={sampledTopLeft.y}
-            min={-2}
-            max={2}
-            sensitivity={0.005}
-            format={(v) => v.toFixed(3)}
-            width={56}
-            onCommit={(v) =>
-              commit({ transform: { ...clip.transform, centerY: v + h / 2 } })
-            }
-          />
-        )}
+        <ScrubbableNumberField
+          value={sampledTopLeft.y}
+          min={-2}
+          max={2}
+          sensitivity={0.005}
+          format={(v) => v.toFixed(3)}
+          width={56}
+          onCommit={(v) =>
+            animated
+              ? edit.upsertKeyframe(
+                  clip.id,
+                  "position",
+                  activeFrame,
+                  positionYKeyframeValue(sampledTopLeft.x, v),
+                )
+              : commit({ transform: { ...clip.transform, centerY: v + h / 2 } })
+          }
+        />
+        {animated && <AnimatedHint t={t} />}
       </Row>
     </section>
   );
@@ -589,12 +587,14 @@ function CropSection({
   clip,
   sampledCrop,
   animated,
+  activeFrame,
   commit,
   t,
 }: {
   clip: Clip;
   sampledCrop: Crop;
   animated: boolean;
+  activeFrame: number;
   commit: (props: Parameters<typeof edit.setClipProperties>[1]) => void;
   t: TFunction;
 }) {
@@ -604,22 +604,25 @@ function CropSection({
   };
   const renderEdge = (label: string, edge: keyof Crop, value: number) => (
     <Row label={label}>
-      {animated ? (
-        <>
-          <ReadOnlyValue text={value.toFixed(3)} />
-          <AnimatedHint t={t} />
-        </>
-      ) : (
-        <ScrubbableNumberField
-          value={value}
-          min={0}
-          max={1}
-          sensitivity={0.005}
-          format={(v) => v.toFixed(3)}
-          width={56}
-          onCommit={(v) => commitEdge(edge, v)}
-        />
-      )}
+      <ScrubbableNumberField
+        value={value}
+        min={0}
+        max={1}
+        sensitivity={0.005}
+        format={(v) => v.toFixed(3)}
+        width={56}
+        onCommit={(v) =>
+          animated
+            ? edit.upsertKeyframe(
+                clip.id,
+                "crop",
+                activeFrame,
+                cropEdgeKeyframeValue(sampledCrop, edge, v),
+              )
+            : commitEdge(edge, v)
+        }
+      />
+      {animated && <AnimatedHint t={t} />}
     </Row>
   );
   return (

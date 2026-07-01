@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   clampTrimDeltaFrames,
+  dbFromLinear,
   fitTransformForMedia,
+  liveVolumeKfLinearAt,
   mediaCanvasAspect,
+  opacityAt,
+  rawOpacityAt,
   resizeTransformKeepingSourceAspect,
   trimSourceValues,
   trimToPlayheadEdits,
+  volumeAt,
 } from "./clip";
 import type { Clip, ClipType } from "./types";
 
@@ -163,5 +168,75 @@ describe("media aspect transform helpers", () => {
       rotation: 12,
       flipHorizontal: true,
     });
+  });
+});
+
+function fullClip(overrides: Partial<Clip> = {}): Clip {
+  return {
+    id: "c1",
+    mediaRef: "c1-media",
+    mediaType: "video",
+    sourceClipType: "video",
+    startFrame: 10,
+    durationFrames: 40,
+    trimStartFrame: 0,
+    trimEndFrame: 0,
+    speed: 1,
+    volume: 1,
+    fadeInFrames: 0,
+    fadeOutFrames: 0,
+    fadeInInterpolation: "linear",
+    fadeOutInterpolation: "linear",
+    opacity: 1,
+    transform: {
+      centerX: 0.5,
+      centerY: 0.5,
+      width: 1,
+      height: 1,
+      rotation: 0,
+      flipHorizontal: false,
+      flipVertical: false,
+    },
+    crop: { left: 0, top: 0, right: 0, bottom: 0 },
+    ...overrides,
+  };
+}
+
+// Regression guard for the Inspector "edit an animated value" seed. Upstream
+// (InspectorView.swift writeVolume/writeOpacity) seeds the editable field from
+// the RAW keyframe-track sample — NOT the composited output — so editing an
+// animated value upserts the authored value instead of baking in the static
+// outer volume / fade envelope. See liveVolumeKfLinearAt + rawOpacityAt.
+describe("animated-value inspector seed (raw track sample, no fade/gain)", () => {
+  it("liveVolumeKfLinearAt is null when the clip has no volume keyframes", () => {
+    expect(liveVolumeKfLinearAt(fullClip(), 15)).toBeNull();
+  });
+
+  it("liveVolumeKfLinearAt returns the raw track gain, excluding static volume and fade", () => {
+    // -6 dB authored keyframe, 2x static outer volume, sampled inside the fade-in.
+    const clip = fullClip({
+      mediaType: "audio",
+      sourceClipType: "audio",
+      volume: 2,
+      fadeInFrames: 20,
+      volumeTrack: { keyframes: [{ frame: 0, value: -6, interpolationOut: "linear" }] },
+    });
+    const raw = liveVolumeKfLinearAt(clip, 15);
+    expect(raw).not.toBeNull();
+    // Round-trips back to the authored -6 dB → editing without change is idempotent.
+    expect(dbFromLinear(raw as number)).toBeCloseTo(-6);
+    // The composited output differs (× static volume 2 × the 0.25 fade ramp at
+    // rel-frame 5), proving the seed is NOT taken from it.
+    expect(volumeAt(clip, 15)).toBeCloseTo((raw as number) * 2 * 0.25);
+  });
+
+  it("rawOpacityAt returns the authored track value, excluding the fade envelope", () => {
+    const clip = fullClip({
+      fadeInFrames: 20,
+      opacityTrack: { keyframes: [{ frame: 0, value: 0.8, interpolationOut: "linear" }] },
+    });
+    // Raw = authored 0.8; effective = 0.8 × 0.25 fade at rel-frame 5.
+    expect(rawOpacityAt(clip, 15)).toBeCloseTo(0.8);
+    expect(opacityAt(clip, 15)).toBeCloseTo(0.2);
   });
 });
