@@ -219,7 +219,9 @@ export async function exportSubtitles(
 // (camelCase `outPath`; lowercase enum tags). Outside Tauri there is no
 // GPU/ffmpeg, so the wrapper rejects with a friendly error rather than
 // silently no-op'ing (an export the user asked for must not quietly do
-// nothing).
+// nothing). Progress streams via the `"export://progress"` event
+// (`onExportProgress`); `cancelExport` requests a mid-encode stop, which
+// surfaces back through `exportVideo`'s rejection as `EXPORT_CANCELLED_SENTINEL`.
 
 /** Output codec. `h264`/`h265` require an `.mp4` output path; `prores` requires `.mov`. */
 export type ExportCodec = "h264" | "h265" | "prores";
@@ -247,6 +249,42 @@ export async function exportVideo(req: ExportRequest): Promise<ExportSummary> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<ExportSummary>("export_video", { req });
   throw new Error("video export requires the desktop app (GPU + ffmpeg)");
+}
+
+/** Stable `Err` string `export_video` rejects with when cancelled mid-encode
+ *  (mirror of the Rust `CANCELLED_SENTINEL`). Callers match this exact string
+ *  to show a neutral "cancelled" state instead of the failure toast. */
+export const EXPORT_CANCELLED_SENTINEL = "export cancelled";
+
+/** Request that the in-flight `export_video` stop at the next frame boundary.
+ *  No-op outside Tauri (there is no export to cancel) and a no-op backend-side
+ *  when nothing is exporting. */
+export async function cancelExport(): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) await invokeImpl<void>("cancel_export");
+}
+
+/** Progress payload for `"export://progress"`: `done` of `total` frames
+ *  composited so far. */
+export interface ExportProgress {
+  done: number;
+  total: number;
+}
+
+/** Subscribe to the throttled `"export://progress"` event fired by `export_video`
+ *  (at most every ~200ms, plus a final 100% emit). Returns an unlisten function;
+ *  no-op (no-op unlisten) outside Tauri. */
+export async function onExportProgress(
+  handler: (progress: ExportProgress) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("export://progress", (e) => {
+    const p = e.payload as { done?: number; total?: number } | undefined;
+    if (p && typeof p.done === "number" && typeof p.total === "number") {
+      handler({ done: p.done, total: p.total });
+    }
+  });
 }
 
 // MARK: - Media commands

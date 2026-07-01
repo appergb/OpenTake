@@ -125,6 +125,9 @@ pub fn run() {
             app.manage(crate::library::LibraryState::new(library_store));
             // Lazily-acquired GPU context for timeline composite previews (#47).
             app.manage(render::RenderState::new());
+            // Shared cancel flag for the in-flight `export_video` (#112 progress
+            // + cancel). One export runs at a time, so a single flag suffices.
+            app.manage(export::ExportControl::default());
 
             // Streaming playback (#53 / PR2): start the loopback MJPEG transport
             // on the Tauri async runtime (mirrors the MCP server spawn) and
@@ -169,6 +172,7 @@ pub fn run() {
             haptic::snap_haptic,
             render::composite_frame,
             export::export_video,
+            export::cancel_export,
             secret::secret_save,
             secret::secret_load,
             secret::secret_delete,

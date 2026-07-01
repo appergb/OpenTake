@@ -11,13 +11,15 @@
  *    the preset matching the timeline's own shorter edge so a standard project
  *    round-trips its native size; it falls back to 1080p (the backend default).
  *
- * The backend runs to completion with no progress callback, so this is a
- * deliberate "status + toast" surface — never a faked progress bar. While the
- * export runs the controls are disabled and the button reads "Exporting…";
- * success / failure both `pushToast` and close on success.
+ * Progress + cancel (mirrors upstream's 200ms `AVAssetExportSession.progress`
+ * poll + cooperative cancel): while busy, a determinate bar tracks the
+ * `"export://progress"` event (`done`/`total` frames) and the footer's Cancel
+ * button is enabled, calling `api.cancelExport()`. A cancelled result closes
+ * the dialog with a neutral toast, distinct from the failure toast. Success /
+ * failure both still `pushToast` and close on success.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { Dropdown } from "../ui/Dropdown";
@@ -72,6 +74,15 @@ export function defaultQuality(width: number, height: number): ExportQuality {
   return "1080p";
 }
 
+/** Format an `{done, total}` progress event as a clamped whole-number percent
+ *  (0-100). `total <= 0` (not yet known, or a zero-frame timeline) reports 0
+ *  rather than dividing by zero. */
+export function progressPercent(done: number, total: number): number {
+  if (total <= 0) return 0;
+  const pct = Math.round((done / total) * 100);
+  return Math.min(100, Math.max(0, pct));
+}
+
 export function ExportDialog() {
   const t = useT();
   const open = useEditorUiStore((s) => s.exportDialogOpen);
@@ -83,14 +94,28 @@ export function ExportDialog() {
   const [quality, setQuality] = useState<ExportQuality>("1080p");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  // Guards against unsubscribing a listener from a stale/overlapping export run
+  // (belt-and-suspenders; only one export runs at a time in practice).
+  const progressUnlisten = useRef<(() => void) | null>(null);
 
   // Re-seed the resolution default from the timeline each time the dialog opens.
   useEffect(() => {
     if (open) {
       setQuality(defaultQuality(timeline.width, timeline.height));
       setError(null);
+      setProgress(null);
     }
   }, [open, timeline.width, timeline.height]);
+
+  // Safety net: unsubscribe on unmount even if a run is somehow still in
+  // flight (the normal path unsubscribes in `onExport`'s `finally`).
+  useEffect(() => {
+    return () => {
+      progressUnlisten.current?.();
+      progressUnlisten.current = null;
+    };
+  }, []);
 
   // Close on Escape (ignored while an export is in flight so the run isn't
   // abandoned mid-encode from the user's point of view).
@@ -156,6 +181,10 @@ export function ExportDialog() {
     if (typeof chosen !== "string") return; // cancelled
 
     setBusy(true);
+    setProgress(null);
+    progressUnlisten.current = await api.onExportProgress(({ done, total }) => {
+      setProgress({ done, total });
+    });
     try {
       const summary = await api.exportVideo({
         outPath: withExt(chosen, ext),
@@ -172,11 +201,28 @@ export function ExportDialog() {
       setOpen(false);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      setError(message);
-      pushToast(t("export.failed"));
+      if (message === api.EXPORT_CANCELLED_SENTINEL) {
+        // User-initiated cancel: neutral toast, not the failure path.
+        pushToast(t("export.cancelled"));
+        setOpen(false);
+      } else {
+        setError(message);
+        pushToast(t("export.failed"));
+      }
     } finally {
+      progressUnlisten.current?.();
+      progressUnlisten.current = null;
+      setProgress(null);
       setBusy(false);
     }
+  }
+
+  async function onCancel(): Promise<void> {
+    if (!busy) {
+      setOpen(false);
+      return;
+    }
+    await api.cancelExport();
   }
 
   return (
@@ -280,6 +326,38 @@ export function ExportDialog() {
             />
           </Row>
 
+          {busy && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
+              <div
+                role="progressbar"
+                aria-label={t("export.title")}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={progressPercent(progress?.done ?? 0, progress?.total ?? 0)}
+                style={{
+                  height: 6,
+                  borderRadius: "var(--radius-xs-sm)",
+                  background: "var(--bg-base)",
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    height: "100%",
+                    width: `${progressPercent(progress?.done ?? 0, progress?.total ?? 0)}%`,
+                    background: "var(--accent-primary)",
+                    transition: "width 150ms var(--ease-out-expo, ease-out)",
+                  }}
+                />
+              </div>
+              <span style={{ fontSize: "var(--fs-xs)", color: "var(--text-secondary)" }}>
+                {t("export.progress", {
+                  percent: progressPercent(progress?.done ?? 0, progress?.total ?? 0),
+                })}
+              </span>
+            </div>
+          )}
+
           {error && (
             <div
               style={{
@@ -309,8 +387,7 @@ export function ExportDialog() {
         >
           <button
             type="button"
-            disabled={busy}
-            onClick={() => setOpen(false)}
+            onClick={onCancel}
             className="hover-area"
             style={{
               height: 28,
@@ -321,8 +398,7 @@ export function ExportDialog() {
               color: "var(--text-secondary)",
               fontSize: "var(--fs-sm)",
               fontWeight: "var(--fw-medium)",
-              cursor: busy ? "default" : "pointer",
-              opacity: busy ? 0.4 : 1,
+              cursor: "pointer",
             }}
           >
             {t("export.cancel")}
