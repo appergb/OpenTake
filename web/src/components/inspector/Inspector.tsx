@@ -15,11 +15,13 @@ import {
   Info,
   Palette,
   Pipette,
+  RotateCcw,
   SlidersHorizontal,
   type LucideIcon,
 } from "lucide-react";
 import { PanelHeaderBar } from "../ui/PanelShell";
 import { Icon } from "../ui/Icon";
+import { HoverButton } from "../ui/HoverButton";
 import { ScrubbableNumberField } from "./ScrubbableNumberField";
 import { TextTab } from "./TextTab";
 import { KeyframesPanel } from "./KeyframesPanel";
@@ -374,6 +376,13 @@ function ClipInspector({
             <section>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <SectionHeader label={t("inspector.section.transform")} />
+                <HoverButton
+                  title={t("inspector.action.resetTransform")}
+                  onClick={() => edit.resetTransform([clip.id])}
+                  size={18}
+                >
+                  <Icon icon={RotateCcw} size={12} />
+                </HoverButton>
               </div>
               <Row label={t("inspector.field.scale")}>
                 <ScrubbableNumberField
