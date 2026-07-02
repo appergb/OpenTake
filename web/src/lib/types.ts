@@ -283,6 +283,14 @@ export type KeyframePayloadReq =
   | { kind: "pair"; keyframes: Keyframe<AnimPair>[] }
   | { kind: "crop"; keyframes: Keyframe<Crop>[] };
 
+/** An explicit single-value keyframe payload, tagged by `kind` (mirror of
+ *  `KeyframeValueDto`). Unlike `KeyframePayloadReq` (a whole replacement
+ *  track), this carries just the value to upsert at a given frame. */
+export type KeyframeValueReq =
+  | { kind: "scalar"; value: number }
+  | { kind: "pair"; value: AnimPair }
+  | { kind: "crop"; value: Crop };
+
 /** A project-frame range `[start, end)` for ripple delete. */
 export interface FrameRangeReq {
   start: number;
@@ -306,6 +314,13 @@ export type EditRequest =
   | { type: "setClipProperties"; clipIds: string[]; properties: ClipPropertiesReq }
   | { type: "setKeyframes"; clipId: string; property: KeyframeProperty; payload: KeyframePayloadReq }
   | { type: "stampKeyframe"; clipId: string; property: KeyframeProperty; frame: number }
+  | {
+      type: "upsertKeyframe";
+      clipId: string;
+      property: KeyframeProperty;
+      frame: number;
+      value: KeyframeValueReq;
+    }
   | { type: "removeKeyframe"; clipId: string; property: KeyframeProperty; frame: number }
   | { type: "moveKeyframe"; clipId: string; property: KeyframeProperty; fromFrame: number; toFrame: number }
   | { type: "setKeyframeInterpolation"; clipId: string; property: KeyframeProperty; frame: number; interpolation: Interpolation }
@@ -335,7 +350,8 @@ export type EditRequest =
   | { type: "renameFolder"; entries: RenameEntryReq[] }
   | { type: "deleteMedia"; assetIds: string[] }
   | { type: "deleteFolder"; folderIds: string[] }
-  | { type: "swapMedia"; clipId: string; mediaRef: string };
+  | { type: "swapMedia"; clipId: string; mediaRef: string }
+  | { type: "resetTransform"; clipIds: string[] };
 
 export interface TextEntryReq {
   trackIndex: number;

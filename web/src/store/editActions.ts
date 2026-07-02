@@ -27,6 +27,7 @@ import type {
   Interpolation,
   KeyframePayloadReq,
   KeyframeProperty,
+  KeyframeValueReq,
   MaskInput,
   MediaItem,
   RenameEntryReq,
@@ -122,6 +123,15 @@ export async function setEffects(clipIds: string[], effects: EffectInput[]) {
   await applyAndRefresh({ type: "setEffects", clipIds, effects });
 }
 
+/** Inspector Transform section "Reset" button (upstream `transformHeader`
+ *  onReset). Resets transform to identity, opacity to full, clears the
+ *  opacity/position/scale/rotation keyframe tracks, and zeroes both fades.
+ *  Crop is untouched (a separate Inspector section upstream). */
+export async function resetTransform(clipIds: string[]) {
+  if (clipIds.length === 0) return;
+  await applyAndRefresh({ type: "resetTransform", clipIds });
+}
+
 export async function linkClips(clipIds: string[]) {
   await applyAndRefresh({ type: "link", clipIds });
 }
@@ -167,6 +177,18 @@ export async function stampKeyframe(
   frame: number,
 ) {
   await applyAndRefresh({ type: "stampKeyframe", clipId, property, frame });
+}
+
+/** Upsert a keyframe at `frame` with an EXPLICIT value (not the sampled value —
+ *  that's `stampKeyframe`). The write path for editing an animated property's
+ *  value at the playhead, mirroring upstream `write<Property>`'s upsert branch. */
+export async function upsertKeyframe(
+  clipId: string,
+  property: KeyframeProperty,
+  frame: number,
+  value: KeyframeValueReq,
+) {
+  await applyAndRefresh({ type: "upsertKeyframe", clipId, property, frame, value });
 }
 
 /** Remove the keyframe at `frame`. */

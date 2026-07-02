@@ -32,7 +32,7 @@ pub use engines::{
 // --- Command layer ---
 pub use command::{
     apply, ClipEntry, ClipProperties, EditCommand, EditError, EditResult, KeyframePayload,
-    KeyframeProperty, RenameEntry, TextEntry,
+    KeyframeProperty, KeyframeValue, RenameEntry, TextEntry,
 };
 pub use editor_state::{DocSnapshot, EditorState};
 pub use id::{IdGen, SeqIdGen};

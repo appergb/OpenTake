@@ -626,6 +626,19 @@ export function volumeAt(clip: Clip, frame: number): number {
   return clip.volume * kfGain * fadeMultiplier(clip, frame);
 }
 
+/**
+ * Raw volume-track sample at `frame` as LINEAR amplitude — the authored keyframe
+ * gain WITHOUT the static outer `volume` or the fade envelope. Mirrors upstream
+ * `Clip.liveVolumeKfDb` (kept linear here to match the linear-valued volume
+ * field). Returns `null` when the track has no keyframes. The Inspector seeds
+ * its editable value from this when volume is animated, so editing upserts the
+ * authored keyframe value rather than the composited output.
+ */
+export function liveVolumeKfLinearAt(clip: Clip, frame: number): number | null {
+  if (!trackIsActive(clip.volumeTrack)) return null;
+  return linearFromDb(sampleScalarTrack(clip.volumeTrack, keyframeOffset(clip, frame), 0.0));
+}
+
 /** Sampled rotation (degrees) at `frame`. 1:1 port of `Clip::rotation_at`. */
 export function rotationAt(clip: Clip, frame: number): number {
   return sampleScalarTrack(clip.rotationTrack, keyframeOffset(clip, frame), clip.transform.rotation);
