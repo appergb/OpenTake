@@ -8,6 +8,7 @@ import { create } from "zustand";
 import { ZOOM } from "../lib/theme";
 import { useProjectStore } from "./projectStore";
 import { totalFrames } from "../lib/geometry";
+import type { CropAspectLock } from "../lib/cropOverlay";
 
 export type Panel = "agent" | "media" | "preview" | "inspector" | "timeline";
 /** Top-level app view (SPEC: 启动先进主页). The editor is one of three views;
@@ -110,6 +111,20 @@ interface UiState {
   inspectorTab: InspectorTabId;
   previewActiveTabId: string;
 
+  /** On-canvas Crop editing (T3-11). Mirrors upstream `EditorViewModel.cropEditingActive`
+   *  (EditorViewModel.swift:91): while `true`, the Preview canvas swaps its
+   *  TransformOverlay for a CropOverlay (PreviewContainerView.swift:37-41) and
+   *  the Inspector's crop toggle shows active. Reset to `false` on clip-selection
+   *  change and on leaving the Video inspector tab (InspectorView.swift:67,90) —
+   *  see `selectClips`/`setInspectorTab` below. */
+  cropEditingActive: boolean;
+  setCropEditingActive: (active: boolean) => void;
+  toggleCropEditingActive: () => void;
+  /** The crop overlay's aspect-lock preset (T3-11). Mirrors upstream
+   *  `EditorViewModel.cropAspectLock` (EditorViewModel.swift:91), default `"free"`. */
+  cropAspectLock: CropAspectLock;
+  setCropAspectLock: (preset: CropAspectLock) => void;
+
   // Media panel navigation
   mediaPanelCurrentFolderId: string | null;
   setMediaPanelCurrentFolderId: (id: string | null) => void;
@@ -210,6 +225,12 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   inspectorTab: "video",
   previewActiveTabId: "timeline",
 
+  cropEditingActive: false,
+  setCropEditingActive: (cropEditingActive) => set({ cropEditingActive }),
+  toggleCropEditingActive: () => set((s) => ({ cropEditingActive: !s.cropEditingActive })),
+  cropAspectLock: "free",
+  setCropAspectLock: (cropAspectLock) => set({ cropAspectLock }),
+
   mediaPanelCurrentFolderId: null,
   setMediaPanelCurrentFolderId: (mediaPanelCurrentFolderId) => set({ mediaPanelCurrentFolderId }),
 
@@ -247,9 +268,12 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   mediaPreviewToggleRequest: 0,
   requestMediaPreviewToggle: () => set((s) => ({ mediaPreviewToggleRequest: s.mediaPreviewToggleRequest + 1 })),
 
-  selectClips: (selectedClipIds) => set({ selectedClipIds }),
+  // Selection change ends crop editing (InspectorView.swift:60-61,90:
+  // `resolvePreferredTab()`, called on every `selectedClipIds` change,
+  // unconditionally clears `cropEditingActive`).
+  selectClips: (selectedClipIds) => set({ selectedClipIds, cropEditingActive: false }),
   clearSelection: () =>
-    set({ selectedClipIds: new Set(), isMarqueeSelecting: false }),
+    set({ selectedClipIds: new Set(), isMarqueeSelecting: false, cropEditingActive: false }),
   selectMediaAssets: (selectedMediaAssetIds) => set({ selectedMediaAssetIds }),
   clearMediaSelection: () => set({ selectedMediaAssetIds: new Set() }),
   setPreviewMedia: (previewMediaId) => set({ previewMediaId }),
@@ -309,7 +333,10 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
 
   setMediaTab: (mediaTab) => set({ mediaTab }),
   setMediaSubTab: (mediaSubTab) => set({ mediaSubTab }),
-  setInspectorTab: (inspectorTab) => set({ inspectorTab }),
+  // Leaving the Video tab ends crop editing (InspectorView.swift:66-68:
+  // `if newTab != .video { editor.cropEditingActive = false }`).
+  setInspectorTab: (inspectorTab) =>
+    set({ inspectorTab, cropEditingActive: inspectorTab === "video" ? get().cropEditingActive : false }),
 
   toast: null,
   pushToast: (message) => set({ toast: { message, id: Date.now() } }),

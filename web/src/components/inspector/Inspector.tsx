@@ -11,6 +11,7 @@
 import { useEffect, useState } from "react";
 import {
   CircleDashed,
+  Crop as CropIcon,
   Diamond,
   Info,
   Palette,
@@ -50,6 +51,7 @@ import {
   scaleKeyframeValue,
   volumeKeyframeValue,
 } from "../../lib/keyframeValue";
+import { CROP_ASPECT_LOCKS, cropForPreset, type CropAspectLock } from "../../lib/cropOverlay";
 import { FS, RADIUS, SPACE } from "../../lib/theme";
 import { useT, type TFunction } from "../../i18n";
 import type {
@@ -295,6 +297,13 @@ function ClipInspector({
     timeline.width,
     timeline.height,
   );
+  // Raw SOURCE pixel aspect (sourceWidth / sourceHeight) for the Crop aspect-lock
+  // menu — distinct from `aspect` above (canvas-normalized). 1:1 with upstream
+  // `sourcePixelAspect(for:)` (CropOverlayView.swift:207-212).
+  const sourcePixelAspect =
+    mediaItem?.width && mediaItem?.height && mediaItem.height > 0
+      ? mediaItem.width / mediaItem.height
+      : null;
 
   const commit = (props: Parameters<typeof edit.setClipProperties>[1]) =>
     edit.setClipProperties([clip.id], props);
@@ -464,6 +473,7 @@ function ClipInspector({
               animated={cropAnimated}
               activeFrame={activeFrame}
               commit={commit}
+              sourcePixelAspect={sourcePixelAspect}
               t={t}
             />
 
@@ -590,7 +600,18 @@ function PositionSection({
   );
 }
 
-// MARK: - Crop section (4 edge insets, 0–1)
+// MARK: - Crop section (on-canvas toggle + aspect preset + 4 edge insets, 0–1)
+
+const CROP_ASPECT_LABEL_KEY: Record<CropAspectLock, string> = {
+  free: "inspector.cropAspect.free",
+  original: "inspector.cropAspect.original",
+  r16x9: "inspector.cropAspect.r16x9",
+  r9x16: "inspector.cropAspect.r9x16",
+  r1x1: "inspector.cropAspect.r1x1",
+  r4x3: "inspector.cropAspect.r4x3",
+  r3x4: "inspector.cropAspect.r3x4",
+  r21x9: "inspector.cropAspect.r21x9",
+};
 
 function CropSection({
   clip,
@@ -598,6 +619,7 @@ function CropSection({
   animated,
   activeFrame,
   commit,
+  sourcePixelAspect,
   t,
 }: {
   clip: Clip;
@@ -605,8 +627,29 @@ function CropSection({
   animated: boolean;
   activeFrame: number;
   commit: (props: Parameters<typeof edit.setClipProperties>[1]) => void;
+  sourcePixelAspect: number | null;
   t: TFunction;
 }) {
+  const cropEditingActive = useEditorUiStore((s) => s.cropEditingActive);
+  const toggleCropEditingActive = useEditorUiStore((s) => s.toggleCropEditingActive);
+  const cropAspectLock = useEditorUiStore((s) => s.cropAspectLock);
+  const setCropAspectLock = useEditorUiStore((s) => s.setCropAspectLock);
+
+  // 1:1 port of `applyCropPreset(_:on:)` (InspectorView.swift:851-863): `free`
+  // only updates the lock state (no crop mutation — the user keeps the current
+  // shape and drags freely); `original` resets to the identity crop; the sized
+  // presets commit the largest centered crop matching that pixel aspect.
+  const applyCropPreset = (preset: CropAspectLock) => {
+    setCropAspectLock(preset);
+    const next = cropForPreset(preset, sourcePixelAspect);
+    if (next === null) return;
+    if (animated) {
+      void edit.upsertKeyframe(clip.id, "crop", activeFrame, { kind: "crop", value: next });
+    } else {
+      commit({ crop: next });
+    }
+  };
+
   const commitEdge = (edge: keyof Crop, v: number) => {
     const next: Crop = { ...clip.crop, [edge]: v };
     commit({ crop: next });
@@ -637,6 +680,37 @@ function CropSection({
   return (
     <section>
       <SectionHeader label={t("inspector.section.crop")} />
+      <Row label={t("inspector.field.cropEditOnCanvas")}>
+        <HoverButton
+          title={t(
+            cropEditingActive ? "inspector.action.cropEditStop" : "inspector.action.cropEditStart",
+          )}
+          active={cropEditingActive}
+          onClick={toggleCropEditingActive}
+          size={20}
+        >
+          <Icon icon={CropIcon} size={13} />
+        </HoverButton>
+        <select
+          value={cropAspectLock}
+          onChange={(e) => applyCropPreset(e.target.value as CropAspectLock)}
+          title={t("inspector.field.cropAspect")}
+          style={{
+            fontSize: "var(--fs-sm)",
+            color: "var(--accent-primary)",
+            background: "var(--bg-raised)",
+            border: "var(--bw-thin) solid var(--border-primary)",
+            borderRadius: "var(--radius-xs)",
+            padding: "1px 4px",
+          }}
+        >
+          {CROP_ASPECT_LOCKS.map((preset) => (
+            <option key={preset} value={preset}>
+              {t(CROP_ASPECT_LABEL_KEY[preset])}
+            </option>
+          ))}
+        </select>
+      </Row>
       {renderEdge(t("inspector.field.cropLeft"), "left", sampledCrop.left)}
       {renderEdge(t("inspector.field.cropTop"), "top", sampledCrop.top)}
       {renderEdge(t("inspector.field.cropRight"), "right", sampledCrop.right)}

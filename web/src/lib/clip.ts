@@ -763,3 +763,34 @@ export function findSelectedVisualClip(
   }
   return null;
 }
+
+/**
+ * The single clip the on-canvas Crop overlay should target, or `null` if it
+ * shouldn't render. 1:1 port of upstream `CropOverlayView.selectedClip`
+ * (CropOverlayView.swift:256-269) — a DIFFERENT match rule from
+ * `findSelectedVisualClip`/`TransformOverlayView.selectedClip` above: it also
+ * excludes text clips (`clip.mediaType != .text` — text has no decoded source
+ * to crop) and, walking every non-audio track's clips, returns `null` outright
+ * if MORE THAN ONE matching (selected, non-text, non-audio-track) clip is
+ * found, rather than "first match wins". As with `findSelectedVisualClip`,
+ * OpenTake tightens upstream's `!selectedClipIds.isEmpty` to exactly one clip
+ * selected total (a strict subset, never wider than upstream).
+ */
+export function findCropEditingClip(
+  timeline: Timeline,
+  selectedClipIds: Set<string> | undefined,
+): Clip | null {
+  if (!selectedClipIds || selectedClipIds.size !== 1) return null;
+  const [id] = selectedClipIds;
+  let match: Clip | null = null;
+  for (const track of timeline.tracks) {
+    if (track.type === "audio") continue;
+    for (const c of track.clips) {
+      if (c.id === id && c.mediaType !== "text") {
+        if (match !== null) return null;
+        match = c;
+      }
+    }
+  }
+  return match;
+}
