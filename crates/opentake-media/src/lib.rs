@@ -71,9 +71,17 @@ pub use waveform::{waveform, waveform_cached, waveform_sample_count};
 
 pub use transcribe::{
     cache::TranscriptCache,
+    model::{self as whisper_model, WhisperModel, DEFAULT_MODEL as DEFAULT_WHISPER_MODEL},
     search::{search as search_spoken, SpokenHit},
+    timeline::{
+        span_frames, timeline_transcript, ClipFragment, ClipTranscript, TimelineTranscript,
+        WordRow, TIMELINE_MAX_WORDS,
+    },
     TranscribeOptions, Transcriber, TranscriptionResult, TranscriptionSegment, TranscriptionWord,
 };
+
+#[cfg(feature = "whisper-backend")]
+pub use transcribe::whisper::WhisperTranscriber;
 
 pub use search::{
     rank as search_visual_ranked, AssetIndex, CancelToken, Embedder, EmbedderSpec, Hit,

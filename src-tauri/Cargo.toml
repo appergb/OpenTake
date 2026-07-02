@@ -30,7 +30,11 @@ opentake-core = { workspace = true }
 opentake-project = { workspace = true }
 opentake-ops = { workspace = true }
 opentake-domain = { workspace = true }
-opentake-media = { workspace = true }
+# Transcription is ON for the shipped app: `whisper-backend` compiles the
+# whisper.cpp CPU backend (via cmake — preinstalled on GitHub runners, no CUDA),
+# `model-download` pulls the ggml model over HTTPS with SHA-1 verification. Both
+# stay optional at the opentake-media level (its own tests run without them).
+opentake-media = { workspace = true, features = ["whisper-backend", "model-download"] }
 opentake-render = { workspace = true }
 opentake-gen = { workspace = true }
 opentake-agent = { workspace = true }

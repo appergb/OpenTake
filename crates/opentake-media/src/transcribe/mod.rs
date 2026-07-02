@@ -8,7 +8,9 @@
 
 pub mod cache;
 pub mod locale;
+pub mod model;
 pub mod search;
+pub mod timeline;
 
 #[cfg(feature = "whisper-backend")]
 pub mod whisper;

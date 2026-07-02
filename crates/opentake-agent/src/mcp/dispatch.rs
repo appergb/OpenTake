@@ -36,7 +36,9 @@ use serde_json::Value;
 
 use crate::mcp::core_handle::CoreHandle;
 use crate::mcp::gen_catalog;
-use crate::mcp::media_bridge::{frame_to_block, ImportSource, InspectResult, MediaBridge};
+use crate::mcp::media_bridge::{
+    frame_to_block, ImportSource, InspectResult, MediaBridge, TranscriptSource,
+};
 use crate::plugin::registry::PluginRegistry;
 use crate::signal::engine;
 use crate::signal::rules::OpContext;
@@ -206,17 +208,17 @@ impl Dispatcher {
             ToolName::SmartReframe => self.smart_reframe(args),
             ToolName::TightenSilences => self.tighten_silences(args, before),
 
-            // --- Render + import (wired to the injected MediaBridge) ---
+            // --- Render + import + transcript (wired to the injected MediaBridge) ---
             ToolName::InspectTimeline => self.inspect_timeline(args, before),
             ToolName::ImportMedia => self.import_media(args, manifest),
+            ToolName::GetTranscript => self.get_transcript(args, before, manifest),
 
             // --- Not yet implementable in this phase (honest stubs) ---
-            // Media reads (inspect/transcript/search) still need the analysis
-            // backend; generation/upscale need the async GenClient + BYOK auth.
+            // Media reads (inspect/search) still need the analysis backend;
+            // generation/upscale need the async GenClient + BYOK auth.
             // Motion graphics (#34) now routes through the planned Motion Canvas
             // plugin: render mp4 -> import media -> place clip.
             ToolName::InspectMedia
-            | ToolName::GetTranscript
             | ToolName::SearchMedia
             | ToolName::GenerateVideo
             | ToolName::GenerateImage
@@ -401,6 +403,139 @@ impl Dispatcher {
             .import_media(import_source, a.name.clone(), a.folder_id.clone())
             .map_err(|e| ToolError::new(e.message))?;
         Ok(ToolResult::ok(outcome.message))
+    }
+
+    /// `get_transcript`: the live timeline transcript in project frames. Walks
+    /// every caption-eligible audio/video clip, transcribes each unique source
+    /// once (cached, via the [`MediaBridge`]), maps each word through the clip's
+    /// trim/speed/position into project frames, and emits compact
+    /// `[text, startFrame, endFrame]` rows per clip with paging + optional
+    /// `clipId` scoping. 1:1 port of `ToolExecutor+Timeline.getTranscript`
+    /// (`:548-628`): the frag selection + window validation + JSON envelope here;
+    /// the pure word→frame mapping in `opentake_media::timeline_transcript`; the
+    /// transcription (whisper + cache) behind the bridge.
+    fn get_transcript(
+        &self,
+        args: &Value,
+        before: &Timeline,
+        manifest: &MediaManifest,
+    ) -> Result<ToolResult, ToolError> {
+        let a: GetTranscriptArgs = decode_tool_args(args, "")?;
+        let fps = before.fps;
+
+        // Window validation (upstream: startFrame must be < endFrame).
+        if let (Some(s), Some(e)) = (a.start_frame, a.end_frame) {
+            if s >= e {
+                return Ok(ToolResult::error(format!(
+                    "startFrame ({s}) must be less than endFrame ({e})"
+                )));
+            }
+        }
+
+        // Caption-eligible fragments in timeline order (mirrors `captionTargets`).
+        let frags = caption_target_fragments(before, manifest, a.clip_id.as_deref());
+        if a.clip_id.is_some() && frags.is_empty() {
+            return Ok(ToolResult::error(format!(
+                "Clip {} not found, or it has no audio/video to transcribe.",
+                a.clip_id.as_deref().unwrap_or("")
+            )));
+        }
+        if frags.is_empty() {
+            // No audio/video on the timeline — an empty transcript, not an error
+            // (upstream returns an empty `clips` array).
+            let out = serde_json::json!({
+                "fps": fps,
+                "timing": "projectFrames",
+                "wordFormat": ["text", "start", "end"],
+                "clips": [],
+            });
+            return Ok(ToolResult::ok(out.to_string()));
+        }
+
+        // Transcribe each UNIQUE source once (cached), via the bridge. Skip —
+        // don't fail — on per-source errors, collecting `{file, reason}`.
+        let unique_sources = unique_transcript_sources(&frags);
+        let Some(bridge) = self.bridge.as_ref() else {
+            return Ok(ToolResult::error(
+                "get_transcript: transcription is not available in this build",
+            ));
+        };
+        let source_results = bridge
+            .transcribe_sources(&unique_sources)
+            .map_err(|e| ToolError::new(e.message))?;
+
+        // Index transcripts + collect skips by media_ref.
+        let mut transcripts: BTreeMap<String, opentake_media::TranscriptionResult> =
+            BTreeMap::new();
+        let mut skipped: Vec<serde_json::Value> = Vec::new();
+        for r in source_results {
+            if let Some(t) = r.transcript {
+                transcripts.insert(r.media_ref, t);
+            } else if let Some(reason) = r.error {
+                let file = manifest
+                    .entries
+                    .iter()
+                    .find(|e| e.id == r.media_ref)
+                    .map(|e| e.name.clone())
+                    .unwrap_or_else(|| r.media_ref.clone());
+                skipped.push(serde_json::json!({ "file": file, "reason": reason }));
+            }
+        }
+
+        // Assemble via the pure mapper: attach each frag's transcript by media_ref.
+        let mapper_frags: Vec<opentake_media::ClipFragment<'_>> = frags
+            .iter()
+            .map(|f| opentake_media::ClipFragment {
+                clip_id: f.clip.id.clone(),
+                track_index: f.track_index,
+                clip: f.clip,
+                transcript: transcripts.get(&f.clip.media_ref),
+            })
+            .collect();
+        let assembled =
+            opentake_media::timeline_transcript(mapper_frags, fps, a.start_frame, a.end_frame);
+
+        // Serialize the upstream envelope: clips with nested compact word rows.
+        let clips_json: Vec<serde_json::Value> = assembled
+            .clips
+            .iter()
+            .map(|c| {
+                let words: Vec<serde_json::Value> = c
+                    .words
+                    .iter()
+                    .map(|w| serde_json::json!([w.text, w.start_frame, w.end_frame]))
+                    .collect();
+                serde_json::json!({
+                    "clipId": c.clip_id,
+                    "trackIndex": c.track_index,
+                    "startFrame": c.start_frame,
+                    "endFrame": c.end_frame,
+                    "words": words,
+                })
+            })
+            .collect();
+
+        let mut out = serde_json::json!({
+            "fps": fps,
+            "timing": "projectFrames",
+            "wordFormat": ["text", "start", "end"],
+            "clips": clips_json,
+        });
+        if assembled.total_words > opentake_media::TIMELINE_MAX_WORDS {
+            out["totalWords"] = serde_json::json!(assembled.total_words);
+            if let Some(next) = assembled.next_start_frame {
+                out["nextStartFrame"] = serde_json::json!(next);
+                out["wordsNote"] = serde_json::json!(format!(
+                    "First {} of {} words. Continue with startFrame = nextStartFrame.",
+                    opentake_media::TIMELINE_MAX_WORDS,
+                    assembled.total_words
+                ));
+            }
+        }
+        if !skipped.is_empty() {
+            out["skipped"] = serde_json::json!(skipped);
+        }
+        Ok(ToolResult::ok(out.to_string()))
     }
 
     // MARK: - Editing tool bodies
@@ -1183,6 +1318,110 @@ impl Dispatcher {
 /// Resolve a clip's media type + has-audio from the manifest entry by id.
 /// Unknown refs fall back to video / no-audio; the ops layer then validates the
 /// id against the track and rejects an incompatible / missing asset.
+/// One caption-eligible clip located on the timeline: a borrowed [`Clip`] plus
+/// its track index and whether its source is video (drives audio extraction).
+/// The `get_transcript` body maps these through the pure timeline transcript
+/// assembler.
+struct TranscriptFrag<'a> {
+    clip: &'a opentake_domain::Clip,
+    track_index: usize,
+    is_video: bool,
+}
+
+/// Whether a clip can be transcribed, mirroring upstream `captionCanTranscribe`:
+/// its media type must be video/audio, and (when the referenced asset is known)
+/// the asset must be audio, or video WITH an audio track. An unknown asset is
+/// permissively eligible (upstream returns `true` when the asset is absent).
+fn caption_can_transcribe(clip: &opentake_domain::Clip, manifest: &MediaManifest) -> bool {
+    use opentake_domain::ClipType;
+    if !matches!(clip.media_type, ClipType::Video | ClipType::Audio) {
+        return false;
+    }
+    match manifest.entries.iter().find(|e| e.id == clip.media_ref) {
+        None => true,
+        Some(entry) => {
+            entry.kind == ClipType::Audio
+                || (entry.kind == ClipType::Video && entry.has_audio.unwrap_or(false))
+        }
+    }
+}
+
+/// Select the timeline's caption-eligible clips in `start_frame` order, mirroring
+/// upstream `captionTargets(in:)`: keep audio/video clips that can be transcribed,
+/// but drop a **video** clip whose `linkGroupId` also has a linked **audio** clip
+/// (the audio partner is transcribed instead, so the video isn't double-counted).
+/// When `clip_filter` is set, restrict to that single clip id. Pure over the
+/// snapshot — unit-tested below.
+fn caption_target_fragments<'a>(
+    timeline: &'a Timeline,
+    manifest: &MediaManifest,
+    clip_filter: Option<&str>,
+) -> Vec<TranscriptFrag<'a>> {
+    use opentake_domain::ClipType;
+
+    // Link groups that contain at least one audio clip anywhere on the timeline.
+    let audio_link_groups: std::collections::BTreeSet<&str> = timeline
+        .tracks
+        .iter()
+        .flat_map(|t| &t.clips)
+        .filter(|c| c.media_type == ClipType::Audio)
+        .filter_map(|c| c.link_group_id.as_deref())
+        .collect();
+
+    let mut frags: Vec<TranscriptFrag<'a>> = Vec::new();
+    for (track_index, track) in timeline.tracks.iter().enumerate() {
+        for clip in &track.clips {
+            if let Some(filter) = clip_filter {
+                if clip.id != filter {
+                    continue;
+                }
+            }
+            if !caption_can_transcribe(clip, manifest) {
+                continue;
+            }
+            // Drop a video clip whose link group also has audio (transcribe the
+            // audio partner instead).
+            if clip.media_type == ClipType::Video {
+                if let Some(gid) = clip.link_group_id.as_deref() {
+                    if audio_link_groups.contains(gid) {
+                        continue;
+                    }
+                }
+            }
+            let is_video = match manifest.entries.iter().find(|e| e.id == clip.media_ref) {
+                Some(entry) => entry.kind == ClipType::Video,
+                // No asset entry: fall back to the clip's own media type (upstream
+                // `captionUsesVideoAudioExtraction` treats an unknown asset as
+                // video when the clip's mediaType is video).
+                None => clip.media_type == ClipType::Video,
+            };
+            frags.push(TranscriptFrag {
+                clip,
+                track_index,
+                is_video,
+            });
+        }
+    }
+    frags.sort_by_key(|f| f.clip.start_frame);
+    frags
+}
+
+/// Dedup fragments down to their distinct source assets for transcription
+/// (upstream `Set(frags.map(\.url))`). First-seen `is_video` wins per media_ref.
+fn unique_transcript_sources(frags: &[TranscriptFrag<'_>]) -> Vec<TranscriptSource> {
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for f in frags {
+        if seen.insert(f.clip.media_ref.as_str()) {
+            out.push(TranscriptSource {
+                media_ref: f.clip.media_ref.clone(),
+                is_video: f.is_video,
+            });
+        }
+    }
+    out
+}
+
 fn resolve_media_kind(
     manifest: &MediaManifest,
     media_ref: &str,
@@ -2841,8 +3080,10 @@ mod tests {
 
     use crate::mcp::media_bridge::{
         BridgeError, ImportOutcome, ImportSource, InspectResult, InspectedFrame, MediaBridge,
+        TranscriptSource, TranscriptSourceResult,
     };
     use crate::tools::result::Block;
+    use opentake_media::{TranscriptionResult, TranscriptionWord};
 
     /// One recorded `import_media` forward: a `kind:detail` tag plus the name /
     /// folder the dispatcher passed through.
@@ -2858,9 +3099,62 @@ mod tests {
     struct FakeBridge {
         inspect_calls: Mutex<Vec<(Vec<i32>, u32)>>,
         import_calls: Mutex<Vec<ImportCall>>,
+        /// Canned transcripts keyed by media_ref (source-seconds timings).
+        transcripts: Mutex<std::collections::HashMap<String, TranscriptionResult>>,
+        /// media_refs the bridge should report as skipped `{reason}`.
+        transcribe_errors: Mutex<std::collections::HashMap<String, String>>,
+        /// When set, `transcribe_sources` returns this hard error (e.g. model
+        /// not installed), mirroring the real bridge's backend-load failure.
+        transcribe_hard_error: Mutex<Option<String>>,
+        /// Records the media_refs passed to the last `transcribe_sources` call,
+        /// so tests can assert dedup.
+        transcribe_calls: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl FakeBridge {
+        fn with_transcript(self, media_ref: &str, t: TranscriptionResult) -> Self {
+            self.transcripts
+                .lock()
+                .unwrap()
+                .insert(media_ref.to_string(), t);
+            self
+        }
     }
 
     impl MediaBridge for FakeBridge {
+        fn transcribe_sources(
+            &self,
+            sources: &[TranscriptSource],
+        ) -> Result<Vec<TranscriptSourceResult>, BridgeError> {
+            self.transcribe_calls
+                .lock()
+                .unwrap()
+                .push(sources.iter().map(|s| s.media_ref.clone()).collect());
+            if let Some(err) = self.transcribe_hard_error.lock().unwrap().clone() {
+                return Err(BridgeError::new(err));
+            }
+            let transcripts = self.transcripts.lock().unwrap();
+            let errors = self.transcribe_errors.lock().unwrap();
+            Ok(sources
+                .iter()
+                .map(|s| {
+                    if let Some(reason) = errors.get(&s.media_ref) {
+                        TranscriptSourceResult {
+                            media_ref: s.media_ref.clone(),
+                            transcript: None,
+                            error: Some(reason.clone()),
+                        }
+                    } else {
+                        TranscriptSourceResult {
+                            media_ref: s.media_ref.clone(),
+                            transcript: transcripts.get(&s.media_ref).cloned(),
+                            error: None,
+                        }
+                    }
+                })
+                .collect())
+        }
+
         fn inspect_timeline(
             &self,
             frames: &[i32],
@@ -3174,5 +3468,280 @@ mod tests {
             bridge.import_calls.lock().unwrap()[0].tag,
             "bytes:image/png"
         );
+    }
+
+    // MARK: - get_transcript (timeline transcript via the MediaBridge)
+
+    fn word(text: &str, start: f64, end: f64) -> TranscriptionWord {
+        TranscriptionWord {
+            text: text.into(),
+            start: Some(start),
+            end: Some(end),
+        }
+    }
+
+    fn transcript(words: Vec<TranscriptionWord>) -> TranscriptionResult {
+        TranscriptionResult {
+            text: String::new(),
+            language: Some("en".into()),
+            words,
+            segments: vec![],
+        }
+    }
+
+    /// A dispatcher whose timeline has one audio clip (media `aud`, at frame 0,
+    /// duration 60, identity) on an audio track, plus a `FakeBridge` seeded with
+    /// `aud`'s transcript. Returns both. `has_audio` audio entry makes the clip
+    /// caption-eligible.
+    fn transcript_dispatcher(t: TranscriptionResult) -> (Dispatcher, Arc<FakeBridge>) {
+        let mut tl = Timeline::new();
+        tl.fps = 30;
+        let mut track = opentake_domain::Track::new("track-a", ClipType::Audio);
+        let mut clip = Clip::new("clip-a", "aud", 0, 60);
+        clip.media_type = ClipType::Audio;
+        track.clips.push(clip);
+        tl.tracks.push(track);
+        let mut m = MediaManifest::new();
+        m.entries.push(audio_entry("aud", "Voice"));
+        let handle = Arc::new(StateHandle::new(tl, m));
+        let bridge = Arc::new(FakeBridge::default().with_transcript("aud", t));
+        let d = Dispatcher::with_bridge(
+            handle,
+            Arc::new(RwLock::new(PluginRegistry::new())),
+            Some(bridge.clone() as Arc<dyn MediaBridge>),
+        );
+        (d, bridge)
+    }
+
+    #[test]
+    fn get_transcript_maps_words_to_project_frames() {
+        let (d, _b) = transcript_dispatcher(transcript(vec![
+            word("hello", 0.0, 0.5),
+            word("world", 0.5, 1.0),
+        ]));
+        let r = d.dispatch("get_transcript", serde_json::json!({}));
+        assert!(!r.is_error, "{}", r.text_joined());
+        let v = first_json(&r);
+        assert_eq!(v["fps"], 30);
+        assert_eq!(v["timing"], "projectFrames");
+        assert_eq!(v["wordFormat"], serde_json::json!(["text", "start", "end"]));
+        let clips = v["clips"].as_array().unwrap();
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0]["clipId"], "clip-a");
+        assert_eq!(clips[0]["trackIndex"], 0);
+        assert_eq!(clips[0]["startFrame"], 0);
+        assert_eq!(clips[0]["endFrame"], 60);
+        // hello 0..0.5s → 0..15, world 0.5..1.0s → 15..30 (30 fps, identity clip).
+        assert_eq!(
+            clips[0]["words"],
+            serde_json::json!([["hello", 0, 15], ["world", 15, 30]])
+        );
+    }
+
+    #[test]
+    fn get_transcript_without_bridge_reports_unavailable() {
+        // Same audio timeline but no bridge wired → honest "not available".
+        let mut tl = Timeline::new();
+        tl.fps = 30;
+        let mut track = opentake_domain::Track::new("track-a", ClipType::Audio);
+        let mut clip = Clip::new("clip-a", "aud", 0, 60);
+        clip.media_type = ClipType::Audio;
+        track.clips.push(clip);
+        tl.tracks.push(track);
+        let mut m = MediaManifest::new();
+        m.entries.push(audio_entry("aud", "Voice"));
+        let d = dispatcher_with(Arc::new(StateHandle::new(tl, m)));
+        let r = d.dispatch("get_transcript", serde_json::json!({}));
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("not available"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn get_transcript_empty_timeline_returns_empty_clips_not_error() {
+        let d = dispatcher_with_fake_bridge(); // video-only, has_audio=false
+        let (d, _b) = d;
+        let r = d.dispatch("get_transcript", serde_json::json!({}));
+        assert!(!r.is_error, "{}", r.text_joined());
+        let v = first_json(&r);
+        assert_eq!(v["clips"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn get_transcript_clip_filter_unknown_errors() {
+        let (d, _b) = transcript_dispatcher(transcript(vec![word("hi", 0.0, 0.5)]));
+        let r = d.dispatch("get_transcript", serde_json::json!({ "clipId": "ghost" }));
+        assert!(r.is_error);
+        assert!(r.text_joined().contains("not found"), "{}", r.text_joined());
+    }
+
+    #[test]
+    fn get_transcript_clip_filter_scopes_to_one_clip() {
+        let (d, _b) = transcript_dispatcher(transcript(vec![word("hi", 0.0, 0.5)]));
+        let r = d.dispatch("get_transcript", serde_json::json!({ "clipId": "clip-a" }));
+        assert!(!r.is_error, "{}", r.text_joined());
+        let v = first_json(&r);
+        assert_eq!(v["clips"].as_array().unwrap()[0]["clipId"], "clip-a");
+    }
+
+    #[test]
+    fn get_transcript_window_paging_filters_words() {
+        // words at 0..0.5s→0..15, 1..1.5s→30..45, 2..2.5s→60..75.
+        let (d, _b) = transcript_dispatcher(transcript(vec![
+            word("a", 0.0, 0.5),
+            word("b", 1.0, 1.5),
+            word("c", 2.0, 2.5),
+        ]));
+        // Need a long-enough clip for word c to be visible; extend the clip.
+        // (The default clip is 60 frames = 2.0s at 30fps, so c's midpoint 2.25s
+        // would be out; use a window that keeps b only.)
+        let r = d.dispatch(
+            "get_transcript",
+            serde_json::json!({ "startFrame": 30, "endFrame": 60 }),
+        );
+        assert!(!r.is_error, "{}", r.text_joined());
+        let v = first_json(&r);
+        let words = v["clips"].as_array().unwrap()[0]["words"]
+            .as_array()
+            .unwrap();
+        assert_eq!(words.len(), 1);
+        assert_eq!(words[0][0], "b");
+    }
+
+    #[test]
+    fn get_transcript_window_start_ge_end_errors() {
+        let (d, _b) = transcript_dispatcher(transcript(vec![word("a", 0.0, 0.5)]));
+        let r = d.dispatch(
+            "get_transcript",
+            serde_json::json!({ "startFrame": 50, "endFrame": 20 }),
+        );
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("must be less than"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn get_transcript_skipped_source_reported_not_fatal() {
+        let (d, bridge) = transcript_dispatcher(transcript(vec![word("a", 0.0, 0.5)]));
+        // Force the source to be skipped with a reason.
+        bridge
+            .transcribe_errors
+            .lock()
+            .unwrap()
+            .insert("aud".into(), "decode failed".into());
+        let r = d.dispatch("get_transcript", serde_json::json!({}));
+        assert!(!r.is_error, "{}", r.text_joined());
+        let v = first_json(&r);
+        assert_eq!(v["clips"].as_array().unwrap().len(), 0);
+        let skipped = v["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0]["file"], "Voice"); // asset display name
+        assert_eq!(skipped[0]["reason"], "decode failed");
+    }
+
+    #[test]
+    fn get_transcript_hard_error_surfaces_as_tool_error() {
+        let (d, bridge) = transcript_dispatcher(transcript(vec![word("a", 0.0, 0.5)]));
+        *bridge.transcribe_hard_error.lock().unwrap() =
+            Some("transcription model not installed".into());
+        let r = d.dispatch("get_transcript", serde_json::json!({}));
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("model not installed"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn get_transcript_rejects_unknown_arg() {
+        let (d, _b) = transcript_dispatcher(transcript(vec![word("a", 0.0, 0.5)]));
+        let r = d.dispatch("get_transcript", serde_json::json!({ "bogus": 1 }));
+        assert!(r.is_error);
+    }
+
+    // MARK: - caption target selection (pure)
+
+    #[test]
+    fn caption_targets_include_audio_and_video_with_audio() {
+        let mut tl = Timeline::new();
+        let mut vt = opentake_domain::Track::new("v", ClipType::Video);
+        vt.clips.push(Clip::new("v-with-audio", "vid_a", 0, 60));
+        vt.clips.push(Clip::new("v-silent", "vid_silent", 60, 60));
+        tl.tracks.push(vt);
+        let mut at = opentake_domain::Track::new("a", ClipType::Audio);
+        let mut ac = Clip::new("a1", "aud", 0, 60);
+        ac.media_type = ClipType::Audio;
+        at.clips.push(ac);
+        tl.tracks.push(at);
+
+        let mut m = MediaManifest::new();
+        let mut v_with = entry("vid_a", "V");
+        v_with.has_audio = Some(true);
+        m.entries.push(v_with);
+        m.entries.push(entry("vid_silent", "Silent")); // has_audio=false
+        m.entries.push(audio_entry("aud", "A"));
+
+        let frags = caption_target_fragments(&tl, &m, None);
+        let ids: Vec<&str> = frags.iter().map(|f| f.clip.id.as_str()).collect();
+        assert!(ids.contains(&"v-with-audio"));
+        assert!(ids.contains(&"a1"));
+        assert!(!ids.contains(&"v-silent")); // no audio track → not eligible
+    }
+
+    #[test]
+    fn caption_targets_drop_video_when_linked_audio_present() {
+        // A video clip and an audio clip share a link group → the video is
+        // dropped (its audio partner is transcribed instead).
+        let mut tl = Timeline::new();
+        let mut vt = opentake_domain::Track::new("v", ClipType::Video);
+        let mut vc = Clip::new("v1", "vid_a", 0, 60);
+        vc.link_group_id = Some("grp".into());
+        vt.clips.push(vc);
+        tl.tracks.push(vt);
+        let mut at = opentake_domain::Track::new("a", ClipType::Audio);
+        let mut ac = Clip::new("a1", "aud", 0, 60);
+        ac.media_type = ClipType::Audio;
+        ac.link_group_id = Some("grp".into());
+        at.clips.push(ac);
+        tl.tracks.push(at);
+
+        let mut m = MediaManifest::new();
+        let mut v_with = entry("vid_a", "V");
+        v_with.has_audio = Some(true);
+        m.entries.push(v_with);
+        m.entries.push(audio_entry("aud", "A"));
+
+        let frags = caption_target_fragments(&tl, &m, None);
+        let ids: Vec<&str> = frags.iter().map(|f| f.clip.id.as_str()).collect();
+        assert!(!ids.contains(&"v1"), "linked video should be dropped");
+        assert!(ids.contains(&"a1"));
+    }
+
+    #[test]
+    fn unique_sources_dedup_by_media_ref() {
+        // Two clips referencing the same audio asset dedup to one source.
+        let mut tl = Timeline::new();
+        let mut at = opentake_domain::Track::new("a", ClipType::Audio);
+        for (i, start) in [(0, 0), (1, 60)] {
+            let mut c = Clip::new(format!("a{i}"), "aud", start, 60);
+            c.media_type = ClipType::Audio;
+            at.clips.push(c);
+        }
+        tl.tracks.push(at);
+        let mut m = MediaManifest::new();
+        m.entries.push(audio_entry("aud", "A"));
+        let frags = caption_target_fragments(&tl, &m, None);
+        assert_eq!(frags.len(), 2);
+        let sources = unique_transcript_sources(&frags);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].media_ref, "aud");
+        assert!(!sources[0].is_video);
     }
 }
