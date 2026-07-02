@@ -55,9 +55,10 @@ default = []
 ort-backend = ["dep:ort"]
 # Real on-device transcription via whisper.cpp (compiles native C++ on enable).
 whisper-backend = ["dep:whisper-rs"]
-# Model weight download/verify/unzip (reqwest + zip). Off by default so the
-# default dependency tree carries no HTTP/TLS stack.
-model-download = ["dep:reqwest", "dep:zip", "dep:futures-util"]
+# Model weight download/verify/unzip (reqwest + zip + sha1). Off by default so
+# the default dependency tree carries no HTTP/TLS stack. `sha1` verifies whisper
+# ggml downloads against whisper.cpp's published SHA-1 checksums.
+model-download = ["dep:reqwest", "dep:zip", "dep:futures-util", "dep:sha1"]
 
 [dependencies.ort]
 version = "=2.0.0-rc.10"
@@ -84,6 +85,10 @@ optional = true
 
 [dependencies.futures-util]
 version = "0.3"
+optional = true
+
+[dependencies.sha1]
+version = "0.10"
 optional = true
 
 [dev-dependencies]

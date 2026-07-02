@@ -513,7 +513,11 @@ pub struct GetTranscriptArgs {
     pub clip_id: Option<String>,
 }
 impl ToolArgs for GetTranscriptArgs {
-    const ALLOWED_KEYS: &'static [&'static str] = &["startFrame", "endFrame", "clipId"];
+    // `wordTimestamps` is accepted for parity with upstream's validator
+    // (`getTranscriptAllowedKeys`) even though get_transcript always emits
+    // compact word rows and ignores it; an unknown key is still rejected.
+    const ALLOWED_KEYS: &'static [&'static str] =
+        &["startFrame", "endFrame", "clipId", "wordTimestamps"];
 }
 
 // --- inspect_timeline ---

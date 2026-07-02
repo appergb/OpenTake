@@ -27,6 +27,7 @@ use base64::Engine as _;
 use opentake_agent::mcp::core_handle::{AppCoreHandle, CoreHandle};
 use opentake_agent::mcp::media_bridge::{
     BridgeError, ImportOutcome, ImportSource, InspectResult, InspectedFrame, MediaBridge,
+    TranscriptSource, TranscriptSourceResult,
 };
 use opentake_agent::mcp::server;
 use opentake_agent::plugin::registry::PluginRegistry;
@@ -121,6 +122,80 @@ impl MediaBridge for TauriMediaBridge {
         let manifest = self.core.media();
         let project_dir = self.core.project_dir();
         composite_frames_jpeg(&timeline, &manifest, &project_dir, frames, max_longest_edge)
+    }
+
+    fn transcribe_sources(
+        &self,
+        sources: &[TranscriptSource],
+    ) -> Result<Vec<TranscriptSourceResult>, BridgeError> {
+        // Per-source, skip-don't-fail (mirrors upstream's per-URL `catch { skipped
+        // … }` loop): a missing file, an un-installed model, or a decode error
+        // skips just that source with a reason — cached sources still return their
+        // transcript, so a mostly-cached timeline never loses results to one bad
+        // (or not-yet-transcribable) clip. The whisper backend loads lazily on the
+        // first cache miss and is shared across the batch; a model-not-installed
+        // failure is memoized so we don't retry the load per source.
+        enum Backend {
+            /// Not attempted yet.
+            Unloaded,
+            /// Loaded and ready.
+            Ready(opentake_media::WhisperTranscriber),
+            /// Load failed (e.g. model not installed); reason skipped per source.
+            Failed(String),
+        }
+        let mut backend = Backend::Unloaded;
+        let mut out = Vec::with_capacity(sources.len());
+        for src in sources {
+            let skip = |reason: String| TranscriptSourceResult {
+                media_ref: src.media_ref.clone(),
+                transcript: None,
+                error: Some(reason),
+            };
+            // Resolve the asset path; a missing/offline source is skipped.
+            let path = match crate::transcribe::resolve_asset(&self.core, &src.media_ref) {
+                Ok((path, _is_video)) => path,
+                Err(reason) => {
+                    out.push(skip(reason));
+                    continue;
+                }
+            };
+            // Cached full transcript short-circuits before the backend loads.
+            if let Some(cached) =
+                opentake_media::transcribe::cache::cached_on_disk(self.engine.cache_root(), &path)
+            {
+                out.push(TranscriptSourceResult {
+                    media_ref: src.media_ref.clone(),
+                    transcript: Some(cached),
+                    error: None,
+                });
+                continue;
+            }
+            // Lazily load the backend on the first cache miss; memoize failure.
+            if let Backend::Unloaded = backend {
+                backend = match crate::transcribe::load_backend(&self.engine) {
+                    Ok(b) => Backend::Ready(b),
+                    Err(e) => Backend::Failed(e),
+                };
+            }
+            let b = match &backend {
+                Backend::Ready(b) => b,
+                Backend::Failed(reason) => {
+                    out.push(skip(reason.clone()));
+                    continue;
+                }
+                Backend::Unloaded => unreachable!("backend was just loaded above"),
+            };
+            let cache = opentake_media::TranscriptCache::new(self.engine.cache_root());
+            match cache.transcript(&path, src.is_video, None, b) {
+                Ok(t) => out.push(TranscriptSourceResult {
+                    media_ref: src.media_ref.clone(),
+                    transcript: Some(t),
+                    error: None,
+                }),
+                Err(e) => out.push(skip(e.to_string())),
+            }
+        }
+        Ok(out)
     }
 
     fn import_media(

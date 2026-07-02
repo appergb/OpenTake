@@ -17,6 +17,7 @@ mod mcp;
 mod media;
 mod render;
 mod secret;
+mod transcribe;
 
 // Streaming playback engine (#53). Feature-gated (`playback-engine`) and `pub`
 // so the gated GPU+ffmpeg integration test can drive the render loop directly.
@@ -185,6 +186,10 @@ pub fn run() {
             secret::secret_save,
             secret::secret_load,
             secret::secret_delete,
+            transcribe::transcribe_model_status,
+            transcribe::download_transcribe_model,
+            transcribe::transcribe_media,
+            transcribe::transcript_get,
             library::library_list,
             library::library_favorite,
             library::library_unfavorite,

@@ -23,6 +23,8 @@
 //! Both methods default to `Err("unsupported")` so a hand-rolled bridge (or the
 //! absence of one) never breaks the build.
 
+use opentake_media::TranscriptionResult;
+
 use crate::tools::result::Block;
 
 /// One composited timeline frame produced by [`MediaBridge::inspect_timeline`],
@@ -109,10 +111,50 @@ impl std::fmt::Display for BridgeError {
 
 impl std::error::Error for BridgeError {}
 
+/// One unique media source to transcribe for `get_transcript`. The dispatcher
+/// dedups clips down to their distinct source assets and passes these; the bridge
+/// resolves each `media_ref` to a file, transcribes it (cached), and returns the
+/// source-seconds transcript. `is_video` drives the same audio-extraction choice
+/// upstream makes (`transcribeVideoAudio` vs `transcribe`).
+#[derive(Debug, Clone)]
+pub struct TranscriptSource {
+    /// Asset id (the clip's `media_ref`).
+    pub media_ref: String,
+    /// True for video assets (extract the audio track first).
+    pub is_video: bool,
+}
+
+/// The result of transcribing one [`TranscriptSource`]: either the transcript or
+/// a per-source skip reason (upstream skips — never fails the whole call — on a
+/// per-asset transcribe error, collecting `{file, reason}` into `skipped`).
+#[derive(Debug, Clone)]
+pub struct TranscriptSourceResult {
+    /// The source's `media_ref`, echoed back for the dispatcher to join on.
+    pub media_ref: String,
+    /// The full source transcript (source-seconds timings) on success.
+    pub transcript: Option<TranscriptionResult>,
+    /// A short skip reason on failure (missing file, decode/transcribe error).
+    pub error: Option<String>,
+}
+
 /// The injected capability boundary for the render + import tools. `Send + Sync`
 /// so the [`Dispatcher`](super::dispatch::Dispatcher) can hold `Arc<dyn
 /// MediaBridge>` across threads (matching [`CoreHandle`](super::core_handle)).
 pub trait MediaBridge: Send + Sync {
+    /// Transcribe each unique source for `get_transcript`, caching so a
+    /// re-transcribe is instant. Per-source errors are returned inline (never
+    /// fatal), matching upstream's skip-don't-fail loop. The default reports
+    /// "unavailable" so a bridge-less build (or a hand-rolled bridge) still
+    /// compiles and returns an honest error.
+    fn transcribe_sources(
+        &self,
+        _sources: &[TranscriptSource],
+    ) -> Result<Vec<TranscriptSourceResult>, BridgeError> {
+        Err(BridgeError::new(
+            "get_transcript: transcription is not available in this build",
+        ))
+    }
+
     /// Composite the timeline at each `frames` value and return them as encoded
     /// image bytes, downscaled so the longest edge is at most `max_longest_edge`.
     /// Frame numbers are validated by the dispatcher; the bridge composites and
