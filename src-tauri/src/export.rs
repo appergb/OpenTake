@@ -670,6 +670,134 @@ fn run_export_with_control(
     })
 }
 
+// MARK: - Self-contained `.opentake` bundle export (#29 / upstream `.palmier`)
+
+/// One media entry that could not be bundled because its source file was not
+/// found on disk. Mirror of `opentake_project::MissingMedia`, serialized as
+/// camelCase for the front end (`id` / `name`). Kept as a dangling reference in
+/// the exported bundle exactly as upstream does.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MissingMediaDto {
+    /// The manifest entry id.
+    pub id: String,
+    /// The manifest entry display name.
+    pub name: String,
+}
+
+impl From<opentake_project::MissingMedia> for MissingMediaDto {
+    fn from(m: opentake_project::MissingMedia) -> Self {
+        MissingMediaDto {
+            id: m.id,
+            name: m.name,
+        }
+    }
+}
+
+/// Summary of a completed `.opentake` bundle export, returned to the front end.
+/// camelCase mirror of `opentake_project::ArchiveReport` plus the written
+/// `outPath`, so the dialog can surface the missing-media list (upstream keeps
+/// the export dialog open and lists what couldn't be included —
+/// `Export/ExportView.swift:369-375`).
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleReportDto {
+    /// Absolute path the bundle was written to.
+    pub out_path: String,
+    /// Ids of entries that were external and are now bundled internally.
+    pub collected: Vec<String>,
+    /// Count of already-internal media files copied across.
+    pub copied_internal: usize,
+    /// Entries whose source file could not be found (kept as dangling refs).
+    pub missing: Vec<MissingMediaDto>,
+    /// Total bytes copied into the new bundle's `media/` directory.
+    pub total_bytes: u64,
+}
+
+impl BundleReportDto {
+    /// Project an [`opentake_project::ArchiveReport`] plus the destination path
+    /// into the camelCase DTO the front end consumes.
+    fn from_report(out_path: String, report: opentake_project::ArchiveReport) -> Self {
+        BundleReportDto {
+            out_path,
+            collected: report.collected,
+            copied_internal: report.copied_internal,
+            missing: report
+                .missing
+                .into_iter()
+                .map(MissingMediaDto::from)
+                .collect(),
+            total_bytes: report.total_bytes,
+        }
+    }
+}
+
+/// `export_bundle`: write a self-contained `.opentake` bundle to `out_path`, with
+/// every resolvable media reference copied inside and the manifest rewritten to
+/// bundle-relative paths (port of upstream `exportPalmierProject` /
+/// `PalmierProjectExporter.export`).
+///
+/// Mirrors upstream `Export/ExportService.swift:166-214` +
+/// `Export/ExportView.swift:351-378`:
+/// - **No save-first.** Upstream archives the *live* in-memory `editor.timeline`
+///   / `editor.mediaManifest` / `editor.generationLog` directly; it does not
+///   flush to disk first. Here the authoritative timeline/manifest/log live in
+///   the Rust [`AppCore`], so snapshotting them is the exact equivalent — the
+///   bundle reflects the live document with no separate save.
+/// - **Unsaved projects are allowed.** Upstream passes `editor.projectURL?`
+///   (optional) as the source bundle; when nil, only `.external` media resolves.
+///   [`AppCore::project_dir`] is `None` for an unsaved project, and
+///   [`opentake_project::archive`] documents that `None` resolves only external
+///   media — so a never-saved project (all media external) still bundles fully,
+///   matching upstream.
+///
+/// Returns the missing-media report so the front end can list entries that
+/// couldn't be included. GPU is not involved (this is pure file collection); IO
+/// failures surface as `Err(String)` at the Tauri boundary.
+#[tauri::command]
+pub fn export_bundle(
+    core: State<'_, AppCore>,
+    out_path: String,
+) -> Result<BundleReportDto, String> {
+    // Snapshot the live document (upstream reads the in-memory editor objects).
+    let timeline = core.get_timeline().timeline;
+    let manifest = core.media();
+    let generation_log = core.generation_log();
+    let source_bundle = core.project_dir();
+
+    run_bundle_export(
+        &timeline,
+        &manifest,
+        &generation_log,
+        source_bundle.as_deref(),
+        out_path,
+    )
+}
+
+/// The bundle-export orchestration, decoupled from Tauri/`AppCore` so it can be
+/// driven directly by a temp-dir integration test with a hand-built timeline /
+/// manifest / generation log. The command wrapper only snapshots the live
+/// session and delegates here (the same split [`run_export`] uses for the video
+/// path). `pub` for the integration test in `tests/bundle_export_integration.rs`.
+///
+/// `source_bundle` is the open project's `.opentake` directory (used to resolve
+/// `.project` relative media and carry across thumbnail / chat sessions), or
+/// `None` for a never-saved project (only `.external` media then resolves) —
+/// matching upstream's optional `sourceProjectURL`.
+pub fn run_bundle_export(
+    timeline: &opentake_domain::Timeline,
+    manifest: &opentake_domain::MediaManifest,
+    generation_log: &opentake_project::GenerationLog,
+    source_bundle: Option<&Path>,
+    out_path: String,
+) -> Result<BundleReportDto, String> {
+    let dest = PathBuf::from(&out_path);
+    let report =
+        opentake_project::archive(timeline, manifest, generation_log, source_bundle, &dest)
+            .map_err(|e| e.to_string())?;
+    Ok(BundleReportDto::from_report(out_path, report))
+}
+
 fn project_frame_time_secs(source_frame: i64, timeline_fps: i32) -> f64 {
     let fps = if timeline_fps > 0 {
         timeline_fps as f64
@@ -949,5 +1077,80 @@ mod tests {
             },
         );
         assert!(mix_timeline_audio(&tl, &media).expect("ok").is_none());
+    }
+
+    // MARK: - `.opentake` bundle export DTOs
+
+    #[test]
+    fn missing_media_dto_serializes_camelcase() {
+        // The front end reads `{ id, name }` — both already single words, so this
+        // pins the field names (and the `serde(rename_all = "camelCase")` on the
+        // struct) against an accidental rename that would silently break the
+        // dialog's missing-media list. camelCase IPC drift is this repo's #1 bug.
+        let dto = MissingMediaDto {
+            id: "asset-7".into(),
+            name: "b-roll.mov".into(),
+        };
+        let json = serde_json::to_value(&dto).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({ "id": "asset-7", "name": "b-roll.mov" })
+        );
+    }
+
+    #[test]
+    fn bundle_report_dto_serializes_camelcase_multiword_fields() {
+        // `outPath`, `copiedInternal`, and `totalBytes` are the multi-word fields
+        // the TS `BundleReport` interface must match verbatim; assert the exact
+        // JSON keys so a Rust-side rename can't diverge from the front end.
+        let dto = BundleReportDto {
+            out_path: "/tmp/My Film.opentake".into(),
+            collected: vec!["asset-1".into(), "asset-2".into()],
+            copied_internal: 3,
+            missing: vec![MissingMediaDto {
+                id: "asset-9".into(),
+                name: "gone.mp4".into(),
+            }],
+            total_bytes: 123_456,
+        };
+        let json = serde_json::to_value(&dto).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "outPath": "/tmp/My Film.opentake",
+                "collected": ["asset-1", "asset-2"],
+                "copiedInternal": 3,
+                "missing": [{ "id": "asset-9", "name": "gone.mp4" }],
+                "totalBytes": 123_456,
+            })
+        );
+    }
+
+    #[test]
+    fn bundle_report_dto_from_report_maps_every_field() {
+        // The projection from the engine's `ArchiveReport` (+ dest path) into the
+        // camelCase DTO must carry each field 1:1, including converting the
+        // engine's `MissingMedia` into the front-end `MissingMediaDto`.
+        let report = opentake_project::ArchiveReport {
+            collected: vec!["ext-1".into()],
+            copied_internal: 2,
+            missing: vec![opentake_project::MissingMedia {
+                id: "m-1".into(),
+                name: "lost.png".into(),
+            }],
+            total_bytes: 4096,
+        };
+        let dto = BundleReportDto::from_report("/out/x.opentake".into(), report);
+        assert_eq!(dto.out_path, "/out/x.opentake");
+        assert_eq!(dto.collected, vec!["ext-1".to_string()]);
+        assert_eq!(dto.copied_internal, 2);
+        assert_eq!(dto.total_bytes, 4096);
+        assert_eq!(
+            dto.missing,
+            vec![MissingMediaDto {
+                id: "m-1".into(),
+                name: "lost.png".into()
+            }]
+        );
     }
 }
