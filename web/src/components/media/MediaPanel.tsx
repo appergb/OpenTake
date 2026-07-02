@@ -47,6 +47,7 @@ import { saveDialog } from "../../lib/dialog";
 import type { MediaFolder, MediaItem } from "../../lib/types";
 import { MediaTabBar, MediaSubTabBar } from "./MediaTabBar";
 import { CaptionsTab } from "./CaptionsTab";
+import { MediaSearchResults } from "./MediaSearch";
 import { useFavoritesStore, useIsFavorite } from "./favorites";
 
 /** MIME-ish type used on dataTransfer when dragging a media item to the timeline. */
@@ -292,7 +293,17 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
         )}
       </div>
 
-      {isEmpty ? (
+      {query !== "" ? (
+        // Smart search: three result groups (Moments / Spoken / Files) + the
+        // index-status affordance. `filteredItems` is the name-matched Files group
+        // (already scoped to the current main/subtab). Moments/Spoken come from
+        // the backend query; they degrade to empty with no model, leaving Files.
+        <MediaSearchResults
+          query={query}
+          nameMatches={filteredItems}
+          hasIndexableAssets={items.some((i) => i.type === "video" || i.type === "image")}
+        />
+      ) : isEmpty ? (
         <EmptyState subTab={subTab} insideFolder={browsing && folderId !== null} />
       ) : (
         <MediaGrid

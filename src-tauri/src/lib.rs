@@ -17,6 +17,7 @@ mod library;
 mod mcp;
 mod media;
 mod render;
+mod search;
 mod secret;
 mod transcribe;
 
@@ -192,6 +193,11 @@ pub fn run() {
             transcribe::transcribe_media,
             transcribe::transcript_get,
             captions::generate_captions,
+            search::search_model_status,
+            search::download_search_model,
+            search::search_index_status,
+            search::search_index_start,
+            search::search_query,
             library::library_list,
             library::library_favorite,
             library::library_unfavorite,
