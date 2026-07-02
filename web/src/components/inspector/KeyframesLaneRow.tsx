@@ -6,8 +6,11 @@
  * Interaction model:
  *  - Click empty track area → seek the playhead to that frame.
  *  - Click a diamond → starts a drag (window mousemove/mouseup); the diamond
- *    follows the cursor in real time, snaps to the playhead within ±5 frames,
- *    and commits via `edit.moveKeyframe` on mouseup.
+ *    follows the cursor in real time, snaps to the nearest of {playhead, clip
+ *    start/end, every OTHER property's keyframes} within ±5 frames (1:1 port
+ *    of upstream `KeyframesLaneRow.applySnap` / `snapTargets`,
+ *    Inspector/Keyframes/KeyframesLane.swift:177-216), and commits via
+ *    `edit.moveKeyframe` on mouseup.
  *  - Right-click a diamond → context menu (delete / set interpolation).
  *  - Stamp button → `edit.stampKeyframe` at the current playhead.
  *  - Clear button → `edit.setKeyframes` with an empty keyframe array.
@@ -22,6 +25,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { useEditorUiStore } from "../../store/uiStore";
 import * as edit from "../../store/editActions";
+import { snapFrame } from "../../lib/keyframeSnap";
 import type {
   AnimPair,
   Clip,
@@ -43,14 +47,49 @@ type AnyKeyframeTrack =
   | KeyframeTrack<AnimPair>
   | KeyframeTrack<Crop>;
 
+/** All animatable properties, used to collect cross-property snap targets
+ *  regardless of which subset (video vs audio) is currently rendered as rows. */
+const ALL_PROPERTIES: KeyframeProperty[] = [
+  "opacity",
+  "volume",
+  "rotation",
+  "position",
+  "scale",
+  "crop",
+];
+
+/** Absolute-frame snap targets from every OTHER property's keyframes on this
+ *  clip, plus the clip's own start/end. Excludes `property` (the row being
+ *  dragged) so a keyframe never snaps to a sibling on its own track — matches
+ *  upstream's `for p in AnimatableProperty.allCases where p != property`
+ *  (KeyframesLane.swift:210-214). Playhead is added separately by the caller
+ *  since it isn't a track-derived target. */
+function crossPropertyAndBoundTargets(clip: Clip, property: KeyframeProperty): number[] {
+  const targets: number[] = [clip.startFrame, clip.startFrame + clip.durationFrames];
+  for (const p of ALL_PROPERTIES) {
+    if (p === property) continue;
+    const otherTrack = getTrack(clip, p);
+    if (!otherTrack) continue;
+    for (const kf of otherTrack.keyframes) {
+      targets.push(kf.frame + clip.startFrame);
+    }
+  }
+  return targets;
+}
+
 export function KeyframesLaneRow({
   clip,
   property,
   t,
+  onSnapChange,
 }: {
   clip: Clip;
   property: KeyframeProperty;
   t: TFunction;
+  /** Reports the absolute frame currently snapped to during a drag (or null
+   *  when not snapped / not dragging) so KeyframesPanel can render a
+   *  panel-wide yellow snap-guide line. */
+  onSnapChange?: (absFrame: number | null) => void;
 }) {
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
   const setActiveFrame = useEditorUiStore((s) => s.setActiveFrame);
@@ -62,12 +101,16 @@ export function KeyframesLaneRow({
    *  Cleared on unmount via the useEffect below to prevent leaks. */
   const dragCleanupRef = useRef<(() => void) | null>(null);
 
-  // Unmount safety: remove any active drag listeners.
+  // Unmount safety: remove any active drag listeners and clear any snap line
+  // the panel may be showing on our behalf (otherwise a mid-drag unmount —
+  // e.g. deselecting the clip — would leave a stale yellow line onscreen).
   useEffect(() => {
     return () => {
       dragCleanupRef.current?.();
       dragCleanupRef.current = null;
+      onSnapChange?.(null);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const startFrame = clip.startFrame;
@@ -119,19 +162,31 @@ export function KeyframesLaneRow({
     setDragging({ fromFrame: absFrame, currentFrame: absFrame });
     // Clamp to [startFrame, startFrame + duration - 1] (half-open clip range).
     const lastFrame = startFrame + duration - 1;
+    // Cross-property + clip-bound targets are stable for the whole drag (they
+    // don't depend on the cursor). Playhead is read fresh per-move below since
+    // it's the one target that could (in theory) change during a drag.
+    const boundTargets = crossPropertyAndBoundTargets(clip, property);
     const onMove = (ev: globalThis.MouseEvent) => {
       const rel = xToFrame(ev.clientX);
       let newFrame = startFrame + rel;
       // Clamp to valid clip range.
       newFrame = Math.max(startFrame, Math.min(lastFrame, newFrame));
-      // Snap to playhead when within threshold.
-      if (Math.abs(newFrame - activeFrame) <= SNAP_FRAMES) newFrame = activeFrame;
+      // Snap to the nearest of {playhead, clip start/end, other properties'
+      // keyframes} within SNAP_FRAMES (upstream KeyframesLane.swift:177-216).
+      const { frame: snapped, snappedTo } = snapFrame(
+        newFrame,
+        [...boundTargets, activeFrame],
+        SNAP_FRAMES,
+      );
+      newFrame = snapped;
+      onSnapChange?.(snappedTo);
       setDragging((d) => (d ? { ...d, currentFrame: newFrame } : d));
     };
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       dragCleanupRef.current = null;
+      onSnapChange?.(null);
       setDragging((d) => {
         if (d && d.fromFrame !== d.currentFrame) {
           void edit.moveKeyframe(clip.id, property, d.fromFrame, d.currentFrame);
