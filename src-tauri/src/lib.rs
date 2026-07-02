@@ -96,17 +96,25 @@ pub fn run() {
                 .app_data_dir()
                 .unwrap_or_else(|_| std::env::temp_dir())
                 .join("models");
-            let engine = MediaEngine::new(cache_root, models_dir);
+            let engine = MediaEngine::new(cache_root.clone(), models_dir.clone());
 
             // Bring up the loopback MCP server (#36) over a session-sharing clone
             // of the core, before the core is moved into managed state. Bundled +
-            // user workflow plugins live under <app_data_dir>/workflows.
+            // user workflow plugins live under <app_data_dir>/workflows. The
+            // media bridge (agent inspect_timeline / import_media) is built from
+            // the SAME cache/models dirs as the UI's engine, so imports share the
+            // same poster/manifest caches.
             let workflows_dir = app
                 .path()
                 .app_data_dir()
                 .unwrap_or_else(|_| std::env::temp_dir())
                 .join("workflows");
-            mcp::spawn(core.clone(), workflows_dir);
+            mcp::spawn(
+                core.clone(),
+                workflows_dir,
+                cache_root.clone(),
+                models_dir.clone(),
+            );
 
             // Global asset library (#37/#54): a cross-project copy-on-favorite
             // store under <app_data_dir>/OpenTake/Library, falling back to the OS

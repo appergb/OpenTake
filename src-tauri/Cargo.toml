@@ -34,8 +34,9 @@ opentake-media = { workspace = true }
 opentake-render = { workspace = true }
 opentake-gen = { workspace = true }
 opentake-agent = { workspace = true }
-# Preview composite frames are returned to the WebView as a base64 PNG data URL.
-image = { version = "0.25", default-features = false, features = ["png"] }
+# Preview composite frames are returned to the WebView as a base64 PNG data URL;
+# the agent's `inspect_timeline` bridge encodes composited frames as JPEG.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
 
 # Streaming playback transport (#53 / #64), behind the `playback-engine` feature.
