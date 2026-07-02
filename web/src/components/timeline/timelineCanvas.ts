@@ -5,10 +5,12 @@
  * (SPEC §5.11), painted by the container.
  */
 
-import { BG, BORDER, TEXT, LAYOUT, TRACK_SIZE, TRIM, GHOST } from "../../lib/theme";
-import { clipRect, trackDisplayHeight, trackY } from "../../lib/geometry";
+import { BG, BORDER, TEXT, LAYOUT, TRACK_SIZE, TRIM, GHOST, RANGE } from "../../lib/theme";
+import { clipRect, trackDisplayHeight, trackY, xForFrame } from "../../lib/geometry";
 import { linkOffsetForClip } from "../../lib/clip";
 import { drawClip, roundRectPath, type ClipThumbnailStrip } from "./clipRenderer";
+import { validRange, type TimelineRange } from "../../lib/timelineRange";
+import type { GapSelection } from "../../lib/timelineGap";
 import type { Timeline, ClipType } from "../../lib/types";
 
 export interface PaintState {
@@ -45,6 +47,12 @@ export interface PaintState {
    *  resolved track + frame span (and a "new track" lane when the drop creates
    *  one). Absent when no media drag is over the timeline. */
   mediaGhost?: MediaGhostPaint;
+  /** Marked in/out range (raw endpoints; gated through `validRange`). Painted as
+   *  a track-area fill + edge lines (upstream `drawTimelineRangeSelection*`). */
+  selectedRange?: TimelineRange | null;
+  /** Selected empty gap between clips — dashed highlight on its track (upstream
+   *  `drawGapSelection`). */
+  selectedGap?: GapSelection | null;
 }
 
 /** A media-panel drag projected over the timeline, for the drop-ghost preview. */
@@ -57,6 +65,10 @@ export interface MediaGhostPaint {
   trackIndex: number | null;
   /** Insert index of the new track to create, or null for an existing track. */
   newTrackIndex: number | null;
+  /** ⌘/Ctrl held → the drop ripple-inserts (pushes existing clips right). Draws
+   *  an insertion line at the drop frame (upstream `drawRippleInsertIndicator`)
+   *  instead of the overwrite ghost's plain gray rect. */
+  rippleInsert?: boolean;
 }
 
 /** A live move/trim, projected for ghost rendering. */
@@ -110,6 +122,22 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
     const dy = trackY(timeline, s.firstAudioIndex, trackHeights);
     ctx.fillStyle = BORDER.divider;
     ctx.fillRect(scrollLeft, dy, s.viewWidth, 2);
+  }
+
+  // 2. Marked-range track fill (behind clips, upstream
+  // `drawTimelineRangeSelectionTrackFill`): a faint Text.primary band spanning
+  // every track's height across the range's frame span. Edges are drawn after
+  // the clips so they sit on top.
+  const range = validRange(s.selectedRange ?? null);
+  if (range && timeline.tracks.length > 0) {
+    const minX = xForFrame(range.startFrame, pixelsPerFrame);
+    const maxX = xForFrame(range.endFrame, pixelsPerFrame);
+    const top = trackY(timeline, 0, trackHeights);
+    const lastBottom =
+      trackY(timeline, timeline.tracks.length - 1, trackHeights) +
+      trackDisplayHeight(timeline.tracks[timeline.tracks.length - 1], trackHeights);
+    ctx.fillStyle = RANGE.trackFill;
+    ctx.fillRect(minX, top, Math.max(0, maxX - minX), Math.max(0, lastBottom - top));
   }
 
   // 3. Clips (skip those fully outside the visible window). A clip being dragged
@@ -262,6 +290,54 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
       ctx.fill();
       ctx.strokeStyle = GHOST.border;
       ctx.lineWidth = 1;
+      ctx.stroke();
+      // Ripple-insert: a solid yellow insertion line at the drop frame (upstream
+      // `drawRippleInsertIndicator`) so a ⌘-drop reads as "push + insert here".
+      if (mg.rippleInsert && ghostX >= scrollLeft && ghostX <= visRight) {
+        ctx.strokeStyle = GHOST.insertLine;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(ghostX, ghostY - 2);
+        ctx.lineTo(ghostX, ghostY + ghostH + 2);
+        ctx.stroke();
+      }
+    }
+  }
+
+  // Selected-gap highlight (upstream `drawGapSelection`): a dashed white box on
+  // the gap's track, inset 2px top/bottom like a clip. Drawn over the clips.
+  const gap = s.selectedGap;
+  if (gap && gap.trackIndex < timeline.tracks.length && gap.endFrame > gap.startFrame) {
+    const gx = xForFrame(gap.startFrame, pixelsPerFrame);
+    const gw = xForFrame(gap.endFrame, pixelsPerFrame) - gx;
+    if (gx + gw >= scrollLeft && gx <= visRight) {
+      const gy = trackY(timeline, gap.trackIndex, trackHeights) + 2;
+      const gh = trackDisplayHeight(timeline.tracks[gap.trackIndex], trackHeights) - 4;
+      ctx.fillStyle = RANGE.gapFill;
+      ctx.fillRect(gx, gy, gw, gh);
+      ctx.strokeStyle = RANGE.gapStroke;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.strokeRect(gx + 0.5, gy + 0.5, gw - 1, gh - 1);
+      ctx.setLineDash([]);
+    }
+  }
+
+  // Marked-range edge lines on top (upstream `drawTimelineRangeSelectionEdges`):
+  // vertical Accent.timecode strokes at the range start + end, full track height.
+  if (range && timeline.tracks.length > 0) {
+    const top = trackY(timeline, 0, trackHeights);
+    const lastBottom =
+      trackY(timeline, timeline.tracks.length - 1, trackHeights) +
+      trackDisplayHeight(timeline.tracks[timeline.tracks.length - 1], trackHeights);
+    ctx.strokeStyle = RANGE.edge;
+    ctx.lineWidth = 2;
+    for (const f of [range.startFrame, range.endFrame]) {
+      const x = xForFrame(f, pixelsPerFrame);
+      if (x < scrollLeft || x > visRight) continue;
+      ctx.beginPath();
+      ctx.moveTo(x, top);
+      ctx.lineTo(x, lastBottom);
       ctx.stroke();
     }
   }

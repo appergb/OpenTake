@@ -335,6 +335,29 @@ export function createFallbackStore() {
           }
           return result(affected.length > 0, affected.length === 1 ? "Add Clip" : "Add Clips", affected);
         }
+        case "insertClips": {
+          // Minimal ripple insert for the browser shell: push clips at/after
+          // atFrame right by the total inserted duration on the target track,
+          // then place the new clips. (Sync-lock / linked-audio ripple is a Rust
+          // concern; the shell only needs the visible push on the target track.)
+          const track = timeline.tracks[cmd.trackIndex];
+          if (!track) return result(false, "Insert Clips", []);
+          const totalPush = cmd.entries.reduce((sum, en) => sum + Math.max(1, en.durationFrames), 0);
+          for (const c of track.clips) {
+            if (c.startFrame >= cmd.atFrame) c.startFrame += totalPush;
+          }
+          const affected: string[] = [];
+          let cursor = cmd.atFrame;
+          for (const entry of cmd.entries) {
+            const id = nextId();
+            const clip = newClipFromEntry(id, { ...entry, startFrame: cursor });
+            track.clips.push(clip);
+            affected.push(id);
+            cursor += Math.max(1, entry.durationFrames);
+          }
+          track.clips.sort((a, b) => a.startFrame - b.startFrame);
+          return result(affected.length > 0, affected.length === 1 ? "Insert Clip" : "Insert Clips", affected);
+        }
         case "removeClips": {
           let changed = false;
           for (const track of timeline.tracks) {

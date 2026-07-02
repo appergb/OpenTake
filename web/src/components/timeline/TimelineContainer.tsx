@@ -14,7 +14,9 @@ import {
   dropTargetAt,
   frameAt,
   totalFrames,
+  trackAt,
 } from "../../lib/geometry";
+import { gapAtFrame } from "../../lib/timelineGap";
 import { firstAudioIndex } from "../../lib/zones";
 import { clampTrimDeltaFrames, trimSourceValues } from "../../lib/clip";
 import { collectTargets, findSnap, findSnapDelta } from "../../lib/snap";
@@ -320,6 +322,9 @@ export function TimelineContainer() {
   const selectedClipIds = useEditorUiStore((s) => s.selectedClipIds);
   const selectClips = useEditorUiStore((s) => s.selectClips);
   const clearSelection = useEditorUiStore((s) => s.clearSelection);
+  const selectedTimelineRange = useEditorUiStore((s) => s.selectedTimelineRange);
+  const selectedGap = useEditorUiStore((s) => s.selectedGap);
+  const selectGap = useEditorUiStore((s) => s.selectGap);
   const trackHeights = useEditorUiStore((s) => s.trackDisplayHeights);
   const mediaItems = useMediaStore((s) => s.items);
 
@@ -539,12 +544,16 @@ export function TimelineContainer() {
       emptyLabel: t("timeline.dropHint"),
       drag,
       mediaGhost: mediaGhostRef.current ?? undefined,
+      selectedRange: selectedTimelineRange,
+      selectedGap,
     });
   }, [
     timeline,
     zoomScale,
     trackHeights,
     selectedClipIds,
+    selectedTimelineRange,
+    selectedGap,
     scrollLeft,
     scrollTop,
     viewport,
@@ -699,8 +708,15 @@ export function TimelineContainer() {
     canvas.style.height = `${LAYOUT.rulerHeight}px`;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    paintRuler(ctx, { fps: timeline.fps, pixelsPerFrame: zoomScale, scrollLeft, width: viewport.width, dpr });
-  }, [timeline.fps, zoomScale, scrollLeft, viewport.width]);
+    paintRuler(ctx, {
+      fps: timeline.fps,
+      pixelsPerFrame: zoomScale,
+      scrollLeft,
+      width: viewport.width,
+      dpr,
+      selectedRange: selectedTimelineRange,
+    });
+  }, [timeline.fps, zoomScale, scrollLeft, viewport.width, selectedTimelineRange]);
 
   // --- Coordinate helpers (event -> document space) ---
   const toDoc = useCallback(
@@ -917,8 +933,16 @@ export function TimelineContainer() {
         return;
       }
 
-      // Empty space -> clear selection (non-shift) + start marquee.
-      if (!e.shiftKey) clearSelection();
+      // Empty space -> clear selection (non-shift) + start marquee. If the click
+      // lands in an empty gap between clips, select that gap (upstream sets
+      // `selectedGap = hitTestGap(...)` here; gap & clip selection are mutually
+      // exclusive). A gap is only selectable when NOT shift-extending a marquee.
+      if (!e.shiftKey) {
+        clearSelection();
+        const ti = trackAt(timeline, docY, trackHeights);
+        const gap = ti !== null ? gapAtFrame(timeline, ti, frameAt(docX, zoomScale)) : null;
+        selectGap(gap); // null clears any prior gap; a hit selects it
+      }
       dragRef.current = {
         kind: "marquee",
         startDocX: docX,
@@ -927,7 +951,7 @@ export function TimelineContainer() {
         curDocY: docY,
       };
     },
-    [toDoc, timeline, zoomScale, trackHeights, toolMode, selectedClipIds, selectClips, clearSelection, setCurrentFrame, setScrubbing],
+    [toDoc, timeline, zoomScale, trackHeights, toolMode, selectedClipIds, selectClips, clearSelection, selectGap, setCurrentFrame, setScrubbing],
   );
 
   const onPointerMove = useCallback(
@@ -1386,11 +1410,20 @@ export function TimelineContainer() {
         startFrame,
         dropTargetAt(timeline, docY, trackHeights),
       );
+      // ⌘/Ctrl held (and landing on an existing track, not a new-track insert or
+      // a trimmed moment drag) → preview a ripple insert (upstream shows
+      // `drawRippleInsertIndicator`). Otherwise the plain overwrite ghost.
+      const rippleInsert =
+        (e.ctrlKey || e.metaKey) &&
+        !momentRange &&
+        resolved.trackIndex !== null &&
+        resolved.newTrack === null;
       const next: MediaGhostPaint = {
         startFrame,
         durationFrames,
         trackIndex: resolved.trackIndex,
         newTrackIndex: resolved.newTrack ? resolved.newTrack.index : null,
+        rippleInsert,
       };
       const prev = mediaGhostRef.current;
       mediaGhostRef.current = next;
@@ -1402,7 +1435,8 @@ export function TimelineContainer() {
         prev.startFrame !== next.startFrame ||
         prev.durationFrames !== next.durationFrames ||
         prev.trackIndex !== next.trackIndex ||
-        prev.newTrackIndex !== next.newTrackIndex;
+        prev.newTrackIndex !== next.newTrackIndex ||
+        prev.rippleInsert !== next.rippleInsert;
       if (changed) forceTick((n) => n + 1);
     },
     [toDoc, timeline, zoomScale, trackHeights, activeFrame],
@@ -1440,6 +1474,30 @@ export function TimelineContainer() {
       // asset's standalone preview.
       useEditorUiStore.getState().setPreviewMedia(null);
       if (!item) return;
+      // Ripple-insert modifier (upstream `performDragOperation`: `let ripple =
+      // mods.contains(.command)`). ⌘/Ctrl held at drop → push existing clips
+      // right and insert at the drop frame instead of overwriting. Only applies
+      // to a plain full-asset drop onto an existing compatible track; moment
+      // (trimmed) drags and new-track drops fall through to the overwrite path.
+      const ripple = e.ctrlKey || e.metaKey;
+      if (
+        ripple &&
+        plan &&
+        plan.newTrackIndex === null &&
+        !momentRange &&
+        plan.trackIndex !== null
+      ) {
+        const insertPlan = edit.buildMediaInsertPlan(
+          useProjectStore.getState().timeline,
+          item,
+          plan.startFrame,
+          plan.trackIndex,
+        );
+        if (insertPlan) {
+          void edit.insertClips(insertPlan.trackIndex, insertPlan.atFrame, insertPlan.entries);
+          return;
+        }
+      }
       if (plan) {
         const preferredTrackIndex = plan.newTrackIndex !== null ? null : plan.trackIndex;
         const insertTrackAt = plan.newTrackIndex !== null ? plan.newTrackIndex : undefined;

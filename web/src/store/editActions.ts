@@ -11,6 +11,10 @@ import { useEditorUiStore } from "./uiStore";
 import { useProjectStore } from "./projectStore";
 import { fitTransformForMedia, trimToPlayheadEdits } from "../lib/clip";
 import type { TrackDropTarget } from "../lib/geometry";
+import { validRange } from "../lib/timelineRange";
+import { planNudge } from "../lib/timelineNudge";
+import { buildInsertPlan, type InsertPlan } from "../lib/timelineInsert";
+import { expandLinkGroup } from "../components/timeline/hitTest";
 import { useClipboardStore } from "./clipboardStore";
 import type {
   CaptionEntryReq,
@@ -51,6 +55,35 @@ async function applyAndRefresh(cmd: Parameters<typeof api.editApply>[0]) {
 export async function addClips(entries: ClipEntryReq[]) {
   if (entries.length === 0) return;
   return applyAndRefresh({ type: "addClips", entries });
+}
+
+/** Ripple-insert clips at `atFrame` on `trackIndex`: place the entries and push
+ *  everything past the insert point right by their total duration on the target
+ *  track + every sync-locked track (backend `InsertClips` / upstream
+ *  `rippleInsertClips`). The overwrite-drop counterpart is {@link addClips}. */
+export async function insertClips(trackIndex: number, atFrame: number, entries: ClipEntryReq[]) {
+  if (entries.length === 0) return;
+  return applyAndRefresh({ type: "insertClips", trackIndex, atFrame, entries });
+}
+
+/** Build the ripple-insert plan for a media item dropped at `atFrame` over
+ *  `preferredTrackIndex` (wires the pure `buildInsertPlan` with the store's
+ *  transform-fit + still-image default). Returns null when no compatible target
+ *  track exists — the caller then falls back to the overwrite add. */
+export function buildMediaInsertPlan(
+  timeline: Timeline,
+  item: MediaItem,
+  atFrame: number,
+  preferredTrackIndex: number | null,
+): InsertPlan | null {
+  return buildInsertPlan(
+    timeline,
+    item,
+    atFrame,
+    preferredTrackIndex,
+    fitTransformForMedia,
+    DEFAULT_IMAGE_SECONDS,
+  );
 }
 
 export async function moveClips(moves: ClipMoveReq[]) {
@@ -407,6 +440,83 @@ export async function rippleDeleteSelectedClips() {
     }
   }
   ui.clearSelection();
+}
+
+/** Ripple-delete the marked in/out range on the anchor clip's track (⇧⌫ when a
+ *  valid range is marked AND a clip is selected). Mirrors upstream
+ *  `rippleDeleteRanges(anchorClipId:)` → `rippleDeleteRangesOnTrack(trackIndex:
+ *  anchorLoc.trackIndex, …)`: the range is cut from the selected clip's track,
+ *  gaps close, linked A/V partners are cut, and sync-locked followers shift
+ *  (the core refuses if a follower would collide). No-op without a valid range
+ *  or a selected clip. Returns true when a delete was issued. */
+export async function rippleDeleteMarkedRange(): Promise<boolean> {
+  const ui = useEditorUiStore.getState();
+  const range = validRange(ui.selectedTimelineRange);
+  if (!range) return false;
+  // Anchor = the selected clip's track (upstream `rippleDeleteRanges(anchorClipId:)`).
+  const anchorId = liveSelectedClipIds()[0];
+  if (!anchorId) return false;
+  const timeline = useProjectStore.getState().timeline;
+  let trackIndex = -1;
+  for (let ti = 0; ti < timeline.tracks.length && trackIndex < 0; ti++) {
+    if (timeline.tracks[ti].clips.some((c) => c.id === anchorId)) trackIndex = ti;
+  }
+  if (trackIndex < 0) return false;
+  try {
+    await rippleDeleteRanges(trackIndex, [{ start: range.startFrame, end: range.endFrame }]);
+    if (isTauri) await forceRefresh();
+  } catch (err) {
+    ui.pushToast(`删除失败 / Delete failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  ui.clearTimelineRange();
+  ui.clearSelection();
+  return true;
+}
+
+/** Ripple-close the selected gap (⇧⌫ on a selected gap): remove the empty span
+ *  and shift the gap track's later clips + every sync-locked follower left by the
+ *  gap length (backend `RippleDeleteRanges` on the gap's track; upstream
+ *  `rippleDeleteSelectedGap`). No-op without a selected gap. Returns true when a
+ *  delete was issued. */
+export async function rippleDeleteSelectedGap(): Promise<boolean> {
+  const ui = useEditorUiStore.getState();
+  const gap = ui.selectedGap;
+  if (!gap || gap.endFrame <= gap.startFrame) return false;
+  // Guard: an out-of-band edit may have filled the gap (upstream re-checks).
+  const timeline = useProjectStore.getState().timeline;
+  const track = timeline.tracks[gap.trackIndex];
+  if (
+    !track ||
+    track.clips.some((c) => c.startFrame < gap.endFrame && c.startFrame + c.durationFrames > gap.startFrame)
+  ) {
+    ui.selectGap(null);
+    return false;
+  }
+  try {
+    await rippleDeleteRanges(gap.trackIndex, [{ start: gap.startFrame, end: gap.endFrame }]);
+    if (isTauri) await forceRefresh();
+  } catch (err) {
+    ui.pushToast(`删除失败 / Delete failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  ui.selectGap(null);
+  return true;
+}
+
+/** Nudge the selected clips by `deltaFrames` along the timeline (OpenTake
+ *  extension: , / . keys, ±5 with Shift). Preserves each clip's track, floors
+ *  the group at frame 0, and moves linked partners together (the selection is
+ *  expanded to full link groups, then routed through `moveClips`). No-op when
+ *  nothing is selected or the floored delta is zero. */
+export async function nudgeSelectedClips(deltaFrames: number) {
+  const ui = useEditorUiStore.getState();
+  if (ui.selectedClipIds.size === 0) return;
+  const timeline = useProjectStore.getState().timeline;
+  // Linked partners travel together (the backend moveClips does NOT auto-expand
+  // link groups — the drag path expands them too).
+  const expanded = expandLinkGroup(timeline, ui.selectedClipIds);
+  const moves = planNudge(timeline, expanded, deltaFrames);
+  if (moves.length === 0) return;
+  await moveClips(moves);
 }
 
 // MARK: - Media -> timeline (drag and drop)
