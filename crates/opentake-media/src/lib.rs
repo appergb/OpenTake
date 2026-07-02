@@ -71,6 +71,11 @@ pub use waveform::{waveform, waveform_cached, waveform_sample_count};
 
 pub use transcribe::{
     cache::TranscriptCache,
+    captions::{
+        caption_specs, dominant_speech_track, CaptionCase, CaptionClipSpec, CaptionTarget, Phrase,
+        MIN_DISPLAY_DURATION_SECS,
+    },
+    languages::{match_language, WHISPER_LANGUAGES},
     model::{self as whisper_model, WhisperModel, DEFAULT_MODEL as DEFAULT_WHISPER_MODEL},
     search::{search as search_spoken, SpokenHit},
     timeline::{

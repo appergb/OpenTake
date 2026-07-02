@@ -7,6 +7,8 @@
 //! names match upstream so `<key>.json` transcript caches are interchangeable.
 
 pub mod cache;
+pub mod captions;
+pub mod languages;
 pub mod locale;
 pub mod model;
 pub mod search;

@@ -212,6 +212,7 @@ impl Dispatcher {
             ToolName::InspectTimeline => self.inspect_timeline(args, before),
             ToolName::ImportMedia => self.import_media(args, manifest),
             ToolName::GetTranscript => self.get_transcript(args, before, manifest),
+            ToolName::AddCaptions => self.add_captions(args, before, manifest),
 
             // --- Not yet implementable in this phase (honest stubs) ---
             // Media reads (inspect/search) still need the analysis backend;
@@ -224,7 +225,6 @@ impl Dispatcher {
             | ToolName::GenerateImage
             | ToolName::GenerateAudio
             | ToolName::UpscaleMedia
-            | ToolName::AddCaptions
             | ToolName::AddMotionGraphic
             | ToolName::EditMotionGraphic => Ok(ToolResult::error(format!(
                 "{}: not yet implemented",
@@ -536,6 +536,207 @@ impl Dispatcher {
             out["skipped"] = serde_json::json!(skipped);
         }
         Ok(ToolResult::ok(out.to_string()))
+    }
+
+    /// `add_captions`: transcribe spoken audio on-device and place styled caption
+    /// clips on a fresh top track — the SAME pipeline as the Captions tab, driven
+    /// through the [`MediaBridge`]. 1:1 port of `ToolExecutor+Captions.addCaptions`
+    /// (`:9-53`) composed with `EditorViewModel.generateCaptions`
+    /// (`EditorViewModel+Captions.swift:97-117`):
+    ///
+    ///   * resolve caption-eligible clips (all, or just `clipIds`); auto-pick the
+    ///     dominant spoken track when `clipIds` is omitted,
+    ///   * transcribe each unique source once (cached; language hint bypasses the
+    ///     cache) via the bridge, skip-don't-fail per source,
+    ///   * build caption clip specs with the pure `opentake_media::caption_specs`
+    ///     (packing / timing / overlap all in that tested module), using the
+    ///     style + placement from the args and this timeline's canvas for the
+    ///     text-fit predicate and per-line transform,
+    ///   * place them atomically via [`EditCommand::AddCaptions`] (one new track,
+    ///     one undo step, each clip carrying the shared `captionGroupId`).
+    ///
+    /// `censorProfanity` is accepted for parity but is a no-op with the whisper
+    /// backend (Apple's `.etiquetteReplacements` has no whisper equivalent yet);
+    /// the value is threaded into transcription so it takes effect if/when the
+    /// backend gains masking, matching upstream's boundary. `fontName`/`color`/
+    /// `centerX`/`centerY`/`fontSize`/`textCase` map onto the caption style/placement.
+    fn add_captions(
+        &self,
+        args: &Value,
+        before: &Timeline,
+        manifest: &MediaManifest,
+    ) -> Result<ToolResult, ToolError> {
+        let a: AddCaptionsArgs = decode_tool_args(args, "")?;
+
+        // Style from args (defaults: Helvetica-Bold @ AppTheme.Caption.defaultFontSize=48,
+        // white). Reuses the same builder as add_texts; caption font size default
+        // differs from the generic text default (96), so seed it explicitly.
+        let mut style = TextStyle {
+            font_size: CAPTION_DEFAULT_FONT_SIZE,
+            ..TextStyle::default()
+        };
+        if let Some(n) = a.font_name.clone() {
+            style.font_name = n;
+        }
+        if let Some(s) = a.font_size {
+            style.font_size = s;
+        }
+        if let Some(hex) = a.color.as_deref() {
+            let c = Rgba::from_hex(hex).ok_or_else(|| {
+                ToolError::new(format!(
+                    "add_captions: invalid color '{hex}' (want #RRGGBB)"
+                ))
+            })?;
+            style.color = c;
+        }
+
+        // Placement center (AppTheme.Caption.defaultCenter = (0.5, 0.9)).
+        let center_x = a.center_x.unwrap_or(CAPTION_DEFAULT_CENTER_X);
+        let center_y = a.center_y.unwrap_or(CAPTION_DEFAULT_CENTER_Y);
+
+        // Letter case (default auto).
+        let case = match a.text_case.as_deref() {
+            None => opentake_media::CaptionCase::Auto,
+            Some(raw) => opentake_media::CaptionCase::parse(raw).ok_or_else(|| {
+                ToolError::new(format!(
+                    "add_captions: textCase must be auto, upper, or lower (got {raw})"
+                ))
+            })?,
+        };
+
+        // Resolve the requested language against the backend's supported set
+        // (upstream validates via matchLocale and errors on an unsupported one).
+        let language = match a.language.as_deref() {
+            None => None,
+            Some(lang) => Some(opentake_media::match_language(lang).ok_or_else(|| {
+                ToolError::new(format!(
+                    "add_captions: on-device transcription does not support language '{lang}'."
+                ))
+            })?),
+        };
+
+        // Caption-eligible clips (all, or restricted to clipIds). Reuses the same
+        // eligibility as get_transcript (`captionTargets`), plus each clip's track id.
+        let clip_ids = a.clip_ids.clone().unwrap_or_default();
+        let auto_detect = clip_ids.is_empty();
+        let frags = if auto_detect {
+            caption_target_fragments(before, manifest, None)
+        } else {
+            // Restrict to the requested clips (each filtered individually so an
+            // ineligible id simply contributes nothing, as upstream).
+            let wanted: std::collections::BTreeSet<&str> =
+                clip_ids.iter().map(String::as_str).collect();
+            caption_target_fragments(before, manifest, None)
+                .into_iter()
+                .filter(|f| wanted.contains(f.clip.id.as_str()))
+                .collect()
+        };
+        if frags.is_empty() {
+            return Ok(ToolResult::error(
+                "add_captions: no audio/video clips to caption.",
+            ));
+        }
+
+        // Transcribe each unique source (cached; language bypasses the cache).
+        let sources = caption_transcript_sources(&frags, language.as_deref());
+        let Some(bridge) = self.bridge.as_ref() else {
+            return Ok(ToolResult::error(
+                "add_captions: transcription is not available in this build",
+            ));
+        };
+        let source_results = bridge
+            .transcribe_sources(&sources)
+            .map_err(|e| ToolError::new(e.message))?;
+        let mut transcripts: BTreeMap<String, opentake_media::TranscriptionResult> =
+            BTreeMap::new();
+        for r in source_results {
+            if let Some(t) = r.transcript {
+                transcripts.insert(r.media_ref, t);
+            }
+        }
+
+        // Build caption targets (clip + track id + resolved transcript).
+        let track_id_of = |ti: usize| before.tracks[ti].id.clone();
+        let targets: Vec<opentake_media::CaptionTarget<'_>> = frags
+            .iter()
+            .map(|f| opentake_media::CaptionTarget {
+                clip_id: f.clip.id.clone(),
+                track_id: track_id_of(f.track_index),
+                clip: f.clip,
+                transcript: transcripts.get(&f.clip.media_ref),
+            })
+            .collect();
+
+        // Auto-detect: keep only the dominant spoken track (upstream `generateCaptions`).
+        let targets: Vec<opentake_media::CaptionTarget<'_>> = if auto_detect {
+            match opentake_media::dominant_speech_track(&targets, before.fps) {
+                Some(winner) => targets
+                    .into_iter()
+                    .filter(|t| t.track_id == winner)
+                    .collect(),
+                None => return Ok(ToolResult::error("No speech detected to caption.")),
+            }
+        } else {
+            targets
+        };
+
+        // Build specs with the pure caption builder. `fits` and the per-line
+        // transform use this timeline's canvas (upstream `captionLineFits` /
+        // `captionTransform`), approximated by the platform-free TextLayout.
+        // One fresh group id per Generate (upstream `UUID().uuidString`).
+        let group_id = new_caption_group_id();
+        let canvas_w = before.width.max(1) as f64;
+        let canvas_h = before.height.max(1) as f64;
+        let max_text_w = canvas_w * CAPTION_MAX_TEXT_WIDTH_RATIO;
+        let fits = |line: &str| {
+            let (w, _) = opentake_domain::TextLayout::natural_size(
+                line,
+                &style,
+                f64::MAX, // measure natural width, then compare to the ratio budget
+                canvas_h,
+            );
+            w <= max_text_w
+        };
+        let specs = opentake_media::caption_specs(&targets, before.fps, case, &group_id, &fits);
+        if specs.is_empty() {
+            return Ok(ToolResult::error("No speech detected to caption."));
+        }
+
+        // Map each spec to a CaptionEntry with a per-line auto-fit transform
+        // centered at (center_x, center_y) (upstream `captionTransform`).
+        let entries: Vec<opentake_ops::CaptionEntry> = specs
+            .into_iter()
+            .map(|s| {
+                let (w, h) = opentake_domain::TextLayout::natural_size(
+                    &s.content, &style, max_text_w, canvas_h,
+                );
+                let transform = Transform {
+                    center_x,
+                    center_y,
+                    width: w / canvas_w,
+                    height: h / canvas_h,
+                    ..Transform::default()
+                };
+                opentake_ops::CaptionEntry {
+                    start_frame: s.start_frame,
+                    duration_frames: s.duration_frames,
+                    content: s.content,
+                    text_style: style.clone(),
+                    transform,
+                    caption_group_id: s.caption_group_id,
+                }
+            })
+            .collect();
+
+        let count = entries.len();
+        let res = self.apply(EditCommand::AddCaptions { entries })?;
+        if !res.changed {
+            return Ok(ToolResult::error("No speech detected to caption."));
+        }
+        Ok(ToolResult::ok(format!(
+            "Added {count} caption{}.",
+            if count == 1 { "" } else { "s" }
+        )))
     }
 
     // MARK: - Editing tool bodies
@@ -1406,6 +1607,52 @@ fn caption_target_fragments<'a>(
     frags
 }
 
+/// Caption style/placement defaults, 1:1 with upstream `AppTheme.Caption`
+/// (`UI/AppTheme.swift:239-249`): a 48-pt caption centered near the bottom
+/// `(0.5, 0.9)`, wrapping at 90% of canvas width.
+const CAPTION_DEFAULT_FONT_SIZE: f64 = 48.0;
+const CAPTION_DEFAULT_CENTER_X: f64 = 0.5;
+const CAPTION_DEFAULT_CENTER_Y: f64 = 0.9;
+const CAPTION_MAX_TEXT_WIDTH_RATIO: f64 = 0.9;
+
+/// Mint a fresh caption-group id (upstream `UUID().uuidString`). A process-wide
+/// counter plus a nanosecond timestamp keeps it unique across Generates within a
+/// session without pulling in a uuid dependency; the value is opaque (only used
+/// for group membership: subtitle export + caption-group style sync).
+fn new_caption_group_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("cap-{nanos:x}-{n:x}")
+}
+
+/// Distinct transcript sources for the caption fragments, tagging each with the
+/// resolved `language` hint (so a foreign-language caption run transcribes with
+/// the hint and bypasses the auto-detect cache). Like [`unique_transcript_sources`]
+/// but carries the language for the `add_captions` path.
+fn caption_transcript_sources(
+    frags: &[TranscriptFrag<'_>],
+    language: Option<&str>,
+) -> Vec<TranscriptSource> {
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for f in frags {
+        if seen.insert(f.clip.media_ref.as_str()) {
+            out.push(TranscriptSource {
+                media_ref: f.clip.media_ref.clone(),
+                is_video: f.is_video,
+                language: language.map(str::to_string),
+            });
+        }
+    }
+    out
+}
+
 /// Dedup fragments down to their distinct source assets for transcription
 /// (upstream `Set(frags.map(\.url))`). First-seen `is_video` wins per media_ref.
 fn unique_transcript_sources(frags: &[TranscriptFrag<'_>]) -> Vec<TranscriptSource> {
@@ -1416,6 +1663,8 @@ fn unique_transcript_sources(frags: &[TranscriptFrag<'_>]) -> Vec<TranscriptSour
             out.push(TranscriptSource {
                 media_ref: f.clip.media_ref.clone(),
                 is_video: f.is_video,
+                // get_transcript reads whatever the auto-detect cache holds.
+                language: None,
             });
         }
     }
@@ -3083,7 +3332,7 @@ mod tests {
         TranscriptSource, TranscriptSourceResult,
     };
     use crate::tools::result::Block;
-    use opentake_media::{TranscriptionResult, TranscriptionWord};
+    use opentake_media::{TranscriptionResult, TranscriptionSegment, TranscriptionWord};
 
     /// One recorded `import_media` forward: a `kind:detail` tag plus the name /
     /// folder the dispatcher passed through.
@@ -3743,5 +3992,192 @@ mod tests {
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].media_ref, "aud");
         assert!(!sources[0].is_video);
+    }
+
+    // MARK: - add_captions (transcribe + place, via the MediaBridge)
+
+    fn segment(text: &str, start: f64, end: f64) -> TranscriptionSegment {
+        TranscriptionSegment {
+            text: text.into(),
+            start,
+            end,
+        }
+    }
+
+    /// A caption transcript: words drive dominant-track selection; segments drive
+    /// the caption-line packing (`caption_specs` iterates segments).
+    fn caption_transcript(
+        words: Vec<TranscriptionWord>,
+        segments: Vec<TranscriptionSegment>,
+    ) -> TranscriptionResult {
+        TranscriptionResult {
+            text: String::new(),
+            language: Some("en".into()),
+            words,
+            segments,
+        }
+    }
+
+    /// Dispatcher with one audio clip (media `aud`, frame 0, dur 300 @ 30fps) on
+    /// an audio track and a `FakeBridge` seeded with `aud`'s caption transcript.
+    fn caption_dispatcher(t: TranscriptionResult) -> (Dispatcher, Arc<FakeBridge>) {
+        let mut tl = Timeline::new();
+        tl.fps = 30;
+        tl.width = 1920;
+        tl.height = 1080;
+        let mut track = opentake_domain::Track::new("track-a", ClipType::Audio);
+        let mut clip = Clip::new("clip-a", "aud", 0, 300);
+        clip.media_type = ClipType::Audio;
+        track.clips.push(clip);
+        tl.tracks.push(track);
+        let mut m = MediaManifest::new();
+        m.entries.push(audio_entry("aud", "Voice"));
+        let handle = Arc::new(StateHandle::new(tl, m));
+        let bridge = Arc::new(FakeBridge::default().with_transcript("aud", t));
+        let d = Dispatcher::with_bridge(
+            handle,
+            Arc::new(RwLock::new(PluginRegistry::new())),
+            Some(bridge.clone() as Arc<dyn MediaBridge>),
+        );
+        (d, bridge)
+    }
+
+    #[test]
+    fn add_captions_places_caption_track_and_reports_count() {
+        let (d, _b) = caption_dispatcher(caption_transcript(
+            vec![word("hello", 0.0, 0.5), word("world", 0.5, 1.0)],
+            vec![segment("Hello world.", 0.0, 1.0)],
+        ));
+        let r = d.dispatch("add_captions", serde_json::json!({}));
+        assert!(!r.is_error, "{}", r.text_joined());
+        assert!(r.text_joined().contains("caption"), "{}", r.text_joined());
+        // A fresh video track was inserted at index 0 holding the caption clip.
+        let tl = d.handle.timeline();
+        assert_eq!(tl.tracks[0].kind, ClipType::Video);
+        assert_eq!(tl.tracks[0].clips.len(), 1);
+        let cap = &tl.tracks[0].clips[0];
+        assert_eq!(cap.media_type, ClipType::Text);
+        assert!(cap.caption_group_id.is_some());
+        assert_eq!(cap.text_content.as_deref(), Some("Hello world."));
+        // Placement near the bottom (default center Y 0.9).
+        assert!((cap.transform.center_y - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn add_captions_applies_text_case_and_style() {
+        let (d, _b) = caption_dispatcher(caption_transcript(
+            vec![word("hi", 0.0, 0.5)],
+            vec![segment("hi there", 0.0, 1.0)],
+        ));
+        let r = d.dispatch(
+            "add_captions",
+            serde_json::json!({ "textCase": "upper", "fontSize": 72, "color": "#FF0000" }),
+        );
+        assert!(!r.is_error, "{}", r.text_joined());
+        let tl = d.handle.timeline();
+        let cap = &tl.tracks[0].clips[0];
+        assert_eq!(cap.text_content.as_deref(), Some("HI THERE"));
+        let style = cap.text_style.as_ref().unwrap();
+        assert_eq!(style.font_size, 72.0);
+        assert!((style.color.r - 1.0).abs() < 1e-9 && style.color.g < 1e-9);
+    }
+
+    #[test]
+    fn add_captions_is_one_undo_step() {
+        let (d, _b) = caption_dispatcher(caption_transcript(
+            vec![word("a", 0.0, 0.5)],
+            vec![segment("A.", 0.0, 1.0)],
+        ));
+        assert!(!d.dispatch("add_captions", serde_json::json!({})).is_error);
+        // The dispatcher tracks agent edits; one undo removes the whole track.
+        let before = d.handle.timeline().tracks.len();
+        let u = d.dispatch("undo", serde_json::json!({}));
+        assert!(!u.is_error, "{}", u.text_joined());
+        assert_eq!(d.handle.timeline().tracks.len(), before - 1);
+    }
+
+    #[test]
+    fn add_captions_no_speech_detected_errors() {
+        // Transcript with no segments → no caption lines → "No speech detected".
+        let (d, _b) = caption_dispatcher(caption_transcript(vec![], vec![]));
+        let r = d.dispatch("add_captions", serde_json::json!({}));
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("No speech detected"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn add_captions_unsupported_language_errors() {
+        let (d, _b) = caption_dispatcher(caption_transcript(
+            vec![word("a", 0.0, 0.5)],
+            vec![segment("A.", 0.0, 1.0)],
+        ));
+        let r = d.dispatch("add_captions", serde_json::json!({ "language": "klingon" }));
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("does not support"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn add_captions_invalid_color_errors() {
+        let (d, _b) = caption_dispatcher(caption_transcript(
+            vec![word("a", 0.0, 0.5)],
+            vec![segment("A.", 0.0, 1.0)],
+        ));
+        let r = d.dispatch("add_captions", serde_json::json!({ "color": "notacolor" }));
+        assert!(r.is_error);
+        assert!(r.text_joined().contains("color"), "{}", r.text_joined());
+    }
+
+    #[test]
+    fn add_captions_no_audio_clips_errors() {
+        // Video-only timeline with has_audio=false → nothing to caption.
+        let (d, _b) = dispatcher_with_fake_bridge();
+        let r = d.dispatch("add_captions", serde_json::json!({}));
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("no audio/video"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn add_captions_without_bridge_reports_unavailable() {
+        let mut tl = Timeline::new();
+        tl.fps = 30;
+        tl.width = 1920;
+        tl.height = 1080;
+        let mut track = opentake_domain::Track::new("track-a", ClipType::Audio);
+        let mut clip = Clip::new("clip-a", "aud", 0, 300);
+        clip.media_type = ClipType::Audio;
+        track.clips.push(clip);
+        tl.tracks.push(track);
+        let mut m = MediaManifest::new();
+        m.entries.push(audio_entry("aud", "Voice"));
+        let d = dispatcher_with(Arc::new(StateHandle::new(tl, m)));
+        let r = d.dispatch("add_captions", serde_json::json!({}));
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("not available"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn add_captions_rejects_unknown_arg() {
+        let (d, _b) = caption_dispatcher(caption_transcript(
+            vec![word("a", 0.0, 0.5)],
+            vec![segment("A.", 0.0, 1.0)],
+        ));
+        let r = d.dispatch("add_captions", serde_json::json!({ "bogus": 1 }));
+        assert!(r.is_error);
     }
 }

@@ -13,6 +13,8 @@ import { fitTransformForMedia, trimToPlayheadEdits } from "../lib/clip";
 import type { TrackDropTarget } from "../lib/geometry";
 import { useClipboardStore } from "./clipboardStore";
 import type {
+  CaptionEntryReq,
+  CaptionRequest,
   Clip,
   ClipEntryReq,
   ClipMoveReq,
@@ -733,6 +735,29 @@ export async function addTextClip() {
   if (res && res.affectedClipIds.length > 0) {
     ui.selectClips(new Set(res.affectedClipIds));
   }
+}
+
+// MARK: - Captions (Captions tab / add_captions)
+
+/** Place a batch of pre-built caption entries on one fresh track as a single
+ *  undoable action (`AddCaptions`). Thin wrapper mirroring the other editActions;
+ *  the Captions tab normally calls {@link generateCaptions} (which builds + places
+ *  in Rust), but this exists for callers holding ready-made caption entries. */
+export async function addCaptions(entries: CaptionEntryReq[]) {
+  if (entries.length === 0) return;
+  return applyAndRefresh({ type: "addCaptions", entries });
+}
+
+/** Run the full caption pipeline for `request` (transcribe + build + place in
+ *  Rust) and refresh the mirror. Returns the caption count so the UI can report
+ *  "no speech detected" (count 0) distinctly from a placed batch. */
+export async function generateCaptions(request: CaptionRequest) {
+  const result = await api.generateCaptions(request);
+  // A placed batch changed the timeline. Force a mirror refresh so it appears
+  // even if Tauri's timeline_changed event races (and the browser has no event
+  // channel at all), matching the other editActions' refresh discipline.
+  if (result.edit.changed) await forceRefresh();
+  return result;
 }
 
 // MARK: - Clipboard (copy / cut / paste, Issue #94)

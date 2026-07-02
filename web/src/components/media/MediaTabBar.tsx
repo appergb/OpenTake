@@ -25,7 +25,7 @@ const MAIN_TABS: ReadonlyArray<MainTab> = [
   { id: "sticker", labelKey: "media.tab.sticker", enabled: false },
   { id: "effect", labelKey: "media.tab.effect", enabled: false },
   { id: "transition", labelKey: "media.tab.transition", enabled: false },
-  { id: "subtitle", labelKey: "media.tab.subtitle", enabled: false },
+  { id: "subtitle", labelKey: "media.tab.subtitle", enabled: true },
   { id: "smartPack", labelKey: "media.tab.smartPack", enabled: false },
 ];
 

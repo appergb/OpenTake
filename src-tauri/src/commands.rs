@@ -19,8 +19,8 @@ use opentake_core::dto::{
 use opentake_core::{AppCore, CmdError, EditCommand};
 
 use opentake_ops::{
-    ClipEntry, ClipMove, ClipProperties, FrameRange, KeyframePayload, KeyframeProperty,
-    KeyframeValue, RenameEntry, TextEntry,
+    CaptionEntry, ClipEntry, ClipMove, ClipProperties, FrameRange, KeyframePayload,
+    KeyframeProperty, KeyframeValue, RenameEntry, TextEntry,
 };
 
 use opentake_domain::{
@@ -408,6 +408,8 @@ pub enum EditRequest {
     #[serde(rename_all = "camelCase")]
     AddTexts { entries: Vec<TextEntryDto> },
     #[serde(rename_all = "camelCase")]
+    AddCaptions { entries: Vec<CaptionEntryDto> },
+    #[serde(rename_all = "camelCase")]
     Link { clip_ids: Vec<String> },
     #[serde(rename_all = "camelCase")]
     Unlink { clip_ids: Vec<String> },
@@ -577,6 +579,12 @@ impl EditRequest {
             }
             EditRequest::AddTexts { entries } => EditCommand::AddTexts {
                 entries: entries.into_iter().map(TextEntryDto::into_entry).collect(),
+            },
+            EditRequest::AddCaptions { entries } => EditCommand::AddCaptions {
+                entries: entries
+                    .into_iter()
+                    .map(CaptionEntryDto::into_entry)
+                    .collect(),
             },
             EditRequest::Link { clip_ids } => EditCommand::Link { clip_ids },
             EditRequest::Unlink { clip_ids } => EditCommand::Unlink { clip_ids },
@@ -805,6 +813,34 @@ impl TextEntryDto {
     }
 }
 
+/// One built caption clip on the wire (mirrors [`CaptionEntry`]). Multi-word
+/// fields MUST be camelCase (`startFrame`, `durationFrames`, `textStyle`,
+/// `captionGroupId`) — the repo's #1 bug class is a DTO field that silently fails
+/// to deserialize because it wasn't camelCase. See `commands.rs` module header.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionEntryDto {
+    pub start_frame: i32,
+    pub duration_frames: i32,
+    pub content: String,
+    pub text_style: TextStyle,
+    pub transform: Transform,
+    pub caption_group_id: String,
+}
+
+impl CaptionEntryDto {
+    fn into_entry(self) -> CaptionEntry {
+        CaptionEntry {
+            start_frame: self.start_frame,
+            duration_frames: self.duration_frames,
+            content: self.content,
+            text_style: self.text_style,
+            transform: self.transform,
+            caption_group_id: self.caption_group_id,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenameEntryDto {
@@ -985,6 +1021,38 @@ mod edit_request_serde_tests {
                 assert_eq!(style.font_size, 48.0);
             }
             other => panic!("expected SetClipProperties, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_add_captions_camelcase_and_maps_to_command() {
+        // The Captions tab / add_captions tool send camelCase caption entries.
+        // Every multi-word field (startFrame/durationFrames/textStyle/
+        // captionGroupId) must deserialize — a non-camelCase key here is the
+        // repo's #1 silent-failure bug class, so this guards it explicitly.
+        let request = serde_json::from_str::<EditRequest>(
+            r#"{"type":"addCaptions","entries":[
+                {"startFrame":0,"durationFrames":21,"content":"Hello",
+                 "textStyle":{"fontName":"Helvetica-Bold","fontSize":48},
+                 "transform":{"centerX":0.5,"centerY":0.9,"width":0.5,"height":0.1,
+                              "rotation":0,"flipHorizontal":false,"flipVertical":false},
+                 "captionGroupId":"grp-1"}
+            ]}"#,
+        )
+        .expect("addCaptions camelCase");
+
+        match request.into_command().expect("addCaptions command") {
+            EditCommand::AddCaptions { entries } => {
+                assert_eq!(entries.len(), 1);
+                let e = &entries[0];
+                assert_eq!(e.start_frame, 0);
+                assert_eq!(e.duration_frames, 21);
+                assert_eq!(e.content, "Hello");
+                assert_eq!(e.caption_group_id, "grp-1");
+                assert_eq!(e.text_style.font_size, 48.0);
+                assert_eq!(e.transform.center_y, 0.9);
+            }
+            other => panic!("expected AddCaptions, got {other:?}"),
         }
     }
 

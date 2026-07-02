@@ -6,6 +6,7 @@
 //! event so the front-end read-only mirror can re-sync (`docs/architecture/ARCHITECTURE.md`
 //! §2 — "真相源在 Rust，前端持镜像").
 
+mod captions;
 mod commands;
 // `pub` so the ffmpeg-gated integration test (`tests/export_integration.rs`) can
 // drive the export orchestrator (`export::run_export`) against the library
@@ -190,6 +191,7 @@ pub fn run() {
             transcribe::download_transcribe_model,
             transcribe::transcribe_media,
             transcribe::transcript_get,
+            captions::generate_captions,
             library::library_list,
             library::library_favorite,
             library::library_unfavorite,

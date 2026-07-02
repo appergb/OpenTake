@@ -159,16 +159,22 @@ impl MediaBridge for TauriMediaBridge {
                     continue;
                 }
             };
-            // Cached full transcript short-circuits before the backend loads.
-            if let Some(cached) =
-                opentake_media::transcribe::cache::cached_on_disk(self.engine.cache_root(), &path)
-            {
-                out.push(TranscriptSourceResult {
-                    media_ref: src.media_ref.clone(),
-                    transcript: Some(cached),
-                    error: None,
-                });
-                continue;
+            // Cached full transcript short-circuits before the backend loads —
+            // but only for the auto-detect (no language hint) case. A language
+            // hint produces a different transcript than the cached auto one, so
+            // it bypasses the cache (upstream `EditorViewModel+Captions.swift:127`).
+            if src.language.is_none() {
+                if let Some(cached) = opentake_media::transcribe::cache::cached_on_disk(
+                    self.engine.cache_root(),
+                    &path,
+                ) {
+                    out.push(TranscriptSourceResult {
+                        media_ref: src.media_ref.clone(),
+                        transcript: Some(cached),
+                        error: None,
+                    });
+                    continue;
+                }
             }
             // Lazily load the backend on the first cache miss; memoize failure.
             if let Backend::Unloaded = backend {
@@ -185,14 +191,32 @@ impl MediaBridge for TauriMediaBridge {
                 }
                 Backend::Unloaded => unreachable!("backend was just loaded above"),
             };
-            let cache = opentake_media::TranscriptCache::new(self.engine.cache_root());
-            match cache.transcript(&path, src.is_video, None, b) {
+            // With a language hint, transcribe directly with the hint threaded to
+            // the backend (the cache convenience uses auto-detect defaults). The
+            // auto path keeps using the caching convenience so repeats are instant.
+            let result = match &src.language {
+                Some(lang) => {
+                    let opts = opentake_media::TranscribeOptions {
+                        preferred_language: Some(lang.clone()),
+                        ..Default::default()
+                    };
+                    opentake_media::transcribe::transcribe_file(&path, b, &opts)
+                        .map_err(|e| e.to_string())
+                }
+                None => {
+                    let cache = opentake_media::TranscriptCache::new(self.engine.cache_root());
+                    cache
+                        .transcript(&path, src.is_video, None, b)
+                        .map_err(|e| e.to_string())
+                }
+            };
+            match result {
                 Ok(t) => out.push(TranscriptSourceResult {
                     media_ref: src.media_ref.clone(),
                     transcript: Some(t),
                     error: None,
                 }),
-                Err(e) => out.push(skip(e.to_string())),
+                Err(e) => out.push(skip(e)),
             }
         }
         Ok(out)

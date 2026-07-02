@@ -46,6 +46,7 @@ import { extractAudio, generateThumbnail, preloadMedia } from "../../lib/api";
 import { saveDialog } from "../../lib/dialog";
 import type { MediaFolder, MediaItem } from "../../lib/types";
 import { MediaTabBar, MediaSubTabBar } from "./MediaTabBar";
+import { CaptionsTab } from "./CaptionsTab";
 import { useFavoritesStore, useIsFavorite } from "./favorites";
 
 /** MIME-ish type used on dataTransfer when dragging a media item to the timeline. */
@@ -129,6 +130,8 @@ export function MediaPanel() {
       <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}>
         {isLibraryTab ? (
           <MediaTab kind={mediaTab as MediaTabKind} />
+        ) : mediaTab === "subtitle" ? (
+          <CaptionsTab />
         ) : (
           <Placeholder label={t(`media.tab.${mediaTab}`)} />
         )}
