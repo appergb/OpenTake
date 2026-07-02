@@ -173,6 +173,7 @@ pub fn run() {
             render::composite_frame,
             export::export_video,
             export::cancel_export,
+            export::export_bundle,
             secret::secret_save,
             secret::secret_load,
             secret::secret_delete,

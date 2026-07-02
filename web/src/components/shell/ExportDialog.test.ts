@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  defaultBundleName,
   defaultMp4Name,
   defaultQuality,
+  formatBytes,
   progressPercent,
   withMp4Ext,
 } from "./ExportDialog";
@@ -35,6 +37,41 @@ describe("defaultMp4Name", () => {
 
   it("handles a bare bundle name with no directory", () => {
     expect(defaultMp4Name("Demo.opentake")).toBe("Demo.mp4");
+  });
+});
+
+describe("defaultBundleName", () => {
+  it("falls back to Untitled.opentake for an unsaved project", () => {
+    expect(defaultBundleName(null)).toBe("Untitled.opentake");
+  });
+
+  it("round-trips a saved project bundle name (dir stripped, extension kept)", () => {
+    expect(
+      defaultBundleName("/Users/me/Documents/OpenTake/My Film.opentake"),
+    ).toBe("My Film.opentake");
+  });
+
+  it("handles a bare bundle name with no directory", () => {
+    expect(defaultBundleName("Demo.opentake")).toBe("Demo.opentake");
+  });
+});
+
+describe("formatBytes", () => {
+  it("reports 0 B for zero, negative, or non-finite sizes", () => {
+    expect(formatBytes(0)).toBe("0 B");
+    expect(formatBytes(-10)).toBe("0 B");
+    expect(formatBytes(NaN)).toBe("0 B");
+  });
+
+  it("keeps raw bytes below 1 KB with no decimal", () => {
+    expect(formatBytes(512)).toBe("512 B");
+  });
+
+  it("scales into KB / MB / GB with one decimal", () => {
+    expect(formatBytes(1024)).toBe("1 KB");
+    expect(formatBytes(1536)).toBe("1.5 KB");
+    expect(formatBytes(5 * 1024 * 1024)).toBe("5 MB");
+    expect(formatBytes(1024 * 1024 * 1024)).toBe("1 GB");
   });
 });
 

@@ -33,6 +33,7 @@ use std::sync::{Arc, Mutex};
 use opentake_domain::{MediaManifest, MediaManifestEntry, Timeline};
 use opentake_ops::command::{EditCommand, EditResult};
 use opentake_ops::IdGen;
+use opentake_project::GenerationLog;
 
 use crate::deps::CoreDeps;
 use crate::error::Result;
@@ -276,6 +277,15 @@ impl AppCore {
     /// media panel renders; reads are infallible.
     pub fn media(&self) -> MediaManifest {
         self.lock().media()
+    }
+
+    /// A snapshot of the current AI generation log. Cloned out from under the
+    /// session lock so a caller (the `.opentake` bundle exporter) can write it
+    /// into a self-contained bundle alongside the timeline + manifest, exactly as
+    /// upstream carries `editor.generationLog` into `PalmierProjectExporter`
+    /// (`Export/ExportService.swift:186-197`). Reads are infallible.
+    pub fn generation_log(&self) -> GenerationLog {
+        self.lock().generation_log().clone()
     }
 
     /// The open project's `.opentake` bundle directory, or `None` for an unsaved

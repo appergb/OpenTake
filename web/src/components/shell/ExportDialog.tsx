@@ -32,6 +32,13 @@ import { saveDialog } from "../../lib/dialog";
 
 const MP4_EXT = "mp4";
 const MOV_EXT = "mov";
+/** Extension of a self-contained project bundle (matches the Rust
+ *  `BUNDLE_EXTENSION` and how projects are named/opened today). */
+const BUNDLE_EXT = "opentake";
+
+/** Top-level export target: a rendered video, or a self-contained project
+ *  bundle (upstream `ExportMode.video` / `.palmierProject`). */
+export type ExportMode = "video" | "bundle";
 
 /** The container extension the backend's `resolve_preset` requires for a codec. */
 export function extForCodec(codec: ExportCodec): typeof MP4_EXT | typeof MOV_EXT {
@@ -66,6 +73,30 @@ export function defaultMp4Name(projectPath: string | null): string {
   return defaultExportName(projectPath, MP4_EXT);
 }
 
+/**
+ * Default bundle filename: the open project's base name with the `.opentake`
+ * extension, falling back to "Untitled.opentake" for an unsaved project
+ * (upstream `startPalmierExport`: `editor.projectURL?…lastPathComponent ??
+ * Project.defaultProjectName`). Reuses {@link defaultExportName}, which already
+ * strips the directory and a trailing `.opentake` from the source path — so a
+ * saved "My Film.opentake" round-trips to "My Film.opentake".
+ */
+export function defaultBundleName(projectPath: string | null): string {
+  if (!projectPath) return `Untitled.${BUNDLE_EXT}`;
+  return defaultExportName(projectPath, BUNDLE_EXT);
+}
+
+/** Human-readable byte size for the bundle "collected N media · <size>" toast.
+ *  Base-1024 with one decimal past KB; pure so it's unit-testable. */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const value = bytes / 1024 ** i;
+  const rounded = i === 0 ? value : Math.round(value * 10) / 10;
+  return `${rounded} ${units[i]}`;
+}
+
 /** Pick the preset whose short edge best matches the timeline's shorter side. */
 export function defaultQuality(width: number, height: number): ExportQuality {
   const shortEdge = Math.min(width, height);
@@ -90,11 +121,16 @@ export function ExportDialog() {
   const pushToast = useEditorUiStore((s) => s.pushToast);
   const timeline = useProjectStore((s) => s.timeline);
 
+  const [mode, setMode] = useState<ExportMode>("video");
   const [codec, setCodec] = useState<ExportCodec>("h264");
   const [quality, setQuality] = useState<ExportQuality>("1080p");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  // Missing-media report from a bundle export that otherwise succeeded. Non-null
+  // keeps the dialog open with a distinct notice (upstream keeps the export
+  // sheet open "so the user sees what couldn't be included").
+  const [bundleMissing, setBundleMissing] = useState<api.MissingMedia[] | null>(null);
   // Guards against unsubscribing a listener from a stale/overlapping export run
   // (belt-and-suspenders; only one export runs at a time in practice).
   const progressUnlisten = useRef<(() => void) | null>(null);
@@ -105,6 +141,7 @@ export function ExportDialog() {
       setQuality(defaultQuality(timeline.width, timeline.height));
       setError(null);
       setProgress(null);
+      setBundleMissing(null);
     }
   }, [open, timeline.width, timeline.height]);
 
@@ -145,6 +182,23 @@ export function ExportDialog() {
     ],
     [t],
   );
+
+  const modeOptions = useMemo(
+    () => [
+      { id: "video" as const, label: t("export.mode.video") },
+      { id: "bundle" as const, label: t("export.mode.bundle") },
+    ],
+    [t],
+  );
+
+  /** Switch export target, clearing any prior run's error / missing report so a
+   *  stale notice from the other mode doesn't linger. Blocked while busy. */
+  function onModeChange(next: ExportMode): void {
+    if (busy) return;
+    setMode(next);
+    setError(null);
+    setBundleMissing(null);
+  }
 
   if (!open) return null;
 
@@ -217,12 +271,78 @@ export function ExportDialog() {
     }
   }
 
+  /**
+   * Self-contained `.opentake` bundle export (upstream `startPalmierExport`).
+   * Snapshots the live project (no save-first, matching upstream) and copies all
+   * resolvable media inside. On a clean result the dialog closes with a success
+   * toast; when some media was missing the dialog stays open with a distinct
+   * report so the user sees what couldn't be included. There is no progress
+   * event for bundling (pure file copy), so no listener is wired.
+   */
+  async function onExportBundle(): Promise<void> {
+    if (busy) return;
+    setError(null);
+    setBundleMissing(null);
+
+    const save = await saveDialog();
+    if (!save) {
+      // No native save panel (outside Tauri) — the export can't run here.
+      pushToast(t("export.bundle.unavailable"));
+      return;
+    }
+    const projectPath = useProjectStore.getState().projectPath;
+    const dir = projectPath
+      ? projectPath.replace(/[\\/][^\\/]*$/, "")
+      : await api.getDefaultProjectDir().catch(() => "");
+    const sep = dir && !dir.endsWith("/") ? "/" : "";
+    const defaultPath = dir
+      ? `${dir}${sep}${defaultBundleName(projectPath)}`
+      : undefined;
+
+    const chosen = await save({
+      title: t("export.bundle.saveDialog"),
+      defaultPath,
+      filters: [{ name: t("export.bundle.saveFilter"), extensions: [BUNDLE_EXT] }],
+    });
+    if (typeof chosen !== "string") return; // cancelled
+
+    setBusy(true);
+    try {
+      const report = await api.exportBundle(withExt(chosen, BUNDLE_EXT));
+      if (report.missing.length === 0) {
+        // Clean success: close with a summary toast (upstream reveals the file
+        // in Finder; no reveal capability is wired here, so surface via toast).
+        pushToast(
+          report.collected.length > 0
+            ? t("export.bundle.done", {
+                collected: report.collected.length,
+                size: formatBytes(report.totalBytes),
+              })
+            : t("export.bundle.doneNoMedia"),
+        );
+        setOpen(false);
+      } else {
+        // Exported, but some media couldn't be found — keep the dialog open and
+        // list them (distinct from the failure path).
+        setBundleMissing(report.missing);
+        pushToast(t("export.bundle.missing", { count: report.missing.length }));
+      }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setError(message);
+      pushToast(t("export.bundle.failed"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function onCancel(): Promise<void> {
     if (!busy) {
       setOpen(false);
       return;
     }
-    await api.cancelExport();
+    // Bundling has no cooperative cancel; only the video path can stop mid-run.
+    if (mode === "video") await api.cancelExport();
   }
 
   return (
@@ -291,7 +411,7 @@ export function ExportDialog() {
           </button>
         </div>
 
-        {/* Body: format + resolution rows. */}
+        {/* Body: mode picker, then mode-specific rows. */}
         <div
           style={{
             padding: "14px",
@@ -300,33 +420,84 @@ export function ExportDialog() {
             gap: "var(--space-md)",
           }}
         >
-          <Row label={t("export.format")}>
+          <Row label={t("export.mode")}>
             <Dropdown
-              value={codec}
-              options={codecOptions}
-              onChange={(id) => setCodec(id)}
-              ariaLabel={t("export.format")}
+              value={mode}
+              options={modeOptions}
+              onChange={(id) => onModeChange(id)}
+              ariaLabel={t("export.mode")}
               minWidth={160}
             />
           </Row>
 
-          <Row
-            label={t("export.resolution")}
-            hint={t("export.timelineSize", {
-              width: timeline.width,
-              height: timeline.height,
-            })}
-          >
-            <Dropdown
-              value={quality}
-              options={qualityOptions}
-              onChange={(id) => setQuality(id)}
-              ariaLabel={t("export.resolution")}
-              minWidth={160}
-            />
-          </Row>
+          {mode === "video" ? (
+            <>
+              <Row label={t("export.format")}>
+                <Dropdown
+                  value={codec}
+                  options={codecOptions}
+                  onChange={(id) => setCodec(id)}
+                  ariaLabel={t("export.format")}
+                  minWidth={160}
+                />
+              </Row>
 
-          {busy && (
+              <Row
+                label={t("export.resolution")}
+                hint={t("export.timelineSize", {
+                  width: timeline.width,
+                  height: timeline.height,
+                })}
+              >
+                <Dropdown
+                  value={quality}
+                  options={qualityOptions}
+                  onChange={(id) => setQuality(id)}
+                  ariaLabel={t("export.resolution")}
+                  minWidth={160}
+                />
+              </Row>
+            </>
+          ) : (
+            <p
+              style={{
+                margin: 0,
+                fontSize: "var(--fs-sm)",
+                color: "var(--text-secondary)",
+                lineHeight: 1.5,
+              }}
+            >
+              {t("export.bundle.description")}
+            </p>
+          )}
+
+          {mode === "bundle" && bundleMissing && (
+            <div
+              style={{
+                fontSize: "var(--fs-xs)",
+                color: "var(--accent-danger, #ff6b6b)",
+                background: "rgba(255,107,107,0.08)",
+                borderRadius: "var(--radius-xs-sm)",
+                padding: "6px 8px",
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+                maxHeight: 120,
+                overflowY: "auto",
+              }}
+            >
+              <span style={{ fontWeight: "var(--fw-medium)" }}>
+                {t("export.bundle.missing", { count: bundleMissing.length })}
+              </span>
+              {bundleMissing.map((m) => (
+                <span key={m.id} style={{ wordBreak: "break-word" }}>
+                  {m.name}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {mode === "video" && busy && (
             <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
               <div
                 role="progressbar"
@@ -406,7 +577,7 @@ export function ExportDialog() {
           <button
             type="button"
             disabled={busy}
-            onClick={onExport}
+            onClick={mode === "bundle" ? onExportBundle : onExport}
             style={{
               height: 28,
               padding: "0 var(--space-lg)",
@@ -420,7 +591,11 @@ export function ExportDialog() {
               opacity: busy ? 0.7 : 1,
             }}
           >
-            {busy ? t("export.exporting") : t("export.run")}
+            {busy
+              ? t("export.exporting")
+              : mode === "bundle"
+                ? t("export.bundle.run")
+                : t("export.run")}
           </button>
         </div>
       </div>

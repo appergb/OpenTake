@@ -83,6 +83,20 @@ const zh: Dict = {
   "export.failed": "导出失败",
   "export.unavailable": "当前环境无法导出视频（需桌面版）",
 
+  // Export mode (#29): video vs self-contained .opentake bundle
+  "export.mode": "导出类型",
+  "export.mode.video": "视频 (.mp4)",
+  "export.mode.bundle": "项目包 (.opentake)",
+  "export.bundle.description": "打包本项目及其全部素材，便于在任意电脑上打开。",
+  "export.bundle.run": "导出项目包",
+  "export.bundle.saveDialog": "导出项目包",
+  "export.bundle.saveFilter": "OpenTake 项目包",
+  "export.bundle.done": "已导出项目包 · 收集 {collected} 项素材 · {size}",
+  "export.bundle.doneNoMedia": "已导出项目包",
+  "export.bundle.missing": "已导出，但有 {count} 项素材缺失、未能包含。",
+  "export.bundle.failed": "导出项目包失败",
+  "export.bundle.unavailable": "当前环境无法导出项目包（需桌面版）",
+
   // View menu
   "view.menu": "视图",
   "view.layout": "布局",
@@ -508,6 +522,21 @@ const en: Dict = {
   "export.cancelled": "Export cancelled",
   "export.failed": "Export failed",
   "export.unavailable": "Video export needs the desktop app",
+
+  // Export mode (#29): video vs self-contained .opentake bundle
+  "export.mode": "Export type",
+  "export.mode.video": "Video (.mp4)",
+  "export.mode.bundle": "Project bundle (.opentake)",
+  "export.bundle.description":
+    "Bundles this project with all its media so it opens on any machine.",
+  "export.bundle.run": "Export Bundle",
+  "export.bundle.saveDialog": "Export Project Bundle",
+  "export.bundle.saveFilter": "OpenTake Bundle",
+  "export.bundle.done": "Bundle exported · {collected} media collected · {size}",
+  "export.bundle.doneNoMedia": "Bundle exported",
+  "export.bundle.missing": "Exported, but {count} media file(s) were missing and couldn't be included.",
+  "export.bundle.failed": "Bundle export failed",
+  "export.bundle.unavailable": "Bundle export needs the desktop app",
 
   "view.menu": "View",
   "view.layout": "Layout",

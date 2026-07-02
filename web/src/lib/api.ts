@@ -287,6 +287,45 @@ export async function onExportProgress(
   });
 }
 
+// MARK: - Self-contained `.opentake` bundle export (#29 / upstream `.palmier`)
+//
+// `export_bundle` writes a self-contained `.opentake` bundle to disk: every
+// resolvable media reference is copied inside and the manifest is rewritten to
+// bundle-relative paths, so the project opens on any machine (port of upstream
+// `ExportService.exportPalmierProject` / `PalmierProjectExporter`). It carries
+// the live in-memory timeline / manifest / generation log with no save-first,
+// matching upstream. Both interfaces mirror the Rust DTOs verbatim — camelCase
+// `outPath` / `copiedInternal` / `totalBytes` (IPC camelCase drift is this
+// repo's #1 historical bug). Outside Tauri there is no Rust core / file system,
+// so the wrapper rejects with a friendly error rather than silently no-op'ing.
+
+/** One media entry that could not be bundled because its source file was not
+ *  found on disk (mirror of Rust `MissingMediaDto`). Kept as a dangling
+ *  reference in the exported bundle, exactly as upstream does. */
+export interface MissingMedia {
+  id: string;
+  name: string;
+}
+
+/** Summary of a completed `.opentake` bundle export (mirror of Rust
+ *  `BundleReportDto`). `missing` lists entries whose source file couldn't be
+ *  found so the dialog can surface them while still reporting success. */
+export interface BundleReport {
+  outPath: string;
+  collected: string[];
+  copiedInternal: number;
+  missing: MissingMedia[];
+  totalBytes: number;
+}
+
+/** Write a self-contained `.opentake` bundle to `outPath`, returning the
+ *  missing-media report. Rejects outside Tauri (no core / no FS). */
+export async function exportBundle(outPath: string): Promise<BundleReport> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<BundleReport>("export_bundle", { outPath });
+  throw new Error("bundle export requires the desktop app");
+}
+
 // MARK: - Media commands
 //
 // `import_folder` scans a directory for white-listed media and imports each;
