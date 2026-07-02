@@ -182,6 +182,7 @@ pub fn run() {
             media::preload_media,
             haptic::snap_haptic,
             render::composite_frame,
+            render::capture_frame_to_media,
             export::export_video,
             export::cancel_export,
             export::export_bundle,

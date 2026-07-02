@@ -627,6 +627,32 @@ export async function compositeFrame(
 }
 
 /**
+ * `capture_frame_to_media`: composite the timeline (or decode a single video
+ * asset) at `frame` and import the result as a NEW still into the media library,
+ * named `"{nameBase} {frame}"` and placed in `folderId` (current media-panel
+ * folder). Pass `sourceMediaId` for the single-clip video preview tab (decodes
+ * that asset's own frame); omit it for the timeline tab (composites). Returns the
+ * updated media catalog, or null outside Tauri (no compositor). Mirrors upstream
+ * `captureCurrentFrameToMedia`.
+ */
+export async function captureFrameToMedia(
+  frame: number,
+  nameBase: string,
+  folderId: string | null,
+  sourceMediaId?: string | null,
+): Promise<MediaList | null> {
+  await ensureTauri();
+  if (invokeImpl)
+    return invokeImpl<MediaList>("capture_frame_to_media", {
+      frame: Math.floor(frame),
+      nameBase,
+      folderId: folderId ?? null,
+      sourceMediaId: sourceMediaId ?? null,
+    });
+  return null;
+}
+
+/**
  * Normalized waveform buckets (`0 = loud, 1 = silence`) for a media asset,
  * computed/cached by the Rust media engine (`get_waveform`). The array spans the
  * WHOLE source; the timeline renderer maps the clip's trimmed sub-range into it.

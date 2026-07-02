@@ -530,9 +530,33 @@ export interface MediaItem {
   thumbnail?: string | null;
   /** Library folder this asset lives in (`null`/absent = root). */
   folderId?: string | null;
+  /** Source file size in bytes when the file resolves on disk (Inspector Source
+   *  → File "Size" row). `null`/absent for missing/unresolvable sources. */
+  fileSize?: number | null;
+  /** Generation snapshot for an AI-generated asset; `null`/absent for imported
+   *  or user assets. Drives the Inspector Source → Generated/Prompt/References
+   *  sections (mirror of `MediaItemDto.generationInput` / upstream
+   *  `MediaAsset.generationInput`). */
+  generationInput?: GenerationInput | null;
   /** `true` when the source file is offline (moved/deleted). Derived from file
    *  existence on the backend; clears after a successful relink. */
   missing?: boolean;
+}
+
+/** Generation input snapshot carried by an AI-generated media asset (mirror of
+ *  the Rust `GenerationInput` DTO). Only the fields the Inspector reads are
+ *  typed; the backend may carry more. The `assetId` reference arrays resolve to
+ *  library items for the References section. */
+export interface GenerationInput {
+  prompt: string;
+  model: string;
+  duration: number;
+  aspectRatio: string;
+  resolution?: string | null;
+  imageURLAssetIds?: string[] | null;
+  referenceImageAssetIds?: string[] | null;
+  referenceVideoAssetIds?: string[] | null;
+  referenceAudioAssetIds?: string[] | null;
 }
 
 /** A media-library folder (flat list; nest via `parentFolderId`). */

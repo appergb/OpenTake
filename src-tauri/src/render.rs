@@ -28,9 +28,10 @@ use base64::Engine as _;
 use serde::Serialize;
 use tauri::State;
 
-use opentake_core::AppCore;
+use opentake_core::{AppCore, EditCommand};
 use opentake_domain::{ClipType, MediaSource, TextStyle};
 use opentake_media::{decode_frame_at, FrameRequest};
+use opentake_ops::command::RenameEntry;
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::wgpu;
 use opentake_render::{
@@ -221,8 +222,9 @@ fn preview_render_size(canvas_w: i32, canvas_h: i32, cap: u32) -> RenderSize {
     RenderSize::new(even(cw * scale), even(ch * scale))
 }
 
-/// Encode an RGBA composite as a base64 PNG `data:` URL.
-fn encode_png_data_url(frame: &DecodedFrame) -> Result<String, String> {
+/// Encode an RGBA composite as PNG bytes. Shared by the preview data-URL path
+/// and the capture-to-media on-disk path.
+fn encode_png_bytes(frame: &DecodedFrame) -> Result<Vec<u8>, String> {
     use image::ImageEncoder;
     let mut bytes: Vec<u8> = Vec::new();
     image::codecs::png::PngEncoder::new(&mut bytes)
@@ -233,22 +235,27 @@ fn encode_png_data_url(frame: &DecodedFrame) -> Result<String, String> {
             image::ExtendedColorType::Rgba8,
         )
         .map_err(|e| format!("png encode: {e}"))?;
+    Ok(bytes)
+}
+
+/// Encode an RGBA composite as a base64 PNG `data:` URL.
+fn encode_png_data_url(frame: &DecodedFrame) -> Result<String, String> {
+    let bytes = encode_png_bytes(frame)?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Ok(format!("data:image/png;base64,{b64}"))
 }
 
-/// `composite_frame`: render the timeline at `frame` to a PNG data URL.
-///
-/// `max_size` caps the longest side (px); omit it for the default preview cap.
-/// Out-of-range frames (and an empty timeline) composite to opaque black, which
-/// is the correct clear color — not an error.
-#[tauri::command]
-pub fn composite_frame(
-    core: State<'_, AppCore>,
-    render: State<'_, RenderState>,
+/// Composite the timeline at `frame` into an RGBA frame at a size capped by
+/// `max_size` (longest side). Shared by [`composite_frame`] (which PNG-encodes it
+/// for the preview) and [`capture_frame_to_media`] (which writes it to disk and
+/// imports it as a still). Out-of-range frames / an empty timeline composite to
+/// opaque black — the correct clear color, not an error.
+fn composite_rgba(
+    core: &AppCore,
+    render: &RenderState,
     frame: i32,
-    max_size: Option<u32>,
-) -> Result<CompositeFrameDto, String> {
+    max_size: u32,
+) -> Result<DecodedFrame, String> {
     // Snapshot the session under its own lock, released before any GPU work.
     let timeline = core.get_timeline().timeline;
     let manifest = core.media();
@@ -300,11 +307,7 @@ pub fn composite_frame(
         media.insert(entry.id.clone(), MediaInfo { path });
     }
 
-    let render_size = preview_render_size(
-        timeline.width,
-        timeline.height,
-        max_size.unwrap_or(DEFAULT_PREVIEW_CAP),
-    );
+    let render_size = preview_render_size(timeline.width, timeline.height, max_size);
 
     let metrics = ManifestMetrics { sizes };
     let plan = build_render_plan(&timeline, render_size, &metrics);
@@ -338,8 +341,7 @@ pub fn composite_frame(
         text_rasterizer: &ctx.text_rasterizer,
         preview_box: (render_size.width, render_size.height),
     };
-    let composite = ctx
-        .compositor
+    ctx.compositor
         .render_to_rgba(
             &ctx.device,
             &ctx.queue,
@@ -347,14 +349,150 @@ pub fn composite_frame(
             &frame_plan,
             &mut resolver,
         )
-        .map_err(|e| format!("composite render failed: {e}"))?;
+        .map_err(|e| format!("composite render failed: {e}"))
+}
 
+/// `composite_frame`: render the timeline at `frame` to a PNG data URL.
+///
+/// `max_size` caps the longest side (px); omit it for the default preview cap.
+#[tauri::command]
+pub fn composite_frame(
+    core: State<'_, AppCore>,
+    render: State<'_, RenderState>,
+    frame: i32,
+    max_size: Option<u32>,
+) -> Result<CompositeFrameDto, String> {
+    let composite = composite_rgba(
+        &core,
+        &render,
+        frame,
+        max_size.unwrap_or(DEFAULT_PREVIEW_CAP),
+    )?;
     let data_url = encode_png_data_url(&composite)?;
     Ok(CompositeFrameDto {
         width: composite.width,
         height: composite.height,
         data_url,
     })
+}
+
+/// `capture_frame_to_media`: composite the timeline at `frame` and import the
+/// result as a NEW still image in the media library — the port of upstream's
+/// `captureCurrentFrameToMedia` (EditorViewModel+MediaLibrary.swift:306-390),
+/// which composites and then hands the PNG to `importPastedImageData(...)` (the
+/// same import machinery a user drop uses), renames it `"{nameBase} {frame}"`,
+/// and moves it into the current media-panel folder.
+///
+/// `name_base` is upstream's `nameBase` (`"Frame"` for the timeline tab, the
+/// source asset's name for a single-clip video tab); the imported asset is named
+/// `"{name_base} {frame}"`. `folder_id` is the current media-panel folder (the
+/// still lands there, else at root). Returns the updated catalog.
+///
+/// `source_media_id` selects the tab, mirroring upstream's internal
+/// `switch tab` branch: `None` composites the whole TIMELINE at `frame` (full
+/// canvas resolution, no preview cap — this becomes a real asset), while `Some`
+/// decodes that single VIDEO asset's own frame at `frame` (upstream's video-tab
+/// path uses `videoComposition = nil`, i.e. the raw asset frame, not a
+/// composite). Both then import identically.
+#[tauri::command]
+pub fn capture_frame_to_media(
+    core: State<'_, AppCore>,
+    render: State<'_, RenderState>,
+    media: State<'_, crate::media::MediaState>,
+    frame: i32,
+    name_base: String,
+    folder_id: Option<String>,
+    source_media_id: Option<String>,
+) -> Result<crate::media::MediaListDto, String> {
+    let engine = media.engine();
+
+    // Frame → RGBA. Timeline tab composites; video tab decodes the source frame.
+    let composite = match &source_media_id {
+        None => composite_rgba(&core, &render, frame, 0)?,
+        Some(id) => decode_source_frame(&core, id, frame)?,
+    };
+
+    // Write the PNG next to the media cache so a subsequent project save can copy
+    // it into the bundle like any other external asset. The frame number keys the
+    // filename so repeated captures at different frames don't collide.
+    let captures_dir = engine.cache_root().join("captures");
+    std::fs::create_dir_all(&captures_dir).map_err(|e| format!("create captures dir: {e}"))?;
+    let png_path = captures_dir.join(format!("capture-{frame:06}-{}.png", uuid_like()));
+    let bytes = encode_png_bytes(&composite)?;
+    std::fs::write(&png_path, &bytes).map_err(|e| format!("write capture png: {e}"))?;
+
+    // Import through the SAME path as a user import (posters + manifest entry +
+    // MediaChanged event), then rename to the upstream "{nameBase} {frame}" and
+    // move into the current folder.
+    let entry = crate::media::import_one(&core, engine, &png_path)
+        .ok_or_else(|| "capture import failed".to_string())?;
+    let name = format!("{name_base} {frame}");
+    core.apply(EditCommand::RenameMedia {
+        entries: vec![RenameEntry {
+            id: entry.id.clone(),
+            name,
+        }],
+    })
+    .map_err(|e| e.to_string())?;
+    if let Some(fid) = folder_id {
+        core.apply(EditCommand::MoveToFolder {
+            asset_ids: vec![entry.id.clone()],
+            folder_id: Some(fid),
+        })
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(crate::media::MediaListDto::from_core(
+        &core,
+        Some(engine.cache_root()),
+    ))
+}
+
+/// Decode a single VIDEO asset's own frame at project-frame `frame` into a
+/// full-resolution RGBA frame (video-tab capture; upstream's `videoComposition =
+/// nil` raw-asset path). The frame → time uses the TIMELINE fps, matching
+/// upstream's `CMTime(value: frame, timescale: fps)` (fps = timeline fps for both
+/// tabs). Errors when the asset is unknown, not a video, or its source is offline.
+fn decode_source_frame(core: &AppCore, media_id: &str, frame: i32) -> Result<DecodedFrame, String> {
+    let timeline = core.get_timeline().timeline;
+    let manifest = core.media();
+    let entry = manifest
+        .entries
+        .iter()
+        .find(|e| e.id == media_id)
+        .ok_or_else(|| format!("media not found: {media_id}"))?;
+    if entry.kind != ClipType::Video {
+        return Err("capture: source tab asset is not a video".to_string());
+    }
+    let path = match &entry.source {
+        MediaSource::External { absolute_path } => PathBuf::from(absolute_path),
+        MediaSource::Project { relative_path } => core
+            .project_dir()
+            .map(|base| base.join(relative_path))
+            .ok_or_else(|| "project not saved; cannot resolve media path".to_string())?,
+    };
+    if !path.is_file() {
+        return Err(format!("source file not found: {}", path.display()));
+    }
+    let fps = if timeline.fps > 0 { timeline.fps } else { 30 };
+    let req = FrameRequest {
+        time_secs: (frame.max(0) as f64) / fps as f64,
+        max_size: (0, 0), // full resolution
+        ..FrameRequest::default()
+    };
+    let (_, rgba) =
+        decode_frame_at(&path, &req).map_err(|e| format!("decode source frame: {e}"))?;
+    Ok(DecodedFrame::new(rgba.width, rgba.height, rgba.rgba, false))
+}
+
+/// A short unique-ish suffix (nanos since epoch) to keep capture filenames from
+/// colliding when the same frame is captured twice. Not cryptographic — just a
+/// disambiguator so two captures of the same frame don't overwrite each other.
+fn uuid_like() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
 }
 
 fn project_frame_time_secs(source_frame: i64, timeline_fps: i32) -> f64 {
