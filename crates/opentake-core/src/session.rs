@@ -65,14 +65,28 @@ pub struct ProbedMedia {
 }
 
 /// File extensions the importer accepts, grouped by the [`ClipType`] they map to.
-/// Mirrors upstream `ClipType(fileExtension:)` minus the Lottie special-case
-/// (Lottie needs a content sniff the bare extension can't provide, so JSON files
-/// are not auto-imported here).
-pub const SUPPORTED_VIDEO_EXTENSIONS: [&str; 3] = ["mov", "mp4", "m4v"];
+///
+/// Upstream's picker (`MediaTab.swift:754` — `allowedContentTypes = [.movie,
+/// .image, .audio, .json]`) surfaces *anything* AVFoundation recognizes for those
+/// UTTypes, far more than upstream's own bare-extension `ClipType(fileExtension:)`
+/// list. OpenTake's importer routes every decode through the system `ffmpeg`,
+/// which handles a much wider set of containers/codecs cross-platform, so the
+/// white-list is widened to the formats ffmpeg reads well rather than mirroring
+/// upstream's narrow macOS-native list. The Lottie/JSON special-case is still
+/// excluded (it needs a content sniff the bare extension can't provide, so JSON
+/// files are not auto-imported here).
+pub const SUPPORTED_VIDEO_EXTENSIONS: [&str; 14] = [
+    "mov", "mp4", "m4v", "mkv", "webm", "avi", "mts", "m2ts", "mpg", "mpeg", "3gp", "wmv", "flv",
+    "ts",
+];
 /// Accepted audio extensions.
-pub const SUPPORTED_AUDIO_EXTENSIONS: [&str; 4] = ["mp3", "wav", "aac", "m4a"];
+pub const SUPPORTED_AUDIO_EXTENSIONS: [&str; 11] = [
+    "mp3", "wav", "aac", "m4a", "flac", "ogg", "opus", "aiff", "aif", "wma", "caf",
+];
 /// Accepted image extensions.
-pub const SUPPORTED_IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "tiff", "heic", "webp"];
+pub const SUPPORTED_IMAGE_EXTENSIONS: [&str; 9] = [
+    "png", "jpg", "jpeg", "tiff", "heic", "webp", "bmp", "gif", "avif",
+];
 
 /// The [`ClipType`] for `path` if its (lowercased) extension is on the import
 /// white-list, else `None`. JSON/Lottie are intentionally excluded (see
@@ -504,6 +518,72 @@ mod tests {
         assert_eq!(importable_clip_type(Path::new("/x/anim.json")), None);
         assert_eq!(importable_clip_type(Path::new("/x/notes.txt")), None);
         assert_eq!(importable_clip_type(Path::new("/x/noext")), None);
+    }
+
+    #[test]
+    fn importable_clip_type_maps_every_whitelisted_extension() {
+        // Each list must map to exactly its ClipType, case-insensitively, so a
+        // new extension can never silently fall through to `None`.
+        for ext in SUPPORTED_VIDEO_EXTENSIONS {
+            let p = format!("/x/clip.{ext}");
+            assert_eq!(
+                importable_clip_type(Path::new(&p)),
+                Some(ClipType::Video),
+                "video ext .{ext} should import as Video"
+            );
+            // Same extension upper-cased still maps (extension is lowercased).
+            let up = format!("/x/clip.{}", ext.to_ascii_uppercase());
+            assert_eq!(importable_clip_type(Path::new(&up)), Some(ClipType::Video));
+        }
+        for ext in SUPPORTED_AUDIO_EXTENSIONS {
+            let p = format!("/x/song.{ext}");
+            assert_eq!(
+                importable_clip_type(Path::new(&p)),
+                Some(ClipType::Audio),
+                "audio ext .{ext} should import as Audio"
+            );
+        }
+        for ext in SUPPORTED_IMAGE_EXTENSIONS {
+            let p = format!("/x/pic.{ext}");
+            assert_eq!(
+                importable_clip_type(Path::new(&p)),
+                Some(ClipType::Image),
+                "image ext .{ext} should import as Image"
+            );
+        }
+    }
+
+    #[test]
+    fn importable_clip_type_covers_newly_added_extensions() {
+        // Spot-check a representative newcomer from each widened list plus junk.
+        assert_eq!(
+            importable_clip_type(Path::new("/x/a.mkv")),
+            Some(ClipType::Video)
+        );
+        assert_eq!(
+            importable_clip_type(Path::new("/x/a.webm")),
+            Some(ClipType::Video)
+        );
+        assert_eq!(
+            importable_clip_type(Path::new("/x/s.flac")),
+            Some(ClipType::Audio)
+        );
+        assert_eq!(
+            importable_clip_type(Path::new("/x/s.opus")),
+            Some(ClipType::Audio)
+        );
+        assert_eq!(
+            importable_clip_type(Path::new("/x/p.gif")),
+            Some(ClipType::Image)
+        );
+        assert_eq!(
+            importable_clip_type(Path::new("/x/p.avif")),
+            Some(ClipType::Image)
+        );
+        // Junk / documents still rejected.
+        assert_eq!(importable_clip_type(Path::new("/x/a.pdf")), None);
+        assert_eq!(importable_clip_type(Path::new("/x/a.exe")), None);
+        assert_eq!(importable_clip_type(Path::new("/x/a.doc")), None);
     }
 
     #[test]

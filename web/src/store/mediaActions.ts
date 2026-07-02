@@ -13,17 +13,36 @@
 import * as api from "../lib/api";
 import { useMediaStore, refreshMedia } from "./mediaStore";
 import { useSettingsStore } from "./settingsStore";
+import { useEditorUiStore } from "./uiStore";
 import { openDialog } from "../lib/dialog";
+import { t } from "../i18n";
+import type { MediaList } from "../lib/types";
 
-/** Extensions the Rust importer accepts (mirrors `session.rs` white-lists). */
-const VIDEO_EXTS = ["mov", "mp4", "m4v"];
-const AUDIO_EXTS = ["mp3", "wav", "aac", "m4a"];
-const IMAGE_EXTS = ["png", "jpg", "jpeg", "tiff", "heic", "webp"];
+/** Extensions the Rust importer accepts (mirrors the `session.rs` white-lists).
+ *  These populate the native file-picker filter so the dialog surfaces the same
+ *  formats the backend can decode; keep in sync with
+ *  `crates/opentake-core/src/session.rs`. */
+const VIDEO_EXTS = [
+  "mov", "mp4", "m4v", "mkv", "webm", "avi", "mts", "m2ts", "mpg", "mpeg", "3gp", "wmv", "flv", "ts",
+];
+const AUDIO_EXTS = [
+  "mp3", "wav", "aac", "m4a", "flac", "ogg", "opus", "aiff", "aif", "wma", "caf",
+];
+const IMAGE_EXTS = ["png", "jpg", "jpeg", "tiff", "heic", "webp", "bmp", "gif", "avif"];
 
 function getErrorMessage(error: unknown): string {
   if (typeof error === "string") return error;
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+/** Toast the count of files an import skipped as unsupported, if any (mirrors
+ *  upstream `mediaPanelToast`). A no-op when nothing was skipped so a clean
+ *  import stays quiet. */
+function reportSkipped(list: MediaList): void {
+  const skipped = list.skipped ?? [];
+  if (skipped.length === 0) return;
+  useEditorUiStore.getState().pushToast(t("media.importSkipped", { count: skipped.length }));
 }
 
 /** Pick a folder and import every supported file inside it. */
@@ -40,8 +59,9 @@ export async function importFolderViaDialog(): Promise<void> {
     });
     if (typeof selected !== "string") return; // cancelled
     store.setImporting(true);
-    await api.importFolder(selected, true);
+    const list = await api.importFolder(selected, true);
     await refreshMedia();
+    reportSkipped(list);
   } catch (error: unknown) {
     store.setError(getErrorMessage(error));
   } finally {
@@ -95,8 +115,9 @@ export async function importFilesViaDialog(): Promise<void> {
     const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
     if (paths.length === 0) return; // cancelled
     store.setImporting(true);
-    await api.importMedia(paths);
+    const list = await api.importMedia(paths);
     await refreshMedia();
+    reportSkipped(list);
   } catch (error: unknown) {
     store.setError(getErrorMessage(error));
   } finally {
