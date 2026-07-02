@@ -23,7 +23,7 @@ import {
   activeAudioClips,
   activeVisualClips,
   advancePlayhead,
-  clipVolume,
+  clipVolumeAt,
   frameForSourceTime,
   isExternalSeekWhilePlaying,
   shouldUseRustEngine,
@@ -337,10 +337,16 @@ export function useTimelinePlaybackEngine(): void {
         const key = previewElementKey(m);
         const el = previewElements.get(key);
         if (!el) continue; // images carry no media element
-        const vol = clipVolume(m.track, m.clip);
+        // Frame-aware gain: static volume x dB keyframe automation x fade ramp
+        // (Clip::volume_at). The true gain can exceed 1 (boosted keyframes / a
+        // >1 static volume) but HTMLMediaElement.volume is capped to [0,1] and
+        // throws a RangeError above 1, so the clamp lives here at the
+        // assignment, not inside the pure helper.
+        // TODO(>0dB): route through a Web Audio GainNode to make >0 dB boosts audible.
+        const gain = clipVolumeAt(m.track, m.clip, r);
         const isVisualVideo = visuals.some((visual) => visual.clip.id === m.clip.id);
-        el.muted = vol <= 0 || (isVisualVideo && duplicatedVisualAudioRefs.has(m.clip.mediaRef));
-        el.volume = vol;
+        el.muted = gain <= 0 || (isVisualVideo && duplicatedVisualAudioRefs.has(m.clip.mediaRef));
+        el.volume = Math.min(1, gain);
         const desired = sourceTimeSec(m.clip, f, fps);
         const previousClipId = lastClipByKey.get(key) ?? null;
         lastClipByKey.set(key, m.clip.id);

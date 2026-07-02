@@ -10,6 +10,7 @@
  * frame instead of switching to a separate ffmpeg/PNG render path.
  */
 
+import { volumeAt } from "../../lib/clip";
 import type { Clip, Timeline, Track } from "../../lib/types";
 
 /** A clip selected for playback at a frame, with its track context. */
@@ -109,6 +110,23 @@ export function clipVolume(track: Track, clip: Clip): number {
   if (track.muted) return 0;
   const v = clip.volume;
   return Math.max(0, Math.min(1, Number.isFinite(v) ? v : 1));
+}
+
+/**
+ * Frame-aware playback gain for a clip: 0 when the track is muted, otherwise
+ * the true `volumeAt` envelope (static volume × dB keyframe automation ×
+ * fade-in/out ramp — `Clip::volume_at` / `Timeline.swift:189`). Unlike
+ * {@link clipVolume} this is NOT clamped to 1 — callers that assign to
+ * `HTMLMediaElement.volume` must clamp at the assignment site, since that
+ * setter throws a RangeError above 1. Floors at 0 (upstream never emits a
+ * negative gain, but this guards a still-authored fade edge) and falls back
+ * to 1 for a non-finite result (matches `clipVolume`'s NaN guard).
+ */
+export function clipVolumeAt(track: Track, clip: Clip, frame: number): number {
+  if (track.muted) return 0;
+  const gain = volumeAt(clip, frame);
+  if (!Number.isFinite(gain)) return 1;
+  return Math.max(0, gain);
 }
 
 /** Effective 0–1 opacity for a clip (clamped; defaults to 1). */
