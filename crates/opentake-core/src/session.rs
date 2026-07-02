@@ -151,10 +151,41 @@ impl EditorSession {
     /// (so saving never mutates the document) plus the generation log, and lets
     /// `opentake-project` write the bundle atomically.
     ///
+    /// **Save-as also copies the source bundle's `media/` directory** into the
+    /// new bundle (upstream `mediaDirWrapper`, `Project/VideoProject.swift:112-117`):
+    /// a project holding internal media
+    /// ([`MediaSource::Project`](opentake_domain::MediaSource) relative paths —
+    /// AI-generated, pasted, captured stills) would otherwise have every one of
+    /// those references silently dangle after Save-As, since `bundle.rs::save`
+    /// "never creates or deletes `media/`". A plain save (target equals the
+    /// current dir) copies nothing; a missing source `media/` is a no-op; a
+    /// partial-copy failure propagates as a real error (never a half-copied
+    /// bundle) — see [`opentake_project::copy_media_dir`].
+    ///
     /// Errors with [`CoreError::NoProjectOpen`] when neither a path nor a
     /// remembered project dir is available.
     pub fn save_project(&mut self, path: Option<PathBuf>) -> Result<PathBuf> {
-        let target = match path.or_else(|| self.project_dir.clone()) {
+        self.save_project_with_thumbnail(path, None)
+    }
+
+    /// Like [`Self::save_project`] but also writes a cover `thumbnail.jpg` when
+    /// `thumbnail` carries JPEG bytes. The caller (which owns the media engine /
+    /// GPU) captures the representative frame — see
+    /// [`opentake_media::capture_project_thumbnail`], the port of upstream
+    /// `captureThumbnail` — and hands the bytes in, so `opentake-core` stays free
+    /// of the ffmpeg/GPU stack (`crate::deps`). `None` leaves any existing
+    /// `thumbnail.jpg` untouched (`bundle.rs::save` only writes the thumbnail when
+    /// [`Project::thumbnail`] is set), matching upstream's best-effort capture
+    /// that simply omits the cover on failure.
+    pub fn save_project_with_thumbnail(
+        &mut self,
+        path: Option<PathBuf>,
+        thumbnail: Option<Vec<u8>>,
+    ) -> Result<PathBuf> {
+        // Remember the currently-open bundle before we adopt any new target, so
+        // a save-as knows the source `media/` to carry across.
+        let previous_dir = self.project_dir.clone();
+        let target = match path.or_else(|| previous_dir.clone()) {
             Some(p) => p,
             None => return Err(CoreError::NoProjectOpen),
         };
@@ -162,12 +193,27 @@ impl EditorSession {
         let mut project = Project::new(target.clone());
         project.timeline = self.state.timeline.clone();
         project.manifest = self.state.manifest.clone();
+        // Cover image (upstream `snapshotThumbnail` → `thumbnail.jpg`): only set
+        // when the caller produced bytes; otherwise leave the on-disk cover as-is.
+        project.thumbnail = thumbnail;
         // Only persist a generation log once it has rows (mirrors the upstream
         // "write the log component when present" tolerance).
         if !self.generation_log.entries.is_empty() {
             project.generation_log = Some(self.generation_log.clone());
         }
         project.save()?;
+
+        // Save-as (target differs from the previously-open bundle): fold the
+        // source bundle's `media/` into the new one before adopting it, so
+        // internal media survives the move. `copy_media_dir` is itself a no-op
+        // when source == dest, but only copy when we truly had a prior bundle at
+        // a different path (a first save of a never-saved project has no source
+        // media/ to carry).
+        if let Some(source_dir) = &previous_dir {
+            if source_dir != &target {
+                opentake_project::copy_media_dir(source_dir, &target)?;
+            }
+        }
 
         self.project_dir = Some(target.clone());
         Ok(target)
@@ -533,5 +579,184 @@ mod tests {
         let err = s.import_media_file("/abs/doc.txt", "x", "doc", &ProbedMedia::default());
         assert!(matches!(err, Err(CoreError::Unsupported("media"))));
         assert!(s.media().entries.is_empty());
+    }
+
+    // --- Save-as copies the project-internal media/ directory (Item 1) ---
+
+    /// A per-call-unique scratch dir under the system temp dir, removed on drop.
+    struct TmpDir(PathBuf);
+    impl TmpDir {
+        fn new(tag: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static N: AtomicU64 = AtomicU64::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            let p = std::env::temp_dir()
+                .join(format!("opentake-saveas-{tag}-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).unwrap();
+            TmpDir(p)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A project-internal (`.project`) manifest entry pointing at
+    /// `media/<file>`, plus the actual file written under the source bundle's
+    /// `media/` dir — the setup a project with internal media has on disk.
+    fn seed_bundle_with_internal_media(
+        bundle: &Path,
+        file_name: &str,
+        bytes: &[u8],
+    ) -> EditorSession {
+        use opentake_domain::{MediaManifestEntry, MediaSource};
+        let media_dir = bundle.join("media");
+        std::fs::create_dir_all(&media_dir).unwrap();
+        std::fs::write(media_dir.join(file_name), bytes).unwrap();
+
+        let mut project = Project::new(bundle.to_path_buf());
+        project.manifest.entries.push(MediaManifestEntry {
+            id: "asset-1".into(),
+            name: file_name.into(),
+            kind: ClipType::Image,
+            source: MediaSource::Project {
+                relative_path: format!("media/{file_name}"),
+            },
+            duration: 0.0,
+            generation_input: None,
+            source_width: Some(2),
+            source_height: Some(2),
+            source_fps: None,
+            has_audio: None,
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+        project.save().unwrap();
+
+        EditorSession::open_project(bundle).unwrap()
+    }
+
+    #[test]
+    fn save_as_copies_internal_media_to_new_bundle_and_manifest_resolves() {
+        use opentake_domain::{MediaResolver, MediaSource};
+        let tmp = TmpDir::new("copy");
+        let src = tmp.path().join("Source.opentake");
+        let dst = tmp.path().join("Dest.opentake");
+
+        let payload = b"PNGDATA";
+        let mut s = seed_bundle_with_internal_media(&src, "still.png", payload);
+        // Sanity: the session opened against the source bundle.
+        assert_eq!(s.project_dir(), Some(src.as_path()));
+
+        // Save-as to a brand-new directory.
+        let written = s.save_project(Some(dst.clone())).unwrap();
+        assert_eq!(written, dst);
+        assert_eq!(s.project_dir(), Some(dst.as_path()));
+
+        // The media file now exists at the SAME relative path inside the new
+        // bundle (media/still.png), with identical bytes.
+        let copied = dst.join("media").join("still.png");
+        assert!(copied.is_file(), "media file missing at {copied:?}");
+        assert_eq!(std::fs::read(&copied).unwrap(), payload);
+
+        // The reopened manifest still resolves the entry to the on-disk file in
+        // the new bundle (the reference did not dangle).
+        let reopened = EditorSession::open_project(&dst).unwrap();
+        let manifest = reopened.media();
+        let entry = &manifest.entries[0];
+        assert!(matches!(
+            &entry.source,
+            MediaSource::Project { relative_path } if relative_path == "media/still.png"
+        ));
+        let resolver = MediaResolver::new(&manifest, Some(dst.as_path()));
+        let resolved = resolver.expected_path("asset-1").unwrap();
+        assert!(
+            resolved.is_file(),
+            "resolved path not on disk: {resolved:?}"
+        );
+        assert_eq!(std::fs::read(&resolved).unwrap(), payload);
+    }
+
+    #[test]
+    fn plain_save_same_path_does_not_touch_media_dir() {
+        let tmp = TmpDir::new("samepath");
+        let src = tmp.path().join("Same.opentake");
+        let mut s = seed_bundle_with_internal_media(&src, "clip.png", b"x");
+
+        // A no-arg save writes back to the same bundle. It must not recurse into
+        // or rewrite media/ (bundle.rs::save "never creates or deletes media/",
+        // and copy_media_dir short-circuits on source == dest). We assert the
+        // existing media file is left exactly as-is.
+        let media_file = src.join("media").join("clip.png");
+        let before = std::fs::metadata(&media_file).unwrap();
+        let written = s.save_project(None).unwrap();
+        assert_eq!(written, src);
+        // File still present, same length; the dir was not replaced/emptied.
+        let after = std::fs::metadata(&media_file).unwrap();
+        assert_eq!(before.len(), after.len());
+        assert!(media_file.is_file());
+    }
+
+    #[test]
+    fn save_with_thumbnail_bytes_writes_thumbnail_jpg() {
+        let tmp = TmpDir::new("thumb");
+        let dir = tmp.path().join("Cover.opentake");
+        let mut s = EditorSession::new_project();
+        s.state = EditorState::from_timeline(one_video_track());
+
+        let jpeg = vec![0xFF, 0xD8, 1, 2, 3, 0xFF, 0xD9]; // stand-in JPEG bytes
+        let written = s
+            .save_project_with_thumbnail(Some(dir.clone()), Some(jpeg.clone()))
+            .unwrap();
+        assert_eq!(written, dir);
+        let thumb = dir.join("thumbnail.jpg");
+        assert!(thumb.is_file(), "thumbnail.jpg not written");
+        assert_eq!(std::fs::read(&thumb).unwrap(), jpeg);
+    }
+
+    #[test]
+    fn save_without_thumbnail_leaves_existing_cover_untouched() {
+        let tmp = TmpDir::new("thumb-keep");
+        let dir = tmp.path().join("Keep.opentake");
+        let mut s = EditorSession::new_project();
+        s.state = EditorState::from_timeline(one_video_track());
+
+        // First save writes a cover.
+        let jpeg = vec![0xFF, 0xD8, 9, 9, 0xFF, 0xD9];
+        s.save_project_with_thumbnail(Some(dir.clone()), Some(jpeg.clone()))
+            .unwrap();
+
+        // A subsequent save with no thumbnail bytes must not delete/overwrite the
+        // existing thumbnail.jpg (bundle.save only writes it when Some).
+        s.save_project_with_thumbnail(None, None).unwrap();
+        assert_eq!(std::fs::read(dir.join("thumbnail.jpg")).unwrap(), jpeg);
+    }
+
+    #[test]
+    fn save_as_with_no_source_media_dir_is_ok() {
+        let tmp = TmpDir::new("nomedia");
+        let src = tmp.path().join("NoMedia.opentake");
+        let dst = tmp.path().join("Out.opentake");
+
+        // Source bundle saved WITHOUT any media/ dir (external-only / empty
+        // project). Save-as must succeed and simply not create a media/ dir.
+        let mut project = Project::new(src.clone());
+        project.timeline = one_video_track();
+        project.save().unwrap();
+        let mut s = EditorSession::open_project(&src).unwrap();
+
+        let written = s.save_project(Some(dst.clone())).unwrap();
+        assert_eq!(written, dst);
+        assert!(dst.join("project.json").is_file());
+        assert!(
+            !dst.join("media").exists(),
+            "no source media/ -> none should be created"
+        );
     }
 }

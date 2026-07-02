@@ -246,9 +246,23 @@ impl AppCore {
     /// (autosave); `Some(path)` is a save-as. Emits [`CoreEvent::ProjectSaved`]
     /// with the written path on success.
     pub fn save_project(&self, path: Option<PathBuf>) -> Result<PathBuf> {
+        self.save_project_with_thumbnail(path, None)
+    }
+
+    /// Like [`Self::save_project`] but also writes a cover `thumbnail.jpg` from
+    /// the supplied JPEG bytes (`None` leaves any existing cover in place). The
+    /// caller — which owns the media engine / GPU — captures the representative
+    /// frame (upstream `captureThumbnail`, via
+    /// [`opentake_media::capture_project_thumbnail`]) so this assembly layer stays
+    /// free of the ffmpeg/GPU stack. Emits [`CoreEvent::ProjectSaved`] on success.
+    pub fn save_project_with_thumbnail(
+        &self,
+        path: Option<PathBuf>,
+        thumbnail: Option<Vec<u8>>,
+    ) -> Result<PathBuf> {
         let written = {
             let mut session = self.lock();
-            session.save_project(path)?
+            session.save_project_with_thumbnail(path, thumbnail)?
         };
         self.events.emit(&CoreEvent::ProjectSaved {
             path: written.to_string_lossy().into_owned(),

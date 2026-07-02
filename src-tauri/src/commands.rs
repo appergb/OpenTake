@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
 use opentake_core::dto::{
-    handle_edit_apply, handle_get_timeline, handle_project_new, handle_project_open,
-    handle_project_save, handle_redo, handle_undo, EditResultDto, TimelineSnapshotDto,
+    handle_edit_apply, handle_get_timeline, handle_project_new, handle_project_open, handle_redo,
+    handle_undo, EditResultDto, TimelineSnapshotDto,
 };
 use opentake_core::{AppCore, CmdError, EditCommand};
 
@@ -60,9 +60,29 @@ pub fn project_open(core: State<'_, AppCore>, path: String) -> Result<TimelineSn
 }
 
 /// `project_save`: `path = None` saves back to the open bundle; `Some` is save-as.
+///
+/// Before delegating to the core save, capture a cover `thumbnail.jpg` from the
+/// timeline's first video/image clip and hand the JPEG bytes in, so the bundle
+/// write persists it (upstream `captureThumbnail` → `snapshotThumbnail`,
+/// `Project/VideoProject.swift:92,261-300`). We deliberately use the **same
+/// source upstream does** — one representative clip frame via ffmpeg
+/// (`opentake_media::capture_project_thumbnail`) — rather than a GPU composite:
+/// upstream never composites for the cover, and the save runs under the session
+/// lock while `composite_frame` takes the GPU lock, so compositing here would
+/// risk lock reentrancy for no fidelity gain. Capture is best-effort: a failure
+/// yields `None`, leaving any existing cover untouched, and never fails the save.
 #[tauri::command]
 pub fn project_save(core: State<'_, AppCore>, path: Option<String>) -> Result<String, String> {
-    handle_project_save(&core, path).map_err(msg)
+    let timeline = core.get_timeline().timeline;
+    let manifest = core.media();
+    let project_dir = core.project_dir();
+    let thumbnail =
+        opentake_media::capture_project_thumbnail(&timeline, &manifest, project_dir.as_deref());
+
+    let target = path.map(std::path::PathBuf::from);
+    core.save_project_with_thumbnail(target, thumbnail)
+        .map(|p| p.to_string_lossy().into_owned())
+        .map_err(|e| e.to_string())
 }
 
 /// `get_default_project_dir`: the default folder new projects save into
@@ -92,8 +112,49 @@ pub fn export_xmeml(core: State<'_, AppCore>, path: String) -> Result<(), String
     let timeline = core.get_timeline().timeline;
     let manifest = core.media();
     let project_dir = core.project_dir();
-    let xml = opentake_project::export_xmeml(&timeline, &manifest, project_dir.as_deref());
+    // Resolve each source file's start timecode via ffprobe (upstream reads the
+    // QuickTime `tmcd` track; here `opentake_media::read_start_timecode_frame`
+    // reads `tags.timecode`). Per-file failures are silently dropped -> 0.
+    let start_timecodes = resolve_start_timecodes(&timeline, &manifest, project_dir.as_deref());
+    let xml = opentake_project::export_xmeml_with_timecodes(
+        &timeline,
+        &manifest,
+        project_dir.as_deref(),
+        &start_timecodes,
+    );
     std::fs::write(&path, xml).map_err(|e| e.to_string())
+}
+
+/// Build the `media_ref -> start-frame` map for [`export_xmeml`]. Iterates the
+/// manifest, resolves each entry to an on-disk file, and reads its start timecode
+/// via ffprobe at the **same integer timebase** the XMEML `<file>` node uses for
+/// that source (`max(1, round(source_fps ?? timeline.fps))`, the upstream
+/// `rateTags` timebase — so the parsed frame count matches the `<rate>` written
+/// beside it). A missing manifest entry path, an unreadable file, or an absent
+/// timecode tag simply yields no map entry, and the exporter falls back to 0
+/// exactly as upstream's `sourceStartFrame(for:) ?? 0` does. Only entries with a
+/// nonzero timecode are inserted (zero is already the exporter default).
+fn resolve_start_timecodes(
+    timeline: &opentake_domain::Timeline,
+    manifest: &opentake_domain::MediaManifest,
+    project_base: Option<&std::path::Path>,
+) -> std::collections::HashMap<String, i32> {
+    let resolver = opentake_domain::MediaResolver::new(manifest, project_base);
+    let mut map = std::collections::HashMap::new();
+    for entry in &manifest.entries {
+        // Same per-file timebase the exporter computes (integer FCP7 timebase).
+        let raw_fps = entry.source_fps.unwrap_or(timeline.fps as f64);
+        let timebase = (raw_fps.round() as i32).max(1);
+        let Some(path) = resolver.expected_path(&entry.id) else {
+            continue;
+        };
+        if let Some(frame) = opentake_media::read_start_timecode_frame(&path, timebase) {
+            if frame > 0 {
+                map.insert(entry.id.clone(), frame);
+            }
+        }
+    }
+    map
 }
 
 /// `export_fcpxml`: deprecated alias for [`export_xmeml`], kept so any existing
