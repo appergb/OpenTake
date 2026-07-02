@@ -175,11 +175,29 @@ pub struct MediaListDto {
     pub items: Vec<MediaItemDto>,
     /// All library folders (flat list; nest via `parentFolderId`).
     pub folders: Vec<MediaFolderDto>,
+    /// File names that were dropped during this import because their type is not
+    /// importable (mirrors upstream `addMediaAsset` → `mediaPanelToast`). Always
+    /// empty for pure listing/relink; only import commands populate it so the
+    /// front end can toast "skipped N unsupported files" instead of dropping them
+    /// silently. Serialized as `skipped`.
+    #[serde(default)]
+    pub skipped: Vec<String>,
 }
 
 impl MediaListDto {
-    /// Build the list from the core's current manifest snapshot.
+    /// Build the list from the core's current manifest snapshot, with no skipped
+    /// files (listing / relink / non-import surfaces).
     fn from_core(core: &AppCore, cache_root: Option<&Path>) -> Self {
+        Self::from_core_with_skipped(core, cache_root, Vec::new())
+    }
+
+    /// Build the list from the core's current manifest snapshot, carrying the
+    /// names of files an import skipped as unsupported.
+    fn from_core_with_skipped(
+        core: &AppCore,
+        cache_root: Option<&Path>,
+        skipped: Vec<String>,
+    ) -> Self {
         let manifest = core.media();
         let project_dir = core.project_dir();
         MediaListDto {
@@ -197,6 +215,7 @@ impl MediaListDto {
                     parent_folder_id: f.parent_folder_id.clone(),
                 })
                 .collect(),
+            skipped,
         }
     }
 }
@@ -544,16 +563,55 @@ fn display_name(path: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// The full file name (with extension) for a skipped-file report — what the user
+/// sees in a picker (mirrors upstream `url.lastPathComponent` in the toast).
+fn display_file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// Import one file into the core, probing it first. Returns the created entry, or
 /// `None` when the extension is not importable (the file is skipped, not an
 /// error — matches upstream's per-file tolerance during folder/batch import).
+///
+/// On a successful import the grid poster is warmed best-effort (Item 3): upstream
+/// `MediaAsset.loadMetadata` eagerly generates a 320px poster in
+/// `finalizeImportedAsset` so the panel shows a real frame immediately. Here the
+/// same small (120×68) poster the media grid would otherwise decode lazily on
+/// first render is generated now and disk-cached, so the freshly-returned
+/// [`MediaItemDto`] already carries a `thumbnail` path. A decode failure is
+/// swallowed (the card falls back to a type placeholder, exactly as today) and
+/// never turns an import into an error.
 fn import_one(core: &AppCore, engine: &MediaEngine, path: &Path) -> Option<MediaManifestEntry> {
     importable_clip_type(path)?;
     let probe = probe_media(engine, path);
     // `import_media_file` re-validates the extension; the type check above only
     // lets us skip probing unsupported files.
-    core.import_media_file(path, display_name(path), &probe)
-        .ok()
+    let entry = core
+        .import_media_file(path, display_name(path), &probe)
+        .ok()?;
+    warm_import_poster(engine, &entry, path);
+    Some(entry)
+}
+
+/// Best-effort eager poster generation for a freshly imported asset (Item 3).
+/// Decodes and disk-caches the small grid poster the media panel reads via
+/// [`cached_thumbnail_path_for_entry`], so the first grid paint shows a real
+/// frame instead of a placeholder — the port of upstream's eager
+/// `AVAssetImageGenerator` at import. Only video/image assets have a frame; audio
+/// and anything else are no-ops. Every failure path is intentionally ignored: a
+/// warm poster is a nicety, never a precondition for import.
+fn warm_import_poster(engine: &MediaEngine, entry: &MediaManifestEntry, path: &Path) {
+    if !matches!(entry.kind, ClipType::Video | ClipType::Image) {
+        return;
+    }
+    if !path.is_file() {
+        return;
+    }
+    // Reuse the exact single-poster path the lazy grid request produces, so the
+    // cache the panel later reads is already populated. Ignore errors.
+    let _ = generate_thumbnail_for_entry(engine, entry, path, None, None, false);
 }
 
 /// `import_folder`: bring a local directory into the library.
@@ -578,25 +636,41 @@ pub fn import_folder(
     }
     let engine = media.engine();
 
+    let mut skipped = Vec::new();
     if recursive.unwrap_or(false) {
-        mirror_dir(&core, engine, &root, None);
+        mirror_dir(&core, engine, &root, None, &mut skipped);
     } else {
-        for file in &collect_media_files(&root, false) {
+        let (files, skipped_files) = list_top_level(&root);
+        for file in &files {
             let _ = import_one(&core, engine, file);
         }
+        skipped = skipped_files;
     }
-    Ok(MediaListDto::from_core(&core, Some(engine.cache_root())))
+    Ok(MediaListDto::from_core_with_skipped(
+        &core,
+        Some(engine.cache_root()),
+        skipped,
+    ))
 }
 
 /// Recursively mirror `dir` into the library: create a folder for `dir` (nested
 /// under `parent_folder_id`), import its direct media files into that folder, and
-/// recurse into subdirectories. Hidden entries (dot-prefixed) are skipped.
-fn mirror_dir(core: &AppCore, engine: &MediaEngine, dir: &Path, parent_folder_id: Option<String>) {
+/// recurse into subdirectories. Hidden entries (dot-prefixed) are skipped. Names
+/// of non-importable visible files are appended to `skipped` so the caller can
+/// toast them.
+fn mirror_dir(
+    core: &AppCore,
+    engine: &MediaEngine,
+    dir: &Path,
+    parent_folder_id: Option<String>,
+    skipped: &mut Vec<String>,
+) {
     let folder_id = create_folder(core, &dir_name(dir), parent_folder_id);
 
-    // Partition this directory's visible entries into media files + subdirs,
-    // both in case-insensitive name order.
-    let (files, subdirs) = list_dir(dir);
+    // Partition this directory's visible entries into media files + subdirs
+    // (both case-insensitive name order) plus the names of unsupported files.
+    let (files, subdirs, mut dir_skipped) = list_dir(dir);
+    skipped.append(&mut dir_skipped);
 
     let mut imported_ids = Vec::new();
     for file in &files {
@@ -614,7 +688,7 @@ fn mirror_dir(core: &AppCore, engine: &MediaEngine, dir: &Path, parent_folder_id
     }
 
     for sub in subdirs {
-        mirror_dir(core, engine, &sub, folder_id.clone());
+        mirror_dir(core, engine, &sub, folder_id.clone(), skipped);
     }
 }
 
@@ -637,13 +711,16 @@ fn dir_name(dir: &Path) -> String {
         .unwrap_or_else(|| "folder".to_string())
 }
 
-/// One directory's visible media files + subdirectories, each sorted by
-/// case-insensitive name (skipping dot-prefixed entries).
-fn list_dir(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+/// One directory's visible media files + subdirectories (each sorted by
+/// case-insensitive name), plus the names of visible non-importable files.
+/// Dot-prefixed (hidden) entries are ignored entirely — an unsupported *type* is
+/// a skip the user should hear about; a hidden dotfile is not.
+fn list_dir(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<String>) {
     let mut files = Vec::new();
     let mut subdirs = Vec::new();
+    let mut skipped = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return (files, subdirs);
+        return (files, subdirs, skipped);
     };
     for entry in entries.flatten() {
         let path = entry.path();
@@ -659,6 +736,8 @@ fn list_dir(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
             subdirs.push(path);
         } else if importable_clip_type(&path).is_some() {
             files.push(path);
+        } else {
+            skipped.push(display_file_name(&path));
         }
     }
     let by_name = |a: &PathBuf, b: &PathBuf| {
@@ -668,12 +747,23 @@ fn list_dir(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     };
     files.sort_by(by_name);
     subdirs.sort_by(by_name);
-    (files, subdirs)
+    skipped.sort_by_key(|s| s.to_lowercase());
+    (files, subdirs, skipped)
+}
+
+/// The top-level importable media files + the names of unsupported files in
+/// `dir`, for a flat (non-recursive) folder import. Subdirectories are ignored
+/// (as before); their contents are neither imported nor reported skipped.
+fn list_top_level(dir: &Path) -> (Vec<PathBuf>, Vec<String>) {
+    let (files, _subdirs, skipped) = list_dir(dir);
+    (files, skipped)
 }
 
 /// `import_media`: import an explicit list of file paths, returning the updated
-/// catalog. Unsupported or unreadable paths are skipped (not fatal); the
-/// returned list reflects whatever imported successfully.
+/// catalog. Unsupported or unreadable paths are skipped (not fatal); the returned
+/// list reflects whatever imported successfully and carries the names of skipped
+/// unsupported files in `skipped` so the front end can toast them (upstream
+/// `mediaPanelToast`) instead of dropping them silently.
 #[tauri::command]
 pub fn import_media(
     core: State<'_, AppCore>,
@@ -681,13 +771,27 @@ pub fn import_media(
     paths: Vec<String>,
 ) -> Result<MediaListDto, String> {
     let engine = media.engine();
+    let mut skipped = Vec::new();
     for p in &paths {
         let path = PathBuf::from(p);
-        if path.is_file() {
-            let _ = import_one(&core, engine, &path);
+        if !path.is_file() {
+            continue;
         }
+        // Only an unsupported *type* is a user-visible "skip"; a supported file
+        // that fails to import (unreadable etc.) is not reported here (matches the
+        // pre-existing best-effort behavior and upstream, which only toasts the
+        // unsupported-type case).
+        if importable_clip_type(&path).is_none() {
+            skipped.push(display_file_name(&path));
+            continue;
+        }
+        let _ = import_one(&core, engine, &path);
     }
-    Ok(MediaListDto::from_core(&core, Some(engine.cache_root())))
+    Ok(MediaListDto::from_core_with_skipped(
+        &core,
+        Some(engine.cache_root()),
+        skipped,
+    ))
 }
 
 /// `get_media`: the current media catalog for the panel. Infallible.
@@ -933,45 +1037,6 @@ pub fn preload_media(
     Ok(())
 }
 
-/// Collect importable media files under `root`. Top-level only unless
-/// `recursive`. Sorted by case-insensitive file name so a folder import mints
-/// asset ids in a stable order. Hidden entries (dot-prefixed) are skipped, as
-/// upstream does (`.skipsHiddenFiles`).
-fn collect_media_files(root: &Path, recursive: bool) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    collect_into(root, recursive, &mut out);
-    out.sort_by(|a, b| {
-        let an = a.file_name().map(|s| s.to_string_lossy().to_lowercase());
-        let bn = b.file_name().map(|s| s.to_string_lossy().to_lowercase());
-        an.cmp(&bn)
-    });
-    out
-}
-
-fn collect_into(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_hidden = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(|s| s.starts_with('.'))
-            .unwrap_or(false);
-        if is_hidden {
-            continue;
-        }
-        if path.is_dir() {
-            if recursive {
-                collect_into(&path, recursive, out);
-            }
-        } else if importable_clip_type(&path).is_some() {
-            out.push(path);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1142,7 +1207,8 @@ mod tests {
 
         let core = AppCore::new();
         let engine = engine_for(tmp.path());
-        mirror_dir(&core, &engine, &root, None);
+        let mut skipped = Vec::new();
+        mirror_dir(&core, &engine, &root, None, &mut skipped);
 
         let m = core.media();
         // Folders: Trip (root) + Day1 + Empty, nested under Trip.
@@ -1160,6 +1226,8 @@ mod tests {
         let b = m.entries.iter().find(|e| e.name == "b").unwrap();
         assert_eq!(a.folder_id.as_deref(), Some(trip.id.as_str()));
         assert_eq!(b.folder_id.as_deref(), Some(day1f.id.as_str()));
+        // The unsupported note.txt is reported skipped, not dropped silently.
+        assert_eq!(skipped, vec!["note.txt"]);
     }
 
     #[test]
@@ -1170,7 +1238,8 @@ mod tests {
         touch(&root.join("x.png"));
         let core = AppCore::new();
         let engine = engine_for(tmp.path());
-        mirror_dir(&core, &engine, &root, None);
+        let mut skipped = Vec::new();
+        mirror_dir(&core, &engine, &root, None, &mut skipped);
 
         let dto = MediaListDto::from_core(&core, None);
         assert_eq!(dto.folders.len(), 1);
@@ -1189,39 +1258,46 @@ mod tests {
     }
 
     #[test]
-    fn collect_top_level_only_skips_subdirs_and_hidden_and_unsupported() {
+    fn list_top_level_keeps_media_reports_unsupported_and_ignores_subdirs_and_hidden() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         touch(&root.join("a.mp4"));
         touch(&root.join("b.png"));
-        touch(&root.join("c.txt")); // unsupported
-        touch(&root.join(".hidden.mp4")); // hidden
+        touch(&root.join("c.txt")); // unsupported → reported skipped
+        touch(&root.join("readme.md")); // unsupported → reported skipped
+        touch(&root.join(".hidden.mp4")); // hidden → ignored entirely (not skipped)
         fs::create_dir(root.join("sub")).unwrap();
-        touch(&root.join("sub").join("d.mov"));
+        touch(&root.join("sub").join("d.mov")); // subdir contents ignored in flat mode
 
-        let files = collect_media_files(root, false);
+        let (files, skipped) = list_top_level(root);
         let names: Vec<String> = files
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["a.mp4", "b.png"]);
+        // Unsupported top-level files are reported (sorted, case-insensitive);
+        // the hidden dotfile and the subdir file are NOT reported.
+        assert_eq!(skipped, vec!["c.txt", "readme.md"]);
     }
 
     #[test]
-    fn collect_recursive_includes_subdirs_sorted() {
+    fn list_dir_partitions_files_subdirs_and_skipped_sorted() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         touch(&root.join("z.mp4"));
+        touch(&root.join("A.mov"));
+        touch(&root.join("junk.bin")); // unsupported
         fs::create_dir(root.join("sub")).unwrap();
-        touch(&root.join("sub").join("a.mov"));
 
-        let files = collect_media_files(root, true);
-        let names: Vec<String> = files
+        let (files, subdirs, skipped) = list_dir(root);
+        let fnames: Vec<String> = files
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        // Sorted case-insensitively by file name: a.mov before z.mp4.
-        assert_eq!(names, vec!["a.mov", "z.mp4"]);
+        // Files sorted case-insensitively: A.mov before z.mp4.
+        assert_eq!(fnames, vec!["A.mov", "z.mp4"]);
+        assert_eq!(subdirs.len(), 1);
+        assert_eq!(skipped, vec!["junk.bin"]);
     }
 
     #[test]
@@ -1249,6 +1325,42 @@ mod tests {
         assert_eq!(list.items[0].kind, ClipType::Video);
         assert_eq!(list.items[0].name, "clip");
         assert_eq!(list.items[0].path.as_deref(), Some(good.to_str().unwrap()));
+    }
+
+    #[test]
+    fn media_list_dto_serializes_skipped_camel_case() {
+        // Listing surfaces carry an empty `skipped`; the field name stays
+        // `skipped` in JSON (single word, so camelCase == snake_case here) and is
+        // always present so the front end can read it unconditionally.
+        let empty = MediaListDto {
+            items: vec![],
+            folders: vec![],
+            skipped: vec![],
+        };
+        let json = serde_json::to_string(&empty).unwrap();
+        assert!(json.contains("\"skipped\":[]"));
+
+        let with_skips = MediaListDto {
+            items: vec![],
+            folders: vec![],
+            skipped: vec!["a.txt".into(), "b.pdf".into()],
+        };
+        let json = serde_json::to_string(&with_skips).unwrap();
+        assert!(json.contains("\"skipped\":[\"a.txt\",\"b.pdf\"]"));
+    }
+
+    #[test]
+    fn from_core_default_skipped_is_empty_and_with_skipped_carries_names() {
+        let core = AppCore::new();
+        // Non-import surfaces report no skips.
+        assert!(MediaListDto::from_core(&core, None).skipped.is_empty());
+        // Import surfaces thread the skipped file names through unchanged.
+        let dto = MediaListDto::from_core_with_skipped(
+            &core,
+            None,
+            vec!["note.txt".into(), "archive.zip".into()],
+        );
+        assert_eq!(dto.skipped, vec!["note.txt", "archive.zip"]);
     }
 
     #[test]

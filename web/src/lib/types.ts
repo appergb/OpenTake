@@ -408,6 +408,12 @@ export interface MediaFolder {
 export interface MediaList {
   items: MediaItem[];
   folders: MediaFolder[];
+  /** File names dropped during the import that produced this list because their
+   *  type is not importable. Empty for plain listing / relink; only `import_*`
+   *  populates it so the panel can toast the skips (mirrors upstream
+   *  `mediaPanelToast`) instead of dropping them silently. Optional because the
+   *  browser-fallback catalogs omit it. */
+  skipped?: string[];
 }
 
 // MARK: - BYOK secret store (mirror of src-tauri SecretStatus)
