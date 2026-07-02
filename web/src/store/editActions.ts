@@ -595,6 +595,37 @@ export function addMediaToTimelineAt(
   return enqueueMediaAdd(() => addMediaToTimelineAtInner(item, startFrame, preferredTrackIndex, insertTrackAt));
 }
 
+/** A source-media sub-range (seconds) to place from a search "Moments"/"Spoken"
+ *  hit: only `[startSec, endSec)` of the asset lands on the timeline as a trimmed
+ *  clip, mirroring upstream's `assetDragString(forAssetId:segment:)`. */
+export interface SourceRange {
+  startSec: number;
+  endSec: number;
+}
+
+/** Frames a moment clip occupies on the timeline for a source `[startSec,endSec)`
+ *  range: the range length in frames, clamped to at least one frame. */
+export function momentDurationFrames(range: SourceRange, fps: number): number {
+  return Math.max(1, Math.round((range.endSec - range.startSec) * fps));
+}
+
+/** Place only `range` of `item` on the timeline at `startFrame` — a trimmed clip
+ *  (drag from a visual/spoken search hit). Reuses the same track resolution as a
+ *  full-asset drop, then overrides the entry's trim/duration from the range.
+ *  A still image (or a range that covers the whole/none of the source) falls back
+ *  to the plain full-asset placement. */
+export function addMomentToTimelineAt(
+  item: MediaItem,
+  startFrame: number,
+  preferredTrackIndex: number | null,
+  range: SourceRange,
+  insertTrackAt?: number,
+): Promise<void> {
+  return enqueueMediaAdd(() =>
+    addMomentToTimelineAtInner(item, startFrame, preferredTrackIndex, range, insertTrackAt),
+  );
+}
+
 async function addMediaToTimelineInner(item: MediaItem): Promise<void> {
   let timeline = useProjectStore.getState().timeline;
   if (firstCompatibleTrackIndex(timeline, item.type) === null) {
@@ -647,6 +678,95 @@ async function addMediaToTimelineAtInner(
       preferredTrackIndex = Math.max(0, Math.min(fallbackInsertAt, timeline.tracks.length - 1));
     }
     entry = entryForMediaAt(timeline, item, Math.max(0, startFrame), preferredTrackIndex);
+  }
+  if (!entry) return;
+  const res = await addClips([entry]);
+  if (res && res.affectedClipIds.length > 0) {
+    useEditorUiStore.getState().selectClips(new Set(res.affectedClipIds));
+  }
+  if (isTauri) await forceRefresh();
+}
+
+/** Build the trimmed clip entry for a source `[startSec,endSec)` moment range on
+ *  `item`, resolving the target track like a full-asset drop. Returns null when
+ *  no compatible track exists (the caller then inserts one and retries). */
+function entryForMomentAt(
+  timeline: Timeline,
+  item: MediaItem,
+  startFrame: number,
+  preferredTrackIndex: number | null,
+  range: SourceRange,
+): ClipEntryReq | null {
+  const fps = timeline.fps;
+  const totalSource = mediaDurationFrames(item, fps);
+  const trimStartFrame = Math.max(0, Math.min(totalSource, Math.round(range.startSec * fps)));
+  const rangeFrames = momentDurationFrames(range, fps);
+  // Clamp the visible span so trimStart + duration never exceed the source.
+  const durationFrames = Math.max(1, Math.min(rangeFrames, totalSource - trimStartFrame));
+  const trimEndFrame = Math.max(0, totalSource - trimStartFrame - durationFrames);
+  const trackIndex = firstOpenCompatibleTrackIndex(
+    timeline,
+    item.type,
+    startFrame,
+    durationFrames,
+    preferredTrackIndex,
+  );
+  if (trackIndex === null) return null;
+  return {
+    mediaRef: item.id,
+    mediaType: item.type,
+    sourceClipType: item.type,
+    trackIndex,
+    startFrame: Math.max(0, startFrame),
+    durationFrames,
+    trimStartFrame,
+    trimEndFrame,
+    hasAudio: item.hasAudio,
+    addLinkedAudio: item.type === "video" && item.hasAudio,
+    transform: fitTransformForMedia(item.width, item.height, timeline.width, timeline.height),
+  };
+}
+
+async function addMomentToTimelineAtInner(
+  item: MediaItem,
+  startFrame: number,
+  preferredTrackIndex: number | null,
+  range: SourceRange,
+  insertTrackAt?: number,
+): Promise<void> {
+  // Stills (or a degenerate range) have no meaningful sub-range → full asset.
+  const spanSec = range.endSec - range.startSec;
+  if (item.type === "image" || spanSec <= 0 || item.duration <= 0) {
+    return addMediaToTimelineAtInner(item, startFrame, preferredTrackIndex, insertTrackAt);
+  }
+
+  let timeline = useProjectStore.getState().timeline;
+  if (insertTrackAt !== undefined) {
+    const res = await insertTrack(item.type === "audio" ? "audio" : "video", insertTrackAt);
+    await forceRefresh();
+    timeline = useProjectStore.getState().timeline;
+    const insertedTrackId = res?.affectedClipIds[0];
+    const insertedIndex = insertedTrackId
+      ? timeline.tracks.findIndex((track) => track.id === insertedTrackId)
+      : -1;
+    if (insertedIndex >= 0) preferredTrackIndex = insertedIndex;
+  }
+  let entry = entryForMomentAt(timeline, item, Math.max(0, startFrame), preferredTrackIndex, range);
+  if (!entry) {
+    const fallbackInsertAt = preferredTrackIndex ?? undefined;
+    const res = await insertTrack(item.type === "audio" ? "audio" : "video", fallbackInsertAt);
+    await forceRefresh();
+    timeline = useProjectStore.getState().timeline;
+    const insertedTrackId = res?.affectedClipIds[0];
+    const insertedIndex = insertedTrackId
+      ? timeline.tracks.findIndex((track) => track.id === insertedTrackId)
+      : -1;
+    if (insertedIndex >= 0) {
+      preferredTrackIndex = insertedIndex;
+    } else if (fallbackInsertAt !== undefined) {
+      preferredTrackIndex = Math.max(0, Math.min(fallbackInsertAt, timeline.tracks.length - 1));
+    }
+    entry = entryForMomentAt(timeline, item, Math.max(0, startFrame), preferredTrackIndex, range);
   }
   if (!entry) return;
   const res = await addClips([entry]);

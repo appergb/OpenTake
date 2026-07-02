@@ -173,8 +173,10 @@ vi.mock("../lib/api", () => ({
 import {
   addMediaToTimeline,
   addMediaToTimelineAt,
+  addMomentToTimelineAt,
   insertTrack,
   mediaDurationFrames,
+  momentDurationFrames,
   pasteClipsAtPlayhead,
   resolveMediaDropTrack,
   swapTracks,
@@ -415,5 +417,64 @@ describe("mediaDurationFrames", () => {
   it("never returns less than one frame", () => {
     const item: MediaItem = { id: "v", name: "v", type: "video", duration: 0.001, hasAudio: false };
     expect(mediaDurationFrames(item, 30)).toBe(1);
+  });
+});
+
+describe("momentDurationFrames", () => {
+  it("returns the range length in frames", () => {
+    expect(momentDurationFrames({ startSec: 3, endSec: 6 }, 30)).toBe(90);
+  });
+
+  it("never returns less than one frame for a tiny range", () => {
+    expect(momentDurationFrames({ startSec: 3, endSec: 3.001 }, 30)).toBe(1);
+  });
+});
+
+describe("addMomentToTimelineAt (trimmed source-range drop from a search hit)", () => {
+  beforeEach(() => {
+    srv.reset();
+    useProjectStore.getState().setMirror(EMPTY, 0);
+    useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, selectedClipIds: new Set() });
+  });
+
+  /** The first video clip's [trimStart, duration, trimEnd] after a placement. */
+  function firstVideoTrim(): [number, number, number] {
+    const tl = useProjectStore.getState().timeline;
+    const track = tl.tracks.find((t) => t.type === "video");
+    const c = track?.clips[0];
+    return c ? [c.trimStartFrame, c.durationFrames, c.trimEndFrame] : [-1, -1, -1];
+  }
+
+  it("places only the source range as a trimmed clip", async () => {
+    // 10s @ 30fps = 300 source frames. Range [3s,6s] → trimStart 90, duration 90,
+    // trimEnd 300-90-90 = 120. Lands at timeline frame 0.
+    const item: MediaItem = { id: "v", name: "v", type: "video", duration: 10, hasAudio: false };
+    await addMomentToTimelineAt(item, 0, null, { startSec: 3, endSec: 6 });
+    expect(visualClipStarts()).toEqual([0]);
+    expect(firstVideoTrim()).toEqual([90, 90, 120]);
+  });
+
+  it("clamps a range that runs past the source end", async () => {
+    // 5s = 150 frames. Range [4s, 9s] would want duration 150 but only 30 frames
+    // of source remain after trimStart 120 → duration clamps to 30, trimEnd 0.
+    const item: MediaItem = { id: "v", name: "v", type: "video", duration: 5, hasAudio: false };
+    await addMomentToTimelineAt(item, 0, null, { startSec: 4, endSec: 9 });
+    expect(firstVideoTrim()).toEqual([120, 30, 0]);
+  });
+
+  it("falls back to the whole asset for a still image (no range)", async () => {
+    // Images have no meaningful sub-range → placed full (default 5s = 150 frames),
+    // untrimmed.
+    const item: MediaItem = { id: "i", name: "i", type: "image", duration: 0, hasAudio: false };
+    await addMomentToTimelineAt(item, 0, null, { startSec: 0, endSec: 0 });
+    expect(firstVideoTrim()).toEqual([0, 150, 0]);
+  });
+
+  it("lands the trimmed clip at the drop start frame", async () => {
+    const item: MediaItem = { id: "v", name: "v", type: "video", duration: 10, hasAudio: false };
+    await addMomentToTimelineAt(item, 45, null, { startSec: 1, endSec: 2 });
+    expect(visualClipStarts()).toEqual([45]);
+    // 1s..2s → trimStart 30, duration 30, trimEnd 300-30-30 = 240.
+    expect(firstVideoTrim()).toEqual([30, 30, 240]);
   });
 });

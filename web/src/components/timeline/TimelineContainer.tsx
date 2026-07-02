@@ -38,6 +38,7 @@ import { ClipContextMenu } from "./ClipContextMenu";
 import { SwapMediaPicker } from "./SwapMediaPicker";
 import { MEDIA_DND_TYPE } from "../media/MediaPanel";
 import { getDraggingMedia, setDraggingMedia } from "../../lib/mediaDragState";
+import { getDraggingMomentRange, setDraggingMomentRange } from "../../lib/momentDragState";
 import { maybeSnapFeedback } from "../../lib/haptic";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
@@ -1353,7 +1354,13 @@ export function TimelineContainer() {
       const item = getDraggingMedia();
       if (!item) return;
       const { docX, docY } = toDoc(e);
-      const durationFrames = edit.mediaDurationFrames(item, timeline.fps);
+      // A search "Moments"/"Spoken" hit drags a trimmed source range: size the
+      // ghost to that range (unless it's a still, which places the whole asset).
+      const momentRange = getDraggingMomentRange();
+      const durationFrames =
+        momentRange && item.type !== "image" && item.duration > 0
+          ? edit.momentDurationFrames(momentRange, timeline.fps)
+          : edit.mediaDurationFrames(item, timeline.fps);
       const rawStart = frameAt(docX, zoomScale);
       // Snap the start OR end edge to a clip edge / playhead (multi-probe, sticky
       // — same engine as a clip move), so the ghost clicks onto neighbours.
@@ -1418,11 +1425,14 @@ export function TimelineContainer() {
       e.stopPropagation();
       const id = e.dataTransfer.getData(MEDIA_DND_TYPE);
       const item = useMediaStore.getState().items.find((m) => m.id === id);
+      // A search-hit drag carries a source-second range → place a trimmed clip.
+      const momentRange = getDraggingMomentRange();
       // Land exactly where the ghost showed: reuse the resolved plan from the
       // last dragover (drop is always preceded by a dragover at the same point).
       const plan = mediaGhostRef.current;
       clearMediaGhost();
       setDraggingMedia(null);
+      setDraggingMomentRange(null);
       // Dropping onto the timeline is an HTML5 `drop` (no pointerdown), so the
       // media-preview→timeline switch in TimelineRegion's onPointerDownCapture
       // never fires. Clear the selected media here so the preview shows the
@@ -1433,7 +1443,17 @@ export function TimelineContainer() {
       if (plan) {
         const preferredTrackIndex = plan.newTrackIndex !== null ? null : plan.trackIndex;
         const insertTrackAt = plan.newTrackIndex !== null ? plan.newTrackIndex : undefined;
-        void edit.addMediaToTimelineAt(item, plan.startFrame, preferredTrackIndex, insertTrackAt);
+        if (momentRange) {
+          void edit.addMomentToTimelineAt(
+            item,
+            plan.startFrame,
+            preferredTrackIndex,
+            momentRange,
+            insertTrackAt,
+          );
+        } else {
+          void edit.addMediaToTimelineAt(item, plan.startFrame, preferredTrackIndex, insertTrackAt);
+        }
         return;
       }
       // Fallback (no prior ghost, e.g. a foreign drag): resolve from the point.
@@ -1442,7 +1462,11 @@ export function TimelineContainer() {
       const target = dropTargetAt(timeline, docY, trackHeights);
       const preferredTrackIndex = target.kind === "existing" ? target.trackIndex : null;
       const insertTrackAt = target.kind === "newTrack" ? target.index : undefined;
-      void edit.addMediaToTimelineAt(item, startFrame, preferredTrackIndex, insertTrackAt);
+      if (momentRange) {
+        void edit.addMomentToTimelineAt(item, startFrame, preferredTrackIndex, momentRange, insertTrackAt);
+      } else {
+        void edit.addMediaToTimelineAt(item, startFrame, preferredTrackIndex, insertTrackAt);
+      }
     },
     [toDoc, zoomScale, timeline, trackHeights, clearMediaGhost],
   );

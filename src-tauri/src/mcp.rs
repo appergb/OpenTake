@@ -27,6 +27,7 @@ use base64::Engine as _;
 use opentake_agent::mcp::core_handle::{AppCoreHandle, CoreHandle};
 use opentake_agent::mcp::media_bridge::{
     BridgeError, ImportOutcome, ImportSource, InspectResult, InspectedFrame, MediaBridge,
+    SearchCandidate, SearchIndexState, SearchMediaResult, SearchSpokenHit, SearchVisualHit,
     TranscriptSource, TranscriptSourceResult,
 };
 use opentake_agent::mcp::server;
@@ -246,6 +247,97 @@ impl MediaBridge for TauriMediaBridge {
                 "source.url import is not yet supported in this build — download the file and pass source.path (a local path), or inline it as source.bytes with source.mimeType.",
             )),
         }
+    }
+
+    fn search_media(
+        &self,
+        candidates: &[SearchCandidate],
+        query: &str,
+        scope: &str,
+        limit: usize,
+    ) -> Result<SearchMediaResult, BridgeError> {
+        // Resolve every candidate id to its source path from the live manifest.
+        // Missing (offline) files are kept — their index/transcript reads simply
+        // yield nothing, matching upstream (a missing file has no results, not an
+        // error). Unresolvable ids are dropped.
+        let manifest = self.core.media();
+        let project_dir = self.core.project_dir();
+        let resolver = opentake_domain::MediaResolver::new(&manifest, project_dir.as_deref());
+        let mut visual_paths: Vec<(String, PathBuf)> = Vec::new();
+        let mut spoken_paths: Vec<(String, PathBuf)> = Vec::new();
+        for c in candidates {
+            let Some(path) = resolver.expected_path(&c.media_ref) else {
+                continue;
+            };
+            if c.is_visual {
+                visual_paths.push((c.media_ref.clone(), path.clone()));
+            }
+            if c.is_spoken {
+                spoken_paths.push((c.media_ref.clone(), path));
+            }
+        }
+
+        let fps = self.core.get_timeline().timeline.fps;
+        let installed = crate::search::model_installed(&self.engine);
+
+        // Visual group (skipped for scope == "spoken").
+        let (status, indexable_assets, indexed_assets, moments) = if scope == "spoken" {
+            (SearchIndexState::Disabled, 0, None, Vec::new())
+        } else {
+            let (indexable, indexed) = crate::search::visual_coverage(&self.engine, &visual_paths);
+            // Status mirrors upstream `visualStatus`: without the model it's
+            // `modelNotInstalled`; with it, `indexing` while any indexable asset
+            // is still un-indexed, else `ready`. (Download/preparing/failed are
+            // transient front-end states the panel owns; the tool reports the
+            // stable installed/ready/indexing view.)
+            let status = if !installed {
+                SearchIndexState::ModelNotInstalled
+            } else if indexable > 0 && indexed < indexable {
+                SearchIndexState::Indexing
+            } else {
+                SearchIndexState::Ready
+            };
+            let moments: Vec<SearchVisualHit> =
+                crate::search::visual_hits_by_id(&self.engine, &visual_paths, query, fps, limit)
+                    .into_iter()
+                    .map(|h| SearchVisualHit {
+                        media_ref: h.media_id,
+                        start_seconds: h.start_sec,
+                        end_seconds: h.end_sec,
+                        score: h.score,
+                        is_image: h.is_image,
+                    })
+                    .collect();
+            // `indexedAssets` is only meaningful when the model is loaded
+            // (upstream sets it only when an embedder spec exists).
+            let indexed_opt = if installed { Some(indexed) } else { None };
+            (status, indexable, indexed_opt, moments)
+        };
+
+        // Spoken group (skipped for scope == "visual"). Works regardless of the
+        // visual index — keyword search over cached transcripts.
+        let spoken: Vec<SearchSpokenHit> = if scope == "visual" {
+            Vec::new()
+        } else {
+            self.engine
+                .search_spoken(query, &spoken_paths, limit)
+                .into_iter()
+                .map(|h| SearchSpokenHit {
+                    media_ref: h.asset_id,
+                    start_seconds: h.start,
+                    end_seconds: h.end,
+                    text: h.text,
+                })
+                .collect()
+        };
+
+        Ok(SearchMediaResult {
+            status,
+            indexable_assets,
+            indexed_assets,
+            moments,
+            spoken,
+        })
     }
 }
 

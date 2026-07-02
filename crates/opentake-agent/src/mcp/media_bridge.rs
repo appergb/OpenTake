@@ -144,6 +144,101 @@ pub struct TranscriptSourceResult {
     pub error: Option<String>,
 }
 
+/// One visual ("Moments") hit for `search_media` — a source-second range in one
+/// asset, or a still image (no range). Source-second timings, ready to convert to
+/// `trimStartFrame`/`trimEndFrame` (upstream `visualResults`' `moments` entries).
+#[derive(Debug, Clone)]
+pub struct SearchVisualHit {
+    /// Asset id (`mediaRef`).
+    pub media_ref: String,
+    /// Shot-start in source seconds (omitted for stills).
+    pub start_seconds: f64,
+    /// Shot-end in source seconds (omitted for stills).
+    pub end_seconds: f64,
+    /// Uncalibrated similarity score (ordering only).
+    pub score: f32,
+    /// True for still images: no time range → upstream sets `type: "image"`.
+    pub is_image: bool,
+}
+
+/// One spoken ("Spoken") hit for `search_media`: a transcript segment matching
+/// every query term (upstream `spokenResults` entries).
+#[derive(Debug, Clone)]
+pub struct SearchSpokenHit {
+    pub media_ref: String,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    pub text: String,
+}
+
+/// The visual index's state for the `search_media` `status` field, mirroring
+/// upstream's `visualStatus` string enum (`ToolExecutor+Search.swift:91-100`).
+/// The dispatcher serializes the exact upstream spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchIndexState {
+    /// Model installed, everything (currently) indexed.
+    Ready,
+    /// Model installed, indexing still in progress.
+    Indexing,
+    /// Model not yet downloaded.
+    ModelNotInstalled,
+    /// Model download in flight.
+    DownloadingModel,
+    /// Model loading/preparing.
+    Preparing,
+    /// Visual search disabled (no backend / build without it).
+    Disabled,
+    /// Model load or download failed.
+    Failed,
+}
+
+impl SearchIndexState {
+    /// The upstream string spelling for the `status` field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SearchIndexState::Ready => "ready",
+            SearchIndexState::Indexing => "indexing",
+            SearchIndexState::ModelNotInstalled => "modelNotInstalled",
+            SearchIndexState::DownloadingModel => "downloadingModel",
+            SearchIndexState::Preparing => "preparing",
+            SearchIndexState::Disabled => "disabled",
+            SearchIndexState::Failed => "failed",
+        }
+    }
+}
+
+/// One asset to search for [`MediaBridge::search_media`]: the dispatcher resolves
+/// the candidate set (optionally restricted to one `mediaRef`) and hands these
+/// down, since only the bridge can resolve ids to files + read the caches.
+#[derive(Debug, Clone)]
+pub struct SearchCandidate {
+    /// Asset id (`mediaRef`).
+    pub media_ref: String,
+    /// True for video/image (visual-searchable).
+    pub is_visual: bool,
+    /// True for video/audio (spoken-searchable).
+    pub is_spoken: bool,
+}
+
+/// The full `search_media` result the bridge returns; the dispatcher shapes it
+/// into the upstream JSON envelope (`status`/`indexableAssets`/`indexedAssets`/
+/// `moments`/`spoken`). Groups rank independently and are never blended.
+#[derive(Debug, Clone)]
+pub struct SearchMediaResult {
+    /// The visual index state for the `status` field.
+    pub status: SearchIndexState,
+    /// Count of visual assets in scope (upstream `indexableAssets`).
+    pub indexable_assets: usize,
+    /// How many of those already have a current on-disk index
+    /// (upstream `indexedAssets`); `None` when the model isn't loaded so the
+    /// count can't be computed (upstream omits the key then).
+    pub indexed_assets: Option<usize>,
+    /// Visual hits (empty when `scope == "spoken"` or the index isn't ready).
+    pub moments: Vec<SearchVisualHit>,
+    /// Spoken hits (empty when `scope == "visual"`; work regardless of status).
+    pub spoken: Vec<SearchSpokenHit>,
+}
+
 /// The injected capability boundary for the render + import tools. `Send + Sync`
 /// so the [`Dispatcher`](super::dispatch::Dispatcher) can hold `Arc<dyn
 /// MediaBridge>` across threads (matching [`CoreHandle`](super::core_handle)).
@@ -190,6 +285,29 @@ pub trait MediaBridge: Send + Sync {
         Err(BridgeError::new(
             "import_media: importing is not available in this build",
         ))
+    }
+
+    /// Search the media library by content: visual (SigLIP2 semantic) and spoken
+    /// (transcript keyword). `candidates` is the resolved, in-scope asset set
+    /// (already filtered to one `mediaRef` when the caller restricted it);
+    /// `scope` is `"visual"`/`"spoken"`/`"both"` and `limit` the per-group cap.
+    /// The two groups rank independently and are never blended (upstream). The
+    /// default reports `disabled` with no hits so a bridge-less build still
+    /// returns an honest, well-formed result the model can read.
+    fn search_media(
+        &self,
+        _candidates: &[SearchCandidate],
+        _query: &str,
+        _scope: &str,
+        _limit: usize,
+    ) -> Result<SearchMediaResult, BridgeError> {
+        Ok(SearchMediaResult {
+            status: SearchIndexState::Disabled,
+            indexable_assets: 0,
+            indexed_assets: None,
+            moments: Vec::new(),
+            spoken: Vec::new(),
+        })
     }
 }
 

@@ -452,6 +452,66 @@ export interface GenerateCaptionsResult {
   captionCount: number;
 }
 
+// MARK: - Semantic search (mirror of src-tauri search.rs DTOs)
+
+/** Whether the SigLIP2 visual-search model is installed, plus enough to prompt a
+ *  one-time download (mirror of Rust `SearchModelStatusDto`). */
+export interface SearchModelStatus {
+  installed: boolean;
+  /** Model identity, e.g. "siglip2-base-patch16-256". */
+  model: string;
+  /** Approximate combined download size in bytes (image + text encoder + tokenizer). */
+  bytes: number;
+}
+
+/** Visual-index coverage for the project's video/image assets (mirror of Rust
+ *  `SearchIndexStatusDto`). Drives the panel's "index now" affordance + progress. */
+export interface SearchIndexStatus {
+  /** The model must be installed before anything can be indexed. */
+  modelInstalled: boolean;
+  /** Count of video/image assets in the project. */
+  indexable: number;
+  /** How many already have a current on-disk embedding index. */
+  indexed: number;
+}
+
+/** One visual ("Moments") hit. `frame` is the shot-start in **source frames**
+ *  (thumb + preview anchor); `startSec`/`endSec` are the source-second range used
+ *  to drag a trimmed clip onto the timeline (mirror of Rust `MomentHitDto`). */
+export interface MomentHit {
+  mediaId: string;
+  frame: number;
+  startSec: number;
+  endSec: number;
+  score: number;
+  /** True for still images (no time range → drag as a plain asset). */
+  isImage: boolean;
+}
+
+/** One spoken ("Spoken") transcript hit (mirror of Rust `SpokenHitDto`). */
+export interface SpokenHit {
+  mediaId: string;
+  startSec: number;
+  endSec: number;
+  text: string;
+  score: number;
+}
+
+/** One filename ("Files") match (mirror of Rust `FileHitDto`). */
+export interface FileHit {
+  mediaId: string;
+  score: number;
+}
+
+/** The three-group query result: Moments (visual), Spoken (transcript), Files
+ *  (name), ranked independently and never blended (mirror of Rust
+ *  `SearchResultsDto`). */
+export interface SearchResults {
+  moments: MomentHit[];
+  spoken: SpokenHit[];
+  files: FileHit[];
+}
+
 // MARK: - Media catalog (mirror of src-tauri MediaItemDto / MediaListDto)
 
 /** One media-library item as returned by `get_media` / `import_*`. `type` is the

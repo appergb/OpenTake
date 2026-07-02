@@ -37,7 +37,7 @@ use serde_json::Value;
 use crate::mcp::core_handle::CoreHandle;
 use crate::mcp::gen_catalog;
 use crate::mcp::media_bridge::{
-    frame_to_block, ImportSource, InspectResult, MediaBridge, TranscriptSource,
+    frame_to_block, ImportSource, InspectResult, MediaBridge, SearchCandidate, TranscriptSource,
 };
 use crate::plugin::registry::PluginRegistry;
 use crate::signal::engine;
@@ -208,19 +208,19 @@ impl Dispatcher {
             ToolName::SmartReframe => self.smart_reframe(args),
             ToolName::TightenSilences => self.tighten_silences(args, before),
 
-            // --- Render + import + transcript (wired to the injected MediaBridge) ---
+            // --- Render + import + transcript + search (wired to the injected MediaBridge) ---
             ToolName::InspectTimeline => self.inspect_timeline(args, before),
             ToolName::ImportMedia => self.import_media(args, manifest),
             ToolName::GetTranscript => self.get_transcript(args, before, manifest),
             ToolName::AddCaptions => self.add_captions(args, before, manifest),
+            ToolName::SearchMedia => self.search_media(args, manifest),
 
             // --- Not yet implementable in this phase (honest stubs) ---
-            // Media reads (inspect/search) still need the analysis backend;
-            // generation/upscale need the async GenClient + BYOK auth.
-            // Motion graphics (#34) now routes through the planned Motion Canvas
-            // plugin: render mp4 -> import media -> place clip.
+            // inspect_media still needs the analysis backend; generation/upscale
+            // need the async GenClient + BYOK auth. Motion graphics (#34) now
+            // routes through the planned Motion Canvas plugin: render mp4 ->
+            // import media -> place clip.
             ToolName::InspectMedia
-            | ToolName::SearchMedia
             | ToolName::GenerateVideo
             | ToolName::GenerateImage
             | ToolName::GenerateAudio
@@ -403,6 +403,134 @@ impl Dispatcher {
             .import_media(import_source, a.name.clone(), a.folder_id.clone())
             .map_err(|e| ToolError::new(e.message))?;
         Ok(ToolResult::ok(outcome.message))
+    }
+
+    /// `search_media`: content search over the library — visual (SigLIP2
+    /// semantic) + spoken (transcript keyword), ranked independently and never
+    /// blended. 1:1 port of `ToolExecutor+Search.searchMedia`
+    /// (`ToolExecutor+Search.swift:6-32`): validate `query`/`scope`/`limit` +
+    /// optional `mediaRef` restrict here, resolve the candidate set from the
+    /// manifest, run both searches behind the [`MediaBridge`], and shape the
+    /// upstream JSON envelope (`status`/`indexableAssets`/`indexedAssets`/
+    /// `moments`/`spoken`). Scores are uncalibrated (ordering only). When the
+    /// visual index isn't ready, `moments` may be empty — the model is told via
+    /// `status` and the `indexableAssets`/`indexedAssets` counts, and Spoken +
+    /// Files-style name lookups still work.
+    fn search_media(
+        &self,
+        args: &Value,
+        manifest: &MediaManifest,
+    ) -> Result<ToolResult, ToolError> {
+        use serde_json::json;
+        let a: SearchMediaArgs = decode_tool_args(args, "")?;
+        let query = a.query.trim().to_string();
+        if query.is_empty() {
+            return Ok(ToolResult::error("search_media: query is empty"));
+        }
+        // scope ∈ {visual, spoken, both}, default both (upstream).
+        let scope = a.scope.as_deref().unwrap_or("both");
+        if !matches!(scope, "visual" | "spoken" | "both") {
+            return Ok(ToolResult::error(format!(
+                "search_media: scope must be visual, spoken, or both (got '{scope}')"
+            )));
+        }
+        // limit default 10, clamped to 1..=50 (upstream `min(max(limit,1),50)`).
+        let limit = a.limit.unwrap_or(10).clamp(1, 50) as usize;
+
+        // Optional `mediaRef` restricts the search to one existing asset.
+        let restrict: Option<String> = match a.media_ref.as_deref() {
+            Some(ref_id) => {
+                let entry = manifest.entries.iter().find(|e| e.id == ref_id);
+                match entry {
+                    Some(e) => Some(e.id.clone()),
+                    None => {
+                        return Ok(ToolResult::error(format!(
+                            "search_media: media not found: {ref_id}"
+                        )));
+                    }
+                }
+            }
+            None => None,
+        };
+
+        // Build the candidate set from the manifest (kind → visual/spoken).
+        use opentake_domain::ClipType;
+        let candidates: Vec<SearchCandidate> = manifest
+            .entries
+            .iter()
+            .filter(|e| restrict.as_deref().is_none_or(|r| r == e.id))
+            .map(|e| SearchCandidate {
+                media_ref: e.id.clone(),
+                is_visual: matches!(e.kind, ClipType::Video | ClipType::Image),
+                is_spoken: matches!(e.kind, ClipType::Video | ClipType::Audio),
+            })
+            .collect();
+
+        let Some(bridge) = self.bridge.as_ref() else {
+            return Ok(ToolResult::error(
+                "search_media: search is not available in this build",
+            ));
+        };
+        let result = bridge
+            .search_media(&candidates, &query, scope, limit)
+            .map_err(|e| ToolError::new(e.message))?;
+
+        // Shape the upstream JSON. `name` per hit is looked up from the manifest.
+        let name_of = |media_ref: &str| -> String {
+            manifest
+                .entries
+                .iter()
+                .find(|e| e.id == media_ref)
+                .map(|e| e.name.clone())
+                .unwrap_or_default()
+        };
+
+        let mut payload = serde_json::Map::new();
+        if scope != "spoken" {
+            // Visual group: status + counts always present; moments when ready.
+            payload.insert("status".into(), json!(result.status.as_str()));
+            payload.insert("indexableAssets".into(), json!(result.indexable_assets));
+            if let Some(indexed) = result.indexed_assets {
+                payload.insert("indexedAssets".into(), json!(indexed));
+            }
+            let moments: Vec<Value> = result
+                .moments
+                .iter()
+                .map(|h| {
+                    let mut m = serde_json::Map::new();
+                    m.insert("mediaRef".into(), json!(h.media_ref));
+                    m.insert("name".into(), json!(name_of(&h.media_ref)));
+                    m.insert("score".into(), json!(h.score as f64));
+                    if h.is_image {
+                        m.insert("type".into(), json!("image"));
+                    } else {
+                        m.insert("startSeconds".into(), json!(h.start_seconds));
+                        m.insert("endSeconds".into(), json!(h.end_seconds));
+                    }
+                    Value::Object(m)
+                })
+                .collect();
+            payload.insert("moments".into(), json!(moments));
+        }
+        if scope != "visual" {
+            let spoken: Vec<Value> = result
+                .spoken
+                .iter()
+                .map(|h| {
+                    json!({
+                        "mediaRef": h.media_ref,
+                        "name": name_of(&h.media_ref),
+                        "startSeconds": h.start_seconds,
+                        "endSeconds": h.end_seconds,
+                        "text": h.text,
+                    })
+                })
+                .collect();
+            payload.insert("spoken".into(), json!(spoken));
+        }
+
+        let out = round_floats_3dp(Value::Object(payload));
+        Ok(ToolResult::ok(out.to_string()))
     }
 
     /// `get_transcript`: the live timeline transcript in project frames. Walks
@@ -2343,6 +2471,9 @@ mod tests {
     use std::sync::Arc;
 
     use crate::mcp::core_handle::CoreHandle;
+    use crate::mcp::media_bridge::{
+        SearchIndexState, SearchMediaResult, SearchSpokenHit, SearchVisualHit,
+    };
 
     /// A faithful [`CoreHandle`] over a real in-memory [`AppCore`], seeded with a
     /// video track and one media asset so `add_clips` can run end to end.
@@ -3358,7 +3489,14 @@ mod tests {
         /// Records the media_refs passed to the last `transcribe_sources` call,
         /// so tests can assert dedup.
         transcribe_calls: Mutex<Vec<Vec<String>>>,
+        /// Canned `search_media` result; when `None` the trait default (disabled)
+        /// runs. Records the `(query, scope, limit, candidate ids)` of each call.
+        search_result: Mutex<Option<SearchMediaResult>>,
+        search_calls: Mutex<Vec<SearchCall>>,
     }
+
+    /// One recorded `search_media` call: `(query, scope, limit, candidate ids)`.
+    type SearchCall = (String, String, usize, Vec<String>);
 
     impl FakeBridge {
         fn with_transcript(self, media_ref: &str, t: TranscriptionResult) -> Self {
@@ -3445,6 +3583,31 @@ mod tests {
             });
             Ok(ImportOutcome {
                 message: format!("Imported via {tag}."),
+            })
+        }
+
+        fn search_media(
+            &self,
+            candidates: &[SearchCandidate],
+            query: &str,
+            scope: &str,
+            limit: usize,
+        ) -> Result<SearchMediaResult, BridgeError> {
+            self.search_calls.lock().unwrap().push((
+                query.to_string(),
+                scope.to_string(),
+                limit,
+                candidates.iter().map(|c| c.media_ref.clone()).collect(),
+            ));
+            if let Some(result) = self.search_result.lock().unwrap().clone() {
+                return Ok(result);
+            }
+            Ok(SearchMediaResult {
+                status: SearchIndexState::Disabled,
+                indexable_assets: 0,
+                indexed_assets: None,
+                moments: Vec::new(),
+                spoken: Vec::new(),
             })
         }
     }
@@ -3716,6 +3879,223 @@ mod tests {
         assert_eq!(
             bridge.import_calls.lock().unwrap()[0].tag,
             "bytes:image/png"
+        );
+    }
+
+    // MARK: - search_media (visual + spoken content search via the MediaBridge)
+
+    fn image_entry(id: &str, name: &str) -> MediaManifestEntry {
+        let mut e = entry(id, name);
+        e.kind = ClipType::Image;
+        e
+    }
+
+    /// A dispatcher over a manifest with a video (`v`), audio (`a`), and image
+    /// (`i`) asset, plus a `FakeBridge` seeded with `result`. Returns both so
+    /// tests can assert the recorded call + JSON shape.
+    fn search_dispatcher(result: SearchMediaResult) -> (Dispatcher, Arc<FakeBridge>) {
+        let tl = Timeline::new();
+        let mut m = MediaManifest::new();
+        m.entries.push(entry("v", "Harbor Sunset"));
+        m.entries.push(audio_entry("a", "Interview"));
+        m.entries.push(image_entry("i", "Poster"));
+        let handle = Arc::new(StateHandle::new(tl, m));
+        let bridge = Arc::new(FakeBridge::default());
+        *bridge.search_result.lock().unwrap() = Some(result);
+        let d = Dispatcher::with_bridge(
+            handle,
+            Arc::new(RwLock::new(PluginRegistry::new())),
+            Some(bridge.clone() as Arc<dyn MediaBridge>),
+        );
+        (d, bridge)
+    }
+
+    fn sample_search_result() -> SearchMediaResult {
+        SearchMediaResult {
+            status: SearchIndexState::Ready,
+            indexable_assets: 2,
+            indexed_assets: Some(2),
+            moments: vec![
+                SearchVisualHit {
+                    media_ref: "v".into(),
+                    start_seconds: 3.0,
+                    end_seconds: 6.0,
+                    score: 0.82,
+                    is_image: false,
+                },
+                SearchVisualHit {
+                    media_ref: "i".into(),
+                    start_seconds: 0.0,
+                    end_seconds: 0.0,
+                    score: 0.5,
+                    is_image: true,
+                },
+            ],
+            spoken: vec![SearchSpokenHit {
+                media_ref: "a".into(),
+                start_seconds: 12.0,
+                end_seconds: 14.0,
+                text: "the budget plan".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn search_media_shapes_upstream_json_with_both_groups() {
+        let (d, bridge) = search_dispatcher(sample_search_result());
+        let r = d.dispatch(
+            "search_media",
+            serde_json::json!({ "query": "sunset harbor" }),
+        );
+        assert!(!r.is_error, "{}", r.text_joined());
+        let v: serde_json::Value = serde_json::from_str(&first_text(&r)).unwrap();
+
+        // Visual group: status + counts + moments.
+        assert_eq!(v["status"], "ready");
+        assert_eq!(v["indexableAssets"], 2);
+        assert_eq!(v["indexedAssets"], 2);
+        let moments = v["moments"].as_array().unwrap();
+        assert_eq!(moments.len(), 2);
+        // Video hit carries a source-second range + name; no `type`.
+        assert_eq!(moments[0]["mediaRef"], "v");
+        assert_eq!(moments[0]["name"], "Harbor Sunset");
+        assert_eq!(moments[0]["startSeconds"], 3.0);
+        assert_eq!(moments[0]["endSeconds"], 6.0);
+        assert!(moments[0].get("type").is_none());
+        // Image hit is `type: image`, no range.
+        assert_eq!(moments[1]["mediaRef"], "i");
+        assert_eq!(moments[1]["type"], "image");
+        assert!(moments[1].get("startSeconds").is_none());
+
+        // Spoken group: mediaRef/name/range/text.
+        let spoken = v["spoken"].as_array().unwrap();
+        assert_eq!(spoken.len(), 1);
+        assert_eq!(spoken[0]["mediaRef"], "a");
+        assert_eq!(spoken[0]["name"], "Interview");
+        assert_eq!(spoken[0]["text"], "the budget plan");
+
+        // Default scope=both, limit=10 forwarded; all three ids are candidates.
+        let calls = bridge.search_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, "both");
+        assert_eq!(calls[0].2, 10);
+        assert_eq!(calls[0].3.len(), 3);
+    }
+
+    #[test]
+    fn search_media_scope_visual_omits_spoken() {
+        let (d, _bridge) = search_dispatcher(sample_search_result());
+        let r = d.dispatch(
+            "search_media",
+            serde_json::json!({ "query": "harbor", "scope": "visual" }),
+        );
+        assert!(!r.is_error, "{}", r.text_joined());
+        let v: serde_json::Value = serde_json::from_str(&first_text(&r)).unwrap();
+        assert!(v.get("moments").is_some());
+        assert!(v.get("spoken").is_none()); // upstream: visual scope omits spoken
+        assert!(v.get("status").is_some());
+    }
+
+    #[test]
+    fn search_media_scope_spoken_omits_visual_status() {
+        let (d, _bridge) = search_dispatcher(sample_search_result());
+        let r = d.dispatch(
+            "search_media",
+            serde_json::json!({ "query": "budget", "scope": "spoken" }),
+        );
+        assert!(!r.is_error, "{}", r.text_joined());
+        let v: serde_json::Value = serde_json::from_str(&first_text(&r)).unwrap();
+        assert!(v.get("spoken").is_some());
+        // Spoken-only skips the visual group entirely (no status/moments).
+        assert!(v.get("status").is_none());
+        assert!(v.get("moments").is_none());
+    }
+
+    #[test]
+    fn search_media_limit_is_clamped_1_to_50() {
+        let (d, bridge) = search_dispatcher(sample_search_result());
+        // Over-max clamps to 50.
+        let _ = d.dispatch(
+            "search_media",
+            serde_json::json!({ "query": "x", "limit": 999 }),
+        );
+        // Under-min clamps to 1.
+        let _ = d.dispatch(
+            "search_media",
+            serde_json::json!({ "query": "x", "limit": 0 }),
+        );
+        let calls = bridge.search_calls.lock().unwrap();
+        assert_eq!(calls[0].2, 50);
+        assert_eq!(calls[1].2, 1);
+    }
+
+    #[test]
+    fn search_media_media_ref_restricts_candidates() {
+        let (d, bridge) = search_dispatcher(sample_search_result());
+        let r = d.dispatch(
+            "search_media",
+            serde_json::json!({ "query": "x", "mediaRef": "v" }),
+        );
+        assert!(!r.is_error, "{}", r.text_joined());
+        let calls = bridge.search_calls.lock().unwrap();
+        // Only the one restricted asset is a candidate.
+        assert_eq!(calls[0].3, vec!["v".to_string()]);
+    }
+
+    #[test]
+    fn search_media_unknown_media_ref_errors() {
+        let (d, _bridge) = search_dispatcher(sample_search_result());
+        let r = d.dispatch(
+            "search_media",
+            serde_json::json!({ "query": "x", "mediaRef": "nope" }),
+        );
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("media not found"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn search_media_empty_query_errors() {
+        let (d, _bridge) = search_dispatcher(sample_search_result());
+        let r = d.dispatch("search_media", serde_json::json!({ "query": "   " }));
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("query is empty"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn search_media_invalid_scope_errors() {
+        let (d, _bridge) = search_dispatcher(sample_search_result());
+        let r = d.dispatch(
+            "search_media",
+            serde_json::json!({ "query": "x", "scope": "sideways" }),
+        );
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("scope must be"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn search_media_without_bridge_reports_unavailable() {
+        let mut m = MediaManifest::new();
+        m.entries.push(entry("v", "Clip"));
+        let handle = Arc::new(StateHandle::new(Timeline::new(), m));
+        let d = Dispatcher::new(handle, Arc::new(RwLock::new(PluginRegistry::new())));
+        let r = d.dispatch("search_media", serde_json::json!({ "query": "x" }));
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("not available in this build"),
+            "{}",
+            r.text_joined()
         );
     }
 

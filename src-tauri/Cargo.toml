@@ -30,11 +30,18 @@ opentake-core = { workspace = true }
 opentake-project = { workspace = true }
 opentake-ops = { workspace = true }
 opentake-domain = { workspace = true }
-# Transcription is ON for the shipped app: `whisper-backend` compiles the
-# whisper.cpp CPU backend (via cmake — preinstalled on GitHub runners, no CUDA),
-# `model-download` pulls the ggml model over HTTPS with SHA-1 verification. Both
-# stay optional at the opentake-media level (its own tests run without them).
-opentake-media = { workspace = true, features = ["whisper-backend", "model-download"] }
+# Transcription + visual semantic search are ON for the shipped app:
+# `whisper-backend` compiles the whisper.cpp CPU backend (via cmake —
+# preinstalled on GitHub runners, no CUDA); `ort-backend` links ONNX Runtime for
+# the SigLIP2 dual-encoder — its `download-binaries` feature fetches a
+# *statically* linked prebuilt onnxruntime at build time and bakes it into the
+# binary (no runtime .so/.dylib to ship; same build-time-network shape as
+# whisper.cpp / model-download); `model-download` pulls the model files over
+# HTTPS with checksum verification. All three stay optional at the
+# opentake-media level (its own default tests run offline, without them);
+# ort-inference tests are feature-gated + runtime-skipped like the GPU/ffmpeg
+# integration tests.
+opentake-media = { workspace = true, features = ["whisper-backend", "ort-backend", "model-download"] }
 opentake-render = { workspace = true }
 opentake-gen = { workspace = true }
 opentake-agent = { workspace = true }

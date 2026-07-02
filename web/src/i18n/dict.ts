@@ -156,6 +156,24 @@ const zh: Dict = {
   "media.offline": "媒体离线",
   "media.relink": "重新链接",
 
+  // 智能搜索（视觉语义 + 口播 + 文件名，对应上游 MediaTab+Search / IndexStatus）
+  "search.group.moments": "画面",
+  "search.group.spoken": "口播",
+  "search.group.files": "文件",
+  "search.smartSearch": "智能搜索",
+  "search.smartSearchHint": "下载一个 {size} 的本地模型，即可按画面内容搜索媒体。",
+  "search.downloading": "下载中 {percent}%",
+  "search.downloadingHint": "正在下载驱动视觉搜索的本地模型。",
+  "search.preparing": "准备中…",
+  "search.indexing": "分析中 {done}/{total}",
+  "search.indexingHint": "正在分析媒体以支持搜索。",
+  "search.index": "建立索引",
+  "search.indexHint": "分析本项目的视频/图片，即可按画面内容搜索。",
+  "search.retry": "重试",
+  "search.retryHint": "视觉搜索模型下载失败。请检查网络后重试。",
+  "search.noMatches": "没有匹配 “{query}” 的结果",
+  "search.dragToTimeline": "拖到时间线以添加此片段",
+
   // 字幕标签（自动转写 + 生成字幕，对应上游 CaptionTab）
   "captions.source": "来源",
   "captions.sourceHelp": "有选中片段时用选中片段，否则用全部可转写音频。选择某条轨道可限定范围。",
@@ -626,6 +644,24 @@ const en: Dict = {
   "media.extractAudioNoAudio": "No audio track in this media",
   "media.offline": "Media Offline",
   "media.relink": "Relink",
+
+  // Smart search (visual semantic + spoken + filename, upstream MediaTab+Search / IndexStatus)
+  "search.group.moments": "Moments",
+  "search.group.spoken": "Spoken",
+  "search.group.files": "Files",
+  "search.smartSearch": "Smart search",
+  "search.smartSearchHint": "Downloads a {size} on-device model so you can search media by what's on screen.",
+  "search.downloading": "Downloading {percent}%",
+  "search.downloadingHint": "Downloading the on-device model that powers visual search.",
+  "search.preparing": "Preparing…",
+  "search.indexing": "Indexing {done}/{total}",
+  "search.indexingHint": "Analyzing media so you can search it.",
+  "search.index": "Build index",
+  "search.indexHint": "Analyze this project's video/images so you can search by what's on screen.",
+  "search.retry": "Retry",
+  "search.retryHint": "Visual search model download failed. Check your connection and try again.",
+  "search.noMatches": "No matches for “{query}”",
+  "search.dragToTimeline": "Drag to the timeline to add this segment",
 
   // Captions tab (auto-transcribe + generate captions, upstream CaptionTab)
   "captions.source": "Source",

@@ -16,6 +16,9 @@ import type {
   GenerateCaptionsResult,
   MediaList,
   ModelStatus,
+  SearchIndexStatus,
+  SearchModelStatus,
+  SearchResults,
   SecretStatus,
   TimelineSnapshot,
   Transcript,
@@ -423,6 +426,87 @@ export async function generateCaptions(
   await ensureTauri();
   if (invokeImpl) return invokeImpl<GenerateCaptionsResult>("generate_captions", { request });
   throw new Error("caption generation requires the desktop app (whisper)");
+}
+
+// MARK: - Semantic search (SigLIP2 visual model + index + query, search-wiring)
+
+/** Whether the SigLIP2 visual-search model is installed. Never downloads. The
+ *  media panel calls this to decide whether to show the "Smart search" download
+ *  affordance. Outside Tauri there is no backend, so report "not installed". */
+export async function searchModelStatus(): Promise<SearchModelStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<SearchModelStatus>("search_model_status");
+  return { installed: false, model: "", bytes: 0 };
+}
+
+/** Download the SigLIP2 model (idempotent), emitting `search://progress` events
+ *  as bytes arrive, SHA-256-verified. Rejects outside Tauri (no backend). */
+export async function downloadSearchModel(): Promise<SearchModelStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<SearchModelStatus>("download_search_model");
+  throw new Error("search model download requires the desktop app");
+}
+
+/** Subscribe to search-model-download progress (`fraction` in 0..=1). No-op
+ *  outside Tauri. */
+export async function onSearchModelProgress(
+  handler: (fraction: number) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("search://progress", (e) => {
+    const p = e.payload as { fraction?: number } | undefined;
+    if (p && typeof p.fraction === "number") handler(p.fraction);
+  });
+}
+
+/** Snapshot how much of the project's video/image media is indexed. Never
+ *  indexes. Outside Tauri report an empty/uninstalled state. */
+export async function searchIndexStatus(): Promise<SearchIndexStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<SearchIndexStatus>("search_index_status");
+  return { modelInstalled: false, indexable: 0, indexed: 0 };
+}
+
+/** Index every not-yet-current video/image asset (sampled frames → SigLIP2
+ *  embeddings), emitting `search://index` progress. Idempotent. Rejects outside
+ *  Tauri or when the model isn't installed. */
+export async function searchIndexStart(): Promise<SearchIndexStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<SearchIndexStatus>("search_index_start");
+  throw new Error("visual indexing requires the desktop app");
+}
+
+/** Subscribe to indexing progress: `completed`/`total` assets + overall
+ *  `fraction` (0..=1). No-op outside Tauri. */
+export async function onSearchIndexProgress(
+  handler: (progress: { completed: number; total: number; fraction: number }) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("search://index", (e) => {
+    const p = e.payload as
+      | { completed?: number; total?: number; fraction?: number }
+      | undefined;
+    if (
+      p &&
+      typeof p.completed === "number" &&
+      typeof p.total === "number" &&
+      typeof p.fraction === "number"
+    ) {
+      handler({ completed: p.completed, total: p.total, fraction: p.fraction });
+    }
+  });
+}
+
+/** Run the three-group content query — Moments (visual), Spoken (transcript),
+ *  Files (name). Visual is best-effort (empty without a model); Spoken + Files
+ *  always work, so plain filename filtering is the zero-setup fallback. Outside
+ *  Tauri returns empty groups (the panel falls back to its in-memory name filter). */
+export async function searchQuery(query: string): Promise<SearchResults> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<SearchResults>("search_query", { query });
+  return { moments: [], spoken: [], files: [] };
 }
 
 /**

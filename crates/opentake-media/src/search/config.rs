@@ -20,6 +20,16 @@ pub const EMBEDDING_DIM: usize = 768;
 pub const IMAGE_SIZE: u32 = 256;
 pub const CONTEXT_LENGTH: usize = 64;
 
+/// Base URL the ONNX model files are fetched from (`{base}/{file}`), mirroring
+/// `WhisperModel.base_url`. Placeholder until the ONNX build is hosted (SPEC
+/// T8.0): the download command constructs `{base}/image_encoder.onnx` etc., and
+/// SHA-256-verifies each against [`manifest`]'s (currently placeholder) hashes,
+/// so a real download only succeeds once both this URL and the manifest
+/// hashes/bytes are filled in. The Hugging Face `resolve/main` raw-file endpoint
+/// is the intended host (same shape as the whisper model URL).
+pub const MODEL_DOWNLOAD_BASE_URL: &str =
+    "https://huggingface.co/opentake/siglip2-base-patch16-256-onnx/resolve/main";
+
 /// The [`EmbedderSpec`] for the configured SigLIP2 model. `normalized` defaults
 /// to `false` to match upstream's assumption that the exported model L2-
 /// normalizes internally (SPEC §0.8); flip it only if calibration proves the
