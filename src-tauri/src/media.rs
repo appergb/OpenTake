@@ -571,6 +571,32 @@ fn display_file_name(path: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// Map a MIME type to the file extension the imported asset is written with.
+/// 1:1 port of upstream `ToolExecutor+Import.fileExtension(forMime:)` — the
+/// accepted set the agent's `import_media` (bytes / url override) validates
+/// against. `json`/Lottie is intentionally excluded from the import white-list
+/// downstream, but the mapping is kept for parity with upstream's table.
+pub(crate) fn file_extension_for_mime(mime: &str) -> Option<&'static str> {
+    match mime.to_ascii_lowercase().as_str() {
+        "video/mp4" | "video/mpeg4" => Some("mp4"),
+        "video/quicktime" => Some("mov"),
+        "audio/mpeg" | "audio/mp3" => Some("mp3"),
+        "audio/wav" | "audio/x-wav" | "audio/wave" => Some("wav"),
+        "audio/aac" => Some("aac"),
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" => Some("m4a"),
+        "image/png" => Some("png"),
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/tiff" => Some("tiff"),
+        "image/heic" | "image/heif" => Some("heic"),
+        _ => None,
+    }
+}
+
+/// The accepted-MIME error line upstream raises for an unsupported `mimeType`
+/// (`ToolExecutor+Import`). Centralized so bytes / url imports share the wording.
+pub(crate) const IMPORT_ACCEPTED_MIMES: &str =
+    "Accepted: video/mp4, video/quicktime, audio/mpeg, audio/wav, audio/aac, audio/mp4, image/png, image/jpeg, image/tiff, image/heic.";
+
 /// Import one file into the core, probing it first. Returns the created entry, or
 /// `None` when the extension is not importable (the file is skipped, not an
 /// error — matches upstream's per-file tolerance during folder/batch import).
@@ -583,7 +609,11 @@ fn display_file_name(path: &Path) -> String {
 /// [`MediaItemDto`] already carries a `thumbnail` path. A decode failure is
 /// swallowed (the card falls back to a type placeholder, exactly as today) and
 /// never turns an import into an error.
-fn import_one(core: &AppCore, engine: &MediaEngine, path: &Path) -> Option<MediaManifestEntry> {
+pub(crate) fn import_one(
+    core: &AppCore,
+    engine: &MediaEngine,
+    path: &Path,
+) -> Option<MediaManifestEntry> {
     importable_clip_type(path)?;
     let probe = probe_media(engine, path);
     // `import_media_file` re-validates the extension; the type check above only
@@ -658,7 +688,7 @@ pub fn import_folder(
 /// recurse into subdirectories. Hidden entries (dot-prefixed) are skipped. Names
 /// of non-importable visible files are appended to `skipped` so the caller can
 /// toast them.
-fn mirror_dir(
+pub(crate) fn mirror_dir(
     core: &AppCore,
     engine: &MediaEngine,
     dir: &Path,

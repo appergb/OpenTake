@@ -27,6 +27,7 @@ use serde_json::{Map, Value};
 use crate::mcp::convert::to_call_tool_result;
 use crate::mcp::core_handle::CoreHandle;
 use crate::mcp::dispatch::Dispatcher;
+use crate::mcp::media_bridge::MediaBridge;
 use crate::plugin::registry::PluginRegistry;
 use crate::prompt::assemble::assemble_system_prompt;
 use crate::tools::descriptions::{description, input_schema};
@@ -43,14 +44,25 @@ pub struct McpServer {
 }
 
 impl McpServer {
-    /// Build a session server over the shared document handle + plugin registry.
+    /// Build a session server over the shared document handle + plugin registry,
+    /// with no media bridge (render/import tools then report "not available").
     pub fn new(handle: Arc<dyn CoreHandle>, registry: Arc<RwLock<PluginRegistry>>) -> Self {
+        Self::with_bridge(handle, registry, None)
+    }
+
+    /// Build a session server with an optional [`MediaBridge`] injected, so
+    /// `inspect_timeline` / `import_media` reach the real GPU + import paths.
+    pub fn with_bridge(
+        handle: Arc<dyn CoreHandle>,
+        registry: Arc<RwLock<PluginRegistry>>,
+        bridge: Option<Arc<dyn MediaBridge>>,
+    ) -> Self {
         let instructions = registry
             .read()
             .map(|r| assemble_system_prompt(&r, "default"))
             .unwrap_or_default();
         McpServer {
-            dispatcher: Arc::new(Dispatcher::new(handle, registry)),
+            dispatcher: Arc::new(Dispatcher::with_bridge(handle, registry, bridge)),
             instructions,
         }
     }
@@ -183,11 +195,22 @@ async fn oauth_protected_resource() -> axum::Json<Value> {
     }))
 }
 
-/// Build the axum router: `StreamableHttpService` at `/mcp`, the OAuth
-/// well-known endpoint, and the loopback guard layered over everything.
+/// Build the axum router with no media bridge (render/import tools report "not
+/// available"). See [`build_router_with_bridge`].
 pub fn build_router(
     handle: Arc<dyn CoreHandle>,
     registry: Arc<RwLock<PluginRegistry>>,
+) -> axum::Router {
+    build_router_with_bridge(handle, registry, None)
+}
+
+/// Build the axum router: `StreamableHttpService` at `/mcp`, the OAuth
+/// well-known endpoint, and the loopback guard layered over everything. The
+/// optional [`MediaBridge`] is cloned into each per-session [`McpServer`].
+pub fn build_router_with_bridge(
+    handle: Arc<dyn CoreHandle>,
+    registry: Arc<RwLock<PluginRegistry>>,
+    bridge: Option<Arc<dyn MediaBridge>>,
 ) -> axum::Router {
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
     use rmcp::transport::streamable_http_server::{
@@ -195,7 +218,13 @@ pub fn build_router(
     };
 
     let service = StreamableHttpService::new(
-        move || Ok(McpServer::new(handle.clone(), registry.clone())),
+        move || {
+            Ok(McpServer::with_bridge(
+                handle.clone(),
+                registry.clone(),
+                bridge.clone(),
+            ))
+        },
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     );
@@ -209,13 +238,25 @@ pub fn build_router(
         .layer(axum::middleware::from_fn(localhost_guard))
 }
 
-/// Bind `addr` (loopback) and serve the MCP router until the process exits.
+/// Bind `addr` (loopback) and serve the MCP router with no media bridge. See
+/// [`serve_with_bridge`].
 pub async fn serve(
     addr: SocketAddr,
     handle: Arc<dyn CoreHandle>,
     registry: Arc<RwLock<PluginRegistry>>,
 ) -> std::io::Result<()> {
-    let router = build_router(handle, registry);
+    serve_with_bridge(addr, handle, registry, None).await
+}
+
+/// Bind `addr` (loopback) and serve the MCP router until the process exits, with
+/// an optional [`MediaBridge`] injected (the Tauri shell passes `Some`).
+pub async fn serve_with_bridge(
+    addr: SocketAddr,
+    handle: Arc<dyn CoreHandle>,
+    registry: Arc<RwLock<PluginRegistry>>,
+    bridge: Option<Arc<dyn MediaBridge>>,
+) -> std::io::Result<()> {
+    let router = build_router_with_bridge(handle, registry, bridge);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("MCP server listening on http://{addr}/mcp");
     axum::serve(listener, router).await

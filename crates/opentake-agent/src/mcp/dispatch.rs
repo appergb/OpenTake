@@ -36,6 +36,7 @@ use serde_json::Value;
 
 use crate::mcp::core_handle::CoreHandle;
 use crate::mcp::gen_catalog;
+use crate::mcp::media_bridge::{frame_to_block, ImportSource, InspectResult, MediaBridge};
 use crate::plugin::registry::PluginRegistry;
 use crate::signal::engine;
 use crate::signal::rules::OpContext;
@@ -43,8 +44,15 @@ use crate::tools::args::{self, *};
 use crate::tools::encode_timeline::encode_timeline;
 use crate::tools::errors::{decode_tool_args, ToolError};
 use crate::tools::names::ToolName;
-use crate::tools::result::ToolResult;
+use crate::tools::result::{Block, ToolResult};
 use crate::tools::short_id;
+
+/// `inspect_timeline` frame-sampling + downscale constants, 1:1 with upstream
+/// `ToolExecutor+InspectTimeline`: default 6 sampled frames, hard cap 12, longest
+/// render edge 512px (the JPEG quality lives with the encoder in the bridge).
+const INSPECT_TIMELINE_DEFAULT_FRAMES: i32 = 6;
+const INSPECT_TIMELINE_MAX_FRAMES: i32 = 12;
+const INSPECT_TIMELINE_MAX_DIMENSION: u32 = 512;
 
 /// The in-process tool dispatcher. Holds the [`CoreHandle`] boundary, the plugin
 /// registry (read-locked for the active plugin), and a per-dispatcher agent-undo
@@ -52,17 +60,36 @@ use crate::tools::short_id;
 pub struct Dispatcher {
     handle: Arc<dyn CoreHandle>,
     registry: Arc<RwLock<PluginRegistry>>,
+    /// The render + import side-door (`inspect_timeline` / `import_media`), or
+    /// `None` in a non-Tauri build / tests. See [`MediaBridge`]. Kept separate from
+    /// [`CoreHandle`] because those two capabilities reach into crates the agent
+    /// layer does not link (`opentake-render`, the src-tauri import path).
+    bridge: Option<Arc<dyn MediaBridge>>,
     /// Action names of agent edits applied through this dispatcher, newest last.
     /// Guards `undo`: we only revert when this session has pushed an edit.
     agent_undo: Mutex<Vec<String>>,
 }
 
 impl Dispatcher {
-    /// New dispatcher over a core handle + plugin registry.
+    /// New dispatcher over a core handle + plugin registry, with no media bridge
+    /// (the two render/import tools then report "not available"). Used by tests and
+    /// any non-Tauri host.
     pub fn new(handle: Arc<dyn CoreHandle>, registry: Arc<RwLock<PluginRegistry>>) -> Self {
+        Self::with_bridge(handle, registry, None)
+    }
+
+    /// New dispatcher with an optional [`MediaBridge`] wired in. The Tauri shell
+    /// (`src-tauri/src/mcp.rs`) passes `Some(bridge)` so `inspect_timeline` /
+    /// `import_media` reach the real GPU + import paths.
+    pub fn with_bridge(
+        handle: Arc<dyn CoreHandle>,
+        registry: Arc<RwLock<PluginRegistry>>,
+        bridge: Option<Arc<dyn MediaBridge>>,
+    ) -> Self {
         Dispatcher {
             handle,
             registry,
+            bridge,
             agent_undo: Mutex::new(Vec::new()),
         }
     }
@@ -179,21 +206,22 @@ impl Dispatcher {
             ToolName::SmartReframe => self.smart_reframe(args),
             ToolName::TightenSilences => self.tighten_silences(args, before),
 
+            // --- Render + import (wired to the injected MediaBridge) ---
+            ToolName::InspectTimeline => self.inspect_timeline(args, before),
+            ToolName::ImportMedia => self.import_media(args, manifest),
+
             // --- Not yet implementable in this phase (honest stubs) ---
-            // Media reads (inspect/transcript/search) + import need the media
-            // backend via a widened CoreHandle; generation/upscale need the async
-            // GenClient + BYOK auth; inspect_timeline needs the render+text path.
+            // Media reads (inspect/transcript/search) still need the analysis
+            // backend; generation/upscale need the async GenClient + BYOK auth.
             // Motion graphics (#34) now routes through the planned Motion Canvas
             // plugin: render mp4 -> import media -> place clip.
             ToolName::InspectMedia
             | ToolName::GetTranscript
-            | ToolName::InspectTimeline
             | ToolName::SearchMedia
             | ToolName::GenerateVideo
             | ToolName::GenerateImage
             | ToolName::GenerateAudio
             | ToolName::UpscaleMedia
-            | ToolName::ImportMedia
             | ToolName::AddCaptions
             | ToolName::AddMotionGraphic
             | ToolName::EditMotionGraphic => Ok(ToolResult::error(format!(
@@ -215,6 +243,164 @@ impl Dispatcher {
         let kind = gen_catalog::parse_kind(a.kind.as_deref())?;
         let payload = gen_catalog::list_models_payload(kind);
         Ok(ToolResult::ok(payload.to_string()))
+    }
+
+    // MARK: - Render + import tool bodies (backed by the MediaBridge)
+
+    /// `inspect_timeline`: composite one project frame, or `maxFrames` frames
+    /// evenly sampled across `[startFrame, endFrame)`, downscaled for tokens.
+    /// 1:1 port of upstream `ToolExecutor+InspectTimeline.inspectTimeline`
+    /// (frame-range validation + even sampling here; the GPU composite + JPEG
+    /// encode behind the [`MediaBridge`]). Returns MCP image content per frame plus
+    /// a trailing meta text block (`fps`/`width`/`height`/`totalFrames`/
+    /// `frameNumbers`).
+    fn inspect_timeline(&self, args: &Value, before: &Timeline) -> Result<ToolResult, ToolError> {
+        let a: InspectTimelineArgs = decode_tool_args(args, "")?;
+
+        let total_frames = before.total_frames();
+        if total_frames <= 0 {
+            return Ok(ToolResult::error("Timeline is empty — nothing to render."));
+        }
+
+        let start_frame = a.start_frame.unwrap_or(0);
+        if start_frame < 0 || start_frame >= total_frames {
+            return Ok(ToolResult::error(format!(
+                "startFrame {start_frame} out of range [0, {total_frames})."
+            )));
+        }
+
+        // Single frame, or evenly-sampled frames across [startFrame, endFrame).
+        // Mirrors upstream exactly: count = clamp(maxFrames|default, ≤max, ≤span),
+        // frame_i = startFrame + floor(span * (i + 0.5) / count).
+        let sampled: Vec<i32> = if let Some(raw_end) = a.end_frame {
+            let end_frame = raw_end.min(total_frames);
+            if end_frame <= start_frame {
+                return Ok(ToolResult::error(format!(
+                    "endFrame must be greater than startFrame ({start_frame})."
+                )));
+            }
+            let span = end_frame - start_frame;
+            let count = a
+                .max_frames
+                .unwrap_or(INSPECT_TIMELINE_DEFAULT_FRAMES)
+                .min(INSPECT_TIMELINE_MAX_FRAMES)
+                .min(span)
+                .max(1);
+            (0..count)
+                .map(|i| {
+                    let offset = (span as f64 * (i as f64 + 0.5) / count as f64).floor() as i32;
+                    start_frame + offset
+                })
+                .collect()
+        } else {
+            vec![start_frame]
+        };
+
+        let Some(bridge) = self.bridge.as_ref() else {
+            return Ok(ToolResult::error(
+                "inspect_timeline: rendering is not available in this build",
+            ));
+        };
+
+        let InspectResult {
+            frames,
+            width,
+            height,
+        } = bridge
+            .inspect_timeline(&sampled, INSPECT_TIMELINE_MAX_DIMENSION)
+            .map_err(|e| ToolError::new(e.message))?;
+
+        if frames.is_empty() {
+            return Ok(ToolResult::error("Failed to render timeline frames."));
+        }
+
+        // Image blocks first, then the meta text block — upstream's
+        // `imageBlocks + [metaJSON]` order.
+        let mut blocks: Vec<Block> = frames.iter().map(frame_to_block).collect();
+        let rendered_frames: Vec<i32> = frames.iter().map(|f| f.frame).collect();
+        let meta = serde_json::json!({
+            "fps": before.fps,
+            "width": width,
+            "height": height,
+            "totalFrames": total_frames,
+            "frameNumbers": rendered_frames,
+        });
+        blocks.push(Block::text(meta.to_string()));
+        Ok(ToolResult::blocks(blocks))
+    }
+
+    /// `import_media`: import external media (url / path / bytes) through the SAME
+    /// path as the user-facing import, via the [`MediaBridge`]. 1:1 port of
+    /// upstream `ToolExecutor+Import.importMedia` — exactly-one-of-source
+    /// validation + folderId existence check here; the IO (download / recursive
+    /// path import / bytes write + poster/manifest/event) behind the bridge.
+    fn import_media(
+        &self,
+        args: &Value,
+        manifest: &MediaManifest,
+    ) -> Result<ToolResult, ToolError> {
+        let a: ImportMediaArgs = decode_tool_args(args, "")?;
+        // Validate the nested `source` object's own keys (upstream
+        // `validateUnknownKeys(source, path: "source")`). The top-level decode
+        // sees `source` as an opaque object, so an unknown key inside it would be
+        // silently dropped without this explicit second decode.
+        let source = match args.get("source") {
+            Some(raw) => decode_tool_args::<ImportSourceArg>(raw, "source")?,
+            None => {
+                return Ok(ToolResult::error("Missing required 'source' object"));
+            }
+        };
+
+        // Exactly one of url / path / bytes.
+        let set_count = [&source.url, &source.path, &source.bytes]
+            .iter()
+            .filter(|v| v.is_some())
+            .count();
+        if set_count != 1 {
+            return Ok(ToolResult::error(format!(
+                "source must set exactly one of 'url', 'path', or 'bytes' (got {set_count})"
+            )));
+        }
+
+        // folderId, when provided, must name an existing folder (upstream
+        // `resolveFolderId`). There is no reference fallback for a tool call.
+        if let Some(folder_id) = a.folder_id.as_deref() {
+            if !manifest.folders.iter().any(|f| f.id == folder_id) {
+                return Ok(ToolResult::error(format!(
+                    "folderId not found: {folder_id}"
+                )));
+            }
+        }
+
+        let import_source = if let Some(path) = source.path.clone() {
+            ImportSource::Path(path)
+        } else if let Some(base64) = source.bytes.clone() {
+            let Some(mime_type) = source.mime_type.clone() else {
+                return Ok(ToolResult::error(
+                    "source.mimeType is required when source.bytes is set",
+                ));
+            };
+            ImportSource::Bytes { base64, mime_type }
+        } else if let Some(url) = source.url.clone() {
+            ImportSource::Url {
+                url,
+                mime_type: source.mime_type.clone(),
+            }
+        } else {
+            // Unreachable: set_count == 1 guaranteed one branch above.
+            return Ok(ToolResult::error("import_media: no source set"));
+        };
+
+        let Some(bridge) = self.bridge.as_ref() else {
+            return Ok(ToolResult::error(
+                "import_media: importing is not available in this build",
+            ));
+        };
+
+        let outcome = bridge
+            .import_media(import_source, a.name.clone(), a.folder_id.clone())
+            .map_err(|e| ToolError::new(e.message))?;
+        Ok(ToolResult::ok(outcome.message))
     }
 
     // MARK: - Editing tool bodies
@@ -2649,5 +2835,344 @@ mod tests {
         let r = d.dispatch("deactivate_workflow", serde_json::json!({}));
         assert!(!r.is_error, "{}", r.text_joined());
         assert!(r.text_joined().contains("Deactivated"));
+    }
+
+    // MARK: - MediaBridge tools (inspect_timeline / import_media)
+
+    use crate::mcp::media_bridge::{
+        BridgeError, ImportOutcome, ImportSource, InspectResult, InspectedFrame, MediaBridge,
+    };
+    use crate::tools::result::Block;
+
+    /// One recorded `import_media` forward: a `kind:detail` tag plus the name /
+    /// folder the dispatcher passed through.
+    struct ImportCall {
+        tag: String,
+        name: Option<String>,
+        folder_id: Option<String>,
+    }
+
+    /// A recording fake bridge: captures the last inspect/import call so tests can
+    /// assert the dispatcher forwarded validated args, and returns canned output.
+    #[derive(Default)]
+    struct FakeBridge {
+        inspect_calls: Mutex<Vec<(Vec<i32>, u32)>>,
+        import_calls: Mutex<Vec<ImportCall>>,
+    }
+
+    impl MediaBridge for FakeBridge {
+        fn inspect_timeline(
+            &self,
+            frames: &[i32],
+            max_longest_edge: u32,
+        ) -> Result<InspectResult, BridgeError> {
+            self.inspect_calls
+                .lock()
+                .unwrap()
+                .push((frames.to_vec(), max_longest_edge));
+            Ok(InspectResult {
+                frames: frames
+                    .iter()
+                    .map(|&frame| InspectedFrame {
+                        frame,
+                        bytes: vec![0xff, 0xd8, 0xff, 0xe0], // JPEG SOI/APP0 stub
+                        media_type: "image/jpeg".into(),
+                    })
+                    .collect(),
+                width: 512,
+                height: 288,
+            })
+        }
+
+        fn import_media(
+            &self,
+            source: ImportSource,
+            name: Option<String>,
+            folder_id: Option<String>,
+        ) -> Result<ImportOutcome, BridgeError> {
+            let tag = match &source {
+                ImportSource::Path(p) => format!("path:{p}"),
+                ImportSource::Bytes { mime_type, .. } => format!("bytes:{mime_type}"),
+                ImportSource::Url { url, .. } => format!("url:{url}"),
+            };
+            self.import_calls.lock().unwrap().push(ImportCall {
+                tag: tag.clone(),
+                name,
+                folder_id,
+            });
+            Ok(ImportOutcome {
+                message: format!("Imported via {tag}."),
+            })
+        }
+    }
+
+    /// A dispatcher whose timeline has a single 60-frame clip and a `FakeBridge`
+    /// wired in. Returns both so tests can inspect the recorded bridge calls.
+    fn dispatcher_with_fake_bridge() -> (Dispatcher, Arc<FakeBridge>) {
+        let mut tl = Timeline::new();
+        tl.fps = 30;
+        let mut track = opentake_domain::Track::new("track-1", ClipType::Video);
+        track.clips.push(Clip::new("clip-1", "asset-1", 0, 60));
+        tl.tracks.push(track);
+        let mut m = MediaManifest::new();
+        m.entries.push(entry("asset-1", "Hero"));
+        let handle = Arc::new(StateHandle::new(tl, m));
+        let bridge = Arc::new(FakeBridge::default());
+        let d = Dispatcher::with_bridge(
+            handle,
+            Arc::new(RwLock::new(PluginRegistry::new())),
+            Some(bridge.clone() as Arc<dyn MediaBridge>),
+        );
+        (d, bridge)
+    }
+
+    #[test]
+    fn inspect_timeline_without_bridge_reports_unavailable() {
+        // The seeded TestHandle timeline is empty, so first assert the empty guard,
+        // then a non-empty timeline with no bridge reports "not available".
+        let d = dispatcher_with(seeded_handle());
+        let r = d.dispatch("inspect_timeline", serde_json::json!({ "startFrame": 0 }));
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("not available"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn inspect_timeline_empty_timeline_errors() {
+        let (d, _b) = {
+            // A bridge is present but the timeline is empty → the empty guard fires
+            // before the bridge is ever consulted.
+            let handle = Arc::new(StateHandle::new(Timeline::new(), MediaManifest::new()));
+            let bridge = Arc::new(FakeBridge::default());
+            let d = Dispatcher::with_bridge(
+                handle,
+                Arc::new(RwLock::new(PluginRegistry::new())),
+                Some(bridge.clone() as Arc<dyn MediaBridge>),
+            );
+            (d, bridge)
+        };
+        let r = d.dispatch("inspect_timeline", serde_json::json!({}));
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("Timeline is empty"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn inspect_timeline_start_frame_out_of_range_errors() {
+        let (d, _b) = dispatcher_with_fake_bridge();
+        // total_frames is 60; startFrame 60 is out of range [0, 60).
+        let r = d.dispatch("inspect_timeline", serde_json::json!({ "startFrame": 60 }));
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("out of range"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn inspect_timeline_end_before_start_errors() {
+        let (d, _b) = dispatcher_with_fake_bridge();
+        let r = d.dispatch(
+            "inspect_timeline",
+            serde_json::json!({ "startFrame": 30, "endFrame": 20 }),
+        );
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("greater than startFrame"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn inspect_timeline_single_frame_returns_one_image_and_meta() {
+        let (d, bridge) = dispatcher_with_fake_bridge();
+        let r = d.dispatch("inspect_timeline", serde_json::json!({ "startFrame": 5 }));
+        assert!(!r.is_error, "{}", r.text_joined());
+
+        // The bridge was asked for exactly [5] at the 512px cap.
+        let calls = bridge.inspect_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], (vec![5], 512));
+
+        // One image block, then a meta text block (upstream order).
+        let images = r
+            .content
+            .iter()
+            .filter(|b| matches!(b, Block::Image { .. }))
+            .count();
+        assert_eq!(images, 1, "one composited frame");
+        // The last text block is the meta JSON with the sampled frame numbers.
+        let meta_text = match &r.content[1] {
+            Block::Text { text } => text.clone(),
+            _ => panic!("expected meta text block after the image"),
+        };
+        let meta: Value = serde_json::from_str(&meta_text).unwrap();
+        assert_eq!(meta["frameNumbers"], serde_json::json!([5]));
+        assert_eq!(meta["totalFrames"], serde_json::json!(60));
+        assert_eq!(meta["width"], serde_json::json!(512));
+        assert_eq!(meta["fps"], serde_json::json!(30));
+    }
+
+    #[test]
+    fn inspect_timeline_range_samples_frames_evenly_capped() {
+        let (d, bridge) = dispatcher_with_fake_bridge();
+        // [0, 60) with default 6 frames → floor(60*(i+0.5)/6): 5,15,25,35,45,55.
+        let r = d.dispatch(
+            "inspect_timeline",
+            serde_json::json!({ "startFrame": 0, "endFrame": 60 }),
+        );
+        assert!(!r.is_error, "{}", r.text_joined());
+        let calls = bridge.inspect_calls.lock().unwrap();
+        assert_eq!(calls[0].0, vec![5, 15, 25, 35, 45, 55]);
+    }
+
+    #[test]
+    fn inspect_timeline_max_frames_is_capped_at_12() {
+        let (d, bridge) = dispatcher_with_fake_bridge();
+        // maxFrames 100 is clamped to 12 (and to the span, which is 60 here).
+        let r = d.dispatch(
+            "inspect_timeline",
+            serde_json::json!({ "startFrame": 0, "endFrame": 60, "maxFrames": 100 }),
+        );
+        assert!(!r.is_error, "{}", r.text_joined());
+        assert_eq!(bridge.inspect_calls.lock().unwrap()[0].0.len(), 12);
+    }
+
+    #[test]
+    fn inspect_timeline_rejects_unknown_arg() {
+        let (d, _b) = dispatcher_with_fake_bridge();
+        let r = d.dispatch("inspect_timeline", serde_json::json!({ "bogus": 1 }));
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("unknown field"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn import_media_without_bridge_reports_unavailable() {
+        let d = dispatcher_with(seeded_handle());
+        let r = d.dispatch(
+            "import_media",
+            serde_json::json!({ "source": { "path": "/x.mp4" } }),
+        );
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("not available"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn import_media_requires_exactly_one_source() {
+        let (d, _b) = dispatcher_with_fake_bridge();
+        // Zero of url/path/bytes.
+        let none = d.dispatch("import_media", serde_json::json!({ "source": {} }));
+        assert!(none.is_error);
+        assert!(
+            none.text_joined().contains("exactly one"),
+            "{}",
+            none.text_joined()
+        );
+        // Two of them.
+        let two = d.dispatch(
+            "import_media",
+            serde_json::json!({ "source": { "path": "/a.mp4", "url": "https://x/a.mp4" } }),
+        );
+        assert!(two.is_error);
+        assert!(
+            two.text_joined().contains("exactly one"),
+            "{}",
+            two.text_joined()
+        );
+    }
+
+    #[test]
+    fn import_media_bytes_requires_mime_type() {
+        let (d, _b) = dispatcher_with_fake_bridge();
+        let r = d.dispatch(
+            "import_media",
+            serde_json::json!({ "source": { "bytes": "AAAA" } }),
+        );
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("mimeType is required"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn import_media_unknown_folder_id_errors() {
+        let (d, _b) = dispatcher_with_fake_bridge();
+        let r = d.dispatch(
+            "import_media",
+            serde_json::json!({ "source": { "path": "/a.mp4" }, "folderId": "ghost" }),
+        );
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("folderId not found"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn import_media_rejects_unknown_nested_source_key() {
+        let (d, _b) = dispatcher_with_fake_bridge();
+        let r = d.dispatch(
+            "import_media",
+            serde_json::json!({ "source": { "url": "https://x/a.mp4", "bogus": 1 } }),
+        );
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("source: unknown field"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn import_media_path_forwards_to_bridge_and_returns_message() {
+        let (d, bridge) = dispatcher_with_fake_bridge();
+        let r = d.dispatch(
+            "import_media",
+            serde_json::json!({ "source": { "path": "/clip.mp4" }, "name": "Clip" }),
+        );
+        assert!(!r.is_error, "{}", r.text_joined());
+        assert!(
+            r.text_joined().contains("Imported via path:/clip.mp4"),
+            "{}",
+            r.text_joined()
+        );
+        let calls = bridge.import_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tag, "path:/clip.mp4");
+        assert_eq!(calls[0].name.as_deref(), Some("Clip"));
+        assert_eq!(calls[0].folder_id, None);
+    }
+
+    #[test]
+    fn import_media_bytes_forwards_mime_to_bridge() {
+        let (d, bridge) = dispatcher_with_fake_bridge();
+        let r = d.dispatch(
+            "import_media",
+            serde_json::json!({ "source": { "bytes": "AAAA", "mimeType": "image/png" } }),
+        );
+        assert!(!r.is_error, "{}", r.text_joined());
+        assert_eq!(
+            bridge.import_calls.lock().unwrap()[0].tag,
+            "bytes:image/png"
+        );
     }
 }
