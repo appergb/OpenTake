@@ -25,6 +25,7 @@ import { maybeSnapFeedback } from "../../lib/haptic";
 import { assetUrl } from "../../lib/asset";
 import { TimelinePlayback } from "./TimelinePlaybackLayer";
 import { TransformOverlay } from "./TransformOverlay";
+import { CropOverlay } from "./CropOverlay";
 import { aspectFitBox, timelinePreviewCanvasStyle } from "./previewLayerStyles";
 import { useT } from "../../i18n";
 import {
@@ -36,7 +37,7 @@ import {
 } from "../../lib/api";
 import { rustEngineEnabled } from "./rustEngine";
 import { shouldUseRustEngine } from "./timelinePlayback";
-import { findSelectedVisualClip, mediaCanvasAspect } from "../../lib/clip";
+import { findCropEditingClip, findSelectedVisualClip, mediaCanvasAspect } from "../../lib/clip";
 import type { MediaItem } from "../../lib/types";
 
 export function Preview() {
@@ -69,6 +70,26 @@ export function Preview() {
     timeline.width,
     timeline.height,
   );
+
+  // The Crop overlay's target clip (T3-11). Mutually exclusive with the
+  // Transform overlay — `PreviewContainerView.swift:37-41`'s
+  // `if cropEditingActive { CropOverlayView() } else { TransformOverlayView() }`
+  // — gated additionally on `cropEditingActive` at render time below.
+  // `findCropEditingClip` (unlike `findSelectedVisualClip`) excludes text
+  // clips and hides on an ambiguous match, per `CropOverlayView.selectedClip`'s
+  // exact rule (clip.ts doc comment).
+  const cropEditingActive = useEditorUiStore((s) => s.cropEditingActive);
+  const cropClip = cropEditingActive ? findCropEditingClip(timeline, selectedClipIds) : null;
+  const cropMediaItem = useMediaStore((s) =>
+    cropClip ? s.items.find((m) => m.id === cropClip.mediaRef) ?? null : null,
+  );
+  // Raw SOURCE pixel aspect (sourceWidth / sourceHeight) — distinct from
+  // `mediaCanvasAspect` above (which normalizes against the timeline canvas).
+  // 1:1 with upstream `sourcePixelAspect(for:)` (CropOverlayView.swift:207-212).
+  const cropSourcePixelAspect =
+    cropMediaItem?.width && cropMediaItem?.height && cropMediaItem.height > 0
+      ? cropMediaItem.width / cropMediaItem.height
+      : null;
 
   // Media-preview playback is driven by the app transport (more capable than the
   // <video>'s native controls), so the <video>/<audio> renders WITHOUT controls
@@ -206,13 +227,27 @@ export function Preview() {
               <>
                 <TimelinePlayback timeline={timeline} fps={fps} />
                 <TimelineRustOverlay />
-                {transformClip && fittedCanvas && (
-                  <TransformOverlay
-                    clip={transformClip}
-                    canvasPx={fittedCanvas}
-                    mediaAspect={transformMediaAspect}
-                  />
-                )}
+                {/* Mutually exclusive per `PreviewContainerView.swift:37-41`: while
+                    crop-editing is active, CropOverlay replaces TransformOverlay
+                    entirely (even if no clip resolves for it — matching upstream's
+                    unconditional `if editor.cropEditingActive` swap). */}
+                {cropEditingActive
+                  ? cropClip &&
+                    fittedCanvas && (
+                      <CropOverlay
+                        clip={cropClip}
+                        canvasPx={fittedCanvas}
+                        sourcePixelAspect={cropSourcePixelAspect}
+                      />
+                    )
+                  : transformClip &&
+                    fittedCanvas && (
+                      <TransformOverlay
+                        clip={transformClip}
+                        canvasPx={fittedCanvas}
+                        mediaAspect={transformMediaAspect}
+                      />
+                    )}
               </>
             ) : (
               // Empty timeline: a framed 16:9 canvas surface placeholder.

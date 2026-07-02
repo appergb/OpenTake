@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   clampTrimDeltaFrames,
   dbFromLinear,
+  findCropEditingClip,
   findSelectedVisualClip,
   fitTransformForMedia,
   liveVolumeKfLinearAt,
@@ -398,6 +399,44 @@ describe("findSelectedVisualClip", () => {
 
   it("returns null for an id that doesn't exist in the timeline", () => {
     expect(findSelectedVisualClip(tl, new Set(["missing"]))).toBeNull();
+  });
+});
+
+describe("findCropEditingClip (upstream CropOverlayView.selectedClip port)", () => {
+  const visual = clip({ id: "v1", mediaType: "video" });
+  const textClip = clip({ id: "t1", mediaType: "text" });
+  const audioClip = clip({ id: "a1", mediaType: "audio" });
+  const tl = timeline([
+    track({ id: "vt", type: "video", clips: [visual, textClip] }),
+    track({ id: "at", type: "audio", clips: [audioClip] }),
+  ]);
+
+  it("resolves the single selected visual clip", () => {
+    expect(findCropEditingClip(tl, new Set(["v1"]))).toBe(visual);
+  });
+
+  it("returns null when the single selected clip is a text clip (unlike findSelectedVisualClip)", () => {
+    expect(findCropEditingClip(tl, new Set(["t1"]))).toBeNull();
+  });
+
+  it("returns null when the single selected clip is on an audio track", () => {
+    expect(findCropEditingClip(tl, new Set(["a1"]))).toBeNull();
+  });
+
+  it("returns null when zero clips are selected", () => {
+    expect(findCropEditingClip(tl, new Set())).toBeNull();
+  });
+
+  it("returns null when more than one clip is selected (marquee)", () => {
+    expect(findCropEditingClip(tl, new Set(["v1", "t1"]))).toBeNull();
+  });
+
+  it("returns null when selectedClipIds is undefined (defensive for test-store mocks)", () => {
+    expect(findCropEditingClip(tl, undefined)).toBeNull();
+  });
+
+  it("returns null for an id that doesn't exist in the timeline", () => {
+    expect(findCropEditingClip(tl, new Set(["missing"]))).toBeNull();
   });
 });
 
