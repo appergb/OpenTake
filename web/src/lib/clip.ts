@@ -271,6 +271,107 @@ export function resizeTransformFromCorner(
   );
 }
 
+/** Snap clip edges to canvas boundaries (0 or 1). 1:1 port of upstream
+ *  `Transform.snapToCanvasEdges(threshold:)` (Models/Timeline.swift:463-481) —
+ *  including its one quirk: both axes share the single `threshold` the caller
+ *  passes (upstream's own `movedTransform` only derives it from canvas WIDTH,
+ *  never height, even for the vertical check). Preserved as-is; not "fixed". */
+function snapTransformToCanvasEdges(t: Transform, threshold: number): Transform {
+  const tl = topLeftForTransform(t);
+  let centerX = t.centerX;
+  const snappedLeft = snapToBoundary(tl.x, threshold);
+  const snappedRight = snapToBoundary(tl.x + t.width, threshold);
+  if (snappedLeft !== tl.x) {
+    centerX -= tl.x - snappedLeft;
+  } else if (snappedRight !== tl.x + t.width) {
+    centerX -= tl.x + t.width - snappedRight;
+  }
+
+  const tl2 = topLeftForTransform({ ...t, centerX });
+  let centerY = t.centerY;
+  const snappedTop = snapToBoundary(tl2.y, threshold);
+  const snappedBottom = snapToBoundary(tl2.y + t.height, threshold);
+  if (snappedTop !== tl2.y) {
+    centerY -= tl2.y - snappedTop;
+  } else if (snappedBottom !== tl2.y + t.height) {
+    centerY -= tl2.y + t.height - snappedBottom;
+  }
+  return { ...t, centerX, centerY };
+}
+
+/** Snap the clip's center to the canvas center (0.5, 0.5) per axis within
+ *  threshold. 1:1 port of upstream `Transform.snapCenterToCanvasCenter`
+ *  (Models/Timeline.swift:484-497), minus the `(x,y)` snapped-flags return —
+ *  OpenTake doesn't port upstream's pink center-guide lines (TransformOverlayView
+ *  centerGuideX/Y), only the functional snap that affects landing position. */
+function snapTransformCenterToCanvasCenter(t: Transform, thresholdH: number, thresholdV: number): Transform {
+  let centerX = t.centerX;
+  let centerY = t.centerY;
+  if (Math.abs(centerX - 0.5) < thresholdH) centerX = 0.5;
+  if (Math.abs(centerY - 0.5) < thresholdV) centerY = 0.5;
+  return { ...t, centerX, centerY };
+}
+
+/** Upstream TransformOverlayView `movedTransform` port (private func,
+ *  TransformOverlayView.swift:98-113). Translates the clip's center by a pixel
+ *  delta, then — only when not rotated — snaps edges to the canvas boundary and
+ *  the center to the canvas center, both using `snapThresholdPx` (0 = no snap,
+ *  matching `resizeTransformFromCorner`'s convention). Used by the on-canvas
+ *  move-drag; corner resizes go through `resizeTransformFromCorner` instead. */
+export function moveTransformByDelta(
+  start: Transform,
+  deltaPx: { width: number; height: number },
+  canvasPx: { width: number; height: number },
+  rotated: boolean,
+  snapThresholdPx = 0,
+): Transform {
+  if (!positiveFinite(canvasPx.width) || !positiveFinite(canvasPx.height)) return start;
+  const moved: Transform = {
+    ...start,
+    centerX: start.centerX + deltaPx.width / canvasPx.width,
+    centerY: start.centerY + deltaPx.height / canvasPx.height,
+  };
+  if (rotated || snapThresholdPx <= 0) return moved;
+  const edgeSnapped = snapTransformToCanvasEdges(moved, snapThresholdPx / canvasPx.width);
+  return snapTransformCenterToCanvasCenter(
+    edgeSnapped,
+    snapThresholdPx / canvasPx.width,
+    snapThresholdPx / canvasPx.height,
+  );
+}
+
+/**
+ * Rotates a screen-space pointer delta into the transform box's own (unrotated)
+ * local frame — the inverse of the box's CSS `rotate(rotationDegrees)` (positive
+ * = clockwise, matching `Transform.rotation`'s upstream doc comment).
+ *
+ * Only the corner-resize drag needs this. Upstream nests its 4 corner handles
+ * inside the box's rotated `ZStack` ancestor (TransformOverlayView.swift:29-43),
+ * so SwiftUI's local-space `DragGesture` translation arrives already rotated
+ * into the box's frame before `resizedTransform` ever sees it. A raw web pointer
+ * delta (`clientX`/`clientY`) has no such compensation, so this applies it
+ * explicitly before the delta reaches `resizeTransformFromCorner`.
+ *
+ * The move gesture does NOT need this: upstream deliberately keeps its move
+ * hit-target OUTSIDE the rotated ZStack (a sibling view sized to the rotated
+ * AABB with a custom `contentShape`, TransformOverlayView.swift:20-27,284-295),
+ * so its translation is raw screen-space too — translating a box's center by a
+ * screen delta is rotation-invariant regardless, so this would be a no-op there.
+ */
+export function rotateDeltaIntoLocalFrame(
+  deltaPx: { width: number; height: number },
+  rotationDegrees: number,
+): { width: number; height: number } {
+  if (rotationDegrees === 0) return deltaPx;
+  const theta = (rotationDegrees * Math.PI) / 180;
+  const cos = Math.cos(theta);
+  const sin = Math.sin(theta);
+  return {
+    width: deltaPx.width * cos + deltaPx.height * sin,
+    height: -deltaPx.width * sin + deltaPx.height * cos,
+  };
+}
+
 /** Which edge a trim drag grabs. */
 export type TrimEdge = "left" | "right";
 
@@ -555,6 +656,29 @@ export function cropAt(clip: Clip, frame: number): Crop {
   return sampleCropTrack(clip.cropTrack, keyframeOffset(clip, frame), clip.crop);
 }
 
+/**
+ * Live-sampled `Transform` at `frame`, incorporating any active position/scale/
+ * rotation keyframe tracks — 1:1 port of upstream `Clip.transformAt(frame:)`,
+ * composed from the already-ported `topLeftAt`/`sizeAt`/`rotationAt` samplers.
+ * `flipHorizontal`/`flipVertical` are never keyframed, so they pass through
+ * from the clip's static `transform` unchanged. Used by the on-canvas Transform
+ * overlay to seed its box position/size/rotation and each drag's start value
+ * (TransformOverlayView.swift:14-16,77,119: `clip.transformAt(frame:)`).
+ */
+export function sampledTransform(clip: Clip, frame: number): Transform {
+  const topLeft = topLeftAt(clip, frame);
+  const [width, height] = sizeAt(clip, frame);
+  return {
+    centerX: topLeft.x + width / 2,
+    centerY: topLeft.y + height / 2,
+    width,
+    height,
+    rotation: rotationAt(clip, frame),
+    flipHorizontal: clip.transform.flipHorizontal,
+    flipVertical: clip.transform.flipVertical,
+  };
+}
+
 /** Whether any transform-related track is active. 1:1 port of `Clip::has_transform_animation`. */
 export function hasTransformAnimation(clip: Clip): boolean {
   return (
@@ -597,4 +721,32 @@ export function linkOffsetForClip(timeline: Timeline, clipId: string): number | 
   const offset = target.startFrame - leadStart;
   if (offset === 0) return null; // lead clip → no badge
   return offset;
+}
+
+/**
+ * The single clip the on-canvas Transform overlay should target, or `null` if
+ * it shouldn't render. Adapts upstream `TransformOverlayView.selectedClip`
+ * (TransformOverlayView.swift:304-313), which scans every non-audio track for
+ * ANY selected clip and returns the first match (so it can render even with
+ * other clips also selected). OpenTake tightens this to exactly one clip
+ * selected total, per the feature's "single visual clip selected" scope —
+ * still a strict subset of when upstream would show the overlay, never wider.
+ * `track.type !== "audio"` mirrors upstream's `track.type != .audio` (covers
+ * video/image/text/lottie — any non-audio track), not `clip.mediaType`.
+ * `selectedClipIds` is optional so callers (and test mocks of the UI store)
+ * that omit it don't need a defensive check of their own.
+ */
+export function findSelectedVisualClip(
+  timeline: Timeline,
+  selectedClipIds: Set<string> | undefined,
+): Clip | null {
+  if (!selectedClipIds || selectedClipIds.size !== 1) return null;
+  const [id] = selectedClipIds;
+  for (const track of timeline.tracks) {
+    if (track.type === "audio") continue;
+    for (const c of track.clips) {
+      if (c.id === id) return c;
+    }
+  }
+  return null;
 }

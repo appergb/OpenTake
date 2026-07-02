@@ -11,6 +11,7 @@ const store = vi.hoisted(() => ({
     isPlaying: false,
     isScrubbing: false,
     previewMediaId: null as string | null,
+    selectedClipIds: new Set<string>(),
     setCurrentFrame: vi.fn(),
     setScrubbing: vi.fn(),
     togglePlay: vi.fn(),
@@ -109,6 +110,7 @@ describe("Preview timeline rendering", () => {
       isPlaying: false,
       isScrubbing: false,
       previewMediaId: null,
+      selectedClipIds: new Set<string>(),
     };
     store.media.items = [
       { id: "base", name: "base", type: "video", duration: 10, hasAudio: true, path: "/base.mov" },
@@ -186,5 +188,68 @@ describe("Preview timeline rendering", () => {
 
     expect(html).toContain("<img");
     expect(html).toContain("pointer-events:none");
+  });
+
+  // Note: only the NEGATIVE guard cases are provable here. `renderToStaticMarkup`
+  // never runs `useEffect`, so the ResizeObserver that measures `stageSize` (and
+  // therefore `fittedCanvas`, Preview.tsx:156) never fires — `fittedCanvas` is
+  // always null in this test file, and TransformOverlay correctly (and
+  // deliberately) renders nothing for a degenerate canvas. The POSITIVE
+  // rendering path — given a real canvasPx — is covered by TransformOverlay.test.tsx,
+  // which renders the component directly instead of through Preview's sizing.
+  describe("Transform overlay mount guard (T3-10)", () => {
+    beforeEach(() => {
+      store.timeline = timeline([
+        track({
+          id: "v1",
+          type: "video",
+          clips: [
+            clip({ id: "base-clip", mediaRef: "base", mediaType: "video" }),
+            clip({ id: "text-clip", mediaRef: "base", mediaType: "text", startFrame: 10 }),
+          ],
+        }),
+        track({
+          id: "a1",
+          type: "audio",
+          clips: [clip({ id: "audio-clip", mediaRef: "base", mediaType: "audio", startFrame: 20 })],
+        }),
+      ]);
+    });
+
+    it("stays hidden when no clip is selected", () => {
+      store.ui.selectedClipIds = new Set();
+
+      const html = renderToStaticMarkup(<Preview />);
+
+      expect(html).not.toContain('data-testid="transform-overlay"');
+    });
+
+    it("stays hidden when more than one clip is selected (marquee)", () => {
+      store.ui.selectedClipIds = new Set(["base-clip", "text-clip"]);
+
+      const html = renderToStaticMarkup(<Preview />);
+
+      expect(html).not.toContain('data-testid="transform-overlay"');
+    });
+
+    it("stays hidden when the single selected clip is on an audio track", () => {
+      store.ui.selectedClipIds = new Set(["audio-clip"]);
+
+      const html = renderToStaticMarkup(<Preview />);
+
+      expect(html).not.toContain('data-testid="transform-overlay"');
+    });
+
+    it("stays hidden while viewing a media-library preview, even with a visual clip selected", () => {
+      store.ui.selectedClipIds = new Set(["base-clip"]);
+      store.ui.previewMediaId = "still";
+      store.media.items = [
+        { id: "still", name: "still", type: "image", duration: 1, hasAudio: false, path: "/still.png" },
+      ];
+
+      const html = renderToStaticMarkup(<Preview />);
+
+      expect(html).not.toContain('data-testid="transform-overlay"');
+    });
   });
 });

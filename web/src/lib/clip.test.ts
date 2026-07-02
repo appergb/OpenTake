@@ -1,13 +1,65 @@
 import { describe, expect, it } from "vitest";
 import {
   clampTrimDeltaFrames,
+  findSelectedVisualClip,
   fitTransformForMedia,
   mediaCanvasAspect,
+  moveTransformByDelta,
   resizeTransformKeepingSourceAspect,
+  rotateDeltaIntoLocalFrame,
+  sampledTransform,
   trimSourceValues,
   trimToPlayheadEdits,
 } from "./clip";
-import type { Clip, ClipType } from "./types";
+import type { Clip, ClipType, Timeline, Track, Transform } from "./types";
+
+/** Full-Clip fixture, matching previewLayerStyles.test.ts / Preview.test.tsx's
+ *  shape so fixtures stay consistent across the codebase. */
+function clip(over: Partial<Clip> = {}): Clip {
+  return {
+    id: "clip",
+    mediaRef: "asset",
+    mediaType: "video",
+    sourceClipType: "video",
+    startFrame: 0,
+    durationFrames: 100,
+    trimStartFrame: 0,
+    trimEndFrame: 0,
+    speed: 1,
+    volume: 1,
+    fadeInFrames: 0,
+    fadeOutFrames: 0,
+    fadeInInterpolation: "smooth",
+    fadeOutInterpolation: "smooth",
+    opacity: 1,
+    transform: {
+      centerX: 0.5,
+      centerY: 0.5,
+      width: 1,
+      height: 1,
+      rotation: 0,
+      flipHorizontal: false,
+      flipVertical: false,
+    },
+    crop: { left: 0, top: 0, right: 0, bottom: 0 },
+    ...over,
+  };
+}
+
+function track(over: Partial<Track> & { id: string; type: ClipType; clips: Clip[] }): Track {
+  return {
+    id: over.id,
+    type: over.type,
+    muted: over.muted ?? false,
+    hidden: over.hidden ?? false,
+    syncLocked: over.syncLocked ?? true,
+    clips: over.clips,
+  };
+}
+
+function timeline(tracks: Track[]): Timeline {
+  return { fps: 30, width: 1920, height: 1080, settingsConfigured: true, tracks };
+}
 
 function tc(over: Partial<{ durationFrames: number; speed: number; trimStartFrame: number; trimEndFrame: number; mediaType: ClipType }> = {}) {
   return {
@@ -163,5 +215,183 @@ describe("media aspect transform helpers", () => {
       rotation: 12,
       flipHorizontal: true,
     });
+  });
+});
+
+describe("sampledTransform (upstream Clip.transformAt(frame:) port)", () => {
+  it("with no active tracks, recomposes the clip's static transform unchanged", () => {
+    const c = clip({
+      transform: {
+        centerX: 0.3,
+        centerY: 0.7,
+        width: 0.4,
+        height: 0.25,
+        rotation: 15,
+        flipHorizontal: true,
+        flipVertical: false,
+      },
+    });
+    const s = sampledTransform(c, 0);
+    expect(s.centerX).toBeCloseTo(c.transform.centerX);
+    expect(s.centerY).toBeCloseTo(c.transform.centerY);
+    expect(s.width).toBe(c.transform.width);
+    expect(s.height).toBe(c.transform.height);
+    expect(s.rotation).toBe(c.transform.rotation);
+    expect(s.flipHorizontal).toBe(c.transform.flipHorizontal);
+    expect(s.flipVertical).toBe(c.transform.flipVertical);
+  });
+
+  it("follows an active position/scale/rotation track at an exact keyframe", () => {
+    const c = clip({
+      startFrame: 100,
+      positionTrack: {
+        keyframes: [
+          { frame: 0, value: { a: 0.1, b: 0.2 }, interpolationOut: "linear" },
+          { frame: 50, value: { a: 0.6, b: 0.1 }, interpolationOut: "hold" },
+        ],
+      },
+      scaleTrack: {
+        keyframes: [{ frame: 0, value: { a: 0.5, b: 0.3 }, interpolationOut: "hold" }],
+      },
+      rotationTrack: {
+        keyframes: [
+          { frame: 0, value: 45, interpolationOut: "hold" },
+          { frame: 50, value: 45, interpolationOut: "hold" },
+        ],
+      },
+    });
+
+    // Absolute frame 150 = clip-relative 50 = the second (held) keyframe.
+    const s = sampledTransform(c, 150);
+    expect(s.rotation).toBe(45);
+    expect(s.width).toBeCloseTo(0.5);
+    expect(s.height).toBeCloseTo(0.3);
+    // topLeftAt returns the sampled position directly; center = topLeft + size/2.
+    expect(s.centerX).toBeCloseTo(0.6 + 0.5 / 2);
+    expect(s.centerY).toBeCloseTo(0.1 + 0.3 / 2);
+  });
+
+  it("passes flipHorizontal/flipVertical through from the static transform (never keyframed)", () => {
+    const c = clip({ transform: { ...clip().transform, flipHorizontal: true, flipVertical: true } });
+    const s = sampledTransform(c, 0);
+    expect(s.flipHorizontal).toBe(true);
+    expect(s.flipVertical).toBe(true);
+  });
+});
+
+describe("moveTransformByDelta (upstream TransformOverlayView.movedTransform port)", () => {
+  const canvas = { width: 1000, height: 1000 };
+  const start: Transform = {
+    centerX: 0.5,
+    centerY: 0.5,
+    width: 0.2,
+    height: 0.2,
+    rotation: 0,
+    flipHorizontal: false,
+    flipVertical: false,
+  };
+
+  it("translates the center by delta/canvasPx on each axis", () => {
+    const moved = moveTransformByDelta(start, { width: 100, height: 50 }, canvas, false);
+    expect(moved.centerX).toBeCloseTo(0.6);
+    expect(moved.centerY).toBeCloseTo(0.55);
+    expect(moved.width).toBe(0.2);
+    expect(moved.height).toBe(0.2);
+  });
+
+  it("snaps the left edge to the canvas boundary within threshold", () => {
+    // topLeft.x after translate = 0.5-0.1 + delta/1000. Land it 3px from x=0.
+    const moved = moveTransformByDelta(start, { width: -397, height: 0 }, canvas, false, 8);
+    expect(moved.centerX).toBeCloseTo(0.1); // left edge pinned to exactly 0
+  });
+
+  it("snaps the center to the canvas center within threshold", () => {
+    const nudged = { ...start, centerX: 0.503, centerY: 0.497 };
+    const moved = moveTransformByDelta(nudged, { width: 0, height: 0 }, canvas, false, 8);
+    expect(moved.centerX).toBe(0.5);
+    expect(moved.centerY).toBe(0.5);
+  });
+
+  it("skips all snapping while rotated, even within threshold", () => {
+    const rotatedStart: Transform = { ...start, rotation: 30, centerX: 0.503 };
+    const moved = moveTransformByDelta(rotatedStart, { width: 0, height: 0 }, canvas, true, 8);
+    expect(moved.centerX).toBe(0.503); // not snapped to 0.5
+  });
+
+  it("skips snapping when snapThresholdPx is omitted (defaults to 0)", () => {
+    const nudged = { ...start, centerX: 0.5001 };
+    const moved = moveTransformByDelta(nudged, { width: 0, height: 0 }, canvas, false);
+    expect(moved.centerX).toBe(0.5001);
+  });
+
+  it("returns start unchanged for a degenerate (zero-size) canvas", () => {
+    expect(moveTransformByDelta(start, { width: 50, height: 50 }, { width: 0, height: 0 }, false)).toBe(start);
+  });
+});
+
+describe("rotateDeltaIntoLocalFrame", () => {
+  it("is the identity at 0 degrees", () => {
+    expect(rotateDeltaIntoLocalFrame({ width: 12, height: -7 }, 0)).toEqual({ width: 12, height: -7 });
+  });
+
+  it("maps a screen-down drag to local +X at 90 degrees (box rotated 90deg CW)", () => {
+    const local = rotateDeltaIntoLocalFrame({ width: 0, height: 10 }, 90);
+    expect(local.width).toBeCloseTo(10);
+    expect(local.height).toBeCloseTo(0);
+  });
+
+  it("negates both axes at 180 degrees", () => {
+    const local = rotateDeltaIntoLocalFrame({ width: 5, height: 3 }, 180);
+    expect(local.width).toBeCloseTo(-5);
+    expect(local.height).toBeCloseTo(-3);
+  });
+
+  it("maps a screen-down drag to local -X at -90 degrees", () => {
+    const local = rotateDeltaIntoLocalFrame({ width: 0, height: 10 }, -90);
+    expect(local.width).toBeCloseTo(-10);
+    expect(local.height).toBeCloseTo(0);
+  });
+
+  it("preserves vector magnitude at a non-axis-aligned angle", () => {
+    const input = { width: 8, height: -6 };
+    const local = rotateDeltaIntoLocalFrame(input, 37);
+    const beforeMag = Math.hypot(input.width, input.height);
+    const afterMag = Math.hypot(local.width, local.height);
+    expect(afterMag).toBeCloseTo(beforeMag);
+  });
+});
+
+describe("findSelectedVisualClip", () => {
+  const visual = clip({ id: "v1", mediaType: "video" });
+  const textClip = clip({ id: "t1", mediaType: "text" });
+  const audioClip = clip({ id: "a1", mediaType: "audio" });
+  const tl = timeline([
+    track({ id: "vt", type: "video", clips: [visual, textClip] }),
+    track({ id: "at", type: "audio", clips: [audioClip] }),
+  ]);
+
+  it("resolves the single selected visual clip", () => {
+    expect(findSelectedVisualClip(tl, new Set(["v1"]))).toBe(visual);
+    expect(findSelectedVisualClip(tl, new Set(["t1"]))).toBe(textClip);
+  });
+
+  it("returns null when the single selected clip is on an audio track", () => {
+    expect(findSelectedVisualClip(tl, new Set(["a1"]))).toBeNull();
+  });
+
+  it("returns null when zero clips are selected", () => {
+    expect(findSelectedVisualClip(tl, new Set())).toBeNull();
+  });
+
+  it("returns null when more than one clip is selected (marquee)", () => {
+    expect(findSelectedVisualClip(tl, new Set(["v1", "t1"]))).toBeNull();
+  });
+
+  it("returns null when selectedClipIds is undefined (defensive for test-store mocks)", () => {
+    expect(findSelectedVisualClip(tl, undefined)).toBeNull();
+  });
+
+  it("returns null for an id that doesn't exist in the timeline", () => {
+    expect(findSelectedVisualClip(tl, new Set(["missing"]))).toBeNull();
   });
 });
