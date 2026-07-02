@@ -5,8 +5,12 @@
 //! frame decode uses the system ffmpeg CLI; image thumbnails use the `image`
 //! crate (with EXIF orientation handled by the decoder).
 
+pub mod project;
 pub mod sprite;
 
+pub use project::{
+    capture_project_thumbnail, pick_thumbnail_source, ThumbnailKind, ThumbnailSource,
+};
 pub use sprite::{load_sprite, save_sprite, ThumbnailCacheMeta, VideoThumb};
 
 use std::path::Path;

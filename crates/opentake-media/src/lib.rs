@@ -38,6 +38,7 @@ pub mod ort_worker;
 pub mod probe;
 pub mod search;
 pub mod thumbnail;
+pub mod timecode;
 pub mod transcribe;
 pub mod waveform;
 
@@ -59,9 +60,12 @@ pub use decode::{
 pub use encode::{ExportPreset, ExportResolution, VideoCodec, VideoEncoder};
 
 pub use thumbnail::{
-    image_thumbnail, video_thumbnail_times, video_thumbnails, PartialThumbCallback,
-    ThumbnailCacheMeta, VideoThumb,
+    capture_project_thumbnail, image_thumbnail, pick_thumbnail_source, video_thumbnail_times,
+    video_thumbnails, PartialThumbCallback, ThumbnailCacheMeta, ThumbnailKind, ThumbnailSource,
+    VideoThumb,
 };
+
+pub use timecode::{parse_smpte_timecode, read_start_timecode_frame};
 
 pub use waveform::{waveform, waveform_cached, waveform_sample_count};
 

@@ -54,10 +54,10 @@ pub mod otio;
 pub mod xmlnode;
 
 pub use archive::{archive, ArchiveReport, MissingMedia};
-pub use bundle::Project;
+pub use bundle::{copy_media_dir, Project};
 pub use edl::export_edl;
 pub use error::{ProjectError, Result};
-pub use fcpxml::export_xmeml;
+pub use fcpxml::{export_xmeml, export_xmeml_with_timecodes};
 pub use fcpxml_modern::export_fcpxml;
 pub use gen_log::{GenerationLog, GenerationLogEntry};
 pub use otio::export_otio;

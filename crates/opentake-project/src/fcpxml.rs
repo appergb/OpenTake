@@ -28,9 +28,12 @@
 //! - 关键帧插值曲线(linear/hold/smooth):导入时用默认缓动
 //!
 //! 与上游的两点差异(都是跨平台降级,语义对齐):
-//! - **源起始时间码**:上游用 AVFoundation 读 QuickTime `tmcd` 轨;Rust/Tauri 无等价
-//!   实现,这里 1:1 降级为 startFrame=0 + `00:00:00:00`(正是上游读不到 tmcd 时的回退
-//!   分支)。源时间码读取为后续(可用 ffprobe 补)。
+//! - **源起始时间码**:上游用 AVFoundation 读 QuickTime `tmcd` 轨(读到的原始 UInt32
+//!   帧数)。Rust/Tauri 无等价实现,改由调用方(src-tauri)经 ffprobe 读
+//!   `tags.timecode` 字符串、用 [`opentake_media::read_start_timecode_frame`] 转成起始帧,
+//!   通过 [`export_xmeml_with_timecodes`] 注入本模块;读不到时退回 startFrame=0 +
+//!   `00:00:00:00`(正是上游 `sourceStartFrame(for:) ?? 0` 的回退分支)。本模块自身保持
+//!   零 IO,`export_xmeml` 不注入任何时间码即等价旧行为(全 0)。
 //! - **文件存在性检查**:domain 的 [`MediaResolver`] 是零 IO 的(只算 expected_path),
 //!   上游 `resolveURL` 会过滤解析不到的 clip。这里在本模块内用 `expected_path() +
 //!   is_file()` 复刻过滤语义,不污染 domain 的零 IO 约束;过滤后 link 的
@@ -51,14 +54,31 @@ fn seconds_to_frame(seconds: f64, fps: i32) -> i32 {
 }
 
 /// 把 [`Timeline`] 导出为 XMEML 4(FCP7 XML)字符串。纯函数:输入时间线、媒体清单、
-/// 以及解析 `Project` 相对路径所需的工程目录,输出完整 XML 文本。
+/// 以及解析 `Project` 相对路径所需的工程目录,输出完整 XML 文本。每个源文件的
+/// `<timecode>` 起始帧一律为 0(降级为 `00:00:00:00`)—— 要注入真实源起始时间码,
+/// 用 [`export_xmeml_with_timecodes`]。
 pub fn export_xmeml(
     timeline: &Timeline,
     manifest: &MediaManifest,
     project_base: Option<&Path>,
 ) -> String {
+    export_xmeml_with_timecodes(timeline, manifest, project_base, &HashMap::new())
+}
+
+/// 同 [`export_xmeml`],但注入每个源文件的**起始时间码帧**(`media_ref → start
+/// frame`)。命中的 `media_ref` 会把该帧写入其 `<file><timecode>`(1:1 对应上游
+/// `sourceStartFrame(for:)` 的返回值,`Export/XMLExporter.swift:220,238-243`);未命中
+/// 或值缺失时退回 0(即上游读不到 tmcd 轨时的 `?? 0` 分支)。保持纯函数:时间码由
+/// 调用方(src-tauri)用 [`opentake_media::read_start_timecode_frame`] 经 ffprobe 解析后
+/// 传入,本模块不做任何 IO。
+pub fn export_xmeml_with_timecodes(
+    timeline: &Timeline,
+    manifest: &MediaManifest,
+    project_base: Option<&Path>,
+    start_timecodes: &HashMap<String, i32>,
+) -> String {
     let resolver = MediaResolver::new(manifest, project_base);
-    Builder::new(timeline, &resolver).build()
+    Builder::new(timeline, &resolver, start_timecodes).build()
 }
 
 // MARK: - Builder
@@ -93,10 +113,17 @@ struct Builder<'a> {
     clip_addresses: HashMap<String, ClipAddress>,
     /// link group id → 该组的片段(按出现顺序)。
     clips_by_link_group: HashMap<String, Vec<Clip>>,
+    /// media_ref → 源起始时间码帧(注入,缺失即 0)。对应上游 `startFrameCache`
+    /// 已解析的结果,只是这里由调用方经 ffprobe 预先算好传入。
+    start_timecodes: &'a HashMap<String, i32>,
 }
 
 impl<'a> Builder<'a> {
-    fn new(timeline: &'a Timeline, resolver: &'a MediaResolver<'a>) -> Self {
+    fn new(
+        timeline: &'a Timeline,
+        resolver: &'a MediaResolver<'a>,
+        start_timecodes: &'a HashMap<String, i32>,
+    ) -> Self {
         Builder {
             timeline,
             resolver,
@@ -106,6 +133,7 @@ impl<'a> Builder<'a> {
             emitted_files: HashSet::new(),
             clip_addresses: HashMap::new(),
             clips_by_link_group: HashMap::new(),
+            start_timecodes,
         }
     }
 
@@ -385,9 +413,11 @@ impl<'a> Builder<'a> {
             el("media", vec![el("video", video_children)])
         };
 
-        // timecode 是 DaVinci Resolve 必需的。源时间码无跨平台读取实现,降级为 0。
+        // timecode 是 DaVinci Resolve 必需的。源起始时间码由调用方经 ffprobe 注入
+        // (`start_timecodes`);未命中退回 0——正是上游 `sourceStartFrame(for:) ?? 0`
+        // 读不到 tmcd 轨时的分支。
         let drop_frame = ntsc && timebase % 30 == 0;
-        let start_frame = 0; // 源起始时间码读取为后续(上游无 tmcd 时也是 0)。
+        let start_frame = self.start_timecodes.get(media_ref).copied().unwrap_or(0);
         let timecode = el(
             "timecode",
             vec![
@@ -1456,6 +1486,63 @@ mod tests {
         assert!(xml.contains("<file id=\"file-v1-video\"/>"));
         // 完整 file 节点(含 pathurl)只发出一次,即使两个 clipitem 引用同一素材。
         assert_eq!(xml.matches("<pathurl>").count(), 1);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn export_injected_start_timecode_lands_in_file_timecode() {
+        let dir = std::env::temp_dir().join(format!("opentake-xmeml-tc-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let vpath = touch(&dir, "tc.mp4");
+        let mut manifest = MediaManifest::new();
+        manifest
+            .entries
+            .push(ext_entry("v1", "tc.mp4", ClipType::Video, &vpath, 4.0));
+        let mut tl = Timeline::new(); // fps 30
+        let mut vtrack = Track::new("vt", ClipType::Video);
+        vtrack.clips.push(Clip::new("c1", "v1", 0, 30));
+        tl.tracks.push(vtrack);
+
+        // 注入 1s 起始时间码:30 fps → 30 帧 → 00:00:01:00。
+        let mut tcs = HashMap::new();
+        tcs.insert("v1".to_string(), 30);
+        let xml = export_xmeml_with_timecodes(&tl, &manifest, None, &tcs);
+
+        // <file><timecode> 里应出现注入的帧与其 SMPTE 串,而非 00:00:00:00。
+        assert!(xml.contains("<frame>30</frame>"));
+        assert!(xml.contains("<string>00:00:01:00</string>"));
+        // sequence 顶层 timecode 仍是固定的 00:00:00:00(未被 per-file 注入影响)。
+        assert!(xml.contains("<string>00:00:00:00</string>"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn export_absent_timecode_falls_back_to_zero() {
+        let dir = std::env::temp_dir().join(format!("opentake-xmeml-tc0-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let vpath = touch(&dir, "notc.mp4");
+        let mut manifest = MediaManifest::new();
+        manifest
+            .entries
+            .push(ext_entry("v1", "notc.mp4", ClipType::Video, &vpath, 4.0));
+        let mut tl = Timeline::new();
+        let mut vtrack = Track::new("vt", ClipType::Video);
+        vtrack.clips.push(Clip::new("c1", "v1", 0, 30));
+        tl.tracks.push(vtrack);
+
+        // 一个不含本文件的 map(命中另一个 ref),该文件必须退回 0。
+        let mut other = HashMap::new();
+        other.insert("someone-else".to_string(), 999);
+        let injected = export_xmeml_with_timecodes(&tl, &manifest, None, &other);
+        // 便捷入口(无注入)也应等价。
+        let plain = export_xmeml(&tl, &manifest, None);
+
+        for xml in [&injected, &plain] {
+            assert!(xml.contains("<frame>0</frame>"));
+            // 该文件 <file><timecode> 的 string 为 00:00:00:00;整份文档不含 999。
+            assert!(xml.contains("<string>00:00:00:00</string>"));
+            assert!(!xml.contains("999"));
+        }
         fs::remove_dir_all(&dir).ok();
     }
 
