@@ -7,8 +7,7 @@
 //! (`opentake_media::VideoEncoder`) to produce a real `.mp4` on disk.
 //!
 //! Scope of this first cut (SPEC §2.4 / §8.2):
-//! - **H.264 / .mp4** only. The encoder already supports H.265 / ProRes presets;
-//!   those land in a follow-up so this slice stays a clean, verifiable spine.
+//! - **H.264 / .mp4**, **H.265 / .mp4**, and **ProRes 422 / .mov** are wired.
 //! - **Linear audio mixdown**: every audio-bearing clip's source window is
 //!   decoded to mono f32 at the mix rate, placed at its frame-derived sample
 //!   offset, scaled by its `volume_at` envelope, summed, hard-limited, and mux'd
@@ -16,8 +15,13 @@
 //!   produces the same video-only file as before.
 //! - Export renders at the **full** export resolution
 //!   ([`opentake_render::export_render_size`]), not the preview cap.
-//! - No progress callback / cancellation yet (the orchestrator runs to
-//!   completion under the GPU lock, one frame at a time).
+//! - **Progress + cancel** (mirrors upstream `Export/ExportService.swift`'s
+//!   200ms `AVAssetExportSession.progress` poll + cooperative cancel): the frame
+//!   loop emits a throttled `"export://progress"` Tauri event and checks a
+//!   shared [`ExportControl`] flag every frame. A mid-export cancel stops the
+//!   loop, best-effort-deletes the partial output file, and returns
+//!   `Err(CANCELLED_SENTINEL)` — a stable string the front end matches to show a
+//!   neutral "cancelled" state instead of the failure toast.
 //!
 //! The manifest/text projection, [`opentake_render::SourceMetrics`] adapter, and
 //! the on-demand ffmpeg [`opentake_render::TextureResolver`] are intentionally a
@@ -28,9 +32,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use opentake_core::AppCore;
 use opentake_domain::{Clip, ClipType, MediaSource, TextStyle};
@@ -51,18 +58,16 @@ use opentake_render::{
 /// frames. Bounds VRAM during the export loop.
 const TEXTURE_CACHE_CAP: usize = 64;
 
-/// Requested output codec, projected from the front-end. Only H.264 is wired in
-/// this slice; the other variants are accepted by the type but rejected with a
-/// clear error until their container/preset branches land.
+/// Requested output codec, projected from the front-end.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ExportCodec {
-    /// H.264 / `.mp4` (the only fully-wired path in this cut).
+    /// H.264 / `.mp4`.
     #[default]
     H264,
-    /// H.265 / `.mp4` (reserved — not yet wired).
+    /// H.265 / `.mp4`.
     H265,
-    /// Apple ProRes 422 / `.mov` (reserved — not yet wired).
+    /// Apple ProRes 422 / `.mov`.
     Prores,
 }
 
@@ -130,9 +135,72 @@ pub struct ExportSummary {
     pub frame_count: i32,
 }
 
-/// Resolve the requested codec to an ffmpeg [`ExportPreset`], rejecting the
-/// not-yet-wired branches with a clear error. Also validates the output
-/// extension matches the codec's container.
+/// Stable `Err` string [`export_video`] returns when the frame loop stops
+/// because [`ExportControl::is_cancelled`] flipped mid-encode. The front end
+/// matches this exact string to show a neutral "cancelled" toast instead of the
+/// failure path — chosen over a `cancelled: bool` field on [`ExportSummary`]
+/// because the loop already threads through `Result<_, String>` at every
+/// composite/encode step, so reusing that channel is the lower-churn option.
+pub const CANCELLED_SENTINEL: &str = "export cancelled";
+
+/// Shared cancel flag for the in-flight export, managed as Tauri app state
+/// (`app.manage(ExportControl::default())`). One export runs at a time in this
+/// cut, so a single flag (rather than a per-export token) is sufficient: the
+/// command handler resets it to `false` at the start of every `export_video`
+/// call, and the frame loop polls it (`Ordering::Relaxed` — a plain progress
+/// signal, not synchronizing any other memory) once per frame.
+#[derive(Default)]
+pub struct ExportControl {
+    cancel: Arc<AtomicBool>,
+}
+
+impl ExportControl {
+    /// Arm for a new export: clears any stale cancel request from a previous run.
+    fn reset(&self) {
+        self.cancel.store(false, Ordering::Relaxed);
+    }
+
+    /// Request cancellation of the in-flight export.
+    fn request_cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// True once [`ExportControl::request_cancel`] has been called since the
+    /// last [`ExportControl::reset`].
+    fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+}
+
+/// `cancel_export`: request that the in-flight export (if any) stop at the next
+/// frame boundary. A no-op when nothing is exporting — the flag is simply
+/// cleared again at the start of the next `export_video` call.
+#[tauri::command]
+pub fn cancel_export(control: State<'_, ExportControl>) {
+    control.request_cancel();
+}
+
+/// Progress payload for the throttled `"export://progress"` event: `done` of
+/// `total` frames composited so far.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+struct ExportProgress {
+    done: i32,
+    total: i32,
+}
+
+/// Minimum spacing between progress emissions, matching upstream's 200ms
+/// `AVAssetExportSession.progress` poll interval.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
+
+/// True when at least [`PROGRESS_INTERVAL`] has elapsed since the last emit —
+/// the throttle the frame loop consults before firing another progress event.
+/// Pure/pulled out of the loop so it's unit-testable without a GPU.
+fn progress_should_emit(last: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(last) >= PROGRESS_INTERVAL
+}
+
+/// Resolve the requested codec to an ffmpeg [`ExportPreset`], validating that
+/// the output extension matches the codec's container.
 fn resolve_preset(
     codec: ExportCodec,
     quality: ExportQuality,
@@ -152,12 +220,24 @@ fn resolve_preset(
                 quality.encode_resolution(),
             ))
         }
-        // TODO(#export): wire H.265 (.mp4) and ProRes 422 (.mov) once their
-        // container/preset branches are validated end-to-end. The encoder
-        // already builds correct args for both; this command just hasn't opted
-        // them in yet, so the export surface stays minimal and verifiable.
-        ExportCodec::H265 => Err("H.265 export is not wired yet (TODO)".to_string()),
-        ExportCodec::Prores => Err("ProRes export is not wired yet (TODO)".to_string()),
+        ExportCodec::H265 => {
+            if ext.as_deref() != Some("mp4") {
+                return Err("H.265 export requires an .mp4 output path".to_string());
+            }
+            Ok(ExportPreset::new(
+                VideoCodec::H265,
+                quality.encode_resolution(),
+            ))
+        }
+        ExportCodec::Prores => {
+            if ext.as_deref() != Some("mov") {
+                return Err("ProRes export requires a .mov output path".to_string());
+            }
+            Ok(ExportPreset::new(
+                VideoCodec::ProRes422,
+                quality.encode_resolution(),
+            ))
+        }
     }
 }
 
@@ -421,30 +501,72 @@ fn mix_timeline_audio(
 /// `export_video`: render the whole timeline to a video file on disk.
 ///
 /// Composites every frame at the full export resolution and encodes them to
-/// `req.out_path` (H.264 / .mp4 in this cut). An empty timeline still produces a
-/// valid (possibly zero-frame) file — out-of-range frames composite to opaque
-/// black, which is the correct clear color, not an error.
+/// `req.out_path` per the requested codec/container. An empty timeline still
+/// produces a valid (possibly zero-frame) file — out-of-range frames composite
+/// to opaque black, which is the correct clear color, not an error.
+///
+/// Emits throttled `"export://progress"` events via `app` and polls `control`
+/// for a mid-encode cancel every frame (see the module doc). This is a sync
+/// (non-`async`) command, so Tauri runs it on a worker thread — `cancel_export`
+/// (and the WebView's event loop delivering `"export://progress"`) keep running
+/// concurrently while this call is in flight.
 ///
 /// GPU acquisition / decode / encode failures surface to the front-end as
-/// `Err(String)` (the Tauri boundary contract).
+/// `Err(String)` (the Tauri boundary contract); a mid-export cancel surfaces as
+/// `Err(`[`CANCELLED_SENTINEL`]`)`.
 #[tauri::command]
-pub fn export_video(core: State<'_, AppCore>, req: ExportRequest) -> Result<ExportSummary, String> {
+pub fn export_video(
+    app: AppHandle,
+    core: State<'_, AppCore>,
+    control: State<'_, ExportControl>,
+    req: ExportRequest,
+) -> Result<ExportSummary, String> {
     // Snapshot the session up front; no session lock is held during GPU/encode.
     let timeline = core.get_timeline().timeline;
     let manifest = core.media();
     let project_dir = core.project_dir();
-    run_export(&timeline, &manifest, &project_dir, &req)
+    control.reset();
+    let on_progress = |done: i32, total: i32| {
+        let _ = app.emit("export://progress", ExportProgress { done, total });
+    };
+    run_export_with_control(
+        &timeline,
+        &manifest,
+        &project_dir,
+        &req,
+        Some(&control),
+        Some(&on_progress),
+    )
 }
 
 /// The export orchestration, decoupled from Tauri/`AppCore` so it can be driven
 /// directly by an ffmpeg-gated integration test with a hand-built timeline +
 /// manifest. The command wrapper only snapshots the live session and delegates
-/// here. `pub` for the integration test in `tests/export_integration.rs`.
+/// here. `pub` for the integration test in `tests/export_integration.rs`. No
+/// cancel/progress wiring — the integration test doesn't need either, so this
+/// keeps its existing 4-argument signature and delegates to
+/// [`run_export_with_control`] with both plumbed as absent.
 pub fn run_export(
     timeline: &opentake_domain::Timeline,
     manifest: &opentake_domain::MediaManifest,
     project_dir: &Option<PathBuf>,
     req: &ExportRequest,
+) -> Result<ExportSummary, String> {
+    run_export_with_control(timeline, manifest, project_dir, req, None, None)
+}
+
+/// Shared orchestration behind [`run_export`] and [`export_video`]: `control`
+/// (checked once per frame) and `on_progress` (called at most every
+/// [`PROGRESS_INTERVAL`], plus once more at 100% when the loop finishes) are
+/// both optional so callers with no Tauri context (the integration test) can
+/// omit them.
+fn run_export_with_control(
+    timeline: &opentake_domain::Timeline,
+    manifest: &opentake_domain::MediaManifest,
+    project_dir: &Option<PathBuf>,
+    req: &ExportRequest,
+    control: Option<&ExportControl>,
+    on_progress: Option<&dyn Fn(i32, i32)>,
 ) -> Result<ExportSummary, String> {
     let out_path = PathBuf::from(&req.out_path);
     let preset = resolve_preset(req.codec, req.quality, &out_path)?;
@@ -477,7 +599,19 @@ pub fn run_export(
     )
     .map_err(|e| format!("encoder init failed: {e}"))?;
 
+    let mut last_progress_emit = Instant::now();
     for f in 0..plan.total_frames {
+        if control.is_some_and(|c| c.is_cancelled()) {
+            // `abort` kills + waits on the ffmpeg child (unlike a plain `drop`,
+            // which would orphan the process and race the file removal below).
+            encoder.abort();
+            // Best-effort cleanup of the partial file — a leftover half-encoded
+            // video must not look like a finished export. Missing/unwritable is
+            // not itself an error worth surfacing over the cancel.
+            let _ = std::fs::remove_file(&out_path);
+            return Err(CANCELLED_SENTINEL.to_string());
+        }
+
         let frame_plan = plan.frame(timeline, f);
         let mut resolver = MediaResolver {
             device: &dev.device,
@@ -505,6 +639,16 @@ pub fn run_export(
                 composite.rgba,
             ))
             .map_err(|e| format!("encode frame {f} failed: {e}"))?;
+
+        if let Some(emit) = on_progress {
+            let now = Instant::now();
+            let done = f + 1;
+            let is_last = done == plan.total_frames;
+            if is_last || progress_should_emit(last_progress_emit, now) {
+                emit(done, plan.total_frames);
+                last_progress_emit = now;
+            }
+        }
     }
 
     // Decode + linearly mix every audio-bearing clip, then hand the mixed PCM to
@@ -552,6 +696,64 @@ fn clip_source_window_secs(clip: &Clip, timeline_fps: i32) -> Option<(f64, f64)>
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn export_control_starts_uncancelled() {
+        let control = ExportControl::default();
+        assert!(!control.is_cancelled());
+    }
+
+    #[test]
+    fn export_control_request_cancel_flips_the_flag() {
+        let control = ExportControl::default();
+        control.request_cancel();
+        assert!(control.is_cancelled());
+    }
+
+    #[test]
+    fn export_control_reset_clears_a_prior_cancel() {
+        // Mirrors `export_video`'s "reset at the start of every call" — a stale
+        // cancel from a finished export must not poison the next one.
+        let control = ExportControl::default();
+        control.request_cancel();
+        control.reset();
+        assert!(!control.is_cancelled());
+    }
+
+    #[test]
+    fn export_control_cancel_is_observable_through_a_clone() {
+        // `cancel_export` (a separate Tauri command) sets the flag on its own
+        // `State<ExportControl>` handle; a clone shares the same underlying
+        // `Arc<AtomicBool>`, matching how Tauri hands out the same managed
+        // instance to every command.
+        let control = ExportControl::default();
+        let clone = ExportControl {
+            cancel: control.cancel.clone(),
+        };
+        clone.request_cancel();
+        assert!(control.is_cancelled());
+    }
+
+    #[test]
+    fn progress_should_emit_false_before_the_interval_elapses() {
+        let last = Instant::now();
+        let now = last + Duration::from_millis(50);
+        assert!(!progress_should_emit(last, now));
+    }
+
+    #[test]
+    fn progress_should_emit_true_once_the_interval_elapses() {
+        let last = Instant::now();
+        let now = last + PROGRESS_INTERVAL;
+        assert!(progress_should_emit(last, now));
+    }
+
+    #[test]
+    fn progress_should_emit_true_well_past_the_interval() {
+        let last = Instant::now();
+        let now = last + Duration::from_secs(1);
+        assert!(progress_should_emit(last, now));
+    }
 
     #[test]
     fn quality_maps_to_both_resolution_selectors() {
@@ -605,21 +807,57 @@ mod tests {
     }
 
     #[test]
-    fn resolve_preset_rejects_unwired_codecs() {
-        assert!(resolve_preset(
+    fn resolve_preset_accepts_h265_mp4() {
+        let preset = resolve_preset(
             ExportCodec::H265,
             ExportQuality::P1080,
-            Path::new("/out.mp4")
+            Path::new("/out.mp4"),
         )
-        .unwrap_err()
-        .contains("H.265"));
-        assert!(resolve_preset(
+        .expect("h265 mp4 should resolve");
+        assert_eq!(preset.codec, VideoCodec::H265);
+        assert_eq!(preset.resolution, EncodeResolution::P1080);
+    }
+
+    #[test]
+    fn resolve_preset_rejects_wrong_extension_for_h265() {
+        let err = resolve_preset(
+            ExportCodec::H265,
+            ExportQuality::P1080,
+            Path::new("/out.mov"),
+        )
+        .unwrap_err();
+        assert!(err.contains(".mp4"), "got: {err}");
+
+        let err = resolve_preset(
+            ExportCodec::H265,
+            ExportQuality::P1080,
+            Path::new("/out.png"),
+        )
+        .unwrap_err();
+        assert!(err.contains(".mp4"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_preset_accepts_prores_mov() {
+        let preset = resolve_preset(
             ExportCodec::Prores,
             ExportQuality::P1080,
-            Path::new("/out.mov")
+            Path::new("/out.mov"),
         )
-        .unwrap_err()
-        .contains("ProRes"));
+        .expect("prores mov should resolve");
+        assert_eq!(preset.codec, VideoCodec::ProRes422);
+        assert_eq!(preset.resolution, EncodeResolution::P1080);
+    }
+
+    #[test]
+    fn resolve_preset_rejects_wrong_extension_for_prores() {
+        let err = resolve_preset(
+            ExportCodec::Prores,
+            ExportQuality::P1080,
+            Path::new("/out.mp4"),
+        )
+        .unwrap_err();
+        assert!(err.contains(".mov"), "got: {err}");
     }
 
     #[test]

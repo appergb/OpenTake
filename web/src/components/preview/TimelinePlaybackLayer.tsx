@@ -80,7 +80,16 @@ export function TimelinePlayback({ timeline, fps }: { timeline: Timeline; fps: n
         const cropMaskStyle = timelinePreviewCropMaskStyle(visual.clip, frame);
         const mediaStyle = timelinePreviewCroppedMediaStyle(visual.clip, frame);
         return (
-          <div key={key} style={timelinePreviewClipStyle(visual.clip, frame)}>
+          <div
+            key={key}
+            // Explicit z-order so the preview composites in the SAME order as the
+            // final render (opentake-render keeps visual track 0 topmost): lower
+            // track index = higher layer. Without this the order relied on DOM
+            // paint order, which React reconciliation could shuffle as clips
+            // enter/leave during scrub — making the preview disagree with the
+            // exported frame. Track indices are small, so 1000 is a safe base.
+            style={{ ...timelinePreviewClipStyle(visual.clip, frame), zIndex: 1000 - visual.trackIndex }}
+          >
             <div style={cropMaskStyle}>
               {visual.clip.mediaType === "video" ? (
                 <video

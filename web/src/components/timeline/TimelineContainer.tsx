@@ -38,6 +38,7 @@ import { ClipContextMenu } from "./ClipContextMenu";
 import { SwapMediaPicker } from "./SwapMediaPicker";
 import { MEDIA_DND_TYPE } from "../media/MediaPanel";
 import { getDraggingMedia, setDraggingMedia } from "../../lib/mediaDragState";
+import { maybeSnapFeedback } from "../../lib/haptic";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
@@ -351,6 +352,9 @@ export function TimelineContainer() {
   // events so the sticky band (1.5x threshold) holds the clip on its target
   // instead of jittering at the edge (SPEC §5.7). Cleared on pointerUp.
   const snapStateRef = useRef<{ frame: number; probeOffset: number } | null>(null);
+  // Sticky snap state for the playhead scrub (independent of the clip-move snap
+  // above), so dragging the playhead magnetizes to clip start/end edges.
+  const scrubSnapRef = useRef<{ frame: number; probeOffset: number } | null>(null);
   const [snapFrame, setSnapFrame] = useState<number | null>(null);
   const [dragTick, forceTick] = useState(0);
   const [menu, setMenu] = useState<TimelineContextMenu | null>(null);
@@ -452,6 +456,35 @@ export function TimelineContainer() {
         proposedTrackDelta,
         0,
       );
+      // Single clip crossing onto exactly one existing clip → preview the swap:
+      // the displaced clip will ghost at the slot the lead is vacating. Mirrors
+      // the drop-side decision in `endDrag` so what you see is what you get.
+      let swap: { clipId: string; toTrackIndex: number; toFrame: number } | undefined;
+      if (
+        !d.isDuplicate &&
+        d.dropTarget.kind === "existing" &&
+        participants.length === 1 &&
+        lead &&
+        resolved.trackDelta !== 0
+      ) {
+        const leadDur = timeline.tracks
+          .flatMap((tk) => tk.clips)
+          .find((c) => c.id === d.hit.clip.id)?.durationFrames;
+        const destTrack = timeline.tracks[lead.trackIndex + resolved.trackDelta];
+        if (leadDur && destTrack) {
+          const leadToFrame = lead.startFrame + d.deltaFrames;
+          const leadEnd = leadToFrame + leadDur;
+          const overlap = destTrack.clips.filter(
+            (c) =>
+              c.id !== d.hit.clip.id &&
+              c.startFrame < leadEnd &&
+              c.startFrame + c.durationFrames > leadToFrame,
+          );
+          if (overlap.length === 1) {
+            swap = { clipId: overlap[0].id, toTrackIndex: lead.trackIndex, toFrame: lead.startFrame };
+          }
+        }
+      }
       drag = {
         kind: "move",
         ids: new Set(d.companions),
@@ -462,6 +495,7 @@ export function TimelineContainer() {
         isDuplicate: d.isDuplicate,
         newTrackType: d.dropTarget.kind === "newTrack" ? d.dropTarget.trackType : undefined,
         newTrackIndex: d.dropTarget.kind === "newTrack" ? d.dropTarget.index : undefined,
+        swap,
       };
     } else if (d?.kind === "trimLeft" || d?.kind === "trimRight") {
       drag = {
@@ -754,9 +788,14 @@ export function TimelineContainer() {
       // Ruler -> scrub playhead.
       if (inRuler) {
         dragRef.current = { kind: "scrub" };
+        scrubSnapRef.current = null;
         setScrubbing(true);
-        const f = frameAt(docX, zoomScale);
-        setCurrentFrame(f);
+        // Snap the playhead to the nearest clip start/end (clip edges only — not
+        // the playhead itself), so scrubbing magnetizes to cut points.
+        const raw = frameAt(docX, zoomScale);
+        const snap = findSnap(raw, collectTargets(timeline, EMPTY_EXCLUDE, null, false), zoomScale, null);
+        setCurrentFrame(Math.max(0, Math.round(snap ? snap.frame : raw)));
+        maybeSnapFeedback(snap ? snap.frame : null);
         return;
       }
 
@@ -897,7 +936,16 @@ export function TimelineContainer() {
       const { docX, docY } = toDoc(e);
 
       if (d.kind === "scrub") {
-        setCurrentFrame(frameAt(docX, zoomScale));
+        // Sticky-snap the dragged playhead to the nearest clip edge so it
+        // magnetizes to cut points without jittering; fire a tick on engage.
+        const raw = frameAt(docX, zoomScale);
+        const targets = collectTargets(timeline, EMPTY_EXCLUDE, null, false);
+        const snap = findSnapDelta([raw], targets, zoomScale, scrubSnapRef.current, [0]);
+        scrubSnapRef.current = snap
+          ? { frame: snap.snappedFrame, probeOffset: snap.probeOffset }
+          : null;
+        setCurrentFrame(Math.max(0, Math.round(snap ? raw + snap.delta : raw)));
+        maybeSnapFeedback(snap ? snap.snappedFrame : null);
         setScrubbing(false);
         return;
       }
@@ -969,6 +1017,7 @@ export function TimelineContainer() {
         }
         dragRef.current = { ...d, deltaFrames, targetTrack, dropTarget };
         setSnapFrame(snapped);
+        maybeSnapFeedback(snapped);
         forceTick((n) => n + 1);
         return;
       }
@@ -1050,6 +1099,7 @@ export function TimelineContainer() {
   const endDrag = useCallback((e: React.PointerEvent) => {
     dragRef.current = null;
     setSnapFrame(null);
+    maybeSnapFeedback(null); // re-arm snap feedback for the next gesture
     setScrubbing(false);
     const el = e.currentTarget as HTMLElement;
     if (el.hasPointerCapture?.(e.pointerId)) el.releasePointerCapture(e.pointerId);
@@ -1155,6 +1205,35 @@ export function TimelineContainer() {
             resolved.targets.map((target) => target.toTrack),
           );
         } else {
+          // Single clip dragged across tracks onto exactly one existing clip:
+          // swap their places (exchange track + start) instead of overwriting —
+          // so the displaced clip relocates rather than getting swallowed.
+          const leadTarget = resolved.targets.find((t) => t.clipId === d.hit.clip.id);
+          const leadDur = timeline.tracks
+            .flatMap((t) => t.clips)
+            .find((c) => c.id === d.hit.clip.id)?.durationFrames;
+          if (
+            participants.length === 1 &&
+            leadTarget &&
+            leadDur &&
+            leadTarget.toTrack !== lead.trackIndex
+          ) {
+            const destTrack = timeline.tracks[leadTarget.toTrack];
+            const movedIds = new Set(resolved.targets.map((t) => t.clipId));
+            const leadEnd = leadTarget.toFrame + leadDur;
+            const overlap = destTrack
+              ? destTrack.clips.filter(
+                  (c) =>
+                    !movedIds.has(c.id) &&
+                    c.startFrame < leadEnd &&
+                    c.startFrame + c.durationFrames > leadTarget.toFrame,
+                )
+              : [];
+            if (overlap.length === 1) {
+              void edit.swapClips(d.hit.clip.id, overlap[0].id);
+              return;
+            }
+          }
           const moves = resolved.targets.map((target) => ({
             clipId: target.clipId,
             toTrack: target.toTrack,
@@ -1308,7 +1387,9 @@ export function TimelineContainer() {
       };
       const prev = mediaGhostRef.current;
       mediaGhostRef.current = next;
-      setSnapFrame(snap ? snap.snappedFrame : null);
+      const snappedFrame = snap ? snap.snappedFrame : null;
+      setSnapFrame(snappedFrame);
+      maybeSnapFeedback(snappedFrame);
       const changed =
         !prev ||
         prev.startFrame !== next.startFrame ||
@@ -1342,6 +1423,12 @@ export function TimelineContainer() {
       const plan = mediaGhostRef.current;
       clearMediaGhost();
       setDraggingMedia(null);
+      // Dropping onto the timeline is an HTML5 `drop` (no pointerdown), so the
+      // media-preview→timeline switch in TimelineRegion's onPointerDownCapture
+      // never fires. Clear the selected media here so the preview shows the
+      // timeline composite at the playhead instead of staying on the dropped
+      // asset's standalone preview.
+      useEditorUiStore.getState().setPreviewMedia(null);
       if (!item) return;
       if (plan) {
         const preferredTrackIndex = plan.newTrackIndex !== null ? null : plan.trackIndex;

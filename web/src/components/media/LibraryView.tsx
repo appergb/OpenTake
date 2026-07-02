@@ -12,7 +12,7 @@
  * 造新 asset,再 refreshMedia)。所有命令在非 Tauri 下安全降级。
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Home,
   Search,
@@ -422,10 +422,33 @@ function EntryCard({ entry }: { entry: LibraryEntry }) {
   const categorize = useLibraryStore((s) => s.categorize);
   const [hovered, setHovered] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Lazy-mount the thumbnail: a video entry without a cached poster falls back
+  // to the full source file, so mounting every card's <video> at once loads
+  // dozens of clips (slow + heavy). Only load once the card scrolls into view.
+  const cardRef = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
 
   const name = sourceName(entry.source) || entry.id;
   // 缩略图:库条目 thumb 优先,否则按 source 让 WebView 解码原文件(asset 协议)。
   const thumb = assetUrl(entry.thumb ?? entry.source);
+
+  useEffect(() => {
+    const el = cardRef.current;
+    if (!el || typeof IntersectionObserver === "undefined") {
+      setVisible(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      ([e]) => {
+        if (!e?.isIntersecting) return;
+        setVisible(true);
+        observer.disconnect();
+      },
+      { root: null, rootMargin: "200px" },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   const handleImport = async () => {
     setBusy(true);
@@ -445,6 +468,7 @@ function EntryCard({ entry }: { entry: LibraryEntry }) {
 
   return (
     <div
+      ref={cardRef}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       title={name}
@@ -464,13 +488,14 @@ function EntryCard({ entry }: { entry: LibraryEntry }) {
           overflow: "hidden",
         }}
       >
-        {thumb && entry.type === "image" ? (
+        {visible && thumb && entry.type === "image" ? (
           <img
             src={thumb}
             alt={name}
+            loading="lazy"
             style={{ width: "100%", height: "100%", objectFit: "cover" }}
           />
-        ) : thumb && entry.type === "video" ? (
+        ) : visible && thumb && entry.type === "video" ? (
           <video
             src={`${thumb}#t=0.1`}
             muted

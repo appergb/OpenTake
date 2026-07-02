@@ -51,6 +51,12 @@ futures = { version = "0.3", optional = true }
 # playback-engine job). Off by default with the rest of the feature.
 cpal = { version = "0.15", optional = true }
 
+# macOS trackpad haptics for snap feedback (1:1 with upstream's
+# NSHapticFeedbackManager). objc2-app-kit 0.3 is already in the lockfile via
+# Tauri, so this only enables the NSHapticFeedback module (incremental build).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSHapticFeedback"] }
+
 [dev-dependencies]
 tempfile = "3"
 

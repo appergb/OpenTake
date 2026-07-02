@@ -31,7 +31,7 @@ pub use ripple::{
     RippleOutcome, RippleRangesReport,
 };
 pub use split::{split_clip, split_single_clip};
-pub use swap::swap_tracks;
+pub use swap::{swap_clip_positions, swap_tracks};
 pub use tracks::{
     available_audio_track_index, insert_track, prune_empty_tracks, remove_tracks,
     resolve_or_create_audio_track, zones, ZoneLayout,

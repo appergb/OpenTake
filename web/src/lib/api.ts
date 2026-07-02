@@ -116,17 +116,68 @@ export async function getDefaultProjectDir(): Promise<string> {
   return "";
 }
 
+// MARK: - Timeline interchange export (XMEML / EDL / OTIO / FCPXML)
+//
+// Four standard editorial-interchange formats, each a thin path-only command
+// that writes the live timeline to disk and returns nothing (or rejects). All
+// no-op outside Tauri (no Rust core / no file system). Pick the format per the
+// target NLE — see each wrapper.
+
 /**
- * Export the current timeline to `path` as Final Cut Pro 7 XML (XMEML, `.xml`)
- * so it opens in Premiere / DaVinci Resolve / FCP. The command name says
- * "fcpxml" (the F4 contract) but the produced format is XMEML — Premiere doesn't
- * read FCPXML natively, so upstream exports XMEML; DaVinci/FCP still import it.
- * No-op outside Tauri (no Rust core / no file system).
+ * Export the current timeline as XMEML 4 (Final Cut Pro 7 XML, `.xml`). This is
+ * the Premiere / DaVinci Resolve / 剪映-importable interchange format (Premiere
+ * does NOT read modern FCPXML; DaVinci/FCP still import FCP7 XML).
  */
-export async function exportFcpxml(path: string): Promise<void> {
+export async function exportXmeml(path: string): Promise<void> {
   await ensureTauri();
   if (invokeImpl) {
-    await invokeImpl<void>("export_fcpxml", { path });
+    await invokeImpl<void>("export_xmeml", { path });
+  }
+}
+
+/**
+ * @deprecated Use {@link exportXmeml}. Historically named "fcpxml" but always
+ * produced XMEML 4 (FCP7 XML). Kept so older callers keep working; for native
+ * Final Cut Pro X FCPXML use {@link exportFcpxmlModern}.
+ */
+export async function exportFcpxml(path: string): Promise<void> {
+  return exportXmeml(path);
+}
+
+/**
+ * Export the current timeline as a CMX3600 EDL (`.edl`) — the classic edit
+ * decision list Premiere / DaVinci / Avid / 剪映 import. Video track only;
+ * effects/transforms/audio are dropped (a CMX3600 limitation).
+ */
+export async function exportEdl(path: string): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) {
+    await invokeImpl<void>("export_edl", { path });
+  }
+}
+
+/**
+ * Export the current timeline as OpenTimelineIO JSON (`.otio`) — the industry
+ * interchange standard `otioview` / DaVinci / Blender read. Preserves track
+ * order/kind, clip placement, source ranges, gaps, and media references.
+ */
+export async function exportOtio(path: string): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) {
+    await invokeImpl<void>("export_otio", { path });
+  }
+}
+
+/**
+ * Export the current timeline as native Final Cut Pro X FCPXML 1.10
+ * (`.fcpxml`). Carries text overlays (`<title>`), transforms, and volume that
+ * XMEML can't. NOTE: Premiere does NOT import FCPXML — use {@link exportXmeml}
+ * for Premiere / DaVinci / 剪映.
+ */
+export async function exportFcpxmlModern(path: string): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) {
+    await invokeImpl<void>("export_fcpxml_modern", { path });
   }
 }
 
@@ -163,14 +214,16 @@ export async function exportSubtitles(
 // MARK: - Video export (#112)
 //
 // `export_video` composites every timeline frame on the GPU and encodes it to a
-// real file on disk (H.264 / .mp4 in this cut; H.265 / ProRes are accepted by
-// the type but rejected by the backend until wired). The request mirrors the
-// Rust `ExportRequest` DTO verbatim (camelCase `outPath`; lowercase enum tags).
-// Outside Tauri there is no GPU/ffmpeg, so the wrapper rejects with a friendly
-// error rather than silently no-op'ing (an export the user asked for must not
-// quietly do nothing).
+// real file on disk (H.264 / H.265 in an .mp4 container, or ProRes 422 in a
+// .mov container). The request mirrors the Rust `ExportRequest` DTO verbatim
+// (camelCase `outPath`; lowercase enum tags). Outside Tauri there is no
+// GPU/ffmpeg, so the wrapper rejects with a friendly error rather than
+// silently no-op'ing (an export the user asked for must not quietly do
+// nothing). Progress streams via the `"export://progress"` event
+// (`onExportProgress`); `cancelExport` requests a mid-encode stop, which
+// surfaces back through `exportVideo`'s rejection as `EXPORT_CANCELLED_SENTINEL`.
 
-/** Output codec. Only `h264` is fully wired; the others are reserved. */
+/** Output codec. `h264`/`h265` require an `.mp4` output path; `prores` requires `.mov`. */
 export type ExportCodec = "h264" | "h265" | "prores";
 
 /** Output short-edge resolution selector. */
@@ -196,6 +249,42 @@ export async function exportVideo(req: ExportRequest): Promise<ExportSummary> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<ExportSummary>("export_video", { req });
   throw new Error("video export requires the desktop app (GPU + ffmpeg)");
+}
+
+/** Stable `Err` string `export_video` rejects with when cancelled mid-encode
+ *  (mirror of the Rust `CANCELLED_SENTINEL`). Callers match this exact string
+ *  to show a neutral "cancelled" state instead of the failure toast. */
+export const EXPORT_CANCELLED_SENTINEL = "export cancelled";
+
+/** Request that the in-flight `export_video` stop at the next frame boundary.
+ *  No-op outside Tauri (there is no export to cancel) and a no-op backend-side
+ *  when nothing is exporting. */
+export async function cancelExport(): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) await invokeImpl<void>("cancel_export");
+}
+
+/** Progress payload for `"export://progress"`: `done` of `total` frames
+ *  composited so far. */
+export interface ExportProgress {
+  done: number;
+  total: number;
+}
+
+/** Subscribe to the throttled `"export://progress"` event fired by `export_video`
+ *  (at most every ~200ms, plus a final 100% emit). Returns an unlisten function;
+ *  no-op (no-op unlisten) outside Tauri. */
+export async function onExportProgress(
+  handler: (progress: ExportProgress) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("export://progress", (e) => {
+    const p = e.payload as { done?: number; total?: number } | undefined;
+    if (p && typeof p.done === "number" && typeof p.total === "number") {
+      handler({ done: p.done, total: p.total });
+    }
+  });
 }
 
 // MARK: - Media commands
@@ -281,6 +370,49 @@ export async function generateThumbnail(
     }
   }
   return null;
+}
+
+/**
+ * Decode (and disk-cache) a HI-RES first-frame poster for a VIDEO asset and
+ * return its on-disk path (run it through {@link assetUrl} to display). This is
+ * the instant, sharp placeholder painted behind the preview `<video>` so a cold
+ * click shows its first frame immediately instead of a blank/spinner — the asset
+ * protocol then streams the real video progressively (it honors HTTP Range, so
+ * `<video preload="metadata">` never downloads the whole file). Returns null for
+ * non-video assets (images render straight from disk; audio has no frame) and
+ * outside Tauri; decode errors are swallowed (best-effort) so the preview just
+ * has no poster rather than throwing. */
+export async function previewPoster(
+  mediaRef: string,
+  timeSecs?: number,
+): Promise<string | null> {
+  await ensureTauri();
+  if (!invokeImpl) return null;
+  try {
+    const args: Record<string, unknown> = { mediaRef };
+    if (timeSecs != null) args.timeSecs = timeSecs;
+    return await invokeImpl<string | null>("preview_poster", args);
+  } catch (e) {
+    console.warn(`preview_poster failed for ${mediaRef}:`, e);
+    return null;
+  }
+}
+
+/** Fire-and-forget preview warm-up for a media asset when it's selected or drag
+ *  starts: the backend decodes its hi-res first-frame poster into the on-disk
+ *  cache on a worker thread, so a subsequent preview shows a sharp first frame
+ *  with no decode on the interaction path. Deliberately light — it no longer
+ *  warms the heavy 240-frame filmstrip sprite or waveform (which never sped
+ *  actual `<video>` playback). No-op in the browser fallback / for non-video;
+ *  errors are swallowed (best-effort). */
+export async function preloadMedia(mediaRef: string): Promise<void> {
+  await ensureTauri();
+  if (!invokeImpl) return;
+  try {
+    await invokeImpl<void>("preload_media", { mediaRef });
+  } catch (e) {
+    console.warn(`preload_media failed for ${mediaRef}:`, e);
+  }
 }
 
 // MARK: - Timeline composite preview (#47)

@@ -142,10 +142,11 @@ export const PLAYHEAD_TRIANGLE = 8;
  *  a neutral gray translucent rect at the resolved track + frame span, matching
  *  the in-timeline move ghost / marquee affordance (white-alpha overlays). */
 export const GHOST = {
-  fill: "rgba(255,255,255,0.16)",
+  fill: "rgba(255,255,255,0.20)",
   border: "rgba(255,255,255,0.55)",
-  /** Faint fill for the "a new track will be created here" lane. */
-  newTrackFill: "rgba(255,255,255,0.05)",
+  /** "A new track inserts here" line — solid yellow, matching upstream
+   *  `NSColor.systemYellow` (TimelineView.swift). */
+  insertLine: "rgb(255,204,0)",
 } as const;
 
 /** §5.4 Clip rendering insets (ClipRenderer.swift). */

@@ -1,6 +1,12 @@
 /**
  * Title bar (SPEC §2.8). Leading: Home (return to launcher). Trailing:
- * Settings + Export. (UpdateBadge/Avatar belong to a separate issue.)
+ * Library + Settings + Export Video + Export Subtitles + Export (interchange).
+ * (UpdateBadge/Avatar belong to a separate issue.)
+ *
+ * The "Export" button opens a small menu of standard timeline-interchange
+ * formats — XMEML / FCP7 XML (Premiere・DaVinci・剪映), FCPXML (Final Cut Pro X),
+ * OTIO (DaVinci・industry standard), and EDL (CMX3600) — each opening the native
+ * save dialog with the right extension and calling its backend command.
  *
  * The Agent panel is toggled from the §2.9 View menu (ViewMenu) and the
  * keyboard shortcut — the dedicated title-bar toggle button was removed by
@@ -19,36 +25,32 @@ import * as api from "../../lib/api";
 import type { SubtitleFormat } from "../../lib/api";
 import { saveDialog } from "../../lib/dialog";
 
-const XML_EXT = "xml";
-
-/** Ensure a chosen path carries the `.xml` extension. */
-function withXmlExt(path: string): string {
-  return path.endsWith(`.${XML_EXT}`) ? path : `${path}.${XML_EXT}`;
-}
-
-/**
- * Default export filename: the open project's base name with `.xml`, falling
- * back to "Timeline.xml" for an unsaved project. The bundle path ends in
- * `…/Name.opentake`, so strip the directory and the `.opentake` suffix.
- */
-function defaultXmlName(projectPath: string | null): string {
-  if (!projectPath) return `Timeline.${XML_EXT}`;
-  const base = projectPath.split(/[\\/]/).pop() ?? projectPath;
-  const stem = base.replace(/\.opentake$/i, "");
-  return `${stem || "Timeline"}.${XML_EXT}`;
-}
-
-/** The open project's base name (without the `.opentake` suffix), or "Timeline". */
+/** The open project's base name (without the `.opentake` suffix), or "Timeline".
+ *  The bundle path ends in `…/Name.opentake`, so strip dir + `.opentake`. */
 function projectStem(projectPath: string | null): string {
   if (!projectPath) return "Timeline";
   const base = projectPath.split(/[\\/]/).pop() ?? projectPath;
   return base.replace(/\.opentake$/i, "") || "Timeline";
 }
 
-/** Ensure a chosen path carries the given subtitle extension (`srt` / `vtt`). */
-function withSubtitleExt(path: string, ext: string): string {
+/** Ensure a chosen path carries the given extension (case-insensitive check). */
+function withExt(path: string, ext: string): string {
   return path.toLowerCase().endsWith(`.${ext}`) ? path : `${path}.${ext}`;
 }
+
+/**
+ * The four standard timeline-interchange formats. `key` drives the i18n labels
+ * (`title.export<Cap>` / `…Dialog` / `…Filter`), `ext` is the file extension,
+ * and `run` invokes the matching backend command with the chosen path.
+ */
+const INTERCHANGE_FORMATS = [
+  { key: "Xmeml", ext: "xml", run: api.exportXmeml },
+  { key: "Fcpxml", ext: "fcpxml", run: api.exportFcpxmlModern },
+  { key: "Otio", ext: "otio", run: api.exportOtio },
+  { key: "Edl", ext: "edl", run: api.exportEdl },
+] as const;
+
+type InterchangeFormat = (typeof INTERCHANGE_FORMATS)[number];
 
 export function TitleBar() {
   const setView = useEditorUiStore((s) => s.setView);
@@ -62,52 +64,48 @@ export function TitleBar() {
   // Subtitle-format popover (SRT / VTT). Dismiss on outside click / Escape.
   const [subMenuOpen, setSubMenuOpen] = useState(false);
   const subMenuRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!subMenuOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (subMenuRef.current && !subMenuRef.current.contains(e.target as Node)) {
-        setSubMenuOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setSubMenuOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [subMenuOpen]);
+  useDismissable(subMenuOpen, subMenuRef, () => setSubMenuOpen(false));
+
+  // Interchange-format popover (XMEML / FCPXML / OTIO / EDL).
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
+  useDismissable(exportMenuOpen, exportMenuRef, () => setExportMenuOpen(false));
 
   // Video export needs something to render: disable the entry when no track
   // holds a clip (an empty timeline would only encode black frames).
   const hasClips = tracks.some((track) => track.clips.length > 0);
 
   /**
-   * Export the timeline as Final Cut Pro 7 XML (`.xml`). Mirrors the new-project
-   * save flow (`projectActions.newProjectAndEnter`): open the native save panel,
-   * default the name to the project, then write via `export_fcpxml`. No-op
-   * outside Tauri (no save panel / file system).
+   * Export the timeline to a chosen interchange `format`. Mirrors the new-project
+   * save flow (`projectActions.newProjectAndEnter`): open the native save panel
+   * defaulted to the project name + the format's extension, then write via the
+   * format's backend command. No-op outside Tauri (no save panel / file system).
    */
-  async function onExport(): Promise<void> {
+  async function onExportInterchange(format: InterchangeFormat): Promise<void> {
+    setExportMenuOpen(false);
     const save = await saveDialog();
-    if (!save) return;
+    if (!save) return; // outside Tauri — no save panel / file system
     const dir = projectPath
       ? projectPath.replace(/[\\/][^\\/]*$/, "")
       : await api.getDefaultProjectDir().catch(() => "");
     const sep = dir && !dir.endsWith("/") ? "/" : "";
     const defaultPath = dir
-      ? `${dir}${sep}${defaultXmlName(projectPath)}`
+      ? `${dir}${sep}${projectStem(projectPath)}.${format.ext}`
       : undefined;
 
     const chosen = await save({
-      title: t("title.exportXmlDialog"),
+      title: t(`title.export${format.key}Dialog`),
       defaultPath,
-      filters: [{ name: t("title.exportXmlFilter"), extensions: [XML_EXT] }],
+      filters: [{ name: t(`title.export${format.key}Filter`), extensions: [format.ext] }],
     });
     if (typeof chosen !== "string") return; // cancelled
-    await api.exportFcpxml(withXmlExt(chosen));
+
+    try {
+      await format.run(withExt(chosen, format.ext));
+      pushToast(t("title.exportInterchangeDone"));
+    } catch {
+      pushToast(t("title.exportInterchangeFailed"));
+    }
   }
 
   /**
@@ -141,7 +139,7 @@ export function TitleBar() {
     if (typeof chosen !== "string") return; // cancelled
 
     try {
-      const summary = await api.exportSubtitles(withSubtitleExt(chosen, format), format);
+      const summary = await api.exportSubtitles(withExt(chosen, format), format);
       pushToast(
         summary.cueCount > 0
           ? t("title.exportSubtitlesDone", { count: summary.cueCount })
@@ -314,25 +312,139 @@ export function TitleBar() {
         )}
       </div>
 
-      <button
-        title={t("title.exportHint")}
-        aria-label={t("title.export")}
-        onClick={onExport}
-        className="hover-area"
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 4,
-          height: 26,
-          padding: "0 var(--space-sm)",
-          color: "var(--text-secondary)",
-          fontSize: "var(--fs-sm)",
-          fontWeight: "var(--fw-medium)",
-        }}
-      >
-        <Icon icon={Upload} size={13} />
-        {t("title.export")}
-      </button>
+      {/* Interchange export (XMEML / FCPXML / OTIO / EDL) with a format popover. */}
+      <div ref={exportMenuRef} style={{ position: "relative", display: "inline-flex" }}>
+        <button
+          title={t("title.exportHint")}
+          aria-label={t("title.export")}
+          aria-haspopup="menu"
+          aria-expanded={exportMenuOpen}
+          onClick={() => setExportMenuOpen((v) => !v)}
+          className="hover-area"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+            height: 26,
+            padding: "0 var(--space-sm)",
+            color: "var(--text-secondary)",
+            fontSize: "var(--fs-sm)",
+            fontWeight: "var(--fw-medium)",
+          }}
+        >
+          <Icon icon={Upload} size={13} />
+          {t("title.export")}
+        </button>
+        {exportMenuOpen && (
+          <div
+            role="menu"
+            aria-label={t("title.export")}
+            style={{
+              position: "absolute",
+              top: "calc(100% + 4px)",
+              right: 0,
+              zIndex: 1200,
+              minWidth: 280,
+              display: "flex",
+              flexDirection: "column",
+              padding: "var(--space-xs)",
+              background: "var(--bg-elevated)",
+              border: "var(--bw-thin) solid var(--border-primary)",
+              borderRadius: "var(--radius-sm)",
+              boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+            }}
+          >
+            {/* Render the timeline to a video file (MP4). Reuses the existing
+                export dialog; disabled (greyed) when the timeline is empty. */}
+            <button
+              role="menuitem"
+              disabled={!hasClips}
+              onClick={() => {
+                setExportMenuOpen(false);
+                setExportDialogOpen(true);
+              }}
+              className={hasClips ? "hover-area" : undefined}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                height: 28,
+                padding: "0 var(--space-sm)",
+                background: "transparent",
+                border: "none",
+                borderRadius: "var(--radius-xs-sm)",
+                color: hasClips ? "var(--text-primary)" : "var(--text-muted)",
+                fontSize: "var(--fs-sm)",
+                fontWeight: "var(--fw-medium)",
+                textAlign: "left",
+                cursor: hasClips ? "pointer" : "default",
+                whiteSpace: "nowrap",
+                opacity: hasClips ? 1 : 0.5,
+              }}
+            >
+              <Icon icon={Film} size={13} />
+              {t("title.exportRenderVideo")}
+            </button>
+            <div
+              style={{
+                height: "var(--bw-thin)",
+                margin: "var(--space-xs) var(--space-sm)",
+                background: "var(--border-subtle)",
+              }}
+            />
+            {INTERCHANGE_FORMATS.map((fmt) => (
+              <button
+                key={fmt.key}
+                role="menuitem"
+                onClick={() => void onExportInterchange(fmt)}
+                className="hover-area"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  height: 28,
+                  padding: "0 var(--space-sm)",
+                  background: "transparent",
+                  border: "none",
+                  borderRadius: "var(--radius-xs-sm)",
+                  color: "var(--text-primary)",
+                  fontSize: "var(--fs-sm)",
+                  textAlign: "left",
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {t(`title.export${fmt.key}`)}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
+}
+
+/**
+ * Dismiss an open popover on outside `mousedown` or `Escape`. Shared by the
+ * title bar's two menus (subtitle + interchange) so both behave identically.
+ */
+function useDismissable(
+  open: boolean,
+  ref: React.RefObject<HTMLDivElement | null>,
+  close: () => void,
+): void {
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) close();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open, ref, close]);
 }

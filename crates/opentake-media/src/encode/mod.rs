@@ -158,6 +158,18 @@ impl VideoEncoder {
         }
     }
 
+    /// Abort a mid-stream encode (e.g. a user cancel): kill the ffmpeg child and
+    /// wait for it to exit, so the caller can safely remove the (now-closed)
+    /// partial output file. `std::process::Child`'s own `Drop` does **not** kill
+    /// or wait — a plain `drop(encoder)` would orphan the ffmpeg process, which
+    /// could still be writing `out_path` at the moment the caller deletes it.
+    /// Best-effort: the child may have already exited on its own.
+    pub fn abort(mut self) {
+        self.stdin.take();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
     /// Finish encoding: close stdin, wait for the video pass, then — when a
     /// mixed audio buffer was supplied — run a second ffmpeg pass to mux it in.
     ///

@@ -220,6 +220,11 @@ export function useTimelinePlaybackEngine(): void {
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
   const isScrubbing = useEditorUiStore((s) => s.isScrubbing);
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
+  // Re-run the paused sync when the timeline itself changes (a clip added /
+  // removed / swapped while paused). The pause-sync effect's other deps don't
+  // change on an edit, so without this a just-dropped clip would hold its source
+  // frame 0 instead of the playhead frame.
+  const timelineVersion = useProjectStore((s) => s.timelineVersion);
   const previousTransportState = useRef({ isPlaying: false, isScrubbing: false });
   // Last frame the Rust engine emitted (playback_frame), so the watcher below can
   // tell an external seek (keyboard / transport) apart from the engine's own
@@ -243,6 +248,11 @@ export function useTimelinePlaybackEngine(): void {
         const pausedFrame = pausedPlayheadFrameFromFrozenVideo(visual, el?.currentTime ?? NaN, fps);
         if (pausedFrame !== null) useEditorUiStore.getState().setActiveFrame(pausedFrame);
       } else if (
+        // A scrub just ended: settle every active element on the final frame.
+        // Without this, a clip the scrub entered near the end can be left on its
+        // source frame 0 ("track head") because its <video> mounted mid-scrub
+        // and the throttled scrub seek never reached it.
+        prev.isScrubbing ||
         shouldSyncPausedMediaToFrame({
           isPlaying,
           isScrubbing,
@@ -254,7 +264,7 @@ export function useTimelinePlaybackEngine(): void {
       }
     }
     previousTransportState.current = { isPlaying, isScrubbing };
-  }, [activeFrame, isPlaying, isScrubbing]);
+  }, [activeFrame, isPlaying, isScrubbing, timelineVersion]);
 
   useEffect(() => {
     // Rust streaming playback owns the PLAY state when the flag is on (under

@@ -38,10 +38,11 @@ import { useT } from "../../i18n";
 import { formatTimecode } from "../../lib/geometry";
 import { setDraggingMedia } from "../../lib/mediaDragState";
 import { assetUrl } from "../../lib/asset";
+import { BoundedCache } from "../../lib/lru";
 import { childFolders, folderTrail, normalizeFolderId } from "../../lib/folderTree";
 import { useProjectStore } from "../../store/projectStore";
 import { addMediaToTimeline } from "../../store/editActions";
-import { extractAudio, generateThumbnail } from "../../lib/api";
+import { extractAudio, generateThumbnail, preloadMedia } from "../../lib/api";
 import { saveDialog } from "../../lib/dialog";
 import type { MediaFolder, MediaItem } from "../../lib/types";
 import { MediaTabBar, MediaSubTabBar } from "./MediaTabBar";
@@ -50,11 +51,18 @@ import { useFavoritesStore, useIsFavorite } from "./favorites";
 /** MIME-ish type used on dataTransfer when dragging a media item to the timeline. */
 export const MEDIA_DND_TYPE = "application/x-opentake-media";
 const MEDIA_THUMBNAIL_CONCURRENCY = 4;
+/** Bound for the in-memory thumbnail-path cache. A long library scrolled top to
+ *  bottom would otherwise grow this Map without limit; cap it (LRU) so memory
+ *  stays bounded — evicted keys just re-request a (disk-cached) path later. */
+const MEDIA_THUMBNAIL_CACHE_MAX = 256;
 
 let activeThumbnailRequests = 0;
 const pendingThumbnailRequests: Array<() => void> = [];
-const mediaThumbnailCache = new Map<string, string | null>();
 const mediaThumbnailInFlight = new Map<string, Promise<string | null>>();
+
+/** Bounded LRU over the resolved thumbnail paths, so a long library scrolled top
+ *  to bottom can't grow memory without limit (see {@link BoundedCache}). */
+const mediaThumbnailCache = new BoundedCache<string | null>(MEDIA_THUMBNAIL_CACHE_MAX);
 
 function runNextThumbnailRequest(): void {
   if (activeThumbnailRequests >= MEDIA_THUMBNAIL_CONCURRENCY) return;
@@ -670,12 +678,34 @@ function MediaCard({ item }: { item: MediaItem }) {
     };
   }, [item, thumbnailKey]);
 
+  // Page-aware preview pre-warm: when a VIDEO card scrolls into view, warm its
+  // hi-res first-frame poster so a click previews near-instantly. Gated by the
+  // same IntersectionObserver as the thumbnail, so cards scrolled far out of
+  // view are never warmed (and we don't warm images/audio — nothing to decode).
+  useEffect(() => {
+    if (item.missing || item.type !== "video") return;
+    const el = cardRef.current;
+    if (!el || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry?.isIntersecting) return;
+        observer.disconnect();
+        void preloadMedia(item.id);
+      },
+      { root: null, rootMargin: "160px" },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [item.id, item.type, item.missing]);
+
   const onDragStart = (e: React.DragEvent) => {
     e.dataTransfer.setData(MEDIA_DND_TYPE, item.id);
     e.dataTransfer.effectAllowed = "copy";
     // Stash the item so the timeline can size its drop ghost during dragover
     // (dataTransfer payloads are unreadable until drop). Cleared on dragEnd.
     setDraggingMedia(item);
+    // Warm caches for a dragged-but-not-clicked asset too (best-effort).
+    void preloadMedia(item.id);
   };
 
   const onDragEnd = () => {
@@ -719,7 +749,12 @@ function MediaCard({ item }: { item: MediaItem }) {
       draggable
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
-      onClick={() => setPreviewMedia(item.id)}
+      onClick={() => {
+        setPreviewMedia(item.id);
+        // Warm poster/sprite/waveform caches so preview + a later timeline drop
+        // are instant instead of decoding on the interaction path.
+        void preloadMedia(item.id);
+      }}
       onDoubleClick={() => void addMediaToTimeline(item)}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}

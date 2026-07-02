@@ -288,6 +288,11 @@ pub enum EditCommand {
     RemoveTracks { track_indexes: Vec<usize> },
     /// Swap two same-kind tracks as whole rows. OpenTake-only extension.
     SwapTracks { a: usize, b: usize },
+    /// Swap the positions — track + start frame — of two clips, so a cross-track
+    /// drag exchanges them instead of overwriting (swallowing) the destination.
+    /// Lossless: refused with no change if a clip would overlap a third clip at
+    /// its new slot. OpenTake-only extension.
+    SwapClips { a: String, b: String },
     /// Insert a new empty track of `kind` (clamped into its zone). Lets the drop
     /// flow create a track on demand when the timeline has no compatible one
     /// (upstream `placeClip` / `add_clips` with omitted `trackIndex` 鈫?
@@ -445,6 +450,7 @@ pub fn apply(
         EditCommand::Unlink { clip_ids } => unlink(state, clip_ids),
         EditCommand::RemoveTracks { track_indexes } => remove_tracks(state, track_indexes),
         EditCommand::SwapTracks { a, b } => swap_tracks(state, a, b),
+        EditCommand::SwapClips { a, b } => swap_clips(state, a, b),
         EditCommand::InsertTrack { kind, at } => insert_track_cmd(state, kind, at, ids),
         EditCommand::SetTrackProps {
             track_index,
@@ -693,6 +699,27 @@ fn swap_tracks(state: &mut EditorState, a: usize, b: usize) -> Result<EditResult
         |st| {
             ops::swap_tracks(&mut st.timeline, a, b);
             Ok(Vec::new())
+        },
+    )
+}
+
+/// Swap the positions of two clips. The op refuses (leaves the timeline
+/// untouched) when the swap would overlap a third clip; `transact` then reports
+/// `changed = false`, so a refused swap is a clean no-op with no undo entry.
+fn swap_clips(state: &mut EditorState, a: String, b: String) -> Result<EditResult, EditError> {
+    if state.find_clip(&a).is_none() {
+        return Err(EditError::Invalid(format!("Clip not found: {a}")));
+    }
+    if state.find_clip(&b).is_none() {
+        return Err(EditError::Invalid(format!("Clip not found: {b}")));
+    }
+    transact(
+        state,
+        "Swap Clips",
+        |_| "Swapped clip positions".to_string(),
+        move |st| {
+            ops::swap_clip_positions(&mut st.timeline, &a, &b);
+            Ok(vec![a, b])
         },
     )
 }

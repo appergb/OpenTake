@@ -1,23 +1,25 @@
 /**
  * ExportDialog (SPEC §2.4 / #112). Modal shown from the title bar to render the
  * whole timeline to a real video file via the `export_video` backend command
- * (per-frame GPU composite → ffmpeg H.264 / .mp4 + AAC mux).
+ * (per-frame GPU composite → ffmpeg + AAC/LPCM mux).
  *
- * Scope mirrors the backend's first cut:
- *  - Format: H.264 / .mp4 is the only wired path; H.265 / ProRes are shown
- *    disabled with a "not wired yet" note (the backend `resolve_preset` rejects
- *    them, so we never let the user pick one and hit a server error).
+ * Scope mirrors the backend:
+ *  - Format: H.264 / H.265 (`.mp4`) and ProRes 422 (`.mov`). The output path's
+ *    extension tracks the selected codec so it always matches what the
+ *    backend's `resolve_preset` requires (see `extForCodec`/`withExt` below).
  *  - Resolution: 720p / 1080p / 4K short-edge presets. The default pre-selects
  *    the preset matching the timeline's own shorter edge so a standard project
  *    round-trips its native size; it falls back to 1080p (the backend default).
  *
- * The backend runs to completion with no progress callback, so this is a
- * deliberate "status + toast" surface — never a faked progress bar. While the
- * export runs the controls are disabled and the button reads "Exporting…";
- * success / failure both `pushToast` and close on success.
+ * Progress + cancel (mirrors upstream's 200ms `AVAssetExportSession.progress`
+ * poll + cooperative cancel): while busy, a determinate bar tracks the
+ * `"export://progress"` event (`done`/`total` frames) and the footer's Cancel
+ * button is enabled, calling `api.cancelExport()`. A cancelled result closes
+ * the dialog with a neutral toast, distinct from the failure toast. Success /
+ * failure both still `pushToast` and close on success.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { Dropdown } from "../ui/Dropdown";
@@ -29,22 +31,39 @@ import type { ExportCodec, ExportQuality } from "../../lib/api";
 import { saveDialog } from "../../lib/dialog";
 
 const MP4_EXT = "mp4";
+const MOV_EXT = "mov";
+
+/** The container extension the backend's `resolve_preset` requires for a codec. */
+export function extForCodec(codec: ExportCodec): typeof MP4_EXT | typeof MOV_EXT {
+  return codec === "prores" ? MOV_EXT : MP4_EXT;
+}
+
+/** Ensure a chosen path carries the given extension (does not strip a wrong one). */
+export function withExt(path: string, ext: string): string {
+  return path.toLowerCase().endsWith(`.${ext}`) ? path : `${path}.${ext}`;
+}
 
 /** Ensure a chosen path carries the `.mp4` extension (the H.264 container). */
 export function withMp4Ext(path: string): string {
-  return path.toLowerCase().endsWith(`.${MP4_EXT}`) ? path : `${path}.${MP4_EXT}`;
+  return withExt(path, MP4_EXT);
 }
 
 /**
- * Default export filename: the open project's base name with `.mp4`, falling
- * back to "Timeline.mp4" for an unsaved project. The bundle path ends in
- * `…/Name.opentake`, so strip the directory and the `.opentake` suffix.
+ * Default export filename: the open project's base name with the codec's
+ * container extension, falling back to "Timeline.<ext>" for an unsaved
+ * project. The bundle path ends in `…/Name.opentake`, so strip the directory
+ * and the `.opentake` suffix.
  */
-export function defaultMp4Name(projectPath: string | null): string {
-  if (!projectPath) return `Timeline.${MP4_EXT}`;
+export function defaultExportName(projectPath: string | null, ext: string): string {
+  if (!projectPath) return `Timeline.${ext}`;
   const base = projectPath.split(/[\\/]/).pop() ?? projectPath;
   const stem = base.replace(/\.opentake$/i, "");
-  return `${stem || "Timeline"}.${MP4_EXT}`;
+  return `${stem || "Timeline"}.${ext}`;
+}
+
+/** Default export filename for the `.mp4` container (H.264 / H.265). */
+export function defaultMp4Name(projectPath: string | null): string {
+  return defaultExportName(projectPath, MP4_EXT);
 }
 
 /** Pick the preset whose short edge best matches the timeline's shorter side. */
@@ -53,6 +72,15 @@ export function defaultQuality(width: number, height: number): ExportQuality {
   if (shortEdge >= 1620) return "4k"; // ≥ 1620 rounds to the 2160 bucket
   if (shortEdge <= 840) return "720p"; // ≤ 840 rounds to the 720 bucket
   return "1080p";
+}
+
+/** Format an `{done, total}` progress event as a clamped whole-number percent
+ *  (0-100). `total <= 0` (not yet known, or a zero-frame timeline) reports 0
+ *  rather than dividing by zero. */
+export function progressPercent(done: number, total: number): number {
+  if (total <= 0) return 0;
+  const pct = Math.round((done / total) * 100);
+  return Math.min(100, Math.max(0, pct));
 }
 
 export function ExportDialog() {
@@ -66,14 +94,28 @@ export function ExportDialog() {
   const [quality, setQuality] = useState<ExportQuality>("1080p");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  // Guards against unsubscribing a listener from a stale/overlapping export run
+  // (belt-and-suspenders; only one export runs at a time in practice).
+  const progressUnlisten = useRef<(() => void) | null>(null);
 
   // Re-seed the resolution default from the timeline each time the dialog opens.
   useEffect(() => {
     if (open) {
       setQuality(defaultQuality(timeline.width, timeline.height));
       setError(null);
+      setProgress(null);
     }
   }, [open, timeline.width, timeline.height]);
+
+  // Safety net: unsubscribe on unmount even if a run is somehow still in
+  // flight (the normal path unsubscribes in `onExport`'s `finally`).
+  useEffect(() => {
+    return () => {
+      progressUnlisten.current?.();
+      progressUnlisten.current = null;
+    };
+  }, []);
 
   // Close on Escape (ignored while an export is in flight so the run isn't
   // abandoned mid-encode from the user's point of view).
@@ -89,8 +131,8 @@ export function ExportDialog() {
   const codecOptions = useMemo(
     () => [
       { id: "h264" as const, label: t("export.codec.h264") },
-      { id: "h265" as const, label: t("export.codec.h265"), disabled: true },
-      { id: "prores" as const, label: t("export.codec.prores"), disabled: true },
+      { id: "h265" as const, label: t("export.codec.h265") },
+      { id: "prores" as const, label: t("export.codec.prores") },
     ],
     [t],
   );
@@ -116,26 +158,36 @@ export function ExportDialog() {
       pushToast(t("export.unavailable"));
       return;
     }
+    const ext = extForCodec(codec);
     const projectPath = useProjectStore.getState().projectPath;
     const dir = projectPath
       ? projectPath.replace(/[\\/][^\\/]*$/, "")
       : await api.getDefaultProjectDir().catch(() => "");
     const sep = dir && !dir.endsWith("/") ? "/" : "";
     const defaultPath = dir
-      ? `${dir}${sep}${defaultMp4Name(projectPath)}`
+      ? `${dir}${sep}${defaultExportName(projectPath, ext)}`
       : undefined;
 
     const chosen = await save({
       title: t("export.saveDialog"),
       defaultPath,
-      filters: [{ name: t("export.saveFilter"), extensions: [MP4_EXT] }],
+      filters: [
+        {
+          name: t(ext === MOV_EXT ? "export.saveFilterMov" : "export.saveFilter"),
+          extensions: [ext],
+        },
+      ],
     });
     if (typeof chosen !== "string") return; // cancelled
 
     setBusy(true);
+    setProgress(null);
+    progressUnlisten.current = await api.onExportProgress(({ done, total }) => {
+      setProgress({ done, total });
+    });
     try {
       const summary = await api.exportVideo({
-        outPath: withMp4Ext(chosen),
+        outPath: withExt(chosen, ext),
         codec,
         quality,
       });
@@ -149,11 +201,28 @@ export function ExportDialog() {
       setOpen(false);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      setError(message);
-      pushToast(t("export.failed"));
+      if (message === api.EXPORT_CANCELLED_SENTINEL) {
+        // User-initiated cancel: neutral toast, not the failure path.
+        pushToast(t("export.cancelled"));
+        setOpen(false);
+      } else {
+        setError(message);
+        pushToast(t("export.failed"));
+      }
     } finally {
+      progressUnlisten.current?.();
+      progressUnlisten.current = null;
+      setProgress(null);
       setBusy(false);
     }
+  }
+
+  async function onCancel(): Promise<void> {
+    if (!busy) {
+      setOpen(false);
+      return;
+    }
+    await api.cancelExport();
   }
 
   return (
@@ -257,6 +326,38 @@ export function ExportDialog() {
             />
           </Row>
 
+          {busy && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
+              <div
+                role="progressbar"
+                aria-label={t("export.title")}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={progressPercent(progress?.done ?? 0, progress?.total ?? 0)}
+                style={{
+                  height: 6,
+                  borderRadius: "var(--radius-xs-sm)",
+                  background: "var(--bg-base)",
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    height: "100%",
+                    width: `${progressPercent(progress?.done ?? 0, progress?.total ?? 0)}%`,
+                    background: "var(--accent-primary)",
+                    transition: "width 150ms var(--ease-out-expo, ease-out)",
+                  }}
+                />
+              </div>
+              <span style={{ fontSize: "var(--fs-xs)", color: "var(--text-secondary)" }}>
+                {t("export.progress", {
+                  percent: progressPercent(progress?.done ?? 0, progress?.total ?? 0),
+                })}
+              </span>
+            </div>
+          )}
+
           {error && (
             <div
               style={{
@@ -286,8 +387,7 @@ export function ExportDialog() {
         >
           <button
             type="button"
-            disabled={busy}
-            onClick={() => setOpen(false)}
+            onClick={onCancel}
             className="hover-area"
             style={{
               height: 28,
@@ -298,8 +398,7 @@ export function ExportDialog() {
               color: "var(--text-secondary)",
               fontSize: "var(--fs-sm)",
               fontWeight: "var(--fw-medium)",
-              cursor: busy ? "default" : "pointer",
-              opacity: busy ? 0.4 : 1,
+              cursor: "pointer",
             }}
           >
             {t("export.cancel")}

@@ -20,6 +20,8 @@ import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
 import { formatTimecode, totalFrames } from "../../lib/geometry";
+import { snapFrameToEdge } from "../../lib/snap";
+import { maybeSnapFeedback } from "../../lib/haptic";
 import { assetUrl } from "../../lib/asset";
 import { TimelinePlayback } from "./TimelinePlaybackLayer";
 import { aspectFitBox, timelinePreviewCanvasStyle } from "./previewLayerStyles";
@@ -28,6 +30,7 @@ import {
   compositeFrame,
   getPreviewEndpoint,
   isTauri,
+  previewPoster,
   type CompositeFrame,
 } from "../../lib/api";
 import { rustEngineEnabled } from "./rustEngine";
@@ -99,9 +102,14 @@ export function Preview() {
   const seekTo = (frame: number) => {
     const clamped = Math.max(0, Math.min(total, frame));
     if (previewing) {
+      // A single media item has no clip edges to snap to.
       if (mediaRef.current) mediaRef.current.currentTime = clamped / fps;
     } else {
-      setCurrentFrame(clamped);
+      // Magnetize the scrub bar to clip start/end edges (~0.25s threshold) and
+      // tick on engage, like dragging the playhead in the timeline.
+      const snapped = snapFrameToEdge(timeline, clamped, Math.max(2, Math.round(fps * 0.25)));
+      setCurrentFrame(snapped.frame);
+      maybeSnapFeedback(snapped.snappedTo);
     }
   };
 
@@ -335,6 +343,28 @@ function MediaPreview({
 }) {
   const t = useT();
   const url = assetUrl(item.path);
+  // Hi-res first-frame poster, painted INSTANTLY behind the <video> so a cold
+  // click shows a sharp frame with no blank/spinner. Decoded (and cached) by the
+  // backend on select; the asset protocol then streams the real video
+  // progressively (it honors HTTP Range, so `preload="metadata"` below does not
+  // download the whole file). Only fetched for video; cleared between items so a
+  // stale poster never flashes on the next clip.
+  const [posterUrl, setPosterUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (item.type !== "video" || item.missing) {
+      setPosterUrl(null);
+      return;
+    }
+    let cancelled = false;
+    setPosterUrl(null);
+    void previewPoster(item.id).then((path) => {
+      if (!cancelled && path) setPosterUrl(assetUrl(path));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [item.id, item.type, item.missing]);
+
   const box: React.CSSProperties = {
     maxWidth: "100%",
     maxHeight: "100%",
@@ -370,12 +400,18 @@ function MediaPreview({
     );
   }
   // video (and any other visual): app transport drives it (no native controls).
+  // `preload="metadata"` (not the default "auto") + an instant hi-res `poster`
+  // make a cold click near-instant: the first frame shows immediately and the
+  // asset protocol streams the rest progressively via HTTP Range, instead of
+  // eagerly buffering the whole file behind a blank frame.
   return (
     <video
       ref={(el) => {
         mediaRef.current = el;
       }}
       src={url}
+      poster={posterUrl ?? undefined}
+      preload="metadata"
       playsInline
       onTimeUpdate={(e) => onTime(e.currentTarget.currentTime)}
       onLoadedMetadata={(e) => onDuration(e.currentTarget.duration || 0)}

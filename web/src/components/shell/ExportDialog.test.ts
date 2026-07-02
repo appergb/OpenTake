@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   defaultMp4Name,
   defaultQuality,
+  progressPercent,
   withMp4Ext,
 } from "./ExportDialog";
 
@@ -52,5 +53,34 @@ describe("defaultQuality", () => {
 
   it("maps large (≥1620 short edge) timelines to 4k", () => {
     expect(defaultQuality(3840, 2160)).toBe("4k");
+  });
+});
+
+describe("progressPercent", () => {
+  it("reports 0 before any frames are done", () => {
+    expect(progressPercent(0, 300)).toBe(0);
+  });
+
+  it("computes a whole-number percent", () => {
+    expect(progressPercent(150, 300)).toBe(50);
+  });
+
+  it("reports 100 when done reaches total", () => {
+    expect(progressPercent(300, 300)).toBe(100);
+  });
+
+  it("rounds to the nearest whole percent", () => {
+    expect(progressPercent(1, 3)).toBe(33);
+    expect(progressPercent(2, 3)).toBe(67);
+  });
+
+  it("returns 0 for a zero (or negative) total instead of dividing by zero", () => {
+    expect(progressPercent(0, 0)).toBe(0);
+    expect(progressPercent(5, 0)).toBe(0);
+    expect(progressPercent(0, -1)).toBe(0);
+  });
+
+  it("clamps done beyond total to 100", () => {
+    expect(progressPercent(400, 300)).toBe(100);
   });
 });

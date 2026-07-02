@@ -44,6 +44,33 @@ export function collectTargets(
   return targets;
 }
 
+/** Snap a bare frame to the nearest clip start/end within `thresholdFrames`.
+ *  Frame-based (no pixels-per-frame), for controls like the preview scrub bar
+ *  that don't carry a timeline zoom. Returns the snapped frame and the engaged
+ *  edge (or `null` when nothing is close enough). */
+export function snapFrameToEdge(
+  timeline: Timeline,
+  frame: number,
+  thresholdFrames: number,
+): { frame: number; snappedTo: number | null } {
+  let best: number | null = null;
+  let bestDist = thresholdFrames + 1;
+  for (const track of timeline.tracks) {
+    for (const clip of track.clips) {
+      for (const edge of [clip.startFrame, endFrame(clip)]) {
+        const dist = Math.abs(edge - frame);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = edge;
+        }
+      }
+    }
+  }
+  return best !== null && bestDist <= thresholdFrames
+    ? { frame: best, snappedTo: best }
+    : { frame, snappedTo: null };
+}
+
 /**
  * Find the nearest snap for a probe frame. `currentlySnapped` carries the
  * previously snapped frame so the sticky band (1.5x) keeps it engaged until the

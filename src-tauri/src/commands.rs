@@ -81,18 +81,69 @@ pub fn get_default_project_dir(app: AppHandle) -> Result<String, String> {
     Ok(dir.to_string_lossy().into_owned())
 }
 
-/// `export_fcpxml`: write the current timeline to `path` as XMEML 4 (Final Cut
-/// Pro 7 XML, `.xml`). Despite the command name, the produced format is XMEML —
-/// see `opentake_project::fcpxml` for why (Premiere Pro doesn't read FCPXML
-/// natively, so upstream exports XMEML; DaVinci/FCP still import FCP7 XML). Reads
+/// `export_xmeml`: write the current timeline to `path` as XMEML 4 (Final Cut
+/// Pro 7 XML, `.xml`). This is the Premiere / DaVinci / 剪映-importable
+/// interchange format — Premiere Pro does NOT read modern FCPXML natively, so
+/// upstream (and OpenTake) emit XMEML; DaVinci/FCP still import FCP7 XML. Reads
 /// the timeline / media manifest / project dir from the core, builds the XML via
 /// the pure `export_xmeml`, and writes the file.
 #[tauri::command]
-pub fn export_fcpxml(core: State<'_, AppCore>, path: String) -> Result<(), String> {
+pub fn export_xmeml(core: State<'_, AppCore>, path: String) -> Result<(), String> {
     let timeline = core.get_timeline().timeline;
     let manifest = core.media();
     let project_dir = core.project_dir();
     let xml = opentake_project::export_xmeml(&timeline, &manifest, project_dir.as_deref());
+    std::fs::write(&path, xml).map_err(|e| e.to_string())
+}
+
+/// `export_fcpxml`: deprecated alias for [`export_xmeml`], kept so any existing
+/// front-end caller keeps working. The command name historically said "fcpxml"
+/// but always produced XMEML 4 (FCP7 XML); the honest name is `export_xmeml`.
+/// New code (and the format picker) should call `export_xmeml`; native FCPXML is
+/// `export_fcpxml_modern`.
+#[tauri::command]
+pub fn export_fcpxml(core: State<'_, AppCore>, path: String) -> Result<(), String> {
+    export_xmeml(core, path)
+}
+
+/// `export_edl`: write the current timeline to `path` as a CMX3600 EDL (`.edl`).
+/// A flat, video-track-only edit decision list (the EDL format itself only
+/// describes one V track + linked audio channels) that Premiere / DaVinci /
+/// Avid / 剪映 import. Effects, transforms, opacity, and multi-track layering are
+/// dropped — see `opentake_project::edl` for the documented limitations.
+#[tauri::command]
+pub fn export_edl(core: State<'_, AppCore>, path: String) -> Result<(), String> {
+    let timeline = core.get_timeline().timeline;
+    let manifest = core.media();
+    let edl = opentake_project::export_edl(&timeline, &manifest);
+    std::fs::write(&path, edl).map_err(|e| e.to_string())
+}
+
+/// `export_otio`: write the current timeline to `path` as OpenTimelineIO JSON
+/// (`.otio`) — the industry-standard interchange `otioview` / DaVinci / Blender
+/// read. Preserves track order/kind, clip placement, source ranges, gaps, and
+/// per-clip media references; see `opentake_project::otio` for what is dropped
+/// (effects, transforms, keyframes).
+#[tauri::command]
+pub fn export_otio(core: State<'_, AppCore>, path: String) -> Result<(), String> {
+    let timeline = core.get_timeline().timeline;
+    let manifest = core.media();
+    let project_dir = core.project_dir();
+    let json = opentake_project::export_otio(&timeline, &manifest, project_dir.as_deref());
+    std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+/// `export_fcpxml_modern`: write the current timeline to `path` as native Final
+/// Cut Pro X FCPXML 1.10 (`.fcpxml`). Unlike XMEML, this carries text overlays
+/// (`<title>`), transforms, opacity, and volume. NOTE: Premiere does NOT import
+/// FCPXML — use `export_xmeml` for Premiere / DaVinci / 剪映. See
+/// `opentake_project::fcpxml_modern`.
+#[tauri::command]
+pub fn export_fcpxml_modern(core: State<'_, AppCore>, path: String) -> Result<(), String> {
+    let timeline = core.get_timeline().timeline;
+    let manifest = core.media();
+    let project_dir = core.project_dir();
+    let xml = opentake_project::export_fcpxml(&timeline, &manifest, project_dir.as_deref());
     std::fs::write(&path, xml).map_err(|e| e.to_string())
 }
 
@@ -297,6 +348,8 @@ pub enum EditRequest {
     #[serde(rename_all = "camelCase")]
     SwapTracks { a: usize, b: usize },
     #[serde(rename_all = "camelCase")]
+    SwapClips { clip_a: String, clip_b: String },
+    #[serde(rename_all = "camelCase")]
     InsertTrack { kind: ClipType, at: Option<usize> },
     #[serde(rename_all = "camelCase")]
     SetTrackProps {
@@ -450,6 +503,10 @@ impl EditRequest {
                 EditCommand::RemoveTracks { track_indexes }
             }
             EditRequest::SwapTracks { a, b } => EditCommand::SwapTracks { a, b },
+            EditRequest::SwapClips { clip_a, clip_b } => EditCommand::SwapClips {
+                a: clip_a,
+                b: clip_b,
+            },
             EditRequest::InsertTrack { kind, at } => EditCommand::InsertTrack { kind, at },
             EditRequest::SetTrackProps {
                 track_index,
@@ -855,6 +912,24 @@ mod edit_request_serde_tests {
                 assert_eq!(b, 2);
             }
             other => panic!("expected SwapTracks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_swap_clips_and_maps_to_command() {
+        // camelCase clipA/clipB must deserialize, or the cross-track swap gesture
+        // silently fails at the IPC boundary (the recurring DTO camelCase trap).
+        let request = serde_json::from_str::<EditRequest>(
+            r#"{"type":"swapClips","clipA":"clip-1","clipB":"clip-2"}"#,
+        )
+        .expect("swapClips camelCase");
+
+        match request.into_command().expect("swapClips command") {
+            EditCommand::SwapClips { a, b } => {
+                assert_eq!(a, "clip-1");
+                assert_eq!(b, "clip-2");
+            }
+            other => panic!("expected SwapClips, got {other:?}"),
         }
     }
 

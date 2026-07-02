@@ -320,6 +320,7 @@ export type EditRequest =
   | { type: "unlink"; clipIds: string[] }
   | { type: "removeTracks"; trackIndexes: number[] }
   | { type: "swapTracks"; a: number; b: number }
+  | { type: "swapClips"; clipA: string; clipB: string }
   | { type: "insertTrack"; kind: ClipType; at?: number }
   | {
       type: "setTrackProps";

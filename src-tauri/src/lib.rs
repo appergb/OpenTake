@@ -11,6 +11,7 @@ mod commands;
 // drive the export orchestrator (`export::run_export`) against the library
 // target. The Tauri command itself is registered below like the other modules.
 pub mod export;
+mod haptic;
 mod library;
 mod mcp;
 mod media;
@@ -124,6 +125,9 @@ pub fn run() {
             app.manage(crate::library::LibraryState::new(library_store));
             // Lazily-acquired GPU context for timeline composite previews (#47).
             app.manage(render::RenderState::new());
+            // Shared cancel flag for the in-flight `export_video` (#112 progress
+            // + cancel). One export runs at a time, so a single flag suffices.
+            app.manage(export::ExportControl::default());
 
             // Streaming playback (#53 / PR2): start the loopback MJPEG transport
             // on the Tauri async runtime (mirrors the MCP server spawn) and
@@ -149,7 +153,11 @@ pub fn run() {
             commands::project_open,
             commands::project_save,
             commands::get_default_project_dir,
+            commands::export_xmeml,
             commands::export_fcpxml,
+            commands::export_fcpxml_modern,
+            commands::export_edl,
+            commands::export_otio,
             commands::export_subtitles,
             commands::check_path_exists,
             media::import_folder,
@@ -159,8 +167,12 @@ pub fn run() {
             media::extract_audio,
             media::get_waveform,
             media::generate_thumbnail,
+            media::preview_poster,
+            media::preload_media,
+            haptic::snap_haptic,
             render::composite_frame,
             export::export_video,
+            export::cancel_export,
             secret::secret_save,
             secret::secret_load,
             secret::secret_delete,

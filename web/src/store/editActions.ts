@@ -55,6 +55,14 @@ export async function moveClips(moves: ClipMoveReq[]) {
   await applyAndRefresh({ type: "moveClips", moves });
 }
 
+/** Swap the positions of two clips (the cross-track "exchange places" gesture)
+ *  so neither overwrites the other. The backend refuses (no change) if the swap
+ *  would overlap a third clip, keeping it lossless. */
+export async function swapClips(clipA: string, clipB: string) {
+  if (clipA === clipB) return;
+  await applyAndRefresh({ type: "swapClips", clipA, clipB });
+}
+
 /** Option/Alt-drag duplicate: deep-copy each clip to a new position. The
  *  backend clones every field (keyframe tracks / grade / masks / effects /
  *  text / transform / crop / fades), mints a fresh id, shifts `startFrame` by
