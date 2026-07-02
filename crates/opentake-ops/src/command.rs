@@ -121,6 +121,22 @@ pub struct TextEntry {
     pub transform: Transform,
 }
 
+/// One built caption clip for [`EditCommand::AddCaptions`]. Like [`TextEntry`]
+/// but (a) has no `track_index` — every caption lands on the single fresh track
+/// the command creates — and (b) carries the `caption_group_id` all clips from
+/// one Generate share, so subtitle export and caption-group style sync recognize
+/// them. The pure builder (`opentake_media::caption_specs`) produced the content,
+/// frames, style, and transform; this leaf just places them.
+#[derive(Clone, Debug)]
+pub struct CaptionEntry {
+    pub start_frame: i32,
+    pub duration_frames: i32,
+    pub content: String,
+    pub text_style: opentake_domain::TextStyle,
+    pub transform: Transform,
+    pub caption_group_id: String,
+}
+
 /// A single clip property assignment for [`EditCommand::SetClipProperties`].
 /// `None` fields are left unchanged; setting a scalar clears the matching
 /// keyframe track (mirrors `applyPropertyChanges`).
@@ -305,6 +321,15 @@ pub enum EditCommand {
     RippleDeleteClips { clip_ids: Vec<String> },
     /// Add text overlays.
     AddTexts { entries: Vec<TextEntry> },
+    /// Place a whole batch of generated caption clips on ONE fresh video track
+    /// (inserted at index 0), as a single undoable action named "Generate
+    /// Captions". 1:1 port of upstream `placeCaptionTrack`
+    /// (`EditorViewModel+Captions.swift:226-242`): a new top track holds every
+    /// caption, and each clip carries the shared `caption_group_id` so subtitle
+    /// export / caption-group style sync recognize it. Atomic on purpose —
+    /// composing `InsertTrack` + `AddTexts` would be two undo steps and could not
+    /// stamp `caption_group_id`. Empty `entries` is a no-op (no track, no change).
+    AddCaptions { entries: Vec<CaptionEntry> },
     /// Link clips into one group.
     Link { clip_ids: Vec<String> },
     /// Unlink clips (and their whole groups).
@@ -485,6 +510,7 @@ pub fn apply(
         } => ripple_delete_ranges(state, track_index, ranges, ids),
         EditCommand::RippleDeleteClips { clip_ids } => ripple_delete_clips(state, clip_ids),
         EditCommand::AddTexts { entries } => add_texts(state, entries, ids),
+        EditCommand::AddCaptions { entries } => add_captions(state, entries, ids),
         EditCommand::Link { clip_ids } => link(state, clip_ids, ids),
         EditCommand::Unlink { clip_ids } => unlink(state, clip_ids),
         EditCommand::RemoveTracks { track_indexes } => remove_tracks(state, track_indexes),
@@ -1839,6 +1865,67 @@ fn add_texts(
                     ops::sort_clips(&mut st.timeline.tracks[ti]);
                 }
             }
+            Ok(added)
+        },
+    )
+}
+
+/// Place a batch of built caption clips on one fresh video track at index 0, as a
+/// single "Generate Captions" transaction. 1:1 port of upstream `placeCaptionTrack`
+/// (`EditorViewModel+Captions.swift:226-242`): insert `Track(type: .video)` at 0,
+/// place every caption clip there (each carrying its `caption_group_id`), and
+/// commit once. Empty input is a no-op. Unlike `add_texts` this never clears a
+/// region — the track is brand new and exclusively the caption track, so clips
+/// are appended directly and sorted (upstream `placeTextClips` onto an empty
+/// track reduces to the same).
+fn add_captions(
+    state: &mut EditorState,
+    entries: Vec<CaptionEntry>,
+    ids: &dyn IdGen,
+) -> Result<EditResult, EditError> {
+    if entries.is_empty() {
+        // No captions built (e.g. no speech detected): no track, no change.
+        // Matches upstream returning `[]` and restoring `timeline` before commit.
+        return Ok(result(state, false, "Generate Captions", Vec::new(), ""));
+    }
+    for (i, e) in entries.iter().enumerate() {
+        if e.duration_frames < 1 {
+            return Err(EditError::Invalid(format!(
+                "entries[{i}]: durationFrames must be >= 1 (got {})",
+                e.duration_frames
+            )));
+        }
+        if e.start_frame < 0 {
+            return Err(EditError::Invalid(format!(
+                "entries[{i}]: startFrame must be >= 0 (got {})",
+                e.start_frame
+            )));
+        }
+    }
+    transact(
+        state,
+        "Generate Captions",
+        |c| format!("Added {} caption(s): {}", c.len(), c.join(", ")),
+        |st| {
+            // Fresh video track at the very top (upstream inserts at index 0).
+            st.timeline.tracks.insert(
+                0,
+                opentake_domain::Track::new(ids.next_id(), ClipType::Video),
+            );
+            let mut added = Vec::with_capacity(entries.len());
+            for e in &entries {
+                let mut clip =
+                    opentake_domain::Clip::new(ids.next_id(), "", e.start_frame, e.duration_frames);
+                clip.media_type = ClipType::Text;
+                clip.source_clip_type = ClipType::Text;
+                clip.transform = e.transform;
+                clip.text_content = Some(e.content.clone());
+                clip.text_style = Some(e.text_style.clone());
+                clip.caption_group_id = Some(e.caption_group_id.clone());
+                added.push(clip.id.clone());
+                st.timeline.tracks[0].clips.push(clip);
+            }
+            ops::sort_clips(&mut st.timeline.tracks[0]);
             Ok(added)
         },
     )
@@ -3589,5 +3676,129 @@ mod reset_transform_tests {
         .unwrap();
         assert!(!res.changed);
         assert_eq!(state.version(), version_before);
+    }
+}
+
+#[cfg(test)]
+mod add_captions_tests {
+    use super::*;
+    use crate::id::SeqIdGen;
+    use opentake_domain::{Clip, ClipType, TextStyle, Track, Transform};
+
+    fn state_with_video_and_audio() -> EditorState {
+        let mut tl = Timeline::new();
+        let mut v = Track::new("v1", ClipType::Video);
+        v.clips.push(Clip::new("c1", "asset", 0, 300));
+        tl.tracks.push(v);
+        let mut a = Track::new("a1", ClipType::Audio);
+        a.clips.push({
+            let mut c = Clip::new("a-clip", "audio-asset", 0, 300);
+            c.media_type = ClipType::Audio;
+            c.source_clip_type = ClipType::Audio;
+            c
+        });
+        tl.tracks.push(a);
+        EditorState::from_timeline(tl)
+    }
+
+    fn caption(content: &str, start: i32, dur: i32, group: &str) -> CaptionEntry {
+        CaptionEntry {
+            start_frame: start,
+            duration_frames: dur,
+            content: content.into(),
+            text_style: TextStyle::default(),
+            transform: Transform::default(),
+            caption_group_id: group.into(),
+        }
+    }
+
+    #[test]
+    fn add_captions_inserts_top_video_track_with_group_ids() {
+        let mut state = state_with_video_and_audio();
+        let ids = SeqIdGen::new("cap-");
+        let res = apply(
+            &mut state,
+            EditCommand::AddCaptions {
+                entries: vec![
+                    caption("hello", 0, 21, "g1"),
+                    caption("world", 21, 21, "g1"),
+                ],
+            },
+            &ids,
+        )
+        .unwrap();
+        assert!(res.changed);
+        assert_eq!(res.action_name, "Generate Captions");
+        assert_eq!(res.affected_clip_ids.len(), 2);
+        // A new track was inserted at index 0 (above the pre-existing video track).
+        assert_eq!(state.timeline.tracks.len(), 3);
+        let cap_track = &state.timeline.tracks[0];
+        assert_eq!(cap_track.kind, ClipType::Video);
+        assert_eq!(cap_track.clips.len(), 2);
+        // Every caption clip is a text clip carrying the caption group id + content.
+        for clip in &cap_track.clips {
+            assert_eq!(clip.media_type, ClipType::Text);
+            assert_eq!(clip.caption_group_id.as_deref(), Some("g1"));
+            assert!(clip.text_content.is_some());
+            assert!(clip.text_style.is_some());
+        }
+        // The original tracks are pushed down, untouched.
+        assert_eq!(state.timeline.tracks[1].id, "v1");
+        assert_eq!(state.timeline.tracks[2].id, "a1");
+    }
+
+    #[test]
+    fn add_captions_is_one_undo_step() {
+        let mut state = state_with_video_and_audio();
+        let ids = SeqIdGen::new("cap-");
+        let tracks_before = state.timeline.tracks.len();
+        apply(
+            &mut state,
+            EditCommand::AddCaptions {
+                entries: vec![caption("a", 0, 30, "g")],
+            },
+            &ids,
+        )
+        .unwrap();
+        assert_eq!(state.timeline.tracks.len(), tracks_before + 1);
+        // A single Undo reverts the entire caption placement (track + all clips).
+        let undo = apply(&mut state, EditCommand::Undo, &ids).unwrap();
+        assert!(undo.changed);
+        assert_eq!(state.timeline.tracks.len(), tracks_before);
+    }
+
+    #[test]
+    fn add_captions_empty_is_noop() {
+        let mut state = state_with_video_and_audio();
+        let ids = SeqIdGen::new("cap-");
+        let version_before = state.version();
+        let res = apply(
+            &mut state,
+            EditCommand::AddCaptions { entries: vec![] },
+            &ids,
+        )
+        .unwrap();
+        assert!(!res.changed);
+        assert_eq!(res.action_name, "Generate Captions");
+        assert_eq!(state.version(), version_before);
+        // No track was created.
+        assert_eq!(state.timeline.tracks.len(), 2);
+    }
+
+    #[test]
+    fn add_captions_rejects_bad_duration() {
+        let mut state = state_with_video_and_audio();
+        let ids = SeqIdGen::new("cap-");
+        let err = apply(
+            &mut state,
+            EditCommand::AddCaptions {
+                entries: vec![caption("x", 0, 0, "g")],
+            },
+            &ids,
+        )
+        .unwrap_err();
+        assert!(matches!(err, EditError::Invalid(_)));
+        // State untouched by the refusal.
+        assert_eq!(state.timeline.tracks.len(), 2);
     }
 }

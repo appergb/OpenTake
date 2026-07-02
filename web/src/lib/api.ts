@@ -9,12 +9,16 @@
  */
 
 import type {
+  CaptionRequest,
   ClipType,
   EditRequest,
   EditResult,
+  GenerateCaptionsResult,
   MediaList,
+  ModelStatus,
   SecretStatus,
   TimelineSnapshot,
+  Transcript,
 } from "./types";
 
 // Tauri injects `__TAURI_INTERNALS__` on the window when running in the shell.
@@ -365,6 +369,60 @@ export async function extractAudio(mediaId: string, outPath: string): Promise<st
   await ensureTauri();
   if (invokeImpl) return invokeImpl<string>("extract_audio", { mediaId, outPath });
   throw new Error("audio extraction requires the desktop app (ffmpeg)");
+}
+
+// MARK: - Transcription (whisper model + on-device transcribe, #183 + captions)
+
+/** Whether the whisper model is installed. Never downloads. The Captions tab
+ *  calls this to decide whether to prompt for a one-time model download.
+ *  Outside Tauri there is no backend, so report "not installed". */
+export async function transcribeModelStatus(): Promise<ModelStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<ModelStatus>("transcribe_model_status");
+  return { installed: false, model: "", bytes: 0 };
+}
+
+/** Download the whisper model (idempotent), emitting `transcribe://progress`
+ *  events as bytes arrive. Rejects outside Tauri (no backend). */
+export async function downloadTranscribeModel(): Promise<ModelStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<ModelStatus>("download_transcribe_model");
+  throw new Error("transcription model download requires the desktop app");
+}
+
+/** Subscribe to model-download progress (`fraction` in 0..=1). No-op outside Tauri. */
+export async function onTranscribeProgress(
+  handler: (fraction: number) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("transcribe://progress", (e) => {
+    const p = e.payload as { fraction?: number } | undefined;
+    if (p && typeof p.fraction === "number") handler(p.fraction);
+  });
+}
+
+/** Transcribe one asset (cached, so repeats are instant). `language` is an
+ *  optional BCP-47/ISO-639 hint; omit for auto-detect. Rejects outside Tauri. */
+export async function transcribeMedia(
+  mediaId: string,
+  language?: string,
+): Promise<Transcript> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<Transcript>("transcribe_media", { mediaId, language });
+  throw new Error("transcription requires the desktop app (whisper)");
+}
+
+/** Generate captions for the requested source: transcribe on-device and place
+ *  styled caption clips on a fresh top track, as one undoable action. The whole
+ *  build (packing/timing/placement) runs in Rust — the SAME pipeline as the
+ *  `add_captions` agent tool. Rejects outside Tauri (no whisper backend). */
+export async function generateCaptions(
+  request: CaptionRequest,
+): Promise<GenerateCaptionsResult> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<GenerateCaptionsResult>("generate_captions", { request });
+  throw new Error("caption generation requires the desktop app (whisper)");
 }
 
 /**

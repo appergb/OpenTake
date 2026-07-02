@@ -122,6 +122,13 @@ pub struct TranscriptSource {
     pub media_ref: String,
     /// True for video assets (extract the audio track first).
     pub is_video: bool,
+    /// Optional BCP-47/ISO-639 language hint for the backend. `None` = auto
+    /// detect (the `get_transcript` path). `add_captions` sets this from the
+    /// caller's resolved locale so foreign-language footage transcribes right.
+    /// When set, the bridge bypasses the shared cache (a language-specific
+    /// transcript differs from the auto-detected one), mirroring upstream's
+    /// "option variants bypass the cache" rule (`EditorViewModel+Captions.swift:127`).
+    pub language: Option<String>,
 }
 
 /// The result of transcribing one [`TranscriptSource`]: either the transcript or

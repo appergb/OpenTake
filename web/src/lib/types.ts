@@ -331,6 +331,7 @@ export type EditRequest =
   | { type: "rippleDeleteRanges"; trackIndex: number; ranges: FrameRangeReq[] }
   | { type: "rippleDeleteClips"; clipIds: string[] }
   | { type: "addTexts"; entries: TextEntryReq[] }
+  | { type: "addCaptions"; entries: CaptionEntryReq[] }
   | { type: "link"; clipIds: string[] }
   | { type: "unlink"; clipIds: string[] }
   | { type: "removeTracks"; trackIndexes: number[] }
@@ -362,6 +363,19 @@ export interface TextEntryReq {
   transform: Transform;
 }
 
+/** One built caption clip (mirror of Rust `CaptionEntryDto`). Every caption in a
+ *  Generate shares one `captionGroupId`; the whole batch lands on a single fresh
+ *  track via `addCaptions`. Multi-word fields MUST be camelCase (the repo's #1
+ *  IPC bug class). */
+export interface CaptionEntryReq {
+  startFrame: number;
+  durationFrames: number;
+  content: string;
+  textStyle: TextStyle;
+  transform: Transform;
+  captionGroupId: string;
+}
+
 export interface EditResult {
   changed: boolean;
   actionName: string;
@@ -373,6 +387,69 @@ export interface EditResult {
 export interface TimelineSnapshot {
   timeline: Timeline;
   version: number;
+}
+
+// MARK: - Transcription (mirror of src-tauri transcribe.rs DTOs)
+
+/** Whether the whisper transcription model is installed, plus enough to prompt a
+ *  one-time download (mirror of Rust `ModelStatusDto`). */
+export interface ModelStatus {
+  installed: boolean;
+  /** Human label, e.g. "base (multilingual)". */
+  model: string;
+  /** Approximate download size in bytes. */
+  bytes: number;
+}
+
+/** One transcript word/token with optional source-seconds timing. */
+export interface TranscriptWord {
+  text: string;
+  start?: number;
+  end?: number;
+}
+
+/** One endpointed transcript segment (sentence/pause boundary), source seconds. */
+export interface TranscriptSegment {
+  text: string;
+  start: number;
+  end: number;
+}
+
+/** A full transcript for one asset (mirror of Rust `TranscriptDto`). */
+export interface Transcript {
+  mediaId: string;
+  text: string;
+  language?: string;
+  segments: TranscriptSegment[];
+  words: TranscriptWord[];
+}
+
+/** Which clips a caption Generate targets (mirror of Rust `CaptionSource`). */
+export type CaptionSource =
+  | { kind: "auto" }
+  | { kind: "track"; trackId: string }
+  | { kind: "clips"; clipIds: string[] };
+
+/** Letter case for captions (mirror of Rust `CaptionCaseDto`). */
+export type CaptionCase = "auto" | "upper" | "lower";
+
+/** The Captions-tab request (mirror of Rust `CaptionRequestDto`). All fields
+ *  optional except `source`; style is the full text style, placement is a
+ *  normalized canvas center, language is an optional BCP-47/ISO-639 hint. */
+export interface CaptionRequest {
+  source: CaptionSource;
+  style?: TextStyle;
+  centerX?: number;
+  centerY?: number;
+  textCase?: CaptionCase;
+  censorProfanity?: boolean;
+  language?: string;
+}
+
+/** Outcome of `generate_captions` (mirror of Rust `GenerateCaptionsResult`). */
+export interface GenerateCaptionsResult {
+  edit: EditResult;
+  captionCount: number;
 }
 
 // MARK: - Media catalog (mirror of src-tauri MediaItemDto / MediaListDto)
