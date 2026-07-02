@@ -9,6 +9,8 @@ import { ZOOM } from "../lib/theme";
 import { useProjectStore } from "./projectStore";
 import { totalFrames } from "../lib/geometry";
 import type { CropAspectLock } from "../lib/cropOverlay";
+import { withRangeStart, withRangeEnd, type TimelineRange } from "../lib/timelineRange";
+import type { GapSelection } from "../lib/timelineGap";
 
 export type Panel = "agent" | "media" | "preview" | "inspector" | "timeline";
 /** Top-level app view (SPEC: 启动先进主页). The editor is one of three views;
@@ -78,6 +80,13 @@ interface UiState {
   selectedMediaAssetIds: Set<string>;
   selectedFolderIds: Set<string>;
   isMarqueeSelecting: boolean;
+  /** Marked in/out timeline range (I/O keys, upstream `selectedTimelineRange`).
+   *  Raw endpoints — `startFrame` may exceed `endFrame` mid-mark; consumers gate
+   *  through `validRange`. `null` when no range is marked. */
+  selectedTimelineRange: TimelineRange | null;
+  /** Selected empty gap between clips on one track (upstream `selectedGap`).
+   *  Mutually exclusive with clip selection. `null` when no gap is selected. */
+  selectedGap: GapSelection | null;
 
   // Timeline view
   zoomScale: number;
@@ -154,6 +163,17 @@ interface UiState {
   selectMediaAssets: (ids: Set<string>) => void;
   clearMediaSelection: () => void;
 
+  /** Mark the range START at `frame` (upstream `markTimelineRangeStart`). Also
+   *  clears any clip / gap selection (the range is its own selection mode). */
+  markRangeStart: (frame: number) => void;
+  /** Mark the range END at `frame` (upstream `markTimelineRangeEnd`). */
+  markRangeEnd: (frame: number) => void;
+  /** Clear the marked range (upstream `clearTimelineRange`, e.g. on Escape). */
+  clearTimelineRange: () => void;
+  /** Select an empty gap (upstream sets `selectedGap`). Clears clip selection —
+   *  gap and clip selection are mutually exclusive. `null` deselects the gap. */
+  selectGap: (gap: GapSelection | null) => void;
+
   setZoomScale: (zoom: number) => void;
   setMinZoomScale: (zoom: number) => void;
   setScroll: (left: number, top: number) => void;
@@ -199,6 +219,8 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   selectedMediaAssetIds: new Set(),
   selectedFolderIds: new Set(),
   isMarqueeSelecting: false,
+  selectedTimelineRange: null,
+  selectedGap: null,
 
   zoomScale: ZOOM.default,
   minZoomScale: 0.05,
@@ -271,12 +293,39 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   // Selection change ends crop editing (InspectorView.swift:60-61,90:
   // `resolvePreferredTab()`, called on every `selectedClipIds` change,
   // unconditionally clears `cropEditingActive`).
-  selectClips: (selectedClipIds) => set({ selectedClipIds, cropEditingActive: false }),
+  // Selecting clips clears any gap selection (upstream: a clip mousedown sets
+  // `selectedGap = nil` — the two are mutually exclusive).
+  selectClips: (selectedClipIds) =>
+    set({ selectedClipIds, selectedGap: null, cropEditingActive: false }),
   clearSelection: () =>
-    set({ selectedClipIds: new Set(), isMarqueeSelecting: false, cropEditingActive: false }),
+    set({
+      selectedClipIds: new Set(),
+      selectedGap: null,
+      isMarqueeSelecting: false,
+      cropEditingActive: false,
+    }),
   selectMediaAssets: (selectedMediaAssetIds) => set({ selectedMediaAssetIds }),
   clearMediaSelection: () => set({ selectedMediaAssetIds: new Set() }),
   setPreviewMedia: (previewMediaId) => set({ previewMediaId }),
+
+  // Marking a range is its own selection mode: upstream's ruler range gesture
+  // (`beginTimelineRangeSelection`) clears clip + gap selection when it starts.
+  markRangeStart: (frame) =>
+    set((s) => ({
+      selectedTimelineRange: withRangeStart(s.selectedTimelineRange, frame),
+      selectedClipIds: new Set(),
+      selectedGap: null,
+    })),
+  markRangeEnd: (frame) =>
+    set((s) => ({
+      selectedTimelineRange: withRangeEnd(s.selectedTimelineRange, frame),
+      selectedClipIds: new Set(),
+      selectedGap: null,
+    })),
+  clearTimelineRange: () => set({ selectedTimelineRange: null }),
+  // Selecting a gap clears clip selection (mutual exclusivity, upstream behavior).
+  selectGap: (selectedGap) =>
+    set(selectedGap ? { selectedGap, selectedClipIds: new Set() } : { selectedGap: null }),
 
   setZoomScale: (zoomScale) =>
     set({ zoomScale: Math.max(get().minZoomScale, Math.min(ZOOM.max, zoomScale)) }),

@@ -4,9 +4,10 @@
  * minor ticks subdivide while each cell stays >= 12px.
  */
 
-import { ACCENT, BG, BORDER, LAYOUT, TEXT } from "../../lib/theme";
+import { ACCENT, BG, BORDER, LAYOUT, RANGE, TEXT } from "../../lib/theme";
 import { chooseTicks } from "../../lib/ruler";
-import { formatTimecode } from "../../lib/geometry";
+import { formatTimecode, xForFrame } from "../../lib/geometry";
+import { validRange, type TimelineRange } from "../../lib/timelineRange";
 
 export interface RulerState {
   fps: number;
@@ -14,7 +15,9 @@ export interface RulerState {
   scrollLeft: number;
   width: number; // visible width (CSS px)
   dpr: number;
-  /** Active playhead frame for the timecode tint at its position (optional). */
+  /** Marked in/out range, painted as a translucent band + edge ticks on the
+   *  ruler (upstream `drawTimelineRangeSelectionRulerFill` / `…Edges`). */
+  selectedRange?: TimelineRange | null;
 }
 
 export function paintRuler(ctx: CanvasRenderingContext2D, s: RulerState) {
@@ -27,6 +30,26 @@ export function paintRuler(ctx: CanvasRenderingContext2D, s: RulerState) {
   ctx.fillRect(0, 0, width, LAYOUT.rulerHeight);
   ctx.fillStyle = BORDER.primary;
   ctx.fillRect(0, LAYOUT.rulerHeight - 1, width, 1);
+
+  // Marked-range band on the ruler (upstream `drawTimelineRangeSelectionRulerFill`
+  // + `…Edges`): a soft fill across the range's x-span plus edge ticks. Drawn
+  // under the ticks/labels so timecode stays legible. `x` is view-space here
+  // (the ruler canvas is not scroll-translated), so subtract scrollLeft.
+  const range = validRange(s.selectedRange ?? null);
+  if (range) {
+    const minX = xForFrame(range.startFrame, pixelsPerFrame) - scrollLeft;
+    const maxX = xForFrame(range.endFrame, pixelsPerFrame) - scrollLeft;
+    ctx.fillStyle = RANGE.rulerFill;
+    ctx.fillRect(minX, 0, Math.max(0, maxX - minX), LAYOUT.rulerHeight);
+    ctx.strokeStyle = RANGE.edge;
+    ctx.lineWidth = 2;
+    for (const x of [minX, maxX]) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, LAYOUT.rulerHeight);
+      ctx.stroke();
+    }
+  }
 
   const { majorInterval, minorSubdivisions } = chooseTicks(pixelsPerFrame, fps);
 

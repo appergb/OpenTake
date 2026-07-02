@@ -177,9 +177,23 @@ export function useKeyboardShortcuts() {
         case "Backspace":
         case "Delete":
           e.preventDefault();
-          // ⇧⌫ ripple-deletes (closes the gap); plain ⌫ lifts out (leaves a gap).
-          if (e.shiftKey) edit.rippleDeleteSelectedClips();
-          else edit.deleteSelectedClips();
+          if (e.shiftKey) {
+            // ⇧⌫ ripple-deletes (closes the gap). Route like upstream's
+            // EditorWindowController: a selected gap closes first; else a marked
+            // range on the selected clip's track; else the selected clips.
+            if (ui.selectedGap) {
+              void edit.rippleDeleteSelectedGap();
+            } else {
+              void (async () => {
+                if (!(await edit.rippleDeleteMarkedRange())) {
+                  await edit.rippleDeleteSelectedClips();
+                }
+              })();
+            }
+          } else {
+            // Plain ⌫ lifts out (leaves a gap).
+            void edit.deleteSelectedClips();
+          }
           return;
         case "KeyQ":
           // 剪映 Q：删除播放头左侧（修剪入点到播放头）。
@@ -190,6 +204,32 @@ export function useKeyboardShortcuts() {
           // 剪映 W：删除播放头右侧（修剪出点到播放头）。
           e.preventDefault();
           edit.trimEndToPlayhead();
+          return;
+        case "KeyI":
+          // I: mark the range IN point at the playhead (upstream keyCode 34
+          // markTimelineRangeStart). No modifiers (matches upstream's
+          // `rangeMarkShortcut` = no Cmd/Alt/Ctrl).
+          e.preventDefault();
+          ui.markRangeStart(Math.round(ui.activeFrame));
+          return;
+        case "KeyO":
+          // O: mark the range OUT point at the playhead (upstream keyCode 31
+          // markTimelineRangeEnd).
+          e.preventDefault();
+          ui.markRangeEnd(Math.round(ui.activeFrame));
+          return;
+        case "Comma":
+          // OpenTake extension (NOT upstream): nudge selected clips left by 1
+          // frame (5 with Shift). , / . is the NLE nudge convention; arrows are
+          // the playhead (upstream-correct), so nudge gets its own keys.
+          e.preventDefault();
+          void edit.nudgeSelectedClips(e.shiftKey ? -5 : -1);
+          return;
+        case "Period":
+          // OpenTake extension (NOT upstream): nudge selected clips right by 1
+          // frame (5 with Shift).
+          e.preventDefault();
+          void edit.nudgeSelectedClips(e.shiftKey ? 5 : 1);
           return;
         case "KeyC":
         case "KeyB":
@@ -218,7 +258,9 @@ export function useKeyboardShortcuts() {
         case "Escape":
           if (ui.maximizedPanel) ui.setMaximizedPanel(null);
           else {
+            // Upstream Escape clears clip selection AND the marked range.
             ui.clearSelection();
+            ui.clearTimelineRange();
             ui.setToolMode("pointer");
           }
           return;

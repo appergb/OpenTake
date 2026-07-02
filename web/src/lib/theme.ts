@@ -149,6 +149,23 @@ export const GHOST = {
   insertLine: "rgb(255,204,0)",
 } as const;
 
+/** Marked in/out range + gap selection overlays (upstream
+ *  `TimelineView.drawTimelineRangeSelection*` / `drawGapSelection`). Opacities
+ *  are the exact upstream `AppTheme.Opacity` literals (hint 0.06, soft 0.10,
+ *  prominent 0.80); the gap uses upstream's inline white 0.12 / 0.9. */
+export const RANGE = {
+  /** Track-area fill (Text.primary @ hint). */
+  trackFill: "rgba(255,255,255,0.06)",
+  /** Ruler-band fill (Text.primary @ soft). */
+  rulerFill: "rgba(255,255,255,0.10)",
+  /** Start/end edge lines (Accent.timecode @ prominent). */
+  edge: "rgba(242,153,51,0.80)",
+  /** Selected-gap fill. */
+  gapFill: "rgba(255,255,255,0.12)",
+  /** Selected-gap dashed stroke. */
+  gapStroke: "rgba(255,255,255,0.9)",
+} as const;
+
 /** §5.4 Clip rendering insets (ClipRenderer.swift). */
 export const CLIP = {
   stripWidth: 3, // left color strip
