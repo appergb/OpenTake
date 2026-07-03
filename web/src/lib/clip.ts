@@ -300,16 +300,29 @@ function snapTransformToCanvasEdges(t: Transform, threshold: number): Transform 
 }
 
 /** Snap the clip's center to the canvas center (0.5, 0.5) per axis within
- *  threshold. 1:1 port of upstream `Transform.snapCenterToCanvasCenter`
- *  (Models/Timeline.swift:484-497), minus the `(x,y)` snapped-flags return —
- *  OpenTake doesn't port upstream's pink center-guide lines (TransformOverlayView
- *  centerGuideX/Y), only the functional snap that affects landing position. */
-function snapTransformCenterToCanvasCenter(t: Transform, thresholdH: number, thresholdV: number): Transform {
+ *  threshold, returning the snapped transform plus the per-axis `(x, y)` snapped
+ *  flags. 1:1 port of upstream `Transform.snapCenterToCanvasCenter`
+ *  (Models/Timeline.swift:484-497), including its snapped-flags return — the
+ *  flags drive the TransformOverlay center guide lines (TransformOverlayView
+ *  centerGuideX/Y, Item 3). */
+function snapTransformCenterToCanvasCenterFlagged(
+  t: Transform,
+  thresholdH: number,
+  thresholdV: number,
+): { transform: Transform; snap: { x: boolean; y: boolean } } {
   let centerX = t.centerX;
   let centerY = t.centerY;
-  if (Math.abs(centerX - 0.5) < thresholdH) centerX = 0.5;
-  if (Math.abs(centerY - 0.5) < thresholdV) centerY = 0.5;
-  return { ...t, centerX, centerY };
+  const snapX = Math.abs(centerX - 0.5) < thresholdH;
+  const snapY = Math.abs(centerY - 0.5) < thresholdV;
+  if (snapX) centerX = 0.5;
+  if (snapY) centerY = 0.5;
+  return { transform: { ...t, centerX, centerY }, snap: { x: snapX, y: snapY } };
+}
+
+/** Snap-only wrapper kept for the existing `moveTransformByDelta` caller, which
+ *  needs the landed transform but not the guide flags. */
+function snapTransformCenterToCanvasCenter(t: Transform, thresholdH: number, thresholdV: number): Transform {
+  return snapTransformCenterToCanvasCenterFlagged(t, thresholdH, thresholdV).transform;
 }
 
 /** Upstream TransformOverlayView `movedTransform` port (private func,
@@ -334,6 +347,49 @@ export function moveTransformByDelta(
   if (rotated || snapThresholdPx <= 0) return moved;
   const edgeSnapped = snapTransformToCanvasEdges(moved, snapThresholdPx / canvasPx.width);
   return snapTransformCenterToCanvasCenter(
+    edgeSnapped,
+    snapThresholdPx / canvasPx.width,
+    snapThresholdPx / canvasPx.height,
+  );
+}
+
+/** Per-axis center-snap flags for the canvas-center guide lines (Item 3). */
+export interface CenterSnap {
+  x: boolean;
+  y: boolean;
+}
+
+/**
+ * Like {@link moveTransformByDelta} but also returns the per-axis center-snap
+ * flags upstream `movedTransform` reports (TransformOverlayView.swift:80-82,
+ * 98-113): `snap.x`/`snap.y` are true when the clip center landed exactly on the
+ * canvas center on that axis. The TransformOverlay draws the pink center guides
+ * from these while dragging. Flags are always `false` under rotation or with
+ * snapping disabled, matching upstream (which skips both snaps when rotated).
+ *
+ * Kept as a separate function from `moveTransformByDelta` so the existing
+ * move-drag path (which discards the flags) is untouched.
+ */
+export function moveTransformByDeltaWithSnap(
+  start: Transform,
+  deltaPx: { width: number; height: number },
+  canvasPx: { width: number; height: number },
+  rotated: boolean,
+  snapThresholdPx = 0,
+): { transform: Transform; snap: CenterSnap } {
+  if (!positiveFinite(canvasPx.width) || !positiveFinite(canvasPx.height)) {
+    return { transform: start, snap: { x: false, y: false } };
+  }
+  const moved: Transform = {
+    ...start,
+    centerX: start.centerX + deltaPx.width / canvasPx.width,
+    centerY: start.centerY + deltaPx.height / canvasPx.height,
+  };
+  if (rotated || snapThresholdPx <= 0) {
+    return { transform: moved, snap: { x: false, y: false } };
+  }
+  const edgeSnapped = snapTransformToCanvasEdges(moved, snapThresholdPx / canvasPx.width);
+  return snapTransformCenterToCanvasCenterFlagged(
     edgeSnapped,
     snapThresholdPx / canvasPx.width,
     snapThresholdPx / canvasPx.height,

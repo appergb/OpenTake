@@ -401,6 +401,12 @@ pub enum EditCommand {
     /// (frames + interpolation back to `Linear`). Crop and its keyframe track
     /// are untouched (a separate Inspector section upstream).
     ResetTransform { clip_ids: Vec<String> },
+    /// Change project timeline settings (FPS / resolution). 1:1 port of upstream
+    /// `EditorViewModel.applyTimelineSettings(fps:width:height:)`: when FPS
+    /// changes, all clip frame values are rescaled by `new/old`; `width`/`height`
+    /// set the canvas. See `ops::set_timeline_settings` for the ported/deferred
+    /// details (the playhead rescale + aspect refit are intentionally not here).
+    SetTimelineSettings { fps: i32, width: i32, height: i32 },
     /// Undo the last committed command.
     Undo,
     /// Redo the last undone command.
@@ -537,6 +543,9 @@ pub fn apply(
         EditCommand::DeleteFolder { folder_ids } => delete_folder(state, folder_ids),
         EditCommand::SwapMedia { clip_id, media_ref } => swap_media(state, clip_id, media_ref),
         EditCommand::ResetTransform { clip_ids } => reset_transform(state, clip_ids),
+        EditCommand::SetTimelineSettings { fps, width, height } => {
+            set_timeline_settings_cmd(state, fps, width, height)
+        }
     }
 }
 
@@ -2351,6 +2360,32 @@ fn reset_transform(
     })
 }
 
+/// Change project timeline settings (FPS / resolution). Validates positivity up
+/// front (a bad request is a hard error, not a silent no-op), then delegates to
+/// `ops::set_timeline_settings` inside a transaction; an unchanged request
+/// (identical already-configured settings) commits nothing.
+fn set_timeline_settings_cmd(
+    state: &mut EditorState,
+    fps: i32,
+    width: i32,
+    height: i32,
+) -> Result<EditResult, EditError> {
+    if fps <= 0 || width <= 0 || height <= 0 {
+        return Err(EditError::Invalid(format!(
+            "timeline settings must be positive (got fps={fps}, width={width}, height={height})"
+        )));
+    }
+    transact(
+        state,
+        "Change Project Settings",
+        move |_| format!("Set timeline to {width}×{height} @ {fps} fps"),
+        |st| {
+            ops::set_timeline_settings(&mut st.timeline, fps, width, height);
+            Ok(Vec::new())
+        },
+    )
+}
+
 // MARK: - Small local helpers
 
 fn validate_entry(state: &EditorState, e: &ClipEntry, i: usize) -> Result<(), EditError> {
@@ -3670,6 +3705,107 @@ mod reset_transform_tests {
             &mut state,
             EditCommand::ResetTransform {
                 clip_ids: vec![clip_id],
+            },
+            &ids,
+        )
+        .unwrap();
+        assert!(!res.changed);
+        assert_eq!(state.version(), version_before);
+    }
+
+    #[test]
+    fn set_timeline_settings_changes_dims_and_bumps_version() {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+        let version_before = state.version();
+        let res = apply(
+            &mut state,
+            EditCommand::SetTimelineSettings {
+                fps: 30,
+                width: 1080,
+                height: 1920,
+            },
+            &ids,
+        )
+        .unwrap();
+        assert!(res.changed);
+        assert_eq!((state.timeline.width, state.timeline.height), (1080, 1920));
+        assert!(state.timeline.settings_configured);
+        assert_eq!(state.version(), version_before + 1);
+    }
+
+    #[test]
+    fn set_timeline_settings_is_undoable() {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+        let (w0, h0, fps0) = (
+            state.timeline.width,
+            state.timeline.height,
+            state.timeline.fps,
+        );
+        apply(
+            &mut state,
+            EditCommand::SetTimelineSettings {
+                fps: 60,
+                width: 2560,
+                height: 1080,
+            },
+            &ids,
+        )
+        .unwrap();
+        assert_eq!(state.timeline.width, 2560);
+
+        let undo = apply(&mut state, EditCommand::Undo, &ids).unwrap();
+        assert!(undo.changed);
+        assert_eq!(
+            (
+                state.timeline.width,
+                state.timeline.height,
+                state.timeline.fps
+            ),
+            (w0, h0, fps0)
+        );
+    }
+
+    #[test]
+    fn set_timeline_settings_rejects_nonpositive() {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+        assert!(apply(
+            &mut state,
+            EditCommand::SetTimelineSettings {
+                fps: 0,
+                width: 1920,
+                height: 1080,
+            },
+            &ids,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn set_timeline_settings_noop_when_identical_and_configured() {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+        // First call configures 1920x1080@30.
+        apply(
+            &mut state,
+            EditCommand::SetTimelineSettings {
+                fps: 30,
+                width: 1920,
+                height: 1080,
+            },
+            &ids,
+        )
+        .unwrap();
+        let version_before = state.version();
+        // Re-applying the same, now-configured settings is a clean no-op.
+        let res = apply(
+            &mut state,
+            EditCommand::SetTimelineSettings {
+                fps: 30,
+                width: 1920,
+                height: 1080,
             },
             &ids,
         )

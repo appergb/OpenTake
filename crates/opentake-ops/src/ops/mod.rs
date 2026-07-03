@@ -10,6 +10,7 @@ pub mod linking;
 pub mod move_clips;
 pub mod place;
 pub mod ripple;
+pub mod settings;
 pub mod split;
 pub mod swap;
 pub mod tracks;
@@ -30,6 +31,7 @@ pub use ripple::{
     apply_shifts, ripple_delete, ripple_delete_ranges_on_track, ripple_insert, validate_shifts,
     RippleOutcome, RippleRangesReport,
 };
+pub use settings::set_timeline_settings;
 pub use split::{split_clip, split_single_clip};
 pub use swap::{swap_clip_positions, swap_tracks};
 pub use tracks::{

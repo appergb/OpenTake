@@ -12,6 +12,8 @@ import {
   Play,
   Pause,
   Camera,
+  Check,
+  ChevronDown,
 } from "lucide-react";
 import { PanelHeaderBar } from "../ui/PanelShell";
 import { HoverButton } from "../ui/HoverButton";
@@ -26,7 +28,11 @@ import { assetUrl } from "../../lib/asset";
 import { TimelinePlayback } from "./TimelinePlaybackLayer";
 import { TransformOverlay } from "./TransformOverlay";
 import { CropOverlay } from "./CropOverlay";
-import { aspectFitBox, timelinePreviewCanvasStyle } from "./previewLayerStyles";
+import {
+  CANVAS_OUTLINE_COLOR,
+  aspectFitBox,
+  timelinePreviewCanvasStyle,
+} from "./previewLayerStyles";
 import { useT } from "../../i18n";
 import {
   captureFrameToMedia,
@@ -37,6 +43,21 @@ import {
 import { rustEngineEnabled } from "./rustEngine";
 import { shouldUseRustEngine } from "./timelinePlayback";
 import { findCropEditingClip, findSelectedVisualClip, mediaCanvasAspect } from "../../lib/clip";
+import { setTimelineSettings } from "../../store/editActions";
+import { applyScrollZoom, type CanvasOffset } from "../../lib/previewZoom";
+import {
+  ASPECT_PRESETS,
+  QUALITY_PRESETS,
+  ZOOM_PRESETS,
+  isAspectPresetActive,
+  isQualityPresetActive,
+  isZoomPresetActive,
+  qualityBadgeLabel,
+  zoomBadgeLabel,
+  type AspectPreset,
+  type QualityPreset,
+  type ZoomPreset,
+} from "../../lib/previewPresets";
 import type { MediaItem } from "../../lib/types";
 
 export function Preview() {
@@ -51,6 +72,13 @@ export function Preview() {
   const selectedClipIds = useEditorUiStore((s) => s.selectedClipIds);
   const pushToast = useEditorUiStore((s) => s.pushToast);
   const mediaPanelCurrentFolderId = useEditorUiStore((s) => s.mediaPanelCurrentFolderId);
+  // Preview canvas zoom + pan (Item 1). Read here and applied to the timeline
+  // stage transform below; the scroll-zoom gesture writes them via a native
+  // (non-passive) wheel listener (see the effect below).
+  const canvasZoom = useEditorUiStore((s) => s.canvasZoom);
+  const canvasOffset = useEditorUiStore((s) => s.canvasOffset);
+  const setCanvasZoom = useEditorUiStore((s) => s.setCanvasZoom);
+  const setCanvasOffset = useEditorUiStore((s) => s.setCanvasOffset);
   const previewItem = useMediaStore((s) =>
     previewMediaId ? s.items.find((m) => m.id === previewMediaId) ?? null : null,
   );
@@ -99,6 +127,9 @@ export function Preview() {
   const [mediaDuration, setMediaDuration] = useState(0);
   const [mediaPlaying, setMediaPlaying] = useState(false);
   const stageRef = useRef<HTMLDivElement | null>(null);
+  // The zoomed canvas box element — the wheel handler measures its rect so the
+  // zoom anchors on the cursor's position within the canvas (not the padded stage).
+  const canvasBoxRef = useRef<HTMLDivElement | null>(null);
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   useEffect(() => {
     setMediaTime(0);
@@ -119,6 +150,18 @@ export function Preview() {
     });
     ro.observe(el);
     return () => ro.disconnect();
+  }, []);
+
+  // Attach the scroll-zoom wheel handler natively with { passive: false } (see
+  // the closure above for why). A latest-ref keeps the listener stable while
+  // always running the current closure — the exact pattern TimelineContainer
+  // uses for its own non-passive wheel listener.
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => scrollZoomRef.current(e);
+    el.addEventListener("wheel", handler, { passive: false });
+    return () => el.removeEventListener("wheel", handler);
   }, []);
 
   // Space bar during media preview → toggle the media element.
@@ -206,11 +249,67 @@ export function Preview() {
   };
 
   const fittedCanvas = aspectFitBox(stageSize.width, stageSize.height, timeline.width, timeline.height);
+  // The zoomed canvas box: the aspect-fit box physically resized by `canvasZoom`
+  // (upstream `.frame(fitSize * zoom)`, PreviewContainerView.swift:20-22,43). The
+  // box stays flex-centered in the stage; `canvasOffset` then translates it
+  // (upstream `.offset(canvasOffset)`, :49). Overlays receive THIS scaled box as
+  // their `canvasPx` so their fraction→px placement and their pointer deltas
+  // (which divide by canvasPx) both track the zoomed canvas 1:1 — the alignment
+  // invariant. `null` (degenerate stage) leaves everything unzoomed.
+  const scaledCanvas =
+    fittedCanvas && canvasZoom > 0
+      ? { width: fittedCanvas.width * canvasZoom, height: fittedCanvas.height * canvasZoom }
+      : fittedCanvas;
+  const canvasTransform = `translate(${canvasOffset.width}px, ${canvasOffset.height}px)`;
   const timelineCanvasStyle = {
     ...timelinePreviewCanvasStyle(timeline.width, timeline.height),
-    ...(fittedCanvas
-      ? { width: fittedCanvas.width, height: fittedCanvas.height, flex: "0 0 auto" }
+    ...(scaledCanvas
+      ? {
+          width: scaledCanvas.width,
+          height: scaledCanvas.height,
+          // Clear the base style's max-100% clamp so a zoomed-in box (bigger than
+          // the stage) actually enlarges — the stage's overflow:hidden then crops
+          // it, showing a magnified region (upstream's `.frame(fitSize*zoom)`
+          // grows past the container and the parent `.clipped()`s it).
+          maxWidth: "none",
+          maxHeight: "none",
+          flex: "0 0 auto",
+          transform: canvasTransform,
+        }
       : {}),
+  };
+
+  // Cursor-anchored scroll-to-zoom (Item 1). Mirrors upstream
+  // PreviewView.swift:115-126 (Cmd+scroll only) and the anchor math in
+  // :14-34. A trackpad pinch arrives as ctrl+wheel and the webview would
+  // otherwise page-zoom, so — exactly like TimelineContainer's wheel handler —
+  // the listener is attached natively with `{ passive: false }` (React's onWheel
+  // is passive, so preventDefault there silently no-ops). Only Cmd/Ctrl+wheel
+  // zooms; a bare scroll is left alone. Guarded on a live scaled canvas.
+  const scrollZoomRef = useRef<(e: WheelEvent) => void>(() => {});
+  scrollZoomRef.current = (e: WheelEvent) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const boxEl = canvasBoxRef.current;
+    if (!boxEl || previewing || !timelineHasContent) return;
+    e.preventDefault();
+    const rect = boxEl.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    // Upstream sensitivity: 0.005 for precise (trackpad) deltas, 0.05 otherwise
+    // (PreviewView.swift:122). deltaMode 0 = pixel (trackpad), 1 = line (mouse).
+    const sensitivity = e.deltaMode === 0 ? 0.005 : 0.05;
+    // Upstream negates: scrolling up (negative deltaY) zooms IN. Browser wheel
+    // deltaY is positive scrolling down, so negate to match.
+    const deltaZoom = -e.deltaY * sensitivity;
+    if (deltaZoom === 0) return;
+    const next = applyScrollZoom({
+      oldZoom: canvasZoom,
+      deltaZoom,
+      pointTopDown: { x: e.clientX - rect.left, y: e.clientY - rect.top },
+      viewSize: { width: rect.width, height: rect.height },
+      offset: canvasOffset as CanvasOffset,
+    });
+    setCanvasOffset(next.offset);
+    setCanvasZoom(next.zoom);
   };
 
   return (
@@ -245,29 +344,46 @@ export function Preview() {
             onPlayingChange={setMediaPlaying}
           />
         ) : (
-          <div style={{ ...timelineCanvasStyle, position: "relative" }}>
+          <div ref={canvasBoxRef} style={{ ...timelineCanvasStyle, position: "relative" }}>
             {timelineHasContent ? (
               <>
                 <TimelinePlayback timeline={timeline} fps={fps} />
                 <TimelineRustOverlay />
+                {/* Below-fit canvas outline (upstream PreviewContainerView.swift:
+                    44-47: Rectangle stroke white @ Opacity.moderate=0.25 when
+                    canvasZoom < 1.0, else invisible). pointer-events:none so it
+                    never intercepts overlay drags. */}
+                {canvasZoom < 1.0 && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      border: `1px solid ${CANVAS_OUTLINE_COLOR}`,
+                      pointerEvents: "none",
+                      zIndex: 4,
+                    }}
+                  />
+                )}
                 {/* Mutually exclusive per `PreviewContainerView.swift:37-41`: while
                     crop-editing is active, CropOverlay replaces TransformOverlay
                     entirely (even if no clip resolves for it — matching upstream's
-                    unconditional `if editor.cropEditingActive` swap). */}
+                    unconditional `if editor.cropEditingActive` swap). Overlays get
+                    the SCALED canvas box (fittedCanvas × canvasZoom) so their
+                    placement + pointer math track the zoomed canvas (invariant). */}
                 {cropEditingActive
                   ? cropClip &&
-                    fittedCanvas && (
+                    scaledCanvas && (
                       <CropOverlay
                         clip={cropClip}
-                        canvasPx={fittedCanvas}
+                        canvasPx={scaledCanvas}
                         sourcePixelAspect={cropSourcePixelAspect}
                       />
                     )
                   : transformClip &&
-                    fittedCanvas && (
+                    scaledCanvas && (
                       <TransformOverlay
                         clip={transformClip}
-                        canvasPx={fittedCanvas}
+                        canvasPx={scaledCanvas}
                         mediaAspect={transformMediaAspect}
                       />
                     )}
@@ -650,16 +766,208 @@ function Badge({ children }: { children: React.ReactNode }) {
   );
 }
 
+interface BadgeMenuOption {
+  key: string;
+  label: string;
+  active: boolean;
+  onSelect: () => void;
+}
+
+/**
+ * Compact borderless badge that opens a popup menu — the port of upstream's
+ * `settingsMenuButton` (`.menuStyle(.borderlessButton)`,
+ * PreviewContainerView.swift:253-268). Keeps the Badge's compact look for the
+ * trigger and reuses the app Dropdown's raised-popup + checked-row styling for
+ * the menu. Closes on outside click / Escape.
+ */
+function BadgeMenu({
+  label,
+  ariaLabel,
+  options,
+}: {
+  label: string;
+  ariaLabel: string;
+  options: BadgeMenuOption[];
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button
+        type="button"
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="hover-area tabular"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 2,
+          height: "var(--icon-md-lg)",
+          padding: "0 var(--space-sm)",
+          borderRadius: "var(--radius-xs-sm)",
+          background: "transparent",
+          border: "none",
+          color: "var(--text-secondary)",
+          fontSize: "var(--fs-xxs)",
+          fontWeight: "var(--fw-bold)",
+          cursor: "pointer",
+        }}
+      >
+        <span>{label}</span>
+        <span style={{ display: "inline-flex", opacity: 0.6 }}>
+          <Icon icon={ChevronDown} size={10} />
+        </span>
+      </button>
+
+      {open && (
+        <div
+          role="listbox"
+          style={{
+            position: "absolute",
+            bottom: "calc(100% + var(--space-xs))",
+            right: 0,
+            minWidth: 96,
+            padding: "var(--space-xxs)",
+            background: "var(--bg-raised)",
+            border: "var(--bw-thin) solid var(--border-primary)",
+            borderRadius: "var(--radius-md)",
+            boxShadow: "var(--shadow-lg)",
+            zIndex: 50,
+            display: "flex",
+            flexDirection: "column",
+            gap: 1,
+          }}
+        >
+          {options.map((opt) => (
+            <button
+              key={opt.key}
+              type="button"
+              role="option"
+              aria-selected={opt.active}
+              onClick={() => {
+                opt.onSelect();
+                setOpen(false);
+              }}
+              className="hover-area"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "var(--space-sm)",
+                height: 26,
+                padding: "0 var(--space-sm)",
+                borderRadius: "var(--radius-xs-sm)",
+                background: opt.active ? "var(--bg-prominent)" : "transparent",
+                color: opt.active ? "var(--text-primary)" : "var(--text-secondary)",
+                fontSize: "var(--fs-sm)",
+                fontWeight: "var(--fw-medium)",
+                textAlign: "left",
+                cursor: "pointer",
+              }}
+            >
+              <span style={{ width: 12, display: "inline-flex", justifyContent: "center", flex: "0 0 auto" }}>
+                {opt.active && <Icon icon={Check} size={11} />}
+              </span>
+              <span style={{ flex: 1 }}>{opt.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Interactive project-setting badges (Items 1 + 2). Aspect applies an
+ * AspectPreset via SetTimelineSettings (changes timeline W/H). Quality selects a
+ * preview render quality (short-edge cap, uiStore.previewQualityShortEdge — does
+ * NOT change timeline dims). Zoom sets the canvas zoom preset (resetting the pan
+ * offset, upstream zoomMenu PreviewContainerView.swift:209-224). FPS stays a
+ * read-only badge (the FPS menu is out of scope for this pass). Mirrors
+ * upstream's `projectSettingsGroup` (:131-154).
+ */
 function ProjectSettingsBadges({ fps, width, height }: { fps: number; width: number; height: number }) {
   const t = useT();
+  const canvasZoom = useEditorUiStore((s) => s.canvasZoom);
+  const setCanvasZoom = useEditorUiStore((s) => s.setCanvasZoom);
+  const setCanvasOffset = useEditorUiStore((s) => s.setCanvasOffset);
+  const previewQualityShortEdge = useEditorUiStore((s) => s.previewQualityShortEdge);
+  const setPreviewQualityShortEdge = useEditorUiStore((s) => s.setPreviewQualityShortEdge);
+
   const g = gcd(width, height) || 1;
-  const quality = height >= 2160 ? "4K" : height >= 1440 ? "2K" : height >= 1080 ? "FHD" : "HD";
+
+  const applyZoom = (preset: ZoomPreset) => {
+    // Upstream zoomMenu resets offset to zero, then sets zoom
+    // (PreviewContainerView.swift:212-213).
+    setCanvasOffset({ width: 0, height: 0 });
+    setCanvasZoom(preset.value);
+  };
+
+  const applyAspect = (preset: AspectPreset) => {
+    void setTimelineSettings(fps, preset.width, preset.height);
+  };
+
+  const applyQuality = (preset: QualityPreset) => {
+    // Toggle off if re-picking the active one (back to backend default cap);
+    // otherwise store the chosen short edge.
+    setPreviewQualityShortEdge(previewQualityShortEdge === preset.shortEdge ? null : preset.shortEdge);
+  };
+
   return (
     <div style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)" }}>
-      <Badge>{`${width / g}:${height / g}`}</Badge>
+      <BadgeMenu
+        label={`${width / g}:${height / g}`}
+        ariaLabel={t("preview.aspectRatio")}
+        options={ASPECT_PRESETS.map((p) => ({
+          key: p.label,
+          label: p.label,
+          active: isAspectPresetActive(p, width, height),
+          onSelect: () => applyAspect(p),
+        }))}
+      />
       <Badge>{fps}</Badge>
-      <Badge>{quality}</Badge>
-      <Badge>{t("preview.fit")}</Badge>
+      <BadgeMenu
+        label={qualityBadgeLabel(width, height)}
+        ariaLabel={t("preview.quality")}
+        options={QUALITY_PRESETS.map((p) => ({
+          key: p.label,
+          label: p.label,
+          // Active when it matches the timeline's native short edge OR the
+          // chosen preview-quality cap.
+          active:
+            previewQualityShortEdge === p.shortEdge ||
+            (previewQualityShortEdge === null && isQualityPresetActive(p, width, height)),
+          onSelect: () => applyQuality(p),
+        }))}
+      />
+      <BadgeMenu
+        label={zoomBadgeLabel(canvasZoom)}
+        ariaLabel={t("preview.canvasZoom")}
+        options={ZOOM_PRESETS.map((p) => ({
+          key: p.label,
+          label: p.label,
+          active: isZoomPresetActive(p, canvasZoom),
+          onSelect: () => applyZoom(p),
+        }))}
+      />
     </div>
   );
 }

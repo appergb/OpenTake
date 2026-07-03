@@ -2,6 +2,14 @@ import type { CSSProperties } from "react";
 import { cropAt, opacityAt, rotationAt, sizeAt, topLeftAt } from "../../lib/clip";
 import type { Clip } from "../../lib/types";
 
+/** White @ AppTheme.Opacity.moderate=0.25 — the below-fit canvas outline stroke
+ *  (PreviewContainerView.swift:44-47). */
+export const CANVAS_OUTLINE_COLOR = "rgba(255,255,255,0.25)";
+
+/** Pink center-guide line: Color(r:1.0,g:0.2,b:0.6) @ Opacity.prominent=0.80
+ *  (TransformOverlayView.swift:72). Shared by TransformOverlay. */
+export const CENTER_GUIDE_COLOR = "rgba(255,51,153,0.8)";
+
 export function timelinePreviewCanvasStyle(width: number, height: number): CSSProperties {
   return {
     position: "relative",

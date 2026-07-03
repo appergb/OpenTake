@@ -391,6 +391,9 @@ const zh: Dict = {
 
   // Preview
   "preview.fit": "适应",
+  "preview.aspectRatio": "画幅比例",
+  "preview.quality": "预览画质",
+  "preview.canvasZoom": "画布缩放",
   "preview.timelineTab": "时间线",
   "preview.noMedia": "暂无媒体",
   "preview.unavailable": "无法预览此文件",
@@ -903,6 +906,9 @@ const en: Dict = {
   "swapMedia.noCandidates": "No compatible media to swap",
 
   "preview.fit": "Fit",
+  "preview.aspectRatio": "Aspect Ratio",
+  "preview.quality": "Quality",
+  "preview.canvasZoom": "Canvas Zoom",
   "preview.timelineTab": "Timeline",
   "preview.noMedia": "No media",
   "preview.unavailable": "Can't preview this file",

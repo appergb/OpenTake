@@ -450,6 +450,8 @@ pub enum EditRequest {
     SwapMedia { clip_id: String, media_ref: String },
     #[serde(rename_all = "camelCase")]
     ResetTransform { clip_ids: Vec<String> },
+    #[serde(rename_all = "camelCase")]
+    SetTimelineSettings { fps: i32, width: i32, height: i32 },
 }
 
 impl EditRequest {
@@ -640,6 +642,9 @@ impl EditRequest {
                 EditCommand::SwapMedia { clip_id, media_ref }
             }
             EditRequest::ResetTransform { clip_ids } => EditCommand::ResetTransform { clip_ids },
+            EditRequest::SetTimelineSettings { fps, width, height } => {
+                EditCommand::SetTimelineSettings { fps, width, height }
+            }
         })
     }
 }

@@ -602,6 +602,13 @@ export async function preloadMedia(mediaRef: string): Promise<void> {
 // and returns a PNG data URL the Preview paints onto a <canvas>. `maxSize` caps
 // the longest side (px); omit for the backend default. Outside Tauri there is no
 // GPU/core, so this returns null and the Preview keeps its placeholder.
+//
+// To honor the Preview Quality badge, callers pass
+// `previewQualityMaxSize(previewQualityShortEdge, timeline.width, timeline.height)`
+// (lib/previewPresets) as `maxSize`. NOTE (honest scope): the interactive
+// timeline preview today is the DOM `<video>` path (TimelinePlaybackLayer),
+// which cannot decode-downscale, so the Quality cap only affects composite-based
+// paths (this command + capture) and the flagged streaming engine.
 
 /** One composited timeline frame: a PNG data URL plus its pixel size. */
 export interface CompositeFrame {

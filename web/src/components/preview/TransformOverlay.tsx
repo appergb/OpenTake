@@ -28,13 +28,15 @@ import { useEffect, useRef, useState } from "react";
 import { useEditorUiStore } from "../../store/uiStore";
 import * as edit from "../../store/editActions";
 import {
-  moveTransformByDelta,
+  moveTransformByDeltaWithSnap,
   resizeTransformFromCorner,
   rotateDeltaIntoLocalFrame,
   sampledTransform,
+  type CenterSnap,
   type TransformResizeCorner,
 } from "../../lib/clip";
 import { SNAP, SPACE } from "../../lib/theme";
+import { CENTER_GUIDE_COLOR } from "./previewLayerStyles";
 import type { Clip, Transform } from "../../lib/types";
 
 /** AppTheme.Spacing.smMd (TransformOverlayView.swift:6). */
@@ -75,12 +77,17 @@ export function TransformOverlay({
   // composited frame does, so the box always aligns with the rendered clip.
   const restTransform = sampledTransform(clip, activeFrame);
   const [dragTransform, setDragTransform] = useState<Transform | null>(null);
+  // Per-axis canvas-center snap flags for the current move-drag (Item 3). Only a
+  // move sets these; a resize/idle leaves them false, so the guides never show
+  // outside a move that lands on center. Drives the pink guide lines below.
+  const [dragSnap, setDragSnap] = useState<CenterSnap>({ x: false, y: false });
   const dragCleanupRef = useRef<(() => void) | null>(null);
 
   // Selection moved to a different clip mid-drag (e.g. clicked elsewhere) —
   // don't let a stale local preview from the PREVIOUS clip leak onto this one.
   useEffect(() => {
     setDragTransform(null);
+    setDragSnap({ x: false, y: false });
   }, [clip.id]);
 
   // Unmount safety: remove any active drag's window listeners.
@@ -99,19 +106,25 @@ export function TransformOverlay({
   // math difference; the listener lifecycle is identical for both.
   const beginDrag = (
     e: React.PointerEvent,
-    computeNext: (dxPx: number, dyPx: number) => Transform,
+    // Returns the next transform plus optional per-axis center-snap flags (only
+    // the move drag reports snap; a resize returns undefined and the guides stay
+    // hidden). Computed once per move so both states share one calculation.
+    computeNext: (dxPx: number, dyPx: number) => { transform: Transform; snap?: CenterSnap },
   ) => {
     e.stopPropagation();
     e.preventDefault();
     const startClientX = e.clientX;
     const startClientY = e.clientY;
     const onMove = (ev: PointerEvent) => {
-      setDragTransform(computeNext(ev.clientX - startClientX, ev.clientY - startClientY));
+      const { transform, snap } = computeNext(ev.clientX - startClientX, ev.clientY - startClientY);
+      setDragTransform(transform);
+      if (snap) setDragSnap(snap);
     };
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       dragCleanupRef.current = null;
+      setDragSnap({ x: false, y: false });
       setDragTransform((cur) => {
         if (cur) void edit.setClipProperties([clip.id], { transform: cur });
         return null;
@@ -128,8 +141,11 @@ export function TransformOverlay({
   const handleMoveDown = (e: React.PointerEvent) => {
     const start = restTransform;
     const rotated = start.rotation !== 0;
+    // `moveTransformByDeltaWithSnap` returns the landed transform + the per-axis
+    // center-snap flags (upstream `movedTransform`'s `(x, y)` return) — the box
+    // preview uses the transform, the guides use the flags.
     beginDrag(e, (dx, dy) =>
-      moveTransformByDelta(start, { width: dx, height: dy }, canvasPx, rotated, SNAP.thresholdPixels),
+      moveTransformByDeltaWithSnap(start, { width: dx, height: dy }, canvasPx, rotated, SNAP.thresholdPixels),
     );
   };
 
@@ -141,15 +157,19 @@ export function TransformOverlay({
       // delta must be rotated into the box's own local frame first — see
       // rotateDeltaIntoLocalFrame's doc comment for why move doesn't need this.
       const local = rotateDeltaIntoLocalFrame({ width: dx, height: dy }, start.rotation);
-      return resizeTransformFromCorner(
-        start,
-        corner,
-        local,
-        canvasPx,
-        mediaAspect,
-        rotated,
-        SNAP.thresholdPixels,
-      );
+      // A resize reports no center-snap (upstream draws the center guides only
+      // for the move gesture), so `snap` is omitted.
+      return {
+        transform: resizeTransformFromCorner(
+          start,
+          corner,
+          local,
+          canvasPx,
+          mediaAspect,
+          rotated,
+          SNAP.thresholdPixels,
+        ),
+      };
     });
   };
 
@@ -162,53 +182,97 @@ export function TransformOverlay({
     return null;
   }
 
+  // Guides are drawn (only while a move-drag snaps the clip center to the canvas
+  // center) as SIBLINGS of the box, positioned over the whole canvas — they
+  // belong to the canvas, not the rotated/translated clip box, so they can't be
+  // the box's children (TransformOverlayView.swift:46-59). Shown only during a
+  // drag: gate on `dragTransform` so an idle/resting selection never shows them.
+  const dragging = dragTransform !== null;
   return (
-    <div
-      data-testid="transform-overlay"
-      style={{
-        position: "absolute",
-        left: display.centerX * canvasPx.width,
-        top: display.centerY * canvasPx.height,
-        width: display.width * canvasPx.width,
-        height: display.height * canvasPx.height,
-        // translate first centers the (still-unrotated) box on the point,
-        // then rotate turns it around its own center — same idiom already
-        // used for keyframe diamonds (KeyframesLaneRow.tsx).
-        transform: `translate(-50%, -50%) rotate(${display.rotation}deg)`,
-        pointerEvents: "none",
-        zIndex: 3,
-      }}
-    >
-      {/* Move-drag surface + visual outline in one element (upstream's box
-          border, TransformOverlayView.swift:30-31). */}
+    <>
       <div
-        onPointerDown={handleMoveDown}
+        data-testid="transform-overlay"
         style={{
           position: "absolute",
-          inset: 0,
-          border: `${BORDER_WIDTH}px solid ${BORDER_COLOR}`,
-          cursor: "move",
-          pointerEvents: "auto",
+          left: display.centerX * canvasPx.width,
+          top: display.centerY * canvasPx.height,
+          width: display.width * canvasPx.width,
+          height: display.height * canvasPx.height,
+          // translate first centers the (still-unrotated) box on the point,
+          // then rotate turns it around its own center — same idiom already
+          // used for keyframe diamonds (KeyframesLaneRow.tsx).
+          transform: `translate(-50%, -50%) rotate(${display.rotation}deg)`,
+          pointerEvents: "none",
+          zIndex: 3,
         }}
-      />
-      {CORNERS.map((corner) => (
+      >
+        {/* Move-drag surface + visual outline in one element (upstream's box
+            border, TransformOverlayView.swift:30-31). */}
         <div
-          key={corner}
-          onPointerDown={(e) => handleResizeDown(e, corner)}
+          onPointerDown={handleMoveDown}
           style={{
             position: "absolute",
-            left: CORNER_POSITION[corner].left,
-            top: CORNER_POSITION[corner].top,
-            width: HANDLE_SIZE,
-            height: HANDLE_SIZE,
-            marginLeft: -HANDLE_SIZE / 2,
-            marginTop: -HANDLE_SIZE / 2,
-            background: BORDER_COLOR,
-            cursor: CORNER_CURSOR[corner],
+            inset: 0,
+            border: `${BORDER_WIDTH}px solid ${BORDER_COLOR}`,
+            cursor: "move",
             pointerEvents: "auto",
           }}
         />
-      ))}
-    </div>
+        {CORNERS.map((corner) => (
+          <div
+            key={corner}
+            onPointerDown={(e) => handleResizeDown(e, corner)}
+            style={{
+              position: "absolute",
+              left: CORNER_POSITION[corner].left,
+              top: CORNER_POSITION[corner].top,
+              width: HANDLE_SIZE,
+              height: HANDLE_SIZE,
+              marginLeft: -HANDLE_SIZE / 2,
+              marginTop: -HANDLE_SIZE / 2,
+              background: BORDER_COLOR,
+              cursor: CORNER_CURSOR[corner],
+              pointerEvents: "auto",
+            }}
+          />
+        ))}
+      </div>
+
+      {/* Pink center guide lines over the canvas center (TransformOverlayView
+          .swift:46-59). Vertical line when the X center snaps, horizontal when
+          the Y center snaps; each spans the full canvas. pointer-events:none. */}
+      {dragging && dragSnap.x && (
+        <div
+          data-testid="transform-guide-x"
+          style={{
+            position: "absolute",
+            left: canvasPx.width / 2,
+            top: 0,
+            width: 1,
+            height: canvasPx.height,
+            marginLeft: -0.5,
+            background: CENTER_GUIDE_COLOR,
+            pointerEvents: "none",
+            zIndex: 4,
+          }}
+        />
+      )}
+      {dragging && dragSnap.y && (
+        <div
+          data-testid="transform-guide-y"
+          style={{
+            position: "absolute",
+            left: 0,
+            top: canvasPx.height / 2,
+            width: canvasPx.width,
+            height: 1,
+            marginTop: -0.5,
+            background: CENTER_GUIDE_COLOR,
+            pointerEvents: "none",
+            zIndex: 4,
+          }}
+        />
+      )}
+    </>
   );
 }

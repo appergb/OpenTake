@@ -8,6 +8,7 @@ import {
   liveVolumeKfLinearAt,
   mediaCanvasAspect,
   moveTransformByDelta,
+  moveTransformByDeltaWithSnap,
   opacityAt,
   rawOpacityAt,
   resizeTransformKeepingSourceAspect,
@@ -332,6 +333,59 @@ describe("moveTransformByDelta (upstream TransformOverlayView.movedTransform por
 
   it("returns start unchanged for a degenerate (zero-size) canvas", () => {
     expect(moveTransformByDelta(start, { width: 50, height: 50 }, { width: 0, height: 0 }, false)).toBe(start);
+  });
+});
+
+describe("moveTransformByDeltaWithSnap (center-guide flags, Item 3)", () => {
+  const canvas = { width: 1000, height: 1000 };
+  const start: Transform = {
+    centerX: 0.5,
+    centerY: 0.5,
+    width: 0.2,
+    height: 0.2,
+    rotation: 0,
+    flipHorizontal: false,
+    flipVertical: false,
+  };
+
+  it("reports both axes snapped when the center lands on the canvas center", () => {
+    const nudged = { ...start, centerX: 0.503, centerY: 0.497 };
+    const { transform, snap } = moveTransformByDeltaWithSnap(nudged, { width: 0, height: 0 }, canvas, false, 8);
+    expect(transform.centerX).toBe(0.5);
+    expect(transform.centerY).toBe(0.5);
+    expect(snap).toEqual({ x: true, y: true });
+  });
+
+  it("reports only the snapped axis when only one is within threshold", () => {
+    // centerX far from 0.5 (no snap), centerY within threshold (snap).
+    const nudged = { ...start, centerX: 0.7, centerY: 0.4995 };
+    const { snap } = moveTransformByDeltaWithSnap(nudged, { width: 0, height: 0 }, canvas, false, 8);
+    expect(snap).toEqual({ x: false, y: true });
+  });
+
+  it("reports no snap when the center is outside threshold on both axes", () => {
+    const nudged = { ...start, centerX: 0.7, centerY: 0.3 };
+    const { snap } = moveTransformByDeltaWithSnap(nudged, { width: 0, height: 0 }, canvas, false, 8);
+    expect(snap).toEqual({ x: false, y: false });
+  });
+
+  it("never snaps while rotated", () => {
+    const rotatedStart: Transform = { ...start, rotation: 30, centerX: 0.5005 };
+    const { transform, snap } = moveTransformByDeltaWithSnap(rotatedStart, { width: 0, height: 0 }, canvas, true, 8);
+    expect(transform.centerX).toBe(0.5005);
+    expect(snap).toEqual({ x: false, y: false });
+  });
+
+  it("never snaps when the threshold is disabled (0)", () => {
+    const nudged = { ...start, centerX: 0.5001 };
+    const { snap } = moveTransformByDeltaWithSnap(nudged, { width: 0, height: 0 }, canvas, false);
+    expect(snap).toEqual({ x: false, y: false });
+  });
+
+  it("returns start + no snap for a degenerate canvas", () => {
+    const { transform, snap } = moveTransformByDeltaWithSnap(start, { width: 5, height: 5 }, { width: 0, height: 0 }, false, 8);
+    expect(transform).toBe(start);
+    expect(snap).toEqual({ x: false, y: false });
   });
 });
 
