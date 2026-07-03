@@ -100,6 +100,14 @@ interface UiState {
   // Preview canvas
   canvasZoom: number;
   canvasOffset: { width: number; height: number };
+  /** Preview render quality (short-edge px) fed to the composite/capture/stream
+   *  paths that accept a `max_size` cap. `null` = backend default. Set by the
+   *  Preview Quality badge menu (upstream QualityPreset drives resolution, but
+   *  OpenTake keeps the timeline dims authoritative and treats this purely as a
+   *  preview-render cap; see `previewQualityMaxSize`). Does NOT change the
+   *  timeline W/H. */
+  previewQualityShortEdge: number | null;
+  setPreviewQualityShortEdge: (shortEdge: number | null) => void;
   /** Media asset previewed in the canvas (clicked in the media panel). `null`
    *  shows the timeline composite. Mirrors upstream `openPreviewTab(mediaAsset)`. */
   previewMediaId: string | null;
@@ -232,6 +240,7 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
 
   canvasZoom: 1,
   canvasOffset: { width: 0, height: 0 },
+  previewQualityShortEdge: null,
   previewMediaId: null,
 
   focusedPanel: "timeline",
@@ -341,6 +350,7 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   setCanvasZoom: (canvasZoom) =>
     set({ canvasZoom, canvasOffset: canvasZoom <= 1 ? { width: 0, height: 0 } : get().canvasOffset }),
   setCanvasOffset: (canvasOffset) => set({ canvasOffset }),
+  setPreviewQualityShortEdge: (previewQualityShortEdge) => set({ previewQualityShortEdge }),
 
   focusPanel: (panel) => {
     // Panel-click side effects (EditorWindowController.swift:188-189):

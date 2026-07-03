@@ -352,7 +352,8 @@ export type EditRequest =
   | { type: "deleteMedia"; assetIds: string[] }
   | { type: "deleteFolder"; folderIds: string[] }
   | { type: "swapMedia"; clipId: string; mediaRef: string }
-  | { type: "resetTransform"; clipIds: string[] };
+  | { type: "resetTransform"; clipIds: string[] }
+  | { type: "setTimelineSettings"; fps: number; width: number; height: number };
 
 export interface TextEntryReq {
   trackIndex: number;

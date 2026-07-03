@@ -574,6 +574,22 @@ export function createFallbackStore() {
         case "swapMedia": {
           return result(false, "Swap Media", []);
         }
+        case "setTimelineSettings": {
+          // Browser shell: reflect the new canvas dims + fps so the preview
+          // aspect updates. The FPS clip-frame rescale is a Rust concern (the
+          // shell isn't the editing source of truth), so it's omitted here.
+          const same =
+            timeline.fps === cmd.fps &&
+            timeline.width === cmd.width &&
+            timeline.height === cmd.height &&
+            timeline.settingsConfigured;
+          if (same) return result(false, "Change Project Settings", []);
+          timeline.fps = cmd.fps;
+          timeline.width = cmd.width;
+          timeline.height = cmd.height;
+          timeline.settingsConfigured = true;
+          return result(true, "Change Project Settings", []);
+        }
         case "renameMedia":
         case "renameFolder":
         case "deleteMedia":

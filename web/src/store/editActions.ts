@@ -167,6 +167,13 @@ export async function resetTransform(clipIds: string[]) {
   await applyAndRefresh({ type: "resetTransform", clipIds });
 }
 
+/** Change project timeline settings (FPS / resolution) — the Preview Aspect and
+ *  Quality badge menus (upstream `applyTimelineSettings`). When FPS changes the
+ *  Rust engine rescales all clip frames; width/height set the canvas. */
+export async function setTimelineSettings(fps: number, width: number, height: number) {
+  await applyAndRefresh({ type: "setTimelineSettings", fps, width, height });
+}
+
 export async function linkClips(clipIds: string[]) {
   await applyAndRefresh({ type: "link", clipIds });
 }

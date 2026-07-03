@@ -132,4 +132,17 @@ describe("TransformOverlay", () => {
 
     expect(html).toBe("");
   });
+
+  it("does not draw center guides at rest (no active drag)", () => {
+    // Guides only appear while a move-drag snaps to center; a resting selection
+    // (no pointer events fired in static markup) must show neither guide. The
+    // snap flags themselves are unit-tested in clip.test.ts
+    // (moveTransformByDeltaWithSnap).
+    const html = renderToStaticMarkup(
+      <TransformOverlay clip={clip()} canvasPx={{ width: 1000, height: 500 }} mediaAspect={null} />,
+    );
+
+    expect(html).not.toContain('data-testid="transform-guide-x"');
+    expect(html).not.toContain('data-testid="transform-guide-y"');
+  });
 });
