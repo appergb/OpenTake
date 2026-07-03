@@ -10,6 +10,8 @@
 
 import { useEffect, useState } from "react";
 import {
+  ChevronLeft,
+  ChevronRight,
   CircleDashed,
   Crop as CropIcon,
   Diamond,
@@ -51,20 +53,31 @@ import {
   scaleKeyframeValue,
   volumeKeyframeValue,
 } from "../../lib/keyframeValue";
+import {
+  clipContainsFrame,
+  hasKeyframeAt,
+  nextKeyframeFrame,
+  previousKeyframeFrame,
+} from "../../lib/keyframeNav";
 import { CROP_ASPECT_LOCKS, cropForPreset, type CropAspectLock } from "../../lib/cropOverlay";
 import { FS, RADIUS, SPACE } from "../../lib/theme";
 import { useT, type TFunction } from "../../i18n";
 import type {
   ChromaKey,
   Clip,
+  ClipType,
   ColorGrade,
   Crop,
+  GenerationInput,
   Interpolation,
+  KeyframeProperty,
   Mask,
   MaskShape,
+  MediaItem,
   Rgb,
   Timeline,
 } from "../../lib/types";
+import { formatFileSize, formatMediaDuration } from "../../lib/mediaFormat";
 
 function gcd(a: number, b: number): number {
   return b === 0 ? a : gcd(b, a % b);
@@ -78,12 +91,29 @@ export function Inspector() {
   const setInspectorTab = useEditorUiStore((s) => s.setInspectorTab);
   const keyframesPanelVisible = useEditorUiStore((s) => s.keyframesPanelVisible);
   const toggleKeyframesPanel = useEditorUiStore((s) => s.toggleKeyframesPanel);
+  // The media-panel asset currently shown in the preview is upstream's
+  // "selected media asset" for the Source inspector (upstream `selectMediaAsset`
+  // opens the asset's preview tab AND selects it; OpenTake's single active
+  // media asset is `previewMediaId`). Resolved from the catalog mirror.
+  const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
+  const mediaAsset = useMediaStore((s) =>
+    previewMediaId ? s.items.find((m) => m.id === previewMediaId) ?? null : null,
+  );
 
   const selectedClips = collectSelected(timeline, selectedClipIds);
   const isMarquee = selectedClips.length > 1;
   const single = selectedClips.length === 1 ? selectedClips[0] : null;
+  // State priority mirrors upstream `InspectorView.body` (:49-56):
+  // marquee > clip(visual/audio) > mediaAsset > projectMetadata. Clip selection
+  // is checked before the media asset, so a selected clip always wins.
+  const showMediaAsset = !isMarquee && !single && mediaAsset !== null;
 
-  const title = single || isMarquee ? t("inspector.title") : t("inspector.timeline");
+  const title =
+    single || isMarquee
+      ? t("inspector.title")
+      : showMediaAsset
+        ? t("inspector.source")
+        : t("inspector.timeline");
   const TitleIcon = single || isMarquee ? SlidersHorizontal : Info;
 
   return (
@@ -110,6 +140,8 @@ export function Inspector() {
             onToggleKeyframes={toggleKeyframesPanel}
             t={t}
           />
+        ) : showMediaAsset && mediaAsset ? (
+          <MediaAssetSource asset={mediaAsset} t={t} />
         ) : (
           <ProjectMetadata timeline={timeline} t={t} />
         )}
@@ -212,6 +244,85 @@ function AnimatedHint({ t }: { t: TFunction }) {
       }}
     >
       {t("inspector.animatedHint")}
+    </span>
+  );
+}
+
+/** Per-row keyframe cluster (SPEC §6.3; 1:1 port of upstream
+ *  `InspectorView.keyframeControls` / `keyframeNavButton`,
+ *  Inspector/InspectorView.swift:511-563). Left/right chevrons jump the playhead
+ *  to the neighboring keyframe (disabled when there is none on that side); the
+ *  center diamond is FILLED when a keyframe sits at the playhead and toggles it
+ *  (stamp when empty, remove when filled). The diamond is disabled — and dimmed —
+ *  while the playhead is outside the clip's span, matching upstream's `inRange`
+ *  gate (`editor.clipFor(id:)?.contains(timelineFrame:)`). All frames are
+ *  absolute; the pure helpers in `../../lib/keyframeNav` handle the clip-relative
+ *  storage conversion. */
+function KeyframeRowControls({
+  clip,
+  property,
+  activeFrame,
+  t,
+}: {
+  clip: Clip;
+  property: KeyframeProperty;
+  activeFrame: number;
+  t: TFunction;
+}) {
+  const setActiveFrame = useEditorUiStore((s) => s.setActiveFrame);
+  const inRange = clipContainsFrame(clip, activeFrame);
+  const onKeyframe = hasKeyframeAt(clip, property, activeFrame);
+  const prev = previousKeyframeFrame(clip, property, activeFrame);
+  const next = nextKeyframeFrame(clip, property, activeFrame);
+
+  const toggle = () => {
+    if (!inRange) return;
+    if (onKeyframe) {
+      void edit.removeKeyframe(clip.id, property, activeFrame);
+    } else {
+      // Stamp the clip's current sampled value at the playhead (upstream's
+      // `stampKeyframe`, which samples the property at `frame`).
+      void edit.stampKeyframe(clip.id, property, activeFrame);
+    }
+  };
+
+  const diamondTitle = !inRange
+    ? t("inspector.keyframe.outsideClip")
+    : onKeyframe
+      ? t("inspector.keyframe.remove")
+      : t("inspector.keyframe.add");
+
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center" }}>
+      <HoverButton
+        title={t("inspector.keyframe.prev")}
+        disabled={prev === null}
+        onClick={() => prev !== null && setActiveFrame(prev)}
+        size={18}
+      >
+        <Icon icon={ChevronLeft} size={12} />
+      </HoverButton>
+      <HoverButton title={diamondTitle} disabled={!inRange} onClick={toggle} size={18}>
+        {/* currentColor drives both stroke and (when set) fill; filled = a
+            keyframe sits at the playhead, in the timecode accent (upstream
+            `diamond.fill` + `timecodeColor`). */}
+        <span
+          style={{
+            display: "inline-flex",
+            color: onKeyframe ? "var(--accent-timecode)" : "var(--text-tertiary)",
+          }}
+        >
+          <Icon icon={Diamond} size={11} fill={onKeyframe ? "currentColor" : "none"} />
+        </span>
+      </HoverButton>
+      <HoverButton
+        title={t("inspector.keyframe.next")}
+        disabled={next === null}
+        onClick={() => next !== null && setActiveFrame(next)}
+        size={18}
+      >
+        <Icon icon={ChevronRight} size={12} />
+      </HoverButton>
     </span>
   );
 }
@@ -377,6 +488,7 @@ function ClipInspector({
                 }
               />
               {volumeAnimated && <AnimatedHint t={t} />}
+              <KeyframeRowControls clip={clip} property="volume" activeFrame={activeFrame} t={t} />
             </Row>
             <FadeSection clip={clip} commit={commit} t={t} />
           </section>
@@ -416,6 +528,7 @@ function ClipInspector({
                   }
                 />
                 {scaleAnimated && <AnimatedHint t={t} />}
+                <KeyframeRowControls clip={clip} property="scale" activeFrame={activeFrame} t={t} />
               </Row>
               <Row label={t("inspector.field.rotation")}>
                 <ScrubbableNumberField
@@ -433,6 +546,7 @@ function ClipInspector({
                   }
                 />
                 {rotationAnimated && <AnimatedHint t={t} />}
+                <KeyframeRowControls clip={clip} property="rotation" activeFrame={activeFrame} t={t} />
               </Row>
               <Row label={t("inspector.field.opacity")}>
                 <ScrubbableNumberField
@@ -455,6 +569,7 @@ function ClipInspector({
                   }
                 />
                 {opacityAnimated && <AnimatedHint t={t} />}
+                <KeyframeRowControls clip={clip} property="opacity" activeFrame={activeFrame} t={t} />
               </Row>
             </section>
 
@@ -574,6 +689,7 @@ function PositionSection({
           }
         />
         {animated && <AnimatedHint t={t} />}
+        <KeyframeRowControls clip={clip} property="position" activeFrame={activeFrame} t={t} />
       </Row>
       <Row label={t("inspector.field.positionY")}>
         <ScrubbableNumberField
@@ -710,6 +826,7 @@ function CropSection({
             </option>
           ))}
         </select>
+        <KeyframeRowControls clip={clip} property="crop" activeFrame={activeFrame} t={t} />
       </Row>
       {renderEdge(t("inspector.field.cropLeft"), "left", sampledCrop.left)}
       {renderEdge(t("inspector.field.cropTop"), "top", sampledCrop.top)}
@@ -1393,6 +1510,163 @@ function hexToRgb(hex: string): Rgb {
     g: ((parsed >> 8) & 0xff) / 255,
     b: (parsed & 0xff) / 255,
   };
+}
+
+// MARK: - Media-asset Source inspector (upstream `mediaAssetInspectorContent`
+// / `assetDetailsContent` / `fileSection`, InspectorView.swift:865-1006).
+
+const CLIP_TYPE_LABEL_KEY: Record<ClipType, string> = {
+  video: "clipType.video",
+  audio: "clipType.audio",
+  image: "clipType.image",
+  text: "clipType.text",
+  lottie: "clipType.lottie",
+};
+
+/** The "Source" inspector state shown when a media-panel asset is active (and no
+ *  clip is selected). Renders the identity header + File section always, and the
+ *  Generated / Prompt / References sections only when the asset carries a
+ *  `generationInput` (AI-generated). Today nothing populates `generationInput`
+ *  (generate_* is still stubbed), so those sections never render in practice —
+ *  the gating is 1:1 with upstream's `if let gen = asset.generationInput` and
+ *  lights up automatically once generation lands. */
+function MediaAssetSource({ asset, t }: { asset: MediaItem; t: TFunction }) {
+  const isAudio = asset.type === "audio";
+  const isImage = asset.type === "image";
+  const gen = asset.generationInput ?? null;
+  return (
+    <div
+      style={{
+        padding: "var(--space-lg)",
+        display: "flex",
+        flexDirection: "column",
+        gap: "var(--space-xl)",
+      }}
+    >
+      {/* Identity header: name (+ AI badge when generated). */}
+      <div style={{ display: "flex", alignItems: "baseline", gap: "var(--space-sm)" }}>
+        <span
+          style={{
+            minWidth: 0,
+            fontSize: "var(--fs-lg)",
+            fontWeight: "var(--fw-semibold)",
+            color: "var(--text-primary)",
+            overflowWrap: "anywhere",
+            userSelect: "text",
+          }}
+        >
+          {asset.name}
+        </span>
+        {gen && <AiBadge t={t} />}
+      </div>
+
+      {/* File section (upstream `fileSection`). Dimensions skipped for audio;
+          Duration skipped for stills; Size/Path shown when resolvable. */}
+      <section>
+        <SectionHeader label={t("inspector.source.file")} />
+        <MetaRow label={t("inspector.source.type")} value={t(CLIP_TYPE_LABEL_KEY[asset.type])} />
+        {!isAudio && asset.width != null && asset.height != null && (
+          <MetaRow
+            label={t("inspector.source.dimensions")}
+            value={`${asset.width} × ${asset.height}`}
+          />
+        )}
+        {asset.duration > 0 && !isImage && (
+          <MetaRow
+            label={t("inspector.source.duration")}
+            value={formatMediaDuration(asset.duration)}
+          />
+        )}
+        {asset.fileSize != null && (
+          <MetaRow label={t("inspector.source.size")} value={formatFileSize(asset.fileSize)} />
+        )}
+        {asset.path && <MetaRow label={t("inspector.source.path")} value={asset.path} />}
+      </section>
+
+      {gen && <GenerationSections gen={gen} t={t} />}
+    </div>
+  );
+}
+
+/** Small "AI" pill shown beside a generated asset's name (upstream `aiBadge`). */
+function AiBadge({ t }: { t: TFunction }) {
+  return (
+    <span
+      style={{
+        flex: "0 0 auto",
+        fontSize: "var(--fs-xxs)",
+        fontWeight: "var(--fw-bold)",
+        letterSpacing: "var(--tracking-wide)",
+        color: "var(--accent-primary)",
+        border: "var(--bw-thin) solid var(--border-primary)",
+        borderRadius: "var(--radius-sm)",
+        padding: "1px 6px",
+      }}
+    >
+      {t("inspector.source.aiBadge")}
+    </span>
+  );
+}
+
+/** Generated / Prompt / References sections for an AI-generated asset (upstream
+ *  `assetDetailsContent`'s `if let gen` block). References resolves reference
+ *  asset ids to library names (upstream renders a thumbnail strip; the name list
+ *  is the lightweight equivalent and only shows resolvable ids). */
+function GenerationSections({ gen, t }: { gen: GenerationInput; t: TFunction }) {
+  const referenceIds = [
+    ...(gen.imageURLAssetIds ?? []),
+    ...(gen.referenceImageAssetIds ?? []),
+    ...(gen.referenceVideoAssetIds ?? []),
+    ...(gen.referenceAudioAssetIds ?? []),
+  ];
+  const references = useMediaStore((s) =>
+    referenceIds
+      .map((id) => s.items.find((m) => m.id === id))
+      .filter((m): m is MediaItem => m != null),
+  );
+  return (
+    <>
+      {references.length > 0 && (
+        <section>
+          <SectionHeader label={t("inspector.source.references")} />
+          {references.map((ref) => (
+            <MetaRow key={ref.id} label={t(CLIP_TYPE_LABEL_KEY[ref.type])} value={ref.name} />
+          ))}
+        </section>
+      )}
+
+      <section>
+        <SectionHeader label={t("inspector.source.generated")} />
+        <MetaRow label={t("inspector.source.model")} value={gen.model} />
+        {gen.aspectRatio.length > 0 && (
+          <MetaRow label={t("inspector.source.aspectRatio")} value={gen.aspectRatio} />
+        )}
+        {gen.resolution && (
+          <MetaRow label={t("inspector.source.resolution")} value={gen.resolution} />
+        )}
+        {gen.duration > 0 && (
+          <MetaRow label={t("inspector.source.durationField")} value={`${gen.duration}s`} />
+        )}
+      </section>
+
+      {gen.prompt.length > 0 && (
+        <section>
+          <SectionHeader label={t("inspector.source.prompt")} />
+          <div
+            style={{
+              fontSize: "var(--fs-sm)",
+              color: "var(--text-secondary)",
+              whiteSpace: "pre-wrap",
+              overflowWrap: "anywhere",
+              userSelect: "text",
+            }}
+          >
+            {gen.prompt}
+          </div>
+        </section>
+      )}
+    </>
+  );
 }
 
 function ProjectMetadata({ timeline, t }: { timeline: Timeline; t: TFunction }) {

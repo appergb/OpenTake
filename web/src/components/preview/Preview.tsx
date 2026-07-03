@@ -18,7 +18,7 @@ import { HoverButton } from "../ui/HoverButton";
 import { Icon } from "../ui/Icon";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
-import { useMediaStore } from "../../store/mediaStore";
+import { useMediaStore, refreshMedia } from "../../store/mediaStore";
 import { formatTimecode, totalFrames } from "../../lib/geometry";
 import { snapFrameToEdge } from "../../lib/snap";
 import { maybeSnapFeedback } from "../../lib/haptic";
@@ -29,11 +29,10 @@ import { CropOverlay } from "./CropOverlay";
 import { aspectFitBox, timelinePreviewCanvasStyle } from "./previewLayerStyles";
 import { useT } from "../../i18n";
 import {
-  compositeFrame,
+  captureFrameToMedia,
   getPreviewEndpoint,
   isTauri,
   previewPoster,
-  type CompositeFrame,
 } from "../../lib/api";
 import { rustEngineEnabled } from "./rustEngine";
 import { shouldUseRustEngine } from "./timelinePlayback";
@@ -51,6 +50,7 @@ export function Preview() {
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
   const selectedClipIds = useEditorUiStore((s) => s.selectedClipIds);
   const pushToast = useEditorUiStore((s) => s.pushToast);
+  const mediaPanelCurrentFolderId = useEditorUiStore((s) => s.mediaPanelCurrentFolderId);
   const previewItem = useMediaStore((s) =>
     previewMediaId ? s.items.find((m) => m.id === previewMediaId) ?? null : null,
   );
@@ -165,16 +165,39 @@ export function Preview() {
     }
   };
 
-  const captureTimelineFrame = async () => {
-    if (previewing || !timelineHasContent) return;
-    const frame = Math.max(0, Math.floor(activeFrame));
+  // Whether the capture button is available: the timeline tab with content, or a
+  // single-clip VIDEO preview tab (upstream shows it on both —
+  // `isTimeline || activePreviewTab.clipType == .video`,
+  // PreviewContainerView.swift:95).
+  const canCaptureVideoTab = previewing && previewItem?.type === "video";
+  const canCapture = (timelineHasContent && !previewing) || canCaptureVideoTab;
+
+  // Capture the current frame INTO the media library as a new still (upstream
+  // `captureCurrentFrameToMedia`): composite the timeline (timeline tab) or decode
+  // the source asset's own frame (video tab), import it named "{nameBase} frame",
+  // place it in the current media folder, then refresh the panel and toast. This
+  // REPLACES the old PNG download — upstream imports, it does not save to disk.
+  const captureFrame = async () => {
+    if (!canCapture) return;
+    const onVideoTab = canCaptureVideoTab;
+    const frame = Math.max(0, Math.floor(onVideoTab ? activeShownFrame : activeFrame));
+    // nameBase: "Frame" on the timeline tab, the asset's name on the video tab.
+    const nameBase = onVideoTab ? (previewItem?.name ?? "Frame") : "Frame";
+    const sourceMediaId = onVideoTab ? (previewItem?.id ?? null) : null;
     try {
-      const image: CompositeFrame | null = await compositeFrame(frame, 0);
-      if (!image) {
+      const list = await captureFrameToMedia(
+        frame,
+        nameBase,
+        mediaPanelCurrentFolderId,
+        sourceMediaId,
+      );
+      if (!list) {
         pushToast(t("preview.captureFrameUnavailable"));
         return;
       }
-      downloadDataUrl(image.dataUrl, `opentake-frame-${String(frame).padStart(6, "0")}.png`);
+      // The command emits media_changed too, but refresh explicitly so the panel
+      // reflects the rename/folder-move (which fire after that event) immediately.
+      await refreshMedia();
       pushToast(t("preview.captureFrameSaved"));
     } catch (error) {
       console.warn("capture frame failed:", error);
@@ -317,8 +340,8 @@ export function Preview() {
         <div style={{ flex: 1 }} />
         <HoverButton
           title={t("preview.captureFrame")}
-          disabled={previewing || !timelineHasContent}
-          onClick={() => void captureTimelineFrame()}
+          disabled={!canCapture}
+          onClick={() => void captureFrame()}
         >
           <Icon icon={Camera} size={13} />
         </HoverButton>
@@ -328,14 +351,6 @@ export function Preview() {
   );
 }
 
-function downloadDataUrl(dataUrl: string, filename: string): void {
-  const link = document.createElement("a");
-  link.href = dataUrl;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-}
 
 /**
  * The Rust streaming-playback surface: an `<img>` pointed at the loopback MJPEG

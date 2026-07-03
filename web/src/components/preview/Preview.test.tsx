@@ -46,6 +46,7 @@ vi.mock("../../store/mediaStore", () => ({
   useMediaStore: Object.assign((selector: (state: typeof store.media) => unknown) => selector(store.media), {
     getState: () => store.media,
   }),
+  refreshMedia: vi.fn(),
 }));
 
 vi.mock("../../lib/asset", () => ({

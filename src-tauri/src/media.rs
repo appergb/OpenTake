@@ -29,7 +29,7 @@ use serde::Serialize;
 use tauri::State;
 
 use opentake_core::{importable_clip_type, AppCore, EditCommand, ProbedMedia};
-use opentake_domain::{ClipType, MediaManifestEntry, MediaSource};
+use opentake_domain::{ClipType, GenerationInput, MediaManifestEntry, MediaSource};
 use opentake_media::{
     cache_key::{file_identity_key, KEY_HEX_LEN},
     decode_frame_at, decode_frames_at,
@@ -89,6 +89,18 @@ pub struct MediaItemDto {
     pub thumbnail: Option<String>,
     /// Library folder this asset lives in (`None` = root), for the folder view.
     pub folder_id: Option<String>,
+    /// Source file size in bytes, when the file resolves on disk. Surfaced for
+    /// the Inspector's Source → File section "Size" row (upstream
+    /// `InspectorView.fileSize(for:)`, which reads `FileManager` attributes).
+    /// `None` for missing/unresolvable sources.
+    pub file_size: Option<u64>,
+    /// Generation snapshot for an AI-generated asset (`None` for imported /
+    /// user assets). 1:1 with upstream `MediaAsset.generationInput`; drives the
+    /// Inspector's Source → Generated / Prompt / References sections. Today no
+    /// generation flow populates it (generate_* is still stubbed), so it is
+    /// always `None` in practice — the Inspector renders those sections only
+    /// when it is present, matching upstream's `if let gen = asset.generationInput`.
+    pub generation_input: Option<GenerationInput>,
     /// `true` when the asset's source file is not on disk (moved / deleted /
     /// offline). Derived from file existence on every read (mirrors upstream
     /// `MediaResolver.isMissing`), so it clears automatically once a `relink_media`
@@ -122,6 +134,16 @@ impl MediaItemDto {
                 cache_root.and_then(|root| cached_thumbnail_path_for_entry(root, entry, path))
             })
         };
+        // File size from the resolved source when it exists (upstream reads
+        // FileManager attributes lazily). Skipped for missing/unresolvable sources.
+        let file_size = if missing {
+            None
+        } else {
+            resolved
+                .as_deref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .map(|m| m.len())
+        };
         MediaItemDto {
             id: entry.id.clone(),
             name: entry.name.clone(),
@@ -133,6 +155,8 @@ impl MediaItemDto {
             path,
             thumbnail,
             folder_id: entry.folder_id.clone(),
+            file_size,
+            generation_input: entry.generation_input.clone(),
             missing,
         }
     }
@@ -186,8 +210,10 @@ pub struct MediaListDto {
 
 impl MediaListDto {
     /// Build the list from the core's current manifest snapshot, with no skipped
-    /// files (listing / relink / non-import surfaces).
-    fn from_core(core: &AppCore, cache_root: Option<&Path>) -> Self {
+    /// files (listing / relink / non-import surfaces). `pub(crate)` so sibling
+    /// command modules (e.g. capture-to-media in `render.rs`) can return the
+    /// current catalog after mutating it.
+    pub(crate) fn from_core(core: &AppCore, cache_root: Option<&Path>) -> Self {
         Self::from_core_with_skipped(core, cache_root, Vec::new())
     }
 
@@ -1107,8 +1133,38 @@ mod tests {
         assert!(dto.has_audio);
         assert_eq!(dto.path.as_deref(), Some("/abs/clip.mp4"));
         assert_eq!(dto.thumbnail, None);
-        // /abs/clip.mp4 doesn't exist → missing is true (existence-derived).
+        // /abs/clip.mp4 doesn't exist → missing is true (existence-derived), and
+        // a missing source has no readable size or generation snapshot.
         assert!(dto.missing);
+        assert_eq!(dto.file_size, None);
+        assert_eq!(dto.generation_input, None);
+    }
+
+    #[test]
+    fn dto_reports_file_size_for_present_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("clip.mp4");
+        fs::write(&source, b"0123456789").unwrap(); // 10 bytes
+        let entry = MediaManifestEntry {
+            id: "a".into(),
+            name: "clip".into(),
+            kind: ClipType::Video,
+            source: MediaSource::External {
+                absolute_path: source.to_string_lossy().into_owned(),
+            },
+            duration: 3.0,
+            generation_input: None,
+            source_width: Some(640),
+            source_height: Some(480),
+            source_fps: Some(24.0),
+            has_audio: Some(true),
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        };
+        let dto = MediaItemDto::from_entry(&entry, None, None);
+        assert!(!dto.missing);
+        assert_eq!(dto.file_size, Some(10));
     }
 
     #[test]
@@ -1124,6 +1180,8 @@ mod tests {
             path: Some("/p.png".into()),
             thumbnail: None,
             folder_id: None,
+            file_size: Some(2048),
+            generation_input: None,
             missing: false,
         };
         let json = serde_json::to_string(&dto).unwrap();
@@ -1131,6 +1189,8 @@ mod tests {
         assert!(json.contains("\"type\":\"image\""));
         assert!(json.contains("\"thumbnail\":null"));
         assert!(json.contains("\"folderId\":null"));
+        assert!(json.contains("\"fileSize\":2048"));
+        assert!(json.contains("\"generationInput\":null"));
         assert!(json.contains("\"missing\":false"));
     }
 
