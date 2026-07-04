@@ -362,6 +362,19 @@ export async function getMedia(): Promise<MediaList> {
 }
 
 /**
+ * `toggle_favorite`: add (`favorite = true`) or remove (`favorite = false`) media
+ * assets from the per-project favorites set (#91), returning the refreshed
+ * catalog. Favorites persist in the project manifest — not browser storage — so
+ * they travel with the project. Unknown ids are ignored by the backend. Outside
+ * Tauri there is no project, so this resolves to an empty catalog.
+ */
+export async function toggleFavorite(assetIds: string[], favorite: boolean): Promise<MediaList> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MediaList>("toggle_favorite", { assetIds, favorite });
+  return { items: [], folders: [] };
+}
+
+/**
  * `extract_audio`: extract the audio track from a media asset into a
  * self-contained audio file. `outPath`'s extension picks the codec
  * (`.m4a` -> AAC, `.mp3` -> libmp3lame, `.wav` -> PCM s16le). Returns the

@@ -28,7 +28,7 @@ import {
 import { Icon } from "../ui/Icon";
 import { HoverButton } from "../ui/HoverButton";
 import { useEditorUiStore, type MediaSubTabId } from "../../store/uiStore";
-import { useMediaStore } from "../../store/mediaStore";
+import { useMediaStore, refreshMedia } from "../../store/mediaStore";
 import {
   importFolderViaDialog,
   importFilesViaDialog,
@@ -42,13 +42,13 @@ import { BoundedCache } from "../../lib/lru";
 import { childFolders, folderTrail, normalizeFolderId } from "../../lib/folderTree";
 import { useProjectStore } from "../../store/projectStore";
 import { addMediaToTimeline } from "../../store/editActions";
-import { extractAudio, generateThumbnail, preloadMedia } from "../../lib/api";
+import { extractAudio, generateThumbnail, preloadMedia, toggleFavorite } from "../../lib/api";
 import { saveDialog } from "../../lib/dialog";
 import type { MediaFolder, MediaItem } from "../../lib/types";
 import { MediaTabBar, MediaSubTabBar } from "./MediaTabBar";
 import { CaptionsTab } from "./CaptionsTab";
 import { MediaSearchResults } from "./MediaSearch";
-import { useFavoritesStore, useIsFavorite } from "./favorites";
+import { migrateLocalFavorites } from "./favorites";
 
 /** MIME-ish type used on dataTransfer when dragging a media item to the timeline. */
 export const MEDIA_DND_TYPE = "application/x-opentake-media";
@@ -120,6 +120,18 @@ export function MediaPanel() {
   const setMediaTab = useEditorUiStore((s) => s.setMediaTab);
   const t = useT();
 
+  // One-time (#91): drain any legacy `opentake.favorites` localStorage stars into
+  // the current project's manifest once its media has loaded. `migrateLocalFavorites`
+  // self-guards (empty store / no matching items → no-op), so this settles after
+  // the first successful migration and safely re-checks on project switch.
+  const items = useMediaStore((s) => s.items);
+  useEffect(() => {
+    if (items.length === 0) return;
+    void migrateLocalFavorites(items).then((applied) => {
+      if (applied) void refreshMedia();
+    });
+  }, [items]);
+
   // 仅 material/audio 渲染素材库内容；其余禁用标签理论上点不到，兜底显示占位。
   const isLibraryTab = mediaTab === "material" || mediaTab === "audio";
 
@@ -149,7 +161,6 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   const error = useMediaStore((s) => s.error);
   const subTab = useEditorUiStore((s) => s.mediaSubTab);
   const setSubTab = useEditorUiStore((s) => s.setMediaSubTab);
-  const favoriteIds = useFavoritesStore((s) => s.ids);
   const currentFolderId = useEditorUiStore((s) => s.mediaPanelCurrentFolderId);
   const setCurrentFolderId = useEditorUiStore((s) => s.setMediaPanelCurrentFolderId);
   const [search, setSearch] = useState("");
@@ -190,12 +201,12 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
     () =>
       items.filter((item) => {
         if (kind === "audio" && item.type !== "audio") return false;
-        if (subTab === "mine" && !favoriteIds.has(item.id)) return false;
+        if (subTab === "mine" && !item.favorite) return false;
         if (query !== "") return item.name.toLowerCase().includes(query);
         if (browsing && normalizeFolderId(item.folderId) !== folderId) return false;
         return true;
       }),
-    [items, kind, subTab, favoriteIds, query, browsing, folderId],
+    [items, kind, subTab, query, browsing, folderId],
   );
 
   const trail = useMemo(() => folderTrail(folders, folderId), [folders, folderId]);
@@ -645,8 +656,7 @@ function MediaCard({ item }: { item: MediaItem }) {
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
   const durationFrames = Math.round(item.duration * fps);
   const selected = previewMediaId === item.id;
-  const favorite = useIsFavorite(item.id);
-  const toggleFavorite = useFavoritesStore((s) => s.toggle);
+  const favorite = item.favorite ?? false;
   const thumbnailKey = mediaThumbnailKey(item);
   const [lazyThumbnail, setLazyThumbnail] = useState<string | null>(
     item.thumbnail ?? mediaThumbnailCache.get(thumbnailKey) ?? null,
@@ -872,7 +882,11 @@ function MediaCard({ item }: { item: MediaItem }) {
           title={favorite ? t("media.unfavorite") : t("media.favorite")}
           onClick={(e) => {
             e.stopPropagation();
-            toggleFavorite(item.id);
+            // Persist to the project manifest; the backend's media_changed event
+            // plus this refresh update every card's `favorite` flag.
+            void toggleFavorite([item.id], !favorite)
+              .then(() => refreshMedia())
+              .catch(() => {});
           }}
           style={{
             position: "absolute",

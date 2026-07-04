@@ -107,6 +107,10 @@ pub struct MediaItemDto {
     /// points the asset at a real file again. The panel/timeline render an
     /// "offline" affordance for missing assets.
     pub missing: bool,
+    /// `true` when the user has favorited this asset (#91). Backs the media
+    /// panel's "mine" tab. Persisted per-project in the manifest's favorites set
+    /// (not browser localStorage), so favorites travel with the project.
+    pub favorite: bool,
 }
 
 impl MediaItemDto {
@@ -116,6 +120,7 @@ impl MediaItemDto {
         entry: &MediaManifestEntry,
         project_dir: Option<&Path>,
         cache_root: Option<&Path>,
+        favorite: bool,
     ) -> Self {
         let resolved = resolve_source_path(entry, project_dir);
         let path = match &entry.source {
@@ -158,6 +163,7 @@ impl MediaItemDto {
             file_size,
             generation_input: entry.generation_input.clone(),
             missing,
+            favorite,
         }
     }
 }
@@ -230,7 +236,14 @@ impl MediaListDto {
             items: manifest
                 .entries
                 .iter()
-                .map(|e| MediaItemDto::from_entry(e, project_dir.as_deref(), cache_root))
+                .map(|e| {
+                    MediaItemDto::from_entry(
+                        e,
+                        project_dir.as_deref(),
+                        cache_root,
+                        manifest.is_favorite(&e.id),
+                    )
+                })
                 .collect(),
             folders: manifest
                 .folders
@@ -856,6 +869,21 @@ pub fn get_media(core: State<'_, AppCore>, media: State<'_, MediaState>) -> Medi
     MediaListDto::from_core(&core, Some(media.engine().cache_root()))
 }
 
+/// `toggle_favorite`: add or remove `asset_ids` from the per-project favorites
+/// set (#91), returning the refreshed catalog so the panel's "mine" tab and the
+/// per-card favorite affordance update. Favorites persist in the project manifest
+/// (not browser storage); unknown ids are ignored by the core. Infallible.
+#[tauri::command]
+pub fn toggle_favorite(
+    core: State<'_, AppCore>,
+    media: State<'_, MediaState>,
+    asset_ids: Vec<String>,
+    favorite: bool,
+) -> MediaListDto {
+    core.set_media_favorite(&asset_ids, favorite);
+    MediaListDto::from_core(&core, Some(media.engine().cache_root()))
+}
+
 /// Validate the user-chosen output path for [`extract_audio`] (Issue #39
 /// review #4 — "out_path 无后端路径边界校验").
 ///
@@ -1165,7 +1193,7 @@ mod tests {
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
         };
-        let dto = MediaItemDto::from_entry(&entry, None, None);
+        let dto = MediaItemDto::from_entry(&entry, None, None, false);
         assert_eq!(dto.id, "a");
         assert_eq!(dto.kind, ClipType::Video);
         assert_eq!(dto.duration, 3.0);
@@ -1202,7 +1230,7 @@ mod tests {
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
         };
-        let dto = MediaItemDto::from_entry(&entry, None, None);
+        let dto = MediaItemDto::from_entry(&entry, None, None, false);
         assert!(!dto.missing);
         assert_eq!(dto.file_size, Some(10));
     }
@@ -1223,6 +1251,7 @@ mod tests {
             file_size: Some(2048),
             generation_input: None,
             missing: false,
+            favorite: true,
         };
         let json = serde_json::to_string(&dto).unwrap();
         assert!(json.contains("\"hasAudio\""));
@@ -1232,6 +1261,7 @@ mod tests {
         assert!(json.contains("\"fileSize\":2048"));
         assert!(json.contains("\"generationInput\":null"));
         assert!(json.contains("\"missing\":false"));
+        assert!(json.contains("\"favorite\":true"));
     }
 
     #[test]
@@ -1262,7 +1292,7 @@ mod tests {
             cached_remote_url_expires_at: None,
         };
 
-        let dto = MediaItemDto::from_entry(&entry, None, Some(&cache_root));
+        let dto = MediaItemDto::from_entry(&entry, None, Some(&cache_root), false);
 
         assert!(!dto.missing);
         let poster_string = poster.to_string_lossy().into_owned();
@@ -1455,6 +1485,35 @@ mod tests {
         assert_eq!(list.items[0].kind, ClipType::Video);
         assert_eq!(list.items[0].name, "clip");
         assert_eq!(list.items[0].path.as_deref(), Some(good.to_str().unwrap()));
+    }
+
+    #[test]
+    fn toggle_favorite_marks_item_and_ignores_unknown_ids() {
+        // #91: favoriting flows through the core into the DTO's `favorite` flag —
+        // the media panel's "mine" tab reads this, not browser storage.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let clip = root.join("clip.mp4");
+        touch(&clip);
+        let core = AppCore::new();
+        let media = MediaState::new(engine_for(root));
+        let entry = import_one(&core, media.engine(), &clip).unwrap();
+
+        // A freshly imported asset is not favorited.
+        let before = MediaListDto::from_core(&core, None);
+        assert_eq!(before.items.len(), 1);
+        assert!(!before.items[0].favorite);
+
+        // Favoriting it surfaces in the DTO.
+        assert_eq!(core.set_media_favorite(&[entry.id.clone()], true), 1);
+        assert!(MediaListDto::from_core(&core, None).items[0].favorite);
+
+        // Unknown ids never create phantom favorites.
+        assert_eq!(core.set_media_favorite(&["ghost".into()], true), 0);
+
+        // Unfavoriting flips it back.
+        assert_eq!(core.set_media_favorite(&[entry.id.clone()], false), 1);
+        assert!(!MediaListDto::from_core(&core, None).items[0].favorite);
     }
 
     #[test]

@@ -542,6 +542,10 @@ export interface MediaItem {
   /** `true` when the source file is offline (moved/deleted). Derived from file
    *  existence on the backend; clears after a successful relink. */
   missing?: boolean;
+  /** `true` when the user has favorited this asset (#91). Backs the media panel's
+   *  "mine" tab; persisted per-project in the manifest (not browser storage), so
+   *  it always arrives from `get_media` / `toggle_favorite`. */
+  favorite: boolean;
 }
 
 /** Generation input snapshot carried by an AI-generated media asset (mirror of

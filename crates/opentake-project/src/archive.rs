@@ -130,6 +130,7 @@ pub fn archive(
         version: manifest.version,
         entries: new_entries,
         folders: manifest.folders.clone(),
+        favorites: manifest.favorites.clone(),
     };
 
     write_json(
@@ -470,6 +471,7 @@ mod tests {
                 external_entry("bbbbbbbb-id", link_b.to_str().unwrap()),
             ],
             folders: Vec::new(),
+            favorites: Vec::new(),
         };
         let log = GenerationLog::new();
         let dest = dir.path().join("Out.opentake");

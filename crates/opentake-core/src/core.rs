@@ -321,6 +321,24 @@ impl AppCore {
         Ok(entry)
     }
 
+    /// Toggle favorite state for `asset_ids` (#91), emitting
+    /// [`CoreEvent::MediaChanged`] after releasing the lock (only when something
+    /// changed) so the media mirror refreshes. Favoriting is a manifest mutation
+    /// outside undo — see [`EditorSession::set_media_favorite`]. Returns how many
+    /// ids changed state.
+    pub fn set_media_favorite(&self, asset_ids: &[String], favorite: bool) -> usize {
+        let (changed, count) = {
+            let mut session = self.lock();
+            let changed = session.set_media_favorite(asset_ids, favorite);
+            let count = session.media().entries.len();
+            (changed, count)
+        };
+        if changed > 0 {
+            self.events.emit(&CoreEvent::MediaChanged { count });
+        }
+        changed
+    }
+
     /// Relink an existing asset (by id) to a new file, keeping the same id, and
     /// emit [`CoreEvent::MediaChanged`] after releasing the lock so observers
     /// refresh. See [`EditorSession::relink_media_file`]: re-importing would mint
