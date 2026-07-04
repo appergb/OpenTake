@@ -3,7 +3,11 @@
 
   <h1>OpenTake</h1>
 
-  <p><strong>Agent-Native Video Production Engine</strong></p>
+  <p>
+    <strong>Agent-Native Video Production Engine</strong><br />
+    エージェントネイティブな動画制作エンジン<br />
+    Agent 原生的视频制作引擎
+  </p>
 
   <p>
     <a href="#-installation"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-6e7385?logo=rust" alt="Platforms" /></a>
