@@ -123,6 +123,8 @@ const zh: Dict = {
   // 二级标签：导入 / 我的
   "media.subtab.import": "导入",
   "media.subtab.mine": "我的",
+  "media.subtab.extract": "提取",
+  "media.subtab.sound": "音效",
   // 星标收藏
   "media.favorite": "收藏",
   "media.unfavorite": "取消收藏",
@@ -153,6 +155,12 @@ const zh: Dict = {
   "media.extractAudioSuccess": "音频已保存：{path}",
   "media.extractAudioFailed": "提取失败：{error}",
   "media.extractAudioNoAudio": "此媒体没有音频轨",
+  "media.extract.empty": "没有可提取音频的视频",
+  "media.extract.hint": "含音频的视频卡片上，点提取按钮把音轨存为独立音频素材",
+  "media.sound.empty": "音效库为空 — 在素材库页收藏音效",
+  "media.sound.add": "添加到项目",
+  "media.sound.added": "已添加：{name}",
+  "media.sound.failed": "添加失败",
   "media.offline": "媒体离线",
   "media.relink": "重新链接",
 
@@ -688,6 +696,8 @@ const en: Dict = {
   "media.tab.smartPack": "Smart Pack",
   "media.subtab.import": "Import",
   "media.subtab.mine": "Mine",
+  "media.subtab.extract": "Extract",
+  "media.subtab.sound": "Sound",
   "media.favorite": "Add to favorites",
   "media.unfavorite": "Remove from favorites",
   "media.empty.mine": "No favorites yet. Tap the star on a clip to save it.",
@@ -717,6 +727,12 @@ const en: Dict = {
   "media.extractAudioSuccess": "Audio saved: {path}",
   "media.extractAudioFailed": "Extract failed: {error}",
   "media.extractAudioNoAudio": "No audio track in this media",
+  "media.extract.empty": "No videos with audio to extract",
+  "media.extract.hint": "On a video card with audio, click Extract to save its track as a standalone audio asset",
+  "media.sound.empty": "No sound effects yet — favorite some on the Library page",
+  "media.sound.add": "Add to project",
+  "media.sound.added": "Added: {name}",
+  "media.sound.failed": "Add failed",
   "media.offline": "Media Offline",
   "media.relink": "Relink",
 

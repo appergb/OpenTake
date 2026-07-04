@@ -115,18 +115,29 @@ interface SubTab {
   labelKey: string;
 }
 
-const SUB_TABS: ReadonlyArray<SubTab> = [
+/** 素材 tab 的二级标签：导入 / 我的。 */
+export const MATERIAL_SUB_TABS: ReadonlyArray<SubTab> = [
   { id: "import", labelKey: "media.subtab.import" },
   { id: "mine", labelKey: "media.subtab.mine" },
 ];
 
-/** 二级 pill 切换：导入 / 我的。 */
+/** 音频 tab 的二级标签：导入 / 我的 / 提取（从视频提取音频）/ 音效（全局音效库）。 */
+export const AUDIO_SUB_TABS: ReadonlyArray<SubTab> = [
+  { id: "import", labelKey: "media.subtab.import" },
+  { id: "mine", labelKey: "media.subtab.mine" },
+  { id: "extract", labelKey: "media.subtab.extract" },
+  { id: "sound", labelKey: "media.subtab.sound" },
+];
+
+/** 二级 pill 切换。`tabs` 由调用方按主 tab 传入（素材 2 项 / 音频 4 项）。 */
 export function MediaSubTabBar({
   active,
   onSelect,
+  tabs = MATERIAL_SUB_TABS,
 }: {
   active: MediaSubTabId;
   onSelect: (tab: MediaSubTabId) => void;
+  tabs?: ReadonlyArray<SubTab>;
 }) {
   const t = useT();
   return (
@@ -141,7 +152,7 @@ export function MediaSubTabBar({
         borderRadius: "var(--radius-md)",
       }}
     >
-      {SUB_TABS.map((tab) => {
+      {tabs.map((tab) => {
         const selected = active === tab.id;
         return (
           <button
