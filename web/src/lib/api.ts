@@ -387,6 +387,18 @@ export async function extractAudio(mediaId: string, outPath: string): Promise<st
   throw new Error("audio extraction requires the desktop app (ffmpeg)");
 }
 
+/**
+ * `save_clip_as_media` (#91 §3.5): render one timeline clip — effects, color,
+ * text, speed baked in — to a new .mp4 in the project bundle's media/ dir and
+ * import it as a fresh asset. Returns the refreshed catalog. Video clips only
+ * for now; needs a saved project. Requires the desktop app (GPU render + ffmpeg).
+ */
+export async function saveClipAsMedia(clipId: string): Promise<MediaList> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MediaList>("save_clip_as_media", { clipId });
+  throw new Error("saving a clip as media requires the desktop app");
+}
+
 // MARK: - Transcription (whisper model + on-device transcribe, #183 + captions)
 
 /** Whether the whisper model is installed. Never downloads. The Captions tab

@@ -36,6 +36,7 @@ type ClipMenuLabels = {
   link: string;
   unlink: string;
   swapMedia: string;
+  saveAsMedia: string;
 };
 
 export function clipContextMenuItems({
@@ -51,6 +52,7 @@ export function clipContextMenuItems({
   onLink,
   onUnlink,
   onSwapMedia,
+  onSaveAsMedia,
 }: {
   clip: Clip;
   hasClipboardContent: boolean;
@@ -64,6 +66,7 @@ export function clipContextMenuItems({
   onLink: (ids: string[]) => void | Promise<void>;
   onUnlink: (ids: string[]) => void | Promise<void>;
   onSwapMedia: () => void;
+  onSaveAsMedia: () => void;
 }): MenuItem[] {
   const items: MenuItem[] = [
     {
@@ -129,6 +132,18 @@ export function clipContextMenuItems({
       action: () => {
         ensureSelected();
         onSwapMedia();
+      },
+    });
+  }
+
+  // Save-as-media: bake this clip (trims, speed, effects, color, text) into a
+  // new reusable asset. Video only for now — the render path produces an .mp4.
+  if (clip.mediaType === "video") {
+    items.push({
+      label: labels.saveAsMedia,
+      action: () => {
+        ensureSelected();
+        onSaveAsMedia();
       },
     });
   }
@@ -254,6 +269,7 @@ export function ClipContextMenu({
         link: t("contextMenu.link"),
         unlink: t("contextMenu.unlink"),
         swapMedia: t("contextMenu.swapMedia"),
+        saveAsMedia: t("contextMenu.saveAsMedia"),
       },
       ensureSelected,
       selectedClipIds: () => [...useEditorUiStore.getState().selectedClipIds],
@@ -264,6 +280,7 @@ export function ClipContextMenu({
       onLink: edit.linkClips,
       onUnlink: edit.unlinkClips,
       onSwapMedia: () => setPendingSwapClipId(clipId),
+      onSaveAsMedia: () => void edit.saveClipAsMedia(clipId),
     });
   }
 

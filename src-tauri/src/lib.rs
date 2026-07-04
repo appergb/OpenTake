@@ -176,6 +176,7 @@ pub fn run() {
             media::relink_media,
             media::get_media,
             media::toggle_favorite,
+            media::save_clip_as_media,
             media::extract_audio,
             media::get_waveform,
             media::generate_thumbnail,
