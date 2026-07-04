@@ -92,4 +92,26 @@ describe("timeline playback state", () => {
     expect(state.activeFrame).toBe(42);
     expect(state.currentFrame).toBe(42);
   });
+
+  it("resets the Rust-engine fallback flag when starting playback", () => {
+    // A previous session tripped the runtime fallback; the next play must retry
+    // the engine, not stay pinned to the legacy stack.
+    useEditorUiStore.setState({ activeFrame: 42, isPlaying: false, rustEngineFailed: true });
+
+    useEditorUiStore.getState().togglePlay();
+
+    const state = useEditorUiStore.getState();
+    expect(state.isPlaying).toBe(true);
+    expect(state.rustEngineFailed).toBe(false);
+  });
+
+  it("keeps the fallback flag set through a pause (only a new play resets it)", () => {
+    useEditorUiStore.setState({ activeFrame: 42, isPlaying: true, rustEngineFailed: true });
+
+    useEditorUiStore.getState().togglePlay(); // pause
+
+    expect(useEditorUiStore.getState().isPlaying).toBe(false);
+    // Pausing must not clear it — the paused frame came from the legacy <video>.
+    expect(useEditorUiStore.getState().rustEngineFailed).toBe(true);
+  });
 });

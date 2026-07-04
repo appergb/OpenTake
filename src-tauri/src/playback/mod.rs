@@ -1,16 +1,16 @@
 //! Continuous Rust streaming playback engine (#53), gated behind the
-//! `playback-engine` feature.
+//! `playback-engine` feature (a DEFAULT feature — this is the shipped preview
+//! path; `--no-default-features` drops it for a minimal build).
 //!
-//! PR1 (this slice) lands the **headless core**: continuous per-clip decode
-//! ([`resolver`]) feeding the same-pixel-path compositor on a dedicated render
-//! thread ([`engine`]), behind clock / frame-sink / playhead-emitter traits, with
-//! the timeline→render projections in [`project`]. Nothing here is wired to a
-//! Tauri command or the front end yet.
+//! Structure: continuous per-clip decode ([`resolver`]) feeding the
+//! same-pixel-path compositor on a dedicated render thread ([`engine`]), behind
+//! clock / frame-sink / playhead-emitter traits, with the timeline→render
+//! projections in [`project`]. The cpal master clock ([`audio`]) + MJPEG
+//! transport ([`transport`]) realise those traits, and [`commands`] registers the
+//! `playback_*` Tauri commands the front end drives during PLAY.
 //!
-//! PR2 adds the cpal master clock + MJPEG transport and registers the
-//! `playback_*` commands; PR3 switches the front end's PLAY path over. Several
-//! public items are therefore intentionally unused until PR2/PR3 wires them —
-//! hence the module-scoped `dead_code` allow.
+//! A few public items stay exercised only by the gated GPU+ffmpeg integration
+//! tests or one build-feature matrix, so the module keeps a `dead_code` allow.
 #![allow(dead_code)]
 
 pub mod audio;

@@ -16,6 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The playback engine (#53) is now a DEFAULT feature, so the workspace
+      # fmt/clippy/test steps below compile it (cpal + axum/tokio + the wgpu
+      # render path). Reclaim runner disk up front — these deps are heavy and the
+      # hosted runner's default free space is tight.
       - name: Free disk space (playback-engine deps are heavy)
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android "$AGENT_TOOLSDIRECTORY" /opt/hostedtoolcache/CodeQL || true
@@ -54,21 +58,22 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all --check
 
+      # `--workspace` compiles the default features, which now include
+      # opentake-tauri's `playback-engine` — so these two steps also lint and test
+      # the streaming engine (its unit tests: drain/clock/projection/transport).
+      # The GPU+ffmpeg integration tests in src-tauri/tests/ compile here too and
+      # auto-skip on the GPU-less / ffmpeg-less runner.
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test
         run: cargo test --workspace
 
-      # The streaming playback engine (#53) is behind the off-by-default
-      # `playback-engine` feature, so the steps above don't compile it. Lint and
-      # test it explicitly. The GPU+ffmpeg integration tests auto-skip on the
-      # GPU-less CI runner; the unit tests (drain/clock/projection) still run.
-      - name: cargo clippy (playback-engine)
-        run: cargo clippy -p opentake-tauri --features playback-engine --all-targets -- -D warnings
-
-      - name: cargo test (playback-engine)
-        run: cargo test -p opentake-tauri --features playback-engine
+      # Prove the minimal build still compiles WITHOUT the engine (the
+      # `--no-default-features` escape hatch: drops cpal/axum/tokio + the
+      # `playback_*` commands; the front end then falls back to the legacy path).
+      - name: cargo clippy (minimal, no default features)
+        run: cargo clippy -p opentake-tauri --no-default-features --all-targets -- -D warnings
 
   web:
     name: Web (install / build)

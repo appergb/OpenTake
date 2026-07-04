@@ -286,15 +286,24 @@ fn playback_engine_thread_streams_frames_to_sink_and_emitter() {
 
     let engine = PlaybackEngine::spawn(tl, media, text, sizes, size, clock, sink, emitter)
         .expect("engine spawns");
-    // The wall clock advances the playhead; give the render thread time to produce
-    // a few frames, then stop (which joins the thread).
-    sleep(Duration::from_millis(600));
+    // The wall clock advances the playhead; POLL for the first frame rather than
+    // sleeping a fixed budget. The first composite waits on a cold ffmpeg-decode +
+    // GPU warm-up, which under the parallel `cargo test --workspace` GPU contention
+    // (many gpu_* / export tests at once) can take well over half a second — a
+    // fixed 600ms sleep flaked here. Same ~2s warm-up budget the direct-render
+    // tests above use; still fails fast (loops break on first frame) on a genuine
+    // "produces nothing" regression.
+    let mut produced = false;
+    for _ in 0..WARMUP_TRIES {
+        if frame_count.load(Ordering::Relaxed) > 0 {
+            produced = true;
+            break;
+        }
+        sleep(WARMUP_SLEEP);
+    }
     engine.stop();
 
-    assert!(
-        frame_count.load(Ordering::Relaxed) > 0,
-        "the engine thread produced no frames"
-    );
+    assert!(produced, "the engine thread produced no frames");
     assert!(
         last_emitted.load(Ordering::Relaxed) >= 0,
         "the engine thread emitted no playhead frame"
