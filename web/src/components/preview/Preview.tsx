@@ -515,26 +515,48 @@ function TimelineRustOverlay() {
     if (!canvas || !ctx) return;
 
     let closed = false;
+
+    // Match the backing store to the frame (no double scaling); the canvas CSS
+    // box then stretches it to fill (equivalent to the old objectFit:fill).
+    const paint = (src: CanvasImageSource, w: number, h: number) => {
+      if (closed || w === 0 || h === 0) return;
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+      ctx.drawImage(src, 0, 0);
+    };
+
+    // Decode each JPEG frame. Prefer createImageBitmap (async, off-thread), but
+    // fall back to an <img> + object URL on older WebKit that lacks it — either
+    // way WebKit renders this reliably, unlike the multipart MJPEG <img>.
+    const drawViaImage = (blob: Blob) => {
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => {
+        paint(img, img.naturalWidth, img.naturalHeight);
+        URL.revokeObjectURL(url);
+      };
+      img.onerror = () => URL.revokeObjectURL(url);
+      img.src = url;
+    };
+    const drawBlob = (blob: Blob) => {
+      if (typeof createImageBitmap === "function") {
+        void createImageBitmap(blob)
+          .then((bmp) => {
+            paint(bmp, bmp.width, bmp.height);
+            bmp.close();
+          })
+          .catch(() => drawViaImage(blob));
+      } else {
+        drawViaImage(blob);
+      }
+    };
+
     const ws = new WebSocket(endpoint);
     ws.binaryType = "blob";
     ws.onmessage = (e) => {
-      if (closed || !(e.data instanceof Blob)) return;
-      void createImageBitmap(e.data)
-        .then((bmp) => {
-          if (closed) {
-            bmp.close();
-            return;
-          }
-          // Match the backing store to the frame (no double scaling); the canvas
-          // CSS box then stretches it to fill (equivalent to the old objectFit:fill).
-          if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
-            canvas.width = bmp.width;
-            canvas.height = bmp.height;
-          }
-          ctx.drawImage(bmp, 0, 0);
-          bmp.close();
-        })
-        .catch(() => {});
+      if (!closed && e.data instanceof Blob) drawBlob(e.data);
     };
 
     return () => {
