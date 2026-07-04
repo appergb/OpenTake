@@ -1,0 +1,16 @@
+[package]
+name = "opentake-project"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = ".opentake project bundle read/write (serde) + media manifest/archive."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+opentake-domain = { workspace = true }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = { workspace = true }

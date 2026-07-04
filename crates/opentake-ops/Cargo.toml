@@ -1,0 +1,13 @@
+[package]
+name = "opentake-ops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure editing algorithms (Overwrite/Ripple/Snap) + EditCommand::apply + UndoStack."
+
+[dependencies]
+opentake-domain = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

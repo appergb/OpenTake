@@ -1,0 +1,77 @@
+{
+  "schema_version": "1.0",
+  "id": "opentake-workflow-audio-first",
+  "name": "音频先入工作流 (Audio-First)",
+  "description": "OpenTake 默认剪辑工作流：先铺音频(口播/旁白/BGM)再切画面。音频驱动的节奏让成片更稳、过渡更顺，适用于口播、Vlog、混剪、综艺包装等绝大多数题材。",
+  "author": { "name": "OpenTake", "url": "https://github.com/appergb/OpenTake" },
+  "license": "GPL-3.0",
+  "tags": ["默认", "音频先入", "audio-driven", "口播", "vlog"],
+  "video_type": {
+    "primary": "",
+    "subtypes": [],
+    "detection_hints": {
+      "track_patterns": ["voice/narration on an audio track", "BGM bed"],
+      "broll_ratio": 0.3
+    }
+  },
+  "workflow": {
+    "approach": "audio_driven",
+    "stages": [
+      {
+        "id": "lay_audio",
+        "name": "先铺音频",
+        "order": 0,
+        "actions": [
+          { "tool": "import_media", "tip": "先导入口播/旁白与 BGM；音频是这条片子的骨架" },
+          { "tool": "add_clips", "tip": "把口播/旁白放到音频轨(A1)，BGM 放到 A2，作为整条时间线的节奏基准" }
+        ]
+      },
+      {
+        "id": "tighten_voice",
+        "name": "精剪口播",
+        "order": 1,
+        "actions": [
+          { "tool": "add_captions", "tip": "先转写口播拿到时间戳，便于在句界/气口处下刀" },
+          { "tool": "split_clip", "tip": "在气口、句界、废话处分割" },
+          { "tool": "ripple_delete_ranges", "tip": "删掉啰嗦/重复/口误段并闭合空隙，先把音频节奏剪顺" }
+        ]
+      },
+      {
+        "id": "lay_picture",
+        "name": "对着音频铺画面",
+        "order": 2,
+        "actions": [
+          { "tool": "search_media", "tip": "按口播语义找对应的主画面/ B-roll" },
+          { "tool": "add_clips", "tip": "主画面放 V1，B-roll 叠在 V2，时长对齐已剪好的音频段" }
+        ]
+      },
+      {
+        "id": "mix",
+        "name": "混音与收尾",
+        "order": 3,
+        "actions": [
+          { "tool": "set_clip_properties", "tip": "口播说话时 BGM 压到 ~10–20%(ducking)；段落过渡用 J-cut：声音先进、画面后切" }
+        ]
+      }
+    ],
+    "rules": {
+      "do": [
+        "永远先铺音频(口播/旁白/BGM)，再对着音频的节奏切画面",
+        "口播/旁白放音频轨并尽量锁定，作为整条时间线的时间基准",
+        "段落过渡优先用 J-cut(声音先入、画面后切)或 L-cut(声音延续到下一镜)",
+        "口播说话时把 BGM 音量压低(ducking)，让人声清晰"
+      ],
+      "dont": [
+        "不要先把画面铺满再回头硬塞音频——那样节奏几乎一定会垮",
+        "不要让 BGM 盖过人声",
+        "不要在没有音频基准的情况下凭感觉切画面长度"
+      ]
+    }
+  },
+  "track_roles": {
+    "V1": { "role": "MainCamera", "label": "主画面" },
+    "V2": { "role": "B_RollOverlay", "label": "B-roll/示意图" },
+    "A1": { "role": "VoiceOver", "label": "口播/旁白", "locked": true },
+    "A2": { "role": "BGM", "label": "背景音乐" }
+  }
+}
