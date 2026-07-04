@@ -13,6 +13,7 @@ import {
   frameForSourceTime,
   isExternalSeekWhilePlaying,
   playbackFrameFromActiveFrame,
+  shouldFallBackToLegacy,
   shouldUseRustEngine,
   sourceTimeSec,
   visualAudioIsDuplicated,
@@ -70,6 +71,41 @@ describe("shouldUseRustEngine", () => {
 
   it("does not engage while paused", () => {
     expect(shouldUseRustEngine({ ...base, isPlaying: false })).toBe(false);
+  });
+
+  it("falls through to legacy once the engine has failed this session", () => {
+    expect(shouldUseRustEngine({ ...base, engineFailed: true })).toBe(false);
+  });
+
+  it("still engages when engineFailed is explicitly false or omitted", () => {
+    expect(shouldUseRustEngine({ ...base, engineFailed: false })).toBe(true);
+    expect(shouldUseRustEngine(base)).toBe(true); // undefined engineFailed
+  });
+});
+
+describe("shouldFallBackToLegacy", () => {
+  it("declares failure only on the engine path, past the deadline, with no frames", () => {
+    expect(
+      shouldFallBackToLegacy({ onEnginePath: true, framesSeen: 0, deadlineElapsed: true }),
+    ).toBe(true);
+  });
+
+  it("stands down once any frame has arrived (GPU path is live)", () => {
+    expect(
+      shouldFallBackToLegacy({ onEnginePath: true, framesSeen: 1, deadlineElapsed: true }),
+    ).toBe(false);
+  });
+
+  it("does not fire before the deadline elapses", () => {
+    expect(
+      shouldFallBackToLegacy({ onEnginePath: true, framesSeen: 0, deadlineElapsed: false }),
+    ).toBe(false);
+  });
+
+  it("does not fire once we've already left the engine path (disposed / paused)", () => {
+    expect(
+      shouldFallBackToLegacy({ onEnginePath: false, framesSeen: 0, deadlineElapsed: true }),
+    ).toBe(false);
   });
 });
 

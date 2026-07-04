@@ -26,6 +26,7 @@ import {
   clipVolumeAt,
   frameForSourceTime,
   isExternalSeekWhilePlaying,
+  shouldFallBackToLegacy,
   shouldUseRustEngine,
   sourceTimeSec,
   type ActiveMedia,
@@ -74,6 +75,13 @@ const DRIFT_SEC = 0.35;
 /** A store `activeFrame` jump beyond this (frames) means an external seek while
  *  playing, so push the new position to the elements instead of reading them. */
 const SEEK_EPSILON_FRAMES = 2;
+/** How long the Rust engine has to emit its FIRST `playback_frame` before the
+ *  runtime watchdog gives up and falls back to the legacy `<video>` stack. Covers
+ *  a GPU-acquire failure inside the render thread (which returns Ok from
+ *  `playback_start`, so the promise doesn't reject) — without this the MJPEG
+ *  `<img>` would sit on a black/frozen canvas. Generous: the first frame waits on
+ *  a cold ffmpeg decode of the active clips. */
+const ENGINE_START_DEADLINE_MS = 2000;
 const interactiveSeekQueue = createInteractiveSeekQueue();
 let interactiveSeekTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -230,6 +238,14 @@ export function useTimelinePlaybackEngine(): void {
   // tell an external seek (keyboard / transport) apart from the engine's own
   // per-frame advance and forward it via playback_seek (#162). null = not driving.
   const lastEngineFrameRef = useRef<number | null>(null);
+  // Runtime escape hatch (shared via the store so the MJPEG overlay in Preview.tsx
+  // sees it too): true when a play attempt can't bring the Rust engine up (spawn
+  // rejects, or no frame by the deadline). It routes the CURRENT play session
+  // through the legacy <video> stack instead of a black/frozen canvas. The store
+  // resets it to false at the start of every play (setPlaying/togglePlay), and it
+  // being store state re-runs the switch effect, which then takes the legacy branch.
+  const engineFailed = useEditorUiStore((s) => s.rustEngineFailed);
+  const setEngineFailed = useEditorUiStore((s) => s.setRustEngineFailed);
 
   useEffect(() => {
     const prev = previousTransportState.current;
@@ -241,8 +257,17 @@ export function useTimelinePlaybackEngine(): void {
       // In Rust-engine mode the playhead is authoritative (driven by
       // playback_frame and settled by setPlaying), so DON'T derive the paused
       // frame from a <video> the Rust path wasn't driving — that would read a
-      // stale currentTime. The legacy path (flag off / non-Tauri) is unchanged.
-      if (prev.isPlaying && !(rustEngineEnabled() && isTauri)) {
+      // stale currentTime. When the engine FELL BACK to legacy this session
+      // (engineFailed), the <video> DID drive playback, so read its frozen clock
+      // like the flag-off / non-Tauri legacy path.
+      const engineDrovePlay = shouldUseRustEngine({
+        rustEnabled: rustEngineEnabled(),
+        isTauri,
+        isPlaying: prev.isPlaying,
+        isScrubbing: prev.isScrubbing,
+        engineFailed,
+      });
+      if (prev.isPlaying && !engineDrovePlay) {
         const visual = activeVideoForPausedSnap(tl, Math.max(0, Math.floor(activeFrame)));
         const el = visual ? previewElements.get(previewElementKey(visual)) : null;
         const pausedFrame = pausedPlayheadFrameFromFrozenVideo(visual, el?.currentTime ?? NaN, fps);
@@ -264,25 +289,61 @@ export function useTimelinePlaybackEngine(): void {
       }
     }
     previousTransportState.current = { isPlaying, isScrubbing };
-  }, [activeFrame, isPlaying, isScrubbing, timelineVersion]);
+  }, [activeFrame, isPlaying, isScrubbing, timelineVersion, engineFailed]);
 
   useEffect(() => {
     // Rust streaming playback owns the PLAY state when the flag is on (under
-    // Tauri). Scrub, pause, non-Tauri, and flag-off all fall through to the
-    // legacy <video> path below — left untouched, so the pause-freeze (74c4c82)
-    // and resume-without-force-seek (5fa3f6f) behaviors are preserved.
-    if (shouldUseRustEngine({ rustEnabled: rustEngineEnabled(), isTauri, isPlaying, isScrubbing })) {
+    // Tauri) AND it hasn't fallen back this session. Scrub, pause, non-Tauri,
+    // flag-off, and a failed engine all fall through to the legacy <video> path
+    // below — left untouched, so the pause-freeze (74c4c82) and
+    // resume-without-force-seek (5fa3f6f) behaviors are preserved.
+    if (
+      shouldUseRustEngine({ rustEnabled: rustEngineEnabled(), isTauri, isPlaying, isScrubbing, engineFailed })
+    ) {
       // The Rust stream provides BOTH video (MJPEG <img>) and audio (cpal), so
       // the <video> followers must not also play (double audio + wasted decode).
       pauseAll();
       lastEngineFrameRef.current = null;
-      const startFrame = Math.max(0, Math.floor(useEditorUiStore.getState().activeFrame));
-      playbackStart(startFrame).catch((e) => console.warn("playbackStart failed:", e));
 
       let unlisten: (() => void) | null = null;
       let disposed = false;
+      let framesSeen = 0;
+      let watchdog: ReturnType<typeof setTimeout> | null = null;
+
+      // Runtime fallback: hand this play session to the legacy stack and warn +
+      // toast ONCE. Guarded so a rejection AND a fired watchdog can't double-fire.
+      const fallBackToLegacy = (why: string) => {
+        if (disposed) return;
+        console.warn(`Rust playback engine unavailable (${why}); falling back to <video>.`);
+        useEditorUiStore.getState().pushToast("Preview engine unavailable — using compatibility playback.");
+        setEngineFailed(true); // re-runs this effect → legacy branch (cleanup runs first)
+      };
+
+      const startFrame = Math.max(0, Math.floor(useEditorUiStore.getState().activeFrame));
+      // A rejected start is a hard spawn failure (e.g. render thread couldn't be
+      // created). A GPU-acquire failure INSIDE the render thread instead returns
+      // Ok, so it can't reject — the watchdog below covers that by watching for
+      // the first frame.
+      playbackStart(startFrame).catch((e) => fallBackToLegacy(`start failed: ${e}`));
+
+      // Startup watchdog: if no frame arrives by the deadline, the GPU/render path
+      // is dead (or silently produced nothing) — fall back before the black MJPEG
+      // <img> is all the user sees. `shouldFallBackToLegacy` keeps the decision pure.
+      watchdog = setTimeout(() => {
+        watchdog = null;
+        if (shouldFallBackToLegacy({ onEnginePath: !disposed, framesSeen, deadlineElapsed: true })) {
+          fallBackToLegacy("no frame within startup deadline");
+        }
+      }, ENGINE_START_DEADLINE_MS);
+
       void onPlaybackFrame((frame) => {
         if (disposed) return; // cleanup ran before the listener resolved
+        // First frame proves the GPU path is live: stand the watchdog down.
+        if (framesSeen === 0 && watchdog !== null) {
+          clearTimeout(watchdog);
+          watchdog = null;
+        }
+        framesSeen++;
         // Record the engine frame BEFORE setActiveFrame: the external-seek watcher
         // (deps include activeFrame) compares the two, so they must update in
         // lock-step — otherwise it would misfire playback_seek on the engine's own
@@ -301,6 +362,7 @@ export function useTimelinePlaybackEngine(): void {
 
       return () => {
         disposed = true;
+        if (watchdog !== null) clearTimeout(watchdog);
         unlisten?.();
         playbackStop().catch((e) => console.warn("playbackStop failed:", e));
         // Seek the <video> followers to the current frame so the paused display
@@ -443,14 +505,20 @@ export function useTimelinePlaybackEngine(): void {
       cancelPendingInteractiveSeek();
       pauseAll();
     };
-  }, [isPlaying, isScrubbing]);
+    // engineFailed is a dep so tripping the runtime fallback tears down the engine
+    // branch and re-enters here on the legacy <video> path for the same session.
+  }, [isPlaying, isScrubbing, engineFailed]);
 
   // While the Rust engine owns PLAY, an external seek (keyboard step / transport
   // click) jumps activeFrame away from the engine's per-frame updates. The switch
   // effect above doesn't depend on activeFrame, so this dedicated watcher tells
-  // the engine to reposition via playback_seek instead of ignoring it (#162).
+  // the engine to reposition via playback_seek instead of ignoring it (#162). Once
+  // the engine has fallen back (engineFailed), the legacy tick handles external
+  // seeks itself, so shouldUseRustEngine gates this off.
   useEffect(() => {
-    if (!shouldUseRustEngine({ rustEnabled: rustEngineEnabled(), isTauri, isPlaying, isScrubbing }))
+    if (
+      !shouldUseRustEngine({ rustEnabled: rustEngineEnabled(), isTauri, isPlaying, isScrubbing, engineFailed })
+    )
       return;
     if (
       isExternalSeekWhilePlaying({
@@ -462,5 +530,5 @@ export function useTimelinePlaybackEngine(): void {
       lastEngineFrameRef.current = f;
       void playbackSeek(f).catch((e) => console.warn("playbackSeek failed:", e));
     }
-  }, [activeFrame, isPlaying, isScrubbing]);
+  }, [activeFrame, isPlaying, isScrubbing, engineFailed]);
 }

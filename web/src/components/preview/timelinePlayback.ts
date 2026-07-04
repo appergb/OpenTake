@@ -196,12 +196,41 @@ export function isExternalSeekWhilePlaying(args: {
  * legacy path. Pure so the switch condition — shared by the engine switch, the
  * external-seek watcher, and the MJPEG overlay — lives (and is tested) in one
  * place instead of being copy-pasted.
+ *
+ * `engineFailed` is the runtime ESCAPE HATCH: once a play attempt fails to start
+ * the Rust engine (spawn error, or no frame within the startup deadline) the
+ * front end trips this so the SAME play session falls through to the legacy
+ * `<video>` stack instead of showing a frozen/black canvas. It resets on the next
+ * play. Optional so existing callers (and tests) that never fail keep the engine.
  */
 export function shouldUseRustEngine(args: {
   rustEnabled: boolean;
   isTauri: boolean;
   isPlaying: boolean;
   isScrubbing: boolean;
+  engineFailed?: boolean;
 }): boolean {
-  return args.rustEnabled && args.isTauri && args.isPlaying && !args.isScrubbing;
+  return (
+    args.rustEnabled &&
+    args.isTauri &&
+    args.isPlaying &&
+    !args.isScrubbing &&
+    !args.engineFailed
+  );
+}
+
+/**
+ * Whether the Rust engine's startup watchdog should declare failure and fall back
+ * to the legacy stack: we're still meant to be on the engine path, yet no
+ * `playback_frame` has arrived by the deadline. `framesSeen` is how many frames
+ * the engine has emitted since this play started; any frame at all means the GPU
+ * path is live, so the watchdog stands down. Pure so the fallback trigger is
+ * unit-tested without timers.
+ */
+export function shouldFallBackToLegacy(args: {
+  onEnginePath: boolean;
+  framesSeen: number;
+  deadlineElapsed: boolean;
+}): boolean {
+  return args.onEnginePath && args.deadlineElapsed && args.framesSeen === 0;
 }

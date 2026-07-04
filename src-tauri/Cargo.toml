@@ -73,9 +73,18 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["NSHapt
 tempfile = "3"
 
 [features]
+# `default` now includes `playback-engine`: the continuous Rust streaming engine
+# is the shipped preview path (upstream's single always-composited surface), so a
+# plain `cargo build`/`cargo test` compiles and exercises it. The feature is kept
+# separate so a minimal build stays possible via `--no-default-features` (drops
+# cpal/axum/tokio + the `playback_*` commands; the front-end flag then falls back
+# to the legacy <video> path — see web/src/components/preview/rustEngine.ts).
+default = ["playback-engine"]
 # this feature is used for production builds or when `devUrl` is not set
 custom-protocol = ["tauri/custom-protocol"]
-# Continuous Rust streaming playback engine (#53). Off by default: PR1 lands the
-# headless core (no commands/UI). PR2 adds cpal + axum/image-jpeg deps under this
-# flag; PR3 flips the front end's runtime toggle.
+# Continuous Rust streaming playback engine (#53): continuous per-clip decode →
+# wgpu composite → MJPEG transport, with a cpal audio master clock. Of its deps
+# only cpal is unique to this feature (audio out); axum/tokio/bytes/futures/
+# image-jpeg are already in the workspace lockfile (via opentake-agent), so
+# enabling it pulls just cpal + its small platform audio bindings.
 playback-engine = ["dep:axum", "dep:tokio", "dep:bytes", "dep:futures", "dep:cpal", "image/jpeg"]

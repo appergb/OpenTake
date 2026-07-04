@@ -479,6 +479,10 @@ export function Preview() {
 function TimelineRustOverlay() {
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
   const isScrubbing = useEditorUiStore((s) => s.isScrubbing);
+  // Runtime fallback flag (previewEngine.ts trips it when the engine can't start):
+  // unmount the MJPEG <img> so the legacy <video> underneath shows through instead
+  // of a frozen/black stream frame.
+  const engineFailed = useEditorUiStore((s) => s.rustEngineFailed);
   const [endpoint, setEndpoint] = useState<string | null>(null);
 
   useEffect(() => {
@@ -495,7 +499,7 @@ function TimelineRustOverlay() {
   }, []);
 
   const active =
-    shouldUseRustEngine({ rustEnabled: rustEngineEnabled(), isTauri, isPlaying, isScrubbing }) &&
+    shouldUseRustEngine({ rustEnabled: rustEngineEnabled(), isTauri, isPlaying, isScrubbing, engineFailed }) &&
     endpoint !== null;
   if (!active) return null;
   return (

@@ -74,6 +74,11 @@ interface UiState {
   activeFrame: number;
   isPlaying: boolean;
   isScrubbing: boolean;
+  /** Runtime escape hatch for the Rust playback engine: set true when a play
+   *  attempt can't bring the engine up (spawn rejects, or no frame by the startup
+   *  deadline), so the current session falls back to the legacy <video> stack and
+   *  the MJPEG overlay unmounts. Reset to false at the start of every play. */
+  rustEngineFailed: boolean;
 
   // Selection
   selectedClipIds: Set<string>;
@@ -157,6 +162,8 @@ interface UiState {
   setActiveFrame: (frame: number) => void;
   setCurrentFrame: (frame: number) => void;
   setPlaying: (playing: boolean) => void;
+  /** Trip the Rust-engine runtime fallback for the current play session. */
+  setRustEngineFailed: (failed: boolean) => void;
   /** Toggle play/pause. When STARTING from the parked end-of-timeline frame,
    *  rewinds to 0 first (both tickers stop at the last drawable frame, so without
    *  this the stop check fires immediately and play does nothing). Mirrors
@@ -222,6 +229,7 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   activeFrame: 0,
   isPlaying: false,
   isScrubbing: false,
+  rustEngineFailed: false,
 
   selectedClipIds: new Set(),
   selectedMediaAssetIds: new Set(),
@@ -272,12 +280,15 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   setCurrentFrame: (currentFrame) => set({ currentFrame, activeFrame: currentFrame }),
   setPlaying: (isPlaying) => {
     if (isPlaying) {
-      set({ isPlaying: true, isScrubbing: false });
+      // Reset the Rust-engine fallback on every fresh play so a one-off failure
+      // last session doesn't pin this one to legacy.
+      set({ isPlaying: true, isScrubbing: false, rustEngineFailed: false });
       return;
     }
     const frame = settledFrame(get().activeFrame);
     set({ currentFrame: frame, activeFrame: frame, isPlaying: false, isScrubbing: false });
   },
+  setRustEngineFailed: (rustEngineFailed) => set({ rustEngineFailed }),
   togglePlay: () => {
     const { isPlaying, activeFrame } = get();
     if (isPlaying) {
@@ -288,11 +299,12 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
     // Starting playback: if parked at/after the last drawable frame (where the
     // ticker stopped), rewind to the start so `next >= last` doesn't fire on the
     // very first tick and stall play. Without media there's nothing to rewind.
+    // Reset the Rust-engine fallback here too (both start-play paths clear it).
     const last = Math.max(0, totalFrames(useProjectStore.getState().timeline) - 1);
     if (activeFrame >= last) {
-      set({ currentFrame: 0, activeFrame: 0, isPlaying: true, isScrubbing: false });
+      set({ currentFrame: 0, activeFrame: 0, isPlaying: true, isScrubbing: false, rustEngineFailed: false });
     } else {
-      set({ isPlaying: true, isScrubbing: false });
+      set({ isPlaying: true, isScrubbing: false, rustEngineFailed: false });
     }
   },
   setScrubbing: (isScrubbing) => set({ isScrubbing }),

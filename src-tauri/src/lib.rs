@@ -21,10 +21,10 @@ mod search;
 mod secret;
 mod transcribe;
 
-// Streaming playback engine (#53). Feature-gated (`playback-engine`) and `pub`
-// so the gated GPU+ffmpeg integration test can drive the render loop directly.
-// No `playback_*` commands are registered yet — that lands in PR2 alongside the
-// cpal master clock and the MJPEG transport.
+// Streaming playback engine (#53). Feature-gated (`playback-engine`, now a DEFAULT
+// feature) and `pub` so the gated GPU+ffmpeg integration test can drive the render
+// loop directly. The `playback_*` commands are registered below; a minimal build
+// (`--no-default-features`) drops this module and those commands.
 #[cfg(feature = "playback-engine")]
 pub mod playback;
 
@@ -140,10 +140,10 @@ pub fn run() {
             // + cancel). One export runs at a time, so a single flag suffices.
             app.manage(export::ExportControl::default());
 
-            // Streaming playback (#53 / PR2): start the loopback MJPEG transport
-            // on the Tauri async runtime (mirrors the MCP server spawn) and
-            // register the playback session state. Behind the off-by-default
-            // `playback-engine` feature.
+            // Streaming playback (#53): start the loopback MJPEG transport on the
+            // Tauri async runtime (mirrors the MCP server spawn) and register the
+            // playback session state. Behind the (now default) `playback-engine`
+            // feature; absent in a `--no-default-features` minimal build.
             #[cfg(feature = "playback-engine")]
             {
                 let preview_server =
