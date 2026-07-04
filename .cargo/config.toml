@@ -1,0 +1,11 @@
+# Force the macOS deployment target for every build script.
+#
+# whisper-rs-sys (whisper.cpp / ggml) uses std::filesystem, which is only
+# available on macOS >= 10.15. Without this, the `cc` crate appends
+# `-mmacosx-version-min=10.13` (the value Tauri injects) as the LAST flag, and
+# clang's "last wins" rule makes the effective target 10.13 — so ggml fails to
+# compile in the release bundle. `force = true` overrides the inherited value so
+# every build script targets 11.0, matching bundle.macOS.minimumSystemVersion in
+# tauri.conf.json. Keep the two in sync.
+[env]
+MACOSX_DEPLOYMENT_TARGET = { value = "11.0", force = true }
