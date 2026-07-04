@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useState, type CSSProperties } from "react";
-import { Bot, Check, Download, FolderOpen, Info, Palette, Settings as SettingsIcon, Trash2, X } from "lucide-react";
+import { Bot, Check, Copy, Download, FolderOpen, Info, Palette, Plug, Settings as SettingsIcon, Trash2, X } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { Dropdown } from "../ui/Dropdown";
 import { useT, useI18nStore, LOCALES } from "../../i18n";
@@ -49,13 +49,14 @@ const settingsControlStyle: CSSProperties = {
   border: "none",
 };
 
-type SettingsPaneId = "general" | "appearance" | "import" | "ai" | "about";
+type SettingsPaneId = "general" | "appearance" | "import" | "ai" | "mcp" | "about";
 
 const SETTINGS_PANES: Array<{ id: SettingsPaneId; icon: typeof SettingsIcon; labelKey: string }> = [
   { id: "general", icon: SettingsIcon, labelKey: "settings.section.general" },
   { id: "appearance", icon: Palette, labelKey: "settings.section.appearance" },
   { id: "import", icon: Download, labelKey: "settings.section.import" },
   { id: "ai", icon: Bot, labelKey: "settings.section.ai" },
+  { id: "mcp", icon: Plug, labelKey: "settings.section.mcp" },
   { id: "about", icon: Info, labelKey: "settings.section.about" },
 ];
 
@@ -225,6 +226,8 @@ function renderActivePane(activePane: SettingsPaneId) {
       return <ImportPane />;
     case "ai":
       return <AiPane />;
+    case "mcp":
+      return <McpPane />;
     case "about":
       return <AboutPane />;
   }
@@ -647,5 +650,122 @@ function Value({ children }: { children: React.ReactNode }) {
     <span className="tabular" style={{ fontSize: "var(--fs-sm-md)", color: "var(--text-secondary)" }}>
       {children}
     </span>
+  );
+}
+
+/** Endpoint of the built-in MCP server. Fixed by the Rust backend
+ *  (`opentake-agent::mcp::server::DEFAULT_ADDR` = 127.0.0.1:19789, mounted at
+ *  `/mcp`), so we hardcode it rather than round-tripping to Tauri. */
+const MCP_SERVER_URL = "http://127.0.0.1:19789/mcp";
+
+/**
+ * MCP Instructions pane. Surfaces the loopback MCP server URL and one-line
+ * install commands for Cursor / Claude Code / Codex / Claude Desktop. The i18n
+ * keys (`mcp.*`) already shipped in `dict.ts`; this wires them into the UI that
+ * beta's settings rewrite had left unrendered.
+ */
+function McpPane() {
+  const t = useT();
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  const copy = async (key: string, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey(null), 1500);
+    } catch {
+      // Clipboard may be unavailable (non-Tauri / denied permission); no-op.
+    }
+  };
+
+  const cursorConfig = JSON.stringify(
+    { mcpServers: { opentake: { type: "http", url: MCP_SERVER_URL } } },
+    null,
+    2,
+  );
+
+  const rows: Array<{ key: string; label: string; hint: string; code: string }> = [
+    { key: "url", label: t("mcp.serverUrl"), hint: t("mcp.serverUrlDesc"), code: MCP_SERVER_URL },
+    {
+      key: "claudeCode",
+      label: t("mcp.claudeCode"),
+      hint: t("mcp.claudeCodeCmd"),
+      code: `claude mcp add --transport http opentake ${MCP_SERVER_URL}`,
+    },
+    {
+      key: "codex",
+      label: t("mcp.codex"),
+      hint: t("mcp.codexCmd"),
+      code: `codex mcp add opentake --url ${MCP_SERVER_URL}`,
+    },
+    { key: "cursor", label: t("mcp.cursor"), hint: t("mcp.cursorManual"), code: cursorConfig },
+    {
+      key: "claudeDesktop",
+      label: t("mcp.claudeDesktop"),
+      hint: t("mcp.claudeDesktopManual"),
+      code: `npx mcp-remote ${MCP_SERVER_URL}`,
+    },
+  ];
+
+  return (
+    <Section title={t("settings.section.mcp")}>
+      <div style={{ fontSize: "var(--fs-md)", color: "var(--text-primary)", fontWeight: "var(--fw-medium)" }}>
+        {t("mcp.title")}
+      </div>
+      <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)", marginTop: -12 }}>
+        {t("mcp.overview")}
+      </div>
+      {rows.map((row) => (
+        <div key={row.key} style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
+          <div style={{ fontSize: "var(--fs-sm-md)", color: "var(--text-primary)" }}>{row.label}</div>
+          <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)" }}>{row.hint}</div>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              gap: "var(--space-sm)",
+              ...settingsControlStyle,
+              borderRadius: "var(--radius-sm)",
+              padding: "var(--space-sm) var(--space-md)",
+            }}
+          >
+            <code
+              style={{
+                flex: 1,
+                minWidth: 0,
+                fontSize: "var(--fs-sm)",
+                color: "var(--text-secondary)",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-all",
+                fontFamily: "var(--font-mono, ui-monospace, monospace)",
+              }}
+            >
+              {row.code}
+            </code>
+            <button
+              type="button"
+              onClick={() => copy(row.key, row.code)}
+              className="hover-area"
+              style={{
+                flex: "0 0 auto",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                height: 24,
+                padding: "0 var(--space-sm)",
+                borderRadius: "var(--radius-xs-sm)",
+                color: "var(--text-secondary)",
+                fontSize: "var(--fs-xs)",
+                fontWeight: "var(--fw-medium)",
+              }}
+            >
+              <Icon icon={copiedKey === row.key ? Check : Copy} size={11} />
+              {copiedKey === row.key ? t("mcp.copied") : t("mcp.copy")}
+            </button>
+          </div>
+        </div>
+      ))}
+      <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)" }}>{t("mcp.note")}</div>
+    </Section>
   );
 }
