@@ -980,7 +980,10 @@ pub fn save_clip_as_media(
 
     // Import the rendered file as a new asset (probe + poster + manifest append).
     import_one(&core, media.engine(), &out_path).ok_or("failed to import the rendered clip")?;
-    Ok(MediaListDto::from_core(&core, Some(media.engine().cache_root())))
+    Ok(MediaListDto::from_core(
+        &core,
+        Some(media.engine().cache_root()),
+    ))
 }
 
 /// Validate the user-chosen output path for [`extract_audio`] (Issue #39
@@ -1604,14 +1607,20 @@ mod tests {
         assert!(!before.items[0].favorite);
 
         // Favoriting it surfaces in the DTO.
-        assert_eq!(core.set_media_favorite(&[entry.id.clone()], true), 1);
+        assert_eq!(
+            core.set_media_favorite(std::slice::from_ref(&entry.id), true),
+            1
+        );
         assert!(MediaListDto::from_core(&core, None).items[0].favorite);
 
         // Unknown ids never create phantom favorites.
         assert_eq!(core.set_media_favorite(&["ghost".into()], true), 0);
 
         // Unfavoriting flips it back.
-        assert_eq!(core.set_media_favorite(&[entry.id.clone()], false), 1);
+        assert_eq!(
+            core.set_media_favorite(std::slice::from_ref(&entry.id), false),
+            1
+        );
         assert!(!MediaListDto::from_core(&core, None).items[0].favorite);
     }
 
