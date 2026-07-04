@@ -856,14 +856,52 @@ pub fn get_media(core: State<'_, AppCore>, media: State<'_, MediaState>) -> Medi
     MediaListDto::from_core(&core, Some(media.engine().cache_root()))
 }
 
+/// Validate the user-chosen output path for [`extract_audio`] (Issue #39
+/// review #4 — "out_path 无后端路径边界校验").
+///
+/// Enforces a path-safety boundary so an `out_path` arriving from the WebView
+/// cannot:
+/// - smuggle null bytes (`\0`) which some OS APIs silently truncate, leaving
+///   the written file at an unexpected location;
+/// - be relative (the native save dialog always returns absolute, but the
+///   command is also callable directly via the Tauri API);
+/// - use an extension ffmpeg would otherwise fall back on an arbitrary codec
+///   for — only `.m4a` / `.m4r` / `.aac` / `.mp3` / `.wav` are allowed,
+///   matching the codec table in
+///   [`opentake_media::MediaEngine::extract_audio`] and the save-dialog
+///   filters in `MediaPanel.tsx`.
+///
+/// Returns the parsed absolute [`PathBuf`] on success.
+fn validate_extract_output(out_path: &str) -> Result<PathBuf, String> {
+    if out_path.contains('\0') {
+        return Err("output path contains null byte".into());
+    }
+    let output = PathBuf::from(out_path);
+    if !output.is_absolute() {
+        return Err(format!(
+            "output path must be absolute: {}",
+            output.display()
+        ));
+    }
+    match output.extension().and_then(|e| e.to_str()) {
+        Some("m4a") | Some("m4r") | Some("aac") | Some("mp3") | Some("wav") => Ok(output),
+        Some(ext) => Err(format!(
+            "unsupported audio extension: .{ext} (use .m4a, .mp3, or .wav)"
+        )),
+        None => Err("output path has no extension (use .m4a, .mp3, or .wav)".into()),
+    }
+}
+
 /// `extract_audio`: extract the audio track from a media asset into a
 /// self-contained audio file (`.m4a` / `.mp3` / `.wav`). The output path is
 /// chosen by the caller via a native save dialog; the codec falls out of the
 /// extension. Used by the media panel's per-card "extract audio" action
 /// (Issue #39).
 ///
-/// Returns the output path on success. Errors when the asset is unknown, the
-/// source path cannot be resolved or found, or ffmpeg fails (missing binary,
+/// The `out_path` is first run through [`validate_extract_output`] to enforce
+/// path-safety boundaries (review #4). Returns the output path on success.
+/// Errors when the asset is unknown, the source path cannot be resolved or
+/// found, the output path is invalid, or ffmpeg fails (missing binary,
 /// non-zero exit, unsupported extension).
 #[tauri::command]
 pub fn extract_audio(
@@ -872,6 +910,9 @@ pub fn extract_audio(
     media_id: String,
     out_path: String,
 ) -> Result<String, String> {
+    // Path boundary check first (review #4): fail fast on a bad output path
+    // before touching the manifest or spawning ffmpeg.
+    let output = validate_extract_output(&out_path)?;
     let manifest = core.media();
     let entry = manifest
         .entries
@@ -888,7 +929,6 @@ pub fn extract_audio(
     if !input.is_file() {
         return Err(format!("source file not found: {}", input.display()));
     }
-    let output = PathBuf::from(&out_path);
     media
         .engine()
         .extract_audio(&input, &output)
@@ -1532,5 +1572,61 @@ mod tests {
         touch(&f);
         let probe = probe_media(&engine_for(tmp.path()), &f);
         assert!(core.relink_media_file("nope", &f, &probe).is_err());
+    }
+
+    // --- extract_audio output-path validation (Issue #39 review #4) ---
+    //
+    // The command is callable from the WebView with an arbitrary string; these
+    // tests lock down the boundary that `validate_extract_output` enforces
+    // before any ffmpeg work begins. They run without ffmpeg on PATH.
+
+    #[test]
+    fn validate_extract_output_accepts_whitelisted_extensions() {
+        // All five extensions accepted by the codec table + the native save
+        // dialog filters should parse to an absolute PathBuf.
+        for ext in ["m4a", "m4r", "aac", "mp3", "wav"] {
+            let p = validate_extract_output(&format!("/tmp/out.{ext}"))
+                .unwrap_or_else(|e| panic!(".{ext}: {e}"));
+            assert_eq!(p.extension().unwrap().to_str().unwrap(), ext);
+            assert!(p.is_absolute());
+        }
+    }
+
+    #[test]
+    fn validate_extract_output_rejects_relative_path() {
+        let err = validate_extract_output("out.m4a").unwrap_err();
+        assert!(
+            err.contains("absolute"),
+            "relative path must be rejected: got {err}"
+        );
+    }
+
+    #[test]
+    fn validate_extract_output_rejects_null_byte() {
+        // A null byte would be silently truncated by some OS path APIs,
+        // writing the file at an unexpected location.
+        let err = validate_extract_output("/tmp/out\0.m4a").unwrap_err();
+        assert!(
+            err.contains("null"),
+            "null byte must be rejected: got {err}"
+        );
+    }
+
+    #[test]
+    fn validate_extract_output_rejects_unknown_extension() {
+        let err = validate_extract_output("/tmp/out.mp4").unwrap_err();
+        assert!(
+            err.contains("unsupported audio extension"),
+            "video extension must be rejected: got {err}"
+        );
+    }
+
+    #[test]
+    fn validate_extract_output_rejects_missing_extension() {
+        let err = validate_extract_output("/tmp/out").unwrap_err();
+        assert!(
+            err.contains("no extension"),
+            "extensionless path must be rejected: got {err}"
+        );
     }
 }

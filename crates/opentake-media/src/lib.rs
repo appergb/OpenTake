@@ -198,26 +198,38 @@ impl MediaEngine {
     }
 }
 
+/// Pick the ffmpeg codec args for an audio output extension (Issue #39).
+///
+/// Returns `None` for unsupported extensions so the caller can surface a
+/// friendly error before spawning ffmpeg. The table matches the save-dialog
+/// filters in `MediaPanel.tsx` (`.m4a` / `.mp3` / `.wav`) plus the closely
+/// related `.m4r` (ringtone) and `.aac` (raw AAC) containers, all of which
+/// the AAC encoder can mux.
+///
+/// Extracted as a pure function so the codec selection can be unit-tested
+/// without ffmpeg on PATH (review #3 — "缺 issue #39 验收测试").
+fn audio_codec_args(ext: &str) -> Option<Vec<&'static str>> {
+    match ext {
+        "m4a" | "m4r" | "aac" => Some(vec!["-c:a", "aac", "-b:a", "192k"]),
+        "mp3" => Some(vec!["-c:a", "libmp3lame", "-b:a", "192k"]),
+        "wav" => Some(vec!["-c:a", "pcm_s16le"]),
+        _ => None,
+    }
+}
+
 /// Run `ffmpeg -y -i <input> -vn <codec args> <output>` to mux the audio track
 /// into a standalone file. Codec is selected by `output`'s extension so the
 /// caller just picks a save-path filter in the native dialog and the right
 /// encoder falls out. `-y` overwrites (the save dialog already confirmed).
 fn extract_audio_file(input: &Path, output: &Path) -> Result<()> {
-    let codec_args: Vec<&str> = match output.extension().and_then(|e| e.to_str()) {
-        Some("m4a") | Some("m4r") | Some("aac") => vec!["-c:a", "aac", "-b:a", "192k"],
-        Some("mp3") => vec!["-c:a", "libmp3lame", "-b:a", "192k"],
-        Some("wav") => vec!["-c:a", "pcm_s16le"],
-        Some(ext) => {
-            return Err(MediaError::Ffmpeg(format!(
-                "unsupported audio extension: .{ext} (use m4a, mp3, or wav)"
-            )));
-        }
-        None => {
-            return Err(MediaError::Ffmpeg(
-                "output path has no extension (use .m4a, .mp3, or .wav)".into(),
-            ));
-        }
-    };
+    let ext = output.extension().and_then(|e| e.to_str()).ok_or_else(|| {
+        MediaError::Ffmpeg("output path has no extension (use .m4a, .mp3, or .wav)".into())
+    })?;
+    let codec_args = audio_codec_args(ext).ok_or_else(|| {
+        MediaError::Ffmpeg(format!(
+            "unsupported audio extension: .{ext} (use m4a, mp3, or wav)"
+        ))
+    })?;
 
     let mut cmd = std::process::Command::new(ff::ffmpeg_path());
     cmd.arg("-y")
@@ -283,5 +295,154 @@ mod tests {
         let _: Option<Hit> = None;
         let _ = PcmFormat::F32;
         let _ = VideoCodec::H264;
+    }
+
+    // --- extract_audio codec selection (Issue #39 review #3) ---
+    //
+    // `audio_codec_args` is a pure function: no ffmpeg spawn, no filesystem
+    // access. These tests run on every platform without any binary on PATH.
+
+    #[test]
+    fn audio_codec_args_picks_aac_for_m4a_family() {
+        for ext in ["m4a", "m4r", "aac"] {
+            let args = audio_codec_args(ext).unwrap_or_else(|| panic!(".{ext}"));
+            assert_eq!(args, ["-c:a", "aac", "-b:a", "192k"], "mismatch for .{ext}");
+        }
+    }
+
+    #[test]
+    fn audio_codec_args_picks_lame_for_mp3() {
+        assert_eq!(
+            audio_codec_args("mp3").unwrap(),
+            ["-c:a", "libmp3lame", "-b:a", "192k"]
+        );
+    }
+
+    #[test]
+    fn audio_codec_args_picks_pcm_for_wav() {
+        assert_eq!(audio_codec_args("wav").unwrap(), ["-c:a", "pcm_s16le"]);
+    }
+
+    #[test]
+    fn audio_codec_args_rejects_unknown_extensions() {
+        // Video containers + empty + uppercase (extension matching is
+        // case-sensitive by design — the save dialog emits lowercase).
+        for ext in ["mp4", "mov", "", "M4A"] {
+            assert!(
+                audio_codec_args(ext).is_none(),
+                ".{ext:?} should not map to a codec"
+            );
+        }
+    }
+
+    /// End-to-end verification of Issue #39 acceptance criteria:
+    /// 1. the output file exists after extraction;
+    /// 2. its duration matches the input (within 0.5s);
+    /// 3. it contains no video stream.
+    ///
+    /// Requires `ffmpeg` + `ffprobe` on PATH; auto-skips when either is
+    /// unavailable (Windows local dev has neither, CI Linux has both — see
+    /// `.github/workflows/ci.yml` `Install system deps`). Run explicitly with
+    /// `cargo test -p opentake-media --ignored extract_audio`.
+    #[test]
+    #[ignore = "requires ffmpeg + ffprobe on PATH; run with --ignored"]
+    fn extract_audio_file_produces_audio_only_output_matching_input_duration() {
+        use std::process::Command;
+        // Skip when ffmpeg/ffprobe unavailable.
+        if Command::new(ff::ffmpeg_path())
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: ffmpeg unavailable");
+            return;
+        }
+        if Command::new("ffprobe").arg("-version").output().is_err() {
+            eprintln!("skipping: ffprobe unavailable");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("src.mp4");
+        let output = tmp.path().join("out.m4a");
+
+        // Generate a 2s fixture: 320x240 black video + 440Hz sine audio.
+        // `-shortest` trims to the shorter stream so both are exactly 2s.
+        let gen = Command::new(ff::ffmpeg_path())
+            .arg("-y")
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=2"])
+            .args(["-f", "lavfi", "-i", "color=size=320x240:rate=24:duration=2"])
+            .args(["-c:a", "aac"])
+            .args(["-c:v", "libx264"])
+            .arg("-shortest")
+            .arg(&input)
+            .output()
+            .expect("ffmpeg fixture gen spawn failed");
+        assert!(
+            gen.status.success(),
+            "fixture gen failed: {}",
+            String::from_utf8_lossy(&gen.stderr)
+        );
+
+        // Run the extraction under test.
+        extract_audio_file(&input, &output).expect("extract_audio_file failed");
+
+        // #1: output exists.
+        assert!(
+            output.is_file(),
+            "output file not created: {}",
+            output.display()
+        );
+
+        // Helper: probe duration (seconds) of a file via ffprobe.
+        let probe_duration = |path: &Path| -> f64 {
+            let out = Command::new("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "csv=p=0",
+                ])
+                .arg(path)
+                .output()
+                .expect("ffprobe spawn failed");
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<f64>()
+                .expect("ffprobe returned non-numeric duration")
+        };
+
+        // #2: duration matches input (within 0.5s — muxing overhead can shift
+        // by a few hundred ms).
+        let dur_in = probe_duration(&input);
+        let dur_out = probe_duration(&output);
+        assert!(
+            (dur_in - dur_out).abs() < 0.5,
+            "duration mismatch: in={dur_in} out={dur_out}"
+        );
+
+        // #3: no video stream in output (`-vn` must have dropped it).
+        let v_streams = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v",
+                "-show_entries",
+                "stream=index",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(&output)
+            .output()
+            .expect("ffprobe spawn failed");
+        let v_streams = String::from_utf8_lossy(&v_streams.stdout);
+        assert!(
+            v_streams.trim().is_empty(),
+            "output has video stream(s): {}",
+            v_streams.trim()
+        );
     }
 }
