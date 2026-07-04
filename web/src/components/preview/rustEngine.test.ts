@@ -1,8 +1,8 @@
 /**
- * rustEngineEnabled flag logic (default-ON escape hatch). The Rust streaming
- * engine is the shipped preview path; only an explicit "0" opts back out to the
- * legacy <video> stack, "1" force-enables, and every other state (missing key,
- * unreadable / undefined localStorage) resolves to ON.
+ * rustEngineEnabled flag logic (default-OFF opt-in). The proven legacy <video>
+ * stack is the shipped preview path; only an explicit "1" opts INTO the Rust
+ * streaming engine. Every other state ("0", a missing key, a stray value, an
+ * unreadable / undefined localStorage) resolves to the legacy default.
  *
  * vitest's default node environment has no localStorage, so each case injects a
  * fresh in-memory stub (or removes it) — the same pattern favorites.test.ts uses.
@@ -30,42 +30,42 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("rustEngineEnabled (default-on)", () => {
-  it("defaults ON when the flag key is absent", () => {
+describe("rustEngineEnabled (default-off, opt-in)", () => {
+  it("defaults OFF (legacy) when the flag key is absent", () => {
     vi.stubGlobal("localStorage", makeLocalStorage());
-    expect(rustEngineEnabled()).toBe(true);
-  });
-
-  it('opts OUT to legacy only for the exact string "0"', () => {
-    vi.stubGlobal("localStorage", makeLocalStorage({ [KEY]: "0" }));
     expect(rustEngineEnabled()).toBe(false);
   });
 
-  it('keeps "1" as a force-ON', () => {
+  it('opts INTO the Rust engine only for the exact string "1"', () => {
     vi.stubGlobal("localStorage", makeLocalStorage({ [KEY]: "1" }));
     expect(rustEngineEnabled()).toBe(true);
   });
 
-  it("treats any other stray value as ON (only \"0\" disables)", () => {
-    vi.stubGlobal("localStorage", makeLocalStorage({ [KEY]: "legacy" }));
-    expect(rustEngineEnabled()).toBe(true);
-    vi.stubGlobal("localStorage", makeLocalStorage({ [KEY]: "false" }));
-    expect(rustEngineEnabled()).toBe(true);
+  it('keeps "0" as legacy', () => {
+    vi.stubGlobal("localStorage", makeLocalStorage({ [KEY]: "0" }));
+    expect(rustEngineEnabled()).toBe(false);
+  });
+
+  it('treats any other stray value as legacy (only "1" enables)', () => {
+    vi.stubGlobal("localStorage", makeLocalStorage({ [KEY]: "rust" }));
+    expect(rustEngineEnabled()).toBe(false);
+    vi.stubGlobal("localStorage", makeLocalStorage({ [KEY]: "true" }));
+    expect(rustEngineEnabled()).toBe(false);
     vi.stubGlobal("localStorage", makeLocalStorage({ [KEY]: "" }));
-    expect(rustEngineEnabled()).toBe(true);
+    expect(rustEngineEnabled()).toBe(false);
   });
 
-  it("defaults ON when localStorage is undefined (non-DOM context)", () => {
+  it("defaults OFF when localStorage is undefined (non-DOM context)", () => {
     vi.stubGlobal("localStorage", undefined);
-    expect(rustEngineEnabled()).toBe(true);
+    expect(rustEngineEnabled()).toBe(false);
   });
 
-  it("defaults ON when localStorage.getItem throws (locked-down context)", () => {
+  it("defaults OFF when localStorage.getItem throws (locked-down context)", () => {
     vi.stubGlobal("localStorage", {
       getItem: () => {
         throw new Error("access denied");
       },
     } as unknown as Storage);
-    expect(rustEngineEnabled()).toBe(true);
+    expect(rustEngineEnabled()).toBe(false);
   });
 });
