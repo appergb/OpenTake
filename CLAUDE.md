@@ -1,6 +1,12 @@
 # OpenTake — 工作交接 / 状态文档（给压缩上下文后的自己）
 
-> 本文件是 OpenTake 开发的**权威状态 + 操作手册**。每次上下文压缩后先读它,再读 `docs/architecture/PORT-1TO1-GAP.md`(1:1 差距与实现计划,批次蓝图)。
+> 本文件是 OpenTake 开发的**权威状态 + 操作手册**。每次上下文压缩后先读它,再读 **`docs/architecture/HANDOFF-2026-07.md`(★ 当前权威 TODO / 交接文档:issue 盘点 + 未完成清单 + 每项怎么写)**。旧的 `PORT-1TO1-GAP.md` 已过时,仅作历史参考。
+
+## ✅ 2026-07-04 状态快照
+
+- **播放引擎收官**:#170(流式引擎全链路)已合并;**PR #189(Rust 引擎默认开 + 运行时回退安全网)本次提交**。唯一欠账 = 真机视觉验收(清单 `docs/architecture/PLAYBACK-ENGINE.md`)。
+- **#171–#188 已把"引擎建成没接 UI"主缺口清完**:whisper 转写/字幕、SigLIP2 搜索、.opentake 打包、导入白名单、save-as bug、Inspector 关键帧、画布 overlay/zoom、时间线 I/O 范围/nudge、H.265/ProRes 导出、agent MediaBridge。
+- **issue 已盘点**(2026-07-04 逐项对码):14 个已完成关闭;8 个收窄留开;剩余大项 = #91 媒体库重写(CRITICAL)、Agent 聊天面板、生成 UI、用户加单五项(倒放/冻结帧/HDR/代理媒体/账号)。**全部实现路径见 HANDOFF-2026-07.md §3。**
 > 用户用中文沟通,回复用中文。用户要我**全自主**:自己开子 Agent / workflow,**绝不让用户开 agent / 不向用户提问要他操作**;**自己用真机 computer-use 测试**,做到能用再回报。
 
 > ⚠️ computer-use 点击本机被 Dock 遮挡全局拦截(报"会落在程序坞")。改用 `preview_start` dev server(浏览器 fallback `web/src/lib/fallback.ts` 有 demo 时间线)+ `preview_eval` 注入测量验证布局,绕开真机点击。详见 `memory/opentake-editing-parity.md`。
