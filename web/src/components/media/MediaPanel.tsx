@@ -258,8 +258,13 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
         {/* actionsRow */}
         <div style={{ height: 28, display: "flex", alignItems: "center", gap: "var(--space-xs)" }}>
           <ImportMenu />
+          {/* AI 生成尚未接线（generate_* 仍是 stub）。封边：明确「即将推出」并禁用，
+              不给测试者一个点了没反应的死按钮。 */}
           <button
-            title={t("media.generate")}
+            type="button"
+            disabled
+            aria-disabled
+            title={t("media.generateSoon")}
             style={{
               display: "inline-flex",
               alignItems: "center",
@@ -271,6 +276,8 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
               color: "#111",
               fontSize: "var(--fs-sm)",
               fontWeight: "var(--fw-medium)",
+              opacity: 0.55,
+              cursor: "not-allowed",
             }}
           >
             <Icon icon={Sparkles} size={12} />

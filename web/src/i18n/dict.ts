@@ -135,6 +135,7 @@ const zh: Dict = {
   "media.importFiles": "导入文件",
   "media.importSkipped": "已跳过 {count} 个不支持的文件",
   "media.generate": "生成",
+  "media.generateSoon": "AI 生成 · 即将推出",
   "media.search": "搜索",
   "media.viewMode": "视图模式",
   "media.sort": "排序",
@@ -416,7 +417,7 @@ const zh: Dict = {
   "preview.captureFrameFailed": "截帧失败",
 
   // Agent panel
-  "agent.placeholder": "Agent 面板(独立功能)",
+  "agent.placeholder": "AI 助手 · 即将推出",
 
   // Home
   "home.welcome": "欢迎使用 OpenTake",
@@ -707,6 +708,7 @@ const en: Dict = {
   "media.importFiles": "Import Files",
   "media.importSkipped": "Skipped {count} unsupported file(s)",
   "media.generate": "Generate",
+  "media.generateSoon": "AI generation · coming soon",
   "media.search": "Search",
   "media.viewMode": "View mode",
   "media.sort": "Sort",
@@ -984,7 +986,7 @@ const en: Dict = {
   "preview.captureFrameUnavailable": "Composite frame unavailable",
   "preview.captureFrameFailed": "Capture frame failed",
 
-  "agent.placeholder": "Agent panel (separate Issue)",
+  "agent.placeholder": "AI assistant · coming soon",
 
   "home.welcome": "Welcome to OpenTake",
   "home.newProject": "New Project",
