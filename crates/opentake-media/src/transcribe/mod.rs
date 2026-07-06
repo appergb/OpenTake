@@ -90,6 +90,33 @@ pub fn is_non_speech_marker(text: &str) -> bool {
         && inner.chars().any(|c| c.is_ascii_alphabetic())
 }
 
+/// Strip non-speech marker segments/words from a transcription. New
+/// transcriptions are already filtered inside the whisper backend, so this is
+/// the READ-side defense for disk caches written before that filter existed
+/// (#198): without it a stale cached transcript resurrects "[BLANK_AUDIO]"
+/// captions forever, since the cache short-circuits re-transcription. When
+/// anything was stripped, `text` is rebuilt from the surviving segments so all
+/// three views stay consistent. Idempotent; clean results pass through as-is.
+pub fn sanitize_transcription(mut result: TranscriptionResult) -> TranscriptionResult {
+    let dirty = result
+        .segments
+        .iter()
+        .any(|s| is_non_speech_marker(&s.text))
+        || result.words.iter().any(|w| is_non_speech_marker(&w.text));
+    if !dirty {
+        return result;
+    }
+    result.segments.retain(|s| !is_non_speech_marker(&s.text));
+    result.words.retain(|w| !is_non_speech_marker(&w.text));
+    result.text = result
+        .segments
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    result
+}
+
 impl TranscriptionResult {
     /// Shift every timestamp by `offset` seconds, back into source time after
     /// transcribing an extracted range. `offset == 0` is the identity. `None`
@@ -358,5 +385,77 @@ mod tests {
                 "did not expect marker: {text:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::*;
+
+    fn dirty() -> TranscriptionResult {
+        TranscriptionResult {
+            text: "hi [BLANK_AUDIO] there".into(),
+            language: None,
+            words: vec![
+                TranscriptionWord {
+                    text: "hi".into(),
+                    start: Some(0.0),
+                    end: Some(0.5),
+                },
+                TranscriptionWord {
+                    text: "[BLANK_AUDIO]".into(),
+                    start: Some(0.5),
+                    end: Some(4.0),
+                },
+            ],
+            segments: vec![
+                TranscriptionSegment {
+                    text: "hi".into(),
+                    start: 0.0,
+                    end: 0.5,
+                },
+                TranscriptionSegment {
+                    text: "(inaudible)".into(),
+                    start: 0.5,
+                    end: 4.0,
+                },
+                TranscriptionSegment {
+                    text: "there".into(),
+                    start: 4.0,
+                    end: 5.0,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn sanitize_strips_marker_rows_and_rebuilds_text() {
+        let r = sanitize_transcription(dirty());
+        assert_eq!(
+            r.segments
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["hi", "there"]
+        );
+        assert_eq!(r.words.len(), 1);
+        assert_eq!(r.text, "hi there");
+    }
+
+    #[test]
+    fn sanitize_passes_clean_results_through_untouched() {
+        let clean = TranscriptionResult {
+            text: "original text preserved".into(),
+            language: Some("en".into()),
+            words: Vec::new(),
+            segments: vec![TranscriptionSegment {
+                text: "original text preserved".into(),
+                start: 0.0,
+                end: 1.0,
+            }],
+        };
+        let out = sanitize_transcription(clean.clone());
+        // Clean input passes through as-is — `text` is NOT rebuilt.
+        assert_eq!(out, clean);
     }
 }

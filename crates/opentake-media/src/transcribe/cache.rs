@@ -68,7 +68,10 @@ pub fn has_cached_on_disk(cache_root: &Path, path: &Path) -> bool {
 pub fn cached_on_disk(cache_root: &Path, path: &Path) -> Option<TranscriptionResult> {
     let key = file_identity_key(path, KEY_HEX_LEN)?;
     let data = std::fs::read(disk_path(cache_root, &key)).ok()?;
-    serde_json::from_slice(&data).ok()
+    let r: TranscriptionResult = serde_json::from_slice(&data).ok()?;
+    // Read-side #198 defense: scrub non-speech markers out of transcripts
+    // cached before the whisper-layer filter existed.
+    Some(super::sanitize_transcription(r))
 }
 
 /// In-memory + disk transcript cache. Thread-safe.
@@ -132,6 +135,9 @@ impl TranscriptCache {
         }
         let data = std::fs::read(disk_path(&self.cache_root, key)).ok()?;
         let r: TranscriptionResult = serde_json::from_slice(&data).ok()?;
+        // Read-side #198 defense (same as `cached_on_disk`): a pre-filter disk
+        // cache must not resurrect "[BLANK_AUDIO]" rows via the memory cache.
+        let r = super::sanitize_transcription(r);
         self.remember(key, r.clone());
         Some(r)
     }
@@ -319,5 +325,64 @@ mod tests {
     fn has_cached_missing_file_is_false() {
         let dir = tempfile::tempdir().unwrap();
         assert!(!has_cached_on_disk(dir.path(), Path::new("/no/such.wav")));
+    }
+
+    /// #198 read-side defense: a disk cache written BEFORE the whisper-layer
+    /// marker filter existed must come back scrubbed, not resurrect
+    /// "[BLANK_AUDIO]" rows (real-device regression: stale cache short-circuits
+    /// re-transcription, so the write-side filter alone never runs).
+    #[test]
+    fn cached_on_disk_scrubs_pre_filter_marker_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut media = tempfile::NamedTempFile::new().unwrap();
+        media.write_all(b"fake-media-bytes").unwrap();
+
+        let stale = TranscriptionResult {
+            text: "hello [BLANK_AUDIO]".into(),
+            language: Some("en".into()),
+            words: vec![
+                TranscriptionWord {
+                    text: "hello".into(),
+                    start: Some(0.0),
+                    end: Some(1.0),
+                },
+                TranscriptionWord {
+                    text: "[BLANK_AUDIO]".into(),
+                    start: Some(1.0),
+                    end: Some(9.0),
+                },
+            ],
+            segments: vec![
+                TranscriptionSegment {
+                    text: "hello".into(),
+                    start: 0.0,
+                    end: 1.0,
+                },
+                TranscriptionSegment {
+                    text: "[BLANK_AUDIO]".into(),
+                    start: 1.0,
+                    end: 9.0,
+                },
+            ],
+        };
+        let key = file_identity_key(media.path(), KEY_HEX_LEN).unwrap();
+        let sub = dir.path().join(CACHE_SUBDIR);
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            sub.join(format!("{key}.json")),
+            serde_json::to_vec(&stale).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = cached_on_disk(dir.path(), media.path()).unwrap();
+        assert_eq!(loaded.segments.len(), 1);
+        assert_eq!(loaded.segments[0].text, "hello");
+        assert!(loaded.words.iter().all(|w| w.text != "[BLANK_AUDIO]"));
+        assert_eq!(loaded.text, "hello");
+
+        // The memory-then-disk path must scrub identically.
+        let cache = TranscriptCache::new(dir.path());
+        let via_cache = cache.cached(&key).unwrap();
+        assert!(via_cache.segments.iter().all(|s| s.text != "[BLANK_AUDIO]"));
     }
 }
