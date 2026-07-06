@@ -557,6 +557,9 @@ fn composite_frames_jpeg(
         RenderDevice::try_new().map_err(|e| BridgeError::new(format!("no GPU device: {e}")))?;
     let compositor = Compositor::new(&dev.device);
     let text_rasterizer = CosmicTextRasterizer::new();
+    if !text_rasterizer.has_fonts() {
+        eprintln!("[render] no system fonts discovered; text clips will render blank");
+    }
 
     let mut out_frames: Vec<InspectedFrame> = Vec::with_capacity(frames.len());
     for &f in frames {
