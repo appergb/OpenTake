@@ -899,7 +899,11 @@ impl Dispatcher {
                 trim_start_frame: e.trim_start_frame,
                 trim_end_frame: e.trim_end_frame,
                 has_audio,
-                add_linked_audio: false,
+                // `place_clip` only actually links when the target is a video
+                // track and the source is a video-with-audio asset (see
+                // `opentake_ops::ops::place::place_clip`), so this is safe to
+                // request unconditionally.
+                add_linked_audio: true,
                 transform: None,
             });
         }
@@ -940,7 +944,10 @@ impl Dispatcher {
                 trim_start_frame: e.trim_start_frame,
                 trim_end_frame: e.trim_end_frame,
                 has_audio,
-                add_linked_audio: false,
+                // See the matching note in `add_clips`: `place_clip` gates the
+                // actual link on target-track/source-type/has_audio, so this is
+                // safe to request unconditionally.
+                add_linked_audio: true,
                 transform: None,
             });
         }
@@ -2815,6 +2822,15 @@ mod tests {
         e
     }
 
+    /// A video asset whose source carries an audio track (`hasAudio: true`) —
+    /// the case `add_clips`/`insert_clips` should auto-create a linked audio
+    /// partner for.
+    fn video_with_audio_entry(id: &str, name: &str) -> MediaManifestEntry {
+        let mut e = entry(id, name);
+        e.has_audio = Some(true);
+        e
+    }
+
     fn entry_with_size(id: &str, name: &str, width: i32, height: i32) -> MediaManifestEntry {
         let mut e = entry(id, name);
         e.source_width = Some(width);
@@ -2990,6 +3006,150 @@ mod tests {
             r.text_joined()
         );
         assert!(h.timeline().tracks.is_empty());
+    }
+
+    // MARK: - #196 add_clips/insert_clips linked-audio fixtures.
+
+    /// One empty video track plus the given manifest entries — for `add_clips`/
+    /// `insert_clips` calls that pass an explicit `trackIndex`.
+    fn one_video_track_handle(entries: Vec<MediaManifestEntry>) -> Arc<StateHandle> {
+        let mut tl = Timeline::new();
+        tl.tracks.push(Track::new("track-1", ClipType::Video));
+        let mut m = MediaManifest::new();
+        m.entries = entries;
+        Arc::new(StateHandle::new(tl, m))
+    }
+
+    #[test]
+    fn add_clips_explicit_track_index_links_audio_for_video_with_audio() {
+        let h = one_video_track_handle(vec![video_with_audio_entry("asset-1", "A")]);
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "add_clips",
+            serde_json::json!({
+                "entries": [
+                    {"mediaRef": "asset-1", "trackIndex": 0, "startFrame": 0, "durationFrames": 30}
+                ]
+            }),
+        );
+
+        assert!(!r.is_error, "{}", r.text_joined());
+        let tl = h.timeline();
+        assert_eq!(tl.tracks.len(), 2, "expected a fresh linked audio track");
+        assert_eq!(tl.tracks[0].clips.len(), 1);
+        assert_eq!(tl.tracks[1].kind, ClipType::Audio);
+        assert_eq!(tl.tracks[1].clips.len(), 1);
+        let video_clip = &tl.tracks[0].clips[0];
+        let audio_clip = &tl.tracks[1].clips[0];
+        assert!(video_clip.link_group_id.is_some());
+        assert_eq!(video_clip.link_group_id, audio_clip.link_group_id);
+        assert_eq!(audio_clip.media_type, ClipType::Audio);
+    }
+
+    #[test]
+    fn add_clips_omitted_track_index_links_audio_for_video_with_audio() {
+        let h = empty_manifest_handle(vec![video_with_audio_entry("asset-1", "A")]);
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "add_clips",
+            serde_json::json!({
+                "entries": [
+                    {"mediaRef": "asset-1", "startFrame": 0, "durationFrames": 30}
+                ]
+            }),
+        );
+
+        assert!(!r.is_error, "{}", r.text_joined());
+        let tl = h.timeline();
+        // The shared visual track (auto-created) plus a fresh linked audio track.
+        assert_eq!(tl.tracks.len(), 2, "expected a fresh linked audio track");
+        assert_eq!(tl.tracks[0].kind, ClipType::Video);
+        assert_eq!(tl.tracks[1].kind, ClipType::Audio);
+        let video_clip = &tl.tracks[0].clips[0];
+        let audio_clip = &tl.tracks[1].clips[0];
+        assert!(video_clip.link_group_id.is_some());
+        assert_eq!(video_clip.link_group_id, audio_clip.link_group_id);
+    }
+
+    #[test]
+    fn add_clips_does_not_link_audio_when_source_has_no_audio() {
+        let h = one_video_track_handle(vec![entry("asset-1", "A")]); // has_audio: false
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "add_clips",
+            serde_json::json!({
+                "entries": [
+                    {"mediaRef": "asset-1", "trackIndex": 0, "startFrame": 0, "durationFrames": 30}
+                ]
+            }),
+        );
+
+        assert!(!r.is_error, "{}", r.text_joined());
+        let tl = h.timeline();
+        assert_eq!(
+            tl.tracks.len(),
+            1,
+            "no linked audio track should be created"
+        );
+        assert!(tl.tracks[0].clips[0].link_group_id.is_none());
+    }
+
+    #[test]
+    fn insert_clips_links_audio_for_video_with_audio() {
+        let h = one_video_track_handle(vec![video_with_audio_entry("asset-1", "A")]);
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "insert_clips",
+            serde_json::json!({
+                "trackIndex": 0,
+                "atFrame": 0,
+                "entries": [
+                    {"mediaRef": "asset-1", "durationFrames": 30}
+                ]
+            }),
+        );
+
+        assert!(!r.is_error, "{}", r.text_joined());
+        let tl = h.timeline();
+        assert_eq!(tl.tracks.len(), 2, "expected a fresh linked audio track");
+        let video_clip = &tl.tracks[0].clips[0];
+        let audio_clip = tl.tracks[1]
+            .clips
+            .iter()
+            .find(|c| c.media_type == ClipType::Audio)
+            .expect("linked audio clip");
+        assert!(video_clip.link_group_id.is_some());
+        assert_eq!(video_clip.link_group_id, audio_clip.link_group_id);
+    }
+
+    #[test]
+    fn insert_clips_does_not_link_audio_when_source_has_no_audio() {
+        let h = one_video_track_handle(vec![entry("asset-1", "A")]); // has_audio: false
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "insert_clips",
+            serde_json::json!({
+                "trackIndex": 0,
+                "atFrame": 0,
+                "entries": [
+                    {"mediaRef": "asset-1", "durationFrames": 30}
+                ]
+            }),
+        );
+
+        assert!(!r.is_error, "{}", r.text_joined());
+        let tl = h.timeline();
+        assert_eq!(
+            tl.tracks.len(),
+            1,
+            "no linked audio track should be created"
+        );
+        assert!(tl.tracks[0].clips[0].link_group_id.is_none());
     }
 
     #[test]
