@@ -1996,6 +1996,18 @@ fn analysis_target<'a>(
     }
 }
 
+/// Whether `clip` has decodable source media a silence-detection PCM extract
+/// can run against. Text (and any other non-audio/video overlay type, e.g. a
+/// future Lottie clip) carries no source file — its `media_ref` doesn't
+/// resolve to a path, so including it here would only ever produce a
+/// `media path not found` warning, never a real analysis result.
+fn has_decodable_source_media(clip: &opentake_domain::Clip) -> bool {
+    matches!(
+        clip.media_type,
+        opentake_domain::ClipType::Video | opentake_domain::ClipType::Audio
+    )
+}
+
 fn silence_targets<'a>(
     timeline: &'a Timeline,
     args: &TightenSilencesArgs,
@@ -2013,7 +2025,9 @@ fn silence_targets<'a>(
                 let (track_index, clip) = find_clip_with_track(timeline, id).ok_or_else(|| {
                     ToolError::new(format!("tighten_silences: clip not found: {id}"))
                 })?;
-                out.push(SilenceTarget { track_index, clip });
+                if has_decodable_source_media(clip) {
+                    out.push(SilenceTarget { track_index, clip });
+                }
             }
             Ok(out)
         }
@@ -2024,6 +2038,7 @@ fn silence_targets<'a>(
             Ok(track
                 .clips
                 .iter()
+                .filter(|clip| has_decodable_source_media(clip))
                 .map(|clip| SilenceTarget { track_index, clip })
                 .collect())
         }
@@ -2036,6 +2051,7 @@ fn silence_targets<'a>(
                 track
                     .clips
                     .iter()
+                    .filter(|clip| has_decodable_source_media(clip))
                     .map(|clip| SilenceTarget { track_index, clip })
                     .collect()
             })
@@ -2777,10 +2793,17 @@ mod tests {
         }
         fn extract_analysis_pcm(
             &self,
-            _media_ref: &str,
+            media_ref: &str,
             _spec: opentake_media::PcmSpec,
             _range: Option<(f64, f64)>,
         ) -> anyhow::Result<opentake_media::PcmBuffer> {
+            // Mirror the real `CoreHandle::media_path` default: an empty
+            // `media_ref` (what text clips carry — see `command.rs::add_texts`)
+            // never resolves to a path, matching production's real failure mode
+            // without needing an actual file on disk.
+            if media_ref.is_empty() {
+                anyhow::bail!("media path not found for mediaRef: {media_ref}");
+            }
             Ok(self.pcm.clone())
         }
     }
@@ -3479,6 +3502,106 @@ mod tests {
         assert!(start <= 3, "{json}");
         assert!(end >= 6, "{json}");
         assert_eq!(json["applied"], serde_json::json!(false));
+    }
+
+    /// A text clip carries no source media (`media_ref` is `""` — see
+    /// `command.rs::add_texts`/`add_captions`), so it can never actually be
+    /// decoded. Built directly (not through `EditCommand::AddTexts`) since this
+    /// handle is read-only.
+    fn text_clip(id: &str, start_frame: i32, duration_frames: i32) -> Clip {
+        let mut c = Clip::new(id, "", start_frame, duration_frames);
+        c.media_type = ClipType::Text;
+        c.source_clip_type = ClipType::Text;
+        c
+    }
+
+    #[test]
+    fn tighten_silences_track_index_skips_text_clip_without_warning() {
+        let mut timeline = Timeline::new();
+        timeline.fps = 10;
+        let mut track = Track::new("mixed-track", ClipType::Video);
+        track.clips.push(Clip::new("clip-a", "asset-1", 0, 10));
+        track.clips.push(text_clip("clip-text", 20, 90)); // e.g. a 9s @ 10fps caption
+        timeline.tracks.push(track);
+        let mut manifest = MediaManifest::new();
+        manifest.entries.push(entry("asset-1", "Voice"));
+        let mut samples = vec![0.5f32; 300];
+        samples.extend(std::iter::repeat_n(0.0f32, 400));
+        samples.extend(std::iter::repeat_n(0.5f32, 300));
+        let h = Arc::new(AnalysisHandle {
+            timeline,
+            manifest,
+            pcm: pcm(samples, 1_000),
+        });
+        let d = dispatcher_with(h);
+
+        let result = d.dispatch(
+            "tighten_silences",
+            serde_json::json!({
+                "trackIndex": 0,
+                "thresholdDb": -40.0,
+                "minSilenceFrames": 2,
+                "paddingFrames": 0
+            }),
+        );
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        let json = first_json(&result);
+        // The text clip must not appear in the per-clip payload at all, and must
+        // not have produced the "media path not found" warning that only an
+        // (attempted) PCM extraction against its empty mediaRef would raise.
+        let clip_ids: Vec<&str> = json["clips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["clipId"].as_str().unwrap())
+            .collect();
+        assert_eq!(clip_ids, vec!["clip-a"], "{json}");
+        let warnings = json["warnings"].as_array().unwrap();
+        assert!(warnings.is_empty(), "{json}");
+    }
+
+    #[test]
+    fn tighten_silences_clip_ids_skips_explicit_text_clip_without_warning() {
+        let mut timeline = Timeline::new();
+        timeline.fps = 10;
+        let mut track = Track::new("mixed-track", ClipType::Video);
+        track.clips.push(Clip::new("clip-a", "asset-1", 0, 10));
+        track.clips.push(text_clip("clip-text", 20, 90));
+        timeline.tracks.push(track);
+        let mut manifest = MediaManifest::new();
+        manifest.entries.push(entry("asset-1", "Voice"));
+        let mut samples = vec![0.5f32; 300];
+        samples.extend(std::iter::repeat_n(0.0f32, 400));
+        samples.extend(std::iter::repeat_n(0.5f32, 300));
+        let h = Arc::new(AnalysisHandle {
+            timeline,
+            manifest,
+            pcm: pcm(samples, 1_000),
+        });
+        let d = dispatcher_with(h);
+
+        let result = d.dispatch(
+            "tighten_silences",
+            serde_json::json!({
+                "clipIds": ["clip-a", "clip-text"],
+                "thresholdDb": -40.0,
+                "minSilenceFrames": 2,
+                "paddingFrames": 0
+            }),
+        );
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        let json = first_json(&result);
+        let clip_ids: Vec<&str> = json["clips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["clipId"].as_str().unwrap())
+            .collect();
+        assert_eq!(clip_ids, vec!["clip-a"], "{json}");
+        let warnings = json["warnings"].as_array().unwrap();
+        assert!(warnings.is_empty(), "{json}");
     }
 
     #[test]
