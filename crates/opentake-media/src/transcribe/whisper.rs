@@ -89,12 +89,19 @@ impl Transcriber for WhisperTranscriber {
             let seg_text = state
                 .full_get_segment_text(i)
                 .map_err(|e| MediaError::Transcribe(format!("segment text: {e}")))?;
-            full_text.push_str(&seg_text);
 
             let t0 = state.full_get_segment_t0(i).unwrap_or(0);
             let t1 = state.full_get_segment_t1(i).unwrap_or(0);
             let trimmed = seg_text.trim();
-            if !trimmed.is_empty() {
+            // Skip a segment that is (once trimmed) nothing but a non-speech
+            // marker whisper learned from its training captions — e.g.
+            // "[BLANK_AUDIO]" over a silent gap (#198). These are ordinary
+            // decoded text, not the internal special tokens filtered below, so
+            // they only ever show up reconstructed at the segment level.
+            // Excluded from `full_text` too, so the plain-text summary stays
+            // consistent with `segments`.
+            if !trimmed.is_empty() && !super::is_non_speech_marker(trimmed) {
+                full_text.push_str(&seg_text);
                 segments.push(TranscriptionSegment {
                     text: trimmed.to_string(),
                     start: cs_to_secs(t0),
@@ -109,10 +116,13 @@ impl Transcriber for WhisperTranscriber {
                     Err(_) => continue,
                 };
                 let trimmed_tok = tok_text.trim();
-                // Skip special tokens (whisper wraps them in [..] / <|..|>) and blanks.
+                // Skip special tokens (whisper wraps them in [..] / <|..|>),
+                // blanks, and a token that is itself a whole non-speech marker
+                // (a short marker like "[MUSIC]" can decode as one token).
                 if trimmed_tok.is_empty()
                     || (trimmed_tok.starts_with("[_"))
                     || (trimmed_tok.starts_with("<|") && trimmed_tok.ends_with("|>"))
+                    || super::is_non_speech_marker(trimmed_tok)
                 {
                     continue;
                 }

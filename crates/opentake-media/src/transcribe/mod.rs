@@ -51,6 +51,45 @@ pub struct TranscriptionResult {
     pub segments: Vec<TranscriptionSegment>,
 }
 
+/// Whether `text` is (once trimmed) entirely one whisper non-speech marker —
+/// e.g. `[BLANK_AUDIO]`, `(inaudible)`, `[MUSIC]`, `{BLANK_AUDIO}`, `[ Pause ]`,
+/// `*music*` — rather than real transcribed speech. whisper models learn these
+/// markers from their training captions; they are ordinary decoded text, not a
+/// special token whisper.cpp's own suppression list already filters (see
+/// `whisper.rs`'s existing `[_` / `<|...|>` skip), so they surface as a normal
+/// segment or word and would otherwise become a real caption clip / transcript
+/// row (issue #198: a 9s `[BLANK_AUDIO]` caption over a silent gap).
+///
+/// Whole-string match only (anchored start to end): a sentence that merely
+/// *contains* a parenthetical, e.g. `"he said (hello)"`, does not match — only
+/// a segment/word whose entire trimmed content is bracketed filler words does.
+/// The bracketed content itself is restricted to letters/underscores/spaces
+/// (no digits or other punctuation), so real short utterances that happen to
+/// be alone in a segment (a name, a number) still fall through untouched.
+pub fn is_non_speech_marker(text: &str) -> bool {
+    let t = text.trim();
+    let bytes = t.as_bytes();
+    if bytes.len() < 3 {
+        return false;
+    }
+    let is_wrapped = match (bytes[0], bytes[bytes.len() - 1]) {
+        (b'[', b']') | (b'(', b')') | (b'{', b'}') => true,
+        (b'*', b'*') => bytes.len() >= 5, // *music*, not the empty `**`
+        _ => false,
+    };
+    if !is_wrapped {
+        return false;
+    }
+    let inner = &t[1..t.len() - 1];
+    if inner.is_empty() {
+        return false;
+    }
+    inner
+        .chars()
+        .all(|c| c.is_ascii_alphabetic() || c == '_' || c == ' ')
+        && inner.chars().any(|c| c.is_ascii_alphabetic())
+}
+
 impl TranscriptionResult {
     /// Shift every timestamp by `offset` seconds, back into source time after
     /// transcribing an extracted range. `offset == 0` is the identity. `None`
@@ -262,5 +301,62 @@ mod tests {
         assert_eq!(s.sample_rate, 16_000);
         assert_eq!(s.channels, 1);
         assert_eq!(s.format, PcmFormat::F32);
+    }
+
+    #[test]
+    fn non_speech_marker_matches_known_whisper_variants() {
+        // Case-insensitive, and covers the bracket/case variants actually seen
+        // in whisper.cpp/OpenAI-whisper output (not just [UPPER_CASE]).
+        for text in [
+            "[BLANK_AUDIO]",
+            "[blank_audio]",
+            "[Music]",
+            "[MUSIC]",
+            "[NOISE]",
+            "(inaudible)",
+            "(sighs)",
+            "(wind_noise)",
+            "{BLANK_AUDIO}",
+            "[ Pause ]",
+            "[ Silence ]",
+            "*music*",
+        ] {
+            assert!(is_non_speech_marker(text), "expected marker: {text:?}");
+        }
+    }
+
+    #[test]
+    fn non_speech_marker_trims_surrounding_whitespace() {
+        assert!(is_non_speech_marker("  [BLANK_AUDIO]  "));
+    }
+
+    #[test]
+    fn non_speech_marker_rejects_real_speech() {
+        for text in [
+            "hello world",
+            "",
+            "a",
+            "ok",
+            // Contains a parenthetical, but is NOT entirely one — must survive.
+            "he said (hello) to her",
+            "(hello) is what he said",
+            // Digits / punctuation inside the brackets are real content, not a
+            // filler marker (e.g. a spoken timestamp or citation-like aside).
+            "[42]",
+            "(don't)",
+            "[BLANK AUDIO!]",
+            // Unmatched / mismatched wrapping.
+            "[BLANK_AUDIO",
+            "BLANK_AUDIO]",
+            "[BLANK_AUDIO)",
+            "**",
+            "()",
+            "[]",
+        ] {
+            assert!(
+                !is_non_speech_marker(text),
+                "did not expect marker: {text:?}"
+            );
+        }
     }
 }

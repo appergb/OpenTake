@@ -175,7 +175,7 @@ impl Dispatcher {
 
             // --- Editing (wired to EditCommand) ---
             ToolName::AddClips => self.add_clips(args, manifest, op),
-            ToolName::InsertClips => self.insert_clips(args, manifest),
+            ToolName::InsertClips => self.insert_clips(args, before, manifest),
             ToolName::MoveClips => self.move_clips(args, before),
             ToolName::RemoveClips => self.remove_clips(args, before, op),
             ToolName::RemoveTracks => self.remove_tracks(args),
@@ -899,7 +899,11 @@ impl Dispatcher {
                 trim_start_frame: e.trim_start_frame,
                 trim_end_frame: e.trim_end_frame,
                 has_audio,
-                add_linked_audio: false,
+                // `place_clip` only actually links when the target is a video
+                // track and the source is a video-with-audio asset (see
+                // `opentake_ops::ops::place::place_clip`), so this is safe to
+                // request unconditionally.
+                add_linked_audio: true,
                 transform: None,
             });
         }
@@ -923,24 +927,56 @@ impl Dispatcher {
     fn insert_clips(
         &self,
         args: &Value,
+        before: &Timeline,
         manifest: &MediaManifest,
     ) -> Result<ToolResult, ToolError> {
         let a: InsertClipsArgs = decode_tool_args(args, "")?;
+        let fps = timeline_fps(before);
         let mut entries = Vec::with_capacity(a.entries.len());
         for (i, raw) in a.entries.iter().enumerate() {
             let e: InsertClipEntry = decode_tool_args(raw, &format!("entries[{i}]"))?;
             let (media_type, has_audio) = resolve_media_kind(manifest, &e.media_ref);
+            let duration_frames = match e.duration_frames {
+                Some(d) => d,
+                None => {
+                    let full = manifest
+                        .entries
+                        .iter()
+                        .find(|entry| entry.id == e.media_ref)
+                        .filter(|entry| entry.duration > 0.0)
+                        .map(|entry| (entry.duration * fps) as i32)
+                        .ok_or_else(|| {
+                            ToolError::new(format!(
+                                "entries[{i}]: durationFrames omitted and mediaRef '{}' has no known duration",
+                                e.media_ref
+                            ))
+                        })?;
+                    let remaining =
+                        full - e.trim_start_frame.unwrap_or(0) - e.trim_end_frame.unwrap_or(0);
+                    if remaining < 1 {
+                        return Err(ToolError::new(format!(
+                            "entries[{i}]: durationFrames omitted and the trimmed source duration is empty (source {full} frame(s), trimStartFrame {}, trimEndFrame {})",
+                            e.trim_start_frame.unwrap_or(0),
+                            e.trim_end_frame.unwrap_or(0)
+                        )));
+                    }
+                    remaining
+                }
+            };
             entries.push(ClipEntry {
                 media_ref: e.media_ref,
                 media_type,
                 source_clip_type: media_type,
                 track_index: a.track_index,
                 start_frame: a.at_frame,
-                duration_frames: e.duration_frames.unwrap_or(0),
+                duration_frames,
                 trim_start_frame: e.trim_start_frame,
                 trim_end_frame: e.trim_end_frame,
                 has_audio,
-                add_linked_audio: false,
+                // See the matching note in `add_clips`: `place_clip` gates the
+                // actual link on target-track/source-type/has_audio, so this is
+                // safe to request unconditionally.
+                add_linked_audio: true,
                 transform: None,
             });
         }
@@ -1960,6 +1996,18 @@ fn analysis_target<'a>(
     }
 }
 
+/// Whether `clip` has decodable source media a silence-detection PCM extract
+/// can run against. Text (and any other non-audio/video overlay type, e.g. a
+/// future Lottie clip) carries no source file — its `media_ref` doesn't
+/// resolve to a path, so including it here would only ever produce a
+/// `media path not found` warning, never a real analysis result.
+fn has_decodable_source_media(clip: &opentake_domain::Clip) -> bool {
+    matches!(
+        clip.media_type,
+        opentake_domain::ClipType::Video | opentake_domain::ClipType::Audio
+    )
+}
+
 fn silence_targets<'a>(
     timeline: &'a Timeline,
     args: &TightenSilencesArgs,
@@ -1977,7 +2025,9 @@ fn silence_targets<'a>(
                 let (track_index, clip) = find_clip_with_track(timeline, id).ok_or_else(|| {
                     ToolError::new(format!("tighten_silences: clip not found: {id}"))
                 })?;
-                out.push(SilenceTarget { track_index, clip });
+                if has_decodable_source_media(clip) {
+                    out.push(SilenceTarget { track_index, clip });
+                }
             }
             Ok(out)
         }
@@ -1988,6 +2038,7 @@ fn silence_targets<'a>(
             Ok(track
                 .clips
                 .iter()
+                .filter(|clip| has_decodable_source_media(clip))
                 .map(|clip| SilenceTarget { track_index, clip })
                 .collect())
         }
@@ -2000,6 +2051,7 @@ fn silence_targets<'a>(
                 track
                     .clips
                     .iter()
+                    .filter(|clip| has_decodable_source_media(clip))
                     .map(|clip| SilenceTarget { track_index, clip })
                     .collect()
             })
@@ -2741,10 +2793,17 @@ mod tests {
         }
         fn extract_analysis_pcm(
             &self,
-            _media_ref: &str,
+            media_ref: &str,
             _spec: opentake_media::PcmSpec,
             _range: Option<(f64, f64)>,
         ) -> anyhow::Result<opentake_media::PcmBuffer> {
+            // Mirror the real `CoreHandle::media_path` default: an empty
+            // `media_ref` (what text clips carry — see `command.rs::add_texts`)
+            // never resolves to a path, matching production's real failure mode
+            // without needing an actual file on disk.
+            if media_ref.is_empty() {
+                anyhow::bail!("media path not found for mediaRef: {media_ref}");
+            }
             Ok(self.pcm.clone())
         }
     }
@@ -2815,10 +2874,27 @@ mod tests {
         e
     }
 
+    /// A video asset whose source carries an audio track (`hasAudio: true`) —
+    /// the case `add_clips`/`insert_clips` should auto-create a linked audio
+    /// partner for.
+    fn video_with_audio_entry(id: &str, name: &str) -> MediaManifestEntry {
+        let mut e = entry(id, name);
+        e.has_audio = Some(true);
+        e
+    }
+
     fn entry_with_size(id: &str, name: &str, width: i32, height: i32) -> MediaManifestEntry {
         let mut e = entry(id, name);
         e.source_width = Some(width);
         e.source_height = Some(height);
+        e
+    }
+
+    /// A media entry with an explicit source `duration` in seconds — used by
+    /// `insert_clips` omitted-`durationFrames` tests.
+    fn entry_with_duration(id: &str, name: &str, duration_secs: f64) -> MediaManifestEntry {
+        let mut e = entry(id, name);
+        e.duration = duration_secs;
         e
     }
 
@@ -2990,6 +3066,247 @@ mod tests {
             r.text_joined()
         );
         assert!(h.timeline().tracks.is_empty());
+    }
+
+    // MARK: - #196 add_clips/insert_clips linked-audio fixtures.
+
+    /// One empty video track plus the given manifest entries — for `add_clips`/
+    /// `insert_clips` calls that pass an explicit `trackIndex`.
+    fn one_video_track_handle(entries: Vec<MediaManifestEntry>) -> Arc<StateHandle> {
+        let mut tl = Timeline::new();
+        tl.tracks.push(Track::new("track-1", ClipType::Video));
+        let mut m = MediaManifest::new();
+        m.entries = entries;
+        Arc::new(StateHandle::new(tl, m))
+    }
+
+    #[test]
+    fn add_clips_explicit_track_index_links_audio_for_video_with_audio() {
+        let h = one_video_track_handle(vec![video_with_audio_entry("asset-1", "A")]);
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "add_clips",
+            serde_json::json!({
+                "entries": [
+                    {"mediaRef": "asset-1", "trackIndex": 0, "startFrame": 0, "durationFrames": 30}
+                ]
+            }),
+        );
+
+        assert!(!r.is_error, "{}", r.text_joined());
+        let tl = h.timeline();
+        assert_eq!(tl.tracks.len(), 2, "expected a fresh linked audio track");
+        assert_eq!(tl.tracks[0].clips.len(), 1);
+        assert_eq!(tl.tracks[1].kind, ClipType::Audio);
+        assert_eq!(tl.tracks[1].clips.len(), 1);
+        let video_clip = &tl.tracks[0].clips[0];
+        let audio_clip = &tl.tracks[1].clips[0];
+        assert!(video_clip.link_group_id.is_some());
+        assert_eq!(video_clip.link_group_id, audio_clip.link_group_id);
+        assert_eq!(audio_clip.media_type, ClipType::Audio);
+    }
+
+    #[test]
+    fn add_clips_omitted_track_index_links_audio_for_video_with_audio() {
+        let h = empty_manifest_handle(vec![video_with_audio_entry("asset-1", "A")]);
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "add_clips",
+            serde_json::json!({
+                "entries": [
+                    {"mediaRef": "asset-1", "startFrame": 0, "durationFrames": 30}
+                ]
+            }),
+        );
+
+        assert!(!r.is_error, "{}", r.text_joined());
+        let tl = h.timeline();
+        // The shared visual track (auto-created) plus a fresh linked audio track.
+        assert_eq!(tl.tracks.len(), 2, "expected a fresh linked audio track");
+        assert_eq!(tl.tracks[0].kind, ClipType::Video);
+        assert_eq!(tl.tracks[1].kind, ClipType::Audio);
+        let video_clip = &tl.tracks[0].clips[0];
+        let audio_clip = &tl.tracks[1].clips[0];
+        assert!(video_clip.link_group_id.is_some());
+        assert_eq!(video_clip.link_group_id, audio_clip.link_group_id);
+    }
+
+    #[test]
+    fn add_clips_does_not_link_audio_when_source_has_no_audio() {
+        let h = one_video_track_handle(vec![entry("asset-1", "A")]); // has_audio: false
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "add_clips",
+            serde_json::json!({
+                "entries": [
+                    {"mediaRef": "asset-1", "trackIndex": 0, "startFrame": 0, "durationFrames": 30}
+                ]
+            }),
+        );
+
+        assert!(!r.is_error, "{}", r.text_joined());
+        let tl = h.timeline();
+        assert_eq!(
+            tl.tracks.len(),
+            1,
+            "no linked audio track should be created"
+        );
+        assert!(tl.tracks[0].clips[0].link_group_id.is_none());
+    }
+
+    #[test]
+    fn insert_clips_links_audio_for_video_with_audio() {
+        let h = one_video_track_handle(vec![video_with_audio_entry("asset-1", "A")]);
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "insert_clips",
+            serde_json::json!({
+                "trackIndex": 0,
+                "atFrame": 0,
+                "entries": [
+                    {"mediaRef": "asset-1", "durationFrames": 30}
+                ]
+            }),
+        );
+
+        assert!(!r.is_error, "{}", r.text_joined());
+        let tl = h.timeline();
+        assert_eq!(tl.tracks.len(), 2, "expected a fresh linked audio track");
+        let video_clip = &tl.tracks[0].clips[0];
+        let audio_clip = tl.tracks[1]
+            .clips
+            .iter()
+            .find(|c| c.media_type == ClipType::Audio)
+            .expect("linked audio clip");
+        assert!(video_clip.link_group_id.is_some());
+        assert_eq!(video_clip.link_group_id, audio_clip.link_group_id);
+    }
+
+    #[test]
+    fn insert_clips_does_not_link_audio_when_source_has_no_audio() {
+        let h = one_video_track_handle(vec![entry("asset-1", "A")]); // has_audio: false
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "insert_clips",
+            serde_json::json!({
+                "trackIndex": 0,
+                "atFrame": 0,
+                "entries": [
+                    {"mediaRef": "asset-1", "durationFrames": 30}
+                ]
+            }),
+        );
+
+        assert!(!r.is_error, "{}", r.text_joined());
+        let tl = h.timeline();
+        assert_eq!(
+            tl.tracks.len(),
+            1,
+            "no linked audio track should be created"
+        );
+        assert!(tl.tracks[0].clips[0].link_group_id.is_none());
+    }
+
+    // MARK: - #197 insert_clips omitted-durationFrames fixtures.
+
+    #[test]
+    fn insert_clips_omitted_duration_uses_full_source_length() {
+        // fps defaults to 30 (Timeline::new()); a 2s asset -> 60 frames.
+        let h = one_video_track_handle(vec![entry_with_duration("asset-1", "A", 2.0)]);
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "insert_clips",
+            serde_json::json!({
+                "trackIndex": 0,
+                "atFrame": 0,
+                "entries": [
+                    {"mediaRef": "asset-1"}
+                ]
+            }),
+        );
+
+        assert!(!r.is_error, "{}", r.text_joined());
+        let tl = h.timeline();
+        assert_eq!(tl.tracks[0].clips[0].duration_frames, 60);
+    }
+
+    #[test]
+    fn insert_clips_omitted_duration_subtracts_trims() {
+        // 2s @ 30fps = 60 frames; trim 10 in + 5 out -> 45 frames remain.
+        let h = one_video_track_handle(vec![entry_with_duration("asset-1", "A", 2.0)]);
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "insert_clips",
+            serde_json::json!({
+                "trackIndex": 0,
+                "atFrame": 0,
+                "entries": [
+                    {"mediaRef": "asset-1", "trimStartFrame": 10, "trimEndFrame": 5}
+                ]
+            }),
+        );
+
+        assert!(!r.is_error, "{}", r.text_joined());
+        let tl = h.timeline();
+        assert_eq!(tl.tracks[0].clips[0].duration_frames, 45);
+    }
+
+    #[test]
+    fn insert_clips_omitted_duration_errors_on_zero_length_source() {
+        let h = one_video_track_handle(vec![entry_with_duration("asset-1", "A", 0.0)]);
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "insert_clips",
+            serde_json::json!({
+                "trackIndex": 0,
+                "atFrame": 0,
+                "entries": [
+                    {"mediaRef": "asset-1"}
+                ]
+            }),
+        );
+
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("no known duration"),
+            "{}",
+            r.text_joined()
+        );
+        assert!(h.timeline().tracks[0].clips.is_empty());
+    }
+
+    #[test]
+    fn insert_clips_omitted_duration_errors_when_trims_consume_entire_source() {
+        // 1s @ 30fps = 30 frames; trimming 20 in + 15 out leaves nothing.
+        let h = one_video_track_handle(vec![entry_with_duration("asset-1", "A", 1.0)]);
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "insert_clips",
+            serde_json::json!({
+                "trackIndex": 0,
+                "atFrame": 0,
+                "entries": [
+                    {"mediaRef": "asset-1", "trimStartFrame": 20, "trimEndFrame": 15}
+                ]
+            }),
+        );
+
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("trimmed source duration is empty"),
+            "{}",
+            r.text_joined()
+        );
+        assert!(h.timeline().tracks[0].clips.is_empty());
     }
 
     #[test]
@@ -3185,6 +3502,106 @@ mod tests {
         assert!(start <= 3, "{json}");
         assert!(end >= 6, "{json}");
         assert_eq!(json["applied"], serde_json::json!(false));
+    }
+
+    /// A text clip carries no source media (`media_ref` is `""` — see
+    /// `command.rs::add_texts`/`add_captions`), so it can never actually be
+    /// decoded. Built directly (not through `EditCommand::AddTexts`) since this
+    /// handle is read-only.
+    fn text_clip(id: &str, start_frame: i32, duration_frames: i32) -> Clip {
+        let mut c = Clip::new(id, "", start_frame, duration_frames);
+        c.media_type = ClipType::Text;
+        c.source_clip_type = ClipType::Text;
+        c
+    }
+
+    #[test]
+    fn tighten_silences_track_index_skips_text_clip_without_warning() {
+        let mut timeline = Timeline::new();
+        timeline.fps = 10;
+        let mut track = Track::new("mixed-track", ClipType::Video);
+        track.clips.push(Clip::new("clip-a", "asset-1", 0, 10));
+        track.clips.push(text_clip("clip-text", 20, 90)); // e.g. a 9s @ 10fps caption
+        timeline.tracks.push(track);
+        let mut manifest = MediaManifest::new();
+        manifest.entries.push(entry("asset-1", "Voice"));
+        let mut samples = vec![0.5f32; 300];
+        samples.extend(std::iter::repeat_n(0.0f32, 400));
+        samples.extend(std::iter::repeat_n(0.5f32, 300));
+        let h = Arc::new(AnalysisHandle {
+            timeline,
+            manifest,
+            pcm: pcm(samples, 1_000),
+        });
+        let d = dispatcher_with(h);
+
+        let result = d.dispatch(
+            "tighten_silences",
+            serde_json::json!({
+                "trackIndex": 0,
+                "thresholdDb": -40.0,
+                "minSilenceFrames": 2,
+                "paddingFrames": 0
+            }),
+        );
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        let json = first_json(&result);
+        // The text clip must not appear in the per-clip payload at all, and must
+        // not have produced the "media path not found" warning that only an
+        // (attempted) PCM extraction against its empty mediaRef would raise.
+        let clip_ids: Vec<&str> = json["clips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["clipId"].as_str().unwrap())
+            .collect();
+        assert_eq!(clip_ids, vec!["clip-a"], "{json}");
+        let warnings = json["warnings"].as_array().unwrap();
+        assert!(warnings.is_empty(), "{json}");
+    }
+
+    #[test]
+    fn tighten_silences_clip_ids_skips_explicit_text_clip_without_warning() {
+        let mut timeline = Timeline::new();
+        timeline.fps = 10;
+        let mut track = Track::new("mixed-track", ClipType::Video);
+        track.clips.push(Clip::new("clip-a", "asset-1", 0, 10));
+        track.clips.push(text_clip("clip-text", 20, 90));
+        timeline.tracks.push(track);
+        let mut manifest = MediaManifest::new();
+        manifest.entries.push(entry("asset-1", "Voice"));
+        let mut samples = vec![0.5f32; 300];
+        samples.extend(std::iter::repeat_n(0.0f32, 400));
+        samples.extend(std::iter::repeat_n(0.5f32, 300));
+        let h = Arc::new(AnalysisHandle {
+            timeline,
+            manifest,
+            pcm: pcm(samples, 1_000),
+        });
+        let d = dispatcher_with(h);
+
+        let result = d.dispatch(
+            "tighten_silences",
+            serde_json::json!({
+                "clipIds": ["clip-a", "clip-text"],
+                "thresholdDb": -40.0,
+                "minSilenceFrames": 2,
+                "paddingFrames": 0
+            }),
+        );
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        let json = first_json(&result);
+        let clip_ids: Vec<&str> = json["clips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["clipId"].as_str().unwrap())
+            .collect();
+        assert_eq!(clip_ids, vec!["clip-a"], "{json}");
+        let warnings = json["warnings"].as_array().unwrap();
+        assert!(warnings.is_empty(), "{json}");
     }
 
     #[test]
