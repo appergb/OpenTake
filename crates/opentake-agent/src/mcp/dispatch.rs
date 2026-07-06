@@ -182,7 +182,7 @@ impl Dispatcher {
             ToolName::SplitClip => self.split_clip(args, before, op),
             ToolName::SetKeyframes => self.set_keyframes(args),
             ToolName::RippleDeleteRanges => self.ripple_delete_ranges(args, before, op),
-            ToolName::AddTexts => self.add_texts(args),
+            ToolName::AddTexts => self.add_texts(args, before),
             ToolName::CreateFolder => self.create_folder(args),
             ToolName::MoveToFolder => self.move_to_folder(args),
             ToolName::SetClipProperties => self.set_clip_properties(args, before, manifest),
@@ -1324,26 +1324,89 @@ impl Dispatcher {
         Ok(ToolResult::ok(res.summary))
     }
 
-    fn add_texts(&self, args: &Value) -> Result<ToolResult, ToolError> {
+    /// Add one or more text overlays. `trackIndex` is optional per-entry:
+    ///
+    /// * omitted on every entry -> auto-creates one shared new top track
+    ///   (`AddTextsAutoTrack`) so an existing top track's content is never
+    ///   clobbered — the fix for #194 (previously an omitted trackIndex fell
+    ///   back to literal track 0, `clear_region`-ing over whatever was there).
+    /// * set on every entry -> places directly onto those tracks
+    ///   (`AddTexts`), overwriting on overlap same as `add_clips` — this is
+    ///   the caller explicitly targeting existing tracks, so overwrite is
+    ///   expected.
+    /// * mixed -> rejected (a new track at index 0 would shift any explicit
+    ///   indices, so there's no single coherent interpretation), matching
+    ///   upstream's exact error text (`ToolExecutor+Texts.swift:102-106`).
+    fn add_texts(&self, args: &Value, before: &Timeline) -> Result<ToolResult, ToolError> {
         let a: AddTextsArgs = decode_tool_args(args, "")?;
-        let mut entries = Vec::with_capacity(a.entries.len());
+        let canvas_w = before.width.max(1) as f64;
+        let canvas_h = before.height.max(1) as f64;
+
+        struct Parsed {
+            track_index: Option<usize>,
+            start_frame: i32,
+            duration_frames: i32,
+            content: String,
+            text_style: TextStyle,
+            transform: Transform,
+        }
+
+        let mut parsed = Vec::with_capacity(a.entries.len());
         for (i, raw) in a.entries.iter().enumerate() {
             let e: AddTextEntry = decode_tool_args(raw, &format!("entries[{i}]"))?;
-            entries.push(TextEntry {
-                track_index: e.track_index.unwrap_or(0),
+            let text_style = build_text_style(
+                e.font_name,
+                e.font_size,
+                e.color.as_deref(),
+                e.alignment.as_deref(),
+            );
+            let transform =
+                resolve_text_transform(e.transform, &e.content, &text_style, canvas_w, canvas_h)?;
+            parsed.push(Parsed {
+                track_index: e.track_index,
                 start_frame: e.start_frame,
                 duration_frames: e.duration_frames,
                 content: e.content,
-                text_style: build_text_style(
-                    e.font_name,
-                    e.font_size,
-                    e.color.as_deref(),
-                    e.alignment.as_deref(),
-                ),
-                transform: build_transform(e.transform),
+                text_style,
+                transform,
             });
         }
-        let res = self.apply(EditCommand::AddTexts { entries })?;
+
+        // All-or-none: a new track at index 0 would shift any explicit indices.
+        let omitted_count = parsed.iter().filter(|p| p.track_index.is_none()).count();
+        if omitted_count != 0 && omitted_count != parsed.len() {
+            return Err(ToolError::new(format!(
+                "Mixed trackIndex: {omitted_count} of {} entries omitted trackIndex. Either set it on every entry or omit it on every entry (to auto-create a shared new track).",
+                parsed.len()
+            )));
+        }
+
+        let res = if omitted_count == parsed.len() && !parsed.is_empty() {
+            let entries = parsed
+                .into_iter()
+                .map(|p| opentake_ops::TextAutoTrackEntry {
+                    start_frame: p.start_frame,
+                    duration_frames: p.duration_frames,
+                    content: p.content,
+                    text_style: p.text_style,
+                    transform: p.transform,
+                })
+                .collect();
+            self.apply(EditCommand::AddTextsAutoTrack { entries })?
+        } else {
+            let entries = parsed
+                .into_iter()
+                .map(|p| TextEntry {
+                    track_index: p.track_index.unwrap_or(0),
+                    start_frame: p.start_frame,
+                    duration_frames: p.duration_frames,
+                    content: p.content,
+                    text_style: p.text_style,
+                    transform: p.transform,
+                })
+                .collect();
+            self.apply(EditCommand::AddTexts { entries })?
+        };
         Ok(ToolResult::ok(res.summary))
     }
 
@@ -2160,25 +2223,88 @@ fn build_ripple_ranges(
     Ok(ranges)
 }
 
-/// Build a domain [`Transform`] from the optional partial `TransformArg`, leaving
-/// unspecified fields at their identity defaults.
-fn build_transform(arg: Option<args::TransformArg>) -> Transform {
-    match arg {
-        Some(t) => transform_from_arg(t),
-        None => Transform::default(),
+/// `add_texts` wraps at 90% of canvas width before auto-fitting the box to the
+/// measured text, same ratio as [`CAPTION_MAX_TEXT_WIDTH_RATIO`] but named
+/// separately since the two tools' constants are independent (upstream
+/// `parseAddTextTransform`, `ToolExecutor+Texts.swift:38`, hardcodes the same
+/// 0.9 for text — it isn't shared with the caption tool's constant either).
+const ADD_TEXT_MAX_TEXT_WIDTH_RATIO: f64 = 0.9;
+
+/// Resolve `add_texts`'s optional partial `TransformArg` into a fully-resolved
+/// [`Transform`], auto-fitting the box to the measured `content`/`style` when
+/// the caller didn't pin an explicit size. 1:1 port of upstream
+/// `parseAddTextTransform` (`ToolExecutor+Texts.swift:18-40`):
+///
+/// * transform omitted entirely -> center (0.5, 0.5) + auto-fit size.
+/// * only `centerX`/`centerY` given -> that center + auto-fit size (the
+///   lower-third case: reposition without hand-computing a box).
+/// * all four of `centerX`/`centerY`/`width`/`height` given -> full override,
+///   no measurement.
+/// * anything else (one of centerX/centerY without the other, or exactly one
+///   of width/height) -> rejected with upstream's exact error text.
+///
+/// This is the fix for #195: previously every shape above fell through to
+/// `Transform::default()` filling in identity `width`/`height` = 1.0 (full
+/// canvas) for any unset field, so a center-only transform never got fit to
+/// the actual text.
+fn resolve_text_transform(
+    arg: Option<args::TransformArg>,
+    content: &str,
+    style: &TextStyle,
+    canvas_w: f64,
+    canvas_h: f64,
+) -> Result<Transform, ToolError> {
+    let Some(t) = arg else {
+        return Ok(auto_fit_text_transform(
+            0.5, 0.5, content, style, canvas_w, canvas_h,
+        ));
+    };
+    let bad_shape = || {
+        ToolError::new(
+            "transform must be either {centerX, centerY} for auto-fit, or all four of {centerX, centerY, width, height}",
+        )
+    };
+    match (t.center_x, t.center_y, t.width, t.height) {
+        (None, None, None, None) => Ok(auto_fit_text_transform(
+            0.5, 0.5, content, style, canvas_w, canvas_h,
+        )),
+        (Some(cx), Some(cy), Some(width), Some(height)) => Ok(Transform {
+            center_x: cx,
+            center_y: cy,
+            width,
+            height,
+            rotation: Transform::default().rotation,
+            flip_horizontal: t.flip_horizontal.unwrap_or(false),
+            flip_vertical: t.flip_vertical.unwrap_or(false),
+        }),
+        (Some(cx), Some(cy), None, None) => Ok(auto_fit_text_transform(
+            cx, cy, content, style, canvas_w, canvas_h,
+        )),
+        _ => Err(bad_shape()),
     }
 }
 
-fn transform_from_arg(t: args::TransformArg) -> Transform {
-    let base = Transform::default();
+/// Auto-fit a text box centered at `(center_x, center_y)` to the natural size
+/// of `content` rendered in `style`, normalized to the canvas. Shared measure
+/// path with `add_captions` (`opentake_domain::TextLayout::natural_size`),
+/// wrapping at [`ADD_TEXT_MAX_TEXT_WIDTH_RATIO`] of canvas width — the same
+/// `canvas.w * 0.9` upstream's `parseAddTextTransform` uses.
+fn auto_fit_text_transform(
+    center_x: f64,
+    center_y: f64,
+    content: &str,
+    style: &TextStyle,
+    canvas_w: f64,
+    canvas_h: f64,
+) -> Transform {
+    let max_width = canvas_w * ADD_TEXT_MAX_TEXT_WIDTH_RATIO;
+    let (w, h) = opentake_domain::TextLayout::natural_size(content, style, max_width, canvas_h);
     Transform {
-        center_x: t.center_x.unwrap_or(base.center_x),
-        center_y: t.center_y.unwrap_or(base.center_y),
-        width: t.width.unwrap_or(base.width),
-        height: t.height.unwrap_or(base.height),
-        rotation: base.rotation,
-        flip_horizontal: t.flip_horizontal.unwrap_or(base.flip_horizontal),
-        flip_vertical: t.flip_vertical.unwrap_or(base.flip_vertical),
+        center_x,
+        center_y,
+        width: w / canvas_w,
+        height: h / canvas_h,
+        ..Transform::default()
     }
 }
 
@@ -4975,6 +5101,224 @@ mod tests {
             vec![segment("A.", 0.0, 1.0)],
         ));
         let r = d.dispatch("add_captions", serde_json::json!({ "bogus": 1 }));
+        assert!(r.is_error);
+    }
+
+    // MARK: - add_texts (#194 auto-track dispatch, #195 auto-fit)
+
+    /// Timeline with a pre-existing top video track holding unrelated content —
+    /// the exact #194 regression scenario: an agent call to `add_texts` that
+    /// omits `trackIndex` must never write into this track.
+    fn timeline_with_existing_top_track() -> Timeline {
+        let mut tl = Timeline::new();
+        tl.fps = 30;
+        tl.width = 1920;
+        tl.height = 1080;
+        let mut track = Track::new("existing-video", ClipType::Video);
+        track
+            .clips
+            .push(Clip::new("existing-clip", "asset", 0, 300));
+        tl.tracks.push(track);
+        tl
+    }
+
+    fn add_texts_dispatcher() -> Dispatcher {
+        dispatcher_with(Arc::new(StateHandle::new(
+            timeline_with_existing_top_track(),
+            MediaManifest::new(),
+        )))
+    }
+
+    #[test]
+    fn add_texts_all_omitted_creates_new_track_leaves_existing_untouched() {
+        let d = add_texts_dispatcher();
+        let r = d.dispatch(
+            "add_texts",
+            serde_json::json!({
+                "entries": [
+                    {"startFrame": 0, "durationFrames": 30, "content": "hello"}
+                ]
+            }),
+        );
+        assert!(!r.is_error, "{}", r.text_joined());
+
+        let tl = d.dispatch("get_timeline", serde_json::json!({}));
+        let v = first_json(&tl);
+        let tracks = v["tracks"].as_array().unwrap();
+        assert_eq!(tracks.len(), 2, "a new track was inserted at index 0");
+        // The new text track is on top; the pre-existing track is pushed down
+        // with its clip completely unchanged.
+        let existing_clips = tracks[1]["clips"].as_array().unwrap();
+        assert_eq!(existing_clips.len(), 1);
+        // clipId may come back short-id-prefixed; check by prefix rather than
+        // exact match (`AGENTS.md`/short_id: ids are always ≥ 8-char prefixes).
+        let clip_id = existing_clips[0]["clipId"].as_str().unwrap();
+        assert!(
+            "existing-clip".starts_with(clip_id) || clip_id.starts_with("existing-clip"),
+            "clipId {clip_id}"
+        );
+        assert_eq!(existing_clips[0]["startFrame"], serde_json::json!(0));
+        assert_eq!(existing_clips[0]["durationFrames"], serde_json::json!(300));
+    }
+
+    #[test]
+    fn add_texts_mixed_track_index_is_rejected() {
+        let d = add_texts_dispatcher();
+        let r = d.dispatch(
+            "add_texts",
+            serde_json::json!({
+                "entries": [
+                    {"trackIndex": 0, "startFrame": 0, "durationFrames": 30, "content": "a"},
+                    {"startFrame": 30, "durationFrames": 30, "content": "b"}
+                ]
+            }),
+        );
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("Mixed trackIndex"),
+            "{}",
+            r.text_joined()
+        );
+
+        // Rejected before any mutation — the existing track is still there,
+        // untouched.
+        let tl = d.dispatch("get_timeline", serde_json::json!({}));
+        let v = first_json(&tl);
+        assert_eq!(v["tracks"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn add_texts_all_specified_writes_directly_to_existing_track() {
+        let d = add_texts_dispatcher();
+        let r = d.dispatch(
+            "add_texts",
+            serde_json::json!({
+                "entries": [
+                    {"trackIndex": 0, "startFrame": 0, "durationFrames": 30, "content": "caption"}
+                ]
+            }),
+        );
+        assert!(!r.is_error, "{}", r.text_joined());
+
+        // No new track: the explicit-index path overwrites track 0 directly
+        // (same as add_clips) — the caller asked for this track by name.
+        let tl = d.dispatch("get_timeline", serde_json::json!({}));
+        let v = first_json(&tl);
+        let tracks = v["tracks"].as_array().unwrap();
+        assert_eq!(tracks.len(), 1);
+        // The pre-existing clip's region [0, 300) was overwritten to make room.
+        let clips = tracks[0]["clips"].as_array().unwrap();
+        assert!(clips
+            .iter()
+            .any(|c| c["content"] == serde_json::json!("caption")));
+    }
+
+    #[test]
+    fn add_texts_omitted_transform_centers_and_auto_fits() {
+        let d = add_texts_dispatcher();
+        let r = d.dispatch(
+            "add_texts",
+            serde_json::json!({
+                "entries": [
+                    {"startFrame": 0, "durationFrames": 30, "content": "Hi"}
+                ]
+            }),
+        );
+        assert!(!r.is_error, "{}", r.text_joined());
+
+        let tl = d.dispatch("get_timeline", serde_json::json!({}));
+        let v = first_json(&tl);
+        let clip = &v["tracks"][0]["clips"][0];
+        let transform = &clip["transform"];
+        assert_eq!(transform["centerX"], serde_json::json!(0.5));
+        assert_eq!(transform["centerY"], serde_json::json!(0.5));
+        // #195: the box must be fit to the short "Hi" content, not the
+        // identity full-canvas 1.0 x 1.0 default.
+        let w = transform["width"].as_f64().unwrap();
+        let h = transform["height"].as_f64().unwrap();
+        assert!(w > 0.0 && w < 1.0, "width should be auto-fit, got {w}");
+        assert!(h > 0.0 && h < 1.0, "height should be auto-fit, got {h}");
+    }
+
+    #[test]
+    fn add_texts_center_only_transform_repositions_with_auto_fit() {
+        let d = add_texts_dispatcher();
+        let r = d.dispatch(
+            "add_texts",
+            serde_json::json!({
+                "entries": [{
+                    "startFrame": 0, "durationFrames": 30, "content": "Lower third",
+                    "transform": {"centerX": 0.5, "centerY": 0.85}
+                }]
+            }),
+        );
+        assert!(!r.is_error, "{}", r.text_joined());
+
+        let tl = d.dispatch("get_timeline", serde_json::json!({}));
+        let v = first_json(&tl);
+        let transform = &v["tracks"][0]["clips"][0]["transform"];
+        assert_eq!(transform["centerY"], serde_json::json!(0.85));
+        let w = transform["width"].as_f64().unwrap();
+        let h = transform["height"].as_f64().unwrap();
+        assert!(w > 0.0 && w < 1.0, "width should be auto-fit, got {w}");
+        assert!(h > 0.0 && h < 1.0, "height should be auto-fit, got {h}");
+    }
+
+    #[test]
+    fn add_texts_full_transform_overrides_without_measuring() {
+        let d = add_texts_dispatcher();
+        let r = d.dispatch(
+            "add_texts",
+            serde_json::json!({
+                "entries": [{
+                    "startFrame": 0, "durationFrames": 30, "content": "x",
+                    "transform": {"centerX": 0.2, "centerY": 0.3, "width": 0.4, "height": 0.1}
+                }]
+            }),
+        );
+        assert!(!r.is_error, "{}", r.text_joined());
+
+        let tl = d.dispatch("get_timeline", serde_json::json!({}));
+        let v = first_json(&tl);
+        let transform = &v["tracks"][0]["clips"][0]["transform"];
+        assert_eq!(transform["centerX"], serde_json::json!(0.2));
+        assert_eq!(transform["centerY"], serde_json::json!(0.3));
+        assert_eq!(transform["width"], serde_json::json!(0.4));
+        assert_eq!(transform["height"], serde_json::json!(0.1));
+    }
+
+    #[test]
+    fn add_texts_transform_with_only_width_is_rejected() {
+        let d = add_texts_dispatcher();
+        let r = d.dispatch(
+            "add_texts",
+            serde_json::json!({
+                "entries": [{
+                    "startFrame": 0, "durationFrames": 30, "content": "x",
+                    "transform": {"centerX": 0.5, "centerY": 0.5, "width": 0.4}
+                }]
+            }),
+        );
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("centerX, centerY"),
+            "{}",
+            r.text_joined()
+        );
+    }
+
+    #[test]
+    fn add_texts_transform_with_only_center_x_is_rejected() {
+        let d = add_texts_dispatcher();
+        let r = d.dispatch(
+            "add_texts",
+            serde_json::json!({
+                "entries": [{
+                    "startFrame": 0, "durationFrames": 30, "content": "x",
+                    "transform": {"centerX": 0.5}
+                }]
+            }),
+        );
         assert!(r.is_error);
     }
 }

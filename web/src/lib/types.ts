@@ -331,6 +331,7 @@ export type EditRequest =
   | { type: "rippleDeleteRanges"; trackIndex: number; ranges: FrameRangeReq[] }
   | { type: "rippleDeleteClips"; clipIds: string[] }
   | { type: "addTexts"; entries: TextEntryReq[] }
+  | { type: "addTextsAutoTrack"; entries: TextAutoTrackEntryReq[] }
   | { type: "addCaptions"; entries: CaptionEntryReq[] }
   | { type: "link"; clipIds: string[] }
   | { type: "unlink"; clipIds: string[] }
@@ -357,6 +358,18 @@ export type EditRequest =
 
 export interface TextEntryReq {
   trackIndex: number;
+  startFrame: number;
+  durationFrames: number;
+  content: string;
+  textStyle: TextStyle;
+  transform: Transform;
+}
+
+/** Like {@link TextEntryReq} minus `trackIndex` — every entry in an
+ *  `addTextsAutoTrack` batch lands on the single fresh track the command
+ *  creates, so there's nothing to target (mirror of Rust
+ *  `TextAutoTrackEntryDto`). */
+export interface TextAutoTrackEntryReq {
   startFrame: number;
   durationFrames: number;
   content: string;

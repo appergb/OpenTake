@@ -38,7 +38,7 @@ import type {
   MaskInput,
   MediaItem,
   RenameEntryReq,
-  TextEntryReq,
+  TextAutoTrackEntryReq,
   TextStyle,
   Timeline,
   Transform,
@@ -950,35 +950,23 @@ const DEFAULT_TEXT_STYLE: TextStyle = {
   },
 };
 
-/** Find the first visual track (video/image/text/lottie) index, or null. */
-function firstVisualTrackIndex(timeline: Timeline): number | null {
-  for (let i = 0; i < timeline.tracks.length; i++) {
-    const t = timeline.tracks[i].type;
-    if (t === "video" || t === "image" || t === "text" || t === "lottie") return i;
-  }
-  return null;
-}
-
-/** Add a text clip at the playhead on the first visual track (creating one if
- *  none exists). Selects the new clip afterwards so the Inspector opens its
- *  Text tab. Used by the Toolbar "T" button. */
+/** Add a text clip at the playhead on a fresh top track. Selects the new clip
+ *  afterwards so the Inspector opens its Text tab. Used by the Toolbar "T"
+ *  button.
+ *
+ *  Always targets a brand-new track via `addTextsAutoTrack`, mirroring
+ *  upstream `addTextClip` (`EditorViewModel+MediaLibrary.swift:519-558`),
+ *  which unconditionally does `insertTrack(at: 0, type: .video)`. This used
+ *  to reuse the first existing visual track instead — a top video/image
+ *  track could hold unrelated content that `addTexts`' overwrite semantics
+ *  would clear to make room for the new text clip (#194). */
 export async function addTextClip() {
   const ui = useEditorUiStore.getState();
   const startFrame = ui.activeFrame;
-  let timeline = useProjectStore.getState().timeline;
-
-  let trackIndex = firstVisualTrackIndex(timeline);
-  if (trackIndex === null) {
-    await insertTrack("video");
-    await forceRefresh();
-    timeline = useProjectStore.getState().timeline;
-    trackIndex = firstVisualTrackIndex(timeline);
-    if (trackIndex === null) return;
-  }
+  const timeline = useProjectStore.getState().timeline;
 
   const durationFrames = Math.max(1, Math.round(DEFAULT_TEXT_SECONDS * timeline.fps));
-  const entry: TextEntryReq = {
-    trackIndex,
+  const entry: TextAutoTrackEntryReq = {
     startFrame,
     durationFrames,
     content: "",
@@ -986,7 +974,12 @@ export async function addTextClip() {
     transform: DEFAULT_TEXT_TRANSFORM,
   };
 
-  const res = await applyAndRefresh({ type: "addTexts", entries: [entry] });
+  const res = await applyAndRefresh({ type: "addTextsAutoTrack", entries: [entry] });
+  // Tauri's timeline_changed event refreshes the mirror asynchronously; force
+  // it synchronously so the mirror (and any caller reading it right after,
+  // e.g. selection logic elsewhere) reflects the new track immediately —
+  // same pattern as addMediaToTimeline.
+  if (isTauri) await forceRefresh();
   if (res && res.affectedClipIds.length > 0) {
     ui.selectClips(new Set(res.affectedClipIds));
   }
