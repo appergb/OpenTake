@@ -175,7 +175,7 @@ impl Dispatcher {
 
             // --- Editing (wired to EditCommand) ---
             ToolName::AddClips => self.add_clips(args, manifest, op),
-            ToolName::InsertClips => self.insert_clips(args, manifest),
+            ToolName::InsertClips => self.insert_clips(args, before, manifest),
             ToolName::MoveClips => self.move_clips(args, before),
             ToolName::RemoveClips => self.remove_clips(args, before, op),
             ToolName::RemoveTracks => self.remove_tracks(args),
@@ -927,20 +927,49 @@ impl Dispatcher {
     fn insert_clips(
         &self,
         args: &Value,
+        before: &Timeline,
         manifest: &MediaManifest,
     ) -> Result<ToolResult, ToolError> {
         let a: InsertClipsArgs = decode_tool_args(args, "")?;
+        let fps = timeline_fps(before);
         let mut entries = Vec::with_capacity(a.entries.len());
         for (i, raw) in a.entries.iter().enumerate() {
             let e: InsertClipEntry = decode_tool_args(raw, &format!("entries[{i}]"))?;
             let (media_type, has_audio) = resolve_media_kind(manifest, &e.media_ref);
+            let duration_frames = match e.duration_frames {
+                Some(d) => d,
+                None => {
+                    let full = manifest
+                        .entries
+                        .iter()
+                        .find(|entry| entry.id == e.media_ref)
+                        .filter(|entry| entry.duration > 0.0)
+                        .map(|entry| (entry.duration * fps) as i32)
+                        .ok_or_else(|| {
+                            ToolError::new(format!(
+                                "entries[{i}]: durationFrames omitted and mediaRef '{}' has no known duration",
+                                e.media_ref
+                            ))
+                        })?;
+                    let remaining =
+                        full - e.trim_start_frame.unwrap_or(0) - e.trim_end_frame.unwrap_or(0);
+                    if remaining < 1 {
+                        return Err(ToolError::new(format!(
+                            "entries[{i}]: durationFrames omitted and the trimmed source duration is empty (source {full} frame(s), trimStartFrame {}, trimEndFrame {})",
+                            e.trim_start_frame.unwrap_or(0),
+                            e.trim_end_frame.unwrap_or(0)
+                        )));
+                    }
+                    remaining
+                }
+            };
             entries.push(ClipEntry {
                 media_ref: e.media_ref,
                 media_type,
                 source_clip_type: media_type,
                 track_index: a.track_index,
                 start_frame: a.at_frame,
-                duration_frames: e.duration_frames.unwrap_or(0),
+                duration_frames,
                 trim_start_frame: e.trim_start_frame,
                 trim_end_frame: e.trim_end_frame,
                 has_audio,
@@ -2838,6 +2867,14 @@ mod tests {
         e
     }
 
+    /// A media entry with an explicit source `duration` in seconds — used by
+    /// `insert_clips` omitted-`durationFrames` tests.
+    fn entry_with_duration(id: &str, name: &str, duration_secs: f64) -> MediaManifestEntry {
+        let mut e = entry(id, name);
+        e.duration = duration_secs;
+        e
+    }
+
     /// One video track with `clip-1` referencing `asset-1`, and `asset-1` in the
     /// manifest named "Old Name".
     fn seeded_handle() -> Arc<StateHandle> {
@@ -3150,6 +3187,103 @@ mod tests {
             "no linked audio track should be created"
         );
         assert!(tl.tracks[0].clips[0].link_group_id.is_none());
+    }
+
+    // MARK: - #197 insert_clips omitted-durationFrames fixtures.
+
+    #[test]
+    fn insert_clips_omitted_duration_uses_full_source_length() {
+        // fps defaults to 30 (Timeline::new()); a 2s asset -> 60 frames.
+        let h = one_video_track_handle(vec![entry_with_duration("asset-1", "A", 2.0)]);
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "insert_clips",
+            serde_json::json!({
+                "trackIndex": 0,
+                "atFrame": 0,
+                "entries": [
+                    {"mediaRef": "asset-1"}
+                ]
+            }),
+        );
+
+        assert!(!r.is_error, "{}", r.text_joined());
+        let tl = h.timeline();
+        assert_eq!(tl.tracks[0].clips[0].duration_frames, 60);
+    }
+
+    #[test]
+    fn insert_clips_omitted_duration_subtracts_trims() {
+        // 2s @ 30fps = 60 frames; trim 10 in + 5 out -> 45 frames remain.
+        let h = one_video_track_handle(vec![entry_with_duration("asset-1", "A", 2.0)]);
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "insert_clips",
+            serde_json::json!({
+                "trackIndex": 0,
+                "atFrame": 0,
+                "entries": [
+                    {"mediaRef": "asset-1", "trimStartFrame": 10, "trimEndFrame": 5}
+                ]
+            }),
+        );
+
+        assert!(!r.is_error, "{}", r.text_joined());
+        let tl = h.timeline();
+        assert_eq!(tl.tracks[0].clips[0].duration_frames, 45);
+    }
+
+    #[test]
+    fn insert_clips_omitted_duration_errors_on_zero_length_source() {
+        let h = one_video_track_handle(vec![entry_with_duration("asset-1", "A", 0.0)]);
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "insert_clips",
+            serde_json::json!({
+                "trackIndex": 0,
+                "atFrame": 0,
+                "entries": [
+                    {"mediaRef": "asset-1"}
+                ]
+            }),
+        );
+
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("no known duration"),
+            "{}",
+            r.text_joined()
+        );
+        assert!(h.timeline().tracks[0].clips.is_empty());
+    }
+
+    #[test]
+    fn insert_clips_omitted_duration_errors_when_trims_consume_entire_source() {
+        // 1s @ 30fps = 30 frames; trimming 20 in + 15 out leaves nothing.
+        let h = one_video_track_handle(vec![entry_with_duration("asset-1", "A", 1.0)]);
+        let d = dispatcher_with(h.clone());
+
+        let r = d.dispatch(
+            "insert_clips",
+            serde_json::json!({
+                "trackIndex": 0,
+                "atFrame": 0,
+                "entries": [
+                    {"mediaRef": "asset-1", "trimStartFrame": 20, "trimEndFrame": 15}
+                ]
+            }),
+        );
+
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("trimmed source duration is empty"),
+            "{}",
+            r.text_joined()
+        );
+        assert!(h.timeline().tracks[0].clips.is_empty());
     }
 
     #[test]
