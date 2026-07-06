@@ -236,8 +236,47 @@ impl TextLayout {
     /// only by the platform-free approximation; the render layer overrides this
     /// with real metrics.
     const APPROX_ADVANCE_FACTOR: f64 = 0.6;
+    /// Approximate advance for East Asian wide / fullwidth characters, which
+    /// render at a full em. Estimating them at the Latin factor (0.6) made
+    /// mixed CJK/Latin lines measure ~40% narrow per CJK char; the auto-fit box
+    /// then hugged the too-small estimate, the real rasterizer (cosmic-text)
+    /// wrapped the overflowing tail onto a second line, and the single-line-tall
+    /// box clipped it away (#195 follow-up: "终验 FINAL CHECK" lost "CHECK").
+    /// Erring WIDE is the safe direction: a slightly roomy box just renders
+    /// centered with margin, while a tight one truncates.
+    const APPROX_WIDE_ADVANCE_FACTOR: f64 = 1.0;
     /// Approximate line height as a fraction of the render size.
     const APPROX_LINE_HEIGHT_FACTOR: f64 = 1.2;
+
+    /// Whether `c` occupies a full em (East Asian Wide / Fullwidth): CJK
+    /// ideographs, kana, hangul, fullwidth forms, and CJK punctuation. Coarse
+    /// range check — this feeds an approximation, so unlisted wide codepoints
+    /// merely fall back to the (narrower) Latin factor.
+    fn is_wide_char(c: char) -> bool {
+        matches!(u32::from(c),
+            0x1100..=0x115F        // Hangul Jamo (leading)
+            | 0x2E80..=0x303E      // CJK Radicals .. CJK Symbols & Punctuation
+            | 0x3041..=0x33FF      // Hiragana .. CJK Compatibility
+            | 0x3400..=0x4DBF      // CJK Ext A
+            | 0x4E00..=0x9FFF      // CJK Unified Ideographs
+            | 0xA000..=0xA4CF      // Yi
+            | 0xAC00..=0xD7A3      // Hangul Syllables
+            | 0xF900..=0xFAFF      // CJK Compatibility Ideographs
+            | 0xFE30..=0xFE4F      // CJK Compatibility Forms
+            | 0xFF00..=0xFF60      // Fullwidth Forms
+            | 0xFFE0..=0xFFE6      // Fullwidth Signs
+            | 0x20000..=0x2FA1F    // CJK Ext B..F + Compat Supplement
+        )
+    }
+
+    /// Approximate advance of one char in render-size units.
+    fn char_advance_factor(c: char) -> f64 {
+        if Self::is_wide_char(c) {
+            Self::APPROX_WIDE_ADVANCE_FACTOR
+        } else {
+            Self::APPROX_ADVANCE_FACTOR
+        }
+    }
 
     /// Approximate natural size. See the type-level note: this is NOT pixel-exact
     /// with upstream CoreText measurement.
@@ -253,13 +292,19 @@ impl TextLayout {
 
         let advance = render_size * Self::APPROX_ADVANCE_FACTOR;
         let line_height = render_size * Self::APPROX_LINE_HEIGHT_FACTOR;
+        // Per-word width honoring wide (CJK/fullwidth) chars at a full em.
+        let word_width = |word: &str| -> f64 {
+            word.chars()
+                .map(|c| render_size * Self::char_advance_factor(c))
+                .sum()
+        };
 
         // Greedy word wrap into `max_width`, approximating each line's width.
         let mut lines = 1usize;
         let mut widest = 0.0f64;
         let mut current = 0.0f64;
         for word in measured.split_whitespace() {
-            let word_w = word.chars().count() as f64 * advance;
+            let word_w = word_width(word);
             let space_w = if current > 0.0 { advance } else { 0.0 };
             if current > 0.0 && current + space_w + word_w > max_width {
                 widest = widest.max(current);
@@ -272,7 +317,7 @@ impl TextLayout {
         widest = widest.max(current);
         // Single token with no spaces still has a width.
         if widest == 0.0 {
-            widest = measured.chars().count() as f64 * advance;
+            widest = word_width(measured);
         }
 
         let bounding_w = widest;
@@ -441,5 +486,36 @@ mod tests {
         let (_, h_half) = TextLayout::natural_size("Word", &style, 10000.0, 540.0);
         // Half canvas -> ~half line height (allowing for ceil + slack).
         assert!(h_half < h_full);
+    }
+
+    /// #195 follow-up: wide (CJK/fullwidth) chars measure a full em, not the
+    /// Latin 0.6 factor — a mixed line's estimate must not undershoot what the
+    /// real rasterizer lays out, or the auto-fit box wraps + clips the tail
+    /// (on-device: "终验 FINAL CHECK" rendered without "CHECK").
+    #[test]
+    fn wide_chars_measure_a_full_em() {
+        let style = TextStyle {
+            font_size: 100.0,
+            ..TextStyle::default()
+        };
+        // 4 CJK chars, no spaces: 4 * 1.0em = 400 (+24 shadow pad, +4 slack).
+        let (w_cjk, _) = TextLayout::natural_size("终验中文", &style, 10000.0, 1080.0);
+        approx(w_cjk, 428.0);
+        // 4 Latin chars keep the 0.6 factor: 4 * 60 = 240 (+24 shadow, +4 slack).
+        let (w_lat, _) = TextLayout::natural_size("Word", &style, 10000.0, 1080.0);
+        approx(w_lat, 268.0);
+    }
+
+    #[test]
+    fn mixed_cjk_latin_line_width_covers_both_scripts() {
+        let style = TextStyle {
+            font_size: 100.0,
+            ..TextStyle::default()
+        };
+        // "终验 AB": (2 * 100) + space(60) + (2 * 60) = 380 (+24 shadow, +4 slack).
+        let (w, _) = TextLayout::natural_size("终验 AB", &style, 10000.0, 1080.0);
+        approx(w, 408.0);
+        // Must exceed the old uniform-0.6 estimate (5 * 60 + 24 + 4 = 328).
+        assert!(w > 328.0);
     }
 }
