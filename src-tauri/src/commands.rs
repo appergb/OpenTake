@@ -20,7 +20,7 @@ use opentake_core::{AppCore, CmdError, EditCommand};
 
 use opentake_ops::{
     CaptionEntry, ClipEntry, ClipMove, ClipProperties, FrameRange, KeyframePayload,
-    KeyframeProperty, KeyframeValue, RenameEntry, TextEntry,
+    KeyframeProperty, KeyframeValue, RenameEntry, TextAutoTrackEntry, TextEntry,
 };
 
 use opentake_domain::{
@@ -408,6 +408,8 @@ pub enum EditRequest {
     #[serde(rename_all = "camelCase")]
     AddTexts { entries: Vec<TextEntryDto> },
     #[serde(rename_all = "camelCase")]
+    AddTextsAutoTrack { entries: Vec<TextAutoTrackEntryDto> },
+    #[serde(rename_all = "camelCase")]
     AddCaptions { entries: Vec<CaptionEntryDto> },
     #[serde(rename_all = "camelCase")]
     Link { clip_ids: Vec<String> },
@@ -581,6 +583,12 @@ impl EditRequest {
             }
             EditRequest::AddTexts { entries } => EditCommand::AddTexts {
                 entries: entries.into_iter().map(TextEntryDto::into_entry).collect(),
+            },
+            EditRequest::AddTextsAutoTrack { entries } => EditCommand::AddTextsAutoTrack {
+                entries: entries
+                    .into_iter()
+                    .map(TextAutoTrackEntryDto::into_entry)
+                    .collect(),
             },
             EditRequest::AddCaptions { entries } => EditCommand::AddCaptions {
                 entries: entries
@@ -809,6 +817,31 @@ impl TextEntryDto {
     fn into_entry(self) -> TextEntry {
         TextEntry {
             track_index: self.track_index,
+            start_frame: self.start_frame,
+            duration_frames: self.duration_frames,
+            content: self.content,
+            text_style: self.text_style,
+            transform: self.transform,
+        }
+    }
+}
+
+/// Like [`TextEntryDto`] minus `trackIndex` — every entry in an
+/// `addTextsAutoTrack` batch lands on the single fresh track the command
+/// creates, so there's nothing to target (#194).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextAutoTrackEntryDto {
+    pub start_frame: i32,
+    pub duration_frames: i32,
+    pub content: String,
+    pub text_style: TextStyle,
+    pub transform: Transform,
+}
+
+impl TextAutoTrackEntryDto {
+    fn into_entry(self) -> TextAutoTrackEntry {
+        TextAutoTrackEntry {
             start_frame: self.start_frame,
             duration_frames: self.duration_frames,
             content: self.content,
@@ -1058,6 +1091,37 @@ mod edit_request_serde_tests {
                 assert_eq!(e.transform.center_y, 0.9);
             }
             other => panic!("expected AddCaptions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_add_texts_auto_track_camelcase_and_maps_to_command() {
+        // `addTextClip` (Toolbar "T") and the `add_texts` MCP tool's
+        // all-omitted-trackIndex path both send this DTO — no `trackIndex`
+        // field at all (#194 fix: writes to a fresh track, never an existing
+        // one). Every multi-word field (startFrame/durationFrames/textStyle)
+        // must deserialize camelCase, same guard as addCaptions above.
+        let request = serde_json::from_str::<EditRequest>(
+            r#"{"type":"addTextsAutoTrack","entries":[
+                {"startFrame":0,"durationFrames":90,"content":"Hello",
+                 "textStyle":{"fontName":"Helvetica-Bold","fontSize":96},
+                 "transform":{"centerX":0.5,"centerY":0.5,"width":0.5,"height":0.1,
+                              "rotation":0,"flipHorizontal":false,"flipVertical":false}}
+            ]}"#,
+        )
+        .expect("addTextsAutoTrack camelCase");
+
+        match request.into_command().expect("addTextsAutoTrack command") {
+            EditCommand::AddTextsAutoTrack { entries } => {
+                assert_eq!(entries.len(), 1);
+                let e = &entries[0];
+                assert_eq!(e.start_frame, 0);
+                assert_eq!(e.duration_frames, 90);
+                assert_eq!(e.content, "Hello");
+                assert_eq!(e.text_style.font_size, 96.0);
+                assert_eq!(e.transform.center_x, 0.5);
+            }
+            other => panic!("expected AddTextsAutoTrack, got {other:?}"),
         }
     }
 
