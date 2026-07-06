@@ -7,10 +7,15 @@
 //     [0,natW]x[0,natH]. Upstream AVFoundation layer-instruction transforms act
 //     on this source-pixel space (verified against affineTransform L599).
 //   - `affine` (row-major [a,b,c,d,tx,ty], CG semantics p' = p . M) maps source
-//     pixels -> CANVAS pixels, origin bottom-left, y up.
-//   - Canvas pixels -> NDC. wgpu's NDC y is up, so no extra y-flip on geometry.
-//   - The single y-flip reconciling "texture row 0 = top" with "y up" happens on
-//     the UV (v = 1 - v), exactly once (SPEC §3.4).
+//     pixels -> CANVAS pixels in the DOMAIN's authoring space: origin TOP-left,
+//     y down (0 = top row; `Transform.center_y` and `Mask::coverage` share it).
+//   - Canvas pixels -> NDC with ONE geometry y-flip (ndc.y = 1 - 2*py/H),
+//     because wgpu NDC is y-up (+1 = top) while the canvas space above is
+//     y-down (#193).
+//   - UV passes straight through (v unflipped): quad corner (0,0) is the box's
+//     top-left after the flip above, and texture row 0 is also the top — the
+//     old `v = 1 - v` flip only ever compensated the pre-#193 mirrored NDC
+//     (#193 follow-up).
 //
 // COLOR / CHROMA / MASK MATH MIRROR:
 //   The pixel math here is a 1:1 mirror of the unit-tested reference in
@@ -265,9 +270,13 @@ fn vs(@builtin(vertex_index) vi: u32) -> VsOut {
         1.0 - px.y / canvas.y * 2.0,
     );
 
-    // UV: quad corner -> crop sub-rect. Flip v once (texture row 0 = top).
-    let uv_lin = mix(u.crop_uv.xy, u.crop_uv.zw, q);
-    let uv = vec2<f32>(uv_lin.x, 1.0 - uv_lin.y);
+    // UV: quad corner -> crop sub-rect, straight through. q = (0,0) is the
+    // box's top-left under the y-down affine + flipped-NDC mapping above, and
+    // texture row 0 is also the top, so v passes through unflipped. The legacy
+    // `1.0 - uv.y` here existed only to compensate the pre-#193 mirrored NDC
+    // line; keeping it after that fix inverted every clip's CONTENT while its
+    // box sat at the right place (#193 follow-up).
+    let uv = mix(u.crop_uv.xy, u.crop_uv.zw, q);
 
     // Normalized canvas position for mask evaluation, in the SAME origin
     // TOP-left / y-down space `Mask::coverage`'s (x, y) argument and
