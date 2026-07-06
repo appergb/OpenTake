@@ -48,11 +48,13 @@ const srv = vi.hoisted(() => {
       type: string;
       kind?: string;
       at?: number;
+      // `addClips` entries carry `trackIndex`; `addTextsAutoTrack` entries
+      // don't (every entry lands on the one fresh track the command creates).
       entries?: Array<{
-        mediaRef: string;
-        mediaType: ClipType;
-        sourceClipType: ClipType;
-        trackIndex: number;
+        mediaRef?: string;
+        mediaType?: ClipType;
+        sourceClipType?: ClipType;
+        trackIndex?: number;
         startFrame: number;
         durationFrames: number;
         trimStartFrame?: number;
@@ -75,19 +77,49 @@ const srv = vi.hoisted(() => {
       if (cmd.type === "addClips" && cmd.entries) {
         const affectedClipIds: string[] = [];
         for (const e of cmd.entries) {
-          const track = state.tracks[e.trackIndex];
+          const track = state.tracks[e.trackIndex ?? -1];
           if (!track) continue;
           clearRegion(track, e.startFrame, e.startFrame + e.durationFrames);
           const id = `c${++state.seq}`;
           track.clips.push({
             id,
-            mediaRef: e.mediaRef,
-            mediaType: e.mediaType,
-            sourceClipType: e.sourceClipType,
+            mediaRef: e.mediaRef ?? "",
+            mediaType: e.mediaType ?? "video",
+            sourceClipType: e.sourceClipType ?? "video",
             startFrame: e.startFrame,
             durationFrames: e.durationFrames,
             trimStartFrame: e.trimStartFrame ?? 0,
             trimEndFrame: e.trimEndFrame ?? 0,
+            transform: e.transform,
+          });
+          affectedClipIds.push(id);
+        }
+        state.version += 1;
+        return { changed: true, affectedClipIds };
+      }
+      if (cmd.type === "addTextsAutoTrack" && cmd.entries && cmd.entries.length > 0) {
+        // Mirrors the ops-layer command: always insert a fresh video track at
+        // index 0, then place every entry there (#194 — never reuse whatever
+        // track the caller already has at index 0).
+        state.tracks.splice(0, 0, {
+          id: `t${++state.seq}`,
+          type: "video",
+          clips: [],
+        });
+        const track = state.tracks[0];
+        const affectedClipIds: string[] = [];
+        for (const e of cmd.entries) {
+          clearRegion(track, e.startFrame, e.startFrame + e.durationFrames);
+          const id = `c${++state.seq}`;
+          track.clips.push({
+            id,
+            mediaRef: "",
+            mediaType: "text",
+            sourceClipType: "text",
+            startFrame: e.startFrame,
+            durationFrames: e.durationFrames,
+            trimStartFrame: 0,
+            trimEndFrame: 0,
             transform: e.transform,
           });
           affectedClipIds.push(id);
@@ -174,6 +206,7 @@ import {
   addMediaToTimeline,
   addMediaToTimelineAt,
   addMomentToTimelineAt,
+  addTextClip,
   insertTrack,
   mediaDurationFrames,
   momentDurationFrames,
@@ -476,5 +509,65 @@ describe("addMomentToTimelineAt (trimmed source-range drop from a search hit)", 
     expect(visualClipStarts()).toEqual([45]);
     // 1s..2s → trimStart 30, duration 30, trimEnd 300-30-30 = 240.
     expect(firstVideoTrim()).toEqual([30, 30, 240]);
+  });
+});
+
+// #194 regression: addTextClip (Toolbar "T") used to reuse the first existing
+// visual track (or insert a new one only when none existed at all). A
+// pre-existing top video track's clip would get overwritten to make room for
+// the new text clip. It must always land on a brand-new track instead.
+describe("addTextClip (Toolbar 'T' button)", () => {
+  beforeEach(() => {
+    srv.reset();
+    useProjectStore.getState().setMirror(EMPTY, 0);
+    useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, selectedClipIds: new Set() });
+  });
+
+  it("creates a fresh track and leaves an existing visual track's clip untouched", async () => {
+    // Seed a pre-existing video track with unrelated content, exactly the
+    // #194 regression scenario.
+    await addMediaToTimeline(video("existing"));
+    const before = useProjectStore.getState().timeline;
+    expect(before.tracks.length).toBe(1);
+    expect(before.tracks[0].clips.length).toBe(1);
+
+    await addTextClip();
+
+    const after = useProjectStore.getState().timeline;
+    // A new track was inserted at index 0 — two tracks total now.
+    expect(after.tracks.length).toBe(2);
+    // The new text clip is on the new top track.
+    expect(after.tracks[0].clips.length).toBe(1);
+    expect(after.tracks[0].clips[0].mediaType).toBe("text");
+    // The pre-existing track (now at index 1) and its clip are unchanged.
+    expect(after.tracks[1].clips.length).toBe(1);
+    expect(after.tracks[1].clips[0].mediaRef).toBe("existing");
+    expect(after.tracks[1].clips[0].startFrame).toBe(0);
+  });
+
+  it("creates a track on an empty timeline too", async () => {
+    await addTextClip();
+    const tl = useProjectStore.getState().timeline;
+    expect(tl.tracks.length).toBe(1);
+    expect(tl.tracks[0].clips.length).toBe(1);
+    expect(tl.tracks[0].clips[0].mediaType).toBe("text");
+  });
+
+  it("selects the newly created text clip", async () => {
+    await addTextClip();
+    const tl = useProjectStore.getState().timeline;
+    const newClipId = tl.tracks[0].clips[0].id;
+    expect(useEditorUiStore.getState().selectedClipIds.has(newClipId)).toBe(true);
+  });
+
+  it("adding two text clips creates two separate top tracks, not one shared track", async () => {
+    // Each call is independent — mirrors upstream addTextClip's unconditional
+    // insertTrack(at: 0), not a "reuse the track I made last time" cache.
+    await addTextClip();
+    await addTextClip();
+    const tl = useProjectStore.getState().timeline;
+    expect(tl.tracks.length).toBe(2);
+    expect(tl.tracks[0].clips.length).toBe(1);
+    expect(tl.tracks[1].clips.length).toBe(1);
   });
 });
