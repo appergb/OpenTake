@@ -265,9 +265,13 @@ fn vs(@builtin(vertex_index) vi: u32) -> VsOut {
         1.0 - px.y / canvas.y * 2.0,
     );
 
-    // UV: quad corner -> crop sub-rect. Flip v once (texture row 0 = top).
-    let uv_lin = mix(u.crop_uv.xy, u.crop_uv.zw, q);
-    let uv = vec2<f32>(uv_lin.x, 1.0 - uv_lin.y);
+    // UV: quad corner -> crop sub-rect, straight through. q = (0,0) is the
+    // box's top-left under the y-down affine + flipped-NDC mapping above, and
+    // texture row 0 is also the top, so v passes through unflipped. The legacy
+    // `1.0 - uv.y` here existed only to compensate the pre-#193 mirrored NDC
+    // line; keeping it after that fix inverted every clip's CONTENT while its
+    // box sat at the right place (#193 follow-up).
+    let uv = mix(u.crop_uv.xy, u.crop_uv.zw, q);
 
     // Normalized canvas position for mask evaluation, in the SAME origin
     // TOP-left / y-down space `Mask::coverage`'s (x, y) argument and

@@ -278,3 +278,122 @@ fn off_center_mask_clips_to_authored_screen_region_not_mirrored() {
          white here would mean canvas_uv got double-flipped alongside the NDC fix, got {bottom:?}"
     );
 }
+
+/// Resolves every source to a texture whose TOP half is red and BOTTOM half is
+/// blue — the content-orientation companion to the solid-color position tests
+/// above. A solid color is blind to a UV flip; this is not.
+struct TwoBandResolver<'d> {
+    device: &'d wgpu::Device,
+    queue: &'d wgpu::Queue,
+    cached: Option<Rc<GpuTexture>>,
+}
+
+impl TextureResolver for TwoBandResolver<'_> {
+    fn resolve(&mut self, _source: &TextureSource, _frame: i64) -> Option<Rc<GpuTexture>> {
+        if self.cached.is_none() {
+            let mut buf = vec![0u8; 64 * 64 * 4];
+            for y in 0..64usize {
+                for x in 0..64usize {
+                    let i = (y * 64 + x) * 4;
+                    // Texture row 0 (top) red, bottom rows blue; premultiplied.
+                    let c: [u8; 4] = if y < 32 {
+                        [255, 0, 0, 255]
+                    } else {
+                        [0, 0, 255, 255]
+                    };
+                    buf[i..i + 4].copy_from_slice(&c);
+                }
+            }
+            let frame = DecodedFrame::new(64, 64, buf, true);
+            let tex = upload_rgba(self.device, self.queue, &frame, false, Some("two-band"));
+            self.cached = Some(Rc::new(tex));
+        }
+        self.cached.clone()
+    }
+}
+
+fn full_canvas_timeline(flip_vertical: bool) -> Timeline {
+    let mut tl = Timeline::new();
+    tl.fps = 30;
+    tl.width = 64;
+    tl.height = 64;
+    let mut clip = Clip::new("c0", "asset", 0, 10);
+    clip.transform = Transform {
+        flip_vertical,
+        ..Transform::default()
+    };
+    let mut track = Track::new("t0", ClipType::Video);
+    track.clips.push(clip);
+    tl.tracks.push(track);
+    tl
+}
+
+fn render_two_band(dev: &RenderDevice, tl: &Timeline) -> DecodedFrame {
+    let plan = build_render_plan(tl, RS, &Metrics);
+    let fp = plan.frame(tl, 0);
+    let compositor = Compositor::new(&dev.device);
+    let mut resolver = TwoBandResolver {
+        device: &dev.device,
+        queue: &dev.queue,
+        cached: None,
+    };
+    compositor
+        .render_to_rgba(&dev.device, &dev.queue, RS, &fp, &mut resolver)
+        .expect("render")
+}
+
+fn avg_row_rgb(frame: &DecodedFrame, y: u32) -> (f64, f64, f64) {
+    let (mut r, mut g, mut b) = (0.0, 0.0, 0.0);
+    for x in 0..frame.width {
+        let i = ((y * frame.width + x) as usize) * 4;
+        r += frame.rgba[i] as f64;
+        g += frame.rgba[i + 1] as f64;
+        b += frame.rgba[i + 2] as f64;
+    }
+    let n = frame.width as f64;
+    (r / n, g / n, b / n)
+}
+
+/// #193 follow-up: the NDC y-flip fix must NOT invert texture CONTENT. The UV
+/// `v` mapping has to stay paired with the flipped vertex positions so that a
+/// texture's top row still renders at the top of its placed box. Regression:
+/// the initial #193 fix flipped NDC y but left the legacy `1.0 - uv.y` flip
+/// (which had been compensating the old mirrored NDC), turning every clip's
+/// pixels upside down while its box sat at the right place.
+#[test]
+fn texture_top_row_renders_at_top_of_placed_box() {
+    let Some(dev) = device_or_skip("texture_top_row_renders_at_top_of_placed_box") else {
+        return;
+    };
+    let frame = render_two_band(&dev, &full_canvas_timeline(false));
+    let (tr, _, tb) = avg_row_rgb(&frame, 8);
+    let (br, _, bb) = avg_row_rgb(&frame, 56);
+    assert!(
+        tr > 180.0 && tb < 60.0,
+        "top of frame must be the texture's RED top band, got avg rgb row8 = ({tr:.0}, _, {tb:.0})"
+    );
+    assert!(
+        bb > 180.0 && br < 60.0,
+        "bottom of frame must be the texture's BLUE bottom band, got avg rgb row56 = ({br:.0}, _, {bb:.0})"
+    );
+}
+
+/// `flip_vertical: true` must still flip the content (blue band on top) — the
+/// UV fix must not eat the authored flip.
+#[test]
+fn flip_vertical_still_inverts_content() {
+    let Some(dev) = device_or_skip("flip_vertical_still_inverts_content") else {
+        return;
+    };
+    let frame = render_two_band(&dev, &full_canvas_timeline(true));
+    let (tr, _, tb) = avg_row_rgb(&frame, 8);
+    let (br, _, bb) = avg_row_rgb(&frame, 56);
+    assert!(
+        tb > 180.0 && tr < 60.0,
+        "flipped clip: top must be BLUE, got avg rgb row8 = ({tr:.0}, _, {tb:.0})"
+    );
+    assert!(
+        br > 180.0 && bb < 60.0,
+        "flipped clip: bottom must be RED, got avg rgb row56 = ({br:.0}, _, {bb:.0})"
+    );
+}
