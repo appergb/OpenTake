@@ -281,6 +281,8 @@ fn run_render_thread(
     let frame_dur = Duration::from_secs_f64(1.0 / fps.max(1) as f64);
 
     loop {
+        let tick = Instant::now();
+
         // Drain pending control messages first.
         loop {
             match rx.try_recv() {
@@ -307,7 +309,17 @@ fn run_render_thread(
         if done {
             return;
         }
-        thread::sleep(frame_dur);
+
+        // Sleep only the remainder of the frame budget (#192): the target
+        // frame comes from the audio-master clock (absolute time), so when a
+        // render overruns `frame_dur` we don't sleep at all and `loop_step`
+        // catches up on the next iteration. Sleeping the full `frame_dur`
+        // unconditionally here previously stacked render time on top of the
+        // frame period and capped playback at ~22fps regardless of target fps.
+        let elapsed = tick.elapsed();
+        if elapsed < frame_dur {
+            thread::sleep(frame_dur - elapsed);
+        }
     }
 }
 

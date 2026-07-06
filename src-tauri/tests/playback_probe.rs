@@ -1,0 +1,321 @@
+//! P0 real-device acceptance probe for the playback engine (the engine half of
+//! the `PLAYBACK-ENGINE.md` acceptance checklist).
+//!
+//! Unlike the unit tests, this drives `PlaybackEngine` end-to-end on real GPU +
+//! real media + a real cpal audio device on this machine. Verifies the #192 fix
+//! (`run_render_thread` sleeping only the remainder of the frame budget instead
+//! of unconditionally sleeping a full `frame_dur` on top of render time, which
+//! capped playback at ~21-23fps regardless of target fps).
+//!
+//! Default `#[ignore]`; run manually on a real machine with a GPU + audio
+//! device:
+//! ```sh
+//! OPENTAKE_PROBE_VIDEO=/path/to/real_video_with_audio.mp4 \
+//!   cargo test -p opentake-tauri --test playback_probe -- --ignored --nocapture
+//! ```
+//! `probe_realtime_playback_with_audio_clock` needs `OPENTAKE_PROBE_VIDEO` (a
+//! real asset with an audio track, so the cpal master clock drives playback);
+//! it soft-skips (prints and returns) when the env var is unset. The other two
+//! probes generate their own fixtures at runtime via ffmpeg into the OS temp
+//! dir and soft-skip when ffmpeg is unavailable.
+#![cfg(feature = "playback-engine")]
+
+use std::collections::HashMap;
+use std::process::Command;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use opentake_domain::{Clip, ClipType, Timeline, Track};
+use opentake_render::{DecodedFrame, RenderSize};
+use opentake_tauri_lib::playback::{
+    audio::build_clock, FrameSink, MediaInfo, PlaybackEngine, PlayheadEmitter,
+};
+
+/// Collects frames: counts + keeps the last one.
+struct ProbeSink {
+    frames: AtomicI32,
+    last: Mutex<Option<DecodedFrame>>,
+}
+
+impl FrameSink for ProbeSink {
+    fn push_frame(&self, frame: &DecodedFrame) {
+        self.frames.fetch_add(1, Ordering::SeqCst);
+        *self.last.lock().unwrap() = Some(frame.clone());
+    }
+}
+
+struct ProbeEmitter {
+    last_frame: AtomicI32,
+}
+
+impl PlayheadEmitter for ProbeEmitter {
+    fn emit(&self, frame: i32) {
+        self.last_frame.store(frame, Ordering::SeqCst);
+    }
+}
+
+fn video_clip(id: &str, media: &str, start: i32, dur: i32) -> Clip {
+    let mut c = Clip::new(id, media, start, dur);
+    c.media_type = ClipType::Video;
+    c.source_clip_type = ClipType::Video;
+    c
+}
+
+/// Run a timeline for `secs` seconds, returning (frames received, last
+/// playhead, last frame).
+fn run_engine(
+    timeline: Timeline,
+    media: HashMap<String, MediaInfo>,
+    sizes: HashMap<String, (u32, u32)>,
+    secs: f64,
+) -> (i32, i32, Option<DecodedFrame>) {
+    let fps = timeline.fps;
+    let (clock, _audio) = build_clock(&timeline, &media, fps, 0);
+    let sink = Arc::new(ProbeSink {
+        frames: AtomicI32::new(0),
+        last: Mutex::new(None),
+    });
+    let emitter = Arc::new(ProbeEmitter {
+        last_frame: AtomicI32::new(-1),
+    });
+    let engine = PlaybackEngine::spawn(
+        timeline,
+        media,
+        HashMap::new(),
+        sizes,
+        RenderSize::new(640, 360),
+        clock,
+        sink.clone(),
+        emitter.clone(),
+    )
+    .expect("engine spawn (GPU acquire)");
+    let deadline = Instant::now() + Duration::from_secs_f64(secs);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    engine.stop();
+    let n = sink.frames.load(Ordering::SeqCst);
+    let head = emitter.last_frame.load(Ordering::SeqCst);
+    let last = sink.last.lock().unwrap().clone();
+    (n, head, last)
+}
+
+fn nonblack_ratio(f: &DecodedFrame) -> f64 {
+    let total = (f.width * f.height) as f64;
+    let mut nonblack = 0u64;
+    for px in f.rgba.chunks_exact(4) {
+        if px[0] > 16 || px[1] > 16 || px[2] > 16 {
+            nonblack += 1;
+        }
+    }
+    nonblack as f64 / total
+}
+
+fn ffmpeg_ready() -> bool {
+    Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Acceptance 1+4: real media (with an audio track, cpal master clock) plays
+/// continuously; frame rate meets target and the playhead advances.
+#[test]
+#[ignore = "real-device probe: needs GPU + audio device + a real video asset"]
+fn probe_realtime_playback_with_audio_clock() {
+    let Ok(src) = std::env::var("OPENTAKE_PROBE_VIDEO") else {
+        eprintln!(
+            "skip: set OPENTAKE_PROBE_VIDEO to a real video file (with audio) to run this probe"
+        );
+        return;
+    };
+    if !std::path::Path::new(&src).exists() {
+        eprintln!("skip: OPENTAKE_PROBE_VIDEO does not exist: {src}");
+        return;
+    }
+    let mut tl = Timeline::new();
+    tl.fps = 30;
+    tl.width = 1920;
+    tl.height = 1080;
+    let mut track = Track::new("t-v1", ClipType::Video);
+    track.clips.push(video_clip("c-1", "m-1", 0, 300));
+    tl.tracks.push(track);
+
+    let mut media = HashMap::new();
+    media.insert("m-1".to_string(), MediaInfo { path: src.into() });
+    let mut sizes = HashMap::new();
+    sizes.insert("m-1".to_string(), (1584u32, 1080u32));
+
+    let (frames, playhead, last) = run_engine(tl, media, sizes, 3.0);
+    eprintln!("[probe] frames={frames} playhead={playhead}");
+    // 3s @30fps targets 90 frames. Pre-#192-fix, the render thread stacked a
+    // full frame period on top of render time and measured ~67 frames/3s
+    // (~22fps) on this asset+machine; post-fix it consistently measures
+    // ~75-77 frames/3s (~25.5fps), bounded by a separate, pre-existing GPU
+    // readback cost in the compositor (a synchronous `device.poll(Wait)`)
+    // rather than by sleep pacing. >=73 asserts the fix (not just "some
+    // number passes") while leaving margin below the observed floor.
+    assert!(frames >= 73, "frame rate too low: {frames} frames in 3s");
+    assert!(playhead >= 73, "playhead did not advance: {playhead}");
+    let last = last.expect("no frame captured");
+    let ratio = nonblack_ratio(&last);
+    eprintln!("[probe] nonblack_ratio={ratio:.3}");
+    assert!(ratio > 0.01, "frames are black (ratio {ratio:.4})");
+}
+
+/// Generate an N-second ProRes (422, profile 2) + PCM audio fixture at `path`
+/// via ffmpeg. Returns false (→ skip) on failure.
+fn make_prores_fixture(path: &std::path::Path, secs: u32) -> bool {
+    Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc2=size=1280x720:rate=30:duration={secs}"),
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=frequency=440:duration={secs}"),
+            "-c:v",
+            "prores_ks",
+            "-profile:v",
+            "2",
+            "-c:a",
+            "pcm_s16le",
+        ])
+        .arg(path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Acceptance 2: ProRes (a format the WebView `<video>` element can't play)
+/// decodes and plays.
+#[test]
+#[ignore = "real-device probe: needs GPU + audio device"]
+fn probe_prores_playback() {
+    if !ffmpeg_ready() {
+        eprintln!("skip: ffmpeg not available");
+        return;
+    }
+    let src = std::env::temp_dir().join("opentake-probe-192-prores.mov");
+    if !make_prores_fixture(&src, 3) {
+        eprintln!("skip: could not generate ProRes fixture at {src:?}");
+        return;
+    }
+
+    let mut tl = Timeline::new();
+    tl.fps = 30;
+    tl.width = 1280;
+    tl.height = 720;
+    let mut track = Track::new("t-v1", ClipType::Video);
+    track.clips.push(video_clip("c-1", "m-1", 0, 90));
+    tl.tracks.push(track);
+
+    let mut media = HashMap::new();
+    media.insert("m-1".to_string(), MediaInfo { path: src });
+    let mut sizes = HashMap::new();
+    sizes.insert("m-1".to_string(), (1280u32, 720u32));
+
+    let (frames, _playhead, last) = run_engine(tl, media, sizes, 2.0);
+    eprintln!("[probe] prores frames={frames}");
+    // 2s @30fps targets 60 frames. Post-#192-fix this consistently measures
+    // ~50-51 frames/2s on this machine (bounded by the same compositor GPU
+    // readback floor as the audio-clock probe above, not by sleep pacing);
+    // pre-fix baseline was >=40. >=48 asserts the fix while leaving margin
+    // below the observed floor.
+    assert!(frames >= 48, "prores playback too slow: {frames} in 2s");
+    let last = last.expect("no prores frame captured");
+    let ratio = nonblack_ratio(&last);
+    eprintln!("[probe] prores nonblack_ratio={ratio:.3}");
+    // testsrc2 is a color-bar pattern, so the non-black ratio should be high.
+    assert!(ratio > 0.5, "prores frames black (ratio {ratio:.4})");
+}
+
+/// Generate a short H.264 color-bar fixture at `path` via ffmpeg. Returns
+/// false (→ skip) on failure.
+fn make_colorbar_fixture(path: &std::path::Path, secs: u32) -> bool {
+    Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc2=size=640x360:rate=30:duration={secs}"),
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=frequency=440:duration={secs}"),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+        ])
+        .arg(path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Acceptance 3: GPU-only color grading is visible in playback frames
+/// (saturation=0 → grayscale output).
+#[test]
+#[ignore = "real-device probe: needs GPU + audio device"]
+fn probe_color_grade_visible_in_playback() {
+    if !ffmpeg_ready() {
+        eprintln!("skip: ffmpeg not available");
+        return;
+    }
+    let src = std::env::temp_dir().join("opentake-probe-192-colorbar.mp4");
+    if !make_colorbar_fixture(&src, 2) {
+        eprintln!("skip: could not generate color-bar fixture at {src:?}");
+        return;
+    }
+
+    let mut tl = Timeline::new();
+    tl.fps = 30;
+    tl.width = 640;
+    tl.height = 360;
+    let mut track = Track::new("t-v1", ClipType::Video);
+    let mut clip = video_clip("c-1", "m-1", 0, 60);
+    let grade = opentake_domain::ColorGrade {
+        saturation: 0.0, // grayscale
+        ..Default::default()
+    };
+    clip.color_grade = Some(grade);
+    track.clips.push(clip);
+    tl.tracks.push(track);
+
+    let mut media = HashMap::new();
+    media.insert("m-1".to_string(), MediaInfo { path: src });
+    let mut sizes = HashMap::new();
+    sizes.insert("m-1".to_string(), (640u32, 360u32));
+
+    let (frames, _playhead, last) = run_engine(tl, media, sizes, 1.5);
+    // 1.5s @30fps targets 45 frames. Post-#192-fix this measures ~32-39
+    // frames/1.5s on this machine across repeated runs (short 1.5s window,
+    // so warm-up cost is a larger share and variance is higher than the
+    // longer probes above; same GPU readback floor, not sleep pacing);
+    // pre-fix baseline was >=20. >=30 asserts the fix while leaving margin
+    // below the observed floor.
+    assert!(frames >= 30, "grade playback too slow: {frames}");
+    let last = last.expect("no graded frame captured");
+    // The color-bar source is highly saturated; grade saturation=0 should
+    // leave every pixel with R≈G≈B.
+    let mut max_dev = 0i32;
+    for px in last.rgba.chunks_exact(4) {
+        let (r, g, b) = (px[0] as i32, px[1] as i32, px[2] as i32);
+        let dev = (r - g).abs().max((g - b).abs()).max((r - b).abs());
+        max_dev = max_dev.max(dev);
+    }
+    eprintln!("[probe] grade frames={frames} max_channel_dev={max_dev}");
+    assert!(
+        max_dev <= 8,
+        "saturation=0 grade not applied in playback (max channel dev {max_dev})"
+    );
+}
