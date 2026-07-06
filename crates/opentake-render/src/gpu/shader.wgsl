@@ -256,20 +256,30 @@ fn vs(@builtin(vertex_index) vi: u32) -> VsOut {
         src.x * u.affine0.y + src.y * u.affine0.w + affine1.y,
     );
 
-    // Canvas pixels (origin bottom-left, y up) -> NDC.
+    // Canvas pixels (origin bottom-left, y up) -> NDC. wgpu/WebGPU NDC is y-up
+    // (+1 = top) but the VIEWPORT/framebuffer it rasterizes into is y-down
+    // (row 0 = top): flip y here so `px.y` (CG-style, bottom-left origin) lands
+    // on the matching framebuffer row instead of mirroring vertically (#193).
     let ndc = vec2<f32>(
         px.x / canvas.x * 2.0 - 1.0,
-        px.y / canvas.y * 2.0 - 1.0,
+        1.0 - px.y / canvas.y * 2.0,
     );
 
     // UV: quad corner -> crop sub-rect. Flip v once (texture row 0 = top).
     let uv_lin = mix(u.crop_uv.xy, u.crop_uv.zw, q);
     let uv = vec2<f32>(uv_lin.x, 1.0 - uv_lin.y);
 
-    // Normalized canvas position for mask evaluation. Masks are authored with
-    // origin TOP-left, y down (same as the source/UI canvas), so flip y from the
-    // NDC's bottom-left origin.
-    let canvas_uv = vec2<f32>(px.x / canvas.x, 1.0 - px.y / canvas.y);
+    // Normalized canvas position for mask evaluation, in the SAME origin
+    // TOP-left / y-down space `Mask::coverage`'s (x, y) argument and
+    // `Transform.center_y` are authored in (0 = top, 1 = bottom). `px` is
+    // CG-style (origin bottom-left, y up), so this divides straight through —
+    // no extra flip. Before the #193 fix this line carried a compensating
+    // `1.0 - ...` that canceled out with the (buggy) un-flipped NDC line above,
+    // keeping mask coverage paired with the (also mirrored) framebuffer; now
+    // that the NDC line is flipped to render un-mirrored, this must drop the
+    // same flip to stay paired, or masks mirror relative to the content they
+    // clip (#193).
+    let canvas_uv = vec2<f32>(px.x / canvas.x, px.y / canvas.y);
 
     var out: VsOut;
     out.pos = vec4<f32>(ndc, 0.0, 1.0);
