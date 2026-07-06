@@ -28,7 +28,7 @@ import {
 import { Icon } from "../ui/Icon";
 import { HoverButton } from "../ui/HoverButton";
 import { useEditorUiStore, type MediaSubTabId } from "../../store/uiStore";
-import { useMediaStore } from "../../store/mediaStore";
+import { useMediaStore, refreshMedia } from "../../store/mediaStore";
 import {
   importFolderViaDialog,
   importFilesViaDialog,
@@ -42,13 +42,14 @@ import { BoundedCache } from "../../lib/lru";
 import { childFolders, folderTrail, normalizeFolderId } from "../../lib/folderTree";
 import { useProjectStore } from "../../store/projectStore";
 import { addMediaToTimeline } from "../../store/editActions";
-import { extractAudio, generateThumbnail, preloadMedia } from "../../lib/api";
+import { extractAudio, generateThumbnail, preloadMedia, toggleFavorite } from "../../lib/api";
 import { saveDialog } from "../../lib/dialog";
 import type { MediaFolder, MediaItem } from "../../lib/types";
-import { MediaTabBar, MediaSubTabBar } from "./MediaTabBar";
+import { MediaTabBar, MediaSubTabBar, MATERIAL_SUB_TABS, AUDIO_SUB_TABS } from "./MediaTabBar";
+import { SoundLibraryTab } from "./SoundLibraryTab";
 import { CaptionsTab } from "./CaptionsTab";
 import { MediaSearchResults } from "./MediaSearch";
-import { useFavoritesStore, useIsFavorite } from "./favorites";
+import { migrateLocalFavorites } from "./favorites";
 
 /** MIME-ish type used on dataTransfer when dragging a media item to the timeline. */
 export const MEDIA_DND_TYPE = "application/x-opentake-media";
@@ -120,6 +121,18 @@ export function MediaPanel() {
   const setMediaTab = useEditorUiStore((s) => s.setMediaTab);
   const t = useT();
 
+  // One-time (#91): drain any legacy `opentake.favorites` localStorage stars into
+  // the current project's manifest once its media has loaded. `migrateLocalFavorites`
+  // self-guards (empty store / no matching items → no-op), so this settles after
+  // the first successful migration and safely re-checks on project switch.
+  const items = useMediaStore((s) => s.items);
+  useEffect(() => {
+    if (items.length === 0) return;
+    void migrateLocalFavorites(items).then((applied) => {
+      if (applied) void refreshMedia();
+    });
+  }, [items]);
+
   // 仅 material/audio 渲染素材库内容；其余禁用标签理论上点不到，兜底显示占位。
   const isLibraryTab = mediaTab === "material" || mediaTab === "audio";
 
@@ -149,7 +162,6 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   const error = useMediaStore((s) => s.error);
   const subTab = useEditorUiStore((s) => s.mediaSubTab);
   const setSubTab = useEditorUiStore((s) => s.setMediaSubTab);
-  const favoriteIds = useFavoritesStore((s) => s.ids);
   const currentFolderId = useEditorUiStore((s) => s.mediaPanelCurrentFolderId);
   const setCurrentFolderId = useEditorUiStore((s) => s.setMediaPanelCurrentFolderId);
   const [search, setSearch] = useState("");
@@ -167,6 +179,15 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   useEffect(() => {
     resetFolder.current(null);
   }, [kind, subTab]);
+
+  // The extract/sound subtabs exist only on the audio tab; if we land on the
+  // material tab still pointing at one, fall back to import.
+  const isAudio = kind === "audio";
+  useEffect(() => {
+    if (!isAudio && (subTab === "extract" || subTab === "sound")) {
+      setSubTab("import");
+    }
+  }, [isAudio, subTab, setSubTab]);
 
   // Effective cursor: favorites view is always flat (root).
   const folderId = browsing ? currentFolderId : null;
@@ -190,17 +211,36 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
     () =>
       items.filter((item) => {
         if (kind === "audio" && item.type !== "audio") return false;
-        if (subTab === "mine" && !favoriteIds.has(item.id)) return false;
+        if (subTab === "mine" && !item.favorite) return false;
         if (query !== "") return item.name.toLowerCase().includes(query);
         if (browsing && normalizeFolderId(item.folderId) !== folderId) return false;
         return true;
       }),
-    [items, kind, subTab, favoriteIds, query, browsing, folderId],
+    [items, kind, subTab, query, browsing, folderId],
+  );
+
+  // "提取" subtab (audio only): project videos carrying an extractable audio
+  // track. Rendered with the same MediaCard, whose hover Extract button already
+  // runs extract_audio — so extracting is reachable without leaving the audio
+  // tab. Search filters by name like the other views.
+  const extractableVideos = useMemo(
+    () =>
+      items.filter(
+        (item) =>
+          item.type === "video" &&
+          item.hasAudio &&
+          !item.missing &&
+          (query === "" || item.name.toLowerCase().includes(query)),
+      ),
+    [items, query],
   );
 
   const trail = useMemo(() => folderTrail(folders, folderId), [folders, folderId]);
   const totalCount = visibleFolders.length + filteredItems.length;
   const isEmpty = totalCount === 0;
+  const audioExtractView = isAudio && subTab === "extract";
+  const audioSoundView = isAudio && subTab === "sound";
+  const displayCount = audioExtractView ? extractableVideos.length : totalCount;
 
   return (
     <>
@@ -218,8 +258,13 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
         {/* actionsRow */}
         <div style={{ height: 28, display: "flex", alignItems: "center", gap: "var(--space-xs)" }}>
           <ImportMenu />
+          {/* AI 生成尚未接线（generate_* 仍是 stub）。封边：明确「即将推出」并禁用，
+              不给测试者一个点了没反应的死按钮。 */}
           <button
-            title={t("media.generate")}
+            type="button"
+            disabled
+            aria-disabled
+            title={t("media.generateSoon")}
             style={{
               display: "inline-flex",
               alignItems: "center",
@@ -231,14 +276,20 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
               color: "#111",
               fontSize: "var(--fs-sm)",
               fontWeight: "var(--fw-medium)",
+              opacity: 0.55,
+              cursor: "not-allowed",
             }}
           >
             <Icon icon={Sparkles} size={12} />
             {t("media.generate")}
           </button>
           <div style={{ flex: 1 }} />
-          {/* 二级标签：导入 / 我的（星标收藏）。 */}
-          <MediaSubTabBar active={subTab} onSelect={setSubTab} />
+          {/* 二级标签：素材=导入/我的；音频额外有 提取 / 音效。 */}
+          <MediaSubTabBar
+            active={subTab}
+            onSelect={setSubTab}
+            tabs={isAudio ? AUDIO_SUB_TABS : MATERIAL_SUB_TABS}
+          />
         </div>
         {/* searchControlsRow */}
         <div style={{ height: 28, display: "flex", alignItems: "center", gap: "var(--space-xs)" }}>
@@ -284,7 +335,13 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
           }}
         >
           <span>{t("media.library")}</span>
-          <span>{importing ? t("media.importing") : t("media.itemCount", { count: totalCount })}</span>
+          <span>
+            {importing
+              ? t("media.importing")
+              : audioSoundView
+                ? ""
+                : t("media.itemCount", { count: displayCount })}
+          </span>
         </div>
         {error && (
           <div style={{ color: "var(--status-error)", fontSize: "var(--fs-xs)" }}>
@@ -293,7 +350,34 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
         )}
       </div>
 
-      {query !== "" ? (
+      {audioSoundView ? (
+        // 音效库（#115 全局库的 sound 分类）搬进音频 tab，一键导入项目。
+        <SoundLibraryTab query={query} />
+      ) : audioExtractView ? (
+        // 从视频提取音频：列出含音轨的项目视频，卡片 hover 的提取按钮即走
+        // extract_audio，无需离开音频 tab。
+        extractableVideos.length === 0 ? (
+          <div
+            style={{
+              flex: 1,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "var(--space-xs)",
+              padding: "var(--space-lg)",
+              color: "var(--text-tertiary)",
+              fontSize: "var(--fs-sm)",
+              textAlign: "center",
+            }}
+          >
+            <span>{t("media.extract.empty")}</span>
+            <span style={{ fontSize: "var(--fs-xs)" }}>{t("media.extract.hint")}</span>
+          </div>
+        ) : (
+          <MediaGrid folders={[]} items={extractableVideos} onOpenFolder={setCurrentFolderId} />
+        )
+      ) : query !== "" ? (
         // Smart search: three result groups (Moments / Spoken / Files) + the
         // index-status affordance. `filteredItems` is the name-matched Files group
         // (already scoped to the current main/subtab). Moments/Spoken come from
@@ -645,8 +729,7 @@ function MediaCard({ item }: { item: MediaItem }) {
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
   const durationFrames = Math.round(item.duration * fps);
   const selected = previewMediaId === item.id;
-  const favorite = useIsFavorite(item.id);
-  const toggleFavorite = useFavoritesStore((s) => s.toggle);
+  const favorite = item.favorite ?? false;
   const thumbnailKey = mediaThumbnailKey(item);
   const [lazyThumbnail, setLazyThumbnail] = useState<string | null>(
     item.thumbnail ?? mediaThumbnailCache.get(thumbnailKey) ?? null,
@@ -872,7 +955,11 @@ function MediaCard({ item }: { item: MediaItem }) {
           title={favorite ? t("media.unfavorite") : t("media.favorite")}
           onClick={(e) => {
             e.stopPropagation();
-            toggleFavorite(item.id);
+            // Persist to the project manifest; the backend's media_changed event
+            // plus this refresh update every card's `favorite` flag.
+            void toggleFavorite([item.id], !favorite)
+              .then(() => refreshMedia())
+              .catch(() => {});
           }}
           style={{
             position: "absolute",

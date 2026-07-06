@@ -29,8 +29,9 @@ export type MediaTabId =
   | "transition"
   | "subtitle"
   | "smartPack";
-/** 素材/音频下的二级标签：导入（全部素材）/ 我的（星标收藏）。 */
-export type MediaSubTabId = "import" | "mine";
+/** 素材/音频下的二级标签：导入（全部素材）/ 我的（星标收藏）。音频 tab 额外有
+ *  提取（从视频提取音频）/ 音效（全局音效库，#91/#115）。 */
+export type MediaSubTabId = "import" | "mine" | "extract" | "sound";
 export type InspectorTabId = "text" | "video" | "audio" | "aiEdit";
 
 const LS = {

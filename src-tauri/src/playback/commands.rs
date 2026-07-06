@@ -184,10 +184,12 @@ pub fn playback_seek(playback: State<'_, PlaybackState>, frame: i32) -> Result<(
     Ok(())
 }
 
-/// The MJPEG stream URL the front end points a playback `<img>` at.
+/// The WebSocket URL the front end connects a playback `<canvas>` to for binary
+/// JPEG frames. (WebKit only paints the first part of the `/stream` MJPEG `<img>`,
+/// so the canvas + WS path replaced it — see `transport.rs`.)
 #[tauri::command]
 pub fn get_preview_endpoint(server: State<'_, Arc<PreviewServer>>) -> String {
-    server.endpoint()
+    server.endpoint_ws()
 }
 
 #[cfg(test)]

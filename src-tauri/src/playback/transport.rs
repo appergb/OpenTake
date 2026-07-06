@@ -19,6 +19,7 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -69,6 +70,7 @@ impl PreviewServer {
         tauri::async_runtime::spawn(async move {
             let app = axum::Router::new()
                 .route("/stream", axum::routing::get(stream_handler))
+                .route("/ws", axum::routing::get(ws_handler))
                 .with_state(tx_clone);
             if let Err(e) = axum::serve(listener, app).await {
                 eprintln!("[mjpeg] server error: {e}");
@@ -78,9 +80,18 @@ impl PreviewServer {
         Ok(Arc::new(Self { port, tx }))
     }
 
-    /// The `<img>`-pointable MJPEG stream URL.
+    /// The `<img>`-pointable MJPEG stream URL. Kept for debugging; the preview
+    /// canvas uses [`Self::endpoint_ws`] instead (WebKit only paints the first
+    /// part of a `multipart/x-mixed-replace` `<img>` — see the module note).
     pub fn endpoint(&self) -> String {
         format!("http://127.0.0.1:{}/stream", self.port)
+    }
+
+    /// The WebSocket URL the preview canvas connects to for binary JPEG frames.
+    /// WebKit/WKWebView renders these reliably (WebSocket + `createImageBitmap` +
+    /// canvas), which the MJPEG `<img>` path does not.
+    pub fn endpoint_ws(&self) -> String {
+        format!("ws://127.0.0.1:{}/ws", self.port)
     }
 
     /// A frame sink that JPEG-encodes composited frames into this server's stream.
@@ -166,6 +177,38 @@ async fn stream_handler(
         body,
     )
         .into_response()
+}
+
+/// `/ws`: push each broadcast JPEG to the preview canvas as a binary WebSocket
+/// message. WebKit/WKWebView consumes these reliably; the `/stream` MJPEG `<img>`
+/// path only ever paints the first frame there (see the module note).
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    State(tx): State<broadcast::Sender<Bytes>>,
+) -> Response {
+    if !origin_is_allowed(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-origin preview stream denied").into_response();
+    }
+    ws.on_upgrade(move |socket| ws_stream(socket, tx.subscribe()))
+}
+
+/// Forward broadcast JPEG frames to one connected preview socket until it closes.
+/// A slow/dead socket drops frames (live preview never back-pressures the render
+/// thread) or ends the loop; encoding stops once the last subscriber is gone.
+async fn ws_stream(mut socket: WebSocket, mut rx: broadcast::Receiver<Bytes>) {
+    loop {
+        match rx.recv().await {
+            Ok(jpeg) => {
+                if socket.send(Message::Binary(jpeg)).await.is_err() {
+                    break;
+                }
+            }
+            // Slow consumer: skip the dropped frames and keep going (live preview).
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
 }
 
 /// A [`FrameSink`] that JPEG-encodes each composited frame and broadcasts it to

@@ -29,7 +29,9 @@ use serde::Serialize;
 use tauri::State;
 
 use opentake_core::{importable_clip_type, AppCore, EditCommand, ProbedMedia};
-use opentake_domain::{ClipType, GenerationInput, MediaManifestEntry, MediaSource};
+use opentake_domain::{
+    ClipType, GenerationInput, MediaManifest, MediaManifestEntry, MediaSource, Timeline,
+};
 use opentake_media::{
     cache_key::{file_identity_key, KEY_HEX_LEN},
     decode_frame_at, decode_frames_at,
@@ -107,6 +109,10 @@ pub struct MediaItemDto {
     /// points the asset at a real file again. The panel/timeline render an
     /// "offline" affordance for missing assets.
     pub missing: bool,
+    /// `true` when the user has favorited this asset (#91). Backs the media
+    /// panel's "mine" tab. Persisted per-project in the manifest's favorites set
+    /// (not browser localStorage), so favorites travel with the project.
+    pub favorite: bool,
 }
 
 impl MediaItemDto {
@@ -116,6 +122,7 @@ impl MediaItemDto {
         entry: &MediaManifestEntry,
         project_dir: Option<&Path>,
         cache_root: Option<&Path>,
+        favorite: bool,
     ) -> Self {
         let resolved = resolve_source_path(entry, project_dir);
         let path = match &entry.source {
@@ -158,6 +165,7 @@ impl MediaItemDto {
             file_size,
             generation_input: entry.generation_input.clone(),
             missing,
+            favorite,
         }
     }
 }
@@ -230,7 +238,14 @@ impl MediaListDto {
             items: manifest
                 .entries
                 .iter()
-                .map(|e| MediaItemDto::from_entry(e, project_dir.as_deref(), cache_root))
+                .map(|e| {
+                    MediaItemDto::from_entry(
+                        e,
+                        project_dir.as_deref(),
+                        cache_root,
+                        manifest.is_favorite(&e.id),
+                    )
+                })
                 .collect(),
             folders: manifest
                 .folders
@@ -856,6 +871,121 @@ pub fn get_media(core: State<'_, AppCore>, media: State<'_, MediaState>) -> Medi
     MediaListDto::from_core(&core, Some(media.engine().cache_root()))
 }
 
+/// `toggle_favorite`: add or remove `asset_ids` from the per-project favorites
+/// set (#91), returning the refreshed catalog so the panel's "mine" tab and the
+/// per-card favorite affordance update. Favorites persist in the project manifest
+/// (not browser storage); unknown ids are ignored by the core. Infallible.
+#[tauri::command]
+pub fn toggle_favorite(
+    core: State<'_, AppCore>,
+    media: State<'_, MediaState>,
+    asset_ids: Vec<String>,
+    favorite: bool,
+) -> MediaListDto {
+    core.set_media_favorite(&asset_ids, favorite);
+    MediaListDto::from_core(&core, Some(media.engine().cache_root()))
+}
+
+/// Build the render inputs for "save clip as media" (#91 §3.5): a single-clip
+/// timeline (the clip re-based to frame 0 on a visible, unmuted track) plus a
+/// manifest subset carrying only that clip's source entry. Pure — the caller
+/// drives the GPU render/encode — so the framing is unit-testable. Also returns
+/// the clip's media type (only video renders today). Errors if the clip id is
+/// not on the timeline, or its source is missing from the manifest.
+fn build_single_clip_export(
+    timeline: &Timeline,
+    manifest: &MediaManifest,
+    clip_id: &str,
+) -> Result<(Timeline, MediaManifest, ClipType), String> {
+    let track = timeline
+        .tracks
+        .iter()
+        .find(|t| t.clips.iter().any(|c| c.id == clip_id))
+        .ok_or_else(|| format!("clip not found: {clip_id}"))?;
+    let clip = track
+        .clips
+        .iter()
+        .find(|c| c.id == clip_id)
+        .expect("clip is present in the matched track");
+
+    // One track — the clip's own, cloned to keep its type/props — holding only
+    // this clip re-based to frame 0; forced visible + unmuted so export renders
+    // it even if the source track was hidden/muted.
+    let mut solo_track = track.clone();
+    let mut solo_clip = clip.clone();
+    solo_clip.start_frame = 0;
+    solo_track.clips = vec![solo_clip];
+    solo_track.hidden = false;
+    solo_track.muted = false;
+
+    // Clone-then-replace keeps every other Timeline field (fps/size/version…).
+    let mut single_timeline = timeline.clone();
+    single_timeline.tracks = vec![solo_track];
+
+    // Manifest subset: only the clip's source (render metrics + decode need it,
+    // nothing else does). Clone-then-retain preserves the manifest version.
+    let mut subset = manifest.clone();
+    subset.entries.retain(|e| e.id == clip.media_ref);
+    subset.folders.clear();
+    subset.favorites.clear();
+    if subset.entries.is_empty() {
+        return Err(format!("media not found for clip: {}", clip.media_ref));
+    }
+
+    Ok((single_timeline, subset, clip.media_type))
+}
+
+/// `save_clip_as_media` (#91 §3.5 / 另存为媒体): render one timeline clip — with
+/// its trims, speed, effects, color and text baked in — to a new `.mp4` in the
+/// project's `media/` dir, then import it as a fresh asset so it shows up in the
+/// panel. Reuses the export pipeline via a single-clip timeline plus the normal
+/// import path. Returns the refreshed catalog.
+///
+/// Video clips only for now (audio/image save-as is a follow-up; basic audio
+/// extraction already exists via `extract_audio`). Requires a saved project —
+/// there must be a bundle `media/` dir to write into.
+#[tauri::command]
+pub fn save_clip_as_media(
+    core: State<'_, AppCore>,
+    media: State<'_, MediaState>,
+    clip_id: String,
+) -> Result<MediaListDto, String> {
+    let timeline = core.get_timeline().timeline;
+    let manifest = core.media();
+    let project_dir = core
+        .project_dir()
+        .ok_or("save your project before saving a clip as media")?;
+
+    let (single_timeline, subset, media_type) =
+        build_single_clip_export(&timeline, &manifest, &clip_id)?;
+    if media_type != ClipType::Video {
+        return Err("only video clips can be saved as media for now".to_string());
+    }
+
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let media_dir = project_dir.join("media");
+    std::fs::create_dir_all(&media_dir).map_err(|e| format!("failed to create media dir: {e}"))?;
+    let out_path = media_dir.join(format!("clip_{clip_id}_{stamp}.mp4"));
+
+    let req = crate::export::ExportRequest {
+        out_path: out_path.to_string_lossy().into_owned(),
+        codec: crate::export::ExportCodec::H264,
+        quality: crate::export::ExportQuality::P1080,
+    };
+    crate::export::run_export(&single_timeline, &subset, &Some(project_dir), &req)
+        .map_err(|e| format!("render failed: {e}"))?;
+
+    // Import the rendered file as a new asset (probe + poster + manifest append).
+    import_one(&core, media.engine(), &out_path).ok_or("failed to import the rendered clip")?;
+    Ok(MediaListDto::from_core(
+        &core,
+        Some(media.engine().cache_root()),
+    ))
+}
+
 /// Validate the user-chosen output path for [`extract_audio`] (Issue #39
 /// review #4 — "out_path 无后端路径边界校验").
 ///
@@ -1165,7 +1295,7 @@ mod tests {
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
         };
-        let dto = MediaItemDto::from_entry(&entry, None, None);
+        let dto = MediaItemDto::from_entry(&entry, None, None, false);
         assert_eq!(dto.id, "a");
         assert_eq!(dto.kind, ClipType::Video);
         assert_eq!(dto.duration, 3.0);
@@ -1202,7 +1332,7 @@ mod tests {
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
         };
-        let dto = MediaItemDto::from_entry(&entry, None, None);
+        let dto = MediaItemDto::from_entry(&entry, None, None, false);
         assert!(!dto.missing);
         assert_eq!(dto.file_size, Some(10));
     }
@@ -1223,6 +1353,7 @@ mod tests {
             file_size: Some(2048),
             generation_input: None,
             missing: false,
+            favorite: true,
         };
         let json = serde_json::to_string(&dto).unwrap();
         assert!(json.contains("\"hasAudio\""));
@@ -1232,6 +1363,7 @@ mod tests {
         assert!(json.contains("\"fileSize\":2048"));
         assert!(json.contains("\"generationInput\":null"));
         assert!(json.contains("\"missing\":false"));
+        assert!(json.contains("\"favorite\":true"));
     }
 
     #[test]
@@ -1262,7 +1394,7 @@ mod tests {
             cached_remote_url_expires_at: None,
         };
 
-        let dto = MediaItemDto::from_entry(&entry, None, Some(&cache_root));
+        let dto = MediaItemDto::from_entry(&entry, None, Some(&cache_root), false);
 
         assert!(!dto.missing);
         let poster_string = poster.to_string_lossy().into_owned();
@@ -1455,6 +1587,102 @@ mod tests {
         assert_eq!(list.items[0].kind, ClipType::Video);
         assert_eq!(list.items[0].name, "clip");
         assert_eq!(list.items[0].path.as_deref(), Some(good.to_str().unwrap()));
+    }
+
+    #[test]
+    fn toggle_favorite_marks_item_and_ignores_unknown_ids() {
+        // #91: favoriting flows through the core into the DTO's `favorite` flag —
+        // the media panel's "mine" tab reads this, not browser storage.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let clip = root.join("clip.mp4");
+        touch(&clip);
+        let core = AppCore::new();
+        let media = MediaState::new(engine_for(root));
+        let entry = import_one(&core, media.engine(), &clip).unwrap();
+
+        // A freshly imported asset is not favorited.
+        let before = MediaListDto::from_core(&core, None);
+        assert_eq!(before.items.len(), 1);
+        assert!(!before.items[0].favorite);
+
+        // Favoriting it surfaces in the DTO.
+        assert_eq!(
+            core.set_media_favorite(std::slice::from_ref(&entry.id), true),
+            1
+        );
+        assert!(MediaListDto::from_core(&core, None).items[0].favorite);
+
+        // Unknown ids never create phantom favorites.
+        assert_eq!(core.set_media_favorite(&["ghost".into()], true), 0);
+
+        // Unfavoriting flips it back.
+        assert_eq!(
+            core.set_media_favorite(std::slice::from_ref(&entry.id), false),
+            1
+        );
+        assert!(!MediaListDto::from_core(&core, None).items[0].favorite);
+    }
+
+    #[test]
+    fn single_clip_export_rebases_clip_and_subsets_manifest() {
+        use opentake_domain::{Clip, Track};
+
+        fn entry_for(id: &str) -> MediaManifestEntry {
+            MediaManifestEntry {
+                id: id.into(),
+                name: id.into(),
+                kind: ClipType::Video,
+                source: MediaSource::External {
+                    absolute_path: format!("/abs/{id}.mp4"),
+                },
+                duration: 2.0,
+                generation_input: None,
+                source_width: Some(640),
+                source_height: Some(480),
+                source_fps: Some(30.0),
+                has_audio: Some(true),
+                folder_id: None,
+                cached_remote_url: None,
+                cached_remote_url_expires_at: None,
+            }
+        }
+
+        // Multi-track, multi-clip timeline; save clip "c2" off a hidden track.
+        let mut tl = Timeline::new();
+        let mut t0 = Track::new("t0", ClipType::Video);
+        t0.clips.push(Clip::new("c1", "mediaA", 0, 30));
+        let mut t1 = Track::new("t1", ClipType::Video);
+        t1.hidden = true;
+        t1.clips.push(Clip::new("c2", "mediaB", 120, 45));
+        tl.tracks.push(t0);
+        tl.tracks.push(t1);
+
+        let mut manifest = MediaManifest::new();
+        manifest.entries.push(entry_for("mediaA"));
+        manifest.entries.push(entry_for("mediaB"));
+
+        let (single, subset, kind) = build_single_clip_export(&tl, &manifest, "c2").unwrap();
+
+        assert_eq!(kind, ClipType::Video);
+        // One track, one clip, re-based to frame 0, forced visible + unmuted.
+        assert_eq!(single.tracks.len(), 1);
+        assert_eq!(single.tracks[0].clips.len(), 1);
+        assert_eq!(single.tracks[0].clips[0].id, "c2");
+        assert_eq!(single.tracks[0].clips[0].start_frame, 0);
+        assert_eq!(single.tracks[0].clips[0].duration_frames, 45); // preserved
+        assert!(!single.tracks[0].hidden);
+        assert!(!single.tracks[0].muted);
+        // Timeline-level fields are preserved by clone-then-replace.
+        assert_eq!(single.fps, tl.fps);
+        assert_eq!(single.width, tl.width);
+        // Manifest subset carries only the clip's source.
+        assert_eq!(subset.entries.len(), 1);
+        assert_eq!(subset.entries[0].id, "mediaB");
+        assert!(subset.favorites.is_empty());
+
+        // Unknown clip id is an error, not a panic.
+        assert!(build_single_clip_export(&tl, &manifest, "nope").is_err());
     }
 
     #[test]

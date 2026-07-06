@@ -46,7 +46,7 @@ describe("rustEngineEnabled (default-on)", () => {
     expect(rustEngineEnabled()).toBe(true);
   });
 
-  it("treats any other stray value as ON (only \"0\" disables)", () => {
+  it('treats any other stray value as ON (only "0" disables)', () => {
     vi.stubGlobal("localStorage", makeLocalStorage({ [KEY]: "legacy" }));
     expect(rustEngineEnabled()).toBe(true);
     vi.stubGlobal("localStorage", makeLocalStorage({ [KEY]: "false" }));

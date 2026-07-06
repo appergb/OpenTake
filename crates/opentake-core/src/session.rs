@@ -286,6 +286,20 @@ impl EditorSession {
         // `now = 0`: a freshly imported local file has no cached remote URL, so
         // the freshness clock is irrelevant to the produced entry.
         let entry = asset.to_manifest_entry(self.project_dir.as_deref(), 0.0);
+        // Dedup (#91 "素材重复出现"): importing a file that is already in the
+        // manifest reuses the existing entry — keeping its id so any clip that
+        // references it stays valid — instead of appending a second entry for the
+        // same source. `source` is the resolved path (external abs or project
+        // relative), identical for the same file under the same project.
+        if let Some(existing) = self
+            .state
+            .manifest
+            .entries
+            .iter()
+            .find(|e| e.source == entry.source)
+        {
+            return Ok(existing.clone());
+        }
         self.state.manifest.entries.push(entry.clone());
         Ok(entry)
     }
@@ -334,6 +348,15 @@ impl EditorSession {
             _ => false,
         });
         Ok(entry.clone())
+    }
+
+    /// Toggle favorite state for `asset_ids` (#91). Like import, this is a media
+    /// manifest mutation *outside* the undo transaction — favoriting is a library
+    /// action, not a timeline edit, so it never enters undo and leaves the
+    /// timeline version untouched. Unknown ids are ignored. Returns the number of
+    /// ids whose favorite state actually changed.
+    pub fn set_media_favorite(&mut self, asset_ids: &[String], favorite: bool) -> usize {
+        self.state.manifest.set_favorites(asset_ids, favorite)
     }
 
     /// A clone of the current media manifest (read-only mirror for the media
@@ -624,6 +647,33 @@ mod tests {
             Some("asset-1")
         );
         assert_eq!(s.version(), 0);
+    }
+
+    #[test]
+    fn reimporting_the_same_file_reuses_the_entry_instead_of_duplicating() {
+        // #91: importing a file already in the manifest must not append a second
+        // entry (the "素材重复出现" bug). The existing entry — id and all — is
+        // reused, so clips that reference it stay valid and the panel shows it once.
+        let mut s = EditorSession::new_project();
+        let probe = ProbedMedia {
+            duration_secs: 5.0,
+            width: Some(640),
+            height: Some(480),
+            fps: Some(24.0),
+            has_audio: true,
+        };
+        let first = s
+            .import_media_file("/abs/clip.mp4", "asset-1", "clip", &probe)
+            .unwrap();
+        // Same on-disk file, different caller-minted id + display name.
+        let second = s
+            .import_media_file("/abs/clip.mp4", "asset-2", "clip-again", &probe)
+            .unwrap();
+
+        assert_eq!(s.media().entries.len(), 1, "re-import must not duplicate");
+        // The reused entry keeps the ORIGINAL id (not the second caller's id).
+        assert_eq!(second.id, "asset-1");
+        assert_eq!(second.source, first.source);
     }
 
     #[test]

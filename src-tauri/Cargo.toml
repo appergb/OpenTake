@@ -54,7 +54,7 @@ base64 = "0.22"
 # Versions already resolved in the workspace lockfile (via opentake-agent), so
 # enabling these pulls no new third-party crates (cpal arrives in the audio
 # follow-up). `image/jpeg` is enabled by the feature for MJPEG frame encoding.
-axum = { version = "0.8", optional = true }
+axum = { version = "0.8", features = ["ws"], optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "sync"], optional = true }
 bytes = { version = "1", optional = true }
 futures = { version = "0.3", optional = true }

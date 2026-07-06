@@ -362,6 +362,19 @@ export async function getMedia(): Promise<MediaList> {
 }
 
 /**
+ * `toggle_favorite`: add (`favorite = true`) or remove (`favorite = false`) media
+ * assets from the per-project favorites set (#91), returning the refreshed
+ * catalog. Favorites persist in the project manifest — not browser storage — so
+ * they travel with the project. Unknown ids are ignored by the backend. Outside
+ * Tauri there is no project, so this resolves to an empty catalog.
+ */
+export async function toggleFavorite(assetIds: string[], favorite: boolean): Promise<MediaList> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MediaList>("toggle_favorite", { assetIds, favorite });
+  return { items: [], folders: [] };
+}
+
+/**
  * `extract_audio`: extract the audio track from a media asset into a
  * self-contained audio file. `outPath`'s extension picks the codec
  * (`.m4a` -> AAC, `.mp3` -> libmp3lame, `.wav` -> PCM s16le). Returns the
@@ -372,6 +385,18 @@ export async function extractAudio(mediaId: string, outPath: string): Promise<st
   await ensureTauri();
   if (invokeImpl) return invokeImpl<string>("extract_audio", { mediaId, outPath });
   throw new Error("audio extraction requires the desktop app (ffmpeg)");
+}
+
+/**
+ * `save_clip_as_media` (#91 §3.5): render one timeline clip — effects, color,
+ * text, speed baked in — to a new .mp4 in the project bundle's media/ dir and
+ * import it as a fresh asset. Returns the refreshed catalog. Video clips only
+ * for now; needs a saved project. Requires the desktop app (GPU render + ffmpeg).
+ */
+export async function saveClipAsMedia(clipId: string): Promise<MediaList> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MediaList>("save_clip_as_media", { clipId });
+  throw new Error("saving a clip as media requires the desktop app");
 }
 
 // MARK: - Transcription (whisper model + on-device transcribe, #183 + captions)

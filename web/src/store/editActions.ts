@@ -9,6 +9,7 @@ import { isTauri } from "../lib/api";
 import { forceRefresh } from "./sync";
 import { useEditorUiStore } from "./uiStore";
 import { useProjectStore } from "./projectStore";
+import { refreshMedia } from "./mediaStore";
 import { fitTransformForMedia, trimToPlayheadEdits } from "../lib/clip";
 import type { TrackDropTarget } from "../lib/geometry";
 import { validRange } from "../lib/timelineRange";
@@ -431,6 +432,23 @@ export async function deleteSelectedClips() {
     }
   }
   ui.clearSelection();
+}
+
+/** Save a clip as a new media asset (#91 §3.5 / 另存为媒体): render it — trims,
+ *  speed, effects, color and text baked in — to the project's media/ dir and
+ *  import it, so it shows up in the panel as a reusable asset. Backend is
+ *  video-only for now and needs a saved project; the render can take a few
+ *  seconds, so start + result are toasted. */
+export async function saveClipAsMedia(clipId: string) {
+  const ui = useEditorUiStore.getState();
+  ui.pushToast("正在导出片段… / Saving clip as media…");
+  try {
+    await api.saveClipAsMedia(clipId);
+    await refreshMedia();
+    ui.pushToast("已另存为媒体 / Saved as media");
+  } catch (err) {
+    ui.pushToast(`另存失败 / Save as media failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /** Ripple-delete selected clips (⇧⌫): remove and close the gaps, shifting

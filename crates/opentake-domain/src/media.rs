@@ -165,6 +165,12 @@ pub struct MediaManifest {
     pub version: i64,
     pub entries: Vec<MediaManifestEntry>,
     pub folders: Vec<MediaFolder>,
+    /// Ids of favorited assets (#91) — a per-project set backing the media
+    /// panel's "mine" tab. Persisted here rather than in browser localStorage so
+    /// favorites travel with the project. Older projects have no `favorites` key,
+    /// so decode defaults it to empty and serialization skips it when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub favorites: Vec<String>,
 }
 
 impl Default for MediaManifest {
@@ -173,6 +179,7 @@ impl Default for MediaManifest {
             version: 2,
             entries: Vec::new(),
             folders: Vec::new(),
+            favorites: Vec::new(),
         }
     }
 }
@@ -180,6 +187,44 @@ impl Default for MediaManifest {
 impl MediaManifest {
     pub fn new() -> Self {
         MediaManifest::default()
+    }
+
+    /// Whether `asset_id` is in the favorites set.
+    pub fn is_favorite(&self, asset_id: &str) -> bool {
+        self.favorites.iter().any(|id| id == asset_id)
+    }
+
+    /// Add (`favorite = true`) or remove (`favorite = false`) `asset_ids` from the
+    /// favorites set. Ids that are not real entries are ignored (a favorite must
+    /// point at a live asset). The set stays duplicate-free. Returns how many ids
+    /// actually changed state.
+    pub fn set_favorites(&mut self, asset_ids: &[String], favorite: bool) -> usize {
+        let mut changed = 0;
+        for id in asset_ids {
+            if !self.entries.iter().any(|e| &e.id == id) {
+                continue;
+            }
+            let pos = self.favorites.iter().position(|f| f == id);
+            match (favorite, pos) {
+                (true, None) => {
+                    self.favorites.push(id.clone());
+                    changed += 1;
+                }
+                (false, Some(i)) => {
+                    self.favorites.remove(i);
+                    changed += 1;
+                }
+                _ => {}
+            }
+        }
+        changed
+    }
+
+    /// Drop favorites whose entry no longer exists — call after removing assets so
+    /// the set never carries dangling ids.
+    pub fn prune_favorites(&mut self) {
+        self.favorites
+            .retain(|id| self.entries.iter().any(|e| &e.id == id));
     }
 }
 
@@ -194,12 +239,15 @@ impl<'de> Deserialize<'de> for MediaManifest {
             version: Option<i64>,
             entries: Option<Vec<MediaManifestEntry>>,
             folders: Option<Vec<MediaFolder>>,
+            // Absent in older projects (added in #91) => empty set.
+            favorites: Option<Vec<String>>,
         }
         let raw = Raw::deserialize(deserializer)?;
         Ok(MediaManifest {
             version: raw.version.unwrap_or(1),
             entries: raw.entries.unwrap_or_default(),
             folders: raw.folders.unwrap_or_default(),
+            favorites: raw.favorites.unwrap_or_default(),
         })
     }
 }
@@ -556,6 +604,52 @@ mod tests {
         assert!(json.contains("\"parentFolderId\":\"root\""));
         let back: MediaFolder = serde_json::from_str(&json).unwrap();
         assert_eq!(f, back);
+    }
+
+    // --- Favorites (#91) ---
+
+    #[test]
+    fn favorites_toggle_ignores_unknown_ids_and_stays_unique() {
+        let mut m = sample_manifest(); // entries: "ext", "proj"
+        assert!(!m.is_favorite("ext"));
+
+        // Favoriting a real entry adds it once; re-favoriting is a no-op.
+        assert_eq!(m.set_favorites(&["ext".into()], true), 1);
+        assert_eq!(m.set_favorites(&["ext".into()], true), 0);
+        assert!(m.is_favorite("ext"));
+        assert_eq!(m.favorites, vec!["ext".to_string()]);
+
+        // Unknown ids are ignored — a favorite must point at a live asset.
+        assert_eq!(m.set_favorites(&["ghost".into()], true), 0);
+        assert!(!m.is_favorite("ghost"));
+
+        // Unfavoriting removes it.
+        assert_eq!(m.set_favorites(&["ext".into()], false), 1);
+        assert!(!m.is_favorite("ext"));
+
+        // prune_favorites drops ids whose entry was deleted.
+        m.favorites.push("proj".into());
+        m.entries.retain(|e| e.id != "proj");
+        m.prune_favorites();
+        assert!(m.favorites.is_empty());
+    }
+
+    #[test]
+    fn favorites_absent_in_old_json_and_omitted_when_empty() {
+        // An older project (no `favorites` key) decodes to an empty set.
+        let m: MediaManifest =
+            serde_json::from_str(r#"{"version":2,"entries":[],"folders":[]}"#).unwrap();
+        assert!(m.favorites.is_empty());
+        // Empty favorites are omitted from serialization (no churn to old files).
+        assert!(!serde_json::to_string(&m).unwrap().contains("favorites"));
+
+        // A non-empty set round-trips.
+        let mut m2 = sample_manifest();
+        m2.set_favorites(&["ext".into()], true);
+        let json = serde_json::to_string(&m2).unwrap();
+        assert!(json.contains("\"favorites\":[\"ext\"]"));
+        let back: MediaManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.favorites, vec!["ext".to_string()]);
     }
 
     // --- MediaResolver ---

@@ -480,17 +480,18 @@ function TimelineRustOverlay() {
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
   const isScrubbing = useEditorUiStore((s) => s.isScrubbing);
   // Runtime fallback flag (previewEngine.ts trips it when the engine can't start):
-  // unmount the MJPEG <img> so the legacy <video> underneath shows through instead
-  // of a frozen/black stream frame.
+  // unmount the canvas so the legacy <video> underneath shows through instead of
+  // a frozen/black frame.
   const engineFailed = useEditorUiStore((s) => s.rustEngineFailed);
   const [endpoint, setEndpoint] = useState<string | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
     if (!rustEngineEnabled() || !isTauri) return;
     let cancelled = false;
     void getPreviewEndpoint().then((url) => {
       // Guard against a null/undefined endpoint leaking into state (which would
-      // otherwise activate the overlay with a broken <img>).
+      // otherwise activate the overlay with a broken connection).
       if (!cancelled && typeof url === "string") setEndpoint(url);
     });
     return () => {
@@ -501,18 +502,78 @@ function TimelineRustOverlay() {
   const active =
     shouldUseRustEngine({ rustEnabled: rustEngineEnabled(), isTauri, isPlaying, isScrubbing, engineFailed }) &&
     endpoint !== null;
+
+  // Stream binary JPEG frames over a WebSocket and paint each to the canvas.
+  // WebKit/WKWebView renders WS + createImageBitmap + canvas reliably; the old
+  // `<img>` pointed at a multipart/x-mixed-replace MJPEG stream only ever painted
+  // the FIRST frame there (the "playback shows one frame" bug), even though the
+  // Rust engine was broadcasting every composited frame.
+  useEffect(() => {
+    if (!active || !endpoint) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
+
+    let closed = false;
+
+    // Match the backing store to the frame (no double scaling); the canvas CSS
+    // box then stretches it to fill (equivalent to the old objectFit:fill).
+    const paint = (src: CanvasImageSource, w: number, h: number) => {
+      if (closed || w === 0 || h === 0) return;
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+      ctx.drawImage(src, 0, 0);
+    };
+
+    // Decode each JPEG frame. Prefer createImageBitmap (async, off-thread), but
+    // fall back to an <img> + object URL on older WebKit that lacks it — either
+    // way WebKit renders this reliably, unlike the multipart MJPEG <img>.
+    const drawViaImage = (blob: Blob) => {
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => {
+        paint(img, img.naturalWidth, img.naturalHeight);
+        URL.revokeObjectURL(url);
+      };
+      img.onerror = () => URL.revokeObjectURL(url);
+      img.src = url;
+    };
+    const drawBlob = (blob: Blob) => {
+      if (typeof createImageBitmap === "function") {
+        void createImageBitmap(blob)
+          .then((bmp) => {
+            paint(bmp, bmp.width, bmp.height);
+            bmp.close();
+          })
+          .catch(() => drawViaImage(blob));
+      } else {
+        drawViaImage(blob);
+      }
+    };
+
+    const ws = new WebSocket(endpoint);
+    ws.binaryType = "blob";
+    ws.onmessage = (e) => {
+      if (!closed && e.data instanceof Blob) drawBlob(e.data);
+    };
+
+    return () => {
+      closed = true;
+      ws.close();
+    };
+  }, [active, endpoint]);
+
   if (!active) return null;
   return (
-    <img
-      src={endpoint ?? undefined}
-      alt=""
-      draggable={false}
+    <canvas
+      ref={canvasRef}
       style={{
         position: "absolute",
         inset: 0,
         width: "100%",
         height: "100%",
-        objectFit: "fill",
         pointerEvents: "none",
         zIndex: 2,
       }}
