@@ -121,6 +121,18 @@ pub struct TextEntry {
     pub transform: Transform,
 }
 
+/// A text overlay entry for [`EditCommand::AddTextsAutoTrack`]. Identical to
+/// [`TextEntry`] minus `track_index` — every entry in the batch lands on the
+/// single fresh track the command creates, so there is nothing to target.
+#[derive(Clone, Debug)]
+pub struct TextAutoTrackEntry {
+    pub start_frame: i32,
+    pub duration_frames: i32,
+    pub content: String,
+    pub text_style: opentake_domain::TextStyle,
+    pub transform: Transform,
+}
+
 /// One built caption clip for [`EditCommand::AddCaptions`]. Like [`TextEntry`]
 /// but (a) has no `track_index` — every caption lands on the single fresh track
 /// the command creates — and (b) carries the `caption_group_id` all clips from
@@ -321,6 +333,21 @@ pub enum EditCommand {
     RippleDeleteClips { clip_ids: Vec<String> },
     /// Add text overlays.
     AddTexts { entries: Vec<TextEntry> },
+    /// Add text overlays onto ONE fresh video track (inserted at index 0), as a
+    /// single undoable action. 1:1 port of upstream `addTexts`'s all-omitted
+    /// path (`ToolExecutor+Texts.swift:114-121`) and the UI's `addTextClip`
+    /// (`EditorViewModel+MediaLibrary.swift:519-558`), both of which always
+    /// create a fresh top track rather than writing into whatever the caller
+    /// finds at track 0 — the bug this command exists to close (#194): an
+    /// existing top track can hold unrelated video/image content, and the
+    /// straight `AddTexts` path would `clear_region` over it. Entries within
+    /// the batch still overwrite each other on overlap, same as `AddTexts`
+    /// (upstream `placeTextClips` groups-by-track + clears each destination
+    /// range in `startFrame` order; here the track is single so that reduces
+    /// to one ordered pass). Empty `entries` is an error, matching `AddTexts`
+    /// (unlike `AddCaptions`, whose empty-is-no-op reflects "no speech
+    /// detected" rather than a caller mistake).
+    AddTextsAutoTrack { entries: Vec<TextAutoTrackEntry> },
     /// Place a whole batch of generated caption clips on ONE fresh video track
     /// (inserted at index 0), as a single undoable action named "Generate
     /// Captions". 1:1 port of upstream `placeCaptionTrack`
@@ -516,6 +543,7 @@ pub fn apply(
         } => ripple_delete_ranges(state, track_index, ranges, ids),
         EditCommand::RippleDeleteClips { clip_ids } => ripple_delete_clips(state, clip_ids),
         EditCommand::AddTexts { entries } => add_texts(state, entries, ids),
+        EditCommand::AddTextsAutoTrack { entries } => add_texts_auto_track(state, entries, ids),
         EditCommand::AddCaptions { entries } => add_captions(state, entries, ids),
         EditCommand::Link { clip_ids } => link(state, clip_ids, ids),
         EditCommand::Unlink { clip_ids } => unlink(state, clip_ids),
@@ -1873,6 +1901,82 @@ fn add_texts(
                     st.timeline.tracks[ti].clips.push(clip);
                     ops::sort_clips(&mut st.timeline.tracks[ti]);
                 }
+            }
+            Ok(added)
+        },
+    )
+}
+
+/// Add text overlays onto one fresh video track inserted at index 0, as a
+/// single "Add Text(s)" transaction. 1:1 port of upstream `addTexts`'s
+/// all-omitted-trackIndex path (`ToolExecutor+Texts.swift:102-121`): a new top
+/// track is created and every entry lands there, so an existing track's
+/// content is never touched. Unlike [`add_captions`] (whose fresh track is
+/// exclusively new caption content and never overlaps itself), entries here
+/// still `clear_region` each other in order — matching `add_texts` and
+/// upstream `placeTextClips`'s per-track `clearRegion` pass — so a caller
+/// batching overlapping entries gets the same "later entry wins" overwrite
+/// semantics as targeting an existing track explicitly.
+fn add_texts_auto_track(
+    state: &mut EditorState,
+    entries: Vec<TextAutoTrackEntry>,
+    ids: &dyn IdGen,
+) -> Result<EditResult, EditError> {
+    if entries.is_empty() {
+        return Err(EditError::Invalid(
+            "Missing or empty 'entries' array".into(),
+        ));
+    }
+    for (i, e) in entries.iter().enumerate() {
+        if e.duration_frames < 1 {
+            return Err(EditError::Invalid(format!(
+                "entries[{i}]: durationFrames must be >= 1 (got {})",
+                e.duration_frames
+            )));
+        }
+        if e.start_frame < 0 {
+            return Err(EditError::Invalid(format!(
+                "entries[{i}]: startFrame must be >= 0 (got {})",
+                e.start_frame
+            )));
+        }
+    }
+    let action_name = if entries.len() == 1 {
+        "Add Text"
+    } else {
+        "Add Texts"
+    };
+    transact(
+        state,
+        action_name,
+        |c| format!("Added {} text clip(s): {}", c.len(), c.join(", ")),
+        |st| {
+            // Fresh video track at the very top, same slot upstream's
+            // `addTexts`/`addTextClip` always insert into.
+            st.timeline.tracks.insert(
+                0,
+                opentake_domain::Track::new(ids.next_id(), ClipType::Video),
+            );
+            let mut added = Vec::with_capacity(entries.len());
+            for e in &entries {
+                ops::clear_region(
+                    &mut st.timeline,
+                    0,
+                    e.start_frame,
+                    e.start_frame + e.duration_frames,
+                    false,
+                    ids,
+                );
+                let mut clip =
+                    opentake_domain::Clip::new(ids.next_id(), "", e.start_frame, e.duration_frames);
+                clip.media_type = ClipType::Text;
+                clip.source_clip_type = ClipType::Text;
+                clip.transform = e.transform;
+                clip.text_content = Some(e.content.clone());
+                clip.text_style = Some(e.text_style.clone());
+                added.push(clip.id.clone());
+                st.timeline.tracks[0].clips.push(clip);
+                ops::sort_clips(&mut st.timeline.tracks[0]);
             }
             Ok(added)
         },
@@ -3936,5 +4040,183 @@ mod add_captions_tests {
         assert!(matches!(err, EditError::Invalid(_)));
         // State untouched by the refusal.
         assert_eq!(state.timeline.tracks.len(), 2);
+    }
+}
+
+/// Tests for [`EditCommand::AddTextsAutoTrack`] (#194): the all-omitted-
+/// trackIndex path must always create a fresh top track rather than writing
+/// into whatever the caller finds at track 0, so pre-existing content on an
+/// existing top track is never clobbered.
+#[cfg(test)]
+mod add_texts_auto_track_tests {
+    use super::*;
+    use crate::id::SeqIdGen;
+    use opentake_domain::{Clip, ClipType, TextStyle, Track, Transform};
+
+    /// A pre-existing top video track already holding unrelated content,
+    /// mirroring the exact scenario #194 reported: calling `add_texts` with
+    /// every `trackIndex` omitted used to `clear_region` over this clip.
+    fn state_with_existing_top_track() -> EditorState {
+        let mut tl = Timeline::new();
+        let mut v = Track::new("existing-video", ClipType::Video);
+        v.clips.push(Clip::new("existing-clip", "asset", 0, 300));
+        tl.tracks.push(v);
+        EditorState::from_timeline(tl)
+    }
+
+    fn text(content: &str, start: i32, dur: i32) -> TextAutoTrackEntry {
+        TextAutoTrackEntry {
+            start_frame: start,
+            duration_frames: dur,
+            content: content.into(),
+            text_style: TextStyle::default(),
+            transform: Transform::default(),
+        }
+    }
+
+    #[test]
+    fn creates_new_top_track_and_leaves_existing_track_untouched() {
+        let mut state = state_with_existing_top_track();
+        let ids = SeqIdGen::new("txt-");
+        let res = apply(
+            &mut state,
+            EditCommand::AddTextsAutoTrack {
+                entries: vec![text("hello", 0, 30)],
+            },
+            &ids,
+        )
+        .unwrap();
+        assert!(res.changed);
+        assert_eq!(res.affected_clip_ids.len(), 1);
+
+        // A new track was inserted at index 0 — the existing track is pushed
+        // down, not written into.
+        assert_eq!(state.timeline.tracks.len(), 2);
+        let new_track = &state.timeline.tracks[0];
+        assert_eq!(new_track.kind, ClipType::Video);
+        assert_eq!(new_track.clips.len(), 1);
+        assert_eq!(new_track.clips[0].media_type, ClipType::Text);
+        assert_eq!(new_track.clips[0].text_content.as_deref(), Some("hello"));
+
+        // The pre-existing track and its clip are completely unchanged — this
+        // is the exact regression #194 reported (an omitted trackIndex used
+        // to `clear_region` straight over track 0's content).
+        let existing = &state.timeline.tracks[1];
+        assert_eq!(existing.id, "existing-video");
+        assert_eq!(existing.clips.len(), 1);
+        assert_eq!(existing.clips[0].id, "existing-clip");
+        assert_eq!(existing.clips[0].start_frame, 0);
+        assert_eq!(existing.clips[0].duration_frames, 300);
+    }
+
+    #[test]
+    fn is_one_undo_step_including_the_new_track() {
+        let mut state = state_with_existing_top_track();
+        let ids = SeqIdGen::new("txt-");
+        let tracks_before = state.timeline.tracks.len();
+        apply(
+            &mut state,
+            EditCommand::AddTextsAutoTrack {
+                entries: vec![text("a", 0, 30), text("b", 30, 30)],
+            },
+            &ids,
+        )
+        .unwrap();
+        assert_eq!(state.timeline.tracks.len(), tracks_before + 1);
+
+        // A single Undo reverts the entire transaction: both text clips AND
+        // the track they were created on.
+        let undo = apply(&mut state, EditCommand::Undo, &ids).unwrap();
+        assert!(undo.changed);
+        assert_eq!(state.timeline.tracks.len(), tracks_before);
+        assert_eq!(state.timeline.tracks[0].id, "existing-video");
+        assert_eq!(state.timeline.tracks[0].clips.len(), 1);
+    }
+
+    #[test]
+    fn empty_entries_is_an_error_not_a_noop() {
+        // Unlike AddCaptions (whose empty-is-no-op reflects "no speech
+        // detected"), an empty entries array here is a caller mistake — same
+        // as the straight AddTexts path.
+        let mut state = state_with_existing_top_track();
+        let ids = SeqIdGen::new("txt-");
+        let version_before = state.version();
+        let err = apply(
+            &mut state,
+            EditCommand::AddTextsAutoTrack { entries: vec![] },
+            &ids,
+        )
+        .unwrap_err();
+        assert!(matches!(err, EditError::Invalid(_)));
+        assert_eq!(state.version(), version_before);
+        assert_eq!(state.timeline.tracks.len(), 1);
+    }
+
+    #[test]
+    fn rejects_bad_duration_and_leaves_state_untouched() {
+        let mut state = state_with_existing_top_track();
+        let ids = SeqIdGen::new("txt-");
+        let err = apply(
+            &mut state,
+            EditCommand::AddTextsAutoTrack {
+                entries: vec![text("x", 0, 0)],
+            },
+            &ids,
+        )
+        .unwrap_err();
+        assert!(matches!(err, EditError::Invalid(_)));
+        assert_eq!(state.timeline.tracks.len(), 1);
+    }
+
+    #[test]
+    fn rejects_negative_start_frame() {
+        let mut state = state_with_existing_top_track();
+        let ids = SeqIdGen::new("txt-");
+        let err = apply(
+            &mut state,
+            EditCommand::AddTextsAutoTrack {
+                entries: vec![text("x", -1, 30)],
+            },
+            &ids,
+        )
+        .unwrap_err();
+        assert!(matches!(err, EditError::Invalid(_)));
+        assert_eq!(state.timeline.tracks.len(), 1);
+    }
+
+    #[test]
+    fn overlapping_entries_in_the_same_batch_overwrite_in_order() {
+        // Same "later entry wins" overwrite semantics as the explicit-track
+        // AddTexts path and upstream `placeTextClips`'s per-track clearRegion
+        // pass — even though the destination track is brand new here.
+        let mut state = state_with_existing_top_track();
+        let ids = SeqIdGen::new("txt-");
+        let res = apply(
+            &mut state,
+            EditCommand::AddTextsAutoTrack {
+                entries: vec![text("first", 0, 60), text("second", 20, 60)],
+            },
+            &ids,
+        )
+        .unwrap();
+        assert!(res.changed);
+
+        let new_track = &state.timeline.tracks[0];
+        // "first" (0..60) is trimmed/removed to make room for "second"
+        // (20..80): only one clip's worth of "first" content can survive the
+        // overlap, and "second" is placed in full.
+        let second = new_track
+            .clips
+            .iter()
+            .find(|c| c.text_content.as_deref() == Some("second"))
+            .expect("second clip survives at its full requested range");
+        assert_eq!(second.start_frame, 20);
+        assert_eq!(second.duration_frames, 60);
+        // "first" no longer occupies the region "second" claimed.
+        for clip in &new_track.clips {
+            if clip.text_content.as_deref() == Some("first") {
+                assert!(clip.start_frame + clip.duration_frames <= 20);
+            }
+        }
     }
 }
