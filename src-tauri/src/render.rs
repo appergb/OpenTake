@@ -322,11 +322,15 @@ fn composite_rgba(
     if guard.is_none() {
         let dev = RenderDevice::try_new().map_err(|e| format!("no GPU device: {e}"))?;
         let compositor = Compositor::new(&dev.device);
+        let text_rasterizer = CosmicTextRasterizer::new();
+        if !text_rasterizer.has_fonts() {
+            eprintln!("[render] no system fonts discovered; text clips will render blank");
+        }
         *guard = Some(GpuContext {
             device: dev.device,
             queue: dev.queue,
             compositor,
-            text_rasterizer: CosmicTextRasterizer::new(),
+            text_rasterizer,
         });
     }
     let ctx = guard.as_ref().expect("ctx set above");
