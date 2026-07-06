@@ -7,10 +7,15 @@
 //     [0,natW]x[0,natH]. Upstream AVFoundation layer-instruction transforms act
 //     on this source-pixel space (verified against affineTransform L599).
 //   - `affine` (row-major [a,b,c,d,tx,ty], CG semantics p' = p . M) maps source
-//     pixels -> CANVAS pixels, origin bottom-left, y up.
-//   - Canvas pixels -> NDC. wgpu's NDC y is up, so no extra y-flip on geometry.
-//   - The single y-flip reconciling "texture row 0 = top" with "y up" happens on
-//     the UV (v = 1 - v), exactly once (SPEC §3.4).
+//     pixels -> CANVAS pixels in the DOMAIN's authoring space: origin TOP-left,
+//     y down (0 = top row; `Transform.center_y` and `Mask::coverage` share it).
+//   - Canvas pixels -> NDC with ONE geometry y-flip (ndc.y = 1 - 2*py/H),
+//     because wgpu NDC is y-up (+1 = top) while the canvas space above is
+//     y-down (#193).
+//   - UV passes straight through (v unflipped): quad corner (0,0) is the box's
+//     top-left after the flip above, and texture row 0 is also the top — the
+//     old `v = 1 - v` flip only ever compensated the pre-#193 mirrored NDC
+//     (#193 follow-up).
 //
 // COLOR / CHROMA / MASK MATH MIRROR:
 //   The pixel math here is a 1:1 mirror of the unit-tested reference in
