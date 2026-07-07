@@ -587,3 +587,26 @@ export interface SecretStatus {
   hasKey: boolean;
   masked: string;
 }
+
+// MARK: - Account scaffold (mirror of src-tauri account.rs DTOs)
+
+/** One verified account session (mirror of Rust `AccountInfo`). The backend
+ *  `/api/auth/verify` response; only `userId` is required, email/plan are
+ *  optional so a minimal backend still works. Multi-word fields are camelCase
+ *  on the wire (the repo's #1 IPC bug class). */
+export interface AccountInfo {
+  userId: string;
+  email?: string;
+  plan?: string;
+}
+
+/** Live account status, tagged by `type` (mirror of Rust `AccountStatus`).
+ *  `offline` is the cold-start default; `connecting` while a verify request is
+ *  in flight; `online` after a successful login; `error` after a failure. The
+ *  app does not auto-verify on launch, so a stored token does not imply
+ *  `online` until the user logs in again. */
+export type AccountStatus =
+  | { type: "offline" }
+  | { type: "connecting" }
+  | { type: "online"; info?: AccountInfo }
+  | { type: "error"; message: string };

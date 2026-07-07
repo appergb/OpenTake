@@ -49,6 +49,10 @@ opentake-agent = { workspace = true }
 # the agent's `inspect_timeline` bridge encodes composited frames as JPEG.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
+# Account scaffold (HANDOFF §3.8): verify a token against a user-configured
+# backend. `rustls-tls` avoids a system OpenSSL dependency; matches the
+# `opentake-gen` reqwest configuration.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Streaming playback transport (#53 / #64), behind the `playback-engine` feature.
 # Versions already resolved in the workspace lockfile (via opentake-agent), so

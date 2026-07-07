@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useState, type CSSProperties } from "react";
-import { Bot, Check, Download, FolderOpen, Info, Palette, Settings as SettingsIcon, Trash2, X } from "lucide-react";
+import { Bot, Check, Download, FolderOpen, Info, Palette, Settings as SettingsIcon, Trash2, User, X } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { Dropdown } from "../ui/Dropdown";
 import { useT, useI18nStore, LOCALES } from "../../i18n";
@@ -23,6 +23,7 @@ import { useEditorUiStore } from "../../store/uiStore";
 import { openDialog } from "../../lib/dialog";
 import { secretSave, secretLoad, secretDelete } from "../../lib/api";
 import type { SecretStatus } from "../../lib/types";
+import { AccountPane } from "./AccountPane";
 
 const settingsPanelStyle: CSSProperties = {
   width: 960,
@@ -49,13 +50,14 @@ const settingsControlStyle: CSSProperties = {
   border: "none",
 };
 
-type SettingsPaneId = "general" | "appearance" | "import" | "ai" | "about";
+type SettingsPaneId = "general" | "appearance" | "import" | "ai" | "account" | "about";
 
 const SETTINGS_PANES: Array<{ id: SettingsPaneId; icon: typeof SettingsIcon; labelKey: string }> = [
   { id: "general", icon: SettingsIcon, labelKey: "settings.section.general" },
   { id: "appearance", icon: Palette, labelKey: "settings.section.appearance" },
   { id: "import", icon: Download, labelKey: "settings.section.import" },
   { id: "ai", icon: Bot, labelKey: "settings.section.ai" },
+  { id: "account", icon: User, labelKey: "settings.section.account" },
   { id: "about", icon: Info, labelKey: "settings.section.about" },
 ];
 
@@ -225,6 +227,8 @@ function renderActivePane(activePane: SettingsPaneId) {
       return <ImportPane />;
     case "ai":
       return <AiPane />;
+    case "account":
+      return <AccountPane />;
     case "about":
       return <AboutPane />;
   }

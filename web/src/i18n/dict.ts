@@ -460,6 +460,7 @@ const zh: Dict = {
 
   // Settings panes (sidebar labels)
   "settings.section.mcp": "MCP 说明",
+  "settings.section.account": "账号",
   "settings.section.storage": "存储",
   "settings.section.notifications": "通知",
 
@@ -481,6 +482,26 @@ const zh: Dict = {
   "mcp.claudeDesktop": "Claude Desktop",
   "mcp.claudeDesktopManual": "手动配置（claude_desktop_config.json 的 mcpServers 字段）",
   "mcp.note": "服务器仅在应用运行时可用，绑定 127.0.0.1，不接受外部连接。",
+
+  // Account pane (HANDOFF §3.8) — no official backend, self-hosted only
+  "account.title": "账号",
+  "account.disclaimer":
+    "OpenTake 没有官方后端。此功能用于连接您自部署的后端。不登录不影响任何本地编辑功能。",
+  "account.backendUrl": "后端地址",
+  "account.backendUrlDesc": "您自部署的 OpenTake 后端根地址（例如 https://my.backend）。不设置则所有账号命令不可用。",
+  "account.backendUrlPlaceholder": "https://your-backend.example.com",
+  "account.saveBackendUrl": "保存地址",
+  "account.clearBackendUrl": "清除",
+  "account.backendUrlSaved": "后端地址已保存。",
+  "account.token": "登录令牌",
+  "account.tokenPlaceholder": "粘贴后端签发的令牌",
+  "account.login": "登录",
+  "account.logout": "登出",
+  "account.loginFailed": "登录失败：{error}",
+  "account.status.offline": "未登录",
+  "account.status.connecting": "连接中…",
+  "account.status.online": "已登录 · {userId}",
+  "account.status.error": "错误：{message}",
 
   // Storage pane
   "storage.cache": "缓存",
@@ -972,6 +993,7 @@ const en: Dict = {
 
   // Settings panes (sidebar labels)
   "settings.section.mcp": "MCP Instructions",
+  "settings.section.account": "Account",
   "settings.section.storage": "Storage",
   "settings.section.notifications": "Notifications",
 
@@ -993,6 +1015,26 @@ const en: Dict = {
   "mcp.claudeDesktop": "Claude Desktop",
   "mcp.claudeDesktopManual": "Manual config (mcpServers field of claude_desktop_config.json)",
   "mcp.note": "The server is only available while the app is running, bound to 127.0.0.1, and does not accept external connections.",
+
+  // Account pane (HANDOFF §3.8) — no official backend, self-hosted only
+  "account.title": "Account",
+  "account.disclaimer":
+    "OpenTake has no official backend. This feature connects to your self-hosted backend. Not signing in does not affect any local editing features.",
+  "account.backendUrl": "Backend URL",
+  "account.backendUrlDesc": "Root URL of your self-hosted OpenTake backend (e.g. https://my.backend). All account commands are unavailable until this is set.",
+  "account.backendUrlPlaceholder": "https://your-backend.example.com",
+  "account.saveBackendUrl": "Save URL",
+  "account.clearBackendUrl": "Clear",
+  "account.backendUrlSaved": "Backend URL saved.",
+  "account.token": "Login token",
+  "account.tokenPlaceholder": "Paste the token issued by your backend",
+  "account.login": "Log in",
+  "account.logout": "Log out",
+  "account.loginFailed": "Login failed: {error}",
+  "account.status.offline": "Signed out",
+  "account.status.connecting": "Connecting…",
+  "account.status.online": "Signed in · {userId}",
+  "account.status.error": "Error: {message}",
 
   // Storage pane
   "storage.cache": "Cache",

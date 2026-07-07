@@ -9,6 +9,8 @@
  */
 
 import type {
+  AccountInfo,
+  AccountStatus,
   CaptionRequest,
   ClipType,
   EditRequest,
@@ -710,6 +712,57 @@ export async function secretDelete(provider: string): Promise<SecretStatus> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<SecretStatus>("secret_delete", { provider });
   return NO_SECRET;
+}
+
+// MARK: - Account scaffold (HANDOFF §3.8)
+//
+// OpenTake ships no official backend. These commands let a user point the app
+// at a self-hosted backend, verify a token against it, and store that token in
+// the OS keychain — same keychain model as the BYOK `secret_*` commands. The
+// backend URL + token never live in JS memory or localStorage; only the live
+// `AccountStatus` is fetched for display. Nothing here gates local editing:
+// outside Tauri (no keychain) the commands degrade to "no backend" / "offline"
+// so the shell still renders. The honest "no official backend" disclaimer is
+// surfaced by the backend verbatim in the login error string.
+
+/** Persist (or clear, when `null`/empty) the self-hosted backend URL. Local
+ *  only — does not contact the backend. No-op outside Tauri (no keychain). */
+export async function accountSetBackendUrl(url: string | null): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) await invokeImpl<void>("account_set_backend_url", { url });
+}
+
+/** Read the configured backend URL, or `null` when unset / outside Tauri. */
+export async function accountGetBackendUrl(): Promise<string | null> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<string | null>("account_get_backend_url");
+  return null;
+}
+
+/** Verify `token` against `{backendUrl}/api/auth/verify` (10s timeout). On
+ *  success the token is persisted to the keychain and the status moves to
+ *  `online`; on failure it rejects with a displayable message (including the
+ *  honest "No backend configured…" string when no URL is set). Rejects outside
+ *  Tauri (no keychain / no HTTP). */
+export async function accountLogin(token: string): Promise<AccountInfo> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<AccountInfo>("account_login", { token });
+  throw new Error("account login requires the desktop app");
+}
+
+/** Drop the stored token and return to `offline`. Local only. No-op outside
+ *  Tauri (no keychain). */
+export async function accountLogout(): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) await invokeImpl<void>("account_logout");
+}
+
+/** Current live account status (`offline` cold start). Outside Tauri reports
+ *  `offline` so the panel renders the signed-out state. */
+export async function accountGetStatus(): Promise<AccountStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<AccountStatus>("account_get_status");
+  return { type: "offline" };
 }
 
 // MARK: - Events

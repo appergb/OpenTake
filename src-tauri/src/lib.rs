@@ -11,6 +11,7 @@ mod commands;
 // `pub` so the ffmpeg-gated integration test (`tests/export_integration.rs`) can
 // drive the export orchestrator (`export::run_export`) against the library
 // target. The Tauri command itself is registered below like the other modules.
+mod account;
 pub mod export;
 mod haptic;
 mod library;
@@ -139,6 +140,9 @@ pub fn run() {
             // Shared cancel flag for the in-flight `export_video` (#112 progress
             // + cancel). One export runs at a time, so a single flag suffices.
             app.manage(export::ExportControl::default());
+            // Account scaffold (HANDOFF §3.8): live login status. Backend URL
+            // + token live in the keychain; this only caches the status.
+            app.manage(account::AccountState::default());
 
             // Streaming playback (#53): start the loopback MJPEG transport on the
             // Tauri async runtime (mirrors the MCP server spawn) and register the
@@ -189,6 +193,11 @@ pub fn run() {
             secret::secret_save,
             secret::secret_load,
             secret::secret_delete,
+            account::account_set_backend_url,
+            account::account_get_backend_url,
+            account::account_login,
+            account::account_logout,
+            account::account_get_status,
             transcribe::transcribe_model_status,
             transcribe::download_transcribe_model,
             transcribe::transcribe_media,
