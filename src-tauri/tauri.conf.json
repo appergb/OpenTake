@@ -26,16 +26,21 @@
         "minHeight": 480,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "trafficLightPosition": { "x": 18, "y": 24 },
-        "backgroundColor": "#0A0A0A",
-        "dragDropEnabled": false
+        "trafficLightPosition": {
+          "x": 18,
+          "y": 24
+        },
+        "dragDropEnabled": false,
+        "transparent": true
       }
     ],
     "security": {
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["**"]
+        "scope": [
+          "**"
+        ]
       }
     }
   },
@@ -51,6 +56,9 @@
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"
-    }
+    },
+    "resources": [
+      "lib/libmpv-wrapper.dylib"
+    ]
   }
 }

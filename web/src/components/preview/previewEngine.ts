@@ -39,14 +39,76 @@ import {
   interactiveToleranceSec,
 } from "./interactiveSeek";
 import type { Timeline } from "../../lib/types";
-import {
-  isTauri,
-  onPlaybackFrame,
-  playbackSeek,
-  playbackStart,
-  playbackStop,
-} from "../../lib/api";
+import { isTauri } from "../../lib/api";
 import { rustEngineEnabled } from "./rustEngine";
+import {
+  command as mpvCommand,
+  init as mpvInit,
+  observeProperties as mpvObserveProperties,
+  setProperty as mpvSetProperty,
+} from "tauri-plugin-libmpv-api";
+import { timelineToEdl } from "../../lib/mpvEdl";
+import { useMediaStore } from "../../store/mediaStore";
+
+// --- Community playback engine (libmpv) -----------------------------------
+// PLAY is delegated to an embedded mpv instance (EDL over the primary video
+// track): decode, A/V sync, and presentation are mpv's. The in-house streaming
+// engine's display leg (WS -> canvas) is unreachable from WKWebView's secure
+// context (plain-ws mixed content is silently blocked), so playback now rides
+// the community engine while pause/scrub/export keep the pixel-exact composite.
+// The mpv video paints on the native window UNDER the (transparent) webview;
+// Preview.tsx opens a transparent hole over the canvas box while mpv drives.
+
+let mpvReadyPromise: Promise<void> | null = null;
+// The fallback toast fires at most once per app session — a broken libmpv
+// otherwise re-toasts on every play attempt.
+let mpvFallbackToastShown = false;
+// Per-play-session hooks the resident property observer forwards into.
+let mpvOnTimePos: ((seconds: number) => void) | null = null;
+let mpvOnEnded: (() => void) | null = null;
+
+function ensureMpv(): Promise<void> {
+  if (!mpvReadyPromise) {
+    mpvReadyPromise = (async () => {
+      await mpvInit({
+        initialOptions: {
+          vo: "gpu-next",
+          hwdec: "auto-safe",
+          "keep-open": "yes",
+          pause: "yes",
+          "force-window": "yes",
+        },
+        observedProperties: [
+          ["time-pos", "double"],
+          ["eof-reached", "flag"],
+        ],
+      });
+      await mpvObserveProperties(
+        [
+          ["time-pos", "double"],
+          ["eof-reached", "flag"],
+        ] as const,
+        ({ name, data }) => {
+          if (name === "time-pos" && typeof data === "number") {
+            mpvOnTimePos?.(data);
+          } else if (name === "eof-reached" && data === true) {
+            mpvOnEnded?.();
+          }
+        },
+      );
+    })().catch((e) => {
+      // Allow a later play to retry a failed bring-up (e.g. libmpv missing).
+      mpvReadyPromise = null;
+      throw e;
+    });
+  }
+  return mpvReadyPromise;
+}
+
+function mediaPathOf(mediaRef: string): string | null {
+  const item = useMediaStore.getState().items.find((i) => i.id === mediaRef);
+  return item?.path ?? null;
+}
 
 // --- Shared element registry ---------------------------------------------
 // playback key -> media element, written by <TimelinePlayback> ref callbacks and
@@ -300,12 +362,11 @@ export function useTimelinePlaybackEngine(): void {
     if (
       shouldUseRustEngine({ rustEnabled: rustEngineEnabled(), isTauri, isPlaying, isScrubbing, engineFailed })
     ) {
-      // The Rust stream provides BOTH video (MJPEG <img>) and audio (cpal), so
-      // the <video> followers must not also play (double audio + wasted decode).
+      // mpv provides BOTH video (native layer) and audio, so the <video>
+      // followers must not also play (double audio + wasted decode).
       pauseAll();
       lastEngineFrameRef.current = null;
 
-      let unlisten: (() => void) | null = null;
       let disposed = false;
       let framesSeen = 0;
       let watchdog: ReturnType<typeof setTimeout> | null = null;
@@ -314,57 +375,73 @@ export function useTimelinePlaybackEngine(): void {
       // toast ONCE. Guarded so a rejection AND a fired watchdog can't double-fire.
       const fallBackToLegacy = (why: string) => {
         if (disposed) return;
-        console.warn(`Rust playback engine unavailable (${why}); falling back to <video>.`);
-        useEditorUiStore.getState().pushToast("Preview engine unavailable — using compatibility playback.");
+        console.warn(`mpv playback engine unavailable (${why}); falling back to <video>.`);
+        if (!mpvFallbackToastShown) {
+          mpvFallbackToastShown = true;
+          useEditorUiStore.getState().pushToast("Preview engine unavailable — using compatibility playback.");
+        }
         setEngineFailed(true); // re-runs this effect → legacy branch (cleanup runs first)
       };
 
+      const tl0 = useProjectStore.getState().timeline;
+      const fps0 = tl0.fps > 0 ? tl0.fps : 30;
       const startFrame = Math.max(0, Math.floor(useEditorUiStore.getState().activeFrame));
-      // A rejected start is a hard spawn failure (e.g. render thread couldn't be
-      // created). A GPU-acquire failure INSIDE the render thread instead returns
-      // Ok, so it can't reject — the watchdog below covers that by watching for
-      // the first frame.
-      playbackStart(startFrame).catch((e) => fallBackToLegacy(`start failed: ${e}`));
+      const edl = timelineToEdl(tl0, mediaPathOf);
 
-      // Startup watchdog: if no frame arrives by the deadline, the GPU/render path
-      // is dead (or silently produced nothing) — fall back before the black MJPEG
-      // <img> is all the user sees. `shouldFallBackToLegacy` keeps the decision pure.
-      watchdog = setTimeout(() => {
-        watchdog = null;
-        if (shouldFallBackToLegacy({ onEnginePath: !disposed, framesSeen, deadlineElapsed: true })) {
-          fallBackToLegacy("no frame within startup deadline");
-        }
-      }, ENGINE_START_DEADLINE_MS);
+      if (!edl) {
+        // Nothing mpv-playable on the primary track (e.g. text-only timeline):
+        // the legacy stack handles it without a toast-worthy failure.
+        fallBackToLegacy("timeline has no mpv-playable clips");
+      } else {
+        mpvOnTimePos = (seconds) => {
+          if (disposed) return;
+          if (framesSeen === 0 && watchdog !== null) {
+            clearTimeout(watchdog);
+            watchdog = null;
+          }
+          framesSeen++;
+          const tl = useProjectStore.getState().timeline;
+          const fps = tl.fps > 0 ? tl.fps : 30;
+          const frame = Math.floor(seconds * fps);
+          // Record the engine frame BEFORE setActiveFrame: the external-seek
+          // watcher compares the two, so they must update in lock-step.
+          lastEngineFrameRef.current = frame;
+          const ui = useEditorUiStore.getState();
+          ui.setActiveFrame(frame);
+          const last = Math.max(0, totalFrames(tl) - 1);
+          if (frame >= last) ui.setPlaying(false);
+        };
+        mpvOnEnded = () => {
+          if (!disposed) useEditorUiStore.getState().setPlaying(false);
+        };
+        void ensureMpv()
+          .then(async () => {
+            if (disposed) return;
+            // `start` applies to the NEXT loadfile: load + position atomically,
+            // then unpause once (keep-open holds the last frame at EOF).
+            await mpvSetProperty("start", String(startFrame / fps0));
+            await mpvCommand("loadfile", [edl, "replace"]);
+            if (!disposed) await mpvSetProperty("pause", false);
+          })
+          .catch((e) => fallBackToLegacy(`mpv start failed: ${e}`));
 
-      void onPlaybackFrame((frame) => {
-        if (disposed) return; // cleanup ran before the listener resolved
-        // First frame proves the GPU path is live: stand the watchdog down.
-        if (framesSeen === 0 && watchdog !== null) {
-          clearTimeout(watchdog);
+        // Startup watchdog: if no time-pos arrives by the deadline, mpv is dead
+        // (libmpv missing / EDL rejected) — fall back before a frozen frame is
+        // all the user sees. `shouldFallBackToLegacy` keeps the decision pure.
+        watchdog = setTimeout(() => {
           watchdog = null;
-        }
-        framesSeen++;
-        // Record the engine frame BEFORE setActiveFrame: the external-seek watcher
-        // (deps include activeFrame) compares the two, so they must update in
-        // lock-step — otherwise it would misfire playback_seek on the engine's own
-        // frames. Do not reorder these two lines.
-        lastEngineFrameRef.current = frame;
-        const ui = useEditorUiStore.getState();
-        ui.setActiveFrame(frame);
-        // Stop at the CURRENT timeline end — re-read so a mid-play edit can't
-        // stop early/late from a stale closure (parity with the legacy loop).
-        const last = Math.max(0, totalFrames(useProjectStore.getState().timeline) - 1);
-        if (frame >= last) ui.setPlaying(false);
-      }).then((un) => {
-        if (disposed) un();
-        else unlisten = un;
-      });
+          if (shouldFallBackToLegacy({ onEnginePath: !disposed, framesSeen, deadlineElapsed: true })) {
+            fallBackToLegacy("no frame within startup deadline");
+          }
+        }, ENGINE_START_DEADLINE_MS);
+      }
 
       return () => {
         disposed = true;
         if (watchdog !== null) clearTimeout(watchdog);
-        unlisten?.();
-        playbackStop().catch((e) => console.warn("playbackStop failed:", e));
+        mpvOnTimePos = null;
+        mpvOnEnded = null;
+        void mpvSetProperty("pause", true).catch(() => {});
         // Seek the <video> followers to the current frame so the paused display
         // (the MJPEG <img> overlay unmounts on pause) shows the right frame. The
         // pause-snap in the other effect now trusts activeFrame directly, so this
@@ -528,7 +605,13 @@ export function useTimelinePlaybackEngine(): void {
     ) {
       const f = Math.max(0, Math.floor(activeFrame));
       lastEngineFrameRef.current = f;
-      void playbackSeek(f).catch((e) => console.warn("playbackSeek failed:", e));
+      const fps = (() => {
+        const tl = useProjectStore.getState().timeline;
+        return tl.fps > 0 ? tl.fps : 30;
+      })();
+      void mpvCommand("seek", [f / fps, "absolute"]).catch((e) =>
+        console.warn("mpv seek failed:", e),
+      );
     }
   }, [activeFrame, isPlaying, isScrubbing, engineFailed]);
 }

@@ -189,7 +189,7 @@ pub fn playback_seek(playback: State<'_, PlaybackState>, frame: i32) -> Result<(
 /// so the canvas + WS path replaced it — see `transport.rs`.)
 #[tauri::command]
 pub fn get_preview_endpoint(server: State<'_, Arc<PreviewServer>>) -> String {
-    server.endpoint_ws()
+    server.endpoint_frame()
 }
 
 #[cfg(test)]

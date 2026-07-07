@@ -265,6 +265,7 @@ Key files for comparison:
 - **Rust** ≥ 1.82 (via [rustup](https://rustup.rs))
 - **Node.js** ≥ 20 + **pnpm**
 - **FFmpeg** ≥ 6.0 (`brew install ffmpeg` / `winget install ffmpeg` / `apt install ffmpeg`)
+- **libmpv** for timeline playback (`brew install mpv` / `apt install libmpv-dev`; playback degrades to a compatibility path without it)
 
 ### Build
 
@@ -279,9 +280,13 @@ cargo clippy
 
 # Frontend
 cd web && pnpm install && pnpm build
+cd ..
+
+# One-time (from the repo root): download the libmpv wrapper into src-tauri/lib/
+./web/node_modules/.bin/tauri-plugin-libmpv-api setup-lib
 
 # Launch Tauri dev mode
-cd .. && cargo tauri dev
+cargo tauri dev
 ```
 
 > ⚠️ **Current Status**: Early design phase. Architecture, roadmap, and module port maps are complete; code implementation in progress.

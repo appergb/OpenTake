@@ -11,6 +11,8 @@ dist/
 # Tauri
 src-tauri/target/
 src-tauri/gen/
+# libmpv runtime libs (download: ./web/node_modules/.bin/tauri-plugin-libmpv-api setup-lib)
+src-tauri/lib/
 
 # Env / secrets (never commit API keys)
 .env

@@ -36,11 +36,11 @@ import {
 import { useT } from "../../i18n";
 import {
   captureFrameToMedia,
-  getPreviewEndpoint,
   isTauri,
   previewPoster,
 } from "../../lib/api";
 import { rustEngineEnabled } from "./rustEngine";
+import { setVideoMarginRatio } from "tauri-plugin-libmpv-api";
 import { shouldUseRustEngine } from "./timelinePlayback";
 import { findCropEditingClip, findSelectedVisualClip, mediaCanvasAspect } from "../../lib/clip";
 import { setTimelineSettings } from "../../store/editActions";
@@ -66,6 +66,8 @@ export function Preview() {
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
   const setCurrentFrame = useEditorUiStore((s) => s.setCurrentFrame);
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
+  const isScrubbing = useEditorUiStore((s) => s.isScrubbing);
+  const rustEngineFailed = useEditorUiStore((s) => s.rustEngineFailed);
   const setScrubbing = useEditorUiStore((s) => s.setScrubbing);
   const togglePlayTimeline = useEditorUiStore((s) => s.togglePlay);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
@@ -261,6 +263,49 @@ export function Preview() {
       ? { width: fittedCanvas.width * canvasZoom, height: fittedCanvas.height * canvasZoom }
       : fittedCanvas;
   const canvasTransform = `translate(${canvasOffset.width}px, ${canvasOffset.height}px)`;
+  // mpv paints on the native window BELOW the webview. While it owns PLAY the
+  // canvas box (and the stage behind it) turn transparent so the video shows
+  // through; pause/scrub restore the opaque composite surfaces (mpv is paused
+  // underneath and hidden by them).
+  const mpvDriving =
+    !previewItem &&
+    shouldUseRustEngine({
+      rustEnabled: rustEngineEnabled(),
+      isTauri,
+      isPlaying,
+      isScrubbing,
+      engineFailed: rustEngineFailed,
+    });
+
+  // Keep mpv's video letterboxed exactly onto the (aspect-fit, zoomed) canvas
+  // box: margins are window-relative ratios, re-synced on layout changes.
+  useEffect(() => {
+    if (!mpvDriving) return;
+    const el = canvasBoxRef.current;
+    if (!el) return;
+    const sync = () => {
+      const r = el.getBoundingClientRect();
+      const W = window.innerWidth;
+      const H = window.innerHeight;
+      if (W <= 0 || H <= 0 || r.width <= 0 || r.height <= 0) return;
+      const clamp01 = (v: number) => Math.min(0.99, Math.max(0, v));
+      void setVideoMarginRatio({
+        left: clamp01(r.left / W),
+        right: clamp01(1 - r.right / W),
+        top: clamp01(r.top / H),
+        bottom: clamp01(1 - r.bottom / H),
+      }).catch((e: unknown) => console.warn("mpv margin sync failed:", e));
+    };
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    window.addEventListener("resize", sync);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", sync);
+    };
+  }, [mpvDriving, scaledCanvas?.width, scaledCanvas?.height]);
+
   const timelineCanvasStyle = {
     ...timelinePreviewCanvasStyle(timeline.width, timeline.height),
     ...(scaledCanvas
@@ -326,7 +371,7 @@ export function Preview() {
         style={{
           flex: 1,
           minHeight: 0,
-          background: "var(--bg-surface)",
+          background: mpvDriving ? "transparent" : "var(--bg-surface)",
           position: "relative",
           display: "flex",
           alignItems: "center",
@@ -344,11 +389,25 @@ export function Preview() {
             onPlayingChange={setMediaPlaying}
           />
         ) : (
-          <div ref={canvasBoxRef} style={{ ...timelineCanvasStyle, position: "relative" }}>
+          <div
+            ref={canvasBoxRef}
+            style={{
+              ...timelineCanvasStyle,
+              position: "relative",
+              ...(mpvDriving ? { background: "transparent" } : {}),
+            }}
+          >
             {timelineHasContent ? (
               <>
-                <TimelinePlayback timeline={timeline} fps={fps} />
-                <TimelineRustOverlay />
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    visibility: mpvDriving ? "hidden" : "visible",
+                  }}
+                >
+                  <TimelinePlayback timeline={timeline} fps={fps} />
+                </div>
                 {/* Below-fit canvas outline (upstream PreviewContainerView.swift:
                     44-47: Rectangle stroke white @ Opacity.moderate=0.25 when
                     canvasZoom < 1.0, else invisible). pointer-events:none so it
@@ -467,119 +526,6 @@ export function Preview() {
   );
 }
 
-
-/**
- * The Rust streaming-playback surface: an `<img>` pointed at the loopback MJPEG
- * stream, shown ONLY during PLAY when the Rust engine flag is on (under Tauri).
- * It overlays `<TimelinePlayback>` (whose `<video>` elements are paused during
- * Rust play) and fills the aspect-fit canvas. Scrub/pause unmount it, so the
- * legacy `<video>`/composite surface shows again. No-op (renders nothing) outside
- * Tauri or with the flag off — the legacy path is untouched.
- */
-function TimelineRustOverlay() {
-  const isPlaying = useEditorUiStore((s) => s.isPlaying);
-  const isScrubbing = useEditorUiStore((s) => s.isScrubbing);
-  // Runtime fallback flag (previewEngine.ts trips it when the engine can't start):
-  // unmount the canvas so the legacy <video> underneath shows through instead of
-  // a frozen/black frame.
-  const engineFailed = useEditorUiStore((s) => s.rustEngineFailed);
-  const [endpoint, setEndpoint] = useState<string | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-
-  useEffect(() => {
-    if (!rustEngineEnabled() || !isTauri) return;
-    let cancelled = false;
-    void getPreviewEndpoint().then((url) => {
-      // Guard against a null/undefined endpoint leaking into state (which would
-      // otherwise activate the overlay with a broken connection).
-      if (!cancelled && typeof url === "string") setEndpoint(url);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const active =
-    shouldUseRustEngine({ rustEnabled: rustEngineEnabled(), isTauri, isPlaying, isScrubbing, engineFailed }) &&
-    endpoint !== null;
-
-  // Stream binary JPEG frames over a WebSocket and paint each to the canvas.
-  // WebKit/WKWebView renders WS + createImageBitmap + canvas reliably; the old
-  // `<img>` pointed at a multipart/x-mixed-replace MJPEG stream only ever painted
-  // the FIRST frame there (the "playback shows one frame" bug), even though the
-  // Rust engine was broadcasting every composited frame.
-  useEffect(() => {
-    if (!active || !endpoint) return;
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx) return;
-
-    let closed = false;
-
-    // Match the backing store to the frame (no double scaling); the canvas CSS
-    // box then stretches it to fill (equivalent to the old objectFit:fill).
-    const paint = (src: CanvasImageSource, w: number, h: number) => {
-      if (closed || w === 0 || h === 0) return;
-      if (canvas.width !== w || canvas.height !== h) {
-        canvas.width = w;
-        canvas.height = h;
-      }
-      ctx.drawImage(src, 0, 0);
-    };
-
-    // Decode each JPEG frame. Prefer createImageBitmap (async, off-thread), but
-    // fall back to an <img> + object URL on older WebKit that lacks it — either
-    // way WebKit renders this reliably, unlike the multipart MJPEG <img>.
-    const drawViaImage = (blob: Blob) => {
-      const url = URL.createObjectURL(blob);
-      const img = new Image();
-      img.onload = () => {
-        paint(img, img.naturalWidth, img.naturalHeight);
-        URL.revokeObjectURL(url);
-      };
-      img.onerror = () => URL.revokeObjectURL(url);
-      img.src = url;
-    };
-    const drawBlob = (blob: Blob) => {
-      if (typeof createImageBitmap === "function") {
-        void createImageBitmap(blob)
-          .then((bmp) => {
-            paint(bmp, bmp.width, bmp.height);
-            bmp.close();
-          })
-          .catch(() => drawViaImage(blob));
-      } else {
-        drawViaImage(blob);
-      }
-    };
-
-    const ws = new WebSocket(endpoint);
-    ws.binaryType = "blob";
-    ws.onmessage = (e) => {
-      if (!closed && e.data instanceof Blob) drawBlob(e.data);
-    };
-
-    return () => {
-      closed = true;
-      ws.close();
-    };
-  }, [active, endpoint]);
-
-  if (!active) return null;
-  return (
-    <canvas
-      ref={canvasRef}
-      style={{
-        position: "absolute",
-        inset: 0,
-        width: "100%",
-        height: "100%",
-        pointerEvents: "none",
-        zIndex: 2,
-      }}
-    />
-  );
-}
 
 /** Renders a single media asset straight from disk via the asset protocol —
  *  `<video>`/`<audio>` (NO native controls; the app transport drives them via

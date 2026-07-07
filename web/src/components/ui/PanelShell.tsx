@@ -6,6 +6,9 @@
 
 import type { ReactNode } from "react";
 import { useEditorUiStore, type Panel } from "../../store/uiStore";
+import { isTauri } from "../../lib/api";
+import { rustEngineEnabled } from "../preview/rustEngine";
+import { shouldUseRustEngine } from "../preview/timelinePlayback";
 
 interface PanelShellProps {
   panel: Panel;
@@ -16,6 +19,23 @@ export function PanelShell({ panel, children }: PanelShellProps) {
   const focusedPanel = useEditorUiStore((s) => s.focusedPanel);
   const focusPanel = useEditorUiStore((s) => s.focusPanel);
   const focused = focusedPanel === panel;
+  // The preview panel sits in the ancestor chain of the mpv "hole": while the
+  // community engine owns PLAY, both shell layers go transparent so the native
+  // video underneath shows through. Other panels always stay opaque.
+  const isPlaying = useEditorUiStore((s) => s.isPlaying);
+  const isScrubbing = useEditorUiStore((s) => s.isScrubbing);
+  const engineFailed = useEditorUiStore((s) => s.rustEngineFailed);
+  const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
+  const holeOpen =
+    panel === "preview" &&
+    !previewMediaId &&
+    shouldUseRustEngine({
+      rustEnabled: rustEngineEnabled(),
+      isTauri,
+      isPlaying,
+      isScrubbing,
+      engineFailed,
+    });
 
   return (
     // Outer = base groove color; the inner card is the surface (SPEC §2.5).
@@ -24,7 +44,7 @@ export function PanelShell({ panel, children }: PanelShellProps) {
         position: "relative",
         width: "100%",
         height: "100%",
-        background: "var(--bg-base)",
+        background: holeOpen ? "transparent" : "var(--bg-base)",
         padding: "calc(var(--panel-gap) / 2)", // 2.5px
         minWidth: 0,
         minHeight: 0,
@@ -36,7 +56,7 @@ export function PanelShell({ panel, children }: PanelShellProps) {
           position: "relative",
           width: "100%",
           height: "100%",
-          background: "var(--bg-surface)",
+          background: holeOpen ? "transparent" : "var(--bg-surface)",
           borderRadius: "var(--radius-sm)",
           overflow: "hidden",
           display: "flex",

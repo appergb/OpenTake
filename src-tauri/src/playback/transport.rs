@@ -50,6 +50,15 @@ const BOUNDARY: &str = "opentake_mjpeg_boundary";
 pub struct PreviewServer {
     port: u16,
     tx: broadcast::Sender<Bytes>,
+    latest: Arc<std::sync::RwLock<Option<Bytes>>>,
+}
+
+/// Shared axum state: the live broadcast sender plus the latest encoded frame
+/// (for the polling `/frame` route).
+#[derive(Clone)]
+struct ServerState {
+    tx: broadcast::Sender<Bytes>,
+    latest: Arc<std::sync::RwLock<Option<Bytes>>>,
 }
 
 impl PreviewServer {
@@ -57,6 +66,7 @@ impl PreviewServer {
     /// Tauri async runtime (call via `tauri::async_runtime::block_on` in setup).
     pub async fn start() -> Result<Arc<Self>, String> {
         let (tx, _rx) = broadcast::channel::<Bytes>(FRAME_CHANNEL_DEPTH);
+        let latest: Arc<std::sync::RwLock<Option<Bytes>>> = Arc::new(std::sync::RwLock::new(None));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -66,18 +76,22 @@ impl PreviewServer {
             .map_err(|e| format!("MJPEG local_addr: {e}"))?
             .port();
 
-        let tx_clone = tx.clone();
+        let state = ServerState {
+            tx: tx.clone(),
+            latest: latest.clone(),
+        };
         tauri::async_runtime::spawn(async move {
             let app = axum::Router::new()
                 .route("/stream", axum::routing::get(stream_handler))
                 .route("/ws", axum::routing::get(ws_handler))
-                .with_state(tx_clone);
+                .route("/frame", axum::routing::get(frame_handler))
+                .with_state(state);
             if let Err(e) = axum::serve(listener, app).await {
                 eprintln!("[mjpeg] server error: {e}");
             }
         });
 
-        Ok(Arc::new(Self { port, tx }))
+        Ok(Arc::new(Self { port, tx, latest }))
     }
 
     /// The `<img>`-pointable MJPEG stream URL. Kept for debugging; the preview
@@ -94,10 +108,21 @@ impl PreviewServer {
         format!("ws://127.0.0.1:{}/ws", self.port)
     }
 
+    /// The single-frame poll URL (`GET /frame` -> latest JPEG). This is what the
+    /// preview `<img>` actually uses: WKWebView's secure `tauri://` context
+    /// blocks plain-`ws://` WebSockets to loopback as mixed content (silently —
+    /// no TCP connect ever happens), while a passive `<img>` load over loopback
+    /// http is allowed. The playhead's `playback_frame` event drives one `<img>`
+    /// reload per rendered frame.
+    pub fn endpoint_frame(&self) -> String {
+        format!("http://127.0.0.1:{}/frame", self.port)
+    }
+
     /// A frame sink that JPEG-encodes composited frames into this server's stream.
     pub fn sink(&self) -> MjpegSink {
         MjpegSink {
             tx: self.tx.clone(),
+            latest: self.latest.clone(),
         }
     }
 }
@@ -121,15 +146,12 @@ fn origin_is_allowed(headers: &HeaderMap) -> bool {
 }
 
 /// `/stream`: relay each broadcast JPEG as a `multipart/x-mixed-replace` part.
-async fn stream_handler(
-    State(tx): State<broadcast::Sender<Bytes>>,
-    headers: HeaderMap,
-) -> Response {
+async fn stream_handler(State(state): State<ServerState>, headers: HeaderMap) -> Response {
     if !origin_is_allowed(&headers) {
         return (StatusCode::FORBIDDEN, "cross-origin preview stream denied").into_response();
     }
 
-    let mut rx = tx.subscribe();
+    let mut rx = state.tx.subscribe();
     // Bridge the broadcast receiver to an axum body stream via a BOUNDED mpsc: a
     // slow client drops frames (live preview) instead of growing memory without
     // limit.
@@ -185,12 +207,41 @@ async fn stream_handler(
 async fn ws_handler(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
-    State(tx): State<broadcast::Sender<Bytes>>,
+    State(state): State<ServerState>,
 ) -> Response {
     if !origin_is_allowed(&headers) {
         return (StatusCode::FORBIDDEN, "cross-origin preview stream denied").into_response();
     }
-    ws.on_upgrade(move |socket| ws_stream(socket, tx.subscribe()))
+    ws.on_upgrade(move |socket| ws_stream(socket, state.tx.subscribe()))
+}
+
+/// `/frame`: the latest composited JPEG, one shot. The preview `<img>` reloads
+/// this per `playback_frame` event (cache-busted by a `?f=N` query); WKWebView
+/// allows passive loopback-http image loads where it blocks plain-`ws://`
+/// WebSockets (mixed content in the secure `tauri://` context).
+async fn frame_handler(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    if !origin_is_allowed(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-origin preview stream denied").into_response();
+    }
+    let latest = state
+        .latest
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    match latest {
+        Some(jpeg) => (
+            [
+                (axum::http::header::CONTENT_TYPE, "image/jpeg".to_string()),
+                (
+                    axum::http::header::CACHE_CONTROL,
+                    "no-store, no-cache, must-revalidate".to_string(),
+                ),
+            ],
+            jpeg,
+        )
+            .into_response(),
+        None => (StatusCode::NO_CONTENT, "").into_response(),
+    }
 }
 
 /// Forward broadcast JPEG frames to one connected preview socket until it closes.
@@ -217,17 +268,25 @@ async fn ws_stream(mut socket: WebSocket, mut rx: broadcast::Receiver<Bytes>) {
 #[derive(Clone)]
 pub struct MjpegSink {
     tx: broadcast::Sender<Bytes>,
+    latest: Arc<std::sync::RwLock<Option<Bytes>>>,
 }
 
 impl FrameSink for MjpegSink {
     fn push_frame(&self, frame: &DecodedFrame) {
-        // No subscribers → nothing to encode (saves CPU when the preview `<img>`
-        // is not mounted).
-        if self.tx.receiver_count() == 0 {
+        // Always encode: the polling `/frame` route reads `latest` without ever
+        // subscribing to the broadcast channel, so receiver_count()==0 no longer
+        // means "nobody is watching". Playback always has exactly one consumer
+        // (the preview `<img>`), so the old idle-skip saved nothing real.
+        let Some(jpeg) = encode_jpeg(frame) else {
             return;
+        };
+        let jpeg = Bytes::from(jpeg);
+        {
+            let mut latest = self.latest.write().unwrap_or_else(|p| p.into_inner());
+            *latest = Some(jpeg.clone());
         }
-        if let Some(jpeg) = encode_jpeg(frame) {
-            let _ = self.tx.send(Bytes::from(jpeg));
+        if self.tx.receiver_count() > 0 {
+            let _ = self.tx.send(jpeg);
         }
     }
 }
