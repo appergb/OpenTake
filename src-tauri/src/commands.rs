@@ -285,9 +285,38 @@ pub fn can_redo(core: State<'_, AppCore>) -> bool {
 /// [`EditRequest`] from a UI gesture; this maps it to an [`EditCommand`] and
 /// routes it through [`AppCore::apply`] (which performs the snapshot/commit/
 /// version transaction and emits `TimelineChanged`).
+///
+/// `FreezeFrame` is intercepted here (not in `into_command`): the desktop shell
+/// composites `at_frame` into a PNG, imports it as a still, and passes the real
+/// asset id as the command's `media_ref` so the inserted image clip carries real
+/// pixels. A capture failure aborts before the edit transaction runs, leaving
+/// the timeline untouched (the composite `withTimelineSwap` never starts). The
+/// `render` / `media` State params are only touched on this path; other commands
+/// map purely and never touch the GPU / media engine.
 #[tauri::command]
-pub fn edit_apply(core: State<'_, AppCore>, command: EditRequest) -> Result<EditResultDto, String> {
-    let cmd = command.into_command()?;
+pub fn edit_apply(
+    core: State<'_, AppCore>,
+    render: State<'_, crate::render::RenderState>,
+    media: State<'_, crate::media::MediaState>,
+    command: EditRequest,
+) -> Result<EditResultDto, String> {
+    let cmd = match command {
+        EditRequest::FreezeFrame {
+            clip_id,
+            at_frame,
+            duration_frames,
+        } => {
+            let media_ref =
+                crate::render::capture_freeze_frame(&core, &render, &media, &clip_id, at_frame)?;
+            EditCommand::FreezeFrame {
+                clip_id,
+                at_frame,
+                duration_frames,
+                media_ref,
+            }
+        }
+        other => other.into_command()?,
+    };
     handle_edit_apply(&core, cmd).map_err(msg)
 }
 
@@ -330,6 +359,19 @@ pub enum EditRequest {
     RemoveClips { clip_ids: Vec<String> },
     #[serde(rename_all = "camelCase")]
     SplitClip { clip_id: String, at_frame: i32 },
+    /// Freeze Frame (OpenTake extension; no upstream equivalent). The desktop
+    /// shell intercepts this in [`edit_apply`]: it composites `at_frame` into a
+    /// PNG, imports it as a still, and passes the real asset id as the command's
+    /// `media_ref` so the inserted image clip carries real pixels. A capture
+    /// failure aborts before the edit transaction runs, leaving the timeline
+    /// untouched. Multi-word fields MUST be camelCase (the repo's #1 IPC bug
+    /// class).
+    #[serde(rename_all = "camelCase")]
+    FreezeFrame {
+        clip_id: String,
+        at_frame: i32,
+        duration_frames: i32,
+    },
     #[serde(rename_all = "camelCase")]
     TrimClips { edits: Vec<TrimEditDto> },
     #[serde(rename_all = "camelCase")]
@@ -485,6 +527,21 @@ impl EditRequest {
             EditRequest::SplitClip { clip_id, at_frame } => {
                 EditCommand::SplitClip { clip_id, at_frame }
             }
+            // Pure mapping: the virtual `freeze:` placeholder keeps the timeline
+            // structure correct when the command is constructed without a capture
+            // (tests / MCP). The desktop shell's `edit_apply` intercepts this
+            // variant FIRST and substitutes the real imported still id before
+            // this mapping ever runs, so the UI path always lands real pixels.
+            EditRequest::FreezeFrame {
+                clip_id,
+                at_frame,
+                duration_frames,
+            } => EditCommand::FreezeFrame {
+                clip_id: clip_id.clone(),
+                at_frame,
+                duration_frames,
+                media_ref: format!("freeze:{clip_id}:{at_frame}"),
+            },
             EditRequest::TrimClips { edits } => EditCommand::TrimClips {
                 edits: edits.into_iter().map(TrimEditDto::into_edit).collect(),
             },
@@ -1106,6 +1163,34 @@ mod edit_request_serde_tests {
                 assert_eq!(b, "clip-2");
             }
             other => panic!("expected SwapClips, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_freeze_frame_camelcase_and_maps_to_command() {
+        // The front-end right-click menu sends camelCase clipId/atFrame/
+        // durationFrames. A non-camelCase key here silently fails to deserialize
+        // (the repo's #1 IPC bug class), so the freeze does nothing — guard it.
+        let request = serde_json::from_str::<EditRequest>(
+            r#"{"type":"freezeFrame","clipId":"clip-1","atFrame":110,"durationFrames":30}"#,
+        )
+        .expect("freezeFrame camelCase");
+
+        match request.into_command().expect("freezeFrame command") {
+            EditCommand::FreezeFrame {
+                clip_id,
+                at_frame,
+                duration_frames,
+                media_ref,
+            } => {
+                assert_eq!(clip_id, "clip-1");
+                assert_eq!(at_frame, 110);
+                assert_eq!(duration_frames, 30);
+                // The pure mapping mints the virtual placeholder (the desktop
+                // shell's edit_apply substitutes the real imported id at runtime).
+                assert_eq!(media_ref, "freeze:clip-1:110");
+            }
+            other => panic!("expected FreezeFrame, got {other:?}"),
         }
     }
 

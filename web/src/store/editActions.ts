@@ -128,6 +128,36 @@ export async function splitClip(clipId: string, atFrame: number) {
   await applyAndRefresh({ type: "splitClip", clipId, atFrame });
 }
 
+/** Default freeze-frame duration: 30 frames = 1s @ 30fps (user request
+ *  2026-07-01, HANDOFF §3.7). */
+export const DEFAULT_FREEZE_FRAMES = 30;
+
+/** Freeze `clipId` at `atFrame` for `durationFrames` (composite capture + split +
+ *  ripple-insert still, one undo step on the backend). `atFrame` must be strictly
+ *  inside the clip; the clip must be video/image. */
+export async function freezeFrame(
+  clipId: string,
+  atFrame: number,
+  durationFrames: number = DEFAULT_FREEZE_FRAMES,
+) {
+  return applyAndRefresh({ type: "freezeFrame", clipId, atFrame, durationFrames });
+}
+
+/** Freeze `clip` at the playhead when the playhead is strictly inside it, else at
+ *  the clip's midpoint (so the right-click gesture always works even when the
+ *  playhead is elsewhere). Only video/image clips are freezeable; the backend
+ *  re-validates and rejects otherwise. Returns the EditResult (or undefined when
+ *  the user cancels the duration prompt). */
+export async function freezeClipAtPlayhead(
+  clip: Clip,
+  durationFrames: number = DEFAULT_FREEZE_FRAMES,
+) {
+  const playhead = Math.round(useEditorUiStore.getState().activeFrame);
+  const inside = playhead > clip.startFrame && playhead < clip.startFrame + clip.durationFrames;
+  const atFrame = inside ? playhead : clip.startFrame + Math.floor(clip.durationFrames / 2);
+  return freezeFrame(clip.id, atFrame, durationFrames);
+}
+
 export async function trimClips(edits: TrimEditReq[]) {
   if (edits.length === 0) return;
   await applyAndRefresh({ type: "trimClips", edits });

@@ -70,6 +70,22 @@ export async function editApplyMany(commands: EditRequest[]): Promise<EditResult
   return results;
 }
 
+/**
+ * Freeze Frame: composite the timeline at `atFrame`, import the still, then split
+ * `clipId` at `atFrame` and ripple-insert the still for `durationFrames` (the
+ * right half shifts right). One undoable composite transaction on the backend; a
+ * capture failure aborts with the timeline untouched. `atFrame` must be strictly
+ * inside the clip, and the clip must be video/image. OpenTake extension (user
+ * request 2026-07-01); no upstream equivalent.
+ */
+export async function freezeFrame(
+  clipId: string,
+  atFrame: number,
+  durationFrames: number,
+): Promise<EditResult> {
+  return editApply({ type: "freezeFrame", clipId, atFrame, durationFrames });
+}
+
 export async function undo(): Promise<EditResult> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<EditResult>("undo");

@@ -384,6 +384,8 @@ const zh: Dict = {
   "contextMenu.link": "链接",
   "contextMenu.unlink": "取消链接",
   "contextMenu.swapMedia": "替换媒体",
+  "contextMenu.freezeFrame": "冻结帧",
+  "contextMenu.freezeFramePrompt": "冻结时长（帧）",
   // Disabled placeholders (issue #93 acceptance: menu must list these even if stub)
   "contextMenu.saveAsMedia": "另存为媒体",
   "contextMenu.extractAudio": "提取音频",
@@ -900,6 +902,8 @@ const en: Dict = {
   "contextMenu.link": "Link",
   "contextMenu.unlink": "Unlink",
   "contextMenu.swapMedia": "Swap Media",
+  "contextMenu.freezeFrame": "Freeze Frame",
+  "contextMenu.freezeFramePrompt": "Freeze duration (frames)",
   // Disabled placeholders (issue #93 acceptance: menu must list these even if stub)
   "contextMenu.saveAsMedia": "Save as Media",
   "contextMenu.extractAudio": "Extract Audio",

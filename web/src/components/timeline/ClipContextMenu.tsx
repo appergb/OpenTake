@@ -36,6 +36,7 @@ type ClipMenuLabels = {
   link: string;
   unlink: string;
   swapMedia: string;
+  freezeFrame: string;
 };
 
 export function clipContextMenuItems({
@@ -51,6 +52,7 @@ export function clipContextMenuItems({
   onLink,
   onUnlink,
   onSwapMedia,
+  onFreezeFrame,
 }: {
   clip: Clip;
   hasClipboardContent: boolean;
@@ -64,6 +66,7 @@ export function clipContextMenuItems({
   onLink: (ids: string[]) => void | Promise<void>;
   onUnlink: (ids: string[]) => void | Promise<void>;
   onSwapMedia: () => void;
+  onFreezeFrame: () => void | Promise<void>;
 }): MenuItem[] {
   const items: MenuItem[] = [
     {
@@ -129,6 +132,13 @@ export function clipContextMenuItems({
       action: () => {
         ensureSelected();
         onSwapMedia();
+      },
+    });
+    items.push({
+      label: labels.freezeFrame,
+      action: () => {
+        ensureSelected();
+        void onFreezeFrame();
       },
     });
   }
@@ -254,6 +264,7 @@ export function ClipContextMenu({
         link: t("contextMenu.link"),
         unlink: t("contextMenu.unlink"),
         swapMedia: t("contextMenu.swapMedia"),
+        freezeFrame: t("contextMenu.freezeFrame"),
       },
       ensureSelected,
       selectedClipIds: () => [...useEditorUiStore.getState().selectedClipIds],
@@ -264,6 +275,19 @@ export function ClipContextMenu({
       onLink: edit.linkClips,
       onUnlink: edit.unlinkClips,
       onSwapMedia: () => setPendingSwapClipId(clipId),
+      onFreezeFrame: async () => {
+        // v1: a simple prompt lets the user adjust the freeze duration (default
+        // 30 frames = 1s @ 30fps). Cancel aborts; a non-positive/NaN input is
+        // ignored. The backend re-validates and rejects bad frame ranges.
+        const input = window.prompt(
+          t("contextMenu.freezeFramePrompt"),
+          String(edit.DEFAULT_FREEZE_FRAMES),
+        );
+        if (input == null) return;
+        const n = parseInt(input, 10);
+        if (!Number.isFinite(n) || n < 1) return;
+        await edit.freezeClipAtPlayhead(clip!, n);
+      },
     });
   }
 

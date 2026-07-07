@@ -310,6 +310,7 @@ export type EditRequest =
     }
   | { type: "removeClips"; clipIds: string[] }
   | { type: "splitClip"; clipId: string; atFrame: number }
+  | { type: "freezeFrame"; clipId: string; atFrame: number; durationFrames: number }
   | { type: "trimClips"; edits: TrimEditReq[] }
   | { type: "setClipProperties"; clipIds: string[]; properties: ClipPropertiesReq }
   | { type: "setKeyframes"; clipId: string; property: KeyframeProperty; payload: KeyframePayloadReq }

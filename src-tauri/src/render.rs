@@ -495,6 +495,50 @@ fn uuid_like() -> u128 {
         .unwrap_or(0)
 }
 
+/// Capture the composited timeline frame at `at_frame` and import it as a NEW
+/// still image asset, returning the new asset's id (the `media_ref` a clip
+/// references). Used by the Freeze Frame composite command ([`EditCommand::FreezeFrame`])
+/// so the inserted still carries real pixels — the capture happens BEFORE the
+/// edit transaction, so a capture failure aborts the whole freeze with the
+/// timeline untouched (no half-applied split). `clip_id` only keys the on-disk
+/// filename for debuggability; it does not affect the captured pixels (the whole
+/// timeline is composited, matching `composite_frame`).
+pub fn capture_freeze_frame(
+    core: &AppCore,
+    render: &RenderState,
+    media: &crate::media::MediaState,
+    clip_id: &str,
+    at_frame: i32,
+) -> Result<String, String> {
+    let engine = media.engine();
+    // Full-resolution composite (max_size = 0 = no cap) so the still is a real
+    // asset, not a preview-downscaled thumbnail.
+    let composite = composite_rgba(core, render, at_frame, 0)?;
+    let captures_dir = engine.cache_root().join("captures");
+    std::fs::create_dir_all(&captures_dir).map_err(|e| format!("create captures dir: {e}"))?;
+    // Sanitize clip_id for a filename (ids are usually uuid-like, but be safe
+    // against any odd character a caller might mint).
+    let safe_id = clip_id
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let png_path = captures_dir.join(format!("freeze_{safe_id}_{at_frame}.png"));
+    let bytes = encode_png_bytes(&composite)?;
+    std::fs::write(&png_path, &bytes).map_err(|e| format!("write freeze png: {e}"))?;
+    // Import through the same path as any user import (poster + manifest entry
+    // + MediaChanged event). import_one returns the new manifest entry; its
+    // `id` is the media_ref the freeze command's image clip will point at.
+    let entry = crate::media::import_one(core, engine, &png_path)
+        .ok_or_else(|| "freeze frame import failed".to_string())?;
+    Ok(entry.id)
+}
+
 fn project_frame_time_secs(source_frame: i64, timeline_fps: i32) -> f64 {
     let fps = if timeline_fps > 0 {
         timeline_fps as f64
