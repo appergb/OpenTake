@@ -408,7 +408,17 @@ const zh: Dict = {
   "preview.captureFrameFailed": "截帧失败",
 
   // Agent panel
-  "agent.placeholder": "Agent 面板(独立功能)",
+  "agent.placeholder": "Agent 面板",
+  "agent.title": "Agent",
+  "agent.inputPlaceholder": "向 Agent 描述要做的编辑…",
+  "agent.send": "发送",
+  "agent.cancel": "停止",
+  "agent.clear": "新对话",
+  "agent.openSettings": "打开设置",
+  "agent.toolCall": "工具调用",
+  "agent.toolArgs": "参数",
+  "agent.toolResult": "结果",
+  "agent.streaming": "生成中…",
 
   // Home
   "home.welcome": "欢迎使用 OpenTake",
@@ -922,7 +932,17 @@ const en: Dict = {
   "preview.captureFrameUnavailable": "Composite frame unavailable",
   "preview.captureFrameFailed": "Capture frame failed",
 
-  "agent.placeholder": "Agent panel (separate Issue)",
+  "agent.placeholder": "Agent panel",
+  "agent.title": "Agent",
+  "agent.inputPlaceholder": "Describe the edit you want…",
+  "agent.send": "Send",
+  "agent.cancel": "Stop",
+  "agent.clear": "New chat",
+  "agent.openSettings": "Open Settings",
+  "agent.toolCall": "Tool call",
+  "agent.toolArgs": "Args",
+  "agent.toolResult": "Result",
+  "agent.streaming": "Streaming…",
 
   "home.welcome": "Welcome to OpenTake",
   "home.newProject": "New Project",

@@ -10,6 +10,8 @@
 
 import type {
   CaptionRequest,
+  ChatMessage,
+  ChatToolCall,
   ClipType,
   EditRequest,
   EditResult,
@@ -755,6 +757,103 @@ export async function onGoHome(handler: () => void): Promise<() => void> {
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("go_home", () => handler());
+}
+
+// MARK: - In-app chat (#HANDOFF-3.3)
+//
+// `chat_send` spawns a chat turn on the backend; the turn streams back via
+// `chat_delta` (text chunks), `chat_tool_call` (tool invocations, emitted
+// twice — request then result), and `chat_done` (final assistant message).
+// `chat_history` returns the persisted message log; `chat_cancel` stops a
+// running turn at the next boundary. All no-ops outside Tauri (no Rust core);
+// the panel renders its empty state and the input is disabled.
+
+/** A streaming text chunk from the assistant. Concatenate in order. */
+export interface ChatDelta {
+  sessionId: string;
+  delta: string;
+}
+
+/** A tool call event: the call (request, then result-filled after dispatch). */
+export interface ChatToolCallEvent {
+  sessionId: string;
+  toolCall: ChatToolCall;
+}
+
+/** The final assistant message of a turn. */
+export interface ChatDoneEvent {
+  sessionId: string;
+  message: ChatMessage;
+}
+
+/** Send a user message, starting (or continuing) a chat session. Returns
+ *  immediately; the turn streams via the `chat_*` events. Rejects outside
+ *  Tauri (no Rust chat backend) or if a turn is already running on the session. */
+export async function chatSend(sessionId: string, text: string): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<void>("chat_send", { sessionId, text });
+  throw new Error("chat requires the desktop app (LLM + tool dispatch)");
+}
+
+/** The persisted message log for a session (empty until the first send).
+ *  While a turn is running the backend owns the session; this returns the last
+ *  persisted state — rely on the streaming events meanwhile. */
+export async function chatHistory(sessionId: string): Promise<ChatMessage[]> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<ChatMessage[]>("chat_history", { sessionId });
+  return [];
+}
+
+/** Request a running turn stop at the next boundary. No-op when nothing is
+ *  running. Outside Tauri there is no turn to cancel. */
+export async function chatCancel(sessionId: string): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) await invokeImpl<void>("chat_cancel", { sessionId });
+}
+
+/** Subscribe to `chat_delta` (streaming text chunks). Returns an unlisten
+ *  function; no-op (no-op unlisten) outside Tauri. */
+export async function onChatDelta(
+  handler: (e: ChatDelta) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("chat_delta", (e) => {
+    const p = e.payload as { sessionId?: string; delta?: string } | undefined;
+    if (p && typeof p.sessionId === "string" && typeof p.delta === "string") {
+      handler({ sessionId: p.sessionId, delta: p.delta });
+    }
+  });
+}
+
+/** Subscribe to `chat_tool_call` (tool invocation cards). Returns an unlisten
+ *  function; no-op outside Tauri. */
+export async function onChatToolCall(
+  handler: (e: ChatToolCallEvent) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("chat_tool_call", (e) => {
+    const p = e.payload as { sessionId?: string; toolCall?: ChatToolCall } | undefined;
+    if (p && typeof p.sessionId === "string" && p.toolCall) {
+      handler({ sessionId: p.sessionId, toolCall: p.toolCall });
+    }
+  });
+}
+
+/** Subscribe to `chat_done` (final assistant message of a turn). Returns an
+ *  unlisten function; no-op outside Tauri. */
+export async function onChatDone(
+  handler: (e: ChatDoneEvent) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("chat_done", (e) => {
+    const p = e.payload as { sessionId?: string; message?: ChatMessage } | undefined;
+    if (p && typeof p.sessionId === "string" && p.message) {
+      handler({ sessionId: p.sessionId, message: p.message });
+    }
+  });
 }
 
 // MARK: - Streaming playback engine (#53)

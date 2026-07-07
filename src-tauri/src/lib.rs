@@ -7,6 +7,7 @@
 //! §2 — "真相源在 Rust，前端持镜像").
 
 mod captions;
+mod chat;
 mod commands;
 // `pub` so the ffmpeg-gated integration test (`tests/export_integration.rs`) can
 // drive the export orchestrator (`export::run_export`) against the library
@@ -114,7 +115,7 @@ pub fn run() {
                 .join("workflows");
             mcp::spawn(
                 core.clone(),
-                workflows_dir,
+                workflows_dir.clone(),
                 cache_root.clone(),
                 models_dir.clone(),
             );
@@ -130,6 +131,13 @@ pub fn run() {
                 .join("OpenTake")
                 .join("Library");
             let library_store = LibraryStore::new(library_root);
+
+            // In-app chat (#HANDOFF-3.3): a ChatLoop over the live core + the
+            // workflow registry from the same workflows_dir the MCP server
+            // scans. The loop shares the Dispatcher pipeline so chat tool calls
+            // land on the same `EditCommand` entry as the MCP server. Placed
+            // before `app.manage(core)` so `core` is still borrowable.
+            app.manage(chat::ChatState::new(core.clone(), workflows_dir.clone()));
 
             app.manage(core);
             app.manage(MediaState::new(engine));
@@ -194,6 +202,9 @@ pub fn run() {
             transcribe::transcribe_media,
             transcribe::transcript_get,
             captions::generate_captions,
+            chat::chat_send,
+            chat::chat_history,
+            chat::chat_cancel,
             search::search_model_status,
             search::download_search_model,
             search::search_index_status,

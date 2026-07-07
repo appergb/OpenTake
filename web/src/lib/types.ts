@@ -587,3 +587,29 @@ export interface SecretStatus {
   hasKey: boolean;
   masked: string;
 }
+
+// MARK: - In-app chat (mirror of opentake-agent::chat::session, camelCase)
+//
+// The chat session/message model. `role` wire values are lowercase to match
+// OpenAI/Anthropic chat conventions (and the Rust `Role` serde rename). A
+// `tool` role message carries `toolCallId` (the call it answers); an
+// `assistant` turn may carry `toolCalls` (the calls it requested).
+
+export type ChatRole = "system" | "user" | "assistant" | "tool";
+
+export interface ChatToolCall {
+  id: string;
+  name: string;
+  args: unknown;
+  result?: unknown;
+  isError?: boolean;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: ChatRole;
+  content: string;
+  toolCalls: ChatToolCall[];
+  createdAt: number;
+  toolCallId?: string;
+}
