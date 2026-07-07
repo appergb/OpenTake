@@ -587,3 +587,10 @@ export interface SecretStatus {
   hasKey: boolean;
   masked: string;
 }
+
+// MARK: - Save as Media (mirror of src-tauri export::ExportFormat, #48)
+
+/** Output format for "Save as Media" (mirror of Rust `ExportFormat`). `video`
+ *  composites to H.264 `.mp4`; `audioWav` writes a mixed-down `.wav`. An
+ *  audio-only clip auto-downgrades `video` → `audioWav` on the backend. */
+export type ExportFormat = "video" | "audioWav";

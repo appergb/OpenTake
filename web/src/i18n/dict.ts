@@ -387,6 +387,8 @@ const zh: Dict = {
   // Disabled placeholders (issue #93 acceptance: menu must list these even if stub)
   "contextMenu.saveAsMedia": "另存为媒体",
   "contextMenu.extractAudio": "提取音频",
+  "media.saveAsMediaSaved": "已保存到媒体库",
+  "media.saveAsMediaFailed": "保存失败",
   "swapMedia.noCandidates": "没有同类型素材可替换",
 
   // Preview
@@ -903,6 +905,8 @@ const en: Dict = {
   // Disabled placeholders (issue #93 acceptance: menu must list these even if stub)
   "contextMenu.saveAsMedia": "Save as Media",
   "contextMenu.extractAudio": "Extract Audio",
+  "media.saveAsMediaSaved": "Saved to media library",
+  "media.saveAsMediaFailed": "Save failed",
   "swapMedia.noCandidates": "No compatible media to swap",
 
   "preview.fit": "Fit",

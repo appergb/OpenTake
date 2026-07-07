@@ -10,6 +10,7 @@ import { useEditorUiStore } from "../../store/uiStore";
 import { useClipboardStore } from "../../store/clipboardStore";
 import * as edit from "../../store/editActions";
 import { useT } from "../../i18n";
+import { onExportProgress, saveClipAsMedia } from "../../lib/api";
 import type { Clip, ClipPropertiesReq, Interpolation } from "../../lib/types";
 import type { FadeEdge } from "./hitTest";
 
@@ -36,6 +37,7 @@ type ClipMenuLabels = {
   link: string;
   unlink: string;
   swapMedia: string;
+  saveAsMedia: string;
 };
 
 export function clipContextMenuItems({
@@ -51,6 +53,7 @@ export function clipContextMenuItems({
   onLink,
   onUnlink,
   onSwapMedia,
+  onSaveAsMedia,
 }: {
   clip: Clip;
   hasClipboardContent: boolean;
@@ -64,6 +67,7 @@ export function clipContextMenuItems({
   onLink: (ids: string[]) => void | Promise<void>;
   onUnlink: (ids: string[]) => void | Promise<void>;
   onSwapMedia: () => void;
+  onSaveAsMedia: () => void | Promise<void>;
 }): MenuItem[] {
   const items: MenuItem[] = [
     {
@@ -133,6 +137,22 @@ export function clipContextMenuItems({
     });
   }
 
+  // Save as Media: render the clip (or a sub-range) to a file and import it
+  // back into the library. Video/image → .mp4; audio → .wav (backend decides).
+  if (
+    clip.mediaType === "video" ||
+    clip.mediaType === "audio" ||
+    clip.mediaType === "image"
+  ) {
+    items.push({
+      label: labels.saveAsMedia,
+      action: () => {
+        ensureSelected();
+        void onSaveAsMedia();
+      },
+    });
+  }
+
   return items;
 }
 
@@ -170,6 +190,7 @@ export function ClipContextMenu({
   const selectedClipIds = useEditorUiStore((s) => s.selectedClipIds);
   const selectClips = useEditorUiStore((s) => s.selectClips);
   const setPendingSwapClipId = useEditorUiStore((s) => s.setPendingSwapClipId);
+  const pushToast = useEditorUiStore((s) => s.pushToast);
   const hasClipboardContent = useClipboardStore((s) => s.hasContent);
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ left: x, top: y });
@@ -229,6 +250,41 @@ export function ClipContextMenu({
     if (!isSelected) selectClips(new Set([clipId]));
   };
 
+  // Save as Media: render the clip to a file and import it back into the
+  // library. Audio clips export as .wav; video/image as .mp4. Progress streams
+  // via the same export://progress event as the full-timeline export (debug-
+  // logged here; a progress bar can hook the same event later).
+  const handleSaveAsMedia = async () => {
+    const c = clip;
+    if (!c) return;
+    const inFrame = c.startFrame;
+    const outFrame = c.startFrame + c.durationFrames;
+    let trackIndex: number | null = null;
+    for (let i = 0; i < timeline.tracks.length; i++) {
+      if (timeline.tracks[i].clips.some((cc) => cc.id === c.id)) {
+        trackIndex = i;
+        break;
+      }
+    }
+    const format = c.mediaType === "audio" ? "audioWav" : "video";
+    const unlistenProgress = await onExportProgress(({ done, total }) => {
+      console.debug(`save-as-media progress: ${done}/${total}`);
+    });
+    try {
+      const list = await saveClipAsMedia(c.id, inFrame, outFrame, format, trackIndex);
+      if (!list) {
+        pushToast(t("media.saveAsMediaFailed"));
+        return;
+      }
+      pushToast(t("media.saveAsMediaSaved"));
+    } catch (error) {
+      console.warn("save as media failed:", error);
+      pushToast(t("media.saveAsMediaFailed"));
+    } finally {
+      unlistenProgress();
+    }
+  };
+
   let items: MenuItem[];
   if (fadeEdge) {
     items = fadeInterpolationMenuItems(
@@ -254,6 +310,7 @@ export function ClipContextMenu({
         link: t("contextMenu.link"),
         unlink: t("contextMenu.unlink"),
         swapMedia: t("contextMenu.swapMedia"),
+        saveAsMedia: t("contextMenu.saveAsMedia"),
       },
       ensureSelected,
       selectedClipIds: () => [...useEditorUiStore.getState().selectedClipIds],
@@ -264,6 +321,7 @@ export function ClipContextMenu({
       onLink: edit.linkClips,
       onUnlink: edit.unlinkClips,
       onSwapMedia: () => setPendingSwapClipId(clipId),
+      onSaveAsMedia: handleSaveAsMedia,
     });
   }
 

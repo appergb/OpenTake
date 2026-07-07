@@ -104,6 +104,21 @@ impl ExportQuality {
     }
 }
 
+/// Requested output format for a "Save as Media" range/clip save (#48). `Video`
+/// composites every frame in range to H.264 `.mp4` through the SAME wgpu
+/// `composite_frame` pixel path as the preview and full-timeline export (so a
+/// saved clip drags back onto the timeline pixel-identical); `AudioWav` skips
+/// the GPU entirely and writes a mixed-down `.wav`. An audio-only clip
+/// auto-downgrades `Video` → `AudioWav` (no frames to composite).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+pub enum ExportFormat {
+    #[default]
+    #[serde(rename = "video")]
+    Video,
+    #[serde(rename = "audioWav")]
+    AudioWav,
+}
+
 /// Parameters for an export, projected from the front-end. `#[serde(default)]`
 /// on the optional knobs keeps older callers (and partial payloads) working: a
 /// bare `{ "outPath": "..." }` exports H.264 / 1080p.
@@ -536,6 +551,7 @@ pub fn export_video(
         &req,
         Some(&control),
         Some(&on_progress),
+        None,
     )
 }
 
@@ -552,7 +568,7 @@ pub fn run_export(
     project_dir: &Option<PathBuf>,
     req: &ExportRequest,
 ) -> Result<ExportSummary, String> {
-    run_export_with_control(timeline, manifest, project_dir, req, None, None)
+    run_export_with_control(timeline, manifest, project_dir, req, None, None, None)
 }
 
 /// Shared orchestration behind [`run_export`] and [`export_video`]: `control`
@@ -567,6 +583,7 @@ fn run_export_with_control(
     req: &ExportRequest,
     control: Option<&ExportControl>,
     on_progress: Option<&dyn Fn(i32, i32)>,
+    frame_range: Option<(i32, i32)>,
 ) -> Result<ExportSummary, String> {
     let out_path = PathBuf::from(&req.out_path);
     let preset = resolve_preset(req.codec, req.quality, &out_path)?;
@@ -599,8 +616,22 @@ fn run_export_with_control(
     )
     .map_err(|e| format!("encoder init failed: {e}"))?;
 
+    // Resolve the frame range to export. `None` = the whole timeline (the
+    // `export_video` path); `Some((lo, hi))` = a marked range or single clip
+    // (#48 "Save as Media"), clamped to the plan so an out-of-range marker
+    // can't export a huge black tail.
+    let (start_frame, end_frame) = match frame_range {
+        None => (0, plan.total_frames),
+        Some((lo, hi)) => {
+            let lo = lo.max(0).min(plan.total_frames);
+            let hi = hi.max(lo).min(plan.total_frames);
+            (lo, hi)
+        }
+    };
+    let range_total = end_frame - start_frame;
+
     let mut last_progress_emit = Instant::now();
-    for f in 0..plan.total_frames {
+    for f in start_frame..end_frame {
         if control.is_some_and(|c| c.is_cancelled()) {
             // `abort` kills + waits on the ffmpeg child (unlike a plain `drop`,
             // which would orphan the process and race the file removal below).
@@ -642,10 +673,10 @@ fn run_export_with_control(
 
         if let Some(emit) = on_progress {
             let now = Instant::now();
-            let done = f + 1;
-            let is_last = done == plan.total_frames;
+            let done = f - start_frame + 1;
+            let is_last = done == range_total;
             if is_last || progress_should_emit(last_progress_emit, now) {
-                emit(done, plan.total_frames);
+                emit(done, range_total);
                 last_progress_emit = now;
             }
         }
@@ -653,7 +684,14 @@ fn run_export_with_control(
 
     // Decode + linearly mix every audio-bearing clip, then hand the mixed PCM to
     // the encoder so `finish` mux's it into the container. No audio → video-only.
+    // For a range/clip save, slice the full-timeline mix to [start, end) so the
+    // saved clip doesn't carry the whole timeline's audio tail.
     if let Some(pcm) = mix_timeline_audio(timeline, &media)? {
+        let pcm = if frame_range.is_some() {
+            slice_pcm(pcm, start_frame, end_frame, plan.fps)
+        } else {
+            pcm
+        };
         encoder.push_audio(pcm);
     }
 
@@ -666,8 +704,195 @@ fn run_export_with_control(
         width: render_size.width,
         height: render_size.height,
         fps: plan.fps,
-        frame_count: plan.total_frames,
+        frame_count: range_total,
     })
+}
+
+// MARK: - Range / clip "Save as Media" (#48)
+
+/// Slice a mixed-down PCM buffer to the samples spanning [start_frame, end_frame)
+/// at `fps`. The mix is laid down at the timeline's sample rate, so the frame
+/// range maps directly to a sample range. Returns an empty buffer for a
+/// degenerate range or out-of-bounds input (the caller then mux's no audio).
+fn slice_pcm(pcm: PcmBuffer, start_frame: i32, end_frame: i32, fps: i32) -> PcmBuffer {
+    if fps <= 0 || start_frame >= end_frame {
+        return PcmBuffer {
+            spec: pcm.spec,
+            samples_f32: Vec::new(),
+        };
+    }
+    let rate = pcm.spec.sample_rate as f64;
+    let lo = ((start_frame.max(0) as f64) / fps as f64 * rate).round() as usize;
+    let hi = ((end_frame.max(0) as f64) / fps as f64 * rate).round() as usize;
+    let lo = lo.min(pcm.samples_f32.len());
+    let hi = hi.max(lo).min(pcm.samples_f32.len());
+    PcmBuffer {
+        spec: pcm.spec,
+        samples_f32: pcm.samples_f32[lo..hi].to_vec(),
+    }
+}
+
+/// Write a mono 16-bit PCM WAV file from a mono f32 buffer. The 44-byte header
+/// (RIFF / fmt / data chunks) is hand-written so an audio-only "Save as Media"
+/// doesn't need to spin up an ffmpeg child for a raw PCM write. Samples are
+/// scaled by 32767 and clamped, matching `mono_f32_to_s16le`.
+fn write_wav_s16le(samples: &[f32], sample_rate: u32, out: &Path) -> Result<(), String> {
+    let data = opentake_media::encode::mono_f32_to_s16le(samples);
+    let mut buf = Vec::with_capacity(44 + data.len());
+    let data_len = data.len() as u32;
+    let chunk_size = 36 + data_len;
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&chunk_size.to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes()); // PCM format
+    buf.extend_from_slice(&1u16.to_le_bytes()); // mono
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    let byte_rate = sample_rate * 2; // mono * 16-bit
+    buf.extend_from_slice(&byte_rate.to_le_bytes());
+    buf.extend_from_slice(&2u16.to_le_bytes()); // block align
+    buf.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_len.to_le_bytes());
+    buf.extend_from_slice(&data);
+    std::fs::write(out, &buf).map_err(|e| format!("write wav: {e}"))
+}
+
+/// `export_range`: render a single clip or a marked timeline range to a media
+/// file ON DISK and import it into the project's media library — the "Save as
+/// Media" right-click action (#48 tail). The output reuses the SAME
+/// `composite_frame` pixel path as the preview and full-timeline export (so a
+/// saved clip drags back onto the timeline looking identical), then hands the
+/// file to `import_media` so it appears in the panel and is undoable as a
+/// manifest mutation.
+///
+/// Two modes:
+/// - `clip_id = Some`: export the single clip. `in_frame`/`out_frame` default
+///   to the clip's timeline span (`start_frame`..`start_frame + duration`);
+///   pass explicit values to export a sub-range (clamped to the clip).
+/// - `clip_id = None`: export the marked range `in_frame..out_frame` of the
+///   whole-timeline composite (all visible tracks composited together).
+///
+/// `format` picks the output kind. `Video` composites every frame in range to
+/// H.264 `.mp4`; `AudioWav` skips the GPU and writes a mixed-down `.wav`. An
+/// audio-only clip (`media_type = audio`) auto-downgrades `Video` to `AudioWav`
+/// (no video frames to composite). Progress streams via the same
+/// `"export://progress"` event as `export_video`. Returns the refreshed media
+/// catalog so the panel can show the new asset.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn export_range(
+    app: AppHandle,
+    core: State<'_, AppCore>,
+    control: State<'_, ExportControl>,
+    media: State<'_, crate::media::MediaState>,
+    track_index: Option<usize>,
+    clip_id: Option<String>,
+    in_frame: i32,
+    out_frame: i32,
+    format: ExportFormat,
+) -> Result<crate::media::MediaListDto, String> {
+    let timeline = core.get_timeline().timeline;
+    let manifest = core.media();
+    let project_dir = core.project_dir();
+    let engine = media.engine();
+
+    // Resolve the clip (if any) and the effective frame range. A clip save
+    // defaults to the clip's own span; an explicit in/out overrides it (clamped
+    // to the clip so a typo can't export a huge range). `track_index` narrows
+    // the lookup when the caller knows the clip's track.
+    let (clip_id_resolved, start, end, is_audio_clip) = match &clip_id {
+        Some(id) => {
+            let clip = match track_index {
+                Some(i) => timeline
+                    .tracks
+                    .get(i)
+                    .and_then(|t| t.clips.iter().find(|c| c.id == *id))
+                    .ok_or_else(|| format!("clip not found: {id} in track {i}"))?,
+                None => timeline
+                    .tracks
+                    .iter()
+                    .flat_map(|t| t.clips.iter())
+                    .find(|c| c.id == *id)
+                    .ok_or_else(|| format!("clip not found: {id}"))?,
+            };
+            let clip_start = clip.start_frame;
+            let clip_end = clip.start_frame + clip.duration_frames.max(0);
+            let s = if in_frame > 0 { in_frame } else { clip_start };
+            let e = if out_frame > 0 { out_frame } else { clip_end };
+            let s = s.max(clip_start).min(clip_end);
+            let e = e.max(s).min(clip_end);
+            (Some(id.clone()), s, e, clip.media_type == ClipType::Audio)
+        }
+        None => {
+            if out_frame <= in_frame {
+                return Err("export_range requires in_frame < out_frame".into());
+            }
+            (None, in_frame.max(0), out_frame.max(0), false)
+        }
+    };
+
+    if end <= start {
+        return Err("export_range: empty frame range".into());
+    }
+
+    // Audio-only clip or explicit AudioWav format → skip the GPU, mix to wav.
+    let is_audio = matches!(format, ExportFormat::AudioWav) || is_audio_clip;
+    let ext = if is_audio { "wav" } else { "mp4" };
+
+    // Output into the media cache's "saves" subdir (same pattern as
+    // capture_frame_to_media's "captures" dir); import_one then brings it into
+    // the manifest as an external asset.
+    let saves_dir = engine.cache_root().join("saves");
+    std::fs::create_dir_all(&saves_dir).map_err(|e| format!("create saves dir: {e}"))?;
+    let name_id = clip_id_resolved.as_deref().unwrap_or("range");
+    let out_path = saves_dir.join(format!("save_{name_id}_{start}_{end}.{ext}"));
+
+    control.reset();
+    let on_progress = |done: i32, total: i32| {
+        let _ = app.emit("export://progress", ExportProgress { done, total });
+    };
+
+    if is_audio {
+        // Mix the whole timeline's audio, then slice to [start, end). No GPU
+        // composite for an audio-only save.
+        let (_sizes, media_map) = project_media(&manifest, &project_dir);
+        let pcm = mix_timeline_audio(&timeline, &media_map)?
+            .ok_or_else(|| "no audio in range to export".to_string())?;
+        let pcm = slice_pcm(pcm, start, end, timeline.fps);
+        if pcm.samples_f32.is_empty() {
+            return Err("no audio in range to export".into());
+        }
+        write_wav_s16le(&pcm.samples_f32, pcm.spec.sample_rate, &out_path)?;
+    } else {
+        let req = ExportRequest {
+            out_path: out_path.to_string_lossy().into_owned(),
+            codec: ExportCodec::H264,
+            quality: ExportQuality::P1080,
+        };
+        run_export_with_control(
+            &timeline,
+            &manifest,
+            &project_dir,
+            &req,
+            Some(&control),
+            Some(&on_progress),
+            Some((start, end)),
+        )?;
+    }
+
+    // Import the rendered file into the media library (same path a user import
+    // takes) so it shows up in the panel and is undoable. A failure here is a
+    // real error — the user just waited for a render and must not get a silent
+    // no-op.
+    let _entry = crate::media::import_one(&core, engine, &out_path)
+        .ok_or_else(|| "save-as-media import failed".to_string())?;
+
+    Ok(crate::media::MediaListDto::from_core(
+        &core,
+        Some(engine.cache_root()),
+    ))
 }
 
 // MARK: - Self-contained `.opentake` bundle export (#29 / upstream `.palmier`)
@@ -1005,6 +1230,105 @@ mod tests {
         )
         .expect("parse");
         assert_eq!(req.quality, ExportQuality::P720);
+    }
+
+    #[test]
+    fn export_format_defaults_to_video() {
+        let f: ExportFormat = serde_json::from_str(r#""video""#).expect("parse");
+        assert_eq!(f, ExportFormat::Video);
+    }
+
+    #[test]
+    fn export_format_parses_audio_wav_tag() {
+        // The front-end sends the camelCase tag `audioWav` (not `audiowav`,
+        // which `rename_all = "lowercase"` would produce) — pin the exact wire
+        // tag so an IPC rename can't silently break the "Save as Media" path.
+        let f: ExportFormat = serde_json::from_str(r#""audioWav""#).expect("parse");
+        assert_eq!(f, ExportFormat::AudioWav);
+    }
+
+    #[test]
+    fn slice_pcm_returns_empty_for_degenerate_range() {
+        let pcm = PcmBuffer {
+            spec: AUDIO_DECODE_SPEC,
+            samples_f32: vec![0.1; 100],
+        };
+        assert!(slice_pcm(pcm, 5, 5, 30).samples_f32.is_empty());
+        // Reversed range (hi < lo) is degenerate too.
+        let pcm = PcmBuffer {
+            spec: AUDIO_DECODE_SPEC,
+            samples_f32: vec![0.1; 100],
+        };
+        assert!(slice_pcm(pcm, 10, 5, 30).samples_f32.is_empty());
+    }
+
+    #[test]
+    fn slice_pcm_returns_empty_for_zero_fps() {
+        let pcm = PcmBuffer {
+            spec: AUDIO_DECODE_SPEC,
+            samples_f32: vec![0.1; 100],
+        };
+        assert!(slice_pcm(pcm, 0, 10, 0).samples_f32.is_empty());
+    }
+
+    #[test]
+    fn slice_pcm_slices_to_frame_range_at_mix_rate() {
+        // 160_000 samples at 48kHz / 30fps = ~100 frames of audio. A 30-frame
+        // range (1s) = 48_000 samples.
+        let pcm = PcmBuffer {
+            spec: AUDIO_DECODE_SPEC,
+            samples_f32: vec![0.5; 160_000],
+        };
+        let sliced = slice_pcm(pcm, 10, 40, 30);
+        assert_eq!(sliced.samples_f32.len(), 48_000);
+        assert!(sliced
+            .samples_f32
+            .iter()
+            .all(|&s| (s - 0.5).abs() < f32::EPSILON));
+    }
+
+    #[test]
+    fn slice_pcm_clamps_to_buffer_length() {
+        // A range past the end of the buffer yields only the available samples,
+        // not an index out of bounds.
+        let pcm = PcmBuffer {
+            spec: AUDIO_DECODE_SPEC,
+            samples_f32: vec![0.1; 100],
+        };
+        let sliced = slice_pcm(pcm, 0, 10_000, 30);
+        assert_eq!(sliced.samples_f32.len(), 100);
+    }
+
+    #[test]
+    fn write_wav_s16le_writes_valid_riff_header() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let out = std::env::temp_dir().join(format!("opentake-wav-test-{nonce}.wav"));
+        // 1 sample of silence + 1 sample of full-scale.
+        write_wav_s16le(&[0.0, 1.0], MIX_SAMPLE_RATE, &out).expect("write");
+        let bytes = std::fs::read(&out).expect("read");
+        // RIFF / WAVE magic.
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        // fmt chunk: PCM, mono, 48kHz, 16-bit.
+        assert_eq!(&bytes[12..16], b"fmt ");
+        assert_eq!(u32::from_le_bytes(bytes[16..20].try_into().unwrap()), 16);
+        assert_eq!(u16::from_le_bytes(bytes[20..22].try_into().unwrap()), 1); // PCM
+        assert_eq!(u16::from_le_bytes(bytes[22..24].try_into().unwrap()), 1); // mono
+        assert_eq!(
+            u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
+            MIX_SAMPLE_RATE
+        );
+        assert_eq!(u16::from_le_bytes(bytes[34..36].try_into().unwrap()), 16); // bits
+                                                                               // data chunk: 2 samples * 2 bytes = 4 bytes.
+        assert_eq!(&bytes[36..40], b"data");
+        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 4);
+        // First sample = 0, second = 32767 (full-scale).
+        assert_eq!(i16::from_le_bytes([bytes[44], bytes[45]]), 0);
+        assert_eq!(i16::from_le_bytes([bytes[46], bytes[47]]), 32767);
+        let _ = std::fs::remove_file(&out);
     }
 
     use opentake_domain::{Timeline, Track};

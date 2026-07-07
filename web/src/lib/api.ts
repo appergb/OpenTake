@@ -13,6 +13,7 @@ import type {
   ClipType,
   EditRequest,
   EditResult,
+  ExportFormat,
   GenerateCaptionsResult,
   MediaList,
   ModelStatus,
@@ -331,6 +332,49 @@ export async function exportBundle(outPath: string): Promise<BundleReport> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<BundleReport>("export_bundle", { outPath });
   throw new Error("bundle export requires the desktop app");
+}
+
+// MARK: - Save clip / range as media (#48)
+//
+// `export_range` renders a single clip or a marked timeline range to a file on
+// disk and imports it into the media library — the "Save as Media" right-click
+// action. It reuses the same `composite_frame` pixel path as the preview and
+// full-timeline export, so a saved clip drags back onto the timeline looking
+// identical. Progress streams via the same `"export://progress"` event as
+// `export_video` (subscribe with `onExportProgress`). Returns null outside
+// Tauri (no GPU/ffmpeg); the refreshed media catalog on success.
+
+/**
+ * Render a clip or marked range and import it as a new media asset.
+ *
+ * - `clipId` set: export that clip (defaults to its full span; pass
+ *   `inFrame`/`outFrame` to export a sub-range, clamped to the clip).
+ * - `clipId` null: export the marked range `inFrame..outFrame` of the
+ *   whole-timeline composite.
+ *
+ * `format` picks the output: `"video"` → H.264 `.mp4` (composited on the GPU);
+ * `"audioWav"` → mixed-down `.wav` (no GPU). An audio-only clip auto-downgrades
+ * `"video"` → `"audioWav"` on the backend. `trackIndex` narrows the clip
+ * lookup when known. Returns the refreshed media catalog, or null outside
+ * Tauri.
+ */
+export async function saveClipAsMedia(
+  clipId: string | null,
+  inFrame: number,
+  outFrame: number,
+  format: ExportFormat = "video",
+  trackIndex: number | null = null,
+): Promise<MediaList | null> {
+  await ensureTauri();
+  if (invokeImpl)
+    return invokeImpl<MediaList>("export_range", {
+      clipId,
+      inFrame: Math.floor(inFrame),
+      outFrame: Math.floor(outFrame),
+      format,
+      trackIndex,
+    });
+  return null;
 }
 
 // MARK: - Media commands
