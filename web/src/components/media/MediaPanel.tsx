@@ -1,8 +1,9 @@
 /**
  * MediaPanel (SPEC §7 + 剪映式顶栏改造)。顶部横排主标签（素材/音频/文本/贴纸/
  * 特效/转场/字幕/智能包裹，仅素材/音频可用，其余置灰占位）取代了原左侧竖排
- * Media/Captions/Music 标签条。素材/音频下再分「导入 / 我的」二级标签：导入=全部
- * （音频标签仅 type==='audio'），我的=星标收藏（localStorage 持久化，见 favorites.ts）。
+ * Media/Captions/Music 标签条。素材/音频下再分「导入 / 我的 / AI 生成」三级标签：
+ * 导入=全部（音频标签仅 type==='audio'，卡片带波形缩略图），我的=星标收藏（路由到
+ * 全局库 library_favorite，跨项目可用，见 favorites.ts），AI 生成=占位（接 PR-5）。
  * 内容区仍是 actions/search/context 工具栏 + 资产网格；网格项 HTML5-draggable 到
  * 时间线（见 `MediaGrid` / `TimelineRegion`）。
  */
@@ -42,13 +43,13 @@ import { BoundedCache } from "../../lib/lru";
 import { childFolders, folderTrail, normalizeFolderId } from "../../lib/folderTree";
 import { useProjectStore } from "../../store/projectStore";
 import { addMediaToTimeline } from "../../store/editActions";
-import { extractAudio, generateThumbnail, preloadMedia } from "../../lib/api";
+import { extractAudio, generateThumbnail, getWaveform, preloadMedia } from "../../lib/api";
 import { saveDialog } from "../../lib/dialog";
 import type { MediaFolder, MediaItem } from "../../lib/types";
 import { MediaTabBar, MediaSubTabBar } from "./MediaTabBar";
 import { CaptionsTab } from "./CaptionsTab";
 import { MediaSearchResults } from "./MediaSearch";
-import { useFavoritesStore, useIsFavorite } from "./favorites";
+import { useFavoritesStore, useIsFavorite, startFavoritesSync } from "./favorites";
 
 /** MIME-ish type used on dataTransfer when dragging a media item to the timeline. */
 export const MEDIA_DND_TYPE = "application/x-opentake-media";
@@ -149,10 +150,16 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   const error = useMediaStore((s) => s.error);
   const subTab = useEditorUiStore((s) => s.mediaSubTab);
   const setSubTab = useEditorUiStore((s) => s.setMediaSubTab);
-  const favoriteIds = useFavoritesStore((s) => s.ids);
+  const favoriteSources = useFavoritesStore((s) => s.sources);
   const currentFolderId = useEditorUiStore((s) => s.mediaPanelCurrentFolderId);
   const setCurrentFolderId = useEditorUiStore((s) => s.setMediaPanelCurrentFolderId);
   const [search, setSearch] = useState("");
+
+  // 首次拿到非空 catalog 后拉取全局库条目 + 迁移 localStorage 旧星标（#91-C）。
+  // `startFavoritesSync` 内有 `started` 守卫，items 后续变化时只会立即返回。
+  useEffect(() => {
+    if (items.length > 0) void startFavoritesSync(items);
+  }, [items]);
 
   // Folder navigation only applies to the "import" view (the full library tree).
   // "我的/favorites" is a flat cross-folder collection, so it ignores folders.
@@ -190,12 +197,12 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
     () =>
       items.filter((item) => {
         if (kind === "audio" && item.type !== "audio") return false;
-        if (subTab === "mine" && !favoriteIds.has(item.id)) return false;
+        if (subTab === "mine" && !favoriteSources.has(item.path ?? "")) return false;
         if (query !== "") return item.name.toLowerCase().includes(query);
         if (browsing && normalizeFolderId(item.folderId) !== folderId) return false;
         return true;
       }),
-    [items, kind, subTab, favoriteIds, query, browsing, folderId],
+    [items, kind, subTab, favoriteSources, query, browsing, folderId],
   );
 
   const trail = useMemo(() => folderTrail(folders, folderId), [folders, folderId]);
@@ -293,7 +300,9 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
         )}
       </div>
 
-      {query !== "" ? (
+      {subTab === "ai" ? (
+        <AiGeneratePlaceholder />
+      ) : query !== "" ? (
         // Smart search: three result groups (Moments / Spoken / Files) + the
         // index-status affordance. `filteredItems` is the name-matched Files group
         // (already scoped to the current main/subtab). Moments/Spoken come from
@@ -645,7 +654,7 @@ function MediaCard({ item }: { item: MediaItem }) {
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
   const durationFrames = Math.round(item.duration * fps);
   const selected = previewMediaId === item.id;
-  const favorite = useIsFavorite(item.id);
+  const favorite = useIsFavorite(item.path);
   const toggleFavorite = useFavoritesStore((s) => s.toggle);
   const thumbnailKey = mediaThumbnailKey(item);
   const [lazyThumbnail, setLazyThumbnail] = useState<string | null>(
@@ -800,6 +809,8 @@ function MediaCard({ item }: { item: MediaItem }) {
             draggable={false}
             style={{ width: "100%", height: "100%", objectFit: "cover" }}
           />
+        ) : item.type === "audio" ? (
+          <AudioWaveform mediaRef={item.id} missing={item.missing} />
         ) : (
           <Icon icon={TYPE_ICON[item.type]} size={22} strokeWidth={1.5} />
         )}
@@ -872,7 +883,7 @@ function MediaCard({ item }: { item: MediaItem }) {
           title={favorite ? t("media.unfavorite") : t("media.favorite")}
           onClick={(e) => {
             e.stopPropagation();
-            toggleFavorite(item.id);
+            void toggleFavorite(item);
           }}
           style={{
             position: "absolute",
@@ -963,4 +974,89 @@ function Placeholder({ label }: { label: string }) {
       {label}
     </div>
   );
+}
+
+/** 「AI 生成」二级标签占位（#91-B1，接 PR-5 生成 UI）。生成式 AI 客户端
+ *  (opentake-gen) 已就绪，但文生视频/图/音频的 UI 入口在本期之外；此占位让
+ *  分区结构到位，避免后续改动 MediaPanel 骨架。 */
+function AiGeneratePlaceholder() {
+  const t = useT();
+  return (
+    <div
+      style={{
+        flex: 1,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: "var(--space-sm)",
+        color: "var(--text-muted)",
+        fontSize: "var(--fs-sm-md)",
+        padding: "var(--space-xl)",
+        textAlign: "center",
+      }}
+    >
+      <Icon icon={Sparkles} size={28} strokeWidth={1.5} />
+      <span>{t("media.subtab.ai")}</span>
+    </div>
+  );
+}
+
+/** 音频卡片的波形缩略图（#91-B3）。复用 `get_waveform` 命令拿归一化桶
+ *  (0=响, 1=静)，采样到固定条数渲染竖条。decode 失败 / 无音频轨 → 不渲染
+ *  （卡片回落到类型图标，由 MediaCard 的 ternary 决定）。 */
+function AudioWaveform({ mediaRef, missing }: { mediaRef: string; missing?: boolean }) {
+  const [buckets, setBuckets] = useState<number[] | null>(null);
+  useEffect(() => {
+    if (missing) return;
+    let cancelled = false;
+    void getWaveform(mediaRef).then((b) => {
+      if (!cancelled) setBuckets(b);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [mediaRef, missing]);
+  if (!buckets || buckets.length === 0) return null;
+  const N = 48;
+  const sampled = sampleWaveform(buckets, N);
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 1,
+        width: "70%",
+        height: "50%",
+      }}
+    >
+      {sampled.map((v, i) => {
+        const h = Math.max(8, (1 - v) * 100);
+        return (
+          <div
+            key={i}
+            style={{
+              flex: 1,
+              height: `${h}%`,
+              minHeight: 2,
+              background: "var(--accent-primary)",
+              opacity: 0.65,
+              borderRadius: 1,
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+/** 把任意长度的波形桶采样到 `target` 条：取每段代表点的值（无插值）。 */
+function sampleWaveform(buckets: number[], target: number): number[] {
+  if (buckets.length <= target) return buckets;
+  const step = buckets.length / target;
+  const out: number[] = new Array(target);
+  for (let i = 0; i < target; i++) {
+    out[i] = buckets[Math.floor(i * step)];
+  }
+  return out;
 }

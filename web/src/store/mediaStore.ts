@@ -41,7 +41,13 @@ let unlisten: (() => void) | null = null;
 export async function refreshMedia(): Promise<void> {
   const list = await api.getMedia();
   const store = useMediaStore.getState();
-  store.setItems(list.items);
+  // Dedup by id (#91-A4): a former bug showed duplicate cards because the store
+  // aggregated by name/path. The store no longer aggregates, but a concurrent
+  // `media_changed` re-fetch could still race a stale list; enforce id-unique so
+  // the grid never shows the same asset twice (last wins, manifest order kept by
+  // the backend).
+  const byId = new Map(list.items.map((i) => [i.id, i] as const));
+  store.setItems([...byId.values()]);
   store.setFolders(list.folders);
 }
 

@@ -123,6 +123,7 @@ const zh: Dict = {
   // 二级标签：导入 / 我的
   "media.subtab.import": "导入",
   "media.subtab.mine": "我的",
+  "media.subtab.ai": "AI 生成",
   // 星标收藏
   "media.favorite": "收藏",
   "media.unfavorite": "取消收藏",
@@ -642,6 +643,7 @@ const en: Dict = {
   "media.tab.smartPack": "Smart Pack",
   "media.subtab.import": "Import",
   "media.subtab.mine": "Mine",
+  "media.subtab.ai": "AI Generate",
   "media.favorite": "Add to favorites",
   "media.unfavorite": "Remove from favorites",
   "media.empty.mine": "No favorites yet. Tap the star on a clip to save it.",

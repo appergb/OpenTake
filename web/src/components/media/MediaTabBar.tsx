@@ -118,6 +118,7 @@ interface SubTab {
 const SUB_TABS: ReadonlyArray<SubTab> = [
   { id: "import", labelKey: "media.subtab.import" },
   { id: "mine", labelKey: "media.subtab.mine" },
+  { id: "ai", labelKey: "media.subtab.ai" },
 ];
 
 /** 二级 pill 切换：导入 / 我的。 */

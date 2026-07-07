@@ -29,8 +29,8 @@ export type MediaTabId =
   | "transition"
   | "subtitle"
   | "smartPack";
-/** 素材/音频下的二级标签：导入（全部素材）/ 我的（星标收藏）。 */
-export type MediaSubTabId = "import" | "mine";
+/** 素材/音频下的二级标签：导入（全部素材）/ 我的（星标收藏，全局库）/ AI 生成（占位，接 PR-5）。 */
+export type MediaSubTabId = "import" | "mine" | "ai";
 export type InspectorTabId = "text" | "video" | "audio" | "aiEdit";
 
 const LS = {
