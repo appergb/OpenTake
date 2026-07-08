@@ -10,6 +10,10 @@ const labels = {
   link: "Link",
   unlink: "Unlink",
   swapMedia: "Swap Media",
+  saveAsMedia: "Save as Media",
+  reverse: "Reverse",
+  reverseOn: "Reverse On",
+  reverseTooLong: "Reverse Too Long",
 };
 
 function clip(overrides: Partial<Clip> = {}): Clip {
@@ -85,6 +89,9 @@ describe("clipContextMenuItems", () => {
       onLink: vi.fn(),
       onUnlink: vi.fn(),
       onSwapMedia: vi.fn(),
+      onSaveAsMedia: vi.fn(),
+      onReverse: vi.fn(),
+      reverseInfo: { isReversed: false, tooLong: false },
     };
   }
 
@@ -150,5 +157,23 @@ describe("clipContextMenuItems", () => {
     expect(videoItems.map((item) => item.label)).toContain("Swap Media");
     expect(imageItems.map((item) => item.label)).toContain("Swap Media");
     expect(audioItems.map((item) => item.label)).not.toContain("Swap Media");
+  });
+
+  it("shows reverse only for video clips", () => {
+    const videoItems = clipContextMenuItems({
+      clip: clip({ mediaType: "video" }),
+      hasClipboardContent: false,
+      labels,
+      ...actions(),
+    });
+    const audioItems = clipContextMenuItems({
+      clip: clip({ mediaType: "audio", sourceClipType: "audio" }),
+      hasClipboardContent: false,
+      labels,
+      ...actions(),
+    });
+
+    expect(videoItems.some((item) => item.label === labels.reverse)).toBe(true);
+    expect(audioItems.some((item) => item.label === labels.reverse)).toBe(false);
   });
 });

@@ -184,6 +184,7 @@ export interface Clip {
   trimStartFrame: number;
   trimEndFrame: number;
   speed: number;
+  reversed?: boolean;
   volume: number;
   fadeInFrames: number;
   fadeOutFrames: number;
@@ -241,6 +242,7 @@ export interface ClipPropertiesReq {
   trimStartFrame?: number;
   trimEndFrame?: number;
   speed?: number;
+  reversed?: boolean;
   volume?: number;
   opacity?: number;
   transform?: Transform;

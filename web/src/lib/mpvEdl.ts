@@ -51,6 +51,7 @@ export function timelineToEdl(
   const fps = timeline.fps > 0 ? timeline.fps : 30;
   const track = primaryVideoTrack(timeline);
   if (!track) return null;
+  if (track.clips.some((clip) => clip.mediaType === "video" && clip.reversed)) return null;
 
   const clips = [...track.clips]
     .filter((c) => (c.mediaType ?? "video") !== "text")

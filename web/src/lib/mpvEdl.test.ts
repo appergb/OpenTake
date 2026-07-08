@@ -61,6 +61,11 @@ describe("timelineToEdl", () => {
     expect(edl).toBe("edl://%12%/media/a.mp4,start=0.500000,length=2.000000");
   });
 
+  it("does not create an mpv edl for reversed clips", () => {
+    const t = timeline([track("video", [clip({ id: "c1", reversed: true })])]);
+    expect(timelineToEdl(t, pathOf)).toBeNull();
+  });
+
   it("fills a leading gap with lavfi black at project size/fps", () => {
     const t = track("video", [clip({ id: "c1", startFrame: 30 })]);
     const edl = timelineToEdl(timeline([t]), pathOf)!;

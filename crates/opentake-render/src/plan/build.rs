@@ -121,6 +121,7 @@ fn make_clip_plan(
         preferred_transform,
         needs_premultiply,
         speed: clip.speed,
+        reversed: clip.reversed,
         trim_start_frame: clip.trim_start_frame,
         media_type: clip.media_type,
         lottie_frame_count,
@@ -233,6 +234,8 @@ pub fn source_frame_index(plan: &ClipPlan, f: i32) -> i64 {
     } else {
         plan.trim_start_frame as i64
     };
+    let duration_frames = (plan.end_frame - plan.start_frame).max(1) as f64;
+    let last = trim + round_haz((duration_frames - 1.0) * plan.speed);
 
     match (&plan.source, plan.media_type) {
         // Image / Text: single static texture.
@@ -247,7 +250,14 @@ pub fn source_frame_index(plan: &ClipPlan, f: i32) -> i64 {
             }
         }
         // Decoded video/audio: source frame number; the decoder maps it to PTS.
-        _ => trim + round_haz(rel * plan.speed),
+        _ => {
+            let offset = round_haz(rel * plan.speed);
+            if plan.reversed {
+                (last - offset).clamp(trim, last)
+            } else {
+                (trim + offset).clamp(trim, last)
+            }
+        }
     }
 }
 

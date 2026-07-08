@@ -13,6 +13,27 @@
 import { volumeAt } from "../../lib/clip";
 import type { Clip, Timeline, Track } from "../../lib/types";
 
+function clipSpeed(clip: Clip): number {
+  return clip.speed > 0 ? clip.speed : 1;
+}
+
+function safeFpsValue(fps: number): number {
+  return fps > 0 ? fps : 30;
+}
+
+function clipLastSourceFrame(clip: Clip): number {
+  const durationFrames = Math.max(1, clip.durationFrames);
+  return clip.trimStartFrame + Math.round((durationFrames - 1) * clipSpeed(clip));
+}
+
+function sourceFrameForTimelineFrame(clip: Clip, frame: number): number {
+  const offset = Math.round((frame - clip.startFrame) * clipSpeed(clip));
+  const first = clip.trimStartFrame;
+  const last = clipLastSourceFrame(clip);
+  if (clip.reversed) return Math.min(last, Math.max(first, last - offset));
+  return Math.min(last, Math.max(first, first + offset));
+}
+
 /** A clip selected for playback at a frame, with its track context. */
 export interface ActiveMedia {
   clip: Clip;
@@ -87,9 +108,8 @@ export function activeAudioClips(timeline: Timeline, frame: number): ActiveMedia
  * (opentake-render plan/build.rs) in seconds. Clamped at 0.
  */
 export function sourceTimeSec(clip: Clip, frame: number, fps: number): number {
-  const speed = clip.speed > 0 ? clip.speed : 1;
-  const safeFps = fps > 0 ? fps : 30;
-  const srcFrame = clip.trimStartFrame + (frame - clip.startFrame) * speed;
+  const safeFps = safeFpsValue(fps);
+  const srcFrame = sourceFrameForTimelineFrame(clip, frame);
   return Math.max(0, srcFrame / safeFps);
 }
 
@@ -99,9 +119,10 @@ export function sourceTimeSec(clip: Clip, frame: number, fps: number): number {
  * master media element's clock (upstream's periodic time observer).
  */
 export function frameForSourceTime(clip: Clip, timeSec: number, fps: number): number {
-  const speed = clip.speed > 0 ? clip.speed : 1;
-  const safeFps = fps > 0 ? fps : 30;
+  const speed = clipSpeed(clip);
+  const safeFps = safeFpsValue(fps);
   const srcFrame = timeSec * safeFps;
+  if (clip.reversed) return clip.startFrame + (clipLastSourceFrame(clip) - srcFrame) / speed;
   return clip.startFrame + (srcFrame - clip.trimStartFrame) / speed;
 }
 

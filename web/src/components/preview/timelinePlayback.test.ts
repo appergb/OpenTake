@@ -240,6 +240,22 @@ describe("sourceTimeSec / frameForSourceTime", () => {
     expect(frameForSourceTime(c, ts, 30)).toBeCloseTo(90);
   });
 
+  it("maps reversed trimmed clips from the end of the trim window", () => {
+    const c = clip({
+      id: "c",
+      mediaType: "video",
+      startFrame: 100,
+      durationFrames: 20,
+      trimStartFrame: 10,
+      speed: 1,
+      reversed: true,
+    });
+    expect(frameForSourceTime(c, sourceTimeSec(c, 100, 30), 30)).toBeCloseTo(100);
+    expect(sourceTimeSec(c, 100, 30) * 30).toBeCloseTo(29);
+    expect(sourceTimeSec(c, 105, 30) * 30).toBeCloseTo(24);
+    expect(sourceTimeSec(c, 119, 30) * 30).toBeCloseTo(10);
+  });
+
   it("clamps source time at 0", () => {
     const c = clip({ id: "c", mediaType: "video", startFrame: 100, trimStartFrame: 0 });
     expect(sourceTimeSec(c, 0, 30)).toBe(0);
