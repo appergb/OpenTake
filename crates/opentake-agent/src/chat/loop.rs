@@ -29,6 +29,44 @@ use crate::signal::engine::build_signal;
 use crate::tools::descriptions::{description, input_schema};
 use crate::tools::names::ToolName;
 
+fn has_trailing_user_message(session: &ChatSession, text: &str) -> bool {
+    matches!(
+        session.messages.last(),
+        Some(ChatMessage {
+            role: crate::chat::session::Role::User,
+            content,
+            ..
+        }) if content == text
+    )
+}
+
+fn persist_assistant_tool_round(
+    session: &mut ChatSession,
+    content: String,
+    tool_calls: Vec<ToolCall>,
+) -> usize {
+    session
+        .messages
+        .push(ChatMessage::assistant(content, tool_calls));
+    session.messages.len() - 1
+}
+
+fn update_assistant_tool_call(
+    session: &mut ChatSession,
+    assistant_index: usize,
+    resolved_tool_call: &ToolCall,
+) {
+    if let Some(message) = session.messages.get_mut(assistant_index) {
+        if let Some(existing) = message
+            .tool_calls
+            .iter_mut()
+            .find(|tool_call| tool_call.id == resolved_tool_call.id)
+        {
+            *existing = resolved_tool_call.clone();
+        }
+    }
+}
+
 /// Events the loop emits during a turn. The Tauri shell forwards each to a
 /// matching front-end event.
 #[derive(Clone, Debug)]
@@ -139,7 +177,9 @@ impl ChatLoop {
         let provider = provider_from_choice(&provider_choice)?;
         session.provider = Some(provider_choice);
         session.model = Some(provider.default_model().to_string());
-        session.messages.push(ChatMessage::user(user_text));
+        if !has_trailing_user_message(session, &user_text) {
+            session.messages.push(ChatMessage::user(user_text));
+        }
 
         if self
             .store
@@ -182,7 +222,8 @@ impl ChatLoop {
             };
 
             let sid_clone = sid.clone();
-            let turn = stream_chat(provider, self.store.as_ref(), req, |ev| match ev {
+            let turn = match stream_chat(provider, self.store.as_ref(), req, &cancel, |ev| match ev
+            {
                 StreamEvent::Delta(delta) => emitter.emit(LoopEvent::Delta {
                     session_id: sid_clone.clone(),
                     delta,
@@ -192,7 +233,22 @@ impl ChatLoop {
                     tool_call,
                 }),
             })
-            .await?;
+            .await
+            {
+                Ok(turn) => turn,
+                Err(LlmError::Cancelled) => return Err(LoopError::Cancelled),
+                Err(err) => return Err(LoopError::Llm(err)),
+            };
+
+            if cancel.load(Ordering::Relaxed) {
+                return Err(LoopError::Cancelled);
+            }
+
+            let assistant_index = persist_assistant_tool_round(
+                session,
+                turn.content.clone(),
+                turn.tool_calls.clone(),
+            );
 
             let mut resolved = Vec::with_capacity(turn.tool_calls.len());
             for mut tc in turn.tool_calls {
@@ -212,6 +268,7 @@ impl ChatLoop {
                 let tc_id = tc.id.clone();
                 tc.result = Some(result_json.clone());
                 tc.is_error = Some(result.is_error);
+                update_assistant_tool_call(session, assistant_index, &tc);
                 emitter.emit(LoopEvent::ToolCall {
                     session_id: sid.clone(),
                     tool_call: tc.clone(),
@@ -222,11 +279,11 @@ impl ChatLoop {
                 resolved.push(tc);
             }
 
-            let assistant = ChatMessage::assistant(turn.content, resolved);
-            let no_tool_calls = assistant.tool_calls.is_empty();
-            session.messages.push(assistant.clone());
-
-            if no_tool_calls {
+            if resolved.is_empty() {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(LoopError::Cancelled);
+                }
+                let assistant = session.messages[assistant_index].clone();
                 emitter.emit(LoopEvent::Done {
                     session_id: sid.clone(),
                     message: assistant,
@@ -238,6 +295,9 @@ impl ChatLoop {
         let last = session.messages.last().cloned().unwrap_or_else(|| {
             ChatMessage::assistant("Reached the tool-call round limit; stopping.", Vec::new())
         });
+        if cancel.load(Ordering::Relaxed) {
+            return Err(LoopError::Cancelled);
+        }
         emitter.emit(LoopEvent::Done {
             session_id: sid,
             message: last,
@@ -333,6 +393,41 @@ mod tests {
         let prompt = loop_.system_prompt();
         assert!(prompt.contains("context signal"));
         assert!(prompt.contains("talking_head") || prompt.contains("video_type"));
+    }
+
+    #[test]
+    fn tool_round_persists_assistant_before_tool_results() {
+        let mut session = ChatSession::new("s1");
+        session.messages.push(ChatMessage::user("trim this"));
+
+        let requested = vec![ToolCall::request(
+            "call-1",
+            "get_timeline",
+            serde_json::json!({}),
+        )];
+        let assistant_index =
+            persist_assistant_tool_round(&mut session, "working".into(), requested.clone());
+
+        let mut resolved = requested[0].clone();
+        resolved.result = Some(serde_json::json!({"summary": "ok"}));
+        resolved.is_error = Some(false);
+        update_assistant_tool_call(&mut session, assistant_index, &resolved);
+        session.messages.push(ChatMessage::tool_result(
+            resolved.id.clone(),
+            resolved.result.clone().unwrap(),
+        ));
+
+        assert_eq!(
+            session.messages[1].role,
+            crate::chat::session::Role::Assistant
+        );
+        assert_eq!(session.messages[1].tool_calls.len(), 1);
+        assert_eq!(
+            session.messages[1].tool_calls[0].result,
+            Some(serde_json::json!({"summary": "ok"}))
+        );
+        assert_eq!(session.messages[2].role, crate::chat::session::Role::Tool);
+        assert_eq!(session.messages[2].tool_call_id.as_deref(), Some("call-1"));
     }
 
     #[tokio::test]

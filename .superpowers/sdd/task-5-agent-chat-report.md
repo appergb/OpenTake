@@ -65,3 +65,11 @@
 
 - The Settings UI still offers `google`, but chat intentionally rejects it until a Google chat transport is added.
 - No focused `AgentPanel` DOM interaction test was added; the current node setup comfortably covered `chatStore` behavior and TypeScript integration, but not effect-driven panel callbacks without introducing a new DOM test harness.
+
+## Review Fixes
+
+- Fixed provider-history ordering in `crates/opentake-agent/src/chat/loop.rs`: tool-using rounds now persist the assistant message that owns `tool_calls` before any subsequent `tool` result messages, and the added unit test proves the next provider/history order is assistant-with-tool-calls immediately followed by tool result.
+- Fixed dropped tool-call cards in `web/src/store/chatStore.ts`: `finalize` now preserves streamed placeholder content/tool calls when the backend final message omits them, and `web/src/store/chatStore.test.ts` covers tool-call event -> resolved tool-call event -> final text with no `toolCalls`.
+- Fixed cancellation during in-flight provider streaming: `stream_chat` / provider readers now accept a cancellation token, poll it while awaiting stream chunks, use a timeout-configured `reqwest::Client`, and the loop checks cancellation before any final `Done` emit.
+- Fixed split UTF-8 handling in provider SSE parsing: provider streams now buffer raw bytes and decode only complete SSE frames, with a focused test covering a multi-byte character split across chunks.
+- Fixed `chat_history` visibility while a turn is running: `src-tauri/src/chat.rs` keeps a persisted session snapshot in the map while the worker owns a clone, and the added unit test verifies the snapshot remains visible.

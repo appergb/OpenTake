@@ -107,9 +107,22 @@ export const useChatStore = create<ChatStoreState>((set) => ({
   finalize: (message) =>
     set((state) => {
       const id = state.streamingId;
+      const finalizeMessage = (existing?: ChatMessage): ChatMessage => {
+        if (!existing) return message;
+        return {
+          ...message,
+          content: message.content.length > 0 ? message.content : existing.content,
+          toolCalls:
+            existing.toolCalls.length > 0 && message.toolCalls.length === 0
+              ? existing.toolCalls
+              : message.toolCalls,
+        };
+      };
       const messages =
         id != null
-          ? state.messages.map((existing) => (existing.id === id ? message : existing))
+          ? state.messages.map((existing) =>
+              existing.id === id ? finalizeMessage(existing) : existing,
+            )
           : [...state.messages, message];
       return { messages, streaming: false, streamingId: null };
     }),

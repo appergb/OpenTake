@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
-use opentake_agent::chat::{ChatLoop, ChatMessage, ChatSession, EmitLoop, LoopEvent};
+use opentake_agent::chat::{ChatLoop, ChatMessage, ChatSession, EmitLoop, LoopError, LoopEvent};
 use opentake_agent::mcp::core_handle::{AppCoreHandle, CoreHandle};
 use opentake_agent::mcp::dispatch::Dispatcher;
 use opentake_gen::{KeyStore, KeyringStore};
@@ -57,12 +57,14 @@ impl ChatState {
         }
     }
 
-    /// Take a session out of the map (so the running task owns it mutably); the
-    /// task re-inserts it when the turn finishes. Mint a new session if absent.
+    /// Snapshot a session for a running turn. The map entry stays in place so
+    /// `chat_history` can still return the last persisted state while the turn
+    /// is in flight.
     fn take_session(&self, session_id: &str) -> ChatSession {
-        let mut sessions = self.sessions.lock().expect("sessions lock");
+        let sessions = self.sessions.lock().expect("sessions lock");
         sessions
-            .remove(session_id)
+            .get(session_id)
+            .cloned()
             .unwrap_or_else(|| ChatSession::new(session_id.to_string()))
     }
 
@@ -168,6 +170,9 @@ pub async fn chat_send(
         .insert(session_id.clone(), cancel.clone());
 
     let mut session = state.take_session(&session_id);
+    session.provider = Some(chat_provider.clone());
+    session.messages.push(ChatMessage::user(text.clone()));
+    state.put_session(session.clone());
     let state_clone = state.inner().clone();
     let sid = session_id.clone();
 
@@ -178,16 +183,28 @@ pub async fn chat_send(
             .run_turn(&mut session, chat_provider, text, &emitter, cancel)
             .await;
 
-        if let Err(e) = &result {
-            let msg = ChatMessage::assistant(format!("⚠️ {e}"), Vec::new());
-            let _ = app.emit(
-                "chat_done",
-                DonePayload {
-                    session_id: sid.clone(),
-                    message: msg.clone(),
-                },
-            );
-            session.messages.push(msg);
+        match &result {
+            Err(LoopError::Cancelled) => {
+                let _ = app.emit(
+                    "chat_done",
+                    DonePayload {
+                        session_id: sid.clone(),
+                        message: ChatMessage::assistant(String::new(), Vec::new()),
+                    },
+                );
+            }
+            Err(e) => {
+                let msg = ChatMessage::assistant(format!("⚠️ {e}"), Vec::new());
+                let _ = app.emit(
+                    "chat_done",
+                    DonePayload {
+                        session_id: sid.clone(),
+                        message: msg.clone(),
+                    },
+                );
+                session.messages.push(msg);
+            }
+            Ok(()) => {}
         }
 
         state_clone.put_session(session);
@@ -241,9 +258,36 @@ mod tests {
         state.put_session(ChatSession::new("s1"));
         let taken = state.take_session("s1");
         assert_eq!(taken.id, "s1");
-        let fresh = state.take_session("s1");
-        assert_eq!(fresh.id, "s1");
-        assert!(fresh.messages.is_empty());
+        let second = state.take_session("s1");
+        assert_eq!(second.id, "s1");
+        assert!(second.messages.is_empty());
+    }
+
+    #[test]
+    fn history_snapshot_remains_visible_while_turn_owns_a_clone() {
+        let state = ChatState::new(
+            AppCore::new(),
+            std::env::temp_dir().join("no-workflows"),
+            std::env::temp_dir().join("chat-cache"),
+            std::env::temp_dir().join("chat-models"),
+        );
+        let mut session = ChatSession::new("s1");
+        session.messages.push(ChatMessage::user("hello"));
+        state.put_session(session.clone());
+
+        let running_copy = state.take_session("s1");
+        assert_eq!(running_copy.messages.len(), 1);
+
+        let history = state
+            .sessions
+            .lock()
+            .unwrap()
+            .get("s1")
+            .cloned()
+            .unwrap()
+            .messages;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].content, "hello");
     }
 
     #[test]

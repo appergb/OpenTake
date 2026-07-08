@@ -86,4 +86,35 @@ describe("chatStore", () => {
     expect(state.messages[0].content).toBe("done");
     expect(state.messages[0].toolCalls[0].result).toEqual({ summary: "trimmed" });
   });
+
+  it("finalize preserves streamed tool cards when final backend message omits toolCalls", () => {
+    const store = useChatStore.getState();
+    store.beginStream("assistant-stream");
+    store.upsertToolCall({
+      id: "tool-1",
+      name: "get_timeline",
+      args: {},
+    });
+    store.upsertToolCall({
+      id: "tool-1",
+      name: "get_timeline",
+      args: {},
+      result: { summary: "ok" },
+      isError: false,
+    });
+    store.finalize(
+      assistantMessage({
+        id: "assistant-final",
+        content: "done without cards",
+        toolCalls: [],
+      }),
+    );
+
+    const state = useChatStore.getState();
+    expect(state.streaming).toBe(false);
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0].content).toBe("done without cards");
+    expect(state.messages[0].toolCalls).toHaveLength(1);
+    expect(state.messages[0].toolCalls[0].result).toEqual({ summary: "ok" });
+  });
 });

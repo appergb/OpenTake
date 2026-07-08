@@ -13,8 +13,10 @@
 //! auto-fallback to another provider when the selected one lacks a key.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use opentake_gen::{KeyStore, ProviderKey};
@@ -133,6 +135,8 @@ pub enum LlmError {
     Provider(String),
     #[error("bad stream: {0}")]
     Stream(String),
+    #[error("cancelled")]
+    Cancelled,
 }
 
 impl From<reqwest::Error> for LlmError {
@@ -144,6 +148,52 @@ impl From<reqwest::Error> for LlmError {
 const OPENAI_URL: &str = "https://api.openai.com/v1/chat/completions";
 const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+fn http_client() -> Result<reqwest::Client, LlmError> {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(READ_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| LlmError::Network(e.to_string()))
+}
+
+fn take_sse_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let end = buffer.windows(2).position(|window| window == b"\n\n")?;
+    let frame = buffer.drain(..end).collect::<Vec<u8>>();
+    buffer.drain(..2);
+    Some(frame)
+}
+
+fn drain_sse_frames(buffer: &mut Vec<u8>) -> Result<Vec<String>, LlmError> {
+    let mut frames = Vec::new();
+    while let Some(frame) = take_sse_frame(buffer) {
+        frames.push(String::from_utf8(frame).map_err(|e| LlmError::Stream(e.to_string()))?);
+    }
+    Ok(frames)
+}
+
+async fn next_chunk_or_cancel<S, B, E>(
+    stream: &mut S,
+    cancel: &AtomicBool,
+) -> Result<Option<Result<B, E>>, LlmError>
+where
+    S: Stream<Item = Result<B, E>> + Unpin,
+{
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(LlmError::Cancelled);
+        }
+        tokio::select! {
+            chunk = stream.next() => return Ok(chunk),
+            _ = tokio::time::sleep(CANCEL_POLL_INTERVAL) => {}
+        }
+    }
+}
 
 /// Stream one chat turn. Text deltas and tool-call requests are delivered via
 /// `on_event`; the final aggregated turn is returned.
@@ -151,6 +201,7 @@ pub async fn stream_chat<F>(
     provider: LlmProvider,
     store: &dyn KeyStore,
     req: ChatRequest<'_>,
+    cancel: &AtomicBool,
     mut on_event: F,
 ) -> Result<TurnResult, LlmError>
 where
@@ -163,8 +214,8 @@ where
 
     let model = req.model.unwrap_or_else(|| provider.default_model());
     match provider {
-        LlmProvider::OpenAi => stream_openai(&key, model, req, &mut on_event).await,
-        LlmProvider::Anthropic => stream_anthropic(&key, model, req, &mut on_event).await,
+        LlmProvider::OpenAi => stream_openai(&key, model, req, cancel, &mut on_event).await,
+        LlmProvider::Anthropic => stream_anthropic(&key, model, req, cancel, &mut on_event).await,
     }
 }
 
@@ -237,13 +288,14 @@ async fn stream_openai<F>(
     key: &str,
     model: &str,
     req: ChatRequest<'_>,
+    cancel: &AtomicBool,
     on_event: &mut F,
 ) -> Result<TurnResult, LlmError>
 where
     F: FnMut(StreamEvent) + Send,
 {
     let body = openai_body(model, req.messages, req.tools);
-    let resp = reqwest::Client::new()
+    let resp = http_client()?
         .post(OPENAI_URL)
         .bearer_auth(key)
         .json(&body)
@@ -258,13 +310,11 @@ where
     let mut full = String::new();
     let mut tool_buf: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
     let mut stream = resp.bytes_stream();
-    let mut buf = String::new();
-    while let Some(chunk) = stream.next().await {
+    let mut buf = Vec::new();
+    while let Some(chunk) = next_chunk_or_cancel(&mut stream, cancel).await? {
         let bytes = chunk.map_err(|e| LlmError::Stream(e.to_string()))?;
-        buf.push_str(std::str::from_utf8(&bytes).map_err(|e| LlmError::Stream(e.to_string()))?);
-        while let Some(idx) = buf.find("\n\n") {
-            let event = buf[..idx].to_string();
-            buf.drain(..idx + 2);
+        buf.extend_from_slice(bytes.as_ref());
+        for event in drain_sse_frames(&mut buf)? {
             if let Some(rest) = event.strip_prefix("data: ") {
                 let rest = rest.trim();
                 if rest == "[DONE]" {
@@ -311,6 +361,9 @@ where
     }
 
     let mut tool_calls = Vec::new();
+    if cancel.load(Ordering::Relaxed) {
+        return Err(LlmError::Cancelled);
+    }
     for (_, (id, name, args_str)) in tool_buf {
         let args = if args_str.is_empty() {
             serde_json::json!({})
@@ -424,13 +477,14 @@ async fn stream_anthropic<F>(
     key: &str,
     model: &str,
     req: ChatRequest<'_>,
+    cancel: &AtomicBool,
     on_event: &mut F,
 ) -> Result<TurnResult, LlmError>
 where
     F: FnMut(StreamEvent) + Send,
 {
     let body = anthropic_body(model, req.messages, req.tools);
-    let resp = reqwest::Client::new()
+    let resp = http_client()?
         .post(ANTHROPIC_URL)
         .header("x-api-key", key)
         .header("anthropic-version", ANTHROPIC_VERSION)
@@ -446,13 +500,11 @@ where
     let mut full = String::new();
     let mut tool_buf: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
     let mut stream = resp.bytes_stream();
-    let mut buf = String::new();
-    while let Some(chunk) = stream.next().await {
+    let mut buf = Vec::new();
+    while let Some(chunk) = next_chunk_or_cancel(&mut stream, cancel).await? {
         let bytes = chunk.map_err(|e| LlmError::Stream(e.to_string()))?;
-        buf.push_str(std::str::from_utf8(&bytes).map_err(|e| LlmError::Stream(e.to_string()))?);
-        while let Some(idx) = buf.find("\n\n") {
-            let event = buf[..idx].to_string();
-            buf.drain(..idx + 2);
+        buf.extend_from_slice(bytes.as_ref());
+        for event in drain_sse_frames(&mut buf)? {
             let data_line = event
                 .lines()
                 .find_map(|l| l.strip_prefix("data: "))
@@ -512,6 +564,9 @@ where
     }
 
     let mut tool_calls = Vec::new();
+    if cancel.load(Ordering::Relaxed) {
+        return Err(LlmError::Cancelled);
+    }
     for (_, (id, name, args_str)) in tool_buf {
         let args = if args_str.is_empty() {
             serde_json::json!({})
@@ -562,6 +617,7 @@ mod tests {
                 tools: &[],
                 model: None,
             },
+            &AtomicBool::new(false),
             |_| {},
         ))
         .unwrap_err()
@@ -673,5 +729,33 @@ mod tests {
         assert_eq!(last["role"], "user");
         assert_eq!(last["content"][0]["type"], "tool_result");
         assert_eq!(last["content"][0]["tool_use_id"], "c1");
+    }
+
+    #[test]
+    fn drain_sse_frames_handles_split_utf8_chunks() {
+        let mut buffer = Vec::new();
+        let bytes = "data: {\"text\":\"你\"}\n\n".as_bytes();
+        buffer.extend_from_slice(&bytes[..15]);
+        assert!(drain_sse_frames(&mut buffer).unwrap().is_empty());
+        buffer.extend_from_slice(&bytes[15..]);
+        let frames = drain_sse_frames(&mut buffer).unwrap();
+        assert_eq!(frames, vec!["data: {\"text\":\"你\"}"]);
+        assert!(buffer.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn next_chunk_or_cancel_interrupts_pending_stream() {
+        let cancel = AtomicBool::new(false);
+        let mut stream = futures::stream::pending::<Result<Vec<u8>, std::io::Error>>();
+        let wait = next_chunk_or_cancel(&mut stream, &cancel);
+        tokio::pin!(wait);
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(CANCEL_POLL_INTERVAL).await;
+        cancel.store(true, Ordering::Relaxed);
+        tokio::time::advance(CANCEL_POLL_INTERVAL).await;
+
+        let err = wait.await.unwrap_err().to_string();
+        assert!(err.contains("cancelled"));
     }
 }
