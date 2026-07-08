@@ -24,7 +24,7 @@ main-line work. Selective replay is the integration method.
 | `opentake-pr9` dirty worktree | Integrated | reverse-clip contract/render/web tests passed across Tasks 2-4 | Ported useful diff; excluded `.claude` deletions |
 | `backup/before-rollback-20260708-163646` | Integrated | commits `0b72a10`, `1cfee93`, `9eceadb` checked against recovery branch in Tasks 2-4 | Ported remaining relevant fixes; docs restored |
 | `fix/text-raster-alignment` | Integrated | commit `89bf38c`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and inspection already showed broad stale-branch direct merge risk against current main-line work | Selective replay only: ported `text_engine.rs` text-style/shadow alignment delta plus focused `gpu_text.rs` coverage, then verified with current text tests |
-| `test/render-pixel-diff` | Deferred | one old commit `eb6e429`, 154 behind / 1 ahead | Defer until text raster is committed; then inspect and replay pixel diff work |
+| `test/render-pixel-diff` | Integrated | commit `eb6e429`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and inspection already showed stale-branch direct merge risk against current main-line work | Selective replay only: restored `crates/opentake-render/tests/pixel_diff.rs` harness and verified with focused pixel-diff tests |
 | `fix/91-media-library-rewrite` | Deferred | one old commit `b9e4954`, 154 behind / 1 ahead | Defer until reverse clip and media surfaces are stable; then inspect for non-regressive pieces |
 | `feat/save-clip-as-media` | Deferred | one old commit `708fd44`, 154 behind / 1 ahead | Defer until reverse and media surfaces are stable; then inspect save-clip-as-media work |
 | `feat/freeze-frame` | Deferred | one old commit `da3e934`, 154 behind / 1 ahead | Defer until source-frame mapping is stable; then inspect and replay freeze-frame work |
@@ -65,3 +65,22 @@ main-line work. Selective replay is the integration method.
     - result: `test shadow_paints_pixels_outside_glyph_footprint ... ok`
   - `cargo test -p opentake-render alignment_shifts_glyph_x_centroid -- --nocapture`
     - result: `test alignment_shifts_glyph_x_centroid ... ok`
+
+### test/render-pixel-diff
+
+- Direct merge rejection evidence:
+  - `git rev-list --left-right --count origin/main...test/render-pixel-diff` -> `154 1`
+  - `git show --stat --summary eb6e4294f6f3397a336b15bf0c67ad8007a62f0f` -> created only `crates/opentake-render/tests/pixel_diff.rs`, but branch inspection for this queue item already established stale-branch direct merge risk at `154/1` drift.
+  - `git show --name-only --format=medium eb6e4294f6f3397a336b15bf0c67ad8007a62f0f` -> `crates/opentake-render/tests/pixel_diff.rs`
+- Selective replay result:
+  - Replayed the missing `crates/opentake-render/tests/pixel_diff.rs` harness into the current tree because the current checkout had no corresponding file or equivalent coverage.
+- Verification:
+  - `cargo test -p opentake-render pixel -- --nocapture`
+    - matched existing `plan::affine::tests::full_canvas_quad_maps_source_pixels_to_canvas_pixels`; current `tests/pixel_diff.rs` names do not contain the literal `pixel`
+    - result: `1 passed; 0 failed`
+  - `cargo test -p opentake-render quadrant_round_trip_psnr_is_high -- --nocapture`
+    - result: `test quadrant_round_trip_psnr_is_high ... ok`
+  - `cargo test -p opentake-render half_opacity_two_track_blend_matches_hand_computed -- --nocapture`
+    - result: `test half_opacity_two_track_blend_matches_hand_computed ... ok`
+  - `cargo test -p opentake-render ssim_identical_frames_score_near_one -- --nocapture`
+    - result: `test ssim_identical_frames_score_near_one ... ok`
