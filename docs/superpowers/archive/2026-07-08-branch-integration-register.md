@@ -21,8 +21,8 @@ main-line work. Selective replay is the integration method.
 
 | Source | Status | Evidence | Action |
 |---|---|---|---|
-| `opentake-pr9` dirty worktree | Deferred | reverse-clip uncommitted diff; branch head equals `origin/main` | Defer until reverse-clip replay task resumes; then port useful changes and exclude `.claude` deletions |
-| `backup/before-rollback-20260708-163646` | Deferred | commits `0b72a10`, `1cfee93`, `9eceadb` | Defer until reverse-clip replay task resumes; then port reverse-clip fixes and docs only |
+| `opentake-pr9` dirty worktree | Integrated | reverse-clip contract/render/web tests passed across Tasks 2-4 | Ported useful diff; excluded `.claude` deletions |
+| `backup/before-rollback-20260708-163646` | Integrated | commits `0b72a10`, `1cfee93`, `9eceadb` checked against recovery branch in Tasks 2-4 | Ported remaining relevant fixes; docs restored |
 | `fix/text-raster-alignment` | Deferred | one old commit `89bf38c`, 154 behind / 1 ahead | Defer until reverse clip is settled; then inspect and replay text raster work |
 | `test/render-pixel-diff` | Deferred | one old commit `eb6e429`, 154 behind / 1 ahead | Defer until text raster is settled; then inspect and replay pixel diff work |
 | `fix/91-media-library-rewrite` | Deferred | one old commit `b9e4954`, 154 behind / 1 ahead | Defer until reverse clip and media surfaces are stable; then inspect for non-regressive pieces |
