@@ -275,4 +275,4 @@ $ git diff --check -- src-tauri/src/commands.rs src-tauri/src/render.rs src-taur
 
 ### Commit SHA
 
-- `c1f7b14` `fix(task5): make freeze and export asset paths unique`
+- `fba5b98` `fix(task5): make freeze and export asset paths unique`
