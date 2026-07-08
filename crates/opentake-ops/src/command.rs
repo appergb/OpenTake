@@ -3600,20 +3600,21 @@ mod reversed_property_tests {
     use crate::id::SeqIdGen;
     use opentake_domain::{Clip, ClipType, Track};
 
-    fn state_with_video_clip() -> EditorState {
+    fn state_with_video_clips() -> EditorState {
         let mut tl = Timeline::new();
         let mut t = Track::new("v1", ClipType::Video);
-        let clip = Clip::new("c1", "asset", 0, 30);
-        t.clips.push(clip);
+        t.clips.push(Clip::new("c1", "asset", 0, 30));
+        t.clips.push(Clip::new("c2", "asset", 40, 30));
         tl.tracks.push(t);
         EditorState::from_timeline(tl)
     }
 
     #[test]
     fn set_clip_properties_reversed_sets_only_requested_clip() {
-        let mut state = state_with_video_clip();
+        let mut state = state_with_video_clips();
         let ids = SeqIdGen::default();
         let video_id = state.timeline.tracks[0].clips[0].id.clone();
+        let untouched_id = state.timeline.tracks[0].clips[1].id.clone();
         let before = state.timeline.clone();
 
         let result = apply(
@@ -3638,6 +3639,14 @@ mod reversed_property_tests {
             .find(|clip| clip.id == video_id)
             .unwrap();
         assert!(clip.reversed);
+        let untouched = state
+            .timeline
+            .tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .find(|clip| clip.id == untouched_id)
+            .unwrap();
+        assert!(!untouched.reversed);
         assert_ne!(state.timeline, before);
     }
 }

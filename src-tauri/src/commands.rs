@@ -1067,11 +1067,10 @@ mod edit_request_serde_tests {
 
     #[test]
     fn deserializes_set_clip_properties_with_reversed() {
-        let request: EditRequest =
-            serde_json::from_str(
-                r#"{"type":"setClipProperties","clipIds":["c1"],"properties":{"reversed":true}}"#,
-            )
-            .expect("setClipProperties with reversed camelCase");
+        let request: EditRequest = serde_json::from_str(
+            r#"{"type":"setClipProperties","clipIds":["c1"],"properties":{"reversed":true}}"#,
+        )
+        .expect("setClipProperties with reversed camelCase");
 
         match request.into_command().expect("setClipProperties command") {
             EditCommand::SetClipProperties { properties, .. } => {
