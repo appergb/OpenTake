@@ -8,3 +8,11 @@
 - Tests: `pnpm -C web test -- src/components/media/favorites.test.ts src/store/mediaStore.test.ts src/store/uiStore.test.ts`; `pnpm -C web exec tsc -b --pretty false`; `git diff --check -- <touched files>` — all passed.
 - Files changed: `web/src/components/media/MediaPanel.tsx`, `web/src/store/mediaStore.ts`, `docs/superpowers/archive/2026-07-08-branch-integration-register.md`.
 - Replay commit SHA: `11eb57c`
+
+## Review Fixes
+
+- Root cause: replayed audio cards routed all thumbnail-less audio assets through `AudioWaveform`, but the component returned `null` for null/empty waveform buckets, so failed/empty waveform loads could leave the thumbnail area blank; the replay also lacked regression tests for duplicate-id collapse and waveform fallback.
+- Fix: `AudioWaveform` now owns the fallback path and renders the caller-supplied type icon until valid waveform buckets exist; it also accepts a narrow test-only `bucketsOverride` so node-environment tests can statically verify waveform vs fallback rendering without adding new test dependencies.
+- Tests: added `mediaStore` duplicate-id regression coverage asserting deterministic last-item wins for duplicate ids; added `MediaPanel` waveform tests covering successful bar rendering plus null/empty fallback; reran `pnpm -C web test -- src/components/media/MediaPanel.test.tsx src/components/media/favorites.test.ts src/store/mediaStore.test.ts src/store/uiStore.test.ts`, `pnpm -C web exec tsc -b --pretty false`, and `git diff --check -- <touched files>`.
+- Files changed: `web/src/components/media/MediaPanel.tsx`, `web/src/components/media/MediaPanel.test.tsx`, `web/src/store/mediaStore.test.ts`.
+- Fix commit SHA: `88eb1db`
