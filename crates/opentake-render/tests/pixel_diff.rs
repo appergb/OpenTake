@@ -316,13 +316,19 @@ fn quadrant_markers_land_in_authored_corners() {
         ]
     };
     let tl_px = sample(16, 16);
-    assert!(tl_px[0] > 200 && tl_px[1] < 50 && tl_px[2] < 50, "TL red, got {tl_px:?}");
+    assert!(
+        tl_px[0] > 200 && tl_px[1] < 50 && tl_px[2] < 50,
+        "TL red, got {tl_px:?}"
+    );
     let tr = sample(48, 16);
     assert!(tr[1] > 200 && tr[0] < 50, "TR green, got {tr:?}");
     let bl = sample(16, 48);
     assert!(bl[2] > 200 && bl[0] < 50, "BL blue, got {bl:?}");
     let br = sample(48, 48);
-    assert!(br[0] > 200 && br[1] > 200 && br[2] < 50, "BR yellow, got {br:?}");
+    assert!(
+        br[0] > 200 && br[1] > 200 && br[2] < 50,
+        "BR yellow, got {br:?}"
+    );
 }
 
 #[test]
@@ -380,7 +386,11 @@ fn half_opacity_two_track_blend_matches_hand_computed() {
     }
     impl TextureResolver for TwoColor<'_> {
         fn resolve(&mut self, _s: &TextureSource, _f: i64) -> Option<Rc<GpuTexture>> {
-            let c = if self.n == 0 { [255, 0, 0, 255] } else { [0, 255, 0, 255] };
+            let c = if self.n == 0 {
+                [255, 0, 0, 255]
+            } else {
+                [0, 255, 0, 255]
+            };
             self.n += 1;
             Some(Rc::new(upload_rgba(
                 self.device,
@@ -626,7 +636,10 @@ fn text_overlay_visible_above_video() {
         .expect("render");
 
     if rasterizer.has_fonts() {
-        let any_text = frame.rgba.chunks_exact(4).any(|px| px[0] > 30 && px[1] > 30);
+        let any_text = frame
+            .rgba
+            .chunks_exact(4)
+            .any(|px| px[0] > 30 && px[1] > 30);
         assert!(any_text, "expected visible text pixels above blue video");
     } else {
         eprintln!("[note] no system fonts; skipped text-visible assertion");
@@ -665,5 +678,8 @@ fn ssim_identical_frames_score_near_one() {
     assert!(s > 0.98, "SSIM of identical frames {s:.4} <= 0.98");
     let solid = make_solid([0, 0, 0, 255]);
     let s2 = ssim(&f1.rgba, &solid.rgba, f1.width, f1.height);
-    assert!(s2 < s, "SSIM vs solid {s2:.4} should be below identical {s:.4}");
+    assert!(
+        s2 < s,
+        "SSIM vs solid {s2:.4} should be below identical {s:.4}"
+    );
 }

@@ -167,7 +167,11 @@ fn x_centroid(frame: &DecodedFrame) -> f64 {
             }
         }
     }
-    if n == 0 { 0.0 } else { sum as f64 / n as f64 }
+    if n == 0 {
+        0.0
+    } else {
+        sum as f64 / n as f64
+    }
 }
 
 fn y_span(frame: &DecodedFrame) -> u32 {
@@ -181,7 +185,11 @@ fn y_span(frame: &DecodedFrame) -> u32 {
             }
         }
     }
-    if y1 < y0 { 0 } else { y1 - y0 + 1 }
+    if y1 < y0 {
+        0
+    } else {
+        y1 - y0 + 1
+    }
 }
 
 #[test]
@@ -211,8 +219,14 @@ fn font_size_scales_with_canvas_height() {
     let n540 = mk((960, 540));
     let n1080 = mk((1920, 1080));
     let n2160 = mk((3840, 2160));
-    assert!(n540 < n1080, "540p ({n540}) must paint fewer pixels than 1080p ({n1080})");
-    assert!(n1080 < n2160, "1080p ({n1080}) must paint fewer pixels than 2160p ({n2160})");
+    assert!(
+        n540 < n1080,
+        "540p ({n540}) must paint fewer pixels than 1080p ({n1080})"
+    );
+    assert!(
+        n1080 < n2160,
+        "1080p ({n1080}) must paint fewer pixels than 2160p ({n2160})"
+    );
 }
 
 #[test]
@@ -250,7 +264,10 @@ fn shadow_paints_pixels_outside_glyph_footprint() {
         })
         .expect("frame");
     let n_yes = lit_count(&with_shadow);
-    assert!(n_yes > n_no, "shadow ({n_yes}) must add lit pixels beyond glyphs ({n_no})");
+    assert!(
+        n_yes > n_no,
+        "shadow ({n_yes}) must add lit pixels beyond glyphs ({n_no})"
+    );
 }
 
 #[test]
@@ -319,7 +336,10 @@ fn long_text_wraps_in_narrow_box() {
         .expect("frame");
     let long_span = y_span(&long);
     let short_span = y_span(&short);
-    assert!(long_span > short_span, "wrapped long text y-span ({long_span}) > single line ({short_span})");
+    assert!(
+        long_span > short_span,
+        "wrapped long text y-span ({long_span}) > single line ({short_span})"
+    );
 }
 
 #[test]
@@ -340,7 +360,10 @@ fn rasterize_is_deterministic_ssim_one() {
     let a = r.rasterize(&req).expect("frame");
     let b = r.rasterize(&req).expect("frame");
     assert_eq!((a.width, a.height), (b.width, b.height));
-    assert_eq!(a.rgba, b.rgba, "rasterize must be deterministic (SSIM = 1.0)");
+    assert_eq!(
+        a.rgba, b.rgba,
+        "rasterize must be deterministic (SSIM = 1.0)"
+    );
 }
 
 #[test]

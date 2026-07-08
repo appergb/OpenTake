@@ -23,8 +23,8 @@ main-line work. Selective replay is the integration method.
 |---|---|---|---|
 | `opentake-pr9` dirty worktree | Integrated | reverse-clip contract/render/web tests passed across Tasks 2-4 | Ported useful diff; excluded `.claude` deletions |
 | `backup/before-rollback-20260708-163646` | Integrated | commits `0b72a10`, `1cfee93`, `9eceadb` checked against recovery branch in Tasks 2-4 | Ported remaining relevant fixes; docs restored |
-| `fix/text-raster-alignment` | Integrated | commit `89bf38c`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and inspection already showed broad stale-branch direct merge risk against current main-line work | Selective replay only: ported `text_engine.rs` text-style/shadow alignment delta plus focused `gpu_text.rs` coverage, then verified with current text tests |
-| `test/render-pixel-diff` | Integrated | commit `eb6e429`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and inspection already showed stale-branch direct merge risk against current main-line work | Selective replay only: restored `crates/opentake-render/tests/pixel_diff.rs` harness and verified with focused pixel-diff tests |
+| `fix/text-raster-alignment` | Integrated | commit `89bf38c`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and inspection already showed broad stale-branch direct merge risk against current main-line work | Selective replay only: ported `text_engine.rs` text-style/shadow alignment delta plus focused `gpu_text.rs` coverage, then verified with current text tests and full `gpu_text` binary run |
+| `test/render-pixel-diff` | Integrated | commit `eb6e429`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and inspection already showed stale-branch direct merge risk against current main-line work | Selective replay only: restored `crates/opentake-render/tests/pixel_diff.rs` harness and verified with focused pixel-diff tests plus full `pixel_diff` binary run |
 | `fix/91-media-library-rewrite` | Deferred | one old commit `b9e4954`, 154 behind / 1 ahead | Defer until reverse clip and media surfaces are stable; then inspect for non-regressive pieces |
 | `feat/save-clip-as-media` | Deferred | one old commit `708fd44`, 154 behind / 1 ahead | Defer until reverse and media surfaces are stable; then inspect save-clip-as-media work |
 | `feat/freeze-frame` | Deferred | one old commit `da3e934`, 154 behind / 1 ahead | Defer until source-frame mapping is stable; then inspect and replay freeze-frame work |
@@ -59,6 +59,8 @@ main-line work. Selective replay is the integration method.
   - `cargo test -p opentake-render text_raster -- --nocapture`
     - matched only existing `gpu::text_raster::tests::null_rasterizer_returns_none_without_panicking`; `tests/gpu_text.rs` current test names do not contain `text_raster`
     - result: `1 passed; 0 failed`
+  - `cargo test -p opentake-render --test gpu_text -- --nocapture`
+    - result: `7 passed; 0 failed`
   - `cargo test -p opentake-render font_size_scales_with_canvas_height -- --nocapture`
     - result: `test font_size_scales_with_canvas_height ... ok`
   - `cargo test -p opentake-render shadow_paints_pixels_outside_glyph_footprint -- --nocapture`
@@ -78,6 +80,8 @@ main-line work. Selective replay is the integration method.
   - `cargo test -p opentake-render pixel -- --nocapture`
     - matched existing `plan::affine::tests::full_canvas_quad_maps_source_pixels_to_canvas_pixels`; current `tests/pixel_diff.rs` names do not contain the literal `pixel`
     - result: `1 passed; 0 failed`
+  - `cargo test -p opentake-render --test pixel_diff -- --nocapture`
+    - result: `14 passed; 0 failed`
   - `cargo test -p opentake-render quadrant_round_trip_psnr_is_high -- --nocapture`
     - result: `test quadrant_round_trip_psnr_is_high ... ok`
   - `cargo test -p opentake-render half_opacity_two_track_blend_matches_hand_computed -- --nocapture`

@@ -347,7 +347,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; fin
 ## Commits created
 
 - `4fdd575` `fix(render): replay text raster alignment from branch queue`
-- `test(render): replay pixel diff coverage from branch queue`
+- `75db4d1` `test(render): replay pixel diff coverage from branch queue`
 
 ## Files changed
 
@@ -361,3 +361,66 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; fin
 
 - The required `text_raster` / `pixel` filters do not directly map to the newly replayed test names, so I recorded the mismatch and added focused current-test runs as compensating verification.
 - Cargo emitted the existing future-incompatibility warning for `block v0.1.6`; it did not block these test runs.
+
+## Fixes After Review
+
+- Applied rustfmt-equivalent formatting to the replayed test files by running `cargo fmt --all`.
+- Added stronger replay evidence by running the full `gpu_text` and `pixel_diff` test binaries and updating the register to point at those complete runs.
+
+### `cargo fmt --all --check`
+
+```text
+```
+
+### `cargo test -p opentake-render --test gpu_text -- --nocapture`
+
+```text
+Finished `test` profile [unoptimized + debuginfo] target(s) in 1.78s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+Running tests/gpu_text.rs (target/debug/deps/gpu_text-a32db4861fd1be37)
+
+running 7 tests
+test natural_size_shadow_padding_matches_upstream ... ok
+test long_text_wraps_in_narrow_box ... ok
+test alignment_shifts_glyph_x_centroid ... ok
+test text_clip_composites_visible_pixels ... ok
+test shadow_paints_pixels_outside_glyph_footprint ... ok
+test rasterize_is_deterministic_ssim_one ... ok
+test font_size_scales_with_canvas_height ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+```
+
+### `cargo test -p opentake-render --test pixel_diff -- --nocapture`
+
+```text
+Compiling opentake-render v1.0.0 (/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake/crates/opentake-render)
+Finished `test` profile [unoptimized + debuginfo] target(s) in 2.11s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+Running tests/pixel_diff.rs (target/debug/deps/pixel_diff-ff21385e0ad7fa72)
+
+running 14 tests
+test crop_to_uv_visible_insets_match_domain_fractions ... ok
+test compose_with_identity_is_noop ... ok
+test affine_flip_horizontal_with_smaller_source ... ok
+test affine_centered_half_canvas_matches_hand_computed ... ok
+test affine_rotation_45_matches_compose_chain ... ok
+test fade_envelope_smoothstep_endpoints_and_midpoint ... ok
+test crop_keyframe_uv_varies_across_frames ... ok
+test transform_keyframe_midframe_affine_equals_transform_at ... ok
+test fade_midframe_renders_half_brightness ... ok
+test quadrant_round_trip_psnr_is_high ... ok
+test half_opacity_two_track_blend_matches_hand_computed ... ok
+test quadrant_markers_land_in_authored_corners ... ok
+test ssim_identical_frames_score_near_one ... ok
+test text_overlay_visible_above_video ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+```
+
+### `git diff --check -- crates/opentake-render/src/gpu/text_engine.rs crates/opentake-render/tests/gpu_text.rs crates/opentake-render/tests/pixel_diff.rs docs/superpowers/archive/2026-07-08-branch-integration-register.md`
+
+```text
+```
