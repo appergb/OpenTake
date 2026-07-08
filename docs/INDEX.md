@@ -62,3 +62,5 @@ docs/
 | [DECISIONS.md](../DECISIONS.md) | 技术选型决策（为何 Rust/Tauri/GPL-3.0） |
 | [CHANGELOG.md](../CHANGELOG.md) | 变更历史 |
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | 贡献指南 |
+| [Specs Index](specs/INDEX.md) | 已批准/历史规格目录 |
+| [Superpowers Recovery](superpowers/specs/2026-07-08-opentake-recovery-integration-design.md) | 本轮恢复集成设计与计划入口 |
