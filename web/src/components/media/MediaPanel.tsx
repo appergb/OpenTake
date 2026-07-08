@@ -884,7 +884,11 @@ function MediaCard({ item }: { item: MediaItem }) {
             style={{ width: "100%", height: "100%", objectFit: "cover" }}
           />
         ) : item.type === "audio" ? (
-          <AudioWaveform mediaRef={item.id} missing={item.missing} />
+          <AudioWaveform
+            mediaRef={item.id}
+            missing={item.missing}
+            fallback={<Icon icon={TYPE_ICON[item.type]} size={22} strokeWidth={1.5} />}
+          />
         ) : (
           <Icon icon={TYPE_ICON[item.type]} size={22} strokeWidth={1.5} />
         )}
@@ -1055,11 +1059,22 @@ function Placeholder({ label }: { label: string }) {
 }
 
 /** 音频卡片的波形缩略图（#91-B3）。复用 `get_waveform` 命令拿归一化桶
- *  (0=响, 1=静)，采样到固定条数渲染竖条。decode 失败 / 无音频轨 → 不渲染
- *  （卡片回落到类型图标，由 MediaCard 的 ternary 决定）。 */
-function AudioWaveform({ mediaRef, missing }: { mediaRef: string; missing?: boolean }) {
-  const [buckets, setBuckets] = useState<number[] | null>(null);
+ *  (0=响, 1=静)，采样到固定条数渲染竖条。decode 失败 / 无音频轨 / 空桶时回退
+ *  到调用方提供的类型图标，避免卡片缩略图区域变空白。 */
+export function AudioWaveform({
+  mediaRef,
+  missing,
+  fallback,
+  bucketsOverride,
+}: {
+  mediaRef: string;
+  missing?: boolean;
+  fallback: React.ReactNode;
+  bucketsOverride?: number[] | null;
+}) {
+  const [buckets, setBuckets] = useState<number[] | null>(bucketsOverride ?? null);
   useEffect(() => {
+    if (bucketsOverride !== undefined) return;
     if (missing) return;
     let cancelled = false;
     void getWaveform(mediaRef).then((b) => {
@@ -1068,11 +1083,12 @@ function AudioWaveform({ mediaRef, missing }: { mediaRef: string; missing?: bool
     return () => {
       cancelled = true;
     };
-  }, [mediaRef, missing]);
-  if (!buckets || buckets.length === 0) return null;
+  }, [mediaRef, missing, bucketsOverride]);
+  if (!buckets || buckets.length === 0) return <>{fallback}</>;
   const sampled = sampleWaveform(buckets, 48);
   return (
     <div
+      data-testid="audio-waveform"
       style={{
         display: "flex",
         alignItems: "center",

@@ -15,13 +15,18 @@ vi.mock("../lib/api", () => ({
 
 import { useMediaStore, refreshMedia } from "./mediaStore";
 
-const item = (id: string, folderId: string | null): MediaItem => ({
+const item = (
+  id: string,
+  folderId: string | null,
+  over: Partial<MediaItem> = {},
+): MediaItem => ({
   id,
   name: id,
   type: "video",
   duration: 1,
   hasAudio: false,
   folderId,
+  ...over,
 });
 const folder = (id: string, parentFolderId: string | null): MediaFolder => ({
   id,
@@ -52,6 +57,30 @@ describe("mediaStore", () => {
     expect(state.items.map((i) => i.id)).toEqual(["a", "b"]);
     expect(state.folders.map((f) => f.id)).toEqual(["trip", "day1"]);
     expect(state.folders[1].parentFolderId).toBe("trip");
+  });
+
+  it("refreshMedia dedups duplicate ids and keeps the last item deterministically", async () => {
+    srv.media = {
+      items: [
+        item("dup", null, { name: "first", duration: 1 }),
+        item("keep", "trip", { name: "keep", duration: 2 }),
+        item("dup", "trip", { name: "second", duration: 99, hasAudio: true }),
+      ],
+      folders: [folder("trip", null)],
+    };
+
+    await refreshMedia();
+
+    const state = useMediaStore.getState();
+    expect(state.items).toHaveLength(2);
+    expect(state.items.map((i) => i.id)).toEqual(["dup", "keep"]);
+    expect(state.items[0]).toMatchObject({
+      id: "dup",
+      name: "second",
+      duration: 99,
+      hasAudio: true,
+      folderId: "trip",
+    });
   });
 
   it("setFolders replaces immutably (new array reference)", () => {
