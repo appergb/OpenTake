@@ -22,6 +22,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use base64::Engine as _;
@@ -498,10 +499,31 @@ fn decode_source_frame(core: &AppCore, media_id: &str, frame: i32) -> Result<Dec
 /// colliding when the same frame is captured twice. Not cryptographic — just a
 /// disambiguator so two captures of the same frame don't overwrite each other.
 fn uuid_like() -> u128 {
-    std::time::SystemTime::now()
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
-        .unwrap_or(0)
+        .unwrap_or(0);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
+    (nanos << 16) | (counter & 0xffff)
+}
+
+fn freeze_capture_png_path(
+    captures_dir: &std::path::Path,
+    clip_id: &str,
+    at_frame: i32,
+) -> PathBuf {
+    let safe_id = clip_id
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    captures_dir.join(format!("freeze_{safe_id}_{at_frame}_{}.png", uuid_like()))
 }
 
 pub fn capture_freeze_frame(
@@ -527,17 +549,7 @@ pub fn capture_freeze_frame(
     )?;
     let captures_dir = engine.cache_root().join("captures");
     std::fs::create_dir_all(&captures_dir).map_err(|e| format!("create captures dir: {e}"))?;
-    let safe_id = clip_id
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    let png_path = captures_dir.join(format!("freeze_{safe_id}_{at_frame}.png"));
+    let png_path = freeze_capture_png_path(&captures_dir, clip_id, at_frame);
     let bytes = encode_png_bytes(&composite)?;
     std::fs::write(&png_path, &bytes).map_err(|e| format!("write freeze png: {e}"))?;
     let entry = crate::media::import_one(core, engine, &png_path)
@@ -701,5 +713,15 @@ mod tests {
         assert!(!solo_timeline.tracks[0].muted);
         assert_eq!(solo_manifest.entries.len(), 1);
         assert_eq!(solo_manifest.entries[0].id, "asset-1");
+    }
+
+    #[test]
+    fn freeze_capture_png_path_is_unique_for_same_clip_and_frame() {
+        let captures_dir = PathBuf::from("/tmp/captures");
+        let first = freeze_capture_png_path(&captures_dir, "clip:1", 42);
+        let second = freeze_capture_png_path(&captures_dir, "clip:1", 42);
+        assert_ne!(first, second);
+        assert!(first.to_string_lossy().contains("freeze_clip_1_42_"));
+        assert!(second.to_string_lossy().contains("freeze_clip_1_42_"));
     }
 }

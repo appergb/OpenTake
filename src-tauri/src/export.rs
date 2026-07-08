@@ -32,7 +32,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -739,6 +739,25 @@ fn write_wav_s16le(samples: &[f32], sample_rate: u32, out: &Path) -> Result<(), 
     std::fs::write(out, &buf).map_err(|e| format!("write wav: {e}"))
 }
 
+fn unique_export_range_path(
+    saves_dir: &Path,
+    name_id: &str,
+    start: i32,
+    end: i32,
+    ext: &str,
+) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
+    saves_dir.join(format!(
+        "save_{name_id}_{start}_{end}_{:x}.{ext}",
+        (nanos << 16) | (counter & 0xffff)
+    ))
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn export_range(
@@ -804,7 +823,7 @@ pub fn export_range(
     let saves_dir = engine.cache_root().join("saves");
     std::fs::create_dir_all(&saves_dir).map_err(|e| format!("create saves dir: {e}"))?;
     let name_id = clip_id_resolved.as_deref().unwrap_or("range");
-    let out_path = saves_dir.join(format!("save_{name_id}_{start}_{end}.{ext}"));
+    let out_path = unique_export_range_path(&saves_dir, name_id, start, end, ext);
 
     control.reset();
     let on_progress = |done: i32, total: i32| {
@@ -1203,6 +1222,16 @@ mod tests {
         };
         let sliced = slice_pcm(pcm, 1, 2, 2);
         assert_eq!(sliced.samples_f32, vec![2.0, 3.0]);
+    }
+
+    #[test]
+    fn export_range_path_is_unique_for_same_range() {
+        let saves_dir = Path::new("/tmp/saves");
+        let first = unique_export_range_path(saves_dir, "clip-1", 10, 20, "mp4");
+        let second = unique_export_range_path(saves_dir, "clip-1", 10, 20, "mp4");
+        assert_ne!(first, second);
+        assert!(first.to_string_lossy().contains("save_clip-1_10_20_"));
+        assert!(second.to_string_lossy().contains("save_clip-1_10_20_"));
     }
 
     #[test]

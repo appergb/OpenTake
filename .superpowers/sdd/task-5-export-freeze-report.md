@@ -245,3 +245,34 @@ $ git diff --check -- src-tauri/src/commands.rs src-tauri/src/render.rs src-taur
 ### Commit SHA
 
 - `2583232` `fix(task5): address batch b review findings`
+
+## Full Task 5 Review Fixes
+
+### Root cause
+
+- `capture_freeze_frame(...)` wrote `freeze_{clip_id}_{frame}.png`, so freezing the same clip/frame again reused the same source path and let import dedup or overwrite the previous asset.
+- `export_range(...)` wrote `save_{name_id}_{start}_{end}.{ext}`, so repeated exports of the same range reused the same source path and could be treated as the same imported asset.
+
+### Changes
+
+- Updated `src-tauri/src/render.rs` so freeze captures now go through `freeze_capture_png_path(...)`, which keeps the existing readable prefix but appends a fresh `uuid_like()` suffix on every write.
+- Hardened `uuid_like()` with a timestamp-plus-counter suffix so same-process back-to-back captures stay unique even if clock resolution is coarse.
+- Updated `src-tauri/src/export.rs` so range exports now go through `unique_export_range_path(...)`, which appends a fresh unique suffix to every `save_*` output path.
+- Added focused unit tests that call the production path helpers twice with identical inputs and assert the resulting paths differ.
+
+### Tests
+
+- `cargo fmt --all --check`
+- `cargo test --manifest-path src-tauri/Cargo.toml -p opentake-tauri freeze_capture --lib -- --nocapture`
+- `cargo test --manifest-path src-tauri/Cargo.toml -p opentake-tauri export_range --lib -- --nocapture`
+- `git diff --check -- src-tauri/src/render.rs src-tauri/src/export.rs .superpowers/sdd/task-5-export-freeze-report.md`
+
+### Files changed
+
+- `src-tauri/src/render.rs`
+- `src-tauri/src/export.rs`
+- `.superpowers/sdd/task-5-export-freeze-report.md`
+
+### Commit SHA
+
+- `c1f7b14` `fix(task5): make freeze and export asset paths unique`
