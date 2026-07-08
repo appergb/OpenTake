@@ -7,6 +7,7 @@
 //! §2 — "真相源在 Rust，前端持镜像").
 
 mod captions;
+mod chat;
 mod commands;
 // `pub` so the ffmpeg-gated integration test (`tests/export_integration.rs`) can
 // drive the export orchestrator (`export::run_export`) against the library
@@ -120,6 +121,12 @@ pub fn run() {
                 .join("workflows");
             mcp::spawn(
                 core.clone(),
+                workflows_dir.clone(),
+                cache_root.clone(),
+                models_dir.clone(),
+            );
+            let chat_state = chat::ChatState::new(
+                core.clone(),
                 workflows_dir,
                 cache_root.clone(),
                 models_dir.clone(),
@@ -138,6 +145,7 @@ pub fn run() {
             let library_store = LibraryStore::new(library_root);
 
             app.manage(core);
+            app.manage(chat_state);
             app.manage(MediaState::new(engine));
             app.manage(crate::library::LibraryState::new(library_store));
             // Lazily-acquired GPU context for timeline composite previews (#47).
@@ -198,6 +206,9 @@ pub fn run() {
             secret::secret_save,
             secret::secret_load,
             secret::secret_delete,
+            chat::chat_send,
+            chat::chat_history,
+            chat::chat_cancel,
             transcribe::transcribe_model_status,
             transcribe::download_transcribe_model,
             transcribe::transcribe_media,

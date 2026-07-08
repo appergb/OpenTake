@@ -29,7 +29,7 @@ main-line work. Selective replay is the integration method.
 | `feat/save-clip-as-media` | Integrated | commit `708fd44`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and queue inspection already established stale-branch broad-deletion risk against current main-line work | Selective replay only: ported range-aware `export_range`, `ExportFormat`/`audioWav`, PCM slicing + WAV writing, and the current explicit frontend export args without touching stale branch head wholesale |
 | `feat/freeze-frame` | Integrated | commit `da3e934`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and queue inspection already established stale-branch broad-deletion risk against current main-line work | Selective replay only: ported the dedicated freeze-frame command, Tauri capture-before-edit hook, request/action/menu wiring, and i18n without merging the stale head |
 | `feat/account-scaffold` | Deferred | one old commit `4986716`, 154 behind / 1 ahead | Defer until editing recovery is settled; then inspect and replay account scaffold work |
-| `feat/agent-chat-panel` | Deferred | one old commit `dd9f224`, 154 behind / 1 ahead | Defer until the wide-surface tasks are done; then inspect and replay chat panel work |
+| `feat/agent-chat-panel` | Integrated | commit `dd9f224`, `154/1` drift; direct stale merge rejected because the branch diff still spans 135 files with broad docs/spec deletions plus unrelated core/media/preview churn | Selective replay only: ported chat loop/session/LLM modules, Tauri chat commands with the current media bridge + explicit provider handling, and the web chat panel/store/types/api/i18n surface |
 | `feat/generative-ui` | No-op | branch head equals `origin/main` | No functional delta at discovery |
 | `feat/inspector-ai-edit-tab` | No-op | branch head equals `origin/main` | No functional delta at discovery |
 | `feat/proxy-media` | No-op | branch head equals `origin/main` | No functional delta at discovery |
@@ -167,3 +167,33 @@ main-line work. Selective replay is the integration method.
     - result: passed with no diagnostics
   - `git diff --check -- web/src/components/media/MediaPanel.tsx web/src/store/mediaStore.ts web/src/components/media/favorites.ts web/src/components/media/favorites.test.ts web/src/components/media/MediaTabBar.tsx web/src/store/uiStore.ts web/src/i18n/dict.ts docs/superpowers/archive/2026-07-08-branch-integration-register.md .superpowers/sdd/task-5-media-library-report.md`
     - result: clean
+
+## Task 5 Batch C
+
+### feat/agent-chat-panel
+
+- Direct merge rejection evidence:
+  - `git rev-list --left-right --count origin/main...feat/agent-chat-panel` -> `154 1`
+  - `git log --oneline --no-merges origin/main..feat/agent-chat-panel` -> `dd9f224 feat(agent): chat panel with streaming + tool dispatch (#HANDOFF-3.3)`
+  - `git diff --name-status origin/main..feat/agent-chat-panel` -> branch head deletes `.cargo/config.toml`, many `docs/port-map/*`, `docs/specs/*`, `src-tauri/src/mpv_bootstrap.rs`, `src-tauri/tests/*`, and unrelated web/media/preview files while also modifying broad core/ops/media/render surfaces; direct stale merge rejected.
+  - `git diff --stat origin/main..feat/agent-chat-panel` -> `135 files changed, 2669 insertions(+), 10289 deletions(-)`
+  - `git show --stat --summary dd9f224` -> chat intent is narrow: `crates/opentake-agent/src/chat/{llm,loop,mod,session}.rs`, `crates/opentake-agent/src/lib.rs`, `src-tauri/src/chat.rs`, `src-tauri/src/lib.rs`, `web/src/components/agent/AgentPanel.tsx`, `web/src/i18n/dict.ts`, `web/src/lib/api.ts`, `web/src/lib/types.ts`, `web/src/store/chatStore.ts`
+- Selective replay result:
+  - Replayed the chat modules into `crates/opentake-agent/src/chat/*` and exported them from `crates/opentake-agent/src/lib.rs`.
+  - Adapted provider handling away from stale auto-pick: `chat_send` now takes the explicit UI-selected `chatProvider`, OpenAI/Anthropic are honored as selected, and `google` fails clearly instead of silently falling back.
+  - Reused the current desktop bridge contract by wiring chat through the same workflow registry + media bridge shape as `src-tauri/src/mcp.rs`; the chat tool catalog also hides bridge-dependent tools when the dispatcher lacks that bridge.
+  - Spliced chat state/commands into the current Tauri app without disturbing newer playback/export/media wiring.
+  - Restored the web chat surface with minimal additions to `AgentPanel`, `chatStore`, `api`, `types`, and `dict`, opening the current Settings modal for no-key guidance.
+- Verification:
+  - `cargo test -p opentake-agent chat -- --nocapture`
+    - result: `20 passed; 0 failed`
+  - `cargo test -p opentake-agent mcp::dispatch -- --nocapture`
+    - result: `100 passed; 0 failed`
+  - `cargo test --manifest-path src-tauri/Cargo.toml -p opentake-tauri chat --lib -- --nocapture`
+    - result: `2 passed; 0 failed`
+  - `cargo test --manifest-path src-tauri/Cargo.toml -p opentake-tauri secret --lib -- --nocapture`
+    - result: `5 passed; 0 failed`
+  - `pnpm -C web test -- src/store/chatStore.test.ts`
+    - result: `48 passed (48 files), 522 passed (522 tests)`; includes the new `chatStore` coverage
+  - `pnpm -C web exec tsc -b --pretty false`
+    - result: passed with no diagnostics

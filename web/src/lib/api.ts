@@ -10,6 +10,8 @@
 
 import type {
   CaptionRequest,
+  ChatMessage,
+  ChatToolCall,
   ClipType,
   EditRequest,
   EditResult,
@@ -738,6 +740,44 @@ export async function secretDelete(provider: string): Promise<SecretStatus> {
   return NO_SECRET;
 }
 
+// MARK: - In-app chat (#HANDOFF-3.3)
+
+export interface ChatDelta {
+  sessionId: string;
+  delta: string;
+}
+
+export interface ChatToolCallEvent {
+  sessionId: string;
+  toolCall: ChatToolCall;
+}
+
+export interface ChatDoneEvent {
+  sessionId: string;
+  message: ChatMessage;
+}
+
+export async function chatSend(
+  sessionId: string,
+  text: string,
+  chatProvider: string,
+): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<void>("chat_send", { sessionId, text, chatProvider });
+  throw new Error("chat requires the desktop app (LLM + tool dispatch)");
+}
+
+export async function chatHistory(sessionId: string): Promise<ChatMessage[]> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<ChatMessage[]>("chat_history", { sessionId });
+  return [];
+}
+
+export async function chatCancel(sessionId: string): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) await invokeImpl<void>("chat_cancel", { sessionId });
+}
+
 // MARK: - Events
 
 /** Subscribe to `timeline_changed`. Returns an unlisten function. No-op (and a
@@ -781,6 +821,45 @@ export async function onGoHome(handler: () => void): Promise<() => void> {
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("go_home", () => handler());
+}
+
+export async function onChatDelta(
+  handler: (event: ChatDelta) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("chat_delta", (e) => {
+    const payload = e.payload as { sessionId?: string; delta?: string } | undefined;
+    if (payload && typeof payload.sessionId === "string" && typeof payload.delta === "string") {
+      handler({ sessionId: payload.sessionId, delta: payload.delta });
+    }
+  });
+}
+
+export async function onChatToolCall(
+  handler: (event: ChatToolCallEvent) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("chat_tool_call", (e) => {
+    const payload = e.payload as { sessionId?: string; toolCall?: ChatToolCall } | undefined;
+    if (payload && typeof payload.sessionId === "string" && payload.toolCall) {
+      handler({ sessionId: payload.sessionId, toolCall: payload.toolCall });
+    }
+  });
+}
+
+export async function onChatDone(
+  handler: (event: ChatDoneEvent) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("chat_done", (e) => {
+    const payload = e.payload as { sessionId?: string; message?: ChatMessage } | undefined;
+    if (payload && typeof payload.sessionId === "string" && payload.message) {
+      handler({ sessionId: payload.sessionId, message: payload.message });
+    }
+  });
 }
 
 // MARK: - Streaming playback engine (#53)

@@ -423,6 +423,16 @@ const zh: Dict = {
 
   // Agent panel
   "agent.placeholder": "AI 助手 · 即将推出",
+  "agent.title": "Agent",
+  "agent.empty": "向 Agent 描述你想完成的剪辑操作。",
+  "agent.desktopOnly": "Agent 仅在桌面版中可用。",
+  "agent.inputPlaceholder": "描述你想做的编辑…",
+  "agent.send": "发送",
+  "agent.cancel": "停止",
+  "agent.clear": "新对话",
+  "agent.openSettings": "打开设置",
+  "agent.toolArgs": "参数",
+  "agent.toolResult": "结果",
 
   // Home
   "home.welcome": "欢迎使用 OpenTake",
@@ -997,6 +1007,16 @@ const en: Dict = {
   "preview.captureFrameFailed": "Capture frame failed",
 
   "agent.placeholder": "AI assistant · coming soon",
+  "agent.title": "Agent",
+  "agent.empty": "Describe the edit you want the Agent to make.",
+  "agent.desktopOnly": "Agent is available only in the desktop app.",
+  "agent.inputPlaceholder": "Describe the edit you want…",
+  "agent.send": "Send",
+  "agent.cancel": "Stop",
+  "agent.clear": "New Chat",
+  "agent.openSettings": "Open Settings",
+  "agent.toolArgs": "Arguments",
+  "agent.toolResult": "Result",
 
   "home.welcome": "Welcome to OpenTake",
   "home.newProject": "New Project",

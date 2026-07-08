@@ -608,4 +608,25 @@ export interface SecretStatus {
   masked: string;
 }
 
+// MARK: - In-app chat (mirror of opentake-agent::chat::session, camelCase)
+
+export type ChatRole = "system" | "user" | "assistant" | "tool";
+
+export interface ChatToolCall {
+  id: string;
+  name: string;
+  args: unknown;
+  result?: unknown;
+  isError?: boolean;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: ChatRole;
+  content: string;
+  toolCalls: ChatToolCall[];
+  createdAt: number;
+  toolCallId?: string;
+}
+
 export type ExportFormat = "video" | "audioWav";

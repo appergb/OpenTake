@@ -96,6 +96,17 @@ impl Dispatcher {
         }
     }
 
+    /// Whether this dispatcher can satisfy render/import tools that require the
+    /// injected [`MediaBridge`].
+    pub fn has_media_bridge(&self) -> bool {
+        self.bridge.is_some()
+    }
+
+    /// Snapshot the current timeline from the bound core handle.
+    pub fn timeline(&self) -> Timeline {
+        self.handle.timeline()
+    }
+
     /// Run one tool through the full pipeline and return its neutral result.
     pub fn dispatch(&self, name: &str, args: Value) -> ToolResult {
         // 1. Resolve the tool name.

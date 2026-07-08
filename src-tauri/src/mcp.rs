@@ -52,7 +52,7 @@ const TEXTURE_CACHE_CAP: usize = 64;
 /// Built-in workflows + any user-authored plugins under `workflows_dir`
 /// (user plugins override a built-in with the same id, since `register` replaces
 /// by id and runs after the built-ins).
-fn build_registry(workflows_dir: &Path) -> PluginRegistry {
+pub(crate) fn build_registry(workflows_dir: &Path) -> PluginRegistry {
     let mut registry = PluginRegistry::with_builtins();
     if workflows_dir.is_dir() {
         let (user, errors) = PluginRegistry::scan(workflows_dir);
@@ -73,8 +73,7 @@ fn build_registry(workflows_dir: &Path) -> PluginRegistry {
 /// keeps running without the agent network face.
 pub fn spawn(core: AppCore, workflows_dir: PathBuf, cache_root: PathBuf, models_dir: PathBuf) {
     let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(core.clone()));
-    let bridge: Arc<dyn MediaBridge> =
-        Arc::new(TauriMediaBridge::new(core, cache_root, models_dir));
+    let bridge = build_media_bridge(core, cache_root, models_dir);
     let registry = Arc::new(RwLock::new(build_registry(&workflows_dir)));
     tauri::async_runtime::spawn(async move {
         let addr = match server::DEFAULT_ADDR.parse() {
@@ -88,6 +87,14 @@ pub fn spawn(core: AppCore, workflows_dir: PathBuf, cache_root: PathBuf, models_
             eprintln!("[mcp] server stopped: {e}");
         }
     });
+}
+
+pub(crate) fn build_media_bridge(
+    core: AppCore,
+    cache_root: PathBuf,
+    models_dir: PathBuf,
+) -> Arc<dyn MediaBridge> {
+    Arc::new(TauriMediaBridge::new(core, cache_root, models_dir))
 }
 
 /// The production [`MediaBridge`]: composites timeline frames on the GPU and
