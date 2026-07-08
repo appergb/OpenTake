@@ -2,7 +2,7 @@
  * MediaPanel (SPEC §7 + 剪映式顶栏改造)。顶部横排主标签（素材/音频/文本/贴纸/
  * 特效/转场/字幕/智能包裹，仅素材/音频可用，其余置灰占位）取代了原左侧竖排
  * Media/Captions/Music 标签条。素材/音频下再分「导入 / 我的」二级标签：导入=全部
- * （音频标签仅 type==='audio'），我的=星标收藏（localStorage 持久化，见 favorites.ts）。
+ * （音频标签仅 type==='audio'），我的=星标收藏（后端 manifest 持久化，见 favorites.ts）。
  * 内容区仍是 actions/search/context 工具栏 + 资产网格；网格项 HTML5-draggable 到
  * 时间线（见 `MediaGrid` / `TimelineRegion`）。
  */
@@ -42,7 +42,7 @@ import { BoundedCache } from "../../lib/lru";
 import { childFolders, folderTrail, normalizeFolderId } from "../../lib/folderTree";
 import { useProjectStore } from "../../store/projectStore";
 import { addMediaToTimeline } from "../../store/editActions";
-import { extractAudio, generateThumbnail, preloadMedia, toggleFavorite } from "../../lib/api";
+import { extractAudio, generateThumbnail, getWaveform, preloadMedia, toggleFavorite } from "../../lib/api";
 import { saveDialog } from "../../lib/dialog";
 import type { MediaFolder, MediaItem } from "../../lib/types";
 import { MediaTabBar, MediaSubTabBar, MATERIAL_SUB_TABS, AUDIO_SUB_TABS } from "./MediaTabBar";
@@ -883,6 +883,8 @@ function MediaCard({ item }: { item: MediaItem }) {
             draggable={false}
             style={{ width: "100%", height: "100%", objectFit: "cover" }}
           />
+        ) : item.type === "audio" ? (
+          <AudioWaveform mediaRef={item.id} missing={item.missing} />
         ) : (
           <Icon icon={TYPE_ICON[item.type]} size={22} strokeWidth={1.5} />
         )}
@@ -1050,4 +1052,62 @@ function Placeholder({ label }: { label: string }) {
       {label}
     </div>
   );
+}
+
+/** 音频卡片的波形缩略图（#91-B3）。复用 `get_waveform` 命令拿归一化桶
+ *  (0=响, 1=静)，采样到固定条数渲染竖条。decode 失败 / 无音频轨 → 不渲染
+ *  （卡片回落到类型图标，由 MediaCard 的 ternary 决定）。 */
+function AudioWaveform({ mediaRef, missing }: { mediaRef: string; missing?: boolean }) {
+  const [buckets, setBuckets] = useState<number[] | null>(null);
+  useEffect(() => {
+    if (missing) return;
+    let cancelled = false;
+    void getWaveform(mediaRef).then((b) => {
+      if (!cancelled) setBuckets(b);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [mediaRef, missing]);
+  if (!buckets || buckets.length === 0) return null;
+  const sampled = sampleWaveform(buckets, 48);
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 1,
+        width: "70%",
+        height: "50%",
+      }}
+    >
+      {sampled.map((v, i) => {
+        const h = Math.max(8, (1 - v) * 100);
+        return (
+          <div
+            key={i}
+            style={{
+              flex: 1,
+              height: `${h}%`,
+              minHeight: 2,
+              background: "var(--accent-primary)",
+              opacity: 0.65,
+              borderRadius: 1,
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+/** 把任意长度的波形桶采样到 `target` 条：取每段代表点的值（无插值）。 */
+function sampleWaveform(buckets: number[], target: number): number[] {
+  if (buckets.length <= target) return buckets;
+  const step = buckets.length / target;
+  const out: number[] = new Array(target);
+  for (let i = 0; i < target; i++) {
+    out[i] = buckets[Math.floor(i * step)];
+  }
+  return out;
 }

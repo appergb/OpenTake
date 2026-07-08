@@ -25,7 +25,7 @@ main-line work. Selective replay is the integration method.
 | `backup/before-rollback-20260708-163646` | Integrated | commits `0b72a10`, `1cfee93`, `9eceadb` checked against recovery branch in Tasks 2-4 | Ported remaining relevant fixes; docs restored |
 | `fix/text-raster-alignment` | Integrated | commit `89bf38c`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and inspection already showed broad stale-branch direct merge risk against current main-line work | Selective replay only: ported `text_engine.rs` text-style/shadow alignment delta plus focused `gpu_text.rs` coverage, then verified with current text tests and full `gpu_text` binary run |
 | `test/render-pixel-diff` | Integrated | commit `eb6e429`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and inspection already showed stale-branch direct merge risk against current main-line work | Selective replay only: restored `crates/opentake-render/tests/pixel_diff.rs` harness and verified with focused pixel-diff tests plus full `pixel_diff` binary run |
-| `fix/91-media-library-rewrite` | Deferred | one old commit `b9e4954`, 154 behind / 1 ahead | Defer until reverse clip and media surfaces are stable; then inspect for non-regressive pieces |
+| `fix/91-media-library-rewrite` | Integrated | commit `b9e4954`, `154/1` drift; direct stale merge rejected because the branch diff still spans 128 files with broad docs/spec deletions and unrelated agent/core/render/tauri/preview churn | Selective replay only: restored missing audio waveform cards and `mediaStore` id-dedup, kept the current manifest-backed favorite migration, deferred stale `ai` subtab replay |
 | `feat/save-clip-as-media` | Integrated | commit `708fd44`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and queue inspection already established stale-branch broad-deletion risk against current main-line work | Selective replay only: ported range-aware `export_range`, `ExportFormat`/`audioWav`, PCM slicing + WAV writing, and the current explicit frontend export args without touching stale branch head wholesale |
 | `feat/freeze-frame` | Integrated | commit `da3e934`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and queue inspection already established stale-branch broad-deletion risk against current main-line work | Selective replay only: ported the dedicated freeze-frame command, Tauri capture-before-edit hook, request/action/menu wiring, and i18n without merging the stale head |
 | `feat/account-scaffold` | Deferred | one old commit `4986716`, 154 behind / 1 ahead | Defer until editing recovery is settled; then inspect and replay account scaffold work |
@@ -144,4 +144,26 @@ main-line work. Selective replay is the integration method.
   - `pnpm -C web exec tsc -b --pretty false`
     - result: passed with no diagnostics
   - `git diff --check -- crates/opentake-ops/src/command.rs src-tauri/src/commands.rs src-tauri/src/render.rs web/src/components/timeline/ClipContextMenu.tsx web/src/components/timeline/ClipContextMenu.test.tsx web/src/i18n/dict.ts web/src/lib/types.ts web/src/store/editActions.ts`
+    - result: clean
+
+### fix/91-media-library-rewrite
+
+- Direct merge rejection evidence:
+  - `git rev-list --left-right --count origin/main...fix/91-media-library-rewrite` -> `154 1`
+  - `git log --oneline --no-merges origin/main..fix/91-media-library-rewrite` -> `b9e4954 fix(media): finish media library rewrite + migrate star to backend (#91, #49, #58)`
+  - `git diff --name-status origin/main..fix/91-media-library-rewrite` -> broad stale-branch diff including `.cargo/config.toml` deletion, `docs/port-map/*` + `docs/specs/*` deletions, and unrelated `M` changes across agent/core/render/tauri/preview surfaces; direct head merge remains rejected
+  - `git diff --stat origin/main..fix/91-media-library-rewrite` -> `128 files changed, 633 insertions(+), 10282 deletions(-)`
+  - `git show --stat --summary b9e4954` -> branch intent was limited to `web/src/components/media/MediaPanel.tsx`, `web/src/components/media/MediaTabBar.tsx`, `web/src/components/media/favorites.ts`, `web/src/components/media/favorites.test.ts`, `web/src/i18n/dict.ts`, `web/src/store/mediaStore.ts`, `web/src/store/uiStore.ts`
+  - `git show --name-only --format=medium b9e4954` -> same seven owned web files; replay was evaluated file-by-file instead of merging the stale head
+- Selective replay decision:
+  - Replayed the still-missing audio waveform card path in `web/src/components/media/MediaPanel.tsx`: current tree still exposes `getWaveform()` in `web/src/lib/api.ts`, but the card fallback had regressed to a plain type icon for audio assets.
+  - Replayed the still-missing `mediaStore` dedup guard in `web/src/store/mediaStore.ts`: current `refreshMedia()` had regressed to `store.setItems(list.items)`, so duplicate ids from overlapping refresh snapshots were no longer collapsed.
+  - Kept the current favorite migration / star toggle path as already integrated: `MediaPanel` already runs `migrateLocalFavorites(items)` on load, `favorites.ts` drains legacy `opentake.favorites` ids via `toggle_favorite`, and the panel filters on `item.favorite`; the stale branch's global-library `library_favorite` / `library_unfavorite` routing was rejected.
+  - Deferred the stale `ai` subtab placeholder (`MediaSubTabId = "ai"` and `media.subtab.ai`) because the current IA now uses `MediaSubTabId = "import" | "mine" | "extract" | "sound"` plus `AUDIO_SUB_TABS` and a disabled toolbar Generate affordance; replaying the old subtab would overwrite newer audio-tab structure.
+- Verification:
+  - `pnpm -C web test -- src/components/media/favorites.test.ts src/store/mediaStore.test.ts src/store/uiStore.test.ts`
+    - result: passed
+  - `pnpm -C web exec tsc -b --pretty false`
+    - result: passed with no diagnostics
+  - `git diff --check -- web/src/components/media/MediaPanel.tsx web/src/store/mediaStore.ts web/src/components/media/favorites.ts web/src/components/media/favorites.test.ts web/src/components/media/MediaTabBar.tsx web/src/store/uiStore.ts web/src/i18n/dict.ts docs/superpowers/archive/2026-07-08-branch-integration-register.md .superpowers/sdd/task-5-media-library-report.md`
     - result: clean

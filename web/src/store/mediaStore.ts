@@ -41,7 +41,11 @@ let unlisten: (() => void) | null = null;
 export async function refreshMedia(): Promise<void> {
   const list = await api.getMedia();
   const store = useMediaStore.getState();
-  store.setItems(list.items);
+  // Dedup by id (#91-A4): a concurrent re-fetch can briefly surface duplicate
+  // assets from overlapping snapshots; collapse by the authoritative item id so
+  // the grid never renders the same asset twice (last wins, backend order kept).
+  const byId = new Map(list.items.map((i) => [i.id, i] as const));
+  store.setItems([...byId.values()]);
   store.setFolders(list.folders);
 }
 
