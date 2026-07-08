@@ -499,6 +499,35 @@ fn uuid_like() -> u128 {
         .unwrap_or(0)
 }
 
+pub fn capture_freeze_frame(
+    core: &AppCore,
+    render: &RenderState,
+    media: &crate::media::MediaState,
+    clip_id: &str,
+    at_frame: i32,
+) -> Result<String, String> {
+    let engine = media.engine();
+    let composite = composite_rgba(core, render, at_frame, 0)?;
+    let captures_dir = engine.cache_root().join("captures");
+    std::fs::create_dir_all(&captures_dir).map_err(|e| format!("create captures dir: {e}"))?;
+    let safe_id = clip_id
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let png_path = captures_dir.join(format!("freeze_{safe_id}_{at_frame}.png"));
+    let bytes = encode_png_bytes(&composite)?;
+    std::fs::write(&png_path, &bytes).map_err(|e| format!("write freeze png: {e}"))?;
+    let entry = crate::media::import_one(core, engine, &png_path)
+        .ok_or_else(|| "freeze frame import failed".to_string())?;
+    Ok(entry.id)
+}
+
 fn project_frame_time_secs(source_frame: i64, timeline_fps: i32) -> f64 {
     let fps = if timeline_fps > 0 {
         timeline_fps as f64

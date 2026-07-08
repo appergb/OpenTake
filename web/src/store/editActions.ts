@@ -129,6 +129,26 @@ export async function splitClip(clipId: string, atFrame: number) {
   await applyAndRefresh({ type: "splitClip", clipId, atFrame });
 }
 
+export const DEFAULT_FREEZE_FRAMES = 30;
+
+export async function freezeFrame(
+  clipId: string,
+  atFrame: number,
+  durationFrames: number = DEFAULT_FREEZE_FRAMES,
+) {
+  return applyAndRefresh({ type: "freezeFrame", clipId, atFrame, durationFrames });
+}
+
+export async function freezeClipAtPlayhead(
+  clip: Clip,
+  durationFrames: number = DEFAULT_FREEZE_FRAMES,
+) {
+  const playhead = Math.round(useEditorUiStore.getState().activeFrame);
+  const inside = playhead > clip.startFrame && playhead < clip.startFrame + clip.durationFrames;
+  const atFrame = inside ? playhead : clip.startFrame + Math.floor(clip.durationFrames / 2);
+  return freezeFrame(clip.id, atFrame, durationFrames);
+}
+
 export async function trimClips(edits: TrimEditReq[]) {
   if (edits.length === 0) return;
   await applyAndRefresh({ type: "trimClips", edits });

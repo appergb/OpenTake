@@ -396,6 +396,8 @@ const zh: Dict = {
   "contextMenu.reverse": "倒放",
   "contextMenu.reverseOn": "取消倒放",
   "contextMenu.reverseTooLong": "片段过长，无法倒放",
+  "contextMenu.freezeFrame": "冻结帧",
+  "contextMenu.freezeFramePrompt": "冻结时长（帧）",
   // Disabled placeholders (issue #93 acceptance: menu must list these even if stub)
   "contextMenu.saveAsMedia": "另存为媒体",
   "contextMenu.extractAudio": "提取音频",
@@ -970,6 +972,8 @@ const en: Dict = {
   "contextMenu.reverse": "Reverse",
   "contextMenu.reverseOn": "Reverse Off",
   "contextMenu.reverseTooLong": "Reverse Unavailable for Long Clips",
+  "contextMenu.freezeFrame": "Freeze Frame",
+  "contextMenu.freezeFramePrompt": "Freeze duration (frames)",
   // Disabled placeholders (issue #93 acceptance: menu must list these even if stub)
   "contextMenu.saveAsMedia": "Save as Media",
   "contextMenu.extractAudio": "Extract Audio",

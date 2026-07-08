@@ -286,8 +286,29 @@ pub fn can_redo(core: State<'_, AppCore>) -> bool {
 /// routes it through [`AppCore::apply`] (which performs the snapshot/commit/
 /// version transaction and emits `TimelineChanged`).
 #[tauri::command]
-pub fn edit_apply(core: State<'_, AppCore>, command: EditRequest) -> Result<EditResultDto, String> {
-    let cmd = command.into_command()?;
+pub fn edit_apply(
+    core: State<'_, AppCore>,
+    render: State<'_, crate::render::RenderState>,
+    media: State<'_, crate::media::MediaState>,
+    command: EditRequest,
+) -> Result<EditResultDto, String> {
+    let cmd = match command {
+        EditRequest::FreezeFrame {
+            clip_id,
+            at_frame,
+            duration_frames,
+        } => {
+            let media_ref =
+                crate::render::capture_freeze_frame(&core, &render, &media, &clip_id, at_frame)?;
+            EditCommand::FreezeFrame {
+                clip_id,
+                at_frame,
+                duration_frames,
+                media_ref,
+            }
+        }
+        other => other.into_command()?,
+    };
     handle_edit_apply(&core, cmd).map_err(msg)
 }
 
@@ -330,6 +351,12 @@ pub enum EditRequest {
     RemoveClips { clip_ids: Vec<String> },
     #[serde(rename_all = "camelCase")]
     SplitClip { clip_id: String, at_frame: i32 },
+    #[serde(rename_all = "camelCase")]
+    FreezeFrame {
+        clip_id: String,
+        at_frame: i32,
+        duration_frames: i32,
+    },
     #[serde(rename_all = "camelCase")]
     TrimClips { edits: Vec<TrimEditDto> },
     #[serde(rename_all = "camelCase")]
@@ -486,6 +513,9 @@ impl EditRequest {
             EditRequest::RemoveClips { clip_ids } => EditCommand::RemoveClips { clip_ids },
             EditRequest::SplitClip { clip_id, at_frame } => {
                 EditCommand::SplitClip { clip_id, at_frame }
+            }
+            EditRequest::FreezeFrame { .. } => {
+                return Err("freezeFrame must be handled by edit_apply".into())
             }
             EditRequest::TrimClips { edits } => EditCommand::TrimClips {
                 edits: edits.into_iter().map(TrimEditDto::into_edit).collect(),
@@ -1077,6 +1107,27 @@ mod edit_request_serde_tests {
                 assert_eq!(properties.reversed, Some(true));
             }
             other => panic!("expected SetClipProperties, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_freeze_frame() {
+        let request = serde_json::from_str::<EditRequest>(
+            r#"{"type":"freezeFrame","clipId":"clip-1","atFrame":120,"durationFrames":30}"#,
+        )
+        .expect("freezeFrame camelCase");
+
+        match request {
+            EditRequest::FreezeFrame {
+                clip_id,
+                at_frame,
+                duration_frames,
+            } => {
+                assert_eq!(clip_id, "clip-1");
+                assert_eq!(at_frame, 120);
+                assert_eq!(duration_frames, 30);
+            }
+            other => panic!("expected FreezeFrame, got {other:?}"),
         }
     }
 

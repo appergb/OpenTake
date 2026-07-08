@@ -27,7 +27,7 @@ main-line work. Selective replay is the integration method.
 | `test/render-pixel-diff` | Integrated | commit `eb6e429`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and inspection already showed stale-branch direct merge risk against current main-line work | Selective replay only: restored `crates/opentake-render/tests/pixel_diff.rs` harness and verified with focused pixel-diff tests plus full `pixel_diff` binary run |
 | `fix/91-media-library-rewrite` | Deferred | one old commit `b9e4954`, 154 behind / 1 ahead | Defer until reverse clip and media surfaces are stable; then inspect for non-regressive pieces |
 | `feat/save-clip-as-media` | Integrated | commit `708fd44`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and queue inspection already established stale-branch broad-deletion risk against current main-line work | Selective replay only: ported range-aware `export_range`, `ExportFormat`/`audioWav`, PCM slicing + WAV writing, and the current explicit frontend export args without touching stale branch head wholesale |
-| `feat/freeze-frame` | Deferred | one old commit `da3e934`, 154 behind / 1 ahead | Defer until source-frame mapping is stable; then inspect and replay freeze-frame work |
+| `feat/freeze-frame` | Integrated | commit `da3e934`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and queue inspection already established stale-branch broad-deletion risk against current main-line work | Selective replay only: ported the dedicated freeze-frame command, Tauri capture-before-edit hook, request/action/menu wiring, and i18n without merging the stale head |
 | `feat/account-scaffold` | Deferred | one old commit `4986716`, 154 behind / 1 ahead | Defer until editing recovery is settled; then inspect and replay account scaffold work |
 | `feat/agent-chat-panel` | Deferred | one old commit `dd9f224`, 154 behind / 1 ahead | Defer until the wide-surface tasks are done; then inspect and replay chat panel work |
 | `feat/generative-ui` | No-op | branch head equals `origin/main` | No functional delta at discovery |
@@ -107,4 +107,26 @@ main-line work. Selective replay is the integration method.
   - `pnpm -C web exec tsc -b --pretty false`
     - result: passed with no diagnostics after the updated API/type signature
   - `git diff --check -- src-tauri/src/export.rs src-tauri/src/lib.rs web/src/lib/api.ts web/src/store/editActions.ts web/src/components/timeline/ClipContextMenu.tsx`
+    - result: clean
+
+### feat/freeze-frame
+
+- Direct merge rejection evidence:
+  - `git rev-list --left-right --count origin/main...feat/freeze-frame` -> `154 1`
+  - `git show --stat --summary da3e934feb6a4cb4a55f8251172839f67fd23ca8` -> touched `crates/opentake-ops/src/command.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/render.rs`, `web/src/components/timeline/ClipContextMenu.tsx`, `web/src/i18n/dict.ts`, `web/src/lib/api.ts`, `web/src/lib/types.ts`, `web/src/store/editActions.ts`
+  - `git show --name-only --format=medium da3e934feb6a4cb4a55f8251172839f67fd23ca8` -> same eight files; branch remains `154/1` stale, so direct head merge stays rejected in favor of replaying the missing command chain on top of current code.
+- Selective replay result:
+  - Replayed `EditCommand::FreezeFrame` into `crates/opentake-ops/src/command.rs` with focused validation and undo/ripple coverage.
+  - Replayed the Tauri-side capture-before-edit hook in `src-tauri/src/commands.rs` and restored `capture_freeze_frame` in `src-tauri/src/render.rs`.
+  - Replayed the front-end request/action/menu/i18n path in `web/src/lib/types.ts`, `web/src/store/editActions.ts`, `web/src/components/timeline/ClipContextMenu.tsx`, `web/src/components/timeline/ClipContextMenu.test.tsx`, and `web/src/i18n/dict.ts`.
+- Verification:
+  - `cargo test -p opentake-ops freeze_frame -- --nocapture`
+    - result: `10 passed; 0 failed`
+  - `cargo test -p opentake-tauri deserializes_freeze_frame --lib -- --nocapture`
+    - result: `test commands::edit_request_serde_tests::deserializes_freeze_frame ... ok`
+  - `pnpm -C web test -- src/components/timeline/ClipContextMenu.test.tsx`
+    - result: `45 passed (45 test files), 514 passed (514 tests)`; the focused file passed after the freeze item was exposed for image/video clips
+  - `pnpm -C web exec tsc -b --pretty false`
+    - result: passed with no diagnostics
+  - `git diff --check -- crates/opentake-ops/src/command.rs src-tauri/src/commands.rs src-tauri/src/render.rs web/src/components/timeline/ClipContextMenu.tsx web/src/components/timeline/ClipContextMenu.test.tsx web/src/i18n/dict.ts web/src/lib/types.ts web/src/store/editActions.ts`
     - result: clean

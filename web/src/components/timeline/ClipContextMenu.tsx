@@ -37,6 +37,7 @@ type ClipMenuLabels = {
   unlink: string;
   swapMedia: string;
   saveAsMedia: string;
+  freezeFrame: string;
   reverse: string;
   reverseOn: string;
   reverseTooLong: string;
@@ -56,6 +57,7 @@ export function clipContextMenuItems({
   onUnlink,
   onSwapMedia,
   onSaveAsMedia,
+  onFreezeFrame,
   onReverse,
   reverseInfo,
 }: {
@@ -72,6 +74,7 @@ export function clipContextMenuItems({
   onUnlink: (ids: string[]) => void | Promise<void>;
   onSwapMedia: () => void;
   onSaveAsMedia: () => void;
+  onFreezeFrame: () => void | Promise<void>;
   onReverse: () => void;
   reverseInfo: { isReversed: boolean; tooLong: boolean };
 }): MenuItem[] {
@@ -139,6 +142,14 @@ export function clipContextMenuItems({
       action: () => {
         ensureSelected();
         onSwapMedia();
+      },
+    });
+
+    items.push({
+      label: labels.freezeFrame,
+      action: () => {
+        ensureSelected();
+        void onFreezeFrame();
       },
     });
   }
@@ -292,6 +303,7 @@ export function ClipContextMenu({
         unlink: t("contextMenu.unlink"),
         swapMedia: t("contextMenu.swapMedia"),
         saveAsMedia: t("contextMenu.saveAsMedia"),
+        freezeFrame: t("contextMenu.freezeFrame"),
         reverse: t("contextMenu.reverse"),
         reverseOn: t("contextMenu.reverseOn"),
         reverseTooLong: t("contextMenu.reverseTooLong"),
@@ -310,6 +322,16 @@ export function ClipContextMenu({
           track.clips.some((candidate) => candidate.id === clipId),
         );
         void edit.saveClipAsMedia(currentClip, trackIndex >= 0 ? trackIndex : null);
+      },
+      onFreezeFrame: async () => {
+        const input = window.prompt(
+          t("contextMenu.freezeFramePrompt"),
+          String(edit.DEFAULT_FREEZE_FRAMES),
+        );
+        if (input == null) return;
+        const frames = parseInt(input, 10);
+        if (!Number.isFinite(frames) || frames < 1) return;
+        await edit.freezeClipAtPlayhead(currentClip, frames);
       },
       onReverse: () => {
         void edit.setClipProperties([clipId], { reversed: !currentClip.reversed });

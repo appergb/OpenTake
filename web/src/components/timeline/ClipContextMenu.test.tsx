@@ -11,6 +11,7 @@ const labels = {
   unlink: "Unlink",
   swapMedia: "Swap Media",
   saveAsMedia: "Save as Media",
+  freezeFrame: "Freeze Frame",
   reverse: "Reverse",
   reverseOn: "Reverse On",
   reverseTooLong: "Reverse Too Long",
@@ -90,6 +91,7 @@ describe("clipContextMenuItems", () => {
       onUnlink: vi.fn(),
       onSwapMedia: vi.fn(),
       onSaveAsMedia: vi.fn(),
+      onFreezeFrame: vi.fn(),
       onReverse: vi.fn(),
       reverseInfo: { isReversed: false, tooLong: false },
     };
@@ -157,6 +159,9 @@ describe("clipContextMenuItems", () => {
     expect(videoItems.map((item) => item.label)).toContain("Swap Media");
     expect(imageItems.map((item) => item.label)).toContain("Swap Media");
     expect(audioItems.map((item) => item.label)).not.toContain("Swap Media");
+    expect(videoItems.map((item) => item.label)).toContain("Freeze Frame");
+    expect(imageItems.map((item) => item.label)).toContain("Freeze Frame");
+    expect(audioItems.map((item) => item.label)).not.toContain("Freeze Frame");
   });
 
   it("shows reverse only for video clips", () => {
