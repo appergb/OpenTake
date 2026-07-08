@@ -1465,6 +1465,7 @@ impl Dispatcher {
             opacity: a.opacity,
             transform: None,
             text_content: a.content.clone(),
+            reversed: a.reversed,
             ..Default::default()
         };
         let Some(transform_patch) = a.transform else {

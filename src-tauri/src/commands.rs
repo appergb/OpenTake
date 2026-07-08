@@ -760,6 +760,8 @@ pub struct ClipPropertiesDto {
     #[serde(default)]
     pub transform: Option<Transform>,
     #[serde(default)]
+    pub reversed: Option<bool>,
+    #[serde(default)]
     pub text_content: Option<String>,
     #[serde(default)]
     pub text_style: Option<TextStyle>,
@@ -789,6 +791,7 @@ impl ClipPropertiesDto {
             volume: self.volume,
             opacity: self.opacity,
             transform: self.transform,
+            reversed: self.reversed,
             text_content: self.text_content,
             text_style: self.text_style,
             crop: self.crop,
@@ -1057,6 +1060,22 @@ mod edit_request_serde_tests {
                 let style = properties.text_style.expect("text_style present");
                 assert_eq!(style.font_name, "Times-Bold");
                 assert_eq!(style.font_size, 48.0);
+            }
+            other => panic!("expected SetClipProperties, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_set_clip_properties_with_reversed() {
+        let request: EditRequest =
+            serde_json::from_str(
+                r#"{"type":"setClipProperties","clipIds":["c1"],"properties":{"reversed":true}}"#,
+            )
+            .expect("setClipProperties with reversed camelCase");
+
+        match request.into_command().expect("setClipProperties command") {
+            EditCommand::SetClipProperties { properties, .. } => {
+                assert_eq!(properties.reversed, Some(true));
             }
             other => panic!("expected SetClipProperties, got {other:?}"),
         }

@@ -61,6 +61,9 @@ fn default_opacity() -> f64 {
 fn default_linear() -> Interpolation {
     Interpolation::Linear
 }
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -136,6 +139,10 @@ pub struct Clip {
     /// Generic named-effect chain. Empty = no effects.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<Effect>,
+    /// Reverse playback. When true, video clips sample their referenced source
+    /// window in reverse order. Non-video sources ignore this flag.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reversed: bool,
 }
 
 impl Clip {
@@ -178,6 +185,7 @@ impl Clip {
             chroma_key: None,
             masks: Vec::new(),
             effects: Vec::new(),
+            reversed: false,
         }
     }
 
@@ -561,6 +569,24 @@ mod tests {
         assert!(c.contains(100));
         assert!(c.contains(129));
         assert!(!c.contains(130));
+    }
+
+    #[test]
+    fn clip_reversed_roundtrip() {
+        let mut c = base_clip();
+        c.reversed = true;
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"reversed\":true"));
+        let back: Clip = serde_json::from_str(&json).unwrap();
+        assert!(back.reversed);
+        assert_eq!(c, back);
+    }
+
+    #[test]
+    fn clip_reversed_defaults_false_when_absent() {
+        let json = r#"{"id":"x","mediaRef":"m","startFrame":0,"durationFrames":12}"#;
+        let c: Clip = serde_json::from_str(json).unwrap();
+        assert!(!c.reversed);
     }
 
     // --- Opacity ---

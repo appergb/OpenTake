@@ -179,6 +179,8 @@ pub struct ClipProperties {
     pub flip_horizontal: Option<bool>,
     /// Vertical flip flag (writes to `transform.flip_vertical`).
     pub flip_vertical: Option<bool>,
+    /// Reverse playback flag. Per-clip and not propagated to linked audio partners.
+    pub reversed: Option<bool>,
 }
 
 /// Which keyframe track [`EditCommand::SetKeyframes`] targets.
@@ -1188,6 +1190,9 @@ fn apply_property_changes(
     }
     if let Some(f) = props.flip_vertical {
         clip.transform.flip_vertical = f;
+    }
+    if let Some(reversed) = props.reversed {
+        clip.reversed = reversed;
     }
     if let Some(c) = &props.text_content {
         clip.text_content = Some(c.clone());
@@ -3586,6 +3591,54 @@ mod text_style_property_tests {
         let clip = &state.timeline.tracks[0].clips[0];
         assert_eq!(clip.text_content.as_deref(), Some("Updated"));
         assert_eq!(clip.text_style.as_ref().unwrap().font_size, 120.0);
+    }
+}
+
+#[cfg(test)]
+mod reversed_property_tests {
+    use super::*;
+    use crate::id::SeqIdGen;
+    use opentake_domain::{Clip, ClipType, Track};
+
+    fn state_with_video_clip() -> EditorState {
+        let mut tl = Timeline::new();
+        let mut t = Track::new("v1", ClipType::Video);
+        let clip = Clip::new("c1", "asset", 0, 30);
+        t.clips.push(clip);
+        tl.tracks.push(t);
+        EditorState::from_timeline(tl)
+    }
+
+    #[test]
+    fn set_clip_properties_reversed_sets_only_requested_clip() {
+        let mut state = state_with_video_clip();
+        let ids = SeqIdGen::default();
+        let video_id = state.timeline.tracks[0].clips[0].id.clone();
+        let before = state.timeline.clone();
+
+        let result = apply(
+            &mut state,
+            EditCommand::SetClipProperties {
+                clip_ids: vec![video_id.clone()],
+                properties: Box::new(ClipProperties {
+                    reversed: Some(true),
+                    ..Default::default()
+                }),
+            },
+            &ids,
+        )
+        .unwrap();
+
+        assert!(result.changed);
+        let clip = state
+            .timeline
+            .tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .find(|clip| clip.id == video_id)
+            .unwrap();
+        assert!(clip.reversed);
+        assert_ne!(state.timeline, before);
     }
 }
 

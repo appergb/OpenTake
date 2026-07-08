@@ -114,6 +114,9 @@ fn encode_clip(clip: &Clip) -> Value {
     if (clip.opacity - 1.0).abs() > f64::EPSILON {
         m.insert("opacity".into(), json!(round3(clip.opacity)));
     }
+    if clip.reversed {
+        m.insert("reversed".into(), json!(true));
+    }
     if clip.fade_in_frames != 0 {
         m.insert("fadeInFrames".into(), json!(clip.fade_in_frames));
     }
@@ -431,12 +434,14 @@ mod tests {
         let mut c = video_clip("c1", 0, 30);
         c.speed = 1.23456;
         c.volume = 0.5;
+        c.reversed = true;
         t.clips.push(c);
         tl.tracks.push(t);
         let v = encode_timeline(&tl, None, None, false);
         let clip = &v["tracks"][0]["clips"][0];
         assert_eq!(clip["speed"], json!(1.235)); // rounded to 3 places
         assert_eq!(clip["volume"], json!(0.5));
+        assert_eq!(clip["reversed"], json!(true));
         assert_eq!(v["canGenerate"], json!(false));
     }
 
