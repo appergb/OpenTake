@@ -235,7 +235,8 @@ pub fn source_frame_index(plan: &ClipPlan, f: i32) -> i64 {
         plan.trim_start_frame as i64
     };
     let duration_frames = (plan.end_frame - plan.start_frame).max(1) as f64;
-    let last = trim + round_haz((duration_frames - 1.0) * plan.speed);
+    let source_frames_consumed = round_haz(duration_frames * plan.speed).max(1);
+    let last = trim + source_frames_consumed - 1;
 
     match (&plan.source, plan.media_type) {
         // Image / Text: single static texture.

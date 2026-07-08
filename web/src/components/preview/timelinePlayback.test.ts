@@ -256,6 +256,38 @@ describe("sourceTimeSec / frameForSourceTime", () => {
     expect(sourceTimeSec(c, 119, 30) * 30).toBeCloseTo(10);
   });
 
+  it("uses the consumed source window boundary for reversed clips at double speed", () => {
+    const c = clip({
+      id: "c",
+      mediaType: "video",
+      startFrame: 100,
+      durationFrames: 20,
+      trimStartFrame: 10,
+      speed: 2,
+      reversed: true,
+    });
+    expect(frameForSourceTime(c, sourceTimeSec(c, 100, 30), 30)).toBeCloseTo(100);
+    expect(sourceTimeSec(c, 100, 30) * 30).toBeCloseTo(49);
+    expect(sourceTimeSec(c, 105, 30) * 30).toBeCloseTo(39);
+    expect(sourceTimeSec(c, 119, 30) * 30).toBeCloseTo(11);
+  });
+
+  it("uses the consumed source window boundary for reversed clips at fractional speed", () => {
+    const c = clip({
+      id: "c",
+      mediaType: "video",
+      startFrame: 100,
+      durationFrames: 20,
+      trimStartFrame: 10,
+      speed: 0.5,
+      reversed: true,
+    });
+    expect(frameForSourceTime(c, sourceTimeSec(c, 100, 30), 30)).toBeCloseTo(100);
+    expect(sourceTimeSec(c, 100, 30) * 30).toBeCloseTo(19);
+    expect(sourceTimeSec(c, 105, 30) * 30).toBeCloseTo(16);
+    expect(sourceTimeSec(c, 119, 30) * 30).toBeCloseTo(10);
+  });
+
   it("clamps source time at 0", () => {
     const c = clip({ id: "c", mediaType: "video", startFrame: 100, trimStartFrame: 0 });
     expect(sourceTimeSec(c, 0, 30)).toBe(0);

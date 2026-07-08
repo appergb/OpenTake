@@ -23,7 +23,8 @@ function safeFpsValue(fps: number): number {
 
 function clipLastSourceFrame(clip: Clip): number {
   const durationFrames = Math.max(1, clip.durationFrames);
-  return clip.trimStartFrame + Math.round((durationFrames - 1) * clipSpeed(clip));
+  const sourceFramesConsumed = Math.max(1, Math.round(durationFrames * clipSpeed(clip)));
+  return clip.trimStartFrame + sourceFramesConsumed - 1;
 }
 
 function sourceFrameForTimelineFrame(clip: Clip, frame: number): number {
