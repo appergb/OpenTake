@@ -192,6 +192,7 @@ pub fn run() {
             render::composite_frame,
             render::capture_frame_to_media,
             export::export_video,
+            export::export_range,
             export::cancel_export,
             export::export_bundle,
             secret::secret_save,

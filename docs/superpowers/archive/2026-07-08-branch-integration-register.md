@@ -26,7 +26,7 @@ main-line work. Selective replay is the integration method.
 | `fix/text-raster-alignment` | Integrated | commit `89bf38c`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and inspection already showed broad stale-branch direct merge risk against current main-line work | Selective replay only: ported `text_engine.rs` text-style/shadow alignment delta plus focused `gpu_text.rs` coverage, then verified with current text tests and full `gpu_text` binary run |
 | `test/render-pixel-diff` | Integrated | commit `eb6e429`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and inspection already showed stale-branch direct merge risk against current main-line work | Selective replay only: restored `crates/opentake-render/tests/pixel_diff.rs` harness and verified with focused pixel-diff tests plus full `pixel_diff` binary run |
 | `fix/91-media-library-rewrite` | Deferred | one old commit `b9e4954`, 154 behind / 1 ahead | Defer until reverse clip and media surfaces are stable; then inspect for non-regressive pieces |
-| `feat/save-clip-as-media` | Deferred | one old commit `708fd44`, 154 behind / 1 ahead | Defer until reverse and media surfaces are stable; then inspect save-clip-as-media work |
+| `feat/save-clip-as-media` | Integrated | commit `708fd44`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and queue inspection already established stale-branch broad-deletion risk against current main-line work | Selective replay only: ported range-aware `export_range`, `ExportFormat`/`audioWav`, PCM slicing + WAV writing, and the current explicit frontend export args without touching stale branch head wholesale |
 | `feat/freeze-frame` | Deferred | one old commit `da3e934`, 154 behind / 1 ahead | Defer until source-frame mapping is stable; then inspect and replay freeze-frame work |
 | `feat/account-scaffold` | Deferred | one old commit `4986716`, 154 behind / 1 ahead | Defer until editing recovery is settled; then inspect and replay account scaffold work |
 | `feat/agent-chat-panel` | Deferred | one old commit `dd9f224`, 154 behind / 1 ahead | Defer until the wide-surface tasks are done; then inspect and replay chat panel work |
@@ -88,3 +88,23 @@ main-line work. Selective replay is the integration method.
     - result: `test half_opacity_two_track_blend_matches_hand_computed ... ok`
   - `cargo test -p opentake-render ssim_identical_frames_score_near_one -- --nocapture`
     - result: `test ssim_identical_frames_score_near_one ... ok`
+
+## Task 5 Batch B
+
+### feat/save-clip-as-media
+
+- Direct merge rejection evidence:
+  - `git rev-list --left-right --count origin/main...feat/save-clip-as-media` -> `154 1`
+  - `git show --stat --summary 708fd443f1d2c8796b71acb7bc0ad1042dabd88c` -> touched `src-tauri/src/export.rs`, `src-tauri/src/lib.rs`, `web/src/components/timeline/ClipContextMenu.tsx`, `web/src/i18n/dict.ts`, `web/src/lib/api.ts`, `web/src/lib/types.ts`
+  - `git show --name-only --format=medium 708fd443f1d2c8796b71acb7bc0ad1042dabd88c` -> same six files; branch remains `154/1` stale, so direct head merge stays rejected in favor of replaying only the missing delta on top of current main-line code.
+- Selective replay result:
+  - Kept the current `save_clip_as_media` path untouched and instead replayed the missing range-aware export path into `src-tauri/src/export.rs`: `ExportFormat`, optional frame-range export plumbing, audio PCM slicing, WAV writing, and `export_range`.
+  - Registered `export_range` in `src-tauri/src/lib.rs`.
+  - Updated the web bridge to pass explicit `clipId | null`, `inFrame`, `outFrame`, `format`, and `trackIndex`, while keeping the current UI behavior focused on clip export.
+- Verification:
+  - `cargo test -p opentake-tauri save_clip --lib -- --nocapture`
+    - result: `running 2 tests` -> `save_clip_export_format_parses_audio_wav ... ok`, `save_clip_slice_pcm_cuts_requested_frame_window ... ok`
+  - `pnpm -C web exec tsc -b --pretty false`
+    - result: passed with no diagnostics after the updated API/type signature
+  - `git diff --check -- src-tauri/src/export.rs src-tauri/src/lib.rs web/src/lib/api.ts web/src/store/editActions.ts web/src/components/timeline/ClipContextMenu.tsx`
+    - result: clean

@@ -13,6 +13,7 @@ import type {
   ClipType,
   EditRequest,
   EditResult,
+  ExportFormat,
   GenerateCaptionsResult,
   MediaList,
   ModelStatus,
@@ -393,10 +394,24 @@ export async function extractAudio(mediaId: string, outPath: string): Promise<st
  * import it as a fresh asset. Returns the refreshed catalog. Video clips only
  * for now; needs a saved project. Requires the desktop app (GPU render + ffmpeg).
  */
-export async function saveClipAsMedia(clipId: string): Promise<MediaList> {
+export async function saveClipAsMedia(
+  clipId: string | null,
+  inFrame: number,
+  outFrame: number,
+  format: ExportFormat = "video",
+  trackIndex: number | null = null,
+): Promise<MediaList | null> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<MediaList>("save_clip_as_media", { clipId });
-  throw new Error("saving a clip as media requires the desktop app");
+  if (invokeImpl) {
+    return invokeImpl<MediaList>("export_range", {
+      clipId,
+      inFrame: Math.floor(inFrame),
+      outFrame: Math.floor(outFrame),
+      format,
+      trackIndex,
+    });
+  }
+  return null;
 }
 
 // MARK: - Transcription (whisper model + on-device transcribe, #183 + captions)

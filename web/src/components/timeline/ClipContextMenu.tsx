@@ -143,8 +143,7 @@ export function clipContextMenuItems({
     });
   }
 
-  // Save-as-media: bake this clip (trims, speed, effects, color, text) into a
-  // new reusable asset. Video only for now — the render path produces an .mp4.
+  // Save-as-media and reverse currently stay video-only.
   if (clip.mediaType === "video") {
     const tooLongAndNotReversed = reverseInfo.tooLong && !reverseInfo.isReversed;
     items.push({
@@ -306,7 +305,12 @@ export function ClipContextMenu({
       onLink: edit.linkClips,
       onUnlink: edit.unlinkClips,
       onSwapMedia: () => setPendingSwapClipId(clipId),
-      onSaveAsMedia: () => void edit.saveClipAsMedia(clipId),
+      onSaveAsMedia: () => {
+        const trackIndex = timeline.tracks.findIndex((track) =>
+          track.clips.some((candidate) => candidate.id === clipId),
+        );
+        void edit.saveClipAsMedia(currentClip, trackIndex >= 0 ? trackIndex : null);
+      },
       onReverse: () => {
         void edit.setClipProperties([clipId], { reversed: !currentClip.reversed });
       },

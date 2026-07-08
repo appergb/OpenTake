@@ -104,6 +104,15 @@ impl ExportQuality {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+pub enum ExportFormat {
+    #[default]
+    #[serde(rename = "video")]
+    Video,
+    #[serde(rename = "audioWav")]
+    AudioWav,
+}
+
 /// Parameters for an export, projected from the front-end. `#[serde(default)]`
 /// on the optional knobs keeps older callers (and partial payloads) working: a
 /// bare `{ "outPath": "..." }` exports H.264 / 1080p.
@@ -536,6 +545,7 @@ pub fn export_video(
         &req,
         Some(&control),
         Some(&on_progress),
+        None,
     )
 }
 
@@ -552,7 +562,7 @@ pub fn run_export(
     project_dir: &Option<PathBuf>,
     req: &ExportRequest,
 ) -> Result<ExportSummary, String> {
-    run_export_with_control(timeline, manifest, project_dir, req, None, None)
+    run_export_with_control(timeline, manifest, project_dir, req, None, None, None)
 }
 
 /// Shared orchestration behind [`run_export`] and [`export_video`]: `control`
@@ -567,6 +577,7 @@ fn run_export_with_control(
     req: &ExportRequest,
     control: Option<&ExportControl>,
     on_progress: Option<&dyn Fn(i32, i32)>,
+    frame_range: Option<(i32, i32)>,
 ) -> Result<ExportSummary, String> {
     let out_path = PathBuf::from(&req.out_path);
     let preset = resolve_preset(req.codec, req.quality, &out_path)?;
@@ -602,8 +613,18 @@ fn run_export_with_control(
     )
     .map_err(|e| format!("encoder init failed: {e}"))?;
 
+    let (start_frame, end_frame) = match frame_range {
+        None => (0, plan.total_frames),
+        Some((lo, hi)) => {
+            let lo = lo.max(0).min(plan.total_frames);
+            let hi = hi.max(lo).min(plan.total_frames);
+            (lo, hi)
+        }
+    };
+    let range_total = end_frame - start_frame;
+
     let mut last_progress_emit = Instant::now();
-    for f in 0..plan.total_frames {
+    for f in start_frame..end_frame {
         if control.is_some_and(|c| c.is_cancelled()) {
             // `abort` kills + waits on the ffmpeg child (unlike a plain `drop`,
             // which would orphan the process and race the file removal below).
@@ -645,10 +666,10 @@ fn run_export_with_control(
 
         if let Some(emit) = on_progress {
             let now = Instant::now();
-            let done = f + 1;
-            let is_last = done == plan.total_frames;
+            let done = f - start_frame + 1;
+            let is_last = done == range_total;
             if is_last || progress_should_emit(last_progress_emit, now) {
-                emit(done, plan.total_frames);
+                emit(done, range_total);
                 last_progress_emit = now;
             }
         }
@@ -657,6 +678,11 @@ fn run_export_with_control(
     // Decode + linearly mix every audio-bearing clip, then hand the mixed PCM to
     // the encoder so `finish` mux's it into the container. No audio → video-only.
     if let Some(pcm) = mix_timeline_audio(timeline, &media)? {
+        let pcm = if frame_range.is_some() {
+            slice_pcm(pcm, start_frame, end_frame, plan.fps)
+        } else {
+            pcm
+        };
         encoder.push_audio(pcm);
     }
 
@@ -669,8 +695,155 @@ fn run_export_with_control(
         width: render_size.width,
         height: render_size.height,
         fps: plan.fps,
-        frame_count: plan.total_frames,
+        frame_count: range_total,
     })
+}
+
+fn slice_pcm(pcm: PcmBuffer, start_frame: i32, end_frame: i32, fps: i32) -> PcmBuffer {
+    if fps <= 0 || start_frame >= end_frame {
+        return PcmBuffer {
+            spec: pcm.spec,
+            samples_f32: Vec::new(),
+        };
+    }
+    let rate = pcm.spec.sample_rate as f64;
+    let lo = ((start_frame.max(0) as f64) / fps as f64 * rate).round() as usize;
+    let hi = ((end_frame.max(0) as f64) / fps as f64 * rate).round() as usize;
+    let lo = lo.min(pcm.samples_f32.len());
+    let hi = hi.max(lo).min(pcm.samples_f32.len());
+    PcmBuffer {
+        spec: pcm.spec,
+        samples_f32: pcm.samples_f32[lo..hi].to_vec(),
+    }
+}
+
+fn write_wav_s16le(samples: &[f32], sample_rate: u32, out: &Path) -> Result<(), String> {
+    let data = opentake_media::encode::mono_f32_to_s16le(samples);
+    let mut buf = Vec::with_capacity(44 + data.len());
+    let data_len = data.len() as u32;
+    let chunk_size = 36 + data_len;
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&chunk_size.to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes());
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+    buf.extend_from_slice(&2u16.to_le_bytes());
+    buf.extend_from_slice(&16u16.to_le_bytes());
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_len.to_le_bytes());
+    buf.extend_from_slice(&data);
+    std::fs::write(out, &buf).map_err(|e| format!("write wav: {e}"))
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn export_range(
+    app: AppHandle,
+    core: State<'_, AppCore>,
+    control: State<'_, ExportControl>,
+    media: State<'_, crate::media::MediaState>,
+    track_index: Option<usize>,
+    clip_id: Option<String>,
+    in_frame: i32,
+    out_frame: i32,
+    format: ExportFormat,
+) -> Result<crate::media::MediaListDto, String> {
+    let timeline = core.get_timeline().timeline;
+    let manifest = core.media();
+    let project_dir = core.project_dir();
+    let engine = media.engine();
+
+    let (clip_id_resolved, start, end, is_audio_clip) = match &clip_id {
+        Some(id) => {
+            let clip = match track_index {
+                Some(i) => timeline
+                    .tracks
+                    .get(i)
+                    .and_then(|t| t.clips.iter().find(|c| c.id == *id))
+                    .ok_or_else(|| format!("clip not found: {id} in track {i}"))?,
+                None => timeline
+                    .tracks
+                    .iter()
+                    .flat_map(|t| t.clips.iter())
+                    .find(|c| c.id == *id)
+                    .ok_or_else(|| format!("clip not found: {id}"))?,
+            };
+            let clip_start = clip.start_frame;
+            let clip_end = clip.start_frame + clip.duration_frames.max(0);
+            let start = if in_frame > 0 { in_frame } else { clip_start }
+                .max(clip_start)
+                .min(clip_end);
+            let end = if out_frame > 0 { out_frame } else { clip_end }
+                .max(start)
+                .min(clip_end);
+            (
+                Some(id.clone()),
+                start,
+                end,
+                clip.media_type == ClipType::Audio,
+            )
+        }
+        None => {
+            if out_frame <= in_frame {
+                return Err("export_range requires in_frame < out_frame".into());
+            }
+            (None, in_frame.max(0), out_frame.max(0), false)
+        }
+    };
+
+    if end <= start {
+        return Err("export_range: empty frame range".into());
+    }
+
+    let is_audio = matches!(format, ExportFormat::AudioWav) || is_audio_clip;
+    let ext = if is_audio { "wav" } else { "mp4" };
+    let saves_dir = engine.cache_root().join("saves");
+    std::fs::create_dir_all(&saves_dir).map_err(|e| format!("create saves dir: {e}"))?;
+    let name_id = clip_id_resolved.as_deref().unwrap_or("range");
+    let out_path = saves_dir.join(format!("save_{name_id}_{start}_{end}.{ext}"));
+
+    control.reset();
+    let on_progress = |done: i32, total: i32| {
+        let _ = app.emit("export://progress", ExportProgress { done, total });
+    };
+
+    if is_audio {
+        let (_sizes, media_map) = project_media(&manifest, &project_dir);
+        let pcm = mix_timeline_audio(&timeline, &media_map)?
+            .ok_or_else(|| "no audio in range to export".to_string())?;
+        let pcm = slice_pcm(pcm, start, end, timeline.fps);
+        if pcm.samples_f32.is_empty() {
+            return Err("no audio in range to export".into());
+        }
+        write_wav_s16le(&pcm.samples_f32, pcm.spec.sample_rate, &out_path)?;
+    } else {
+        let req = ExportRequest {
+            out_path: out_path.to_string_lossy().into_owned(),
+            codec: ExportCodec::H264,
+            quality: ExportQuality::P1080,
+        };
+        run_export_with_control(
+            &timeline,
+            &manifest,
+            &project_dir,
+            &req,
+            Some(&control),
+            Some(&on_progress),
+            Some((start, end)),
+        )?;
+    }
+
+    crate::media::import_one(&core, engine, &out_path)
+        .ok_or_else(|| "save-as-media import failed".to_string())?;
+
+    Ok(crate::media::MediaListDto::from_core(
+        &core,
+        Some(engine.cache_root()),
+    ))
 }
 
 // MARK: - Self-contained `.opentake` bundle export (#29 / upstream `.palmier`)
@@ -1010,7 +1183,27 @@ mod tests {
         assert_eq!(req.quality, ExportQuality::P720);
     }
 
+    #[test]
+    fn save_clip_export_format_parses_audio_wav() {
+        let format: ExportFormat = serde_json::from_str(r#""audioWav""#).expect("parse");
+        assert_eq!(format, ExportFormat::AudioWav);
+    }
+
     use opentake_domain::{Timeline, Track};
+
+    #[test]
+    fn save_clip_slice_pcm_cuts_requested_frame_window() {
+        let pcm = PcmBuffer {
+            spec: PcmSpec {
+                sample_rate: 4,
+                channels: 1,
+                format: PcmFormat::F32,
+            },
+            samples_f32: vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+        };
+        let sliced = slice_pcm(pcm, 1, 2, 2);
+        assert_eq!(sliced.samples_f32, vec![2.0, 3.0]);
+    }
 
     #[test]
     fn clip_source_window_uses_timeline_fps_not_media_source_fps() {

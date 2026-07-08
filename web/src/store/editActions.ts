@@ -439,11 +439,15 @@ export async function deleteSelectedClips() {
  *  import it, so it shows up in the panel as a reusable asset. Backend is
  *  video-only for now and needs a saved project; the render can take a few
  *  seconds, so start + result are toasted. */
-export async function saveClipAsMedia(clipId: string) {
+export async function saveClipAsMedia(clip: Clip, trackIndex: number | null) {
   const ui = useEditorUiStore.getState();
   ui.pushToast("正在导出片段… / Saving clip as media…");
   try {
-    await api.saveClipAsMedia(clipId);
+    const format = clip.mediaType === "audio" ? "audioWav" : "video";
+    const inFrame = clip.startFrame;
+    const outFrame = clip.startFrame + clip.durationFrames;
+    const list = await api.saveClipAsMedia(clip.id, inFrame, outFrame, format, trackIndex);
+    if (!list) throw new Error("desktop app required");
     await refreshMedia();
     ui.pushToast("已另存为媒体 / Saved as media");
   } catch (err) {
