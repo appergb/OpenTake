@@ -28,7 +28,7 @@ main-line work. Selective replay is the integration method.
 | `fix/91-media-library-rewrite` | Integrated | commit `b9e4954`, `154/1` drift; direct stale merge rejected because the branch diff still spans 128 files with broad docs/spec deletions and unrelated agent/core/render/tauri/preview churn | Selective replay only: restored missing audio waveform cards and `mediaStore` id-dedup, kept the current manifest-backed favorite migration, deferred stale `ai` subtab replay |
 | `feat/save-clip-as-media` | Integrated | commit `708fd44`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and queue inspection already established stale-branch broad-deletion risk against current main-line work | Selective replay only: ported range-aware `export_range`, `ExportFormat`/`audioWav`, PCM slicing + WAV writing, and the current explicit frontend export args without touching stale branch head wholesale |
 | `feat/freeze-frame` | Integrated | commit `da3e934`, `154/1` drift; direct stale merge rejected because branch head is 154 behind and queue inspection already established stale-branch broad-deletion risk against current main-line work | Selective replay only: ported the dedicated freeze-frame command, Tauri capture-before-edit hook, request/action/menu wiring, and i18n without merging the stale head |
-| `feat/account-scaffold` | Deferred | one old commit `4986716`, 154 behind / 1 ahead | Defer until editing recovery is settled; then inspect and replay account scaffold work |
+| `feat/account-scaffold` | Deferred | commit `4986716`, `154/1` drift; direct stale merge rejected because branch diff spans 129 files with broad docs/spec/test/playback/preview deletions | Current BYOK keychain + local MCP/agent path covers the recovery goal; account login has no official backend contract and remains a future product surface |
 | `feat/agent-chat-panel` | Integrated | commit `dd9f224`, `154/1` drift; direct stale merge rejected because the branch diff still spans 135 files with broad docs/spec deletions plus unrelated core/media/preview churn | Selective replay only: ported chat loop/session/LLM modules, Tauri chat commands with the current media bridge + explicit provider handling, and the web chat panel/store/types/api/i18n surface |
 | `feat/generative-ui` | No-op | branch head equals `origin/main` | No functional delta at discovery |
 | `feat/inspector-ai-edit-tab` | No-op | branch head equals `origin/main` | No functional delta at discovery |
@@ -186,14 +186,54 @@ main-line work. Selective replay is the integration method.
   - Restored the web chat surface with minimal additions to `AgentPanel`, `chatStore`, `api`, `types`, and `dict`, opening the current Settings modal for no-key guidance.
 - Verification:
   - `cargo test -p opentake-agent chat -- --nocapture`
-    - result: `20 passed; 0 failed`
+    - result: `23 passed; 0 failed`
   - `cargo test -p opentake-agent mcp::dispatch -- --nocapture`
     - result: `100 passed; 0 failed`
   - `cargo test --manifest-path src-tauri/Cargo.toml -p opentake-tauri chat --lib -- --nocapture`
-    - result: `2 passed; 0 failed`
+    - result: `3 passed; 0 failed`
   - `cargo test --manifest-path src-tauri/Cargo.toml -p opentake-tauri secret --lib -- --nocapture`
     - result: `5 passed; 0 failed`
   - `pnpm -C web test -- src/store/chatStore.test.ts`
-    - result: `48 passed (48 files), 522 passed (522 tests)`; includes the new `chatStore` coverage
+    - result: `48 passed (48 files), 523 passed (523 tests)`; includes the new `chatStore` coverage
   - `pnpm -C web exec tsc -b --pretty false`
     - result: passed with no diagnostics
+  - `git diff --check -- crates/opentake-agent/src/chat/mod.rs crates/opentake-agent/src/chat/session.rs crates/opentake-agent/src/chat/llm.rs crates/opentake-agent/src/chat/loop.rs crates/opentake-agent/src/lib.rs crates/opentake-agent/src/mcp/dispatch.rs src-tauri/src/chat.rs src-tauri/src/lib.rs src-tauri/src/mcp.rs web/src/store/chatStore.ts web/src/store/chatStore.test.ts web/src/components/agent/AgentPanel.tsx web/src/lib/api.ts web/src/lib/types.ts web/src/i18n/dict.ts docs/superpowers/archive/2026-07-08-branch-integration-register.md .superpowers/sdd/task-5-agent-chat-report.md`
+    - result: clean
+
+### feat/account-scaffold
+
+- Direct merge rejection evidence:
+  - `git rev-list --left-right --count origin/main...feat/account-scaffold` -> `154 1`
+  - `git log --oneline --no-merges origin/main..feat/account-scaffold` -> `4986716 feat(account): scaffold configurable backend login panel (#HANDOFF-3.8)`
+  - `git diff --name-status origin/main..feat/account-scaffold` -> branch head deletes `.cargo/config.toml`, many `docs/port-map/*`, `docs/specs/*`, `src-tauri/src/mpv_bootstrap.rs`, `src-tauri/tests/*`, and unrelated media/preview/playback files while adding `src-tauri/src/account.rs` and `web/src/components/settings/AccountPane.tsx`; direct stale merge rejected.
+  - `git diff --stat origin/main..feat/account-scaffold` -> `129 files changed, 1155 insertions(+), 10279 deletions(-)`
+  - `git show --stat --summary 4986716` -> account intent is narrower than the stale branch head: `src-tauri/src/account.rs`, `src-tauri/src/lib.rs`, `web/src/components/settings/AccountPane.tsx`, `web/src/components/settings/SettingsView.tsx`, `web/src/i18n/dict.ts`, `web/src/lib/api.ts`, `web/src/lib/types.ts`, plus dependency updates.
+- Selective replay decision:
+  - Deferred account scaffold replay. The commit itself states there is no official backend and does not block local features.
+  - Current recovery goal is covered by local editing, BYOK keychain commands (`secret_save`, `secret_load`, `secret_delete`), explicit provider settings, and the bridge-backed in-app Agent chat/MCP path.
+  - Replaying account now would add a second credential/product surface and live backend URL/token behavior without a committed backend contract.
+- Verification:
+  - Read-only exploration report: `.superpowers/sdd/task-5-account-noop-exploration.md`
+  - Current keychain/provider path verified earlier by `cargo test --manifest-path src-tauri/Cargo.toml -p opentake-tauri secret --lib -- --nocapture`
+    - result: `5 passed; 0 failed`
+
+### No-op branches
+
+- `feat/generative-ui`
+  - `git rev-list --left-right --count origin/main...feat/generative-ui` -> `0 0`
+  - `git log --oneline --no-merges origin/main..feat/generative-ui` -> no output
+  - `git diff --name-status origin/main..feat/generative-ui` -> no output
+  - `git diff --stat origin/main..feat/generative-ui` -> no output
+  - Decision: `No-op`; branch head equals `origin/main`.
+- `feat/inspector-ai-edit-tab`
+  - `git rev-list --left-right --count origin/main...feat/inspector-ai-edit-tab` -> `0 0`
+  - `git log --oneline --no-merges origin/main..feat/inspector-ai-edit-tab` -> no output
+  - `git diff --name-status origin/main..feat/inspector-ai-edit-tab` -> no output
+  - `git diff --stat origin/main..feat/inspector-ai-edit-tab` -> no output
+  - Decision: `No-op`; branch head equals `origin/main`.
+- `feat/proxy-media`
+  - `git rev-list --left-right --count origin/main...feat/proxy-media` -> `0 0`
+  - `git log --oneline --no-merges origin/main..feat/proxy-media` -> no output
+  - `git diff --name-status origin/main..feat/proxy-media` -> no output
+  - `git diff --stat origin/main..feat/proxy-media` -> no output
+  - Decision: `No-op`; branch head equals `origin/main`.
