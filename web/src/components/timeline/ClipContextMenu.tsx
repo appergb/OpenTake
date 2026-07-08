@@ -317,12 +317,7 @@ export function ClipContextMenu({
       onLink: edit.linkClips,
       onUnlink: edit.unlinkClips,
       onSwapMedia: () => setPendingSwapClipId(clipId),
-      onSaveAsMedia: () => {
-        const trackIndex = timeline.tracks.findIndex((track) =>
-          track.clips.some((candidate) => candidate.id === clipId),
-        );
-        void edit.saveClipAsMedia(currentClip, trackIndex >= 0 ? trackIndex : null);
-      },
+      onSaveAsMedia: () => void edit.saveClipAsMedia(clipId),
       onFreezeFrame: async () => {
         const input = window.prompt(
           t("contextMenu.freezeFramePrompt"),

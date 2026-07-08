@@ -29,7 +29,7 @@ use serde::Serialize;
 use tauri::State;
 
 use opentake_core::{AppCore, EditCommand};
-use opentake_domain::{ClipType, MediaSource, TextStyle};
+use opentake_domain::{ClipType, MediaSource, TextStyle, Timeline};
 use opentake_media::{decode_frame_at, FrameRequest};
 use opentake_ops::command::RenameEntry;
 use opentake_render::gpu::texture::upload_rgba;
@@ -250,21 +250,14 @@ fn encode_png_data_url(frame: &DecodedFrame) -> Result<String, String> {
 /// for the preview) and [`capture_frame_to_media`] (which writes it to disk and
 /// imports it as a still). Out-of-range frames / an empty timeline composite to
 /// opaque black — the correct clear color, not an error.
-fn composite_rgba(
-    core: &AppCore,
+fn composite_rgba_for_snapshot(
+    timeline: &Timeline,
+    manifest: &opentake_domain::MediaManifest,
+    project_dir: &Option<PathBuf>,
     render: &RenderState,
     frame: i32,
     max_size: u32,
 ) -> Result<DecodedFrame, String> {
-    // Snapshot the session under its own lock, released before any GPU work.
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    // A saved project copies its media into the bundle and rewrites entries to
-    // `MediaSource::Project { relative_path }` (see opentake-project archive), so
-    // resolving paths must join the bundle dir — skipping them left a reopened
-    // project's preview black.
-    let project_dir = core.project_dir();
-
     // Project text clips (content + style + box) so the resolver can rasterize
     // them on demand. Keyed by clip id, matching `TextureSource::Text { clip_id }`.
     let mut text: HashMap<String, TextInfo> = HashMap::new();
@@ -310,8 +303,8 @@ fn composite_rgba(
     let render_size = preview_render_size(timeline.width, timeline.height, max_size);
 
     let metrics = ManifestMetrics { sizes };
-    let plan = build_render_plan(&timeline, render_size, &metrics);
-    let frame_plan = plan.frame(&timeline, frame);
+    let plan = build_render_plan(timeline, render_size, &metrics);
+    let frame_plan = plan.frame(timeline, frame);
 
     // Acquire (or reuse) the GPU context, then composite + read back. The lock is
     // held across the render so the `Rc`-based texture cache never crosses threads.
@@ -354,6 +347,18 @@ fn composite_rgba(
             &mut resolver,
         )
         .map_err(|e| format!("composite render failed: {e}"))
+}
+
+fn composite_rgba(
+    core: &AppCore,
+    render: &RenderState,
+    frame: i32,
+    max_size: u32,
+) -> Result<DecodedFrame, String> {
+    let timeline = core.get_timeline().timeline;
+    let manifest = core.media();
+    let project_dir = core.project_dir();
+    composite_rgba_for_snapshot(&timeline, &manifest, &project_dir, render, frame, max_size)
 }
 
 /// `composite_frame`: render the timeline at `frame` to a PNG data URL.
@@ -507,7 +512,19 @@ pub fn capture_freeze_frame(
     at_frame: i32,
 ) -> Result<String, String> {
     let engine = media.engine();
-    let composite = composite_rgba(core, render, at_frame, 0)?;
+    let timeline = core.get_timeline().timeline;
+    let manifest = core.media();
+    let project_dir = core.project_dir();
+    let (solo_timeline, solo_manifest) =
+        build_freeze_capture_snapshot(&timeline, &manifest, clip_id)?;
+    let composite = composite_rgba_for_snapshot(
+        &solo_timeline,
+        &solo_manifest,
+        &project_dir,
+        render,
+        at_frame,
+        0,
+    )?;
     let captures_dir = engine.cache_root().join("captures");
     std::fs::create_dir_all(&captures_dir).map_err(|e| format!("create captures dir: {e}"))?;
     let safe_id = clip_id
@@ -528,6 +545,41 @@ pub fn capture_freeze_frame(
     Ok(entry.id)
 }
 
+fn build_freeze_capture_snapshot(
+    timeline: &Timeline,
+    manifest: &opentake_domain::MediaManifest,
+    clip_id: &str,
+) -> Result<(Timeline, opentake_domain::MediaManifest), String> {
+    let track = timeline
+        .tracks
+        .iter()
+        .find(|track| track.clips.iter().any(|clip| clip.id == clip_id))
+        .ok_or_else(|| format!("clip not found: {clip_id}"))?;
+    let clip = track
+        .clips
+        .iter()
+        .find(|clip| clip.id == clip_id)
+        .ok_or_else(|| format!("clip not found: {clip_id}"))?;
+
+    let mut solo_track = track.clone();
+    solo_track.clips = vec![clip.clone()];
+    solo_track.hidden = false;
+    solo_track.muted = false;
+
+    let mut solo_timeline = timeline.clone();
+    solo_timeline.tracks = vec![solo_track];
+
+    let mut subset = manifest.clone();
+    subset.entries.retain(|entry| entry.id == clip.media_ref);
+    subset.folders.clear();
+    subset.favorites.clear();
+    if subset.entries.is_empty() {
+        return Err(format!("media not found for clip: {}", clip.media_ref));
+    }
+
+    Ok((solo_timeline, subset))
+}
+
 fn project_frame_time_secs(source_frame: i64, timeline_fps: i32) -> f64 {
     let fps = if timeline_fps > 0 {
         timeline_fps as f64
@@ -540,6 +592,7 @@ fn project_frame_time_secs(source_frame: i64, timeline_fps: i32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opentake_domain::{Clip, MediaManifest, MediaManifestEntry, Track};
 
     #[test]
     fn project_frame_time_uses_timeline_fps_not_source_fps() {
@@ -586,5 +639,67 @@ mod tests {
             .expect("valid base64");
         // PNG magic number.
         assert_eq!(&bytes[..4], &[0x89, b'P', b'N', b'G']);
+    }
+
+    #[test]
+    fn freeze_capture_snapshot_isolates_target_clip_and_media() {
+        let mut timeline = Timeline::new();
+        let mut target_track = Track::new("v1", ClipType::Video);
+        target_track.hidden = true;
+        target_track.muted = true;
+        target_track
+            .clips
+            .push(Clip::new("clip-1", "asset-1", 100, 60));
+        let mut overlay_track = Track::new("v2", ClipType::Video);
+        overlay_track
+            .clips
+            .push(Clip::new("clip-2", "asset-2", 100, 60));
+        timeline.tracks = vec![target_track, overlay_track];
+
+        let mut manifest = MediaManifest::default();
+        manifest.entries.push(MediaManifestEntry {
+            id: "asset-1".into(),
+            name: "asset-1".into(),
+            kind: ClipType::Video,
+            source: MediaSource::External {
+                absolute_path: "/tmp/a.mov".into(),
+            },
+            duration: 1.0,
+            generation_input: None,
+            source_width: Some(1920),
+            source_height: Some(1080),
+            source_fps: Some(30.0),
+            has_audio: Some(false),
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+        manifest.entries.push(MediaManifestEntry {
+            id: "asset-2".into(),
+            name: "asset-2".into(),
+            kind: ClipType::Video,
+            source: MediaSource::External {
+                absolute_path: "/tmp/b.mov".into(),
+            },
+            duration: 1.0,
+            generation_input: None,
+            source_width: Some(1920),
+            source_height: Some(1080),
+            source_fps: Some(30.0),
+            has_audio: Some(false),
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+
+        let (solo_timeline, solo_manifest) =
+            build_freeze_capture_snapshot(&timeline, &manifest, "clip-1").expect("snapshot");
+        assert_eq!(solo_timeline.tracks.len(), 1);
+        assert_eq!(solo_timeline.tracks[0].clips.len(), 1);
+        assert_eq!(solo_timeline.tracks[0].clips[0].id, "clip-1");
+        assert!(!solo_timeline.tracks[0].hidden);
+        assert!(!solo_timeline.tracks[0].muted);
+        assert_eq!(solo_manifest.entries.len(), 1);
+        assert_eq!(solo_manifest.entries[0].id, "asset-1");
     }
 }

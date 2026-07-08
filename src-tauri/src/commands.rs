@@ -298,6 +298,7 @@ pub fn edit_apply(
             at_frame,
             duration_frames,
         } => {
+            validate_freeze_frame_request(&core, &clip_id, at_frame, duration_frames)?;
             let media_ref =
                 crate::render::capture_freeze_frame(&core, &render, &media, &clip_id, at_frame)?;
             EditCommand::FreezeFrame {
@@ -320,6 +321,40 @@ pub fn check_path_exists(path: String) -> bool {
 
 fn msg(e: CmdError) -> String {
     e.message
+}
+
+fn validate_freeze_frame_request(
+    core: &AppCore,
+    clip_id: &str,
+    at_frame: i32,
+    duration_frames: i32,
+) -> Result<(), String> {
+    let timeline = core.get_timeline().timeline;
+    let clip = timeline
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .find(|clip| clip.id == clip_id)
+        .ok_or_else(|| format!("Clip not found: {clip_id}"))?;
+    if !(at_frame > clip.start_frame && at_frame < clip.end_frame()) {
+        return Err(format!(
+            "Frame {at_frame} must be strictly inside clip range ({}..{})",
+            clip.start_frame,
+            clip.end_frame()
+        ));
+    }
+    if duration_frames < 1 {
+        return Err(format!(
+            "durationFrames must be >= 1 (got {duration_frames})"
+        ));
+    }
+    if !matches!(clip.media_type, ClipType::Video | ClipType::Image) {
+        return Err(format!(
+            "Freeze Frame requires a video or image clip (got {:?})",
+            clip.media_type
+        ));
+    }
+    Ok(())
 }
 
 // MARK: - EditRequest (serde-friendly mirror of EditCommand)
@@ -1049,8 +1084,10 @@ impl KeyframeValueDto {
 
 #[cfg(test)]
 mod edit_request_serde_tests {
-    use super::EditRequest;
-    use opentake_core::EditCommand;
+    use super::{validate_freeze_frame_request, EditRequest};
+    use opentake_core::{AppCore, EditCommand};
+    use opentake_domain::ClipType;
+    use opentake_ops::ClipEntry;
 
     // Regression: the front end sends camelCase keys (clipIds/clipId/atFrame…).
     // serde's enum-level `rename_all` does NOT rename struct-variant fields, so
@@ -1129,6 +1166,71 @@ mod edit_request_serde_tests {
             }
             other => panic!("expected FreezeFrame, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn freeze_frame_preflight_rejects_bad_requests_before_capture() {
+        let core = AppCore::new();
+
+        core.apply(EditCommand::InsertTrack {
+            kind: ClipType::Video,
+            at: None,
+        })
+        .expect("video track");
+        let err = validate_freeze_frame_request(&core, "nope", 10, 1).unwrap_err();
+        assert!(err.contains("Clip not found"));
+
+        let added = core
+            .apply(EditCommand::AddClips {
+                entries: vec![ClipEntry {
+                    media_ref: "asset-1".into(),
+                    media_type: ClipType::Video,
+                    source_clip_type: ClipType::Video,
+                    track_index: 0,
+                    start_frame: 100,
+                    duration_frames: 60,
+                    trim_start_frame: None,
+                    trim_end_frame: None,
+                    has_audio: false,
+                    add_linked_audio: false,
+                    transform: None,
+                }],
+            })
+            .expect("video clip");
+        let clip_id = added.affected_clip_ids[0].clone();
+        let err = validate_freeze_frame_request(&core, &clip_id, 100, 30).unwrap_err();
+        assert!(err.contains("strictly inside clip range"));
+
+        let err = validate_freeze_frame_request(&core, &clip_id, 120, 0).unwrap_err();
+        assert!(err.contains("durationFrames must be >= 1"));
+
+        let audio = AppCore::new();
+        audio
+            .apply(EditCommand::InsertTrack {
+                kind: ClipType::Audio,
+                at: None,
+            })
+            .expect("audio track");
+        let added = audio
+            .apply(EditCommand::AddClips {
+                entries: vec![ClipEntry {
+                    media_ref: "asset-a1".into(),
+                    media_type: ClipType::Audio,
+                    source_clip_type: ClipType::Audio,
+                    track_index: 0,
+                    start_frame: 100,
+                    duration_frames: 60,
+                    trim_start_frame: None,
+                    trim_end_frame: None,
+                    has_audio: true,
+                    add_linked_audio: false,
+                    transform: None,
+                }],
+            })
+            .expect("audio clip");
+        let audio_clip_id = added.affected_clip_ids[0].clone();
+        let err = validate_freeze_frame_request(&audio, &audio_clip_id, 120, 30).unwrap_err();
+        assert!(err.contains("video or image clip"));
     }
 
     #[test]

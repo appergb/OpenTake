@@ -13,7 +13,6 @@ import type {
   ClipType,
   EditRequest,
   EditResult,
-  ExportFormat,
   GenerateCaptionsResult,
   MediaList,
   ModelStatus,
@@ -391,27 +390,14 @@ export async function extractAudio(mediaId: string, outPath: string): Promise<st
 /**
  * `save_clip_as_media` (#91 §3.5): render one timeline clip — effects, color,
  * text, speed baked in — to a new .mp4 in the project bundle's media/ dir and
- * import it as a fresh asset. Returns the refreshed catalog. Video clips only
- * for now; needs a saved project. Requires the desktop app (GPU render + ffmpeg).
+ * import it as a fresh asset. This intentionally keeps the original single-clip
+ * semantics; range export lives behind `export_range` on the backend and is not
+ * the clip-context menu path.
  */
-export async function saveClipAsMedia(
-  clipId: string | null,
-  inFrame: number,
-  outFrame: number,
-  format: ExportFormat = "video",
-  trackIndex: number | null = null,
-): Promise<MediaList | null> {
+export async function saveClipAsMedia(clipId: string): Promise<MediaList> {
   await ensureTauri();
-  if (invokeImpl) {
-    return invokeImpl<MediaList>("export_range", {
-      clipId,
-      inFrame: Math.floor(inFrame),
-      outFrame: Math.floor(outFrame),
-      format,
-      trackIndex,
-    });
-  }
-  return null;
+  if (invokeImpl) return invokeImpl<MediaList>("save_clip_as_media", { clipId });
+  throw new Error("saving a clip as media requires the desktop app");
 }
 
 // MARK: - Transcription (whisper model + on-device transcribe, #183 + captions)

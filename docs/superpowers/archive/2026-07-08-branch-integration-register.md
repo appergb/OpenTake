@@ -95,33 +95,48 @@ main-line work. Selective replay is the integration method.
 
 - Direct merge rejection evidence:
   - `git rev-list --left-right --count origin/main...feat/save-clip-as-media` -> `154 1`
+  - `git log --oneline --no-merges origin/main..feat/save-clip-as-media` -> `708fd44 feat(export): save clip/range as media (#48 tail)`
+  - `git diff --name-status origin/main..feat/save-clip-as-media` -> broad stale-branch diff including `.cargo/config.toml` deletion, many `docs/specs/*` deletions, and wide unrelated `M` changes across Rust/web surfaces; direct stale merge remains rejected and `.claude`-style deletions stay excluded
+  - `git diff --stat origin/main..feat/save-clip-as-media` -> `127 files changed, 790 insertions(+), 10274 deletions(-)`
   - `git show --stat --summary 708fd443f1d2c8796b71acb7bc0ad1042dabd88c` -> touched `src-tauri/src/export.rs`, `src-tauri/src/lib.rs`, `web/src/components/timeline/ClipContextMenu.tsx`, `web/src/i18n/dict.ts`, `web/src/lib/api.ts`, `web/src/lib/types.ts`
   - `git show --name-only --format=medium 708fd443f1d2c8796b71acb7bc0ad1042dabd88c` -> same six files; branch remains `154/1` stale, so direct head merge stays rejected in favor of replaying only the missing delta on top of current main-line code.
 - Selective replay result:
-  - Kept the current `save_clip_as_media` path untouched and instead replayed the missing range-aware export path into `src-tauri/src/export.rs`: `ExportFormat`, optional frame-range export plumbing, audio PCM slicing, WAV writing, and `export_range`.
+  - Kept the current `save_clip_as_media` command as the clip-context Save as Media path so the existing single-clip semantics remain: render exactly one clip, bake clip-local trim/speed/effects/text, write under project `media/`, and import it durably.
+  - Replayed the missing future range-export backend into `src-tauri/src/export.rs`: `ExportFormat`, optional frame-range export plumbing, audio PCM slicing, WAV writing, and `export_range`.
   - Registered `export_range` in `src-tauri/src/lib.rs`.
-  - Updated the web bridge to pass explicit `clipId | null`, `inFrame`, `outFrame`, `format`, and `trackIndex`, while keeping the current UI behavior focused on clip export.
+  - Restored the clip-context UI/API path in `web/src/lib/api.ts`, `web/src/store/editActions.ts`, and `web/src/components/timeline/ClipContextMenu.tsx` to call `save_clip_as_media` again; the new range arguments remain backend-only for future range UX.
+  - Added focused web coverage in `web/src/store/editActions.saveClipAsMedia.test.ts` so the clip-context action keeps the single-clip command signature.
 - Verification:
   - `cargo test -p opentake-tauri save_clip --lib -- --nocapture`
     - result: `running 2 tests` -> `save_clip_export_format_parses_audio_wav ... ok`, `save_clip_slice_pcm_cuts_requested_frame_window ... ok`
+  - `pnpm -C web test -- src/store/editActions.saveClipAsMedia.test.ts src/components/timeline/ClipContextMenu.test.tsx`
+    - result: `46 passed (46 test files), 515 passed (515 tests)`; includes the new single-clip Save as Media call-shape check and the context-menu coverage
   - `pnpm -C web exec tsc -b --pretty false`
     - result: passed with no diagnostics after the updated API/type signature
-  - `git diff --check -- src-tauri/src/export.rs src-tauri/src/lib.rs web/src/lib/api.ts web/src/store/editActions.ts web/src/components/timeline/ClipContextMenu.tsx`
+  - `git diff --check -- src-tauri/src/export.rs src-tauri/src/lib.rs web/src/lib/api.ts web/src/store/editActions.ts web/src/store/editActions.saveClipAsMedia.test.ts web/src/components/timeline/ClipContextMenu.tsx`
     - result: clean
 
 ### feat/freeze-frame
 
 - Direct merge rejection evidence:
   - `git rev-list --left-right --count origin/main...feat/freeze-frame` -> `154 1`
+  - `git log --oneline --no-merges origin/main..feat/freeze-frame` -> `da3e934 feat(ops): freeze frame composite command (split + insert image clip)`
+  - `git diff --name-status origin/main..feat/freeze-frame` -> broad stale-branch diff including `.cargo/config.toml` deletion, many `docs/specs/*` deletions, and wide unrelated `M` changes across Rust/web surfaces; direct stale merge remains rejected and `.claude`-style deletions stay excluded
+  - `git diff --stat origin/main..feat/freeze-frame` -> `127 files changed, 770 insertions(+), 10242 deletions(-)`
   - `git show --stat --summary da3e934feb6a4cb4a55f8251172839f67fd23ca8` -> touched `crates/opentake-ops/src/command.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/render.rs`, `web/src/components/timeline/ClipContextMenu.tsx`, `web/src/i18n/dict.ts`, `web/src/lib/api.ts`, `web/src/lib/types.ts`, `web/src/store/editActions.ts`
   - `git show --name-only --format=medium da3e934feb6a4cb4a55f8251172839f67fd23ca8` -> same eight files; branch remains `154/1` stale, so direct head merge stays rejected in favor of replaying the missing command chain on top of current code.
 - Selective replay result:
   - Replayed `EditCommand::FreezeFrame` into `crates/opentake-ops/src/command.rs` with focused validation and undo/ripple coverage.
-  - Replayed the Tauri-side capture-before-edit hook in `src-tauri/src/commands.rs` and restored `capture_freeze_frame` in `src-tauri/src/render.rs`.
+  - Tightened the Tauri-side capture-before-edit hook in `src-tauri/src/commands.rs` so freeze requests are preflight-validated before any capture/import side effect; transaction-time validation in ops remains in place.
+  - Refactored `src-tauri/src/render.rs` so freeze capture renders a temporary one-track snapshot containing only the target clip, preserving that clip's own source-frame/transform/crop/speed behavior without baking other tracks or overlays into the PNG.
   - Replayed the front-end request/action/menu/i18n path in `web/src/lib/types.ts`, `web/src/store/editActions.ts`, `web/src/components/timeline/ClipContextMenu.tsx`, `web/src/components/timeline/ClipContextMenu.test.tsx`, and `web/src/i18n/dict.ts`.
 - Verification:
   - `cargo test -p opentake-ops freeze_frame -- --nocapture`
     - result: `10 passed; 0 failed`
+  - `cargo test -p opentake-tauri freeze_frame_preflight --lib -- --nocapture`
+    - result: `test commands::edit_request_serde_tests::freeze_frame_preflight_rejects_bad_requests_before_capture ... ok`
+  - `cargo test -p opentake-tauri freeze_capture_snapshot --lib -- --nocapture`
+    - result: `test render::tests::freeze_capture_snapshot_isolates_target_clip_and_media ... ok`
   - `cargo test -p opentake-tauri deserializes_freeze_frame --lib -- --nocapture`
     - result: `test commands::edit_request_serde_tests::deserializes_freeze_frame ... ok`
   - `pnpm -C web test -- src/components/timeline/ClipContextMenu.test.tsx`
