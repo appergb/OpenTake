@@ -28,7 +28,7 @@ use opentake_agent::mcp::core_handle::{AppCoreHandle, CoreHandle};
 use opentake_agent::mcp::media_bridge::{
     BridgeError, ImportOutcome, ImportSource, InspectResult, InspectedFrame, MediaBridge,
     SearchCandidate, SearchIndexState, SearchMediaResult, SearchSpokenHit, SearchVisualHit,
-    TranscriptSource, TranscriptSourceResult,
+    TranscriptSource, TranscriptSourceResult, IMPORT_BYTES_DECODED_MAX,
 };
 use opentake_agent::mcp::server;
 use opentake_agent::plugin::registry::PluginRegistry;
@@ -436,6 +436,13 @@ impl TauriMediaBridge {
             .ok()
             .filter(|d| !d.is_empty())
             .ok_or_else(|| BridgeError::new("source.bytes is not valid non-empty base64"))?;
+        if data.len() > IMPORT_BYTES_DECODED_MAX {
+            return Err(BridgeError::new(format!(
+                "source.bytes decoded payload is too large: {} bytes, max {}; use source.path for larger files",
+                data.len(),
+                IMPORT_BYTES_DECODED_MAX
+            )));
+        }
 
         let project_dir = self
             .core
@@ -899,6 +906,25 @@ mod tests {
             .unwrap_err();
         assert!(
             err.message.contains("No project is open"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn bytes_import_rejects_decoded_payload_over_limit() {
+        let bridge = TauriMediaBridge::new(
+            AppCore::new(),
+            std::env::temp_dir().join("inspect-cache"),
+            std::env::temp_dir().join("inspect-models"),
+        );
+        let oversized = vec![0u8; IMPORT_BYTES_DECODED_MAX + 1];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(oversized);
+        let err = bridge
+            .import_from_bytes(&b64, "image/png", None, None)
+            .unwrap_err();
+        assert!(
+            err.message.contains("decoded payload is too large"),
             "{}",
             err.message
         );
