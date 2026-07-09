@@ -237,3 +237,34 @@ main-line work. Selective replay is the integration method.
   - `git diff --name-status origin/main..feat/proxy-media` -> no output
   - `git diff --stat origin/main..feat/proxy-media` -> no output
   - Decision: `No-op`; branch head equals `origin/main`.
+
+## Task 6 Verification And Security
+
+### Final verification report
+
+- Report: `docs/superpowers/archive/2026-07-08-verification-report.md`
+- Security/code commit: `2193ac7 fix(security): harden mcp imports and update vulnerable deps`
+- Verification date: `2026-07-09`
+
+### Required command results
+
+- `cargo fmt --all --check` -> passed
+- `cargo clippy --workspace --all-targets -- -D warnings` -> passed
+- `cargo test --workspace` -> passed
+- `cargo clippy -p opentake-tauri --no-default-features --all-targets -- -D warnings` -> passed
+- `pnpm -C web build` -> passed
+- `pnpm -C web test` -> passed
+
+### Security results
+
+- `pnpm -C web audit --audit-level moderate` -> passed with no known vulnerabilities.
+- Local `target/cargo-tools/bin/cargo-audit audit` -> exited 0 after vulnerable dependency updates.
+- Fixed RustSec vulnerabilities by updating `crossbeam-epoch`, `quinn-proto`, `quick-xml` through `plist`, and `rmcp`.
+- Fixed MCP import DoS risk by bounding base64 input length, decoded byte length, and HTTP request body size.
+- Secret scan found no real secrets; hits were documentation placeholders, scan text, task filenames, historical upstream-analysis text, or env var names.
+
+### Runtime and Agent results
+
+- Dedicated desktop/runtime Agent launched the dev app with Vite `8.1.3`, observed the `OpenTake` window, verified the MCP listener on `127.0.0.1:19789`, initialized MCP, listed tools, called `get_timeline`, and confirmed oversized `/mcp` requests return `413 Payload Too Large`.
+- Earlier runtime Agent verified the heavier edit path: import fallback media, add to timeline, edit clip properties, set reverse state, inspect timeline frame metadata, and activate a workflow.
+- Security re-review Agent approved the final body-limit regression test and reported no remaining findings.
