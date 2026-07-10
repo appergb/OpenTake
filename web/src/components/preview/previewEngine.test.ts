@@ -1,8 +1,12 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import * as previewEngine from "./previewEngine";
 import { pausedSeekToleranceSec, previewElementKey, shouldSyncPausedMediaToFrame } from "./previewEngine";
 import type { ActiveMedia } from "./timelinePlayback";
 import type { Clip, ClipType, Timeline, Track } from "../../lib/types";
+
+const previewEngineSource = readFileSync(new URL("./previewEngine.ts", import.meta.url), "utf8");
+const removedPluginPackage = ["tauri-plugin", "lib", "mpv-api"].join("-");
 
 function clip(over: Partial<Clip> & { id: string; mediaType: ClipType }): Clip {
   return {
@@ -170,6 +174,45 @@ describe("shouldSeekPlayingFollower", () => {
         desiredTimeSec: 1.1,
       }),
     ).toBe(true);
+  });
+});
+
+describe("WebKit playback transport", () => {
+  it("plays and pauses an ordinary media element without a native plugin call", async () => {
+    const setWebKitMediaPlayback = (
+      previewEngine as {
+        setWebKitMediaPlayback?: (
+          element: Pick<HTMLMediaElement, "currentTime" | "pause" | "paused" | "play">,
+          playing: boolean,
+          desiredTimeSec?: number,
+        ) => void;
+      }
+    ).setWebKitMediaPlayback;
+    const play = async () => {};
+    const element = {
+      currentTime: 0,
+      paused: true,
+      pause: () => {
+        element.paused = true;
+      },
+      play: async () => {
+        element.paused = false;
+        await play();
+      },
+    };
+
+    expect(typeof setWebKitMediaPlayback).toBe("function");
+    setWebKitMediaPlayback?.(element, true, 1.25);
+    await Promise.resolve();
+    expect(element.paused).toBe(false);
+    expect(element.currentTime).toBe(1.25);
+
+    setWebKitMediaPlayback?.(element, false);
+    expect(element.paused).toBe(true);
+    expect(previewEngineSource).not.toContain(removedPluginPackage);
+    expect(previewEngineSource).not.toMatch(
+      /timelineToEdl|\bmpv(?:Command|Init|ObserveProperties|SetProperty)\b/,
+    );
   });
 });
 

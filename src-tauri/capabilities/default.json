@@ -12,7 +12,6 @@
     "core:event:allow-emit",
     "dialog:default",
     "dialog:allow-open",
-    "dialog:allow-save",
-    "libmpv:default"
+    "dialog:allow-save"
   ]
 }

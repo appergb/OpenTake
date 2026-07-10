@@ -17,7 +17,6 @@ mod haptic;
 mod library;
 mod mcp;
 mod media;
-mod mpv_bootstrap;
 mod render;
 mod search;
 mod secret;
@@ -54,7 +53,6 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_libmpv::init())
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 // Background-run: don't quit, hide and return to Home.
@@ -77,10 +75,6 @@ pub fn run() {
             let _ = app
                 .handle()
                 .set_activation_policy(tauri::ActivationPolicy::Regular);
-
-            // Mirror the libmpv wrapper to the plugin's exe-adjacent search path
-            // BEFORE the first play can dlopen it (see `mpv_bootstrap`).
-            mpv_bootstrap::ensure_wrapper(app.handle());
 
             // The one authoritative editing session, shared with every command.
             let core = AppCore::new();

@@ -98,10 +98,7 @@ export default function App() {
         height: "100%",
         width: "100%",
         position: "relative",
-        // Editor view: transparent root — each panel paints itself, and the
-        // preview hole must see through to the native mpv layer. Full-screen
-        // views (home/library) keep the base backdrop.
-        background: view === "editor" ? "transparent" : "var(--bg-base)",
+        background: "var(--bg-base)",
       }}
     >
       {view === "home" ? (

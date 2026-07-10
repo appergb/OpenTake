@@ -1,4 +1,5 @@
 import React from "react";
+import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Clip, ClipType, Timeline, Track } from "../../lib/types";
@@ -61,6 +62,9 @@ vi.mock("../../lib/asset", () => ({
 
 import { Preview } from "./Preview";
 import { TimelinePlayback } from "./TimelinePlaybackLayer";
+
+const previewSource = readFileSync(new URL("./Preview.tsx", import.meta.url), "utf8");
+const removedPluginPackage = ["tauri-plugin", "lib", "mpv-api"].join("-");
 
 function clip(over: Partial<Clip> & { id: string; mediaRef: string; mediaType: ClipType }): Clip {
   return {
@@ -139,6 +143,28 @@ describe("Preview timeline rendering", () => {
     expect(html).toContain("<video");
     expect(html).not.toContain("<img");
     expect(html).not.toContain("data:image/png");
+  });
+
+  it("keeps ordinary WebKit video visible for play and pause without a native plugin bridge", () => {
+    store.timeline = timeline([
+      track({
+        id: "v1",
+        type: "video",
+        clips: [clip({ id: "base-clip", mediaRef: "base", mediaType: "video" })],
+      }),
+    ]);
+
+    store.ui.isPlaying = false;
+    const pausedHtml = renderToStaticMarkup(<Preview />);
+    store.ui.isPlaying = true;
+    const playingHtml = renderToStaticMarkup(<Preview />);
+
+    expect(pausedHtml).toContain("<video");
+    expect(playingHtml).toContain("<video");
+    expect(pausedHtml).not.toContain("visibility:hidden");
+    expect(playingHtml).not.toContain("visibility:hidden");
+    expect(previewSource).not.toContain(removedPluginPackage);
+    expect(previewSource).not.toMatch(/setVideoMarginRatio|mpvDriving/);
   });
 
   it("renders every visible visual layer on the shared timeline canvas", () => {

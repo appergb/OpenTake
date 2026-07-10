@@ -3438,7 +3438,6 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
- "tauri-plugin-libmpv",
  "tempfile",
  "tokio",
 ]
@@ -5213,27 +5212,6 @@ dependencies = [
  "thiserror 2.0.18",
  "toml 1.1.2+spec-1.1.0",
  "url",
-]
-
-[[package]]
-name = "tauri-plugin-libmpv"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "447798aec64877a1e476c2ebc2360a8374740ccf32fdc31949e4942e3fef903e"
-dependencies = [
- "base64 0.22.1",
- "indexmap 2.14.0",
- "libc",
- "libloading 0.8.9",
- "log",
- "once_cell",
- "raw-window-handle",
- "scopeguard",
- "serde",
- "serde_json",
- "tauri",
- "tauri-plugin",
- "thiserror 2.0.18",
 ]
 
 [[package]]

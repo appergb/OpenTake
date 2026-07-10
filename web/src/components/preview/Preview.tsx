@@ -36,12 +36,8 @@ import {
 import { useT } from "../../i18n";
 import {
   captureFrameToMedia,
-  isTauri,
   previewPoster,
 } from "../../lib/api";
-import { rustEngineEnabled } from "./rustEngine";
-import { setVideoMarginRatio } from "tauri-plugin-libmpv-api";
-import { shouldUseRustEngine } from "./timelinePlayback";
 import { findCropEditingClip, findSelectedVisualClip, mediaCanvasAspect } from "../../lib/clip";
 import { setTimelineSettings } from "../../store/editActions";
 import { applyScrollZoom, type CanvasOffset } from "../../lib/previewZoom";
@@ -66,8 +62,6 @@ export function Preview() {
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
   const setCurrentFrame = useEditorUiStore((s) => s.setCurrentFrame);
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
-  const isScrubbing = useEditorUiStore((s) => s.isScrubbing);
-  const rustEngineFailed = useEditorUiStore((s) => s.rustEngineFailed);
   const setScrubbing = useEditorUiStore((s) => s.setScrubbing);
   const togglePlayTimeline = useEditorUiStore((s) => s.togglePlay);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
@@ -263,48 +257,6 @@ export function Preview() {
       ? { width: fittedCanvas.width * canvasZoom, height: fittedCanvas.height * canvasZoom }
       : fittedCanvas;
   const canvasTransform = `translate(${canvasOffset.width}px, ${canvasOffset.height}px)`;
-  // mpv paints on the native window BELOW the webview. While it owns PLAY the
-  // canvas box (and the stage behind it) turn transparent so the video shows
-  // through; pause/scrub restore the opaque composite surfaces (mpv is paused
-  // underneath and hidden by them).
-  const mpvDriving =
-    !previewItem &&
-    shouldUseRustEngine({
-      rustEnabled: rustEngineEnabled(),
-      isTauri,
-      isPlaying,
-      isScrubbing,
-      engineFailed: rustEngineFailed,
-    });
-
-  // Keep mpv's video letterboxed exactly onto the (aspect-fit, zoomed) canvas
-  // box: margins are window-relative ratios, re-synced on layout changes.
-  useEffect(() => {
-    if (!mpvDriving) return;
-    const el = canvasBoxRef.current;
-    if (!el) return;
-    const sync = () => {
-      const r = el.getBoundingClientRect();
-      const W = window.innerWidth;
-      const H = window.innerHeight;
-      if (W <= 0 || H <= 0 || r.width <= 0 || r.height <= 0) return;
-      const clamp01 = (v: number) => Math.min(0.99, Math.max(0, v));
-      void setVideoMarginRatio({
-        left: clamp01(r.left / W),
-        right: clamp01(1 - r.right / W),
-        top: clamp01(r.top / H),
-        bottom: clamp01(1 - r.bottom / H),
-      }).catch((e: unknown) => console.warn("mpv margin sync failed:", e));
-    };
-    sync();
-    const ro = new ResizeObserver(sync);
-    ro.observe(el);
-    window.addEventListener("resize", sync);
-    return () => {
-      ro.disconnect();
-      window.removeEventListener("resize", sync);
-    };
-  }, [mpvDriving, scaledCanvas?.width, scaledCanvas?.height]);
 
   const timelineCanvasStyle = {
     ...timelinePreviewCanvasStyle(timeline.width, timeline.height),
@@ -371,7 +323,7 @@ export function Preview() {
         style={{
           flex: 1,
           minHeight: 0,
-          background: mpvDriving ? "transparent" : "var(--bg-surface)",
+          background: "var(--bg-surface)",
           position: "relative",
           display: "flex",
           alignItems: "center",
@@ -394,7 +346,6 @@ export function Preview() {
             style={{
               ...timelineCanvasStyle,
               position: "relative",
-              ...(mpvDriving ? { background: "transparent" } : {}),
             }}
           >
             {timelineHasContent ? (
@@ -403,7 +354,6 @@ export function Preview() {
                   style={{
                     position: "absolute",
                     inset: 0,
-                    visibility: mpvDriving ? "hidden" : "visible",
                   }}
                 >
                   <TimelinePlayback timeline={timeline} fps={fps} />

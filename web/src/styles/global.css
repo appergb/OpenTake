@@ -16,10 +16,7 @@ body,
 }
 
 body {
-  /* Transparent so the native-layer mpv video (playback engine) can show
-     through the preview hole; every panel paints its own background
-     (PanelShell/TitleBar), so the chrome stays opaque. */
-  background: transparent;
+  background: var(--bg-base);
   color: var(--text-primary);
   font-family: var(--font-ui);
   font-size: var(--fs-md);

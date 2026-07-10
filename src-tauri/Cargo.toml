@@ -62,7 +62,6 @@ futures = { version = "0.3", optional = true }
 # CoreAudio on macOS, ALSA on Linux (CI installs libasound2-dev for the
 # playback-engine job). Off by default with the rest of the feature.
 cpal = { version = "0.15", optional = true }
-tauri-plugin-libmpv = "0.3.2"
 
 # macOS trackpad haptics for snap feedback (1:1 with upstream's
 # NSHapticFeedbackManager). objc2-app-kit 0.3 is already in the lockfile via

@@ -55,16 +55,6 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      # `tauri.conf.json` bundles `lib/libmpv-wrapper.dylib` unconditionally
-      # (macOS-only — used by the libmpv PLAY path). tauri_build's resource
-      # check fails on Linux because the dylib isn't committed for non-macOS.
-      # Create an empty placeholder so the resource path resolves; it's never
-      # actually bundled here since `cargo clippy`/`test` don't run `tauri build`.
-      - name: Create libmpv placeholder for Linux CI
-        run: |
-          mkdir -p src-tauri/lib
-          touch src-tauri/lib/libmpv-wrapper.dylib
-
       - name: cargo fmt
         run: cargo fmt --all --check
 
