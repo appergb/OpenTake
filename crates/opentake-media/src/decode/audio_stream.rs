@@ -9,17 +9,16 @@
 //! This is the one-shot preload form (decode a clip's window up front); the
 //! chunked / background streaming form is the remaining half of #160.
 
-use std::io::Read;
 use std::path::Path;
 
-use crate::decode::pcm::{PcmFormat, PcmSpec};
-use crate::error::{MediaError, Result};
-use crate::ff;
-use crate::probe;
+use crate::cancel::MediaCancelToken;
+use crate::decode::pcm::{decode_raw_pcm_cancellable, PcmFormat, PcmSpec};
+use crate::error::Result;
 
 /// Build the ffmpeg args to decode the first audio track to raw interleaved PCM
 /// on stdout, honoring an optional `[lo, hi)` absolute-seconds range. Mirrors
 /// `pcm::pcm_args` but is kept self-contained (no shared mono path).
+#[cfg(test)]
 fn interleaved_args(path: &Path, spec: &PcmSpec, range: Option<(f64, f64)>) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     if let Some((lo, hi)) = range {
@@ -70,30 +69,16 @@ pub fn decode_pcm_interleaved(
     spec: &PcmSpec,
     range: Option<(f64, f64)>,
 ) -> Result<Vec<f32>> {
-    // Cheap guard: confirm an audio track exists before spawning the decoder.
-    if let Ok(p) = probe::probe(path) {
-        if !p.has_audio {
-            return Err(MediaError::no_track("audio", path));
-        }
-    }
+    decode_pcm_interleaved_cancellable(path, spec, range, &MediaCancelToken::new())
+}
 
-    let mut child = ff::ffmpeg()
-        .args(interleaved_args(path, spec, range))
-        .spawn()
-        .map_err(|e| MediaError::Ffmpeg(format!("spawn: {e}")))?;
-
-    // Read raw PCM straight off stdout (the event parser is tuned for video).
-    let mut raw = Vec::new();
-    if let Some(mut stdout) = child.take_stdout() {
-        stdout
-            .read_to_end(&mut raw)
-            .map_err(|e| MediaError::Ffmpeg(format!("read stdout: {e}")))?;
-    }
-    let status = child.wait().map_err(MediaError::Io)?;
-    if !status.success() && raw.is_empty() {
-        return Err(MediaError::no_track("audio", path));
-    }
-
+pub fn decode_pcm_interleaved_cancellable(
+    path: &Path,
+    spec: &PcmSpec,
+    range: Option<(f64, f64)>,
+    cancel: &MediaCancelToken,
+) -> Result<Vec<f32>> {
+    let raw = decode_raw_pcm_cancellable(path, spec, range, cancel)?;
     Ok(raw_to_interleaved_f32(&raw, spec))
 }
 

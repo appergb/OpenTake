@@ -6,9 +6,12 @@ pub mod frame;
 pub mod pcm;
 pub mod stream;
 
-pub use audio_stream::decode_pcm_interleaved;
-pub use frame::{decode_frame_at, decode_frames_at, fit_within, FrameRequest};
-pub use pcm::{extract_pcm, PcmBuffer, PcmFormat, PcmSpec};
+pub use audio_stream::{decode_pcm_interleaved, decode_pcm_interleaved_cancellable};
+pub use frame::{
+    decode_frame_at, decode_frame_at_cancellable, decode_frames_at, decode_frames_at_cancellable,
+    fit_within, FrameRequest,
+};
+pub use pcm::{extract_pcm, extract_pcm_cancellable, PcmBuffer, PcmFormat, PcmSpec};
 pub use stream::{
     spawn_video_stream, StreamDecodeControl, StreamVideoFrame, VideoStream, VideoStreamRequest,
     DEFAULT_VIDEO_STREAM_QUEUE_CAPACITY,

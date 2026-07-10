@@ -28,6 +28,7 @@ mod ff;
 
 pub mod analysis;
 pub mod cache_key;
+pub mod cancel;
 pub mod decode;
 pub mod encode;
 pub mod error;
@@ -46,15 +47,17 @@ use std::path::{Path, PathBuf};
 
 // --- flat re-exports of the public API ---
 
+pub use cancel::MediaCancelToken;
 pub use error::{MediaError, Result};
 pub use frame::RgbaFrame;
 
 pub use probe::{probe, MediaProbe};
 
 pub use decode::{
-    decode_frame_at, decode_frames_at, decode_pcm_interleaved, extract_pcm, FrameRequest,
-    PcmBuffer, PcmFormat, PcmSpec, StreamDecodeControl, StreamVideoFrame, VideoStream,
-    VideoStreamRequest, DEFAULT_VIDEO_STREAM_QUEUE_CAPACITY,
+    decode_frame_at, decode_frame_at_cancellable, decode_frames_at, decode_frames_at_cancellable,
+    decode_pcm_interleaved, decode_pcm_interleaved_cancellable, extract_pcm,
+    extract_pcm_cancellable, FrameRequest, PcmBuffer, PcmFormat, PcmSpec, StreamDecodeControl,
+    StreamVideoFrame, VideoStream, VideoStreamRequest, DEFAULT_VIDEO_STREAM_QUEUE_CAPACITY,
 };
 
 pub use encode::{ExportPreset, ExportResolution, VideoCodec, VideoEncoder};
@@ -67,7 +70,10 @@ pub use thumbnail::{
 
 pub use timecode::{parse_smpte_timecode, read_start_timecode_frame};
 
-pub use waveform::{waveform, waveform_cached, waveform_sample_count};
+pub use waveform::{
+    waveform, waveform_cached, waveform_cached_cancellable, waveform_cancellable,
+    waveform_sample_count,
+};
 
 pub use transcribe::{
     cache::TranscriptCache,

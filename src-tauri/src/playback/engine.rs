@@ -15,6 +15,7 @@
 //! loop.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -27,6 +28,96 @@ use opentake_render::{
 
 use super::project::{ManifestMetrics, MediaInfo, TextInfo};
 use super::resolver::{PlaybackResolverState, StreamingResolver};
+
+const REAPER_CAPACITY: usize = 2;
+
+struct ReapJob(Vec<JoinHandle<()>>);
+
+struct ReaperInner {
+    sender: mpsc::SyncSender<ReapJob>,
+    outstanding: Arc<AtomicUsize>,
+}
+
+/// One persistent join worker with at most two outstanding teardown jobs.
+#[derive(Clone)]
+pub struct BoundedReaper {
+    inner: Arc<ReaperInner>,
+}
+
+pub struct ReapPermit {
+    reaper: BoundedReaper,
+    active: bool,
+}
+
+impl BoundedReaper {
+    pub fn new() -> Self {
+        let (sender, receiver) = mpsc::sync_channel::<ReapJob>(REAPER_CAPACITY);
+        let inner = Arc::new(ReaperInner {
+            sender,
+            outstanding: Arc::new(AtomicUsize::new(0)),
+        });
+        let worker_outstanding = Arc::clone(&inner.outstanding);
+        let _ = thread::Builder::new()
+            .name("opentake-playback-reaper".to_string())
+            .spawn(move || {
+                while let Ok(ReapJob(handles)) = receiver.recv() {
+                    for handle in handles {
+                        let _ = handle.join();
+                    }
+                    worker_outstanding.fetch_sub(1, Ordering::AcqRel);
+                }
+            });
+        Self { inner }
+    }
+
+    pub fn try_reserve(&self) -> Result<ReapPermit, String> {
+        self.inner
+            .outstanding
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |outstanding| {
+                (outstanding < REAPER_CAPACITY).then_some(outstanding + 1)
+            })
+            .map_err(|_| "playback_teardown_busy".to_string())?;
+        Ok(ReapPermit {
+            reaper: self.clone(),
+            active: true,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_until_idle(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        while self.inner.outstanding.load(Ordering::Acquire) != 0 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(self.inner.outstanding.load(Ordering::Acquire), 0);
+    }
+}
+
+impl Default for BoundedReaper {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ReapPermit {
+    pub fn enqueue(mut self, handles: Vec<JoinHandle<()>>) -> Result<(), String> {
+        match self.reaper.inner.sender.try_send(ReapJob(handles)) {
+            Ok(()) => {
+                self.active = false;
+                Ok(())
+            }
+            Err(error) => Err(format!("playback reaper enqueue failed: {error}")),
+        }
+    }
+}
+
+impl Drop for ReapPermit {
+    fn drop(&mut self) {
+        if self.active {
+            self.reaper.inner.outstanding.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
 
 /// Drives the playback playhead. The audio master clock (cpal) implements this in
 /// PR2; PR1 uses [`InstantClock`] (wall-clock) and the no-audio fallback.
@@ -334,6 +425,38 @@ impl PlaybackEngine {
             let _ = handle.join();
         }
     }
+
+    pub fn request_stop(mut self) -> Option<JoinHandle<()>> {
+        let _ = self.control_tx.send(PlaybackCmd::Stop);
+        self.handle.take()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_stub() -> (Self, mpsc::Receiver<()>) {
+        let (control_tx, control_rx) = mpsc::channel();
+        let (stopped_tx, stopped_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            while let Ok(command) = control_rx.recv() {
+                match command {
+                    PlaybackCmd::Stop => {
+                        let _ = stopped_tx.send(());
+                        break;
+                    }
+                    PlaybackCmd::Pause(_, reply) | PlaybackCmd::Resume(_, reply) => {
+                        let _ = reply.send(());
+                    }
+                    PlaybackCmd::Seek(_) => {}
+                }
+            }
+        });
+        (
+            Self {
+                control_tx,
+                handle: Some(handle),
+            },
+            stopped_rx,
+        )
+    }
 }
 
 impl Drop for PlaybackEngine {
@@ -488,6 +611,38 @@ fn run_render_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_reaper_rejects_new_start_when_teardown_backlog_is_full() {
+        let reaper = BoundedReaper::new();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+
+        for _ in 0..2 {
+            let permit = reaper
+                .try_reserve()
+                .expect("two teardown jobs fit the bounded reaper");
+            let job_release = Arc::clone(&release_rx);
+            let handle = thread::spawn(move || {
+                job_release
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .recv()
+                    .expect("release teardown handle");
+            });
+            permit
+                .enqueue(vec![handle])
+                .expect("enqueue teardown handles");
+        }
+
+        assert!(
+            reaper.try_reserve().is_err(),
+            "a third start must be rejected while two teardowns are outstanding"
+        );
+        release_tx.send(()).expect("release first teardown");
+        release_tx.send(()).expect("release second teardown");
+        reaper.wait_until_idle(Duration::from_secs(2));
+    }
 
     #[test]
     fn frame_at_elapsed_truncates_not_rounds() {

@@ -27,7 +27,7 @@ use std::path::Path;
 
 use crate::cache_key::{file_identity_key, KEY_HEX_LEN};
 use crate::error::Result;
-use crate::{extract_pcm, PcmFormat, PcmSpec};
+use crate::{extract_pcm_cancellable, MediaCancelToken, PcmFormat, PcmSpec};
 
 /// Sample rate for waveform decode. The exact rate is immaterial — the signal is
 /// RMS-downsampled to a fixed bucket count derived from duration — so a single
@@ -38,12 +38,20 @@ const WAVEFORM_SAMPLE_RATE: u32 = 22_050;
 /// Bucket count follows [`waveform_sample_count`]. Decodes the first audio track
 /// to mono f32 via ffmpeg; errors (propagated) when there is no audio track.
 pub fn waveform(path: &Path, duration_secs: f64) -> Result<Vec<f32>> {
+    waveform_cancellable(path, duration_secs, &MediaCancelToken::new())
+}
+
+pub fn waveform_cancellable(
+    path: &Path,
+    duration_secs: f64,
+    cancel: &MediaCancelToken,
+) -> Result<Vec<f32>> {
     let spec = PcmSpec {
         sample_rate: WAVEFORM_SAMPLE_RATE,
         channels: 1,
         format: PcmFormat::F32,
     };
-    let pcm = extract_pcm(path, &spec, None)?;
+    let pcm = extract_pcm_cancellable(path, &spec, Some((0.0, duration_secs)), cancel)?;
     let count = waveform_sample_count(duration_secs);
     Ok(rms_downsample_normalized(&pcm.samples_f32, count))
 }
@@ -51,13 +59,22 @@ pub fn waveform(path: &Path, duration_secs: f64) -> Result<Vec<f32>> {
 /// Like [`waveform`] but reads/writes the `.waveform` disk cache under
 /// `<cache_root>/MediaVisualCache/<key>.waveform`.
 pub fn waveform_cached(cache_root: &Path, path: &Path, duration_secs: f64) -> Result<Vec<f32>> {
+    waveform_cached_cancellable(cache_root, path, duration_secs, &MediaCancelToken::new())
+}
+
+pub fn waveform_cached_cancellable(
+    cache_root: &Path,
+    path: &Path,
+    duration_secs: f64,
+    cancel: &MediaCancelToken,
+) -> Result<Vec<f32>> {
     if let Some(key) = file_identity_key(path, KEY_HEX_LEN) {
         if let Some(cached) = store::load_waveform(cache_root, &key) {
             return Ok(cached);
         }
-        let samples = waveform(path, duration_secs)?;
+        let samples = waveform_cancellable(path, duration_secs, cancel)?;
         let _ = store::save_waveform(cache_root, &key, &samples);
         return Ok(samples);
     }
-    waveform(path, duration_secs)
+    waveform_cancellable(path, duration_secs, cancel)
 }

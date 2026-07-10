@@ -55,6 +55,8 @@ pub enum PlaybackErrorCode {
     Cancelled,
     Busy,
     Engine,
+    AudioBufferTooLarge,
+    Allocation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -88,6 +90,20 @@ impl PlaybackCommandError {
     pub fn engine(message: impl Into<String>) -> Self {
         Self {
             code: PlaybackErrorCode::Engine,
+            message: message.into(),
+        }
+    }
+
+    pub fn audio_buffer_too_large(message: impl Into<String>) -> Self {
+        Self {
+            code: PlaybackErrorCode::AudioBufferTooLarge,
+            message: message.into(),
+        }
+    }
+
+    pub fn allocation(message: impl Into<String>) -> Self {
+        Self {
+            code: PlaybackErrorCode::Allocation,
             message: message.into(),
         }
     }

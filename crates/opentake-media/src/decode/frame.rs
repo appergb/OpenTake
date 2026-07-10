@@ -14,6 +14,7 @@ use std::path::Path;
 
 use ffmpeg_sidecar::event::FfmpegEvent;
 
+use crate::cancel::MediaCancelToken;
 use crate::error::{MediaError, Result};
 use crate::ff;
 use crate::frame::RgbaFrame;
@@ -117,6 +118,17 @@ fn frame_args(path: &Path, req: &FrameRequest) -> Vec<String> {
 
 /// Decode the frame at/after `req.time_secs`, returning `(actual_secs, frame)`.
 pub fn decode_frame_at(path: &Path, req: &FrameRequest) -> Result<(f64, RgbaFrame)> {
+    decode_frame_at_cancellable(path, req, &MediaCancelToken::new())
+}
+
+pub fn decode_frame_at_cancellable(
+    path: &Path,
+    req: &FrameRequest,
+    cancel: &MediaCancelToken,
+) -> Result<(f64, RgbaFrame)> {
+    if cancel.is_cancelled() {
+        return Err(MediaError::Cancelled);
+    }
     let mut child = ff::ffmpeg()
         .args(frame_args(path, req))
         .spawn()
@@ -127,6 +139,11 @@ pub fn decode_frame_at(path: &Path, req: &FrameRequest) -> Result<(f64, RgbaFram
         .iter()
         .map_err(|e| MediaError::Ffmpeg(format!("iter: {e}")))?;
     for event in iter {
+        if cancel.checkpoint() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(MediaError::Cancelled);
+        }
         if let FfmpegEvent::OutputFrame(f) = event {
             if f.width == 0 || f.height == 0 {
                 continue;
@@ -137,7 +154,39 @@ pub fn decode_frame_at(path: &Path, req: &FrameRequest) -> Result<(f64, RgbaFram
         }
     }
     let _ = child.wait();
+    if cancel.is_cancelled() {
+        return Err(MediaError::Cancelled);
+    }
     result.ok_or_else(|| MediaError::Decode(format!("no frame at {:.3}s", req.time_secs)))
+}
+
+pub fn decode_frames_at_cancellable(
+    path: &Path,
+    times_secs: &[f64],
+    base: &FrameRequest,
+    cancel: &MediaCancelToken,
+) -> Vec<Result<(f64, RgbaFrame)>> {
+    let mut out = Vec::with_capacity(times_secs.len());
+    let mut last_time = f64::NEG_INFINITY;
+    for &time in times_secs {
+        if cancel.checkpoint() {
+            out.push(Err(MediaError::Cancelled));
+            break;
+        }
+        let request = FrameRequest {
+            time_secs: time,
+            ..base.clone()
+        };
+        match decode_frame_at_cancellable(path, &request, cancel) {
+            Ok((actual, frame)) if actual > last_time => {
+                last_time = actual;
+                out.push(Ok((actual, frame)));
+            }
+            Ok(_) | Err(MediaError::Decode(_)) => {}
+            Err(error) => out.push(Err(error)),
+        }
+    }
+    out
 }
 
 /// Decode a batch of ascending `times_secs`. De-duplicates frames whose decoded

@@ -18,8 +18,10 @@ use tauri::{AppHandle, Manager, State};
 use opentake_core::AppCore;
 use opentake_render::{even, RenderSize};
 
-use super::audio::build_clock_paused;
-use super::engine::{FrameSink, PlaybackEngine, PlayheadEmitter};
+use super::audio::{build_clock_paused_cancellable, AudioPlayback, AudioPrepareWorker};
+use super::engine::{
+    BoundedReaper, FrameSink, PlaybackClock, PlaybackEngine, PlayheadEmitter, ReapPermit,
+};
 use super::project::{project_media, project_text};
 use super::session::{
     PlaybackCommandError, PlaybackIdentity, ProjectTransition, SessionControl, SessionRegistry,
@@ -39,6 +41,17 @@ struct RunningPlayback {
     engine: PlaybackEngine,
     audio: Option<super::audio::AudioPlayback>,
     publication: PublicationGate,
+    server: Option<Arc<PreviewServer>>,
+    reap: ReapPermit,
+}
+
+type PreparedAudio = Result<(Arc<dyn PlaybackClock>, Option<AudioPlayback>), String>;
+
+struct PlaybackResources {
+    engine: PlaybackEngine,
+    audio: Option<AudioPlayback>,
+    publication: PublicationGate,
+    server: Arc<PreviewServer>,
 }
 
 impl RunningPlayback {
@@ -46,10 +59,24 @@ impl RunningPlayback {
         self.publication.close();
     }
 
-    fn stop(self) {
+    fn shutdown(self) -> Result<(), PlaybackCommandError> {
         self.publication.close();
-        drop(self.audio);
-        self.engine.stop();
+        if let Some(server) = self.server.as_ref() {
+            server.clear_session(&self.identity);
+        }
+        if let Some(audio) = self.audio.as_ref() {
+            audio.mute();
+        }
+        let mut handles = Vec::with_capacity(2);
+        if let Some(handle) = self.audio.and_then(|audio| audio.request_stop()) {
+            handles.push(handle);
+        }
+        if let Some(handle) = self.engine.request_stop() {
+            handles.push(handle);
+        }
+        self.reap
+            .enqueue(handles)
+            .map_err(PlaybackCommandError::engine)
     }
 }
 
@@ -57,11 +84,23 @@ impl RunningPlayback {
 struct PlaybackSlot {
     sessions: SessionRegistry,
     running: Option<RunningPlayback>,
+    prepare_cancel: Option<opentake_media::MediaCancelToken>,
 }
 
-#[derive(Default)]
 pub struct PlaybackState {
     slot: Mutex<PlaybackSlot>,
+    audio_prepare: AudioPrepareWorker<PreparedAudio>,
+    reaper: BoundedReaper,
+}
+
+impl Default for PlaybackState {
+    fn default() -> Self {
+        Self {
+            slot: Mutex::new(PlaybackSlot::default()),
+            audio_prepare: AudioPrepareWorker::new(),
+            reaper: BoundedReaper::new(),
+        }
+    }
 }
 
 impl PlaybackState {
@@ -74,9 +113,16 @@ impl PlaybackState {
         identity: PlaybackIdentity,
         authoritative: opentake_core::ProjectRevision,
         frame: i32,
-    ) -> Result<Option<StartTicket>, PlaybackCommandError> {
-        let (decision, old) = {
+    ) -> Result<Option<(StartTicket, ReapPermit)>, PlaybackCommandError> {
+        let (decision, old, pending_reap) = {
             let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(cancel) = slot.prepare_cancel.take() {
+                cancel.cancel();
+            }
+            let pending_reap = self
+                .reaper
+                .try_reserve()
+                .map_err(PlaybackCommandError::busy)?;
             let decision = slot.sessions.begin_start(identity.clone(), authoritative)?;
             if matches!(decision, StartDecision::Resume) {
                 let Some(running) = slot.running.as_ref() else {
@@ -96,53 +142,78 @@ impl PlaybackState {
                 if let Some(audio) = running.audio.as_ref() {
                     audio.resume().map_err(PlaybackCommandError::engine)?;
                 }
+                drop(pending_reap);
                 return Ok(None);
             }
             let old = slot.running.take();
-            (decision, old)
+            (decision, old, pending_reap)
         };
         if let Some(running) = old {
-            running.stop();
+            running.shutdown()?;
         }
         let StartDecision::Build(ticket) = decision else {
             unreachable!("resume returned above")
         };
-        Ok(Some(ticket))
+        Ok(Some((ticket, pending_reap)))
     }
 
     fn install_if_current(
         &self,
         ticket: StartTicket,
+        cleanup: ReapPermit,
         authoritative: opentake_core::ProjectRevision,
-        engine: PlaybackEngine,
-        audio: Option<super::audio::AudioPlayback>,
-        publication: PublicationGate,
+        resources: PlaybackResources,
         frame: i32,
     ) -> Result<(), PlaybackCommandError> {
         let identity = ticket.identity().clone();
+        let PlaybackResources {
+            engine,
+            audio,
+            publication,
+            server,
+        } = resources;
         let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
         if let Err(error) = slot.sessions.install_if_current(ticket, authoritative) {
             drop(slot);
             publication.close();
-            drop(audio);
-            engine.stop();
+            let running = RunningPlayback {
+                identity,
+                engine,
+                audio,
+                publication,
+                server: Some(server),
+                reap: cleanup,
+            };
+            running.shutdown()?;
             return Err(error);
         }
         if let Err(error) = engine.resume(frame) {
             slot.sessions.control(&identity, SessionControl::Stop);
             drop(slot);
-            publication.close();
-            drop(audio);
-            engine.stop();
+            let running = RunningPlayback {
+                identity,
+                engine,
+                audio,
+                publication,
+                server: Some(server),
+                reap: cleanup,
+            };
+            running.shutdown()?;
             return Err(PlaybackCommandError::engine(error));
         }
         if let Some(audio_playback) = audio.as_ref() {
             if let Err(error) = audio_playback.resume() {
                 slot.sessions.control(&identity, SessionControl::Stop);
                 drop(slot);
-                publication.close();
-                drop(audio);
-                engine.stop();
+                let running = RunningPlayback {
+                    identity,
+                    engine,
+                    audio,
+                    publication,
+                    server: Some(server),
+                    reap: cleanup,
+                };
+                running.shutdown()?;
                 return Err(PlaybackCommandError::engine(error));
             }
         }
@@ -151,6 +222,8 @@ impl PlaybackState {
             engine,
             audio,
             publication,
+            server: Some(server),
+            reap: cleanup,
         });
         Ok(())
     }
@@ -190,7 +263,7 @@ impl PlaybackState {
                 let running = slot.running.take();
                 drop(slot);
                 if let Some(running) = running {
-                    running.stop();
+                    running.shutdown()?;
                 }
             }
         }
@@ -202,6 +275,9 @@ impl PlaybackState {
         let transition = slot.sessions.begin_project_transition()?;
         if let Some(running) = slot.running.as_ref() {
             running.close_publication();
+            if let Some(server) = running.server.as_ref() {
+                server.clear_session(&running.identity);
+            }
         }
         Ok(transition)
     }
@@ -225,7 +301,7 @@ impl PlaybackState {
             }
         };
         if let Some(running) = running {
-            running.stop();
+            let _ = running.shutdown();
         }
     }
 
@@ -240,7 +316,7 @@ impl PlaybackState {
         };
         let identity = running.as_ref().map(|running| running.identity.clone());
         if let Some(running) = running {
-            running.stop();
+            let _ = running.shutdown();
         }
         identity
     }
@@ -263,7 +339,7 @@ impl PlaybackState {
         };
         let identity = running.as_ref().map(|running| running.identity.clone());
         if let Some(running) = running {
-            running.stop();
+            let _ = running.shutdown();
         }
         identity
     }
@@ -308,6 +384,16 @@ where
         .map_err(PlaybackCommandError::engine)
 }
 
+fn audio_prepare_error(message: String) -> PlaybackCommandError {
+    if message.contains("audio_buffer_too_large") {
+        PlaybackCommandError::audio_buffer_too_large(message)
+    } else if message.contains("audio_allocation_failed") {
+        PlaybackCommandError::allocation(message)
+    } else {
+        PlaybackCommandError::engine(message)
+    }
+}
+
 /// Start (or restart) continuous playback from `from_frame`.
 ///
 /// `from_frame` is the current playhead (the front end owns playhead state). The
@@ -327,7 +413,7 @@ pub async fn playback_start(
         version: snapshot.version,
     };
     let start_at = from_frame.max(0);
-    let Some(ticket) =
+    let Some((ticket, cleanup)) =
         app.state::<PlaybackState>()
             .prepare_start(identity.clone(), authoritative, start_at)?
     else {
@@ -336,7 +422,7 @@ pub async fn playback_start(
 
     // Snapshot the session synchronously — no managed-state guard is held across
     // the await below (Tauri async commands require a Send future).
-    let (timeline, sizes, media, text, render_size, fps, sink, emitter, publication) = {
+    let (timeline, sizes, media, text, render_size, fps, sink, emitter, publication, server) = {
         let timeline = snapshot.timeline;
         let manifest = snapshot.media;
         let project_dir = snapshot.project_dir;
@@ -345,7 +431,7 @@ pub async fn playback_start(
         let render_size =
             playback_render_size(timeline.width, timeline.height, PLAYBACK_PREVIEW_CAP);
         let fps = timeline.fps;
-        let server = app.state::<Arc<PreviewServer>>();
+        let server = app.state::<Arc<PreviewServer>>().inner().clone();
         let publication = PublicationGate::open();
         let concrete_sink = server.sink(identity.clone(), publication.clone());
         let emitter: Arc<dyn PlayheadEmitter> = Arc::new(TauriPlayheadEmitter::new(
@@ -364,19 +450,37 @@ pub async fn playback_start(
             sink,
             emitter,
             publication,
+            server,
         )
     };
 
     // Decoding + mixing the whole timeline's audio (ffmpeg per clip) can take
     // seconds on a long project; run it (and cpal setup) off the IPC thread so
     // the command never freezes the UI.
-    let (clock, audio) = {
+    let cancel = opentake_media::MediaCancelToken::new();
+    {
+        let state = app.state::<PlaybackState>();
+        state
+            .slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .prepare_cancel = Some(cancel.clone());
+    }
+    let receiver = {
         let timeline = timeline.clone();
         let media = media.clone();
-        tokio::task::spawn_blocking(move || build_clock_paused(&timeline, &media, fps, start_at))
-            .await
-            .map_err(|e| PlaybackCommandError::engine(format!("audio prepare task failed: {e}")))?
+        let prepare_cancel = cancel.clone();
+        app.state::<PlaybackState>()
+            .audio_prepare
+            .try_submit(move || {
+                build_clock_paused_cancellable(&timeline, &media, fps, start_at, &prepare_cancel)
+            })
+            .map_err(PlaybackCommandError::busy)?
     };
+    let (clock, audio) = receiver
+        .await
+        .map_err(|_| PlaybackCommandError::engine("audio prepare worker stopped"))?
+        .map_err(audio_prepare_error)?;
 
     let engine = spawn_ready_off_executor(move || {
         PlaybackEngine::spawn_ready(
@@ -395,10 +499,14 @@ pub async fn playback_start(
     let current = app.state::<AppCore>().project_revision();
     app.state::<PlaybackState>().install_if_current(
         ticket,
+        cleanup,
         current,
-        engine,
-        audio,
-        publication,
+        PlaybackResources {
+            engine,
+            audio,
+            publication,
+            server,
+        },
         start_at,
     )
 }
@@ -442,6 +550,9 @@ pub fn get_preview_endpoint(server: State<'_, Arc<PreviewServer>>) -> String {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
 
     use opentake_domain::Timeline;
 
@@ -497,9 +608,241 @@ mod tests {
                 engine,
                 audio: None,
                 publication: gate.clone(),
+                server: None,
+                reap: state
+                    .reaper
+                    .try_reserve()
+                    .expect("reserve test session reap"),
             });
         }
         (state, gate)
+    }
+
+    fn install_server_on_running(state: &PlaybackState, server: Arc<PreviewServer>) {
+        state
+            .slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .running
+            .as_mut()
+            .expect("running playback")
+            .server = Some(server);
+    }
+
+    fn publish_test_frame(
+        server: &PreviewServer,
+        identity: PlaybackIdentity,
+        gate: PublicationGate,
+        frame: i32,
+    ) {
+        let sink = server.sink(identity, gate);
+        let publication = sink.publication();
+        sink.push_frame(&opentake_render::DecodedFrame::new(
+            1,
+            1,
+            vec![255, 0, 0, 255],
+            false,
+        ));
+        assert!(publication.commit(frame, frame).is_some());
+    }
+
+    fn frame_status(server: &PreviewServer, identity: &PlaybackIdentity, frame: i32) -> u16 {
+        let endpoint = server.endpoint_frame();
+        let address = endpoint
+            .strip_prefix("http://")
+            .and_then(|rest| rest.strip_suffix("/frame"))
+            .expect("loopback frame endpoint");
+        let mut stream = TcpStream::connect(address).expect("connect preview server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set preview read timeout");
+        write!(
+            stream,
+            "GET /frame?projectEpoch={}&timelineVersion={}&sessionId={}&frame={frame}&sequence=1 HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n",
+            identity.project_epoch, identity.timeline_version, identity.session_id
+        )
+        .expect("request exact frame");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .expect("read exact frame response");
+        String::from_utf8_lossy(&response)
+            .split_whitespace()
+            .nth(1)
+            .expect("HTTP status")
+            .parse()
+            .expect("numeric HTTP status")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_closes_publication_and_mutes_audio_before_any_reap() {
+        let identity = identity(4, 2, "shutdown-order");
+        let server = PreviewServer::start().await.expect("start preview server");
+        let (state, gate) = state_with_running(identity.clone());
+        install_server_on_running(&state, Arc::clone(&server));
+        publish_test_frame(&server, identity.clone(), gate.clone(), 0);
+        assert_eq!(frame_status(&server, &identity, 0), 200);
+        let (audio, muted, audio_stop) = super::super::audio::AudioPlayback::test_stub();
+        let (engine, engine_stop) = PlaybackEngine::test_stub();
+        {
+            let mut slot = state
+                .slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let running = slot.running.as_mut().expect("running playback");
+            running.audio = Some(audio);
+            running.engine = engine;
+        }
+
+        state
+            .control(identity.clone(), SessionControl::Stop, 0)
+            .expect("stop queues teardown");
+
+        assert!(!gate.is_open());
+        assert!(muted.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(frame_status(&server, &identity, 0), 204);
+        audio_stop
+            .recv_timeout(Duration::from_secs(2))
+            .expect("audio stop requested before command returns");
+        engine_stop
+            .recv_timeout(Duration::from_secs(2))
+            .expect("render stop requested before command returns");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn late_inflight_render_cannot_publish_after_project_boundary_returns() {
+        let identity = identity(5, 7, "late-render");
+        let server = PreviewServer::start().await.expect("start preview server");
+        let (state, gate) = state_with_running(identity.clone());
+        install_server_on_running(&state, Arc::clone(&server));
+        publish_test_frame(&server, identity.clone(), gate.clone(), 0);
+        assert_eq!(frame_status(&server, &identity, 0), 200);
+
+        let _transition = state
+            .begin_project_transition()
+            .expect("begin project boundary");
+        let sink = server.sink(identity.clone(), gate);
+        let publication = sink.publication();
+        let late = std::thread::spawn(move || {
+            sink.push_frame(&opentake_render::DecodedFrame::new(
+                1,
+                1,
+                vec![0, 255, 0, 255],
+                false,
+            ));
+            publication.commit(1, 1)
+        });
+
+        assert!(late.join().expect("join late render").is_none());
+        assert_eq!(frame_status(&server, &identity, 0), 204);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clearing_old_session_latest_cannot_clear_replacement_session_frame() {
+        let old = identity(8, 3, "old-session");
+        let replacement = identity(8, 3, "replacement-session");
+        let server = PreviewServer::start().await.expect("start preview server");
+        publish_test_frame(&server, old.clone(), PublicationGate::open(), 0);
+        publish_test_frame(&server, replacement.clone(), PublicationGate::open(), 0);
+
+        server.clear_session(&old);
+
+        assert_eq!(frame_status(&server, &old, 0), 204);
+        assert_eq!(frame_status(&server, &replacement, 0), 200);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn external_project_event_invalidates_while_reaper_capacity_is_full() {
+        let old = identity(12, 4, "external-full-old");
+        let replacement = identity(13, 0, "external-full-new");
+        let server = PreviewServer::start().await.expect("start preview server");
+        let (state, gate) = state_with_running(old.clone());
+        install_server_on_running(&state, Arc::clone(&server));
+        let sink = server.sink(old.clone(), gate.clone());
+        let publication = sink.publication();
+
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let backlog = state
+            .reaper
+            .try_reserve()
+            .expect("second and final reaper slot");
+        backlog
+            .enqueue(vec![std::thread::spawn(move || {
+                release_rx.recv().expect("release teardown backlog");
+            })])
+            .expect("enqueue teardown backlog");
+
+        let invalidated = state.activate_project_event(13);
+
+        assert_eq!(invalidated, Some(old.clone()));
+        assert!(!gate.is_open());
+        assert!(publication.commit(1, 1).is_none());
+        let error = state
+            .control(old, SessionControl::Seek, 1)
+            .expect_err("external boundary invalidates old identity synchronously");
+        assert_eq!(
+            error.code,
+            super::super::session::PlaybackErrorCode::Superseded
+        );
+        let busy = match state.prepare_start(replacement.clone(), replacement.revision(), 0) {
+            Err(error) => error,
+            Ok(_) => panic!("new start stays busy until teardown capacity recovers"),
+        };
+        assert_eq!(busy.code, super::super::session::PlaybackErrorCode::Busy);
+
+        release_tx.send(()).expect("release teardown backlog");
+        state.reaper.wait_until_idle(Duration::from_secs(2));
+        let pending = state
+            .prepare_start(replacement.clone(), replacement.revision(), 0)
+            .expect("capacity recovered")
+            .expect("replacement build admitted");
+        drop(pending);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn external_timeline_invalidation_uses_reserved_reap_slot_when_backlog_is_full() {
+        let old = identity(21, 6, "timeline-full-old");
+        let replacement = identity(21, 7, "timeline-full-new");
+        let server = PreviewServer::start().await.expect("start preview server");
+        let (state, gate) = state_with_running(old.clone());
+        install_server_on_running(&state, Arc::clone(&server));
+        let sink = server.sink(old.clone(), gate.clone());
+        let publication = sink.publication();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        state
+            .reaper
+            .try_reserve()
+            .expect("second and final reaper slot")
+            .enqueue(vec![std::thread::spawn(move || {
+                release_rx.recv().expect("release teardown backlog");
+            })])
+            .expect("enqueue teardown backlog");
+
+        let invalidated = state.invalidate_timeline(21, 7);
+
+        assert_eq!(invalidated, Some(old.clone()));
+        assert!(!gate.is_open());
+        assert!(publication.commit(1, 1).is_none());
+        let error = state
+            .control(old, SessionControl::Pause, 1)
+            .expect_err("timeline invalidation supersedes old control immediately");
+        assert_eq!(
+            error.code,
+            super::super::session::PlaybackErrorCode::Superseded
+        );
+        let busy = match state.prepare_start(replacement.clone(), replacement.revision(), 0) {
+            Err(error) => error,
+            Ok(_) => panic!("new start stays busy until timeline teardown capacity recovers"),
+        };
+        assert_eq!(busy.code, super::super::session::PlaybackErrorCode::Busy);
+
+        release_tx.send(()).expect("release teardown backlog");
+        state.reaper.wait_until_idle(Duration::from_secs(2));
+        let pending = state
+            .prepare_start(replacement.clone(), replacement.revision(), 0)
+            .expect("capacity recovered")
+            .expect("replacement build admitted");
+        drop(pending);
     }
 
     #[test]
