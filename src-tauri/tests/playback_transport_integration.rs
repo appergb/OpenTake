@@ -12,9 +12,10 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use bytes::Bytes;
+use opentake_render::DecodedFrame;
 use opentake_tauri_lib::playback::session::PlaybackIdentity;
-use opentake_tauri_lib::playback::PreviewServer;
+use opentake_tauri_lib::playback::transport::PublicationGate;
+use opentake_tauri_lib::playback::{FrameSink, PreviewServer};
 
 /// Parse the port out of `http://127.0.0.1:<port>/stream`.
 fn port_of(endpoint: &str) -> u16 {
@@ -103,21 +104,19 @@ fn frame_route_serves_only_the_exact_published_identity() {
     };
     let port = port_of(&server.endpoint());
     let identity = PlaybackIdentity::new(7, 11, "session-42").expect("valid identity");
-    server.publish_encoded_frame(
-        identity,
-        18,
-        5,
-        false,
-        Bytes::from_static(&[0xff, 0xd8, 0xff, 0xd9]),
-    );
+    let sink = server.sink(identity, PublicationGate::open());
+    sink.push_frame(&DecodedFrame::new(2, 2, vec![255; 2 * 2 * 4], false));
+    sink.publication()
+        .commit(18, 18)
+        .expect("encoded sink frame must commit to the exact-frame route");
 
     let cases = [
-        (7, 11, "session-42", 18, 5, 200, "exact identity"),
-        (8, 11, "session-42", 18, 5, 204, "wrong project epoch"),
-        (7, 12, "session-42", 18, 5, 204, "wrong timeline version"),
-        (7, 11, "session-43", 18, 5, 204, "wrong session"),
-        (7, 11, "session-42", 19, 5, 204, "wrong frame"),
-        (7, 11, "session-42", 18, 6, 204, "wrong sequence"),
+        (7, 11, "session-42", 18, 1, 200, "exact identity"),
+        (8, 11, "session-42", 18, 1, 204, "wrong project epoch"),
+        (7, 12, "session-42", 18, 1, 204, "wrong timeline version"),
+        (7, 11, "session-43", 18, 1, 204, "wrong session"),
+        (7, 11, "session-42", 19, 1, 204, "wrong frame"),
+        (7, 11, "session-42", 18, 2, 204, "wrong sequence"),
     ];
     for (epoch, version, session, frame, sequence, expected, label) in cases {
         let response = get_path(

@@ -197,13 +197,13 @@ impl PlaybackState {
         Ok(())
     }
 
-    pub fn begin_project_transition(&self) -> ProjectTransition {
+    pub fn begin_project_transition(&self) -> Result<ProjectTransition, PlaybackCommandError> {
         let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
-        let transition = slot.sessions.begin_project_transition();
+        let transition = slot.sessions.begin_project_transition()?;
         if let Some(running) = slot.running.as_ref() {
             running.close_publication();
         }
-        transition
+        Ok(transition)
     }
 
     pub fn cancel_project_transition(&self, transition: ProjectTransition) {
@@ -350,10 +350,7 @@ pub async fn playback_start(
         let concrete_sink = server.sink(identity.clone(), publication.clone());
         let emitter: Arc<dyn PlayheadEmitter> = Arc::new(TauriPlayheadEmitter::new(
             app.clone(),
-            server.inner().as_ref(),
             &concrete_sink,
-            identity.clone(),
-            publication.clone(),
             timeline.total_frames().max(1) - 1,
         ));
         let sink: Arc<dyn FrameSink> = Arc::new(concrete_sink);
@@ -506,11 +503,17 @@ mod tests {
     }
 
     #[test]
-    fn stale_project_transition_cannot_reopen_or_take_current_resources() {
+    fn overlapping_project_transition_is_busy_and_preserves_owner_resources() {
         let current = identity(8, 3, "current-session");
         let (state, publication) = state_with_running(current.clone());
-        let first = state.begin_project_transition();
-        let second = state.begin_project_transition();
+        let first = state
+            .begin_project_transition()
+            .expect("begin owning project transition");
+        let second = state
+            .begin_project_transition()
+            .expect_err("overlapping project transition must report busy");
+
+        assert_eq!(second.code, super::super::session::PlaybackErrorCode::Busy);
 
         assert!(
             state.activate_project_event(9).is_none(),
@@ -525,17 +528,6 @@ mod tests {
             .expect("project event must retain transition-owned resources");
 
         state.cancel_project_transition(first);
-        assert!(
-            !publication.is_open(),
-            "stale cancel must not reopen the transition owner's publication"
-        );
-
-        state.activate_project(first, 9);
-        state
-            .control(current.clone(), SessionControl::Seek, 4)
-            .expect("stale activate must not take current playback resources");
-
-        state.cancel_project_transition(second);
         assert!(
             publication.is_open(),
             "owning cancel restores the retained publication"
@@ -640,6 +632,121 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iter()
             .all(|event| !matches!(event, CoreEvent::ProjectOpened { .. })));
+    }
+
+    #[test]
+    fn overlapping_project_open_is_rejected_before_core_or_playback_mutation() {
+        let core = AppCore::new();
+        let before = core.project_revision();
+        let current = identity(before.project_epoch, before.version, "overlap-session");
+        let (playback, publication) = state_with_running(current.clone());
+        let first = playback
+            .begin_project_transition()
+            .expect("begin owning project transition");
+        let missing = std::env::temp_dir()
+            .join(format!(
+                "opentake-overlap-must-not-open-{}.opentake",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .into_owned();
+
+        let error = crate::commands::project_open_with_playback(&core, missing, &playback)
+            .expect_err("a second project boundary must report busy");
+        let error = serde_json::to_value(error).expect("serialize command error");
+
+        assert_eq!(
+            error.get("code").and_then(serde_json::Value::as_str),
+            Some("busy")
+        );
+        assert_eq!(core.project_revision(), before);
+        assert_eq!(playback.active_identity(), Some(current.clone()));
+        assert!(
+            !publication.is_open(),
+            "the first transition must retain publication ownership"
+        );
+
+        playback.cancel_project_transition(first);
+        assert!(publication.is_open());
+        playback
+            .control(current, SessionControl::Stop, 0)
+            .expect("stop retained test session");
+    }
+
+    #[test]
+    fn project_event_interleave_keeps_core_event_and_playback_on_one_boundary() {
+        use opentake_core::CoreEvent;
+
+        let core = AppCore::new();
+        let before = core.project_revision();
+        let current = identity(before.project_epoch, before.version, "interleave-session");
+        let (playback, publication) = state_with_running(current.clone());
+        let playback = Arc::new(playback);
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let callback_core = core.clone();
+        let callback_playback = Arc::clone(&playback);
+        let callback_observations = Arc::clone(&observations);
+        core.subscribe(move |event| {
+            let CoreEvent::ProjectOpened { project_epoch, .. } = event else {
+                return;
+            };
+            let invalidated = callback_playback.activate_project_event(*project_epoch);
+            let new_error =
+                crate::commands::project_new_with_playback(&callback_core, &callback_playback)
+                    .expect_err("nested project_new must report busy");
+            let open_error = crate::commands::project_open_with_playback(
+                &callback_core,
+                "must-not-reach-core.opentake".to_owned(),
+                &callback_playback,
+            )
+            .expect_err("nested project_open must report busy");
+            callback_observations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push((
+                    *project_epoch,
+                    invalidated,
+                    new_error.code,
+                    open_error.code,
+                    callback_core.project_revision(),
+                ));
+        });
+
+        let snapshot = crate::commands::project_new_with_playback(&core, &playback)
+            .expect("owning project boundary succeeds");
+        let observed = observations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].0, snapshot.project_epoch);
+        assert_eq!(observed[0].1, None);
+        assert_eq!(
+            observed[0].2,
+            super::super::session::PlaybackErrorCode::Busy
+        );
+        assert_eq!(
+            observed[0].3,
+            super::super::session::PlaybackErrorCode::Busy
+        );
+        assert_eq!(observed[0].4, core.project_revision());
+        assert_eq!(snapshot.project_epoch, before.project_epoch + 1);
+        assert_eq!(
+            core.project_revision().project_epoch,
+            snapshot.project_epoch
+        );
+        assert_eq!(playback.active_identity(), None);
+        assert!(
+            !publication.is_open(),
+            "the old session cannot publish after the committed boundary"
+        );
+        let error = playback
+            .control(current, SessionControl::Seek, 1)
+            .expect_err("the old playback identity must be superseded");
+        assert_eq!(
+            error.code,
+            super::super::session::PlaybackErrorCode::Superseded
+        );
     }
 
     #[test]

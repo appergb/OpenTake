@@ -6,8 +6,11 @@ const nativeApiHarness = vi.hoisted(() => {
   const harness = {
     activeListeners: 0,
     deferred: false,
+    listenerAttempts: [] as Array<{
+      resolve(): void;
+      reject(): void;
+    }>,
     order: [] as string[],
-    resolveListener: null as null | (() => void),
     unlistenCalls: 0,
     onPlaybackFrame: vi.fn(),
     playbackStart: vi.fn(),
@@ -25,12 +28,23 @@ const nativeApiHarness = vi.hoisted(() => {
       harness.order.push("listener-ready");
       return Promise.resolve(unlisten);
     }
-    return new Promise<() => void>((resolve) => {
-      harness.resolveListener = () => {
-        harness.activeListeners += 1;
-        harness.order.push("listener-ready");
-        resolve(unlisten);
-      };
+    return new Promise<() => void>((resolve, reject) => {
+      let settled = false;
+      harness.listenerAttempts.push({
+        resolve() {
+          if (settled) return;
+          settled = true;
+          harness.activeListeners += 1;
+          harness.order.push("listener-ready");
+          resolve(unlisten);
+        },
+        reject() {
+          if (settled) return;
+          settled = true;
+          harness.order.push("listener-rejected");
+          reject(new Error("listener registration rejected"));
+        },
+      });
     });
   });
   harness.playbackStart.mockImplementation(async () => {
@@ -123,8 +137,8 @@ beforeEach(async () => {
   await nativePlaybackController.stopCurrent();
   nativeApiHarness.activeListeners = 0;
   nativeApiHarness.deferred = false;
+  nativeApiHarness.listenerAttempts = [];
   nativeApiHarness.order = [];
-  nativeApiHarness.resolveListener = null;
   nativeApiHarness.unlistenCalls = 0;
   nativeApiHarness.onPlaybackFrame.mockClear();
   nativeApiHarness.playbackStart.mockClear();
@@ -200,7 +214,7 @@ describe("shouldSyncPausedMediaToFrame", () => {
     expect(nativeApiHarness.playbackStart).not.toHaveBeenCalled();
 
     await act(async () => {
-      nativeApiHarness.resolveListener?.();
+      nativeApiHarness.listenerAttempts[0]?.resolve();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -213,6 +227,95 @@ describe("shouldSyncPausedMediaToFrame", () => {
     expect(nativeApiHarness.order.slice(1).every((entry) => entry === "start")).toBe(true);
 
     await unmountPlaybackHook(root);
+    expect(nativeApiHarness.activeListeners).toBe(0);
+    expect(nativeApiHarness.unlistenCalls).toBe(1);
+  });
+
+  it("re-registers the native frame listener when PLAY retries after registration rejection", async () => {
+    nativeApiHarness.deferred = true;
+    useProjectStore.setState({ projectEpoch: 4, timelineVersion: 7, timeline: timeline([]) });
+    useEditorUiStore.setState({
+      activeFrame: 0,
+      currentFrame: 0,
+      isPlaying: true,
+      isScrubbing: false,
+      rustEngineFailed: false,
+    });
+
+    const root = await mountPlaybackHook();
+
+    expect(nativeApiHarness.onPlaybackFrame).toHaveBeenCalledTimes(1);
+    expect(nativeApiHarness.playbackStart).not.toHaveBeenCalled();
+
+    await act(async () => {
+      nativeApiHarness.listenerAttempts[0]?.reject();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(useEditorUiStore.getState().isPlaying).toBe(false);
+
+    await act(async () => {
+      useEditorUiStore.getState().setPlaying(true);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(nativeApiHarness.onPlaybackFrame).toHaveBeenCalledTimes(2);
+    expect(nativeApiHarness.playbackStart).not.toHaveBeenCalled();
+
+    await act(async () => {
+      nativeApiHarness.listenerAttempts[1]?.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(nativeApiHarness.activeListeners).toBe(1);
+    expect(nativeApiHarness.playbackStart).toHaveBeenCalledTimes(1);
+    expect(nativeApiHarness.order).toEqual([
+      "listener-rejected",
+      "listener-ready",
+      "start",
+    ]);
+
+    await unmountPlaybackHook(root);
+    expect(nativeApiHarness.activeListeners).toBe(0);
+    expect(nativeApiHarness.unlistenCalls).toBe(1);
+  });
+
+  it("keeps one pending registration across a rapid remount and replaces it after rejection", async () => {
+    nativeApiHarness.deferred = true;
+    useProjectStore.setState({ projectEpoch: 4, timelineVersion: 7, timeline: timeline([]) });
+    useEditorUiStore.setState({
+      activeFrame: 0,
+      currentFrame: 0,
+      isPlaying: false,
+      isScrubbing: false,
+      rustEngineFailed: false,
+    });
+
+    const firstRoot = await mountPlaybackHook();
+    expect(nativeApiHarness.onPlaybackFrame).toHaveBeenCalledTimes(1);
+    await unmountPlaybackHook(firstRoot);
+
+    const secondRoot = await mountPlaybackHook();
+    expect(nativeApiHarness.onPlaybackFrame).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      nativeApiHarness.listenerAttempts[0]?.reject();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await unmountPlaybackHook(secondRoot);
+
+    const thirdRoot = await mountPlaybackHook();
+    expect(nativeApiHarness.onPlaybackFrame).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      nativeApiHarness.listenerAttempts[1]?.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(nativeApiHarness.activeListeners).toBe(1);
+    expect(nativeApiHarness.unlistenCalls).toBe(0);
+    await unmountPlaybackHook(thirdRoot);
     expect(nativeApiHarness.activeListeners).toBe(0);
     expect(nativeApiHarness.unlistenCalls).toBe(1);
   });

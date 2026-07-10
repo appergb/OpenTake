@@ -1,9 +1,10 @@
 //! The `#[tauri::command]` surface.
 //!
 //! Each command is a thin shim: it locks nothing of its own, delegates to an
-//! `opentake_core::dto::handle_*` function (which wraps [`AppCore`]), and maps
-//! the boundary `CmdError` to a `String` so the front end gets a plain rejected
-//! Promise (`AGENTS.md`: "边界层转 Tauri 的 `Err(String)`").
+//! `opentake_core::dto::handle_*` function (which wraps [`AppCore`]). Most
+//! boundary `CmdError`s become strings; playback-aware project lifecycle
+//! commands preserve the structured playback error code so overlap is reported
+//! as `busy` before core mutation.
 //!
 //! `EditCommand` itself is not `Deserialize` (it carries engine value types with
 //! no serde derives), so the editing entry point takes a local serde-friendly
@@ -54,11 +55,19 @@ pub fn redo(core: State<'_, AppCore>) -> Result<EditResultDto, String> {
 pub fn project_new(
     core: State<'_, AppCore>,
     playback: State<'_, crate::playback::PlaybackState>,
-) -> TimelineSnapshotDto {
-    let transition = playback.begin_project_transition();
-    let snapshot = handle_project_new(&core);
+) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
+    project_new_with_playback(&core, &playback)
+}
+
+#[cfg(feature = "playback-engine")]
+pub(crate) fn project_new_with_playback(
+    core: &AppCore,
+    playback: &crate::playback::PlaybackState,
+) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
+    let transition = playback.begin_project_transition()?;
+    let snapshot = handle_project_new(core);
     playback.activate_project(transition, snapshot.project_epoch);
-    snapshot
+    Ok(snapshot)
 }
 
 #[cfg(not(feature = "playback-engine"))]
@@ -74,7 +83,7 @@ pub fn project_open(
     core: State<'_, AppCore>,
     path: String,
     playback: State<'_, crate::playback::PlaybackState>,
-) -> Result<TimelineSnapshotDto, String> {
+) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
     project_open_with_playback(&core, path, &playback)
 }
 
@@ -83,9 +92,12 @@ pub(crate) fn project_open_with_playback(
     core: &AppCore,
     path: String,
     playback: &crate::playback::PlaybackState,
-) -> Result<TimelineSnapshotDto, String> {
-    let transition = playback.begin_project_transition();
-    match handle_project_open(core, path).map_err(msg) {
+) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
+    let transition = playback.begin_project_transition()?;
+    match handle_project_open(core, path)
+        .map_err(msg)
+        .map_err(crate::playback::session::PlaybackCommandError::engine)
+    {
         Ok(snapshot) => {
             playback.activate_project(transition, snapshot.project_epoch);
             Ok(snapshot)

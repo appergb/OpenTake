@@ -225,14 +225,19 @@ impl SessionRegistry {
         self.active = None;
     }
 
-    pub fn begin_project_transition(&mut self) -> ProjectTransition {
+    pub fn begin_project_transition(&mut self) -> Result<ProjectTransition, PlaybackCommandError> {
+        if self.transition.is_some() {
+            return Err(PlaybackCommandError::busy(
+                "project transition is already in progress",
+            ));
+        }
         self.generation = self.generation.wrapping_add(1);
         let transition = ProjectTransition(self.generation);
         self.transition = Some(transition);
         if let Some(active) = self.active.as_mut() {
             active.publication_open = false;
         }
-        transition
+        Ok(transition)
     }
 
     #[must_use]
@@ -342,7 +347,9 @@ mod tests {
         let mut registry = SessionRegistry::default();
         let current = identity(3, 8, "current");
         install(&mut registry, current.clone());
-        let transition = registry.begin_project_transition();
+        let transition = registry
+            .begin_project_transition()
+            .expect("begin project transition");
 
         let error = registry
             .begin_start(
@@ -366,7 +373,9 @@ mod tests {
         let old = identity(9, 2, "old");
         install(&mut registry, old.clone());
 
-        let transition = registry.begin_project_transition();
+        let transition = registry
+            .begin_project_transition()
+            .expect("begin project transition");
         assert!(!registry.publication_is_open(&old));
         assert!(registry.activate_project(transition, 10));
 
@@ -379,7 +388,9 @@ mod tests {
         let core = AppCore::new();
         let before = core.project_revision();
         let mut registry = SessionRegistry::default();
-        let transition = registry.begin_project_transition();
+        let transition = registry
+            .begin_project_transition()
+            .expect("begin project transition");
 
         let snapshot = core.new_project();
         assert!(registry.activate_project(transition, snapshot.project_epoch));

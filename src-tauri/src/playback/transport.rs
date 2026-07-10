@@ -281,31 +281,18 @@ impl PreviewServer {
     pub fn sink(&self, identity: PlaybackIdentity, gate: PublicationGate) -> MjpegSink {
         MjpegSink {
             tx: self.tx.clone(),
-            pending: PendingFrameStore::default(),
-            sequence: Arc::new(AtomicU64::new(0)),
-            identity,
-            gate,
+            publication: EncodedFramePublication {
+                identity,
+                gate,
+                pending: PendingFrameStore::default(),
+                latest: self.latest.clone(),
+                sequence: Arc::new(AtomicU64::new(0)),
+            },
         }
     }
 
     pub fn clear_session(&self, identity: &PlaybackIdentity) {
         self.latest.clear_session(identity);
-    }
-
-    /// Publish one already-encoded session frame into the exact `/frame` lookup
-    /// store. The render emitter uses the same store after sink encoding; this
-    /// boundary is also useful to validate the live HTTP route independently of
-    /// Tauri event delivery.
-    pub fn publish_encoded_frame(
-        &self,
-        identity: PlaybackIdentity,
-        frame: i32,
-        sequence: u64,
-        terminal: bool,
-        jpeg: Bytes,
-    ) {
-        self.latest
-            .publish(identity, frame, sequence, terminal, jpeg);
     }
 }
 
@@ -452,15 +439,79 @@ async fn ws_stream(mut socket: WebSocket, mut rx: broadcast::Receiver<Bytes>) {
 #[derive(Clone)]
 pub struct MjpegSink {
     tx: broadcast::Sender<Bytes>,
-    pending: PendingFrameStore,
-    sequence: Arc<AtomicU64>,
+    publication: EncodedFramePublication,
+}
+
+/// The one commit coordinator shared by the encoded-frame sink, exact-frame
+/// HTTP store, and Tauri playhead event. A frame becomes observable only when
+/// its matching playhead tick commits the staged JPEG through this object.
+#[derive(Clone)]
+pub struct EncodedFramePublication {
     identity: PlaybackIdentity,
     gate: PublicationGate,
+    pending: PendingFrameStore,
+    latest: LatestFrameStore,
+    sequence: Arc<AtomicU64>,
+}
+
+impl EncodedFramePublication {
+    fn stage(&self, jpeg: Bytes) -> bool {
+        self.gate
+            .with_open(|| {
+                let sequence = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
+                *self
+                    .pending
+                    .0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PendingFrame {
+                    identity: self.identity.clone(),
+                    sequence,
+                    jpeg,
+                });
+            })
+            .is_some()
+    }
+
+    /// Commit the most recently staged encoded frame to `/frame` and return the
+    /// exact event payload that must be emitted for that publication.
+    pub fn commit(&self, frame: i32, last_frame: i32) -> Option<PlaybackFramePublication> {
+        self.gate.with_open(|| {
+            let pending = self
+                .pending
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()?;
+            if pending.identity != self.identity {
+                return None;
+            }
+            let terminal = frame >= last_frame;
+            self.latest.publish(
+                self.identity.clone(),
+                frame,
+                pending.sequence,
+                terminal,
+                pending.jpeg,
+            );
+            Some(PlaybackFramePublication::new(
+                self.identity.clone(),
+                frame,
+                pending.sequence,
+                terminal,
+            ))
+        })?
+    }
+}
+
+impl MjpegSink {
+    pub fn publication(&self) -> EncodedFramePublication {
+        self.publication.clone()
+    }
 }
 
 impl FrameSink for MjpegSink {
     fn push_frame(&self, frame: &DecodedFrame) {
-        if !self.gate.is_open() {
+        if !self.publication.gate.is_open() {
             return;
         }
         // Always encode: the polling `/frame` route reads `latest` without ever
@@ -471,21 +522,9 @@ impl FrameSink for MjpegSink {
             return;
         };
         let jpeg = Bytes::from(jpeg);
-        let _ = self.gate.with_open(|| {
-            let sequence = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
-            *self
-                .pending
-                .0
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PendingFrame {
-                identity: self.identity.clone(),
-                sequence,
-                jpeg: jpeg.clone(),
-            });
-            if self.tx.receiver_count() > 0 {
-                let _ = self.tx.send(jpeg);
-            }
-        });
+        if self.publication.stage(jpeg.clone()) && self.tx.receiver_count() > 0 {
+            let _ = self.tx.send(jpeg);
+        }
     }
 }
 
@@ -517,7 +556,7 @@ fn encode_jpeg(frame: &DecodedFrame) -> Option<Vec<u8>> {
 /// playhead / timecode while the pixels arrive over the MJPEG stream.
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PlayheadDto {
+pub struct PlaybackFramePublication {
     project_epoch: u64,
     timeline_version: u64,
     session_id: String,
@@ -526,7 +565,7 @@ struct PlayheadDto {
     terminal: bool,
 }
 
-impl PlayheadDto {
+impl PlaybackFramePublication {
     fn new(identity: PlaybackIdentity, frame: i32, sequence: u64, terminal: bool) -> Self {
         Self {
             project_epoch: identity.project_epoch,
@@ -543,28 +582,15 @@ impl PlayheadDto {
 /// event. Throttling is unnecessary: one small event per rendered frame.
 pub struct TauriPlayheadEmitter {
     app: AppHandle,
-    identity: PlaybackIdentity,
-    gate: PublicationGate,
-    pending: PendingFrameStore,
-    latest: LatestFrameStore,
+    publication: EncodedFramePublication,
     last_frame: i32,
 }
 
 impl TauriPlayheadEmitter {
-    pub fn new(
-        app: AppHandle,
-        server: &PreviewServer,
-        sink: &MjpegSink,
-        identity: PlaybackIdentity,
-        gate: PublicationGate,
-        last_frame: i32,
-    ) -> Self {
+    pub fn new(app: AppHandle, sink: &MjpegSink, last_frame: i32) -> Self {
         TauriPlayheadEmitter {
             app,
-            identity,
-            gate,
-            pending: sink.pending.clone(),
-            latest: server.latest.clone(),
+            publication: sink.publication(),
             last_frame,
         }
     }
@@ -572,32 +598,9 @@ impl TauriPlayheadEmitter {
 
 impl PlayheadEmitter for TauriPlayheadEmitter {
     fn emit(&self, frame: i32) {
-        let _ = self.gate.with_open(|| {
-            let pending = self
-                .pending
-                .0
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take();
-            let Some(pending) = pending else {
-                return;
-            };
-            if pending.identity != self.identity {
-                return;
-            }
-            let terminal = frame >= self.last_frame;
-            self.latest.publish(
-                self.identity.clone(),
-                frame,
-                pending.sequence,
-                terminal,
-                pending.jpeg,
-            );
-            let _ = self.app.emit(
-                "playback_frame",
-                PlayheadDto::new(self.identity.clone(), frame, pending.sequence, terminal),
-            );
-        });
+        if let Some(publication) = self.publication.commit(frame, self.last_frame) {
+            let _ = self.app.emit("playback_frame", publication);
+        }
     }
 }
 
@@ -661,7 +664,7 @@ mod tests {
     fn playhead_event_carries_session_revision_sequence_and_terminal() {
         let identity = super::super::session::PlaybackIdentity::new(7, 11, "session-42")
             .expect("valid identity");
-        let dto = PlayheadDto::new(identity, 123, 9, true);
+        let dto = PlaybackFramePublication::new(identity, 123, 9, true);
 
         assert_eq!(
             serde_json::to_value(dto).expect("serialize"),

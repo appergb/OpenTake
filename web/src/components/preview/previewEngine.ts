@@ -48,13 +48,19 @@ import {
 import { rustEngineEnabled } from "./rustEngine";
 
 interface NativeFrameListenerSlot {
-  ready: Promise<() => void>;
+  registration: NativeFrameListenerRegistration | null;
+  registrationGeneration: number;
   references: number;
   teardownGeneration: number;
 }
 
-interface NativeFrameListenerLease {
+interface NativeFrameListenerRegistration {
+  generation: number;
   ready: Promise<() => void>;
+}
+
+interface NativeFrameListenerLease {
+  ensureReady(): Promise<() => void>;
   release(): void;
 }
 
@@ -63,12 +69,34 @@ let nativeFrameListener: NativeFrameListenerSlot | null = null;
 // StrictMode performs setup → cleanup → setup in one turn. A deferred teardown
 // lets the second setup reclaim the still-pending listen Promise; the generation
 // checks also prevent a resolved old cleanup from unlistening a newer lease.
+function ensureNativeFrameListenerRegistration(
+  slot: NativeFrameListenerSlot,
+): Promise<() => void> {
+  if (slot.registration) return slot.registration.ready;
+
+  const registration: NativeFrameListenerRegistration = {
+    generation: ++slot.registrationGeneration,
+    ready: onPlaybackFrame((event) => {
+      nativePlaybackController.acceptFrame(event);
+    }),
+  };
+  slot.registration = registration;
+  void registration.ready.catch(() => {
+    if (
+      nativeFrameListener === slot &&
+      slot.registration?.generation === registration.generation
+    ) {
+      slot.registration = null;
+    }
+  });
+  return registration.ready;
+}
+
 function acquireNativeFrameListener(): NativeFrameListenerLease {
   if (!nativeFrameListener) {
     nativeFrameListener = {
-      ready: onPlaybackFrame((event) => {
-        nativePlaybackController.acceptFrame(event);
-      }),
+      registration: null,
+      registrationGeneration: 0,
       references: 0,
       teardownGeneration: 0,
     };
@@ -76,9 +104,10 @@ function acquireNativeFrameListener(): NativeFrameListenerLease {
   const slot = nativeFrameListener;
   slot.references += 1;
   slot.teardownGeneration += 1;
+  ensureNativeFrameListenerRegistration(slot);
   let released = false;
   return {
-    ready: slot.ready,
+    ensureReady: () => ensureNativeFrameListenerRegistration(slot),
     release() {
       if (released) return;
       released = true;
@@ -92,16 +121,23 @@ function acquireNativeFrameListener(): NativeFrameListenerLease {
         ) {
           return;
         }
-        void slot.ready.then(
+        const registration = slot.registration;
+        if (!registration) {
+          nativeFrameListener = null;
+          return;
+        }
+        void registration.ready.then(
           (unlisten) => {
             if (
               nativeFrameListener !== slot ||
               slot.references !== 0 ||
-              slot.teardownGeneration !== teardownGeneration
+              slot.teardownGeneration !== teardownGeneration ||
+              slot.registration?.generation !== registration.generation
             ) {
               return;
             }
             nativeFrameListener = null;
+            slot.registration = null;
             unlisten();
           },
           () => {
@@ -407,7 +443,7 @@ export function useTimelinePlaybackEngine(): void {
       });
 
       const startFrame = Math.max(0, Math.floor(useEditorUiStore.getState().activeFrame));
-      const listenerReady = nativeFrameListenerLeaseRef.current?.ready;
+      const listenerReady = nativeFrameListenerLeaseRef.current?.ensureReady();
       if (!listenerReady) {
         unsubscribePublication();
         setEngineFailed(true);
