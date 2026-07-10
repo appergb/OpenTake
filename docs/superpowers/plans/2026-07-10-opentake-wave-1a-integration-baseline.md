@@ -538,35 +538,55 @@ the path already exists, stop and inspect; never overwrite or remove it.
 
 - [ ] **Step 5: Establish the clean pre-restoration baseline**
 
-Run from the detached review worktree before applying any patch:
+The source commit still declares the ignored libmpv resource that Task 4
+removes. Linked worktrees do not copy ignored build inputs, so hydrate only the
+detached review worktree from canonical after verifying the two known hashes.
+Never hydrate integration. Run:
 
 ```bash
 set -euo pipefail
+CANON='/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake'
 SAFETY='/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-safety/20260710-full-convergence'
-LOG="$SAFETY/logs/clean-source-baseline"
 REVIEW='/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-wave1a-review'
-CARGO_AUDIT_BIN='/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake/target/cargo-tools/bin/cargo-audit'
-test ! -e "$LOG"
-mkdir -p "$LOG"
-cd "$REVIEW"
-test -x "$CARGO_AUDIT_BIN"
-pnpm -C web install --frozen-lockfile 2>&1 | tee "$LOG/pnpm-install.log"
-cargo fmt --all --check 2>&1 | tee "$LOG/cargo-fmt.log"
-cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee "$LOG/cargo-clippy.log"
-cargo test --workspace -- --nocapture 2>&1 | tee "$LOG/cargo-test.log"
-cargo clippy -p opentake-tauri --no-default-features --all-targets -- -D warnings \
-  2>&1 | tee "$LOG/cargo-clippy-no-default.log"
-pnpm -C web build 2>&1 | tee "$LOG/web-build.log"
-pnpm -C web test 2>&1 | tee "$LOG/web-test.log"
-pnpm -C web audit --audit-level high 2>&1 | tee "$LOG/pnpm-audit.log"
-"$CARGO_AUDIT_BIN" audit 2>&1 | tee "$LOG/cargo-audit.log"
-test -z "$(git status --porcelain)"
+mkdir -p "$REVIEW/src-tauri/lib"
+for name in libmpv-wrapper.dylib libmpv.dylib; do
+  case "$name" in
+    libmpv-wrapper.dylib)
+      expected='eeef5934bae6a39c1d274c82a841fd2fb3bcaab083f3b040a6639e25353d7fed' ;;
+    libmpv.dylib)
+      expected='dac1800e1a43a2fe6bb6f4f9b0410628771d81094f24c2c2f8e63f76a96bc944' ;;
+  esac
+  source="$CANON/src-tauri/lib/$name"
+  target="$REVIEW/src-tauri/lib/$name"
+  test "$(shasum -a 256 "$source" | awk '{print $1}')" = "$expected"
+  ditto "$source" "$target"
+  test "$(shasum -a 256 "$target" | awk '{print $1}')" = "$expected"
+  git -C "$REVIEW" check-ignore -q "src-tauri/lib/$name"
+done
+test -z "$(git -C "$REVIEW" status --porcelain)"
+zsh "$SAFETY/run-code-slice-gate.zsh" "$REVIEW" \
+  'clean-source-baseline-hydrated'
+for name in libmpv-wrapper.dylib libmpv.dylib; do
+  target="$REVIEW/src-tauri/lib/$name"
+  case "$name" in
+    libmpv-wrapper.dylib)
+      expected='eeef5934bae6a39c1d274c82a841fd2fb3bcaab083f3b040a6639e25353d7fed' ;;
+    libmpv.dylib)
+      expected='dac1800e1a43a2fe6bb6f4f9b0410628771d81094f24c2c2f8e63f76a96bc944' ;;
+  esac
+  test "$(shasum -a 256 "$target" | awk '{print $1}')" = "$expected"
+  rm -- "$target"
+done
+test -z "$(git -C "$REVIEW" status --porcelain)"
+test -z "$(git -C '/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-full-convergence' status --porcelain)"
 ```
 
-Expected: the clean source commit passes before restoration and stays clean.
-If any command fails, stop before Task 3, diagnose the source baseline, and
-amend this plan with the reviewed prerequisite; never attribute an existing
-source failure to the restored patch or continue silently.
+Expected: the hydrated clean source commit passes the full gate, its two ignored
+copies are removed afterward, and both implementation worktrees stay clean.
+The earlier failed `clean-source-baseline` log remains immutable evidence of the
+missing-resource prerequisite. If another command fails, stop before Task 3,
+diagnose and independently review the next prerequisite; never attribute an
+existing source failure to the restored patch or continue silently.
 
 ### Task 3: Hash-Verify And Freeze Every Dirty Byte Without Polluting Integration
 
