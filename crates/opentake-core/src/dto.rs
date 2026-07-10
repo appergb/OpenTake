@@ -49,6 +49,8 @@ impl From<CoreError> for CmdError {
 pub struct TimelineSnapshotDto {
     /// The timeline at [`Self::version`] (serialized with the domain schema).
     pub timeline: Timeline,
+    /// The project session this timeline belongs to.
+    pub project_epoch: u64,
     /// The document version this snapshot was taken at.
     pub version: u64,
 }
@@ -57,6 +59,7 @@ impl From<TimelineSnapshot> for TimelineSnapshotDto {
     fn from(s: TimelineSnapshot) -> Self {
         TimelineSnapshotDto {
             timeline: s.timeline,
+            project_epoch: s.project_epoch,
             version: s.version,
         }
     }
@@ -137,9 +140,10 @@ pub fn handle_project_save(
         .map(|p| p.to_string_lossy().into_owned()))
 }
 
-/// `project_new`: replace the session with a fresh, unsaved project. Infallible.
-pub fn handle_project_new(core: &AppCore) {
-    core.new_project();
+/// `project_new`: replace the session with a fresh, unsaved project and return
+/// its first snapshot. Infallible.
+pub fn handle_project_new(core: &AppCore) -> TimelineSnapshotDto {
+    core.new_project().into()
 }
 
 /// Adapt a [`Result`] into the boundary's `Result<_, CmdError>`.
@@ -204,7 +208,10 @@ mod tests {
         let core = core_with_track();
         let dto = handle_get_timeline(&core);
         assert_eq!(dto.version, 0);
+        assert_eq!(dto.project_epoch, 1);
         assert_eq!(dto.timeline.tracks.len(), 1);
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["projectEpoch"], 1);
     }
 
     #[test]
@@ -241,6 +248,18 @@ mod tests {
         let core = AppCore::new(); // unsaved, no project dir
         let err = handle_project_save(&core, None).unwrap_err();
         assert_eq!(err.code, "internal");
+    }
+
+    #[test]
+    fn project_new_handler_returns_first_snapshot() {
+        let core = core_with_track();
+        handle_edit_apply(&core, add_one_clip()).unwrap();
+
+        let dto = handle_project_new(&core);
+
+        assert_eq!(dto.version, 0);
+        assert_eq!(dto.project_epoch, 2);
+        assert!(dto.timeline.tracks.is_empty());
     }
 
     #[test]

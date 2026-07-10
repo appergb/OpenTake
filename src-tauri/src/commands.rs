@@ -47,10 +47,11 @@ pub fn redo(core: State<'_, AppCore>) -> Result<EditResultDto, String> {
     handle_redo(&core).map_err(msg)
 }
 
-/// `project_new`: replace the session with a fresh, unsaved project.
+/// `project_new`: replace the session with a fresh, unsaved project and return
+/// its first snapshot.
 #[tauri::command]
-pub fn project_new(core: State<'_, AppCore>) {
-    handle_project_new(&core);
+pub fn project_new(core: State<'_, AppCore>) -> TimelineSnapshotDto {
+    handle_project_new(&core)
 }
 
 /// `project_open`: open a `.opentake` bundle, returning the first snapshot.
@@ -73,11 +74,12 @@ pub fn project_open(core: State<'_, AppCore>, path: String) -> Result<TimelineSn
 /// yields `None`, leaving any existing cover untouched, and never fails the save.
 #[tauri::command]
 pub fn project_save(core: State<'_, AppCore>, path: Option<String>) -> Result<String, String> {
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    let project_dir = core.project_dir();
-    let thumbnail =
-        opentake_media::capture_project_thumbnail(&timeline, &manifest, project_dir.as_deref());
+    let snapshot = core.runtime_snapshot();
+    let thumbnail = opentake_media::capture_project_thumbnail(
+        &snapshot.timeline,
+        &snapshot.media,
+        snapshot.project_dir.as_deref(),
+    );
 
     let target = path.map(std::path::PathBuf::from);
     core.save_project_with_thumbnail(target, thumbnail)
@@ -109,17 +111,19 @@ pub fn get_default_project_dir(app: AppHandle) -> Result<String, String> {
 /// the pure `export_xmeml`, and writes the file.
 #[tauri::command]
 pub fn export_xmeml(core: State<'_, AppCore>, path: String) -> Result<(), String> {
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    let project_dir = core.project_dir();
+    let snapshot = core.runtime_snapshot();
     // Resolve each source file's start timecode via ffprobe (upstream reads the
     // QuickTime `tmcd` track; here `opentake_media::read_start_timecode_frame`
     // reads `tags.timecode`). Per-file failures are silently dropped -> 0.
-    let start_timecodes = resolve_start_timecodes(&timeline, &manifest, project_dir.as_deref());
+    let start_timecodes = resolve_start_timecodes(
+        &snapshot.timeline,
+        &snapshot.media,
+        snapshot.project_dir.as_deref(),
+    );
     let xml = opentake_project::export_xmeml_with_timecodes(
-        &timeline,
-        &manifest,
-        project_dir.as_deref(),
+        &snapshot.timeline,
+        &snapshot.media,
+        snapshot.project_dir.as_deref(),
         &start_timecodes,
     );
     std::fs::write(&path, xml).map_err(|e| e.to_string())
@@ -174,9 +178,8 @@ pub fn export_fcpxml(core: State<'_, AppCore>, path: String) -> Result<(), Strin
 /// dropped — see `opentake_project::edl` for the documented limitations.
 #[tauri::command]
 pub fn export_edl(core: State<'_, AppCore>, path: String) -> Result<(), String> {
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    let edl = opentake_project::export_edl(&timeline, &manifest);
+    let snapshot = core.runtime_snapshot();
+    let edl = opentake_project::export_edl(&snapshot.timeline, &snapshot.media);
     std::fs::write(&path, edl).map_err(|e| e.to_string())
 }
 
@@ -187,10 +190,12 @@ pub fn export_edl(core: State<'_, AppCore>, path: String) -> Result<(), String> 
 /// (effects, transforms, keyframes).
 #[tauri::command]
 pub fn export_otio(core: State<'_, AppCore>, path: String) -> Result<(), String> {
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    let project_dir = core.project_dir();
-    let json = opentake_project::export_otio(&timeline, &manifest, project_dir.as_deref());
+    let snapshot = core.runtime_snapshot();
+    let json = opentake_project::export_otio(
+        &snapshot.timeline,
+        &snapshot.media,
+        snapshot.project_dir.as_deref(),
+    );
     std::fs::write(&path, json).map_err(|e| e.to_string())
 }
 
@@ -201,10 +206,12 @@ pub fn export_otio(core: State<'_, AppCore>, path: String) -> Result<(), String>
 /// `opentake_project::fcpxml_modern`.
 #[tauri::command]
 pub fn export_fcpxml_modern(core: State<'_, AppCore>, path: String) -> Result<(), String> {
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    let project_dir = core.project_dir();
-    let xml = opentake_project::export_fcpxml(&timeline, &manifest, project_dir.as_deref());
+    let snapshot = core.runtime_snapshot();
+    let xml = opentake_project::export_fcpxml(
+        &snapshot.timeline,
+        &snapshot.media,
+        snapshot.project_dir.as_deref(),
+    );
     std::fs::write(&path, xml).map_err(|e| e.to_string())
 }
 

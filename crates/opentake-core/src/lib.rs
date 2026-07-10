@@ -19,8 +19,8 @@
 //!
 //! ## The pieces
 //!
-//! - [`AppCore`] — the cloneable façade over `Arc<Mutex<EditorSession>>`; the
-//!   single editing entry point ([`AppCore::apply`]) plus undo/redo, project
+//! - [`AppCore`] — the cloneable façade over one mutex-protected project session;
+//!   the single editing entry point ([`AppCore::apply`]) plus undo/redo, project
 //!   lifecycle, reads, and event broadcasting ([`core`]).
 //! - [`EditorSession`] — the in-memory document: an [`opentake_ops::EditorState`]
 //!   plus the bundle path and generation log it needs to round-trip ([`session`]).
@@ -43,7 +43,7 @@ pub mod events;
 pub mod session;
 
 // --- Assembly façade ---
-pub use crate::core::{AppCore, TimelineSnapshot};
+pub use crate::core::{AppCore, ProjectRevision, ProjectRuntimeSnapshot, TimelineSnapshot};
 pub use session::{
     importable_clip_type, EditorSession, ProbedMedia, SUPPORTED_AUDIO_EXTENSIONS,
     SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS,

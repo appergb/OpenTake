@@ -85,14 +85,66 @@ impl IdGen for CoreIdGen {
 pub struct TimelineSnapshot {
     /// The timeline at version [`Self::version`].
     pub timeline: Timeline,
+    /// The project session this timeline belongs to.
+    pub project_epoch: u64,
     /// The document version this snapshot was taken at.
     pub version: u64,
+}
+
+/// Identity of the current project session and its document version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProjectRevision {
+    /// Monotonic identity of the current project session.
+    pub project_epoch: u64,
+    /// Monotonic edit version within the current project session.
+    pub version: u64,
+}
+
+/// One-lock snapshot of the state consumed by runtime media operations.
+#[derive(Clone, Debug)]
+pub struct ProjectRuntimeSnapshot {
+    /// The authoritative timeline.
+    pub timeline: Timeline,
+    /// The media catalog paired with [`Self::timeline`].
+    pub media: MediaManifest,
+    /// The bundle directory paired with [`Self::timeline`].
+    pub project_dir: Option<PathBuf>,
+    /// The project session identity paired with [`Self::timeline`].
+    pub project_epoch: u64,
+    /// The document version paired with [`Self::timeline`].
+    pub version: u64,
+}
+
+struct CoreSessionSlot {
+    project_epoch: u64,
+    editor: EditorSession,
+}
+
+struct PreparedProjectOpen {
+    path: PathBuf,
+    editor: EditorSession,
+}
+
+impl CoreSessionSlot {
+    fn timeline_snapshot(&self) -> TimelineSnapshot {
+        TimelineSnapshot {
+            timeline: self.editor.timeline(),
+            project_epoch: self.project_epoch,
+            version: self.editor.version(),
+        }
+    }
+
+    fn replace_editor(&mut self, editor: EditorSession) -> TimelineSnapshot {
+        self.editor = editor;
+        self.project_epoch += 1;
+        self.timeline_snapshot()
+    }
 }
 
 /// The cloneable handle to the one authoritative editing session.
 #[derive(Clone)]
 pub struct AppCore {
-    session: Arc<Mutex<EditorSession>>,
+    session: Arc<Mutex<CoreSessionSlot>>,
     events: EventBus,
     deps: Arc<CoreDeps>,
     // `Send + Sync` so `AppCore` stays shareable across threads (Tauri State,
@@ -116,7 +168,10 @@ impl AppCore {
     /// A core with explicit capability backends (the production wiring path).
     pub fn with_deps(deps: CoreDeps) -> Self {
         AppCore {
-            session: Arc::new(Mutex::new(EditorSession::new_project())),
+            session: Arc::new(Mutex::new(CoreSessionSlot {
+                project_epoch: 0,
+                editor: EditorSession::new_project(),
+            })),
             events: EventBus::new(),
             deps: Arc::new(deps),
             ids: Arc::new(CoreIdGen::new("id-")),
@@ -150,26 +205,43 @@ impl AppCore {
 
     /// A snapshot of the current timeline + its version (`get_timeline`).
     pub fn get_timeline(&self) -> TimelineSnapshot {
+        self.lock().timeline_snapshot()
+    }
+
+    /// The identity and document version of the current project session.
+    pub fn project_revision(&self) -> ProjectRevision {
         let session = self.lock();
-        TimelineSnapshot {
-            timeline: session.timeline(),
-            version: session.version(),
+        ProjectRevision {
+            project_epoch: session.project_epoch,
+            version: session.editor.version(),
+        }
+    }
+
+    /// A runtime snapshot of the current project state.
+    pub fn runtime_snapshot(&self) -> ProjectRuntimeSnapshot {
+        let session = self.lock();
+        ProjectRuntimeSnapshot {
+            timeline: session.editor.timeline(),
+            media: session.editor.media(),
+            project_dir: session.editor.project_dir().map(PathBuf::from),
+            project_epoch: session.project_epoch,
+            version: session.editor.version(),
         }
     }
 
     /// The current document version.
     pub fn version(&self) -> u64 {
-        self.lock().version()
+        self.lock().editor.version()
     }
 
     /// Whether an undo / redo is currently available (for enabling UI affordances).
     pub fn can_undo(&self) -> bool {
-        self.lock().can_undo()
+        self.lock().editor.can_undo()
     }
 
     /// Whether a redo is currently available.
     pub fn can_redo(&self) -> bool {
-        self.lock().can_redo()
+        self.lock().editor.can_redo()
     }
 
     // MARK: - The single editing entry point
@@ -181,12 +253,14 @@ impl AppCore {
     /// command actually changed the document. Unchanged commands (and rejected
     /// ones) emit nothing and do not move the version.
     pub fn apply(&self, command: EditCommand) -> Result<EditResult> {
-        let result = {
+        let (result, project_epoch) = {
             let mut session = self.lock();
-            session.apply(command, self.ids.as_ref())?
+            let result = session.editor.apply(command, self.ids.as_ref())?;
+            (result, session.project_epoch)
         };
         if result.changed {
             self.events.emit(&CoreEvent::TimelineChanged {
+                project_epoch,
                 version: result.timeline_version,
             });
         }
@@ -208,17 +282,20 @@ impl AppCore {
 
     // MARK: - Project lifecycle
 
-    /// Replace the current session with a fresh, unsaved project and emit
-    /// [`CoreEvent::ProjectOpened`] (path empty, version 0).
-    pub fn new_project(&self) {
-        {
+    /// Replace the current session with a fresh, unsaved project, emit
+    /// [`CoreEvent::ProjectOpened`] (path empty, version 0), and return its first
+    /// snapshot.
+    pub fn new_project(&self) -> TimelineSnapshot {
+        let snapshot = {
             let mut session = self.lock();
-            *session = EditorSession::new_project();
-        }
+            session.replace_editor(EditorSession::new_project())
+        };
         self.events.emit(&CoreEvent::ProjectOpened {
             path: String::new(),
-            version: 0,
+            project_epoch: snapshot.project_epoch,
+            version: snapshot.version,
         });
+        snapshot
     }
 
     /// Open the `.opentake` bundle at `path`, replacing the current session.
@@ -226,21 +303,26 @@ impl AppCore {
     /// first snapshot itself, so no `TimelineChanged` is emitted —
     /// `core-SPEC.md` §5.4 step 6). Returns the first snapshot for convenience.
     pub fn open_project(&self, path: impl Into<PathBuf>) -> Result<TimelineSnapshot> {
-        let path = path.into();
-        let opened = EditorSession::open_project(&path)?;
+        let prepared = Self::prepare_project_open(path.into())?;
+        Ok(self.commit_project_open(prepared))
+    }
+
+    fn prepare_project_open(path: PathBuf) -> Result<PreparedProjectOpen> {
+        let editor = EditorSession::open_project(&path)?;
+        Ok(PreparedProjectOpen { path, editor })
+    }
+
+    fn commit_project_open(&self, prepared: PreparedProjectOpen) -> TimelineSnapshot {
         let snapshot = {
             let mut session = self.lock();
-            *session = opened;
-            TimelineSnapshot {
-                timeline: session.timeline(),
-                version: session.version(),
-            }
+            session.replace_editor(prepared.editor)
         };
         self.events.emit(&CoreEvent::ProjectOpened {
-            path: path.to_string_lossy().into_owned(),
+            path: prepared.path.to_string_lossy().into_owned(),
+            project_epoch: snapshot.project_epoch,
             version: snapshot.version,
         });
-        Ok(snapshot)
+        snapshot
     }
 
     /// Save the current project. `path = None` saves back to the open bundle
@@ -261,12 +343,16 @@ impl AppCore {
         path: Option<PathBuf>,
         thumbnail: Option<Vec<u8>>,
     ) -> Result<PathBuf> {
-        let written = {
+        let (written, project_epoch) = {
             let mut session = self.lock();
-            session.save_project_with_thumbnail(path, thumbnail)?
+            let written = session
+                .editor
+                .save_project_with_thumbnail(path, thumbnail)?;
+            (written, session.project_epoch)
         };
         self.events.emit(&CoreEvent::ProjectSaved {
             path: written.to_string_lossy().into_owned(),
+            project_epoch,
         });
         Ok(written)
     }
@@ -276,7 +362,7 @@ impl AppCore {
     /// A snapshot of the current media manifest (`get_media`). The catalog the
     /// media panel renders; reads are infallible.
     pub fn media(&self) -> MediaManifest {
-        self.lock().media()
+        self.lock().editor.media()
     }
 
     /// A snapshot of the current AI generation log. Cloned out from under the
@@ -285,14 +371,14 @@ impl AppCore {
     /// upstream carries `editor.generationLog` into `PalmierProjectExporter`
     /// (`Export/ExportService.swift:186-197`). Reads are infallible.
     pub fn generation_log(&self) -> GenerationLog {
-        self.lock().generation_log().clone()
+        self.lock().editor.generation_log().clone()
     }
 
     /// The open project's `.opentake` bundle directory, or `None` for an unsaved
     /// project. Needed to resolve [`MediaSource::Project`](opentake_domain::MediaSource)
     /// relative paths to on-disk files (preview/composite read the original media).
     pub fn project_dir(&self) -> Option<PathBuf> {
-        self.lock().project_dir().map(|p| p.to_path_buf())
+        self.lock().editor.project_dir().map(|p| p.to_path_buf())
     }
 
     /// Import a local media file as an external reference, minting the asset id
@@ -311,13 +397,16 @@ impl AppCore {
         probe: &ProbedMedia,
     ) -> Result<MediaManifestEntry> {
         let id = self.ids.next_id();
-        let (entry, count) = {
+        let (entry, count, project_epoch) = {
             let mut session = self.lock();
-            let entry = session.import_media_file(path, id, name, probe)?;
-            let count = session.media().entries.len();
-            (entry, count)
+            let entry = session.editor.import_media_file(path, id, name, probe)?;
+            let count = session.editor.media().entries.len();
+            (entry, count, session.project_epoch)
         };
-        self.events.emit(&CoreEvent::MediaChanged { count });
+        self.events.emit(&CoreEvent::MediaChanged {
+            project_epoch,
+            count,
+        });
         Ok(entry)
     }
 
@@ -327,14 +416,17 @@ impl AppCore {
     /// outside undo — see [`EditorSession::set_media_favorite`]. Returns how many
     /// ids changed state.
     pub fn set_media_favorite(&self, asset_ids: &[String], favorite: bool) -> usize {
-        let (changed, count) = {
+        let (changed, count, project_epoch) = {
             let mut session = self.lock();
-            let changed = session.set_media_favorite(asset_ids, favorite);
-            let count = session.media().entries.len();
-            (changed, count)
+            let changed = session.editor.set_media_favorite(asset_ids, favorite);
+            let count = session.editor.media().entries.len();
+            (changed, count, session.project_epoch)
         };
         if changed > 0 {
-            self.events.emit(&CoreEvent::MediaChanged { count });
+            self.events.emit(&CoreEvent::MediaChanged {
+                project_epoch,
+                count,
+            });
         }
         changed
     }
@@ -351,13 +443,16 @@ impl AppCore {
         path: impl AsRef<std::path::Path>,
         probe: &ProbedMedia,
     ) -> Result<MediaManifestEntry> {
-        let (entry, count) = {
+        let (entry, count, project_epoch) = {
             let mut session = self.lock();
-            let entry = session.relink_media_file(asset_id, path, probe)?;
-            let count = session.media().entries.len();
-            (entry, count)
+            let entry = session.editor.relink_media_file(asset_id, path, probe)?;
+            let count = session.editor.media().entries.len();
+            (entry, count, session.project_epoch)
         };
-        self.events.emit(&CoreEvent::MediaChanged { count });
+        self.events.emit(&CoreEvent::MediaChanged {
+            project_epoch,
+            count,
+        });
         Ok(entry)
     }
 
@@ -367,7 +462,7 @@ impl AppCore {
     /// guard. Command bodies are panic-free value-type ops, so poisoning is not
     /// expected; recovering keeps a stray panic in one observer from wedging the
     /// whole core.
-    fn lock(&self) -> std::sync::MutexGuard<'_, EditorSession> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, CoreSessionSlot> {
         self.session
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -388,9 +483,60 @@ mod tests {
             let mut session = core.session.lock().unwrap();
             let mut tl = Timeline::new();
             tl.tracks.push(Track::new("t1", ClipType::Video));
-            session.seed_from_timeline(tl);
+            session.editor.seed_from_timeline(tl);
         }
         core
+    }
+
+    fn project_bundle(label: &str) -> PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let sequence = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "opentake-core-project-epoch-{}-{label}-{sequence}.opentake",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let core = AppCore::new();
+        {
+            let mut session = core.session.lock().unwrap();
+            let mut timeline = Timeline::new();
+            timeline
+                .tracks
+                .push(Track::new(format!("{label}-track"), ClipType::Video));
+            session.editor.seed_from_timeline(timeline);
+        }
+        core.import_media_file(
+            std::env::temp_dir().join(format!("{label}.mp4")),
+            label,
+            &ProbedMedia::default(),
+        )
+        .unwrap();
+        core.save_project(Some(dir.clone())).unwrap();
+        dir
+    }
+
+    fn assert_runtime_snapshot_matches_project(
+        snapshot: &ProjectRuntimeSnapshot,
+        first_dir: &std::path::Path,
+        second_dir: &std::path::Path,
+        initial_epoch: u64,
+    ) {
+        assert_eq!(snapshot.version, 0);
+        let (label, expected_epoch_parity) = match snapshot.project_dir.as_deref() {
+            Some(path) if path == first_dir => ("first", 0),
+            Some(path) if path == second_dir => ("second", 1),
+            other => panic!("runtime snapshot has unexpected project dir: {other:?}"),
+        };
+        assert_eq!(snapshot.timeline.tracks.len(), 1);
+        assert_eq!(snapshot.timeline.tracks[0].id, format!("{label}-track"));
+        assert_eq!(snapshot.media.entries.len(), 1);
+        assert_eq!(snapshot.media.entries[0].name, label);
+        assert!(snapshot.project_epoch >= initial_epoch);
+        assert_eq!(
+            (snapshot.project_epoch - initial_epoch) % 2,
+            expected_epoch_parity
+        );
     }
 
     fn add_one_clip() -> EditCommand {
@@ -453,7 +599,13 @@ mod tests {
         assert_eq!(core.version(), 1);
 
         let events = seen.lock().unwrap().clone();
-        assert_eq!(events, vec![CoreEvent::TimelineChanged { version: 1 }]);
+        assert_eq!(
+            events,
+            vec![CoreEvent::TimelineChanged {
+                project_epoch: 0,
+                version: 1
+            }]
+        );
     }
 
     #[test]
@@ -488,7 +640,7 @@ mod tests {
             .unwrap()
             .iter()
             .map(|e| match e {
-                CoreEvent::TimelineChanged { version } => *version,
+                CoreEvent::TimelineChanged { version, .. } => *version,
                 _ => 0,
             })
             .collect();
@@ -510,6 +662,77 @@ mod tests {
     }
 
     #[test]
+    fn opening_two_projects_produces_distinct_epochs_at_version_zero() {
+        let first_dir = project_bundle("first");
+        let second_dir = project_bundle("second");
+        let core = AppCore::new();
+
+        let first = core.open_project(&first_dir).unwrap();
+        let second = core.open_project(&second_dir).unwrap();
+
+        assert_eq!(first.version, 0);
+        assert_eq!(second.version, 0);
+        assert_ne!(first.project_epoch, second.project_epoch);
+
+        let _ = std::fs::remove_dir_all(first_dir);
+        let _ = std::fs::remove_dir_all(second_dir);
+    }
+
+    #[test]
+    fn new_project_advances_epoch_even_when_versions_collide() {
+        let core = AppCore::new();
+        let before = core.project_revision();
+
+        core.new_project();
+        let after = core.project_revision();
+
+        assert_eq!(before.version, 0);
+        assert_eq!(after.version, 0);
+        assert!(after.project_epoch > before.project_epoch);
+    }
+
+    #[test]
+    fn runtime_snapshot_never_mixes_timeline_media_and_project_dir() {
+        let first_dir = project_bundle("first");
+        let second_dir = project_bundle("second");
+        let core = AppCore::new();
+        core.open_project(&first_dir).unwrap();
+        let initial_epoch = core.project_revision().project_epoch;
+
+        assert_runtime_snapshot_matches_project(
+            &core.runtime_snapshot(),
+            &first_dir,
+            &second_dir,
+            initial_epoch,
+        );
+
+        let mut spare = EditorSession::open_project(&second_dir).unwrap();
+        let writer_core = core.clone();
+        let writer = std::thread::spawn(move || {
+            for _ in 0..20_000 {
+                let mut session = writer_core.lock();
+                std::mem::swap(&mut session.editor, &mut spare);
+                session.project_epoch += 1;
+                drop(session);
+                std::thread::yield_now();
+            }
+        });
+
+        for _ in 0..10_000 {
+            assert_runtime_snapshot_matches_project(
+                &core.runtime_snapshot(),
+                &first_dir,
+                &second_dir,
+                initial_epoch,
+            );
+        }
+        writer.join().unwrap();
+
+        let _ = std::fs::remove_dir_all(first_dir);
+        let _ = std::fs::remove_dir_all(second_dir);
+    }
+
+    #[test]
     fn new_project_resets_and_emits_project_opened() {
         let core = core_with_track();
         core.apply(add_one_clip()).unwrap();
@@ -519,13 +742,15 @@ mod tests {
         let sink = Arc::clone(&seen);
         core.subscribe(move |ev| sink.lock().unwrap().push(ev.clone()));
 
-        core.new_project();
+        let snapshot = core.new_project();
         assert_eq!(core.version(), 0);
+        assert_eq!(snapshot.project_epoch, 1);
         assert!(core.get_timeline().timeline.tracks.is_empty());
         assert_eq!(
             seen.lock().unwrap().clone(),
             vec![CoreEvent::ProjectOpened {
                 path: String::new(),
+                project_epoch: 1,
                 version: 0
             }]
         );
@@ -554,13 +779,17 @@ mod tests {
         let core2 = AppCore::new();
         let snap = core2.open_project(dir.clone()).unwrap();
         assert_eq!(snap.timeline, before);
+        assert_eq!(snap.project_epoch, 1);
         assert_eq!(snap.version, 0);
 
         // First core saw a ProjectSaved event with the dir path.
         let path_str = dir.to_string_lossy().into_owned();
         assert_eq!(
             seen.lock().unwrap().clone(),
-            vec![CoreEvent::ProjectSaved { path: path_str }]
+            vec![CoreEvent::ProjectSaved {
+                path: path_str,
+                project_epoch: 0
+            }]
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -589,7 +818,10 @@ mod tests {
         assert_eq!(core.version(), 0);
         assert_eq!(
             seen.lock().unwrap().clone(),
-            vec![CoreEvent::MediaChanged { count: 1 }]
+            vec![CoreEvent::MediaChanged {
+                project_epoch: 0,
+                count: 1
+            }]
         );
     }
 
