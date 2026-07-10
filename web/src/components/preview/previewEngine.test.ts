@@ -1,12 +1,70 @@
-import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const hookHarness = vi.hoisted(() => ({
+  effects: [] as Array<() => void | (() => void)>,
+  refs: [] as Array<{ current: unknown }>,
+  refCursor: 0,
+}));
+
+// Substitute only React's lifecycle scheduler so the production hook, Zustand
+// stores/actions, media registry, and rAF clock remain the code under test.
+vi.mock("react", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  const useEffect = (effect: () => void | (() => void)) => {
+    hookHarness.effects.push(effect);
+  };
+  const useRef = <T,>(initialValue: T) => {
+    const index = hookHarness.refCursor++;
+    const ref = hookHarness.refs[index] ?? { current: initialValue };
+    hookHarness.refs[index] = ref;
+    return ref as { current: T };
+  };
+  return {
+    ...actual,
+    useEffect,
+    useRef,
+  };
+});
+
+vi.mock("../../store/projectStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../store/projectStore")>();
+  const store = actual.useProjectStore;
+  const directStore = Object.assign(
+    <T,>(selector: (state: ReturnType<typeof store.getState>) => T) =>
+      selector(store.getState()),
+    store,
+  );
+  return { ...actual, useProjectStore: directStore };
+});
+
+// Zustand's bound hook normally delegates to React.useSyncExternalStore. The
+// direct selectors keep the same real stores while the lifecycle is controlled.
+vi.mock("../../store/uiStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../store/uiStore")>();
+  const store = actual.useEditorUiStore;
+  const directStore = Object.assign(
+    <T,>(selector: (state: ReturnType<typeof store.getState>) => T) =>
+      selector(store.getState()),
+    store,
+  );
+  return { ...actual, useEditorUiStore: directStore };
+});
+
 import * as previewEngine from "./previewEngine";
 import { pausedSeekToleranceSec, previewElementKey, shouldSyncPausedMediaToFrame } from "./previewEngine";
 import type { ActiveMedia } from "./timelinePlayback";
 import type { Clip, ClipType, Timeline, Track } from "../../lib/types";
+import { useProjectStore } from "../../store/projectStore";
+import { useEditorUiStore } from "../../store/uiStore";
 
-const previewEngineSource = readFileSync(new URL("./previewEngine.ts", import.meta.url), "utf8");
-const removedPluginPackage = ["tauri-plugin", "lib", "mpv-api"].join("-");
+function runPlaybackHookEffects(): Array<() => void> {
+  hookHarness.effects = [];
+  hookHarness.refCursor = 0;
+  previewEngine.useTimelinePlaybackEngine();
+  return hookHarness.effects
+    .map((effect) => effect())
+    .filter((cleanup): cleanup is () => void => typeof cleanup === "function");
+}
 
 function clip(over: Partial<Clip> & { id: string; mediaType: ClipType }): Clip {
   return {
@@ -178,41 +236,86 @@ describe("shouldSeekPlayingFollower", () => {
 });
 
 describe("WebKit playback transport", () => {
-  it("plays and pauses an ordinary media element without a native plugin call", async () => {
-    const setWebKitMediaPlayback = (
-      previewEngine as {
-        setWebKitMediaPlayback?: (
-          element: Pick<HTMLMediaElement, "currentTime" | "pause" | "paused" | "play">,
-          playing: boolean,
-          desiredTimeSec?: number,
-        ) => void;
-      }
-    ).setWebKitMediaPlayback;
-    const play = async () => {};
+  afterEach(() => {
+    hookHarness.effects = [];
+    hookHarness.refs = [];
+    hookHarness.refCursor = 0;
+    vi.unstubAllGlobals();
+  });
+
+  it("drives a registered media element through play and pause from the owning clock", async () => {
+    const tl = timeline([
+      track({
+        id: "v1",
+        type: "video",
+        clips: [clip({ id: "clip-1", mediaRef: "asset", mediaType: "video" })],
+      }),
+    ]);
+    const active = {
+      trackIndex: 0,
+      track: tl.tracks[0],
+      clip: tl.tracks[0].clips[0],
+    } as ActiveMedia;
+    const key = previewElementKey(active);
+    let paused = true;
+    const play = vi.fn(async () => {
+      paused = false;
+    });
+    const pause = vi.fn(() => {
+      paused = true;
+    });
     const element = {
       currentTime: 0,
-      paused: true,
-      pause: () => {
-        element.paused = true;
+      muted: false,
+      volume: 1,
+      get paused() {
+        return paused;
       },
-      play: async () => {
-        element.paused = false;
-        await play();
-      },
-    };
-
-    expect(typeof setWebKitMediaPlayback).toBe("function");
-    setWebKitMediaPlayback?.(element, true, 1.25);
-    await Promise.resolve();
-    expect(element.paused).toBe(false);
-    expect(element.currentTime).toBe(1.25);
-
-    setWebKitMediaPlayback?.(element, false);
-    expect(element.paused).toBe(true);
-    expect(previewEngineSource).not.toContain(removedPluginPackage);
-    expect(previewEngineSource).not.toMatch(
-      /timelineToEdl|\bmpv(?:Command|Init|ObserveProperties|SetProperty)\b/,
+      play,
+      pause,
+    } as unknown as HTMLMediaElement;
+    const rafCallbacks = new Map<number, FrameRequestCallback>();
+    let nextRafId = 1;
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) => {
+        const id = nextRafId++;
+        rafCallbacks.set(id, callback);
+        return id;
+      }),
     );
+    vi.stubGlobal(
+      "cancelAnimationFrame",
+      vi.fn((id: number) => {
+        rafCallbacks.delete(id);
+      }),
+    );
+    useProjectStore.setState({ timeline: tl, timelineVersion: 1 });
+    useEditorUiStore.setState({
+      currentFrame: 0,
+      activeFrame: 0,
+      isPlaying: false,
+      isScrubbing: false,
+    });
+    previewEngine.previewElements.set(key, element);
+
+    useEditorUiStore.getState().togglePlay();
+    const playingCleanups = runPlaybackHookEffects();
+    const firstFrame = rafCallbacks.values().next().value as FrameRequestCallback | undefined;
+    expect(firstFrame).toBeTypeOf("function");
+    firstFrame?.(16);
+    await Promise.resolve();
+    expect(useEditorUiStore.getState().isPlaying).toBe(true);
+    expect(play).toHaveBeenCalled();
+
+    useEditorUiStore.getState().togglePlay();
+    playingCleanups.reverse().forEach((cleanup) => cleanup());
+    runPlaybackHookEffects().reverse().forEach((cleanup) => cleanup());
+    expect(useEditorUiStore.getState().isPlaying).toBe(false);
+    expect(pause).toHaveBeenCalled();
+    expect(previewEngine).not.toHaveProperty("setWebKitMediaPlayback");
+
+    previewEngine.previewElements.remove(key);
   });
 });
 

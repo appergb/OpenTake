@@ -127,7 +127,7 @@ export function shouldSeekPlayingFollower(args: {
   return Math.abs(args.currentTimeSec - args.desiredTimeSec) > (args.driftSec ?? DRIFT_SEC);
 }
 
-export function setWebKitMediaPlayback(
+function setWebKitMediaPlayback(
   element: Pick<HTMLMediaElement, "currentTime" | "pause" | "paused" | "play">,
   playing: boolean,
   desiredTimeSec?: number,
