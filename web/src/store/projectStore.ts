@@ -16,6 +16,7 @@ const EMPTY_TIMELINE: Timeline = {
 };
 
 interface ProjectState {
+  projectEpoch: number;
   timelineVersion: number;
   timeline: Timeline;
   projectPath: string | null;
@@ -25,7 +26,7 @@ interface ProjectState {
   canUndo: boolean;
   canRedo: boolean;
   /** Replace the mirror (called by the sync layer after get_timeline). */
-  setMirror: (timeline: Timeline, version: number) => void;
+  setMirror: (timeline: Timeline, version: number, projectEpoch?: number) => void;
   setProjectPath: (path: string | null) => void;
   setHistory: (canUndo: boolean, canRedo: boolean) => void;
   /** Mark the current version as persisted (called after a successful save / on
@@ -34,13 +35,19 @@ interface ProjectState {
 }
 
 export const useProjectStore = create<ProjectState>((set) => ({
+  projectEpoch: 0,
   timelineVersion: 0,
   timeline: EMPTY_TIMELINE,
   projectPath: null,
   lastSavedVersion: 0,
   canUndo: false,
   canRedo: false,
-  setMirror: (timeline, timelineVersion) => set({ timeline, timelineVersion }),
+  setMirror: (timeline, timelineVersion, projectEpoch) =>
+    set((state) => ({
+      timeline,
+      timelineVersion,
+      projectEpoch: projectEpoch ?? state.projectEpoch,
+    })),
   setProjectPath: (projectPath) => set({ projectPath }),
   setHistory: (canUndo, canRedo) => set({ canUndo, canRedo }),
   markSaved: () => set((s) => ({ lastSavedVersion: s.timelineVersion })),

@@ -59,12 +59,39 @@ fn start_server() -> Option<std::sync::Arc<PreviewServer>> {
 }
 
 fn get(port: u16, extra_headers: &str) -> String {
+    get_path(port, "/stream", extra_headers)
+}
+
+fn get_path(port: u16, path: &str, extra_headers: &str) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect loopback");
     let req = format!(
-        "GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra_headers}Connection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra_headers}Connection: close\r\n\r\n"
     );
     stream.write_all(req.as_bytes()).expect("write request");
     read_head(&mut stream)
+}
+
+#[test]
+fn frame_route_requires_the_full_session_query() {
+    let Some(server) = start_server() else {
+        return;
+    };
+    let port = port_of(&server.endpoint());
+    let missing = get_path(port, "/frame", "");
+    assert!(
+        missing.contains(" 400 "),
+        "missing query must be rejected:\n{missing}"
+    );
+
+    let no_publication = get_path(
+        port,
+        "/frame?projectEpoch=1&timelineVersion=0&sessionId=session-1&frame=0&sequence=1",
+        "",
+    );
+    assert!(
+        no_publication.contains(" 204 "),
+        "a valid query with no matching publication must return 204:\n{no_publication}"
+    );
 }
 
 #[test]

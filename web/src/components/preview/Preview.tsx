@@ -36,6 +36,7 @@ import {
 import { useT } from "../../i18n";
 import {
   captureFrameToMedia,
+  getPreviewEndpoint,
   previewPoster,
 } from "../../lib/api";
 import { findCropEditingClip, findSelectedVisualClip, mediaCanvasAspect } from "../../lib/clip";
@@ -55,6 +56,12 @@ import {
   type ZoomPreset,
 } from "../../lib/previewPresets";
 import type { MediaItem } from "../../lib/types";
+import { useNativePlaybackPublication } from "./nativePlaybackSession";
+import {
+  nativeFrameDisplayState,
+  shouldAcceptNativeFrameLoad,
+  type LoadedNativeFrame,
+} from "./timelinePlayback";
 
 export function Preview() {
   const t = useT();
@@ -122,6 +129,13 @@ export function Preview() {
   const [mediaTime, setMediaTime] = useState(0);
   const [mediaDuration, setMediaDuration] = useState(0);
   const [mediaPlaying, setMediaPlaying] = useState(false);
+  const nativeFrameEvent = useNativePlaybackPublication();
+  const [previewFrameEndpoint, setPreviewFrameEndpoint] = useState<string | null>(null);
+  const [loadedNativeFrame, setLoadedNativeFrame] = useState<LoadedNativeFrame | null>(null);
+  const nativeFrameRequestRef = useRef<{
+    url: string;
+    frame: LoadedNativeFrame;
+  } | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   // The zoomed canvas box element — the wheel handler measures its rect so the
   // zoom anchors on the cursor's position within the canvas (not the padded stage).
@@ -132,6 +146,30 @@ export function Preview() {
     setMediaDuration(0);
     setMediaPlaying(false);
   }, [previewMediaId]);
+  useEffect(() => {
+    let disposed = false;
+    void getPreviewEndpoint().then((endpoint) => {
+      if (!disposed) setPreviewFrameEndpoint(endpoint);
+    });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+  useEffect(() => {
+    if (loadedNativeFrame && !nativeFrameEvent) {
+      setLoadedNativeFrame(null);
+      return;
+    }
+    if (
+      loadedNativeFrame &&
+      nativeFrameEvent &&
+      (loadedNativeFrame.projectEpoch !== nativeFrameEvent.projectEpoch ||
+        loadedNativeFrame.timelineVersion !== nativeFrameEvent.timelineVersion ||
+        loadedNativeFrame.sessionId !== nativeFrameEvent.sessionId)
+    ) {
+      setLoadedNativeFrame(null);
+    }
+  }, [loadedNativeFrame, nativeFrameEvent]);
   useEffect(() => {
     const el = stageRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
@@ -177,6 +215,25 @@ export function Preview() {
     : totalFrames(timeline);
   const activeShownFrame = previewing ? Math.round(mediaTime * fps) : activeFrame;
   const playing = previewing ? mediaPlaying : isPlaying;
+  const nativeDisplay = nativeFrameDisplayState({
+    event: nativeFrameEvent,
+    endpoint: previewFrameEndpoint,
+    loaded: loadedNativeFrame,
+    isPlaying,
+  });
+  nativeFrameRequestRef.current =
+    nativeDisplay.requestUrl && nativeFrameEvent
+      ? {
+          url: nativeDisplay.requestUrl,
+          frame: {
+            projectEpoch: nativeFrameEvent.projectEpoch,
+            timelineVersion: nativeFrameEvent.timelineVersion,
+            sessionId: nativeFrameEvent.sessionId,
+            frame: nativeFrameEvent.frame,
+            sequence: nativeFrameEvent.sequence,
+          },
+        }
+      : null;
 
   const seekTo = (frame: number) => {
     const clamped = Math.max(0, Math.min(total, frame));
@@ -354,10 +411,36 @@ export function Preview() {
                   style={{
                     position: "absolute",
                     inset: 0,
+                    visibility: nativeDisplay.showWebKit ? "visible" : "hidden",
                   }}
                 >
                   <TimelinePlayback timeline={timeline} fps={fps} />
                 </div>
+                {nativeDisplay.requestUrl && nativeFrameEvent && (
+                  <img
+                    src={nativeDisplay.requestUrl}
+                    alt=""
+                    onLoad={(event) => {
+                      const request = nativeFrameRequestRef.current;
+                      if (
+                        request &&
+                        event.currentTarget.currentSrc === request.url &&
+                        shouldAcceptNativeFrameLoad(nativeFrameEvent, request.frame)
+                      ) {
+                        setLoadedNativeFrame(request.frame);
+                      }
+                    }}
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      width: "100%",
+                      height: "100%",
+                      objectFit: "contain",
+                      visibility: nativeDisplay.showNativeImage ? "visible" : "hidden",
+                      pointerEvents: "none",
+                    }}
+                  />
+                )}
                 {/* Below-fit canvas outline (upstream PreviewContainerView.swift:
                     44-47: Rectangle stroke white @ Opacity.moderate=0.25 when
                     canvasZoom < 1.0, else invisible). pointer-events:none so it

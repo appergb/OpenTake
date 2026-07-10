@@ -294,6 +294,27 @@ fn resolve_media_tools() {
 /// `kind` tag the front end listens for; the payload is the event itself
 /// (serialized with its `kind`-tagged shape).
 fn forward_event(app: &tauri::AppHandle, event: &CoreEvent) {
+    #[cfg(feature = "playback-engine")]
+    {
+        if let Some(playback) = app.try_state::<playback::PlaybackState>() {
+            let invalidated = match event {
+                CoreEvent::TimelineChanged {
+                    project_epoch,
+                    version,
+                } => playback.invalidate_timeline(*project_epoch, *version),
+                CoreEvent::ProjectOpened { project_epoch, .. } => {
+                    playback.activate_project_event(*project_epoch)
+                }
+                CoreEvent::ProjectSaved { .. } | CoreEvent::MediaChanged { .. } => None,
+            };
+            if let (Some(identity), Some(server)) = (
+                invalidated,
+                app.try_state::<std::sync::Arc<playback::PreviewServer>>(),
+            ) {
+                server.clear_session(&identity);
+            }
+        }
+    }
     let name = match event {
         CoreEvent::TimelineChanged { .. } => "timeline_changed",
         CoreEvent::ProjectOpened { .. } => "project_opened",

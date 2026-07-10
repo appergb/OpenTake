@@ -18,10 +18,14 @@ use tauri::{AppHandle, Manager, State};
 use opentake_core::AppCore;
 use opentake_render::{even, RenderSize};
 
-use super::audio::build_clock;
+use super::audio::build_clock_paused;
 use super::engine::{FrameSink, PlaybackEngine, PlayheadEmitter};
 use super::project::{project_media, project_text};
-use super::transport::{PreviewServer, TauriPlayheadEmitter};
+use super::session::{
+    PlaybackCommandError, PlaybackIdentity, ProjectTransition, SessionControl, SessionRegistry,
+    StartDecision, StartTicket,
+};
+use super::transport::{PreviewServer, PublicationGate, TauriPlayheadEmitter};
 
 /// Preview downscale cap (longest side, px) for streaming playback — matches the
 /// single-frame preview so PLAY and scrub/pause look identical.
@@ -31,15 +35,33 @@ const PLAYBACK_PREVIEW_CAP: u32 = 1280;
 /// The audio handle is kept alive for the session (dropping it stops the cpal
 /// stream); `_audio` is `None` for a silent timeline (wall-clock driven).
 struct RunningPlayback {
+    identity: PlaybackIdentity,
     engine: PlaybackEngine,
-    _audio: Option<super::audio::AudioPlayback>,
+    audio: Option<super::audio::AudioPlayback>,
+    publication: PublicationGate,
 }
 
-/// Holds the currently-running playback session (if any). A new `playback_start`
-/// stops the previous one first, so at most one render thread + audio stream run.
+impl RunningPlayback {
+    fn close_publication(&self) {
+        self.publication.close();
+    }
+
+    fn stop(self) {
+        self.publication.close();
+        drop(self.audio);
+        self.engine.stop();
+    }
+}
+
+#[derive(Default)]
+struct PlaybackSlot {
+    sessions: SessionRegistry,
+    running: Option<RunningPlayback>,
+}
+
 #[derive(Default)]
 pub struct PlaybackState {
-    running: Mutex<Option<RunningPlayback>>,
+    slot: Mutex<PlaybackSlot>,
 }
 
 impl PlaybackState {
@@ -47,41 +69,205 @@ impl PlaybackState {
         PlaybackState::default()
     }
 
-    /// Replace the running session, stopping (and joining) any previous one
-    /// AFTER releasing the lock — a slow render-thread join must not block the
-    /// other playback commands (which all take this same lock).
-    fn install(&self, engine: PlaybackEngine, audio: Option<super::audio::AudioPlayback>) {
-        let old = {
-            let mut guard = self.running.lock().unwrap_or_else(|p| p.into_inner());
-            let old = guard.take();
-            *guard = Some(RunningPlayback {
-                engine,
-                _audio: audio,
-            });
-            old
+    fn prepare_start(
+        &self,
+        identity: PlaybackIdentity,
+        authoritative: opentake_core::ProjectRevision,
+        frame: i32,
+    ) -> Result<Option<StartTicket>, PlaybackCommandError> {
+        let (decision, old) = {
+            let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+            let decision = slot.sessions.begin_start(identity.clone(), authoritative)?;
+            if matches!(decision, StartDecision::Resume) {
+                let Some(running) = slot.running.as_ref() else {
+                    return Err(PlaybackCommandError::superseded(
+                        "retained playback resources are no longer installed",
+                    ));
+                };
+                if running.identity != identity {
+                    return Err(PlaybackCommandError::superseded(
+                        "retained playback identity changed",
+                    ));
+                }
+                running
+                    .engine
+                    .resume(frame)
+                    .map_err(PlaybackCommandError::engine)?;
+                if let Some(audio) = running.audio.as_ref() {
+                    audio.resume().map_err(PlaybackCommandError::engine)?;
+                }
+                return Ok(None);
+            }
+            let old = slot.running.take();
+            (decision, old)
         };
-        if let Some(session) = old {
-            session.engine.stop();
+        if let Some(running) = old {
+            running.stop();
+        }
+        let StartDecision::Build(ticket) = decision else {
+            unreachable!("resume returned above")
+        };
+        Ok(Some(ticket))
+    }
+
+    fn install_if_current(
+        &self,
+        ticket: StartTicket,
+        authoritative: opentake_core::ProjectRevision,
+        engine: PlaybackEngine,
+        audio: Option<super::audio::AudioPlayback>,
+        publication: PublicationGate,
+        frame: i32,
+    ) -> Result<(), PlaybackCommandError> {
+        let identity = ticket.identity().clone();
+        let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+        if let Err(error) = slot.sessions.install_if_current(ticket, authoritative) {
+            drop(slot);
+            publication.close();
+            drop(audio);
+            engine.stop();
+            return Err(error);
+        }
+        if let Err(error) = engine.resume(frame) {
+            slot.sessions.control(&identity, SessionControl::Stop);
+            drop(slot);
+            publication.close();
+            drop(audio);
+            engine.stop();
+            return Err(PlaybackCommandError::engine(error));
+        }
+        if let Some(audio_playback) = audio.as_ref() {
+            if let Err(error) = audio_playback.resume() {
+                slot.sessions.control(&identity, SessionControl::Stop);
+                drop(slot);
+                publication.close();
+                drop(audio);
+                engine.stop();
+                return Err(PlaybackCommandError::engine(error));
+            }
+        }
+        slot.running = Some(RunningPlayback {
+            identity,
+            engine,
+            audio,
+            publication,
+        });
+        Ok(())
+    }
+
+    fn control(
+        &self,
+        identity: PlaybackIdentity,
+        control: SessionControl,
+        frame: i32,
+    ) -> Result<(), PlaybackCommandError> {
+        let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+        if !slot.sessions.control(&identity, control) {
+            return Err(PlaybackCommandError::superseded(
+                "playback control targeted a stale session",
+            ));
+        }
+        match control {
+            SessionControl::Pause => {
+                let running = slot.running.as_ref().ok_or_else(|| {
+                    PlaybackCommandError::superseded("playback session is no longer installed")
+                })?;
+                if let Some(audio) = running.audio.as_ref() {
+                    audio.pause().map_err(PlaybackCommandError::engine)?;
+                }
+                running
+                    .engine
+                    .pause(frame)
+                    .map_err(PlaybackCommandError::engine)?;
+            }
+            SessionControl::Seek => {
+                let running = slot.running.as_ref().ok_or_else(|| {
+                    PlaybackCommandError::superseded("playback session is no longer installed")
+                })?;
+                running.engine.seek(frame);
+            }
+            SessionControl::Stop => {
+                let running = slot.running.take();
+                drop(slot);
+                if let Some(running) = running {
+                    running.stop();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn begin_project_transition(&self) -> ProjectTransition {
+        let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+        let transition = slot.sessions.begin_project_transition();
+        if let Some(running) = slot.running.as_ref() {
+            running.close_publication();
+        }
+        transition
+    }
+
+    pub fn cancel_project_transition(&self, transition: ProjectTransition) {
+        let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+        slot.sessions.cancel_project_transition(transition);
+        if let Some(running) = slot.running.as_ref() {
+            running.publication.reopen();
         }
     }
 
-    /// Stop and drop the running session (render thread joined, audio dropped).
-    fn shutdown(&self) {
-        let taken = {
-            let mut guard = self.running.lock().unwrap_or_else(|p| p.into_inner());
-            guard.take()
+    pub fn activate_project(&self, transition: ProjectTransition, project_epoch: u64) {
+        let running = {
+            let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+            slot.sessions.activate_project(transition, project_epoch);
+            slot.running.take()
         };
-        if let Some(session) = taken {
-            session.engine.stop();
+        if let Some(running) = running {
+            running.stop();
         }
     }
 
-    /// Forward a seek to the running engine, if any.
-    fn forward_seek(&self, frame: i32) {
-        let guard = self.running.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(session) = guard.as_ref() {
-            session.engine.seek(frame);
+    pub fn activate_project_event(&self, project_epoch: u64) -> Option<PlaybackIdentity> {
+        let running = {
+            let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+            slot.sessions.activate_project_event(project_epoch);
+            slot.running.take()
+        };
+        let identity = running.as_ref().map(|running| running.identity.clone());
+        if let Some(running) = running {
+            running.stop();
         }
+        identity
+    }
+
+    pub fn invalidate_timeline(
+        &self,
+        project_epoch: u64,
+        version: u64,
+    ) -> Option<PlaybackIdentity> {
+        let running = {
+            let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+            if slot
+                .sessions
+                .invalidate_for_timeline_change(project_epoch, version)
+            {
+                slot.running.take()
+            } else {
+                None
+            }
+        };
+        let identity = running.as_ref().map(|running| running.identity.clone());
+        if let Some(running) = running {
+            running.stop();
+        }
+        identity
+    }
+
+    pub fn active_identity(&self) -> Option<PlaybackIdentity> {
+        self.slot
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .sessions
+            .active_identity()
+            .cloned()
     }
 }
 
@@ -109,21 +295,48 @@ fn playback_render_size(canvas_w: i32, canvas_h: i32, cap: u32) -> RenderSize {
 /// transport and emitting `playback_frame` events. Returns `Err` only on engine
 /// spawn failure; a GPU-less host fails fast here.
 #[tauri::command]
-pub async fn playback_start(app: AppHandle, from_frame: i32) -> Result<(), String> {
+pub async fn playback_start(
+    app: AppHandle,
+    from_frame: i32,
+    identity: PlaybackIdentity,
+) -> Result<(), PlaybackCommandError> {
+    let identity = identity.validate()?;
+    let snapshot = app.state::<AppCore>().runtime_snapshot();
+    let authoritative = opentake_core::ProjectRevision {
+        project_epoch: snapshot.project_epoch,
+        version: snapshot.version,
+    };
+    let start_at = from_frame.max(0);
+    let Some(ticket) =
+        app.state::<PlaybackState>()
+            .prepare_start(identity.clone(), authoritative, start_at)?
+    else {
+        return Ok(());
+    };
+
     // Snapshot the session synchronously — no managed-state guard is held across
     // the await below (Tauri async commands require a Send future).
-    let (timeline, sizes, media, text, render_size, fps, sink, emitter) = {
-        let core = app.state::<AppCore>();
-        let timeline = core.get_timeline().timeline;
-        let manifest = core.media();
-        let project_dir = core.project_dir();
+    let (timeline, sizes, media, text, render_size, fps, sink, emitter, publication) = {
+        let timeline = snapshot.timeline;
+        let manifest = snapshot.media;
+        let project_dir = snapshot.project_dir;
         let (sizes, media) = project_media(&manifest, &project_dir);
         let text = project_text(&timeline);
         let render_size =
             playback_render_size(timeline.width, timeline.height, PLAYBACK_PREVIEW_CAP);
         let fps = timeline.fps;
-        let sink: Arc<dyn FrameSink> = Arc::new(app.state::<Arc<PreviewServer>>().sink());
-        let emitter: Arc<dyn PlayheadEmitter> = Arc::new(TauriPlayheadEmitter::new(app.clone()));
+        let server = app.state::<Arc<PreviewServer>>();
+        let publication = PublicationGate::open();
+        let concrete_sink = server.sink(identity.clone(), publication.clone());
+        let emitter: Arc<dyn PlayheadEmitter> = Arc::new(TauriPlayheadEmitter::new(
+            app.clone(),
+            server.inner().as_ref(),
+            &concrete_sink,
+            identity.clone(),
+            publication.clone(),
+            timeline.total_frames().max(1) - 1,
+        ));
+        let sink: Arc<dyn FrameSink> = Arc::new(concrete_sink);
         (
             timeline,
             sizes,
@@ -133,9 +346,9 @@ pub async fn playback_start(app: AppHandle, from_frame: i32) -> Result<(), Strin
             fps,
             sink,
             emitter,
+            publication,
         )
     };
-    let start_at = from_frame.max(0);
 
     // Decoding + mixing the whole timeline's audio (ffmpeg per clip) can take
     // seconds on a long project; run it (and cpal setup) off the IPC thread so
@@ -143,12 +356,12 @@ pub async fn playback_start(app: AppHandle, from_frame: i32) -> Result<(), Strin
     let (clock, audio) = {
         let timeline = timeline.clone();
         let media = media.clone();
-        tokio::task::spawn_blocking(move || build_clock(&timeline, &media, fps, start_at))
+        tokio::task::spawn_blocking(move || build_clock_paused(&timeline, &media, fps, start_at))
             .await
-            .map_err(|e| format!("audio prepare task failed: {e}"))?
+            .map_err(|e| PlaybackCommandError::engine(format!("audio prepare task failed: {e}")))?
     };
 
-    let engine = PlaybackEngine::spawn(
+    let engine = PlaybackEngine::spawn_ready(
         timeline,
         media,
         text,
@@ -157,36 +370,50 @@ pub async fn playback_start(app: AppHandle, from_frame: i32) -> Result<(), Strin
         clock,
         sink,
         emitter,
-    )?;
-    app.state::<PlaybackState>().install(engine, audio);
-    Ok(())
+        start_at,
+    )
+    .map_err(PlaybackCommandError::engine)?;
+    let current = app.state::<AppCore>().project_revision();
+    app.state::<PlaybackState>().install_if_current(
+        ticket,
+        current,
+        engine,
+        audio,
+        publication,
+        start_at,
+    )
 }
 
-/// Pause playback: stop the render thread (the front end freezes the `<video>`
-/// at the last `playback_frame`). Same teardown as stop in this cut.
+/// Pause the matching session while retaining its render and audio resources.
 #[tauri::command]
-pub fn playback_pause(playback: State<'_, PlaybackState>) -> Result<(), String> {
-    playback.shutdown();
-    Ok(())
+pub fn playback_pause(
+    playback: State<'_, PlaybackState>,
+    identity: PlaybackIdentity,
+    frame: i32,
+) -> Result<(), PlaybackCommandError> {
+    playback.control(identity.validate()?, SessionControl::Pause, frame.max(0))
 }
 
 /// Stop playback and tear down the engine.
 #[tauri::command]
-pub fn playback_stop(playback: State<'_, PlaybackState>) -> Result<(), String> {
-    playback.shutdown();
-    Ok(())
+pub fn playback_stop(
+    playback: State<'_, PlaybackState>,
+    identity: PlaybackIdentity,
+) -> Result<(), PlaybackCommandError> {
+    playback.control(identity.validate()?, SessionControl::Stop, 0)
 }
 
 /// Seek the running engine to `frame` (no-op when not playing).
 #[tauri::command]
-pub fn playback_seek(playback: State<'_, PlaybackState>, frame: i32) -> Result<(), String> {
-    playback.forward_seek(frame.max(0));
-    Ok(())
+pub fn playback_seek(
+    playback: State<'_, PlaybackState>,
+    identity: PlaybackIdentity,
+    frame: i32,
+) -> Result<(), PlaybackCommandError> {
+    playback.control(identity.validate()?, SessionControl::Seek, frame.max(0))
 }
 
-/// The WebSocket URL the front end connects a playback `<canvas>` to for binary
-/// JPEG frames. (WebKit only paints the first part of the `/stream` MJPEG `<img>`,
-/// so the canvas + WS path replaced it — see `transport.rs`.)
+/// The session-scoped `/frame` endpoint used for exact JPEG requests.
 #[tauri::command]
 pub fn get_preview_endpoint(server: State<'_, Arc<PreviewServer>>) -> String {
     server.endpoint_frame()

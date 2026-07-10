@@ -25,6 +25,8 @@ import {
   advancePlayhead,
   clipVolumeAt,
   frameForSourceTime,
+  isExternalSeekWhilePlaying,
+  shouldUseRustEngine,
   sourceTimeSec,
   type ActiveMedia,
 } from "./timelinePlayback";
@@ -36,6 +38,33 @@ import {
   interactiveToleranceSec,
 } from "./interactiveSeek";
 import type { Timeline } from "../../lib/types";
+import { isTauri, onPlaybackFrame } from "../../lib/api";
+import {
+  clearNativePlaybackPublication,
+  getNativePlaybackPublication,
+  nativePlaybackController,
+  subscribeNativePlaybackPublication,
+} from "./nativePlaybackSession";
+import { rustEngineEnabled } from "./rustEngine";
+
+let nativeFrameListener: Promise<() => void> | null = null;
+
+function ensureNativeFrameListener(): Promise<() => void> {
+  if (!nativeFrameListener) {
+    nativeFrameListener = onPlaybackFrame((event) => {
+      nativePlaybackController.acceptFrame(event);
+    });
+  }
+  return nativeFrameListener;
+}
+
+export async function startNativePlaybackAfterListener<T>(
+  listenerReady: Promise<unknown>,
+  start: () => Promise<T>,
+): Promise<T> {
+  await listenerReady;
+  return start();
+}
 
 // --- Shared element registry ---------------------------------------------
 // playback key -> media element, written by <TimelinePlayback> ref callbacks and
@@ -234,7 +263,22 @@ export function useTimelinePlaybackEngine(): void {
   // change on an edit, so without this a just-dropped clip would hold its source
   // frame 0 instead of the playhead frame.
   const timelineVersion = useProjectStore((s) => s.timelineVersion);
+  const projectEpoch = useProjectStore((s) => s.projectEpoch);
   const previousTransportState = useRef({ isPlaying: false, isScrubbing: false });
+  const lastEngineFrameRef = useRef<number | null>(null);
+  const activeNativeIdentityRef = useRef<ReturnType<
+    typeof nativePlaybackController.currentIdentity
+  >>(null);
+  const engineFailed = useEditorUiStore((s) => s.rustEngineFailed);
+  const setEngineFailed = useEditorUiStore((s) => s.setRustEngineFailed);
+
+  useEffect(() => {
+    const listener = ensureNativeFrameListener();
+    return () => {
+      void listener.then((unlisten) => unlisten());
+      if (nativeFrameListener === listener) nativeFrameListener = null;
+    };
+  }, []);
 
   useEffect(() => {
     const prev = previousTransportState.current;
@@ -243,7 +287,15 @@ export function useTimelinePlaybackEngine(): void {
       pauseAll();
       const tl = useProjectStore.getState().timeline;
       const fps = tl.fps > 0 ? tl.fps : 30;
-      if (prev.isPlaying) {
+      const project = useProjectStore.getState();
+      const nativeIdentity = activeNativeIdentityRef.current;
+      const nativeDrovePreviousPlay =
+        prev.isPlaying &&
+        !engineFailed &&
+        nativeIdentity !== null &&
+        nativeIdentity.projectEpoch === project.projectEpoch &&
+        nativeIdentity.timelineVersion === project.timelineVersion;
+      if (prev.isPlaying && !nativeDrovePreviousPlay) {
         const visual = activeVideoForPausedSnap(tl, Math.max(0, Math.floor(activeFrame)));
         const el = visual ? previewElements.get(previewElementKey(visual)) : null;
         const pausedFrame = pausedPlayheadFrameFromFrozenVideo(visual, el?.currentTime ?? NaN, fps);
@@ -265,9 +317,79 @@ export function useTimelinePlaybackEngine(): void {
       }
     }
     previousTransportState.current = { isPlaying, isScrubbing };
-  }, [activeFrame, isPlaying, isScrubbing, timelineVersion]);
+  }, [activeFrame, engineFailed, isPlaying, isScrubbing, projectEpoch, timelineVersion]);
 
   useEffect(() => {
+    if (
+      shouldUseRustEngine({
+        rustEnabled: rustEngineEnabled(),
+        isTauri,
+        isPlaying,
+        isScrubbing,
+        engineFailed,
+      })
+    ) {
+      pauseAll();
+      let disposed = false;
+      let identity = activeNativeIdentityRef.current;
+      const unsubscribePublication = subscribeNativePlaybackPublication(() => {
+        const current = getNativePlaybackPublication();
+        if (!current || disposed || !activeNativeIdentityRef.current) return;
+        lastEngineFrameRef.current = current.frame;
+        const ui = useEditorUiStore.getState();
+        ui.setActiveFrame(current.frame);
+        if (current.terminal) ui.setPlaying(false);
+      });
+
+      const startFrame = Math.max(0, Math.floor(useEditorUiStore.getState().activeFrame));
+      const start = startNativePlaybackAfterListener(ensureNativeFrameListener(), () =>
+        nativePlaybackController.start({ projectEpoch, timelineVersion }, startFrame, {
+          onIdentity: (started) => {
+            identity = started;
+            activeNativeIdentityRef.current = started;
+            lastEngineFrameRef.current = null;
+          },
+        }),
+      );
+      void start
+        .then((started) => {
+          if (disposed) {
+            void nativePlaybackController.cleanup(started, "stop", startFrame);
+            return;
+          }
+          identity = started;
+          activeNativeIdentityRef.current = started;
+        })
+        .catch((error) => {
+          if (disposed) return;
+          if (nativePlaybackController.shouldFallback(error)) {
+            clearNativePlaybackPublication();
+            setEngineFailed(true);
+          } else {
+            useEditorUiStore.getState().setPlaying(false);
+          }
+        });
+
+      return () => {
+        disposed = true;
+        unsubscribePublication();
+        const current = identity ?? activeNativeIdentityRef.current;
+        if (!current) return;
+        const project = useProjectStore.getState();
+        const ui = useEditorUiStore.getState();
+        const sameRevision =
+          current.projectEpoch === project.projectEpoch &&
+          current.timelineVersion === project.timelineVersion;
+        const action = sameRevision && !ui.rustEngineFailed ? "pause" : "stop";
+        if (ui.isScrubbing) clearNativePlaybackPublication();
+        void nativePlaybackController.cleanup(
+          current,
+          action,
+          Math.max(0, Math.floor(ui.activeFrame)),
+        );
+      };
+    }
+
     if (!isPlaying && !isScrubbing) {
       cancelPendingInteractiveSeek();
       pauseAll();
@@ -393,5 +515,30 @@ export function useTimelinePlaybackEngine(): void {
       cancelPendingInteractiveSeek();
       pauseAll();
     };
-  }, [isPlaying, isScrubbing]);
+  }, [isPlaying, isScrubbing, engineFailed, projectEpoch, timelineVersion, setEngineFailed]);
+
+  useEffect(() => {
+    if (
+      !shouldUseRustEngine({
+        rustEnabled: rustEngineEnabled(),
+        isTauri,
+        isPlaying,
+        isScrubbing,
+        engineFailed,
+      })
+    ) {
+      return;
+    }
+    const identity = activeNativeIdentityRef.current;
+    if (
+      identity &&
+      isExternalSeekWhilePlaying({
+        activeFrame,
+        lastEngineFrame: lastEngineFrameRef.current,
+      })
+    ) {
+      lastEngineFrameRef.current = Math.max(0, Math.floor(activeFrame));
+      void nativePlaybackController.seek(identity, activeFrame);
+    }
+  }, [activeFrame, engineFailed, isPlaying, isScrubbing]);
 }

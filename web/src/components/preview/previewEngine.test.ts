@@ -113,6 +113,26 @@ function timeline(tracks: Track[]): Timeline {
 }
 
 describe("shouldSyncPausedMediaToFrame", () => {
+  it("registers exactly one playback frame listener before starting the session", async () => {
+    const order: string[] = [];
+    let resolveListener: (() => void) | null = null;
+    const listenerReady = new Promise<void>((resolve) => {
+      resolveListener = () => {
+        order.push("listen");
+        resolve();
+      };
+    });
+    const result = previewEngine.startNativePlaybackAfterListener(listenerReady, async () => {
+      order.push("start");
+      return "started";
+    });
+
+    expect(order).toEqual([]);
+    resolveListener?.();
+    await expect(result).resolves.toBe("started");
+    expect(order).toEqual(["listen", "start"]);
+  });
+
   it("does not seek on the play-to-pause edge", () => {
     expect(
       shouldSyncPausedMediaToFrame({

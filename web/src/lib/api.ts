@@ -18,11 +18,14 @@ import type {
   GenerateCaptionsResult,
   MediaList,
   ModelStatus,
+  PlaybackCommandError,
+  PlaybackFrameEvent,
+  PlaybackIdentity,
+  RuntimeTimelineSnapshot,
   SearchIndexStatus,
   SearchModelStatus,
   SearchResults,
   SecretStatus,
-  TimelineSnapshot,
   Transcript,
 } from "./types";
 
@@ -50,10 +53,10 @@ async function ensureTauri(): Promise<void> {
 
 // MARK: - Commands
 
-export async function getTimeline(): Promise<TimelineSnapshot> {
+export async function getTimeline(): Promise<RuntimeTimelineSnapshot> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<TimelineSnapshot>("get_timeline");
-  return fallback.getTimeline();
+  if (invokeImpl) return invokeImpl<RuntimeTimelineSnapshot>("get_timeline");
+  return { ...fallback.getTimeline(), projectEpoch: 0 };
 }
 
 export async function editApply(command: EditRequest): Promise<EditResult> {
@@ -96,19 +99,19 @@ export async function canRedo(): Promise<boolean> {
   return false;
 }
 
-export async function projectNew(): Promise<void> {
+export async function projectNew(): Promise<RuntimeTimelineSnapshot> {
   await ensureTauri();
   if (invokeImpl) {
-    await invokeImpl<void>("project_new");
-    return;
+    return invokeImpl<RuntimeTimelineSnapshot>("project_new");
   }
   fallback.reset();
+  return { ...fallback.getTimeline(), projectEpoch: 0 };
 }
 
-export async function projectOpen(path: string): Promise<TimelineSnapshot> {
+export async function projectOpen(path: string): Promise<RuntimeTimelineSnapshot> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<TimelineSnapshot>("project_open", { path });
-  return fallback.getTimeline();
+  if (invokeImpl) return invokeImpl<RuntimeTimelineSnapshot>("project_open", { path });
+  return { ...fallback.getTimeline(), projectEpoch: 0 };
 }
 
 export async function projectSave(path: string | null): Promise<string> {
@@ -783,24 +786,39 @@ export async function chatCancel(sessionId: string): Promise<void> {
 /** Subscribe to `timeline_changed`. Returns an unlisten function. No-op (and a
  *  no-op unlisten) when not in Tauri. */
 export async function onTimelineChanged(
-  handler: (version: number) => void,
+  handler: (projectEpoch: number, version: number) => void,
 ): Promise<() => void> {
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("timeline_changed", (e) => {
-    const payload = e.payload as { version?: number } | undefined;
-    if (payload && typeof payload.version === "number") handler(payload.version);
+    const payload = e.payload as { projectEpoch?: number; version?: number } | undefined;
+    if (
+      payload &&
+      typeof payload.projectEpoch === "number" &&
+      typeof payload.version === "number"
+    ) {
+      handler(payload.projectEpoch, payload.version);
+    }
   });
 }
 
 export async function onProjectOpened(
-  handler: (path: string, version: number) => void,
+  handler: (path: string, projectEpoch: number, version: number) => void,
 ): Promise<() => void> {
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("project_opened", (e) => {
-    const p = e.payload as { path?: string; version?: number } | undefined;
-    if (p) handler(p.path ?? "", p.version ?? 0);
+    const p = e.payload as
+      | { path?: string; projectEpoch?: number; version?: number }
+      | undefined;
+    if (
+      p &&
+      typeof p.path === "string" &&
+      typeof p.projectEpoch === "number" &&
+      typeof p.version === "number"
+    ) {
+      handler(p.path, p.projectEpoch, p.version);
+    }
   });
 }
 
@@ -873,32 +891,39 @@ export async function onChatDone(
 
 /** Start (or restart) Rust streaming playback from `fromFrame` (the current
  *  playhead). No-op outside Tauri. */
-export async function playbackStart(fromFrame: number): Promise<void> {
+export async function playbackStart(
+  fromFrame: number,
+  identity: PlaybackIdentity,
+): Promise<void> {
   await ensureTauri();
   if (invokeImpl)
-    await invokeImpl<void>("playback_start", { fromFrame: Math.floor(fromFrame) });
+    await invokeImpl<void>("playback_start", {
+      fromFrame: Math.floor(fromFrame),
+      identity,
+    });
 }
 
-/** Pause Rust playback: the render thread stops (the front end then freezes the
- *  <video> on the last frame). No-op outside Tauri. */
-export async function playbackPause(): Promise<void> {
+/** Pause the matching retained Rust playback session. No-op outside Tauri. */
+export async function playbackPause(identity: PlaybackIdentity, frame: number): Promise<void> {
   await ensureTauri();
-  if (invokeImpl) await invokeImpl<void>("playback_pause");
+  if (invokeImpl)
+    await invokeImpl<void>("playback_pause", { identity, frame: Math.floor(frame) });
 }
 
 /** Stop Rust playback and tear down the engine. No-op outside Tauri. */
-export async function playbackStop(): Promise<void> {
+export async function playbackStop(identity: PlaybackIdentity): Promise<void> {
   await ensureTauri();
-  if (invokeImpl) await invokeImpl<void>("playback_stop");
+  if (invokeImpl) await invokeImpl<void>("playback_stop", { identity });
 }
 
 /** Seek the running Rust engine to `frame` (no-op when not playing / outside Tauri). */
-export async function playbackSeek(frame: number): Promise<void> {
+export async function playbackSeek(identity: PlaybackIdentity, frame: number): Promise<void> {
   await ensureTauri();
-  if (invokeImpl) await invokeImpl<void>("playback_seek", { frame: Math.floor(frame) });
+  if (invokeImpl)
+    await invokeImpl<void>("playback_seek", { identity, frame: Math.floor(frame) });
 }
 
-/** The MJPEG stream URL to point a playback <img> at, or null outside Tauri. */
+/** The loopback `/frame` endpoint used for identity-scoped JPEG requests. */
 export async function getPreviewEndpoint(): Promise<string | null> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<string>("get_preview_endpoint");
@@ -908,14 +933,47 @@ export async function getPreviewEndpoint(): Promise<string | null> {
 /** Subscribe to `playback_frame` (the Rust master clock's current frame). Returns
  *  an unlisten function; no-op (no-op unlisten) outside Tauri. */
 export async function onPlaybackFrame(
-  handler: (frame: number) => void,
+  handler: (event: PlaybackFrameEvent) => void,
 ): Promise<() => void> {
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("playback_frame", (e) => {
-    const payload = e.payload as { frame?: number } | undefined;
-    if (payload && typeof payload.frame === "number") handler(payload.frame);
+    const event = decodePlaybackFrameEvent(e.payload);
+    if (event) handler(event);
   });
+}
+
+export function decodePlaybackFrameEvent(payload: unknown): PlaybackFrameEvent | null {
+  if (!payload || typeof payload !== "object") return null;
+  const event = payload as Partial<PlaybackFrameEvent>;
+  if (
+    !Number.isSafeInteger(event.projectEpoch) ||
+    (event.projectEpoch ?? -1) < 0 ||
+    !Number.isSafeInteger(event.timelineVersion) ||
+    (event.timelineVersion ?? -1) < 0 ||
+    typeof event.sessionId !== "string" ||
+    !/^[A-Za-z0-9-]{1,128}$/.test(event.sessionId) ||
+    !Number.isSafeInteger(event.frame) ||
+    (event.frame ?? -1) < 0 ||
+    !Number.isSafeInteger(event.sequence) ||
+    (event.sequence ?? -1) < 0 ||
+    typeof event.terminal !== "boolean"
+  ) {
+    return null;
+  }
+  return event as PlaybackFrameEvent;
+}
+
+export function decodePlaybackCommandError(error: unknown): PlaybackCommandError | null {
+  if (!error || typeof error !== "object") return null;
+  const candidate = error as Partial<PlaybackCommandError>;
+  if (
+    !["superseded", "cancelled", "busy", "engine"].includes(candidate.code ?? "") ||
+    typeof candidate.message !== "string"
+  ) {
+    return null;
+  }
+  return candidate as PlaybackCommandError;
 }
 
 // MARK: - Browser fallback (mirror, not authoritative)

@@ -21,7 +21,7 @@
 //! mixdown (`export.rs`), parameterised by the device rate and done per channel.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -78,8 +78,15 @@ impl PlaybackClock for AudioClock {
 /// `!Send` on macOS, so it lives entirely on that thread; this handle drives a
 /// cooperative stop. Dropping it stops audio and joins the thread.
 pub struct AudioPlayback {
-    stop_tx: Sender<()>,
+    control_tx: Sender<AudioCmd>,
+    paused: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+}
+
+enum AudioCmd {
+    Pause(Sender<Result<(), String>>),
+    Resume(Sender<Result<(), String>>),
+    Stop,
 }
 
 impl AudioPlayback {
@@ -87,16 +94,22 @@ impl AudioPlayback {
     /// Returns `Err` if the device/stream can't be set up (caller falls back to
     /// the wall clock). Blocks until the stream is built so failures surface
     /// synchronously.
-    fn start(buffer: Arc<Vec<f32>>, pos: Arc<AtomicU64>) -> Result<Self, String> {
-        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    fn start(
+        buffer: Arc<Vec<f32>>,
+        pos: Arc<AtomicU64>,
+        paused: Arc<AtomicBool>,
+    ) -> Result<Self, String> {
+        let (control_tx, control_rx) = mpsc::channel::<AudioCmd>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+        let thread_paused = paused.clone();
         let handle = thread::Builder::new()
             .name("opentake-audio".to_string())
-            .spawn(move || audio_thread(buffer, pos, stop_rx, ready_tx))
+            .spawn(move || audio_thread(buffer, pos, thread_paused, control_rx, ready_tx))
             .map_err(|e| format!("spawn audio thread: {e}"))?;
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(AudioPlayback {
-                stop_tx,
+                control_tx,
+                paused,
                 handle: Some(handle),
             }),
             Ok(Err(e)) => {
@@ -106,11 +119,35 @@ impl AudioPlayback {
             Err(_) => Err("audio thread exited before init".to_string()),
         }
     }
+
+    pub fn pause(&self) -> Result<(), String> {
+        self.paused.store(true, Ordering::Release);
+        self.control(AudioCmd::Pause)
+    }
+
+    pub fn resume(&self) -> Result<(), String> {
+        self.control(AudioCmd::Resume)?;
+        self.paused.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    fn control(
+        &self,
+        command: impl FnOnce(Sender<Result<(), String>>) -> AudioCmd,
+    ) -> Result<(), String> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.control_tx
+            .send(command(reply_tx))
+            .map_err(|_| "audio thread exited before transport control".to_string())?;
+        reply_rx
+            .recv()
+            .map_err(|_| "audio thread exited during transport control".to_string())?
+    }
 }
 
 impl Drop for AudioPlayback {
     fn drop(&mut self) {
-        let _ = self.stop_tx.send(());
+        let _ = self.control_tx.send(AudioCmd::Stop);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -122,14 +159,26 @@ impl Drop for AudioPlayback {
 fn audio_thread(
     buffer: Arc<Vec<f32>>,
     pos: Arc<AtomicU64>,
-    stop_rx: Receiver<()>,
+    paused: Arc<AtomicBool>,
+    control_rx: Receiver<AudioCmd>,
     ready_tx: Sender<Result<(), String>>,
 ) {
-    match build_and_play(&buffer, &pos) {
+    match build_and_play(&buffer, &pos, &paused) {
         Ok(stream) => {
             let _ = ready_tx.send(Ok(()));
-            // Park until stop (or the handle is dropped); then drop the stream.
-            let _ = stop_rx.recv();
+            while let Ok(command) = control_rx.recv() {
+                match command {
+                    AudioCmd::Pause(reply) => {
+                        let _ =
+                            reply.send(stream.pause().map_err(|e| format!("stream pause: {e}")));
+                    }
+                    AudioCmd::Resume(reply) => {
+                        let _ =
+                            reply.send(stream.play().map_err(|e| format!("stream resume: {e}")));
+                    }
+                    AudioCmd::Stop => break,
+                }
+            }
             drop(stream);
         }
         Err(e) => {
@@ -140,7 +189,11 @@ fn audio_thread(
 
 /// Acquire the default output device + config, build the typed output stream, and
 /// start it. The returned `Stream` must stay alive on the calling thread.
-fn build_and_play(buffer: &Arc<Vec<f32>>, pos: &Arc<AtomicU64>) -> Result<cpal::Stream, String> {
+fn build_and_play(
+    buffer: &Arc<Vec<f32>>,
+    pos: &Arc<AtomicU64>,
+    paused: &Arc<AtomicBool>,
+) -> Result<cpal::Stream, String> {
     let host = cpal::default_host();
     let device = host
         .default_output_device()
@@ -150,8 +203,17 @@ fn build_and_play(buffer: &Arc<Vec<f32>>, pos: &Arc<AtomicU64>) -> Result<cpal::
         .map_err(|e| format!("default output config: {e}"))?;
     let sample_format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
-    let stream = build_stream(sample_format, &device, &config, buffer.clone(), pos.clone())?;
-    stream.play().map_err(|e| format!("stream play: {e}"))?;
+    let stream = build_stream(
+        sample_format,
+        &device,
+        &config,
+        buffer.clone(),
+        pos.clone(),
+        paused.clone(),
+    )?;
+    if !paused.load(Ordering::Acquire) {
+        stream.play().map_err(|e| format!("stream play: {e}"))?;
+    }
     Ok(stream)
 }
 
@@ -162,21 +224,22 @@ fn build_stream(
     config: &cpal::StreamConfig,
     buffer: Arc<Vec<f32>>,
     pos: Arc<AtomicU64>,
+    paused: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, String> {
     // Cover every fixed-size cpal format (all satisfy SizedSample + FromSample<f32>)
     // so a non-F32 default device (I32 is common on Linux/Windows) still gets audio
     // instead of silently falling back to the wall clock.
     match format {
-        cpal::SampleFormat::F32 => out_stream::<f32>(device, config, buffer, pos),
-        cpal::SampleFormat::F64 => out_stream::<f64>(device, config, buffer, pos),
-        cpal::SampleFormat::I8 => out_stream::<i8>(device, config, buffer, pos),
-        cpal::SampleFormat::I16 => out_stream::<i16>(device, config, buffer, pos),
-        cpal::SampleFormat::I32 => out_stream::<i32>(device, config, buffer, pos),
-        cpal::SampleFormat::I64 => out_stream::<i64>(device, config, buffer, pos),
-        cpal::SampleFormat::U8 => out_stream::<u8>(device, config, buffer, pos),
-        cpal::SampleFormat::U16 => out_stream::<u16>(device, config, buffer, pos),
-        cpal::SampleFormat::U32 => out_stream::<u32>(device, config, buffer, pos),
-        cpal::SampleFormat::U64 => out_stream::<u64>(device, config, buffer, pos),
+        cpal::SampleFormat::F32 => out_stream::<f32>(device, config, buffer, pos, paused),
+        cpal::SampleFormat::F64 => out_stream::<f64>(device, config, buffer, pos, paused),
+        cpal::SampleFormat::I8 => out_stream::<i8>(device, config, buffer, pos, paused),
+        cpal::SampleFormat::I16 => out_stream::<i16>(device, config, buffer, pos, paused),
+        cpal::SampleFormat::I32 => out_stream::<i32>(device, config, buffer, pos, paused),
+        cpal::SampleFormat::I64 => out_stream::<i64>(device, config, buffer, pos, paused),
+        cpal::SampleFormat::U8 => out_stream::<u8>(device, config, buffer, pos, paused),
+        cpal::SampleFormat::U16 => out_stream::<u16>(device, config, buffer, pos, paused),
+        cpal::SampleFormat::U32 => out_stream::<u32>(device, config, buffer, pos, paused),
+        cpal::SampleFormat::U64 => out_stream::<u64>(device, config, buffer, pos, paused),
         other => Err(format!("unsupported cpal sample format: {other}")),
     }
 }
@@ -206,6 +269,7 @@ fn out_stream<T>(
     config: &cpal::StreamConfig,
     buffer: Arc<Vec<f32>>,
     pos: Arc<AtomicU64>,
+    paused: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, String>
 where
     T: SizedSample + FromSample<f32>,
@@ -220,6 +284,12 @@ where
                 // Atomically claim this block's start frame and advance the master
                 // clock. A concurrent `seek` (store) is honored on the next
                 // callback; within a block we play from the claimed start.
+                if paused.load(Ordering::Acquire) {
+                    for sample in data.iter_mut() {
+                        *sample = T::from_sample(0.0f32);
+                    }
+                    return;
+                }
                 let start = pos.fetch_add(out_frames as u64, Ordering::AcqRel) as usize;
                 for (i, frame) in data.chunks_mut(channels).enumerate() {
                     let base = (start + i) * MIX_CHANNELS;
@@ -383,6 +453,27 @@ pub fn build_clock(
     fps: i32,
     start_frame: i32,
 ) -> (Arc<dyn PlaybackClock>, Option<AudioPlayback>) {
+    build_clock_with_state(timeline, media, fps, start_frame, false)
+}
+
+/// Prepare audio without starting the device clock. The retained playback
+/// session resumes audio only after its first composited frame is buffered.
+pub fn build_clock_paused(
+    timeline: &Timeline,
+    media: &HashMap<String, MediaInfo>,
+    fps: i32,
+    start_frame: i32,
+) -> (Arc<dyn PlaybackClock>, Option<AudioPlayback>) {
+    build_clock_with_state(timeline, media, fps, start_frame, true)
+}
+
+fn build_clock_with_state(
+    timeline: &Timeline,
+    media: &HashMap<String, MediaInfo>,
+    fps: i32,
+    start_frame: i32,
+    start_paused: bool,
+) -> (Arc<dyn PlaybackClock>, Option<AudioPlayback>) {
     let rate = default_output_rate().unwrap_or(FALLBACK_SAMPLE_RATE);
     let mixed = mix_timeline_stereo(timeline, media, rate);
     if mixed.is_empty() {
@@ -391,6 +482,7 @@ pub fn build_clock(
 
     let buffer = Arc::new(mixed);
     let pos = Arc::new(AtomicU64::new(0));
+    let paused = Arc::new(AtomicBool::new(start_paused));
     let clock = AudioClock {
         pos: pos.clone(),
         rate,
@@ -398,7 +490,7 @@ pub fn build_clock(
     };
     clock.seek(start_frame); // begin playback at the current playhead
 
-    match AudioPlayback::start(buffer, pos) {
+    match AudioPlayback::start(buffer, pos, paused) {
         Ok(audio) => (Arc::new(clock), Some(audio)),
         Err(e) => {
             eprintln!("[audio] {e}; falling back to wall clock");

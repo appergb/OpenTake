@@ -52,6 +52,10 @@ pub trait PlayheadEmitter: Send + Sync {
 
 /// Control messages to the render thread.
 pub enum PlaybackCmd {
+    /// Freeze at `frame` while retaining GPU and decoder state.
+    Pause(i32, mpsc::Sender<()>),
+    /// Resume a retained session from `frame`.
+    Resume(i32, mpsc::Sender<()>),
     /// Jump the clock + restart streams at this frame.
     Seek(i32),
     /// Stop the loop and tear down (streams stop cooperatively).
@@ -205,6 +209,74 @@ impl PlaybackEngine {
         sink: Arc<dyn FrameSink>,
         emitter: Arc<dyn PlayheadEmitter>,
     ) -> Result<Self, String> {
+        Self::spawn_internal(
+            timeline,
+            media,
+            text,
+            sizes,
+            render_size,
+            clock,
+            sink,
+            emitter,
+            None,
+            None,
+        )
+    }
+
+    /// Spawn the GPU thread, render and buffer its first complete frame, then
+    /// return a paused handle. The caller installs the authoritative session
+    /// before `resume` makes that buffered frame observable.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_ready(
+        timeline: Timeline,
+        media: HashMap<String, MediaInfo>,
+        text: HashMap<String, TextInfo>,
+        sizes: HashMap<String, (u32, u32)>,
+        render_size: RenderSize,
+        clock: Arc<dyn PlaybackClock>,
+        sink: Arc<dyn FrameSink>,
+        emitter: Arc<dyn PlayheadEmitter>,
+        start_frame: i32,
+    ) -> Result<Self, String> {
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let engine = Self::spawn_internal(
+            timeline,
+            media,
+            text,
+            sizes,
+            render_size,
+            clock,
+            sink,
+            emitter,
+            Some(start_frame.max(0)),
+            Some(ready_tx),
+        )?;
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(engine),
+            Ok(Err(error)) => {
+                engine.stop();
+                Err(error)
+            }
+            Err(_) => {
+                engine.stop();
+                Err("playback thread exited before the first frame".to_string())
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_internal(
+        timeline: Timeline,
+        media: HashMap<String, MediaInfo>,
+        text: HashMap<String, TextInfo>,
+        sizes: HashMap<String, (u32, u32)>,
+        render_size: RenderSize,
+        clock: Arc<dyn PlaybackClock>,
+        sink: Arc<dyn FrameSink>,
+        emitter: Arc<dyn PlayheadEmitter>,
+        initial_frame: Option<i32>,
+        startup: Option<mpsc::Sender<Result<(), String>>>,
+    ) -> Result<Self, String> {
         let (tx, rx) = mpsc::channel();
         let handle = thread::Builder::new()
             .name("opentake-playback-render".to_string())
@@ -219,6 +291,8 @@ impl PlaybackEngine {
                     sink,
                     emitter,
                     rx,
+                    initial_frame,
+                    startup,
                 );
             })
             .map_err(|e| format!("spawn playback thread: {e}"))?;
@@ -231,6 +305,24 @@ impl PlaybackEngine {
     /// Seek the running engine to `frame`.
     pub fn seek(&self, frame: i32) {
         let _ = self.control_tx.send(PlaybackCmd::Seek(frame));
+    }
+
+    pub fn pause(&self, frame: i32) -> Result<(), String> {
+        self.barrier(|reply| PlaybackCmd::Pause(frame, reply))
+    }
+
+    pub fn resume(&self, frame: i32) -> Result<(), String> {
+        self.barrier(|reply| PlaybackCmd::Resume(frame, reply))
+    }
+
+    fn barrier(&self, command: impl FnOnce(mpsc::Sender<()>) -> PlaybackCmd) -> Result<(), String> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.control_tx
+            .send(command(reply_tx))
+            .map_err(|_| "playback render thread exited before control".to_string())?;
+        reply_rx
+            .recv()
+            .map_err(|_| "playback render thread exited during control".to_string())
     }
 
     /// Stop the engine and join the render thread.
@@ -265,10 +357,15 @@ fn run_render_thread(
     sink: Arc<dyn FrameSink>,
     emitter: Arc<dyn PlayheadEmitter>,
     rx: mpsc::Receiver<PlaybackCmd>,
+    initial_frame: Option<i32>,
+    mut startup: Option<mpsc::Sender<Result<(), String>>>,
 ) {
     let mut render_loop = match RenderLoop::new(timeline, media, text, sizes, render_size) {
         Ok(rl) => rl,
         Err(e) => {
+            if let Some(tx) = startup.take() {
+                let _ = tx.send(Err(e.clone()));
+            }
             eprintln!("[playback] {e}");
             return;
         }
@@ -276,16 +373,60 @@ fn run_render_thread(
     let total = render_loop.total_frames();
     let fps = render_loop.fps();
     if total <= 0 {
+        if let Some(tx) = startup.take() {
+            let _ = tx.send(Err("playback timeline has no drawable frames".to_string()));
+        }
         return;
     }
+    if let Some(frame) = initial_frame {
+        clock.seek(frame);
+    }
     let frame_dur = Duration::from_secs_f64(1.0 / fps.max(1) as f64);
+    let mut paused = false;
+    let mut buffered_first: Option<(i32, DecodedFrame)> = None;
 
     loop {
+        if paused {
+            match rx.recv() {
+                Ok(PlaybackCmd::Pause(frame, reply)) => {
+                    clock.seek(frame);
+                    let _ = reply.send(());
+                }
+                Ok(PlaybackCmd::Resume(frame, reply)) => {
+                    clock.seek(frame);
+                    render_loop.seek();
+                    if let Some((buffered_frame, image)) = buffered_first.take() {
+                        sink.push_frame(&image);
+                        emitter.emit(buffered_frame);
+                    }
+                    paused = false;
+                    let _ = reply.send(());
+                }
+                Ok(PlaybackCmd::Seek(frame)) => {
+                    clock.seek(frame);
+                    render_loop.seek();
+                    buffered_first = None;
+                }
+                Ok(PlaybackCmd::Stop) | Err(_) => return,
+            }
+            continue;
+        }
         let tick = Instant::now();
 
         // Drain pending control messages first.
         loop {
             match rx.try_recv() {
+                Ok(PlaybackCmd::Pause(frame, reply)) => {
+                    clock.seek(frame);
+                    paused = true;
+                    let _ = reply.send(());
+                    break;
+                }
+                Ok(PlaybackCmd::Resume(frame, reply)) => {
+                    clock.seek(frame);
+                    render_loop.seek();
+                    let _ = reply.send(());
+                }
                 Ok(PlaybackCmd::Seek(f)) => {
                     clock.seek(f);
                     render_loop.seek();
@@ -296,18 +437,37 @@ fn run_render_thread(
             }
         }
 
+        if paused {
+            continue;
+        }
+
         let (clamped, done) = loop_step(clock.frame(fps), total);
         match render_loop.render_frame(clamped) {
             Ok(frame) => {
-                sink.push_frame(&frame);
-                emitter.emit(clamped);
+                if let Some(tx) = startup.take() {
+                    if tx.send(Ok(())).is_err() {
+                        return;
+                    }
+                    buffered_first = Some((clamped, frame));
+                    paused = true;
+                } else {
+                    sink.push_frame(&frame);
+                    emitter.emit(clamped);
+                }
             }
-            Err(e) => eprintln!("[playback] {e}"),
+            Err(e) => {
+                if let Some(tx) = startup.take() {
+                    let _ = tx.send(Err(e.clone()));
+                    return;
+                }
+                eprintln!("[playback] {e}");
+            }
         }
 
         // Auto-stop once the clock reaches the final frame (#53: end → stop).
-        if done {
-            return;
+        if done || paused {
+            paused = true;
+            continue;
         }
 
         // Sleep only the remainder of the frame budget (#192): the target

@@ -11,7 +11,89 @@
  */
 
 import { volumeAt } from "../../lib/clip";
-import type { Clip, Timeline, Track } from "../../lib/types";
+import type { Clip, PlaybackFrameEvent, Timeline, Track } from "../../lib/types";
+
+export interface LoadedNativeFrame {
+  projectEpoch: number;
+  timelineVersion: number;
+  sessionId: string;
+  frame: number;
+  sequence: number;
+}
+
+function validNativeFrameIdentity(frame: LoadedNativeFrame): boolean {
+  return (
+    Number.isSafeInteger(frame.projectEpoch) &&
+    frame.projectEpoch >= 0 &&
+    Number.isSafeInteger(frame.timelineVersion) &&
+    frame.timelineVersion >= 0 &&
+    /^[A-Za-z0-9-]{1,128}$/.test(frame.sessionId) &&
+    Number.isSafeInteger(frame.frame) &&
+    frame.frame >= 0 &&
+    Number.isSafeInteger(frame.sequence) &&
+    frame.sequence >= 0
+  );
+}
+
+export function playbackFrameUrl(
+  endpoint: string | null,
+  frame: LoadedNativeFrame,
+): string | null {
+  if (!endpoint || !validNativeFrameIdentity(frame)) return null;
+  const params = new URLSearchParams();
+  params.set("projectEpoch", String(frame.projectEpoch));
+  params.set("timelineVersion", String(frame.timelineVersion));
+  params.set("sessionId", frame.sessionId);
+  params.set("frame", String(frame.frame));
+  params.set("sequence", String(frame.sequence));
+  return `${endpoint}?${params.toString()}`;
+}
+
+export function shouldAcceptNativeFrameLoad(
+  expected: PlaybackFrameEvent | null,
+  loaded: LoadedNativeFrame,
+): boolean {
+  return (
+    expected !== null &&
+    validNativeFrameIdentity(loaded) &&
+    expected.projectEpoch === loaded.projectEpoch &&
+    expected.timelineVersion === loaded.timelineVersion &&
+    expected.sessionId === loaded.sessionId &&
+    expected.frame === loaded.frame &&
+    expected.sequence === loaded.sequence
+  );
+}
+
+export function nativeFrameDisplayState(args: {
+  event: PlaybackFrameEvent | null;
+  endpoint: string | null;
+  loaded: LoadedNativeFrame | null;
+  isPlaying: boolean;
+}): {
+  requestUrl: string | null;
+  displayUrl: string | null;
+  showNativeImage: boolean;
+  showWebKit: boolean;
+} {
+  const requestUrl = args.event ? playbackFrameUrl(args.endpoint, args.event) : null;
+  const loadedMatchesSession =
+    args.loaded !== null &&
+    args.event !== null &&
+    args.loaded.projectEpoch === args.event.projectEpoch &&
+    args.loaded.timelineVersion === args.event.timelineVersion &&
+    args.loaded.sessionId === args.event.sessionId;
+  const displayUrl =
+    loadedMatchesSession && args.loaded
+      ? playbackFrameUrl(args.endpoint, args.loaded)
+      : null;
+  const showNativeImage = displayUrl !== null;
+  return {
+    requestUrl,
+    displayUrl,
+    showNativeImage,
+    showWebKit: !showNativeImage,
+  };
+}
 
 function clipSpeed(clip: Clip): number {
   return clip.speed > 0 ? clip.speed : 1;

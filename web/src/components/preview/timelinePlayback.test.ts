@@ -12,12 +12,77 @@ import {
   clipVolumeAt,
   frameForSourceTime,
   isExternalSeekWhilePlaying,
+  nativeFrameDisplayState,
+  playbackFrameUrl,
   playbackFrameFromActiveFrame,
+  shouldAcceptNativeFrameLoad,
   shouldFallBackToLegacy,
   shouldUseRustEngine,
   sourceTimeSec,
   visualAudioIsDuplicated,
 } from "./timelinePlayback";
+
+describe("session-scoped native frame display", () => {
+  const event = {
+    projectEpoch: 8,
+    timelineVersion: 13,
+    sessionId: "session-4",
+    frame: 21,
+    sequence: 5,
+    terminal: false,
+  };
+
+  it("builds a frame URL with project epoch timeline version session id frame and sequence", () => {
+    expect(playbackFrameUrl("http://127.0.0.1:4999/frame", event)).toBe(
+      "http://127.0.0.1:4999/frame?projectEpoch=8&timelineVersion=13&sessionId=session-4&frame=21&sequence=5",
+    );
+  });
+
+  it("rejects an event or image load missing any identity field", () => {
+    expect(playbackFrameUrl("http://127.0.0.1:4999/frame", { ...event, sessionId: "" })).toBeNull();
+    expect(
+      shouldAcceptNativeFrameLoad(event, {
+        projectEpoch: 8,
+        timelineVersion: 13,
+        sessionId: "",
+        frame: 21,
+        sequence: 5,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps WebKit visible until the first matching native frame has loaded", () => {
+    const state = nativeFrameDisplayState({
+      event,
+      endpoint: "http://127.0.0.1:4999/frame",
+      loaded: null,
+      isPlaying: true,
+    });
+
+    expect(state.requestUrl).not.toBeNull();
+    expect(state.showNativeImage).toBe(false);
+    expect(state.showWebKit).toBe(true);
+  });
+
+  it("retains the matching loaded native frame when playback pauses", () => {
+    const loaded = {
+      projectEpoch: event.projectEpoch,
+      timelineVersion: event.timelineVersion,
+      sessionId: event.sessionId,
+      frame: event.frame,
+      sequence: event.sequence,
+    };
+    const state = nativeFrameDisplayState({
+      event,
+      endpoint: "http://127.0.0.1:4999/frame",
+      loaded,
+      isPlaying: false,
+    });
+
+    expect(state.displayUrl).toContain("sessionId=session-4");
+    expect(state.showNativeImage).toBe(true);
+  });
+});
 
 describe("isExternalSeekWhilePlaying", () => {
   it("returns false before the engine has emitted a frame", () => {

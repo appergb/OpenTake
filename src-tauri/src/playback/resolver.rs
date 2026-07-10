@@ -26,6 +26,7 @@
 //! image / text.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::rc::Rc;
 
 use opentake_media::decode::{
@@ -254,10 +255,14 @@ impl<'d, 's> StreamingResolver<'d, 's> {
         // while `state.streams` is.
         let mut uploaded: Vec<(String, Rc<GpuTexture>)> = Vec::with_capacity(targets.len());
         for t in &targets {
+            let media_path = self
+                .state
+                .media
+                .get(&t.media_ref)
+                .map(|info| info.path.clone());
             if !self.state.streams.contains_key(&t.clip_id) {
-                if let Some(info) = self.state.media.get(&t.media_ref) {
-                    let mut req =
-                        VideoStreamRequest::new(info.path.clone(), self.state.timeline_fps);
+                if let Some(path) = media_path.clone() {
+                    let mut req = VideoStreamRequest::new(path, self.state.timeline_fps);
                     req.start_frame = t.source_frame.max(0);
                     req.max_size = self.state.render_box;
                     if let Ok(stream) = spawn_video_stream(req) {
@@ -269,6 +274,18 @@ impl<'d, 's> StreamingResolver<'d, 's> {
             }
             if let Some(cs) = self.state.streams.get_mut(&t.clip_id) {
                 cs.advance(t.source_frame, self.device, self.queue);
+                if cs.cached_tex.is_none() {
+                    if let Some(path) = media_path.as_deref() {
+                        cs.cached_tex = bootstrap_video_texture(
+                            self.device,
+                            self.queue,
+                            path,
+                            t.source_frame,
+                            self.state.timeline_fps,
+                            self.state.render_box,
+                        );
+                    }
+                }
                 if let Some(tex) = &cs.cached_tex {
                     uploaded.push((format!("v:{}:{}", t.media_ref, t.source_frame), tex.clone()));
                 }
@@ -332,6 +349,26 @@ impl<'d, 's> StreamingResolver<'d, 's> {
         );
         Some(self.state.static_cache.insert(key, tex))
     }
+}
+
+fn bootstrap_video_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    path: &Path,
+    source_frame: i64,
+    timeline_fps: i32,
+    render_box: (u32, u32),
+) -> Option<Rc<GpuTexture>> {
+    let request = FrameRequest {
+        time_secs: source_frame.max(0) as f64 / timeline_fps.max(1) as f64,
+        max_size: render_box,
+        tolerance_secs: 0.1,
+        apply_rotation: true,
+    };
+    let (_actual, frame) = decode_frame_at(path, &request).ok()?;
+    let decoded = DecodedFrame::new(frame.width, frame.height, frame.rgba, false);
+    let texture = upload_rgba(device, queue, &decoded, false, Some("playback-bootstrap"));
+    Some(Rc::new(texture))
 }
 
 impl TextureResolver for StreamingResolver<'_, '_> {

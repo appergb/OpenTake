@@ -49,12 +49,46 @@ pub fn redo(core: State<'_, AppCore>) -> Result<EditResultDto, String> {
 
 /// `project_new`: replace the session with a fresh, unsaved project and return
 /// its first snapshot.
+#[cfg(feature = "playback-engine")]
+#[tauri::command]
+pub fn project_new(
+    core: State<'_, AppCore>,
+    playback: State<'_, crate::playback::PlaybackState>,
+) -> TimelineSnapshotDto {
+    let transition = playback.begin_project_transition();
+    let snapshot = handle_project_new(&core);
+    playback.activate_project(transition, snapshot.project_epoch);
+    snapshot
+}
+
+#[cfg(not(feature = "playback-engine"))]
 #[tauri::command]
 pub fn project_new(core: State<'_, AppCore>) -> TimelineSnapshotDto {
     handle_project_new(&core)
 }
 
 /// `project_open`: open a `.opentake` bundle, returning the first snapshot.
+#[cfg(feature = "playback-engine")]
+#[tauri::command]
+pub fn project_open(
+    core: State<'_, AppCore>,
+    path: String,
+    playback: State<'_, crate::playback::PlaybackState>,
+) -> Result<TimelineSnapshotDto, String> {
+    let transition = playback.begin_project_transition();
+    match handle_project_open(&core, path).map_err(msg) {
+        Ok(snapshot) => {
+            playback.activate_project(transition, snapshot.project_epoch);
+            Ok(snapshot)
+        }
+        Err(error) => {
+            playback.cancel_project_transition(transition);
+            Err(error)
+        }
+    }
+}
+
+#[cfg(not(feature = "playback-engine"))]
 #[tauri::command]
 pub fn project_open(core: State<'_, AppCore>, path: String) -> Result<TimelineSnapshotDto, String> {
     handle_project_open(&core, path).map_err(msg)

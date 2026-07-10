@@ -14,7 +14,7 @@
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -105,14 +105,18 @@ fn try_render_loop(
     }
 }
 
-/// Render `target` repeatedly until the frame has any non-zero pixel (decode
-/// warmed up) or the budget is exhausted. Returns the non-black frame's RGBA.
+fn has_visible_rgb(rgba: &[u8]) -> bool {
+    rgba.chunks_exact(4)
+        .any(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
+}
+
+/// Render `target` repeatedly until the frame has a non-black RGB pixel.
 fn render_until_content(rl: &mut RenderLoop, target: i32, w: u32, h: u32) -> Option<Vec<u8>> {
     for _ in 0..WARMUP_TRIES {
         let f = rl.render_frame(target).expect("render_frame");
         assert_eq!(f.width, w, "composite width matches render size");
         assert_eq!(f.height, h, "composite height matches render size");
-        if f.rgba.iter().any(|&b| b != 0) {
+        if has_visible_rgb(&f.rgba) {
             return Some(f.rgba);
         }
         sleep(WARMUP_SLEEP);
@@ -153,15 +157,20 @@ fn render_loop_streams_frames_advances_and_seeks() {
     assert_eq!(rl.total_frames(), frames as i32);
     assert_eq!(rl.fps(), fps as i32);
 
-    // Frame 0 composites real content (not the clear color).
-    let frame0 = render_until_content(&mut rl, 0, w, h)
-        .expect("frame 0 should composite non-black within the warm-up budget");
+    // spawn_ready may publish only a complete first frame, never the compositor
+    // clear that the non-blocking stream returns during cold decoder startup.
+    let frame0 = rl.render_frame(0).expect("render_frame(0)");
+    assert!(
+        has_visible_rgb(&frame0.rgba),
+        "frame 0 should be visible on the first render"
+    );
+    let frame0 = frame0.rgba;
 
     // A later frame differs (testsrc animates a moving pattern + timestamp).
     let mut differs = false;
     for _ in 0..WARMUP_TRIES {
         let f = rl.render_frame(8).expect("render_frame(8)");
-        if f.rgba.iter().any(|&b| b != 0) && f.rgba != frame0 {
+        if has_visible_rgb(&f.rgba) && f.rgba != frame0 {
             differs = true;
             break;
         }
@@ -221,7 +230,7 @@ fn render_loop_composites_two_tracks_concurrently() {
     // must come back with real content (no panic, no all-black).
     let composed = render_until_content(&mut rl, 0, w, h)
         .expect("two-track composite should render non-black within the warm-up budget");
-    assert!(composed.iter().any(|&b| b != 0));
+    assert!(has_visible_rgb(&composed));
 }
 
 /// The threaded `PlaybackEngine` end-to-end: spawn it over a real GPU + ffmpeg
@@ -265,12 +274,23 @@ fn playback_engine_thread_streams_frames_to_sink_and_emitter() {
     let text = project_text(&tl);
 
     let frame_count = Arc::new(AtomicUsize::new(0));
+    let first_frame = Arc::new(Mutex::new(None::<Vec<u8>>));
     let last_emitted = Arc::new(AtomicI32::new(-1));
 
-    struct CountingSink(Arc<AtomicUsize>);
+    struct CountingSink {
+        count: Arc<AtomicUsize>,
+        first_frame: Arc<Mutex<Option<Vec<u8>>>>,
+    }
     impl FrameSink for CountingSink {
-        fn push_frame(&self, _frame: &DecodedFrame) {
-            self.0.fetch_add(1, Ordering::Relaxed);
+        fn push_frame(&self, frame: &DecodedFrame) {
+            self.count.fetch_add(1, Ordering::Relaxed);
+            let mut first = self
+                .first_frame
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if first.is_none() {
+                *first = Some(frame.rgba.clone());
+            }
         }
     }
     struct RecordingEmitter(Arc<AtomicI32>);
@@ -281,29 +301,28 @@ fn playback_engine_thread_streams_frames_to_sink_and_emitter() {
     }
 
     let clock: Arc<dyn PlaybackClock> = Arc::new(InstantClock::new(0));
-    let sink: Arc<dyn FrameSink> = Arc::new(CountingSink(frame_count.clone()));
+    let sink: Arc<dyn FrameSink> = Arc::new(CountingSink {
+        count: frame_count.clone(),
+        first_frame: first_frame.clone(),
+    });
     let emitter: Arc<dyn PlayheadEmitter> = Arc::new(RecordingEmitter(last_emitted.clone()));
 
-    let engine = PlaybackEngine::spawn(tl, media, text, sizes, size, clock, sink, emitter)
-        .expect("engine spawns");
-    // The wall clock advances the playhead; POLL for the first frame rather than
-    // sleeping a fixed budget. The first composite waits on a cold ffmpeg-decode +
-    // GPU warm-up, which under the parallel `cargo test --workspace` GPU contention
-    // (many gpu_* / export tests at once) can take well over half a second — a
-    // fixed 600ms sleep flaked here. Same ~2s warm-up budget the direct-render
-    // tests above use; still fails fast (loops break on first frame) on a genuine
-    // "produces nothing" regression.
-    let mut produced = false;
-    for _ in 0..WARMUP_TRIES {
-        if frame_count.load(Ordering::Relaxed) > 0 {
-            produced = true;
-            break;
-        }
-        sleep(WARMUP_SLEEP);
-    }
+    let engine = PlaybackEngine::spawn_ready(tl, media, text, sizes, size, clock, sink, emitter, 0)
+        .expect("engine prepares first frame");
+    assert_eq!(frame_count.load(Ordering::Relaxed), 0);
+    engine.resume(0).expect("install publishes buffered frame");
+    let produced = frame_count.load(Ordering::Relaxed) > 0;
     engine.stop();
 
     assert!(produced, "the engine thread produced no frames");
+    assert!(
+        first_frame
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .is_some_and(|rgba| has_visible_rgb(rgba)),
+        "the engine's first publication must be visible"
+    );
     assert!(
         last_emitted.load(Ordering::Relaxed) >= 0,
         "the engine thread emitted no playhead frame"

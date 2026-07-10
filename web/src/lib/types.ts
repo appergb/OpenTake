@@ -403,7 +403,36 @@ export interface EditResult {
 
 export interface TimelineSnapshot {
   timeline: Timeline;
+  projectEpoch?: number;
   version: number;
+}
+
+/** Runtime IPC snapshots always carry project identity. `TimelineSnapshot`
+ * keeps the optional field only for the browser fallback fixture schema. */
+export interface RuntimeTimelineSnapshot extends TimelineSnapshot {
+  projectEpoch: number;
+}
+
+export interface ProjectRevision {
+  projectEpoch: number;
+  timelineVersion: number;
+}
+
+export interface PlaybackIdentity extends ProjectRevision {
+  sessionId: string;
+}
+
+export interface PlaybackFrameEvent extends PlaybackIdentity {
+  frame: number;
+  sequence: number;
+  terminal: boolean;
+}
+
+export type PlaybackCommandErrorCode = "superseded" | "cancelled" | "busy" | "engine";
+
+export interface PlaybackCommandError {
+  code: PlaybackCommandErrorCode;
+  message: string;
 }
 
 // MARK: - Transcription (mirror of src-tauri transcribe.rs DTOs)

@@ -6,6 +6,7 @@
 
 import * as api from "../lib/api";
 import { useProjectStore } from "./projectStore";
+import { stopNativePlaybackForProjectBoundary } from "../components/preview/nativePlaybackSession";
 
 let started = false;
 let unlistenTimeline: (() => void) | null = null;
@@ -13,7 +14,7 @@ let unlistenOpened: (() => void) | null = null;
 
 async function refreshMirror(): Promise<void> {
   const snap = await api.getTimeline();
-  useProjectStore.getState().setMirror(snap.timeline, snap.version);
+  useProjectStore.getState().setMirror(snap.timeline, snap.version, snap.projectEpoch);
   const [canUndo, canRedo] = await Promise.all([api.canUndo(), api.canRedo()]);
   useProjectStore.getState().setHistory(canUndo, canRedo);
 }
@@ -25,12 +26,14 @@ export async function startSync(): Promise<void> {
 
   await refreshMirror();
 
-  unlistenTimeline = await api.onTimelineChanged(async (version) => {
-    if (version > useProjectStore.getState().timelineVersion) {
+  unlistenTimeline = await api.onTimelineChanged(async (projectEpoch, version) => {
+    const current = useProjectStore.getState();
+    if (projectEpoch !== current.projectEpoch || version > current.timelineVersion) {
       await refreshMirror();
     }
   });
   unlistenOpened = await api.onProjectOpened(async (path) => {
+    await stopNativePlaybackForProjectBoundary();
     useProjectStore.getState().setProjectPath(path || null);
     await refreshMirror();
   });

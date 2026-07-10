@@ -14,6 +14,7 @@ import { useRecentStore } from "./recentStore";
 import { refreshMedia } from "./mediaStore";
 import { openDialog, saveDialog } from "../lib/dialog";
 import { t } from "../i18n";
+import { stopNativePlaybackForProjectBoundary } from "../components/preview/nativePlaybackSession";
 
 const PROJECT_EXT = "opentake";
 
@@ -35,7 +36,11 @@ function withExt(path: string): string {
 export async function newProjectAndEnter(): Promise<void> {
   const save = await saveDialog();
   if (!save) {
-    await api.projectNew();
+    await stopNativePlaybackForProjectBoundary();
+    const snapshot = await api.projectNew();
+    useProjectStore
+      .getState()
+      .setMirror(snapshot.timeline, snapshot.version, snapshot.projectEpoch);
     await forceRefresh();
     useEditorUiStore.getState().setView("editor");
     return;
@@ -55,7 +60,11 @@ export async function newProjectAndEnter(): Promise<void> {
   if (typeof chosen !== "string") return; // cancelled
 
   const path = withExt(chosen);
-  await api.projectNew();
+  await stopNativePlaybackForProjectBoundary();
+  const snapshot = await api.projectNew();
+  useProjectStore
+    .getState()
+    .setMirror(snapshot.timeline, snapshot.version, snapshot.projectEpoch);
   await api.projectSave(path);
   useProjectStore.getState().setProjectPath(path);
   useProjectStore.getState().markSaved();
@@ -85,8 +94,9 @@ export async function saveCurrentProject(): Promise<void> {
 /** Open `path` (a `.opentake` bundle), refresh the mirror, record it, and enter
  *  the editor. Used by both the dialog flow and the recents list. */
 export async function openProjectPath(path: string): Promise<void> {
+  await stopNativePlaybackForProjectBoundary();
   const snap = await api.projectOpen(path);
-  useProjectStore.getState().setMirror(snap.timeline, snap.version);
+  useProjectStore.getState().setMirror(snap.timeline, snap.version, snap.projectEpoch);
   useProjectStore.getState().setProjectPath(path);
   useProjectStore.getState().markSaved();
   useRecentStore.getState().add(path);
