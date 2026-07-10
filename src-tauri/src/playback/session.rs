@@ -235,31 +235,39 @@ impl SessionRegistry {
         transition
     }
 
-    pub fn cancel_project_transition(&mut self, transition: ProjectTransition) {
+    #[must_use]
+    pub fn cancel_project_transition(&mut self, transition: ProjectTransition) -> bool {
         if self.transition != Some(transition) {
-            return;
+            return false;
         }
         self.transition = None;
         if let Some(active) = self.active.as_mut() {
             active.publication_open = true;
         }
+        true
     }
 
-    pub fn activate_project(&mut self, transition: ProjectTransition, project_epoch: u64) {
+    #[must_use]
+    pub fn activate_project(&mut self, transition: ProjectTransition, project_epoch: u64) -> bool {
         if self.transition != Some(transition) {
-            return;
+            return false;
         }
         self.project_epoch = project_epoch;
         self.transition = None;
         self.active = None;
         self.generation = self.generation.wrapping_add(1);
+        true
     }
 
-    pub fn activate_project_event(&mut self, project_epoch: u64) {
+    #[must_use]
+    pub fn activate_project_event(&mut self, project_epoch: u64) -> bool {
+        if self.transition.is_some() {
+            return false;
+        }
         self.project_epoch = project_epoch;
-        self.transition = None;
         self.active = None;
         self.generation = self.generation.wrapping_add(1);
+        true
     }
 
     pub fn invalidate_for_timeline_change(&mut self, project_epoch: u64, version: u64) -> bool {
@@ -295,8 +303,7 @@ impl SessionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opentake_core::{AppCore, CoreEvent};
-    use std::sync::{Arc, Mutex};
+    use opentake_core::AppCore;
 
     fn identity(epoch: u64, version: u64, id: &str) -> PlaybackIdentity {
         PlaybackIdentity::new(epoch, version, id).expect("valid identity")
@@ -349,7 +356,7 @@ mod tests {
 
         assert_eq!(error.code, PlaybackErrorCode::Cancelled);
         assert!(!registry.publication_is_open(&current));
-        registry.cancel_project_transition(transition);
+        assert!(registry.cancel_project_transition(transition));
         assert!(registry.publication_is_open(&current));
     }
 
@@ -361,40 +368,10 @@ mod tests {
 
         let transition = registry.begin_project_transition();
         assert!(!registry.publication_is_open(&old));
-        registry.activate_project(transition, 10);
+        assert!(registry.activate_project(transition, 10));
 
         assert_eq!(registry.project_epoch(), 10);
         assert!(registry.active_identity().is_none());
-    }
-
-    #[test]
-    fn project_open_failure_does_not_advance_epoch_or_stop_playback() {
-        let core = AppCore::new();
-        let before = core.project_revision();
-        let current = identity(before.project_epoch, before.version, "current");
-        let mut registry = SessionRegistry::default();
-        install(&mut registry, current.clone());
-        let events = Arc::new(Mutex::new(Vec::<CoreEvent>::new()));
-        let sink = Arc::clone(&events);
-        core.subscribe(move |event| sink.lock().expect("events").push(event.clone()));
-
-        let transition = registry.begin_project_transition();
-        let result = core.open_project(std::env::temp_dir().join(format!(
-            "opentake-missing-project-{}-5-2.opentake",
-            std::process::id()
-        )));
-        assert!(result.is_err());
-        registry.cancel_project_transition(transition);
-
-        assert_eq!(core.project_revision(), before);
-        assert_eq!(registry.active_identity(), Some(&current));
-        assert_eq!(registry.phase(), Some(SessionPhase::Running));
-        assert!(registry.publication_is_open(&current));
-        assert!(events
-            .lock()
-            .expect("events")
-            .iter()
-            .all(|event| !matches!(event, CoreEvent::ProjectOpened { .. })));
     }
 
     #[test]
@@ -405,7 +382,7 @@ mod tests {
         let transition = registry.begin_project_transition();
 
         let snapshot = core.new_project();
-        registry.activate_project(transition, snapshot.project_epoch);
+        assert!(registry.activate_project(transition, snapshot.project_epoch));
 
         assert_eq!(snapshot.project_epoch, before.project_epoch + 1);
         assert_eq!(

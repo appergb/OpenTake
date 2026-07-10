@@ -208,17 +208,21 @@ impl PlaybackState {
 
     pub fn cancel_project_transition(&self, transition: ProjectTransition) {
         let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
-        slot.sessions.cancel_project_transition(transition);
-        if let Some(running) = slot.running.as_ref() {
-            running.publication.reopen();
+        if slot.sessions.cancel_project_transition(transition) {
+            if let Some(running) = slot.running.as_ref() {
+                running.publication.reopen();
+            }
         }
     }
 
     pub fn activate_project(&self, transition: ProjectTransition, project_epoch: u64) {
         let running = {
             let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
-            slot.sessions.activate_project(transition, project_epoch);
-            slot.running.take()
+            if slot.sessions.activate_project(transition, project_epoch) {
+                slot.running.take()
+            } else {
+                None
+            }
         };
         if let Some(running) = running {
             running.stop();
@@ -228,8 +232,11 @@ impl PlaybackState {
     pub fn activate_project_event(&self, project_epoch: u64) -> Option<PlaybackIdentity> {
         let running = {
             let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
-            slot.sessions.activate_project_event(project_epoch);
-            slot.running.take()
+            if slot.sessions.activate_project_event(project_epoch) {
+                slot.running.take()
+            } else {
+                None
+            }
         };
         let identity = running.as_ref().map(|running| running.identity.clone());
         if let Some(running) = running {
@@ -286,6 +293,19 @@ fn playback_render_size(canvas_w: i32, canvas_h: i32, cap: u32) -> RenderSize {
         1.0
     };
     RenderSize::new(even(cw * scale), even(ch * scale))
+}
+
+async fn spawn_ready_off_executor<T, F>(build: F) -> Result<T, PlaybackCommandError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(build)
+        .await
+        .map_err(|error| {
+            PlaybackCommandError::engine(format!("playback ready task failed: {error}"))
+        })?
+        .map_err(PlaybackCommandError::engine)
 }
 
 /// Start (or restart) continuous playback from `from_frame`.
@@ -361,18 +381,20 @@ pub async fn playback_start(
             .map_err(|e| PlaybackCommandError::engine(format!("audio prepare task failed: {e}")))?
     };
 
-    let engine = PlaybackEngine::spawn_ready(
-        timeline,
-        media,
-        text,
-        sizes,
-        render_size,
-        clock,
-        sink,
-        emitter,
-        start_at,
-    )
-    .map_err(PlaybackCommandError::engine)?;
+    let engine = spawn_ready_off_executor(move || {
+        PlaybackEngine::spawn_ready(
+            timeline,
+            media,
+            text,
+            sizes,
+            render_size,
+            clock,
+            sink,
+            emitter,
+            start_at,
+        )
+    })
+    .await?;
     let current = app.state::<AppCore>().project_revision();
     app.state::<PlaybackState>().install_if_current(
         ticket,
@@ -422,6 +444,203 @@ pub fn get_preview_endpoint(server: State<'_, Arc<PreviewServer>>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    use opentake_domain::Timeline;
+
+    use super::super::engine::{InstantClock, PlaybackClock};
+
+    struct NoopSink;
+
+    impl FrameSink for NoopSink {
+        fn push_frame(&self, _frame: &opentake_render::DecodedFrame) {}
+    }
+
+    struct NoopEmitter;
+
+    impl PlayheadEmitter for NoopEmitter {
+        fn emit(&self, _frame: i32) {}
+    }
+
+    fn identity(epoch: u64, version: u64, session_id: &str) -> PlaybackIdentity {
+        PlaybackIdentity::new(epoch, version, session_id).expect("valid playback identity")
+    }
+
+    fn state_with_running(identity: PlaybackIdentity) -> (PlaybackState, PublicationGate) {
+        let state = PlaybackState::new();
+        let gate = PublicationGate::open();
+        let engine = PlaybackEngine::spawn(
+            Timeline::default(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            RenderSize::new(2, 2),
+            Arc::new(InstantClock::new(0)) as Arc<dyn PlaybackClock>,
+            Arc::new(NoopSink),
+            Arc::new(NoopEmitter),
+        )
+        .expect("spawn inert playback resource");
+        {
+            let mut slot = state
+                .slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let StartDecision::Build(ticket) = slot
+                .sessions
+                .begin_start(identity.clone(), identity.revision())
+                .expect("begin playback session")
+            else {
+                panic!("fresh session must build");
+            };
+            slot.sessions
+                .install_if_current(ticket, identity.revision())
+                .expect("install playback session");
+            slot.running = Some(RunningPlayback {
+                identity,
+                engine,
+                audio: None,
+                publication: gate.clone(),
+            });
+        }
+        (state, gate)
+    }
+
+    #[test]
+    fn stale_project_transition_cannot_reopen_or_take_current_resources() {
+        let current = identity(8, 3, "current-session");
+        let (state, publication) = state_with_running(current.clone());
+        let first = state.begin_project_transition();
+        let second = state.begin_project_transition();
+
+        assert!(
+            state.activate_project_event(9).is_none(),
+            "a project event cannot take resources owned by a live transition"
+        );
+        assert!(
+            !publication.is_open(),
+            "project event must keep the transition publication closed"
+        );
+        state
+            .control(current.clone(), SessionControl::Seek, 3)
+            .expect("project event must retain transition-owned resources");
+
+        state.cancel_project_transition(first);
+        assert!(
+            !publication.is_open(),
+            "stale cancel must not reopen the transition owner's publication"
+        );
+
+        state.activate_project(first, 9);
+        state
+            .control(current.clone(), SessionControl::Seek, 4)
+            .expect("stale activate must not take current playback resources");
+
+        state.cancel_project_transition(second);
+        assert!(
+            publication.is_open(),
+            "owning cancel restores the retained publication"
+        );
+        state
+            .control(current, SessionControl::Stop, 0)
+            .expect("stop retained test session");
+    }
+
+    #[test]
+    fn external_project_event_without_local_transition_still_invalidates_playback() {
+        let current = identity(8, 3, "external-boundary");
+        let (state, _publication) = state_with_running(current.clone());
+
+        assert_eq!(state.activate_project_event(9), Some(current.clone()));
+        assert_eq!(state.active_identity(), None);
+        let error = state
+            .control(current, SessionControl::Seek, 4)
+            .expect_err("external boundary removes the old playback session");
+        assert_eq!(
+            error.code,
+            super::super::session::PlaybackErrorCode::Superseded
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn spawn_ready_wait_does_not_block_async_executor() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (heartbeat_tx, heartbeat_rx) = mpsc::channel();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            let _ = heartbeat_tx.send(());
+        });
+        let watchdog = std::thread::spawn(move || {
+            entered_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("blocking ready work started");
+            let executor_remained_live = heartbeat_rx
+                .recv_timeout(Duration::from_millis(250))
+                .is_ok();
+            release_tx.send(()).expect("release blocking ready work");
+            executor_remained_live
+        });
+
+        let value = spawn_ready_off_executor(move || {
+            entered_tx.send(()).expect("announce blocking ready work");
+            release_rx.recv().expect("wait until liveness was observed");
+            Ok::<_, String>(42)
+        })
+        .await
+        .expect("blocking start result");
+
+        assert_eq!(value, 42);
+        assert!(
+            watchdog.join().expect("join liveness watchdog"),
+            "the async executor must schedule a heartbeat while spawn_ready waits"
+        );
+    }
+
+    #[test]
+    fn project_open_failure_does_not_advance_epoch_or_stop_playback() {
+        use opentake_core::CoreEvent;
+
+        let core = AppCore::new();
+        let before = core.project_revision();
+        let current = identity(before.project_epoch, before.version, "current-session");
+        let (playback, publication) = state_with_running(current.clone());
+        let events = Arc::new(Mutex::new(Vec::<CoreEvent>::new()));
+        let received = Arc::clone(&events);
+        core.subscribe(move |event| {
+            received
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(event.clone());
+        });
+        let missing = std::env::temp_dir()
+            .join(format!(
+                "opentake-missing-review-fix-{}.opentake",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .into_owned();
+
+        let result = crate::commands::project_open_with_playback(&core, missing, &playback);
+
+        assert!(result.is_err());
+        assert_eq!(core.project_revision(), before);
+        assert_eq!(playback.active_identity(), Some(current.clone()));
+        assert!(
+            publication.is_open(),
+            "failed open must restore publication"
+        );
+        playback
+            .control(current, SessionControl::Seek, 4)
+            .expect("failed open must retain playback resources");
+        assert!(events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .all(|event| !matches!(event, CoreEvent::ProjectOpened { .. })));
+    }
 
     #[test]
     fn render_size_caps_long_side_keeping_aspect() {

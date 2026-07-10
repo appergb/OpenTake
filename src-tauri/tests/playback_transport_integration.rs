@@ -12,6 +12,8 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
+use bytes::Bytes;
+use opentake_tauri_lib::playback::session::PlaybackIdentity;
 use opentake_tauri_lib::playback::PreviewServer;
 
 /// Parse the port out of `http://127.0.0.1:<port>/stream`.
@@ -92,6 +94,44 @@ fn frame_route_requires_the_full_session_query() {
         no_publication.contains(" 204 "),
         "a valid query with no matching publication must return 204:\n{no_publication}"
     );
+}
+
+#[test]
+fn frame_route_serves_only_the_exact_published_identity() {
+    let Some(server) = start_server() else {
+        return;
+    };
+    let port = port_of(&server.endpoint());
+    let identity = PlaybackIdentity::new(7, 11, "session-42").expect("valid identity");
+    server.publish_encoded_frame(
+        identity,
+        18,
+        5,
+        false,
+        Bytes::from_static(&[0xff, 0xd8, 0xff, 0xd9]),
+    );
+
+    let cases = [
+        (7, 11, "session-42", 18, 5, 200, "exact identity"),
+        (8, 11, "session-42", 18, 5, 204, "wrong project epoch"),
+        (7, 12, "session-42", 18, 5, 204, "wrong timeline version"),
+        (7, 11, "session-43", 18, 5, 204, "wrong session"),
+        (7, 11, "session-42", 19, 5, 204, "wrong frame"),
+        (7, 11, "session-42", 18, 6, 204, "wrong sequence"),
+    ];
+    for (epoch, version, session, frame, sequence, expected, label) in cases {
+        let response = get_path(
+            port,
+            &format!(
+                "/frame?projectEpoch={epoch}&timelineVersion={version}&sessionId={session}&frame={frame}&sequence={sequence}"
+            ),
+            "",
+        );
+        assert!(
+            response.contains(&format!(" {expected} ")),
+            "{label} must return {expected}:\n{response}"
+        );
+    }
 }
 
 #[test]

@@ -26,7 +26,6 @@
 //! image / text.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::rc::Rc;
 
 use opentake_media::decode::{
@@ -69,27 +68,60 @@ impl ClipStream {
         }
     }
 
-    /// Advance this clip's stream to `target`, uploading the matched frame to the
-    /// GPU and caching it. When decode is behind (no frame at/after target yet),
-    /// the previous `cached_tex` is retained so the layer holds its last frame
-    /// rather than flickering to black.
+    /// Advance this clip's single decoder stream to `target`, uploading and
+    /// caching the matched frame. The cold call waits for that stream's first
+    /// frame so `spawn_ready` can stage visible pixels; warm calls use only
+    /// non-blocking queue reads and retain `cached_tex` when decode falls behind.
     fn advance(&mut self, target: i64, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let cold = self.cached_tex.is_none();
         let next = {
             let rx = self.stream.receiver();
             // Decode errors are skipped (treated as "no frame this pull"): a
             // transient error reuses the last frame; a dead stream simply holds
             // the last frame. Surfacing decode errors to the UI is a PR2 concern.
-            drain_to_target(
-                &mut self.pending,
-                || rx.try_recv().ok().and_then(|r| r.ok()),
-                target,
-            )
+            if cold {
+                receive_cold_frame(
+                    &mut || rx.recv().ok().and_then(|result| result.ok()),
+                    target,
+                )
+            } else {
+                drain_to_target(
+                    &mut self.pending,
+                    || rx.try_recv().ok().and_then(|result| result.ok()),
+                    target,
+                )
+            }
         };
         if let Some(vf) = next {
             let decoded = DecodedFrame::new(vf.frame.width, vf.frame.height, vf.frame.rgba, false);
             let tex = upload_rgba(device, queue, &decoded, false, Some("playback-src"));
             self.cached_tex = Some(Rc::new(tex));
         }
+    }
+}
+
+fn receive_cold_frame(
+    pull: &mut impl FnMut() -> Option<StreamVideoFrame>,
+    target: i64,
+) -> Option<StreamVideoFrame> {
+    while let Some(frame) = pull() {
+        if frame.source_frame >= target {
+            return Some(frame);
+        }
+    }
+    None
+}
+
+fn ensure_stream_with<'a, S, E>(
+    streams: &'a mut HashMap<String, S>,
+    clip_id: &str,
+    create: impl FnOnce() -> Result<S, E>,
+) -> Result<&'a mut S, E> {
+    use std::collections::hash_map::Entry;
+
+    match streams.entry(clip_id.to_string()) {
+        Entry::Occupied(entry) => Ok(entry.into_mut()),
+        Entry::Vacant(entry) => Ok(entry.insert(create()?)),
     }
 }
 
@@ -260,32 +292,19 @@ impl<'d, 's> StreamingResolver<'d, 's> {
                 .media
                 .get(&t.media_ref)
                 .map(|info| info.path.clone());
-            if !self.state.streams.contains_key(&t.clip_id) {
-                if let Some(path) = media_path.clone() {
-                    let mut req = VideoStreamRequest::new(path, self.state.timeline_fps);
+            if let Some(path) = media_path {
+                let timeline_fps = self.state.timeline_fps;
+                let render_box = self.state.render_box;
+                let _ = ensure_stream_with(&mut self.state.streams, &t.clip_id, || {
+                    let mut req = VideoStreamRequest::new(path, timeline_fps);
                     req.start_frame = t.source_frame.max(0);
-                    req.max_size = self.state.render_box;
-                    if let Ok(stream) = spawn_video_stream(req) {
-                        self.state
-                            .streams
-                            .insert(t.clip_id.clone(), ClipStream::new(stream));
-                    }
-                }
+                    req.timeline_fps = timeline_fps;
+                    req.max_size = render_box;
+                    spawn_video_stream(req).map(ClipStream::new)
+                });
             }
             if let Some(cs) = self.state.streams.get_mut(&t.clip_id) {
                 cs.advance(t.source_frame, self.device, self.queue);
-                if cs.cached_tex.is_none() {
-                    if let Some(path) = media_path.as_deref() {
-                        cs.cached_tex = bootstrap_video_texture(
-                            self.device,
-                            self.queue,
-                            path,
-                            t.source_frame,
-                            self.state.timeline_fps,
-                            self.state.render_box,
-                        );
-                    }
-                }
                 if let Some(tex) = &cs.cached_tex {
                     uploaded.push((format!("v:{}:{}", t.media_ref, t.source_frame), tex.clone()));
                 }
@@ -349,26 +368,6 @@ impl<'d, 's> StreamingResolver<'d, 's> {
         );
         Some(self.state.static_cache.insert(key, tex))
     }
-}
-
-fn bootstrap_video_texture(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    path: &Path,
-    source_frame: i64,
-    timeline_fps: i32,
-    render_box: (u32, u32),
-) -> Option<Rc<GpuTexture>> {
-    let request = FrameRequest {
-        time_secs: source_frame.max(0) as f64 / timeline_fps.max(1) as f64,
-        max_size: render_box,
-        tolerance_secs: 0.1,
-        apply_rotation: true,
-    };
-    let (_actual, frame) = decode_frame_at(path, &request).ok()?;
-    let decoded = DecodedFrame::new(frame.width, frame.height, frame.rgba, false);
-    let texture = upload_rgba(device, queue, &decoded, false, Some("playback-bootstrap"));
-    Some(Rc::new(texture))
 }
 
 impl TextureResolver for StreamingResolver<'_, '_> {
@@ -467,5 +466,32 @@ mod tests {
         let got = drain_to_target(&mut pending, queue_pull(vec![]), 5);
         assert!(got.is_none());
         assert!(pending.is_none());
+    }
+
+    #[test]
+    fn cold_video_uses_one_decoder_source_and_receives_its_first_frame() {
+        let mut streams = HashMap::new();
+        let mut decoder_invocations = 0;
+        let stream = ensure_stream_with(&mut streams, "clip-1", || {
+            decoder_invocations += 1;
+            Ok::<_, ()>("decoder-1")
+        })
+        .expect("create cold decoder");
+        assert_eq!(*stream, "decoder-1");
+
+        let same = ensure_stream_with(&mut streams, "clip-1", || {
+            decoder_invocations += 1;
+            Ok::<_, ()>("duplicate-decoder")
+        })
+        .expect("reuse decoder");
+        assert_eq!(*same, "decoder-1");
+        assert_eq!(
+            decoder_invocations, 1,
+            "one clip must have one cold decoder source"
+        );
+
+        let mut pulls = queue_pull(vec![vf(3), vf(5)]);
+        let first = receive_cold_frame(&mut pulls, 5).expect("cold decoder supplies visible frame");
+        assert_eq!(first.source_frame, 5);
     }
 }

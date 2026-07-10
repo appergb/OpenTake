@@ -47,15 +47,76 @@ import {
 } from "./nativePlaybackSession";
 import { rustEngineEnabled } from "./rustEngine";
 
-let nativeFrameListener: Promise<() => void> | null = null;
+interface NativeFrameListenerSlot {
+  ready: Promise<() => void>;
+  references: number;
+  teardownGeneration: number;
+}
 
-function ensureNativeFrameListener(): Promise<() => void> {
+interface NativeFrameListenerLease {
+  ready: Promise<() => void>;
+  release(): void;
+}
+
+let nativeFrameListener: NativeFrameListenerSlot | null = null;
+
+// StrictMode performs setup → cleanup → setup in one turn. A deferred teardown
+// lets the second setup reclaim the still-pending listen Promise; the generation
+// checks also prevent a resolved old cleanup from unlistening a newer lease.
+function acquireNativeFrameListener(): NativeFrameListenerLease {
   if (!nativeFrameListener) {
-    nativeFrameListener = onPlaybackFrame((event) => {
-      nativePlaybackController.acceptFrame(event);
-    });
+    nativeFrameListener = {
+      ready: onPlaybackFrame((event) => {
+        nativePlaybackController.acceptFrame(event);
+      }),
+      references: 0,
+      teardownGeneration: 0,
+    };
   }
-  return nativeFrameListener;
+  const slot = nativeFrameListener;
+  slot.references += 1;
+  slot.teardownGeneration += 1;
+  let released = false;
+  return {
+    ready: slot.ready,
+    release() {
+      if (released) return;
+      released = true;
+      slot.references = Math.max(0, slot.references - 1);
+      const teardownGeneration = ++slot.teardownGeneration;
+      queueMicrotask(() => {
+        if (
+          nativeFrameListener !== slot ||
+          slot.references !== 0 ||
+          slot.teardownGeneration !== teardownGeneration
+        ) {
+          return;
+        }
+        void slot.ready.then(
+          (unlisten) => {
+            if (
+              nativeFrameListener !== slot ||
+              slot.references !== 0 ||
+              slot.teardownGeneration !== teardownGeneration
+            ) {
+              return;
+            }
+            nativeFrameListener = null;
+            unlisten();
+          },
+          () => {
+            if (
+              nativeFrameListener === slot &&
+              slot.references === 0 &&
+              slot.teardownGeneration === teardownGeneration
+            ) {
+              nativeFrameListener = null;
+            }
+          },
+        );
+      });
+    },
+  };
 }
 
 export async function startNativePlaybackAfterListener<T>(
@@ -269,14 +330,18 @@ export function useTimelinePlaybackEngine(): void {
   const activeNativeIdentityRef = useRef<ReturnType<
     typeof nativePlaybackController.currentIdentity
   >>(null);
+  const nativeFrameListenerLeaseRef = useRef<NativeFrameListenerLease | null>(null);
   const engineFailed = useEditorUiStore((s) => s.rustEngineFailed);
   const setEngineFailed = useEditorUiStore((s) => s.setRustEngineFailed);
 
   useEffect(() => {
-    const listener = ensureNativeFrameListener();
+    const lease = acquireNativeFrameListener();
+    nativeFrameListenerLeaseRef.current = lease;
     return () => {
-      void listener.then((unlisten) => unlisten());
-      if (nativeFrameListener === listener) nativeFrameListener = null;
+      if (nativeFrameListenerLeaseRef.current === lease) {
+        nativeFrameListenerLeaseRef.current = null;
+      }
+      lease.release();
     };
   }, []);
 
@@ -342,7 +407,13 @@ export function useTimelinePlaybackEngine(): void {
       });
 
       const startFrame = Math.max(0, Math.floor(useEditorUiStore.getState().activeFrame));
-      const start = startNativePlaybackAfterListener(ensureNativeFrameListener(), () =>
+      const listenerReady = nativeFrameListenerLeaseRef.current?.ready;
+      if (!listenerReady) {
+        unsubscribePublication();
+        setEngineFailed(true);
+        return;
+      }
+      const start = startNativePlaybackAfterListener(listenerReady, () =>
         nativePlaybackController.start({ projectEpoch, timelineVersion }, startFrame, {
           onIdentity: (started) => {
             identity = started;

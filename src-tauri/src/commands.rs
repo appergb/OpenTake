@@ -75,8 +75,17 @@ pub fn project_open(
     path: String,
     playback: State<'_, crate::playback::PlaybackState>,
 ) -> Result<TimelineSnapshotDto, String> {
+    project_open_with_playback(&core, path, &playback)
+}
+
+#[cfg(feature = "playback-engine")]
+pub(crate) fn project_open_with_playback(
+    core: &AppCore,
+    path: String,
+    playback: &crate::playback::PlaybackState,
+) -> Result<TimelineSnapshotDto, String> {
     let transition = playback.begin_project_transition();
-    match handle_project_open(&core, path).map_err(msg) {
+    match handle_project_open(core, path).map_err(msg) {
         Ok(snapshot) => {
             playback.activate_project(transition, snapshot.project_epoch);
             Ok(snapshot)

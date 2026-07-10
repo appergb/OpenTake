@@ -191,7 +191,7 @@ impl PublicationGate {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
     }
 
-    fn is_open(&self) -> bool {
+    pub(crate) fn is_open(&self) -> bool {
         *self
             .0
             .lock()
@@ -290,6 +290,22 @@ impl PreviewServer {
 
     pub fn clear_session(&self, identity: &PlaybackIdentity) {
         self.latest.clear_session(identity);
+    }
+
+    /// Publish one already-encoded session frame into the exact `/frame` lookup
+    /// store. The render emitter uses the same store after sink encoding; this
+    /// boundary is also useful to validate the live HTTP route independently of
+    /// Tauri event delivery.
+    pub fn publish_encoded_frame(
+        &self,
+        identity: PlaybackIdentity,
+        frame: i32,
+        sequence: u64,
+        terminal: bool,
+        jpeg: Bytes,
+    ) {
+        self.latest
+            .publish(identity, frame, sequence, terminal, jpeg);
     }
 }
 

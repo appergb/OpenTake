@@ -225,7 +225,9 @@ impl PlaybackEngine {
 
     /// Spawn the GPU thread, render and buffer its first complete frame, then
     /// return a paused handle. The caller installs the authoritative session
-    /// before `resume` makes that buffered frame observable.
+    /// before `resume` makes that buffered frame observable. Waiting for the
+    /// render-thread handshake is synchronous, so async command callers must run
+    /// this constructor on a blocking worker.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_ready(
         timeline: Timeline,

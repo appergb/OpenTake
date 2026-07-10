@@ -1,53 +1,58 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import React, { StrictMode, act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const hookHarness = vi.hoisted(() => ({
-  effects: [] as Array<() => void | (() => void)>,
-  refs: [] as Array<{ current: unknown }>,
-  refCursor: 0,
-}));
+const nativeApiHarness = vi.hoisted(() => {
+  const harness = {
+    activeListeners: 0,
+    deferred: false,
+    order: [] as string[],
+    resolveListener: null as null | (() => void),
+    unlistenCalls: 0,
+    onPlaybackFrame: vi.fn(),
+    playbackStart: vi.fn(),
+    playbackPause: vi.fn(),
+    playbackSeek: vi.fn(),
+    playbackStop: vi.fn(),
+  };
+  const unlisten = () => {
+    harness.activeListeners -= 1;
+    harness.unlistenCalls += 1;
+  };
+  harness.onPlaybackFrame.mockImplementation(() => {
+    if (!harness.deferred) {
+      harness.activeListeners += 1;
+      harness.order.push("listener-ready");
+      return Promise.resolve(unlisten);
+    }
+    return new Promise<() => void>((resolve) => {
+      harness.resolveListener = () => {
+        harness.activeListeners += 1;
+        harness.order.push("listener-ready");
+        resolve(unlisten);
+      };
+    });
+  });
+  harness.playbackStart.mockImplementation(async () => {
+    harness.order.push("start");
+  });
+  harness.playbackPause.mockResolvedValue(undefined);
+  harness.playbackSeek.mockResolvedValue(undefined);
+  harness.playbackStop.mockResolvedValue(undefined);
+  return harness;
+});
 
-// Substitute only React's lifecycle scheduler so the production hook, Zustand
-// stores/actions, media registry, and rAF clock remain the code under test.
-vi.mock("react", async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  const useEffect = (effect: () => void | (() => void)) => {
-    hookHarness.effects.push(effect);
-  };
-  const useRef = <T,>(initialValue: T) => {
-    const index = hookHarness.refCursor++;
-    const ref = hookHarness.refs[index] ?? { current: initialValue };
-    hookHarness.refs[index] = ref;
-    return ref as { current: T };
-  };
+vi.mock("../../lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/api")>();
   return {
     ...actual,
-    useEffect,
-    useRef,
+    isTauri: true,
+    onPlaybackFrame: nativeApiHarness.onPlaybackFrame,
+    playbackStart: nativeApiHarness.playbackStart,
+    playbackPause: nativeApiHarness.playbackPause,
+    playbackSeek: nativeApiHarness.playbackSeek,
+    playbackStop: nativeApiHarness.playbackStop,
   };
-});
-
-vi.mock("../../store/projectStore", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../store/projectStore")>();
-  const store = actual.useProjectStore;
-  const directStore = Object.assign(
-    <T,>(selector: (state: ReturnType<typeof store.getState>) => T) =>
-      selector(store.getState()),
-    store,
-  );
-  return { ...actual, useProjectStore: directStore };
-});
-
-// Zustand's bound hook normally delegates to React.useSyncExternalStore. The
-// direct selectors keep the same real stores while the lifecycle is controlled.
-vi.mock("../../store/uiStore", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../store/uiStore")>();
-  const store = actual.useEditorUiStore;
-  const directStore = Object.assign(
-    <T,>(selector: (state: ReturnType<typeof store.getState>) => T) =>
-      selector(store.getState()),
-    store,
-  );
-  return { ...actual, useEditorUiStore: directStore };
 });
 
 import * as previewEngine from "./previewEngine";
@@ -56,15 +61,79 @@ import type { ActiveMedia } from "./timelinePlayback";
 import type { Clip, ClipType, Timeline, Track } from "../../lib/types";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
+import { nativePlaybackController } from "./nativePlaybackSession";
 
-function runPlaybackHookEffects(): Array<() => void> {
-  hookHarness.effects = [];
-  hookHarness.refCursor = 0;
-  previewEngine.useTimelinePlaybackEngine();
-  return hookHarness.effects
-    .map((effect) => effect())
-    .filter((cleanup): cleanup is () => void => typeof cleanup === "function");
+function installReactHost(): Element {
+  const document = {
+    nodeType: 9,
+    defaultView: globalThis,
+    addEventListener() {},
+    removeEventListener() {},
+    activeElement: null,
+    documentElement: null as unknown,
+  };
+  const container = {
+    nodeType: 1,
+    nodeName: "DIV",
+    tagName: "DIV",
+    namespaceURI: "http://www.w3.org/1999/xhtml",
+    ownerDocument: document,
+    addEventListener() {},
+    removeEventListener() {},
+    appendChild() {},
+    removeChild() {},
+    firstChild: null,
+  };
+  document.documentElement = container;
+  vi.stubGlobal("window", globalThis);
+  vi.stubGlobal("document", document);
+  vi.stubGlobal("HTMLIFrameElement", function HTMLIFrameElement() {});
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("getSelection", () => null);
+  return container as unknown as Element;
 }
+
+function PlaybackHookHarness(): null {
+  previewEngine.useTimelinePlaybackEngine();
+  return null;
+}
+
+async function mountPlaybackHook(strict = false): Promise<Root> {
+  const root = createRoot(installReactHost());
+  await act(async () => {
+    root.render(
+      strict
+        ? React.createElement(StrictMode, null, React.createElement(PlaybackHookHarness))
+        : React.createElement(PlaybackHookHarness),
+    );
+    await Promise.resolve();
+  });
+  return root;
+}
+
+async function unmountPlaybackHook(root: Root): Promise<void> {
+  await act(async () => {
+    root.unmount();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+beforeEach(async () => {
+  await nativePlaybackController.stopCurrent();
+  nativeApiHarness.activeListeners = 0;
+  nativeApiHarness.deferred = false;
+  nativeApiHarness.order = [];
+  nativeApiHarness.resolveListener = null;
+  nativeApiHarness.unlistenCalls = 0;
+  nativeApiHarness.onPlaybackFrame.mockClear();
+  nativeApiHarness.playbackStart.mockClear();
+  nativeApiHarness.playbackPause.mockClear();
+  nativeApiHarness.playbackSeek.mockClear();
+  nativeApiHarness.playbackStop.mockClear();
+});
+
+afterEach(() => vi.unstubAllGlobals());
 
 function clip(over: Partial<Clip> & { id: string; mediaType: ClipType }): Clip {
   return {
@@ -113,24 +182,39 @@ function timeline(tracks: Track[]): Timeline {
 }
 
 describe("shouldSyncPausedMediaToFrame", () => {
-  it("registers exactly one playback frame listener before starting the session", async () => {
-    const order: string[] = [];
-    let resolveListener: (() => void) | null = null;
-    const listenerReady = new Promise<void>((resolve) => {
-      resolveListener = () => {
-        order.push("listen");
-        resolve();
-      };
-    });
-    const result = previewEngine.startNativePlaybackAfterListener(listenerReady, async () => {
-      order.push("start");
-      return "started";
+  it("registers one listener before start across a StrictMode cleanup and remount", async () => {
+    nativeApiHarness.deferred = true;
+    useProjectStore.setState({ projectEpoch: 4, timelineVersion: 7, timeline: timeline([]) });
+    useEditorUiStore.setState({
+      activeFrame: 0,
+      currentFrame: 0,
+      isPlaying: true,
+      isScrubbing: false,
+      rustEngineFailed: false,
     });
 
-    expect(order).toEqual([]);
-    resolveListener?.();
-    await expect(result).resolves.toBe("started");
-    expect(order).toEqual(["listen", "start"]);
+    const root = await mountPlaybackHook(true);
+
+    expect(nativeApiHarness.onPlaybackFrame).toHaveBeenCalledTimes(1);
+    expect(nativeApiHarness.activeListeners).toBe(0);
+    expect(nativeApiHarness.playbackStart).not.toHaveBeenCalled();
+
+    await act(async () => {
+      nativeApiHarness.resolveListener?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(nativeApiHarness.onPlaybackFrame).toHaveBeenCalledTimes(1);
+    expect(nativeApiHarness.activeListeners).toBe(1);
+    expect(nativeApiHarness.unlistenCalls).toBe(0);
+    expect(nativeApiHarness.playbackStart).toHaveBeenCalled();
+    expect(nativeApiHarness.order[0]).toBe("listener-ready");
+    expect(nativeApiHarness.order.slice(1).every((entry) => entry === "start")).toBe(true);
+
+    await unmountPlaybackHook(root);
+    expect(nativeApiHarness.activeListeners).toBe(0);
+    expect(nativeApiHarness.unlistenCalls).toBe(1);
   });
 
   it("does not seek on the play-to-pause edge", () => {
@@ -256,13 +340,6 @@ describe("shouldSeekPlayingFollower", () => {
 });
 
 describe("WebKit playback transport", () => {
-  afterEach(() => {
-    hookHarness.effects = [];
-    hookHarness.refs = [];
-    hookHarness.refCursor = 0;
-    vi.unstubAllGlobals();
-  });
-
   it("drives a registered media element through play and pause from the owning clock", async () => {
     const tl = timeline([
       track({
@@ -310,31 +387,41 @@ describe("WebKit playback transport", () => {
         rafCallbacks.delete(id);
       }),
     );
+    vi.stubGlobal("localStorage", {
+      getItem: () => "0",
+      setItem() {},
+      removeItem() {},
+    });
     useProjectStore.setState({ timeline: tl, timelineVersion: 1 });
     useEditorUiStore.setState({
       currentFrame: 0,
       activeFrame: 0,
       isPlaying: false,
       isScrubbing: false,
+      rustEngineFailed: true,
     });
     previewEngine.previewElements.set(key, element);
 
     useEditorUiStore.getState().togglePlay();
-    const playingCleanups = runPlaybackHookEffects();
+    const root = await mountPlaybackHook();
     const firstFrame = rafCallbacks.values().next().value as FrameRequestCallback | undefined;
     expect(firstFrame).toBeTypeOf("function");
-    firstFrame?.(16);
-    await Promise.resolve();
+    await act(async () => {
+      firstFrame?.(16);
+      await Promise.resolve();
+    });
     expect(useEditorUiStore.getState().isPlaying).toBe(true);
     expect(play).toHaveBeenCalled();
 
-    useEditorUiStore.getState().togglePlay();
-    playingCleanups.reverse().forEach((cleanup) => cleanup());
-    runPlaybackHookEffects().reverse().forEach((cleanup) => cleanup());
+    await act(async () => {
+      useEditorUiStore.getState().togglePlay();
+      await Promise.resolve();
+    });
     expect(useEditorUiStore.getState().isPlaying).toBe(false);
     expect(pause).toHaveBeenCalled();
     expect(previewEngine).not.toHaveProperty("setWebKitMediaPlayback");
 
+    await unmountPlaybackHook(root);
     previewEngine.previewElements.remove(key);
   });
 });
