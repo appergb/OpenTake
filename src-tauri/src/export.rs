@@ -758,6 +758,10 @@ fn unique_export_range_path(
     ))
 }
 
+fn ensure_export_range_mutable(core: &AppCore) -> Result<(), String> {
+    core.ensure_project_mutable().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn export_range(
@@ -771,6 +775,7 @@ pub fn export_range(
     out_frame: i32,
     format: ExportFormat,
 ) -> Result<crate::media::MediaListDto, String> {
+    ensure_export_range_mutable(&core)?;
     let timeline = core.get_timeline().timeline;
     let manifest = core.media();
     let project_dir = core.project_dir();
@@ -857,6 +862,7 @@ pub fn export_range(
     }
 
     crate::media::import_one(&core, engine, &out_path)
+        .map_err(|e| e.to_string())?
         .ok_or_else(|| "save-as-media import failed".to_string())?;
 
     Ok(crate::media::MediaListDto::from_core(
@@ -954,17 +960,14 @@ pub fn export_bundle(
     core: State<'_, AppCore>,
     out_path: String,
 ) -> Result<BundleReportDto, String> {
-    // Snapshot the live document (upstream reads the in-memory editor objects).
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    let generation_log = core.generation_log();
-    let source_bundle = core.project_dir();
+    let snapshot = core.bundle_export_snapshot();
 
     run_bundle_export(
-        &timeline,
-        &manifest,
-        &generation_log,
-        source_bundle.as_deref(),
+        &snapshot.timeline,
+        &snapshot.manifest,
+        &snapshot.generation_log,
+        snapshot.project_path.as_deref(),
+        &snapshot.compatibility,
         out_path,
     )
 }
@@ -984,8 +987,10 @@ pub fn run_bundle_export(
     manifest: &opentake_domain::MediaManifest,
     generation_log: &opentake_project::GenerationLog,
     source_bundle: Option<&Path>,
+    compatibility: &opentake_project::ProjectCompatibility,
     out_path: String,
 ) -> Result<BundleReportDto, String> {
+    compatibility.ensure_writable().map_err(|e| e.to_string())?;
     let dest = PathBuf::from(&out_path);
     let report =
         opentake_project::archive(timeline, manifest, generation_log, source_bundle, &dest)
@@ -1018,7 +1023,69 @@ fn clip_source_window_secs(clip: &Clip, timeline_fps: i32) -> Option<(f64, f64)>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::Path;
+
+    fn unknown_core(root: &Path) -> AppCore {
+        let bundle = root.join("Unknown.opentake");
+        let project = opentake_project::Project::new(&bundle);
+        project.save().expect("save known fixture");
+        let path = bundle.join("project.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read timeline fixture"))
+                .expect("decode timeline fixture");
+        value["futureTimeline"] = serde_json::json!(true);
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&value).expect("encode unknown fixture"),
+        )
+        .expect("write unknown fixture");
+        let core = AppCore::new();
+        core.open_project(bundle).expect("unknown project opens");
+        core
+    }
+
+    fn recursive_tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        fn walk(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+            if !dir.exists() {
+                return;
+            }
+            let mut paths = fs::read_dir(dir)
+                .expect("read tree")
+                .map(|entry| entry.expect("read tree entry").path())
+                .collect::<Vec<_>>();
+            paths.sort();
+            for path in paths {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("tree path under root")
+                    .into();
+                if path.is_dir() {
+                    out.push((relative, b"<dir>".to_vec()));
+                    walk(root, &path, out);
+                } else {
+                    out.push((relative, fs::read(&path).expect("read tree file")));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    #[test]
+    fn export_range_refuses_before_save_output_creation() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let core = unknown_core(tmp.path());
+        let saves = tmp.path().join("cache/saves");
+        fs::create_dir_all(saves.join("existing")).expect("create saves fixture");
+        fs::write(saves.join("existing/keep.bin"), b"before").expect("write saves fixture");
+        let before = recursive_tree(&saves);
+
+        ensure_export_range_mutable(&core).expect_err("range export must be rejected");
+
+        assert_eq!(recursive_tree(&saves), before);
+    }
 
     #[test]
     fn export_control_starts_uncancelled() {

@@ -43,7 +43,9 @@ pub mod events;
 pub mod session;
 
 // --- Assembly façade ---
-pub use crate::core::{AppCore, ProjectRevision, ProjectRuntimeSnapshot, TimelineSnapshot};
+pub use crate::core::{
+    AppCore, BundleExportSnapshot, ProjectRevision, ProjectRuntimeSnapshot, TimelineSnapshot,
+};
 pub use session::{
     importable_clip_type, EditorSession, ProbedMedia, SUPPORTED_AUDIO_EXTENSIONS,
     SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS,

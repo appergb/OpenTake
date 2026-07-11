@@ -359,6 +359,9 @@ impl TauriMediaBridge {
         name: Option<&str>,
         folder_id: Option<&str>,
     ) -> Result<ImportOutcome, BridgeError> {
+        self.core
+            .ensure_project_mutable()
+            .map_err(|error| BridgeError::new(error.to_string()))?;
         let file_url = PathBuf::from(path);
         let meta = std::fs::metadata(&file_url)
             .map_err(|_| BridgeError::new(format!("File not found: {path}")))?;
@@ -370,7 +373,8 @@ impl TauriMediaBridge {
             let before_folders = self.core.media().folders.len();
             let mut skipped = Vec::new();
             let parent = folder_id.map(|s| s.to_string());
-            crate::media::mirror_dir(&self.core, &self.engine, &file_url, parent, &mut skipped);
+            crate::media::mirror_dir(&self.core, &self.engine, &file_url, parent, &mut skipped)
+                .map_err(|error| BridgeError::new(error.to_string()))?;
             let after = self.core.media();
             let asset_count = after.entries.len().saturating_sub(before_entries);
             let folder_count = after.folders.len().saturating_sub(before_folders);
@@ -403,8 +407,9 @@ impl TauriMediaBridge {
             )));
         }
         let entry = crate::media::import_one(&self.core, &self.engine, &file_url)
+            .map_err(|error| BridgeError::new(error.to_string()))?
             .ok_or_else(|| BridgeError::new(format!("Failed to import file: {path}")))?;
-        let entry = self.apply_import_metadata(entry, name, folder_id);
+        let entry = self.apply_import_metadata(entry, name, folder_id)?;
         Ok(ImportOutcome {
             message: format!(
                 "Imported '{}' (id: {}, type: {}) from path. Available now in get_media.",
@@ -425,6 +430,9 @@ impl TauriMediaBridge {
         name: Option<&str>,
         folder_id: Option<&str>,
     ) -> Result<ImportOutcome, BridgeError> {
+        self.core
+            .ensure_project_mutable()
+            .map_err(|error| BridgeError::new(error.to_string()))?;
         let Some(file_ext) = crate::media::file_extension_for_mime(mime_type) else {
             return Err(BridgeError::new(format!(
                 "Unsupported mimeType '{mime_type}'. {}",
@@ -457,11 +465,18 @@ impl TauriMediaBridge {
         std::fs::write(&dest, &data)
             .map_err(|e| BridgeError::new(format!("Failed to write bytes to disk: {e}")))?;
 
-        let Some(entry) = crate::media::import_one(&self.core, &self.engine, &dest) else {
-            let _ = std::fs::remove_file(&dest);
-            return Err(BridgeError::new("Failed to register imported asset"));
+        let entry = match crate::media::import_one(&self.core, &self.engine, &dest) {
+            Ok(Some(entry)) => entry,
+            Ok(None) => {
+                let _ = std::fs::remove_file(&dest);
+                return Err(BridgeError::new("Failed to register imported asset"));
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(&dest);
+                return Err(BridgeError::new(error.to_string()));
+            }
         };
-        let entry = self.apply_import_metadata(entry, name, folder_id);
+        let entry = self.apply_import_metadata(entry, name, folder_id)?;
         Ok(ImportOutcome {
             message: format!(
                 "Imported '{}' (id: {}, type: {}, {} bytes). Available now in get_media.",
@@ -481,28 +496,27 @@ impl TauriMediaBridge {
         mut entry: opentake_domain::MediaManifestEntry,
         name: Option<&str>,
         folder_id: Option<&str>,
-    ) -> opentake_domain::MediaManifestEntry {
+    ) -> Result<opentake_domain::MediaManifestEntry, BridgeError> {
         if let Some(name) = name {
-            if self
-                .core
+            self.core
                 .apply(opentake_core::EditCommand::RenameMedia {
                     entries: vec![opentake_ops::RenameEntry {
                         id: entry.id.clone(),
                         name: name.to_string(),
                     }],
                 })
-                .is_ok()
-            {
-                entry.name = name.to_string();
-            }
+                .map_err(|error| BridgeError::new(error.to_string()))?;
+            entry.name = name.to_string();
         }
         if let Some(folder_id) = folder_id {
-            let _ = self.core.apply(opentake_core::EditCommand::MoveToFolder {
-                asset_ids: vec![entry.id.clone()],
-                folder_id: Some(folder_id.to_string()),
-            });
+            self.core
+                .apply(opentake_core::EditCommand::MoveToFolder {
+                    asset_ids: vec![entry.id.clone()],
+                    folder_id: Some(folder_id.to_string()),
+                })
+                .map_err(|error| BridgeError::new(error.to_string()))?;
         }
-        entry
+        Ok(entry)
     }
 }
 
@@ -816,6 +830,97 @@ fn project_frame_time_secs(source_frame: i64, timeline_fps: i32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unknown_core(root: &Path) -> AppCore {
+        let bundle = root.join("Unknown.opentake");
+        let project = opentake_project::Project::new(&bundle);
+        project.save().expect("save known fixture");
+        let path = bundle.join("project.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read timeline fixture"))
+                .expect("decode timeline fixture");
+        value["futureTimeline"] = serde_json::json!(true);
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&value).expect("encode unknown fixture"),
+        )
+        .expect("write unknown fixture");
+        let core = AppCore::new();
+        core.open_project(bundle).expect("unknown project opens");
+        core
+    }
+
+    fn recursive_tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        fn walk(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+            if !dir.exists() {
+                return;
+            }
+            let mut paths = std::fs::read_dir(dir)
+                .expect("read tree")
+                .map(|entry| entry.expect("read tree entry").path())
+                .collect::<Vec<_>>();
+            paths.sort();
+            for path in paths {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("tree path under root")
+                    .into();
+                if path.is_dir() {
+                    out.push((relative, b"<dir>".to_vec()));
+                    walk(root, &path, out);
+                } else {
+                    out.push((relative, std::fs::read(&path).expect("read tree file")));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    #[test]
+    fn mcp_path_import_refuses_unknown_project_without_manifest_or_folder_change() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let core = unknown_core(tmp.path());
+        let file = tmp.path().join("incoming.mp4");
+        std::fs::write(&file, b"fixture").expect("write import fixture");
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir(&empty).expect("create empty directory fixture");
+        let bridge = TauriMediaBridge::new(
+            core.clone(),
+            tmp.path().join("cache"),
+            tmp.path().join("models"),
+        );
+        let before = core.media();
+
+        bridge
+            .import_from_path(&file.to_string_lossy(), None, None)
+            .expect_err("MCP file import must be rejected");
+        assert_eq!(core.media(), before);
+        bridge
+            .import_from_path(&empty.to_string_lossy(), None, None)
+            .expect_err("MCP empty directory import must be rejected");
+        assert_eq!(core.media(), before);
+    }
+
+    #[test]
+    fn mcp_bytes_import_refuses_before_media_tree_mutation() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let core = unknown_core(tmp.path());
+        let media_tree = core.project_dir().expect("opened project").join("media");
+        let before_exists = media_tree.exists();
+        let before = recursive_tree(&media_tree);
+        let bridge =
+            TauriMediaBridge::new(core, tmp.path().join("cache"), tmp.path().join("models"));
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"png-fixture");
+
+        bridge
+            .import_from_bytes(&payload, "image/png", None, None)
+            .expect_err("MCP bytes import must be rejected");
+
+        assert_eq!(media_tree.exists(), before_exists);
+        assert_eq!(recursive_tree(&media_tree), before);
+    }
 
     #[test]
     fn fit_render_size_downscales_to_longest_edge_keeping_aspect() {

@@ -53,14 +53,27 @@ pub struct TimelineSnapshotDto {
     pub project_epoch: u64,
     /// The document version this snapshot was taken at.
     pub version: u64,
+    /// Current project bundle path (`null` for a new unsaved project).
+    pub project_path: Option<std::path::PathBuf>,
+    /// Whether project mutations are blocked to preserve unknown fields.
+    #[serde(rename = "compatibilityReadOnly")]
+    pub compatibility_read_only: bool,
+    /// Sorted persisted-schema paths this build does not understand.
+    #[serde(rename = "compatibilityBlockers")]
+    pub compatibility_blockers: Vec<String>,
 }
 
 impl From<TimelineSnapshot> for TimelineSnapshotDto {
     fn from(s: TimelineSnapshot) -> Self {
+        let compatibility_read_only = s.compatibility.is_read_only();
+        let compatibility_blockers = s.compatibility.blockers().to_vec();
         TimelineSnapshotDto {
             timeline: s.timeline,
             project_epoch: s.project_epoch,
             version: s.version,
+            project_path: s.project_path,
+            compatibility_read_only,
+            compatibility_blockers,
         }
     }
 }

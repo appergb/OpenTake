@@ -20,6 +20,7 @@ use opentake_domain::{
     Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track,
 };
 use opentake_project::GenerationLog;
+use opentake_project::ProjectCompatibility;
 use opentake_tauri_lib::export::run_bundle_export;
 
 /// One external manifest entry pointing at `absolute_path` (which may or may not
@@ -88,6 +89,7 @@ fn run_bundle_export_collects_present_media_and_reports_missing() {
         &manifest,
         &log,
         None,
+        &ProjectCompatibility::default(),
         dest.to_string_lossy().into_owned(),
     )
     .expect("bundle export should succeed");

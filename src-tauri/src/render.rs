@@ -404,6 +404,10 @@ pub fn composite_frame(
 /// decodes that single VIDEO asset's own frame at `frame` (upstream's video-tab
 /// path uses `videoComposition = nil`, i.e. the raw asset frame, not a
 /// composite). Both then import identically.
+fn ensure_capture_frame_mutable(core: &AppCore) -> Result<(), String> {
+    core.ensure_project_mutable().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn capture_frame_to_media(
     core: State<'_, AppCore>,
@@ -414,6 +418,7 @@ pub fn capture_frame_to_media(
     folder_id: Option<String>,
     source_media_id: Option<String>,
 ) -> Result<crate::media::MediaListDto, String> {
+    ensure_capture_frame_mutable(&core)?;
     let engine = media.engine();
 
     // Frame → RGBA. Timeline tab composites; video tab decodes the source frame.
@@ -435,6 +440,7 @@ pub fn capture_frame_to_media(
     // MediaChanged event), then rename to the upstream "{nameBase} {frame}" and
     // move into the current folder.
     let entry = crate::media::import_one(&core, engine, &png_path)
+        .map_err(|e| e.to_string())?
         .ok_or_else(|| "capture import failed".to_string())?;
     let name = format!("{name_base} {frame}");
     core.apply(EditCommand::RenameMedia {
@@ -526,6 +532,10 @@ fn freeze_capture_png_path(
     captures_dir.join(format!("freeze_{safe_id}_{at_frame}_{}.png", uuid_like()))
 }
 
+fn ensure_capture_freeze_mutable(core: &AppCore) -> Result<(), String> {
+    core.ensure_project_mutable().map_err(|e| e.to_string())
+}
+
 pub fn capture_freeze_frame(
     core: &AppCore,
     render: &RenderState,
@@ -533,6 +543,7 @@ pub fn capture_freeze_frame(
     clip_id: &str,
     at_frame: i32,
 ) -> Result<String, String> {
+    ensure_capture_freeze_mutable(core)?;
     let engine = media.engine();
     let timeline = core.get_timeline().timeline;
     let manifest = core.media();
@@ -553,6 +564,7 @@ pub fn capture_freeze_frame(
     let bytes = encode_png_bytes(&composite)?;
     std::fs::write(&png_path, &bytes).map_err(|e| format!("write freeze png: {e}"))?;
     let entry = crate::media::import_one(core, engine, &png_path)
+        .map_err(|e| e.to_string())?
         .ok_or_else(|| "freeze frame import failed".to_string())?;
     Ok(entry.id)
 }
@@ -605,6 +617,82 @@ fn project_frame_time_secs(source_frame: i64, timeline_fps: i32) -> f64 {
 mod tests {
     use super::*;
     use opentake_domain::{Clip, MediaManifest, MediaManifestEntry, Track};
+    use std::fs;
+
+    fn unknown_core(root: &std::path::Path) -> AppCore {
+        let bundle = root.join("Unknown.opentake");
+        let project = opentake_project::Project::new(&bundle);
+        project.save().expect("save known fixture");
+        let path = bundle.join("project.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read timeline fixture"))
+                .expect("decode timeline fixture");
+        value["futureTimeline"] = serde_json::json!(true);
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&value).expect("encode unknown fixture"),
+        )
+        .expect("write unknown fixture");
+        let core = AppCore::new();
+        core.open_project(bundle).expect("unknown project opens");
+        core
+    }
+
+    fn recursive_tree(root: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
+        fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+            if !dir.exists() {
+                return;
+            }
+            let mut paths = fs::read_dir(dir)
+                .expect("read tree")
+                .map(|entry| entry.expect("read tree entry").path())
+                .collect::<Vec<_>>();
+            paths.sort();
+            for path in paths {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("tree path under root")
+                    .into();
+                if path.is_dir() {
+                    out.push((relative, b"<dir>".to_vec()));
+                    walk(root, &path, out);
+                } else {
+                    out.push((relative, fs::read(&path).expect("read tree file")));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    #[test]
+    fn capture_frame_to_media_refuses_before_capture_creation() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let core = unknown_core(tmp.path());
+        let captures = tmp.path().join("cache/captures");
+        fs::create_dir_all(captures.join("existing")).expect("create captures fixture");
+        fs::write(captures.join("existing/keep.png"), b"before").expect("write captures fixture");
+        let before = recursive_tree(&captures);
+
+        ensure_capture_frame_mutable(&core).expect_err("capture frame must be rejected");
+
+        assert_eq!(recursive_tree(&captures), before);
+    }
+
+    #[test]
+    fn capture_freeze_frame_refuses_before_capture_creation() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let core = unknown_core(tmp.path());
+        let captures = tmp.path().join("cache/captures");
+        fs::create_dir_all(captures.join("existing")).expect("create captures fixture");
+        fs::write(captures.join("existing/keep.png"), b"before").expect("write captures fixture");
+        let before = recursive_tree(&captures);
+
+        ensure_capture_freeze_mutable(&core).expect_err("freeze frame must be rejected");
+
+        assert_eq!(recursive_tree(&captures), before);
+    }
 
     #[test]
     fn project_frame_time_uses_timeline_fps_not_source_fps() {

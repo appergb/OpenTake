@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex};
 use opentake_domain::{MediaManifest, MediaManifestEntry, Timeline};
 use opentake_ops::command::{EditCommand, EditResult};
 use opentake_ops::IdGen;
-use opentake_project::GenerationLog;
+use opentake_project::{GenerationLog, ProjectCompatibility};
 
 use crate::deps::CoreDeps;
 use crate::error::Result;
@@ -89,6 +89,10 @@ pub struct TimelineSnapshot {
     pub project_epoch: u64,
     /// The document version this snapshot was taken at.
     pub version: u64,
+    /// The current project bundle path, if it has been saved/opened.
+    pub project_path: Option<PathBuf>,
+    /// Persisted fields this build cannot safely mutate.
+    pub compatibility: ProjectCompatibility,
 }
 
 /// Identity of the current project session and its document version.
@@ -115,6 +119,17 @@ pub struct ProjectRuntimeSnapshot {
     pub version: u64,
 }
 
+/// One-lock snapshot consumed by self-contained project export.
+#[derive(Clone, Debug)]
+pub struct BundleExportSnapshot {
+    pub timeline: Timeline,
+    pub manifest: MediaManifest,
+    pub generation_log: GenerationLog,
+    pub project_path: Option<PathBuf>,
+    pub project_epoch: u64,
+    pub compatibility: ProjectCompatibility,
+}
+
 struct CoreSessionSlot {
     project_epoch: u64,
     editor: EditorSession,
@@ -135,6 +150,8 @@ impl CoreSessionSlot {
             timeline: self.editor.timeline(),
             project_epoch: self.project_epoch,
             version: self.editor.version(),
+            project_path: self.editor.project_dir().map(PathBuf::from),
+            compatibility: self.editor.compatibility().clone(),
         }
     }
 
@@ -231,6 +248,24 @@ impl AppCore {
             project_epoch: session.project_epoch,
             version: session.editor.version(),
         }
+    }
+
+    /// Snapshot all self-contained bundle inputs under one session lock.
+    pub fn bundle_export_snapshot(&self) -> BundleExportSnapshot {
+        let session = self.lock();
+        BundleExportSnapshot {
+            timeline: session.editor.timeline(),
+            manifest: session.editor.media(),
+            generation_log: session.editor.generation_log().clone(),
+            project_path: session.editor.project_dir().map(PathBuf::from),
+            project_epoch: session.project_epoch,
+            compatibility: session.editor.compatibility().clone(),
+        }
+    }
+
+    /// Refuse application-layer filesystem work before it can mutate a project.
+    pub fn ensure_project_mutable(&self) -> Result<()> {
+        self.lock().editor.ensure_mutable()
     }
 
     /// The current document version.
@@ -419,10 +454,10 @@ impl AppCore {
     /// changed) so the media mirror refreshes. Favoriting is a manifest mutation
     /// outside undo — see [`EditorSession::set_media_favorite`]. Returns how many
     /// ids changed state.
-    pub fn set_media_favorite(&self, asset_ids: &[String], favorite: bool) -> usize {
+    pub fn set_media_favorite(&self, asset_ids: &[String], favorite: bool) -> Result<usize> {
         let (changed, count, project_epoch) = {
             let mut session = self.lock();
-            let changed = session.editor.set_media_favorite(asset_ids, favorite);
+            let changed = session.editor.set_media_favorite(asset_ids, favorite)?;
             let count = session.editor.media().entries.len();
             (changed, count, session.project_epoch)
         };
@@ -432,7 +467,7 @@ impl AppCore {
                 count,
             });
         }
-        changed
+        Ok(changed)
     }
 
     /// Relink an existing asset (by id) to a new file, keeping the same id, and

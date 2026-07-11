@@ -28,7 +28,7 @@ use image::ImageEncoder;
 use serde::Serialize;
 use tauri::State;
 
-use opentake_core::{importable_clip_type, AppCore, EditCommand, ProbedMedia};
+use opentake_core::{importable_clip_type, AppCore, CoreError, EditCommand, ProbedMedia};
 use opentake_domain::{
     ClipType, GenerationInput, MediaManifest, MediaManifestEntry, MediaSource, Timeline,
 };
@@ -665,15 +665,15 @@ pub(crate) fn import_one(
     core: &AppCore,
     engine: &MediaEngine,
     path: &Path,
-) -> Option<MediaManifestEntry> {
-    importable_clip_type(path)?;
+) -> Result<Option<MediaManifestEntry>, CoreError> {
+    if importable_clip_type(path).is_none() {
+        return Ok(None);
+    }
     let probe = probe_media(engine, path);
     // `import_media_file` re-validates the extension; the type check above only
     // lets us skip probing unsupported files.
-    let entry = core
-        .import_media_file(path, display_name(path), &probe)
-        .ok()?;
-    Some(entry)
+    let entry = core.import_media_file(path, display_name(path), &probe)?;
+    Ok(Some(entry))
 }
 
 /// Admit an imported asset's small grid poster to the project-scoped scheduler.
@@ -726,6 +726,7 @@ pub fn import_folder(
     path: String,
     recursive: Option<bool>,
 ) -> Result<MediaListDto, String> {
+    core.ensure_project_mutable().map_err(|e| e.to_string())?;
     let root = PathBuf::from(&path);
     if !root.is_dir() {
         return Err(format!("not a directory: {path}"));
@@ -743,11 +744,12 @@ pub fn import_folder(
             None,
             &mut skipped,
             &mut prewarm_results,
-        );
+        )
+        .map_err(|e| e.to_string())?;
     } else {
         let (files, skipped_files) = list_top_level(&root);
         for file in &files {
-            if let Some(entry) = import_one(&core, engine, file) {
+            if let Some(entry) = import_one(&core, engine, file).map_err(|e| e.to_string())? {
                 prewarm_results.push(schedule_import_poster(
                     &core, engine, &prewarm, &entry, file,
                 ));
@@ -774,7 +776,7 @@ pub(crate) fn mirror_dir(
     dir: &Path,
     parent_folder_id: Option<String>,
     skipped: &mut Vec<String>,
-) {
+) -> Result<(), CoreError> {
     let mut unused_results = Vec::new();
     mirror_dir_impl(
         core,
@@ -784,7 +786,7 @@ pub(crate) fn mirror_dir(
         parent_folder_id,
         skipped,
         &mut unused_results,
-    );
+    )
 }
 
 fn mirror_dir_scheduled(
@@ -795,7 +797,7 @@ fn mirror_dir_scheduled(
     parent_folder_id: Option<String>,
     skipped: &mut Vec<String>,
     prewarm_results: &mut Vec<ImportPrewarmDto>,
-) {
+) -> Result<(), CoreError> {
     mirror_dir_impl(
         core,
         engine,
@@ -804,7 +806,7 @@ fn mirror_dir_scheduled(
         parent_folder_id,
         skipped,
         prewarm_results,
-    );
+    )
 }
 
 fn mirror_dir_impl(
@@ -815,8 +817,8 @@ fn mirror_dir_impl(
     parent_folder_id: Option<String>,
     skipped: &mut Vec<String>,
     prewarm_results: &mut Vec<ImportPrewarmDto>,
-) {
-    let folder_id = create_folder(core, &dir_name(dir), parent_folder_id);
+) -> Result<(), CoreError> {
+    let folder_id = create_folder(core, &dir_name(dir), parent_folder_id)?;
 
     // Partition this directory's visible entries into media files + subdirs
     // (both case-insensitive name order) plus the names of unsupported files.
@@ -825,20 +827,18 @@ fn mirror_dir_impl(
 
     let mut imported_ids = Vec::new();
     for file in &files {
-        if let Some(entry) = import_one(core, engine, file) {
+        if let Some(entry) = import_one(core, engine, file)? {
             if let Some(prewarm) = prewarm {
                 prewarm_results.push(schedule_import_poster(core, engine, prewarm, &entry, file));
             }
             imported_ids.push(entry.id);
         }
     }
-    if let Some(fid) = &folder_id {
-        if !imported_ids.is_empty() {
-            let _ = core.apply(EditCommand::MoveToFolder {
-                asset_ids: imported_ids,
-                folder_id: Some(fid.clone()),
-            });
-        }
+    if !imported_ids.is_empty() {
+        core.apply(EditCommand::MoveToFolder {
+            asset_ids: imported_ids,
+            folder_id: Some(folder_id.clone()),
+        })?;
     }
 
     for sub in subdirs {
@@ -847,22 +847,28 @@ fn mirror_dir_impl(
             engine,
             prewarm,
             &sub,
-            folder_id.clone(),
+            Some(folder_id.clone()),
             skipped,
             prewarm_results,
-        );
+        )?;
     }
+    Ok(())
 }
 
-/// Create a library folder, returning its new id (or `None` if the core rejected
-/// it — e.g. an empty name, which `dir_name` avoids).
-fn create_folder(core: &AppCore, name: &str, parent_folder_id: Option<String>) -> Option<String> {
+/// Create a library folder, returning its new id or propagating the rejection.
+fn create_folder(
+    core: &AppCore,
+    name: &str,
+    parent_folder_id: Option<String>,
+) -> Result<String, CoreError> {
     core.apply(EditCommand::CreateFolder {
         name: name.to_string(),
         parent_folder_id,
-    })
-    .ok()
-    .and_then(|res| res.affected_clip_ids.into_iter().next())
+    })?
+    .affected_clip_ids
+    .into_iter()
+    .next()
+    .ok_or_else(|| CoreError::Media("folder creation returned no id".into()))
 }
 
 /// Directory display name (its last path component), falling back to "folder".
@@ -933,6 +939,7 @@ pub fn import_media(
     prewarm: State<'_, prewarm::PrewarmScheduler>,
     paths: Vec<String>,
 ) -> Result<MediaListDto, String> {
+    core.ensure_project_mutable().map_err(|e| e.to_string())?;
     let engine = media.engine();
     let mut skipped = Vec::new();
     let mut prewarm_results = Vec::new();
@@ -949,7 +956,7 @@ pub fn import_media(
             skipped.push(display_file_name(&path));
             continue;
         }
-        if let Some(entry) = import_one(&core, engine, &path) {
+        if let Some(entry) = import_one(&core, engine, &path).map_err(|e| e.to_string())? {
             prewarm_results.push(schedule_import_poster(
                 &core, engine, &prewarm, &entry, &path,
             ));
@@ -972,16 +979,24 @@ pub fn get_media(core: State<'_, AppCore>, media: State<'_, MediaState>) -> Medi
 /// `toggle_favorite`: add or remove `asset_ids` from the per-project favorites
 /// set (#91), returning the refreshed catalog so the panel's "mine" tab and the
 /// per-card favorite affordance update. Favorites persist in the project manifest
-/// (not browser storage); unknown ids are ignored by the core. Infallible.
+/// (not browser storage); unknown ids are ignored by the core.
 #[tauri::command]
 pub fn toggle_favorite(
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
     asset_ids: Vec<String>,
     favorite: bool,
-) -> MediaListDto {
-    core.set_media_favorite(&asset_ids, favorite);
-    MediaListDto::from_core(&core, Some(media.engine().cache_root()))
+) -> Result<MediaListDto, String> {
+    core.set_media_favorite(&asset_ids, favorite)
+        .map_err(|e| e.to_string())?;
+    Ok(MediaListDto::from_core(
+        &core,
+        Some(media.engine().cache_root()),
+    ))
+}
+
+fn ensure_save_clip_as_media_mutable(core: &AppCore) -> Result<(), String> {
+    core.ensure_project_mutable().map_err(|e| e.to_string())
 }
 
 /// Build the render inputs for "save clip as media" (#91 §3.5): a single-clip
@@ -1049,6 +1064,7 @@ pub fn save_clip_as_media(
     prewarm: State<'_, prewarm::PrewarmScheduler>,
     clip_id: String,
 ) -> Result<MediaListDto, String> {
+    ensure_save_clip_as_media_mutable(&core)?;
     let timeline = core.get_timeline().timeline;
     let manifest = core.media();
     let project_dir = core
@@ -1078,8 +1094,9 @@ pub fn save_clip_as_media(
         .map_err(|e| format!("render failed: {e}"))?;
 
     // Import the rendered file, then admit its poster without blocking import.
-    let entry =
-        import_one(&core, media.engine(), &out_path).ok_or("failed to import the rendered clip")?;
+    let entry = import_one(&core, media.engine(), &out_path)
+        .map_err(|e| e.to_string())?
+        .ok_or("failed to import the rendered clip")?;
     let result = schedule_import_poster(&core, media.engine(), &prewarm, &entry, &out_path);
     Ok(MediaListDto::from_core_with_import_results(
         &core,
@@ -1423,6 +1440,133 @@ mod tests {
         fs::write(path, b"x").unwrap();
     }
 
+    fn unknown_core(root: &Path) -> AppCore {
+        let bundle = root.join("Unknown.opentake");
+        let source = root.join("source.mp4");
+        touch(&source);
+        let mut project = opentake_project::Project::new(&bundle);
+        project.manifest.entries.push(MediaManifestEntry {
+            id: "asset-1".into(),
+            name: "source".into(),
+            kind: ClipType::Video,
+            source: MediaSource::External {
+                absolute_path: source.to_string_lossy().into_owned(),
+            },
+            duration: 1.0,
+            generation_input: None,
+            source_width: Some(320),
+            source_height: Some(240),
+            source_fps: Some(30.0),
+            has_audio: Some(false),
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+        project.save().expect("save known fixture");
+        let path = bundle.join("project.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read timeline fixture"))
+                .expect("decode timeline fixture");
+        value["futureTimeline"] = serde_json::json!(true);
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&value).expect("encode unknown fixture"),
+        )
+        .expect("write unknown fixture");
+        let core = AppCore::new();
+        core.open_project(bundle).expect("unknown project opens");
+        core
+    }
+
+    fn recursive_tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        fn walk(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+            if !dir.exists() {
+                return;
+            }
+            let mut paths = fs::read_dir(dir)
+                .expect("read tree")
+                .map(|entry| entry.expect("read tree entry").path())
+                .collect::<Vec<_>>();
+            paths.sort();
+            for path in paths {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("tree path under root")
+                    .into();
+                if path.is_dir() {
+                    out.push((relative, b"<dir>".to_vec()));
+                    walk(root, &path, out);
+                } else {
+                    out.push((relative, fs::read(&path).expect("read tree file")));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    #[test]
+    fn favorite_command_refuses_unknown_project_without_manifest_change() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let core = unknown_core(tmp.path());
+        let before = core.media();
+
+        let error = core
+            .set_media_favorite(&["asset-1".into()], true)
+            .expect_err("favorite must be rejected");
+
+        assert_eq!(error.code(), "validation");
+        assert_eq!(core.media(), before);
+    }
+
+    #[test]
+    fn import_commands_refuse_unknown_project_without_manifest_or_folder_change() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let root = tmp.path();
+        let core = unknown_core(root);
+        let engine = engine_for(root);
+        let explicit = root.join("explicit.mp4");
+        touch(&explicit);
+        let flat = root.join("flat");
+        fs::create_dir(&flat).expect("create flat fixture");
+        touch(&flat.join("flat.mp4"));
+        let recursive = root.join("recursive");
+        fs::create_dir_all(recursive.join("nested")).expect("create recursive fixture");
+        touch(&recursive.join("nested/recursive.mp4"));
+        let empty = root.join("empty");
+        fs::create_dir(&empty).expect("create empty fixture");
+        let before = core.media();
+
+        import_one(&core, &engine, &explicit).expect_err("explicit import must be rejected");
+        assert_eq!(core.media(), before);
+        for file in list_top_level(&flat).0 {
+            import_one(&core, &engine, &file).expect_err("flat import must be rejected");
+        }
+        assert_eq!(core.media(), before);
+        mirror_dir(&core, &engine, &recursive, None, &mut Vec::new())
+            .expect_err("recursive import must be rejected");
+        assert_eq!(core.media(), before);
+        mirror_dir(&core, &engine, &empty, None, &mut Vec::new())
+            .expect_err("empty import must be rejected");
+        assert_eq!(core.media(), before);
+    }
+
+    #[test]
+    fn save_clip_as_media_refuses_before_media_output_creation() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let core = unknown_core(tmp.path());
+        let media_tree = core.project_dir().expect("opened project").join("media");
+        fs::create_dir_all(media_tree.join("existing")).expect("create media tree fixture");
+        fs::write(media_tree.join("existing/keep.bin"), b"before")
+            .expect("write media tree fixture");
+        let before = recursive_tree(&media_tree);
+
+        ensure_save_clip_as_media_mutable(&core).expect_err("save clip must be rejected");
+
+        assert_eq!(recursive_tree(&media_tree), before);
+    }
+
     #[test]
     fn dto_projects_external_entry_with_path() {
         let entry = MediaManifestEntry {
@@ -1621,7 +1765,7 @@ mod tests {
                 .unwrap();
         }
 
-        let entry = import_one(&core, &engine, &source).unwrap();
+        let entry = import_one(&core, &engine, &source).unwrap().unwrap();
         let target = poster_path_for(engine.cache_root(), &cache_key_for(&source).unwrap());
         let first = schedule_import_poster(&core, &engine, &scheduler, &entry, &source);
         let duplicate = schedule_import_poster(&core, &engine, &scheduler, &entry, &source);
@@ -1659,14 +1803,16 @@ mod tests {
         let engine = engine_for(tmp.path());
 
         let core = AppCore::new();
-        let old_entry = import_one(&core, &engine, &old_source).unwrap();
+        let old_entry = import_one(&core, &engine, &old_source).unwrap().unwrap();
         let old_epoch = core.project_revision().project_epoch;
         let scheduler = prewarm::PrewarmScheduler::new(old_epoch);
 
         // A separate project has its own id generator, so its first persisted
         // asset legitimately reuses the old project's id with another source.
         let replacement = AppCore::new();
-        let new_entry = import_one(&replacement, &engine, &new_source).unwrap();
+        let new_entry = import_one(&replacement, &engine, &new_source)
+            .unwrap()
+            .unwrap();
         assert_eq!(new_entry.id, old_entry.id);
         assert_ne!(new_entry.source, old_entry.source);
         let bundle = tmp.path().join("replacement.opentake");
@@ -1728,7 +1874,8 @@ mod tests {
             None,
             &mut skipped,
             &mut prewarm_results,
-        );
+        )
+        .unwrap();
 
         let m = core.media();
         // Folders: Trip (root) + Day1 + Empty, nested under Trip.
@@ -1769,7 +1916,8 @@ mod tests {
             None,
             &mut skipped,
             &mut prewarm_results,
-        );
+        )
+        .unwrap();
 
         let dto = MediaListDto::from_core(&core, None);
         assert_eq!(dto.folders.len(), 1);
@@ -1867,7 +2015,7 @@ mod tests {
         touch(&clip);
         let core = AppCore::new();
         let media = MediaState::new(engine_for(root));
-        let entry = import_one(&core, media.engine(), &clip).unwrap();
+        let entry = import_one(&core, media.engine(), &clip).unwrap().unwrap();
 
         // A freshly imported asset is not favorited.
         let before = MediaListDto::from_core(&core, None);
@@ -1876,17 +2024,19 @@ mod tests {
 
         // Favoriting it surfaces in the DTO.
         assert_eq!(
-            core.set_media_favorite(std::slice::from_ref(&entry.id), true),
+            core.set_media_favorite(std::slice::from_ref(&entry.id), true)
+                .unwrap(),
             1
         );
         assert!(MediaListDto::from_core(&core, None).items[0].favorite);
 
         // Unknown ids never create phantom favorites.
-        assert_eq!(core.set_media_favorite(&["ghost".into()], true), 0);
+        assert_eq!(core.set_media_favorite(&["ghost".into()], true).unwrap(), 0);
 
         // Unfavoriting flips it back.
         assert_eq!(
-            core.set_media_favorite(std::slice::from_ref(&entry.id), false),
+            core.set_media_favorite(std::slice::from_ref(&entry.id), false)
+                .unwrap(),
             1
         );
         assert!(!MediaListDto::from_core(&core, None).items[0].favorite);
@@ -2000,7 +2150,7 @@ mod tests {
         let engine = engine_for(root);
         let f = root.join("a.png");
         touch(&f);
-        import_one(&core, &engine, &f);
+        import_one(&core, &engine, &f).unwrap();
 
         let list = MediaListDto::from_core(&core, None);
         assert_eq!(list.items.len(), 1);
@@ -2017,7 +2167,7 @@ mod tests {
         let engine = engine_for(root);
         let orig = root.join("clip.mp4");
         touch(&orig);
-        let id = import_one(&core, &engine, &orig).unwrap().id;
+        let id = import_one(&core, &engine, &orig).unwrap().unwrap().id;
 
         // Source goes missing → the panel reads it as offline.
         fs::remove_file(&orig).unwrap();
@@ -2052,7 +2202,7 @@ mod tests {
         let engine = engine_for(root);
         let orig = root.join("clip.mp4");
         touch(&orig);
-        let id = import_one(&core, &engine, &orig).unwrap().id;
+        let id = import_one(&core, &engine, &orig).unwrap().unwrap().id;
 
         // Relinking a video asset to an audio file is rejected (upstream parity).
         let wrong = root.join("song.mp3");

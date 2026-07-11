@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use opentake_domain::{ClipType, MediaAsset, MediaManifest, MediaManifestEntry, Timeline};
 use opentake_ops::command::{self, EditCommand, EditResult};
 use opentake_ops::{EditorState, IdGen};
-use opentake_project::{GenerationLog, Project};
+use opentake_project::{GenerationLog, Project, ProjectCompatibility};
 
 use crate::error::{CoreError, Result};
 
@@ -116,6 +116,9 @@ pub struct EditorSession {
 
     /// Append-only AI generation audit log (persisted as `generation-log.json`).
     generation_log: GenerationLog,
+
+    /// Persisted fields this build cannot safely write back.
+    compatibility: ProjectCompatibility,
 }
 
 impl Default for EditorSession {
@@ -133,6 +136,7 @@ impl EditorSession {
             state: EditorState::default(),
             project_dir: None,
             generation_log: GenerationLog::new(),
+            compatibility: ProjectCompatibility::default(),
         }
     }
 
@@ -145,6 +149,7 @@ impl EditorSession {
     /// `project.json`, etc.) as [`CoreError::Project`].
     pub fn open_project(path: impl AsRef<Path>) -> Result<Self> {
         let project = Project::open(path)?;
+        let compatibility = project.compatibility().clone();
         // EditorState::new wraps timeline + manifest with empty history at
         // version 0 — exactly the post-open state we want.
         let state = EditorState::new(project.timeline, project.manifest);
@@ -152,6 +157,7 @@ impl EditorSession {
             state,
             project_dir: Some(project.bundle_path),
             generation_log: project.generation_log.unwrap_or_default(),
+            compatibility,
         })
     }
 
@@ -196,6 +202,7 @@ impl EditorSession {
         path: Option<PathBuf>,
         thumbnail: Option<Vec<u8>>,
     ) -> Result<PathBuf> {
+        self.ensure_mutable()?;
         // Remember the currently-open bundle before we adopt any new target, so
         // a save-as knows the source `media/` to carry across.
         let previous_dir = self.project_dir.clone();
@@ -204,7 +211,8 @@ impl EditorSession {
             None => return Err(CoreError::NoProjectOpen),
         };
 
-        let mut project = Project::new(target.clone());
+        let mut project =
+            Project::new_with_compatibility(target.clone(), self.compatibility.clone());
         project.timeline = self.state.timeline.clone();
         project.manifest = self.state.manifest.clone();
         // Cover image (upstream `snapshotThumbnail` → `thumbnail.jpg`): only set
@@ -238,6 +246,7 @@ impl EditorSession {
     /// `opentake-ops`. `Undo`/`Redo` are ordinary commands here (the ops layer
     /// models them as such), so the session needs no separate undo plumbing.
     pub fn apply(&mut self, command: EditCommand, ids: &dyn IdGen) -> Result<EditResult> {
+        self.ensure_mutable()?;
         Ok(command::apply(&mut self.state, command, ids)?)
     }
 
@@ -268,6 +277,7 @@ impl EditorSession {
         name: impl Into<String>,
         probe: &ProbedMedia,
     ) -> Result<MediaManifestEntry> {
+        self.ensure_mutable()?;
         let path = path.as_ref();
         let kind = importable_clip_type(path).ok_or(CoreError::Unsupported("media"))?;
 
@@ -317,6 +327,7 @@ impl EditorSession {
         path: impl AsRef<Path>,
         probe: &ProbedMedia,
     ) -> Result<MediaManifestEntry> {
+        self.ensure_mutable()?;
         let path = path.as_ref();
         let kind = importable_clip_type(path).ok_or(CoreError::Unsupported("media"))?;
         let entry = self
@@ -355,8 +366,9 @@ impl EditorSession {
     /// action, not a timeline edit, so it never enters undo and leaves the
     /// timeline version untouched. Unknown ids are ignored. Returns the number of
     /// ids whose favorite state actually changed.
-    pub fn set_media_favorite(&mut self, asset_ids: &[String], favorite: bool) -> usize {
-        self.state.manifest.set_favorites(asset_ids, favorite)
+    pub fn set_media_favorite(&mut self, asset_ids: &[String], favorite: bool) -> Result<usize> {
+        self.ensure_mutable()?;
+        Ok(self.state.manifest.set_favorites(asset_ids, favorite))
     }
 
     /// A clone of the current media manifest (read-only mirror for the media
@@ -404,6 +416,16 @@ impl EditorSession {
     /// Read-only access to the generation log.
     pub fn generation_log(&self) -> &GenerationLog {
         &self.generation_log
+    }
+
+    /// Compatibility state inherited from the opened project.
+    pub fn compatibility(&self) -> &ProjectCompatibility {
+        &self.compatibility
+    }
+
+    pub(crate) fn ensure_mutable(&self) -> Result<()> {
+        self.compatibility.ensure_writable()?;
+        Ok(())
     }
 
     /// Test-only seam: reseat the editable state from a prebuilt timeline (empty
