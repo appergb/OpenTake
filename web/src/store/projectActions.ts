@@ -121,7 +121,7 @@ async function runSaveCoordinator(): Promise<void> {
     const snapshot = captureSaveSnapshot();
     if (!snapshot) return;
     if (explicitRequest && !sameProject(explicitRequest)) {
-      if (queuedExplicitSave || currentProjectNeedsSave()) continue;
+      if (queuedExplicitSave) continue;
       return;
     }
     activeSaveSnapshot = snapshot;
@@ -138,7 +138,7 @@ async function runSaveCoordinator(): Promise<void> {
       }
       if (queuedExplicitSave) continue;
       if (failureIsCurrent) return;
-      if (currentProjectNeedsSave()) continue;
+      if (sameProject(snapshot) && currentProjectNeedsSave()) continue;
       return;
     }
 
@@ -152,7 +152,7 @@ async function runSaveCoordinator(): Promise<void> {
       after.markSaved(snapshot.timelineVersion);
     }
     if (queuedExplicitSave) continue;
-    if (currentProjectNeedsSave()) continue;
+    if (sameProject(snapshot) && currentProjectNeedsSave()) continue;
     return;
   }
 }

@@ -282,4 +282,35 @@ describe("saveCurrentProject", () => {
     expect(useEditorUiStore.getState().toast).toBeNull();
     expect(srv.projectSave).toHaveBeenCalledTimes(1);
   });
+
+  it("does not redirect a stale queued request to a different dirty project", async () => {
+    const first = deferred<string>();
+    srv.projectSave.mockImplementationOnce(() => first.promise);
+
+    const projectASave = saveCurrentProject();
+    useProjectStore.getState().replaceProjectSnapshot({
+      timeline: srv.timeline,
+      projectEpoch: 2,
+      version: 3,
+      projectPath: "/tmp/project-b.opentake",
+      compatibilityReadOnly: true,
+      compatibilityBlockers: ["project.json:futureTimeline"],
+    });
+    const staleProjectBSave = saveCurrentProject();
+    useProjectStore.getState().replaceProjectSnapshot({
+      timeline: srv.timeline,
+      projectEpoch: 3,
+      version: 4,
+      projectPath: "/tmp/project-c.opentake",
+      compatibilityReadOnly: false,
+      compatibilityBlockers: [],
+    });
+    useProjectStore.getState().setMirror(srv.timeline, 5, 3);
+    first.resolve("/tmp/unknown.opentake");
+    await Promise.all([projectASave, staleProjectBSave]);
+
+    expect(srv.projectSave).toHaveBeenCalledTimes(1);
+    expect(useProjectStore.getState().lastSavedVersion).toBe(4);
+    expect(useProjectStore.getState().timelineVersion).toBe(5);
+  });
 });
