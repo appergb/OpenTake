@@ -687,12 +687,9 @@ fn schedule_import_poster(
     path: &Path,
 ) -> ImportPrewarmDto {
     let snapshot = core.runtime_snapshot();
-    let result = if !snapshot
-        .media
-        .entries
-        .iter()
-        .any(|candidate| candidate.id == entry.id)
-    {
+    let result = if !snapshot.media.entries.iter().any(|candidate| {
+        candidate.id == entry.id && candidate.kind == entry.kind && candidate.source == entry.source
+    }) {
         prewarm::PrewarmResult::StaleProject
     } else if let Ok(key) = cache_key_for(path) {
         let target = poster_path_for(engine.cache_root(), &key);
@@ -1646,6 +1643,43 @@ mod tests {
         }
         assert_eq!(scheduler.in_flight_count(), 0);
         assert!(!target.exists(), "stale queued import poster was published");
+    }
+
+    #[test]
+    fn completed_project_swap_rejects_same_id_from_old_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old_source = tmp.path().join("old.png");
+        let new_source = tmp.path().join("new.png");
+        image::RgbaImage::from_pixel(16, 16, image::Rgba([255, 0, 0, 255]))
+            .save(&old_source)
+            .unwrap();
+        image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 0, 255, 255]))
+            .save(&new_source)
+            .unwrap();
+        let engine = engine_for(tmp.path());
+
+        let core = AppCore::new();
+        let old_entry = import_one(&core, &engine, &old_source).unwrap();
+        let old_epoch = core.project_revision().project_epoch;
+        let scheduler = prewarm::PrewarmScheduler::new(old_epoch);
+
+        // A separate project has its own id generator, so its first persisted
+        // asset legitimately reuses the old project's id with another source.
+        let replacement = AppCore::new();
+        let new_entry = import_one(&replacement, &engine, &new_source).unwrap();
+        assert_eq!(new_entry.id, old_entry.id);
+        assert_ne!(new_entry.source, old_entry.source);
+        let bundle = tmp.path().join("replacement.opentake");
+        replacement.save_project(Some(bundle.clone())).unwrap();
+
+        scheduler.begin_project_transition().unwrap();
+        let snapshot = core.open_project(bundle).unwrap();
+        scheduler.activate_project(snapshot.project_epoch);
+        let old_target = poster_path_for(engine.cache_root(), &cache_key_for(&old_source).unwrap());
+
+        let admission = schedule_import_poster(&core, &engine, &scheduler, &old_entry, &old_source);
+        assert_eq!(admission.result, prewarm::PrewarmResult::StaleProject);
+        assert!(!old_target.exists());
     }
 
     #[test]
