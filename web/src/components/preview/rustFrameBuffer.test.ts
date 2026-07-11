@@ -99,6 +99,7 @@ describe("retained Rust frame buffer", () => {
       afterPaint: (callback) => {
         painted = callback;
       },
+      isCurrentIdentity: () => true,
       setPlaying: vi.fn(),
       stop,
       onTerminalFailure: vi.fn(),
@@ -137,6 +138,7 @@ describe("retained Rust frame buffer", () => {
     const onTerminalFailure = vi.fn();
     applyRustFrameBufferEffect("terminal-exhausted", frame(2, { terminal: true }), {
       afterPaint: (callback) => callback(),
+      isCurrentIdentity: () => true,
       setPlaying,
       stop,
       onTerminalFailure,
@@ -148,6 +150,28 @@ describe("retained Rust frame buffer", () => {
     });
     expect(setPlaying).toHaveBeenCalledWith(false);
     expect(onTerminalFailure).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a terminal paint callback after playback identity changes", () => {
+    let painted: (() => void) | null = null;
+    let identityIsCurrent = true;
+    const setPlaying = vi.fn();
+    const stop = vi.fn().mockResolvedValue(undefined);
+
+    applyRustFrameBufferEffect("terminal-promoted", frame(2, { terminal: true }), {
+      afterPaint: (callback) => {
+        painted = callback;
+      },
+      isCurrentIdentity: () => identityIsCurrent,
+      setPlaying,
+      stop,
+      onTerminalFailure: vi.fn(),
+    });
+    identityIsCurrent = false;
+    (painted as (() => void) | null)?.();
+
+    expect(stop).not.toHaveBeenCalled();
+    expect(setPlaying).not.toHaveBeenCalled();
   });
 
   it("clears both slots when project epoch timeline version or session id changes", () => {

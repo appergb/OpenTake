@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { CompositeFrame } from "../../lib/api";
 import type { PlaybackFrameEvent, PlaybackIdentity } from "../../lib/types";
 import { useEditorUiStore } from "../../store/uiStore";
-import { nativePlaybackController } from "./nativePlaybackSession";
+import { nativePlaybackController, samePlaybackIdentity } from "./nativePlaybackSession";
 import {
   createRustFrameBufferState,
   failRustFrame,
@@ -42,6 +42,7 @@ function identityFor(frame: PlaybackFrameEvent): PlaybackIdentity {
 
 export interface RustFrameBufferEffectDependencies {
   afterPaint: (callback: () => void) => void;
+  isCurrentIdentity: (identity: PlaybackIdentity) => boolean;
   setPlaying: (playing: boolean) => void;
   stop: (identity: PlaybackIdentity) => Promise<void>;
   onTerminalFailure: () => void;
@@ -52,15 +53,18 @@ export function applyRustFrameBufferEffect(
   frame: PlaybackFrameEvent,
   dependencies: RustFrameBufferEffectDependencies,
 ): void {
+  const identity = identityFor(frame);
   if (effect === "terminal-exhausted") {
+    if (!dependencies.isCurrentIdentity(identity)) return;
     dependencies.onTerminalFailure();
     dependencies.setPlaying(false);
-    void dependencies.stop(identityFor(frame)).catch(() => undefined);
+    void dependencies.stop(identity).catch(() => undefined);
     return;
   }
   if (effect === "terminal-promoted") {
     dependencies.afterPaint(() => {
-      const stopped = dependencies.stop(identityFor(frame));
+      if (!dependencies.isCurrentIdentity(identity)) return;
+      const stopped = dependencies.stop(identity);
       dependencies.setPlaying(false);
       void stopped.catch(() => undefined);
     });
@@ -98,6 +102,8 @@ export function RustFrameBuffer({
     }
     applyRustFrameBufferEffect(effect, frame, {
       afterPaint,
+      isCurrentIdentity: (identity) =>
+        samePlaybackIdentity(nativePlaybackController.currentIdentity(), identity),
       setPlaying: (playing) => useEditorUiStore.getState().setPlaying(playing),
       stop: (identity) => nativePlaybackController.stop(identity),
       onTerminalFailure,
