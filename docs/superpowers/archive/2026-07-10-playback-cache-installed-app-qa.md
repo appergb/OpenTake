@@ -156,12 +156,16 @@ original 2026-07-10 risk record remain open unless separately proven elsewhere:
   Models / Help / Feedback / Privacy surfaces;
 - signed/notarized packaging, CSP and asset-scope hardening, bundled
   ffmpeg/ffprobe sidecars, search-model manifest integrity, and Windows
-  transport/sidecar behavior.
+  transport/sidecar behavior;
+- automated CI coverage for the Computer Use screenshot checks and the
+  no-extra-mpv/media-process sentinel. Both remain manual QA evidence; the 04a
+  automated gate does not execute or replace them.
 
 ## Current disposition
 
 Verified only within the artifact boundaries above: the tested installed app
-showed visible play/pause/resume without a separate mpv process; Task 6.2 proved
+showed visible play/pause/resume without a separate mpv process through manual
+Computer Use and process-sentinel QA, not automated CI coverage; Task 6.2 proved
 the exact capability route and retained-frame handoff; Task 6.3 proved final
 same-ID/different-path visual-cache replacement. Unsupported capabilities are
 fail-closed and must not be marketed as verified. Installed-app export UI
