@@ -50,13 +50,14 @@ const srv = vi.hoisted(() => {
         compatibilityBlockers: [],
       };
     }),
+    projectSave: vi.fn(async (path: string | null) => path ?? ""),
   };
 });
 
 vi.mock("../lib/api", () => ({
   projectOpen: srv.projectOpen,
   projectNew: srv.projectNew,
-  projectSave: async (path: string | null) => path ?? "",
+  projectSave: srv.projectSave,
   getDefaultProjectDir: async () => "",
   getTimeline: async () => ({
     timeline: srv.timeline,
@@ -80,7 +81,7 @@ vi.mock("../lib/dialog", () => ({
   openDialog: async () => undefined,
 }));
 
-import { newProjectAndEnter, openProjectPath } from "./projectActions";
+import { newProjectAndEnter, openProjectPath, saveCurrentProject } from "./projectActions";
 import { useEditorUiStore } from "./uiStore";
 import { useMediaStore } from "./mediaStore";
 import { useProjectStore } from "./projectStore";
@@ -92,10 +93,12 @@ describe("openProjectPath", () => {
     srv.stopBoundary.mockClear();
     srv.projectOpen.mockClear();
     srv.projectNew.mockClear();
+    srv.projectSave.mockReset();
+    srv.projectSave.mockImplementation(async (path: string | null) => path ?? "");
     useMediaStore.getState().setItems([]);
     useRecentStore.setState({ recents: [] });
     useProjectStore.setState({ projectPath: null, timelineVersion: 0 });
-    useEditorUiStore.setState({ view: "home" });
+    useEditorUiStore.setState({ view: "home", toast: null });
   });
 
   it("refreshes the media mirror after opening a project", async () => {
@@ -145,5 +148,29 @@ describe("openProjectPath", () => {
     expect(srv.order.slice(0, 2)).toEqual(["stop", "new"]);
     expect(useProjectStore.getState().projectEpoch).toBe(5);
     expect(useProjectStore.getState().projectPath).toBe("/tmp/fresh.opentake");
+  });
+});
+
+describe("saveCurrentProject", () => {
+  beforeEach(() => {
+    srv.projectSave.mockReset();
+    srv.projectSave.mockImplementation(async (path: string | null) => path ?? "");
+    useProjectStore.setState({
+      projectPath: "/tmp/unknown.opentake",
+      timelineVersion: 9,
+      lastSavedVersion: 8,
+    });
+    useEditorUiStore.setState({ toast: null });
+  });
+
+  it("surfaces a rejected compatibility save and keeps the document dirty", async () => {
+    srv.projectSave.mockRejectedValueOnce(
+      new Error("project is compatibility read-only because this build does not understand future fields"),
+    );
+
+    await saveCurrentProject();
+
+    expect(useEditorUiStore.getState().toast?.message).toContain("compatibility read-only");
+    expect(useProjectStore.getState().lastSavedVersion).toBe(8);
   });
 });

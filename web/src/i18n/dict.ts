@@ -26,6 +26,7 @@ const zh: Dict = {
     "此项目包含当前版本无法安全保存的字段。仍可查看项目内容，但编辑和保存已停用。",
   "compatibility.blockerCount.one": "{count} 个兼容性问题",
   "compatibility.blockerCount.many": "{count} 个兼容性问题",
+  "project.saveFailed": "保存失败：{error}",
 
   // TitleBar
   "title.toggleAgent": "切换 Agent 面板",
@@ -637,6 +638,7 @@ const en: Dict = {
     "This project contains fields this version cannot safely save. You can still inspect the project, but editing and saving are disabled.",
   "compatibility.blockerCount.one": "{count} compatibility issue",
   "compatibility.blockerCount.many": "{count} compatibility issues",
+  "project.saveFailed": "Save failed: {error}",
 
   "title.toggleAgent": "Toggle Agent Panel",
   "title.export": "Export",

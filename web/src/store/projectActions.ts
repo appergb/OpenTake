@@ -76,7 +76,8 @@ export async function newProjectAndEnter(): Promise<void> {
  * Cmd/Ctrl+S shortcut and the debounced autosave. No-op when no project is open
  * (Home view) or outside Tauri. The backend already knows the bundle path from
  * the initial save, so no path is passed. Best-effort: a failure leaves the
- * dirty state so the next autosave/Cmd+S retries.
+ * dirty state so the next autosave/Cmd+S retries, and surface the backend
+ * reason so compatibility read-only saves never fail silently.
  */
 export async function saveCurrentProject(): Promise<void> {
   const { projectPath } = useProjectStore.getState();
@@ -84,8 +85,10 @@ export async function saveCurrentProject(): Promise<void> {
   try {
     await api.projectSave(null);
     useProjectStore.getState().markSaved();
-  } catch {
-    // Keep the document dirty so a later save retries; surfaced via UI later.
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    useEditorUiStore.getState().pushToast(t("project.saveFailed", { error: message }));
+    // Keep the document dirty so a later save retries.
   }
 }
 
