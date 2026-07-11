@@ -1,7 +1,7 @@
 //! Audio master clock + cpal output for streaming playback (#63 / #160).
 //!
 //! The acceptance is "audio drives the playhead; video follows (dropping frames
-//! to stay in sync)". [`build_clock`] realises that: when the timeline carries
+//! to stay in sync)". [`try_build_clock`] realises that: when the timeline carries
 //! sound it pre-mixes the whole timeline to one **interleaved stereo** buffer at
 //! the cpal device sample rate, plays it through a dedicated cpal output thread,
 //! and exposes the device's frame position as [`AudioClock`] — the master clock
