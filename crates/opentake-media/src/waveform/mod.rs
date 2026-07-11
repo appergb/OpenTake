@@ -56,6 +56,29 @@ pub fn waveform_cancellable(
     Ok(rms_downsample_normalized(&pcm.samples_f32, count))
 }
 
+/// Compute a cancellable waveform and serialize the cache payload without
+/// publishing it. Project-scoped prewarm jobs hand these bytes to their epoch
+/// guard for a same-directory staged rename.
+pub fn waveform_cache_bytes_cancellable(
+    path: &Path,
+    duration_secs: f64,
+    cancel: &MediaCancelToken,
+) -> Result<Vec<u8>> {
+    let samples = waveform_cancellable(path, duration_secs, cancel)?;
+    if cancel.checkpoint() {
+        return Err(crate::MediaError::Cancelled);
+    }
+    Ok(waveform_cache_bytes(&samples))
+}
+
+fn waveform_cache_bytes(samples: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(samples.len().saturating_mul(4));
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
+}
+
 /// Like [`waveform`] but reads/writes the `.waveform` disk cache under
 /// `<cache_root>/MediaVisualCache/<key>.waveform`.
 pub fn waveform_cached(cache_root: &Path, path: &Path, duration_secs: f64) -> Result<Vec<f32>> {
@@ -77,4 +100,17 @@ pub fn waveform_cached_cancellable(
         return Ok(samples);
     }
     waveform_cancellable(path, duration_secs, cancel)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::waveform_cache_bytes;
+
+    #[test]
+    fn prewarm_waveform_cache_bytes_are_little_endian() {
+        assert_eq!(
+            waveform_cache_bytes(&[1.0, -0.25]),
+            vec![0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x80, 0xbe]
+        );
+    }
 }

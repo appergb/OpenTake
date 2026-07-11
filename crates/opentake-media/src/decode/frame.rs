@@ -15,6 +15,7 @@ use std::thread;
 use std::time::Duration;
 
 use ffmpeg_sidecar::event::FfmpegEvent;
+use image::ImageEncoder;
 
 use crate::cancel::MediaCancelToken;
 use crate::error::{MediaError, Result};
@@ -221,6 +222,27 @@ pub fn decode_frame_at_cancellable(
             }
         }
     }
+}
+
+/// Decode one cancellable frame and encode it as PNG bytes without publishing
+/// a cache file. Project-scoped prewarm jobs stage these bytes and let their
+/// epoch guard perform the final atomic rename.
+pub fn decode_frame_png_cancellable(
+    path: &Path,
+    req: &FrameRequest,
+    cancel: &MediaCancelToken,
+) -> Result<(f64, Vec<u8>)> {
+    let (actual, frame) = decode_frame_at_cancellable(path, req, cancel)?;
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut bytes)
+        .write_image(
+            &frame.rgba,
+            frame.width,
+            frame.height,
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|error| MediaError::Encode(format!("png: {error}")))?;
+    Ok((actual, bytes))
 }
 
 pub fn decode_frames_at_cancellable(

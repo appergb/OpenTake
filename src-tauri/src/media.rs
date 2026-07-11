@@ -43,6 +43,8 @@ use opentake_media::{
     FrameRequest, MediaEngine, RgbaFrame,
 };
 
+pub mod prewarm;
+
 /// Managed-state wrapper over the media engine. The engine is read-only here
 /// (probe only) and shared across commands; `Send + Sync` so it lives in Tauri
 /// state.
@@ -347,6 +349,11 @@ fn write_png(path: &Path, frame: &RgbaFrame) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    let bytes = encode_png(frame)?;
+    std::fs::write(path, bytes).map_err(|e| e.to_string())
+}
+
+fn encode_png(frame: &RgbaFrame) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     image::codecs::png::PngEncoder::new(&mut bytes)
         .write_image(
@@ -356,7 +363,7 @@ fn write_png(path: &Path, frame: &RgbaFrame) -> Result<(), String> {
             image::ExtendedColorType::Rgba8,
         )
         .map_err(|e| format!("png encode: {e}"))?;
-    std::fs::write(path, bytes).map_err(|e| e.to_string())
+    Ok(bytes)
 }
 
 fn cached_thumbnail_path_for_entry(
@@ -1225,42 +1232,86 @@ pub fn get_waveform(
     })
 }
 
-/// `preload_media`: warm ONLY what makes the next preview instant — the hi-res
-/// first-frame poster (video) — so a cold click shows a sharp first frame with
-/// no decode on the interaction path. Meant to be called fire-and-forget when a
-/// media item is selected or drag starts; it runs on a Tauri worker thread, so
-/// it never blocks the UI, and is best-effort (a failure just means the cache
-/// stays cold, never an error to the caller).
+/// `preload_media`: enqueue the smallest cache that makes the selected media
+/// immediately useful — a hi-res first-frame poster for video or a waveform for
+/// audio. The bounded project scheduler keeps this fire-and-forget work off the
+/// command thread and returns an explicit admission result.
 ///
-/// Deliberately does NOT warm the 240-frame timeline filmstrip sprite or the
-/// waveform: both are heavy full-source decodes that do nothing to speed actual
-/// `<video>` playback (the asset protocol streams that progressively), and the
-/// sprite/waveform are loaded lazily by their own consumers when a clip is
-/// actually on the timeline.
+/// Deliberately does not warm the 240-frame filmstrip sprite. Video playback is
+/// streamed progressively; audio has no progressive visual fallback, so its
+/// bounded waveform job is the useful equivalent of the video poster.
 #[tauri::command]
 pub fn preload_media(
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
+    prewarm: State<'_, prewarm::PrewarmScheduler>,
     media_ref: String,
-) -> Result<(), String> {
-    let manifest = core.media();
-    let Some(entry) = manifest.entries.iter().find(|e| e.id == media_ref) else {
-        return Ok(());
+) -> Result<prewarm::PrewarmResult, String> {
+    let snapshot = core.runtime_snapshot();
+    let Some(entry) = snapshot.media.entries.iter().find(|e| e.id == media_ref) else {
+        return Ok(prewarm::PrewarmResult::Cached);
     };
-    if entry.kind != ClipType::Video {
-        return Ok(());
-    }
-    let Some(path) = resolve_source_path(entry, core.project_dir().as_deref()) else {
-        return Ok(());
+    let Some(path) = resolve_source_path(entry, snapshot.project_dir.as_deref()) else {
+        return Ok(prewarm::PrewarmResult::Cached);
     };
     if !path.is_file() {
-        return Ok(());
+        return Ok(prewarm::PrewarmResult::Cached);
     }
-    if let Ok(key) = cache_key_for(&path) {
-        // Hi-res preview poster only (best-effort).
-        let _ = video_preview_poster(media.engine(), &path, &key, None);
+    let key = cache_key_for(&path)?;
+    let epoch = snapshot.project_epoch;
+    match entry.kind {
+        ClipType::Video => {
+            let target = preview_poster_path_for(media.engine().cache_root(), &key, 0.0);
+            let cached = image::image_dimensions(&target).is_ok();
+            Ok(prewarm.schedule(
+                epoch,
+                prewarm::PrewarmKind::PreviewPoster,
+                key,
+                cached,
+                move |context| {
+                    let request = FrameRequest {
+                        time_secs: 0.0,
+                        max_size: PREVIEW_POSTER_MAX_SIZE,
+                        tolerance_secs: THUMB_TOLERANCE_SECS,
+                        apply_rotation: true,
+                    };
+                    let cancel = context.cancel_token();
+                    let Ok((_, bytes)) =
+                        opentake_media::decode::frame::decode_frame_png_cancellable(
+                            &path, &request, &cancel,
+                        )
+                    else {
+                        return;
+                    };
+                    let _ = context.commit_staged_bytes(&target, &bytes);
+                },
+            ))
+        }
+        ClipType::Audio => {
+            let target =
+                visual_cache_dir(media.engine().cache_root()).join(format!("{key}.waveform"));
+            let cached =
+                opentake_media::waveform::store::load_waveform(media.engine().cache_root(), &key)
+                    .is_some();
+            let duration = entry.duration;
+            Ok(prewarm.schedule(
+                epoch,
+                prewarm::PrewarmKind::TimelineVisuals,
+                key,
+                cached,
+                move |context| {
+                    let cancel = context.cancel_token();
+                    let Ok(bytes) = opentake_media::waveform::waveform_cache_bytes_cancellable(
+                        &path, duration, &cancel,
+                    ) else {
+                        return;
+                    };
+                    let _ = context.commit_staged_bytes(&target, &bytes);
+                },
+            ))
+        }
+        _ => Ok(prewarm::PrewarmResult::Cached),
     }
-    Ok(())
 }
 
 #[cfg(test)]

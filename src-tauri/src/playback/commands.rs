@@ -116,6 +116,14 @@ impl PlaybackState {
         PlaybackState::default()
     }
 
+    pub fn ensure_project_transition_available(&self) -> Result<(), PlaybackCommandError> {
+        self.slot
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .sessions
+            .ensure_project_transition_available()
+    }
+
     fn coordinate_start(
         &self,
         identity: PlaybackIdentity,

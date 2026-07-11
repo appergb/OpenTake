@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
 use opentake_core::dto::{
-    handle_edit_apply, handle_get_timeline, handle_project_new, handle_project_open, handle_redo,
-    handle_undo, EditResultDto, TimelineSnapshotDto,
+    handle_edit_apply, handle_get_timeline, handle_project_new, handle_redo, handle_undo,
+    EditResultDto, TimelineSnapshotDto,
 };
 use opentake_core::{AppCore, CmdError, EditCommand};
 
@@ -55,25 +55,48 @@ pub fn redo(core: State<'_, AppCore>) -> Result<EditResultDto, String> {
 pub fn project_new(
     core: State<'_, AppCore>,
     playback: State<'_, crate::playback::PlaybackState>,
+    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
 ) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
-    project_new_with_playback(&core, &playback)
+    project_new_with_playback_and_prewarm(&core, &playback, &prewarm)
 }
 
-#[cfg(feature = "playback-engine")]
+#[cfg(all(feature = "playback-engine", test))]
 pub(crate) fn project_new_with_playback(
     core: &AppCore,
     playback: &crate::playback::PlaybackState,
 ) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
+    let prewarm =
+        crate::media::prewarm::PrewarmScheduler::new(core.project_revision().project_epoch);
+    project_new_with_playback_and_prewarm(core, playback, &prewarm)
+}
+
+#[cfg(feature = "playback-engine")]
+fn project_new_with_playback_and_prewarm(
+    core: &AppCore,
+    playback: &crate::playback::PlaybackState,
+    prewarm: &crate::media::prewarm::PrewarmScheduler,
+) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
     let transition = playback.begin_project_transition()?;
+    if let Err(error) = prewarm.begin_project_transition() {
+        playback.cancel_project_transition(transition);
+        return Err(crate::playback::session::PlaybackCommandError::busy(error));
+    }
     let snapshot = handle_project_new(core);
     playback.activate_project(transition, snapshot.project_epoch);
+    prewarm.activate_project(snapshot.project_epoch);
     Ok(snapshot)
 }
 
 #[cfg(not(feature = "playback-engine"))]
 #[tauri::command]
-pub fn project_new(core: State<'_, AppCore>) -> TimelineSnapshotDto {
-    handle_project_new(&core)
+pub fn project_new(
+    core: State<'_, AppCore>,
+    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
+) -> Result<TimelineSnapshotDto, String> {
+    prewarm.begin_project_transition()?;
+    let snapshot = handle_project_new(&core);
+    prewarm.activate_project(snapshot.project_epoch);
+    Ok(snapshot)
 }
 
 /// `project_open`: open a `.opentake` bundle, returning the first snapshot.
@@ -83,36 +106,58 @@ pub fn project_open(
     core: State<'_, AppCore>,
     path: String,
     playback: State<'_, crate::playback::PlaybackState>,
+    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
 ) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
-    project_open_with_playback(&core, path, &playback)
+    project_open_with_playback_and_prewarm(&core, path, &playback, &prewarm)
 }
 
-#[cfg(feature = "playback-engine")]
+#[cfg(all(feature = "playback-engine", test))]
 pub(crate) fn project_open_with_playback(
     core: &AppCore,
     path: String,
     playback: &crate::playback::PlaybackState,
 ) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
+    let prewarm =
+        crate::media::prewarm::PrewarmScheduler::new(core.project_revision().project_epoch);
+    project_open_with_playback_and_prewarm(core, path, playback, &prewarm)
+}
+
+#[cfg(feature = "playback-engine")]
+fn project_open_with_playback_and_prewarm(
+    core: &AppCore,
+    path: String,
+    playback: &crate::playback::PlaybackState,
+    prewarm: &crate::media::prewarm::PrewarmScheduler,
+) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
+    playback.ensure_project_transition_available()?;
+    let prepared =
+        AppCore::prepare_project_open(std::path::PathBuf::from(path)).map_err(|error| {
+            crate::playback::session::PlaybackCommandError::engine(error.to_string())
+        })?;
     let transition = playback.begin_project_transition()?;
-    match handle_project_open(core, path)
-        .map_err(msg)
-        .map_err(crate::playback::session::PlaybackCommandError::engine)
-    {
-        Ok(snapshot) => {
-            playback.activate_project(transition, snapshot.project_epoch);
-            Ok(snapshot)
-        }
-        Err(error) => {
-            playback.cancel_project_transition(transition);
-            Err(error)
-        }
+    if let Err(error) = prewarm.begin_project_transition() {
+        playback.cancel_project_transition(transition);
+        return Err(crate::playback::session::PlaybackCommandError::busy(error));
     }
+    let snapshot = TimelineSnapshotDto::from(core.commit_project_open(prepared));
+    playback.activate_project(transition, snapshot.project_epoch);
+    prewarm.activate_project(snapshot.project_epoch);
+    Ok(snapshot)
 }
 
 #[cfg(not(feature = "playback-engine"))]
 #[tauri::command]
-pub fn project_open(core: State<'_, AppCore>, path: String) -> Result<TimelineSnapshotDto, String> {
-    handle_project_open(&core, path).map_err(msg)
+pub fn project_open(
+    core: State<'_, AppCore>,
+    path: String,
+    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
+) -> Result<TimelineSnapshotDto, String> {
+    let prepared = AppCore::prepare_project_open(std::path::PathBuf::from(path))
+        .map_err(|error| error.to_string())?;
+    prewarm.begin_project_transition()?;
+    let snapshot = TimelineSnapshotDto::from(core.commit_project_open(prepared));
+    prewarm.activate_project(snapshot.project_epoch);
+    Ok(snapshot)
 }
 
 /// `project_save`: `path = None` saves back to the open bundle; `Some` is save-as.
@@ -1141,6 +1186,64 @@ impl KeyframeValueDto {
             KeyframeValueDto::Pair { value } => KeyframeValue::Pair(value),
             KeyframeValueDto::Crop { value } => KeyframeValue::Crop(value),
         }
+    }
+}
+
+#[cfg(all(test, feature = "playback-engine"))]
+mod project_prewarm_lifecycle_tests {
+    use super::project_open_with_playback_and_prewarm;
+    use crate::media::prewarm::PrewarmScheduler;
+    use crate::playback::PlaybackState;
+    use opentake_core::AppCore;
+
+    #[test]
+    fn failed_project_prepare_changes_no_playback_or_prewarm_state() {
+        let core = AppCore::new();
+        let before = core.project_revision();
+        let playback = PlaybackState::new();
+        let prewarm = PrewarmScheduler::new(before.project_epoch);
+        let missing = tempfile::tempdir()
+            .expect("tempdir")
+            .path()
+            .join("missing.opentake")
+            .to_string_lossy()
+            .into_owned();
+
+        let error = project_open_with_playback_and_prewarm(&core, missing, &playback, &prewarm)
+            .expect_err("missing project must fail in prepare");
+
+        assert_eq!(
+            error.code,
+            crate::playback::session::PlaybackErrorCode::Engine
+        );
+        assert_eq!(core.project_revision(), before);
+        assert_eq!(prewarm.project_state(), (before.project_epoch, false));
+        assert!(playback.active_identity().is_none());
+    }
+
+    #[test]
+    fn successful_open_activates_prepared_epoch_in_both_coordinators() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let bundle = fixture.path().join("prepared.opentake");
+        let source = AppCore::new();
+        source
+            .save_project(Some(bundle.clone()))
+            .expect("save project fixture");
+
+        let core = AppCore::new();
+        let before = core.project_revision();
+        let playback = PlaybackState::new();
+        let prewarm = PrewarmScheduler::new(before.project_epoch);
+        let snapshot = project_open_with_playback_and_prewarm(
+            &core,
+            bundle.to_string_lossy().into_owned(),
+            &playback,
+            &prewarm,
+        )
+        .expect("commit prepared project");
+
+        assert_ne!(snapshot.project_epoch, before.project_epoch);
+        assert_eq!(prewarm.project_state(), (snapshot.project_epoch, false));
     }
 }
 

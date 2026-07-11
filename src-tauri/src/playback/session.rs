@@ -149,6 +149,15 @@ pub struct SessionRegistry {
 }
 
 impl SessionRegistry {
+    pub fn ensure_project_transition_available(&self) -> Result<(), PlaybackCommandError> {
+        if self.transition.is_some() {
+            return Err(PlaybackCommandError::busy(
+                "project transition is already in progress",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn start_would_resume(
         &self,
         requested: &PlaybackIdentity,

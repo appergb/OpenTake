@@ -37,6 +37,7 @@ use tauri::{Emitter, Manager, WindowEvent};
 #[cfg(target_os = "macos")]
 use tauri::RunEvent;
 
+use crate::media::prewarm::PrewarmScheduler;
 use crate::media::MediaState;
 
 /// Build and run the Tauri application. The `main.rs` binary calls this.
@@ -78,6 +79,7 @@ pub fn run() {
 
             // The one authoritative editing session, shared with every command.
             let core = AppCore::new();
+            let initial_project_epoch = core.project_revision().project_epoch;
 
             // Forward core events to the WebView. The closure runs on whatever
             // thread emitted the event (after the core released its lock), so
@@ -141,6 +143,7 @@ pub fn run() {
             app.manage(core);
             app.manage(chat_state);
             app.manage(MediaState::new(engine));
+            app.manage(PrewarmScheduler::new(initial_project_epoch));
             app.manage(crate::library::LibraryState::new(library_store));
             // Lazily-acquired GPU context for timeline composite previews (#47).
             app.manage(render::RenderState::new());
@@ -294,6 +297,11 @@ fn resolve_media_tools() {
 /// `kind` tag the front end listens for; the payload is the event itself
 /// (serialized with its `kind`-tagged shape).
 fn forward_event(app: &tauri::AppHandle, event: &CoreEvent) {
+    if let CoreEvent::ProjectOpened { project_epoch, .. } = event {
+        if let Some(prewarm) = app.try_state::<PrewarmScheduler>() {
+            prewarm.activate_project(*project_epoch);
+        }
+    }
     #[cfg(feature = "playback-engine")]
     {
         if let Some(playback) = app.try_state::<playback::PlaybackState>() {

@@ -120,7 +120,11 @@ struct CoreSessionSlot {
     editor: EditorSession,
 }
 
-struct PreparedProjectOpen {
+/// Fully loaded project replacement awaiting an atomic session commit.
+///
+/// Fields stay private so callers can only pass the exact prepared value back
+/// to [`AppCore::commit_project_open`].
+pub struct PreparedProjectOpen {
     path: PathBuf,
     editor: EditorSession,
 }
@@ -307,12 +311,12 @@ impl AppCore {
         Ok(self.commit_project_open(prepared))
     }
 
-    fn prepare_project_open(path: PathBuf) -> Result<PreparedProjectOpen> {
+    pub fn prepare_project_open(path: PathBuf) -> Result<PreparedProjectOpen> {
         let editor = EditorSession::open_project(&path)?;
         Ok(PreparedProjectOpen { path, editor })
     }
 
-    fn commit_project_open(&self, prepared: PreparedProjectOpen) -> TimelineSnapshot {
+    pub fn commit_project_open(&self, prepared: PreparedProjectOpen) -> TimelineSnapshot {
         let snapshot = {
             let mut session = self.lock();
             session.replace_editor(prepared.editor)
