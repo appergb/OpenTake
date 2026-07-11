@@ -251,24 +251,26 @@ describe("accessibleClipRects", () => {
     expect(timelineContainer.clipAccessTargetSize?.(80, 46)).toEqual({ width: 80, height: 46 });
   });
 
-  it("makes the full 24px proxy footprint pointer-hittable through the canvas", () => {
+  it("keeps the full 24px canvas and AX footprint aligned at the timeline boundary", () => {
     const tl = timeline([
-      track("v1", [clip({ id: "narrow", mediaType: "video", startFrame: 10, durationFrames: 1 })]),
+      track("v1", [clip({ id: "narrow", mediaType: "video", startFrame: 0, durationFrames: 1 })]),
     ]);
     const rect = timelineContainer.accessibleClipRects?.(tl, 1, {}, 0, 0, 500, 200)?.[0];
 
-    expect(rect).toBeDefined();
-    const hit = timelineContainer.hitTestAccessibleClip?.(
-      tl,
-      10 - 11,
-      (rect?.top ?? 0) + 23,
-      1,
-      {},
+    expect(timelineContainer.clipAccessTargetRect?.(0, rect?.top ?? 0, 1, 46, 0, 24)).toEqual({
+      left: 0,
+      top: rect?.top,
+      width: 24,
+      height: 46,
+    });
+    expect(rect).toMatchObject({ left: LAYOUT.trackHeaderWidth, width: 24, height: 46 });
+    expect(timelineContainer.hitTestAccessibleClip?.(tl, 0, (rect?.top ?? 0) + 23, 1, {})?.clip.id).toBe(
+      "narrow",
     );
-
-    expect(hit?.clip.id).toBe("narrow");
-    expect(hit?.region).toBe("body");
-    expect(timelineContainer.hitTestAccessibleClip?.(tl, 10 - 13, (rect?.top ?? 0) + 23, 1, {})).toBeNull();
+    const haloHit = timelineContainer.hitTestAccessibleClip?.(tl, 23.9, (rect?.top ?? 0) + 23, 1, {});
+    expect(haloHit?.clip.id).toBe("narrow");
+    expect(haloHit?.region).toBe("body");
+    expect(timelineContainer.hitTestAccessibleClip?.(tl, 24.1, (rect?.top ?? 0) + 23, 1, {})).toBeNull();
   });
 
   it("uses the same linked-group selection semantics for canvas and AX proxies", () => {

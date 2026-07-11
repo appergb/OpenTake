@@ -187,6 +187,30 @@ export function clipAccessTargetSize(width: number, height: number): { width: nu
   return { width: Math.max(24, width), height: Math.max(24, height) };
 }
 
+export function clipAccessTargetRect(
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+  minLeft: number,
+  maxRight: number,
+  minTop = 0,
+  maxBottom = Number.POSITIVE_INFINITY,
+): { left: number; top: number; width: number; height: number } {
+  const target = clipAccessTargetSize(width, height);
+  const centeredLeft = left - (target.width - width) / 2;
+  const centeredTop = top - (target.height - height) / 2;
+  const availableWidth = Math.max(0, maxRight - minLeft);
+  const availableHeight = Math.max(0, maxBottom - minTop);
+  const clampedLeft = Number.isFinite(maxRight) && availableWidth >= target.width
+    ? Math.max(minLeft, Math.min(maxRight - target.width, centeredLeft))
+    : Math.max(minLeft, centeredLeft);
+  const clampedTop = Number.isFinite(maxBottom) && availableHeight >= target.height
+    ? Math.max(minTop, Math.min(maxBottom - target.height, centeredTop))
+    : Math.max(minTop, centeredTop);
+  return { left: clampedLeft, top: clampedTop, ...target };
+}
+
 export function clipSelectionForInteraction(
   timeline: Timeline,
   selectedClipIds: Set<string>,
@@ -221,6 +245,8 @@ export function hitTestAccessibleClip(
   docY: number,
   pixelsPerFrame: number,
   trackHeights: Record<string, number>,
+  documentWidth = Math.max(24, totalFrames(timeline) * pixelsPerFrame),
+  documentHeight = contentHeight(timeline, 0, trackHeights),
 ): ClipHit | null {
   const exact = hitTestClip(timeline, docX, docY, pixelsPerFrame, trackHeights);
   if (exact) return exact;
@@ -232,10 +258,22 @@ export function hitTestAccessibleClip(
     for (let clipIndex = 0; clipIndex < track.clips.length; clipIndex++) {
       const clip = track.clips[clipIndex];
       const rect = clipRect(timeline, trackIndex, clip, pixelsPerFrame, trackHeights);
-      const target = clipAccessTargetSize(rect.width, rect.height);
-      const left = rect.x - (target.width - rect.width) / 2;
-      const top = rect.y - (target.height - rect.height) / 2;
-      if (docX < left || docX > left + target.width || docY < top || docY > top + target.height) {
+      const target = clipAccessTargetRect(
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        0,
+        documentWidth,
+        0,
+        documentHeight,
+      );
+      if (
+        docX < target.left ||
+        docX > target.left + target.width ||
+        docY < target.top ||
+        docY > target.top + target.height
+      ) {
         continue;
       }
       const dx = docX < rect.x ? rect.x - docX : Math.max(0, docX - (rect.x + rect.width));
@@ -279,12 +317,24 @@ export function accessibleClipRects(
 ): AccessibleClipRect[] {
   const rects: AccessibleClipRect[] = [];
   const right = LAYOUT.trackHeaderWidth + viewWidth;
+  const documentWidth = contentWidth(totalFrames(timeline), pixelsPerFrame, viewWidth);
+  const documentHeight = contentHeight(timeline, viewHeight, trackHeights);
   for (let trackIndex = 0; trackIndex < timeline.tracks.length; trackIndex++) {
     const track = timeline.tracks[trackIndex];
     for (const clip of track.clips) {
-      const rect = clipRect(timeline, trackIndex, clip, pixelsPerFrame, trackHeights);
-      const left = LAYOUT.trackHeaderWidth + rect.x - scrollLeft;
-      const top = rect.y - scrollTop;
+      const clipGeometry = clipRect(timeline, trackIndex, clip, pixelsPerFrame, trackHeights);
+      const rect = clipAccessTargetRect(
+        clipGeometry.x,
+        clipGeometry.y,
+        clipGeometry.width,
+        clipGeometry.height,
+        0,
+        documentWidth,
+        0,
+        documentHeight,
+      );
+      const left = LAYOUT.trackHeaderWidth + rect.left - scrollLeft;
+      const top = rect.top - scrollTop;
       if (
         left + rect.width < LAYOUT.trackHeaderWidth ||
         left > right ||
@@ -1027,7 +1077,15 @@ export function TimelineContainer() {
         return;
       }
 
-      const hit = hitTestAccessibleClip(timeline, docX, docY, zoomScale, trackHeights);
+      const hit = hitTestAccessibleClip(
+        timeline,
+        docX,
+        docY,
+        zoomScale,
+        trackHeights,
+        docWidth,
+        docHeight,
+      );
       const fadeHit =
         !e.metaKey && !e.shiftKey
           ? fadeKneeHit(timeline, docX, docY, zoomScale, trackHeights)
@@ -1144,7 +1202,21 @@ export function TimelineContainer() {
         curDocY: docY,
       };
     },
-    [toDoc, timeline, zoomScale, trackHeights, toolMode, selectedClipIds, selectClips, clearSelection, selectGap, setCurrentFrame, setScrubbing],
+    [
+      toDoc,
+      timeline,
+      zoomScale,
+      trackHeights,
+      toolMode,
+      selectedClipIds,
+      selectClips,
+      clearSelection,
+      selectGap,
+      setCurrentFrame,
+      setScrubbing,
+      docWidth,
+      docHeight,
+    ],
   );
 
   const onPointerMove = useCallback(
@@ -1526,7 +1598,15 @@ export function TimelineContainer() {
         });
         return;
       }
-      const hit = hitTestAccessibleClip(timeline, docX, docY, zoomScale, trackHeights);
+      const hit = hitTestAccessibleClip(
+        timeline,
+        docX,
+        docY,
+        zoomScale,
+        trackHeights,
+        docWidth,
+        docHeight,
+      );
       if (!hit) return; // empty space: keep the default (suppressed) menu
       e.preventDefault();
       const fadeHit = fadeKneeHit(timeline, docX, docY, zoomScale, trackHeights);
@@ -1541,7 +1621,16 @@ export function TimelineContainer() {
       }
       setMenu({ kind: "clip", clipId: hit.clip.id, x: e.clientX, y: e.clientY });
     },
-    [toDoc, timeline, zoomScale, trackHeights, selectedClipIds, selectClips],
+    [
+      toDoc,
+      timeline,
+      zoomScale,
+      trackHeights,
+      selectedClipIds,
+      selectClips,
+      docWidth,
+      docHeight,
+    ],
   );
 
   // Media dropped from the panel lands AT the cursor: its start frame = the drop
@@ -1824,7 +1913,8 @@ export function TimelineContainer() {
               position: "absolute",
               left: rect.left,
               top: rect.top,
-              ...clipAccessTargetSize(rect.width, rect.height),
+              width: rect.width,
+              height: rect.height,
               pointerEvents: "none",
             }}
           />
