@@ -57,6 +57,45 @@ pub struct AudioPrepareWorker<T: Send + 'static> {
     occupied: Arc<AtomicBool>,
 }
 
+/// Owning admission for the single audio-prepare worker slot. Dropping an
+/// unsubmitted permit releases the reservation; after submit, the worker owns
+/// it until the build closure has fully returned.
+#[must_use]
+pub struct AudioPreparePermit<T: Send + 'static> {
+    sender: SyncSender<AudioPrepareJob<T>>,
+    occupied: Arc<AtomicBool>,
+    reserved: bool,
+}
+
+impl<T: Send + 'static> AudioPreparePermit<T> {
+    pub fn submit(
+        mut self,
+        build: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<tokio::sync::oneshot::Receiver<T>, String> {
+        let (result, receiver) = tokio::sync::oneshot::channel();
+        let job = AudioPrepareJob {
+            build: Box::new(build),
+            result,
+        };
+        match self.sender.try_send(job) {
+            Ok(()) => {
+                self.reserved = false;
+                Ok(receiver)
+            }
+            Err(TrySendError::Full(_)) => Err("audio_prepare_busy".to_string()),
+            Err(TrySendError::Disconnected(_)) => Err("audio_prepare_worker_stopped".to_string()),
+        }
+    }
+}
+
+impl<T: Send + 'static> Drop for AudioPreparePermit<T> {
+    fn drop(&mut self) {
+        if self.reserved {
+            self.occupied.store(false, Ordering::Release);
+        }
+    }
+}
+
 impl<T: Send + 'static> AudioPrepareWorker<T> {
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::sync_channel::<AudioPrepareJob<T>>(1);
@@ -74,29 +113,22 @@ impl<T: Send + 'static> AudioPrepareWorker<T> {
         Self { sender, occupied }
     }
 
+    pub fn try_reserve(&self) -> Result<AudioPreparePermit<T>, String> {
+        self.occupied
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "audio_prepare_busy".to_string())?;
+        Ok(AudioPreparePermit {
+            sender: self.sender.clone(),
+            occupied: Arc::clone(&self.occupied),
+            reserved: true,
+        })
+    }
+
     pub fn try_submit(
         &self,
         build: impl FnOnce() -> T + Send + 'static,
     ) -> Result<tokio::sync::oneshot::Receiver<T>, String> {
-        self.occupied
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| "audio_prepare_busy".to_string())?;
-        let (result, receiver) = tokio::sync::oneshot::channel();
-        let job = AudioPrepareJob {
-            build: Box::new(build),
-            result,
-        };
-        match self.sender.try_send(job) {
-            Ok(()) => Ok(receiver),
-            Err(TrySendError::Full(_)) => {
-                self.occupied.store(false, Ordering::Release);
-                Err("audio_prepare_busy".to_string())
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                self.occupied.store(false, Ordering::Release);
-                Err("audio_prepare_worker_stopped".to_string())
-            }
-        }
+        self.try_reserve()?.submit(build)
     }
 
     pub fn is_occupied(&self) -> bool {
@@ -705,7 +737,7 @@ pub fn build_clock_paused(
     media: &HashMap<String, MediaInfo>,
     fps: i32,
     start_frame: i32,
-) -> Result<(Arc<dyn PlaybackClock>, Option<AudioPlayback>), String> {
+) -> Result<(Arc<dyn PlaybackClock>, Option<AudioPlayback>), MediaError> {
     build_clock_paused_cancellable(timeline, media, fps, start_frame, &MediaCancelToken::new())
 }
 
@@ -715,9 +747,8 @@ pub fn build_clock_paused_cancellable(
     fps: i32,
     start_frame: i32,
     cancel: &MediaCancelToken,
-) -> Result<(Arc<dyn PlaybackClock>, Option<AudioPlayback>), String> {
+) -> Result<(Arc<dyn PlaybackClock>, Option<AudioPlayback>), MediaError> {
     build_clock_with_state(timeline, media, fps, start_frame, true, cancel)
-        .map_err(|error| error.to_string())
 }
 
 fn build_clock_with_state(

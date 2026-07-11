@@ -18,7 +18,9 @@ use tauri::{AppHandle, Manager, State};
 use opentake_core::AppCore;
 use opentake_render::{even, RenderSize};
 
-use super::audio::{build_clock_paused_cancellable, AudioPlayback, AudioPrepareWorker};
+use super::audio::{
+    build_clock_paused_cancellable, AudioPlayback, AudioPreparePermit, AudioPrepareWorker,
+};
 use super::engine::{
     BoundedReaper, FrameSink, PlaybackClock, PlaybackEngine, PlayheadEmitter, ReapPermit,
 };
@@ -45,7 +47,8 @@ struct RunningPlayback {
     reap: ReapPermit,
 }
 
-type PreparedAudio = Result<(Arc<dyn PlaybackClock>, Option<AudioPlayback>), String>;
+type PreparedAudio =
+    Result<(Arc<dyn PlaybackClock>, Option<AudioPlayback>), opentake_media::MediaError>;
 
 struct PlaybackResources {
     engine: PlaybackEngine,
@@ -119,8 +122,11 @@ impl PlaybackState {
         authoritative: opentake_core::ProjectRevision,
         frame: i32,
         cancel: opentake_media::MediaCancelToken,
-    ) -> Result<Option<(StartTicket, ReapPermit)>, PlaybackCommandError> {
-        let (decision, old, pending_reap) = {
+    ) -> Result<
+        Option<(StartTicket, ReapPermit, AudioPreparePermit<PreparedAudio>)>,
+        PlaybackCommandError,
+    > {
+        let (decision, old, pending_reap, audio_admission) = {
             let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
             if slot.sessions.start_would_resume(&identity, authoritative)? {
                 let decision = slot.sessions.begin_start(identity.clone(), authoritative)?;
@@ -144,6 +150,10 @@ impl PlaybackState {
                 }
                 return Ok(None);
             }
+            let audio_admission = self
+                .audio_prepare
+                .try_reserve()
+                .map_err(PlaybackCommandError::busy)?;
             let pending_reap = self
                 .reaper
                 .try_reserve()
@@ -159,7 +169,7 @@ impl PlaybackState {
                 incumbent.cancel.cancel();
             }
             let old = slot.running.take();
-            (decision, old, pending_reap)
+            (decision, old, pending_reap, audio_admission)
         };
         if let Some(running) = old {
             running.shutdown()?;
@@ -167,7 +177,7 @@ impl PlaybackState {
         let StartDecision::Build(ticket) = decision else {
             unreachable!("resume returned above")
         };
-        Ok(Some((ticket, pending_reap)))
+        Ok(Some((ticket, pending_reap, audio_admission)))
     }
 
     #[cfg(test)]
@@ -176,7 +186,10 @@ impl PlaybackState {
         identity: PlaybackIdentity,
         authoritative: opentake_core::ProjectRevision,
         frame: i32,
-    ) -> Result<Option<(StartTicket, ReapPermit)>, PlaybackCommandError> {
+    ) -> Result<
+        Option<(StartTicket, ReapPermit, AudioPreparePermit<PreparedAudio>)>,
+        PlaybackCommandError,
+    > {
         self.coordinate_start(
             identity,
             authoritative,
@@ -449,13 +462,11 @@ where
         .map_err(PlaybackCommandError::engine)
 }
 
-fn audio_prepare_error(message: String) -> PlaybackCommandError {
-    if message.contains("audio_buffer_too_large") {
-        PlaybackCommandError::audio_buffer_too_large(message)
-    } else if message.contains("audio_allocation_failed") {
-        PlaybackCommandError::allocation(message)
-    } else {
-        PlaybackCommandError::engine(message)
+fn audio_prepare_error(error: opentake_media::MediaError) -> PlaybackCommandError {
+    let message = error.to_string();
+    match error {
+        opentake_media::MediaError::Cancelled => PlaybackCommandError::cancelled(message),
+        _ => PlaybackCommandError::engine(message),
     }
 }
 
@@ -500,7 +511,7 @@ pub async fn playback_start(
     };
     let start_at = from_frame.max(0);
     let cancel = opentake_media::MediaCancelToken::new();
-    let Some((ticket, cleanup)) = app.state::<PlaybackState>().coordinate_start(
+    let Some((ticket, cleanup, audio_admission)) = app.state::<PlaybackState>().coordinate_start(
         identity.clone(),
         authoritative,
         start_at,
@@ -551,13 +562,12 @@ pub async fn playback_start(
         let timeline = timeline.clone();
         let media = media.clone();
         let prepare_cancel = cancel.clone();
-        let state = app.state::<PlaybackState>();
-        match state.audio_prepare.try_submit(move || {
+        match audio_admission.submit(move || {
             build_clock_paused_cancellable(&timeline, &media, fps, start_at, &prepare_cancel)
         }) {
             Ok(receiver) => receiver,
             Err(error) => {
-                state.finish_prepare(&cancel);
+                app.state::<PlaybackState>().finish_prepare(&cancel);
                 return Err(PlaybackCommandError::busy(error));
             }
         }
@@ -778,7 +788,7 @@ mod tests {
         let state = PlaybackState::new();
         let incumbent_identity = identity(1, 4, "incumbent-prepare");
         let incumbent_cancel = opentake_media::MediaCancelToken::new();
-        let incumbent = state
+        let (incumbent_ticket, incumbent_cleanup, incumbent_admission) = state
             .coordinate_start(
                 incumbent_identity.clone(),
                 incumbent_identity.revision(),
@@ -787,6 +797,7 @@ mod tests {
             )
             .expect("incumbent prepare adopted")
             .expect("incumbent builds");
+        drop(incumbent_admission);
 
         let rejected_cancel = opentake_media::MediaCancelToken::new();
         let error = match state.coordinate_start(
@@ -806,7 +817,7 @@ mod tests {
         assert!(!incumbent_cancel.is_cancelled());
         assert!(!rejected_cancel.is_cancelled());
         assert_eq!(state.pending_prepare_identity(), Some(incumbent_identity));
-        drop(incumbent);
+        drop((incumbent_ticket, incumbent_cleanup));
     }
 
     #[test]
@@ -814,7 +825,7 @@ mod tests {
         let state = PlaybackState::new();
         let incumbent_identity = identity(2, 1, "incumbent-busy");
         let incumbent_cancel = opentake_media::MediaCancelToken::new();
-        let incumbent = state
+        let (incumbent_ticket, incumbent_cleanup, incumbent_admission) = state
             .coordinate_start(
                 incumbent_identity.clone(),
                 incumbent_identity.revision(),
@@ -823,6 +834,7 @@ mod tests {
             )
             .expect("incumbent prepare adopted")
             .expect("incumbent builds");
+        drop(incumbent_admission);
         let backlog = state
             .reaper
             .try_reserve()
@@ -842,7 +854,101 @@ mod tests {
         assert!(!incumbent_cancel.is_cancelled());
         assert_eq!(state.pending_prepare_identity(), Some(incumbent_identity));
         drop(backlog);
-        drop(incumbent);
+        drop((incumbent_ticket, incumbent_cleanup));
+    }
+
+    #[test]
+    fn audio_worker_busy_is_decided_before_incumbent_adoption_or_cancellation() {
+        let state = PlaybackState::new();
+        let incumbent_identity = identity(2, 2, "incumbent-worker");
+        let incumbent_cancel = opentake_media::MediaCancelToken::new();
+        let (_ticket, _cleanup, admission) = state
+            .coordinate_start(
+                incumbent_identity.clone(),
+                incumbent_identity.revision(),
+                0,
+                incumbent_cancel.clone(),
+            )
+            .expect("incumbent coordinator succeeds")
+            .expect("incumbent builds");
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let result = admission
+            .submit(move || {
+                entered_tx.send(()).expect("announce incumbent entry");
+                release_rx.recv().expect("release incumbent closure");
+                Ok((
+                    Arc::new(InstantClock::new(0)) as Arc<dyn PlaybackClock>,
+                    None,
+                ))
+            })
+            .expect("submit through reserved production admission");
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("incumbent closure entered");
+
+        let rejected_cancel = opentake_media::MediaCancelToken::new();
+        let error = match state.coordinate_start(
+            identity(2, 2, "worker-busy-request"),
+            incumbent_identity.revision(),
+            0,
+            rejected_cancel.clone(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("occupied production worker must reject B as Busy"),
+        };
+
+        assert_eq!(error.code, super::super::session::PlaybackErrorCode::Busy);
+        assert!(!incumbent_cancel.is_cancelled());
+        assert!(!rejected_cancel.is_cancelled());
+        assert_eq!(state.pending_prepare_identity(), Some(incumbent_identity));
+
+        release_tx.send(()).expect("release incumbent closure");
+        result
+            .blocking_recv()
+            .expect("incumbent worker result channel")
+            .expect("incumbent preparation succeeds");
+    }
+
+    #[test]
+    fn typed_media_cancellation_maps_to_cancelled_command_error() {
+        let error = audio_prepare_error(opentake_media::MediaError::Cancelled);
+        let serialized = serde_json::to_value(&error).expect("serialize cancellation error");
+
+        assert_eq!(
+            error.code,
+            super::super::session::PlaybackErrorCode::Cancelled
+        );
+        assert_eq!(error.message, "cancelled");
+        assert_eq!(
+            serialized.get("code").and_then(serde_json::Value::as_str),
+            Some("cancelled")
+        );
+    }
+
+    #[test]
+    fn bounded_audio_errors_keep_sentinels_under_the_four_code_contract() {
+        for sentinel in [
+            "audio_buffer_too_large: projected peak",
+            "audio_allocation_failed: interleaved reserve",
+        ] {
+            let error =
+                audio_prepare_error(opentake_media::MediaError::Decode(sentinel.to_string()));
+            let serialized = serde_json::to_value(&error).expect("serialize command error");
+
+            assert_eq!(error.code, super::super::session::PlaybackErrorCode::Engine);
+            assert!(error.message.contains(sentinel));
+            assert_eq!(
+                serialized.get("code").and_then(serde_json::Value::as_str),
+                Some("engine")
+            );
+            assert_eq!(
+                serialized
+                    .get("message")
+                    .and_then(serde_json::Value::as_str),
+                Some(error.message.as_str())
+            );
+        }
     }
 
     #[test]
@@ -961,22 +1067,21 @@ mod tests {
         let state = PlaybackState::new();
         let current = identity(30, 2, "boundary-worker");
         let cancel = opentake_media::MediaCancelToken::new();
-        let pending = state
+        let (_ticket, _cleanup, admission) = state
             .coordinate_start(current.clone(), current.revision(), 0, cancel.clone())
             .expect("pending prepare adopted")
             .expect("pending prepare builds");
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let worker_cancel = cancel.clone();
-        let result = state
-            .audio_prepare
-            .try_submit(move || {
+        let result = admission
+            .submit(move || {
                 entered_tx.send(()).expect("announce prepare entry");
                 while !worker_cancel.is_cancelled() {
                     std::thread::yield_now();
                 }
                 release_rx.recv().expect("release cancelled prepare");
-                Err("cancelled".to_string())
+                Err(opentake_media::MediaError::Cancelled)
             })
             .expect("submit production audio prepare");
         entered_rx
@@ -999,14 +1104,13 @@ mod tests {
         release_tx.send(()).expect("release cancelled prepare");
         assert!(matches!(
             result.blocking_recv().expect("prepare result"),
-            Err(message) if message == "cancelled"
+            Err(opentake_media::MediaError::Cancelled)
         ));
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while state.audio_prepare.is_occupied() && std::time::Instant::now() < deadline {
             std::thread::yield_now();
         }
         assert!(!state.audio_prepare.is_occupied());
-        drop(pending);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

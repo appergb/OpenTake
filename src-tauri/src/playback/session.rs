@@ -55,8 +55,6 @@ pub enum PlaybackErrorCode {
     Cancelled,
     Busy,
     Engine,
-    AudioBufferTooLarge,
-    Allocation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -90,20 +88,6 @@ impl PlaybackCommandError {
     pub fn engine(message: impl Into<String>) -> Self {
         Self {
             code: PlaybackErrorCode::Engine,
-            message: message.into(),
-        }
-    }
-
-    pub fn audio_buffer_too_large(message: impl Into<String>) -> Self {
-        Self {
-            code: PlaybackErrorCode::AudioBufferTooLarge,
-            message: message.into(),
-        }
-    }
-
-    pub fn allocation(message: impl Into<String>) -> Self {
-        Self {
-            code: PlaybackErrorCode::Allocation,
             message: message.into(),
         }
     }
@@ -345,6 +329,17 @@ impl SessionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playback_error_code_rejects_codes_outside_the_existing_web_contract() {
+        for unsupported in ["audio_buffer_too_large", "allocation"] {
+            let encoded = format!("\"{unsupported}\"");
+            assert!(
+                serde_json::from_str::<PlaybackErrorCode>(&encoded).is_err(),
+                "{unsupported} must not be exposed as a fifth public command code"
+            );
+        }
+    }
     use opentake_core::AppCore;
 
     fn identity(epoch: u64, version: u64, id: &str) -> PlaybackIdentity {
