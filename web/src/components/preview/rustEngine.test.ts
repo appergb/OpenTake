@@ -31,6 +31,13 @@ afterEach(() => {
 });
 
 describe("rustEngineEnabled (default-on)", () => {
+  it("uses the caller automatic default without changing the no-argument default", () => {
+    vi.stubGlobal("localStorage", makeLocalStorage());
+    expect(rustEngineEnabled()).toBe(true);
+    expect(rustEngineEnabled(false)).toBe(false);
+    expect(rustEngineEnabled(true)).toBe(true);
+  });
+
   it("defaults ON when the flag key is absent", () => {
     vi.stubGlobal("localStorage", makeLocalStorage());
     expect(rustEngineEnabled()).toBe(true);
@@ -39,16 +46,19 @@ describe("rustEngineEnabled (default-on)", () => {
   it('opts OUT to legacy only for the exact string "0"', () => {
     vi.stubGlobal("localStorage", makeLocalStorage({ [KEY]: "0" }));
     expect(rustEngineEnabled()).toBe(false);
+    expect(rustEngineEnabled(true)).toBe(false);
   });
 
   it('keeps "1" as a force-ON', () => {
     vi.stubGlobal("localStorage", makeLocalStorage({ [KEY]: "1" }));
     expect(rustEngineEnabled()).toBe(true);
+    expect(rustEngineEnabled(false)).toBe(true);
   });
 
   it('treats any other stray value as ON (only "0" disables)', () => {
     vi.stubGlobal("localStorage", makeLocalStorage({ [KEY]: "legacy" }));
     expect(rustEngineEnabled()).toBe(true);
+    expect(rustEngineEnabled(false)).toBe(false);
     vi.stubGlobal("localStorage", makeLocalStorage({ [KEY]: "false" }));
     expect(rustEngineEnabled()).toBe(true);
     vi.stubGlobal("localStorage", makeLocalStorage({ [KEY]: "" }));
@@ -58,6 +68,7 @@ describe("rustEngineEnabled (default-on)", () => {
   it("defaults ON when localStorage is undefined (non-DOM context)", () => {
     vi.stubGlobal("localStorage", undefined);
     expect(rustEngineEnabled()).toBe(true);
+    expect(rustEngineEnabled(false)).toBe(false);
   });
 
   it("defaults ON when localStorage.getItem throws (locked-down context)", () => {
@@ -67,5 +78,6 @@ describe("rustEngineEnabled (default-on)", () => {
       },
     } as unknown as Storage);
     expect(rustEngineEnabled()).toBe(true);
+    expect(rustEngineEnabled(false)).toBe(false);
   });
 });
