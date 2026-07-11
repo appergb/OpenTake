@@ -23,8 +23,12 @@ const srv = vi.hoisted(() => {
     snapshotResponses: [] as Array<Promise<RuntimeTimelineSnapshot>>,
     undoResponses: [] as Array<Promise<boolean>>,
     redoResponses: [] as Array<Promise<boolean>>,
+    timelineListenerResponses: [] as Array<Promise<() => void>>,
+    openedListenerResponses: [] as Array<Promise<() => void>>,
     undoCalls: 0,
     redoCalls: 0,
+    timelineListenerCalls: 0,
+    openedListenerCalls: 0,
     order: [] as string[],
     onProjectOpened: null as null | ((path: string, projectEpoch: number, version: number) => Promise<void> | void),
     invalidate: vi.fn(async () => {
@@ -55,12 +59,16 @@ vi.mock("../lib/api", () => ({
     srv.redoCalls += 1;
     return (await srv.redoResponses.shift()) ?? false;
   },
-  onTimelineChanged: async () => () => {},
+  onTimelineChanged: async () => {
+    srv.timelineListenerCalls += 1;
+    return (await srv.timelineListenerResponses.shift()) ?? (() => {});
+  },
   onProjectOpened: async (
     handler: (path: string, projectEpoch: number, version: number) => Promise<void> | void,
   ) => {
+    srv.openedListenerCalls += 1;
     srv.onProjectOpened = handler;
-    return () => {};
+    return (await srv.openedListenerResponses.shift()) ?? (() => {});
   },
 }));
 
@@ -93,8 +101,12 @@ beforeEach(() => {
   srv.snapshotResponses.length = 0;
   srv.undoResponses.length = 0;
   srv.redoResponses.length = 0;
+  srv.timelineListenerResponses.length = 0;
+  srv.openedListenerResponses.length = 0;
   srv.undoCalls = 0;
   srv.redoCalls = 0;
+  srv.timelineListenerCalls = 0;
+  srv.openedListenerCalls = 0;
 });
 
 afterEach(() => {
@@ -202,5 +214,49 @@ describe("project event sync", () => {
     await refresh;
 
     expect(useProjectStore.getState().projectPath).toBe("/tmp/current.opentake");
+  });
+
+  it("does not register listeners after stop while initial refresh is pending", async () => {
+    const initialSnapshot = deferred<RuntimeTimelineSnapshot>();
+    srv.snapshotResponses.push(initialSnapshot.promise);
+
+    const startup = startSync();
+    stopSync();
+    initialSnapshot.resolve(snapshot(1, 0, "/tmp/stale.opentake"));
+    await startup;
+
+    expect(srv.timelineListenerCalls).toBe(0);
+    expect(srv.openedListenerCalls).toBe(0);
+  });
+
+  it("cleans both listeners when stop occurs during second registration", async () => {
+    const firstUnsubscribe = vi.fn();
+    const secondUnsubscribe = vi.fn();
+    const openedRegistration = deferred<() => void>();
+    srv.timelineListenerResponses.push(Promise.resolve(firstUnsubscribe));
+    srv.openedListenerResponses.push(openedRegistration.promise);
+
+    const startup = startSync();
+    await vi.waitFor(() => expect(srv.openedListenerCalls).toBe(1));
+    stopSync();
+    openedRegistration.resolve(secondUnsubscribe);
+    await startup;
+
+    expect(firstUnsubscribe).toHaveBeenCalledTimes(1);
+    expect(secondUnsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("registers exactly one listener pair after restarting a stopped pending startup", async () => {
+    const staleSnapshot = deferred<RuntimeTimelineSnapshot>();
+    srv.snapshotResponses.push(staleSnapshot.promise);
+
+    const staleStartup = startSync();
+    stopSync();
+    await startSync();
+    staleSnapshot.resolve(snapshot(1, 0, "/tmp/stale.opentake"));
+    await staleStartup;
+
+    expect(srv.timelineListenerCalls).toBe(1);
+    expect(srv.openedListenerCalls).toBe(1);
   });
 });

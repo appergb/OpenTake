@@ -13,6 +13,7 @@ let started = false;
 let unlistenTimeline: (() => void) | null = null;
 let unlistenOpened: (() => void) | null = null;
 let refreshGeneration = 0;
+let lifecycleGeneration = 0;
 
 async function refreshMirror(): Promise<void> {
   const generation = ++refreshGeneration;
@@ -36,23 +37,41 @@ async function refreshMirror(): Promise<void> {
 export async function startSync(): Promise<void> {
   if (started) return;
   started = true;
+  const generation = ++lifecycleGeneration;
 
   await refreshMirror();
+  if (!started || generation !== lifecycleGeneration) return;
 
-  unlistenTimeline = await api.onTimelineChanged(async (projectEpoch, version) => {
+  const timelineUnlisten = await api.onTimelineChanged(async (projectEpoch, version) => {
     const current = useProjectStore.getState();
     if (projectEpoch !== current.projectEpoch || version > current.timelineVersion) {
       await refreshMirror();
     }
   });
-  unlistenOpened = await api.onProjectOpened(async () => {
+  if (!started || generation !== lifecycleGeneration) {
+    timelineUnlisten();
+    return;
+  }
+  unlistenTimeline = timelineUnlisten;
+
+  const openedUnlisten = await api.onProjectOpened(async () => {
     await stopNativePlaybackForProjectBoundary();
     await refreshMirror();
     useEditorUiStore.getState().resetProjectRuntimeState();
   });
+  if (!started || generation !== lifecycleGeneration) {
+    openedUnlisten();
+    if (unlistenTimeline === timelineUnlisten) {
+      timelineUnlisten();
+      unlistenTimeline = null;
+    }
+    return;
+  }
+  unlistenOpened = openedUnlisten;
 }
 
 export function stopSync(): void {
+  lifecycleGeneration += 1;
   refreshGeneration += 1;
   unlistenTimeline?.();
   unlistenOpened?.();
