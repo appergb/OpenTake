@@ -1,5 +1,37 @@
 # 交接 · 未完成工作规划(2026-07-04)
 
+## 2026-07-10/11 Wave 1A reviewed addendum
+
+This dated addendum supersedes the **current-status** playback and real-device
+claims in §0, §1, and §3.1 below. Those sections remain intact as the
+2026-07-04 historical snapshot; they are no longer instructions to enable a
+default-off Rust renderer or to perform the then-missing first device check.
+
+- Playback capability routing is now the sole authority. Plain media routes to
+  WebKit; timelines needing text/color-grade/chroma-key/supported-mask
+  compositing route to Rust when available and enabled; Lottie, enabled generic
+  effects, polygon/overflow masks, and compositing combined with reverse or any
+  non-unit speed are `unsupported` and fail closed.
+- Rust publication is exact and session-scoped:
+  `{projectEpoch, timelineVersion, sessionId, frame, sequence}` selects a finite
+  `/frame` JPEG. It is not a long-lived `<img src=MJPEG>` transport.
+  `PublicationGate`, bounded preparation/reaping, exact cold bootstrap,
+  identity-scoped control, and the retained two-slot frame handoff prevent late
+  work from replacing a newer visible frame. The historical Promise-tail
+  interrupt was superseded by the reviewed identity/cancellation controller;
+  pause/stop/project boundaries still interrupt obsolete startup before reap.
+- Media prewarm uses a bounded 24-job, three-worker scheduler. Project epoch,
+  media id/kind/source, and canonical source identity gate poster, preview,
+  waveform, and timeline-visual cache admission/publication, including the
+  same-ID/different-path case.
+- Exact detached-bundle QA passed for Task 6.2 (`dc83284319bd…`) and the final
+  Task 6.3 bundle (`1f2bf4e49877…`). These are distinct from the older
+  `/Applications/OpenTake.app`; their hashes must not be conflated. See
+  [2026-07-10 playback/cache QA](../superpowers/archive/2026-07-10-playback-cache-installed-app-qa.md).
+- Still not yet complete: installed-app export UI artifact verification,
+  Windows transport/CSP/sidecar validation and security hardening, signed and
+  notarized packaging, and renderer support for the fail-closed capability set.
+
 > **本文档是当前权威 TODO / 交接文档**:哪些做完了、哪些 issue 该关、剩下什么没写完、每一项该怎么写。
 > 上级:[架构目录](INDEX.md)。历史差距文档 [PORT-1TO1-GAP.md](PORT-1TO1-GAP.md)(已过时)与 2026-07 初审计相比,本文以 **main = `ace3236`(PR #188)+ PR #189** 为基线重新核对过代码,结论以本文为准。
 > 逐项核对方式:grep/读码验证,非凭记忆;每项附证据(commit / 文件路径)。

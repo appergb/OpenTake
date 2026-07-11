@@ -55,3 +55,49 @@
 - The unfinished Open Code reverse-clip task is complete across domain, ops, render, Tauri, Agent/MCP, and web playback surfaces.
 - Stale branches were not direct-merged because they would have deleted current main-line files; still-relevant deltas were selectively replayed and tested.
 - Security-critical dependency vulnerabilities were fixed, and the MCP import surface now has explicit base64, decoded byte, and HTTP request-body limits.
+
+## 2026-07-10/11 Wave 1A Reviewed Update
+
+This addendum does not replace the historical branch, commit, or `48` files /
+`523` tests figures above. It records the later full-convergence review at
+integration HEAD `1f2bf4e49877c145b7c7990e2a7ad85b32685aed`.
+
+### Reviewed slices
+
+| Slice | Final SHA | Review result |
+|---|---|---|
+| Runtime dependency/libmpv removal | `bffbcf64d991ac39d8dcef84d95298e968bed6f7` | APPROVE |
+| Project runtime identity | `2eff907cfc9cbb816a1a961d546c93f4ed363f7e` | APPROVE |
+| Playback session/publication identity | `e2daeb279a337e22c412e31ab3acd95acbcb4456` | APPROVE |
+| Bounded playback workers/control | `ba5b1ceac463f01c6830fa2e5932734d99d66eeb` | APPROVE |
+| Exact cancellable bootstrap | `24ab2590ce964fd04f3dc960be23c26408270ef4` | APPROVE |
+| Project-scoped media prewarm | `f99da16c27b440a10715cc4b2e50b9ab713fafa9` | APPROVE |
+| Live exact transport evidence | `3fe09766819b0d07b17d94a7c870ac744d41129c` | APPROVE |
+| Playback capability route | `8b47e64a8e6c679f6bb3605ac1c92fb1a98415b5` | APPROVE |
+| Retained Rust frame UI | `dc83284319bdd7ec816a0175f1e97b90a9bc5e1a` | APPROVE after repaired exact-bundle QA |
+| Project/source visual-cache UI | `1f2bf4e49877c145b7c7990e2a7ad85b32685aed` | APPROVE; Critical 0 / Important 0 / Minor 0 |
+
+### Exact pre-document gates
+
+The persisted safety-snapshot `logs/04a-tests-evidence-integration` evidence
+reports:
+
+- focused Web: 5 files, 62/62 tests passed;
+- full Web: 54 files, 570/570 tests passed;
+- playback integration: 7/7 passed, 0 ignored;
+- live playback transport: 6/6 passed, 0 ignored;
+- Rust workspace: passed, with seven deliberate ignored tests still reported.
+
+The seven ignored tests are one `opentake-media` ffmpeg+ffprobe environment
+probe and six real-device probes (three export and three playback). They are not
+counted as passes. All named playback/media assertions in the focused playback
+and transport commands executed and passed.
+
+### Evidence boundaries
+
+The 2026-07-10 installed application, the 2026-07-11 Task 6.2 detached bundle,
+and the final Task 6.3 detached bundle have different executable and app-tree
+hashes. Results are attributed only to the artifact actually exercised; see
+[`2026-07-10-playback-cache-installed-app-qa.md`](2026-07-10-playback-cache-installed-app-qa.md).
+Unsupported capabilities are fail-closed, not verified renderer support.
+Installed-app export UI artifact verification is still not yet complete.
