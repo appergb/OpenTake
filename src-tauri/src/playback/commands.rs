@@ -576,7 +576,8 @@ pub async fn playback_start(
         .await
         .map_err(|_| PlaybackCommandError::engine("audio prepare worker stopped"));
     app.state::<PlaybackState>().finish_prepare(&cancel);
-    let (clock, audio) = prepared?.map_err(audio_prepare_error)?;
+    let prepared = prepared?.map_err(PlaybackCommandError::engine)?;
+    let (clock, audio) = prepared.map_err(audio_prepare_error)?;
 
     let engine = match spawn_ready_off_executor(move || {
         PlaybackEngine::spawn_ready(
@@ -907,6 +908,7 @@ mod tests {
         result
             .blocking_recv()
             .expect("incumbent worker result channel")
+            .expect("incumbent job succeeds")
             .expect("incumbent preparation succeeds");
     }
 
@@ -1103,7 +1105,10 @@ mod tests {
             .is_err());
         release_tx.send(()).expect("release cancelled prepare");
         assert!(matches!(
-            result.blocking_recv().expect("prepare result"),
+            result
+                .blocking_recv()
+                .expect("prepare result channel")
+                .expect("prepare job returns"),
             Err(opentake_media::MediaError::Cancelled)
         ));
         let deadline = std::time::Instant::now() + Duration::from_secs(2);

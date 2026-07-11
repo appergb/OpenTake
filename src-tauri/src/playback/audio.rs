@@ -21,6 +21,7 @@
 //! mixdown (`export.rs`), parameterised by the device rate and done per channel.
 
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::Arc;
@@ -48,7 +49,15 @@ const MIX_CANCEL_CHUNK_FRAMES: usize = 4 * 1024;
 
 struct AudioPrepareJob<T> {
     build: Box<dyn FnOnce() -> T + Send + 'static>,
-    result: tokio::sync::oneshot::Sender<T>,
+    result: tokio::sync::oneshot::Sender<Result<T, String>>,
+}
+
+struct AudioPrepareOccupancyGuard(Arc<AtomicBool>);
+
+impl Drop for AudioPrepareOccupancyGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 /// One persistent blocking worker with exactly one admitted audio-prepare job.
@@ -71,7 +80,7 @@ impl<T: Send + 'static> AudioPreparePermit<T> {
     pub fn submit(
         mut self,
         build: impl FnOnce() -> T + Send + 'static,
-    ) -> Result<tokio::sync::oneshot::Receiver<T>, String> {
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<T, String>>, String> {
         let (result, receiver) = tokio::sync::oneshot::channel();
         let job = AudioPrepareJob {
             build: Box::new(build),
@@ -105,9 +114,11 @@ impl<T: Send + 'static> AudioPrepareWorker<T> {
             .name("opentake-audio-prepare".to_string())
             .spawn(move || {
                 while let Ok(job) = receiver.recv() {
-                    let value = (job.build)();
+                    let occupancy = AudioPrepareOccupancyGuard(Arc::clone(&worker_occupied));
+                    let value = catch_unwind(AssertUnwindSafe(job.build))
+                        .map_err(|_| "audio_prepare_job_panicked".to_string());
+                    drop(occupancy);
                     let _ = job.result.send(value);
-                    worker_occupied.store(false, Ordering::Release);
                 }
             });
         Self { sender, occupied }
@@ -127,7 +138,7 @@ impl<T: Send + 'static> AudioPrepareWorker<T> {
     pub fn try_submit(
         &self,
         build: impl FnOnce() -> T + Send + 'static,
-    ) -> Result<tokio::sync::oneshot::Receiver<T>, String> {
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<T, String>>, String> {
         self.try_reserve()?.submit(build)
     }
 
@@ -157,6 +168,12 @@ fn checked_audio_bytes(frames: usize) -> Result<usize, MediaError> {
         .ok_or_else(|| audio_buffer_too_large("stereo f32 byte count overflow"))
 }
 
+fn checked_gain_bytes(frames: usize) -> Result<usize, MediaError> {
+    frames
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| audio_buffer_too_large("gain byte count overflow"))
+}
+
 fn frames_at_rate(timeline_frames: i32, fps: i32, rate: u32) -> Result<usize, MediaError> {
     if timeline_frames <= 0 || fps <= 0 || rate == 0 {
         return Ok(0);
@@ -168,9 +185,10 @@ fn frames_at_rate(timeline_frames: i32, fps: i32, rate: u32) -> Result<usize, Me
     Ok(frames as usize)
 }
 
-fn projected_session_premix_bytes(timeline: &Timeline, rate: u32) -> Result<usize, MediaError> {
-    let output_frames = frames_at_rate(timeline.total_frames(), timeline.fps, rate)?;
-    let mut bytes = checked_audio_bytes(output_frames)?;
+fn projected_session_peak_bytes(timeline: &Timeline, rate: u32) -> Result<usize, MediaError> {
+    let mut retained_bytes = 0_usize;
+    let mut max_stage_bytes = 0_usize;
+    let mut max_mix_frames = 0_usize;
     for track in &timeline.tracks {
         if track.muted {
             continue;
@@ -180,18 +198,36 @@ fn projected_session_premix_bytes(timeline: &Timeline, rate: u32) -> Result<usiz
                 continue;
             }
             let source_frames = clip.source_frames_consumed().max(0);
-            let decoded_frames = frames_at_rate(source_frames, timeline.fps, rate)?;
-            let decoded_bytes = checked_audio_bytes(decoded_frames)?;
-            // decode_raw_pcm retains f32 stereo bytes while conversion reserves
-            // an equally-sized interleaved Vec<f32>. Both coexist until the
-            // conversion returns, alongside the final timeline mix.
-            bytes = bytes
+            let expected_frames = frames_at_rate(source_frames, timeline.fps, rate)?;
+            let bounded_frames = expected_frames
+                .checked_add(1)
+                .ok_or_else(|| audio_buffer_too_large("PCM slack frame overflow"))?;
+            let decoded_bytes = checked_audio_bytes(bounded_frames)?;
+            let gain_bytes = checked_gain_bytes(bounded_frames)?;
+
+            let conversion_stage = retained_bytes
                 .checked_add(decoded_bytes)
-                .and_then(|total| total.checked_add(decoded_bytes))
-                .ok_or_else(|| audio_buffer_too_large("session pre-mix byte count overflow"))?;
+                .and_then(|bytes| bytes.checked_add(decoded_bytes))
+                .ok_or_else(|| audio_buffer_too_large("PCM conversion peak overflow"))?;
+            max_stage_bytes = max_stage_bytes.max(conversion_stage);
+
+            retained_bytes = retained_bytes
+                .checked_add(decoded_bytes)
+                .and_then(|bytes| bytes.checked_add(gain_bytes))
+                .ok_or_else(|| audio_buffer_too_large("retained audio peak overflow"))?;
+            max_stage_bytes = max_stage_bytes.max(retained_bytes);
+
+            let start_frames = frames_at_rate(clip.start_frame.max(0), timeline.fps, rate)?;
+            let end_frames = start_frames
+                .checked_add(bounded_frames)
+                .ok_or_else(|| audio_buffer_too_large("mix frame extent overflow"))?;
+            max_mix_frames = max_mix_frames.max(end_frames);
         }
     }
-    Ok(bytes)
+    let mix_stage = retained_bytes
+        .checked_add(checked_audio_bytes(max_mix_frames)?)
+        .ok_or_else(|| audio_buffer_too_large("final mix peak overflow"))?;
+    Ok(max_stage_bytes.max(mix_stage))
 }
 
 /// Audio master clock: the playhead derives from the device frame position
@@ -678,7 +714,7 @@ fn mix_timeline_stereo(
     if timeline.fps <= 0 || rate == 0 {
         return Ok(Vec::new());
     }
-    let projected_bytes = projected_session_premix_bytes(timeline, rate)?;
+    let projected_bytes = projected_session_peak_bytes(timeline, rate)?;
     if projected_bytes > MAX_SESSION_PREMIX_BYTES {
         return Err(audio_buffer_too_large(format!(
             "projected {projected_bytes} bytes exceeds {MAX_SESSION_PREMIX_BYTES}"
@@ -707,18 +743,13 @@ fn mix_timeline_stereo(
     mix_stereo(&clips, cancel)
 }
 
-/// Build the playback clock for a session starting at `start_frame`.
-///
-/// Pre-mixes the timeline audio; if there's sound, plays it through cpal and
-/// returns an [`AudioClock`] (audio is master) + the live [`AudioPlayback`].
-/// Otherwise — or if the audio device can't be opened — returns the wall-clock
-/// [`InstantClock`], so a silent project (or a headless host) still plays video.
-pub fn build_clock(
+/// Production-facing clock construction with explicit media/allocation errors.
+pub fn try_build_clock(
     timeline: &Timeline,
     media: &HashMap<String, MediaInfo>,
     fps: i32,
     start_frame: i32,
-) -> (Arc<dyn PlaybackClock>, Option<AudioPlayback>) {
+) -> Result<(Arc<dyn PlaybackClock>, Option<AudioPlayback>), MediaError> {
     build_clock_with_state(
         timeline,
         media,
@@ -727,7 +758,19 @@ pub fn build_clock(
         false,
         &MediaCancelToken::new(),
     )
-    .unwrap_or_else(|error| panic!("playback audio preparation failed: {error}"))
+}
+
+/// Debug-only compatibility helper for the real-device integration probe.
+/// Release production callers must use [`try_build_clock`].
+#[cfg(debug_assertions)]
+pub fn build_clock(
+    timeline: &Timeline,
+    media: &HashMap<String, MediaInfo>,
+    fps: i32,
+    start_frame: i32,
+) -> (Arc<dyn PlaybackClock>, Option<AudioPlayback>) {
+    try_build_clock(timeline, media, fps, start_frame)
+        .unwrap_or_else(|error| panic!("playback audio preparation failed: {error}"))
 }
 
 /// Prepare audio without starting the device clock. The retained playback
@@ -939,6 +982,27 @@ mod tests {
     }
 
     #[test]
+    fn speed_and_gain_actual_stage_peak_is_rejected_before_decode() {
+        let mut clip = audio_clip("expanded", "missing", 0, 73 * 30);
+        clip.speed = 4.0;
+        clip.volume = 0.5;
+        let timeline = audio_timeline(vec![clip]);
+        let media = HashMap::from([(
+            "missing".to_string(),
+            MediaInfo {
+                path: PathBuf::from("/must/not-decode-speed-gain-peak.wav"),
+            },
+        )]);
+        let cancel = MediaCancelToken::new();
+
+        let error = mix_timeline_stereo(&timeline, &media, 48_000, &cancel)
+            .expect_err("retained decoded, gains, and actual mix extent exceed 256 MiB");
+
+        assert!(error.to_string().contains("audio_buffer_too_large"));
+        assert_eq!(cancel.spawned_child_count(), 0);
+    }
+
+    #[test]
     fn audio_decode_failure_is_not_silently_treated_as_silent_timeline() {
         let timeline = audio_timeline(vec![audio_clip("broken", "missing", 0, 30)]);
         let media = HashMap::from([(
@@ -952,6 +1016,42 @@ mod tests {
             .expect_err("decode failure must propagate instead of producing an empty mix");
 
         assert!(!matches!(error, MediaError::Cancelled));
+    }
+
+    #[test]
+    fn try_build_clock_propagates_missing_audio_error_without_panic() {
+        let timeline = audio_timeline(vec![audio_clip("broken", "missing", 0, 30)]);
+        let media = HashMap::from([(
+            "missing".to_string(),
+            MediaInfo {
+                path: PathBuf::from("/definitely/missing/try-build-clock.wav"),
+            },
+        )]);
+
+        let error = match try_build_clock(&timeline, &media, 30, 0) {
+            Err(error) => error,
+            Ok(_) => panic!("production clock entry must propagate media errors"),
+        };
+
+        assert!(!matches!(error, MediaError::Cancelled));
+    }
+
+    #[test]
+    fn try_build_clock_propagates_over_cap_error_without_panic() {
+        let timeline = audio_timeline(vec![audio_clip("huge", "missing", 0, 30 * 60 * 12)]);
+        let media = HashMap::from([(
+            "missing".to_string(),
+            MediaInfo {
+                path: PathBuf::from("/must/not-decode-over-cap-clock.wav"),
+            },
+        )]);
+
+        let error = match try_build_clock(&timeline, &media, 30, 0) {
+            Err(error) => error,
+            Ok(_) => panic!("production clock entry must propagate the preflight error"),
+        };
+
+        assert!(error.to_string().contains("audio_buffer_too_large"));
     }
 
     #[test]
@@ -984,8 +1084,44 @@ mod tests {
             );
         }
         release_tx.send(()).expect("release first prepare");
-        assert_eq!(first.blocking_recv().expect("first result"), 1);
+        assert_eq!(
+            first
+                .blocking_recv()
+                .expect("first result channel")
+                .expect("first job succeeds"),
+            1
+        );
         assert_eq!(max_active.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn panicking_prepare_reports_error_releases_capacity_and_worker_survives() {
+        let worker = AudioPrepareWorker::<usize>::new();
+        let first = worker
+            .try_reserve()
+            .expect("reserve first prepare")
+            .submit(|| panic!("deterministic prepare panic"))
+            .expect("submit first prepare");
+
+        let error = first
+            .blocking_recv()
+            .expect("worker must publish a panic result")
+            .expect_err("panicking closure must be an explicit job error");
+        assert_eq!(error, "audio_prepare_job_panicked");
+        assert!(!worker.is_occupied());
+
+        let second = worker
+            .try_reserve()
+            .expect("capacity recovered after unwind")
+            .submit(|| 7)
+            .expect("persistent worker accepts next job");
+        assert_eq!(
+            second
+                .blocking_recv()
+                .expect("second result channel")
+                .expect("second job succeeds"),
+            7
+        );
     }
 
     #[test]
@@ -1013,7 +1149,10 @@ mod tests {
 
         assert!(worker.try_submit(|| ()).is_err());
         release_tx.send(()).expect("allow cancelled worker exit");
-        first.blocking_recv().expect("cancelled worker exits");
+        first
+            .blocking_recv()
+            .expect("cancelled worker result channel")
+            .expect("cancelled worker exits");
         let deadline = Instant::now() + Duration::from_secs(2);
         while worker.is_occupied() && Instant::now() < deadline {
             std::thread::yield_now();
@@ -1023,6 +1162,7 @@ mod tests {
             .try_submit(|| ())
             .expect("capacity releases only after exit")
             .blocking_recv()
+            .expect("replacement result channel")
             .expect("replacement prepare completes");
     }
 
