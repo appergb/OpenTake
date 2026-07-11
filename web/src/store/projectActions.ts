@@ -120,10 +120,7 @@ async function runSaveCoordinator(): Promise<void> {
     queuedExplicitSave = null;
     const snapshot = captureSaveSnapshot();
     if (!snapshot) return;
-    if (explicitRequest && !sameProject(explicitRequest)) {
-      if (queuedExplicitSave) continue;
-      return;
-    }
+    if (explicitRequest && !sameProject(explicitRequest)) return;
     activeSaveSnapshot = snapshot;
 
     try {
