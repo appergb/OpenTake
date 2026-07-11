@@ -13,7 +13,13 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
-use opentake_media::MediaCancelToken;
+use image::ImageEncoder;
+use opentake_domain::ClipType;
+use opentake_media::{
+    decode::frame::decode_frame_png_cancellable,
+    thumbnail::{image_thumbnail, IMAGE_THUMB_MAX_PIXEL, THUMB_MAX_SIZE, THUMB_TOLERANCE_SECS},
+    FrameRequest, MediaCancelToken,
+};
 use serde::Serialize;
 
 const PREWARM_QUEUE_CAPACITY: usize = 24;
@@ -21,7 +27,6 @@ const PREWARM_WORKERS: usize = 3;
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
 pub enum PrewarmKind {
     GridPoster,
     PreviewPoster,
@@ -169,6 +174,74 @@ impl PrewarmScheduler {
         }
     }
 
+    /// Queue the small import/grid poster under the same bounded, epoch-scoped
+    /// ownership as every other prewarm job. The caller supplies the canonical
+    /// content cache key and target used by the lazy grid-poster path.
+    pub fn schedule_grid_poster(
+        &self,
+        epoch: u64,
+        media_kind: ClipType,
+        cache_key: String,
+        source: std::path::PathBuf,
+        target: std::path::PathBuf,
+    ) -> PrewarmResult {
+        if !matches!(media_kind, ClipType::Video | ClipType::Image) || !source.is_file() {
+            return PrewarmResult::Cached;
+        }
+        let cached = image::image_dimensions(&target).is_ok();
+        self.schedule(
+            epoch,
+            PrewarmKind::GridPoster,
+            cache_key,
+            cached,
+            move |context| {
+                let bytes = match media_kind {
+                    ClipType::Video => {
+                        let request = FrameRequest {
+                            time_secs: 0.0,
+                            max_size: THUMB_MAX_SIZE,
+                            tolerance_secs: THUMB_TOLERANCE_SECS,
+                            apply_rotation: true,
+                        };
+                        let cancel = context.cancel_token();
+                        let Ok((_, bytes)) =
+                            decode_frame_png_cancellable(&source, &request, &cancel)
+                        else {
+                            return;
+                        };
+                        bytes
+                    }
+                    ClipType::Image => {
+                        if context.is_cancelled() {
+                            return;
+                        }
+                        let Ok(frame) = image_thumbnail(&source, IMAGE_THUMB_MAX_PIXEL) else {
+                            return;
+                        };
+                        if context.is_cancelled() {
+                            return;
+                        }
+                        let mut bytes = Vec::new();
+                        if image::codecs::png::PngEncoder::new(&mut bytes)
+                            .write_image(
+                                &frame.rgba,
+                                frame.width,
+                                frame.height,
+                                image::ExtendedColorType::Rgba8,
+                            )
+                            .is_err()
+                        {
+                            return;
+                        }
+                        bytes
+                    }
+                    _ => return,
+                };
+                let _ = context.commit_staged_bytes(&target, &bytes);
+            },
+        )
+    }
+
     fn remove_reservation(&self, reservation: &ReservationKey) {
         self.inner
             .state
@@ -179,7 +252,7 @@ impl PrewarmScheduler {
     }
 
     #[cfg(test)]
-    fn in_flight_count(&self) -> usize {
+    pub(crate) fn in_flight_count(&self) -> usize {
         self.inner
             .state
             .lock()

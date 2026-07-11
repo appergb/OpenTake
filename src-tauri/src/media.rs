@@ -216,6 +216,18 @@ pub struct MediaListDto {
     /// silently. Serialized as `skipped`.
     #[serde(default)]
     pub skipped: Vec<String>,
+    /// Admission decisions for best-effort import poster prewarm. Import stays
+    /// successful even when the bounded queue is busy, while callers can still
+    /// observe whether each poster was queued, coalesced, cached, or rejected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prewarm: Vec<ImportPrewarmDto>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPrewarmDto {
+    pub media_ref: String,
+    pub result: prewarm::PrewarmResult,
 }
 
 impl MediaListDto {
@@ -224,15 +236,14 @@ impl MediaListDto {
     /// command modules (e.g. capture-to-media in `render.rs`) can return the
     /// current catalog after mutating it.
     pub(crate) fn from_core(core: &AppCore, cache_root: Option<&Path>) -> Self {
-        Self::from_core_with_skipped(core, cache_root, Vec::new())
+        Self::from_core_with_import_results(core, cache_root, Vec::new(), Vec::new())
     }
 
-    /// Build the list from the core's current manifest snapshot, carrying the
-    /// names of files an import skipped as unsupported.
-    fn from_core_with_skipped(
+    fn from_core_with_import_results(
         core: &AppCore,
         cache_root: Option<&Path>,
         skipped: Vec<String>,
+        prewarm: Vec<ImportPrewarmDto>,
     ) -> Self {
         let manifest = core.media();
         let project_dir = core.project_dir();
@@ -259,6 +270,7 @@ impl MediaListDto {
                 })
                 .collect(),
             skipped,
+            prewarm,
         }
     }
 }
@@ -649,14 +661,6 @@ pub(crate) const IMPORT_ACCEPTED_MIMES: &str =
 /// `None` when the extension is not importable (the file is skipped, not an
 /// error — matches upstream's per-file tolerance during folder/batch import).
 ///
-/// On a successful import the grid poster is warmed best-effort (Item 3): upstream
-/// `MediaAsset.loadMetadata` eagerly generates a 320px poster in
-/// `finalizeImportedAsset` so the panel shows a real frame immediately. Here the
-/// same small (120×68) poster the media grid would otherwise decode lazily on
-/// first render is generated now and disk-cached, so the freshly-returned
-/// [`MediaItemDto`] already carries a `thumbnail` path. A decode failure is
-/// swallowed (the card falls back to a type placeholder, exactly as today) and
-/// never turns an import into an error.
 pub(crate) fn import_one(
     core: &AppCore,
     engine: &MediaEngine,
@@ -669,27 +673,43 @@ pub(crate) fn import_one(
     let entry = core
         .import_media_file(path, display_name(path), &probe)
         .ok()?;
-    warm_import_poster(engine, &entry, path);
     Some(entry)
 }
 
-/// Best-effort eager poster generation for a freshly imported asset (Item 3).
-/// Decodes and disk-caches the small grid poster the media panel reads via
-/// [`cached_thumbnail_path_for_entry`], so the first grid paint shows a real
-/// frame instead of a placeholder — the port of upstream's eager
-/// `AVAssetImageGenerator` at import. Only video/image assets have a frame; audio
-/// and anything else are no-ops. Every failure path is intentionally ignored: a
-/// warm poster is a nicety, never a precondition for import.
-fn warm_import_poster(engine: &MediaEngine, entry: &MediaManifestEntry, path: &Path) {
-    if !matches!(entry.kind, ClipType::Video | ClipType::Image) {
-        return;
+/// Admit an imported asset's small grid poster to the project-scoped scheduler.
+/// The post-import snapshot proves the entry still belongs to the epoch being
+/// scheduled; if a project replacement won the race, old content is rejected.
+fn schedule_import_poster(
+    core: &AppCore,
+    engine: &MediaEngine,
+    scheduler: &prewarm::PrewarmScheduler,
+    entry: &MediaManifestEntry,
+    path: &Path,
+) -> ImportPrewarmDto {
+    let snapshot = core.runtime_snapshot();
+    let result = if !snapshot
+        .media
+        .entries
+        .iter()
+        .any(|candidate| candidate.id == entry.id)
+    {
+        prewarm::PrewarmResult::StaleProject
+    } else if let Ok(key) = cache_key_for(path) {
+        let target = poster_path_for(engine.cache_root(), &key);
+        scheduler.schedule_grid_poster(
+            snapshot.project_epoch,
+            entry.kind,
+            key,
+            path.to_path_buf(),
+            target,
+        )
+    } else {
+        prewarm::PrewarmResult::Cached
+    };
+    ImportPrewarmDto {
+        media_ref: entry.id.clone(),
+        result,
     }
-    if !path.is_file() {
-        return;
-    }
-    // Reuse the exact single-poster path the lazy grid request produces, so the
-    // cache the panel later reads is already populated. Ignore errors.
-    let _ = generate_thumbnail_for_entry(engine, entry, path, None, None, false);
 }
 
 /// `import_folder`: bring a local directory into the library.
@@ -705,6 +725,7 @@ fn warm_import_poster(engine: &MediaEngine, entry: &MediaManifestEntry, path: &P
 pub fn import_folder(
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
+    prewarm: State<'_, prewarm::PrewarmScheduler>,
     path: String,
     recursive: Option<bool>,
 ) -> Result<MediaListDto, String> {
@@ -715,19 +736,33 @@ pub fn import_folder(
     let engine = media.engine();
 
     let mut skipped = Vec::new();
+    let mut prewarm_results = Vec::new();
     if recursive.unwrap_or(false) {
-        mirror_dir(&core, engine, &root, None, &mut skipped);
+        mirror_dir_scheduled(
+            &core,
+            engine,
+            &prewarm,
+            &root,
+            None,
+            &mut skipped,
+            &mut prewarm_results,
+        );
     } else {
         let (files, skipped_files) = list_top_level(&root);
         for file in &files {
-            let _ = import_one(&core, engine, file);
+            if let Some(entry) = import_one(&core, engine, file) {
+                prewarm_results.push(schedule_import_poster(
+                    &core, engine, &prewarm, &entry, file,
+                ));
+            }
         }
         skipped = skipped_files;
     }
-    Ok(MediaListDto::from_core_with_skipped(
+    Ok(MediaListDto::from_core_with_import_results(
         &core,
         Some(engine.cache_root()),
         skipped,
+        prewarm_results,
     ))
 }
 
@@ -743,6 +778,47 @@ pub(crate) fn mirror_dir(
     parent_folder_id: Option<String>,
     skipped: &mut Vec<String>,
 ) {
+    let mut unused_results = Vec::new();
+    mirror_dir_impl(
+        core,
+        engine,
+        None,
+        dir,
+        parent_folder_id,
+        skipped,
+        &mut unused_results,
+    );
+}
+
+fn mirror_dir_scheduled(
+    core: &AppCore,
+    engine: &MediaEngine,
+    prewarm: &prewarm::PrewarmScheduler,
+    dir: &Path,
+    parent_folder_id: Option<String>,
+    skipped: &mut Vec<String>,
+    prewarm_results: &mut Vec<ImportPrewarmDto>,
+) {
+    mirror_dir_impl(
+        core,
+        engine,
+        Some(prewarm),
+        dir,
+        parent_folder_id,
+        skipped,
+        prewarm_results,
+    );
+}
+
+fn mirror_dir_impl(
+    core: &AppCore,
+    engine: &MediaEngine,
+    prewarm: Option<&prewarm::PrewarmScheduler>,
+    dir: &Path,
+    parent_folder_id: Option<String>,
+    skipped: &mut Vec<String>,
+    prewarm_results: &mut Vec<ImportPrewarmDto>,
+) {
     let folder_id = create_folder(core, &dir_name(dir), parent_folder_id);
 
     // Partition this directory's visible entries into media files + subdirs
@@ -753,6 +829,9 @@ pub(crate) fn mirror_dir(
     let mut imported_ids = Vec::new();
     for file in &files {
         if let Some(entry) = import_one(core, engine, file) {
+            if let Some(prewarm) = prewarm {
+                prewarm_results.push(schedule_import_poster(core, engine, prewarm, &entry, file));
+            }
             imported_ids.push(entry.id);
         }
     }
@@ -766,7 +845,15 @@ pub(crate) fn mirror_dir(
     }
 
     for sub in subdirs {
-        mirror_dir(core, engine, &sub, folder_id.clone(), skipped);
+        mirror_dir_impl(
+            core,
+            engine,
+            prewarm,
+            &sub,
+            folder_id.clone(),
+            skipped,
+            prewarm_results,
+        );
     }
 }
 
@@ -846,10 +933,12 @@ fn list_top_level(dir: &Path) -> (Vec<PathBuf>, Vec<String>) {
 pub fn import_media(
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
+    prewarm: State<'_, prewarm::PrewarmScheduler>,
     paths: Vec<String>,
 ) -> Result<MediaListDto, String> {
     let engine = media.engine();
     let mut skipped = Vec::new();
+    let mut prewarm_results = Vec::new();
     for p in &paths {
         let path = PathBuf::from(p);
         if !path.is_file() {
@@ -863,12 +952,17 @@ pub fn import_media(
             skipped.push(display_file_name(&path));
             continue;
         }
-        let _ = import_one(&core, engine, &path);
+        if let Some(entry) = import_one(&core, engine, &path) {
+            prewarm_results.push(schedule_import_poster(
+                &core, engine, &prewarm, &entry, &path,
+            ));
+        }
     }
-    Ok(MediaListDto::from_core_with_skipped(
+    Ok(MediaListDto::from_core_with_import_results(
         &core,
         Some(engine.cache_root()),
         skipped,
+        prewarm_results,
     ))
 }
 
@@ -955,6 +1049,7 @@ fn build_single_clip_export(
 pub fn save_clip_as_media(
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
+    prewarm: State<'_, prewarm::PrewarmScheduler>,
     clip_id: String,
 ) -> Result<MediaListDto, String> {
     let timeline = core.get_timeline().timeline;
@@ -985,11 +1080,15 @@ pub fn save_clip_as_media(
     crate::export::run_export(&single_timeline, &subset, &Some(project_dir), &req)
         .map_err(|e| format!("render failed: {e}"))?;
 
-    // Import the rendered file as a new asset (probe + poster + manifest append).
-    import_one(&core, media.engine(), &out_path).ok_or("failed to import the rendered clip")?;
-    Ok(MediaListDto::from_core(
+    // Import the rendered file, then admit its poster without blocking import.
+    let entry =
+        import_one(&core, media.engine(), &out_path).ok_or("failed to import the rendered clip")?;
+    let result = schedule_import_poster(&core, media.engine(), &prewarm, &entry, &out_path);
+    Ok(MediaListDto::from_core_with_import_results(
         &core,
         Some(media.engine().cache_root()),
+        Vec::new(),
+        vec![result],
     ))
 }
 
@@ -1486,6 +1585,70 @@ mod tests {
     }
 
     #[test]
+    fn imported_grid_poster_is_coalesced_and_stale_queue_never_publishes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("still.png");
+        image::RgbaImage::from_pixel(32, 24, image::Rgba([10, 20, 30, 255]))
+            .save(&source)
+            .unwrap();
+        let core = AppCore::new();
+        let engine = engine_for(tmp.path());
+        let epoch = core.project_revision().project_epoch;
+        let scheduler = prewarm::PrewarmScheduler::new(epoch);
+
+        // Occupy all three persistent workers so the production import poster
+        // remains queued while ownership rotates.
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Arc::new(std::sync::Mutex::new(release_rx));
+        for index in 0..3 {
+            let entered = entered_tx.clone();
+            let release = std::sync::Arc::clone(&release_rx);
+            assert_eq!(
+                scheduler.schedule(
+                    epoch,
+                    prewarm::PrewarmKind::PreviewPoster,
+                    format!("block-import-{index}"),
+                    false,
+                    move |_| {
+                        entered.send(()).unwrap();
+                        release.lock().unwrap().recv().unwrap();
+                    },
+                ),
+                prewarm::PrewarmResult::Queued
+            );
+        }
+        for _ in 0..3 {
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+        }
+
+        let entry = import_one(&core, &engine, &source).unwrap();
+        let target = poster_path_for(engine.cache_root(), &cache_key_for(&source).unwrap());
+        let first = schedule_import_poster(&core, &engine, &scheduler, &entry, &source);
+        let duplicate = schedule_import_poster(&core, &engine, &scheduler, &entry, &source);
+        assert_eq!(first.result, prewarm::PrewarmResult::Queued);
+        assert_eq!(duplicate.result, prewarm::PrewarmResult::Duplicate);
+        assert_eq!(
+            serde_json::to_value(&first).unwrap(),
+            serde_json::json!({"mediaRef": entry.id, "result": "queued"})
+        );
+
+        scheduler.begin_project_transition().unwrap();
+        scheduler.activate_project(epoch + 1);
+        for _ in 0..3 {
+            release_tx.send(()).unwrap();
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while scheduler.in_flight_count() != 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(scheduler.in_flight_count(), 0);
+        assert!(!target.exists(), "stale queued import poster was published");
+    }
+
+    #[test]
     fn thumbnail_dto_serializes_camel_case() {
         let dto = ThumbnailDto {
             media_ref: "m".into(),
@@ -1520,8 +1683,18 @@ mod tests {
 
         let core = AppCore::new();
         let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(core.project_revision().project_epoch);
         let mut skipped = Vec::new();
-        mirror_dir(&core, &engine, &root, None, &mut skipped);
+        let mut prewarm_results = Vec::new();
+        mirror_dir_scheduled(
+            &core,
+            &engine,
+            &scheduler,
+            &root,
+            None,
+            &mut skipped,
+            &mut prewarm_results,
+        );
 
         let m = core.media();
         // Folders: Trip (root) + Day1 + Empty, nested under Trip.
@@ -1551,8 +1724,18 @@ mod tests {
         touch(&root.join("x.png"));
         let core = AppCore::new();
         let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(core.project_revision().project_epoch);
         let mut skipped = Vec::new();
-        mirror_dir(&core, &engine, &root, None, &mut skipped);
+        let mut prewarm_results = Vec::new();
+        mirror_dir_scheduled(
+            &core,
+            &engine,
+            &scheduler,
+            &root,
+            None,
+            &mut skipped,
+            &mut prewarm_results,
+        );
 
         let dto = MediaListDto::from_core(&core, None);
         assert_eq!(dto.folders.len(), 1);
@@ -1745,6 +1928,7 @@ mod tests {
             items: vec![],
             folders: vec![],
             skipped: vec![],
+            prewarm: vec![],
         };
         let json = serde_json::to_string(&empty).unwrap();
         assert!(json.contains("\"skipped\":[]"));
@@ -1753,6 +1937,7 @@ mod tests {
             items: vec![],
             folders: vec![],
             skipped: vec!["a.txt".into(), "b.pdf".into()],
+            prewarm: vec![],
         };
         let json = serde_json::to_string(&with_skips).unwrap();
         assert!(json.contains("\"skipped\":[\"a.txt\",\"b.pdf\"]"));
@@ -1764,10 +1949,11 @@ mod tests {
         // Non-import surfaces report no skips.
         assert!(MediaListDto::from_core(&core, None).skipped.is_empty());
         // Import surfaces thread the skipped file names through unchanged.
-        let dto = MediaListDto::from_core_with_skipped(
+        let dto = MediaListDto::from_core_with_import_results(
             &core,
             None,
             vec!["note.txt".into(), "archive.zip".into()],
+            Vec::new(),
         );
         assert_eq!(dto.skipped, vec!["note.txt", "archive.zip"]);
     }
