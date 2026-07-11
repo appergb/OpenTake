@@ -200,6 +200,10 @@ impl PlaybackState {
 
     fn finish_prepare(&self, cancel: &opentake_media::MediaCancelToken) {
         let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+        Self::finish_prepare_locked(&mut slot, cancel);
+    }
+
+    fn finish_prepare_locked(slot: &mut PlaybackSlot, cancel: &opentake_media::MediaCancelToken) {
         if slot
             .prepare
             .as_ref()
@@ -232,6 +236,7 @@ impl PlaybackState {
         authoritative: opentake_core::ProjectRevision,
         resources: PlaybackResources,
         frame: i32,
+        prepare_cancel: &opentake_media::MediaCancelToken,
     ) -> Result<(), PlaybackCommandError> {
         let identity = ticket.identity().clone();
         let PlaybackResources {
@@ -241,6 +246,7 @@ impl PlaybackState {
             server,
         } = resources;
         let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+        Self::finish_prepare_locked(&mut slot, prepare_cancel);
         if let Err(error) = slot.sessions.install_if_current(ticket, authoritative) {
             drop(slot);
             publication.close();
@@ -311,6 +317,11 @@ impl PlaybackState {
         {
             slot.sessions.stop_all();
             Self::cancel_prepare(&mut slot);
+            let running = slot.running.take();
+            drop(slot);
+            if let Some(running) = running {
+                running.shutdown()?;
+            }
             return Ok(());
         }
         if !slot.sessions.control(&identity, control) {
@@ -649,8 +660,8 @@ pub async fn playback_start(
             server,
         },
         start_at,
+        &cancel,
     );
-    app.state::<PlaybackState>().finish_prepare(&cancel);
     result
 }
 
@@ -876,6 +887,36 @@ mod tests {
 
         assert!(cancel.is_cancelled());
         assert_eq!(state.pending_prepare_identity(), None);
+    }
+
+    #[test]
+    fn stop_shuts_down_running_if_pending_and_installed_ownership_overlap() {
+        let current = identity(1, 6, "readiness-handoff");
+        let (state, publication) = state_with_running(current.clone());
+        let cancel = opentake_media::MediaCancelToken::new();
+        {
+            let mut slot = state
+                .slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            slot.prepare = Some(PendingPrepare {
+                identity: current.clone(),
+                cancel: cancel.clone(),
+            });
+        }
+
+        state
+            .control(current, SessionControl::Stop, 0)
+            .expect("matching stop closes every handoff owner");
+
+        assert!(cancel.is_cancelled());
+        assert!(!publication.is_open());
+        let slot = state
+            .slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(slot.prepare.is_none());
+        assert!(slot.running.is_none());
     }
 
     #[test]
