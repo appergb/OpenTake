@@ -24,11 +24,46 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use opentake_domain::{MediaManifest, Timeline};
-use serde::Serialize;
+use serde::{de::DeserializeOwned, Serialize};
+use serde_json::Value;
 
 use crate::error::{ProjectError, Result};
 use crate::gen_log::GenerationLog;
 use crate::layout;
+
+/// Persisted schema details this build cannot safely write back.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProjectCompatibility {
+    blockers: Vec<String>,
+}
+
+impl ProjectCompatibility {
+    /// Whether saving would discard data this build does not understand.
+    pub fn is_read_only(&self) -> bool {
+        !self.blockers.is_empty()
+    }
+
+    /// Sorted, file-qualified reasons the project is compatibility read-only.
+    pub fn blockers(&self) -> &[String] {
+        &self.blockers
+    }
+
+    fn extend(&mut self, blockers: impl IntoIterator<Item = String>) {
+        self.blockers.extend(blockers);
+        self.blockers.sort();
+        self.blockers.dedup();
+    }
+
+    /// Refuse a write that would discard unknown persisted data.
+    pub fn ensure_writable(&self) -> Result<()> {
+        if self.is_read_only() {
+            return Err(ProjectError::CompatibilityReadOnly {
+                blockers: self.blockers.clone(),
+            });
+        }
+        Ok(())
+    }
+}
 
 /// An opened `.opentake` project: the bundle path plus its decoded components.
 ///
@@ -52,18 +87,33 @@ pub struct Project {
     /// JPEG thumbnail bytes to write on the next `save`. `None` leaves any
     /// existing `thumbnail.jpg` on disk untouched.
     pub thumbnail: Option<Vec<u8>>,
+    compatibility: ProjectCompatibility,
 }
 
 impl Project {
     /// Create a fresh, empty project rooted at `bundle_path` (not yet written).
     pub fn new(bundle_path: impl Into<PathBuf>) -> Self {
+        Self::new_with_compatibility(bundle_path, ProjectCompatibility::default())
+    }
+
+    /// Create a project while preserving compatibility state from an opened bundle.
+    pub fn new_with_compatibility(
+        bundle_path: impl Into<PathBuf>,
+        compatibility: ProjectCompatibility,
+    ) -> Self {
         Project {
             bundle_path: bundle_path.into(),
             timeline: Timeline::new(),
             manifest: MediaManifest::new(),
             generation_log: None,
             thumbnail: None,
+            compatibility,
         }
+    }
+
+    /// Compatibility state detected while opening the persisted components.
+    pub fn compatibility(&self) -> &ProjectCompatibility {
+        &self.compatibility
     }
 
     /// Open the `.opentake` bundle at `path`.
@@ -86,15 +136,19 @@ impl Project {
             });
         }
         let timeline_bytes = read_file(&timeline_path)?;
-        let timeline: Timeline = serde_json::from_slice(&timeline_bytes)
-            .map_err(|e| ProjectError::json(layout::TIMELINE_FILE, e))?;
+        let (timeline, timeline_blockers) =
+            decode_component::<Timeline>(&timeline_bytes, layout::TIMELINE_FILE)?;
+        let mut compatibility = ProjectCompatibility::default();
+        compatibility.extend(timeline_blockers);
 
         // media.json: strict when present, empty default when absent.
         let manifest_path = layout::manifest_path(bundle);
         let manifest = if manifest_path.is_file() {
             let bytes = read_file(&manifest_path)?;
-            serde_json::from_slice(&bytes)
-                .map_err(|e| ProjectError::json(layout::MANIFEST_FILE, e))?
+            let (manifest, blockers) =
+                decode_component::<MediaManifest>(&bytes, layout::MANIFEST_FILE)?;
+            compatibility.extend(blockers);
+            manifest
         } else {
             MediaManifest::new()
         };
@@ -102,9 +156,20 @@ impl Project {
         // generation-log.json: lenient — a parse error degrades to None.
         let gen_log_path = layout::generation_log_path(bundle);
         let generation_log = if gen_log_path.is_file() {
-            match read_file(&gen_log_path) {
-                Ok(bytes) => serde_json::from_slice::<GenerationLog>(&bytes).ok(),
-                Err(_) => None,
+            match read_file(&gen_log_path).and_then(|bytes| {
+                decode_component::<GenerationLog>(&bytes, layout::GENERATION_LOG_FILE)
+            }) {
+                Ok((log, blockers)) => {
+                    compatibility.extend(blockers);
+                    Some(log)
+                }
+                Err(_) => {
+                    compatibility.extend([format!(
+                        "{}:invalid-or-unreadable",
+                        layout::GENERATION_LOG_FILE
+                    )]);
+                    None
+                }
             }
         } else {
             None
@@ -116,6 +181,7 @@ impl Project {
             manifest,
             generation_log,
             thumbnail: None,
+            compatibility,
         })
     }
 
@@ -133,6 +199,7 @@ impl Project {
     /// Like [`Self::save`] but targets an explicit `bundle` directory (used by
     /// the archiver to stage a self-contained copy). Does not mutate `self`.
     pub fn save_to(&self, bundle: impl AsRef<Path>) -> Result<()> {
+        self.compatibility.ensure_writable()?;
         let bundle = bundle.as_ref();
         create_dir_all(bundle)?;
 
@@ -146,6 +213,97 @@ impl Project {
         }
         Ok(())
     }
+}
+
+fn decode_component<T: DeserializeOwned>(bytes: &[u8], file: &str) -> Result<(T, Vec<String>)> {
+    let document: Value =
+        serde_json::from_slice(bytes).map_err(|error| ProjectError::json(file, error))?;
+    let mut decoder = serde_json::Deserializer::from_slice(bytes);
+    let mut ignored = Vec::new();
+    let value = serde_ignored::deserialize(&mut decoder, |path| {
+        ignored.push(format!(
+            "{file}:{}",
+            canonical_ignored_path(&path, &document)
+        ));
+    })
+    .map_err(|error| ProjectError::json(file, error))?;
+    decoder
+        .end()
+        .map_err(|error| ProjectError::json(file, error))?;
+    ignored.sort();
+    ignored.dedup();
+    Ok((value, ignored))
+}
+
+enum IgnoredSegment {
+    Map(String),
+    Seq(usize),
+}
+
+fn canonical_ignored_path(path: &serde_ignored::Path<'_>, document: &Value) -> String {
+    fn collect(path: &serde_ignored::Path<'_>, segments: &mut Vec<IgnoredSegment>) {
+        match path {
+            serde_ignored::Path::Root => {}
+            serde_ignored::Path::Seq { parent, index } => {
+                collect(parent, segments);
+                segments.push(IgnoredSegment::Seq(*index));
+            }
+            serde_ignored::Path::Map { parent, key } => {
+                collect(parent, segments);
+                segments.push(IgnoredSegment::Map(key.clone()));
+            }
+            serde_ignored::Path::Some { parent }
+            | serde_ignored::Path::NewtypeStruct { parent }
+            | serde_ignored::Path::NewtypeVariant { parent } => collect(parent, segments),
+        }
+    }
+
+    let mut segments = Vec::new();
+    collect(path, &mut segments);
+
+    let mut current = Some(document);
+    let mut rendered = Vec::new();
+    for segment in segments {
+        match segment {
+            IgnoredSegment::Seq(index) => {
+                rendered.push(index.to_string());
+                current = current
+                    .and_then(Value::as_array)
+                    .and_then(|array| array.get(index));
+            }
+            IgnoredSegment::Map(key) => {
+                let direct = current
+                    .and_then(Value::as_object)
+                    .and_then(|object| object.get(&key));
+                if let Some(value) = direct {
+                    rendered.push(key);
+                    current = Some(value);
+                    continue;
+                }
+
+                let variant = current
+                    .and_then(Value::as_object)
+                    .filter(|object| object.len() == 1)
+                    .and_then(|object| object.iter().next())
+                    .filter(|(_, value)| {
+                        value
+                            .as_object()
+                            .is_some_and(|fields| fields.contains_key(&key))
+                    });
+                if let Some((variant_name, variant_value)) = variant {
+                    rendered.push(variant_name.clone());
+                    rendered.push(key.clone());
+                    current = variant_value
+                        .as_object()
+                        .and_then(|fields| fields.get(&key));
+                } else {
+                    rendered.push(key);
+                    current = None;
+                }
+            }
+        }
+    }
+    rendered.join(".")
 }
 
 /// Copy a source bundle's `media/` directory into `dest_bundle`, recursively,

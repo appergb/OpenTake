@@ -37,6 +37,15 @@ pub enum ProjectError {
         /// The underlying serde error.
         source: serde_json::Error,
     },
+
+    /// Writing would discard persisted fields this build does not understand.
+    #[error(
+        "project is compatibility read-only because this build does not understand: {blockers:?}"
+    )]
+    CompatibilityReadOnly {
+        /// Sorted, file-qualified persisted fields that require a newer build.
+        blockers: Vec<String>,
+    },
 }
 
 impl ProjectError {
