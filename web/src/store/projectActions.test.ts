@@ -242,4 +242,44 @@ describe("saveCurrentProject", () => {
     expect(srv.projectSave).toHaveBeenCalledTimes(1);
     expect(useProjectStore.getState().lastSavedVersion).toBe(9);
   });
+
+  it("queues an explicit save for a clean project opened during another project save", async () => {
+    const first = deferred<string>();
+    srv.projectSave
+      .mockImplementationOnce(() => first.promise)
+      .mockRejectedValueOnce("project B is compatibility read-only");
+
+    const projectASave = saveCurrentProject();
+    useProjectStore.getState().replaceProjectSnapshot({
+      timeline: srv.timeline,
+      projectEpoch: 2,
+      version: 3,
+      projectPath: "/tmp/project-b.opentake",
+      compatibilityReadOnly: true,
+      compatibilityBlockers: ["project.json:futureTimeline"],
+    });
+    const projectBSave = saveCurrentProject();
+    first.resolve("/tmp/unknown.opentake");
+    await Promise.all([projectASave, projectBSave]);
+
+    expect(srv.projectSave).toHaveBeenCalledTimes(2);
+    expect(useEditorUiStore.getState().toast?.message).toBe(
+      "保存失败：project B is compatibility read-only",
+    );
+    expect(useProjectStore.getState().lastSavedVersion).toBe(3);
+  });
+
+  it("suppresses a failure after the initiating snapshot revision changes", async () => {
+    const first = deferred<string>();
+    srv.projectSave.mockImplementationOnce(() => first.promise);
+    useProjectStore.setState({ lastSavedVersion: 9 });
+
+    const saving = saveCurrentProject();
+    useProjectStore.getState().setMirror(srv.timeline, 9, 1);
+    first.reject("stale save failure");
+    await saving;
+
+    expect(useEditorUiStore.getState().toast).toBeNull();
+    expect(srv.projectSave).toHaveBeenCalledTimes(1);
+  });
 });

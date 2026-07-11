@@ -79,6 +79,28 @@ interface SaveSnapshot {
 }
 
 let saveInFlight: Promise<void> | null = null;
+let activeSaveSnapshot: SaveSnapshot | null = null;
+let queuedExplicitSave: SaveSnapshot | null = null;
+
+function captureSaveSnapshot(): SaveSnapshot | null {
+  const current = useProjectStore.getState();
+  if (!current.projectPath) return null;
+  return {
+    snapshotMutationRevision: current.snapshotMutationRevision,
+    projectEpoch: current.projectEpoch,
+    projectPath: current.projectPath,
+    timelineVersion: current.timelineVersion,
+  };
+}
+
+function sameSnapshot(left: SaveSnapshot, right: SaveSnapshot): boolean {
+  return (
+    left.snapshotMutationRevision === right.snapshotMutationRevision &&
+    left.projectEpoch === right.projectEpoch &&
+    left.projectPath === right.projectPath &&
+    left.timelineVersion === right.timelineVersion
+  );
+}
 
 function sameProject(snapshot: SaveSnapshot): boolean {
   const current = useProjectStore.getState();
@@ -94,27 +116,33 @@ function currentProjectNeedsSave(): boolean {
 
 async function runSaveCoordinator(): Promise<void> {
   while (true) {
-    const current = useProjectStore.getState();
-    if (!current.projectPath) return;
-    const snapshot: SaveSnapshot = {
-      snapshotMutationRevision: current.snapshotMutationRevision,
-      projectEpoch: current.projectEpoch,
-      projectPath: current.projectPath,
-      timelineVersion: current.timelineVersion,
-    };
+    const explicitRequest = queuedExplicitSave;
+    queuedExplicitSave = null;
+    const snapshot = captureSaveSnapshot();
+    if (!snapshot) return;
+    if (explicitRequest && !sameProject(explicitRequest)) {
+      if (queuedExplicitSave || currentProjectNeedsSave()) continue;
+      return;
+    }
+    activeSaveSnapshot = snapshot;
 
     try {
       await api.projectSave(null);
     } catch (error) {
-      if (sameProject(snapshot)) {
+      activeSaveSnapshot = null;
+      const afterFailure = captureSaveSnapshot();
+      const failureIsCurrent = Boolean(afterFailure && sameSnapshot(snapshot, afterFailure));
+      if (failureIsCurrent) {
         const message = error instanceof Error ? error.message : String(error);
         useEditorUiStore.getState().pushToast(t("project.saveFailed", { error: message }));
-        return;
       }
+      if (queuedExplicitSave) continue;
+      if (failureIsCurrent) return;
       if (currentProjectNeedsSave()) continue;
       return;
     }
 
+    activeSaveSnapshot = null;
     const after = useProjectStore.getState();
     if (
       sameProject(snapshot) &&
@@ -122,8 +150,8 @@ async function runSaveCoordinator(): Promise<void> {
       after.timelineVersion === snapshot.timelineVersion
     ) {
       after.markSaved(snapshot.timelineVersion);
-      return;
     }
+    if (queuedExplicitSave) continue;
     if (currentProjectNeedsSave()) continue;
     return;
   }
@@ -138,7 +166,15 @@ async function runSaveCoordinator(): Promise<void> {
  * toast a newly opened project.
  */
 export function saveCurrentProject(): Promise<void> {
-  if (saveInFlight) return saveInFlight;
+  const request = captureSaveSnapshot();
+  if (!request) return Promise.resolve();
+  if (saveInFlight) {
+    if (!activeSaveSnapshot || !sameSnapshot(request, activeSaveSnapshot)) {
+      queuedExplicitSave = request;
+    }
+    return saveInFlight;
+  }
+  queuedExplicitSave = request;
   const run = runSaveCoordinator();
   const tracked = run.finally(() => {
     if (saveInFlight === tracked) saveInFlight = null;
