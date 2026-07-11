@@ -2,7 +2,12 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { PlaybackFrameEvent } from "../../lib/types";
-import { applyRustFrameBufferEffect, RustFrameBuffer } from "./RustFrameBuffer.tsx";
+import {
+  afterPaint,
+  applyRustFrameBufferEffect,
+  rustFrameEventSource,
+  RustFrameBuffer,
+} from "./RustFrameBuffer.tsx";
 import {
   createRustFrameBufferState,
   failRustFrame,
@@ -172,6 +177,43 @@ describe("retained Rust frame buffer", () => {
 
     expect(stop).not.toHaveBeenCalled();
     expect(setPlaying).not.toHaveBeenCalled();
+  });
+
+  it("uses the completed image URL when a stable slot dispatches an old event", () => {
+    expect(
+      rustFrameEventSource({
+        currentSrc: `${endpoint}?sequence=2`,
+        src: `${endpoint}?sequence=3`,
+      } as HTMLImageElement),
+    ).toBe(`${endpoint}?sequence=2`);
+  });
+
+  it("waits through the browser paint boundary before ending terminal playback", () => {
+    const callbacks: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callbacks.push(callback);
+      return callbacks.length;
+    });
+    const stop = vi.fn().mockResolvedValue(undefined);
+
+    try {
+      applyRustFrameBufferEffect("terminal-promoted", frame(2, { terminal: true }), {
+        afterPaint,
+        isCurrentIdentity: () => true,
+        setPlaying: vi.fn(),
+        stop,
+        onTerminalFailure: vi.fn(),
+      });
+
+      expect(callbacks).toHaveLength(1);
+      callbacks.shift()?.(0);
+      expect(stop).not.toHaveBeenCalled();
+      expect(callbacks).toHaveLength(1);
+      callbacks.shift()?.(16);
+      expect(stop).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("clears both slots when project epoch timeline version or session id changes", () => {

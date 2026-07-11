@@ -24,12 +24,16 @@ export interface RustFrameBufferProps {
   onTerminalFailure: () => void;
 }
 
-function afterPaint(callback: () => void): void {
+export function afterPaint(callback: () => void): void {
   if (typeof requestAnimationFrame === "function") {
-    requestAnimationFrame(() => callback());
+    requestAnimationFrame(() => requestAnimationFrame(() => callback()));
   } else {
     queueMicrotask(callback);
   }
+}
+
+export function rustFrameEventSource(target: Pick<HTMLImageElement, "currentSrc">): string {
+  return target.currentSrc;
 }
 
 function identityFor(frame: PlaybackFrameEvent): PlaybackIdentity {
@@ -222,8 +226,12 @@ export function RustFrameBuffer({
           src={slot.src ?? undefined}
           alt=""
           draggable={false}
-          onLoad={() => slot.src && onLoad(index as 0 | 1, slot.src)}
-          onError={() => slot.src && onError(index as 0 | 1, slot.src)}
+          onLoad={(event) =>
+            onLoad(index as 0 | 1, rustFrameEventSource(event.currentTarget))
+          }
+          onError={(event) =>
+            onError(index as 0 | 1, rustFrameEventSource(event.currentTarget))
+          }
           style={{
             position: "absolute",
             inset: 0,
