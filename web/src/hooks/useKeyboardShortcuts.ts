@@ -63,6 +63,18 @@ export function handleTransportSpaceKeyDown(
   return true;
 }
 
+export function handleProjectSaveKeyDown(
+  e: KeyboardEvent,
+  save: () => void = () => {
+    void saveCurrentProject();
+  },
+): boolean {
+  if (e.code !== "KeyS" || (!e.metaKey && !e.ctrlKey)) return false;
+  e.preventDefault();
+  if (!e.repeat) save();
+  return true;
+}
+
 export function useKeyboardShortcuts() {
   useEffect(() => {
     const handleSpaceKeyDown = (e: KeyboardEvent) => {
@@ -103,6 +115,8 @@ export function useKeyboardShortcuts() {
         ui.setScroll(Math.max(0, f * (next - old) + ui.scrollLeft), ui.scrollTop);
       };
 
+      if (handleProjectSaveKeyDown(e)) return;
+
       // Cmd-modified actions.
       if (mod) {
         switch (e.code) {
@@ -127,10 +141,6 @@ export function useKeyboardShortcuts() {
             // ⌘K (existing) and ⌘B (剪映 split-at-playhead) both split.
             e.preventDefault();
             edit.splitAtPlayhead();
-            return;
-          case "KeyS":
-            e.preventDefault();
-            void saveCurrentProject();
             return;
           case "Digit1":
             e.preventDefault();

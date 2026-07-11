@@ -1,6 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { MediaList, Timeline } from "../lib/types";
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 const srv = vi.hoisted(() => {
   const timeline: Timeline = {
     fps: 30,
@@ -86,6 +96,7 @@ import { useEditorUiStore } from "./uiStore";
 import { useMediaStore } from "./mediaStore";
 import { useProjectStore } from "./projectStore";
 import { useRecentStore } from "./recentStore";
+import { useI18nStore } from "../i18n";
 
 describe("openProjectPath", () => {
   beforeEach(() => {
@@ -156,21 +167,79 @@ describe("saveCurrentProject", () => {
     srv.projectSave.mockReset();
     srv.projectSave.mockImplementation(async (path: string | null) => path ?? "");
     useProjectStore.setState({
+      snapshotMutationRevision: 0,
+      projectEpoch: 1,
       projectPath: "/tmp/unknown.opentake",
       timelineVersion: 9,
       lastSavedVersion: 8,
     });
     useEditorUiStore.setState({ toast: null });
+    useI18nStore.setState({ locale: "zh-CN" });
   });
 
-  it("surfaces a rejected compatibility save and keeps the document dirty", async () => {
+  it("surfaces a production-shaped string rejection and keeps the document dirty", async () => {
     srv.projectSave.mockRejectedValueOnce(
-      new Error("project is compatibility read-only because this build does not understand future fields"),
+      "project is compatibility read-only because this build does not understand future fields",
     );
 
     await saveCurrentProject();
 
-    expect(useEditorUiStore.getState().toast?.message).toContain("compatibility read-only");
+    expect(useEditorUiStore.getState().toast?.message).toBe(
+      "保存失败：project is compatibility read-only because this build does not understand future fields",
+    );
     expect(useProjectStore.getState().lastSavedVersion).toBe(8);
+  });
+
+  it("queues one follow-up save when the document advances during an in-flight save", async () => {
+    const first = deferred<string>();
+    const second = deferred<string>();
+    srv.projectSave
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+
+    const saving = saveCurrentProject();
+    useProjectStore.getState().setMirror(srv.timeline, 10, 1);
+    first.resolve("/tmp/unknown.opentake");
+
+    await vi.waitFor(() => expect(srv.projectSave).toHaveBeenCalledTimes(2));
+    expect(useProjectStore.getState().lastSavedVersion).toBe(8);
+
+    second.resolve("/tmp/unknown.opentake");
+    await saving;
+    expect(useProjectStore.getState().lastSavedVersion).toBe(10);
+  });
+
+  it("suppresses a stale failure after switching projects", async () => {
+    const first = deferred<string>();
+    srv.projectSave.mockImplementationOnce(() => first.promise);
+
+    const saving = saveCurrentProject();
+    useProjectStore.getState().replaceProjectSnapshot({
+      timeline: srv.timeline,
+      projectEpoch: 2,
+      version: 3,
+      projectPath: "/tmp/new.opentake",
+      compatibilityReadOnly: false,
+      compatibilityBlockers: [],
+    });
+    first.reject("old project save failed");
+    await saving;
+
+    expect(useEditorUiStore.getState().toast).toBeNull();
+    expect(useProjectStore.getState().lastSavedVersion).toBe(3);
+  });
+
+  it("coalesces overlapping autosave and keyboard requests", async () => {
+    const first = deferred<string>();
+    srv.projectSave.mockImplementationOnce(() => first.promise);
+
+    const autosave = saveCurrentProject();
+    const keyboardSave = saveCurrentProject();
+    expect(srv.projectSave).toHaveBeenCalledTimes(1);
+
+    first.resolve("/tmp/unknown.opentake");
+    await Promise.all([autosave, keyboardSave]);
+    expect(srv.projectSave).toHaveBeenCalledTimes(1);
+    expect(useProjectStore.getState().lastSavedVersion).toBe(9);
   });
 });

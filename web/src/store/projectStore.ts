@@ -37,7 +37,7 @@ interface ProjectState {
   setHistory: (canUndo: boolean, canRedo: boolean) => void;
   /** Mark the current version as persisted (called after a successful save / on
    *  open, so a freshly opened project is not considered dirty). */
-  markSaved: () => void;
+  markSaved: (version?: number) => void;
 }
 
 export const useProjectStore = create<ProjectState>((set) => ({
@@ -97,5 +97,6 @@ export const useProjectStore = create<ProjectState>((set) => ({
       projectPath,
     })),
   setHistory: (canUndo, canRedo) => set({ canUndo, canRedo }),
-  markSaved: () => set((s) => ({ lastSavedVersion: s.timelineVersion })),
+  markSaved: (version) =>
+    set((state) => ({ lastSavedVersion: version ?? state.timelineVersion })),
 }));

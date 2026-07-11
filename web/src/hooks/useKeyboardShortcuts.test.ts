@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  handleProjectSaveKeyDown,
   handleTransportSpaceKeyDown,
   shouldHandleTransportSpaceKey,
 } from "./useKeyboardShortcuts";
@@ -97,5 +98,29 @@ describe("keyboard transport Space shortcut", () => {
 
     expect("releaseTransportSpaceFocus" in shortcuts).toBe(false);
     expect("suppressTransportSpaceKeyUp" in shortcuts).toBe(false);
+  });
+});
+
+describe("project save shortcut", () => {
+  it("prevents the native shortcut but ignores repeated KeyS events", () => {
+    let saves = 0;
+    let prevented = 0;
+    const handled = handleProjectSaveKeyDown(
+      event({
+        code: "KeyS",
+        metaKey: true,
+        repeat: true,
+        preventDefault: () => {
+          prevented += 1;
+        },
+      }),
+      () => {
+        saves += 1;
+      },
+    );
+
+    expect(handled).toBe(true);
+    expect(prevented).toBe(1);
+    expect(saves).toBe(0);
   });
 });

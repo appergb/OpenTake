@@ -71,25 +71,80 @@ export async function newProjectAndEnter(): Promise<void> {
   useEditorUiStore.getState().setView("editor");
 }
 
+interface SaveSnapshot {
+  snapshotMutationRevision: number;
+  projectEpoch: number;
+  projectPath: string;
+  timelineVersion: number;
+}
+
+let saveInFlight: Promise<void> | null = null;
+
+function sameProject(snapshot: SaveSnapshot): boolean {
+  const current = useProjectStore.getState();
+  return (
+    current.projectEpoch === snapshot.projectEpoch && current.projectPath === snapshot.projectPath
+  );
+}
+
+function currentProjectNeedsSave(): boolean {
+  const current = useProjectStore.getState();
+  return Boolean(current.projectPath) && current.timelineVersion !== current.lastSavedVersion;
+}
+
+async function runSaveCoordinator(): Promise<void> {
+  while (true) {
+    const current = useProjectStore.getState();
+    if (!current.projectPath) return;
+    const snapshot: SaveSnapshot = {
+      snapshotMutationRevision: current.snapshotMutationRevision,
+      projectEpoch: current.projectEpoch,
+      projectPath: current.projectPath,
+      timelineVersion: current.timelineVersion,
+    };
+
+    try {
+      await api.projectSave(null);
+    } catch (error) {
+      if (sameProject(snapshot)) {
+        const message = error instanceof Error ? error.message : String(error);
+        useEditorUiStore.getState().pushToast(t("project.saveFailed", { error: message }));
+        return;
+      }
+      if (currentProjectNeedsSave()) continue;
+      return;
+    }
+
+    const after = useProjectStore.getState();
+    if (
+      sameProject(snapshot) &&
+      after.snapshotMutationRevision === snapshot.snapshotMutationRevision &&
+      after.timelineVersion === snapshot.timelineVersion
+    ) {
+      after.markSaved(snapshot.timelineVersion);
+      return;
+    }
+    if (currentProjectNeedsSave()) continue;
+    return;
+  }
+}
+
 /**
  * Save the open project back to its bundle (`project_save(None)`). Used by the
- * Cmd/Ctrl+S shortcut and the debounced autosave. No-op when no project is open
- * (Home view) or outside Tauri. The backend already knows the bundle path from
- * the initial save, so no path is passed. Best-effort: a failure leaves the
- * dirty state so the next autosave/Cmd+S retries, and surface the backend
- * reason so compatibility read-only saves never fail silently.
+ * Cmd/Ctrl+S shortcut and the debounced autosave. Concurrent triggers share one
+ * coordinator; if the document advances while a save is in flight, one fresh
+ * save follows before the new version can be marked persisted. Completions are
+ * bound to the initiating project identity so an old project cannot mark or
+ * toast a newly opened project.
  */
-export async function saveCurrentProject(): Promise<void> {
-  const { projectPath } = useProjectStore.getState();
-  if (!projectPath) return;
-  try {
-    await api.projectSave(null);
-    useProjectStore.getState().markSaved();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    useEditorUiStore.getState().pushToast(t("project.saveFailed", { error: message }));
-    // Keep the document dirty so a later save retries.
-  }
+export function saveCurrentProject(): Promise<void> {
+  if (saveInFlight) return saveInFlight;
+  const run = runSaveCoordinator();
+  const tracked = run.finally(() => {
+    if (saveInFlight === tracked) saveInFlight = null;
+  });
+  saveInFlight = tracked;
+  return tracked;
 }
 
 /** Open `path` (a `.opentake` bundle), refresh the mirror, record it, and enter
