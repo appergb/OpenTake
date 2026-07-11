@@ -38,9 +38,7 @@ export async function newProjectAndEnter(): Promise<void> {
   if (!save) {
     await stopNativePlaybackForProjectBoundary();
     const snapshot = await api.projectNew();
-    useProjectStore
-      .getState()
-      .setMirror(snapshot.timeline, snapshot.version, snapshot.projectEpoch);
+    useProjectStore.getState().replaceProjectSnapshot(snapshot);
     await forceRefresh();
     useEditorUiStore.getState().resetProjectRuntimeState();
     useEditorUiStore.getState().setView("editor");
@@ -63,14 +61,12 @@ export async function newProjectAndEnter(): Promise<void> {
   const path = withExt(chosen);
   await stopNativePlaybackForProjectBoundary();
   const snapshot = await api.projectNew();
-  useProjectStore
-    .getState()
-    .setMirror(snapshot.timeline, snapshot.version, snapshot.projectEpoch);
+  useProjectStore.getState().replaceProjectSnapshot(snapshot);
   await api.projectSave(path);
+  await forceRefresh();
   useProjectStore.getState().setProjectPath(path);
   useProjectStore.getState().markSaved();
   useRecentStore.getState().add(path);
-  await forceRefresh();
   useEditorUiStore.getState().resetProjectRuntimeState();
   useEditorUiStore.getState().setView("editor");
 }
@@ -98,10 +94,9 @@ export async function saveCurrentProject(): Promise<void> {
 export async function openProjectPath(path: string): Promise<void> {
   await stopNativePlaybackForProjectBoundary();
   const snap = await api.projectOpen(path);
-  useProjectStore.getState().setMirror(snap.timeline, snap.version, snap.projectEpoch);
-  useProjectStore.getState().setProjectPath(path);
+  useProjectStore.getState().replaceProjectSnapshot(snap);
   useProjectStore.getState().markSaved();
-  useRecentStore.getState().add(path);
+  if (snap.projectPath) useRecentStore.getState().add(snap.projectPath);
   await refreshMedia();
   useEditorUiStore.getState().resetProjectRuntimeState();
   useEditorUiStore.getState().setView("editor");

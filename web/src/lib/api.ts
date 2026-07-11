@@ -56,7 +56,13 @@ async function ensureTauri(): Promise<void> {
 export async function getTimeline(): Promise<RuntimeTimelineSnapshot> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<RuntimeTimelineSnapshot>("get_timeline");
-  return { ...fallback.getTimeline(), projectEpoch: 0 };
+  return {
+    ...fallback.getTimeline(),
+    projectEpoch: 0,
+    projectPath: null,
+    compatibilityReadOnly: false,
+    compatibilityBlockers: [],
+  };
 }
 
 export async function editApply(command: EditRequest): Promise<EditResult> {
@@ -105,13 +111,25 @@ export async function projectNew(): Promise<RuntimeTimelineSnapshot> {
     return invokeImpl<RuntimeTimelineSnapshot>("project_new");
   }
   fallback.reset();
-  return { ...fallback.getTimeline(), projectEpoch: 0 };
+  return {
+    ...fallback.getTimeline(),
+    projectEpoch: 0,
+    projectPath: null,
+    compatibilityReadOnly: false,
+    compatibilityBlockers: [],
+  };
 }
 
 export async function projectOpen(path: string): Promise<RuntimeTimelineSnapshot> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<RuntimeTimelineSnapshot>("project_open", { path });
-  return { ...fallback.getTimeline(), projectEpoch: 0 };
+  return {
+    ...fallback.getTimeline(),
+    projectEpoch: 0,
+    projectPath: null,
+    compatibilityReadOnly: false,
+    compatibilityBlockers: [],
+  };
 }
 
 export async function projectSave(path: string | null): Promise<string> {

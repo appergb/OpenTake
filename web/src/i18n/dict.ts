@@ -20,6 +20,13 @@ const zh: Dict = {
   "app.name": "OpenTake",
   "app.tagline": "为 AI 打造的视频编辑器。生成与剪辑,一处搞定。",
 
+  // Project schema compatibility
+  "compatibility.title": "兼容性只读模式",
+  "compatibility.description":
+    "此项目包含当前版本无法安全保存的字段。仍可查看项目内容，但编辑和保存已停用。",
+  "compatibility.blockerCount.one": "{count} 个兼容性问题",
+  "compatibility.blockerCount.many": "{count} 个兼容性问题",
+
   // TitleBar
   "title.toggleAgent": "切换 Agent 面板",
   "title.export": "导出",
@@ -624,6 +631,12 @@ const zh: Dict = {
 const en: Dict = {
   "app.name": "OpenTake",
   "app.tagline": "A video editor built for AI. Generate and edit, all in one place.",
+
+  "compatibility.title": "Compatibility read-only mode",
+  "compatibility.description":
+    "This project contains fields this version cannot safely save. You can still inspect the project, but editing and saving are disabled.",
+  "compatibility.blockerCount.one": "{count} compatibility issue",
+  "compatibility.blockerCount.many": "{count} compatibility issues",
 
   "title.toggleAgent": "Toggle Agent Panel",
   "title.export": "Export",

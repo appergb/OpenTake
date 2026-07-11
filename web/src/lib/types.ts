@@ -411,6 +411,9 @@ export interface TimelineSnapshot {
  * keeps the optional field only for the browser fallback fixture schema. */
 export interface RuntimeTimelineSnapshot extends TimelineSnapshot {
   projectEpoch: number;
+  projectPath: string | null;
+  compatibilityReadOnly: boolean;
+  compatibilityBlockers: string[];
 }
 
 export interface ProjectRevision {

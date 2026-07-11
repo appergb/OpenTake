@@ -15,7 +15,7 @@ let unlistenOpened: (() => void) | null = null;
 
 async function refreshMirror(): Promise<void> {
   const snap = await api.getTimeline();
-  useProjectStore.getState().setMirror(snap.timeline, snap.version, snap.projectEpoch);
+  useProjectStore.getState().replaceProjectSnapshot(snap);
   const [canUndo, canRedo] = await Promise.all([api.canUndo(), api.canRedo()]);
   useProjectStore.getState().setHistory(canUndo, canRedo);
 }
@@ -33,9 +33,8 @@ export async function startSync(): Promise<void> {
       await refreshMirror();
     }
   });
-  unlistenOpened = await api.onProjectOpened(async (path) => {
+  unlistenOpened = await api.onProjectOpened(async () => {
     await stopNativePlaybackForProjectBoundary();
-    useProjectStore.getState().setProjectPath(path || null);
     await refreshMirror();
     useEditorUiStore.getState().resetProjectRuntimeState();
   });

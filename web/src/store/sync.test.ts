@@ -11,6 +11,7 @@ const srv = vi.hoisted(() => {
   };
   return {
     timeline,
+    projectPath: null as string | null,
     order: [] as string[],
     onProjectOpened: null as null | ((path: string, projectEpoch: number, version: number) => Promise<void> | void),
     invalidate: vi.fn(async () => {
@@ -22,7 +23,14 @@ const srv = vi.hoisted(() => {
 vi.mock("../lib/api", () => ({
   getTimeline: async () => {
     srv.order.push("refresh");
-    return { timeline: srv.timeline, projectEpoch: 1, version: 0 };
+    return {
+      timeline: srv.timeline,
+      projectEpoch: 1,
+      version: 0,
+      projectPath: srv.projectPath,
+      compatibilityReadOnly: false,
+      compatibilityBlockers: [],
+    };
   },
   canUndo: async () => false,
   canRedo: async () => false,
@@ -48,6 +56,7 @@ afterEach(() => {
   srv.order.length = 0;
   srv.invalidate.mockClear();
   srv.onProjectOpened = null;
+  srv.projectPath = null;
 });
 
 describe("project event sync", () => {
@@ -62,11 +71,12 @@ describe("project event sync", () => {
     await startSync();
     srv.order.length = 0;
 
-    await srv.onProjectOpened?.("/tmp/external.opentake", 7, 0);
+    srv.projectPath = "/tmp/snapshot.opentake";
+    await srv.onProjectOpened?.("/tmp/event-payload.opentake", 7, 0);
 
     expect(srv.order.slice(0, 2)).toEqual(["invalidate", "refresh"]);
     expect(useProjectStore.getState().projectEpoch).toBe(1);
-    expect(useProjectStore.getState().projectPath).toBe("/tmp/external.opentake");
+    expect(useProjectStore.getState().projectPath).toBe("/tmp/snapshot.opentake");
     const ui = useEditorUiStore.getState();
     expect(ui.isPlaying).toBe(false);
     expect(ui.currentFrame).toBe(0);

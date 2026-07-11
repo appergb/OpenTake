@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { TitleBar } from "./components/shell/TitleBar";
 import { ExportDialog } from "./components/shell/ExportDialog";
 import { EditorSplit } from "./components/shell/EditorSplit";
+import { CompatibilityBanner } from "./components/shell/CompatibilityBanner";
 import { HomeView } from "./components/home/HomeView";
 import { SettingsView } from "./components/settings/SettingsView";
 import { LibraryView } from "./components/media/LibraryView";
@@ -101,6 +102,7 @@ export default function App() {
         background: "var(--bg-base)",
       }}
     >
+      <CompatibilityBanner />
       {view === "home" ? (
         <HomeView />
       ) : view === "library" ? (
