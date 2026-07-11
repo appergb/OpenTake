@@ -302,16 +302,32 @@ fn origin_is_allowed(headers: &HeaderMap) -> bool {
     match headers.get(axum::http::header::ORIGIN) {
         None => true,
         Some(value) => match value.to_str() {
-            Ok(origin) => {
-                origin.starts_with("http://127.0.0.1")
-                    || origin.starts_with("http://localhost")
-                    || origin.starts_with("https://localhost")
-                    || origin.starts_with("tauri://")
-                    || origin.starts_with("http://tauri.localhost")
-            }
+            Ok(origin) => origin_value_is_allowed(origin),
             Err(_) => false,
         },
     }
+}
+
+fn origin_value_is_allowed(origin: &str) -> bool {
+    let Ok(uri) = origin.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    if uri.path() != "/" || uri.query().is_some() {
+        return false;
+    }
+    let (Some(scheme), Some(host)) = (uri.scheme_str(), uri.host()) else {
+        return false;
+    };
+    matches!(
+        (scheme, host),
+        ("http", "127.0.0.1")
+            | ("http", "localhost")
+            | ("https", "localhost")
+            | ("tauri", "localhost")
+            | ("http", "tauri.localhost")
+            | ("http", "[::1]")
+            | ("https", "[::1]")
+    )
 }
 
 /// `/stream`: relay each broadcast JPEG as a `multipart/x-mixed-replace` part.

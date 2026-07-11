@@ -69,6 +69,14 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+      - name: live playback transport integration (fail closed)
+        run: |
+          set -euo pipefail
+          cargo test -p opentake-tauri \
+            --features playback-engine \
+            --test playback_transport_integration \
+            -- --test-threads=1
+
       # Prove the minimal build still compiles WITHOUT the engine (the
       # `--no-default-features` escape hatch: drops cpal/axum/tokio + the
       # `playback_*` commands; the front end then falls back to the legacy path).
