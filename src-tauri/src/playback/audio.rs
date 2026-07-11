@@ -760,19 +760,6 @@ pub fn try_build_clock(
     )
 }
 
-/// Debug-only compatibility helper for the real-device integration probe.
-/// Release production callers must use [`try_build_clock`].
-#[cfg(debug_assertions)]
-pub fn build_clock(
-    timeline: &Timeline,
-    media: &HashMap<String, MediaInfo>,
-    fps: i32,
-    start_frame: i32,
-) -> (Arc<dyn PlaybackClock>, Option<AudioPlayback>) {
-    try_build_clock(timeline, media, fps, start_frame)
-        .unwrap_or_else(|error| panic!("playback audio preparation failed: {error}"))
-}
-
 /// Prepare audio without starting the device clock. The retained playback
 /// session resumes audio only after its first composited frame is buffered.
 pub fn build_clock_paused(

@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use opentake_domain::{Clip, ClipType, Timeline, Track};
 use opentake_render::{DecodedFrame, RenderSize};
 use opentake_tauri_lib::playback::{
-    audio::build_clock, FrameSink, MediaInfo, PlaybackEngine, PlayheadEmitter,
+    audio::try_build_clock, FrameSink, MediaInfo, PlaybackEngine, PlayheadEmitter,
 };
 
 /// Collects frames: counts + keeps the last one.
@@ -71,7 +71,7 @@ fn run_engine(
     secs: f64,
 ) -> (i32, i32, Option<DecodedFrame>) {
     let fps = timeline.fps;
-    let (clock, _audio) = build_clock(&timeline, &media, fps, 0);
+    let (clock, _audio) = try_build_clock(&timeline, &media, fps, 0).expect("probe audio clock");
     let sink = Arc::new(ProbeSink {
         frames: AtomicI32::new(0),
         last: Mutex::new(None),
