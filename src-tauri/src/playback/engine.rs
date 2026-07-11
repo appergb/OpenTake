@@ -22,6 +22,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use opentake_domain::Timeline;
+use opentake_media::MediaCancelToken;
 use opentake_render::{
     build_render_plan, Compositor, DecodedFrame, RenderDevice, RenderPlan, RenderSize,
 };
@@ -230,6 +231,24 @@ impl RenderLoop {
         sizes: HashMap<String, (u32, u32)>,
         render_size: RenderSize,
     ) -> Result<Self, String> {
+        Self::new_with_cancel(
+            timeline,
+            media,
+            text,
+            sizes,
+            render_size,
+            MediaCancelToken::new(),
+        )
+    }
+
+    fn new_with_cancel(
+        timeline: Timeline,
+        media: HashMap<String, MediaInfo>,
+        text: HashMap<String, TextInfo>,
+        sizes: HashMap<String, (u32, u32)>,
+        render_size: RenderSize,
+        cancel: MediaCancelToken,
+    ) -> Result<Self, String> {
         let dev = RenderDevice::try_new().map_err(|e| format!("no GPU device: {e}"))?;
         let compositor = Compositor::new(&dev.device);
         let metrics = ManifestMetrics { sizes };
@@ -239,6 +258,7 @@ impl RenderLoop {
             text,
             plan.fps,
             (render_size.width, render_size.height),
+            cancel,
         );
         Ok(RenderLoop {
             device: dev.device,
@@ -288,6 +308,7 @@ impl RenderLoop {
 pub struct PlaybackEngine {
     control_tx: mpsc::Sender<PlaybackCmd>,
     handle: Option<JoinHandle<()>>,
+    cancel: MediaCancelToken,
 }
 
 impl PlaybackEngine {
@@ -376,6 +397,8 @@ impl PlaybackEngine {
         startup: Option<mpsc::Sender<Result<(), String>>>,
     ) -> Result<Self, String> {
         let (tx, rx) = mpsc::channel();
+        let cancel = MediaCancelToken::new();
+        let render_cancel = cancel.clone();
         let handle = thread::Builder::new()
             .name("opentake-playback-render".to_string())
             .spawn(move || {
@@ -391,12 +414,14 @@ impl PlaybackEngine {
                     rx,
                     initial_frame,
                     startup,
+                    render_cancel,
                 );
             })
             .map_err(|e| format!("spawn playback thread: {e}"))?;
         Ok(PlaybackEngine {
             control_tx: tx,
             handle: Some(handle),
+            cancel,
         })
     }
 
@@ -425,6 +450,7 @@ impl PlaybackEngine {
 
     /// Stop the engine and join the render thread.
     pub fn stop(mut self) {
+        self.cancel.cancel();
         let _ = self.control_tx.send(PlaybackCmd::Stop);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
@@ -432,6 +458,7 @@ impl PlaybackEngine {
     }
 
     pub fn request_stop(mut self) -> Option<JoinHandle<()>> {
+        self.cancel.cancel();
         let _ = self.control_tx.send(PlaybackCmd::Stop);
         self.handle.take()
     }
@@ -458,6 +485,7 @@ impl PlaybackEngine {
             Self {
                 control_tx,
                 handle: Some(handle),
+                cancel: MediaCancelToken::new(),
             },
             stopped_rx,
         )
@@ -467,6 +495,7 @@ impl PlaybackEngine {
 impl Drop for PlaybackEngine {
     fn drop(&mut self) {
         // Best-effort cooperative stop if the caller didn't `stop()` explicitly.
+        self.cancel.cancel();
         let _ = self.control_tx.send(PlaybackCmd::Stop);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
@@ -489,17 +518,19 @@ fn run_render_thread(
     rx: mpsc::Receiver<PlaybackCmd>,
     initial_frame: Option<i32>,
     mut startup: Option<mpsc::Sender<Result<(), String>>>,
+    cancel: MediaCancelToken,
 ) {
-    let mut render_loop = match RenderLoop::new(timeline, media, text, sizes, render_size) {
-        Ok(rl) => rl,
-        Err(e) => {
-            if let Some(tx) = startup.take() {
-                let _ = tx.send(Err(e.clone()));
+    let mut render_loop =
+        match RenderLoop::new_with_cancel(timeline, media, text, sizes, render_size, cancel) {
+            Ok(rl) => rl,
+            Err(e) => {
+                if let Some(tx) = startup.take() {
+                    let _ = tx.send(Err(e.clone()));
+                }
+                eprintln!("[playback] {e}");
+                return;
             }
-            eprintln!("[playback] {e}");
-            return;
-        }
-    };
+        };
     let total = render_loop.total_frames();
     let fps = render_loop.fps();
     if total <= 0 {

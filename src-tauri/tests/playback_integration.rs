@@ -14,15 +14,16 @@
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::sleep;
-use std::time::Duration;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::{self, sleep};
+use std::time::{Duration, Instant};
 
 use opentake_domain::{
     Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track,
 };
 use opentake_media::{decode_frame_at, FrameRequest};
 use opentake_render::{DecodedFrame, RenderSize};
+use opentake_tauri_lib::playback::engine::BoundedReaper;
 use opentake_tauri_lib::playback::{
     project_media, project_text, FrameSink, InstantClock, PlaybackClock, PlaybackEngine,
     PlayheadEmitter, RenderLoop,
@@ -171,6 +172,28 @@ fn required_render_loop(
         .expect("exact-bootstrap integration requires a GPU adapter")
 }
 
+struct ManualClock(AtomicI32);
+
+impl ManualClock {
+    fn new(frame: i32) -> Self {
+        Self(AtomicI32::new(frame))
+    }
+
+    fn set(&self, frame: i32) {
+        self.0.store(frame, Ordering::Release);
+    }
+}
+
+impl PlaybackClock for ManualClock {
+    fn frame(&self, _fps: i32) -> i32 {
+        self.0.load(Ordering::Acquire)
+    }
+
+    fn seek(&self, frame: i32) {
+        self.set(frame);
+    }
+}
+
 #[test]
 fn cold_bootstrap_uses_exact_trimmed_source_frame() {
     assert!(
@@ -251,6 +274,113 @@ fn cold_bootstrap_decode_failure_is_reported_instead_of_publishing_black() {
         error.contains("bootstrap") && error.contains("asset-1"),
         "error must identify bootstrap media failure: {error}"
     );
+}
+
+#[test]
+fn stopping_running_engine_cancels_blocked_cold_bootstrap() {
+    assert!(ffmpeg_ready(), "cancellation integration requires ffmpeg");
+    let dir = tempfile::tempdir().expect("fixture tempdir");
+    let fifo = dir.path().join("blocked-source");
+    let status = Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo must start");
+    assert!(
+        status.success(),
+        "mkfifo must create the blocked media source"
+    );
+
+    let mut timeline = Timeline::new();
+    timeline.fps = 30;
+    let mut track = Track::new("t1", ClipType::Video);
+    track.clips.push(Clip::new("clip-1", "asset-1", 1, 4));
+    timeline.tracks.push(track);
+    let mut manifest = MediaManifest::new();
+    manifest
+        .entries
+        .push(external_entry("asset-1", &fifo, 2, 2, 30.0));
+    let (sizes, media) = project_media(&manifest, &None);
+    let text = project_text(&timeline);
+
+    struct NoopSink;
+    impl FrameSink for NoopSink {
+        fn push_frame(&self, _frame: &DecodedFrame) {}
+    }
+    struct NoopEmitter;
+    impl PlayheadEmitter for NoopEmitter {
+        fn emit(&self, _frame: i32) {}
+    }
+
+    let clock = Arc::new(ManualClock::new(0));
+    let engine = PlaybackEngine::spawn_ready(
+        timeline,
+        media,
+        text,
+        sizes,
+        RenderSize::new(2, 2),
+        clock.clone(),
+        Arc::new(NoopSink),
+        Arc::new(NoopEmitter),
+        0,
+    )
+    .expect("frame zero prepares before the clip becomes visible");
+    engine.resume(0).expect("resume prepared engine");
+    clock.set(1);
+    sleep(Duration::from_millis(250));
+
+    let reaper = BoundedReaper::new();
+    let render_permit = reaper
+        .try_reserve()
+        .expect("reserve the blocked engine teardown");
+    let dummy_permit = reaper
+        .try_reserve()
+        .expect("reserve the second bounded teardown slot");
+    assert!(
+        reaper.try_reserve().is_err(),
+        "both teardown slots must be occupied before cancellation"
+    );
+
+    let render_handle = engine
+        .request_stop()
+        .expect("running engine owns a render handle");
+    let joined = Arc::new(Mutex::new(None));
+    let joined_result = Arc::clone(&joined);
+    let join_wrapper = thread::spawn(move || {
+        *joined_result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(render_handle.join().is_ok());
+    });
+    render_permit
+        .enqueue(vec![join_wrapper])
+        .expect("enqueue cancelled render handle");
+
+    let (dummy_release_tx, dummy_release_rx) = mpsc::channel();
+    let dummy_handle = thread::spawn(move || {
+        let _ = dummy_release_rx.recv();
+    });
+    dummy_permit
+        .enqueue(vec![dummy_handle])
+        .expect("enqueue held second teardown");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let recovered = loop {
+        match reaper.try_reserve() {
+            Ok(permit) => break permit,
+            Err(_) if Instant::now() < deadline => sleep(Duration::from_millis(10)),
+            Err(error) => panic!("cancelled bootstrap did not recover reaper capacity: {error}"),
+        }
+    };
+    assert!(
+        joined
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some_and(|ok| ok),
+        "render thread must not panic during cancellation"
+    );
+    drop(recovered);
+    dummy_release_tx
+        .send(())
+        .expect("release held teardown slot");
 }
 
 #[test]
