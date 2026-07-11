@@ -80,6 +80,15 @@ describe("resolveTimelinePlaybackRoute", () => {
     expect(
       resolveTimelinePlaybackRoute(timeline(clip({ speed: 1.75 })), runtime).kind,
     ).toBe("webkit");
+    expect(
+      resolveTimelinePlaybackRoute(timeline(clip({ speed: 0 })), runtime).kind,
+    ).toBe("webkit");
+    expect(
+      resolveTimelinePlaybackRoute(
+        timeline(clip({ speed: 1 + Number.EPSILON })),
+        runtime,
+      ).kind,
+    ).toBe("webkit");
   });
 
   it("routes text color chroma and supported masks to Rust", () => {
@@ -141,22 +150,24 @@ describe("resolveTimelinePlaybackRoute", () => {
   });
 
   it("returns Unsupported for composited content plus speed", () => {
-    const result = resolveTimelinePlaybackRoute(
-      timeline(
-        clip({
-          speed: 2,
-          chromaKey: {
-            keyColor: { r: 0, g: 1, b: 0 },
-            similarity: 0.2,
-            smoothness: 0.1,
-            spill: 0.1,
-          },
-        }),
-      ),
-      runtime,
-    );
-    expect(result.kind).toBe("unsupported");
-    expect(reasonCodes(result)).toContain("composited-speed");
+    for (const speed of [2, 0, 1 + Number.EPSILON]) {
+      const result = resolveTimelinePlaybackRoute(
+        timeline(
+          clip({
+            speed,
+            chromaKey: {
+              keyColor: { r: 0, g: 1, b: 0 },
+              similarity: 0.2,
+              smoothness: 0.1,
+              spill: 0.1,
+            },
+          }),
+        ),
+        runtime,
+      );
+      expect(result.kind).toBe("unsupported");
+      expect(reasonCodes(result)).toContain("composited-speed");
+    }
   });
 
   it("returns Unsupported for Lottie enabled effects polygon masks and mask overflow", () => {

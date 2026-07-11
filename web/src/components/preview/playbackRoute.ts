@@ -56,8 +56,7 @@ function inspectClip(
     clip,
     needsRust,
     reversed: clip.reversed === true,
-    speedChanged:
-      Number.isFinite(clip.speed) && clip.speed > 0 && Math.abs(clip.speed - 1) > 1e-9,
+    speedChanged: clip.speed !== 1,
   };
 }
 
