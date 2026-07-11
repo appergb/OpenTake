@@ -104,6 +104,7 @@ const zh: Dict = {
   "view.layoutDefault": "默认布局",
   "view.layoutMedia": "媒体布局",
   "view.layoutVertical": "竖屏布局",
+  "view.agentPanel": "Agent 面板",
   "view.mediaPanel": "媒体面板",
   "view.inspector": "检查器",
 
@@ -706,6 +707,7 @@ const en: Dict = {
   "view.layoutDefault": "Default Layout",
   "view.layoutMedia": "Media Layout",
   "view.layoutVertical": "Vertical Layout",
+  "view.agentPanel": "Agent Panel",
   "view.mediaPanel": "Media Panel",
   "view.inspector": "Inspector",
 

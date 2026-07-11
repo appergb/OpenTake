@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { DICTS } from "../../i18n/dict";
 
 const titleBarSource = readFileSync(new URL("./TitleBar.tsx", import.meta.url), "utf8");
 const viewMenuSource = readFileSync(new URL("./ViewMenu.tsx", import.meta.url), "utf8");
@@ -23,6 +24,11 @@ describe("TitleBar alignment", () => {
     expect(viewMenuSource).toContain("view.agentPanel");
     expect(viewMenuSource).toContain("toggleAgentPanel");
     expect(viewMenuSource).toContain("⌘⌥A");
+  });
+
+  it("localizes the Agent panel menu name instead of exposing its translation key", () => {
+    expect(DICTS["zh-CN"]["view.agentPanel"]).toBe("Agent 面板");
+    expect(DICTS.en["view.agentPanel"]).toBe("Agent Panel");
   });
 
   it("keeps the titlebar-safe-left padding reserved for macOS traffic lights", () => {
