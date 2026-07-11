@@ -323,4 +323,87 @@ describe("project event sync", () => {
     expect(useEditorUiStore.getState().currentFrame).toBe(0);
     expect(useEditorUiStore.getState().selectedClipIds.size).toBe(0);
   });
+
+  it("does not let a pending refresh overwrite a direct project replacement", async () => {
+    const staleSnapshot = deferred<RuntimeTimelineSnapshot>();
+    srv.snapshotResponses.push(staleSnapshot.promise);
+    const refresh = forceRefresh();
+
+    useProjectStore
+      .getState()
+      .replaceProjectSnapshot(snapshot(12, 0, "/tmp/direct.opentake", true));
+    const undoCalls = srv.undoCalls;
+    const redoCalls = srv.redoCalls;
+    staleSnapshot.resolve(snapshot(11, 9, "/tmp/stale.opentake"));
+    await refresh;
+
+    const state = useProjectStore.getState();
+    expect(state.projectEpoch).toBe(12);
+    expect(state.projectPath).toBe("/tmp/direct.opentake");
+    expect(state.compatibilityReadOnly).toBe(true);
+    expect(srv.undoCalls).toBe(undoCalls);
+    expect(srv.redoCalls).toBe(redoCalls);
+  });
+
+  it("does not let a pending refresh repopulate a cleared project", async () => {
+    useProjectStore
+      .getState()
+      .replaceProjectSnapshot(snapshot(7, 3, "/tmp/active.opentake", true));
+    const staleSnapshot = deferred<RuntimeTimelineSnapshot>();
+    srv.snapshotResponses.push(staleSnapshot.promise);
+    const refresh = forceRefresh();
+
+    useProjectStore.getState().clearProjectSnapshot();
+    staleSnapshot.resolve(snapshot(7, 4, "/tmp/active.opentake", true));
+    await refresh;
+
+    const state = useProjectStore.getState();
+    expect(state.projectEpoch).toBe(0);
+    expect(state.projectPath).toBeNull();
+    expect(state.timeline.tracks).toEqual([]);
+    expect(state.compatibilityReadOnly).toBe(false);
+    expect(srv.undoCalls).toBe(0);
+    expect(srv.redoCalls).toBe(0);
+  });
+
+  it("preserves a direct saved path against an older same-revision response", async () => {
+    useProjectStore.getState().replaceProjectSnapshot(snapshot(5, 0, null));
+    const beforeSave = deferred<RuntimeTimelineSnapshot>();
+    srv.snapshotResponses.push(beforeSave.promise);
+    const staleRefresh = forceRefresh();
+
+    useProjectStore.getState().setProjectPath("/tmp/saved.opentake");
+    beforeSave.resolve(snapshot(5, 0, null));
+    await staleRefresh;
+    expect(useProjectStore.getState().projectPath).toBe("/tmp/saved.opentake");
+
+    srv.projectPath = "/tmp/refreshed.opentake";
+    await forceRefresh();
+    expect(useProjectStore.getState().projectPath).toBe("/tmp/refreshed.opentake");
+  });
+
+  it("does not let pending history cross a same-identity compatibility replacement", async () => {
+    const staleUndo = deferred<boolean>();
+    const staleRedo = deferred<boolean>();
+    srv.snapshotResponses.push(Promise.resolve(snapshot(6, 2, "/tmp/same.opentake")));
+    srv.undoResponses.push(staleUndo.promise);
+    srv.redoResponses.push(staleRedo.promise);
+    const refresh = forceRefresh();
+    await vi.waitFor(() => {
+      expect(srv.undoCalls).toBe(1);
+      expect(srv.redoCalls).toBe(1);
+    });
+
+    useProjectStore
+      .getState()
+      .replaceProjectSnapshot(snapshot(6, 2, "/tmp/same.opentake", true));
+    staleUndo.resolve(true);
+    staleRedo.resolve(true);
+    await refresh;
+
+    const state = useProjectStore.getState();
+    expect(state.compatibilityReadOnly).toBe(true);
+    expect(state.canUndo).toBe(false);
+    expect(state.canRedo).toBe(false);
+  });
 });

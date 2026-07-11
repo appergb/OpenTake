@@ -16,6 +16,8 @@ const EMPTY_TIMELINE: Timeline = {
 };
 
 interface ProjectState {
+  /** Monotonic authority boundary for snapshot/path writes; never reset. */
+  snapshotMutationRevision: number;
   projectEpoch: number;
   timelineVersion: number;
   timeline: Timeline;
@@ -39,6 +41,7 @@ interface ProjectState {
 }
 
 export const useProjectStore = create<ProjectState>((set) => ({
+  snapshotMutationRevision: 0,
   projectEpoch: 0,
   timelineVersion: 0,
   timeline: EMPTY_TIMELINE,
@@ -50,6 +53,7 @@ export const useProjectStore = create<ProjectState>((set) => ({
   canRedo: false,
   setMirror: (timeline, timelineVersion, projectEpoch) =>
     set((state) => ({
+      snapshotMutationRevision: state.snapshotMutationRevision + 1,
       timeline,
       timelineVersion,
       projectEpoch: projectEpoch ?? state.projectEpoch,
@@ -58,6 +62,7 @@ export const useProjectStore = create<ProjectState>((set) => ({
     set((state) => {
       const projectChanged = state.projectEpoch !== snapshot.projectEpoch;
       return {
+        snapshotMutationRevision: state.snapshotMutationRevision + 1,
         projectEpoch: snapshot.projectEpoch,
         timelineVersion: snapshot.version,
         timeline: snapshot.timeline,
@@ -74,7 +79,8 @@ export const useProjectStore = create<ProjectState>((set) => ({
       };
     }),
   clearProjectSnapshot: () =>
-    set({
+    set((state) => ({
+      snapshotMutationRevision: state.snapshotMutationRevision + 1,
       projectEpoch: 0,
       timelineVersion: 0,
       timeline: EMPTY_TIMELINE,
@@ -84,8 +90,12 @@ export const useProjectStore = create<ProjectState>((set) => ({
       lastSavedVersion: 0,
       canUndo: false,
       canRedo: false,
-    }),
-  setProjectPath: (projectPath) => set({ projectPath }),
+    })),
+  setProjectPath: (projectPath) =>
+    set((state) => ({
+      snapshotMutationRevision: state.snapshotMutationRevision + 1,
+      projectPath,
+    })),
   setHistory: (canUndo, canRedo) => set({ canUndo, canRedo }),
   markSaved: () => set((s) => ({ lastSavedVersion: s.timelineVersion })),
 }));

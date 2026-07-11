@@ -30,6 +30,7 @@ describe("project snapshot schema compatibility", () => {
   });
 
   it("replaces project identity, mirror, path, and compatibility in one update", () => {
+    const revisionBeforeReplace = useProjectStore.getState().snapshotMutationRevision;
     useProjectStore.setState({
       projectEpoch: 7,
       lastSavedVersion: 99,
@@ -55,6 +56,7 @@ describe("project snapshot schema compatibility", () => {
     expect(state.lastSavedVersion).toBe(13);
     expect(state.canUndo).toBe(false);
     expect(state.canRedo).toBe(false);
+    expect(state.snapshotMutationRevision).toBe(revisionBeforeReplace + 1);
   });
 
   it("preserves saved and history state during a same-epoch refresh", () => {
@@ -64,6 +66,7 @@ describe("project snapshot schema compatibility", () => {
       canUndo: true,
       canRedo: true,
     });
+    const revisionBeforeRefresh = useProjectStore.getState().snapshotMutationRevision;
 
     useProjectStore.getState().replaceProjectSnapshot(
       snapshot({ version: 14, projectPath: "/Volumes/QA/renamed.opentake" }),
@@ -74,6 +77,7 @@ describe("project snapshot schema compatibility", () => {
     expect(state.lastSavedVersion).toBe(11);
     expect(state.canUndo).toBe(true);
     expect(state.canRedo).toBe(true);
+    expect(state.snapshotMutationRevision).toBe(revisionBeforeRefresh + 1);
   });
 
   it("clears compatibility when replacing the mirror with a known project", () => {
@@ -94,5 +98,22 @@ describe("project snapshot schema compatibility", () => {
     expect(state.projectPath).toBe("/tmp/known.opentake");
     expect(state.compatibilityReadOnly).toBe(false);
     expect(state.compatibilityBlockers).toEqual([]);
+  });
+
+  it("keeps snapshot mutation revisions monotonic across mirror, path, and clear boundaries", () => {
+    const revisions = [useProjectStore.getState().snapshotMutationRevision];
+    useProjectStore.getState().setMirror(UNKNOWN_TIMELINE, 2, 3);
+    revisions.push(useProjectStore.getState().snapshotMutationRevision);
+    useProjectStore.getState().setProjectPath("/tmp/saved.opentake");
+    revisions.push(useProjectStore.getState().snapshotMutationRevision);
+    useProjectStore.getState().clearProjectSnapshot();
+    revisions.push(useProjectStore.getState().snapshotMutationRevision);
+    useProjectStore.getState().clearProjectSnapshot();
+    revisions.push(useProjectStore.getState().snapshotMutationRevision);
+
+    for (let index = 1; index < revisions.length; index += 1) {
+      expect(revisions[index]).toBeGreaterThan(revisions[index - 1]!);
+    }
+    expect(revisions.at(-1)).not.toBe(0);
   });
 });

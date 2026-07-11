@@ -17,13 +17,18 @@ let lifecycleGeneration = 0;
 
 async function refreshMirror(): Promise<void> {
   const generation = ++refreshGeneration;
+  const mutationRevision = useProjectStore.getState().snapshotMutationRevision;
   const snap = await api.getTimeline();
   if (generation !== refreshGeneration) return;
-  useProjectStore.getState().replaceProjectSnapshot(snap);
+  const beforeCommit = useProjectStore.getState();
+  if (beforeCommit.snapshotMutationRevision !== mutationRevision) return;
+  beforeCommit.replaceProjectSnapshot(snap);
+  const committedRevision = useProjectStore.getState().snapshotMutationRevision;
   const [canUndo, canRedo] = await Promise.all([api.canUndo(), api.canRedo()]);
   if (generation !== refreshGeneration) return;
   const current = useProjectStore.getState();
   if (
+    current.snapshotMutationRevision !== committedRevision ||
     current.projectEpoch !== snap.projectEpoch ||
     current.timelineVersion !== snap.version ||
     current.projectPath !== snap.projectPath
