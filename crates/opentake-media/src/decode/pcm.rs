@@ -164,9 +164,20 @@ fn join_reader<T>(handle: JoinHandle<Result<T>>, name: &str) -> Result<T> {
 }
 
 fn join_pipes(readers: PipeReaders) -> Result<(StdoutRead, Vec<u8>)> {
-    let stdout = join_reader(readers.stdout, "stdout")?;
-    let stderr = join_reader(readers.stderr, "stderr")?;
-    Ok((stdout, stderr))
+    // Join both handles before propagating either failure. Returning after the
+    // first failed join would detach the other pipe reader and could keep the
+    // FFmpeg pipe (and its allocation) alive beyond this decode request.
+    let stdout = join_reader(readers.stdout, "stdout");
+    let stderr = join_reader(readers.stderr, "stderr");
+    match (stdout, stderr) {
+        (Ok(stdout), Ok(stderr)) => Ok((stdout, stderr)),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
+}
+
+fn terminate_child(child: &mut ffmpeg_sidecar::child::FfmpegChild) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn wait_for_pcm_child(
@@ -176,12 +187,19 @@ fn wait_for_pcm_child(
 ) -> Result<(ExitStatus, StdoutRead, Vec<u8>)> {
     loop {
         if cancel.checkpoint() {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_child(child);
             let _ = join_pipes(readers);
             return Err(MediaError::Cancelled);
         }
-        if let Some(status) = child.as_inner_mut().try_wait().map_err(MediaError::Io)? {
+        let status = match child.as_inner_mut().try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                terminate_child(child);
+                let _ = join_pipes(readers);
+                return Err(MediaError::Io(error));
+            }
+        };
+        if let Some(status) = status {
             let (stdout, stderr) = join_pipes(readers)?;
             if cancel.is_cancelled() {
                 return Err(MediaError::Cancelled);
@@ -190,6 +208,36 @@ fn wait_for_pcm_child(
         }
         thread::sleep(CHILD_POLL_INTERVAL);
     }
+}
+
+fn validate_pcm_output(
+    path: &Path,
+    status: ExitStatus,
+    stdout: StdoutRead,
+    stderr: Vec<u8>,
+    reader_cap: usize,
+) -> Result<Vec<u8>> {
+    if stdout.exceeded_cap {
+        return Err(audio_buffer_too_large(format!(
+            "FFmpeg stdout read {} bytes, exceeding {reader_cap}",
+            stdout.total_read
+        )));
+    }
+    if !status.success() {
+        let detail = String::from_utf8_lossy(&stderr);
+        let suffix = if detail.trim().is_empty() {
+            String::new()
+        } else {
+            format!(": {}", detail.trim())
+        };
+        return Err(MediaError::Ffmpeg(format!(
+            "decode exited {status}{suffix}"
+        )));
+    }
+    if stdout.bytes.is_empty() {
+        return Err(MediaError::no_track("audio", path));
+    }
+    Ok(stdout.bytes)
 }
 
 /// Requested PCM layout.
@@ -242,15 +290,17 @@ fn pcm_args(path: &Path, spec: &PcmSpec, range: Option<(f64, f64)>) -> Vec<Strin
 }
 
 /// Convert interleaved raw PCM bytes to mono f32, averaging `channels`.
-fn raw_to_mono_f32(bytes: &[u8], spec: &PcmSpec) -> Vec<f32> {
+fn raw_to_mono_f32(bytes: &[u8], spec: &PcmSpec) -> Result<Vec<f32>> {
     let bps = spec.format.bytes_per_sample();
     let ch = spec.channels.max(1) as usize;
     let frame_bytes = bps * ch;
     if frame_bytes == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let frames = bytes.len() / frame_bytes;
-    let mut out = Vec::with_capacity(frames);
+    let mut out = Vec::new();
+    out.try_reserve_exact(frames)
+        .map_err(|error| allocation_error(format!("mono f32 reserve {frames}: {error}")))?;
     for f in 0..frames {
         let base = f * frame_bytes;
         let mut sum = 0.0f32;
@@ -269,7 +319,7 @@ fn raw_to_mono_f32(bytes: &[u8], spec: &PcmSpec) -> Vec<f32> {
         }
         out.push(sum / ch as f32);
     }
-    out
+    Ok(out)
 }
 
 /// Decode `path`'s first audio track to the requested PCM spec, returning a mono
@@ -286,7 +336,7 @@ pub fn extract_pcm_cancellable(
     cancel: &MediaCancelToken,
 ) -> Result<PcmBuffer> {
     let raw = decode_raw_pcm_cancellable(path, spec, range, cancel)?;
-    let samples = raw_to_mono_f32(&raw, spec);
+    let samples = raw_to_mono_f32(&raw, spec)?;
     Ok(PcmBuffer {
         spec: *spec,
         samples_f32: samples,
@@ -331,50 +381,49 @@ pub(super) fn decode_raw_pcm_cancellable(
         .spawn()
         .map_err(|e| MediaError::Ffmpeg(format!("spawn: {e}")))?;
     cancel.child_spawned();
-    let stdout = child
-        .take_stdout()
-        .ok_or_else(|| MediaError::Ffmpeg("FFmpeg stdout pipe missing".to_string()))?;
-    let stderr = child
-        .take_stderr()
-        .ok_or_else(|| MediaError::Ffmpeg("FFmpeg stderr pipe missing".to_string()))?;
+    let stdout = match child.take_stdout() {
+        Some(stdout) => stdout,
+        None => {
+            terminate_child(&mut child);
+            return Err(MediaError::Ffmpeg("FFmpeg stdout pipe missing".to_string()));
+        }
+    };
+    let stderr = match child.take_stderr() {
+        Some(stderr) => stderr,
+        None => {
+            terminate_child(&mut child);
+            return Err(MediaError::Ffmpeg("FFmpeg stderr pipe missing".to_string()));
+        }
+    };
     let stdout_cancel = cancel.clone();
     let stderr_cancel = cancel.clone();
+    let stdout_reader = match thread::Builder::new()
+        .name("opentake-pcm-stdout".to_string())
+        .spawn(move || read_stdout(stdout, reader_cap, stdout_cancel))
+    {
+        Ok(reader) => reader,
+        Err(error) => {
+            terminate_child(&mut child);
+            return Err(MediaError::Ffmpeg(format!("spawn stdout reader: {error}")));
+        }
+    };
+    let stderr_reader = match thread::Builder::new()
+        .name("opentake-pcm-stderr".to_string())
+        .spawn(move || read_stderr(stderr, stderr_cancel))
+    {
+        Ok(reader) => reader,
+        Err(error) => {
+            terminate_child(&mut child);
+            let _ = join_reader(stdout_reader, "stdout");
+            return Err(MediaError::Ffmpeg(format!("spawn stderr reader: {error}")));
+        }
+    };
     let readers = PipeReaders {
-        stdout: thread::Builder::new()
-            .name("opentake-pcm-stdout".to_string())
-            .spawn(move || read_stdout(stdout, reader_cap, stdout_cancel))
-            .map_err(|error| MediaError::Ffmpeg(format!("spawn stdout reader: {error}")))?,
-        stderr: thread::Builder::new()
-            .name("opentake-pcm-stderr".to_string())
-            .spawn(move || read_stderr(stderr, stderr_cancel))
-            .map_err(|error| MediaError::Ffmpeg(format!("spawn stderr reader: {error}")))?,
+        stdout: stdout_reader,
+        stderr: stderr_reader,
     };
     let (status, stdout, stderr) = wait_for_pcm_child(&mut child, readers, cancel)?;
-    if stdout.exceeded_cap {
-        return Err(audio_buffer_too_large(format!(
-            "FFmpeg stdout read {} bytes, exceeding {reader_cap}",
-            stdout.total_read
-        )));
-    }
-    let raw = stdout.bytes;
-    if !status.success() && raw.is_empty() {
-        let detail = String::from_utf8_lossy(&stderr);
-        if !detail.trim().is_empty() {
-            return Err(MediaError::Ffmpeg(format!(
-                "decode exited {status}: {}",
-                detail.trim()
-            )));
-        }
-        return Err(MediaError::no_track("audio", path));
-    }
-    // ffmpeg can exit 0 with empty stdout when metadata says audio exists but
-    // no decodable samples: treat as no audio track so the waveform cache
-    // isn't poisoned with all-1.0 silence.
-    if raw.is_empty() {
-        return Err(MediaError::no_track("audio", path));
-    }
-
-    Ok(raw)
+    validate_pcm_output(path, status, stdout, stderr, reader_cap)
 }
 
 #[cfg(test)]
@@ -458,6 +507,73 @@ mod tests {
     }
 
     #[test]
+    fn reader_failure_still_joins_the_other_started_reader() {
+        let stdout = std::thread::spawn(|| {
+            Err(MediaError::Ffmpeg(
+                "deterministic stdout read failure".to_string(),
+            ))
+        });
+        let (stderr_entered_tx, stderr_entered_rx) = mpsc::channel();
+        let (stderr_release_tx, stderr_release_rx) = mpsc::channel();
+        let stderr = std::thread::spawn(move || {
+            stderr_entered_tx.send(()).expect("stderr reader entered");
+            stderr_release_rx.recv().expect("release stderr reader");
+            Ok(Vec::new())
+        });
+        let (done_tx, done_rx) = mpsc::channel();
+        let joiner = std::thread::spawn(move || {
+            done_tx
+                .send(join_pipes(PipeReaders { stdout, stderr }))
+                .expect("publish join result");
+        });
+        stderr_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("stderr reader started");
+
+        let early = done_rx.recv_timeout(Duration::from_millis(100)).ok();
+        stderr_release_tx.send(()).expect("release stderr reader");
+        let returned_early = early.is_some();
+        let result = match early {
+            Some(result) => result,
+            None => done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("join waits for both readers"),
+        };
+        joiner.join().expect("join coordinator");
+
+        assert!(
+            !returned_early,
+            "reader failure must not detach the other reader"
+        );
+        assert!(matches!(result, Err(MediaError::Ffmpeg(_))));
+    }
+
+    #[test]
+    fn nonzero_ffmpeg_exit_with_partial_stdout_is_a_hard_error() {
+        let status = Command::new("sh")
+            .args(["-c", "exit 7"])
+            .status()
+            .expect("obtain deterministic nonzero status");
+        let stdout = StdoutRead {
+            bytes: vec![1, 2, 3, 4],
+            exceeded_cap: false,
+            total_read: 4,
+        };
+
+        let error = validate_pcm_output(
+            Path::new("/partial.wav"),
+            status,
+            stdout,
+            b"decoder failed after producing bytes".to_vec(),
+            8,
+        )
+        .expect_err("partial stdout must never mask a nonzero FFmpeg exit");
+
+        assert!(matches!(error, MediaError::Ffmpeg(_)));
+        assert!(error.to_string().contains("decoder failed"));
+    }
+
+    #[test]
     fn duration_from_mono_samples() {
         let b = PcmBuffer {
             spec: PcmSpec {
@@ -513,7 +629,7 @@ mod tests {
         bytes.extend_from_slice(&0i16.to_le_bytes());
         bytes.extend_from_slice(&16384i16.to_le_bytes());
         bytes.extend_from_slice(&(-32768i16).to_le_bytes());
-        let out = raw_to_mono_f32(&bytes, &spec);
+        let out = raw_to_mono_f32(&bytes, &spec).unwrap();
         assert_eq!(out.len(), 3);
         assert!((out[0] - 0.0).abs() < 1e-6);
         assert!((out[1] - 0.5).abs() < 1e-3);
@@ -532,7 +648,7 @@ mod tests {
         for v in [1.0f32, 0.0, -0.5, 0.5] {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
-        let out = raw_to_mono_f32(&bytes, &spec);
+        let out = raw_to_mono_f32(&bytes, &spec).unwrap();
         assert_eq!(out.len(), 2);
         assert!((out[0] - 0.5).abs() < 1e-6);
         assert!((out[1] - 0.0).abs() < 1e-6);
@@ -546,7 +662,7 @@ mod tests {
             format: PcmFormat::S16Le,
         };
         // 3 bytes = 1 full s16 sample + 1 stray byte → 1 sample.
-        let out = raw_to_mono_f32(&[0, 0, 7], &spec);
+        let out = raw_to_mono_f32(&[0, 0, 7], &spec).unwrap();
         assert_eq!(out.len(), 1);
     }
 }

@@ -165,6 +165,27 @@ pub struct SessionRegistry {
 }
 
 impl SessionRegistry {
+    pub fn start_would_resume(
+        &self,
+        requested: &PlaybackIdentity,
+        authoritative: ProjectRevision,
+    ) -> Result<bool, PlaybackCommandError> {
+        let requested = requested.clone().validate()?;
+        if self.transition.is_some() {
+            return Err(PlaybackCommandError::cancelled(
+                "project transition is in progress",
+            ));
+        }
+        if requested.revision() != authoritative {
+            return Err(PlaybackCommandError::superseded(
+                "requested playback revision is stale",
+            ));
+        }
+        Ok(self.active.as_ref().is_some_and(|active| {
+            active.identity == requested && active.phase == SessionPhase::Paused
+        }))
+    }
+
     pub fn begin_start(
         &mut self,
         requested: PlaybackIdentity,

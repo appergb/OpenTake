@@ -149,8 +149,13 @@ fn projected_session_premix_bytes(timeline: &Timeline, rate: u32) -> Result<usiz
             }
             let source_frames = clip.source_frames_consumed().max(0);
             let decoded_frames = frames_at_rate(source_frames, timeline.fps, rate)?;
+            let decoded_bytes = checked_audio_bytes(decoded_frames)?;
+            // decode_raw_pcm retains f32 stereo bytes while conversion reserves
+            // an equally-sized interleaved Vec<f32>. Both coexist until the
+            // conversion returns, alongside the final timeline mix.
             bytes = bytes
-                .checked_add(checked_audio_bytes(decoded_frames)?)
+                .checked_add(decoded_bytes)
+                .and_then(|total| total.checked_add(decoded_bytes))
                 .ok_or_else(|| audio_buffer_too_large("session pre-mix byte count overflow"))?;
         }
     }
@@ -295,6 +300,38 @@ impl AudioPlayback {
             },
             paused,
             stopped_rx,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_blocking_stop() -> (Self, Arc<AtomicBool>, Receiver<()>, Sender<()>) {
+        let (control_tx, control_rx) = mpsc::channel();
+        let (stopped_tx, stopped_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let paused = Arc::new(AtomicBool::new(false));
+        let handle = thread::spawn(move || {
+            while let Ok(command) = control_rx.recv() {
+                match command {
+                    AudioCmd::Pause(reply) | AudioCmd::Resume(reply) => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    AudioCmd::Stop => {
+                        let _ = stopped_tx.send(());
+                        let _ = release_rx.recv();
+                        break;
+                    }
+                }
+            }
+        });
+        (
+            Self {
+                control_tx,
+                paused: Arc::clone(&paused),
+                handle: Some(handle),
+            },
+            paused,
+            stopped_rx,
+            release_tx,
         )
     }
 }
@@ -846,6 +883,28 @@ mod tests {
 
         assert!(error.to_string().contains("audio_buffer_too_large"));
         assert_eq!(cancel.spawned_child_count(), 0);
+    }
+
+    #[test]
+    fn audio_prepare_rejects_raw_plus_converted_peak_before_decode() {
+        let timeline = audio_timeline(vec![audio_clip("peak", "missing", 0, 30 * 60 * 5)]);
+        let media = HashMap::from([(
+            "missing".to_string(),
+            MediaInfo {
+                path: PathBuf::from("/must/not/be/decoded-for-peak.wav"),
+            },
+        )]);
+        let cancel = MediaCancelToken::new();
+
+        let error = mix_timeline_stereo(&timeline, &media, 48_000, &cancel)
+            .expect_err("raw PCM, converted f32, and output mix exceed 256 MiB together");
+
+        assert!(error.to_string().contains("audio_buffer_too_large"));
+        assert_eq!(
+            cancel.spawned_child_count(),
+            0,
+            "peak must be rejected before FFmpeg starts"
+        );
     }
 
     #[test]

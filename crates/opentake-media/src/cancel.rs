@@ -60,4 +60,9 @@ impl MediaCancelToken {
     pub fn checkpoint_count(&self) -> usize {
         self.state.checkpoints.load(Ordering::Acquire)
     }
+
+    #[doc(hidden)]
+    pub fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
 }

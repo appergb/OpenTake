@@ -91,6 +91,11 @@ impl BoundedReaper {
         }
         assert_eq!(self.inner.outstanding.load(Ordering::Acquire), 0);
     }
+
+    #[cfg(test)]
+    pub(crate) fn outstanding_count(&self) -> usize {
+        self.inner.outstanding.load(Ordering::Acquire)
+    }
 }
 
 impl Default for BoundedReaper {
