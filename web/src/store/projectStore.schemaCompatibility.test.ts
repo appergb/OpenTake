@@ -30,6 +30,12 @@ describe("project snapshot schema compatibility", () => {
   });
 
   it("replaces project identity, mirror, path, and compatibility in one update", () => {
+    useProjectStore.setState({
+      projectEpoch: 7,
+      lastSavedVersion: 99,
+      canUndo: true,
+      canRedo: true,
+    });
     const updates: number[] = [];
     const unsubscribe = useProjectStore.subscribe((state) => {
       updates.push(state.timelineVersion);
@@ -46,6 +52,28 @@ describe("project snapshot schema compatibility", () => {
     expect(state.projectPath).toBe("/Volumes/QA/unknown.opentake");
     expect(state.compatibilityReadOnly).toBe(true);
     expect(state.compatibilityBlockers).toEqual(["timeline.tracks[0].futureField"]);
+    expect(state.lastSavedVersion).toBe(13);
+    expect(state.canUndo).toBe(false);
+    expect(state.canRedo).toBe(false);
+  });
+
+  it("preserves saved and history state during a same-epoch refresh", () => {
+    useProjectStore.getState().replaceProjectSnapshot(snapshot());
+    useProjectStore.setState({
+      lastSavedVersion: 11,
+      canUndo: true,
+      canRedo: true,
+    });
+
+    useProjectStore.getState().replaceProjectSnapshot(
+      snapshot({ version: 14, projectPath: "/Volumes/QA/renamed.opentake" }),
+    );
+
+    const state = useProjectStore.getState();
+    expect(state.timelineVersion).toBe(14);
+    expect(state.lastSavedVersion).toBe(11);
+    expect(state.canUndo).toBe(true);
+    expect(state.canRedo).toBe(true);
   });
 
   it("clears compatibility when replacing the mirror with a known project", () => {

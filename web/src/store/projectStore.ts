@@ -55,13 +55,23 @@ export const useProjectStore = create<ProjectState>((set) => ({
       projectEpoch: projectEpoch ?? state.projectEpoch,
     })),
   replaceProjectSnapshot: (snapshot) =>
-    set({
-      projectEpoch: snapshot.projectEpoch,
-      timelineVersion: snapshot.version,
-      timeline: snapshot.timeline,
-      projectPath: snapshot.projectPath,
-      compatibilityReadOnly: snapshot.compatibilityReadOnly,
-      compatibilityBlockers: snapshot.compatibilityBlockers,
+    set((state) => {
+      const projectChanged = state.projectEpoch !== snapshot.projectEpoch;
+      return {
+        projectEpoch: snapshot.projectEpoch,
+        timelineVersion: snapshot.version,
+        timeline: snapshot.timeline,
+        projectPath: snapshot.projectPath,
+        compatibilityReadOnly: snapshot.compatibilityReadOnly,
+        compatibilityBlockers: snapshot.compatibilityBlockers,
+        ...(projectChanged
+          ? {
+              lastSavedVersion: snapshot.version,
+              canUndo: false,
+              canRedo: false,
+            }
+          : {}),
+      };
     }),
   clearProjectSnapshot: () =>
     set({

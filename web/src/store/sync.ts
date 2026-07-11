@@ -12,11 +12,23 @@ import { stopNativePlaybackForProjectBoundary } from "../components/preview/nati
 let started = false;
 let unlistenTimeline: (() => void) | null = null;
 let unlistenOpened: (() => void) | null = null;
+let refreshGeneration = 0;
 
 async function refreshMirror(): Promise<void> {
+  const generation = ++refreshGeneration;
   const snap = await api.getTimeline();
+  if (generation !== refreshGeneration) return;
   useProjectStore.getState().replaceProjectSnapshot(snap);
   const [canUndo, canRedo] = await Promise.all([api.canUndo(), api.canRedo()]);
+  if (generation !== refreshGeneration) return;
+  const current = useProjectStore.getState();
+  if (
+    current.projectEpoch !== snap.projectEpoch ||
+    current.timelineVersion !== snap.version ||
+    current.projectPath !== snap.projectPath
+  ) {
+    return;
+  }
   useProjectStore.getState().setHistory(canUndo, canRedo);
 }
 
@@ -41,6 +53,7 @@ export async function startSync(): Promise<void> {
 }
 
 export function stopSync(): void {
+  refreshGeneration += 1;
   unlistenTimeline?.();
   unlistenOpened?.();
   unlistenTimeline = null;
