@@ -726,20 +726,28 @@ pub fn import_folder(
     path: String,
     recursive: Option<bool>,
 ) -> Result<MediaListDto, String> {
+    import_folder_impl(&core, media.engine(), &prewarm, path, recursive)
+}
+
+fn import_folder_impl(
+    core: &AppCore,
+    engine: &MediaEngine,
+    prewarm: &prewarm::PrewarmScheduler,
+    path: String,
+    recursive: Option<bool>,
+) -> Result<MediaListDto, String> {
     core.ensure_project_mutable().map_err(|e| e.to_string())?;
     let root = PathBuf::from(&path);
     if !root.is_dir() {
         return Err(format!("not a directory: {path}"));
     }
-    let engine = media.engine();
-
     let mut skipped = Vec::new();
     let mut prewarm_results = Vec::new();
     if recursive.unwrap_or(false) {
         mirror_dir_scheduled(
-            &core,
+            core,
             engine,
-            &prewarm,
+            prewarm,
             &root,
             None,
             &mut skipped,
@@ -749,16 +757,14 @@ pub fn import_folder(
     } else {
         let (files, skipped_files) = list_top_level(&root);
         for file in &files {
-            if let Some(entry) = import_one(&core, engine, file).map_err(|e| e.to_string())? {
-                prewarm_results.push(schedule_import_poster(
-                    &core, engine, &prewarm, &entry, file,
-                ));
+            if let Some(entry) = import_one(core, engine, file).map_err(|e| e.to_string())? {
+                prewarm_results.push(schedule_import_poster(core, engine, prewarm, &entry, file));
             }
         }
         skipped = skipped_files;
     }
     Ok(MediaListDto::from_core_with_import_results(
-        &core,
+        core,
         Some(engine.cache_root()),
         skipped,
         prewarm_results,
@@ -939,8 +945,16 @@ pub fn import_media(
     prewarm: State<'_, prewarm::PrewarmScheduler>,
     paths: Vec<String>,
 ) -> Result<MediaListDto, String> {
+    import_media_impl(&core, media.engine(), &prewarm, paths)
+}
+
+fn import_media_impl(
+    core: &AppCore,
+    engine: &MediaEngine,
+    prewarm: &prewarm::PrewarmScheduler,
+    paths: Vec<String>,
+) -> Result<MediaListDto, String> {
     core.ensure_project_mutable().map_err(|e| e.to_string())?;
-    let engine = media.engine();
     let mut skipped = Vec::new();
     let mut prewarm_results = Vec::new();
     for p in &paths {
@@ -956,14 +970,12 @@ pub fn import_media(
             skipped.push(display_file_name(&path));
             continue;
         }
-        if let Some(entry) = import_one(&core, engine, &path).map_err(|e| e.to_string())? {
-            prewarm_results.push(schedule_import_poster(
-                &core, engine, &prewarm, &entry, &path,
-            ));
+        if let Some(entry) = import_one(core, engine, &path).map_err(|e| e.to_string())? {
+            prewarm_results.push(schedule_import_poster(core, engine, prewarm, &entry, &path));
         }
     }
     Ok(MediaListDto::from_core_with_import_results(
-        &core,
+        core,
         Some(engine.cache_root()),
         skipped,
         prewarm_results,
@@ -987,16 +999,18 @@ pub fn toggle_favorite(
     asset_ids: Vec<String>,
     favorite: bool,
 ) -> Result<MediaListDto, String> {
-    core.set_media_favorite(&asset_ids, favorite)
-        .map_err(|e| e.to_string())?;
-    Ok(MediaListDto::from_core(
-        &core,
-        Some(media.engine().cache_root()),
-    ))
+    toggle_favorite_impl(&core, media.engine().cache_root(), asset_ids, favorite)
+        .map_err(|e| e.to_string())
 }
 
-fn ensure_save_clip_as_media_mutable(core: &AppCore) -> Result<(), String> {
-    core.ensure_project_mutable().map_err(|e| e.to_string())
+fn toggle_favorite_impl(
+    core: &AppCore,
+    cache_root: &Path,
+    asset_ids: Vec<String>,
+    favorite: bool,
+) -> Result<MediaListDto, CoreError> {
+    core.set_media_favorite(&asset_ids, favorite)?;
+    Ok(MediaListDto::from_core(core, Some(cache_root)))
 }
 
 /// Build the render inputs for "save clip as media" (#91 §3.5): a single-clip
@@ -1064,7 +1078,25 @@ pub fn save_clip_as_media(
     prewarm: State<'_, prewarm::PrewarmScheduler>,
     clip_id: String,
 ) -> Result<MediaListDto, String> {
-    ensure_save_clip_as_media_mutable(&core)?;
+    save_clip_as_media_impl(&core, || {
+        save_clip_as_media_workflow(&core, media.engine(), &prewarm, &clip_id)
+    })
+}
+
+fn save_clip_as_media_impl(
+    core: &AppCore,
+    workflow: impl FnOnce() -> Result<MediaListDto, String>,
+) -> Result<MediaListDto, String> {
+    core.ensure_project_mutable().map_err(|e| e.to_string())?;
+    workflow()
+}
+
+fn save_clip_as_media_workflow(
+    core: &AppCore,
+    engine: &MediaEngine,
+    prewarm: &prewarm::PrewarmScheduler,
+    clip_id: &str,
+) -> Result<MediaListDto, String> {
     let timeline = core.get_timeline().timeline;
     let manifest = core.media();
     let project_dir = core
@@ -1072,7 +1104,7 @@ pub fn save_clip_as_media(
         .ok_or("save your project before saving a clip as media")?;
 
     let (single_timeline, subset, media_type) =
-        build_single_clip_export(&timeline, &manifest, &clip_id)?;
+        build_single_clip_export(&timeline, &manifest, clip_id)?;
     if media_type != ClipType::Video {
         return Err("only video clips can be saved as media for now".to_string());
     }
@@ -1094,13 +1126,13 @@ pub fn save_clip_as_media(
         .map_err(|e| format!("render failed: {e}"))?;
 
     // Import the rendered file, then admit its poster without blocking import.
-    let entry = import_one(&core, media.engine(), &out_path)
+    let entry = import_one(core, engine, &out_path)
         .map_err(|e| e.to_string())?
         .ok_or("failed to import the rendered clip")?;
-    let result = schedule_import_poster(&core, media.engine(), &prewarm, &entry, &out_path);
+    let result = schedule_import_poster(core, engine, prewarm, &entry, &out_path);
     Ok(MediaListDto::from_core_with_import_results(
-        &core,
-        Some(media.engine().cache_root()),
+        core,
+        Some(engine.cache_root()),
         Vec::new(),
         vec![result],
     ))
@@ -1512,9 +1544,13 @@ mod tests {
         let core = unknown_core(tmp.path());
         let before = core.media();
 
-        let error = core
-            .set_media_favorite(&["asset-1".into()], true)
-            .expect_err("favorite must be rejected");
+        let error = toggle_favorite_impl(
+            &core,
+            &tmp.path().join("cache"),
+            vec!["asset-1".into()],
+            true,
+        )
+        .expect_err("favorite must be rejected");
 
         assert_eq!(error.code(), "validation");
         assert_eq!(core.media(), before);
@@ -1537,18 +1573,58 @@ mod tests {
         let empty = root.join("empty");
         fs::create_dir(&empty).expect("create empty fixture");
         let before = core.media();
+        let scheduler = prewarm::PrewarmScheduler::new(core.project_revision().project_epoch);
 
-        import_one(&core, &engine, &explicit).expect_err("explicit import must be rejected");
+        let explicit_error = import_media_impl(
+            &core,
+            &engine,
+            &scheduler,
+            vec![explicit.to_string_lossy().into_owned()],
+        )
+        .expect_err("explicit import must be rejected");
+        assert!(
+            explicit_error.contains("compatibility read-only"),
+            "{explicit_error}"
+        );
         assert_eq!(core.media(), before);
-        for file in list_top_level(&flat).0 {
-            import_one(&core, &engine, &file).expect_err("flat import must be rejected");
-        }
+        let flat_error = import_folder_impl(
+            &core,
+            &engine,
+            &scheduler,
+            flat.to_string_lossy().into_owned(),
+            Some(false),
+        )
+        .expect_err("flat import must be rejected");
+        assert!(
+            flat_error.contains("compatibility read-only"),
+            "{flat_error}"
+        );
         assert_eq!(core.media(), before);
-        mirror_dir(&core, &engine, &recursive, None, &mut Vec::new())
-            .expect_err("recursive import must be rejected");
+        let recursive_error = import_folder_impl(
+            &core,
+            &engine,
+            &scheduler,
+            recursive.to_string_lossy().into_owned(),
+            Some(true),
+        )
+        .expect_err("recursive import must be rejected");
+        assert!(
+            recursive_error.contains("compatibility read-only"),
+            "{recursive_error}"
+        );
         assert_eq!(core.media(), before);
-        mirror_dir(&core, &engine, &empty, None, &mut Vec::new())
-            .expect_err("empty import must be rejected");
+        let empty_error = import_folder_impl(
+            &core,
+            &engine,
+            &scheduler,
+            empty.to_string_lossy().into_owned(),
+            Some(true),
+        )
+        .expect_err("empty import must be rejected");
+        assert!(
+            empty_error.contains("compatibility read-only"),
+            "{empty_error}"
+        );
         assert_eq!(core.media(), before);
     }
 
@@ -1561,9 +1637,19 @@ mod tests {
         fs::write(media_tree.join("existing/keep.bin"), b"before")
             .expect("write media tree fixture");
         let before = recursive_tree(&media_tree);
+        let called = std::cell::Cell::new(false);
+        let sentinel = media_tree.join("workflow-ran-before-guard.bin");
 
-        ensure_save_clip_as_media_mutable(&core).expect_err("save clip must be rejected");
+        let error = save_clip_as_media_impl(&core, || {
+            called.set(true);
+            fs::write(&sentinel, b"bad ordering").expect("write workflow sentinel");
+            Err("workflow should not run".into())
+        })
+        .expect_err("save clip must be rejected");
 
+        assert!(error.contains("compatibility read-only"), "{error}");
+        assert!(!called.get());
+        assert!(!sentinel.exists());
         assert_eq!(recursive_tree(&media_tree), before);
     }
 

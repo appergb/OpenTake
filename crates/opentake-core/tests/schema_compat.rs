@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use opentake_core::{AppCore, CoreError, EditCommand, ProbedMedia, TimelineSnapshotDto};
 use opentake_domain::{ClipType, MediaManifestEntry, MediaSource, Timeline, Track};
-use opentake_project::{Project, ProjectError};
+use opentake_project::{GenerationLog, GenerationLogEntry, Project, ProjectError};
 use serde_json::{json, Value};
 
 struct TempDir(PathBuf);
@@ -68,6 +68,15 @@ fn write_unknown_bundle(root: &Path, label: &str) -> PathBuf {
         .manifest
         .entries
         .push(external_entry("asset-1", label, &source));
+    project.generation_log = Some(GenerationLog {
+        version: 1,
+        entries: vec![GenerationLogEntry::new(
+            format!("{label}-generation"),
+            format!("{label}-model"),
+            Some(label.len() as i64),
+            None,
+        )],
+    });
     project.save().expect("save known fixture");
 
     let timeline_path = bundle.join("project.json");
@@ -243,10 +252,16 @@ fn bundle_snapshot_is_single_epoch_and_snapshots_carry_sorted_compatibility() {
         ])
     );
     let initial_bundle = core.bundle_export_snapshot();
+    let initial_epoch = timeline.project_epoch;
     assert_eq!(initial_bundle.project_epoch, timeline.project_epoch);
     assert_eq!(initial_bundle.timeline, timeline.timeline);
     assert_eq!(initial_bundle.project_path, timeline.project_path);
     assert_eq!(initial_bundle.compatibility, timeline.compatibility);
+    assert_eq!(initial_bundle.generation_log.entries.len(), 1);
+    assert_eq!(
+        initial_bundle.generation_log.entries[0].id,
+        "Alpha-generation"
+    );
 
     let toggler = {
         let core = core.clone();
@@ -266,21 +281,45 @@ fn bundle_snapshot_is_single_epoch_and_snapshots_carry_sorted_compatibility() {
             .project_path
             .as_deref()
             .expect("opened project path");
-        let (label, blocker) = if path == first {
-            ("Alpha", "project.json:futureAlphaTimeline")
+        let (label, expected_blockers, expected_parity) = if path == first {
+            (
+                "Alpha",
+                [
+                    "media.json:futureAlphaMedia",
+                    "project.json:futureAlphaTimeline",
+                ],
+                0,
+            )
         } else if path == second {
-            ("Zulu", "project.json:futureZuluTimeline")
+            (
+                "Zulu",
+                [
+                    "media.json:futureZuluMedia",
+                    "project.json:futureZuluTimeline",
+                ],
+                1,
+            )
         } else {
             panic!("unexpected snapshot project path: {}", path.display());
         };
         assert_eq!(snapshot.timeline.tracks[0].id, format!("{label}-track"));
         assert_eq!(snapshot.manifest.entries[0].name, label);
-        assert!(snapshot
-            .compatibility
-            .blockers()
-            .iter()
-            .any(|candidate| candidate == blocker));
-        assert!(snapshot.project_epoch > 0);
+        assert_eq!(snapshot.compatibility.blockers(), expected_blockers);
+        assert_eq!(snapshot.generation_log.entries.len(), 1);
+        assert_eq!(
+            snapshot.generation_log.entries[0].id,
+            format!("{label}-generation")
+        );
+        assert_eq!(
+            snapshot.generation_log.entries[0].model,
+            format!("{label}-model")
+        );
+        assert!(snapshot.project_epoch >= initial_epoch);
+        assert_eq!(
+            (snapshot.project_epoch - initial_epoch) % 2,
+            expected_parity,
+            "epoch identity must match the strict Zulu/Alpha open alternation"
+        );
     }
     toggler.join().expect("project toggler completes");
 }

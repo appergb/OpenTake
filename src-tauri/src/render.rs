@@ -404,10 +404,6 @@ pub fn composite_frame(
 /// decodes that single VIDEO asset's own frame at `frame` (upstream's video-tab
 /// path uses `videoComposition = nil`, i.e. the raw asset frame, not a
 /// composite). Both then import identically.
-fn ensure_capture_frame_mutable(core: &AppCore) -> Result<(), String> {
-    core.ensure_project_mutable().map_err(|e| e.to_string())
-}
-
 #[tauri::command]
 pub fn capture_frame_to_media(
     core: State<'_, AppCore>,
@@ -418,13 +414,40 @@ pub fn capture_frame_to_media(
     folder_id: Option<String>,
     source_media_id: Option<String>,
 ) -> Result<crate::media::MediaListDto, String> {
-    ensure_capture_frame_mutable(&core)?;
-    let engine = media.engine();
+    capture_frame_to_media_impl(&core, || {
+        capture_frame_to_media_workflow(
+            &core,
+            &render,
+            media.engine(),
+            frame,
+            &name_base,
+            folder_id,
+            source_media_id.as_deref(),
+        )
+    })
+}
 
+fn capture_frame_to_media_impl(
+    core: &AppCore,
+    workflow: impl FnOnce() -> Result<crate::media::MediaListDto, String>,
+) -> Result<crate::media::MediaListDto, String> {
+    core.ensure_project_mutable().map_err(|e| e.to_string())?;
+    workflow()
+}
+
+fn capture_frame_to_media_workflow(
+    core: &AppCore,
+    render: &RenderState,
+    engine: &opentake_media::MediaEngine,
+    frame: i32,
+    name_base: &str,
+    folder_id: Option<String>,
+    source_media_id: Option<&str>,
+) -> Result<crate::media::MediaListDto, String> {
     // Frame → RGBA. Timeline tab composites; video tab decodes the source frame.
-    let composite = match &source_media_id {
-        None => composite_rgba(&core, &render, frame, 0)?,
-        Some(id) => decode_source_frame(&core, id, frame)?,
+    let composite = match source_media_id {
+        None => composite_rgba(core, render, frame, 0)?,
+        Some(id) => decode_source_frame(core, id, frame)?,
     };
 
     // Write the PNG next to the media cache so a subsequent project save can copy
@@ -439,7 +462,7 @@ pub fn capture_frame_to_media(
     // Import through the SAME path as a user import (posters + manifest entry +
     // MediaChanged event), then rename to the upstream "{nameBase} {frame}" and
     // move into the current folder.
-    let entry = crate::media::import_one(&core, engine, &png_path)
+    let entry = crate::media::import_one(core, engine, &png_path)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "capture import failed".to_string())?;
     let name = format!("{name_base} {frame}");
@@ -459,7 +482,7 @@ pub fn capture_frame_to_media(
     }
 
     Ok(crate::media::MediaListDto::from_core(
-        &core,
+        core,
         Some(engine.cache_root()),
     ))
 }
@@ -532,10 +555,6 @@ fn freeze_capture_png_path(
     captures_dir.join(format!("freeze_{safe_id}_{at_frame}_{}.png", uuid_like()))
 }
 
-fn ensure_capture_freeze_mutable(core: &AppCore) -> Result<(), String> {
-    core.ensure_project_mutable().map_err(|e| e.to_string())
-}
-
 pub fn capture_freeze_frame(
     core: &AppCore,
     render: &RenderState,
@@ -543,8 +562,26 @@ pub fn capture_freeze_frame(
     clip_id: &str,
     at_frame: i32,
 ) -> Result<String, String> {
-    ensure_capture_freeze_mutable(core)?;
-    let engine = media.engine();
+    capture_freeze_frame_impl(core, || {
+        capture_freeze_frame_workflow(core, render, media.engine(), clip_id, at_frame)
+    })
+}
+
+fn capture_freeze_frame_impl(
+    core: &AppCore,
+    workflow: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    core.ensure_project_mutable().map_err(|e| e.to_string())?;
+    workflow()
+}
+
+fn capture_freeze_frame_workflow(
+    core: &AppCore,
+    render: &RenderState,
+    engine: &opentake_media::MediaEngine,
+    clip_id: &str,
+    at_frame: i32,
+) -> Result<String, String> {
     let timeline = core.get_timeline().timeline;
     let manifest = core.media();
     let project_dir = core.project_dir();
@@ -674,9 +711,19 @@ mod tests {
         fs::create_dir_all(captures.join("existing")).expect("create captures fixture");
         fs::write(captures.join("existing/keep.png"), b"before").expect("write captures fixture");
         let before = recursive_tree(&captures);
+        let called = std::cell::Cell::new(false);
+        let sentinel = captures.join("frame-workflow-ran-before-guard.png");
 
-        ensure_capture_frame_mutable(&core).expect_err("capture frame must be rejected");
+        let error = capture_frame_to_media_impl(&core, || {
+            called.set(true);
+            fs::write(&sentinel, b"bad ordering").expect("write workflow sentinel");
+            Err("workflow should not run".into())
+        })
+        .expect_err("capture frame must be rejected");
 
+        assert!(error.contains("compatibility read-only"), "{error}");
+        assert!(!called.get());
+        assert!(!sentinel.exists());
         assert_eq!(recursive_tree(&captures), before);
     }
 
@@ -688,9 +735,19 @@ mod tests {
         fs::create_dir_all(captures.join("existing")).expect("create captures fixture");
         fs::write(captures.join("existing/keep.png"), b"before").expect("write captures fixture");
         let before = recursive_tree(&captures);
+        let called = std::cell::Cell::new(false);
+        let sentinel = captures.join("freeze-workflow-ran-before-guard.png");
 
-        ensure_capture_freeze_mutable(&core).expect_err("freeze frame must be rejected");
+        let error = capture_freeze_frame_impl(&core, || {
+            called.set(true);
+            fs::write(&sentinel, b"bad ordering").expect("write workflow sentinel");
+            Err("workflow should not run".into())
+        })
+        .expect_err("freeze frame must be rejected");
 
+        assert!(error.contains("compatibility read-only"), "{error}");
+        assert!(!called.get());
+        assert!(!sentinel.exists());
         assert_eq!(recursive_tree(&captures), before);
     }
 

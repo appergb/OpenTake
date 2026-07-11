@@ -758,10 +758,6 @@ fn unique_export_range_path(
     ))
 }
 
-fn ensure_export_range_mutable(core: &AppCore) -> Result<(), String> {
-    core.ensure_project_mutable().map_err(|e| e.to_string())
-}
-
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn export_range(
@@ -775,12 +771,44 @@ pub fn export_range(
     out_frame: i32,
     format: ExportFormat,
 ) -> Result<crate::media::MediaListDto, String> {
-    ensure_export_range_mutable(&core)?;
+    export_range_impl(&core, || {
+        export_range_workflow(
+            &app,
+            &core,
+            &control,
+            media.engine(),
+            track_index,
+            clip_id,
+            in_frame,
+            out_frame,
+            format,
+        )
+    })
+}
+
+fn export_range_impl(
+    core: &AppCore,
+    workflow: impl FnOnce() -> Result<crate::media::MediaListDto, String>,
+) -> Result<crate::media::MediaListDto, String> {
+    core.ensure_project_mutable().map_err(|e| e.to_string())?;
+    workflow()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_range_workflow(
+    app: &AppHandle,
+    core: &AppCore,
+    control: &ExportControl,
+    engine: &opentake_media::MediaEngine,
+    track_index: Option<usize>,
+    clip_id: Option<String>,
+    in_frame: i32,
+    out_frame: i32,
+    format: ExportFormat,
+) -> Result<crate::media::MediaListDto, String> {
     let timeline = core.get_timeline().timeline;
     let manifest = core.media();
     let project_dir = core.project_dir();
-    let engine = media.engine();
-
     let (clip_id_resolved, start, end, is_audio_clip) = match &clip_id {
         Some(id) => {
             let clip = match track_index {
@@ -855,18 +883,18 @@ pub fn export_range(
             &manifest,
             &project_dir,
             &req,
-            Some(&control),
+            Some(control),
             Some(&on_progress),
             Some((start, end)),
         )?;
     }
 
-    crate::media::import_one(&core, engine, &out_path)
+    crate::media::import_one(core, engine, &out_path)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "save-as-media import failed".to_string())?;
 
     Ok(crate::media::MediaListDto::from_core(
-        &core,
+        core,
         Some(engine.cache_root()),
     ))
 }
@@ -1081,9 +1109,19 @@ mod tests {
         fs::create_dir_all(saves.join("existing")).expect("create saves fixture");
         fs::write(saves.join("existing/keep.bin"), b"before").expect("write saves fixture");
         let before = recursive_tree(&saves);
+        let called = std::cell::Cell::new(false);
+        let sentinel = saves.join("range-workflow-ran-before-guard.bin");
 
-        ensure_export_range_mutable(&core).expect_err("range export must be rejected");
+        let error = export_range_impl(&core, || {
+            called.set(true);
+            fs::write(&sentinel, b"bad ordering").expect("write workflow sentinel");
+            Err("workflow should not run".into())
+        })
+        .expect_err("range export must be rejected");
 
+        assert!(error.contains("compatibility read-only"), "{error}");
+        assert!(!called.get());
+        assert!(!sentinel.exists());
         assert_eq!(recursive_tree(&saves), before);
     }
 
