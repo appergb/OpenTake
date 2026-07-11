@@ -303,6 +303,16 @@ impl PlaybackState {
         frame: i32,
     ) -> Result<(), PlaybackCommandError> {
         let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+        if control == SessionControl::Stop
+            && slot
+                .prepare
+                .as_ref()
+                .is_some_and(|pending| pending.identity == identity)
+        {
+            slot.sessions.stop_all();
+            Self::cancel_prepare(&mut slot);
+            return Ok(());
+        }
         if !slot.sessions.control(&identity, control) {
             return Err(PlaybackCommandError::superseded(
                 "playback control targeted a stale session",
@@ -572,15 +582,31 @@ pub async fn playback_start(
             }
         }
     };
-    let prepared = receiver
-        .await
-        .map_err(|_| PlaybackCommandError::engine("audio prepare worker stopped"));
-    app.state::<PlaybackState>().finish_prepare(&cancel);
-    let prepared = prepared?.map_err(PlaybackCommandError::engine)?;
-    let (clock, audio) = prepared.map_err(audio_prepare_error)?;
+    let prepared = match receiver.await {
+        Ok(prepared) => prepared,
+        Err(_) => {
+            app.state::<PlaybackState>().finish_prepare(&cancel);
+            return Err(PlaybackCommandError::engine("audio prepare worker stopped"));
+        }
+    };
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            app.state::<PlaybackState>().finish_prepare(&cancel);
+            return Err(PlaybackCommandError::engine(error));
+        }
+    };
+    let (clock, audio) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            app.state::<PlaybackState>().finish_prepare(&cancel);
+            return Err(audio_prepare_error(error));
+        }
+    };
 
+    let ready_cancel = cancel.clone();
     let engine = match spawn_ready_off_executor(move || {
-        PlaybackEngine::spawn_ready(
+        PlaybackEngine::spawn_ready_cancellable(
             timeline,
             media,
             text,
@@ -590,12 +616,17 @@ pub async fn playback_start(
             sink,
             emitter,
             start_at,
+            ready_cancel,
         )
     })
     .await
     {
         Ok(engine) => engine,
-        Err(error) => {
+        Err(mut error) => {
+            if cancel.is_cancelled() {
+                error = PlaybackCommandError::cancelled(error.message);
+            }
+            app.state::<PlaybackState>().finish_prepare(&cancel);
             cleanup_audio_after_engine_ready_failure(
                 identity,
                 audio,
@@ -607,7 +638,7 @@ pub async fn playback_start(
         }
     };
     let current = app.state::<AppCore>().project_revision();
-    app.state::<PlaybackState>().install_if_current(
+    let result = app.state::<PlaybackState>().install_if_current(
         ticket,
         cleanup,
         current,
@@ -618,7 +649,9 @@ pub async fn playback_start(
             server,
         },
         start_at,
-    )
+    );
+    app.state::<PlaybackState>().finish_prepare(&cancel);
+    result
 }
 
 /// Pause the matching session while retaining its render and audio resources.
@@ -819,6 +852,30 @@ mod tests {
         assert!(!rejected_cancel.is_cancelled());
         assert_eq!(state.pending_prepare_identity(), Some(incumbent_identity));
         drop((incumbent_ticket, incumbent_cleanup));
+    }
+
+    #[test]
+    fn stop_cancels_matching_pending_readiness_before_install() {
+        let state = PlaybackState::new();
+        let pending_identity = identity(1, 5, "pending-readiness");
+        let cancel = opentake_media::MediaCancelToken::new();
+        let (_ticket, _cleanup, admission) = state
+            .coordinate_start(
+                pending_identity.clone(),
+                pending_identity.revision(),
+                0,
+                cancel.clone(),
+            )
+            .expect("pending readiness is coordinated")
+            .expect("fresh session builds");
+        drop(admission);
+
+        state
+            .control(pending_identity, SessionControl::Stop, 0)
+            .expect("matching stop cancels pending readiness");
+
+        assert!(cancel.is_cancelled());
+        assert_eq!(state.pending_prepare_identity(), None);
     }
 
     #[test]

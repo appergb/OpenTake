@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use opentake_domain::{
     Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track,
 };
-use opentake_media::{decode_frame_at, FrameRequest};
+use opentake_media::{decode_frame_at, FrameRequest, MediaCancelToken};
 use opentake_render::{DecodedFrame, RenderSize};
 use opentake_tauri_lib::playback::engine::BoundedReaper;
 use opentake_tauri_lib::playback::{
@@ -273,6 +273,83 @@ fn cold_bootstrap_decode_failure_is_reported_instead_of_publishing_black() {
     assert!(
         error.contains("bootstrap") && error.contains("asset-1"),
         "error must identify bootstrap media failure: {error}"
+    );
+}
+
+#[test]
+fn cancelling_initial_ready_bootstrap_releases_the_readiness_worker() {
+    assert!(ffmpeg_ready(), "cancellation integration requires ffmpeg");
+    let dir = tempfile::tempdir().expect("fixture tempdir");
+    let fifo = dir.path().join("blocked-initial-source");
+    let status = Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo must start");
+    assert!(status.success(), "mkfifo must create the blocked source");
+
+    let mut timeline = Timeline::new();
+    timeline.fps = 30;
+    let mut track = Track::new("t1", ClipType::Video);
+    track.clips.push(Clip::new("clip-1", "asset-1", 0, 4));
+    timeline.tracks.push(track);
+    let mut manifest = MediaManifest::new();
+    manifest
+        .entries
+        .push(external_entry("asset-1", &fifo, 2, 2, 30.0));
+    let (sizes, media) = project_media(&manifest, &None);
+    let text = project_text(&timeline);
+
+    struct NoopSink;
+    impl FrameSink for NoopSink {
+        fn push_frame(&self, _frame: &DecodedFrame) {}
+    }
+    struct NoopEmitter;
+    impl PlayheadEmitter for NoopEmitter {
+        fn emit(&self, _frame: i32) {}
+    }
+
+    let cancel = MediaCancelToken::new();
+    let ready_cancel = cancel.clone();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let result = PlaybackEngine::spawn_ready_cancellable(
+            timeline,
+            media,
+            text,
+            sizes,
+            RenderSize::new(2, 2),
+            Arc::new(ManualClock::new(0)),
+            Arc::new(NoopSink),
+            Arc::new(NoopEmitter),
+            0,
+            ready_cancel,
+        );
+        let _ = ready_tx.send(result.map(|engine| engine.stop()));
+    });
+
+    let spawn_deadline = Instant::now() + Duration::from_secs(3);
+    while cancel.spawned_child_count() == 0 && Instant::now() < spawn_deadline {
+        sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        cancel.spawned_child_count(),
+        1,
+        "initial exact bootstrap must reach the blocked ffmpeg child"
+    );
+
+    cancel.cancel();
+    let error = ready_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("external cancellation must release spawn_ready")
+        .expect_err("cancelled initial readiness must not install an engine");
+    assert!(
+        error.contains("cancelled"),
+        "typed cause must survive: {error}"
+    );
+    assert_eq!(
+        cancel.active_reader_count(),
+        0,
+        "cancelled initial bootstrap must join its event reader"
     );
 }
 

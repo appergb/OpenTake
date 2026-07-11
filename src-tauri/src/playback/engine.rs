@@ -337,6 +337,7 @@ impl PlaybackEngine {
             emitter,
             None,
             None,
+            MediaCancelToken::new(),
         )
     }
 
@@ -357,6 +358,37 @@ impl PlaybackEngine {
         emitter: Arc<dyn PlayheadEmitter>,
         start_frame: i32,
     ) -> Result<Self, String> {
+        Self::spawn_ready_cancellable(
+            timeline,
+            media,
+            text,
+            sizes,
+            render_size,
+            clock,
+            sink,
+            emitter,
+            start_frame,
+            MediaCancelToken::new(),
+        )
+    }
+
+    /// Prepare the first exact frame with a caller-owned session token. The
+    /// playback coordinator keeps this token reachable until installation, so
+    /// project/timeline invalidation can cancel a blocked initial bootstrap
+    /// before a [`PlaybackEngine`] handle exists.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_ready_cancellable(
+        timeline: Timeline,
+        media: HashMap<String, MediaInfo>,
+        text: HashMap<String, TextInfo>,
+        sizes: HashMap<String, (u32, u32)>,
+        render_size: RenderSize,
+        clock: Arc<dyn PlaybackClock>,
+        sink: Arc<dyn FrameSink>,
+        emitter: Arc<dyn PlayheadEmitter>,
+        start_frame: i32,
+        cancel: MediaCancelToken,
+    ) -> Result<Self, String> {
         let (ready_tx, ready_rx) = mpsc::channel();
         let engine = Self::spawn_internal(
             timeline,
@@ -369,6 +401,7 @@ impl PlaybackEngine {
             emitter,
             Some(start_frame.max(0)),
             Some(ready_tx),
+            cancel,
         )?;
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(engine),
@@ -395,9 +428,9 @@ impl PlaybackEngine {
         emitter: Arc<dyn PlayheadEmitter>,
         initial_frame: Option<i32>,
         startup: Option<mpsc::Sender<Result<(), String>>>,
+        cancel: MediaCancelToken,
     ) -> Result<Self, String> {
         let (tx, rx) = mpsc::channel();
-        let cancel = MediaCancelToken::new();
         let render_cancel = cancel.clone();
         let handle = thread::Builder::new()
             .name("opentake-playback-render".to_string())
