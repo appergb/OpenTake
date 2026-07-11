@@ -61,6 +61,8 @@ const srv = vi.hoisted(() => {
         trimEndFrame?: number;
         transform?: Transform;
       }>;
+      trackIndex?: number;
+      atFrame?: number;
       a?: number;
       b?: number;
     }): { changed: boolean; affectedClipIds: string[] } {
@@ -91,6 +93,37 @@ const srv = vi.hoisted(() => {
             trimStartFrame: e.trimStartFrame ?? 0,
             trimEndFrame: e.trimEndFrame ?? 0,
             transform: e.transform,
+          });
+          affectedClipIds.push(id);
+        }
+        state.version += 1;
+        return { changed: true, affectedClipIds };
+      }
+      if (
+        cmd.type === "insertClips" &&
+        cmd.entries &&
+        cmd.trackIndex !== undefined &&
+        cmd.atFrame !== undefined
+      ) {
+        const track = state.tracks[cmd.trackIndex];
+        if (!track) return { changed: false, affectedClipIds: [] };
+        const duration = cmd.entries.reduce((sum, entry) => sum + entry.durationFrames, 0);
+        for (const existing of track.clips) {
+          if (existing.startFrame >= cmd.atFrame) existing.startFrame += duration;
+        }
+        const affectedClipIds: string[] = [];
+        for (const entry of cmd.entries) {
+          const id = `c${++state.seq}`;
+          track.clips.push({
+            id,
+            mediaRef: entry.mediaRef ?? "",
+            mediaType: entry.mediaType ?? "video",
+            sourceClipType: entry.sourceClipType ?? "video",
+            startFrame: entry.startFrame,
+            durationFrames: entry.durationFrames,
+            trimStartFrame: entry.trimStartFrame ?? 0,
+            trimEndFrame: entry.trimEndFrame ?? 0,
+            transform: entry.transform,
           });
           affectedClipIds.push(id);
         }
@@ -207,6 +240,7 @@ import {
   addMediaToTimelineAt,
   addMomentToTimelineAt,
   addTextClip,
+  insertClips,
   insertTrack,
   mediaDurationFrames,
   momentDurationFrames,
@@ -308,6 +342,35 @@ describe("addMediaToTimeline", () => {
     expect(ui.previewMediaId).toBeNull();
     expect(ui.currentFrame).toBe(180);
     expect(ui.activeFrame).toBe(180);
+  });
+
+  it("selects ripple-inserted media and moves the playhead to the insertion frame", async () => {
+    await addMediaToTimeline(video("base"));
+    useEditorUiStore.setState({
+      activeFrame: 240,
+      currentFrame: 240,
+      previewMediaId: "base",
+      selectedClipIds: new Set(["old-selection"]),
+    });
+
+    await insertClips(0, 30, [
+      {
+        mediaRef: "ripple",
+        mediaType: "video",
+        sourceClipType: "video",
+        trackIndex: 0,
+        startFrame: 30,
+        durationFrames: 60,
+      },
+    ]);
+
+    const inserted = useProjectStore.getState().timeline.tracks[0]?.clips.find((clip) => clip.mediaRef === "ripple");
+    const ui = useEditorUiStore.getState();
+    expect(inserted).toBeDefined();
+    expect(Array.from(ui.selectedClipIds)).toEqual([inserted?.id]);
+    expect(ui.previewMediaId).toBeNull();
+    expect(ui.currentFrame).toBe(30);
+    expect(ui.activeFrame).toBe(30);
   });
 
   it("adds vertical media with the upstream aspect-fit transform", async () => {

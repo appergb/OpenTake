@@ -264,10 +264,10 @@ describe("accessibleClipRects", () => {
       height: 46,
     });
     expect(rect).toMatchObject({ left: LAYOUT.trackHeaderWidth, width: 24, height: 46 });
-    expect(timelineContainer.hitTestAccessibleClip?.(tl, 0, (rect?.top ?? 0) + 23, 1, {})?.clip.id).toBe(
-      "narrow",
-    );
-    const haloHit = timelineContainer.hitTestAccessibleClip?.(tl, 23.9, (rect?.top ?? 0) + 23, 1, {});
+    const exactHit = timelineContainer.hitTestAccessibleClip?.(tl, 0, (rect?.top ?? 0) + 23, 1, {});
+    expect(exactHit?.clip.id).toBe("narrow");
+    expect(exactHit?.region).toBe("trimLeft");
+    const haloHit = timelineContainer.hitTestAccessibleClip?.(tl, 24, (rect?.top ?? 0) + 23, 1, {});
     expect(haloHit?.clip.id).toBe("narrow");
     expect(haloHit?.region).toBe("body");
     expect(timelineContainer.hitTestAccessibleClip?.(tl, 24.1, (rect?.top ?? 0) + 23, 1, {})).toBeNull();
@@ -302,6 +302,29 @@ describe("accessibleClipRects", () => {
 });
 
 describe("structured media prewarm coordination", () => {
+  it("does not let an old project admission block or satisfy the current project", () => {
+    const oldKey = timelineContainer.timelinePrewarmKey?.(3, "shared", "/same.mov|online") ?? "";
+    const currentKey = timelineContainer.timelinePrewarmKey?.(4, "shared", "/same.mov|online") ?? "";
+
+    expect(oldKey).not.toBe(currentKey);
+    expect(
+      timelineContainer.timelinePrewarmShouldStart?.(
+        currentKey,
+        new Set([oldKey]),
+        new Map([[oldKey, "cached"]]),
+        new Map(),
+      ),
+    ).toBe(true);
+    expect(
+      timelineContainer.timelinePrewarmShouldStart?.(
+        oldKey,
+        new Set([oldKey]),
+        new Map([[oldKey, "cached"]]),
+        new Map(),
+      ),
+    ).toBe(false);
+  });
+
   it("retries queued duplicate and busy admissions without retrying terminal states", () => {
     expect(timelineContainer.prewarmResultNeedsRetry?.("queued")).toBe(true);
     expect(timelineContainer.prewarmResultNeedsRetry?.("duplicate")).toBe(true);

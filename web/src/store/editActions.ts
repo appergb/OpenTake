@@ -64,7 +64,15 @@ export async function addClips(entries: ClipEntryReq[]) {
  *  `rippleInsertClips`). The overwrite-drop counterpart is {@link addClips}. */
 export async function insertClips(trackIndex: number, atFrame: number, entries: ClipEntryReq[]) {
   if (entries.length === 0) return;
-  return applyAndRefresh({ type: "insertClips", trackIndex, atFrame, entries });
+  const res = await applyAndRefresh({ type: "insertClips", trackIndex, atFrame, entries });
+  if (isTauri && res.changed) await forceRefresh();
+  if (res.affectedClipIds.length > 0) {
+    const ui = useEditorUiStore.getState();
+    ui.selectClips(new Set(res.affectedClipIds));
+    ui.setPreviewMedia(null);
+    ui.setCurrentFrame(Math.max(0, atFrame));
+  }
+  return res;
 }
 
 /** Build the ripple-insert plan for a media item dropped at `atFrame` over

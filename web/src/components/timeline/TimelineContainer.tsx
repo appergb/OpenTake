@@ -183,6 +183,25 @@ export function prewarmResultAllowsCacheRead(result: PrewarmResult | null): bool
   return result === "cached";
 }
 
+export function timelinePrewarmKey(
+  projectEpoch: number,
+  mediaRef: string,
+  sourceKey: string,
+): string {
+  return JSON.stringify([projectEpoch, mediaRef, sourceKey]);
+}
+
+export function timelinePrewarmShouldStart(
+  key: string,
+  inFlight: Set<string>,
+  admissions: Map<string, PrewarmResult | null>,
+  retryCounts: Map<string, number>,
+): boolean {
+  if (inFlight.has(key)) return false;
+  if (prewarmResultAllowsCacheRead(admissions.get(key) ?? null)) return false;
+  return (retryCounts.get(key) ?? 0) <= 8;
+}
+
 export function clipAccessTargetSize(width: number, height: number): { width: number; height: number } {
   return { width: Math.max(24, width), height: Math.max(24, height) };
 }
@@ -496,6 +515,7 @@ function moveParticipantsForIds(timeline: Timeline, ids: string[]): MoveParticip
 
 export function TimelineContainer() {
   const timeline = useProjectStore((s) => s.timeline);
+  const projectEpoch = useProjectStore((s) => s.projectEpoch);
   const zoomScale = useEditorUiStore((s) => s.zoomScale);
   const setZoomScale = useEditorUiStore((s) => s.setZoomScale);
   const setMinZoomScale = useEditorUiStore((s) => s.setMinZoomScale);
@@ -567,8 +587,8 @@ export function TimelineContainer() {
   const thumbnailPosterInFlightRef = useRef<Set<string>>(new Set());
   const thumbnailSpriteInFlightRef = useRef<Set<string>>(new Set());
   const prewarmInFlightRef = useRef<Set<string>>(new Set());
-  const timelinePrewarmRef = useRef<Map<string, { sourceKey: string; result: PrewarmResult | null }>>(new Map());
-  const prewarmRetryRef = useRef<Map<string, { sourceKey: string; count: number }>>(new Map());
+  const timelinePrewarmRef = useRef<Map<string, PrewarmResult | null>>(new Map());
+  const prewarmRetryRef = useRef<Map<string, number>>(new Map());
   const cacheRetryTimerRef = useRef<number | null>(null);
   const [cacheRetryTick, setCacheRetryTick] = useState(0);
   // Guards `setWaveformVersion` against firing after unmount (the cache write itself
@@ -591,17 +611,16 @@ export function TimelineContainer() {
   }, []);
 
   const recordPrewarmResult = useCallback(
-    (ref: string, sourceKey: string, result: PrewarmResult | null) => {
-      timelinePrewarmRef.current.set(ref, { sourceKey, result });
+    (key: string, result: PrewarmResult | null) => {
+      timelinePrewarmRef.current.set(key, result);
       if (prewarmResultAllowsCacheRead(result)) {
-        prewarmRetryRef.current.delete(ref);
+        prewarmRetryRef.current.delete(key);
         if (mountedRef.current) setCacheRetryTick((value) => value + 1);
         return;
       }
       if (!prewarmResultNeedsRetry(result)) return;
-      const previous = prewarmRetryRef.current.get(ref);
-      const count = previous?.sourceKey === sourceKey ? previous.count + 1 : 1;
-      prewarmRetryRef.current.set(ref, { sourceKey, count });
+      const count = (prewarmRetryRef.current.get(key) ?? 0) + 1;
+      prewarmRetryRef.current.set(key, count);
       if (count <= 8) scheduleCacheRetry();
     },
     [scheduleCacheRetry],
@@ -805,17 +824,31 @@ export function TimelineContainer() {
     }
     for (const ref of wanted) {
       const sourceKey = thumbnailSourceKeys.get(ref);
-      if (!sourceKey || prewarmInFlightRef.current.has(ref)) continue;
-      const existing = timelinePrewarmRef.current.get(ref);
-      if (existing?.sourceKey === sourceKey && prewarmResultAllowsCacheRead(existing.result)) continue;
-      const retry = prewarmRetryRef.current.get(ref);
-      if (retry?.sourceKey === sourceKey && retry.count > 8) continue;
-      prewarmInFlightRef.current.add(ref);
+      if (!sourceKey) continue;
+      const key = timelinePrewarmKey(projectEpoch, ref, sourceKey);
+      if (
+        !timelinePrewarmShouldStart(
+          key,
+          prewarmInFlightRef.current,
+          timelinePrewarmRef.current,
+          prewarmRetryRef.current,
+        )
+      ) {
+        continue;
+      }
+      prewarmInFlightRef.current.add(key);
       void preloadMedia(ref)
-        .then((result) => recordPrewarmResult(ref, sourceKey, result))
-        .finally(() => prewarmInFlightRef.current.delete(ref));
+        .then((result) => recordPrewarmResult(key, result))
+        .finally(() => prewarmInFlightRef.current.delete(key));
     }
-  }, [timeline, missingMediaRefs, thumbnailSourceKeys, cacheRetryTick, recordPrewarmResult]);
+  }, [
+    timeline,
+    projectEpoch,
+    missingMediaRefs,
+    thumbnailSourceKeys,
+    cacheRetryTick,
+    recordPrewarmResult,
+  ]);
 
   // Load waveform samples only after the scheduler confirms the cache is ready,
   // then trigger a repaint. The real bars replace the faint band without doing
@@ -831,11 +864,12 @@ export function TimelineContainer() {
     }
     for (const ref of wanted) {
       const sourceKey = thumbnailSourceKeys.get(ref);
-      const admission = timelinePrewarmRef.current.get(ref);
+      const admission = sourceKey
+        ? timelinePrewarmRef.current.get(timelinePrewarmKey(projectEpoch, ref, sourceKey))
+        : null;
       if (
         !sourceKey ||
-        admission?.sourceKey !== sourceKey ||
-        !prewarmResultAllowsCacheRead(admission.result)
+        !prewarmResultAllowsCacheRead(admission ?? null)
       ) {
         continue;
       }
@@ -859,7 +893,7 @@ export function TimelineContainer() {
           inFlightRef.current.delete(ref);
         });
     }
-  }, [timeline, missingMediaRefs, thumbnailSourceKeys, cacheRetryTick]);
+  }, [timeline, projectEpoch, missingMediaRefs, thumbnailSourceKeys, cacheRetryTick]);
 
   useEffect(() => {
     latestThumbnailSourceKeysRef.current = thumbnailSourceKeys;
