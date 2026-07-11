@@ -159,11 +159,33 @@ fn unknown_top_level_timeline_field_blocks_writes_without_changing_bytes() {
     let tmp = TempDir::new("schema-unknown-timeline");
     let bundle = tmp.child("UnknownTimeline.opentake");
     write_known_bundle(&bundle);
-    mutate_json(&bundle, "project.json", |timeline| {
-        timeline["futureTimeline"] = json!(true);
+
+    let timeline_path = bundle.join("project.json");
+    let mut timeline_json =
+        std::fs::read_to_string(&timeline_path).expect("read raw timeline fixture");
+    let object_end = timeline_json.rfind('}').expect("timeline is a JSON object");
+    timeline_json.insert_str(
+        object_end,
+        ",\n  \"futureTimeline\": true,\n  \"futureTimeline\": false\n",
+    );
+    common::write_file(&timeline_path, timeline_json.as_bytes());
+    mutate_json(&bundle, "media.json", |manifest| {
+        manifest["futureManifest"] = json!(true);
+    });
+    mutate_json(&bundle, "generation-log.json", |log| {
+        log["futureGenerationLog"] = json!(true);
     });
 
-    assert_read_only_without_file_changes(&bundle, &["project.json:futureTimeline"]);
+    // Component-local sorting would preserve project/media/log open order, and
+    // the repeated raw key proves the final blocker list is also deduplicated.
+    assert_read_only_without_file_changes(
+        &bundle,
+        &[
+            "generation-log.json:futureGenerationLog",
+            "media.json:futureManifest",
+            "project.json:futureTimeline",
+        ],
+    );
 }
 
 #[test]
