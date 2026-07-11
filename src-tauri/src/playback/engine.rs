@@ -264,7 +264,7 @@ impl RenderLoop {
     pub fn render_frame(&mut self, target: i32) -> Result<DecodedFrame, String> {
         let frame_plan = self.plan.frame(&self.timeline, target);
         let mut resolver = StreamingResolver::new(&self.device, &self.queue, &mut self.state);
-        resolver.sync_active(&frame_plan);
+        resolver.sync_active(&frame_plan)?;
         self.compositor
             .render_to_rgba(
                 &self.device,

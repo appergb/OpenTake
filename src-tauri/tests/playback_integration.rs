@@ -21,6 +21,7 @@ use std::time::Duration;
 use opentake_domain::{
     Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track,
 };
+use opentake_media::{decode_frame_at, FrameRequest};
 use opentake_render::{DecodedFrame, RenderSize};
 use opentake_tauri_lib::playback::{
     project_media, project_text, FrameSink, InstantClock, PlaybackClock, PlaybackEngine,
@@ -65,6 +66,41 @@ fn make_video(path: &Path, w: u32, h: u32, fps: u32, frames: u32, hue: i32) -> b
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+fn make_distinct_cfr_video(path: &Path, w: u32, h: u32, fps: u32, frames: u32) {
+    let output = Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc2=size={w}x{h}:rate={fps}"),
+            "-frames:v",
+            &frames.to_string(),
+            "-c:v",
+            "libx264",
+            "-g",
+            &frames.to_string(),
+            "-keyint_min",
+            &frames.to_string(),
+            "-sc_threshold",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-fps_mode",
+            "cfr",
+            "-y",
+        ])
+        .arg(path)
+        .output()
+        .expect("required ffmpeg must start for exact-bootstrap fixture");
+    assert!(
+        output.status.success(),
+        "generate exact-bootstrap CFR fixture: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn external_entry(id: &str, path: &Path, w: i32, h: i32, fps: f64) -> MediaManifestEntry {
@@ -122,6 +158,99 @@ fn render_until_content(rl: &mut RenderLoop, target: i32, w: u32, h: u32) -> Opt
         sleep(WARMUP_SLEEP);
     }
     None
+}
+
+fn required_render_loop(
+    timeline: Timeline,
+    manifest: &MediaManifest,
+    render_size: RenderSize,
+) -> RenderLoop {
+    let (sizes, media) = project_media(manifest, &None);
+    let text = project_text(&timeline);
+    RenderLoop::new(timeline, media, text, sizes, render_size)
+        .expect("exact-bootstrap integration requires a GPU adapter")
+}
+
+#[test]
+fn cold_bootstrap_uses_exact_trimmed_source_frame() {
+    assert!(
+        ffmpeg_ready(),
+        "exact-bootstrap integration requires ffmpeg"
+    );
+    let dir = tempfile::tempdir().expect("fixture tempdir");
+    let src = dir.path().join("distinct-cfr.mp4");
+    let (w, h, fps, frames, source_frame) = (160u32, 90u32, 12u32, 12u32, 5i32);
+    make_distinct_cfr_video(&src, w, h, fps, frames);
+
+    let exact_request = |frame: i32| FrameRequest {
+        time_secs: frame as f64 / fps as f64,
+        max_size: (w, h),
+        tolerance_secs: 0.0,
+        apply_rotation: true,
+    };
+    let (_, predecessor) = decode_frame_at(&src, &exact_request(source_frame - 1))
+        .expect("decode predecessor fixture frame");
+    let (_, target) =
+        decode_frame_at(&src, &exact_request(source_frame)).expect("decode target fixture frame");
+    assert_ne!(
+        target.rgba, predecessor.rgba,
+        "CFR fixture must have distinct adjacent frame pixels"
+    );
+
+    let mut timeline = Timeline::new();
+    timeline.fps = fps as i32;
+    let mut track = Track::new("t1", ClipType::Video);
+    let mut clip = Clip::new("clip-1", "asset-1", 0, frames as i32 - source_frame);
+    clip.trim_start_frame = source_frame;
+    track.clips.push(clip);
+    timeline.tracks.push(track);
+    let mut manifest = MediaManifest::new();
+    manifest.entries.push(external_entry(
+        "asset-1", &src, w as i32, h as i32, fps as f64,
+    ));
+
+    let mut render_loop = required_render_loop(timeline, &manifest, RenderSize::new(w, h));
+    let first = render_loop
+        .render_frame(0)
+        .expect("cold bootstrap must render the trimmed source frame");
+
+    assert_eq!(first.rgba, target.rgba, "first composite must match target");
+    assert_ne!(
+        first.rgba, predecessor.rgba,
+        "first composite must not use the predecessor"
+    );
+}
+
+#[test]
+fn cold_bootstrap_decode_failure_is_reported_instead_of_publishing_black() {
+    let dir = tempfile::tempdir().expect("fixture tempdir");
+    let missing = dir.path().join("missing.mp4");
+    let (w, h, fps) = (160u32, 90u32, 12u32);
+
+    let mut timeline = Timeline::new();
+    timeline.fps = fps as i32;
+    let mut track = Track::new("t1", ClipType::Video);
+    let mut clip = Clip::new("clip-1", "asset-1", 0, 3);
+    clip.trim_start_frame = 4;
+    track.clips.push(clip);
+    timeline.tracks.push(track);
+    let mut manifest = MediaManifest::new();
+    manifest.entries.push(external_entry(
+        "asset-1", &missing, w as i32, h as i32, fps as f64,
+    ));
+
+    let mut render_loop = required_render_loop(timeline, &manifest, RenderSize::new(w, h));
+    let error = match render_loop.render_frame(0) {
+        Ok(frame) => panic!(
+            "cold bootstrap decode failure published {}x{} black frame",
+            frame.width, frame.height
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("bootstrap") && error.contains("asset-1"),
+        "error must identify bootstrap media failure: {error}"
+    );
 }
 
 #[test]
