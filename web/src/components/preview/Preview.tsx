@@ -3,7 +3,7 @@
  * bar with project-setting badges. Transport drives the local playhead.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   SkipBack,
   SkipForward,
@@ -36,7 +36,9 @@ import {
 import { useT } from "../../i18n";
 import {
   captureFrameToMedia,
+  compositeFrame,
   getPreviewEndpoint,
+  isTauri,
   previewPoster,
 } from "../../lib/api";
 import { findCropEditingClip, findSelectedVisualClip, mediaCanvasAspect } from "../../lib/clip";
@@ -49,6 +51,7 @@ import {
   isAspectPresetActive,
   isQualityPresetActive,
   isZoomPresetActive,
+  previewQualityMaxSize,
   qualityBadgeLabel,
   zoomBadgeLabel,
   type AspectPreset,
@@ -57,15 +60,15 @@ import {
 } from "../../lib/previewPresets";
 import type { MediaItem } from "../../lib/types";
 import { useNativePlaybackPublication } from "./nativePlaybackSession";
-import {
-  nativeFrameDisplayState,
-  shouldAcceptNativeFrameLoad,
-  type LoadedNativeFrame,
-} from "./timelinePlayback";
+import { resolveTimelinePlaybackRoute, type UnsupportedPlaybackReason } from "./playbackRoute";
+import { rustEngineEnabled } from "./rustEngine";
+import { RustFrameBuffer } from "./RustFrameBuffer.tsx";
 
 export function Preview() {
   const t = useT();
   const timeline = useProjectStore((s) => s.timeline);
+  const projectEpoch = useProjectStore((s) => s.projectEpoch);
+  const timelineVersion = useProjectStore((s) => s.timelineVersion);
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
   const setCurrentFrame = useEditorUiStore((s) => s.setCurrentFrame);
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
@@ -82,6 +85,7 @@ export function Preview() {
   const canvasOffset = useEditorUiStore((s) => s.canvasOffset);
   const setCanvasZoom = useEditorUiStore((s) => s.setCanvasZoom);
   const setCanvasOffset = useEditorUiStore((s) => s.setCanvasOffset);
+  const previewQualityShortEdge = useEditorUiStore((s) => s.previewQualityShortEdge);
   const previewItem = useMediaStore((s) =>
     previewMediaId ? s.items.find((m) => m.id === previewMediaId) ?? null : null,
   );
@@ -131,11 +135,6 @@ export function Preview() {
   const [mediaPlaying, setMediaPlaying] = useState(false);
   const nativeFrameEvent = useNativePlaybackPublication();
   const [previewFrameEndpoint, setPreviewFrameEndpoint] = useState<string | null>(null);
-  const [loadedNativeFrame, setLoadedNativeFrame] = useState<LoadedNativeFrame | null>(null);
-  const nativeFrameRequestRef = useRef<{
-    url: string;
-    frame: LoadedNativeFrame;
-  } | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   // The zoomed canvas box element — the wheel handler measures its rect so the
   // zoom anchors on the cursor's position within the canvas (not the padded stage).
@@ -155,21 +154,6 @@ export function Preview() {
       disposed = true;
     };
   }, []);
-  useEffect(() => {
-    if (loadedNativeFrame && !nativeFrameEvent) {
-      setLoadedNativeFrame(null);
-      return;
-    }
-    if (
-      loadedNativeFrame &&
-      nativeFrameEvent &&
-      (loadedNativeFrame.projectEpoch !== nativeFrameEvent.projectEpoch ||
-        loadedNativeFrame.timelineVersion !== nativeFrameEvent.timelineVersion ||
-        loadedNativeFrame.sessionId !== nativeFrameEvent.sessionId)
-    ) {
-      setLoadedNativeFrame(null);
-    }
-  }, [loadedNativeFrame, nativeFrameEvent]);
   useEffect(() => {
     const el = stageRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
@@ -215,25 +199,19 @@ export function Preview() {
     : totalFrames(timeline);
   const activeShownFrame = previewing ? Math.round(mediaTime * fps) : activeFrame;
   const playing = previewing ? mediaPlaying : isPlaying;
-  const nativeDisplay = nativeFrameDisplayState({
-    event: nativeFrameEvent,
-    endpoint: previewFrameEndpoint,
-    loaded: loadedNativeFrame,
-    isPlaying,
+  const playbackRoute = resolveTimelinePlaybackRoute(timeline, {
+    rustAvailable: isTauri,
+    rustEnabled: rustEngineEnabled(),
   });
-  nativeFrameRequestRef.current =
-    nativeDisplay.requestUrl && nativeFrameEvent
-      ? {
-          url: nativeDisplay.requestUrl,
-          frame: {
-            projectEpoch: nativeFrameEvent.projectEpoch,
-            timelineVersion: nativeFrameEvent.timelineVersion,
-            sessionId: nativeFrameEvent.sessionId,
-            frame: nativeFrameEvent.frame,
-            sequence: nativeFrameEvent.sequence,
-          },
-        }
-      : null;
+  const timelinePlaybackAllowed = playbackRoute.kind !== "unsupported";
+  const requestCompositeStill = useCallback(
+    (frame: number) =>
+      compositeFrame(
+        frame,
+        previewQualityMaxSize(previewQualityShortEdge, timeline.width, timeline.height),
+      ),
+    [previewQualityShortEdge, timeline.height, timeline.width],
+  );
 
   const seekTo = (frame: number) => {
     const clamped = Math.max(0, Math.min(total, frame));
@@ -256,6 +234,7 @@ export function Preview() {
       if (el.paused) void el.play();
       else el.pause();
     } else {
+      if (!timelinePlaybackAllowed) return;
       // Rewinds from the parked end frame on replay (see store togglePlay).
       togglePlayTimeline();
     }
@@ -266,7 +245,8 @@ export function Preview() {
   // `isTimeline || activePreviewTab.clipType == .video`,
   // PreviewContainerView.swift:95).
   const canCaptureVideoTab = previewing && previewItem?.type === "video";
-  const canCapture = (timelineHasContent && !previewing) || canCaptureVideoTab;
+  const canCapture =
+    (timelineHasContent && !previewing && timelinePlaybackAllowed) || canCaptureVideoTab;
 
   // Capture the current frame INTO the media library as a new still (upstream
   // `captureCurrentFrameToMedia`): composite the timeline (timeline tab) or decode
@@ -405,42 +385,22 @@ export function Preview() {
               position: "relative",
             }}
           >
-            {timelineHasContent ? (
+            {timelineHasContent && playbackRoute.kind === "unsupported" ? (
+              <UnsupportedPlaybackSurface reasons={playbackRoute.reasons} />
+            ) : timelineHasContent ? (
               <>
-                <div
-                  style={{
-                    position: "absolute",
-                    inset: 0,
-                    visibility: nativeDisplay.showWebKit ? "visible" : "hidden",
-                  }}
-                >
+                {playbackRoute.kind === "webkit" && (
                   <TimelinePlayback timeline={timeline} fps={fps} />
-                </div>
-                {nativeDisplay.requestUrl && nativeFrameEvent && (
-                  <img
-                    src={nativeDisplay.requestUrl}
-                    alt=""
-                    onLoad={(event) => {
-                      const request = nativeFrameRequestRef.current;
-                      if (
-                        request &&
-                        event.currentTarget.currentSrc === request.url &&
-                        shouldAcceptNativeFrameLoad(nativeFrameEvent, request.frame)
-                      ) {
-                        setLoadedNativeFrame(request.frame);
-                      }
-                    }}
-                    style={{
-                      position: "absolute",
-                      inset: 0,
-                      width: "100%",
-                      height: "100%",
-                      objectFit: "contain",
-                      visibility: nativeDisplay.showNativeImage ? "visible" : "hidden",
-                      pointerEvents: "none",
-                    }}
-                  />
                 )}
+                <RustFrameBuffer
+                  event={nativeFrameEvent}
+                  endpoint={previewFrameEndpoint}
+                  projectEpoch={projectEpoch}
+                  timelineVersion={timelineVersion}
+                  engineDriving={playbackRoute.kind === "rust" && isPlaying}
+                  requestCompositeStill={requestCompositeStill}
+                  onTerminalFailure={() => pushToast(t("preview.terminalFrameFailed"))}
+                />
                 {/* Below-fit canvas outline (upstream PreviewContainerView.swift:
                     44-47: Rectangle stroke white @ Opacity.moderate=0.25 when
                     canvasZoom < 1.0, else invisible). pointer-events:none so it
@@ -535,7 +495,11 @@ export function Preview() {
           <HoverButton title={t("preview.stepBack")} onClick={() => seekTo(activeShownFrame - 1)}>
             <Icon icon={StepBack} size={13} />
           </HoverButton>
-          <HoverButton title={t("preview.playPause")} onClick={togglePlay}>
+          <HoverButton
+            title={t("preview.playPause")}
+            disabled={!previewing && !timelinePlaybackAllowed}
+            onClick={togglePlay}
+          >
             <Icon icon={playing ? Pause : Play} size={14} />
           </HoverButton>
           <HoverButton title={t("preview.stepForward")} onClick={() => seekTo(activeShownFrame + 1)}>
@@ -556,6 +520,37 @@ export function Preview() {
         <ProjectSettingsBadges fps={timeline.fps} width={timeline.width} height={timeline.height} />
       </div>
     </>
+  );
+}
+
+function unsupportedReasonKey(reason: UnsupportedPlaybackReason): string {
+  return `preview.unsupportedPlayback.${reason.code}`;
+}
+
+function UnsupportedPlaybackSurface({ reasons }: { reasons: UnsupportedPlaybackReason[] }) {
+  const t = useT();
+  return (
+    <div
+      data-testid="unsupported-playback-surface"
+      role="status"
+      style={{
+        position: "absolute",
+        inset: 0,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: "var(--space-sm)",
+        padding: "var(--space-xl)",
+        color: "var(--text-secondary)",
+        textAlign: "center",
+      }}
+    >
+      <strong style={{ color: "var(--text-primary)" }}>{t("preview.unsupportedPlayback")}</strong>
+      <span style={{ fontSize: "var(--fs-xs)" }}>
+        {reasons.map((reason) => t(unsupportedReasonKey(reason))).join(" · ")}
+      </span>
+    </div>
   );
 }
 

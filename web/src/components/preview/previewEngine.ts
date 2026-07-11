@@ -26,7 +26,6 @@ import {
   clipVolumeAt,
   frameForSourceTime,
   isExternalSeekWhilePlaying,
-  shouldUseRustEngine,
   sourceTimeSec,
   type ActiveMedia,
 } from "./timelinePlayback";
@@ -46,6 +45,7 @@ import {
   subscribeNativePlaybackPublication,
 } from "./nativePlaybackSession";
 import { rustEngineEnabled } from "./rustEngine";
+import { resolveTimelinePlaybackRoute } from "./playbackRoute";
 
 interface NativeFrameListenerSlot {
   registration: NativeFrameListenerRegistration | null;
@@ -421,15 +421,18 @@ export function useTimelinePlaybackEngine(): void {
   }, [activeFrame, engineFailed, isPlaying, isScrubbing, projectEpoch, timelineVersion]);
 
   useEffect(() => {
-    if (
-      shouldUseRustEngine({
-        rustEnabled: rustEngineEnabled(),
-        isTauri,
-        isPlaying,
-        isScrubbing,
-        engineFailed,
-      })
-    ) {
+    const timeline = useProjectStore.getState().timeline;
+    const route = resolveTimelinePlaybackRoute(timeline, {
+      rustAvailable: isTauri,
+      rustEnabled: rustEngineEnabled() && !engineFailed,
+    });
+    if (route.kind === "unsupported") {
+      cancelPendingInteractiveSeek();
+      pauseAll();
+      if (isPlaying) useEditorUiStore.getState().setPlaying(false);
+      return;
+    }
+    if (route.kind === "rust" && isPlaying && !isScrubbing) {
       pauseAll();
       let disposed = false;
       let identity = activeNativeIdentityRef.current;
@@ -439,7 +442,6 @@ export function useTimelinePlaybackEngine(): void {
         lastEngineFrameRef.current = current.frame;
         const ui = useEditorUiStore.getState();
         ui.setActiveFrame(current.frame);
-        if (current.terminal) ui.setPlaying(false);
       });
 
       const startFrame = Math.max(0, Math.floor(useEditorUiStore.getState().activeFrame));
@@ -495,6 +497,12 @@ export function useTimelinePlaybackEngine(): void {
           Math.max(0, Math.floor(ui.activeFrame)),
         );
       };
+    }
+
+    if (route.kind === "rust") {
+      cancelPendingInteractiveSeek();
+      pauseAll();
+      return;
     }
 
     if (!isPlaying && !isScrubbing) {
@@ -625,15 +633,11 @@ export function useTimelinePlaybackEngine(): void {
   }, [isPlaying, isScrubbing, engineFailed, projectEpoch, timelineVersion, setEngineFailed]);
 
   useEffect(() => {
-    if (
-      !shouldUseRustEngine({
-        rustEnabled: rustEngineEnabled(),
-        isTauri,
-        isPlaying,
-        isScrubbing,
-        engineFailed,
-      })
-    ) {
+    const route = resolveTimelinePlaybackRoute(useProjectStore.getState().timeline, {
+      rustAvailable: isTauri,
+      rustEnabled: rustEngineEnabled() && !engineFailed,
+    });
+    if (route.kind !== "rust" || !isPlaying || isScrubbing) {
       return;
     }
     const identity = activeNativeIdentityRef.current;

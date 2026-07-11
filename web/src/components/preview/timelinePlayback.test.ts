@@ -12,77 +12,10 @@ import {
   clipVolumeAt,
   frameForSourceTime,
   isExternalSeekWhilePlaying,
-  nativeFrameDisplayState,
-  playbackFrameUrl,
   playbackFrameFromActiveFrame,
-  shouldAcceptNativeFrameLoad,
-  shouldFallBackToLegacy,
-  shouldUseRustEngine,
   sourceTimeSec,
   visualAudioIsDuplicated,
 } from "./timelinePlayback";
-
-describe("session-scoped native frame display", () => {
-  const event = {
-    projectEpoch: 8,
-    timelineVersion: 13,
-    sessionId: "session-4",
-    frame: 21,
-    sequence: 5,
-    terminal: false,
-  };
-
-  it("builds a frame URL with project epoch timeline version session id frame and sequence", () => {
-    expect(playbackFrameUrl("http://127.0.0.1:4999/frame", event)).toBe(
-      "http://127.0.0.1:4999/frame?projectEpoch=8&timelineVersion=13&sessionId=session-4&frame=21&sequence=5",
-    );
-  });
-
-  it("rejects an event or image load missing any identity field", () => {
-    expect(playbackFrameUrl("http://127.0.0.1:4999/frame", { ...event, sessionId: "" })).toBeNull();
-    expect(
-      shouldAcceptNativeFrameLoad(event, {
-        projectEpoch: 8,
-        timelineVersion: 13,
-        sessionId: "",
-        frame: 21,
-        sequence: 5,
-      }),
-    ).toBe(false);
-  });
-
-  it("keeps WebKit visible until the first matching native frame has loaded", () => {
-    const state = nativeFrameDisplayState({
-      event,
-      endpoint: "http://127.0.0.1:4999/frame",
-      loaded: null,
-      isPlaying: true,
-    });
-
-    expect(state.requestUrl).not.toBeNull();
-    expect(state.showNativeImage).toBe(false);
-    expect(state.showWebKit).toBe(true);
-  });
-
-  it("retains the matching loaded native frame when playback pauses", () => {
-    const loaded = {
-      projectEpoch: event.projectEpoch,
-      timelineVersion: event.timelineVersion,
-      sessionId: event.sessionId,
-      frame: event.frame,
-      sequence: event.sequence,
-    };
-    const state = nativeFrameDisplayState({
-      event,
-      endpoint: "http://127.0.0.1:4999/frame",
-      loaded,
-      isPlaying: false,
-    });
-
-    expect(state.displayUrl).toContain("sessionId=session-4");
-    expect(state.showNativeImage).toBe(true);
-  });
-});
 
 describe("isExternalSeekWhilePlaying", () => {
   it("returns false before the engine has emitted a frame", () => {
@@ -112,65 +45,6 @@ describe("isExternalSeekWhilePlaying", () => {
     // delta == 2 (== default eps) → not forwarded; delta == 3 → forwarded.
     expect(isExternalSeekWhilePlaying({ activeFrame: 32, lastEngineFrame: 30 })).toBe(false);
     expect(isExternalSeekWhilePlaying({ activeFrame: 33, lastEngineFrame: 30 })).toBe(true);
-  });
-});
-
-describe("shouldUseRustEngine", () => {
-  const base = { rustEnabled: true, isTauri: true, isPlaying: true, isScrubbing: false };
-
-  it("routes PLAY to Rust when flag on, under Tauri, playing, not scrubbing", () => {
-    expect(shouldUseRustEngine(base)).toBe(true);
-  });
-
-  it("stays on the legacy <video> path when the flag is off", () => {
-    expect(shouldUseRustEngine({ ...base, rustEnabled: false })).toBe(false);
-  });
-
-  it("stays on the legacy path outside Tauri (browser dev server)", () => {
-    expect(shouldUseRustEngine({ ...base, isTauri: false })).toBe(false);
-  });
-
-  it("relinquishes to the legacy scrub path during a scrub", () => {
-    expect(shouldUseRustEngine({ ...base, isScrubbing: true })).toBe(false);
-  });
-
-  it("does not engage while paused", () => {
-    expect(shouldUseRustEngine({ ...base, isPlaying: false })).toBe(false);
-  });
-
-  it("falls through to legacy once the engine has failed this session", () => {
-    expect(shouldUseRustEngine({ ...base, engineFailed: true })).toBe(false);
-  });
-
-  it("still engages when engineFailed is explicitly false or omitted", () => {
-    expect(shouldUseRustEngine({ ...base, engineFailed: false })).toBe(true);
-    expect(shouldUseRustEngine(base)).toBe(true); // undefined engineFailed
-  });
-});
-
-describe("shouldFallBackToLegacy", () => {
-  it("declares failure only on the engine path, past the deadline, with no frames", () => {
-    expect(
-      shouldFallBackToLegacy({ onEnginePath: true, framesSeen: 0, deadlineElapsed: true }),
-    ).toBe(true);
-  });
-
-  it("stands down once any frame has arrived (GPU path is live)", () => {
-    expect(
-      shouldFallBackToLegacy({ onEnginePath: true, framesSeen: 1, deadlineElapsed: true }),
-    ).toBe(false);
-  });
-
-  it("does not fire before the deadline elapses", () => {
-    expect(
-      shouldFallBackToLegacy({ onEnginePath: true, framesSeen: 0, deadlineElapsed: false }),
-    ).toBe(false);
-  });
-
-  it("does not fire once we've already left the engine path (disposed / paused)", () => {
-    expect(
-      shouldFallBackToLegacy({ onEnginePath: false, framesSeen: 0, deadlineElapsed: true }),
-    ).toBe(false);
   });
 });
 

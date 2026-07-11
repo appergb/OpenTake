@@ -38,6 +38,7 @@ describe("keyboard transport Space shortcut", () => {
     const handled = handleTransportSpaceKeyDown(e, {
       view: "editor",
       previewMediaId: null,
+      timelinePlaybackAllowed: true,
       requestMediaPreviewToggle: () => {},
       togglePlay: () => {
         toggles += 1;
@@ -59,6 +60,28 @@ describe("keyboard transport Space shortcut", () => {
     const handled = handleTransportSpaceKeyDown(e, {
       view: "editor",
       previewMediaId: null,
+      timelinePlaybackAllowed: true,
+      requestMediaPreviewToggle: () => {},
+      togglePlay: () => {
+        toggles += 1;
+      },
+    });
+
+    expect(handled).toBe(true);
+    expect(toggles).toBe(0);
+  });
+
+  it("does not start timeline playback from Space when route is Unsupported", () => {
+    let toggles = 0;
+    const e = event({
+      preventDefault: () => {},
+      stopPropagation: () => {},
+    } as Partial<KeyboardEvent>);
+
+    const handled = handleTransportSpaceKeyDown(e, {
+      view: "editor",
+      previewMediaId: null,
+      timelinePlaybackAllowed: false,
       requestMediaPreviewToggle: () => {},
       togglePlay: () => {
         toggles += 1;

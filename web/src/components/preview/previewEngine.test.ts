@@ -195,10 +195,20 @@ function timeline(tracks: Track[]): Timeline {
   return { fps: 30, width: 1920, height: 1080, settingsConfigured: true, tracks };
 }
 
+function rustTimeline(overrides: Partial<Clip> = {}): Timeline {
+  return timeline([
+    track({
+      id: "text-track",
+      type: "text",
+      clips: [clip({ id: "text-clip", mediaType: "text", ...overrides })],
+    }),
+  ]);
+}
+
 describe("shouldSyncPausedMediaToFrame", () => {
   it("registers one listener before start across a StrictMode cleanup and remount", async () => {
     nativeApiHarness.deferred = true;
-    useProjectStore.setState({ projectEpoch: 4, timelineVersion: 7, timeline: timeline([]) });
+    useProjectStore.setState({ projectEpoch: 4, timelineVersion: 7, timeline: rustTimeline() });
     useEditorUiStore.setState({
       activeFrame: 0,
       currentFrame: 0,
@@ -233,7 +243,7 @@ describe("shouldSyncPausedMediaToFrame", () => {
 
   it("re-registers the native frame listener when PLAY retries after registration rejection", async () => {
     nativeApiHarness.deferred = true;
-    useProjectStore.setState({ projectEpoch: 4, timelineVersion: 7, timeline: timeline([]) });
+    useProjectStore.setState({ projectEpoch: 4, timelineVersion: 7, timeline: rustTimeline() });
     useEditorUiStore.setState({
       activeFrame: 0,
       currentFrame: 0,
@@ -318,6 +328,27 @@ describe("shouldSyncPausedMediaToFrame", () => {
     await unmountPlaybackHook(thirdRoot);
     expect(nativeApiHarness.activeListeners).toBe(0);
     expect(nativeApiHarness.unlistenCalls).toBe(1);
+  });
+
+  it("uses the capability route as the final engine guard", async () => {
+    useProjectStore.setState({
+      projectEpoch: 4,
+      timelineVersion: 7,
+      timeline: rustTimeline({ reversed: true }),
+    });
+    useEditorUiStore.setState({
+      activeFrame: 0,
+      currentFrame: 0,
+      isPlaying: true,
+      isScrubbing: false,
+      rustEngineFailed: false,
+    });
+
+    const root = await mountPlaybackHook();
+
+    expect(useEditorUiStore.getState().isPlaying).toBe(false);
+    expect(nativeApiHarness.playbackStart).not.toHaveBeenCalled();
+    await unmountPlaybackHook(root);
   });
 
   it("does not seek on the play-to-pause edge", () => {
