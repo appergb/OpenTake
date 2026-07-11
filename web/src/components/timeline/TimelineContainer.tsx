@@ -202,6 +202,21 @@ export function timelinePrewarmShouldStart(
   return (retryCounts.get(key) ?? 0) <= 8;
 }
 
+export function timelineVisualCacheIsCurrent(
+  currentKey: string,
+  cachedKey: string | undefined,
+): boolean {
+  return cachedKey === currentKey;
+}
+
+export function timelineVisualRequestShouldStart(
+  currentKey: string,
+  cachedKey: string | undefined,
+  inFlight: Set<string>,
+): boolean {
+  return !timelineVisualCacheIsCurrent(currentKey, cachedKey) && !inFlight.has(currentKey);
+}
+
 export function clipAccessTargetSize(width: number, height: number): { width: number; height: number } {
   return { width: Math.max(24, width), height: Math.max(24, height) };
 }
@@ -553,6 +568,16 @@ export function TimelineContainer() {
       ),
     [mediaItems],
   );
+  const visualCacheKeys = useMemo(
+    () =>
+      new Map(
+        Array.from(thumbnailSourceKeys, ([ref, sourceKey]) => [
+          ref,
+          timelinePrewarmKey(projectEpoch, ref, sourceKey),
+        ]),
+      ),
+    [projectEpoch, thumbnailSourceKeys],
+  );
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const contentCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -578,8 +603,9 @@ export function TimelineContainer() {
   const waveformsRef = useRef<Map<string, number[]>>(new Map());
   // Visual thumbnail cache (media id → decoded sprite/single image).
   const thumbnailsRef = useRef<Map<string, ClipThumbnailStrip>>(new Map());
-  const thumbnailSourceKeysRef = useRef<Map<string, string>>(new Map());
-  const latestThumbnailSourceKeysRef = useRef(thumbnailSourceKeys);
+  const waveformCacheKeysRef = useRef<Map<string, string>>(new Map());
+  const thumbnailCacheKeysRef = useRef<Map<string, string>>(new Map());
+  const latestVisualCacheKeysRef = useRef(visualCacheKeys);
   // Refs of media whose waveform fetch is currently in flight — kept separate from
   // the resolved-cache `waveformsRef` so a failed/empty fetch can be retried on a
   // later effect run instead of being permanently suppressed by a placeholder (#127).
@@ -600,7 +626,27 @@ export function TimelineContainer() {
   }, []);
   const [waveformVersion, setWaveformVersion] = useState(0);
   const [thumbnailVersion, setThumbnailVersion] = useState(0);
-  latestThumbnailSourceKeysRef.current = thumbnailSourceKeys;
+  latestVisualCacheKeysRef.current = visualCacheKeys;
+  const currentWaveforms = useMemo(() => {
+    const current = new Map<string, number[]>();
+    for (const [ref, samples] of waveformsRef.current) {
+      const key = visualCacheKeys.get(ref);
+      if (key && timelineVisualCacheIsCurrent(key, waveformCacheKeysRef.current.get(ref))) {
+        current.set(ref, samples);
+      }
+    }
+    return current;
+  }, [visualCacheKeys, waveformVersion]);
+  const currentThumbnails = useMemo(() => {
+    const current = new Map<string, ClipThumbnailStrip>();
+    for (const [ref, strip] of thumbnailsRef.current) {
+      const key = visualCacheKeys.get(ref);
+      if (key && timelineVisualCacheIsCurrent(key, thumbnailCacheKeysRef.current.get(ref))) {
+        current.set(ref, strip);
+      }
+    }
+    return current;
+  }, [visualCacheKeys, thumbnailVersion]);
 
   const scheduleCacheRetry = useCallback(() => {
     if (cacheRetryTimerRef.current !== null) return;
@@ -783,8 +829,8 @@ export function TimelineContainer() {
       scrollTop,
       viewWidth: viewport.width,
       viewHeight: viewport.height,
-      waveforms: waveformsRef.current,
-      thumbnails: thumbnailsRef.current,
+      waveforms: currentWaveforms,
+      thumbnails: currentThumbnails,
       missingMediaRefs,
       emptyLabel: t("timeline.dropHint"),
       drag,
@@ -807,6 +853,8 @@ export function TimelineContainer() {
     firstAudio,
     waveformVersion,
     thumbnailVersion,
+    currentWaveforms,
+    currentThumbnails,
     missingMediaRefs,
     dragTick,
     t,
@@ -864,50 +912,71 @@ export function TimelineContainer() {
     }
     for (const ref of wanted) {
       const sourceKey = thumbnailSourceKeys.get(ref);
-      const admission = sourceKey
-        ? timelinePrewarmRef.current.get(timelinePrewarmKey(projectEpoch, ref, sourceKey))
-        : null;
+      const key = visualCacheKeys.get(ref);
+      const admission = key ? timelinePrewarmRef.current.get(key) : null;
       if (
         !sourceKey ||
+        !key ||
         !prewarmResultAllowsCacheRead(admission ?? null)
       ) {
         continue;
       }
       // Skip only if already resolved (cached) or a fetch is in flight. A failed or
       // empty fetch leaves no placeholder, so a later effect run retries it.
-      if (waveformsRef.current.has(ref) || inFlightRef.current.has(ref)) continue;
-      inFlightRef.current.add(ref);
+      if (
+        !timelineVisualRequestShouldStart(
+          key,
+          waveformCacheKeysRef.current.get(ref),
+          inFlightRef.current,
+        )
+      ) {
+        continue;
+      }
+      inFlightRef.current.add(key);
       void getWaveform(ref)
         .then((samples) => {
-          // Write the cache even if `timeline` changed meanwhile — a ref write is
-          // idempotent and mount-independent. Discarding valid results on every edit
-          // was exactly what dropped waveforms intermittently (#127). Only the
-          // repaint bump is guarded against unmount.
-          if (samples && samples.length > 0) {
+          // Same-project timeline edits keep the key stable, while a project/source
+          // replacement changes it and rejects the stale async result.
+          if (
+            samples &&
+            samples.length > 0 &&
+            latestVisualCacheKeysRef.current.get(ref) === key
+          ) {
             waveformsRef.current.set(ref, samples);
+            waveformCacheKeysRef.current.set(ref, key);
             if (mountedRef.current) setWaveformVersion((v) => v + 1);
           }
         })
         .finally(() => {
           // Clear in-flight so a failed/empty ref is retried on the next effect run.
-          inFlightRef.current.delete(ref);
+          inFlightRef.current.delete(key);
         });
     }
-  }, [timeline, projectEpoch, missingMediaRefs, thumbnailSourceKeys, cacheRetryTick]);
+  }, [timeline, missingMediaRefs, thumbnailSourceKeys, visualCacheKeys, cacheRetryTick]);
 
   useEffect(() => {
-    latestThumbnailSourceKeysRef.current = thumbnailSourceKeys;
-    let changed = false;
-    for (const ref of thumbnailsRef.current.keys()) {
-      const sourceKey = thumbnailSourceKeys.get(ref);
-      if (!sourceKey || thumbnailSourceKeysRef.current.get(ref) !== sourceKey) {
-        thumbnailsRef.current.delete(ref);
-        thumbnailSourceKeysRef.current.delete(ref);
-        changed = true;
+    latestVisualCacheKeysRef.current = visualCacheKeys;
+    let waveformChanged = false;
+    for (const ref of waveformsRef.current.keys()) {
+      const key = visualCacheKeys.get(ref);
+      if (!key || !timelineVisualCacheIsCurrent(key, waveformCacheKeysRef.current.get(ref))) {
+        waveformsRef.current.delete(ref);
+        waveformCacheKeysRef.current.delete(ref);
+        waveformChanged = true;
       }
     }
-    if (changed && mountedRef.current) setThumbnailVersion((v) => v + 1);
-  }, [thumbnailSourceKeys]);
+    let thumbnailChanged = false;
+    for (const ref of thumbnailsRef.current.keys()) {
+      const key = visualCacheKeys.get(ref);
+      if (!key || !timelineVisualCacheIsCurrent(key, thumbnailCacheKeysRef.current.get(ref))) {
+        thumbnailsRef.current.delete(ref);
+        thumbnailCacheKeysRef.current.delete(ref);
+        thumbnailChanged = true;
+      }
+    }
+    if (waveformChanged && mountedRef.current) setWaveformVersion((v) => v + 1);
+    if (thumbnailChanged && mountedRef.current) setThumbnailVersion((v) => v + 1);
+  }, [visualCacheKeys]);
 
   // Load visual thumbnails in two phases: a poster first so dropped clips paint
   // immediately, then a video sprite that upgrades the same cache entry.
@@ -923,7 +992,7 @@ export function TimelineContainer() {
 
     const storeThumbnail = async (
       ref: string,
-      sourceKey: string,
+      key: string,
       result: Awaited<ReturnType<typeof generateThumbnail>>,
       requireSprite: boolean,
     ): Promise<boolean> => {
@@ -939,8 +1008,7 @@ export function TimelineContainer() {
       const url = assetUrl(path);
       if (!url) return false;
       const image = await loadImageElement(url);
-      const latestSourceKey = latestThumbnailSourceKeysRef.current.get(ref);
-      if (latestSourceKey !== sourceKey) return false;
+      if (latestVisualCacheKeysRef.current.get(ref) !== key) return false;
       const strip: ClipThumbnailStrip = {
         image,
         kind: hasSprite ? "sprite" : "single",
@@ -950,47 +1018,53 @@ export function TimelineContainer() {
         times: result.times,
       };
       thumbnailsRef.current.set(ref, strip);
-      thumbnailSourceKeysRef.current.set(ref, sourceKey);
+      thumbnailCacheKeysRef.current.set(ref, key);
       if (mountedRef.current) setThumbnailVersion((v) => v + 1);
       return true;
     };
 
-    const startSpriteLoad = (ref: string, sourceKey: string) => {
-      if (thumbnailSpriteInFlightRef.current.has(ref)) return;
-      thumbnailSpriteInFlightRef.current.add(ref);
+    const startSpriteLoad = (ref: string, key: string) => {
+      if (thumbnailSpriteInFlightRef.current.has(key)) return;
+      thumbnailSpriteInFlightRef.current.add(key);
       void generateThumbnail(ref, { includeSprite: true })
-        .then((result) => storeThumbnail(ref, sourceKey, result, true))
+        .then((result) => storeThumbnail(ref, key, result, true))
         .catch((err) => {
           console.warn(`thumbnail sprite load failed for ${ref}:`, err);
         })
         .finally(() => {
-          thumbnailSpriteInFlightRef.current.delete(ref);
+          thumbnailSpriteInFlightRef.current.delete(key);
         });
     };
 
     for (const [ref, mediaType] of wanted) {
-      const sourceKey = thumbnailSourceKeys.get(ref);
-      if (!sourceKey) continue;
-      const existing = thumbnailsRef.current.get(ref);
+      const key = visualCacheKeys.get(ref);
+      if (!key) continue;
+      const cachedKey = thumbnailCacheKeysRef.current.get(ref);
+      const existing = timelineVisualCacheIsCurrent(key, cachedKey)
+        ? thumbnailsRef.current.get(ref)
+        : undefined;
 
-      if (!existing && !thumbnailPosterInFlightRef.current.has(ref)) {
-        thumbnailPosterInFlightRef.current.add(ref);
+      if (
+        !existing &&
+        timelineVisualRequestShouldStart(key, cachedKey, thumbnailPosterInFlightRef.current)
+      ) {
+        thumbnailPosterInFlightRef.current.add(key);
         void generateThumbnail(ref, { includeSprite: false })
           .then(async (result) => {
-            const stored = await storeThumbnail(ref, sourceKey, result, false);
-            if (stored && mediaType === "video") startSpriteLoad(ref, sourceKey);
+            const stored = await storeThumbnail(ref, key, result, false);
+            if (stored && mediaType === "video") startSpriteLoad(ref, key);
           })
           .catch((err) => {
             console.warn(`thumbnail poster load failed for ${ref}:`, err);
           })
           .finally(() => {
-            thumbnailPosterInFlightRef.current.delete(ref);
+            thumbnailPosterInFlightRef.current.delete(key);
           });
       } else if (mediaType === "video" && existing && existing.kind !== "sprite") {
-        startSpriteLoad(ref, sourceKey);
+        startSpriteLoad(ref, key);
       }
     }
-  }, [timeline, missingMediaRefs, thumbnailSourceKeys]);
+  }, [timeline, missingMediaRefs, visualCacheKeys]);
 
   // Paint ruler canvas (sticky top).
   useEffect(() => {

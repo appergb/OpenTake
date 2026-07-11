@@ -325,6 +325,19 @@ describe("structured media prewarm coordination", () => {
     ).toBe(false);
   });
 
+  it("does not let an old source cache or request block current visual loading", () => {
+    const oldKey = timelineContainer.timelinePrewarmKey?.(7, "shared", "/old.mov|online") ?? "";
+    const currentKey = timelineContainer.timelinePrewarmKey?.(8, "shared", "/new.mov|online") ?? "";
+
+    expect(timelineContainer.timelineVisualCacheIsCurrent?.(currentKey, oldKey)).toBe(false);
+    expect(
+      timelineContainer.timelineVisualRequestShouldStart?.(currentKey, oldKey, new Set([oldKey])),
+    ).toBe(true);
+    expect(
+      timelineContainer.timelineVisualRequestShouldStart?.(oldKey, oldKey, new Set([oldKey])),
+    ).toBe(false);
+  });
+
   it("retries queued duplicate and busy admissions without retrying terminal states", () => {
     expect(timelineContainer.prewarmResultNeedsRetry?.("queued")).toBe(true);
     expect(timelineContainer.prewarmResultNeedsRetry?.("duplicate")).toBe(true);
