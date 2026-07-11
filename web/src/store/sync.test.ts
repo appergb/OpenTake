@@ -20,6 +20,7 @@ const srv = vi.hoisted(() => {
   return {
     timeline,
     projectPath: null as string | null,
+    compatibilityReadOnly: false,
     snapshotResponses: [] as Array<Promise<RuntimeTimelineSnapshot>>,
     undoResponses: [] as Array<Promise<boolean>>,
     redoResponses: [] as Array<Promise<boolean>>,
@@ -29,10 +30,16 @@ const srv = vi.hoisted(() => {
     redoCalls: 0,
     timelineListenerCalls: 0,
     openedListenerCalls: 0,
+    projectOpenedHandlers: [] as Array<
+      (path: string, projectEpoch: number, version: number) => Promise<void> | void
+    >,
+    playbackResponses: [] as Array<Promise<void>>,
     order: [] as string[],
     onProjectOpened: null as null | ((path: string, projectEpoch: number, version: number) => Promise<void> | void),
     invalidate: vi.fn(async () => {
       srv.order.push("invalidate");
+      const queued = srv.playbackResponses.shift();
+      if (queued) await queued;
     }),
   };
 });
@@ -47,8 +54,8 @@ vi.mock("../lib/api", () => ({
       projectEpoch: 1,
       version: 0,
       projectPath: srv.projectPath,
-      compatibilityReadOnly: false,
-      compatibilityBlockers: [],
+      compatibilityReadOnly: srv.compatibilityReadOnly,
+      compatibilityBlockers: srv.compatibilityReadOnly ? ["manifest.futureField"] : [],
     };
   },
   canUndo: async () => {
@@ -68,6 +75,7 @@ vi.mock("../lib/api", () => ({
   ) => {
     srv.openedListenerCalls += 1;
     srv.onProjectOpened = handler;
+    srv.projectOpenedHandlers.push(handler);
     return (await srv.openedListenerResponses.shift()) ?? (() => {});
   },
 }));
@@ -107,6 +115,8 @@ beforeEach(() => {
   srv.redoCalls = 0;
   srv.timelineListenerCalls = 0;
   srv.openedListenerCalls = 0;
+  srv.projectOpenedHandlers.length = 0;
+  srv.playbackResponses.length = 0;
 });
 
 afterEach(() => {
@@ -115,6 +125,7 @@ afterEach(() => {
   srv.invalidate.mockClear();
   srv.onProjectOpened = null;
   srv.projectPath = null;
+  srv.compatibilityReadOnly = false;
 });
 
 describe("project event sync", () => {
@@ -258,5 +269,58 @@ describe("project event sync", () => {
 
     expect(srv.timelineListenerCalls).toBe(1);
     expect(srv.openedListenerCalls).toBe(1);
+  });
+
+  it("invalidates an executing old project-opened callback across stop and restart", async () => {
+    await startSync();
+    const oldHandler = srv.projectOpenedHandlers[0]!;
+    expect(oldHandler).toBeTypeOf("function");
+
+    useEditorUiStore.setState({
+      isPlaying: true,
+      currentFrame: 88,
+      activeFrame: 88,
+      selectedClipIds: new Set(["new-selection"]),
+    });
+    const oldPlayback = deferred<void>();
+    srv.playbackResponses.push(oldPlayback.promise);
+    const oldCallback = oldHandler("/tmp/old-event.opentake", 1, 0);
+    await vi.waitFor(() => expect(srv.invalidate).toHaveBeenCalledTimes(1));
+
+    stopSync();
+    srv.projectPath = "/tmp/new.opentake";
+    srv.compatibilityReadOnly = true;
+    await startSync();
+    const newHandler = srv.projectOpenedHandlers[1]!;
+    expect(newHandler).toBeTypeOf("function");
+    const refreshesBeforeResume = srv.order.filter((entry) => entry === "refresh").length;
+    const undoCallsBeforeResume = srv.undoCalls;
+    const redoCallsBeforeResume = srv.redoCalls;
+    srv.snapshotResponses.push(Promise.resolve(snapshot(1, 0, "/tmp/old.opentake")));
+
+    oldPlayback.resolve();
+    await oldCallback;
+
+    expect(srv.order.filter((entry) => entry === "refresh")).toHaveLength(
+      refreshesBeforeResume,
+    );
+    expect(srv.undoCalls).toBe(undoCallsBeforeResume);
+    expect(srv.redoCalls).toBe(redoCallsBeforeResume);
+    expect(useProjectStore.getState().projectPath).toBe("/tmp/new.opentake");
+    expect(useProjectStore.getState().compatibilityReadOnly).toBe(true);
+    expect(useEditorUiStore.getState().isPlaying).toBe(true);
+    expect(useEditorUiStore.getState().currentFrame).toBe(88);
+    expect(useEditorUiStore.getState().selectedClipIds).toEqual(new Set(["new-selection"]));
+
+    srv.snapshotResponses.length = 0;
+    srv.projectPath = "/tmp/newer.opentake";
+    srv.compatibilityReadOnly = false;
+    await newHandler("/tmp/new-event.opentake", 1, 0);
+
+    expect(useProjectStore.getState().projectPath).toBe("/tmp/newer.opentake");
+    expect(useProjectStore.getState().compatibilityReadOnly).toBe(false);
+    expect(useEditorUiStore.getState().isPlaying).toBe(false);
+    expect(useEditorUiStore.getState().currentFrame).toBe(0);
+    expect(useEditorUiStore.getState().selectedClipIds.size).toBe(0);
   });
 });

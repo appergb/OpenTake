@@ -38,28 +38,35 @@ export async function startSync(): Promise<void> {
   if (started) return;
   started = true;
   const generation = ++lifecycleGeneration;
+  const lifecycleActive = () => started && generation === lifecycleGeneration;
 
   await refreshMirror();
-  if (!started || generation !== lifecycleGeneration) return;
+  if (!lifecycleActive()) return;
 
   const timelineUnlisten = await api.onTimelineChanged(async (projectEpoch, version) => {
+    if (!lifecycleActive()) return;
     const current = useProjectStore.getState();
     if (projectEpoch !== current.projectEpoch || version > current.timelineVersion) {
+      if (!lifecycleActive()) return;
       await refreshMirror();
+      if (!lifecycleActive()) return;
     }
   });
-  if (!started || generation !== lifecycleGeneration) {
+  if (!lifecycleActive()) {
     timelineUnlisten();
     return;
   }
   unlistenTimeline = timelineUnlisten;
 
   const openedUnlisten = await api.onProjectOpened(async () => {
+    if (!lifecycleActive()) return;
     await stopNativePlaybackForProjectBoundary();
+    if (!lifecycleActive()) return;
     await refreshMirror();
+    if (!lifecycleActive()) return;
     useEditorUiStore.getState().resetProjectRuntimeState();
   });
-  if (!started || generation !== lifecycleGeneration) {
+  if (!lifecycleActive()) {
     openedUnlisten();
     if (unlistenTimeline === timelineUnlisten) {
       timelineUnlisten();
