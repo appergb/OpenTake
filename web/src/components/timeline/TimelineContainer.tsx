@@ -187,6 +187,77 @@ export function clipAccessTargetSize(width: number, height: number): { width: nu
   return { width: Math.max(24, width), height: Math.max(24, height) };
 }
 
+export function clipSelectionForInteraction(
+  timeline: Timeline,
+  selectedClipIds: Set<string>,
+  clipId: string,
+  modifiers: { shiftKey?: boolean; altKey?: boolean },
+): Set<string> {
+  const linked = !modifiers.altKey;
+  const already = selectedClipIds.has(clipId);
+  const group = linked
+    ? expandLinkGroup(timeline, new Set([clipId]))
+    : new Set([clipId]);
+  if (modifiers.shiftKey) {
+    const next = new Set(selectedClipIds);
+    if (already) group.forEach((id) => next.delete(id));
+    else group.forEach((id) => next.add(id));
+    return next;
+  }
+  if (modifiers.altKey && !already) return new Set([clipId]);
+  if (!already) return group;
+  return selectedClipIds;
+}
+
+/**
+ * Canvas clips keep their precise edit geometry, while the surrounding pointer
+ * target grows to WCAG 2.2's 24px minimum. Exact clip hits always win; only the
+ * padded halo is treated as a body hit, so it cannot accidentally grab a trim
+ * handle. When neighbouring halos overlap, the nearest visible clip wins.
+ */
+export function hitTestAccessibleClip(
+  timeline: Timeline,
+  docX: number,
+  docY: number,
+  pixelsPerFrame: number,
+  trackHeights: Record<string, number>,
+): ClipHit | null {
+  const exact = hitTestClip(timeline, docX, docY, pixelsPerFrame, trackHeights);
+  if (exact) return exact;
+
+  let nearest: { hit: ClipHit; distance: number } | null = null;
+  for (let trackIndex = 0; trackIndex < timeline.tracks.length; trackIndex++) {
+    const track = timeline.tracks[trackIndex];
+    if (track.hidden) continue;
+    for (let clipIndex = 0; clipIndex < track.clips.length; clipIndex++) {
+      const clip = track.clips[clipIndex];
+      const rect = clipRect(timeline, trackIndex, clip, pixelsPerFrame, trackHeights);
+      const target = clipAccessTargetSize(rect.width, rect.height);
+      const left = rect.x - (target.width - rect.width) / 2;
+      const top = rect.y - (target.height - rect.height) / 2;
+      if (docX < left || docX > left + target.width || docY < top || docY > top + target.height) {
+        continue;
+      }
+      const dx = docX < rect.x ? rect.x - docX : Math.max(0, docX - (rect.x + rect.width));
+      const dy = docY < rect.y ? rect.y - docY : Math.max(0, docY - (rect.y + rect.height));
+      const distance = dx * dx + dy * dy;
+      if (!nearest || distance < nearest.distance) {
+        nearest = {
+          hit: {
+            trackIndex,
+            clipIndex,
+            clip,
+            region: "body",
+            localX: Math.max(0, Math.min(rect.width, docX - rect.x)),
+          },
+          distance,
+        };
+      }
+    }
+  }
+  return nearest?.hit ?? null;
+}
+
 export interface AccessibleClipRect {
   clipId: string;
   trackIndex: number;
@@ -956,7 +1027,7 @@ export function TimelineContainer() {
         return;
       }
 
-      const hit = hitTestClip(timeline, docX, docY, zoomScale, trackHeights);
+      const hit = hitTestAccessibleClip(timeline, docX, docY, zoomScale, trackHeights);
       const fadeHit =
         !e.metaKey && !e.shiftKey
           ? fadeKneeHit(timeline, docX, docY, zoomScale, trackHeights)
@@ -1010,25 +1081,7 @@ export function TimelineContainer() {
 
       if (hit) {
         // Selection logic (linkedOn = !Option).
-        const linked = !e.altKey;
-        const already = selectedClipIds.has(hit.clip.id);
-        let nextSel: Set<string>;
-        if (e.shiftKey) {
-          nextSel = new Set(selectedClipIds);
-          const group = linked
-            ? expandLinkGroup(timeline, new Set([hit.clip.id]))
-            : new Set([hit.clip.id]);
-          if (already) group.forEach((id) => nextSel.delete(id));
-          else group.forEach((id) => nextSel.add(id));
-        } else if (e.altKey && !already) {
-          nextSel = new Set([hit.clip.id]);
-        } else if (!already) {
-          nextSel = linked
-            ? expandLinkGroup(timeline, new Set([hit.clip.id]))
-            : new Set([hit.clip.id]);
-        } else {
-          nextSel = selectedClipIds;
-        }
+        const nextSel = clipSelectionForInteraction(timeline, selectedClipIds, hit.clip.id, e);
         selectClips(nextSel);
 
         // Fade knees sit in a 14px upstream hit square that can overlap the 4px
@@ -1473,7 +1526,7 @@ export function TimelineContainer() {
         });
         return;
       }
-      const hit = hitTestClip(timeline, docX, docY, zoomScale, trackHeights);
+      const hit = hitTestAccessibleClip(timeline, docX, docY, zoomScale, trackHeights);
       if (!hit) return; // empty space: keep the default (suppressed) menu
       e.preventDefault();
       const fadeHit = fadeKneeHit(timeline, docX, docY, zoomScale, trackHeights);
@@ -1481,10 +1534,10 @@ export function TimelineContainer() {
         setMenu({ kind: "clip", clipId: hit.clip.id, fadeEdge: fadeHit.edge, x: e.clientX, y: e.clientY });
         return;
       }
-      // If the clip isn't already selected, select just it so menu actions
-      // target the right clip.
+      // If the clip isn't already selected, select it with the same linked-group
+      // semantics as a primary click so menu actions target the expected group.
       if (!selectedClipIds.has(hit.clip.id)) {
-        selectClips(new Set([hit.clip.id]));
+        selectClips(clipSelectionForInteraction(timeline, selectedClipIds, hit.clip.id, {}));
       }
       setMenu({ kind: "clip", clipId: hit.clip.id, x: e.clientX, y: e.clientY });
     },
@@ -1737,11 +1790,15 @@ export function TimelineContainer() {
             aria-label={rect.label}
             aria-pressed={selectedClipIds.has(rect.clipId)}
             data-clip-id={rect.clipId}
-            onClick={() => selectClips(new Set([rect.clipId]))}
+            onClick={(event) =>
+              selectClips(clipSelectionForInteraction(timeline, selectedClipIds, rect.clipId, event))
+            }
             onKeyDown={(event) => {
               if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
                 event.preventDefault();
-                selectClips(new Set([rect.clipId]));
+                if (!selectedClipIds.has(rect.clipId)) {
+                  selectClips(clipSelectionForInteraction(timeline, selectedClipIds, rect.clipId, {}));
+                }
                 const bounds = event.currentTarget.getBoundingClientRect();
                 setMenu({
                   kind: "clip",
@@ -1753,7 +1810,9 @@ export function TimelineContainer() {
             }}
             onContextMenu={(event) => {
               event.preventDefault();
-              selectClips(new Set([rect.clipId]));
+              if (!selectedClipIds.has(rect.clipId)) {
+                selectClips(clipSelectionForInteraction(timeline, selectedClipIds, rect.clipId, {}));
+              }
               setMenu({
                 kind: "clip",
                 clipId: rect.clipId,

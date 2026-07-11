@@ -251,6 +251,43 @@ describe("accessibleClipRects", () => {
     expect(timelineContainer.clipAccessTargetSize?.(80, 46)).toEqual({ width: 80, height: 46 });
   });
 
+  it("makes the full 24px proxy footprint pointer-hittable through the canvas", () => {
+    const tl = timeline([
+      track("v1", [clip({ id: "narrow", mediaType: "video", startFrame: 10, durationFrames: 1 })]),
+    ]);
+    const rect = timelineContainer.accessibleClipRects?.(tl, 1, {}, 0, 0, 500, 200)?.[0];
+
+    expect(rect).toBeDefined();
+    const hit = timelineContainer.hitTestAccessibleClip?.(
+      tl,
+      10 - 11,
+      (rect?.top ?? 0) + 23,
+      1,
+      {},
+    );
+
+    expect(hit?.clip.id).toBe("narrow");
+    expect(hit?.region).toBe("body");
+    expect(timelineContainer.hitTestAccessibleClip?.(tl, 10 - 13, (rect?.top ?? 0) + 23, 1, {})).toBeNull();
+  });
+
+  it("uses the same linked-group selection semantics for canvas and AX proxies", () => {
+    const tl = timeline([
+      track("v1", [clip({ id: "video", mediaType: "video", linkGroupId: "pair" })]),
+      track("a1", [clip({ id: "audio", mediaType: "audio", linkGroupId: "pair" })], "audio"),
+    ]);
+
+    expect(
+      Array.from(timelineContainer.clipSelectionForInteraction?.(tl, new Set(), "video", {}) ?? []).sort(),
+    ).toEqual(["audio", "video"]);
+    expect(
+      Array.from(
+        timelineContainer.clipSelectionForInteraction?.(tl, new Set(), "video", { altKey: true }) ?? [],
+      ),
+    ).toEqual(["video"]);
+    expect(timelineContainerSource).not.toContain("selectClips(new Set([rect.clipId]))");
+  });
+
   it("exposes button selection through the pressed state", () => {
     expect(timelineContainerSource).toContain("aria-pressed={selectedClipIds.has(rect.clipId)}");
     expect(timelineContainerSource).not.toContain("aria-selected={selectedClipIds.has(rect.clipId)}");
