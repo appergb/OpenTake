@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import * as timelineContainer from "./TimelineContainer";
 import { findSnapDelta } from "../../lib/snap";
+import { LAYOUT } from "../../lib/theme";
 import type { Clip, ClipType, Timeline, Track } from "../../lib/types";
+
+const timelineContainerSource = readFileSync(new URL("./TimelineContainer.tsx", import.meta.url), "utf8");
 
 function clip(over: Partial<Clip> & { id: string; mediaType: ClipType }): Clip {
   return {
@@ -202,5 +206,76 @@ describe("volumeKeyframeMenuItems", () => {
     expect(onSetInterpolation).toHaveBeenNthCalledWith(1, "linear");
     expect(onSetInterpolation).toHaveBeenNthCalledWith(2, "smooth");
     expect(onSetInterpolation).toHaveBeenNthCalledWith(3, "hold");
+  });
+});
+
+describe("accessibleClipRects", () => {
+  it("maps canvas clips to stable accessible button rectangles", () => {
+    const tl = timeline([
+      track("v1", [clip({ id: "c1", mediaType: "video", startFrame: 10, durationFrames: 20 })]),
+    ]);
+
+    const rects = timelineContainer.accessibleClipRects?.(tl, 5, {}, 12, 7, 500, 200);
+
+    expect(rects).toEqual([
+      {
+        clipId: "c1",
+        trackIndex: 0,
+        left: LAYOUT.trackHeaderWidth + 10 * 5 - 12,
+        top: LAYOUT.rulerHeight + LAYOUT.dropZoneHeight + 2 - 7,
+        width: 20 * 5,
+        height: 46,
+        label: "Clip c1 on V1",
+      },
+    ]);
+  });
+
+  it("uses the visible timeline track labels for multi-track accessibility", () => {
+    const tl = timeline([
+      track("v2", [clip({ id: "top", mediaType: "video", startFrame: 0, durationFrames: 10 })]),
+      track("v1", [clip({ id: "base", mediaType: "video", startFrame: 20, durationFrames: 10 })]),
+      track("a1", [clip({ id: "voice", mediaType: "audio", startFrame: 0, durationFrames: 10 })], "audio"),
+    ]);
+
+    const rects = timelineContainer.accessibleClipRects?.(tl, 5, {}, 0, 0, 500, 300);
+
+    expect(rects?.map((r) => r.label)).toEqual([
+      "Clip top on V2",
+      "Clip base on V1",
+      "Clip voice on A1",
+    ]);
+  });
+
+  it("keeps narrow clip proxies at the WCAG 2.2 minimum target size", () => {
+    expect(timelineContainer.clipAccessTargetSize?.(1, 12)).toEqual({ width: 24, height: 24 });
+    expect(timelineContainer.clipAccessTargetSize?.(80, 46)).toEqual({ width: 80, height: 46 });
+  });
+
+  it("exposes button selection through the pressed state", () => {
+    expect(timelineContainerSource).toContain("aria-pressed={selectedClipIds.has(rect.clipId)}");
+    expect(timelineContainerSource).not.toContain("aria-selected={selectedClipIds.has(rect.clipId)}");
+  });
+
+  it("groups the keyboard clip proxies under a named timeline region", () => {
+    expect(timelineContainerSource).toContain('role="group"');
+    expect(timelineContainerSource).toContain('aria-label="Timeline clips"');
+  });
+});
+
+describe("structured media prewarm coordination", () => {
+  it("retries queued duplicate and busy admissions without retrying terminal states", () => {
+    expect(timelineContainer.prewarmResultNeedsRetry?.("queued")).toBe(true);
+    expect(timelineContainer.prewarmResultNeedsRetry?.("duplicate")).toBe(true);
+    expect(timelineContainer.prewarmResultNeedsRetry?.("busy")).toBe(true);
+    expect(timelineContainer.prewarmResultNeedsRetry?.("cached")).toBe(false);
+    expect(timelineContainer.prewarmResultNeedsRetry?.("staleProject")).toBe(false);
+    expect(timelineContainer.prewarmResultNeedsRetry?.(null)).toBe(false);
+  });
+
+  it("reads prewarmed timeline visuals only after the backend reports cached", () => {
+    expect(timelineContainer.prewarmResultAllowsCacheRead?.("cached")).toBe(true);
+    for (const result of ["queued", "duplicate", "busy", "staleProject", null] as const) {
+      expect(timelineContainer.prewarmResultAllowsCacheRead?.(result)).toBe(false);
+    }
   });
 });

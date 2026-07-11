@@ -83,6 +83,29 @@ describe("openProjectPath", () => {
     expect(useEditorUiStore.getState().view).toBe("editor");
   });
 
+  it("resets project-scoped UI runtime only after a successful project open", async () => {
+    useEditorUiStore.setState({
+      isPlaying: true,
+      currentFrame: 91,
+      activeFrame: 91,
+      selectedClipIds: new Set(["old-clip"]),
+      previewMediaId: "old-media",
+      layoutPreset: "vertical",
+      agentPanelVisible: false,
+    });
+
+    await openProjectPath("/tmp/reset.opentake");
+
+    const ui = useEditorUiStore.getState();
+    expect(ui.isPlaying).toBe(false);
+    expect(ui.currentFrame).toBe(0);
+    expect(ui.activeFrame).toBe(0);
+    expect(ui.selectedClipIds.size).toBe(0);
+    expect(ui.previewMediaId).toBeNull();
+    expect(ui.layoutPreset).toBe("vertical");
+    expect(ui.agentPanelVisible).toBe(false);
+  });
+
   it("stops native playback before opening a project whose version collides", async () => {
     useProjectStore.setState({ projectEpoch: 3, timelineVersion: 7 });
 

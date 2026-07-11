@@ -45,6 +45,14 @@ function reportSkipped(list: MediaList): void {
   useEditorUiStore.getState().pushToast(t("media.importSkipped", { count: skipped.length }));
 }
 
+function warmNewTimelineMedia(list: MediaList, beforeIds: Set<string>): void {
+  for (const item of list.items) {
+    if (beforeIds.has(item.id) || item.missing) continue;
+    if (item.type !== "video" && item.type !== "audio") continue;
+    void api.preloadMedia(item.id);
+  }
+}
+
 /** Pick a folder and import every supported file inside it. */
 export async function importFolderViaDialog(): Promise<void> {
   const open = await openDialog();
@@ -52,6 +60,7 @@ export async function importFolderViaDialog(): Promise<void> {
   const store = useMediaStore.getState();
   store.setError(null);
   try {
+    const beforeIds = new Set(store.items.map((item) => item.id));
     const selected = await open({
       directory: true,
       multiple: false,
@@ -60,6 +69,7 @@ export async function importFolderViaDialog(): Promise<void> {
     if (typeof selected !== "string") return; // cancelled
     store.setImporting(true);
     const list = await api.importFolder(selected, true);
+    warmNewTimelineMedia(list, beforeIds);
     await refreshMedia();
     reportSkipped(list);
   } catch (error: unknown) {
@@ -104,6 +114,7 @@ export async function importFilesViaDialog(): Promise<void> {
   const store = useMediaStore.getState();
   store.setError(null);
   try {
+    const beforeIds = new Set(store.items.map((item) => item.id));
     const selected = await open({
       directory: false,
       multiple: true,
@@ -116,6 +127,7 @@ export async function importFilesViaDialog(): Promise<void> {
     if (paths.length === 0) return; // cancelled
     store.setImporting(true);
     const list = await api.importMedia(paths);
+    warmNewTimelineMedia(list, beforeIds);
     await refreshMedia();
     reportSkipped(list);
   } catch (error: unknown) {

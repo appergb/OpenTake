@@ -19,6 +19,12 @@ describe("TitleBar alignment", () => {
     expect(viewMenuSource).toContain("height: 26");
   });
 
+  it("exposes the Agent panel from the View menu for mouse and accessibility users", () => {
+    expect(viewMenuSource).toContain("view.agentPanel");
+    expect(viewMenuSource).toContain("toggleAgentPanel");
+    expect(viewMenuSource).toContain("⌘⌥A");
+  });
+
   it("keeps the titlebar-safe-left padding reserved for macOS traffic lights", () => {
     expect(titleBarSource).toContain("var(--titlebar-safe-left)");
   });

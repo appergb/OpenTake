@@ -211,6 +211,9 @@ interface UiState {
   setMediaTab: (tab: MediaTabId) => void;
   setMediaSubTab: (tab: MediaSubTabId) => void;
   setInspectorTab: (tab: InspectorTabId) => void;
+  /** Clear project-scoped runtime state when a different project/session starts.
+   *  Preserve user layout and panel visibility preferences. */
+  resetProjectRuntimeState: () => void;
 
   // Toast (transient message)
   toast: { message: string; id: number } | null;
@@ -409,6 +412,33 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   // `if newTab != .video { editor.cropEditingActive = false }`).
   setInspectorTab: (inspectorTab) =>
     set({ inspectorTab, cropEditingActive: inspectorTab === "video" ? get().cropEditingActive : false }),
+  resetProjectRuntimeState: () =>
+    set({
+      currentFrame: 0,
+      activeFrame: 0,
+      isPlaying: false,
+      isScrubbing: false,
+      rustEngineFailed: false,
+      selectedClipIds: new Set(),
+      selectedMediaAssetIds: new Set(),
+      selectedFolderIds: new Set(),
+      isMarqueeSelecting: false,
+      selectedTimelineRange: null,
+      selectedGap: null,
+      scrollLeft: 0,
+      scrollTop: 0,
+      toolMode: "pointer",
+      trackDisplayHeights: {},
+      canvasZoom: 1,
+      canvasOffset: { width: 0, height: 0 },
+      previewMediaId: null,
+      focusedPanel: "timeline",
+      maximizedPanel: null,
+      cropEditingActive: false,
+      cropAspectLock: "free",
+      mediaPanelCurrentFolderId: null,
+      pendingSwapClipId: null,
+    }),
 
   toast: null,
   pushToast: (message) => set({ toast: { message, id: Date.now() } }),

@@ -35,6 +35,7 @@ import { useEditorUiStore } from "../../store/uiStore";
 import { addMediaToTimeline } from "../../store/editActions";
 import {
   generateThumbnail,
+  preloadMedia,
   searchIndexStatus,
   searchIndexStart,
   downloadSearchModel,
@@ -436,6 +437,7 @@ function MomentCard({ hit }: { hit: MomentHit }) {
     e.dataTransfer.setData(MEDIA_DND_TYPE, item.id);
     e.dataTransfer.effectAllowed = "copy";
     setDraggingMedia(item);
+    void preloadMedia(item.id);
     // Stills drag as the whole asset (no meaningful range).
     if (!hit.isImage) setDraggingMomentRange({ startSec: hit.startSec, endSec: hit.endSec });
     else setDraggingMomentRange(null);
@@ -453,7 +455,10 @@ function MomentCard({ hit }: { hit: MomentHit }) {
       draggable
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
-      onClick={() => setPreviewMedia(item.id)}
+      onClick={() => {
+        setPreviewMedia(item.id);
+        void preloadMedia(item.id);
+      }}
       title={t("search.dragToTimeline")}
       style={{ display: "flex", flexDirection: "column", gap: 3, cursor: "grab" }}
     >
@@ -491,6 +496,7 @@ function SpokenRow({ hit }: { hit: SpokenHit }) {
     e.dataTransfer.setData(MEDIA_DND_TYPE, item.id);
     e.dataTransfer.effectAllowed = "copy";
     setDraggingMedia(item);
+    void preloadMedia(item.id);
     setDraggingMomentRange({ startSec: hit.startSec, endSec: hit.endSec });
   };
   const onDragEnd = () => {
@@ -503,7 +509,10 @@ function SpokenRow({ hit }: { hit: SpokenHit }) {
       draggable
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
-      onClick={() => setPreviewMedia(item.id)}
+      onClick={() => {
+        setPreviewMedia(item.id);
+        void preloadMedia(item.id);
+      }}
       title={t("search.dragToTimeline")}
       style={{
         display: "flex",
@@ -555,6 +564,7 @@ function FileCard({ item }: { item: MediaItem }) {
     e.dataTransfer.setData(MEDIA_DND_TYPE, item.id);
     e.dataTransfer.effectAllowed = "copy";
     setDraggingMedia(item);
+    void preloadMedia(item.id);
     setDraggingMomentRange(null); // whole asset
   };
   const onDragEnd = () => setDraggingMedia(null);
@@ -564,7 +574,10 @@ function FileCard({ item }: { item: MediaItem }) {
       draggable
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
-      onClick={() => setPreviewMedia(item.id)}
+      onClick={() => {
+        setPreviewMedia(item.id);
+        void preloadMedia(item.id);
+      }}
       onDoubleClick={() => void addMediaToTimeline(item)}
       title={item.name}
       style={{ display: "flex", flexDirection: "column", gap: 3, cursor: "grab" }}

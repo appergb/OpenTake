@@ -298,6 +298,18 @@ describe("addMediaToTimeline", () => {
     expect(videoTracks[1].clips.map((c) => [c.mediaRef, c.startFrame])).toEqual([["base", 0]]);
   });
 
+  it("moves the playhead to the dropped clip so preview shows the new media", async () => {
+    await addMediaToTimeline(video("base"));
+    useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, previewMediaId: "base" });
+
+    await addMediaToTimelineAt(video("later"), 180, 0);
+
+    const ui = useEditorUiStore.getState();
+    expect(ui.previewMediaId).toBeNull();
+    expect(ui.currentFrame).toBe(180);
+    expect(ui.activeFrame).toBe(180);
+  });
+
   it("adds vertical media with the upstream aspect-fit transform", async () => {
     await addMediaToTimeline(video("vertical", 1080, 1920));
 

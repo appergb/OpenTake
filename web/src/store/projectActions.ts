@@ -42,6 +42,7 @@ export async function newProjectAndEnter(): Promise<void> {
       .getState()
       .setMirror(snapshot.timeline, snapshot.version, snapshot.projectEpoch);
     await forceRefresh();
+    useEditorUiStore.getState().resetProjectRuntimeState();
     useEditorUiStore.getState().setView("editor");
     return;
   }
@@ -70,6 +71,7 @@ export async function newProjectAndEnter(): Promise<void> {
   useProjectStore.getState().markSaved();
   useRecentStore.getState().add(path);
   await forceRefresh();
+  useEditorUiStore.getState().resetProjectRuntimeState();
   useEditorUiStore.getState().setView("editor");
 }
 
@@ -101,6 +103,7 @@ export async function openProjectPath(path: string): Promise<void> {
   useProjectStore.getState().markSaved();
   useRecentStore.getState().add(path);
   await refreshMedia();
+  useEditorUiStore.getState().resetProjectRuntimeState();
   useEditorUiStore.getState().setView("editor");
 }
 

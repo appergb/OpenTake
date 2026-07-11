@@ -6,6 +6,7 @@
 
 import * as api from "../lib/api";
 import { useProjectStore } from "./projectStore";
+import { useEditorUiStore } from "./uiStore";
 import { stopNativePlaybackForProjectBoundary } from "../components/preview/nativePlaybackSession";
 
 let started = false;
@@ -36,6 +37,7 @@ export async function startSync(): Promise<void> {
     await stopNativePlaybackForProjectBoundary();
     useProjectStore.getState().setProjectPath(path || null);
     await refreshMirror();
+    useEditorUiStore.getState().resetProjectRuntimeState();
   });
 }
 

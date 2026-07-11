@@ -792,12 +792,18 @@ async function addMediaToTimelineInner(item: MediaItem): Promise<void> {
   }
   const entry = entryForMedia(timeline, item);
   if (!entry) return;
-  await addClips([entry]);
+  const res = await addClips([entry]);
   // Tauri refreshes the mirror via the async `timeline_changed` event, which may
-  // not have fired yet; refresh now so the next queued add computes its append
-  // position from a mirror that already includes this clip. (Browser mode
-  // already refreshed inside `applyAndRefresh` — guard to avoid a double fetch.)
+  // not have fired yet; refresh now so both the next queued add and the preview
+  // see a timeline that already includes this clip. (Browser mode already
+  // refreshed inside `applyAndRefresh` — guard to avoid a double fetch.)
   if (isTauri) await forceRefresh();
+  if (res && res.affectedClipIds.length > 0) {
+    const ui = useEditorUiStore.getState();
+    ui.selectClips(new Set(res.affectedClipIds));
+    ui.setPreviewMedia(null);
+    ui.setCurrentFrame(entry.startFrame);
+  }
 }
 
 async function addMediaToTimelineAtInner(
@@ -836,10 +842,13 @@ async function addMediaToTimelineAtInner(
   }
   if (!entry) return;
   const res = await addClips([entry]);
-  if (res && res.affectedClipIds.length > 0) {
-    useEditorUiStore.getState().selectClips(new Set(res.affectedClipIds));
-  }
   if (isTauri) await forceRefresh();
+  if (res && res.affectedClipIds.length > 0) {
+    const ui = useEditorUiStore.getState();
+    ui.selectClips(new Set(res.affectedClipIds));
+    ui.setPreviewMedia(null);
+    ui.setCurrentFrame(entry.startFrame);
+  }
 }
 
 /** Build the trimmed clip entry for a source `[startSec,endSec)` moment range on
@@ -925,10 +934,13 @@ async function addMomentToTimelineAtInner(
   }
   if (!entry) return;
   const res = await addClips([entry]);
-  if (res && res.affectedClipIds.length > 0) {
-    useEditorUiStore.getState().selectClips(new Set(res.affectedClipIds));
-  }
   if (isTauri) await forceRefresh();
+  if (res && res.affectedClipIds.length > 0) {
+    const ui = useEditorUiStore.getState();
+    ui.selectClips(new Set(res.affectedClipIds));
+    ui.setPreviewMedia(null);
+    ui.setCurrentFrame(entry.startFrame);
+  }
 }
 
 // MARK: - Text tool (Toolbar "T" button, SPEC §4)

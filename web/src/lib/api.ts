@@ -610,20 +610,34 @@ export async function previewPoster(
   }
 }
 
-/** Fire-and-forget preview warm-up for a media asset when it's selected or drag
- *  starts: the backend decodes its hi-res first-frame poster into the on-disk
- *  cache on a worker thread, so a subsequent preview shows a sharp first frame
- *  with no decode on the interaction path. Deliberately light — it no longer
- *  warms the heavy 240-frame filmstrip sprite or waveform (which never sped
- *  actual `<video>` playback). No-op in the browser fallback / for non-video;
- *  errors are swallowed (best-effort). */
-export async function preloadMedia(mediaRef: string): Promise<void> {
+export type PrewarmResult = "queued" | "duplicate" | "cached" | "busy" | "staleProject";
+
+const PREWARM_RESULTS = new Set<PrewarmResult>([
+  "queued",
+  "duplicate",
+  "cached",
+  "busy",
+  "staleProject",
+]);
+
+export function decodePrewarmResult(value: unknown): PrewarmResult | null {
+  return typeof value === "string" && PREWARM_RESULTS.has(value as PrewarmResult)
+    ? (value as PrewarmResult)
+    : null;
+}
+
+/** Queue the project-scoped poster/waveform warm-up owned by the bounded Rust
+ * scheduler. The structured admission result lets callers distinguish a cache
+ * hit from queued/duplicate/busy work without starting a synchronous decoder.
+ * Browser fallback is already cache-safe; transport errors remain best-effort. */
+export async function preloadMedia(mediaRef: string): Promise<PrewarmResult | null> {
   await ensureTauri();
-  if (!invokeImpl) return;
+  if (!invokeImpl) return "cached";
   try {
-    await invokeImpl<void>("preload_media", { mediaRef });
+    return decodePrewarmResult(await invokeImpl<unknown>("preload_media", { mediaRef }));
   } catch (e) {
     console.warn(`preload_media failed for ${mediaRef}:`, e);
+    return null;
   }
 }
 

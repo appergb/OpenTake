@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { decodePlaybackCommandError, decodePlaybackFrameEvent } from "./api";
+import {
+  decodePlaybackCommandError,
+  decodePlaybackFrameEvent,
+  decodePrewarmResult,
+} from "./api";
 
 describe("playback IPC decoding", () => {
   it("decodes the full playback frame identity instead of accepting frame only", () => {
@@ -49,5 +53,15 @@ describe("playback IPC decoding", () => {
     }
     expect(decodePlaybackCommandError("plain string")).toBeNull();
     expect(decodePlaybackCommandError({ code: "unknown", message: "detail" })).toBeNull();
+  });
+});
+
+describe("media prewarm IPC decoding", () => {
+  it("accepts only the five structured prewarm admission results", () => {
+    for (const result of ["queued", "duplicate", "cached", "busy", "staleProject"] as const) {
+      expect(decodePrewarmResult?.(result)).toBe(result);
+    }
+    expect(decodePrewarmResult?.("stale_project")).toBeNull();
+    expect(decodePrewarmResult?.({ result: "queued" })).toBeNull();
   });
 });

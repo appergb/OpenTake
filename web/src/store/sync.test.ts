@@ -41,6 +41,7 @@ vi.mock("../components/preview/nativePlaybackSession", () => ({
 
 import { startSync, stopSync } from "./sync";
 import { useProjectStore } from "./projectStore";
+import { useEditorUiStore } from "./uiStore";
 
 afterEach(() => {
   stopSync();
@@ -51,6 +52,13 @@ afterEach(() => {
 
 describe("project event sync", () => {
   it("invalidates project scoped playback on externally initiated project_opened", async () => {
+    useEditorUiStore.setState({
+      isPlaying: true,
+      currentFrame: 77,
+      activeFrame: 77,
+      selectedClipIds: new Set(["old-clip"]),
+      layoutPreset: "media",
+    });
     await startSync();
     srv.order.length = 0;
 
@@ -59,5 +67,11 @@ describe("project event sync", () => {
     expect(srv.order.slice(0, 2)).toEqual(["invalidate", "refresh"]);
     expect(useProjectStore.getState().projectEpoch).toBe(1);
     expect(useProjectStore.getState().projectPath).toBe("/tmp/external.opentake");
+    const ui = useEditorUiStore.getState();
+    expect(ui.isPlaying).toBe(false);
+    expect(ui.currentFrame).toBe(0);
+    expect(ui.activeFrame).toBe(0);
+    expect(ui.selectedClipIds.size).toBe(0);
+    expect(ui.layoutPreset).toBe("media");
   });
 });
