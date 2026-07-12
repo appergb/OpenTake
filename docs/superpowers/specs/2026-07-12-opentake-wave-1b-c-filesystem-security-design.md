@@ -199,18 +199,30 @@ External media requirements:
   unchanged, so two separately listed symlink paths still produce separate
   collected entries as upstream expects;
 - Rust displays the complete ordered list through paged native message dialogs,
-  ten entries per page. Each page includes original path, resolved target, and
-  `regular` or `missing` status; intermediate pages use native `Next`/`Cancel`
-  buttons, the last page alone uses `Approve all`/`Cancel`, and cancel on any
-  page returns no output and performs no writes. No entry may be hidden behind
-  a representative sample;
+  at most two entries per page. Each page includes original path, resolved
+  target, and `regular` or `missing` status; intermediate pages use native
+  `Next`/`Cancel` buttons, the last page alone uses `Approve all`/`Cancel`, and
+  cancel on any page returns no output and performs no writes. No entry may be
+  hidden behind a representative sample;
+- before dialog construction, backslash, C0/C1 controls, CR/LF/tab, and Unicode
+  bidi controls are reversibly escaped. Each escaped original/target field is at
+  most 768 UTF-8 bytes, and a page is at most 4,096 bytes and eight display
+  lines. Longer input returns typed `ExternalDisclosureTooLong`; no truncation
+  or middle elision is allowed. Tests compare the exact escaped authorization
+  model with every rendered native page on all three release platforms;
 - a manifest over 4,096 external entries or 4 MiB of disclosure text returns
   typed `TooManyExternalSources` before showing dialogs or writing output;
 - successfully copied external entries are rewritten to project-relative
   `media/` paths. A missing external entry is rewritten to a deterministic,
-  absent `media/missing/<asset-id>-<sanitized-basename>` project reference and
-  remains in the missing-media report. No host absolute path is persisted in
-  the exported `media.json`;
+  absent `media/missing/<sha256>-<sanitized-basename>` project reference and
+  remains in the missing-media report. SHA-256 uses a domain-separated encoding
+  of entry ordinal, raw asset id, and raw lexical source path; the full 64 hex
+  characters are retained. The basename uses only ASCII alphanumeric, `.`, `_`,
+  and `-`, is capped at 64 bytes, and falls back to `missing`. The resulting path
+  is passed through the same normal-component validator, and collisions are a
+  typed error. Raw asset ids never become path components, and no host absolute
+  path from `MediaSource::External.absolutePath` is persisted in an exported
+  media source field;
 - no external-source approval is inferred from project JSON or WebView state.
 
 If an external path resolves to a different target between native confirmation
@@ -239,9 +251,27 @@ approved source identities and root capabilities have been recorded:
 2. `build_into`: create an unpredictable, exclusive sibling staging directory
    under `dest.parent`, copy media/extras through the preflight plan, and write
    the three JSON documents into that empty stage;
-3. `publish_new`: open the staged bundle through `Project::open`, verify its
-   core documents and rewritten media references, verify the retained stage
-   identity, then perform one atomic no-replace rename to the destination.
+3. `validate_staged_bundle`: strictly read the three just-written JSON documents
+   and rewritten media references relative to the retained stage handle, then
+   verify the parent entry still names that stage identity;
+4. `publish_new`: perform one atomic no-replace rename to the destination.
+
+`validate_staged_bundle(stage: &StageCapability)` never calls the current
+path-based `Project::open`. Core JSON is opened with `openat`/the Windows handle
+adapter under the stage capability and decoded with strict, generated-output
+rules; directory/media checks use the same retained root. `Project::open` is
+reserved for post-publication QA, where path resolution no longer authorizes a
+write.
+
+An RAII `StageGuard` owns the parent capability, stage handle, name, and stable
+identity. Cleanup recursively unlinks children relative to the retained stage
+handle and removes the parent entry only after it still matches that identity.
+If the name was rebound, cleanup never follows or deletes the replacement; it
+empties only objects reachable through the retained capability where the OS
+allows and returns `StageIdentityLost`. In that hostile same-account tamper case
+an unreachable empty stage may remain, but no destination is published and no
+unproven path is deleted. Ordinary build/validation/CAS failures remove the
+stage completely.
 
 `publish_new` is a platform adapter, not `std::fs::rename`:
 
@@ -256,19 +286,21 @@ approved source identities and root capabilities have been recorded:
   `UnsupportedAtomicPublish`. It never falls back to check-then-rename.
 
 The stage is exclusively created with mode `0700` on Unix and equivalent
-owner-only access on Windows. Its retained identity is compared with the entry
-under the parent capability immediately before publication; a replaced or
-renamed stage is rejected and only the retained, proven stage is eligible for
-cleanup. Tests can swap the parent or stage before this final identity check and
-must observe refusal. Arbitrary hostile same-account processes after that check
-remain outside the stated threat boundary; atomic destination no-replace still
-holds against every concurrent destination creator.
+owner-only access on Windows. Its retained identity is checked before any
+validation read and again immediately before publication. Tests can swap the
+parent, stage name, or stage child before those checks and must observe refusal
+without changing the replacement. Arbitrary hostile same-account processes
+after the final check remain outside the stated threat boundary; atomic
+destination no-replace still holds against every concurrent destination
+creator.
 
-Any prepare/build/validation failure removes only the stage and leaves source
-and destination untouched. If a competing process creates the destination,
-publication fails rather than replacing it. Staging is in the destination
-parent so the final rename cannot cross filesystems. Output byte accounting
-uses the successful copy return value rather than a second metadata lookup.
+Any ordinary prepare/build/validation failure removes only the stage and leaves
+source and destination untouched; the explicitly described identity-lost tamper
+case may leave an unreachable empty stage rather than delete an unproven name.
+If a competing process creates the destination, publication fails rather than
+replacing it. Staging is in the destination parent so the final rename cannot
+cross filesystems. Output byte accounting uses the successful copy return value
+rather than a second metadata lookup.
 
 This design does not overwrite existing destinations. Rust returns typed
 `DestinationExists`, and the native workflow asks the user to choose a fresh
@@ -301,11 +333,14 @@ Flow:
    approved source identities, and reject any external target that differs from
    the confirmed resolution;
 7. run prepare/build/validation in a blocking worker;
-8. immediately before `publish_new`, call the same one-lock identity comparison
-   again. A same-project edit, media import/favorite/relink, Save-As, project
-   open/new, or future generation-log mutation deletes the stage and creates no
-   destination;
-9. publish and return the report with the exact published path.
+8. call `AppCore::publish_bundle_if_identity(expected, &mut stage_guard)`. This
+   one finalizer acquires the core lock, compares epoch/revision/path, keeps the
+   lock held for the single `publish_new` syscall, constructs the success report,
+   then releases it. A same-project edit, media import/favorite/relink, Save-As,
+   project open/new, or future generation-log mutation either commits before the
+   lock and causes `ProjectChanged`, or waits until after publication;
+9. on mismatch/publication failure, release the lock and clean through
+   `StageGuard`; on success return the exact published path.
 
 `CoreSessionSlot` owns a monotonic `bundle_revision` separate from the timeline
 version. It increments on every successful change to timeline, media manifest,
@@ -314,7 +349,9 @@ mutators must pass through wrappers that advance it. `BundleExportSnapshot`
 contains the revision, and `bundle_identity()`/`compare_bundle_identity()` read
 epoch, revision, and path together under one lock. Focused tests prove media-only
 and generation-log-only changes invalidate an authorization even when the
-timeline version is unchanged.
+timeline version is unchanged. `compare_bundle_identity()` is used for the
+pre-write check; only `publish_bundle_if_identity()` may perform the final
+compare-and-publish transition.
 
 The main WebView cannot supply or override the destination. MCP and Agent do
 not gain bundle export in this slice. Any future Agent flow must use the same
@@ -325,10 +362,11 @@ branch removes its JavaScript save-panel/path construction. `null` is neutral
 cancel. Rejections carry a serializable tagged `BundleExportErrorDto` with a
 stable code (`destination_exists`, `unsafe_source`, `unsafe_destination`,
 `unsupported_source_type`, `project_changed`, `stage_failure`,
-`unsupported_filesystem`, `too_many_external_sources`, or `io`), a user-safe
-message, and an optional display path. The Tauri boundary maps `ProjectError`
-once without flattening it to `String`; TypeScript narrows the DTO by `code` and
-never parses localized messages.
+`stage_identity_lost`, `unsupported_filesystem`, `too_many_external_sources`,
+`external_disclosure_too_long`, or `io`), a user-safe message, and an optional
+display path. The Tauri boundary maps `ProjectError` once without flattening it
+to `String`; TypeScript narrows the DTO by `code` and never parses localized
+messages.
 
 ### D. Bundle entry and empty-timeline behavior
 
@@ -362,16 +400,35 @@ Save-As to an existing different bundle is rejected. Normal save to the exact
 current project remains a separate component-atomic operation and receives no
 new overwrite semantics in C2.
 
+Rust also owns every C2 destination authorization. `project_save()` becomes a
+pathless command that may only save to the already-authorized active
+`project_dir`. A separate `project_save_as(app, core)` opens the native panel and
+returns `Result<Option<PathDto>, SaveProjectErrorDto>`; it accepts no renderer
+path, and only its native result can create a `DestinationCapability`. The new
+project UI uses `project_new_with_dialog(...)`, which opens the Rust panel first,
+publishes a fresh empty bundle through the same transaction, and commits the new
+session/playback transition only after publication; cancellation leaves the
+current session unchanged. Web `projectSave(path)` and its JavaScript Save-As/new
+project dialogs are removed. Browser-only fallback remains in-memory and has no
+filesystem authority.
+
 C2 uses an explicit short-lock CAS transaction:
 
-1. under the core lock, clone an immutable save snapshot containing timeline,
-   manifest, generation log, compatibility, source `project_dir`, project epoch,
-   and `bundle_revision`, plus the caller-provided captured thumbnail;
-2. release the lock and build/validate a new-destination stage through the C1
+1. capture an initial `BundleIdentity` for the native default, open the Rust save
+   panel, and compare that identity after selection; a project change cancels
+   authorization before thumbnail or output work;
+2. under the core lock, capture `SaveCaptureSnapshot` containing the exact
+   epoch, `bundle_revision`, path, timeline, and manifest used for thumbnail
+   capture; release the lock and capture the optional JPEG;
+3. call `prepare_save_snapshot(capture_identity, thumbnail)`, which compares the
+   supplied identity under one lock before cloning timeline, manifest,
+   generation log, compatibility, source path, and the identity. A mismatch
+   returns `ProjectChanged` rather than attaching an old thumbnail to new state;
+4. release the lock and build/validate a new-destination stage through the C1
    capabilities;
-3. reacquire the lock, compare epoch/revision/source path, and on mismatch
+5. reacquire the lock, compare epoch/revision/source path, and on mismatch
    release the lock, delete the stage, and return `ProjectChanged`;
-4. while that short lock remains held, call `publish_new`, update `project_dir`,
+6. while that short lock remains held, call `publish_new`, update `project_dir`,
    advance `bundle_revision`, and capture the `ProjectSaved` payload; then
    release the lock and emit the event.
 
@@ -383,7 +440,8 @@ otherwise a source `thumbnail.jpg` is copied through the nofollow policy; when
 neither exists the output omits it. Generation log always comes from the save
 snapshot, and chat sessions are safely copied from the source bundle. No output
 component is inherited from a pre-existing destination because C2 only publishes
-to a new path.
+to a new path. The same capture-identity comparison protects thumbnail writes on
+normal same-project save, without changing its destination semantics.
 
 Wave 1B-C is not release-complete until both subprojects pass their exact-bundle
 QA. C1 may merge first because it removes the current critical export path.
@@ -400,6 +458,8 @@ case into `Io` or `missing`:
 - project changed during authorization;
 - stage validation/publication failure;
 - too many external sources;
+- external disclosure too long;
+- stage identity lost;
 - unsupported secure filesystem or atomic publication.
 
 User-facing errors state what remains safe: source unchanged, destination
@@ -431,8 +491,14 @@ only cancellation uses `Ok(None)`.
   loop, and check/open-swap cases fail closed;
 - every external entry appears in the paged confirmation, including a sensitive
   final entry in a large manifest, without changing lexical dedup semantics;
+- exact native pages match the escaped authorization model; overlong fields,
+  page-byte/line overflow, newlines, controls, backslashes, and bidi controls
+  either render reversibly within the fixed limits or fail before dialogs;
 - missing external paths are sanitized to absent project-relative references and
-  no host absolute path survives in output JSON;
+  no raw external `absolutePath` survives in an output source field;
+- hostile asset ids containing parent/root components, both separators,
+  controls, bidi text, host paths, long strings, or collision inputs never enter
+  placeholder paths; full digest paths remain unique normal components;
 - a low-FD-limit large manifest completes without unbounded open handles, while
   over-limit disclosure returns `TooManyExternalSources` before output.
 
@@ -440,7 +506,8 @@ only cancellation uses `Ok(None)`.
 
 - build failure after copied media preserves source and creates no destination;
 - JSON serialization/write, thumbnail, chat, validation, and final-rename
-  failures remove stage and preserve source;
+  failures remove stage and preserve source, except identity-lost tamper may
+  leave only the capability-cleaned unreachable empty stage;
 - existing destination is byte-identical and returns `DestinationExists`;
 - successful output contains no stale media or staging names and reopens through
   `Project::open`;
@@ -449,6 +516,9 @@ only cancellation uses `Ok(None)`.
   directory, or symlink causes atomic refusal and leaves it byte-identical;
 - parent/stage swaps before the final identity check cause refusal and cleanup
   through retained capabilities;
+- strict stage validation opens no component through `Project::open(path)`;
+  stage-name/child replacement remains byte-identical, and an identity-lost
+  cleanup never deletes an unproven name;
 - unsupported no-replace syscalls/filesystems fail closed without ordinary
   rename fallback;
 - Linux, macOS, and Windows native race suites exercise their platform adapter;
@@ -462,6 +532,8 @@ only cancellation uses `Ok(None)`.
   while the stage is building creates no destination;
 - timeline, media-only, and generation-log-only mutations each advance
   `bundle_revision` and fail both pre-write and pre-publish CAS seams;
+- a deterministic finalizer seam proves queued mutations cannot commit between
+  the final comparison and `publish_new`;
 - external-source confirmation is required before the save panel;
 - an external target swap after confirmation aborts rather than copying the new
   target;
@@ -483,6 +555,11 @@ only cancellation uses `Ok(None)`.
 - existing different destination remains byte-identical;
 - edits, media-only changes, open/new, and another Save-As during stage build
   fail the final CAS with no destination and no path adoption;
+- Rust Save-As/new-project commands accept no renderer destination, cancel
+  without state change, and are the only source of `DestinationCapability`;
+- timeline edit, media-only change, open/new, and Save-As between
+  `SaveCaptureSnapshot` and `prepare_save_snapshot` reject the captured thumbnail
+  and publish nothing;
 - captured thumbnail overrides a source cover, `None` safely carries a source
   cover, and absent-on-both omits it; chat and generation log survive reopen;
 - normal same-project save behavior and autosave remain unchanged.
@@ -509,11 +586,12 @@ and Save-As reopen.
 Wave 1B-C1 is accepted only when normal UI cannot propose or authorize the open
 project as destination, renderer code cannot provide an arbitrary destination,
 all internal/archive-extra paths stay inside the approved source, every external
-read is fully disclosed, host absolute paths do not leak into the output,
+read is fully disclosed, external source fields do not leak host absolute paths,
 existing destinations are protected by a proven platform no-replace primitive,
 and a successful fresh destination appears only after a complete validated stage
 whose bundle identity still matches the authorized snapshot.
 
 Wave 1B-C is accepted only after C2 also proves that Save-As publishes a complete
-new bundle or nothing, never changes project identity on failure, and reuses the
-same path and nofollow controls.
+new bundle or nothing, never changes project identity on failure, accepts no
+renderer-supplied Save-As/new-project destination, binds any thumbnail to the
+same bundle identity, and reuses the same path and nofollow controls.
