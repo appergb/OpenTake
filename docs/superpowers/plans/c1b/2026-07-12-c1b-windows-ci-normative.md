@@ -1,4 +1,4 @@
-# C1B Windows, Native CI, and Evidence Normative Appendix
+# C1B Windows, Native CI, and Evidence Normative Appendix — Attempt 4
 
 ## 0. 绑定范围与来源
 
@@ -13,7 +13,7 @@
 - safety root：`/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-safety/20260712-wave1bc-filesystem`
 - integration repo root：`/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-full-convergence`
 
-attempt 2 必须删除 attempt 1 的以下决定：
+Attempt 4 必须删除 Attempt 1–3 的以下决定：
 
 1. 统一使用 common appendix 的递归 `DirectoryAuthority`；每个打开/创建的目录 authority 都能作为下一层 parent。
 2. 不再把 file capability 做成只能查 metadata 的死端。它提供受控 `read`、`write_all`、`rewind`、`flush`，raw HANDLE 不外泄。
@@ -26,7 +26,7 @@ attempt 2 必须删除 attempt 1 的以下决定：
 
 ### 1.1 Authority 形状
 
-Common facade 以 common/Unix appendix section 2 为唯一来源。attempt 3 的 Windows adapter 只包含下面这些既有 common symbols；名称和参数逐项一致，`windows.rs` 不包含兼容别名或第二 facade：
+Common facade 以 common/Unix appendix section 2 为唯一来源。Attempt 4 的 Windows adapter 只包含下面这些既有 common symbols；名称和参数逐项一致，`windows.rs` 不包含兼容别名或第二 facade：
 
 ```text
 platform::{NativeNamespaceAnchor, NativeDirectory, NativeFile};
@@ -47,7 +47,7 @@ platform::create_file_new(&DirectoryAuthority, &ComponentName, CreatePermissions
 platform::create_stage_dir_new(&DirectoryAuthority, &ComponentName, CreatePermissions) -> Result<StageCapability>;
 platform::enumerate(&DirectoryAuthority) -> Result<Vec<ComponentName>>;
 platform::read_link_component(&DirectoryAuthority, &ComponentName) -> Result<RawLinkTarget>;
-platform::metadata_from_file(&FileCapability) -> Result<EntryMetadata>;
+platform::metadata_from_file(&NativeFile) -> Result<EntryMetadata>;
 platform::read_file(&mut NativeFile, &mut [u8]) -> Result<usize>;
 platform::write_file(&mut NativeFile, &[u8]) -> Result<usize>;
 platform::seek_file(&mut NativeFile, SeekFrom) -> Result<u64>;
@@ -616,9 +616,17 @@ const CLEANUP_DIR_CONTRACT: OpenContract = OpenContract {
     attributes: 0,
     delete_right: true,
 };
+const CLEANUP_REPARSE_CONTRACT: OpenContract = OpenContract {
+    desired: FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE,
+    disposition: FILE_OPEN,
+    // No FILE_DIRECTORY_FILE/NON_DIRECTORY_FILE: open the reparse entry itself, never its target.
+    options: COMMON_OPTIONS,
+    attributes: 0,
+    delete_right: true,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OpenOperation { Query, DirRead, DirMutate, FileRead, FileWrite, CreateFile, CreateDir, CreateStage, CleanupFile, CleanupDir }
+enum OpenOperation { Query, DirRead, DirMutate, FileRead, FileWrite, CreateFile, CreateDir, CreateStage, CleanupFile, CleanupDir, CleanupReparse }
 
 fn contract_for_operation(operation: OpenOperation) -> OpenContract {
     match operation {
@@ -632,6 +640,7 @@ fn contract_for_operation(operation: OpenOperation) -> OpenContract {
         OpenOperation::CreateStage => CREATE_STAGE_CONTRACT,
         OpenOperation::CleanupFile => CLEANUP_FILE_CONTRACT,
         OpenOperation::CleanupDir => CLEANUP_DIR_CONTRACT,
+        OpenOperation::CleanupReparse => CLEANUP_REPARSE_CONTRACT,
     }
 }
 ```
@@ -655,7 +664,7 @@ const NAME_OFFSET: usize = offset_of!(FILE_DIRECTORY_INFORMATION, FileName);
 
 对 cursor 处每个 record 依次验证：
 
-1. `remaining >= size_of::<FILE_DIRECTORY_INFORMATION>()`；读取 fixed fields 用 `read_unaligned`，不把任意 byte slice 转成 Rust reference。
+1. `remaining >= NAME_OFFSET`；只按各字段的 `offset_of!` 位置逐字段读取 `NextEntryOffset` 与 `FileNameLength`，不读取或构造含 padded variable tail 的整个 `FILE_DIRECTORY_INFORMATION`。
 2. `FileNameLength` 必须为偶数且非零；`NAME_OFFSET + FileNameLength <= remaining`，所有加法 checked。
 3. UTF-16 slice 长度为 `FileNameLength / 2`，用 `OsStringExt::from_wide` 保留 unpaired surrogate，再交 `ComponentName`。`.`/`..` 只允许作为被显式跳过的 directory control record。
 4. `NextEntryOffset == 0` 表示本批最后一项；该 record 的 name end 仍须在 `used` 内。
@@ -670,6 +679,14 @@ native parser tests 直接喂：单项、多项、unpaired UTF-16、odd byte len
 ```rust
 fn parse_directory_batch(bytes: &[u8]) -> Result<Vec<ComponentName>> {
     const NAME_OFFSET: usize = offset_of!(FILE_DIRECTORY_INFORMATION, FileName);
+    const NEXT_OFFSET: usize = offset_of!(FILE_DIRECTORY_INFORMATION, NextEntryOffset);
+    const NAME_LENGTH_OFFSET: usize = offset_of!(FILE_DIRECTORY_INFORMATION, FileNameLength);
+    const U32_BYTES: usize = size_of::<u32>();
+    fn field_u32(bytes: &[u8], record: usize, field: usize) -> Option<u32> {
+        let start = record.checked_add(field)?;
+        let end = start.checked_add(U32_BYTES)?;
+        Some(u32::from_le_bytes(bytes.get(start..end)?.try_into().ok()?))
+    }
     if bytes.is_empty() {
         return Err(SafeFsError::InvalidNativeBuffer {
             operation: SafeFsOperation::ParseDirectoryBuffer,
@@ -682,16 +699,21 @@ fn parse_directory_batch(bytes: &[u8]) -> Result<Vec<ComponentName>> {
     let maximum = bytes.len() / NAME_OFFSET.max(1) + 1;
     loop {
         iterations += 1;
-        if iterations > maximum || cursor > bytes.len() || bytes.len() - cursor < size_of::<FILE_DIRECTORY_INFORMATION>() {
+        if iterations > maximum || cursor > bytes.len() || bytes.len() - cursor < NAME_OFFSET {
             return Err(SafeFsError::InvalidNativeBuffer {
                 operation: SafeFsOperation::ParseDirectoryBuffer,
                 reason: NativeBufferReason::DirectoryBufferMalformed,
             });
         }
-        let base = bytes[cursor..].as_ptr();
-        // SAFETY: fixed header availability checked; unaligned kernel buffer is read by value.
-        let record = unsafe { std::ptr::read_unaligned(base.cast::<FILE_DIRECTORY_INFORMATION>()) };
-        let name_bytes = usize::try_from(record.FileNameLength).map_err(|_| SafeFsError::InvalidNativeBuffer {
+        let next_raw = field_u32(bytes, cursor, NEXT_OFFSET).ok_or(SafeFsError::InvalidNativeBuffer {
+            operation: SafeFsOperation::ParseDirectoryBuffer,
+            reason: NativeBufferReason::DirectoryBufferMalformed,
+        })?;
+        let name_raw = field_u32(bytes, cursor, NAME_LENGTH_OFFSET).ok_or(SafeFsError::InvalidNativeBuffer {
+            operation: SafeFsOperation::ParseDirectoryBuffer,
+            reason: NativeBufferReason::DirectoryBufferMalformed,
+        })?;
+        let name_bytes = usize::try_from(name_raw).map_err(|_| SafeFsError::InvalidNativeBuffer {
             operation: SafeFsOperation::ParseDirectoryBuffer,
             reason: NativeBufferReason::LengthOverflow,
         })?;
@@ -715,7 +737,7 @@ fn parse_directory_batch(bytes: &[u8]) -> Result<Vec<ComponentName>> {
         let os = OsString::from_wide(&units);
         if os != OsStr::new(".") && os != OsStr::new("..") { names.push(ComponentName::new(os)?); }
 
-        let next = usize::try_from(record.NextEntryOffset).map_err(|_| SafeFsError::InvalidNativeBuffer {
+        let next = usize::try_from(next_raw).map_err(|_| SafeFsError::InvalidNativeBuffer {
             operation: SafeFsOperation::ParseDirectoryBuffer,
             reason: NativeBufferReason::DirectoryBufferMalformed,
         })?;
@@ -731,6 +753,21 @@ fn parse_directory_batch(bytes: &[u8]) -> Result<Vec<ComponentName>> {
         cursor += next;
     }
     Ok(names)
+}
+
+fn validated_directory_used(status: NTSTATUS, iosb: &IO_STATUS_BLOCK) -> Result<usize> {
+    let used = checked_information(SafeFsOperation::EnumerateDirectory, iosb, DIRECTORY_BUFFER_BYTES)?;
+    if used == 0 {
+        return Err(SafeFsError::InvalidNativeBuffer {
+            operation: SafeFsOperation::EnumerateDirectory,
+            reason: if status == STATUS_BUFFER_OVERFLOW {
+                NativeBufferReason::DirectoryBufferTooSmall
+            } else {
+                NativeBufferReason::DirectoryBufferMalformed
+            },
+        });
+    }
+    Ok(used)
 }
 
 pub(super) fn enumerate(directory: &DirectoryAuthority) -> Result<Vec<ComponentName>> {
@@ -750,17 +787,7 @@ pub(super) fn enumerate(directory: &DirectoryAuthority) -> Result<Vec<ComponentN
         if status < STATUS_SUCCESS && status != STATUS_BUFFER_OVERFLOW {
             return Err(nt_error(SafeFsOperation::EnumerateDirectory, status));
         }
-        let used = checked_information(SafeFsOperation::EnumerateDirectory, &iosb, DIRECTORY_BUFFER_BYTES)?;
-        if used == 0 {
-            return Err(SafeFsError::InvalidNativeBuffer {
-                operation: SafeFsOperation::EnumerateDirectory,
-                reason: if status == STATUS_BUFFER_OVERFLOW {
-                    NativeBufferReason::DirectoryBufferTooSmall
-                } else {
-                    NativeBufferReason::DirectoryBufferMalformed
-                },
-            });
-        }
+        let used = validated_directory_used(status, &iosb)?;
         for name in parse_directory_batch(&buffer.0[..used])? {
             match query_child_nofollow(directory, &name)? {
                 ChildState::Present(metadata) if metadata.kind != EntryKind::SymlinkOrReparse => output.push(name),
@@ -1110,14 +1137,12 @@ pub(super) fn open_cleanup_child_nofollow(
         ChildState::Absent => return Err(SafeFsError::NotFound { operation: SafeFsOperation::OpenCleanupEntry }),
         ChildState::Present(metadata) => metadata,
     };
-    if metadata.kind == EntryKind::SymlinkOrReparse {
-        return Err(SafeFsError::SymlinkOrReparsePoint { operation: SafeFsOperation::OpenCleanupEntry });
-    }
-    let contract = contract_for_operation(if metadata.kind == EntryKind::Directory {
-        OpenOperation::CleanupDir
-    } else {
-        OpenOperation::CleanupFile
-    });
+    let operation = match metadata.kind {
+        EntryKind::Directory => OpenOperation::CleanupDir,
+        EntryKind::SymlinkOrReparse => OpenOperation::CleanupReparse,
+        _ => OpenOperation::CleanupFile,
+    };
+    let contract = contract_for_operation(operation);
     let handle = nt_create_relative(parent.native.node.handle.raw(), name, parent.native.node.case_mode,
         contract.desired, contract.disposition, contract.options, contract.attributes, null(),
         SafeFsOperation::OpenCleanupEntry)?;
@@ -1131,6 +1156,12 @@ pub(super) fn open_cleanup_child_nofollow(
             operation: SafeFsOperation::QueryMetadata,
             expected: metadata.identity,
             actual: opened.identity,
+        });
+    }
+    if opened.kind != metadata.kind {
+        return Err(SafeFsError::UnsupportedEntryType {
+            operation: SafeFsOperation::OpenCleanupEntry,
+            kind: opened.kind,
         });
     }
     if opened.kind == EntryKind::Directory {
@@ -1277,6 +1308,8 @@ unsafe {
 ```rust
 struct RenameInformationBuffer { storage: Vec<usize>, used: u32 }
 
+const _: () = assert!(align_of::<usize>() >= align_of::<FILE_RENAME_INFORMATION>());
+
 impl RenameInformationBuffer {
     fn new(parent: HANDLE, target: &ComponentName) -> Result<Self> {
         let units: Vec<u16> = target.as_os_str().encode_wide().collect();
@@ -1291,6 +1324,7 @@ impl RenameInformationBuffer {
         let mut storage = vec![0usize; total.div_ceil(size_of::<usize>()).max(1)];
         let base = storage.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
         debug_assert_eq!((base as usize) % align_of::<FILE_RENAME_INFORMATION>(), 0);
+        debug_assert!(storage.len() * size_of::<usize>() >= total);
         // SAFETY: usize storage is sufficiently aligned and has at least total bytes; source units live for copy.
         unsafe {
             (*base).Anonymous.ReplaceIfExists = false;
@@ -1309,7 +1343,7 @@ impl RenameInformationBuffer {
 
 fn rename_retained_noreplace(
     native: &NativeDirectory,
-    opened: &EntryMetadata,
+    _opened: &EntryMetadata,
     parent: &DirectoryAuthority,
     target: &ComponentName,
 ) -> Result<()> {
@@ -1333,17 +1367,10 @@ fn rename_retained_noreplace(
             query_child_nofollow(parent, target)));
     }
     complete_nt(SafeFsOperation::RenameNoReplaceSameParent, status, &iosb)?;
-    match query_child_nofollow(parent, target)? {
-        ChildState::Present(metadata) if metadata.identity == opened.identity => Ok(()),
-        ChildState::Present(metadata) => Err(SafeFsError::IdentityChanged {
-            operation: SafeFsOperation::RenameNoReplaceSameParent,
-            expected: opened.identity.clone(),
-            actual: metadata.identity,
-        }),
-        ChildState::Absent => Err(SafeFsError::NamespaceChanged {
-            operation: SafeFsOperation::RenameNoReplaceSameParent,
-        }),
-    }
+    // NtSetInformationFile success is the linearization point. Do not reopen `target` while the
+    // consumed source HANDLE still has DELETE and deliberately omits FILE_SHARE_DELETE: that
+    // second open would conflict with our own share contract and could turn success into error.
+    Ok(())
 }
 
 fn verify_same_parent(expected: &DirectoryAuthority, actual: &DirectoryAuthority) -> Result<()> {
@@ -1361,6 +1388,7 @@ pub(super) fn quarantine_stage(
 ) -> Result<QuarantinedCapability> {
     let StageCapability { parent: owned_parent, directory, original_name, opened } = stage;
     verify_same_parent(&owned_parent, parent)?;
+    revalidate_namespace(parent)?;
     rename_retained_noreplace(&directory.native, &opened, parent, &quarantine)?;
     Ok(QuarantinedCapability {
         parent: owned_parent,
@@ -1378,6 +1406,7 @@ pub(super) fn publish_stage_noreplace(
 ) -> Result<()> {
     let StageCapability { parent: owned_parent, directory, opened, .. } = stage;
     verify_same_parent(&owned_parent, parent)?;
+    revalidate_namespace(parent)?;
     if directory.opened.identity != opened.identity {
         return Err(SafeFsError::IdentityChanged {
             operation: SafeFsOperation::RenameNoReplaceSameParent,
@@ -1391,7 +1420,7 @@ pub(super) fn publish_stage_noreplace(
 }
 ```
 
-调用 length 精确为 `total`（转 u32 checked），不是 storage capacity；alignment 由 `Vec<FILE_RENAME_INFORMATION>` 保证。compile/native assertions：`name_offset == offset_of!(..., FileName)`、`name_offset % align_of::<u16>() == 0`、`storage byte capacity >= total`，逐字段 round-trip，UTF-16 length 是 bytes，不含 NUL。target 是 validated single component，不含终止 NUL。
+调用 length 精确为 `total`（转 u32 checked），不是 storage capacity；实际 storage 是 `Vec<usize>`，必须以 `const`/compile assertion 与 native test 证明 `align_of::<usize>() >= align_of::<FILE_RENAME_INFORMATION>()`，并证明 `storage.len() * size_of::<usize>() >= total`。其余 assertions：`name_offset == offset_of!(..., FileName)`、`name_offset % align_of::<u16>() == 0`、逐字段 round-trip，UTF-16 length 是 bytes，不含 NUL。target 是 validated single component，不含终止 NUL。
 
 调用：
 
@@ -1405,7 +1434,7 @@ NtSetInformationFile(
 )
 ```
 
-source HANDLE 与 parent capability、buffer storage 在 call 完成前都存活。成功后检查 parent-relative target identity 等于 source retained identity；不相等是 invariant/namespace failure。collision tests 覆盖 file、empty dir、non-empty dir、reparse point，目标 identity/bytes/tree 均不变；没有 `MoveFileExW`、`SetFileInformationByHandle(FileRenameInfo)` 或 joined path fallback。
+source HANDLE 与 parent capability、buffer storage 在 call 完成前都存活。成功的 `NtSetInformationFile` 本身是 no-replace rename 的线性化点；在 retained DELETE HANDLE drop 前禁止按 target name 重开。若需要诊断新名称，只能在同一 HANDLE 上使用 bounds-checked `NtQueryInformationFile(FileNameInformation)`，且诊断失败不得把已完成的 rename 改报失败；C1B 默认不做这个非必要查询。collision tests 覆盖 file、empty dir、non-empty dir、reparse point，目标 identity/bytes/tree 均不变；另有 quarantine 与 publish 成功 native tests 证明返回 `Ok` 和最终 namespace。没有 `MoveFileExW`、`SetFileInformationByHandle(FileRenameInfo)` 或 joined path fallback。
 
 ## 11. Volume / remote mapping proof
 
@@ -1645,7 +1674,7 @@ fn create_directory_contract(parent: &DirectoryAuthority, name: &ComponentName, 
     let opened = query_entry_metadata(handle.raw(), filesystem, operation)?;
     if opened.kind != EntryKind::Directory { return Err(SafeFsError::UnsupportedEntryType { operation, kind: opened.kind }); }
     if let Some(expected) = &security {
-        if let Err(error) = verify_owner_only(handle.raw(), expected) {
+        if let Err(error) = verify_created_owner_only(handle.raw(), expected) {
             mark_delete_handle(handle.raw(), SafeFsOperation::DeleteQuarantinedEmptyDirectory)?;
             drop(handle);
             return Err(error);
@@ -1690,7 +1719,7 @@ pub(super) fn create_file_new(parent: &DirectoryAuthority, name: &ComponentName,
     let opened = query_entry_metadata(handle.raw(), filesystem, SafeFsOperation::CreateFile)?;
     if opened.kind != EntryKind::RegularFile { return Err(SafeFsError::UnsupportedEntryType { operation: SafeFsOperation::CreateFile, kind: opened.kind }); }
     if let Some(expected) = &security {
-        if let Err(error) = verify_owner_only(handle.raw(), expected) {
+        if let Err(error) = verify_created_owner_only(handle.raw(), expected) {
             mark_delete_handle(handle.raw(), SafeFsOperation::DeleteQuarantinedEntry)?;
             drop(handle);
             return Err(error);
@@ -1756,18 +1785,25 @@ mod tests {
             .arg(parent.join(link)).arg(parent.join(target)).output().expect("execute mklink");
         assert!(output.status.success(), "mklink failed: {}", String::from_utf8_lossy(&output.stderr));
     }
-    fn directory_record(value: &str) -> Vec<u8> {
-        let units: Vec<u16> = OsStr::new(value).encode_wide().collect();
-        let offset = offset_of!(FILE_DIRECTORY_INFORMATION, FileName);
-        let mut bytes = vec![0u8; offset + units.len() * 2];
-        let mut header = FILE_DIRECTORY_INFORMATION::default();
-        header.FileNameLength = u32::try_from(units.len() * 2).unwrap();
-        // SAFETY: buffer has a full header/name and both copies are within bounds.
-        unsafe {
-            std::ptr::write_unaligned(bytes.as_mut_ptr().cast::<FILE_DIRECTORY_INFORMATION>(), header);
-            std::ptr::copy_nonoverlapping(units.as_ptr().cast::<u8>(), bytes.as_mut_ptr().add(offset), units.len() * 2);
+    fn write_u32(bytes: &mut [u8], offset: usize, value: u32) {
+        let end = offset.checked_add(size_of::<u32>()).expect("fixture offset overflow");
+        bytes.get_mut(offset..end).expect("fixture field in bounds").copy_from_slice(&value.to_le_bytes());
+    }
+    fn directory_record_units(units: &[u16], next: u32) -> Vec<u8> {
+        let name_offset = offset_of!(FILE_DIRECTORY_INFORMATION, FileName);
+        let name_bytes = units.len().checked_mul(size_of::<u16>()).expect("fixture length overflow");
+        let mut bytes = vec![0u8; name_offset.checked_add(name_bytes).expect("fixture allocation overflow")];
+        write_u32(&mut bytes, offset_of!(FILE_DIRECTORY_INFORMATION, NextEntryOffset), next);
+        write_u32(&mut bytes, offset_of!(FILE_DIRECTORY_INFORMATION, FileNameLength),
+            u32::try_from(name_bytes).expect("fixture name length fits u32"));
+        for (index, unit) in units.iter().enumerate() {
+            let start = name_offset + index * size_of::<u16>();
+            bytes[start..start + 2].copy_from_slice(&unit.to_le_bytes());
         }
         bytes
+    }
+    fn directory_record(value: &str) -> Vec<u8> {
+        directory_record_units(&OsStr::new(value).encode_wide().collect::<Vec<_>>(), 0)
     }
     fn test_iosb(status: NTSTATUS, information: usize) -> IO_STATUS_BLOCK {
         let mut block = IO_STATUS_BLOCK::default();
@@ -1815,8 +1851,9 @@ mod tests {
             (OpenOperation::FileWrite, FILE_WRITE_CONTRACT), (OpenOperation::CreateFile, CREATE_FILE_CONTRACT),
             (OpenOperation::CreateDir, CREATE_DIR_CONTRACT), (OpenOperation::CreateStage, CREATE_STAGE_CONTRACT),
             (OpenOperation::CleanupFile, CLEANUP_FILE_CONTRACT), (OpenOperation::CleanupDir, CLEANUP_DIR_CONTRACT),
+            (OpenOperation::CleanupReparse, CLEANUP_REPARSE_CONTRACT),
         ];
-        assert_eq!(rows.len(), 10);
+        assert_eq!(rows.len(), 11);
         for (operation, expected) in rows {
             let recorded = contract_for_operation(operation);
             assert_eq!(recorded, expected);
@@ -1829,6 +1866,8 @@ mod tests {
         assert_ne!(CREATE_STAGE_CONTRACT.desired & DELETE, 0);
         assert_ne!(CLEANUP_FILE_CONTRACT.desired & DELETE, 0);
         assert_ne!(CLEANUP_DIR_CONTRACT.desired & DELETE, 0);
+        assert_ne!(CLEANUP_REPARSE_CONTRACT.desired & DELETE, 0);
+        assert_eq!(CLEANUP_REPARSE_CONTRACT.options & (FILE_DIRECTORY_FILE | FILE_NON_DIRECTORY_FILE), 0);
     }
 
     #[test]
@@ -1852,21 +1891,81 @@ mod tests {
 
     #[test]
     fn reparse_parser_bounds_every_field() {
-        let invalid = [vec![], vec![0; 7], vec![1, 0, 0, 0, 10, 0, 0, 0]];
+        const MOUNT: u32 = 0xA000_0003;
+        const SYMLINK: u32 = 0xA000_000C;
+        let packet = |tag: u32, payload: &[u8]| {
+            let mut bytes = Vec::with_capacity(8 + payload.len());
+            bytes.extend_from_slice(&tag.to_le_bytes());
+            bytes.extend_from_slice(&u16::try_from(payload.len()).unwrap().to_le_bytes());
+            bytes.extend_from_slice(&0u16.to_le_bytes());
+            bytes.extend_from_slice(payload);
+            bytes
+        };
+        let invalid = [
+            vec![], vec![0; 7],
+            vec![1, 0, 0, 0, 10, 0, 0, 0],
+            { let mut value = vec![0; MAXIMUM_REPARSE_DATA_BUFFER_SIZE as usize + 1]; value[4..6].copy_from_slice(&0u16.to_le_bytes()); value },
+            packet(MOUNT, &[0; 7]),
+            packet(SYMLINK, &[0; 11]),
+            packet(MOUNT, &[1, 0, 2, 0, 0, 0, 0, 0, 0, 0]),
+            packet(MOUNT, &[0, 0, 4, 0, 0, 0, 0, 0, 0, 0]),
+            packet(SYMLINK, &[0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0]),
+        ];
         for bytes in invalid { assert!(matches!(parse_reparse(&bytes),
-            Err(SafeFsError::InvalidNativeBuffer { reason: NativeBufferReason::ReparseBufferMalformed, .. }))); }
+            Err(SafeFsError::InvalidNativeBuffer { reason: NativeBufferReason::ReparseBufferMalformed, .. })),
+            "accepted malformed reparse packet: {bytes:?}"); }
+        let mount = packet(MOUNT, &[0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(parse_reparse(&mount).unwrap(), (MOUNT, mount.clone()));
+        for flags in [0u32, 1u32] {
+            let mut payload = vec![0; 12];
+            payload[8..12].copy_from_slice(&flags.to_le_bytes());
+            let link = packet(SYMLINK, &payload);
+            assert_eq!(parse_reparse(&link).unwrap(), (SYMLINK, link));
+        }
         let unknown = vec![0x34, 0x12, 0, 0, 2, 0, 0, 0, 0xAA, 0xBB];
         assert_eq!(parse_reparse(&unknown).unwrap(), (0x1234, unknown.clone()));
     }
 
     #[test]
     fn directory_parser_bounds_and_requery() {
-        assert_eq!(parse_directory_batch(&directory_record("leaf")).unwrap(), vec![name("leaf")]);
-        assert!(parse_directory_batch(&[]).is_err());
+        for value in ["a", "ab", "abc"] {
+            assert_eq!(parse_directory_batch(&directory_record(value)).unwrap(), vec![name(value)]);
+        }
+        let first = directory_record_units(&[b'a' as u16], 72);
+        let mut multi = first;
+        multi.resize(72, 0);
+        multi.extend(directory_record_units(&[b'b' as u16, b'c' as u16], 0));
+        assert_eq!(parse_directory_batch(&multi).unwrap(), vec![name("a"), name("bc")]);
+        let unpaired = directory_record_units(&[0xD800], 0);
+        assert_eq!(parse_directory_batch(&unpaired).unwrap()[0].as_os_str().encode_wide().collect::<Vec<_>>(), vec![0xD800]);
+
+        let malformed = |bytes: Vec<u8>| assert!(matches!(parse_directory_batch(&bytes),
+            Err(SafeFsError::InvalidNativeBuffer { reason: NativeBufferReason::DirectoryBufferMalformed, .. })));
+        malformed(Vec::new());
+        malformed(vec![0; offset_of!(FILE_DIRECTORY_INFORMATION, FileName) - 1]);
         let mut odd = directory_record("leaf");
-        let offset = offset_of!(FILE_DIRECTORY_INFORMATION, FileNameLength);
-        odd[offset..offset + 4].copy_from_slice(&3u32.to_le_bytes());
-        assert!(parse_directory_batch(&odd).is_err());
+        write_u32(&mut odd, offset_of!(FILE_DIRECTORY_INFORMATION, FileNameLength), 3);
+        malformed(odd);
+        let mut overrun = directory_record("a");
+        write_u32(&mut overrun, offset_of!(FILE_DIRECTORY_INFORMATION, FileNameLength), 4);
+        malformed(overrun);
+        let mut zero_progress = directory_record("a");
+        write_u32(&mut zero_progress, offset_of!(FILE_DIRECTORY_INFORMATION, NextEntryOffset), 1);
+        malformed(zero_progress);
+        let mut misaligned = directory_record("a");
+        write_u32(&mut misaligned, offset_of!(FILE_DIRECTORY_INFORMATION, NextEntryOffset), 70);
+        malformed(misaligned);
+        let mut beyond = directory_record("a");
+        write_u32(&mut beyond, offset_of!(FILE_DIRECTORY_INFORMATION, NextEntryOffset), 72);
+        malformed(beyond);
+        let mut trailing = directory_record("a");
+        trailing.extend_from_slice(&[0xA5; 16]);
+        assert_eq!(parse_directory_batch(&trailing).unwrap(), vec![name("a")]);
+        assert!(matches!(validated_directory_used(STATUS_BUFFER_OVERFLOW,
+            &test_iosb(STATUS_BUFFER_OVERFLOW, 0)),
+            Err(SafeFsError::InvalidNativeBuffer { reason: NativeBufferReason::DirectoryBufferTooSmall, .. })));
+        assert!(matches!(validated_directory_used(STATUS_SUCCESS, &test_iosb(STATUS_SUCCESS, 0)),
+            Err(SafeFsError::InvalidNativeBuffer { reason: NativeBufferReason::DirectoryBufferMalformed, .. })));
     }
 
     #[test]
@@ -1887,9 +1986,9 @@ mod tests {
     fn nested_retained_io_roundtrip() {
         let temp = TestDir::new("nested");
         let authority = root(&temp);
-        let a = create_dir_new(&authority, &name("a"), CreatePermissions::OwnerOnly, DirectoryAccess::MutateChildren).unwrap();
-        let b = create_dir_new(&a, &name("b"), CreatePermissions::OwnerOnly, DirectoryAccess::MutateChildren).unwrap();
-        let mut file = create_file_new(&b, &name("data"), CreatePermissions::OwnerOnly).unwrap();
+        let a = create_dir_new(&authority, &name("a"), CreatePermissions::Inherit, DirectoryAccess::MutateChildren).unwrap();
+        let b = create_dir_new(&a, &name("b"), CreatePermissions::Inherit, DirectoryAccess::MutateChildren).unwrap();
+        let mut file = create_file_new(&b, &name("data"), CreatePermissions::Inherit).unwrap();
         file.write_all(b"retained").unwrap(); file.flush().unwrap(); file.sync_all().unwrap(); file.seek(SeekFrom::Start(0)).unwrap();
         let mut output = [0u8; 8]; assert_eq!(file.read(&mut output).unwrap(), 8); assert_eq!(&output, b"retained");
         assert_eq!(enumerate(&b).unwrap(), vec![name("data")]);
@@ -2017,7 +2116,7 @@ git diff --check
 
 ## 13. 完整 GitHub Actions YAML
 
-attempt 2 用以下完整 `.github/workflows/ci.yml`，保留现有 rust/web jobs并加入 exact-SHA native matrix。`workflow_dispatch` 只有该 workflow 已存在 default branch 时才可调用；在它首次进入 default branch 前，中间 SHA 只能通过授权 PR 的 head-SHA path 取得 receipt。
+Attempt 4 用以下完整 `.github/workflows/ci.yml`，保留现有 rust/web jobs并加入 exact-SHA native matrix。`workflow_dispatch` 只有该 workflow 已存在 default branch 时才可调用；在它首次进入 default branch 前，中间 SHA 只能通过授权 PR 的 head-SHA path 取得 receipt。
 
 ```yaml
 name: CI
@@ -2348,20 +2447,7 @@ expect_red() {
 }
 ```
 
-固定 commit/gate sequence：
-
-1. test-only `test(ci): specify immutable safe filesystem receipts`；只 add `scripts/validate-c1b-ci.rb` 与 `scripts/tests/validate-c1b-ci-test.rb`。RED：`ruby scripts/tests/validate-c1b-ci-test.rb`，必须因缺 `safe-filesystem`/SHA binding assertion 失败，不能因 YAML syntax 失败。GREEN commit `ci: bind safe filesystem receipts to immutable sha`；只 add `.github/workflows/ci.yml`，先 `actionlint`，不可用时跑 section 13 Ruby，再跑 test script，三者 exit 0 后才审查。
-2. test-only `test(project): specify Windows capability opens and io`；只 add `crates/opentake-project/src/safe_fs/windows.rs` 的 `#[cfg(test)]` module、common compile seam 与 Cargo Windows dependency，不加入 production Nt bodies。先在 Windows runner 运行：
-   `expect_red 'safe_fs::windows::tests::operation_contract_spy_all_rows' "$EVIDENCE/windows-open-red.log"`、
-   `expect_red 'safe_fs::windows::tests::query_reports_reparse_as_present_and_open_rejects' "$EVIDENCE/windows-reparse-red.log"`、
-   `expect_red 'safe_fs::windows::tests::nested_retained_io_roundtrip' "$EVIDENCE/windows-io-red.log"`。
-   GREEN commit `feat(project): capture Windows filesystem capabilities` 只加入 sections 2–8、11 的 production bodies；三个 exact tests exit 0，随后 section 12 全组、clippy/check/native receipt，两角色 0/0/0。
-3. test-only `test(project): specify Windows retained-handle mutations`；只增加 DACL/delete/rename tests。Windows RED 固定：
-   `expect_red 'safe_fs::windows::tests::owner_only_dacl_is_exact_and_rollback_is_closed' "$EVIDENCE/windows-dacl-red.log"`、
-   `expect_red 'safe_fs::windows::tests::retained_delete_ignores_name_rebound' "$EVIDENCE/windows-delete-red.log"`、
-   `expect_red 'safe_fs::windows::tests::rename_never_replaces_any_target_kind' "$EVIDENCE/windows-rename-red.log"`。
-   GREEN commit `feat(project): add Windows capability-relative mutations` 只加入 sections 8–10 production bodies；三个 exact tests和全组 exit 0，随后 native receipt + 两角色 0/0/0。
-4. convergence SHA 不增加行为；只允许 review-fix commits。必须取得 Linux/macOS/Windows 同一 40-hex SHA receipt，再跑 workspace/no-default/product-closed checks 与 final two-role audit。
+固定 commit/gate sequence 只有一套：Task 3 CI RED/GREEN 使用 section 18.7；Task 6A compile-complete refusal scaffold 使用 section 18.1；Task 6B 单一 acquisition/I/O RED 与 sections 2–7/11 GREEN 使用 section 18.2；Task 7 DACL/delete/rename RED 与 sections 8–10 GREEN 使用 sections 18.3–18.6；Task 8 convergence/evidence 使用 section 18.8。
 
 每个 commit 前 `git diff --cached --name-only` 必须等于该步骤列出的 paths；每个 GREEN 前保存对应 RED commit SHA/log/receipt。任何 RED 在 `running 1 test` 前失败都要先修 test harness 并产生新的 test-only commit；不得把 harness compile failure记录成行为 RED。本稿不授权 push/PR；到首次 native receipt gate 若无远端 authority，按 section 14 写 BLOCKED 并停止。
 
@@ -2374,3 +2460,843 @@ expect_red() {
 5. Unix 无通用“按 fd unlink name”原语；主计划必须采用 quarantine/fail-leak 或明确缩窄 threat contract，不能恢复 attempt 1 的原子 identity-bound 声称。
 
 以上风险都不是允许 pathname fallback、ordinary rename、跳过 native receipt 或擅自远端 publication 的理由。
+
+## 18. Attempt 4 executable patches
+
+Sections 2–15 freeze the final platform algorithms and evidence contracts. This section supplies the exact compile-scaffold, task-specific source/test patches, and repository-versioned validators used by the single task sequence in section 16; it does not define a second facade or an alternate task order.
+
+本节关闭 Attempt 3 的全部 Windows/CI finding，并给 sections 2–15 的最终算法配置唯一的 task-specific patch sequence。全计划只使用主计划 Task 6A、6B、7、8 编号，report/receipt path 也只使用这些编号。
+
+### 18.1 Task 6A：先提交 compile-complete fail-closed Windows scaffold
+
+Task 6A commit `feat(project): add fail-closed Windows platform scaffold` 发生在任何 Windows behavior test 之前。它加入 Windows target dependency，并把 Task 2A 的 `include!("unsupported.rs")` 替换为下面这份完整 `windows.rs`。该 scaffold 的唯一职责是让 common facade 在 `x86_64-pc-windows-msvc` 上完整编译；所有 acquisition、I/O、DACL、quarantine、publish、cleanup 都以结构化错误拒绝。它没有 `todo!`、`unimplemented!`、panic 或缺失 symbol。
+
+```rust
+#![deny(unsafe_op_in_unsafe_fn)]
+
+use super::capability::*;
+use super::component::ComponentName;
+use super::error::*;
+use std::io::SeekFrom;
+use std::path::Path;
+
+pub(super) struct NativeNamespaceAnchor;
+pub(super) struct NativeDirectory;
+pub(super) struct NativeFile;
+
+fn filesystem_refusal<T>(operation: SafeFsOperation) -> Result<T> {
+    Err(SafeFsError::UnsupportedSecureFilesystem {
+        operation,
+        reason: SecureFilesystemReason::UnsupportedTarget,
+    })
+}
+
+fn mutation_refusal<T>(operation: SafeFsOperation) -> Result<T> {
+    Err(SafeFsError::UnsupportedAtomicPublish {
+        operation,
+        reason: AtomicPublishReason::PrimitiveUnavailable,
+    })
+}
+
+pub(super) fn capture_absolute_directory(_: &Path, _: DirectoryAccess) -> Result<DirectoryAuthority> {
+    filesystem_refusal(SafeFsOperation::CaptureNamespaceRoot)
+}
+pub(super) fn revalidate_namespace(_: &DirectoryAuthority) -> Result<()> {
+    filesystem_refusal(SafeFsOperation::RevalidateNamespace)
+}
+pub(super) fn query_child_nofollow(_: &DirectoryAuthority, _: &ComponentName) -> Result<ChildState> {
+    filesystem_refusal(SafeFsOperation::QueryChild)
+}
+pub(super) fn open_dir_nofollow(_: &DirectoryAuthority, _: &ComponentName, _: DirectoryAccess) -> Result<DirectoryAuthority> {
+    filesystem_refusal(SafeFsOperation::OpenDirectory)
+}
+pub(super) fn open_file_nofollow(_: &DirectoryAuthority, _: &ComponentName, _: FileAccess) -> Result<FileCapability> {
+    filesystem_refusal(SafeFsOperation::OpenFile)
+}
+pub(super) fn create_dir_new(_: &DirectoryAuthority, _: &ComponentName, _: CreatePermissions, _: DirectoryAccess) -> Result<DirectoryAuthority> {
+    filesystem_refusal(SafeFsOperation::CreateDirectory)
+}
+pub(super) fn create_stage_dir_new(_: &DirectoryAuthority, _: &ComponentName, _: CreatePermissions) -> Result<StageCapability> {
+    mutation_refusal(SafeFsOperation::CreateStageDirectory)
+}
+pub(super) fn create_file_new(_: &DirectoryAuthority, _: &ComponentName, _: CreatePermissions) -> Result<FileCapability> {
+    filesystem_refusal(SafeFsOperation::CreateFile)
+}
+pub(super) fn enumerate(_: &DirectoryAuthority) -> Result<Vec<ComponentName>> {
+    filesystem_refusal(SafeFsOperation::EnumerateDirectory)
+}
+pub(super) fn read_link_component(_: &DirectoryAuthority, _: &ComponentName) -> Result<RawLinkTarget> {
+    filesystem_refusal(SafeFsOperation::ReadLink)
+}
+pub(super) fn metadata_from_file(_: &NativeFile) -> Result<EntryMetadata> {
+    filesystem_refusal(SafeFsOperation::QueryMetadata)
+}
+pub(super) fn read_file(_: &mut NativeFile, _: &mut [u8]) -> Result<usize> {
+    filesystem_refusal(SafeFsOperation::ReadFile)
+}
+pub(super) fn write_file(_: &mut NativeFile, _: &[u8]) -> Result<usize> {
+    filesystem_refusal(SafeFsOperation::WriteFile)
+}
+pub(super) fn seek_file(_: &mut NativeFile, _: SeekFrom) -> Result<u64> {
+    filesystem_refusal(SafeFsOperation::SeekFile)
+}
+pub(super) fn flush_file(_: &mut NativeFile) -> Result<()> {
+    filesystem_refusal(SafeFsOperation::FlushFile)
+}
+pub(super) fn sync_file(_: &NativeFile) -> Result<()> {
+    filesystem_refusal(SafeFsOperation::SyncFile)
+}
+pub(super) fn quarantine_stage(_: StageCapability, _: &DirectoryAuthority, _: ComponentName) -> Result<QuarantinedCapability> {
+    mutation_refusal(SafeFsOperation::QuarantineNoReplace)
+}
+pub(super) fn publish_stage_noreplace(_: StageCapability, _: &DirectoryAuthority, _: ComponentName) -> Result<()> {
+    mutation_refusal(SafeFsOperation::PublishNoReplace)
+}
+pub(super) fn open_cleanup_child_nofollow(_: &QuarantinedCapability, _: &ComponentName) -> Result<CleanupCapability> {
+    filesystem_refusal(SafeFsOperation::OpenCleanupEntry)
+}
+pub(super) fn delete_quarantined_entry(_: CleanupCapability) -> Result<()> {
+    filesystem_refusal(SafeFsOperation::DeleteQuarantinedEntry)
+}
+pub(super) fn delete_quarantined_empty_directory(_: QuarantinedCapability) -> Result<()> {
+    filesystem_refusal(SafeFsOperation::DeleteQuarantinedEmptyDirectory)
+}
+```
+
+Task 6A 固定 gate：
+
+```powershell
+cargo fmt --all --check
+cargo clippy -p opentake-project --lib --tests --target x86_64-pc-windows-msvc -- -D warnings
+cargo check -p opentake-project --lib --tests --target x86_64-pc-windows-msvc
+git diff --check
+```
+
+### 18.2 Task 6B：一个可执行 behavior RED，随后只实现 acquisition/I/O
+
+Task 6B test-only commit `test(project): specify Windows capability acquisition and io` 只在 scaffold 末尾加入 section 12 的 `TestDir`、`name`、`root` helper 与 `nested_retained_io_roundtrip`，并保持该 test 使用 `CreatePermissions::Inherit`。不得加入 OwnerOnly、delete、rename 或 mapping-mutation tests。下面命令必须先显示一次 `running 1 test`，再因 `capture_absolute_directory` 返回 `UnsupportedSecureFilesystem` 而恰好失败一次：
+
+```powershell
+expect_red 'safe_fs::windows::tests::nested_retained_io_roundtrip' "$EVIDENCE/windows-io-red.log"
+Select-String -Path "$EVIDENCE/windows-io-red.log" -Pattern 'UnsupportedSecureFilesystem|UnsupportedTarget'
+```
+
+Task 6B GREEN `feat(project): capture Windows filesystem capabilities` 完整加入 sections 2–7 与 11 的 real production bodies、parser/reparse/NTSTATUS pure helpers以及 read/create/open/enumerate I/O；不加入 section 8–10 的 DACL/delete/rename 实现。为保持 common platform surface compile-complete，GREEN 必须保留下面这些精确 refusal bodies；Task 7 才替换它们：
+
+```rust
+fn owner_only_refusal<T>() -> Result<T> {
+    Err(SafeFsError::UnsupportedSecureFilesystem {
+        operation: SafeFsOperation::VerifySecurityDescriptor,
+        reason: SecureFilesystemReason::UnsupportedTarget,
+    })
+}
+
+fn require_inherited_permissions(permissions: CreatePermissions) -> Result<()> {
+    match permissions {
+        CreatePermissions::Inherit => Ok(()),
+        CreatePermissions::OwnerOnly => owner_only_refusal(),
+    }
+}
+
+pub(super) fn quarantine_stage(_: StageCapability, _: &DirectoryAuthority, _: ComponentName) -> Result<QuarantinedCapability> {
+    Err(SafeFsError::UnsupportedAtomicPublish {
+        operation: SafeFsOperation::QuarantineNoReplace,
+        reason: AtomicPublishReason::PrimitiveUnavailable,
+    })
+}
+pub(super) fn publish_stage_noreplace(_: StageCapability, _: &DirectoryAuthority, _: ComponentName) -> Result<()> {
+    Err(SafeFsError::UnsupportedAtomicPublish {
+        operation: SafeFsOperation::PublishNoReplace,
+        reason: AtomicPublishReason::PrimitiveUnavailable,
+    })
+}
+pub(super) fn open_cleanup_child_nofollow(_: &QuarantinedCapability, _: &ComponentName) -> Result<CleanupCapability> {
+    Err(SafeFsError::UnsupportedSecureFilesystem {
+        operation: SafeFsOperation::OpenCleanupEntry,
+        reason: SecureFilesystemReason::UnsupportedTarget,
+    })
+}
+pub(super) fn delete_quarantined_entry(_: CleanupCapability) -> Result<()> {
+    Err(SafeFsError::UnsupportedSecureFilesystem {
+        operation: SafeFsOperation::DeleteQuarantinedEntry,
+        reason: SecureFilesystemReason::UnsupportedTarget,
+    })
+}
+pub(super) fn delete_quarantined_empty_directory(_: QuarantinedCapability) -> Result<()> {
+    Err(SafeFsError::UnsupportedSecureFilesystem {
+        operation: SafeFsOperation::DeleteQuarantinedEmptyDirectory,
+        reason: SecureFilesystemReason::UnsupportedTarget,
+    })
+}
+```
+
+`create_file_new`、`create_dir_new` 与 `create_stage_dir_new` 在 Task 6B 中先调用 `require_inherited_permissions(permissions)?`；`Inherit` 继续执行 real create，`OwnerOnly` 必须在任何 namespace mutation 前拒绝。Task 7 删除该 refusal helper 并由 section 8 的 `OwnerOnlySecurity` 取代。Task 6B GREEN 后 `nested_retained_io_roundtrip` 和全部 pure parser/contract tests 通过；此时不把 DACL/mutation tests 加入 test module。
+
+Task 6B 对 section 11 create/parent-duplication 的 compile-complete bodies 固定如下；它们替换前文引用 section 8/9 symbols 的版本：
+
+```rust
+fn duplicate_directory(source: &DirectoryAuthority) -> Result<DirectoryAuthority> {
+    let mut duplicated = null_mut();
+    // SAFETY: retained source HANDLE; current-process source/target; output writable; same access only.
+    if unsafe { DuplicateHandle(GetCurrentProcess(), source.native.node.handle.raw(), GetCurrentProcess(),
+        &mut duplicated, 0, false, DUPLICATE_SAME_ACCESS) } == 0 {
+        return Err(last_win32(SafeFsOperation::OpenDirectory));
+    }
+    let handle = OwnedHandle::new(duplicated, SafeFsOperation::OpenDirectory)?;
+    let old = &source.native.node;
+    let node = Arc::new(DirectoryNode {
+        handle,
+        parent: old.parent.as_ref().map(Arc::clone),
+        name: old.name.clone(),
+        case_mode: old.case_mode,
+        metadata: old.metadata.clone(),
+        volume: old.volume.clone(),
+    });
+    Ok(DirectoryAuthority {
+        anchor: Arc::clone(&source.anchor),
+        native: NativeDirectory { node, access: source.native.access, delete_right: source.native.delete_right },
+        access: source.access,
+        opened: source.opened.clone(),
+        case_mode: source.case_mode,
+        snapshot: source.snapshot.clone(),
+    })
+}
+
+fn create_directory_contract(
+    parent: &DirectoryAuthority,
+    name: &ComponentName,
+    permissions: CreatePermissions,
+    access: DirectoryAccess,
+    contract: OpenContract,
+) -> Result<DirectoryAuthority> {
+    let operation = if access == DirectoryAccess::Stage {
+        SafeFsOperation::CreateStageDirectory
+    } else {
+        SafeFsOperation::CreateDirectory
+    };
+    require_mutation(parent, operation)?;
+    require_inherited_permissions(permissions)?;
+    let handle = nt_create_relative(parent.native.node.handle.raw(), name, parent.case_mode,
+        contract.desired, contract.disposition, contract.options, contract.attributes, null(), operation)?;
+    let filesystem = parent.opened.filesystem.as_ref().ok_or(SafeFsError::UnsupportedSecureFilesystem {
+        operation: SafeFsOperation::ProbeFilesystem,
+        reason: SecureFilesystemReason::FilesystemProbeUnavailable,
+    })?;
+    let opened = query_entry_metadata(handle.raw(), filesystem, operation)?;
+    if opened.kind != EntryKind::Directory {
+        return Err(SafeFsError::UnsupportedEntryType { operation, kind: opened.kind });
+    }
+    let case_mode = query_case_mode(handle.raw())?;
+    let snapshot = append_snapshot(&parent.snapshot, name.clone(), &opened, case_mode)?;
+    let node = Arc::new(DirectoryNode {
+        handle,
+        parent: Some(Arc::clone(&parent.native.node)),
+        name: Some(name.clone()),
+        case_mode,
+        metadata: opened.clone(),
+        volume: parent.native.node.volume.clone(),
+    });
+    Ok(DirectoryAuthority {
+        anchor: Arc::clone(&parent.anchor),
+        native: NativeDirectory { node, access, delete_right: contract.delete_right },
+        access,
+        opened,
+        case_mode,
+        snapshot,
+    })
+}
+
+pub(super) fn create_dir_new(parent: &DirectoryAuthority, name: &ComponentName,
+    permissions: CreatePermissions, access: DirectoryAccess) -> Result<DirectoryAuthority> {
+    if access == DirectoryAccess::Stage {
+        return Err(SafeFsError::AccessMismatch { operation: SafeFsOperation::CreateDirectory });
+    }
+    create_directory_contract(parent, name, permissions, access, contract_for_operation(OpenOperation::CreateDir))
+}
+
+pub(super) fn create_stage_dir_new(parent: &DirectoryAuthority, name: &ComponentName,
+    permissions: CreatePermissions) -> Result<StageCapability> {
+    require_inherited_permissions(permissions)?;
+    let owned_parent = duplicate_directory(parent)?;
+    let directory = create_directory_contract(parent, name, CreatePermissions::Inherit,
+        DirectoryAccess::Stage, contract_for_operation(OpenOperation::CreateStage))?;
+    let opened = directory.opened.clone();
+    Ok(StageCapability { parent: owned_parent, directory, original_name: name.clone(), opened })
+}
+
+pub(super) fn create_file_new(parent: &DirectoryAuthority, name: &ComponentName,
+    permissions: CreatePermissions) -> Result<FileCapability> {
+    require_mutation(parent, SafeFsOperation::CreateFile)?;
+    require_inherited_permissions(permissions)?;
+    let contract = contract_for_operation(OpenOperation::CreateFile);
+    let handle = nt_create_relative(parent.native.node.handle.raw(), name, parent.case_mode,
+        contract.desired, contract.disposition, contract.options, contract.attributes, null(),
+        SafeFsOperation::CreateFile)?;
+    let filesystem = parent.opened.filesystem.as_ref().ok_or(SafeFsError::UnsupportedSecureFilesystem {
+        operation: SafeFsOperation::ProbeFilesystem,
+        reason: SecureFilesystemReason::FilesystemProbeUnavailable,
+    })?;
+    let opened = query_entry_metadata(handle.raw(), filesystem, SafeFsOperation::CreateFile)?;
+    if opened.kind != EntryKind::RegularFile {
+        return Err(SafeFsError::UnsupportedEntryType {
+            operation: SafeFsOperation::CreateFile,
+            kind: opened.kind,
+        });
+    }
+    Ok(FileCapability {
+        native: NativeFile { handle, opened: opened.clone(), access: FileAccess::ReadWrite, delete_right: false },
+        access: FileAccess::ReadWrite,
+        opened,
+    })
+}
+```
+
+Task 7 保留 `duplicate_directory`，只替换上述两个 create implementation 的 permission/security branch；不得重复定义 helper。
+
+### 18.3 Task 7：唯一 OwnerOnly/DACL/delete/rename 实现 task
+
+Task 7 test-only commit `test(project): specify Windows retained-handle security and mutations` 才加入 section 12 除 `nested_retained_io_roundtrip` 外的完整 tests，以及本节 18.4–18.6 的 probe、success、collision、cleanup、rollback tests。以下三个 behavior tests 分别命中 Task 6B 的 compile-complete refusal，且每个都满足 `expect_red` 的 `running 1 test` 约束：
+
+```powershell
+expect_red 'safe_fs::windows::tests::owner_only_dacl_is_exact_and_rollback_is_closed' "$EVIDENCE/windows-dacl-red.log"
+expect_red 'safe_fs::windows::tests::retained_delete_ignores_name_rebound' "$EVIDENCE/windows-delete-red.log"
+expect_red 'safe_fs::windows::tests::rename_never_replaces_any_target_kind' "$EVIDENCE/windows-rename-red.log"
+```
+
+Task 7 GREEN `feat(project): add Windows capability-relative security and mutations` 独占 sections 8–10：删除 Task 6B refusal helper；加入 `OwnerOnlySecurity`、post-create exact DACL verification与同一 retained HANDLE rollback；加入 reparse-safe cleanup、FileDispositionInformation delete、FileRenameInformation no-replace rename。Task 6B 不拥有 section 8，Task 7 不重写 sections 2–7/11。Task 7 全组 GREEN 后才申请 exact-SHA native receipts。
+
+### 18.4 Fresh revalidation 的 production-used test probe
+
+section 11 的旧 `revalidate_namespace` body 由下面代码替换。`quarantine_stage` 与 `publish_stage_noreplace` 已在 section 10 的修正版中于 rename 前调用该函数，因此 mapping probe failure 发生在 namespace mutation 前。test hook 只在 `cfg(test)` 下存在，但 production 与 test 共用同一个 `collect_revalidation_proof` control path。
+
+```rust
+#[derive(Clone)]
+struct RevalidationProof {
+    volume: VolumeProof,
+    snapshot: NamespaceSnapshot,
+    remote: bool,
+}
+
+#[cfg(test)]
+type RevalidationHook = Arc<dyn Fn(&DirectoryAuthority) -> Result<RevalidationProof> + Send + Sync>;
+#[cfg(test)]
+static REVALIDATION_HOOK: std::sync::OnceLock<std::sync::Mutex<Option<RevalidationHook>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+struct RevalidationHookGuard;
+#[cfg(test)]
+impl Drop for RevalidationHookGuard {
+    fn drop(&mut self) {
+        *REVALIDATION_HOOK.get_or_init(Default::default).lock().expect("revalidation hook mutex poisoned") = None;
+    }
+}
+
+#[cfg(test)]
+fn install_revalidation_hook(hook: RevalidationHook) -> RevalidationHookGuard {
+    let mut slot = REVALIDATION_HOOK.get_or_init(Default::default).lock().expect("revalidation hook mutex poisoned");
+    assert!(slot.is_none(), "revalidation tests require --test-threads=1");
+    *slot = Some(hook);
+    RevalidationHookGuard
+}
+
+fn collect_revalidation_proof(directory: &DirectoryAuthority) -> Result<RevalidationProof> {
+    #[cfg(test)]
+    {
+        let hook = REVALIDATION_HOOK.get_or_init(Default::default)
+            .lock().expect("revalidation hook mutex poisoned").clone();
+        if let Some(hook) = hook { return hook(directory); }
+    }
+    let mut path = directory.anchor.native.absolute_path.clone();
+    for row in directory.snapshot.components.iter().skip(directory.anchor.native.base_components) {
+        path.push(row.name.as_os_str());
+    }
+    let fresh = capture_absolute_directory(&path, directory.anchor.native.access)
+        .map_err(|_| SafeFsError::NamespaceChanged { operation: SafeFsOperation::RevalidateNamespace })?;
+    Ok(RevalidationProof {
+        volume: fresh.anchor.native.mapping.clone(),
+        snapshot: fresh.snapshot,
+        remote: false,
+    })
+}
+
+pub(super) fn revalidate_namespace(directory: &DirectoryAuthority) -> Result<()> {
+    let fresh = collect_revalidation_proof(directory)?;
+    let expected = &directory.anchor.native.mapping;
+    let exact = !fresh.remote
+        && fresh.volume.mapping == expected.mapping
+        && fresh.volume.guid == expected.guid
+        && fresh.volume.volume_serial32 == expected.volume_serial32
+        && fresh.volume.volume_serial == expected.volume_serial
+        && fresh.volume.root_id == expected.root_id
+        && fresh.snapshot.root_identity == directory.snapshot.root_identity
+        && fresh.snapshot.root_filesystem == directory.snapshot.root_filesystem
+        && fresh.snapshot.root_case_mode == directory.snapshot.root_case_mode
+        && fresh.snapshot.components == directory.snapshot.components;
+    if exact { Ok(()) } else {
+        Err(SafeFsError::NamespaceChanged { operation: SafeFsOperation::RevalidateNamespace })
+    }
+}
+```
+
+完整 field-by-field blocking test 如下；没有 real mount privilege 依赖：
+
+```rust
+#[test]
+fn every_revalidation_field_is_bound_before_mutation() {
+    let temp = TestDir::new("probe-fields");
+    let authority = root(&temp);
+    let baseline = collect_revalidation_proof(&authority).unwrap();
+    let reject = |mutate: fn(&mut RevalidationProof)| {
+        let mut changed = baseline.clone();
+        mutate(&mut changed);
+        let _guard = install_revalidation_hook(Arc::new(move |_| Ok(changed.clone())));
+        assert!(matches!(revalidate_namespace(&authority), Err(SafeFsError::NamespaceChanged { .. })));
+    };
+    reject(|p| p.volume.mapping.push(b'x' as u16));
+    reject(|p| p.volume.guid.push(b'x' as u16));
+    reject(|p| p.volume.volume_serial32 ^= 1);
+    reject(|p| p.volume.volume_serial ^= 1);
+    reject(|p| p.volume.root_id[0] ^= 1);
+    reject(|p| p.snapshot.root_identity = StableIdentity::Windows { volume_serial: 1, file_id: [1; 16] });
+    reject(|p| p.snapshot.root_case_mode = match p.snapshot.root_case_mode {
+        CaseMode::Sensitive => CaseMode::Insensitive,
+        CaseMode::Insensitive => CaseMode::Sensitive,
+    });
+    reject(|p| {
+        let first = p.snapshot.components.first_mut().expect("fixture path has a component");
+        first.identity = StableIdentity::Windows { volume_serial: 2, file_id: [2; 16] };
+    });
+    reject(|p| {
+        let first = p.snapshot.components.first_mut().expect("fixture path has a component");
+        first.case_mode = match first.case_mode {
+            CaseMode::Sensitive => CaseMode::Insensitive,
+            CaseMode::Insensitive => CaseMode::Sensitive,
+        };
+    });
+    reject(|p| p.remote = true);
+}
+
+#[test]
+fn quarantine_and_publish_refuse_changed_probe_without_mutation() {
+    for publish in [false, true] {
+        let temp = TestDir::new(if publish { "publish-probe" } else { "quarantine-probe" });
+        let authority = root(&temp);
+        let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::OwnerOnly).unwrap();
+        let mut changed = collect_revalidation_proof(&authority).unwrap();
+        changed.volume.guid.push(b'x' as u16);
+        let _guard = install_revalidation_hook(Arc::new(move |_| Ok(changed.clone())));
+        let result = if publish {
+            publish_stage_noreplace(stage, &authority, name("destination"))
+                .map(|_| ())
+        } else {
+            quarantine_stage(stage, &authority, name("quarantine"))
+                .map(|_| ())
+        };
+        assert!(matches!(result, Err(SafeFsError::NamespaceChanged { .. })));
+        assert!(temp.path().join("stage").is_dir());
+        assert!(!temp.path().join(if publish { "destination" } else { "quarantine" }).exists());
+    }
+}
+```
+
+### 18.5 Rename、collision 与 reparse cleanup 的完整 native 成功/失败证明
+
+下面 tests 加入 Task 7 test-only commit；它们替代 section 12 中同名的单-file collision subset：
+
+```rust
+#[test]
+fn quarantine_and_publish_success_do_not_self_conflict() {
+    let quarantine_temp = TestDir::new("quarantine-success");
+    let authority = root(&quarantine_temp);
+    let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::OwnerOnly).unwrap();
+    let quarantined = quarantine_stage(stage, &authority, name("quarantine")).expect("retained rename succeeds");
+    drop(quarantined);
+    assert!(!quarantine_temp.path().join("stage").exists());
+    assert!(quarantine_temp.path().join("quarantine").is_dir());
+
+    let publish_temp = TestDir::new("publish-success");
+    let authority = root(&publish_temp);
+    let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::OwnerOnly).unwrap();
+    publish_stage_noreplace(stage, &authority, name("destination")).expect("retained publish succeeds");
+    assert!(!publish_temp.path().join("stage").exists());
+    assert!(publish_temp.path().join("destination").is_dir());
+}
+
+#[test]
+fn rename_never_replaces_any_target_kind() {
+    for kind in ["file", "empty-dir", "nonempty-dir", "reparse"] {
+        let temp = TestDir::new(kind);
+        let target = temp.path().join("target");
+        let external = temp.path().join("external");
+        match kind {
+            "file" => fs::write(&target, b"keep-file").unwrap(),
+            "empty-dir" => fs::create_dir(&target).unwrap(),
+            "nonempty-dir" => { fs::create_dir(&target).unwrap(); fs::write(target.join("keep"), b"tree").unwrap(); }
+            "reparse" => {
+                fs::create_dir(&external).unwrap();
+                fs::write(external.join("keep"), b"outside").unwrap();
+                let output = Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&target).arg(&external).output().unwrap();
+                assert!(output.status.success(), "mklink failed: {}", String::from_utf8_lossy(&output.stderr));
+            }
+            _ => unreachable!(),
+        }
+        let authority = root(&temp);
+        let before = match query_child_nofollow(&authority, &name("target")).unwrap() {
+            ChildState::Present(value) => value,
+            ChildState::Absent => panic!("target fixture absent"),
+        };
+        let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::OwnerOnly).unwrap();
+        assert!(matches!(publish_stage_noreplace(stage, &authority, name("target")),
+            Err(SafeFsError::AlreadyExists { .. })));
+        let after = match query_child_nofollow(&authority, &name("target")).unwrap() {
+            ChildState::Present(value) => value,
+            ChildState::Absent => panic!("collision target removed"),
+        };
+        assert_eq!(after.identity, before.identity);
+        match kind {
+            "file" => assert_eq!(fs::read(&target).unwrap(), b"keep-file"),
+            "nonempty-dir" => assert_eq!(fs::read(target.join("keep")).unwrap(), b"tree"),
+            "reparse" => assert_eq!(fs::read(external.join("keep")).unwrap(), b"outside"),
+            _ => assert!(target.is_dir()),
+        }
+    }
+}
+
+#[test]
+fn cleanup_deletes_reparse_entry_without_traversing_target() {
+    let temp = TestDir::new("cleanup-reparse");
+    let external = temp.path().join("external");
+    fs::create_dir(&external).unwrap();
+    fs::write(external.join("keep"), b"outside-bytes").unwrap();
+    let authority = root(&temp);
+    let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::OwnerOnly).unwrap();
+    let stage_path = temp.path().join("stage");
+    let output = Command::new("cmd").args(["/C", "mklink", "/J"])
+        .arg(stage_path.join("link")).arg(&external).output().unwrap();
+    assert!(output.status.success(), "mklink failed: {}", String::from_utf8_lossy(&output.stderr));
+    let quarantine = quarantine_stage(stage, &authority, name("quarantine")).unwrap();
+    let cleanup = open_cleanup_child_nofollow(&quarantine, &name("link")).unwrap();
+    delete_quarantined_entry(cleanup).unwrap();
+    assert_eq!(fs::read(external.join("keep")).unwrap(), b"outside-bytes");
+    delete_quarantined_empty_directory(quarantine).unwrap();
+    assert_eq!(fs::read(external.join("keep")).unwrap(), b"outside-bytes");
+}
+```
+
+`open_cleanup_child_nofollow` 对 `SymlinkOrReparse` 必须选择 `CLEANUP_REPARSE_CONTRACT`：`FILE_OPEN_REPARSE_POINT | FILE_OPEN_FOR_BACKUP_INTENT | FILE_SYNCHRONOUS_IO_NONALERT`，不带 `FILE_DIRECTORY_FILE`/`FILE_NON_DIRECTORY_FILE`，desired access 含 `FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE`。它校验同一 retained HANDLE 的 tag/identity 后构造 `CleanupCapability::Entry`；`delete_quarantined_entry` 只对该 HANDLE 设置 disposition。禁止读取 link target、禁止跟随、禁止 joined-path delete。
+
+### 18.6 Exact DACL rollback test seam
+
+post-create verification 使用下面 wrapper；生产路径默认直接调用 `verify_owner_only`，test-only injection 只让验证返回失败，随后 production create body 必须对刚创建的同一 retained DELETE HANDLE 调 `mark_delete_handle` 并 drop：
+
+```rust
+#[cfg(test)]
+static FORCE_DACL_VERIFY_FAILURE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn verify_created_owner_only(handle: HANDLE, expected: &OwnerOnlySecurity) -> Result<()> {
+    #[cfg(test)]
+    if FORCE_DACL_VERIFY_FAILURE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        return Err(SafeFsError::InvalidNativeBuffer {
+            operation: SafeFsOperation::VerifySecurityDescriptor,
+            reason: NativeBufferReason::SecurityDescriptorMalformed,
+        });
+    }
+    verify_owner_only(handle, expected)
+}
+```
+
+section 11 的两个 create bodies 必须调用 `verify_created_owner_only`，不再直接调用 `verify_owner_only`。完整 rollback assertion：
+
+```rust
+#[test]
+fn owner_only_dacl_is_exact_and_rollback_is_closed() {
+    let temp = TestDir::new("dacl");
+    let authority = root(&temp);
+    let file = create_file_new(&authority, &name("good"), CreatePermissions::OwnerOnly).unwrap();
+    let expected = OwnerOnlySecurity::new(false).unwrap();
+    verify_owner_only(file.native.handle.raw(), &expected).unwrap();
+    drop(file);
+
+    FORCE_DACL_VERIFY_FAILURE.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(matches!(create_file_new(&authority, &name("rollback"), CreatePermissions::OwnerOnly),
+        Err(SafeFsError::InvalidNativeBuffer {
+            operation: SafeFsOperation::VerifySecurityDescriptor,
+            reason: NativeBufferReason::SecurityDescriptorMalformed,
+        })));
+    assert!(matches!(query_child_nofollow(&authority, &name("rollback")).unwrap(), ChildState::Absent));
+}
+```
+
+### 18.7 Repository-versioned CI validator 与完整 RED/GREEN test
+
+Task 3（主计划编号保持 Task 3）test-only commit 只加入以下两个文件。`scripts/validate-c1b-ci.rb` 完整内容：
+
+```ruby
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "yaml"
+
+module C1bCiValidator
+  SHA = /\A[0-9a-f]{40}\z/
+  RECEIPTS = %w[linux-x86_64 macos-native windows-x86_64].freeze
+  RUNNERS = %w[ubuntu-24.04 macos-14 windows-2022].freeze
+  TARGET_EXPRESSION = "${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+
+  module_function
+
+  def select_target(event_name:, github_sha:, pull_request_head_sha: nil, dispatch_sha: nil)
+    value = case event_name
+            when "workflow_dispatch" then dispatch_sha
+            when "pull_request" then pull_request_head_sha
+            when "push" then github_sha
+            else raise "unsupported event #{event_name.inspect}"
+            end
+    normalized = value.to_s.downcase
+    raise "selected SHA is not immutable 40-hex" unless SHA.match?(normalized)
+    normalized
+  end
+
+  def validate(path)
+    raw = File.read(path)
+    document = YAML.safe_load(raw, aliases: true)
+    raise "workflow root must be a mapping" unless document.is_a?(Hash)
+    events = document["on"] || document[true]
+    raise "missing on mapping" unless events.is_a?(Hash)
+    raise "push must be independently bound to main" unless events.dig("push", "branches") == ["main"]
+    raise "pull_request trigger missing" unless events.key?("pull_request")
+    dispatch = events.dig("workflow_dispatch", "inputs", "commit_sha")
+    raise "workflow_dispatch.commit_sha must be required" unless dispatch.is_a?(Hash) && dispatch["required"] == true
+
+    job = document.dig("jobs", "safe-filesystem")
+    raise "missing safe-filesystem job and immutable SHA binding" unless job.is_a?(Hash)
+    rows = job.dig("strategy", "matrix", "include")
+    raise "safe-filesystem matrix missing" unless rows.is_a?(Array)
+    receipt_ids = rows.map { |row| row.fetch("receipt_id") }
+    runners = rows.map { |row| row.fetch("runner") }
+    raise "duplicate or missing receipt ids" unless receipt_ids.sort == RECEIPTS.sort && receipt_ids.uniq.length == receipt_ids.length
+    raise "native runners do not match contract" unless runners == RUNNERS
+
+    target = job.dig("env", "TARGET_SHA")
+    raise "TARGET_SHA must bind push, PR head, and dispatch independently" unless target == TARGET_EXPRESSION
+    steps = job.fetch("steps")
+    checkout = steps.find { |step| step["uses"] == "actions/checkout@v4" }
+    raise "checkout@v4 step missing" unless checkout
+    raise "checkout ref is not TARGET_SHA" unless checkout.dig("with", "ref") == "${{ env.TARGET_SHA }}"
+    raise "checkout must fetch immutable object history" unless checkout.dig("with", "fetch-depth") == 0
+    raise "checkout credentials must not persist" unless checkout.dig("with", "persist-credentials") == false
+
+    bind = steps.find { |step| step["name"] == "Assert exact checked-out SHA" }
+    bind_text = bind && bind["run"].to_s
+    raise "missing exact git rev-parse assertion" unless bind_text&.include?("git rev-parse HEAD") && bind_text.include?('test "$actual" = "$expected"')
+    receipt = steps.find { |step| step["name"] == "Build exclusive JSON receipt" }
+    raise "receipt builder must run under always" unless receipt && receipt["if"] == "always()"
+    receipt_text = receipt["run"].to_s
+    %w[requested_sha checked_out_sha aggregate_exit opentake-c1b-native-receipt-v1].each do |token|
+      raise "receipt missing #{token}" unless receipt_text.include?(token)
+    end
+    upload = steps.find { |step| step["uses"] == "actions/upload-artifact@v4" }
+    raise "receipt artifact upload missing" unless upload && upload["if"] == "always()"
+    expected_name = "c1b-native-${{ matrix.receipt_id }}-${{ steps.bind.outputs.sha }}"
+    raise "artifact name not SHA-bound" unless upload.dig("with", "name") == expected_name
+    enforce = steps.find { |step| step["name"] == "Enforce native aggregate" }
+    raise "aggregate enforce step missing" unless enforce && enforce["if"] == "always()" &&
+      enforce["run"].to_s.include?("final-aggregate.raw-exit")
+
+    merge = "a" * 40
+    head = "b" * 40
+    dispatch_sha = "c" * 40
+    push = "d" * 40
+    raise "push selection failed" unless select_target(event_name: "push", github_sha: push) == push
+    selected_pr = select_target(event_name: "pull_request", github_sha: merge, pull_request_head_sha: head)
+    raise "PR selected synthetic merge SHA" unless selected_pr == head && selected_pr != merge
+    raise "dispatch selection failed" unless select_target(event_name: "workflow_dispatch", github_sha: push,
+      dispatch_sha: dispatch_sha) == dispatch_sha
+    true
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  path = ARGV.fetch(0) { abort "usage: validate-c1b-ci.rb WORKFLOW" }
+  C1bCiValidator.validate(path)
+  puts "c1b-ci-validation=ok"
+end
+```
+
+`scripts/tests/validate-c1b-ci-test.rb` 完整内容；fixture 全部由 test 在临时目录从 repository workflow 派生，不增加未列出的 fixture files：
+
+```ruby
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "open3"
+require "tmpdir"
+require_relative "../validate-c1b-ci"
+
+ROOT = File.expand_path("../..", __dir__)
+WORKFLOW = File.join(ROOT, ".github/workflows/ci.yml")
+VALIDATOR = File.join(ROOT, "scripts/validate-c1b-ci.rb")
+
+def assert(condition, message)
+  raise message unless condition
+end
+
+def run_validator(path)
+  Open3.capture3(RbConfig.ruby, VALIDATOR, path)
+end
+
+stdout, stderr, status = run_validator(WORKFLOW)
+assert(status.success?, "canonical workflow validation failed: #{stdout}#{stderr}")
+
+merge = "a" * 40
+head = "b" * 40
+push = "c" * 40
+dispatch = "d" * 40
+assert(C1bCiValidator.select_target(event_name: "push", github_sha: push) == push, "push SHA selection")
+assert(C1bCiValidator.select_target(event_name: "pull_request", github_sha: merge,
+  pull_request_head_sha: head) == head, "PR head SHA selection")
+assert(C1bCiValidator.select_target(event_name: "pull_request", github_sha: merge,
+  pull_request_head_sha: head) != merge, "synthetic merge SHA accepted")
+assert(C1bCiValidator.select_target(event_name: "workflow_dispatch", github_sha: push,
+  dispatch_sha: dispatch) == dispatch, "dispatch SHA selection")
+
+raw = File.read(WORKFLOW)
+mutations = {
+  "pr-uses-merge" => ["github.event.pull_request.head.sha", "github.sha"],
+  "checkout-not-bound" => ["ref: ${{ env.TARGET_SHA }}", "ref: main"],
+  "missing-dispatch-input" => ["required: true", "required: false"],
+  "receipt-not-always" => ["name: Build exclusive JSON receipt\n        if: always()",
+    "name: Build exclusive JSON receipt\n        if: success()"],
+}
+Dir.mktmpdir("c1b-ci-validator") do |directory|
+  mutations.each do |label, (before, after)|
+    assert(raw.include?(before), "fixture mutation token missing: #{label}")
+    path = File.join(directory, "#{label}.yml")
+    File.write(path, raw.sub(before, after))
+    _out, _err, result = run_validator(path)
+    assert(!result.success?, "validator accepted malformed fixture #{label}")
+  end
+end
+
+puts "c1b-ci-validator-tests=ok"
+```
+
+RED commit 运行 `ruby scripts/tests/validate-c1b-ci-test.rb`；父 workflow 尚无 `safe-filesystem` 时，必须输出 `missing safe-filesystem job and immutable SHA binding` 并非零退出。GREEN commit 只修改 `.github/workflows/ci.yml` 为 section 13 exact YAML；随后：
+
+```bash
+ruby scripts/validate-c1b-ci.rb .github/workflows/ci.yml
+ruby scripts/tests/validate-c1b-ci-test.rb
+actionlint .github/workflows/ci.yml
+```
+
+三者均为 0；若 `actionlint` 未安装，只能将该项记录为 tool-unavailable，并仍须运行前两项，不能把 YAML parse 当作替代。
+
+### 18.8 Repository-versioned final evidence validator
+
+Task 8 convergence commit 加入 `scripts/validate-c1b-evidence.rb`；完整内容如下：
+
+```ruby
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "json"
+require "open3"
+
+SHA = /\A[0-9a-f]{40}\z/
+EXPECTED_IDS = %w[linux-x86_64 macos-native windows-x86_64].freeze
+EXPECTED_COMMANDS = %w[cargo-fmt cargo-clippy safe-fs-unit archive-security].freeze
+
+gate, expected_sha, spec_report, implementation_report, repo = ARGV
+abort "usage: validate-c1b-evidence.rb GATE_DIR SHA SPEC_REPORT IMPLEMENTATION_REPORT REPO" unless repo
+expected_sha = expected_sha.downcase
+raise "final SHA must be lowercase 40-hex" unless SHA.match?(expected_sha)
+raise "gate directory missing" unless Dir.exist?(gate)
+
+head, head_status = Open3.capture2("git", "-C", repo, "rev-parse", "HEAD")
+raise "cannot read repository HEAD" unless head_status.success?
+raise "repository HEAD mismatch" unless head.strip.downcase == expected_sha
+status, status_result = Open3.capture2("git", "-C", repo, "status", "--porcelain=v1")
+raise "cannot read repository status" unless status_result.success?
+raise "repository is not clean" unless status.empty?
+
+ledger_path = File.join(gate, "command-ledger.json")
+ledger = JSON.parse(File.read(ledger_path))
+raise "command ledger must be a non-empty array" unless ledger.is_a?(Array) && !ledger.empty?
+ledger_ids = ledger.map { |row| row.fetch("id") }
+raise "duplicate local command id" unless ledger_ids.uniq.length == ledger_ids.length
+ledger.each do |row|
+  raise "local command exit is nonzero: #{row.fetch('id')}" unless row.fetch("exit_code") == 0
+  raise "local command cwd mismatch" unless row.fetch("cwd") == repo
+  %w[log raw_exit].each do |field|
+    path = File.join(gate, row.fetch(field))
+    raise "missing #{field} for #{row.fetch('id')}" unless File.file?(path)
+  end
+  raw_exit = File.read(File.join(gate, row.fetch("raw_exit"))).strip
+  raise "raw exit mismatch for #{row.fetch('id')}" unless raw_exit == "0"
+end
+
+receipt_paths = Dir.glob(File.join(gate, "native-receipts", "*", "*", "receipt.json"))
+raise "expected exactly three native receipts" unless receipt_paths.length == 3
+receipts = receipt_paths.map { |path| [path, JSON.parse(File.read(path))] }
+ids = receipts.map { |_path, receipt| receipt.fetch("receipt_id") }
+raise "duplicate or missing native receipt id" unless ids.sort == EXPECTED_IDS.sort && ids.uniq.length == ids.length
+receipts.each do |path, receipt|
+  raise "receipt schema mismatch: #{path}" unless receipt.fetch("schema") == "opentake-c1b-native-receipt-v1"
+  requested = receipt.fetch("requested_sha").downcase
+  checked = receipt.fetch("checked_out_sha").downcase
+  raise "receipt SHA malformed: #{path}" unless SHA.match?(requested) && SHA.match?(checked)
+  raise "receipt SHA mismatch: #{path}" unless requested == checked && checked == expected_sha
+  commands = receipt.fetch("commands")
+  command_ids = commands.map { |command| command.fetch("id") }
+  raise "receipt command set mismatch: #{path}" unless command_ids == EXPECTED_COMMANDS
+  raise "duplicate receipt command: #{path}" unless command_ids.uniq.length == command_ids.length
+  commands.each do |command|
+    raise "native command failed: #{path}:#{command.fetch('id')}" unless command.fetch("exit_code") == 0
+    receipt_dir = File.dirname(path)
+    log = File.join(receipt_dir, command.fetch("log"))
+    raw_exit = File.join(receipt_dir, command.fetch("raw_exit"))
+    raise "native log missing: #{log}" unless File.file?(log)
+    raise "native raw exit missing: #{raw_exit}" unless File.file?(raw_exit)
+    raise "native raw exit mismatch: #{raw_exit}" unless File.read(raw_exit).strip == "0"
+  end
+  raise "native aggregate failed: #{path}" unless receipt.fetch("aggregate_exit") == 0
+end
+
+{
+  "spec-security" => spec_report,
+  "implementation" => implementation_report,
+}.each do |role, path|
+  raise "#{role} report missing" unless File.file?(path)
+  body = File.read(path)
+  raise "#{role} report role mismatch" unless body.match?(/^Role:\s*.*#{Regexp.escape(role)}/i)
+  raise "#{role} report commit mismatch" unless body.match?(/^Commit:\s*`?#{expected_sha}`?\s*$/i)
+  raise "#{role} report not approved" unless body.match?(/^Verdict:\s*\*\*?APPROVE\*\*?\s*$/i) || body.match?(/^Verdict:\s*APPROVE\s*$/i)
+  %w[Critical Important Minor].each do |severity|
+    raise "#{role} report has #{severity} findings" unless body.match?(/^#{severity}:\s*\*\*?0\*\*?\s*$/i) || body.match?(/^#{severity}:\s*0\s*$/i)
+  end
+end
+
+results_path = File.join(gate, "results.md")
+raise "results.md missing" unless File.file?(results_path)
+results = File.read(results_path)
+raise "results missing final SHA" unless results.include?(expected_sha)
+EXPECTED_IDS.each { |id| raise "results missing #{id}" unless results.include?(id) }
+
+puts "c1b-evidence-validation=ok sha=#{expected_sha}"
+```
+
+最终调用固定为：
+
+```bash
+ruby scripts/validate-c1b-evidence.rb \
+  "$GATE_DIR" "$FINAL_SHA" \
+  "$FINAL_SPEC_REPORT" "$FINAL_IMPLEMENTATION_REPORT" \
+  '/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-full-convergence' \
+  >"$GATE_DIR/results-validation.log" 2>&1
+printf '%s\n' "$?" >"$GATE_DIR/results-validation.raw-exit"
+test "$(cat "$GATE_DIR/results-validation.raw-exit")" = 0
+```
+
+该 validator 同时覆盖 final SHA、三份 receipt 的 requested/checked-out SHA、duplicate IDs、每个 command/aggregate exit、两份 review report 的 commit/0 findings、clean worktree、ledger/native log 与 raw-exit 存在性、`results.md`。任何不满足项都非零退出；不能在 validation 后修改 evidence 或 commit。

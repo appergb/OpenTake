@@ -1,6 +1,6 @@
 # C1B Common and Unix Normative Implementation Appendix
 
-Status: normative, repository-versioned, attempt-3 implementation contract. It is bound to approved design `31bfd57e40e3a2bd0ca42b331e5aa877db2d6ace` and C1A baseline `e67917260ace36e4db1ede4e36eecbc401825bb1`. This appendix contains the complete common facade, unsupported adapter, Unix ownership model, deterministic tests, and executable RED/GREEN evidence protocol. There is no second Windows-only facade.
+Status: normative, repository-versioned, attempt-4 implementation contract. It is bound to approved design `31bfd57e40e3a2bd0ca42b331e5aa877db2d6ace` and C1A baseline `e67917260ace36e4db1ede4e36eecbc401825bb1`. This appendix contains the complete common facade, unsupported adapter, Unix ownership model, deterministic tests, and executable RED/GREEN evidence protocol. There is no second Windows-only facade.
 
 ## 1. Invariants and threat-boundary contract
 
@@ -566,19 +566,19 @@ pub(super) fn delete_quarantined_entry(_: CleanupCapability) -> Result<()> { uns
 pub(super) fn delete_quarantined_empty_directory(_: QuarantinedCapability) -> Result<()> { unsupported(SafeFsOperation::DeleteQuarantinedEmptyDirectory) }
 ```
 
-Task 2 target adapters are exact one-line source files, so every configured target compiles against this same seam before native behavior lands:
+Task 2A target adapters are exact one-line source files, so every configured target compiles against this same seam before native behavior lands:
 
 ```rust
-// safe_fs/unix.rs during Task 2 only
+// safe_fs/unix.rs during Task 2A and Task 2B only
 include!("unsupported.rs");
 ```
 
 ```rust
-// safe_fs/windows.rs during Task 2 only
+// safe_fs/windows.rs during Task 2A and Task 2B only
 include!("unsupported.rs");
 ```
 
-Task 3 replaces the Unix file with section 4. The Windows task replaces the Windows file with the Windows normative appendix; neither adapter may retain a second facade.
+Task 4 replaces the Unix file with section 4. The Windows task replaces the Windows file with the Windows normative appendix; neither adapter may retain a second facade.
 
 ## 4. Unix adapter: exact ownership and complete algorithms
 
@@ -613,6 +613,12 @@ const BTRFS_MAGIC: i64 = 0x9123_683e;
 #[cfg(target_os = "linux")]
 const TMPFS_MAGIC: i64 = 0x0102_1994;
 #[cfg(target_os = "linux")]
+const NFS_MAGIC: i64 = 0x0000_6969;
+#[cfg(target_os = "linux")]
+const CIFS_MAGIC: i64 = 0xff53_4d42;
+#[cfg(target_os = "linux")]
+const SMB2_MAGIC: i64 = 0xfe53_4d42;
+#[cfg(target_os = "linux")]
 const FS_IOC_GETFLAGS: libc::c_ulong = 0x8008_6601;
 #[cfg(target_os = "linux")]
 const FS_CASEFOLD_FL: libc::c_long = 0x4000_0000;
@@ -642,25 +648,52 @@ fn kind(stat: &rustix::fs::Stat) -> EntryKind {
 }
 
 #[cfg(target_os = "linux")]
-fn probe_local(fd: impl AsFd, stat: &rustix::fs::Stat, operation: SafeFsOperation) -> Result<LocalFilesystemSnapshot> {
-    let fs = rustix::fs::fstatfs(&fd).map_err(|error| io(operation, error))?;
-    let vfs = rustix::fs::fstatvfs(fd).map_err(|error| io(operation, error))?;
-    let family = match fs.f_type as i64 {
+fn linux_filesystem_from_raw(magic: i64, fsid: u64, device: u64, operation: SafeFsOperation) -> Result<LocalFilesystemSnapshot> {
+    let family = match magic {
         EXT_MAGIC => LinuxFilesystem::Ext,
         XFS_MAGIC => LinuxFilesystem::Xfs,
         BTRFS_MAGIC => LinuxFilesystem::Btrfs,
         TMPFS_MAGIC => LinuxFilesystem::Tmpfs,
+        NFS_MAGIC | CIFS_MAGIC | SMB2_MAGIC => return Err(SafeFsError::UnsupportedSecureFilesystem { operation, reason: SecureFilesystemReason::RemoteFilesystem }),
         _ => return Err(SafeFsError::UnsupportedSecureFilesystem { operation, reason: SecureFilesystemReason::UnknownFilesystem }),
     };
-    Ok(LocalFilesystemSnapshot::Linux { family, fsid: vfs.f_fsid, device: stat.st_dev as u64 })
+    Ok(LocalFilesystemSnapshot::Linux { family, fsid, device })
+}
+
+#[cfg(target_os = "linux")]
+fn probe_local(fd: impl AsFd, stat: &rustix::fs::Stat, operation: SafeFsOperation) -> Result<LocalFilesystemSnapshot> {
+    #[cfg(test)]
+    if let Some(sample) = super::test_seam::unix_probe_sample() {
+        return match sample {
+            super::test_seam::UnixProbeSample::Linux { magic, fsid, device, .. } => linux_filesystem_from_raw(magic, fsid, device, operation),
+            super::test_seam::UnixProbeSample::Failure(reason) => Err(SafeFsError::UnsupportedSecureFilesystem { operation, reason }),
+            super::test_seam::UnixProbeSample::MacOs { .. } => Err(SafeFsError::UnsupportedSecureFilesystem { operation, reason: SecureFilesystemReason::FilesystemProbeUnavailable }),
+        };
+    }
+    let fs = rustix::fs::fstatfs(&fd).map_err(|error| io(operation, error))?;
+    let vfs = rustix::fs::fstatvfs(fd).map_err(|error| io(operation, error))?;
+    linux_filesystem_from_raw(fs.f_type as i64, vfs.f_fsid, stat.st_dev as u64, operation)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_filesystem_from_raw(flags: u32, type_name: [u8; 16], fsid: u64, device: u64, operation: SafeFsOperation) -> Result<LocalFilesystemSnapshot> {
+    if flags & MNT_LOCAL == 0 { return Err(SafeFsError::UnsupportedSecureFilesystem { operation, reason: SecureFilesystemReason::RemoteFilesystem }); }
+    Ok(LocalFilesystemSnapshot::MacOs { type_name, fsid, device })
 }
 
 #[cfg(target_os = "macos")]
 fn probe_local(fd: impl AsFd, stat: &rustix::fs::Stat, operation: SafeFsOperation) -> Result<LocalFilesystemSnapshot> {
+    #[cfg(test)]
+    if let Some(sample) = super::test_seam::unix_probe_sample() {
+        return match sample {
+            super::test_seam::UnixProbeSample::MacOs { mount_flags, type_name, fsid, device, .. } => macos_filesystem_from_raw(mount_flags, type_name, fsid, device, operation),
+            super::test_seam::UnixProbeSample::Failure(reason) => Err(SafeFsError::UnsupportedSecureFilesystem { operation, reason }),
+            super::test_seam::UnixProbeSample::Linux { .. } => Err(SafeFsError::UnsupportedSecureFilesystem { operation, reason: SecureFilesystemReason::FilesystemProbeUnavailable }),
+        };
+    }
     let fs = rustix::fs::fstatfs(&fd).map_err(|error| io(operation, error))?;
     let vfs = rustix::fs::fstatvfs(fd).map_err(|error| io(operation, error))?;
-    if fs.f_flags & MNT_LOCAL == 0 { return Err(SafeFsError::UnsupportedSecureFilesystem { operation, reason: SecureFilesystemReason::RemoteFilesystem }); }
-    Ok(LocalFilesystemSnapshot::MacOs { type_name: fs.f_fstypename.map(|byte| byte as u8), fsid: vfs.f_fsid, device: stat.st_dev as u64 })
+    macos_filesystem_from_raw(fs.f_flags, fs.f_fstypename.map(|byte| byte as u8), vfs.f_fsid, stat.st_dev as u64, operation)
 }
 
 fn opened_metadata(fd: impl AsFd, operation: SafeFsOperation) -> Result<EntryMetadata> {
@@ -670,30 +703,60 @@ fn opened_metadata(fd: impl AsFd, operation: SafeFsOperation) -> Result<EntryMet
 }
 
 #[cfg(target_os = "linux")]
-fn probe_case_mode(fd: impl AsFd, metadata: &EntryMetadata, operation: SafeFsOperation) -> Result<CaseMode> {
-    let family = match metadata.filesystem.as_ref() {
-        Some(LocalFilesystemSnapshot::Linux { family, .. }) => *family,
-        _ => return Err(SafeFsError::UnsupportedSecureFilesystem { operation, reason: SecureFilesystemReason::CaseSemanticsUnavailable }),
-    };
+fn linux_case_from_raw(family: LinuxFilesystem, ext_flags: std::result::Result<i64, SecureFilesystemReason>, operation: SafeFsOperation) -> Result<CaseMode> {
     match family {
         LinuxFilesystem::Xfs | LinuxFilesystem::Btrfs | LinuxFilesystem::Tmpfs => Ok(CaseMode::Sensitive),
         LinuxFilesystem::Ext => {
-            let mut flags: libc::c_long = 0;
-            let result = unsafe { libc::ioctl(fd.as_fd().as_raw_fd(), FS_IOC_GETFLAGS, &mut flags) };
-            if result < 0 { return Err(SafeFsError::UnsupportedSecureFilesystem { operation, reason: SecureFilesystemReason::CaseSemanticsUnavailable }); }
-            if flags & FS_CASEFOLD_FL == 0 { Ok(CaseMode::Sensitive) } else { Ok(CaseMode::Insensitive) }
+            let flags = ext_flags.map_err(|reason| SafeFsError::UnsupportedSecureFilesystem { operation, reason })?;
+            if flags & FS_CASEFOLD_FL as i64 == 0 { Ok(CaseMode::Sensitive) } else { Ok(CaseMode::Insensitive) }
         }
     }
 }
 
 #[cfg(target_os = "macos")]
-fn probe_case_mode(fd: impl AsFd, _: &EntryMetadata, operation: SafeFsOperation) -> Result<CaseMode> {
-    let value = unsafe { libc::fpathconf(fd.as_fd().as_raw_fd(), libc::_PC_CASE_SENSITIVE) };
+fn macos_case_from_raw(value: i64, operation: SafeFsOperation) -> Result<CaseMode> {
     match value {
         0 => Ok(CaseMode::Insensitive),
         1 => Ok(CaseMode::Sensitive),
         _ => Err(SafeFsError::UnsupportedSecureFilesystem { operation, reason: SecureFilesystemReason::CaseSemanticsUnavailable }),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn probe_case_mode(fd: impl AsFd, metadata: &EntryMetadata, operation: SafeFsOperation) -> Result<CaseMode> {
+    let family = match metadata.filesystem.as_ref() {
+        Some(LocalFilesystemSnapshot::Linux { family, .. }) => *family,
+        _ => return Err(SafeFsError::UnsupportedSecureFilesystem { operation, reason: SecureFilesystemReason::CaseSemanticsUnavailable }),
+    };
+    #[cfg(test)]
+    if let Some(sample) = super::test_seam::unix_probe_sample() {
+        return match sample {
+            super::test_seam::UnixProbeSample::Linux { ext_flags, .. } => linux_case_from_raw(family, ext_flags, operation),
+            super::test_seam::UnixProbeSample::Failure(reason) => Err(SafeFsError::UnsupportedSecureFilesystem { operation, reason }),
+            super::test_seam::UnixProbeSample::MacOs { .. } => Err(SafeFsError::UnsupportedSecureFilesystem { operation, reason: SecureFilesystemReason::CaseSemanticsUnavailable }),
+        };
+    }
+    let ext_flags = if family == LinuxFilesystem::Ext {
+        let mut flags: libc::c_long = 0;
+        let result = unsafe { libc::ioctl(fd.as_fd().as_raw_fd(), FS_IOC_GETFLAGS, &mut flags) };
+        if result < 0 { Err(SecureFilesystemReason::CaseSemanticsUnavailable) } else { Ok(flags as i64) }
+    } else {
+        Ok(0)
+    };
+    linux_case_from_raw(family, ext_flags, operation)
+}
+
+#[cfg(target_os = "macos")]
+fn probe_case_mode(fd: impl AsFd, _: &EntryMetadata, operation: SafeFsOperation) -> Result<CaseMode> {
+    #[cfg(test)]
+    if let Some(sample) = super::test_seam::unix_probe_sample() {
+        return match sample {
+            super::test_seam::UnixProbeSample::MacOs { case_sensitive, .. } => macos_case_from_raw(case_sensitive, operation),
+            super::test_seam::UnixProbeSample::Failure(reason) => Err(SafeFsError::UnsupportedSecureFilesystem { operation, reason }),
+            super::test_seam::UnixProbeSample::Linux { .. } => Err(SafeFsError::UnsupportedSecureFilesystem { operation, reason: SecureFilesystemReason::CaseSemanticsUnavailable }),
+        };
+    }
+    macos_case_from_raw(unsafe { libc::fpathconf(fd.as_fd().as_raw_fd(), libc::_PC_CASE_SENSITIVE) }, operation)
 }
 
 fn name_metadata(parent: &DirectoryAuthority, name: &ComponentName, operation: SafeFsOperation) -> Result<ChildState> {
@@ -977,6 +1040,63 @@ All private tests live in `crates/opentake-project/src/safe_fs/tests.rs`. No dup
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::error::SecureFilesystemReason;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum UnixProbeSample {
+    Linux {
+        magic: i64,
+        fsid: u64,
+        device: u64,
+        ext_flags: std::result::Result<i64, SecureFilesystemReason>,
+    },
+    MacOs {
+        mount_flags: u32,
+        type_name: [u8; 16],
+        fsid: u64,
+        device: u64,
+        case_sensitive: i64,
+    },
+    Failure(SecureFilesystemReason),
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+static UNIX_PROBE: OnceLock<Mutex<Option<UnixProbeSample>>> = OnceLock::new();
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) struct UnixProbeGuard;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn install_unix_probe(sample: UnixProbeSample) -> UnixProbeGuard {
+    let mut slot = UNIX_PROBE.get_or_init(|| Mutex::new(None)).lock().expect("Unix probe mutex poisoned");
+    assert!(slot.is_none(), "safe_fs probe tests require --test-threads=1");
+    *slot = Some(sample);
+    UnixProbeGuard
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl UnixProbeGuard {
+    pub(super) fn replace(&self, sample: UnixProbeSample) {
+        let mut slot = UNIX_PROBE.get_or_init(|| Mutex::new(None)).lock().expect("Unix probe mutex poisoned");
+        assert!(slot.is_some(), "Unix probe guard is not installed");
+        *slot = Some(sample);
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn unix_probe_sample() -> Option<UnixProbeSample> {
+    UNIX_PROBE.get_or_init(|| Mutex::new(None)).lock().expect("Unix probe mutex poisoned").clone()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for UnixProbeGuard {
+    fn drop(&mut self) {
+        *UNIX_PROBE.get_or_init(|| Mutex::new(None)).lock().expect("Unix probe mutex poisoned") = None;
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum HookPoint { BeforeQuarantineRename, BeforeQuarantineRestore, AfterFinalIdentityReadBeforeNameSyscall, BeforeMappingRewalk }
 type Hook = Arc<dyn Fn(HookPoint) + Send + Sync>;
@@ -995,7 +1115,7 @@ impl RaceGate {
 }
 ```
 
-The release build has no hook call because each call site is guarded by `#[cfg(test)]`.
+The release build has neither race hooks nor probe injection: `test_seam` and every call to it are guarded by `#[cfg(test)]`. Real `fstatfs`/`fstatvfs`/`FS_IOC_GETFLAGS` and `MNT_LOCAL`/`_PC_CASE_SENSITIVE` probes remain the release path; injection feeds the same raw-value classifiers and the same `snapshot_from_root`/`revalidate_namespace` production path. Probe tests use a scoped in-process value replacement, never sleeps, polling, mounts, or network filesystems.
 
 ### Required complete Unix test bodies
 
@@ -1032,6 +1152,115 @@ mod unix_contract {
             ChildState::Present(metadata) => metadata.identity,
             ChildState::Absent => panic!("expected present fixture child"),
         }
+    }
+
+    fn assert_probe_rejected(sample: test_seam::UnixProbeSample, expected: SecureFilesystemReason) {
+        let temp = TestDir::new("probe-rejected");
+        let _guard = test_seam::install_unix_probe(sample);
+        let error = capture_absolute_directory(temp.path(), DirectoryAccess::Read).expect_err("probe must reject capture");
+        assert!(matches!(error, SafeFsError::UnsupportedSecureFilesystem { reason, .. } if reason == expected));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_sample(magic: i64, fsid: u64, device: u64, ext_flags: std::result::Result<i64, SecureFilesystemReason>) -> test_seam::UnixProbeSample {
+        test_seam::UnixProbeSample::Linux { magic, fsid, device, ext_flags }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_filesystem_and_case_probe_matrix_is_enforced() {
+        use super::super::capability::LinuxFilesystem;
+        const EXT: i64 = 0x0000_ef53;
+        const XFS: i64 = 0x5846_5342;
+        const BTRFS: i64 = 0x9123_683e;
+        const TMPFS: i64 = 0x0102_1994;
+        const NFS: i64 = 0x0000_6969;
+        const CASEFOLD: i64 = 0x4000_0000;
+        for (magic, expected) in [(EXT, LinuxFilesystem::Ext), (XFS, LinuxFilesystem::Xfs), (BTRFS, LinuxFilesystem::Btrfs), (TMPFS, LinuxFilesystem::Tmpfs)] {
+            let temp = TestDir::new("linux-accepted");
+            let _guard = test_seam::install_unix_probe(linux_sample(magic, 7, 11, Ok(0)));
+            let authority = capture_absolute_directory(temp.path(), DirectoryAccess::Read).expect("accepted Linux family");
+            assert!(matches!(&authority.namespace_snapshot().root_filesystem, LocalFilesystemSnapshot::Linux { family, fsid: 7, device: 11 } if *family == expected));
+            assert_eq!(authority.namespace_snapshot().root_case_mode, CaseMode::Sensitive);
+        }
+        {
+            let temp = TestDir::new("linux-casefold");
+            let _guard = test_seam::install_unix_probe(linux_sample(EXT, 7, 11, Ok(CASEFOLD)));
+            let authority = capture_absolute_directory(temp.path(), DirectoryAccess::Read).expect("ext casefold probe");
+            assert_eq!(authority.namespace_snapshot().root_case_mode, CaseMode::Insensitive);
+        }
+        assert_probe_rejected(linux_sample(0x7fff_ffff, 7, 11, Ok(0)), SecureFilesystemReason::UnknownFilesystem);
+        assert_probe_rejected(linux_sample(NFS, 7, 11, Ok(0)), SecureFilesystemReason::RemoteFilesystem);
+        assert_probe_rejected(test_seam::UnixProbeSample::Failure(SecureFilesystemReason::FilesystemProbeUnavailable), SecureFilesystemReason::FilesystemProbeUnavailable);
+        assert_probe_rejected(linux_sample(EXT, 7, 11, Err(SecureFilesystemReason::CaseSemanticsUnavailable)), SecureFilesystemReason::CaseSemanticsUnavailable);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_revalidation_rejects_fsid_device_and_case_changes() {
+        const EXT: i64 = 0x0000_ef53;
+        const CASEFOLD: i64 = 0x4000_0000;
+        let temp = TestDir::new("linux-probe-change");
+        let baseline = linux_sample(EXT, 7, 11, Ok(0));
+        let guard = test_seam::install_unix_probe(baseline.clone());
+
+        let fsid_authority = capture_absolute_directory(temp.path(), DirectoryAccess::Read).expect("capture fsid baseline");
+        guard.replace(linux_sample(EXT, 8, 11, Ok(0)));
+        assert!(matches!(revalidate_namespace(&fsid_authority), Err(SafeFsError::NamespaceChanged { .. })));
+
+        guard.replace(baseline.clone());
+        let device_authority = capture_absolute_directory(temp.path(), DirectoryAccess::Read).expect("capture device baseline");
+        guard.replace(linux_sample(EXT, 7, 12, Ok(0)));
+        assert!(matches!(revalidate_namespace(&device_authority), Err(SafeFsError::NamespaceChanged { .. })));
+
+        guard.replace(baseline);
+        let case_authority = capture_absolute_directory(temp.path(), DirectoryAccess::Read).expect("capture case baseline");
+        guard.replace(linux_sample(EXT, 7, 11, Ok(CASEFOLD)));
+        assert!(matches!(revalidate_namespace(&case_authority), Err(SafeFsError::NamespaceChanged { .. })));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_sample(mount_flags: u32, fsid: u64, device: u64, case_sensitive: i64) -> test_seam::UnixProbeSample {
+        test_seam::UnixProbeSample::MacOs { mount_flags, type_name: *b"apfs\0\0\0\0\0\0\0\0\0\0\0\0", fsid, device, case_sensitive }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_local_and_case_probe_matrix_is_enforced() {
+        const LOCAL: u32 = 0x0000_1000;
+        for (raw_case, expected) in [(1, CaseMode::Sensitive), (0, CaseMode::Insensitive)] {
+            let temp = TestDir::new("macos-local");
+            let _guard = test_seam::install_unix_probe(macos_sample(LOCAL, 7, 11, raw_case));
+            let authority = capture_absolute_directory(temp.path(), DirectoryAccess::Read).expect("MNT_LOCAL and _PC_CASE_SENSITIVE accepted");
+            assert!(matches!(&authority.namespace_snapshot().root_filesystem, LocalFilesystemSnapshot::MacOs { fsid: 7, device: 11, .. }));
+            assert_eq!(authority.namespace_snapshot().root_case_mode, expected);
+        }
+        assert_probe_rejected(macos_sample(0, 7, 11, 1), SecureFilesystemReason::RemoteFilesystem);
+        assert_probe_rejected(test_seam::UnixProbeSample::Failure(SecureFilesystemReason::FilesystemProbeUnavailable), SecureFilesystemReason::FilesystemProbeUnavailable);
+        assert_probe_rejected(macos_sample(LOCAL, 7, 11, -1), SecureFilesystemReason::CaseSemanticsUnavailable);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_revalidation_rejects_fsid_device_and_case_changes() {
+        const LOCAL: u32 = 0x0000_1000;
+        let temp = TestDir::new("macos-probe-change");
+        let baseline = macos_sample(LOCAL, 7, 11, 1);
+        let guard = test_seam::install_unix_probe(baseline.clone());
+
+        let fsid_authority = capture_absolute_directory(temp.path(), DirectoryAccess::Read).expect("capture fsid baseline");
+        guard.replace(macos_sample(LOCAL, 8, 11, 1));
+        assert!(matches!(revalidate_namespace(&fsid_authority), Err(SafeFsError::NamespaceChanged { .. })));
+
+        guard.replace(baseline.clone());
+        let device_authority = capture_absolute_directory(temp.path(), DirectoryAccess::Read).expect("capture device baseline");
+        guard.replace(macos_sample(LOCAL, 7, 12, 1));
+        assert!(matches!(revalidate_namespace(&device_authority), Err(SafeFsError::NamespaceChanged { .. })));
+
+        guard.replace(baseline);
+        let case_authority = capture_absolute_directory(temp.path(), DirectoryAccess::Read).expect("capture case baseline");
+        guard.replace(macos_sample(LOCAL, 7, 11, 0));
+        assert!(matches!(revalidate_namespace(&case_authority), Err(SafeFsError::NamespaceChanged { .. })));
     }
 
     #[test]
@@ -1213,11 +1442,30 @@ Windows NTSTATUS mapping, directory/reparse buffer reasons, DACL verification, a
 
 ## 7. Executable test-first task protocol
 
-All commands run in `/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-full-convergence`. `SAFETY_ROOT=/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-safety/20260712-wave1bc-filesystem`. Task 2A is the sole compile-scaffold exception: its RED proves the module is absent, and its GREEN is a compile-complete acquisition-refusing skeleton. Every behavioral task beginning with Task 2 then commits a named failing test before implementation. Behavioral RED evidence must show `running 1 test`, a nonzero exit, the test-only SHA, and the unchanged implementation parent SHA. A behavioral command that reports `0 tests` invalidates the attempt.
+All commands run in `/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-full-convergence`. `SAFETY_ROOT=/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-safety/20260712-wave1bc-filesystem`. The main-plan numbering is the only numbering used here: Task 2A is the compile scaffold, Task 2B is common validation, Task 4 is Unix read/acquisition, and Task 5 is Unix mutation/cleanup. Task 2A is the sole compile-scaffold exception: its test-only commit adds only the unresolved private module declaration, and its RED must be compiler `E0583`; its separate GREEN commit adds the compile-complete acquisition-refusing skeleton. Every behavioral task beginning with Task 2B commits a named failing test before implementation. Behavioral RED evidence must show `running 1 test`, a nonzero exit, the test-only SHA, and the unchanged implementation parent SHA. A behavioral command that reports `0 tests` invalidates the attempt.
 
-### Task 2A — compile-complete fail-closed common skeleton
+### Task 2A — compile RED, then compile-complete fail-closed common skeleton
 
-Files: create `safe_fs/{mod,error,component,capability,ops,unsupported,unix,windows,test_seam,tests}.rs` and add private `mod safe_fs;` to `lib.rs`. `error.rs`, `capability.rs`, `ops.rs`, `mod.rs`, and `unsupported.rs` use sections 2–3. Both selected target adapters are the exact `include!("unsupported.rs")` files from section 3. `tests.rs` is empty. `test_seam.rs` contains section 5. The only temporary source is the following compile-complete, fail-closed `component.rs`; it constructs no component and therefore grants no filesystem authority:
+The test-only commit modifies exactly `crates/opentake-project/src/lib.rs`, adding one private `mod safe_fs;` declaration beside the existing crate-root module declarations. It must not create `safe_fs.rs`, `safe_fs/mod.rs`, or any other file. Before commit, `git diff --name-only` must print only `crates/opentake-project/src/lib.rs`, and `git diff -- crates/opentake-project/src/lib.rs` must show only that declaration. Commit and record the true compiler RED:
+
+```bash
+git diff --name-only | diff -u - <(printf '%s\n' crates/opentake-project/src/lib.rs)
+git add crates/opentake-project/src/lib.rs
+git diff --cached --name-only | diff -u - <(printf '%s\n' crates/opentake-project/src/lib.rs)
+git commit -m "test(project): require C1B safe filesystem module"
+TEST_SHA=$(git rev-parse HEAD)
+RED_DIR="$SAFETY_ROOT/red/c1b-task-2a-$TEST_SHA"
+mkdir "$RED_DIR"
+set +e
+cargo check -p opentake-project --lib >"$RED_DIR/output.log" 2>&1
+STATUS=$?
+set -e
+test "$STATUS" -ne 0
+rg -n "error\[E0583\]|file not found for module .safe_fs.|could not compile" "$RED_DIR/output.log"
+printf 'test_sha=%s\nparent_sha=%s\nexit=%s\nkind=compile-module-missing\n' "$TEST_SHA" "$(git rev-parse "$TEST_SHA^")" "$STATUS" >"$RED_DIR/receipt.txt"
+```
+
+The GREEN commit then creates exactly `safe_fs/{mod,error,component,capability,ops,unsupported,unix,windows,test_seam,tests}.rs`; `lib.rs` is already committed and is not staged again. `error.rs`, `capability.rs`, `ops.rs`, `mod.rs`, and `unsupported.rs` use sections 2–3. Both selected target adapters are the exact `include!("unsupported.rs")` files from section 3. `tests.rs` is empty, and `test_seam.rs` is the complete section-5 source. The probe seam is test-only infrastructure and grants no authority; the unsupported adapters do not call it. The only temporary source is the following compile-complete, fail-closed `component.rs`; it constructs no component and therefore grants no filesystem authority:
 
 ```rust
 use super::error::{Result, SafeFsError, SafeFsOperation, SecureFilesystemReason};
@@ -1239,21 +1487,6 @@ impl RelativeComponents {
 }
 ```
 
-Compile RED and evidence:
-
-```bash
-SCAFFOLD_PARENT=$(git rev-parse HEAD)
-RED_DIR="$SAFETY_ROOT/red/c1b-task-2a-$SCAFFOLD_PARENT"
-mkdir "$RED_DIR"
-set +e
-cargo check -p opentake-project --lib >"$RED_DIR/output.log" 2>&1
-STATUS=$?
-set -e
-test "$STATUS" -ne 0
-rg -n "safe_fs|E0583|could not compile" "$RED_DIR/output.log"
-printf 'parent_sha=%s\nexit=%s\nkind=compile-scaffold\n' "$SCAFFOLD_PARENT" "$STATUS" >"$RED_DIR/receipt.txt"
-```
-
 Scaffold GREEN, commit, and review:
 
 ```bash
@@ -1263,14 +1496,25 @@ cargo check -p opentake-project --lib --tests --target x86_64-unknown-linux-gnu
 cargo check -p opentake-project --lib --tests --target x86_64-pc-windows-msvc
 cargo clippy -p opentake-project --lib --tests -- -D warnings
 git diff --check
-git add crates/opentake-project/src/lib.rs crates/opentake-project/src/safe_fs
+git add crates/opentake-project/src/safe_fs
+git diff --cached --name-only | diff -u - <(printf '%s\n' \
+  crates/opentake-project/src/safe_fs/capability.rs \
+  crates/opentake-project/src/safe_fs/component.rs \
+  crates/opentake-project/src/safe_fs/error.rs \
+  crates/opentake-project/src/safe_fs/mod.rs \
+  crates/opentake-project/src/safe_fs/ops.rs \
+  crates/opentake-project/src/safe_fs/test_seam.rs \
+  crates/opentake-project/src/safe_fs/tests.rs \
+  crates/opentake-project/src/safe_fs/unix.rs \
+  crates/opentake-project/src/safe_fs/unsupported.rs \
+  crates/opentake-project/src/safe_fs/windows.rs)
 git commit -m "feat(project): add fail-closed C1B filesystem skeleton"
 SCAFFOLD_SHA=$(git rev-parse HEAD)
 ```
 
-The two reports are `$SAFETY_ROOT/logs/c1b-task-2a-$SCAFFOLD_SHA-attempt-1/{spec-security-review.md,implementation-review.md}`. Both must bind `SCAFFOLD_SHA` and approve 0/0/0 before the behavioral Task 2 test is added. Reviewers confirm every adapter refuses acquisition and the temporary component constructor always fails.
+For the first review set `REVIEW_ATTEMPT=1`; increment it for each rejected replacement without reusing a directory. The exact reports are `$SAFETY_ROOT/logs/c1b-task-2a-$SCAFFOLD_SHA-attempt-$REVIEW_ATTEMPT/{spec-security-review.md,implementation-review.md}`. Both must bind `SCAFFOLD_SHA`, cite `$SAFETY_ROOT/red/c1b-task-2a-$TEST_SHA/{output.log,receipt.txt}`, and approve 0/0/0 before Task 2B. Reviewers confirm the RED commit contains only `mod safe_fs;`, `E0583` is the compiler failure, every GREEN adapter refuses acquisition, and the temporary component constructor always fails.
 
-### Task 2 — common facade, component validation, unsupported adapter
+### Task 2B — common facade, component validation, unsupported adapter
 
 Test-only commit adds `component_accepts_safe_names_and_rejects_too_long_and_unsafe_names` to the sole `safe_fs/tests.rs`. Against the approved fail-closed scaffold it compiles, runs exactly one test, and fails at `safe component accepted`.
 
@@ -1278,7 +1522,7 @@ Test-only commit adds `component_accepts_safe_names_and_rejects_too_long_and_uns
 git add crates/opentake-project/src/safe_fs/tests.rs
 git commit -m "test(project): specify C1B common capability facade"
 TEST_SHA=$(git rev-parse HEAD)
-RED_DIR="$SAFETY_ROOT/red/c1b-task-2-$TEST_SHA"
+RED_DIR="$SAFETY_ROOT/red/c1b-task-2b-$TEST_SHA"
 mkdir "$RED_DIR"
 set +e
 cargo test -p opentake-project --lib safe_fs::tests::component_accepts_safe_names_and_rejects_too_long_and_unsafe_names -- --exact --test-threads=1 >"$RED_DIR/output.log" 2>&1
@@ -1289,7 +1533,7 @@ rg -n "running 1 test|component_accepts_safe_names_and_rejects_too_long_and_unsa
 printf 'test_sha=%s\nparent_sha=%s\nexit=%s\n' "$TEST_SHA" "$(git rev-parse "$TEST_SHA^")" "$STATUS" >"$RED_DIR/receipt.txt"
 ```
 
-GREEN replaces only the temporary fail-closed `component.rs` with the complete validator in section 2. All acquisition adapters remain the section-3 refusal implementation, so Task 2 claims component/common compile behavior only.
+GREEN replaces only the temporary fail-closed `component.rs` with the complete validator in section 2. All acquisition adapters remain the section-3 refusal implementation, so Task 2B claims component/common compile behavior only.
 
 ```bash
 cargo test -p opentake-project --lib safe_fs::tests::component_accepts_safe_names_and_rejects_too_long_and_unsafe_names -- --exact --test-threads=1
@@ -1306,28 +1550,33 @@ git commit -m "feat(project): validate C1B filesystem components"
 GREEN_SHA=$(git rev-parse HEAD)
 ```
 
-Task 2 does not claim file, directory, quarantine, or platform behavior. Reviews bind `GREEN_SHA` and must be 0/0/0 before Task 3.
+Task 2B does not claim file, directory, quarantine, or platform behavior. Its reports are `$SAFETY_ROOT/logs/c1b-task-2b-$GREEN_SHA-attempt-$REVIEW_ATTEMPT/{spec-security-review.md,implementation-review.md}` and its RED receipt is `$SAFETY_ROOT/red/c1b-task-2b-$TEST_SHA/receipt.txt`. Reviews bind `GREEN_SHA` and must be 0/0/0 before Task 4.
 
-### Task 3 — Unix recursive namespace and platform-dispatched file I/O
+### Task 4 — Unix recursive namespace, filesystem/case proof, and platform-dispatched file I/O
 
-The test-only commit adds exactly these named tests to the single `safe_fs/tests.rs`: `recursive_authority_revalidates_anchor_and_entire_child_scope`, `query_symlink_fifo_and_special_entries_is_nonblocking_present_metadata`, and `platform_dispatched_file_bytes_copy_seek_flush_and_sync`.
+The test-only commit adds exactly these named tests to the single `safe_fs/tests.rs`: `recursive_authority_revalidates_anchor_and_entire_child_scope`, `query_symlink_fifo_and_special_entries_is_nonblocking_present_metadata`, `platform_dispatched_file_bytes_copy_seek_flush_and_sync`, Linux-only `linux_filesystem_and_case_probe_matrix_is_enforced` and `linux_revalidation_rejects_fsid_device_and_case_changes`, and macOS-only `macos_local_and_case_probe_matrix_is_enforced` and `macos_revalidation_rejects_fsid_device_and_case_changes`. Against the approved unsupported adapter and already-reviewed test-only seam, the host-specific probe matrix compiles, runs once, and fails only when acquisition returns the typed refusal.
 
 ```bash
 git add crates/opentake-project/src/safe_fs/tests.rs
 git commit -m "test(project): specify Unix recursive filesystem authorities"
 TEST_SHA=$(git rev-parse HEAD)
-RED_DIR="$SAFETY_ROOT/red/c1b-task-3-$TEST_SHA"
+RED_DIR="$SAFETY_ROOT/red/c1b-task-4-$TEST_SHA"
 mkdir "$RED_DIR"
+case "$(uname -s)" in
+  Linux) RED_TEST=linux_filesystem_and_case_probe_matrix_is_enforced ;;
+  Darwin) RED_TEST=macos_local_and_case_probe_matrix_is_enforced ;;
+  *) printf 'Task 4 RED requires native Linux or macOS\n' >&2; exit 1 ;;
+esac
 set +e
-cargo test -p opentake-project --lib safe_fs::tests::unix_contract::recursive_authority_revalidates_anchor_and_entire_child_scope -- --exact --test-threads=1 >"$RED_DIR/output.log" 2>&1
+cargo test -p opentake-project --lib "safe_fs::tests::unix_contract::$RED_TEST" -- --exact --test-threads=1 >"$RED_DIR/output.log" 2>&1
 STATUS=$?
 set -e
 test "$STATUS" -ne 0
-rg -n "running 1 test|recursive_authority_revalidates_anchor_and_entire_child_scope|FAILED|error" "$RED_DIR/output.log"
+rg -n "running 1 test|$RED_TEST|UnsupportedTarget|FAILED" "$RED_DIR/output.log"
 printf 'test_sha=%s\nparent_sha=%s\nexit=%s\n' "$TEST_SHA" "$(git rev-parse "$TEST_SHA^")" "$STATUS" >"$RED_DIR/receipt.txt"
 ```
 
-GREEN adds the Unix acquisition, full-scope rewalk, query, file byte I/O, and create/open code from section 4. It does not add quarantine or cleanup yet. To keep the single platform seam compile-complete, Task 3 ends `unix.rs` with these exact fail-closed bodies; Task 4 replaces them with section 4's consuming implementations:
+GREEN adds the Unix acquisition, real and injected filesystem/case probes, full-scope rewalk, query, file byte I/O, and create/open code from section 4. The injected raw samples pass through the same classifiers and snapshot comparison used by release probes and revalidation; real native probes remain additive. It does not add quarantine or cleanup yet. To keep the single platform seam compile-complete, Task 4 ends `unix.rs` with these exact fail-closed bodies; Task 5 replaces them with section 4's consuming implementations:
 
 ```rust
 pub(super) fn quarantine_stage(_: StageCapability, _: &DirectoryAuthority, _: ComponentName) -> Result<QuarantinedCapability> {
@@ -1351,6 +1600,7 @@ pub(super) fn delete_quarantined_empty_directory(_: QuarantinedCapability) -> Re
 cargo test -p opentake-project --lib safe_fs::tests::unix_contract::recursive_authority_revalidates_anchor_and_entire_child_scope -- --exact --test-threads=1
 cargo test -p opentake-project --lib safe_fs::tests::unix_contract::query_symlink_fifo_and_special_entries_is_nonblocking_present_metadata -- --exact --test-threads=1
 cargo test -p opentake-project --lib safe_fs::tests::unix_contract::platform_dispatched_file_bytes_copy_seek_flush_and_sync -- --exact --test-threads=1
+cargo test -p opentake-project --lib safe_fs::tests::unix_contract -- --test-threads=1
 cargo test -p opentake-project --lib safe_fs::tests -- --test-threads=1
 cargo fmt --all --check
 cargo clippy -p opentake-project --lib --tests -- -D warnings
@@ -1364,17 +1614,17 @@ git commit -m "feat(project): add Unix recursive filesystem authorities"
 GREEN_SHA=$(git rev-parse HEAD)
 ```
 
-Native Linux and macOS receipts at this exact `GREEN_SHA` are blocking for Task 3 approval; cross-target check is compilation evidence only.
+Task 4 reports are `$SAFETY_ROOT/logs/c1b-task-4-$GREEN_SHA-attempt-$REVIEW_ATTEMPT/{spec-security-review.md,implementation-review.md}`, the RED receipt is `$SAFETY_ROOT/red/c1b-task-4-$TEST_SHA/receipt.txt`, and native receipts are `$SAFETY_ROOT/native-receipts/c1b-task-4-$GREEN_SHA/{linux,macos}/results.json`. Native Linux and macOS receipts at this exact `GREEN_SHA` are blocking for Task 4 approval; cross-target check is compilation evidence only.
 
-### Task 4 — consuming quarantine, recursive cleanup, and publish
+### Task 5 — consuming quarantine, recursive cleanup, and publish
 
 The test-only commit adds named tests `source_swap_before_quarantine_restores_without_deletion`, `restore_collision_fail_leaks_original_and_quarantine`, `final_unix_name_window_is_explicit_same_account_boundary`, `nested_recursive_quarantine_cleanup_removes_files_symlink_fifo_and_directories`, and `destination_collision_preserves_stage_and_every_destination_kind`.
 
 ```bash
-git add crates/opentake-project/src/safe_fs/tests.rs crates/opentake-project/src/safe_fs/test_seam.rs
+git add crates/opentake-project/src/safe_fs/tests.rs
 git commit -m "test(project): specify Unix quarantine and recursive cleanup"
 TEST_SHA=$(git rev-parse HEAD)
-RED_DIR="$SAFETY_ROOT/red/c1b-task-4-$TEST_SHA"
+RED_DIR="$SAFETY_ROOT/red/c1b-task-5-$TEST_SHA"
 mkdir "$RED_DIR"
 set +e
 cargo test -p opentake-project --lib safe_fs::tests::unix_contract::nested_recursive_quarantine_cleanup_removes_files_symlink_fifo_and_directories -- --exact --test-threads=1 >"$RED_DIR/output.log" 2>&1
@@ -1385,7 +1635,7 @@ rg -n "running 1 test|nested_recursive_quarantine_cleanup_removes_files_symlink_
 printf 'test_sha=%s\nparent_sha=%s\nexit=%s\n' "$TEST_SHA" "$(git rev-parse "$TEST_SHA^")" "$STATUS" >"$RED_DIR/receipt.txt"
 ```
 
-GREEN adds the complete consuming capability algorithms from section 4 and bounded race seam from section 5.
+GREEN adds the complete consuming capability algorithms and their `#[cfg(test)]` bounded race-hook call sites from section 4; the section-5 seam itself was already present in the fail-closed scaffold.
 
 ```bash
 cargo test -p opentake-project --lib safe_fs::tests::unix_contract -- --test-threads=1
@@ -1404,7 +1654,7 @@ git commit -m "feat(project): add Unix consuming quarantine cleanup"
 GREEN_SHA=$(git rev-parse HEAD)
 ```
 
-For each GREEN SHA, reports are written to `$SAFETY_ROOT/logs/c1b-task-N-$GREEN_SHA-attempt-1/{spec-security-review.md,implementation-review.md}`. Both bind the same 40-character SHA and state `APPROVE — Critical 0 / Important 0 / Minor 0`. Linux/macOS native receipt paths are `$SAFETY_ROOT/native-receipts/c1b-task-N-$GREEN_SHA/{linux,macos}/results.json`. Missing publication authority is `BLOCKED`; it is not permission to push or dispatch.
+Task 5 reports are `$SAFETY_ROOT/logs/c1b-task-5-$GREEN_SHA-attempt-$REVIEW_ATTEMPT/{spec-security-review.md,implementation-review.md}`, its RED receipt is `$SAFETY_ROOT/red/c1b-task-5-$TEST_SHA/receipt.txt`, and native receipts are `$SAFETY_ROOT/native-receipts/c1b-task-5-$GREEN_SHA/{linux,macos}/results.json`. Both reviews bind the same 40-character SHA and state `APPROVE — Critical 0 / Important 0 / Minor 0`. Missing publication authority is `BLOCKED`; it is not permission to push or dispatch.
 
 ## 8. Residual platform limits
 

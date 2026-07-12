@@ -1,4 +1,4 @@
-# OpenTake Wave 1B-C1B Safe Filesystem Capability Implementation Plan — Attempt 3
+# OpenTake Wave 1B-C1B Safe Filesystem Capability Implementation Plan — Attempt 4
 
 > **Execution rule:** use `superpowers:subagent-driven-development` for every task. Every task is RED → GREEN → focused commit → two fresh exact-SHA reviews. No implementation starts until this plan and both appendices are independently approved 0/0/0.
 
@@ -9,7 +9,7 @@
 **Normative appendices (part of this plan):**
 
 - `docs/superpowers/plans/c1b/2026-07-12-c1b-common-unix-normative.md`: complete common enums/types/facade, recursive `DirectoryAuthority`, retained `FileCapability` byte I/O, Unix adapter, error/absence table, deterministic seams, quarantine/fail-leak protocol, tests, and Task 2A/2B/4/5 execution blocks.
-- `docs/superpowers/plans/c1b/2026-07-12-c1b-windows-ci-normative.md`: complete Windows NT contracts, raw-status mapping, parsers, DACL, HANDLE-bound mutation, exact-SHA workflow/receipt YAML, evidence schema, and remote BLOCKED rule.
+- `docs/superpowers/plans/c1b/2026-07-12-c1b-windows-ci-normative.md`: complete Windows NT contracts, raw-status mapping, parsers, DACL, HANDLE-bound mutation, Task 6A/6B/7 patches, exact-SHA workflow/receipt YAML, repository validators, evidence schema, and remote BLOCKED rule.
 
 A task brief cites this entry plus exact appendix sections. No unversioned source is normative.
 
@@ -79,9 +79,9 @@ git commit -m "test: make project fixtures target-clean"
 
 Double review before Task 2A.
 
-## Task 2A — Compile-complete fail-closed substrate scaffold
+## Task 2A — Compile RED, then fail-closed substrate scaffold
 
-Execute Common/Unix appendix section 7, Task 2A exactly. This is the only permitted compile-scaffold RED: the pre-change command must fail because `safe_fs` is absent, then GREEN creates the private common modules plus selected adapters that all refuse authority acquisition. `component.rs` also refuses every component. No filesystem authority or product surface is enabled.
+Execute Common/Unix appendix section 7, Task 2A exactly. First make a test-only commit that adds only private `mod safe_fs;` to `lib.rs`; the exact `cargo check` must then fail with `E0583` because the module files are absent. GREEN is a separate commit that creates the private common modules plus selected adapters, all refusing authority acquisition. `component.rs` also refuses every component. No filesystem authority or product surface is enabled.
 
 Commit only the appendix add set as `feat(project): add fail-closed C1B filesystem skeleton`; run the three target checks and both exact-SHA reviews before Task 2B.
 
@@ -109,15 +109,19 @@ Execute Common/Unix appendix section 7, Task 4 exactly. The test-only commit cov
 
 GREEN installs the move-only `StageCapability → QuarantinedCapability → CleanupCapability` state machine and bounded race seam. Unix quarantine is name-linearized, re-opened and identity-verified; mismatch restores once or fail-leaks. Final Unix name mutation remains inside the documented same-account boundary. Commit `feat(project): add Unix consuming quarantine cleanup`; require same-SHA Linux/macOS receipts and double review.
 
-## Task 6 — Windows recursive read/I/O substrate
+## Task 6A — Compile-complete fail-closed Windows platform scaffold
 
-Execute Windows/CI appendix section 16 item 2 using the unified common facade. The test-only commit adds the complete Windows fixture/spy/race helpers and read/I/O tests without production NT bodies. The appendix `expect_red` function must prove each focused test ran exactly once and failed behaviorally.
+Execute Windows/CI appendix sections 16 and 18.1 exactly. This focused scaffold commit replaces Task 2A's Windows `include!("unsupported.rs")` with the complete Windows platform surface and target dependency. Every acquisition, I/O, DACL, quarantine, publish, and cleanup operation returns a structured fail-closed error; no authority can be acquired and no filesystem mutation occurs. Three-target compilation, product-closed checks, and both exact-SHA reviews are blocking before Task 6B.
 
-GREEN adds Windows appendix sections 2–8 and 11 production bodies: exact operation contracts, synchronous IOSB, case/volume/remote proof, bounds-checked directory/reparse parsers, NTSTATUS-first mapping, recursive authority, and platform-dispatched I/O. Query reports reparse metadata as present; open rejects it. Commit `feat(project): capture Windows filesystem capabilities`; require the full native Windows test group, exact-SHA Windows receipt, three-target checks, product-closed checks, and two reviews.
+## Task 6B — Windows recursive read/I/O substrate
+
+Execute Windows/CI appendix sections 16, 18.2, and the read/I/O portions of sections 2–7/11. The test-only commit adds the complete Windows fixture/spy/race helpers and read/I/O tests against the compiling refusal scaffold. One named acquisition/I/O test must reach the typed refusal, run exactly once, and fail behaviorally; a compile failure or `0 tests` invalidates RED. Pure parser/contract tests may already pass and are not misreported as RED.
+
+GREEN adds only Windows acquisition/I/O production bodies: exact operation contracts, synchronous IOSB, case/volume/remote proof, bounds-checked directory/reparse parsers, NTSTATUS-first mapping, recursive authority, `CreatePermissions::Inherit`, and platform-dispatched I/O. Query reports reparse metadata as present; open rejects it. OwnerOnly/DACL and every mutation entry remain explicit compiling refusal bodies for Task 7. Commit `feat(project): capture Windows filesystem capabilities`; require the Task 6B native group, exact-SHA Windows receipt, three-target checks, product-closed checks, and two reviews.
 
 ## Task 7 — Windows DACL and retained-HANDLE mutation
 
-Execute Windows/CI appendix section 16 item 3. The test-only commit adds the complete DACL/delete/rename tests and must produce three behavioral RED receipts through `expect_red`. GREEN adds appendix sections 8–10 mutation bodies. Protected owner DACL storage outlives `NtCreateFile`; cleanup and publication consume the original DELETE-capable HANDLE; rename uses only `NtSetInformationFile(FileRenameInformation)` relative to the retained parent.
+Execute Windows/CI appendix sections 16 and 18.3–18.6. The test-only commit adds the complete OwnerOnly/DACL/delete/rename/reparse-cleanup/mapping tests against Task 6B's typed refusal bodies and must produce the specified behavioral RED receipts. GREEN alone adds appendix sections 8–10 security/mutation bodies. Protected owner DACL storage outlives `NtCreateFile`; cleanup and publication consume the original DELETE-capable HANDLE; reparse cleanup deletes only the retained link handle; rename uses only `NtSetInformationFile(FileRenameInformation)` relative to the retained parent and performs no conflicting post-success reopen. Fresh full-chain mapping revalidation precedes quarantine and publish.
 
 Commit `feat(project): add Windows capability-relative mutations`; require full Windows native tests, same-SHA receipt, all common/product-closed gates, and two reviews.
 
@@ -140,7 +144,7 @@ cargo check -p opentake-project --lib --tests --target x86_64-pc-windows-msvc
 git diff --check
 ```
 
-Validate three receipt schemas, unique IDs, requested=checked-out=final SHA, all command/aggregate exits 0. Spawn fresh filesystem/spec/security and implementation/quality/integration auditors; both bind final SHA and approve 0/0/0. `results.md` records baseline/final SHA, pre/post clean status, all local gates, run IDs/attempts/receipt SHAs, audits, aggregate. C1B completes only when results validation exits 0; C1/C1C–C1E/Wave 1B-C remain incomplete.
+Validate three receipt schemas, unique IDs, requested=checked-out=final SHA, all command/aggregate exits 0 using the repository-versioned `scripts/validate-c1b-evidence.rb` and exact invocation in Windows/CI appendix section 18.8. Spawn fresh filesystem/spec/security and implementation/quality/integration auditors; both bind final SHA and approve 0/0/0. `results.md` records baseline/final SHA, pre/post clean status, all local gates, run IDs/attempts/receipt SHAs, audits, aggregate. C1B completes only when results validation exits 0; C1/C1C–C1E/Wave 1B-C remain incomplete.
 
 ## Residual risks and stop rules
 
