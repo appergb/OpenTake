@@ -185,8 +185,8 @@ export function ExportDialog() {
 
   const modeOptions = useMemo(
     () => [
+      // C1A fail closed: Rust-owned destination and disclosure are not integrated yet.
       { id: "video" as const, label: t("export.mode.video") },
-      { id: "bundle" as const, label: t("export.mode.bundle") },
     ],
     [t],
   );

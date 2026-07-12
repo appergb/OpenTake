@@ -199,7 +199,6 @@ pub fn run() {
             export::export_video,
             export::export_range,
             export::cancel_export,
-            export::export_bundle,
             secret::secret_save,
             secret::secret_load,
             secret::secret_delete,

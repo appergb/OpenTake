@@ -901,10 +901,9 @@ fn export_range_workflow(
 
 // MARK: - Self-contained `.opentake` bundle export (#29 / upstream `.palmier`)
 
-/// One media entry that could not be bundled because its source file was not
-/// found on disk. Mirror of `opentake_project::MissingMedia`, serialized as
-/// camelCase for the front end (`id` / `name`). Kept as a dangling reference in
-/// the exported bundle exactly as upstream does.
+/// C1A missing-media compatibility DTO retained for Rust integration tests.
+/// No registered Tauri command or Web UI entry exposes it while the secure
+/// native workflow is under construction.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MissingMediaDto {
@@ -923,11 +922,9 @@ impl From<opentake_project::MissingMedia> for MissingMediaDto {
     }
 }
 
-/// Summary of a completed `.opentake` bundle export, returned to the front end.
-/// camelCase mirror of `opentake_project::ArchiveReport` plus the written
-/// `outPath`, so the dialog can surface the missing-media list (upstream keeps
-/// the export dialog open and lists what couldn't be included —
-/// `Export/ExportView.swift:369-375`).
+/// C1A bundle-report compatibility DTO retained for Rust integration tests.
+/// No registered Tauri command or Web UI entry exposes it while the secure
+/// native workflow is under construction.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BundleReportDto {
@@ -961,55 +958,9 @@ impl BundleReportDto {
     }
 }
 
-/// `export_bundle`: write a self-contained `.opentake` bundle to `out_path`, with
-/// every resolvable media reference copied inside and the manifest rewritten to
-/// bundle-relative paths (port of upstream `exportPalmierProject` /
-/// `PalmierProjectExporter.export`).
-///
-/// Mirrors upstream `Export/ExportService.swift:166-214` +
-/// `Export/ExportView.swift:351-378`:
-/// - **No save-first.** Upstream archives the *live* in-memory `editor.timeline`
-///   / `editor.mediaManifest` / `editor.generationLog` directly; it does not
-///   flush to disk first. Here the authoritative timeline/manifest/log live in
-///   the Rust [`AppCore`], so snapshotting them is the exact equivalent — the
-///   bundle reflects the live document with no separate save.
-/// - **Unsaved projects are allowed.** Upstream passes `editor.projectURL?`
-///   (optional) as the source bundle; when nil, only `.external` media resolves.
-///   [`AppCore::project_dir`] is `None` for an unsaved project, and
-///   [`opentake_project::archive`] documents that `None` resolves only external
-///   media — so a never-saved project (all media external) still bundles fully,
-///   matching upstream.
-///
-/// Returns the missing-media report so the front end can list entries that
-/// couldn't be included. GPU is not involved (this is pure file collection); IO
-/// failures surface as `Err(String)` at the Tauri boundary.
-#[tauri::command]
-pub fn export_bundle(
-    core: State<'_, AppCore>,
-    out_path: String,
-) -> Result<BundleReportDto, String> {
-    let snapshot = core.bundle_export_snapshot();
-
-    run_bundle_export(
-        &snapshot.timeline,
-        &snapshot.manifest,
-        &snapshot.generation_log,
-        snapshot.project_path.as_deref(),
-        &snapshot.compatibility,
-        out_path,
-    )
-}
-
-/// The bundle-export orchestration, decoupled from Tauri/`AppCore` so it can be
-/// driven directly by a temp-dir integration test with a hand-built timeline /
-/// manifest / generation log. The command wrapper only snapshots the live
-/// session and delegates here (the same split [`run_export`] uses for the video
-/// path). `pub` for the integration test in `tests/bundle_export_integration.rs`.
-///
-/// `source_bundle` is the open project's `.opentake` directory (used to resolve
-/// `.project` relative media and carry across thumbnail / chat sessions), or
-/// `None` for a never-saved project (only `.external` media then resolves) —
-/// matching upstream's optional `sourceProjectURL`.
+/// C1A non-command archive seam. It is public only for Rust integration tests;
+/// the registered Tauri handler and UI entry are intentionally absent.
+/// `source_bundle` remains optional so never-saved-project parity can be tested.
 pub fn run_bundle_export(
     timeline: &opentake_domain::Timeline,
     manifest: &opentake_domain::MediaManifest,
