@@ -70,6 +70,11 @@ path for this revision. This design applies these narrower conclusions:
 - The output is a directory package. Cross-platform `std::fs::rename` cannot
   atomically replace an arbitrary existing non-empty directory. Wave 1B-C must
   not describe backup/rollback as a single atomic replace.
+- The renderer is inside the attack boundary. A separate hostile process already
+  running as the same operating-system account is not; that process can read and
+  rewrite all of the user's project data regardless of this command. Destination
+  collision is nevertheless handled atomically so benign concurrent exporters
+  cannot clobber one another.
 
 ## Alternatives Considered
 
@@ -106,6 +111,35 @@ Users export to a new name instead.
 Save-As next. It constructs an immutable preflight plan before the first output
 write.
 
+The implementation boundary is a new private `safe_fs` module rather than
+scattered `std::fs` checks:
+
+- on Linux and macOS, `rustix` supplies descriptor-relative `openat`, `statat`,
+  directory iteration, unlink, and `renameat_with` operations;
+- Unix traversal opens each directory with `O_DIRECTORY | O_NOFOLLOW |
+  O_CLOEXEC`, opens leaves with `O_NOFOLLOW | O_CLOEXEC`, and verifies type and
+  `(device, inode)` from the opened handle;
+- on Windows, a target-specific `windows-sys` adapter opens directories with
+  `FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT`, rejects every
+  reparse point through `FileAttributeTagInfo`, retains file identity from
+  `FileIdInfo`, and holds the authorized parent without `FILE_SHARE_DELETE`;
+- unsupported operating systems or filesystems return typed
+  `UnsupportedSecureFilesystem`/`UnsupportedAtomicPublish`; there is no
+  path-based or ordinary-rename fallback.
+
+Linux, macOS, and Windows compile gates are required. The path-policy and
+publication race suites run natively on all three release platforms; the
+existing Ubuntu-only CI is expanded before C1 is accepted.
+
+Project media and auxiliary trees always reject symlink/reparse components.
+External media uses a separate bounded resolver: Unix walks with `readlinkat`
+relative to retained directory descriptors; Windows reads only supported
+symlink/mount-point reparse data with `FSCTL_GET_REPARSE_POINT`. Both cap link
+depth, reject loops and unsupported reparse tags, produce a canonical
+component-only target, and then reopen that target with nofollow/reparse-point
+flags for identity verification. Ambient `canonicalize()` is discovery only and
+is never the copy authorization primitive.
+
 Destination requirements:
 
 - absolute path;
@@ -124,6 +158,13 @@ a differently cased alias as the existing source while a case-sensitive volume
 may accept it as a distinct new entry. The implementation does not infer volume
 semantics from the host platform and does not use the existing lexical
 `standardize()` dedup key as a security decision.
+
+The native selection is converted immediately into a
+`DestinationCapability`: the canonical parent directory handle, its stable file
+identity, the validated single destination name, and an exclusive random stage
+name. Stage creation, output `create_new`, validation, cleanup, and publication
+remain relative to that same handle. Neither the original renderer-visible path
+nor a freshly resolved parent path is used after capability creation.
 
 Project media requirements:
 
@@ -146,33 +187,52 @@ Auxiliary source requirements:
 
 External media requirements:
 
-- missing external paths retain the current missing-media report;
-- readable external paths are enumerated before the save panel;
-- symlink targets are resolved for the confirmation summary and opened once for
-  copying; the existing lexical dedup key remains unchanged, so two separately
-  listed symlink paths still produce separate collected entries as upstream
-  expects;
-- Rust shows a native warning that the export will read files outside the
-  project and reports the count plus representative paths/targets. Cancel
-  returns no output and performs no writes;
+- `absolutePath` must be absolute. Relative paths never resolve against the
+  process working directory;
+- a symlink is allowed only when complete resolution ends at a regular file;
+  a directory, FIFO, socket, device, reparse point, symlink loop, or other
+  special target is rejected;
+- only `NotFound` is missing. Permission, metadata, resolution, and other I/O
+  failures are typed errors rather than missing media;
+- the analysis records every lexically distinct manifest path, status, resolved
+  target, and stable file identity. The existing lexical dedup key remains
+  unchanged, so two separately listed symlink paths still produce separate
+  collected entries as upstream expects;
+- Rust displays the complete ordered list through paged native message dialogs,
+  ten entries per page. Each page includes original path, resolved target, and
+  `regular` or `missing` status; intermediate pages use native `Next`/`Cancel`
+  buttons, the last page alone uses `Approve all`/`Cancel`, and cancel on any
+  page returns no output and performs no writes. No entry may be hidden behind
+  a representative sample;
+- a manifest over 4,096 external entries or 4 MiB of disclosure text returns
+  typed `TooManyExternalSources` before showing dialogs or writing output;
+- successfully copied external entries are rewritten to project-relative
+  `media/` paths. A missing external entry is rewritten to a deterministic,
+  absent `media/missing/<asset-id>-<sanitized-basename>` project reference and
+  remains in the missing-media report. No host absolute path is persisted in
+  the exported `media.json`;
 - no external-source approval is inferred from project JSON or WebView state.
 
 If an external path resolves to a different target between native confirmation
 and source-handle acquisition, export aborts without output. It does not silently
 extend the confirmation to the replacement target.
 
-The copy implementation uses source file handles and destination `create_new`
-handles. A separate check followed by path-based `fs::copy` is not sufficient.
-Directory traversal must be descriptor/capability-relative or must prove the
-opened entry identity has not changed. Tests introduce swaps at the check/open
-seams.
+The copy implementation is bounded and streaming. It retains source/destination
+root capabilities plus each source's approved canonical target and stable file
+identity, but does not pre-open an unbounded handle set. For each item it opens
+at most one source and one destination leaf, verifies the opened identity and
+regular-file metadata against the plan, copies through those handles, verifies
+that size/identity did not change during the copy, and closes both before the
+next item. A separate check followed by path-based `fs::copy` is not sufficient.
+Tests introduce swaps at the check/open seams and run a large manifest under a
+low file-descriptor limit.
 
 ### B. Build and publish split
 
 Archive becomes three explicit phases. Source-only analysis may run before the
 save panel so Rust can obtain external-source consent, but the immutable
 preflight plan is complete only after a destination has been selected and all
-approved source handles have been acquired:
+approved source identities and root capabilities have been recorded:
 
 1. `prepare`: validate compatibility, paths, relationships, source kinds, and
    external-source summary without creating output;
@@ -180,8 +240,29 @@ approved source handles have been acquired:
    under `dest.parent`, copy media/extras through the preflight plan, and write
    the three JSON documents into that empty stage;
 3. `publish_new`: open the staged bundle through `Project::open`, verify its
-   core documents and rewritten media references, then rename the complete
-   stage once to the still-nonexistent destination.
+   core documents and rewritten media references, verify the retained stage
+   identity, then perform one atomic no-replace rename to the destination.
+
+`publish_new` is a platform adapter, not `std::fs::rename`:
+
+- Linux calls descriptor-relative `renameat2(..., RENAME_NOREPLACE)` through
+  `rustix::fs::renameat_with(..., RenameFlags::NOREPLACE)`;
+- macOS calls descriptor-relative `renameatx_np(..., RENAME_EXCL)` through the
+  same `rustix` API; a volume that rejects exclusive rename fails closed;
+- Windows opens the stage with delete access and calls
+  `SetFileInformationByHandle(FileRenameInfo)` with `ReplaceIfExists = FALSE`
+  while the non-delete-shared parent handle remains open;
+- an unsupported syscall, volume, remote-share behavior, or filesystem returns
+  `UnsupportedAtomicPublish`. It never falls back to check-then-rename.
+
+The stage is exclusively created with mode `0700` on Unix and equivalent
+owner-only access on Windows. Its retained identity is compared with the entry
+under the parent capability immediately before publication; a replaced or
+renamed stage is rejected and only the retained, proven stage is eligible for
+cleanup. Tests can swap the parent or stage before this final identity check and
+must observe refusal. Arbitrary hostile same-account processes after that check
+remain outside the stated threat boundary; atomic destination no-replace still
+holds against every concurrent destination creator.
 
 Any prepare/build/validation failure removes only the stage and leaves source
 and destination untouched. If a competing process creates the destination,
@@ -202,25 +283,38 @@ The Tauri command no longer accepts `outPath`:
 pub async fn export_bundle(
     app: tauri::AppHandle,
     core: tauri::State<'_, AppCore>,
-) -> Result<Option<BundleReportDto>, String>
+) -> Result<Option<BundleReportDto>, BundleExportErrorDto>
 ```
 
 Flow:
 
-1. capture a lock-consistent snapshot including project epoch, path, and document
-   version; `BundleExportSnapshot` gains the currently missing `version` field;
+1. capture a lock-consistent snapshot including project epoch, path, and a new
+   opaque `bundle_revision` covering every export input;
 2. perform source-only authorization analysis and, when necessary, show the
    native external-source confirmation;
 3. open the Rust `tauri-plugin-dialog` save panel with the safe default name;
 4. cancel returns `Ok(None)`;
-5. compare `AppCore::project_revision()` with the captured epoch/version and
-   recapture the current path; any epoch, version, or path change aborts before
-   output so the dialogs cannot authorize one revision and export another;
-6. complete destination relationship checks, acquire the approved source
-   handles, and reject any external target that differs from the confirmed
-   resolution;
-7. run build/publish in a blocking worker;
-8. return the report with the exact published path.
+5. call one lock-scoped `compare_bundle_identity()` over project epoch,
+   `bundle_revision`, and path; any change aborts before output so the dialogs
+   cannot authorize one bundle state and export another;
+6. complete destination relationship checks, acquire root capabilities and
+   approved source identities, and reject any external target that differs from
+   the confirmed resolution;
+7. run prepare/build/validation in a blocking worker;
+8. immediately before `publish_new`, call the same one-lock identity comparison
+   again. A same-project edit, media import/favorite/relink, Save-As, project
+   open/new, or future generation-log mutation deletes the stage and creates no
+   destination;
+9. publish and return the report with the exact published path.
+
+`CoreSessionSlot` owns a monotonic `bundle_revision` separate from the timeline
+version. It increments on every successful change to timeline, media manifest,
+generation log, compatibility state, or `project_dir`; all present and future
+mutators must pass through wrappers that advance it. `BundleExportSnapshot`
+contains the revision, and `bundle_identity()`/`compare_bundle_identity()` read
+epoch, revision, and path together under one lock. Focused tests prove media-only
+and generation-log-only changes invalidate an authorization even when the
+timeline version is unchanged.
 
 The main WebView cannot supply or override the destination. MCP and Agent do
 not gain bundle export in this slice. Any future Agent flow must use the same
@@ -228,7 +322,13 @@ Rust-owned native confirmation and may not expose a raw-path mutation tool.
 
 The Web API becomes `exportBundle(): Promise<BundleReport | null>`. The bundle
 branch removes its JavaScript save-panel/path construction. `null` is neutral
-cancel. Existing errors continue to render in the export dialog.
+cancel. Rejections carry a serializable tagged `BundleExportErrorDto` with a
+stable code (`destination_exists`, `unsafe_source`, `unsafe_destination`,
+`unsupported_source_type`, `project_changed`, `stage_failure`,
+`unsupported_filesystem`, `too_many_external_sources`, or `io`), a user-safe
+message, and an optional display path. The Tauri boundary maps `ProjectError`
+once without flattening it to `String`; TypeScript narrows the DTO by `code` and
+never parses localized messages.
 
 ### D. Bundle entry and empty-timeline behavior
 
@@ -262,6 +362,29 @@ Save-As to an existing different bundle is rejected. Normal save to the exact
 current project remains a separate component-atomic operation and receives no
 new overwrite semantics in C2.
 
+C2 uses an explicit short-lock CAS transaction:
+
+1. under the core lock, clone an immutable save snapshot containing timeline,
+   manifest, generation log, compatibility, source `project_dir`, project epoch,
+   and `bundle_revision`, plus the caller-provided captured thumbnail;
+2. release the lock and build/validate a new-destination stage through the C1
+   capabilities;
+3. reacquire the lock, compare epoch/revision/source path, and on mismatch
+   release the lock, delete the stage, and return `ProjectChanged`;
+4. while that short lock remains held, call `publish_new`, update `project_dir`,
+   advance `bundle_revision`, and capture the `ProjectSaved` payload; then
+   release the lock and emit the event.
+
+The core lock is never held during media/tree copying, but no edit can occur
+between the final CAS, atomic publication, and adoption of the new project path.
+A publication failure leaves the active path and revision unchanged. Thumbnail
+precedence is deterministic: fresh captured JPEG bytes override everything;
+otherwise a source `thumbnail.jpg` is copied through the nofollow policy; when
+neither exists the output omits it. Generation log always comes from the save
+snapshot, and chat sessions are safely copied from the source bundle. No output
+component is inherited from a pre-existing destination because C2 only publishes
+to a new path.
+
 Wave 1B-C is not release-complete until both subprojects pass their exact-bundle
 QA. C1 may merge first because it removes the current critical export path.
 
@@ -275,11 +398,15 @@ case into `Io` or `missing`:
 - destination exists;
 - unsupported source file type/symlink policy;
 - project changed during authorization;
-- stage validation/publication failure.
+- stage validation/publication failure;
+- too many external sources;
+- unsupported secure filesystem or atomic publication.
 
 User-facing errors state what remains safe: source unchanged, destination
 unchanged/not created, and whether a fresh name is required. Detailed paths stay
 in the export dialog error, not in transient success toasts or release logs.
+The serializable `BundleExportErrorDto` preserves those categories across IPC;
+only cancellation uses `Ok(None)`.
 
 ## Test Design
 
@@ -300,8 +427,14 @@ in the export dialog error, not in transient success toasts or release logs.
 - thumbnail and chat root/entry symlink escapes fail;
 - destination under chat sessions cannot recurse;
 - only `NotFound` becomes optional absent/missing;
-- external source confirmation accept/cancel and symlink-target presentation are
-  covered without changing lexical dedup semantics.
+- external relative, directory, FIFO, socket, device, permission-error, symlink
+  loop, and check/open-swap cases fail closed;
+- every external entry appears in the paged confirmation, including a sensitive
+  final entry in a large manifest, without changing lexical dedup semantics;
+- missing external paths are sanitized to absent project-relative references and
+  no host absolute path survives in output JSON;
+- a low-FD-limit large manifest completes without unbounded open handles, while
+  over-limit disclosure returns `TooManyExternalSources` before output.
 
 ### Publication
 
@@ -312,17 +445,23 @@ in the export dialog error, not in transient success toasts or release logs.
 - successful output contains no stale media or staging names and reopens through
   `Project::open`;
 - stage is a sibling on the same filesystem;
-- concurrent destination creation causes refusal, not replacement;
+- concurrent creation of a destination file, empty directory, non-empty
+  directory, or symlink causes atomic refusal and leaves it byte-identical;
+- parent/stage swaps before the final identity check cause refusal and cleanup
+  through retained capabilities;
+- unsupported no-replace syscalls/filesystems fail closed without ordinary
+  rename fallback;
+- Linux, macOS, and Windows native race suites exercise their platform adapter;
 - check/open and entry-type/copy race hooks cannot redirect a copy outside the
   approved source.
 
 ### Tauri/Web
 
 - the command has no `outPath` input and cancellation creates nothing;
-- a project identity/revision change while the native panel is open creates
-  nothing;
-- `BundleExportSnapshot.version` and `project_revision()` are compared before
-  the first output write;
+- a project epoch/path/bundle-revision change while a native dialog is open or
+  while the stage is building creates no destination;
+- timeline, media-only, and generation-log-only mutations each advance
+  `bundle_revision` and fail both pre-write and pre-publish CAS seams;
 - external-source confirmation is required before the save panel;
 - an external target swap after confirmation aborts rather than copying the new
   target;
@@ -330,8 +469,9 @@ in the export dialog error, not in transient success toasts or release logs.
 - saved/unsaved/collision defaults are safe;
 - bundle export remains available on an empty timeline while video remains
   disabled;
-- success, missing media, cancellation, typed path rejection, and generic I/O
-  errors render distinctly.
+- DTO serialization and Web narrowing distinguish success, missing media,
+  cancellation, every typed path/publication rejection, and generic I/O without
+  parsing message text.
 
 ### C2 Save-As
 
@@ -341,6 +481,10 @@ in the export dialog error, not in transient success toasts or release logs.
 - a complete new bundle is validated and published once, then becomes the
   active `project_dir`;
 - existing different destination remains byte-identical;
+- edits, media-only changes, open/new, and another Save-As during stage build
+  fail the final CAS with no destination and no path adoption;
+- captured thumbnail overrides a source cover, `None` safely carries a source
+  cover, and absent-on-both omits it; chat and generation log survive reopen;
 - normal same-project save behavior and autosave remain unchanged.
 
 Every code slice uses RED proof, focused tests, full relevant Rust/Web gates,
@@ -364,9 +508,11 @@ and Save-As reopen.
 
 Wave 1B-C1 is accepted only when normal UI cannot propose or authorize the open
 project as destination, renderer code cannot provide an arbitrary destination,
-all internal/archive-extra paths stay inside the approved source, existing
-destinations are never changed, and a successful fresh destination appears only
-after a complete validated stage.
+all internal/archive-extra paths stay inside the approved source, every external
+read is fully disclosed, host absolute paths do not leak into the output,
+existing destinations are protected by a proven platform no-replace primitive,
+and a successful fresh destination appears only after a complete validated stage
+whose bundle identity still matches the authorized snapshot.
 
 Wave 1B-C is accepted only after C2 also proves that Save-As publishes a complete
 new bundle or nothing, never changes project identity on failure, and reuses the
