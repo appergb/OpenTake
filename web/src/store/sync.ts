@@ -24,7 +24,17 @@ async function refreshMirror(): Promise<void> {
   const beforeCommit = useProjectStore.getState();
   if (beforeCommit.snapshotMutationRevision !== mutationRevision) return;
   beforeCommit.replaceProjectSnapshot(snap);
-  const committedRevision = useProjectStore.getState().snapshotMutationRevision;
+  const committed = useProjectStore.getState();
+  const committedRevision = committed.snapshotMutationRevision;
+  const projectChanged =
+    beforeCommit.projectEpoch !== committed.projectEpoch ||
+    beforeCommit.projectPath !== committed.projectPath;
+  if (projectChanged) {
+    resetProjectMediaTransientState();
+    useEditorUiStore.getState().resetProjectRuntimeState();
+    await refreshMedia();
+    if (generation !== refreshGeneration) return;
+  }
   const [canUndo, canRedo] = await Promise.all([api.canUndo(), api.canRedo()]);
   if (generation !== refreshGeneration) return;
   const current = useProjectStore.getState();
@@ -66,18 +76,9 @@ export async function startSync(): Promise<void> {
 
   const openedUnlisten = await api.onProjectOpened(async () => {
     if (!lifecycleActive()) return;
-    const before = useProjectStore.getState();
     await stopNativePlaybackForProjectBoundary();
     if (!lifecycleActive()) return;
     await refreshMirror();
-    if (!lifecycleActive()) return;
-    const after = useProjectStore.getState();
-    if (before.projectEpoch !== after.projectEpoch || before.projectPath !== after.projectPath) {
-      resetProjectMediaTransientState();
-      await refreshMedia();
-      if (!lifecycleActive()) return;
-    }
-    useEditorUiStore.getState().resetProjectRuntimeState();
   });
   if (!lifecycleActive()) {
     openedUnlisten();

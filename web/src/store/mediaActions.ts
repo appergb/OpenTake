@@ -82,7 +82,7 @@ export async function importFolderViaDialog(): Promise<void> {
   const project = captureProjectIdentity();
   let importOperation: MediaImportOperation | null = null;
   const open = await openDialog();
-  if (!open) return;
+  if (!open || !isCurrentProject(project)) return;
   const store = useMediaStore.getState();
   store.setError(null);
   try {
@@ -117,7 +117,7 @@ export async function importFolderViaDialog(): Promise<void> {
 export async function relinkMediaViaDialog(mediaRef: string): Promise<void> {
   const project = captureProjectIdentity();
   const open = await openDialog();
-  if (!open) return;
+  if (!open || !isCurrentProject(project)) return;
   const store = useMediaStore.getState();
   store.setError(null);
   try {
@@ -144,7 +144,7 @@ export async function importFilesViaDialog(): Promise<void> {
   const project = captureProjectIdentity();
   let importOperation: MediaImportOperation | null = null;
   const open = await openDialog();
-  if (!open) return;
+  if (!open || !isCurrentProject(project)) return;
   const store = useMediaStore.getState();
   store.setError(null);
   try {

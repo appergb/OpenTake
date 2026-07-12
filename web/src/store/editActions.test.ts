@@ -306,7 +306,7 @@ function clipboardClip(transform: Transform): Clip {
 describe("addMediaToTimeline", () => {
   beforeEach(() => {
     srv.reset();
-    useProjectStore.getState().setMirror(EMPTY, 0);
+    useProjectStore.getState().setMirror(EMPTY, 0, 1);
     useClipboardStore.getState().clear();
     useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, selectedClipIds: new Set() });
   });
@@ -545,7 +545,7 @@ describe("momentDurationFrames", () => {
 describe("addMomentToTimelineAt (trimmed source-range drop from a search hit)", () => {
   beforeEach(() => {
     srv.reset();
-    useProjectStore.getState().setMirror(EMPTY, 0);
+    useProjectStore.getState().setMirror(EMPTY, 0, 1);
     useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, selectedClipIds: new Set() });
   });
 
@@ -598,7 +598,7 @@ describe("addMomentToTimelineAt (trimmed source-range drop from a search hit)", 
 describe("addTextClip (Toolbar 'T' button)", () => {
   beforeEach(() => {
     srv.reset();
-    useProjectStore.getState().setMirror(EMPTY, 0);
+    useProjectStore.getState().setMirror(EMPTY, 0, 1);
     useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, selectedClipIds: new Set() });
   });
 

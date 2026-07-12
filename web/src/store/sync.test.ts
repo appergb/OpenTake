@@ -30,6 +30,7 @@ const srv = vi.hoisted(() => {
     redoCalls: 0,
     timelineListenerCalls: 0,
     openedListenerCalls: 0,
+    mediaError: null as string | null,
     projectOpenedHandlers: [] as Array<
       (path: string, projectEpoch: number, version: number) => Promise<void> | void
     >,
@@ -41,7 +42,9 @@ const srv = vi.hoisted(() => {
       const queued = srv.playbackResponses.shift();
       if (queued) await queued;
     }),
-    resetMediaTransient: vi.fn(),
+    resetMediaTransient: vi.fn(() => {
+      srv.mediaError = null;
+    }),
     refreshMedia: vi.fn(async () => true),
   };
 });
@@ -122,6 +125,7 @@ beforeEach(() => {
   srv.redoCalls = 0;
   srv.timelineListenerCalls = 0;
   srv.openedListenerCalls = 0;
+  srv.mediaError = null;
   srv.projectOpenedHandlers.length = 0;
   srv.playbackResponses.length = 0;
   srv.resetMediaTransient.mockClear();
@@ -139,6 +143,10 @@ afterEach(() => {
 
 describe("project event sync", () => {
   it("invalidates project scoped playback on externally initiated project_opened", async () => {
+    await startSync();
+    srv.order.length = 0;
+    srv.resetMediaTransient.mockClear();
+    srv.refreshMedia.mockClear();
     useEditorUiStore.setState({
       isPlaying: true,
       currentFrame: 77,
@@ -146,8 +154,6 @@ describe("project event sync", () => {
       selectedClipIds: new Set(["old-clip"]),
       layoutPreset: "media",
     });
-    await startSync();
-    srv.order.length = 0;
 
     srv.projectPath = "/tmp/snapshot.opentake";
     await srv.onProjectOpened?.("/tmp/event-payload.opentake", 7, 0);
@@ -161,6 +167,55 @@ describe("project event sync", () => {
     expect(ui.activeFrame).toBe(0);
     expect(ui.selectedClipIds.size).toBe(0);
     expect(ui.layoutPreset).toBe("media");
+    expect(srv.resetMediaTransient).toHaveBeenCalledTimes(1);
+    expect(srv.refreshMedia).toHaveBeenCalledTimes(1);
+  });
+
+  it("resets media at snapshot commit before later new-project errors can appear", async () => {
+    await startSync();
+    srv.resetMediaTransient.mockClear();
+    srv.refreshMedia.mockClear();
+    const pendingUndo = deferred<boolean>();
+    const pendingRedo = deferred<boolean>();
+    srv.snapshotResponses.push(
+      Promise.resolve(snapshot(2, 0, "/tmp/new-project.opentake")),
+    );
+    srv.undoResponses.push(pendingUndo.promise);
+    srv.redoResponses.push(pendingRedo.promise);
+    srv.mediaError = "old project error";
+
+    const opened = srv.onProjectOpened?.("/tmp/new-project.opentake", 2, 0);
+    await vi.waitFor(() => {
+      expect(useProjectStore.getState().projectPath).toBe("/tmp/new-project.opentake");
+    });
+    expect(srv.resetMediaTransient).toHaveBeenCalledTimes(1);
+    srv.mediaError = "new project error";
+
+    pendingUndo.resolve(false);
+    pendingRedo.resolve(false);
+    await opened;
+
+    expect(srv.mediaError).toBe("new project error");
+    expect(srv.refreshMedia).toHaveBeenCalledTimes(1);
+  });
+
+  it("applies media boundary effects when a later refresh wins the project-open race", async () => {
+    await startSync();
+    srv.resetMediaTransient.mockClear();
+    srv.refreshMedia.mockClear();
+    const openedSnapshot = deferred<RuntimeTimelineSnapshot>();
+    const winningSnapshot = deferred<RuntimeTimelineSnapshot>();
+    srv.snapshotResponses.push(openedSnapshot.promise, winningSnapshot.promise);
+
+    const opened = srv.onProjectOpened?.("/tmp/new-project.opentake", 2, 0);
+    await vi.waitFor(() => expect(srv.invalidate).toHaveBeenCalled());
+    const winningRefresh = forceRefresh();
+    openedSnapshot.resolve(snapshot(2, 0, "/tmp/new-project.opentake"));
+    await opened;
+    winningSnapshot.resolve(snapshot(2, 0, "/tmp/new-project.opentake"));
+    await winningRefresh;
+
+    expect(useProjectStore.getState().projectPath).toBe("/tmp/new-project.opentake");
     expect(srv.resetMediaTransient).toHaveBeenCalledTimes(1);
     expect(srv.refreshMedia).toHaveBeenCalledTimes(1);
   });
@@ -287,12 +342,6 @@ describe("project event sync", () => {
     const oldHandler = srv.projectOpenedHandlers[0]!;
     expect(oldHandler).toBeTypeOf("function");
 
-    useEditorUiStore.setState({
-      isPlaying: true,
-      currentFrame: 88,
-      activeFrame: 88,
-      selectedClipIds: new Set(["new-selection"]),
-    });
     const oldPlayback = deferred<void>();
     srv.playbackResponses.push(oldPlayback.promise);
     const oldCallback = oldHandler("/tmp/old-event.opentake", 1, 0);
@@ -302,6 +351,12 @@ describe("project event sync", () => {
     srv.projectPath = "/tmp/new.opentake";
     srv.compatibilityReadOnly = true;
     await startSync();
+    useEditorUiStore.setState({
+      isPlaying: true,
+      currentFrame: 88,
+      activeFrame: 88,
+      selectedClipIds: new Set(["new-selection"]),
+    });
     const newHandler = srv.projectOpenedHandlers[1]!;
     expect(newHandler).toBeTypeOf("function");
     const refreshesBeforeResume = srv.order.filter((entry) => entry === "refresh").length;

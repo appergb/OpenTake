@@ -27,6 +27,7 @@ const srv = vi.hoisted(() => ({
   relinkMedia: vi.fn(),
   getMedia: vi.fn(),
   preloadMedia: vi.fn(),
+  loadOpenDialog: vi.fn(),
   open: vi.fn(),
 }));
 
@@ -39,7 +40,7 @@ vi.mock("../lib/api", () => ({
 }));
 
 vi.mock("../lib/dialog", () => ({
-  openDialog: async () => srv.open,
+  openDialog: srv.loadOpenDialog,
 }));
 
 import {
@@ -58,7 +59,9 @@ describe("mediaActions import warmup", () => {
     srv.relinkMedia.mockReset();
     srv.getMedia.mockReset();
     srv.preloadMedia.mockReset();
+    srv.loadOpenDialog.mockReset();
     srv.open.mockReset();
+    srv.loadOpenDialog.mockResolvedValue(srv.open);
     srv.open.mockResolvedValue(srv.selected);
     srv.importMedia.mockResolvedValue(srv.imported);
     srv.importFolder.mockResolvedValue(srv.imported);
@@ -178,6 +181,30 @@ describe("mediaActions import warmup", () => {
 
     expect(srv.importFolder).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["file import", () => importFilesViaDialog()],
+    ["folder import", () => importFolderViaDialog()],
+    ["relink", () => relinkMediaViaDialog("asset-1")],
+  ])(
+    "does not open a stale %s picker or clear the new project error after dialog loading",
+    async (_label, runAction) => {
+      const dialogLoader = deferred<typeof srv.open>();
+      srv.loadOpenDialog.mockImplementationOnce(() => dialogLoader.promise);
+
+      const action = runAction();
+      useProjectStore.setState({
+        projectEpoch: 2,
+        projectPath: "/tmp/project-b.opentake",
+      });
+      useMediaStore.setState({ error: "new project error" });
+      dialogLoader.resolve(srv.open);
+      await action;
+
+      expect(srv.open).not.toHaveBeenCalled();
+      expect(useMediaStore.getState().error).toBe("new project error");
+    },
+  );
 
   it("surfaces a production-shaped relink failure for the current project", async () => {
     srv.open.mockResolvedValueOnce("/tmp/relink.mov");
