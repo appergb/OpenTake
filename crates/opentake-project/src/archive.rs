@@ -63,8 +63,9 @@ pub struct MissingMedia {
 /// `None` when the project has never been saved (only `.external` media can
 /// then be resolved).
 ///
-/// `dest_bundle` is created fresh: if it already exists it is removed first
-/// (matching upstream's atomic replace).
+/// `dest_bundle` must not exist. Any existing file, directory, or symlink
+/// returns [`ProjectError::DestinationExists`] before source resolution or
+/// output mutation.
 pub fn archive(
     timeline: &Timeline,
     manifest: &MediaManifest,
@@ -72,14 +73,14 @@ pub fn archive(
     source_bundle: Option<&Path>,
     dest_bundle: &Path,
 ) -> Result<ArchiveReport> {
-    // Match upstream's "remove then land" semantics (Swift exporter:
-    // `if fm.fileExists(atPath: destURL.path) { try fm.removeItem(at: destURL) }`
-    // before moving the freshly staged bundle into place). Without this, re-
-    // archiving over an existing bundle would leak stale `media/` files, an old
-    // `thumbnail.jpg`, etc. Deleting first yields a pure bundle and honors this
-    // function's doc contract.
-    if dest_bundle.exists() {
-        fs::remove_dir_all(dest_bundle).map_err(|e| ProjectError::io(dest_bundle, e))?;
+    match std::fs::symlink_metadata(dest_bundle) {
+        Ok(_) => {
+            return Err(ProjectError::DestinationExists {
+                path: dest_bundle.to_path_buf(),
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ProjectError::io(dest_bundle, error)),
     }
 
     let media_dir = layout::media_dir(dest_bundle);

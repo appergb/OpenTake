@@ -19,6 +19,9 @@ pub enum ProjectError {
     #[error("not a project bundle directory: {0}")]
     NotABundle(PathBuf),
 
+    #[error("bundle export destination already exists: {path}")]
+    DestinationExists { path: PathBuf },
+
     /// A filesystem operation failed. `path` records what we were touching.
     #[error("io error at {path}: {source}")]
     Io {
