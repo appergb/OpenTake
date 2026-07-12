@@ -41,6 +41,8 @@ const srv = vi.hoisted(() => {
       const queued = srv.playbackResponses.shift();
       if (queued) await queued;
     }),
+    resetMediaTransient: vi.fn(),
+    refreshMedia: vi.fn(async () => true),
   };
 });
 
@@ -84,6 +86,11 @@ vi.mock("../components/preview/nativePlaybackSession", () => ({
   stopNativePlaybackForProjectBoundary: srv.invalidate,
 }));
 
+vi.mock("./mediaStore", () => ({
+  resetProjectMediaTransientState: srv.resetMediaTransient,
+  refreshMedia: srv.refreshMedia,
+}));
+
 import { forceRefresh, startSync, stopSync } from "./sync";
 import { useProjectStore } from "./projectStore";
 import { useEditorUiStore } from "./uiStore";
@@ -117,6 +124,8 @@ beforeEach(() => {
   srv.openedListenerCalls = 0;
   srv.projectOpenedHandlers.length = 0;
   srv.playbackResponses.length = 0;
+  srv.resetMediaTransient.mockClear();
+  srv.refreshMedia.mockClear();
 });
 
 afterEach(() => {
@@ -152,6 +161,8 @@ describe("project event sync", () => {
     expect(ui.activeFrame).toBe(0);
     expect(ui.selectedClipIds.size).toBe(0);
     expect(ui.layoutPreset).toBe("media");
+    expect(srv.resetMediaTransient).toHaveBeenCalledTimes(1);
+    expect(srv.refreshMedia).toHaveBeenCalledTimes(1);
   });
 
   it("does not let a late old snapshot replace a newer project", async () => {

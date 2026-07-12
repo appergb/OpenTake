@@ -9,6 +9,7 @@
 import { create } from "zustand";
 import * as api from "../lib/api";
 import type { MediaFolder, MediaItem } from "../lib/types";
+import { useProjectStore } from "./projectStore";
 
 interface MediaState {
   items: MediaItem[];
@@ -21,7 +22,6 @@ interface MediaState {
   setFolders: (folders: MediaFolder[]) => void;
   setImporting: (importing: boolean) => void;
   setError: (error: string | null) => void;
-  resetTransientState: () => void;
 }
 
 export const useMediaStore = create<MediaState>((set) => ({
@@ -33,22 +33,76 @@ export const useMediaStore = create<MediaState>((set) => ({
   setFolders: (folders) => set({ folders }),
   setImporting: (importing) => set({ importing }),
   setError: (error) => set({ error }),
-  resetTransientState: () => set({ importing: false, error: null }),
 }));
 
 let started = false;
 let unlisten: (() => void) | null = null;
+let refreshGeneration = 0;
+let nextImportOperationId = 0;
+
+interface ProjectIdentity {
+  projectEpoch: number;
+  projectPath: string | null;
+}
+
+export interface MediaImportOperation {
+  id: number;
+  project: ProjectIdentity;
+}
+
+const activeImportOperations = new Map<number, MediaImportOperation>();
+
+function captureProjectIdentity(): ProjectIdentity {
+  const { projectEpoch, projectPath } = useProjectStore.getState();
+  return { projectEpoch, projectPath };
+}
+
+function sameProject(left: ProjectIdentity, right: ProjectIdentity): boolean {
+  return left.projectEpoch === right.projectEpoch && left.projectPath === right.projectPath;
+}
+
+function currentProjectHasActiveImport(): boolean {
+  const current = captureProjectIdentity();
+  return [...activeImportOperations.values()].some((operation) =>
+    sameProject(operation.project, current),
+  );
+}
+
+export function beginMediaImport(): MediaImportOperation {
+  const operation = {
+    id: ++nextImportOperationId,
+    project: captureProjectIdentity(),
+  };
+  activeImportOperations.set(operation.id, operation);
+  useMediaStore.getState().setImporting(true);
+  return operation;
+}
+
+export function endMediaImport(operation: MediaImportOperation): void {
+  if (!activeImportOperations.delete(operation.id)) return;
+  useMediaStore.getState().setImporting(currentProjectHasActiveImport());
+}
+
+export function resetProjectMediaTransientState(): void {
+  refreshGeneration += 1;
+  activeImportOperations.clear();
+  useMediaStore.setState({ importing: false, error: null });
+}
 
 /** Fetch the current catalog into the store (items + folder tree). */
-export async function refreshMedia(): Promise<void> {
+export async function refreshMedia(): Promise<boolean> {
+  const generation = ++refreshGeneration;
+  const project = captureProjectIdentity();
   const list = await api.getMedia();
-  const store = useMediaStore.getState();
+  if (generation !== refreshGeneration || !sameProject(project, captureProjectIdentity())) {
+    return false;
+  }
   // Dedup by id (#91-A4): a concurrent re-fetch can briefly surface duplicate
   // assets from overlapping snapshots; collapse by the authoritative item id so
   // the grid never renders the same asset twice (last wins, backend order kept).
   const byId = new Map(list.items.map((i) => [i.id, i] as const));
-  store.setItems([...byId.values()]);
-  store.setFolders(list.folders);
+  useMediaStore.setState({ items: [...byId.values()], folders: list.folders });
+  return true;
 }
 
 /** Idempotent bootstrap: initial fetch + subscribe to `media_changed`. */
@@ -62,6 +116,7 @@ export async function startMediaSync(): Promise<void> {
 }
 
 export function stopMediaSync(): void {
+  refreshGeneration += 1;
   unlisten?.();
   unlisten = null;
   started = false;

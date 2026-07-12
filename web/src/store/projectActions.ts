@@ -11,7 +11,7 @@ import { forceRefresh } from "./sync";
 import { useEditorUiStore } from "./uiStore";
 import { useProjectStore } from "./projectStore";
 import { useRecentStore } from "./recentStore";
-import { refreshMedia, useMediaStore } from "./mediaStore";
+import { refreshMedia, resetProjectMediaTransientState } from "./mediaStore";
 import { openDialog, saveDialog } from "../lib/dialog";
 import { t } from "../i18n";
 import { stopNativePlaybackForProjectBoundary } from "../components/preview/nativePlaybackSession";
@@ -39,7 +39,7 @@ export async function newProjectAndEnter(): Promise<void> {
     await stopNativePlaybackForProjectBoundary();
     const snapshot = await api.projectNew();
     useProjectStore.getState().replaceProjectSnapshot(snapshot);
-    useMediaStore.getState().resetTransientState();
+    resetProjectMediaTransientState();
     await forceRefresh();
     useEditorUiStore.getState().resetProjectRuntimeState();
     useEditorUiStore.getState().setView("editor");
@@ -63,7 +63,7 @@ export async function newProjectAndEnter(): Promise<void> {
   await stopNativePlaybackForProjectBoundary();
   const snapshot = await api.projectNew();
   useProjectStore.getState().replaceProjectSnapshot(snapshot);
-  useMediaStore.getState().resetTransientState();
+  resetProjectMediaTransientState();
   await api.projectSave(path);
   await forceRefresh();
   useProjectStore.getState().setProjectPath(path);
@@ -188,7 +188,7 @@ export async function openProjectPath(path: string): Promise<void> {
   await stopNativePlaybackForProjectBoundary();
   const snap = await api.projectOpen(path);
   useProjectStore.getState().replaceProjectSnapshot(snap);
-  useMediaStore.getState().resetTransientState();
+  resetProjectMediaTransientState();
   useProjectStore.getState().markSaved();
   if (snap.projectPath) useRecentStore.getState().add(snap.projectPath);
   await refreshMedia();

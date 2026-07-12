@@ -5,15 +5,25 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { MediaFolder, MediaItem, MediaList } from "../lib/types";
 
-const srv: { media: MediaList } = {
-  media: { items: [], folders: [] },
-};
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+const srv = vi.hoisted(() => ({
+  media: { items: [], folders: [] } as MediaList,
+  getMedia: vi.fn(),
+}));
 
 vi.mock("../lib/api", () => ({
-  getMedia: async (): Promise<MediaList> => srv.media,
+  getMedia: srv.getMedia,
 }));
 
 import { useMediaStore, refreshMedia } from "./mediaStore";
+import { useProjectStore } from "./projectStore";
 
 const item = (
   id: string,
@@ -36,8 +46,14 @@ const folder = (id: string, parentFolderId: string | null): MediaFolder => ({
 
 describe("mediaStore", () => {
   beforeEach(() => {
+    srv.getMedia.mockReset();
+    srv.getMedia.mockImplementation(async () => srv.media);
     useMediaStore.getState().setItems([]);
     useMediaStore.getState().setFolders([]);
+    useProjectStore.setState({
+      projectEpoch: 1,
+      projectPath: "/tmp/project-a.opentake",
+    });
   });
 
   it("starts with empty items and folders", () => {
@@ -89,5 +105,32 @@ describe("mediaStore", () => {
     const after = useMediaStore.getState().folders;
     expect(after).not.toBe(before);
     expect(after).toHaveLength(1);
+  });
+
+  it("does not let an older project refresh overwrite the current catalog", async () => {
+    const projectA = deferred<MediaList>();
+    srv.getMedia.mockImplementationOnce(() => projectA.promise);
+    const staleRefresh = refreshMedia();
+
+    useProjectStore.setState({
+      projectEpoch: 2,
+      projectPath: "/tmp/project-b.opentake",
+    });
+    srv.media = {
+      items: [item("project-b", null)],
+      folders: [folder("project-b-folder", null)],
+    };
+    await refreshMedia();
+
+    projectA.resolve({
+      items: [item("project-a", null)],
+      folders: [folder("project-a-folder", null)],
+    });
+    await staleRefresh;
+
+    expect(useMediaStore.getState().items.map((entry) => entry.id)).toEqual(["project-b"]);
+    expect(useMediaStore.getState().folders.map((entry) => entry.id)).toEqual([
+      "project-b-folder",
+    ]);
   });
 });

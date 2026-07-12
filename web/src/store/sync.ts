@@ -8,6 +8,7 @@ import * as api from "../lib/api";
 import { useProjectStore } from "./projectStore";
 import { useEditorUiStore } from "./uiStore";
 import { stopNativePlaybackForProjectBoundary } from "../components/preview/nativePlaybackSession";
+import { refreshMedia, resetProjectMediaTransientState } from "./mediaStore";
 
 let started = false;
 let unlistenTimeline: (() => void) | null = null;
@@ -65,10 +66,17 @@ export async function startSync(): Promise<void> {
 
   const openedUnlisten = await api.onProjectOpened(async () => {
     if (!lifecycleActive()) return;
+    const before = useProjectStore.getState();
     await stopNativePlaybackForProjectBoundary();
     if (!lifecycleActive()) return;
     await refreshMirror();
     if (!lifecycleActive()) return;
+    const after = useProjectStore.getState();
+    if (before.projectEpoch !== after.projectEpoch || before.projectPath !== after.projectPath) {
+      resetProjectMediaTransientState();
+      await refreshMedia();
+      if (!lifecycleActive()) return;
+    }
     useEditorUiStore.getState().resetProjectRuntimeState();
   });
   if (!lifecycleActive()) {

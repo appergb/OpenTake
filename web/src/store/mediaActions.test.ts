@@ -23,6 +23,8 @@ const srv = vi.hoisted(() => ({
     folders: [],
   } as MediaList,
   importMedia: vi.fn(),
+  importFolder: vi.fn(),
+  relinkMedia: vi.fn(),
   getMedia: vi.fn(),
   preloadMedia: vi.fn(),
   open: vi.fn(),
@@ -30,6 +32,8 @@ const srv = vi.hoisted(() => ({
 
 vi.mock("../lib/api", () => ({
   importMedia: srv.importMedia,
+  importFolder: srv.importFolder,
+  relinkMedia: srv.relinkMedia,
   getMedia: srv.getMedia,
   preloadMedia: srv.preloadMedia,
 }));
@@ -38,18 +42,27 @@ vi.mock("../lib/dialog", () => ({
   openDialog: async () => srv.open,
 }));
 
-import { importFilesViaDialog } from "./mediaActions";
+import {
+  importFilesViaDialog,
+  importFolderViaDialog,
+  relinkMediaViaDialog,
+} from "./mediaActions";
 import { useMediaStore } from "./mediaStore";
 import { useProjectStore } from "./projectStore";
+import { useEditorUiStore } from "./uiStore";
 
 describe("mediaActions import warmup", () => {
   beforeEach(() => {
     srv.importMedia.mockReset();
+    srv.importFolder.mockReset();
+    srv.relinkMedia.mockReset();
     srv.getMedia.mockReset();
     srv.preloadMedia.mockReset();
     srv.open.mockReset();
     srv.open.mockResolvedValue(srv.selected);
     srv.importMedia.mockResolvedValue(srv.imported);
+    srv.importFolder.mockResolvedValue(srv.imported);
+    srv.relinkMedia.mockResolvedValue(undefined);
     srv.getMedia.mockResolvedValue(srv.imported);
     useMediaStore.setState({
       items: [
@@ -63,6 +76,7 @@ describe("mediaActions import warmup", () => {
       projectEpoch: 1,
       projectPath: "/tmp/project-a.opentake",
     });
+    useEditorUiStore.setState({ toast: null });
   });
 
   it("preloads newly imported timeline-capable media after file import", async () => {
@@ -105,5 +119,92 @@ describe("mediaActions import warmup", () => {
     await importing;
 
     expect(srv.preloadMedia).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a production-shaped string failure for the current project", async () => {
+    srv.importMedia.mockRejectedValueOnce("current project import failed");
+
+    await importFilesViaDialog();
+
+    expect(useMediaStore.getState().error).toBe("current project import failed");
+  });
+
+  it("keeps importing visible when a second picker is cancelled", async () => {
+    const pending = deferred<MediaList>();
+    srv.importMedia.mockImplementationOnce(() => pending.promise);
+    const firstImport = importFilesViaDialog();
+    await vi.waitFor(() => expect(useMediaStore.getState().importing).toBe(true));
+
+    srv.open.mockResolvedValueOnce(null);
+    await importFilesViaDialog();
+    expect(useMediaStore.getState().importing).toBe(true);
+
+    pending.resolve(srv.imported);
+    await firstImport;
+    expect(useMediaStore.getState().importing).toBe(false);
+  });
+
+  it("keeps importing visible until both concurrent imports finish", async () => {
+    const first = deferred<MediaList>();
+    const second = deferred<MediaList>();
+    srv.importMedia
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+
+    const firstImport = importFilesViaDialog();
+    const secondImport = importFilesViaDialog();
+    await vi.waitFor(() => expect(srv.importMedia).toHaveBeenCalledTimes(2));
+
+    first.resolve(srv.imported);
+    await firstImport;
+    expect(useMediaStore.getState().importing).toBe(true);
+
+    second.resolve(srv.imported);
+    await secondImport;
+    expect(useMediaStore.getState().importing).toBe(false);
+  });
+
+  it("does not start a folder import selected after the project changed", async () => {
+    const selected = deferred<string>();
+    srv.open.mockImplementationOnce(() => selected.promise);
+
+    const importing = importFolderViaDialog();
+    useProjectStore.setState({
+      projectEpoch: 2,
+      projectPath: "/tmp/project-b.opentake",
+    });
+    selected.resolve("/tmp/folder");
+    await importing;
+
+    expect(srv.importFolder).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a production-shaped relink failure for the current project", async () => {
+    srv.open.mockResolvedValueOnce("/tmp/relink.mov");
+    srv.relinkMedia.mockRejectedValueOnce("current project relink failed");
+
+    await relinkMediaViaDialog("asset-1");
+
+    expect(useMediaStore.getState().error).toBe("current project relink failed");
+  });
+
+  it("does not report skipped media after switching projects during refresh", async () => {
+    const pendingRefresh = deferred<MediaList>();
+    srv.importMedia.mockResolvedValueOnce({
+      ...srv.imported,
+      skipped: ["unsupported.bin"],
+    });
+    srv.getMedia.mockImplementationOnce(() => pendingRefresh.promise);
+
+    const importing = importFilesViaDialog();
+    await vi.waitFor(() => expect(srv.getMedia).toHaveBeenCalledTimes(1));
+    useProjectStore.setState({
+      projectEpoch: 2,
+      projectPath: "/tmp/project-b.opentake",
+    });
+    pendingRefresh.resolve(srv.imported);
+    await importing;
+
+    expect(useEditorUiStore.getState().toast).toBeNull();
   });
 });

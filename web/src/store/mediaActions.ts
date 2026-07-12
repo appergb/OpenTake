@@ -11,7 +11,13 @@
  */
 
 import * as api from "../lib/api";
-import { useMediaStore, refreshMedia } from "./mediaStore";
+import {
+  beginMediaImport,
+  endMediaImport,
+  refreshMedia,
+  useMediaStore,
+  type MediaImportOperation,
+} from "./mediaStore";
 import { useSettingsStore } from "./settingsStore";
 import { useEditorUiStore } from "./uiStore";
 import { useProjectStore } from "./projectStore";
@@ -74,6 +80,7 @@ function warmNewTimelineMedia(list: MediaList, beforeIds: Set<string>): void {
 /** Pick a folder and import every supported file inside it. */
 export async function importFolderViaDialog(): Promise<void> {
   const project = captureProjectIdentity();
+  let importOperation: MediaImportOperation | null = null;
   const open = await openDialog();
   if (!open) return;
   const store = useMediaStore.getState();
@@ -87,7 +94,7 @@ export async function importFolderViaDialog(): Promise<void> {
     });
     if (typeof selected !== "string") return; // cancelled
     if (!isCurrentProject(project)) return;
-    store.setImporting(true);
+    importOperation = beginMediaImport();
     const list = await api.importFolder(selected, true);
     if (!isCurrentProject(project)) return;
     warmNewTimelineMedia(list, beforeIds);
@@ -97,7 +104,7 @@ export async function importFolderViaDialog(): Promise<void> {
   } catch (error: unknown) {
     if (isCurrentProject(project)) store.setError(getErrorMessage(error));
   } finally {
-    if (isCurrentProject(project)) store.setImporting(false);
+    if (importOperation) endMediaImport(importOperation);
   }
 }
 
@@ -135,6 +142,7 @@ export async function relinkMediaViaDialog(mediaRef: string): Promise<void> {
 /** Pick one or more media files and import them. */
 export async function importFilesViaDialog(): Promise<void> {
   const project = captureProjectIdentity();
+  let importOperation: MediaImportOperation | null = null;
   const open = await openDialog();
   if (!open) return;
   const store = useMediaStore.getState();
@@ -152,7 +160,7 @@ export async function importFilesViaDialog(): Promise<void> {
     const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
     if (paths.length === 0) return; // cancelled
     if (!isCurrentProject(project)) return;
-    store.setImporting(true);
+    importOperation = beginMediaImport();
     const list = await api.importMedia(paths);
     if (!isCurrentProject(project)) return;
     warmNewTimelineMedia(list, beforeIds);
@@ -162,6 +170,6 @@ export async function importFilesViaDialog(): Promise<void> {
   } catch (error: unknown) {
     if (isCurrentProject(project)) store.setError(getErrorMessage(error));
   } finally {
-    if (isCurrentProject(project)) store.setImporting(false);
+    if (importOperation) endMediaImport(importOperation);
   }
 }

@@ -129,6 +129,16 @@ describe("openProjectPath", () => {
     expect(useMediaStore.getState().error).toBeNull();
   });
 
+  it("preserves media transient state when project open fails", async () => {
+    useMediaStore.setState({ importing: true, error: "old project error" });
+    srv.projectOpen.mockRejectedValueOnce(new Error("open failed"));
+
+    await expect(openProjectPath("/tmp/broken.opentake")).rejects.toThrow("open failed");
+
+    expect(useMediaStore.getState().importing).toBe(true);
+    expect(useMediaStore.getState().error).toBe("old project error");
+  });
+
   it("resets project-scoped UI runtime only after a successful project open", async () => {
     useEditorUiStore.setState({
       isPlaying: true,
