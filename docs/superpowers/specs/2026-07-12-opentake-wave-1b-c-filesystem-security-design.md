@@ -131,15 +131,26 @@ Linux, macOS, and Windows compile gates are required. The path-policy and
 publication race suites run natively on all three release platforms; the
 existing Ubuntu-only CI is expanded before C1 is accepted.
 
-Every destination carries a `NamespaceAnchor`, not only an open parent. Starting
-at the filesystem/volume root, the adapter retains the bounded component chain
-`(directory handle, child name, stable identity)` down to the authorized parent.
-Unix re-walks the chain with descriptor-relative `statat(..., NOFOLLOW)` before
-stage validation and final publication. Windows retains every ancestor handle
-without `FILE_SHARE_DELETE` and also rechecks `FileIdInfo`. A renamed, rebound,
-or remounted component returns `DestinationNamespaceChanged`; output is not
-published through a still-open directory object whose authorized pathname has
-changed.
+Every destination carries a `NamespaceAnchor`, not only an open parent. Unix
+starts at the global `/` namespace root, including every mount-point component,
+and retains the bounded chain `(directory handle, child name, device/inode)` to
+the authorized parent. Windows records the canonical volume GUID plus volume
+serial/file ID and current drive-letter or volume-mount mapping, then retains
+every ancestor handle without `FILE_SHARE_DELETE`. UNC/remote filesystems that
+cannot prove stable mapping fail closed. Before stage validation and final
+publication, Unix re-walks from global `/`; Windows reopens the current mapping
+and compares volume/file identity. A successfully renamed, rebound, or remapped
+component returns `DestinationNamespaceChanged`; on Windows it is also valid for
+the held handles to prevent the attempted mutation with a sharing violation.
+Output is never published through an authorized pathname whose current mapping
+cannot be proven.
+
+`StableIdentity` is platform-specific: Unix local filesystems use device/inode
+plus the root-relative mount-point chain; Windows local volumes use volume GUID,
+volume serial, and file ID. Unsupported identity/mount behavior is
+`UnsupportedSecureFilesystem`. Unprivileged CI injects deterministic mapping and
+identity seam changes; privileged real mount/remount jobs are optional platform
+validation rather than a required ordinary-CI capability.
 
 Project media and auxiliary trees always reject symlink/reparse components.
 External media uses a separate bounded resolver: Unix walks with `readlinkat`
@@ -176,6 +187,18 @@ exclusive random stage name. Stage creation, output `create_new`, validation,
 cleanup, and publication remain relative to that same handle. Neither the
 original renderer-visible path nor a freshly resolved parent path is used after
 capability creation.
+
+A saved project also receives `SourceCapability` before any external disclosure
+or save panel opens. It contains the global-root `NamespaceAnchor`, source bundle
+root handle/identity, `media/` root identity or proven absence, and the
+thumbnail/chat root identity-or-absence snapshot. Those bounded root handles
+remain open across dialogs. Internal and auxiliary leaves are opened only
+relative to them; source namespace, root identities, and present/absent states
+are revalidated after each dialog and immediately before the final stage
+integrity check. A removable-volume rebind, root replacement, or optional-tree
+appearance/disappearance returns `SourceNamespaceChanged` and creates no
+destination. Unsaved projects have no source tree and require no source
+capability.
 
 Project media requirements:
 
@@ -275,10 +298,11 @@ approved source identities and root capabilities have been recorded:
 2. `build_into`: create an unpredictable, exclusive sibling staging directory
    under `dest.parent`, copy media/extras through the preflight plan, and write
    the three JSON documents into that empty stage, producing a `BuildReceipt`;
-3. `validate_staged_bundle`: strictly read the three just-written JSON documents
+3. `validate_staged_bundle`: as the last complete integrity check immediately
+   before the core finalizer, strictly read the three just-written JSON documents
    and rewritten media references relative to the retained stage handle, match
-   the complete tree to `BuildReceipt`, then verify the namespace anchor and
-   parent entry still name that stage identity;
+   the complete tree to `BuildReceipt`, and verify source/destination namespace
+   anchors plus the parent entry still name the approved identities;
 4. `publish_new`: perform one atomic no-replace rename to the destination.
 
 `validate_staged_bundle(stage: &StageCapability)` never calls the current
@@ -297,6 +321,15 @@ then performs strict JSON/media-reference checks. Replacing generated JSON with
 different but valid JSON, replacing media, or adding a hidden extra entry cannot
 pass. An identical-byte replacement is harmless content-equivalence but still
 fails identity comparison.
+
+No dialog, hashing, source copy, or other fallible preparation occurs between
+this final complete validation and `publish_bundle_if_identity`; the finalizer
+only compares core identity, rechecks source/destination namespace and stage-root
+identity, and performs the single rename. Child mutation after the complete
+validation returns is classified as arbitrary hostile same-account tamper and is
+outside the threat boundary already stated above. Tests inject child/extra-entry
+replacement before or during final validation; they do not claim the root-only
+finalizer can detect a post-validation child mutation.
 
 An RAII `StageGuard` owns the parent capability, stage handle, name, and stable
 identity. Cleanup recursively unlinks children relative to the retained stage
@@ -322,13 +355,14 @@ stage completely.
 
 The stage is exclusively created with mode `0700` on Unix and equivalent
 owner-only access on Windows. Its retained identity is checked before any
-validation read and again immediately before publication; the full
-`NamespaceAnchor` is revalidated at both points. Tests can swap/rebind an
-ancestor or parent, swap the stage name, replace a stage child with valid data,
-or add an extra child before those checks and must observe refusal without
-changing the replacement. Arbitrary hostile same-account processes after the
-final check remain outside the stated threat boundary; atomic destination
-no-replace still holds against every concurrent destination creator.
+validation read and again immediately before publication; the source and
+destination namespace anchors are revalidated at both points. Tests can
+swap/rebind an ancestor or parent, swap the stage name, replace a stage child
+with valid data, or add an extra child before/during final validation and must
+observe refusal without changing the replacement. Arbitrary hostile
+same-account child mutation after final validation remains outside the stated
+threat boundary; atomic destination no-replace still holds against every
+concurrent destination creator.
 
 Any ordinary prepare/build/validation failure removes only the stage and leaves
 source and destination untouched; the explicitly described identity-lost tamper
@@ -357,17 +391,21 @@ pub async fn export_bundle(
 Flow:
 
 1. capture a lock-consistent snapshot including project epoch, path, and a new
-   opaque `bundle_revision` covering every export input;
-2. perform source-only authorization analysis and, when necessary, show the
-   native external-source confirmation;
+   opaque `bundle_revision` covering every export input, then acquire its
+   `SourceCapability`; compare bundle identity and source mapping again before
+   releasing control to any dialog;
+2. perform source-only authorization analysis through that capability and, when
+   necessary, show the native external-source confirmation; revalidate the
+   source namespace afterward;
 3. open the Rust `tauri-plugin-dialog` save panel with the safe default name;
 4. cancel returns `Ok(None)`;
 5. call one lock-scoped `compare_bundle_identity()` over project epoch,
    `bundle_revision`, and path; any change aborts before output so the dialogs
-   cannot authorize one bundle state and export another;
-6. complete destination relationship checks, acquire root capabilities and
-   approved source identities, and reject any external target that differs from
-   the confirmed resolution;
+   cannot authorize one bundle state and export another, and revalidate the
+   retained source capability again;
+6. acquire the `DestinationCapability`, complete relationship checks and source
+   leaf identities through the retained `SourceCapability`, and reject any
+   external target that differs from the confirmed resolution;
 7. run prepare/build/validation in a blocking worker;
 8. call `AppCore::publish_bundle_if_identity(expected, &mut stage_guard)`. This
    one finalizer acquires the core lock, compares epoch/revision/path, keeps the
@@ -399,6 +437,7 @@ cancel. Rejections carry a serializable tagged `BundleExportErrorDto` with a
 stable code (`destination_exists`, `unsafe_source`, `unsafe_destination`,
 `unsupported_source_type`, `project_changed`, `stage_failure`,
 `stage_identity_lost`, `destination_namespace_changed`,
+`source_namespace_changed`,
 `unsupported_filesystem`, `too_many_external_sources`,
 `external_disclosure_too_long`, or `io`), a user-safe message, and an optional
 display path. The Tauri boundary maps `ProjectError` once without flattening it
@@ -488,20 +527,31 @@ and prewarm epochs:
    `EditorSession` carrying that future path; no transition reservation is held
    during dialogs or build;
 2. immediately before finalization, reserve playback transition first and
-   prewarm transition second using the existing ordered rollback. If prewarm is
-   busy, cancel playback; in no-default-feature builds reserve prewarm only;
+   prewarm transition second. Prewarm gains an opaque generation token and
+   `cancel_project_transition(token)`; stale-token cancel/activate is a no-op.
+   If prewarm is busy, cancel playback; in no-default-feature builds reserve
+   prewarm only;
 3. under one short core lock, compare the original identity, call `publish_new`,
    and install the already prepared editor, advancing project epoch and
    `bundle_revision`. Every allocation/parse/fallible preparation occurs before
    this point, so after a successful rename the in-memory install is infallible;
 4. on CAS/publication failure, release the lock, cancel every reservation, and
-   clean the stage. On success, release the lock, activate playback then prewarm
-   for the new epoch, and emit one `ProjectOpened` event carrying the published
-   path/version; no intermediate empty-path project event is emitted.
+   clean the stage. On success, release the lock and emit one `ProjectOpened`
+   event carrying the published path/version; no intermediate empty-path project
+   event is emitted. The existing synchronous `ProjectOpened` bridge is the sole
+   activation owner: it activates prewarm and playback exactly once for the new
+   epoch and consumes the matching tokens. The command never explicitly
+   activates them before or after the event.
 
 Cancellation, playback-busy, prewarm-busy, CAS mismatch, and publication failure
-leave the current session/epoch and both registries unchanged and create no
-destination. Feature-on and no-default-feature tests prove every seam.
+leave the current session/epoch, active playback publication/session, and active
+prewarm epoch unchanged and create no destination. Beginning a transition may
+cancel speculative playback preparation/prewarm work; cancellation does not
+resurrect that background work, and the UI may schedule it again. Token cancel
+does restore the authoritative registry to accepting work for the unchanged
+epoch. Feature-on and no-default-feature tests prove every seam, including that
+the success event produces exactly one epoch rotation and stale tokens are
+no-ops.
 
 Wave 1B-C is not release-complete until both subprojects pass their exact-bundle
 QA. C1 may merge first because it removes the current critical export path.
@@ -521,6 +571,7 @@ case into `Io` or `missing`:
 - external disclosure too long;
 - stage identity lost;
 - destination namespace changed;
+- source namespace changed;
 - unsupported secure filesystem or atomic publication.
 
 User-facing errors state what remains safe: source unchanged, destination
@@ -565,6 +616,9 @@ only cancellation uses `Ok(None)`.
   placeholder paths; full digest paths remain unique normal components;
 - project media, thumbnail, and chat hard-link leaves are rejected; link-count
   changes during copy fail closed on all three platforms;
+- source bundle/media/thumbnail/chat identity or present/absent changes across
+  external disclosure/save panel, including removable-volume rebind, fail before
+  destination creation;
 - a low-FD-limit large manifest completes without unbounded open handles, while
   over-limit disclosure returns `TooManyExternalSources` before output.
 
@@ -580,12 +634,15 @@ only cancellation uses `Ok(None)`.
 - stage is a sibling on the same filesystem;
 - concurrent creation of a destination file, empty directory, non-empty
   directory, or symlink causes atomic refusal and leaves it byte-identical;
-- ancestor/parent rename, rebind, or remount and stage swaps before validation or
-  final publication cause refusal and capability cleanup;
+- Unix ancestor/parent rename, rebind, or mount mapping changes are detected from
+  global `/`; Windows either blocks them through held-handle sharing or detects
+  a changed drive/volume mapping; both prevent publication;
 - strict stage validation opens no component through `Project::open(path)`;
   receipt mismatch, valid-JSON/media replacement, missing/extra entry, and
-  stage-name/child replacement are rejected, and identity-lost cleanup never
-  deletes an unproven name;
+  stage-name/child replacement before/during final validation are rejected, and
+  identity-lost cleanup never deletes an unproven name;
+- deterministic unprivileged adapter seams cover mount/mapping identity changes;
+  privileged real remount tests are optional platform jobs;
 - unsupported no-replace syscalls/filesystems fail closed without ordinary
   rename fallback;
 - Linux, macOS, and Windows native race suites exercise their platform adapter;
@@ -627,6 +684,9 @@ only cancellation uses `Ok(None)`.
 - feature-on and no-default-feature new-project tests cover playback busy,
   prewarm busy, CAS mismatch, publication failure, cancellation, and success,
   asserting destination, session/epoch, event, and registry state;
+- prewarm token cancel/activate is generation-safe, cancellation documents
+  discarded speculative work, and the `ProjectOpened` bridge performs exactly
+  one playback/prewarm epoch activation;
 - timeline edit, media-only change, open/new, and Save-As between
   `SaveCaptureSnapshot` and `prepare_save_snapshot` reject the captured thumbnail
   and publish nothing;
@@ -659,7 +719,8 @@ all internal/archive-extra paths stay inside the approved source, every external
 read is fully disclosed, external source fields do not leak host absolute paths,
 existing destinations are protected by a proven platform no-replace primitive,
 and a successful fresh destination appears only after a complete validated stage
-whose bundle identity still matches the authorized snapshot.
+whose bundle and source-namespace identities still match the authorized
+snapshot.
 
 Wave 1B-C is accepted only after C2 also proves that Save-As publishes a complete
 new bundle or nothing, never changes project identity on failure, accepts no
