@@ -131,6 +131,16 @@ Linux, macOS, and Windows compile gates are required. The path-policy and
 publication race suites run natively on all three release platforms; the
 existing Ubuntu-only CI is expanded before C1 is accepted.
 
+Every destination carries a `NamespaceAnchor`, not only an open parent. Starting
+at the filesystem/volume root, the adapter retains the bounded component chain
+`(directory handle, child name, stable identity)` down to the authorized parent.
+Unix re-walks the chain with descriptor-relative `statat(..., NOFOLLOW)` before
+stage validation and final publication. Windows retains every ancestor handle
+without `FILE_SHARE_DELETE` and also rechecks `FileIdInfo`. A renamed, rebound,
+or remounted component returns `DestinationNamespaceChanged`; output is not
+published through a still-open directory object whose authorized pathname has
+changed.
+
 Project media and auxiliary trees always reject symlink/reparse components.
 External media uses a separate bounded resolver: Unix walks with `readlinkat`
 relative to retained directory descriptors; Windows reads only supported
@@ -161,10 +171,11 @@ semantics from the host platform and does not use the existing lexical
 
 The native selection is converted immediately into a
 `DestinationCapability`: the canonical parent directory handle, its stable file
-identity, the validated single destination name, and an exclusive random stage
-name. Stage creation, output `create_new`, validation, cleanup, and publication
-remain relative to that same handle. Neither the original renderer-visible path
-nor a freshly resolved parent path is used after capability creation.
+identity, its `NamespaceAnchor`, the validated single destination name, and an
+exclusive random stage name. Stage creation, output `create_new`, validation,
+cleanup, and publication remain relative to that same handle. Neither the
+original renderer-visible path nor a freshly resolved parent path is used after
+capability creation.
 
 Project media requirements:
 
@@ -173,6 +184,8 @@ Project media requirements:
   root, prefix, `.` ambiguity, or `..`;
 - every existing path component is opened without following a symlink;
 - the leaf is a regular file under the canonical source `media/` root;
+- a file leaf must have exactly one hard link (`st_nlink == 1` on Unix,
+  `NumberOfLinks == 1` on Windows), checked before and after copy;
 - valid but absent media remains a `MissingMedia` result; malformed, escaped,
   inaccessible, symlinked, or special-file paths are typed errors.
 
@@ -182,6 +195,8 @@ Auxiliary source requirements:
 - `chat-sessions/`, when present, is a real directory under the source bundle;
 - traversal accepts only real directories and regular files and rejects every
   symlink, socket, FIFO, device, or other special entry;
+- every thumbnail/chat file leaf must have exactly one hard link, checked before
+  and after copy; multi-link leaves are `UnsupportedSourceType::HardLink`;
 - only `NotFound` means optional absent. Permission, metadata, and I/O errors
   fail the archive.
 
@@ -198,20 +213,29 @@ External media requirements:
   target, and stable file identity. The existing lexical dedup key remains
   unchanged, so two separately listed symlink paths still produce separate
   collected entries as upstream expects;
-- Rust displays the complete ordered list through paged native message dialogs,
-  at most two entries per page. Each page includes original path, resolved
-  target, and `regular` or `missing` status; intermediate pages use native
-  `Next`/`Cancel` buttons, the last page alone uses `Approve all`/`Cancel`, and
-  cancel on any page returns no output and performs no writes. No entry may be
-  hidden behind a representative sample;
-- before dialog construction, backslash, C0/C1 controls, CR/LF/tab, and Unicode
-  bidi controls are reversibly escaped. Each escaped original/target field is at
-  most 768 UTF-8 bytes, and a page is at most 4,096 bytes and eight display
-  lines. Longer input returns typed `ExternalDisclosureTooLong`; no truncation
-  or middle elision is allowed. Tests compare the exact escaped authorization
-  model with every rendered native page on all three release platforms;
-- a manifest over 4,096 external entries or 4 MiB of disclosure text returns
-  typed `TooManyExternalSources` before showing dialogs or writing output;
+- `native_disclosure` is a non-WebView platform adapter whose Rust-owned model
+  and return value never pass through renderer IPC. macOS uses an AppKit
+  `NSPanel` with `NSTableView` inside `NSScrollView`; Windows uses a Win32 modal
+  dialog with `SysListView32`; Linux uses a GTK modal window with a scrolled
+  `TreeView`. All show one row per lexical entry with separate original,
+  resolved-target, and status columns, plus search and cancel. `Approve all`
+  stays disabled until the complete model is loaded, and the virtualized table
+  supports scrolling back through every row;
+- disclosure text uses a reversible ASCII encoding of operating-system path
+  units, not Unicode scalar assumptions. Unix passes printable ASCII bytes
+  except backslash and encodes every other raw byte as `\xNN`; Windows passes
+  printable ASCII UTF-16 units except backslash and encodes every other code
+  unit, including unpaired surrogates, as `\uNNNN`. U+2028/U+2029, bidi,
+  zero-width/default-ignorable characters, C0/C1 controls, separators, and all
+  non-ASCII therefore have no raw visual effect. Display columns are counted on
+  this ASCII form;
+- an encoded original or target over 4,096 columns, a manifest over 4,096
+  external entries, or a total encoded model over 4 MiB returns typed
+  `ExternalDisclosureTooLong`/`TooManyExternalSources` before opening the panel
+  or writing output. No field is truncated or elided;
+- native accessibility/UI QA enumerates every table row and column and compares
+  it byte-for-byte with the Rust authorization model. Only the adapter's native
+  approve result can continue; renderer events cannot synthesize it;
 - successfully copied external entries are rewritten to project-relative
   `media/` paths. A missing external entry is rewritten to a deterministic,
   absent `media/missing/<sha256>-<sanitized-basename>` project reference and
@@ -250,10 +274,11 @@ approved source identities and root capabilities have been recorded:
    external-source summary without creating output;
 2. `build_into`: create an unpredictable, exclusive sibling staging directory
    under `dest.parent`, copy media/extras through the preflight plan, and write
-   the three JSON documents into that empty stage;
+   the three JSON documents into that empty stage, producing a `BuildReceipt`;
 3. `validate_staged_bundle`: strictly read the three just-written JSON documents
-   and rewritten media references relative to the retained stage handle, then
-   verify the parent entry still names that stage identity;
+   and rewritten media references relative to the retained stage handle, match
+   the complete tree to `BuildReceipt`, then verify the namespace anchor and
+   parent entry still name that stage identity;
 4. `publish_new`: perform one atomic no-replace rename to the destination.
 
 `validate_staged_bundle(stage: &StageCapability)` never calls the current
@@ -262,6 +287,16 @@ adapter under the stage capability and decoded with strict, generated-output
 rules; directory/media checks use the same retained root. `Project::open` is
 reserved for post-publication QA, where path resolution no longer authorizes a
 write.
+
+Every directory and leaf created by `build_into` has a receipt. Directory rows
+record relative normal path and stable identity. Leaf rows record relative path,
+type, identity, exact length, and full SHA-256 measured through the writer's open
+handle. Validation enumerates the stage capability, rejects any missing or extra
+entry, reopens each leaf nofollow, matches identity/type/length/digest, and only
+then performs strict JSON/media-reference checks. Replacing generated JSON with
+different but valid JSON, replacing media, or adding a hidden extra entry cannot
+pass. An identical-byte replacement is harmless content-equivalence but still
+fails identity comparison.
 
 An RAII `StageGuard` owns the parent capability, stage handle, name, and stable
 identity. Cleanup recursively unlinks children relative to the retained stage
@@ -287,12 +322,13 @@ stage completely.
 
 The stage is exclusively created with mode `0700` on Unix and equivalent
 owner-only access on Windows. Its retained identity is checked before any
-validation read and again immediately before publication. Tests can swap the
-parent, stage name, or stage child before those checks and must observe refusal
-without changing the replacement. Arbitrary hostile same-account processes
-after the final check remain outside the stated threat boundary; atomic
-destination no-replace still holds against every concurrent destination
-creator.
+validation read and again immediately before publication; the full
+`NamespaceAnchor` is revalidated at both points. Tests can swap/rebind an
+ancestor or parent, swap the stage name, replace a stage child with valid data,
+or add an extra child before those checks and must observe refusal without
+changing the replacement. Arbitrary hostile same-account processes after the
+final check remain outside the stated threat boundary; atomic destination
+no-replace still holds against every concurrent destination creator.
 
 Any ordinary prepare/build/validation failure removes only the stage and leaves
 source and destination untouched; the explicitly described identity-lost tamper
@@ -362,7 +398,8 @@ branch removes its JavaScript save-panel/path construction. `null` is neutral
 cancel. Rejections carry a serializable tagged `BundleExportErrorDto` with a
 stable code (`destination_exists`, `unsafe_source`, `unsafe_destination`,
 `unsupported_source_type`, `project_changed`, `stage_failure`,
-`stage_identity_lost`, `unsupported_filesystem`, `too_many_external_sources`,
+`stage_identity_lost`, `destination_namespace_changed`,
+`unsupported_filesystem`, `too_many_external_sources`,
 `external_disclosure_too_long`, or `io`), a user-safe message, and an optional
 display path. The Tauri boundary maps `ProjectError` once without flattening it
 to `String`; TypeScript narrows the DTO by `code` and never parses localized
@@ -443,6 +480,29 @@ component is inherited from a pre-existing destination because C2 only publishes
 to a new path. The same capture-identity comparison protects thumbnail writes on
 normal same-project save, without changing its destination semantics.
 
+Fresh project creation has a distinct finalizer because it also changes playback
+and prewarm epochs:
+
+1. capture the current `BundleIdentity`, obtain the Rust-native destination, and
+   build/validate a fully prepared empty-bundle stage plus an infallible fresh
+   `EditorSession` carrying that future path; no transition reservation is held
+   during dialogs or build;
+2. immediately before finalization, reserve playback transition first and
+   prewarm transition second using the existing ordered rollback. If prewarm is
+   busy, cancel playback; in no-default-feature builds reserve prewarm only;
+3. under one short core lock, compare the original identity, call `publish_new`,
+   and install the already prepared editor, advancing project epoch and
+   `bundle_revision`. Every allocation/parse/fallible preparation occurs before
+   this point, so after a successful rename the in-memory install is infallible;
+4. on CAS/publication failure, release the lock, cancel every reservation, and
+   clean the stage. On success, release the lock, activate playback then prewarm
+   for the new epoch, and emit one `ProjectOpened` event carrying the published
+   path/version; no intermediate empty-path project event is emitted.
+
+Cancellation, playback-busy, prewarm-busy, CAS mismatch, and publication failure
+leave the current session/epoch and both registries unchanged and create no
+destination. Feature-on and no-default-feature tests prove every seam.
+
 Wave 1B-C is not release-complete until both subprojects pass their exact-bundle
 QA. C1 may merge first because it removes the current critical export path.
 
@@ -460,6 +520,7 @@ case into `Io` or `missing`:
 - too many external sources;
 - external disclosure too long;
 - stage identity lost;
+- destination namespace changed;
 - unsupported secure filesystem or atomic publication.
 
 User-facing errors state what remains safe: source unchanged, destination
@@ -489,16 +550,21 @@ only cancellation uses `Ok(None)`.
 - only `NotFound` becomes optional absent/missing;
 - external relative, directory, FIFO, socket, device, permission-error, symlink
   loop, and check/open-swap cases fail closed;
-- every external entry appears in the paged confirmation, including a sensitive
-  final entry in a large manifest, without changing lexical dedup semantics;
-- exact native pages match the escaped authorization model; overlong fields,
-  page-byte/line overflow, newlines, controls, backslashes, and bidi controls
-  either render reversibly within the fixed limits or fail before dialogs;
+- every external entry appears in the Rust-owned native disclosure table,
+  including a sensitive final entry in a large manifest, without changing
+  lexical dedup semantics;
+- native accessibility rows match the ASCII authorization model byte-for-byte;
+  Unix non-UTF8 bytes, Windows unpaired surrogates, U+2028/U+2029, zero-width,
+  default-ignorable, control, separator, backslash, and bidi inputs round-trip or
+  fail the documented model limits before the panel;
+- renderer attempts cannot alter the disclosure model or synthesize approval;
 - missing external paths are sanitized to absent project-relative references and
   no raw external `absolutePath` survives in an output source field;
 - hostile asset ids containing parent/root components, both separators,
   controls, bidi text, host paths, long strings, or collision inputs never enter
   placeholder paths; full digest paths remain unique normal components;
+- project media, thumbnail, and chat hard-link leaves are rejected; link-count
+  changes during copy fail closed on all three platforms;
 - a low-FD-limit large manifest completes without unbounded open handles, while
   over-limit disclosure returns `TooManyExternalSources` before output.
 
@@ -514,11 +580,12 @@ only cancellation uses `Ok(None)`.
 - stage is a sibling on the same filesystem;
 - concurrent creation of a destination file, empty directory, non-empty
   directory, or symlink causes atomic refusal and leaves it byte-identical;
-- parent/stage swaps before the final identity check cause refusal and cleanup
-  through retained capabilities;
+- ancestor/parent rename, rebind, or remount and stage swaps before validation or
+  final publication cause refusal and capability cleanup;
 - strict stage validation opens no component through `Project::open(path)`;
-  stage-name/child replacement remains byte-identical, and an identity-lost
-  cleanup never deletes an unproven name;
+  receipt mismatch, valid-JSON/media replacement, missing/extra entry, and
+  stage-name/child replacement are rejected, and identity-lost cleanup never
+  deletes an unproven name;
 - unsupported no-replace syscalls/filesystems fail closed without ordinary
   rename fallback;
 - Linux, macOS, and Windows native race suites exercise their platform adapter;
@@ -557,6 +624,9 @@ only cancellation uses `Ok(None)`.
   fail the final CAS with no destination and no path adoption;
 - Rust Save-As/new-project commands accept no renderer destination, cancel
   without state change, and are the only source of `DestinationCapability`;
+- feature-on and no-default-feature new-project tests cover playback busy,
+  prewarm busy, CAS mismatch, publication failure, cancellation, and success,
+  asserting destination, session/epoch, event, and registry state;
 - timeline edit, media-only change, open/new, and Save-As between
   `SaveCaptureSnapshot` and `prepare_save_snapshot` reject the captured thumbnail
   and publish nothing;
