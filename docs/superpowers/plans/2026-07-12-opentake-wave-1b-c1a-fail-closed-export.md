@@ -590,8 +590,10 @@ Minor: 0
 
 The quality report uses `Role: quality-integration` and the same literal
 40-character commit. `<the literal 40-character C1A_SHA>` is an instruction to
-insert the value from `integration-final-head.log`; that angle-bracket text
-must not appear in either report.
+insert the value from the already-recorded and validated
+`integration-post-head.log`; that angle-bracket text must not appear in either
+report. The later `integration-final-head` and `review-final-head` gates
+independently re-prove the same SHA after both reports land.
 
 After both reports land, continue in the same zsh shell and validate the report
 shape plus the final exact/clean trees:
