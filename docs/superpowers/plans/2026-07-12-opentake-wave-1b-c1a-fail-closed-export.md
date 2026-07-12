@@ -8,6 +8,15 @@
 
 **Tech Stack:** Rust 2021, Tauri 2, React 18, TypeScript 5.6, Vitest 4, Cargo workspace tests.
 
+## Global Constraints
+
+- The approved design is `docs/superpowers/specs/2026-07-12-opentake-wave-1b-c-filesystem-security-design.md` at exact commit `31bfd57e40e3a2bd0ca42b331e5aa877db2d6ace`.
+- C1A is fail-closed removal only. It does not complete C1 or Wave 1B-C and must not re-enable bundle export.
+- No C1A command accepts a renderer-provided destination path or renderer approval token. The retained Web compatibility function must terminate at Tauri's unknown-command refusal.
+- Bundle export remains disabled until Rust-owned native disclosure, Rust-owned save selection, source/destination capabilities, receipt-backed staging, no-replace publication, and revision CAS are integrated together under later approved plans.
+- Every product and plan edit uses `apply_patch`; formatting tools may perform only mechanical rewrites after the semantic patch.
+- Each task commit and the whole C1A slice require two fresh exact-commit reviewers: spec/security and quality/implementation. Both must report `APPROVE` with Critical/Important/Minor `0/0/0`; every finding is fixed and both roles repeat.
+
 ---
 
 ## Scope And Gates
@@ -72,14 +81,14 @@ Then append this test inside the existing file without adding a second import:
 ```ts
 it("offers no bundle mode while the secure native workflow is under construction", () => {
   const source = readFileSync(new URL("./ExportDialog.tsx", import.meta.url), "utf8");
-  expect(source).not.toContain('{ id: "bundle" as const');
+  expect(source).not.toMatch(/\bid\s*:\s*["']bundle["']/);
 });
 ```
 
 - [ ] **Step 4: Run the Web tests and record RED**
 
 ```bash
-pnpm -C web test -- src/components/shell/ExportDialog.test.ts
+pnpm -C web exec vitest run src/components/shell/ExportDialog.test.ts
 ```
 
 Expected: FAIL because the component's sole mode selector still offers bundle export.
@@ -163,7 +172,7 @@ The component initializes `mode` to `"video"`; `Dropdown` can now emit only `"vi
 ```bash
 cargo test -p opentake-tauri --test bundle_export_surface -- --test-threads=1
 cargo test -p opentake-tauri --test bundle_export_integration -- --test-threads=1
-pnpm -C web test -- src/components/shell/ExportDialog.test.ts src/components/shell/TitleBar.visual.test.ts
+pnpm -C web exec vitest run src/components/shell/ExportDialog.test.ts src/components/shell/TitleBar.visual.test.ts
 pnpm -C web exec tsc -b --pretty false
 pnpm -C web build
 cargo check --workspace --all-targets
@@ -383,36 +392,23 @@ Set `SLICE_SHA=$(git rev-parse HEAD)`, fast-forward the clean detached review tr
 
 **Files:**
 - Verify only; no product edit unless a gate exposes a defect.
-- Evidence root: set `GATE_TIMESTAMP=$(date +%Y%m%d-%H%M%S)` and `C1A_SHA=$(git rev-parse HEAD)`, then use `/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-safety/20260712-wave1bc-filesystem/branch-gates/${GATE_TIMESTAMP}-${C1A_SHA}/`. Every command gets a `.log` file containing stdout/stderr and an `.exit` file containing its numeric status.
+- Evidence root: `/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-safety/20260712-wave1bc-filesystem/branch-gates/${GATE_TIMESTAMP}-${C1A_SHA}/`.
+- Every required gate gets a `.log` containing stdout/stderr and a normalized `.exit`; raw statuses that need interpretation use `.raw-exit` as well.
 
-- [ ] **Step 1: Freeze exact clean trees**
+- [ ] **Step 1: Create a fresh receipt root and freeze exact clean trees**
 
-```bash
-C1A_SHA=$(git rev-parse HEAD)
-test -z "$(git status --short)"
-git -C /Users/lvbaiqing/TRUE\ 开发/PRIMARY-CN/OpenTake-wave1a-review merge --ff-only "$C1A_SHA"
-test -z "$(git -C /Users/lvbaiqing/TRUE\ 开发/PRIMARY-CN/OpenTake-wave1a-review status --short)"
-```
-
-Create the evidence directory, record both exact SHAs and both porcelain
-statuses, and do not reuse an earlier directory:
-
-```bash
-GATE_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-EVIDENCE_DIR="/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-safety/20260712-wave1bc-filesystem/branch-gates/${GATE_TIMESTAMP}-${C1A_SHA}"
-mkdir -p "$EVIDENCE_DIR/final-audit"
-git rev-parse HEAD >"$EVIDENCE_DIR/integration-head.txt"
-git status --porcelain=v1 >"$EVIDENCE_DIR/integration-status.txt"
-git -C "/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-wave1a-review" rev-parse HEAD >"$EVIDENCE_DIR/review-head.txt"
-git -C "/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-wave1a-review" status --porcelain=v1 >"$EVIDENCE_DIR/review-status.txt"
-```
-
-- [ ] **Step 2: Run complete current branch gates**
-
-Use this exact zsh helper in the integration tree. It deliberately records all
-statuses instead of aborting after the first failure:
+Run from the integration tree in zsh. The initial variable capture chooses the
+directory; the recorded `integration-pre-head` gate independently proves its
+value before any test or review begins.
 
 ```zsh
+C1A_SHA=$(git rev-parse HEAD)
+GATE_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+EVIDENCE_DIR="/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-safety/20260712-wave1bc-filesystem/branch-gates/${GATE_TIMESTAMP}-${C1A_SHA}"
+mkdir -p "$EVIDENCE_DIR/final-audit" || exit 1
+print -r -- "created $EVIDENCE_DIR/final-audit" >"$EVIDENCE_DIR/evidence-dir-create.log"
+print -r -- 0 >"$EVIDENCE_DIR/evidence-dir-create.exit"
+
 record_gate() {
   local name="$1"
   shift
@@ -421,17 +417,78 @@ record_gate() {
   print -r -- "$status" >"$EVIDENCE_DIR/${name}.exit"
 }
 
+record_clean() {
+  local name="$1"
+  shift
+  "$@" >"$EVIDENCE_DIR/${name}.log" 2>&1
+  local raw_status=$?
+  print -r -- "$raw_status" >"$EVIDENCE_DIR/${name}.raw-exit"
+  if [[ $raw_status -eq 0 && ! -s "$EVIDENCE_DIR/${name}.log" ]]; then
+    print -r -- 0 >"$EVIDENCE_DIR/${name}.exit"
+  else
+    print -r -- 1 >"$EVIDENCE_DIR/${name}.exit"
+  fi
+}
+
+record_head() {
+  local name="$1"
+  shift
+  "$@" >"$EVIDENCE_DIR/${name}.log" 2>&1
+  local raw_status=$?
+  print -r -- "$raw_status" >"$EVIDENCE_DIR/${name}.raw-exit"
+  if [[ $raw_status -eq 0 && "$(<"$EVIDENCE_DIR/${name}.log")" == "$C1A_SHA" ]]; then
+    print -r -- 0 >"$EVIDENCE_DIR/${name}.exit"
+  else
+    print -r -- 1 >"$EVIDENCE_DIR/${name}.exit"
+  fi
+}
+
+record_head integration-pre-head git rev-parse HEAD
+record_clean integration-pre-status git status --porcelain=v1
+record_gate review-fast-forward git -C "/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-wave1a-review" merge --ff-only "$C1A_SHA"
+record_head review-pre-head git -C "/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-wave1a-review" rev-parse HEAD
+record_clean review-pre-status git -C "/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-wave1a-review" status --porcelain=v1
+```
+
+All five normalized `.exit` receipts above must be 0. `record_head` proves each
+tree equals `C1A_SHA`; `record_clean` proves `git status` both executed
+successfully and emitted no stdout/stderr.
+
+- [ ] **Step 2: Run complete current branch gates with an append-only audit retry**
+
+Continue in the same zsh shell so `C1A_SHA`, `EVIDENCE_DIR`, and the helpers
+remain defined:
+
+```zsh
 record_gate cargo-fmt cargo fmt --all --check
 record_gate cargo-clippy-workspace cargo clippy --workspace --all-targets -- -D warnings
 record_gate cargo-clippy-tauri-nodefault cargo clippy -p opentake-tauri --no-default-features --all-targets -- -D warnings
 record_gate cargo-test-workspace cargo test --workspace --all-targets -- --test-threads=1
 record_gate web-test pnpm -C web test
 record_gate web-build pnpm -C web build
-record_gate web-audit pnpm -C web audit --audit-level high
 record_gate git-diff-check git diff --check "31bfd57e40e3a2bd0ca42b331e5aa877db2d6ace..${C1A_SHA}"
+
+pnpm -C web audit --audit-level high >"$EVIDENCE_DIR/web-audit-attempt-1.log" 2>&1
+audit_status=$?
+print -r -- "$audit_status" >"$EVIDENCE_DIR/web-audit-attempt-1.raw-exit"
+if [[ $audit_status -eq 0 ]]; then
+  print -r -- "attempt-1-pass" >"$EVIDENCE_DIR/web-audit-disposition.txt"
+  print -r -- 0 >"$EVIDENCE_DIR/web-audit.exit"
+elif rg -q 'ERR_PNPM_META_FETCH_FAIL|EAI_AGAIN|ENETUNREACH|ECONNRESET|ECONNREFUSED|ETIMEDOUT' "$EVIDENCE_DIR/web-audit-attempt-1.log"; then
+  pnpm -C web audit --audit-level high >"$EVIDENCE_DIR/web-audit-retry.log" 2>&1
+  retry_status=$?
+  print -r -- "$retry_status" >"$EVIDENCE_DIR/web-audit-retry.raw-exit"
+  print -r -- "network-failure-then-one-retry" >"$EVIDENCE_DIR/web-audit-disposition.txt"
+  print -r -- "$retry_status" >"$EVIDENCE_DIR/web-audit.exit"
+else
+  print -r -- "non-network-failure-no-retry" >"$EVIDENCE_DIR/web-audit-disposition.txt"
+  print -r -- "$audit_status" >"$EVIDENCE_DIR/web-audit.exit"
+fi
 ```
 
-Expected: all exit 0. If an external advisory fetch fails, record the network error and retry once; never report an unrun audit as passed.
+Expected: every normalized `.exit` is 0. The first audit log is never
+overwritten. Only the enumerated transport failures permit one distinctly
+named retry; vulnerability/policy failures are not retried or normalized away.
 
 - [ ] **Step 3: Prove the production surface is fail closed**
 
@@ -465,44 +522,138 @@ record_present() {
 
 record_absent no-bundle-handler 'export::export_bundle,' src-tauri/src/lib.rs
 record_absent no-bundle-command '\bfn[[:space:]]+export_bundle\b' src-tauri/src/export.rs
-record_absent no-bundle-mode '\{ id: "bundle" as const' web/src/components/shell/ExportDialog.tsx
+record_absent no-bundle-mode "\\bid[[:space:]]*:[[:space:]]*['\\\"]bundle['\\\"]" web/src/components/shell/ExportDialog.tsx
 record_present rust-test-seam 'pub fn run_bundle_export' src-tauri/src/export.rs
 record_gate tauri-surface-test cargo test -p opentake-tauri --test bundle_export_surface -- --test-threads=1
 record_gate archive-security-test cargo test -p opentake-project --test archive_security -- --test-threads=1
 
+record_head integration-post-head git rev-parse HEAD
+record_clean integration-post-status git status --porcelain=v1
+record_head review-post-head git -C "/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-wave1a-review" rev-parse HEAD
+record_clean review-post-status git -C "/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-wave1a-review" status --porcelain=v1
+
 gate_failed=0
-for status_file in "$EVIDENCE_DIR"/*.exit; do
-  if [[ "$(<"$status_file")" != "0" ]]; then
-    print -r -- "FAILED: $status_file"
-    gate_failed=1
+{
+  for status_file in "$EVIDENCE_DIR"/*.exit; do
+    if [[ "$(<"$status_file")" != "0" ]]; then
+      print -r -- "FAILED: $status_file"
+      gate_failed=1
+    fi
+  done
+  if [[ $gate_failed -eq 0 ]]; then
+    print -r -- "PASS: all pre-audit branch gates"
   fi
-done
-(( gate_failed == 0 ))
+} >"$EVIDENCE_DIR/pre-audit-aggregate.log" 2>&1
+print -r -- "$gate_failed" >"$EVIDENCE_DIR/pre-audit-aggregate.exit"
+[[ $gate_failed -eq 0 ]]
 ```
 
 Expected: the first three single-line source invariants find nothing; the final
 search confirms only the non-command Rust seam remains for later secure
 integration. Capture each search's stdout/stderr and its expected status under
 `$EVIDENCE_DIR`. A negative search passes only with raw `rg` status 1; status 2
-is an execution error. The final aggregate command must exit 0 before audit.
+is an execution error. Both post-gate trees must still equal `C1A_SHA` and be
+clean. `pre-audit-aggregate.exit` must be 0 before auditors are dispatched.
 
 - [ ] **Step 4: Dispatch final fresh C1A whole-slice auditors**
 
 Dispatch one spec/security auditor and one quality/integration auditor. Both
-verify exact SHA/clean state from the recorded files, inspect all `.exit` and
+verify exact SHA/clean state from the pre/post recorded files, inspect all `.exit` and
 `.log` evidence, rerun the surface and archive-security tests, and check video
 export remains reachable. The spec report must be written to
 `$EVIDENCE_DIR/final-audit/spec-security-review.md`; the quality report must be
 written to `$EVIDENCE_DIR/final-audit/quality-integration-review.md`. Each report
 records reviewed SHA, commands rerun, verdict, and Critical/Important/Minor
-counts, and must state `APPROVE` with `0/0/0`. After both reports land, record
-their paths and verdicts in `$EVIDENCE_DIR/results.md` with `apply_patch`. Any
-finding creates a new fix commit, a new evidence directory, and restarts Task 3
-with both fresh roles.
+counts using these exact header lines:
 
-- [ ] **Step 5: Prepare the next executable plan before more product code**
+```text
+Verdict: APPROVE
+Critical: 0
+Important: 0
+Minor: 0
+```
 
-Create and independently review `docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1b-safe-filesystem.md`. Its scope is only capability interfaces plus complete Unix/macOS/Windows implementations and private unit fixtures; it must not re-enable the product bundle entry. C1A is complete after this handoff, while C1 and Wave 1B-C remain incomplete.
+After both reports land, continue in the same zsh shell and validate the report
+shape plus the final exact/clean trees:
+
+```zsh
+record_approval_report() {
+  local name="$1"
+  local report="$2"
+  : >"$EVIDENCE_DIR/${name}.log"
+  local status=0
+  for pattern in '^Verdict: APPROVE$' '^Critical: 0$' '^Important: 0$' '^Minor: 0$'; do
+    rg -n -- "$pattern" "$report" >>"$EVIDENCE_DIR/${name}.log" 2>&1 || status=1
+  done
+  print -r -- "$status" >"$EVIDENCE_DIR/${name}.exit"
+}
+
+record_approval_report spec-security-audit "$EVIDENCE_DIR/final-audit/spec-security-review.md"
+record_approval_report quality-integration-audit "$EVIDENCE_DIR/final-audit/quality-integration-review.md"
+record_head integration-final-head git rev-parse HEAD
+record_clean integration-final-status git status --porcelain=v1
+record_head review-final-head git -C "/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-wave1a-review" rev-parse HEAD
+record_clean review-final-status git -C "/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-wave1a-review" status --porcelain=v1
+
+final_failed=0
+{
+  for status_file in "$EVIDENCE_DIR"/*.exit; do
+    if [[ "$(<"$status_file")" != "0" ]]; then
+      print -r -- "FAILED: $status_file"
+      final_failed=1
+    fi
+  done
+  if [[ $final_failed -eq 0 ]]; then
+    print -r -- "PASS: C1A exact-commit gate and both audits"
+  fi
+} >"$EVIDENCE_DIR/final-aggregate.log" 2>&1
+print -r -- "$final_failed" >"$EVIDENCE_DIR/final-aggregate.exit"
+[[ $final_failed -eq 0 ]]
+```
+
+Only after `final-aggregate.exit` is 0, create `results.md` with `apply_patch`.
+If `web-audit-disposition.txt` is `attempt-1-pass`, use this exact body:
+
+```markdown
+# C1A Branch Gate Result
+
+- Overall: APPROVE
+- Exact commit: integration and review final-head gates both match C1A_SHA.
+- Cleanliness: integration and review final-status gates are both clean.
+- Command evidence: every required normalized .exit receipt is 0; final-aggregate.exit is 0.
+- Dependency audit: attempt 1 passed; see web-audit-attempt-1.log and web-audit-attempt-1.raw-exit.
+- Spec/security audit: APPROVE, Critical/Important/Minor 0/0/0; see final-audit/spec-security-review.md.
+- Quality/integration audit: APPROVE, Critical/Important/Minor 0/0/0; see final-audit/quality-integration-review.md.
+- Scope: C1A fail-closed removal complete; C1 and Wave 1B-C remain incomplete.
+```
+
+If it is `network-failure-then-one-retry`, use this exact body instead:
+
+```markdown
+# C1A Branch Gate Result
+
+- Overall: APPROVE
+- Exact commit: integration and review final-head gates both match C1A_SHA.
+- Cleanliness: integration and review final-status gates are both clean.
+- Command evidence: every required normalized .exit receipt is 0; final-aggregate.exit is 0.
+- Dependency audit: attempt 1 had an enumerated transport failure and the single retry passed; see web-audit-attempt-1.log, web-audit-attempt-1.raw-exit, web-audit-retry.log, and web-audit-retry.raw-exit.
+- Spec/security audit: APPROVE, Critical/Important/Minor 0/0/0; see final-audit/spec-security-review.md.
+- Quality/integration audit: APPROVE, Critical/Important/Minor 0/0/0; see final-audit/quality-integration-review.md.
+- Scope: C1A fail-closed removal complete; C1 and Wave 1B-C remain incomplete.
+```
+
+Any finding or nonzero normalized receipt creates a fix commit, a new evidence
+directory, and a complete repeat of Task 3 with both fresh roles.
+
+## Controller Handoff After C1A
+
+After this plan is complete, the controller separately creates and independently
+reviews `docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1b-safe-filesystem.md`
+under the `writing-plans` workflow. That separate plan owns capability
+interfaces, complete Unix/macOS/Windows implementations, private unit fixtures,
+its own commit/SHA/report paths/re-review loop, and must not re-enable the
+product bundle entry. It is not an executable C1A task or a condition hidden
+inside C1A's final receipt.
 
 ## Execution Mode
 
