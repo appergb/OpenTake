@@ -21,6 +21,7 @@ interface MediaState {
   setFolders: (folders: MediaFolder[]) => void;
   setImporting: (importing: boolean) => void;
   setError: (error: string | null) => void;
+  resetTransientState: () => void;
 }
 
 export const useMediaStore = create<MediaState>((set) => ({
@@ -32,6 +33,7 @@ export const useMediaStore = create<MediaState>((set) => ({
   setFolders: (folders) => set({ folders }),
   setImporting: (importing) => set({ importing }),
   setError: (error) => set({ error }),
+  resetTransientState: () => set({ importing: false, error: null }),
 }));
 
 let started = false;

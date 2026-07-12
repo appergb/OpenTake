@@ -121,6 +121,14 @@ describe("openProjectPath", () => {
     expect(useEditorUiStore.getState().view).toBe("editor");
   });
 
+  it("clears a media error from the previously open project", async () => {
+    useMediaStore.getState().setError("old project import failed");
+
+    await openProjectPath("/tmp/demo.opentake");
+
+    expect(useMediaStore.getState().error).toBeNull();
+  });
+
   it("resets project-scoped UI runtime only after a successful project open", async () => {
     useEditorUiStore.setState({
       isPlaying: true,
