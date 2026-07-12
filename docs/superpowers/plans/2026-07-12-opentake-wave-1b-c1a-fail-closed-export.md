@@ -403,7 +403,7 @@ Set `SLICE_SHA=$(git rev-parse HEAD)`, fast-forward the clean detached review tr
 **Files:**
 - Verify only; no product edit unless a gate exposes a defect.
 - Evidence root: an exclusive `mktemp -d` child matching `/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-safety/20260712-wave1bc-filesystem/branch-gates/${GATE_TIMESTAMP}-${C1A_SHA}-XXXXXX/`.
-- Every required gate gets a `.log` containing stdout/stderr and a normalized `.exit`; raw statuses that need interpretation use `.raw-exit` as well.
+- Every ordinary gate gets a same-name `.log` containing stdout/stderr and a normalized `.exit`; raw statuses that need interpretation use `.raw-exit` as well. The dependency audit deliberately uses immutable `web-audit-attempt-1.log` / optional `web-audit-retry.log` plus normalized `web-audit.exit`, and `web-audit-disposition.txt` identifies which log authorized it.
 
 - [ ] **Step 1: Create a fresh receipt root and freeze exact clean trees**
 
@@ -415,6 +415,7 @@ value before any test or review begins.
 C1A_SHA=$(git rev-parse HEAD)
 GATE_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 EVIDENCE_PARENT="/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-safety/20260712-wave1bc-filesystem/branch-gates"
+mkdir -p -- "$EVIDENCE_PARENT" || exit 1
 EVIDENCE_DIR=$(mktemp -d "$EVIDENCE_PARENT/${GATE_TIMESTAMP}-${C1A_SHA}-XXXXXX") || exit 1
 mkdir "$EVIDENCE_DIR/final-audit" || exit 1
 print -r -- "created $EVIDENCE_DIR/final-audit" >"$EVIDENCE_DIR/evidence-dir-create.log"
@@ -424,8 +425,8 @@ record_gate() {
   local name="$1"
   shift
   "$@" >"$EVIDENCE_DIR/${name}.log" 2>&1
-  local status=$?
-  print -r -- "$status" >"$EVIDENCE_DIR/${name}.exit"
+  local gate_status=$?
+  print -r -- "$gate_status" >"$EVIDENCE_DIR/${name}.exit"
 }
 
 record_clean() {
@@ -515,7 +516,7 @@ record_absent() {
   local file="$3"
   rg -n -- "$pattern" "$file" >"$EVIDENCE_DIR/${name}.log" 2>&1
   local raw_status=$?
-  print -r -- "$raw_status" >"$EVIDENCE_DIR/${name}.rg-exit"
+  print -r -- "$raw_status" >"$EVIDENCE_DIR/${name}.raw-exit"
   if [[ $raw_status -eq 1 ]]; then
     print -r -- 0 >"$EVIDENCE_DIR/${name}.exit"
   else
@@ -529,7 +530,7 @@ record_present() {
   local file="$3"
   rg -n -- "$pattern" "$file" >"$EVIDENCE_DIR/${name}.log" 2>&1
   local raw_status=$?
-  print -r -- "$raw_status" >"$EVIDENCE_DIR/${name}.rg-exit"
+  print -r -- "$raw_status" >"$EVIDENCE_DIR/${name}.raw-exit"
   print -r -- "$raw_status" >"$EVIDENCE_DIR/${name}.exit"
 }
 
@@ -604,7 +605,7 @@ record_approval_report() {
   local report="$2"
   local expected_role="$3"
   : >"$EVIDENCE_DIR/${name}.log"
-  local status=0
+  local report_status=0
   local expected
   local count
   for expected in \
@@ -617,7 +618,7 @@ record_approval_report() {
     count=$(rg -c -F -x -- "$expected" "$report" 2>>"$EVIDENCE_DIR/${name}.log")
     print -r -- "$expected => ${count:-0}" >>"$EVIDENCE_DIR/${name}.log"
     if [[ "$count" != "1" ]]; then
-      status=1
+      report_status=1
     fi
   done
   local prefix_count
@@ -625,10 +626,10 @@ record_approval_report() {
     prefix_count=$(rg -c -- "^${prefix}:" "$report" 2>>"$EVIDENCE_DIR/${name}.log")
     print -r -- "${prefix} header count => ${prefix_count:-0}" >>"$EVIDENCE_DIR/${name}.log"
     if [[ "$prefix_count" != "1" ]]; then
-      status=1
+      report_status=1
     fi
   done
-  print -r -- "$status" >"$EVIDENCE_DIR/${name}.exit"
+  print -r -- "$report_status" >"$EVIDENCE_DIR/${name}.exit"
 }
 
 record_approval_report spec-security-audit "$EVIDENCE_DIR/final-audit/spec-security-review.md" spec-security
@@ -722,11 +723,11 @@ then compute the final aggregate:
 ```zsh
 record_results() {
   local report="$EVIDENCE_DIR/results.md"
-  local status=0
+  local result_status=0
   : >"$EVIDENCE_DIR/results-validation.log"
 
   if rg -n -F -- 'RESOLVED_C1A_SHA' "$report" >>"$EVIDENCE_DIR/results-validation.log" 2>&1; then
-    status=1
+    result_status=1
   fi
 
   local expected
@@ -745,7 +746,7 @@ record_results() {
     count=$(rg -c -F -x -- "$expected" "$report" 2>>"$EVIDENCE_DIR/results-validation.log")
     print -r -- "$expected => ${count:-0}" >>"$EVIDENCE_DIR/results-validation.log"
     if [[ "$count" != "1" ]]; then
-      status=1
+      result_status=1
     fi
   done
 
@@ -765,17 +766,17 @@ record_results() {
     count=$(rg -c -F -x -- "$expected" "$report" 2>>"$EVIDENCE_DIR/results-validation.log")
     print -r -- "$expected => ${count:-0}" >>"$EVIDENCE_DIR/results-validation.log"
     if [[ "$count" != "1" ]]; then
-      status=1
+      result_status=1
     fi
   done
   local gate_row_count
   gate_row_count=$(rg -c -- '^\| [a-z][^|]* \| 0 \|$' "$report" 2>>"$EVIDENCE_DIR/results-validation.log")
   print -r -- "normalized zero gate rows => ${gate_row_count:-0}" >>"$EVIDENCE_DIR/results-validation.log"
   if [[ "$gate_row_count" != "34" ]]; then
-    status=1
+    result_status=1
   fi
   if rg -n -- '^\| [a-z][^|]* \| [^|]*[1-9][^|]* \|$' "$report" >>"$EVIDENCE_DIR/results-validation.log" 2>&1; then
-    status=1
+    result_status=1
   fi
 
   local disposition
@@ -786,20 +787,20 @@ record_results() {
     expected='- Dependency audit: attempt 1 had an enumerated transport failure and the single retry passed; see web-audit-attempt-1.log, web-audit-attempt-1.raw-exit, web-audit-retry.log, and web-audit-retry.raw-exit.'
   else
     expected='INVALID-AUDIT-DISPOSITION'
-    status=1
+    result_status=1
   fi
   count=$(rg -c -F -x -- "$expected" "$report" 2>>"$EVIDENCE_DIR/results-validation.log")
   print -r -- "$expected => ${count:-0}" >>"$EVIDENCE_DIR/results-validation.log"
   if [[ "$count" != "1" ]]; then
-    status=1
+    result_status=1
   fi
 
   local dependency_lines
   dependency_lines=$(rg -c -- '^- Dependency audit:' "$report" 2>>"$EVIDENCE_DIR/results-validation.log")
   if [[ "$dependency_lines" != "1" ]]; then
-    status=1
+    result_status=1
   fi
-  print -r -- "$status" >"$EVIDENCE_DIR/results-validation.exit"
+  print -r -- "$result_status" >"$EVIDENCE_DIR/results-validation.exit"
 }
 
 record_results
