@@ -90,7 +90,7 @@ vi.mock("../components/preview/nativePlaybackSession", () => ({
 }));
 
 vi.mock("./mediaStore", () => ({
-  resetProjectMediaTransientState: srv.resetMediaTransient,
+  resetProjectMediaState: srv.resetMediaTransient,
   refreshMedia: srv.refreshMedia,
 }));
 

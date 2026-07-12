@@ -83,10 +83,10 @@ export function endMediaImport(operation: MediaImportOperation): void {
   useMediaStore.getState().setImporting(currentProjectHasActiveImport());
 }
 
-export function resetProjectMediaTransientState(): void {
+export function resetProjectMediaState(): void {
   refreshGeneration += 1;
   activeImportOperations.clear();
-  useMediaStore.setState({ importing: false, error: null });
+  useMediaStore.setState({ items: [], folders: [], importing: false, error: null });
 }
 
 /** Fetch the current catalog into the store (items + folder tree). */

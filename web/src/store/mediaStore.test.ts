@@ -22,7 +22,7 @@ vi.mock("../lib/api", () => ({
   getMedia: srv.getMedia,
 }));
 
-import { useMediaStore, refreshMedia } from "./mediaStore";
+import { useMediaStore, refreshMedia, resetProjectMediaState } from "./mediaStore";
 import { useProjectStore } from "./projectStore";
 
 const item = (
@@ -48,8 +48,7 @@ describe("mediaStore", () => {
   beforeEach(() => {
     srv.getMedia.mockReset();
     srv.getMedia.mockImplementation(async () => srv.media);
-    useMediaStore.getState().setItems([]);
-    useMediaStore.getState().setFolders([]);
+    useMediaStore.setState({ items: [], folders: [], importing: false, error: null });
     useProjectStore.setState({
       projectEpoch: 1,
       projectPath: "/tmp/project-a.opentake",
@@ -105,6 +104,24 @@ describe("mediaStore", () => {
     const after = useMediaStore.getState().folders;
     expect(after).not.toBe(before);
     expect(after).toHaveLength(1);
+  });
+
+  it("clears the complete old-project media state at a successful project boundary", () => {
+    useMediaStore.setState({
+      items: [item("project-a", "project-a-folder")],
+      folders: [folder("project-a-folder", null)],
+      importing: true,
+      error: "project A import failed",
+    });
+
+    resetProjectMediaState();
+
+    expect(useMediaStore.getState()).toMatchObject({
+      items: [],
+      folders: [],
+      importing: false,
+      error: null,
+    });
   });
 
   it("does not let an older project refresh overwrite the current catalog", async () => {

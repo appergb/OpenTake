@@ -61,6 +61,7 @@ const srv = vi.hoisted(() => {
       };
     }),
     projectSave: vi.fn(async (path: string | null) => path ?? ""),
+    getMedia: vi.fn(async () => media),
   };
 });
 
@@ -79,7 +80,7 @@ vi.mock("../lib/api", () => ({
   }),
   canUndo: async () => false,
   canRedo: async () => false,
-  getMedia: async () => srv.media,
+  getMedia: srv.getMedia,
 }));
 
 vi.mock("../components/preview/nativePlaybackSession", () => ({
@@ -104,9 +105,11 @@ describe("openProjectPath", () => {
     srv.stopBoundary.mockClear();
     srv.projectOpen.mockClear();
     srv.projectNew.mockClear();
+    srv.getMedia.mockReset();
+    srv.getMedia.mockImplementation(async () => srv.media);
     srv.projectSave.mockReset();
     srv.projectSave.mockImplementation(async (path: string | null) => path ?? "");
-    useMediaStore.getState().setItems([]);
+    useMediaStore.setState({ items: [], folders: [], importing: false, error: null });
     useRecentStore.setState({ recents: [] });
     useProjectStore.setState({ projectPath: null, timelineVersion: 0 });
     useEditorUiStore.setState({ view: "home", toast: null });
@@ -130,13 +133,55 @@ describe("openProjectPath", () => {
   });
 
   it("preserves media transient state when project open fails", async () => {
-    useMediaStore.setState({ importing: true, error: "old project error" });
+    const oldFolder = { id: "old-folder", name: "Old", parentFolderId: null };
+    useMediaStore.setState({
+      items: srv.media.items,
+      folders: [oldFolder],
+      importing: true,
+      error: "old project error",
+    });
     srv.projectOpen.mockRejectedValueOnce(new Error("open failed"));
 
     await expect(openProjectPath("/tmp/broken.opentake")).rejects.toThrow("open failed");
 
     expect(useMediaStore.getState().importing).toBe(true);
     expect(useMediaStore.getState().error).toBe("old project error");
+    expect(useMediaStore.getState().items).toEqual(srv.media.items);
+    expect(useMediaStore.getState().folders).toEqual([oldFolder]);
+  });
+
+  it("clears the old catalog immediately, then installs the opened project catalog", async () => {
+    useMediaStore.setState({
+      items: [{ ...srv.media.items[0]!, id: "old-item" }],
+      folders: [{ id: "old-folder", name: "Old", parentFolderId: null }],
+    });
+    const nextCatalog = deferred<MediaList>();
+    srv.getMedia.mockImplementationOnce(() => nextCatalog.promise);
+
+    const opening = openProjectPath("/tmp/demo.opentake");
+    await vi.waitFor(() => {
+      expect(useProjectStore.getState().projectPath).toBe("/tmp/core-resolved.opentake");
+    });
+    expect(useMediaStore.getState().items).toEqual([]);
+    expect(useMediaStore.getState().folders).toEqual([]);
+
+    nextCatalog.resolve(srv.media);
+    await opening;
+    expect(useMediaStore.getState().items.map((item) => item.id)).toEqual(["m1"]);
+  });
+
+  it("never restores the old catalog when the opened project media refresh fails", async () => {
+    useMediaStore.setState({
+      items: [{ ...srv.media.items[0]!, id: "old-item" }],
+      folders: [{ id: "old-folder", name: "Old", parentFolderId: null }],
+    });
+    srv.getMedia.mockRejectedValueOnce(new Error("media refresh failed"));
+
+    await expect(openProjectPath("/tmp/demo.opentake")).rejects.toThrow("media refresh failed");
+
+    expect(useProjectStore.getState().projectPath).toBe("/tmp/core-resolved.opentake");
+    expect(useMediaStore.getState().items).toEqual([]);
+    expect(useMediaStore.getState().folders).toEqual([]);
   });
 
   it("resets project-scoped UI runtime only after a successful project open", async () => {

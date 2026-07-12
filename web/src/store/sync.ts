@@ -8,7 +8,7 @@ import * as api from "../lib/api";
 import { useProjectStore } from "./projectStore";
 import { useEditorUiStore } from "./uiStore";
 import { stopNativePlaybackForProjectBoundary } from "../components/preview/nativePlaybackSession";
-import { refreshMedia, resetProjectMediaTransientState } from "./mediaStore";
+import { refreshMedia, resetProjectMediaState } from "./mediaStore";
 
 let started = false;
 let unlistenTimeline: (() => void) | null = null;
@@ -30,7 +30,7 @@ async function refreshMirror(): Promise<void> {
     beforeCommit.projectEpoch !== committed.projectEpoch ||
     beforeCommit.projectPath !== committed.projectPath;
   if (projectChanged) {
-    resetProjectMediaTransientState();
+    resetProjectMediaState();
     useEditorUiStore.getState().resetProjectRuntimeState();
     await refreshMedia();
     if (generation !== refreshGeneration) return;
