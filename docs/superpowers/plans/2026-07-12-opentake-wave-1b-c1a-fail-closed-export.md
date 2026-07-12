@@ -53,10 +53,16 @@ Create `src-tauri/tests/bundle_export_surface.rs` exactly as follows:
 const LIB_RS: &str = include_str!("../src/lib.rs");
 const EXPORT_RS: &str = include_str!("../src/export.rs");
 
+fn identifiers(source: &str) -> impl Iterator<Item = &str> {
+    source
+        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .filter(|token| !token.is_empty())
+}
+
 #[test]
 fn bundle_export_is_not_registered_or_exposed_as_a_tauri_command() {
-    assert!(!LIB_RS.contains("export::export_bundle,"));
-    assert!(!EXPORT_RS.contains("fn export_bundle"));
+    assert!(!identifiers(LIB_RS).any(|token| token == "export_bundle"));
+    assert!(!identifiers(EXPORT_RS).any(|token| token == "export_bundle"));
 }
 ```
 
@@ -66,7 +72,11 @@ fn bundle_export_is_not_registered_or_exposed_as_a_tauri_command() {
 cargo test -p opentake-tauri --test bundle_export_surface -- --test-threads=1
 ```
 
-Expected: FAIL because `export::export_bundle` is registered and the wrapper is a Tauri command.
+Expected: FAIL because both current files contain the standalone identifier
+`export_bundle`. Splitting on every non-identifier character makes the
+regression independent of whitespace, comments, `::` spacing, and line layout;
+it does not confuse the retained identifier `run_bundle_export` with the
+forbidden standalone identifier.
 
 - [ ] **Step 3: Add the UI-entry RED test**
 
@@ -392,7 +402,7 @@ Set `SLICE_SHA=$(git rev-parse HEAD)`, fast-forward the clean detached review tr
 
 **Files:**
 - Verify only; no product edit unless a gate exposes a defect.
-- Evidence root: `/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-safety/20260712-wave1bc-filesystem/branch-gates/${GATE_TIMESTAMP}-${C1A_SHA}/`.
+- Evidence root: an exclusive `mktemp -d` child matching `/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-safety/20260712-wave1bc-filesystem/branch-gates/${GATE_TIMESTAMP}-${C1A_SHA}-XXXXXX/`.
 - Every required gate gets a `.log` containing stdout/stderr and a normalized `.exit`; raw statuses that need interpretation use `.raw-exit` as well.
 
 - [ ] **Step 1: Create a fresh receipt root and freeze exact clean trees**
@@ -404,8 +414,9 @@ value before any test or review begins.
 ```zsh
 C1A_SHA=$(git rev-parse HEAD)
 GATE_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-EVIDENCE_DIR="/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-safety/20260712-wave1bc-filesystem/branch-gates/${GATE_TIMESTAMP}-${C1A_SHA}"
-mkdir -p "$EVIDENCE_DIR/final-audit" || exit 1
+EVIDENCE_PARENT="/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-safety/20260712-wave1bc-filesystem/branch-gates"
+EVIDENCE_DIR=$(mktemp -d "$EVIDENCE_PARENT/${GATE_TIMESTAMP}-${C1A_SHA}-XXXXXX") || exit 1
+mkdir "$EVIDENCE_DIR/final-audit" || exit 1
 print -r -- "created $EVIDENCE_DIR/final-audit" >"$EVIDENCE_DIR/evidence-dir-create.log"
 print -r -- 0 >"$EVIDENCE_DIR/evidence-dir-create.exit"
 
@@ -452,7 +463,9 @@ record_clean review-pre-status git -C "/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/O
 
 All five normalized `.exit` receipts above must be 0. `record_head` proves each
 tree equals `C1A_SHA`; `record_clean` proves `git status` both executed
-successfully and emitted no stdout/stderr.
+successfully and emitted no stdout/stderr. `mktemp -d` creates the evidence root
+exclusively; a restart always receives a new random suffix and can never reuse
+or overwrite an earlier attempt directory.
 
 - [ ] **Step 2: Run complete current branch gates with an append-only audit retry**
 
@@ -520,7 +533,7 @@ record_present() {
   print -r -- "$raw_status" >"$EVIDENCE_DIR/${name}.exit"
 }
 
-record_absent no-bundle-handler 'export::export_bundle,' src-tauri/src/lib.rs
+record_absent no-bundle-handler '\bexport_bundle\b' src-tauri/src/lib.rs
 record_absent no-bundle-command '\bfn[[:space:]]+export_bundle\b' src-tauri/src/export.rs
 record_absent no-bundle-mode "\\bid[[:space:]]*:[[:space:]]*['\\\"]bundle['\\\"]" web/src/components/shell/ExportDialog.tsx
 record_present rust-test-seam 'pub fn run_bundle_export' src-tauri/src/export.rs
@@ -567,11 +580,18 @@ records reviewed SHA, commands rerun, verdict, and Critical/Important/Minor
 counts using these exact header lines:
 
 ```text
+Role: spec-security
+Commit: <the literal 40-character C1A_SHA>
 Verdict: APPROVE
 Critical: 0
 Important: 0
 Minor: 0
 ```
+
+The quality report uses `Role: quality-integration` and the same literal
+40-character commit. `<the literal 40-character C1A_SHA>` is an instruction to
+insert the value from `integration-final-head.log`; that angle-bracket text
+must not appear in either report.
 
 After both reports land, continue in the same zsh shell and validate the report
 shape plus the final exact/clean trees:
@@ -580,20 +600,207 @@ shape plus the final exact/clean trees:
 record_approval_report() {
   local name="$1"
   local report="$2"
+  local expected_role="$3"
   : >"$EVIDENCE_DIR/${name}.log"
   local status=0
-  for pattern in '^Verdict: APPROVE$' '^Critical: 0$' '^Important: 0$' '^Minor: 0$'; do
-    rg -n -- "$pattern" "$report" >>"$EVIDENCE_DIR/${name}.log" 2>&1 || status=1
+  local expected
+  local count
+  for expected in \
+    "Role: ${expected_role}" \
+    "Commit: ${C1A_SHA}" \
+    'Verdict: APPROVE' \
+    'Critical: 0' \
+    'Important: 0' \
+    'Minor: 0'; do
+    count=$(rg -c -F -x -- "$expected" "$report" 2>>"$EVIDENCE_DIR/${name}.log")
+    print -r -- "$expected => ${count:-0}" >>"$EVIDENCE_DIR/${name}.log"
+    if [[ "$count" != "1" ]]; then
+      status=1
+    fi
+  done
+  local prefix_count
+  for prefix in Role Commit Verdict Critical Important Minor; do
+    prefix_count=$(rg -c -- "^${prefix}:" "$report" 2>>"$EVIDENCE_DIR/${name}.log")
+    print -r -- "${prefix} header count => ${prefix_count:-0}" >>"$EVIDENCE_DIR/${name}.log"
+    if [[ "$prefix_count" != "1" ]]; then
+      status=1
+    fi
   done
   print -r -- "$status" >"$EVIDENCE_DIR/${name}.exit"
 }
 
-record_approval_report spec-security-audit "$EVIDENCE_DIR/final-audit/spec-security-review.md"
-record_approval_report quality-integration-audit "$EVIDENCE_DIR/final-audit/quality-integration-review.md"
+record_approval_report spec-security-audit "$EVIDENCE_DIR/final-audit/spec-security-review.md" spec-security
+record_approval_report quality-integration-audit "$EVIDENCE_DIR/final-audit/quality-integration-review.md" quality-integration
 record_head integration-final-head git rev-parse HEAD
 record_clean integration-final-status git status --porcelain=v1
 record_head review-final-head git -C "/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-wave1a-review" rev-parse HEAD
 record_clean review-final-status git -C "/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-wave1a-review" status --porcelain=v1
+
+pre_results_failed=0
+{
+  for status_file in "$EVIDENCE_DIR"/*.exit; do
+    if [[ "$(<"$status_file")" != "0" ]]; then
+      print -r -- "FAILED: $status_file"
+      pre_results_failed=1
+    fi
+  done
+  if [[ $pre_results_failed -eq 0 ]]; then
+    print -r -- "PASS: exact-commit gates and both audits are ready for results"
+  fi
+} >"$EVIDENCE_DIR/pre-results-aggregate.log" 2>&1
+print -r -- "$pre_results_failed" >"$EVIDENCE_DIR/pre-results-aggregate.exit"
+[[ $pre_results_failed -eq 0 ]]
+```
+
+Only after `pre-results-aggregate.exit` is 0, create `results.md` with
+`apply_patch`. In the body below, replace every `RESOLVED_C1A_SHA` with the
+literal 40-character contents of `integration-final-head.log`; the marker must
+not remain in the file. If `web-audit-disposition.txt` is `attempt-1-pass`, use
+the first dependency-audit bullet. If it is
+`network-failure-then-one-retry`, use the second. No other body variation is
+permitted.
+
+```markdown
+# C1A Branch Gate Result
+
+- Overall: APPROVE
+- Exact commit: RESOLVED_C1A_SHA
+- Integration final SHA: RESOLVED_C1A_SHA
+- Review final SHA: RESOLVED_C1A_SHA
+- Integration clean status: 0
+- Review clean status: 0
+- Dependency audit: attempt 1 passed; see web-audit-attempt-1.log and web-audit-attempt-1.raw-exit.
+- Dependency audit: attempt 1 had an enumerated transport failure and the single retry passed; see web-audit-attempt-1.log, web-audit-attempt-1.raw-exit, web-audit-retry.log, and web-audit-retry.raw-exit.
+- Spec/security audit: final-audit/spec-security-review.md; Role spec-security; Commit RESOLVED_C1A_SHA; APPROVE 0/0/0.
+- Quality/integration audit: final-audit/quality-integration-review.md; Role quality-integration; Commit RESOLVED_C1A_SHA; APPROVE 0/0/0.
+- Scope: C1A fail-closed removal complete; C1 and Wave 1B-C remain incomplete.
+
+| Normalized gate | Status |
+| --- | ---: |
+| evidence-dir-create | 0 |
+| integration-pre-head | 0 |
+| integration-pre-status | 0 |
+| review-fast-forward | 0 |
+| review-pre-head | 0 |
+| review-pre-status | 0 |
+| cargo-fmt | 0 |
+| cargo-clippy-workspace | 0 |
+| cargo-clippy-tauri-nodefault | 0 |
+| cargo-test-workspace | 0 |
+| web-test | 0 |
+| web-build | 0 |
+| git-diff-check | 0 |
+| web-audit | 0 |
+| no-bundle-handler | 0 |
+| no-bundle-command | 0 |
+| no-bundle-mode | 0 |
+| rust-test-seam | 0 |
+| tauri-surface-test | 0 |
+| archive-security-test | 0 |
+| integration-post-head | 0 |
+| integration-post-status | 0 |
+| review-post-head | 0 |
+| review-post-status | 0 |
+| pre-audit-aggregate | 0 |
+| spec-security-audit | 0 |
+| quality-integration-audit | 0 |
+| integration-final-head | 0 |
+| integration-final-status | 0 |
+| review-final-head | 0 |
+| review-final-status | 0 |
+| pre-results-aggregate | 0 |
+| results-validation | 0 |
+| final-aggregate | 0 |
+```
+
+The two dependency-audit bullets above are mutually exclusive: the
+`results.md` file contains exactly one of them. Validate the concrete receipt,
+then compute the final aggregate:
+
+```zsh
+record_results() {
+  local report="$EVIDENCE_DIR/results.md"
+  local status=0
+  : >"$EVIDENCE_DIR/results-validation.log"
+
+  if rg -n -F -- 'RESOLVED_C1A_SHA' "$report" >>"$EVIDENCE_DIR/results-validation.log" 2>&1; then
+    status=1
+  fi
+
+  local expected
+  local count
+  for expected in \
+    '# C1A Branch Gate Result' \
+    '- Overall: APPROVE' \
+    "- Exact commit: ${C1A_SHA}" \
+    "- Integration final SHA: ${C1A_SHA}" \
+    "- Review final SHA: ${C1A_SHA}" \
+    '- Integration clean status: 0' \
+    '- Review clean status: 0' \
+    "- Spec/security audit: final-audit/spec-security-review.md; Role spec-security; Commit ${C1A_SHA}; APPROVE 0/0/0." \
+    "- Quality/integration audit: final-audit/quality-integration-review.md; Role quality-integration; Commit ${C1A_SHA}; APPROVE 0/0/0." \
+    '- Scope: C1A fail-closed removal complete; C1 and Wave 1B-C remain incomplete.'; do
+    count=$(rg -c -F -x -- "$expected" "$report" 2>>"$EVIDENCE_DIR/results-validation.log")
+    print -r -- "$expected => ${count:-0}" >>"$EVIDENCE_DIR/results-validation.log"
+    if [[ "$count" != "1" ]]; then
+      status=1
+    fi
+  done
+
+  local gate
+  for gate in \
+    evidence-dir-create integration-pre-head integration-pre-status \
+    review-fast-forward review-pre-head review-pre-status cargo-fmt \
+    cargo-clippy-workspace cargo-clippy-tauri-nodefault cargo-test-workspace \
+    web-test web-build git-diff-check web-audit no-bundle-handler \
+    no-bundle-command no-bundle-mode rust-test-seam tauri-surface-test \
+    archive-security-test integration-post-head integration-post-status \
+    review-post-head review-post-status pre-audit-aggregate \
+    spec-security-audit quality-integration-audit integration-final-head \
+    integration-final-status review-final-head review-final-status \
+    pre-results-aggregate results-validation final-aggregate; do
+    expected="| ${gate} | 0 |"
+    count=$(rg -c -F -x -- "$expected" "$report" 2>>"$EVIDENCE_DIR/results-validation.log")
+    print -r -- "$expected => ${count:-0}" >>"$EVIDENCE_DIR/results-validation.log"
+    if [[ "$count" != "1" ]]; then
+      status=1
+    fi
+  done
+  local gate_row_count
+  gate_row_count=$(rg -c -- '^\| [a-z][^|]* \| 0 \|$' "$report" 2>>"$EVIDENCE_DIR/results-validation.log")
+  print -r -- "normalized zero gate rows => ${gate_row_count:-0}" >>"$EVIDENCE_DIR/results-validation.log"
+  if [[ "$gate_row_count" != "34" ]]; then
+    status=1
+  fi
+  if rg -n -- '^\| [a-z][^|]* \| [^|]*[1-9][^|]* \|$' "$report" >>"$EVIDENCE_DIR/results-validation.log" 2>&1; then
+    status=1
+  fi
+
+  local disposition
+  disposition="$(<"$EVIDENCE_DIR/web-audit-disposition.txt")"
+  if [[ "$disposition" == "attempt-1-pass" ]]; then
+    expected='- Dependency audit: attempt 1 passed; see web-audit-attempt-1.log and web-audit-attempt-1.raw-exit.'
+  elif [[ "$disposition" == "network-failure-then-one-retry" ]]; then
+    expected='- Dependency audit: attempt 1 had an enumerated transport failure and the single retry passed; see web-audit-attempt-1.log, web-audit-attempt-1.raw-exit, web-audit-retry.log, and web-audit-retry.raw-exit.'
+  else
+    expected='INVALID-AUDIT-DISPOSITION'
+    status=1
+  fi
+  count=$(rg -c -F -x -- "$expected" "$report" 2>>"$EVIDENCE_DIR/results-validation.log")
+  print -r -- "$expected => ${count:-0}" >>"$EVIDENCE_DIR/results-validation.log"
+  if [[ "$count" != "1" ]]; then
+    status=1
+  fi
+
+  local dependency_lines
+  dependency_lines=$(rg -c -- '^- Dependency audit:' "$report" 2>>"$EVIDENCE_DIR/results-validation.log")
+  if [[ "$dependency_lines" != "1" ]]; then
+    status=1
+  fi
+  print -r -- "$status" >"$EVIDENCE_DIR/results-validation.exit"
+}
+
+record_results
 
 final_failed=0
 {
@@ -604,43 +811,15 @@ final_failed=0
     fi
   done
   if [[ $final_failed -eq 0 ]]; then
-    print -r -- "PASS: C1A exact-commit gate and both audits"
+    print -r -- "PASS: C1A exact-commit gate, results receipt, and both audits"
   fi
 } >"$EVIDENCE_DIR/final-aggregate.log" 2>&1
 print -r -- "$final_failed" >"$EVIDENCE_DIR/final-aggregate.exit"
 [[ $final_failed -eq 0 ]]
 ```
 
-Only after `final-aggregate.exit` is 0, create `results.md` with `apply_patch`.
-If `web-audit-disposition.txt` is `attempt-1-pass`, use this exact body:
-
-```markdown
-# C1A Branch Gate Result
-
-- Overall: APPROVE
-- Exact commit: integration and review final-head gates both match C1A_SHA.
-- Cleanliness: integration and review final-status gates are both clean.
-- Command evidence: every required normalized .exit receipt is 0; final-aggregate.exit is 0.
-- Dependency audit: attempt 1 passed; see web-audit-attempt-1.log and web-audit-attempt-1.raw-exit.
-- Spec/security audit: APPROVE, Critical/Important/Minor 0/0/0; see final-audit/spec-security-review.md.
-- Quality/integration audit: APPROVE, Critical/Important/Minor 0/0/0; see final-audit/quality-integration-review.md.
-- Scope: C1A fail-closed removal complete; C1 and Wave 1B-C remain incomplete.
-```
-
-If it is `network-failure-then-one-retry`, use this exact body instead:
-
-```markdown
-# C1A Branch Gate Result
-
-- Overall: APPROVE
-- Exact commit: integration and review final-head gates both match C1A_SHA.
-- Cleanliness: integration and review final-status gates are both clean.
-- Command evidence: every required normalized .exit receipt is 0; final-aggregate.exit is 0.
-- Dependency audit: attempt 1 had an enumerated transport failure and the single retry passed; see web-audit-attempt-1.log, web-audit-attempt-1.raw-exit, web-audit-retry.log, and web-audit-retry.raw-exit.
-- Spec/security audit: APPROVE, Critical/Important/Minor 0/0/0; see final-audit/spec-security-review.md.
-- Quality/integration audit: APPROVE, Critical/Important/Minor 0/0/0; see final-audit/quality-integration-review.md.
-- Scope: C1A fail-closed removal complete; C1 and Wave 1B-C remain incomplete.
-```
+The literal `final-aggregate | 0` row becomes true only when the last command
+returns 0. A nonzero result prevents approval and preserves the failed receipt.
 
 Any finding or nonzero normalized receipt creates a fix commit, a new evidence
 directory, and a complete repeat of Task 3 with both fresh roles.
