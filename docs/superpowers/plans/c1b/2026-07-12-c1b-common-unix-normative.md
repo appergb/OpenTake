@@ -1,6 +1,6 @@
 # C1B Common and Unix Normative Implementation Appendix
 
-Status: normative, repository-versioned, attempt-4 implementation contract. It is bound to approved design `31bfd57e40e3a2bd0ca42b331e5aa877db2d6ace` and C1A baseline `e67917260ace36e4db1ede4e36eecbc401825bb1`. This appendix contains the complete common facade, unsupported adapter, Unix ownership model, deterministic tests, and executable RED/GREEN evidence protocol. There is no second Windows-only facade.
+Status: normative, repository-versioned, attempt-5 implementation contract. It is bound to approved design `31bfd57e40e3a2bd0ca42b331e5aa877db2d6ace` and C1A baseline `e67917260ace36e4db1ede4e36eecbc401825bb1`. This appendix contains the complete common facade, unsupported adapter, Unix ownership model, deterministic tests, and executable RED/GREEN evidence protocol. There is no second Windows-only facade.
 
 ## 1. Invariants and threat-boundary contract
 
@@ -12,7 +12,7 @@ Status: normative, repository-versioned, attempt-4 implementation contract. It i
 6. `query_child_nofollow` returns `Ok(ChildState::Present(metadata))` for symlinks, reparse points, FIFOs, sockets, and devices. Unix performs `statat(..., SYMLINK_NOFOLLOW)` only; it never opens a FIFO/device merely to answer a query.
 7. Root quarantine and final publish are atomic no-replace name operations. Unix `renameat2(RENAME_NOREPLACE)` or `renameatx_np(RENAME_EXCL)` is the linearization point. There is no check-then-rename substitute.
 8. Unix cannot bind `unlinkat` or the source side of rename atomically to an earlier inode handle. After verified root quarantine, recursive cleanup performs a fresh nofollow identity read immediately before each name syscall. That final same-account race is outside the approved threat boundary and is never described as handle-bound. Mismatch, ambiguity, or restore collision fails closed and retains the quarantine.
-9. Recursive cleanup never joins an ambient path. It enumerates a retained quarantined directory, opens/records each child relative to that authority, recursively consumes child cleanup capabilities, then consumes the empty root capability.
+9. Recursive cleanup never joins an ambient path. Enumeration validates and returns every child component name, including symlink/reparse and special-entry names, without following it or granting authority. Validation callers query/reject nofollow metadata; cleanup opens/records each returned child relative to the retained quarantined authority, recursively consumes child cleanup capabilities, then consumes the empty root capability.
 
 ## 2. Complete common source
 
@@ -296,7 +296,7 @@ pub(crate) enum CreatePermissions { Inherit, OwnerOnly }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CaseMode { Sensitive, Insensitive }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LinuxFilesystem { Ext, Xfs, Btrfs, Tmpfs }
+pub(crate) enum LinuxFilesystem { Ext, Xfs, Btrfs }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LocalFilesystemSnapshot {
@@ -472,6 +472,8 @@ pub(crate) fn open_file_nofollow(parent: &DirectoryAuthority, name: &ComponentNa
 pub(crate) fn create_dir_new(parent: &DirectoryAuthority, name: &ComponentName, permissions: CreatePermissions, access: DirectoryAccess) -> Result<DirectoryAuthority> { platform::create_dir_new(parent, name, permissions, access) }
 pub(crate) fn create_stage_dir_new(parent: &DirectoryAuthority, name: &ComponentName, permissions: CreatePermissions) -> Result<StageCapability> { platform::create_stage_dir_new(parent, name, permissions) }
 pub(crate) fn create_file_new(parent: &DirectoryAuthority, name: &ComponentName, permissions: CreatePermissions) -> Result<FileCapability> { platform::create_file_new(parent, name, permissions) }
+// Name enumeration validates and returns every child component without following it or
+// granting authority. Callers must query metadata or open an explicit nofollow capability.
 pub(crate) fn enumerate(directory: &DirectoryAuthority) -> Result<Vec<ComponentName>> { platform::enumerate(directory) }
 pub(crate) fn read_link_component(parent: &DirectoryAuthority, name: &ComponentName) -> Result<RawLinkTarget> { platform::read_link_component(parent, name) }
 pub(crate) fn quarantine_stage(stage: StageCapability, parent: &DirectoryAuthority, quarantine_name: ComponentName) -> Result<QuarantinedCapability> { platform::quarantine_stage(stage, parent, quarantine_name) }
@@ -611,8 +613,6 @@ const XFS_MAGIC: i64 = 0x5846_5342;
 #[cfg(target_os = "linux")]
 const BTRFS_MAGIC: i64 = 0x9123_683e;
 #[cfg(target_os = "linux")]
-const TMPFS_MAGIC: i64 = 0x0102_1994;
-#[cfg(target_os = "linux")]
 const NFS_MAGIC: i64 = 0x0000_6969;
 #[cfg(target_os = "linux")]
 const CIFS_MAGIC: i64 = 0xff53_4d42;
@@ -653,7 +653,6 @@ fn linux_filesystem_from_raw(magic: i64, fsid: u64, device: u64, operation: Safe
         EXT_MAGIC => LinuxFilesystem::Ext,
         XFS_MAGIC => LinuxFilesystem::Xfs,
         BTRFS_MAGIC => LinuxFilesystem::Btrfs,
-        TMPFS_MAGIC => LinuxFilesystem::Tmpfs,
         NFS_MAGIC | CIFS_MAGIC | SMB2_MAGIC => return Err(SafeFsError::UnsupportedSecureFilesystem { operation, reason: SecureFilesystemReason::RemoteFilesystem }),
         _ => return Err(SafeFsError::UnsupportedSecureFilesystem { operation, reason: SecureFilesystemReason::UnknownFilesystem }),
     };
@@ -705,7 +704,7 @@ fn opened_metadata(fd: impl AsFd, operation: SafeFsOperation) -> Result<EntryMet
 #[cfg(target_os = "linux")]
 fn linux_case_from_raw(family: LinuxFilesystem, ext_flags: std::result::Result<i64, SecureFilesystemReason>, operation: SafeFsOperation) -> Result<CaseMode> {
     match family {
-        LinuxFilesystem::Xfs | LinuxFilesystem::Btrfs | LinuxFilesystem::Tmpfs => Ok(CaseMode::Sensitive),
+        LinuxFilesystem::Xfs | LinuxFilesystem::Btrfs => Ok(CaseMode::Sensitive),
         LinuxFilesystem::Ext => {
             let flags = ext_flags.map_err(|reason| SafeFsError::UnsupportedSecureFilesystem { operation, reason })?;
             if flags & FS_CASEFOLD_FL as i64 == 0 { Ok(CaseMode::Sensitive) } else { Ok(CaseMode::Insensitive) }
@@ -920,6 +919,11 @@ pub(super) fn write_file(native: &mut NativeFile, buffer: &[u8]) -> Result<usize
 pub(super) fn seek_file(native: &mut NativeFile, position: SeekFrom) -> Result<u64> { match native { NativeFile::Open(file) => file.seek(position).map_err(|error| SafeFsError::io(SafeFsOperation::SeekFile, error)), NativeFile::NameOnly { .. } => Err(SafeFsError::AccessMismatch { operation: SafeFsOperation::SeekFile }) } }
 pub(super) fn flush_file(native: &mut NativeFile) -> Result<()> { match native { NativeFile::Open(file) => file.flush().map_err(|error| SafeFsError::io(SafeFsOperation::FlushFile, error)), NativeFile::NameOnly { .. } => Err(SafeFsError::AccessMismatch { operation: SafeFsOperation::FlushFile }) } }
 pub(super) fn sync_file(native: &NativeFile) -> Result<()> { match native { NativeFile::Open(file) => file.sync_all().map_err(|error| SafeFsError::io(SafeFsOperation::SyncFile, error)), NativeFile::NameOnly { .. } => Err(SafeFsError::AccessMismatch { operation: SafeFsOperation::SyncFile }) } }
+
+// Bounded nofollow name discovery validates and returns every raw child component,
+// including symlink/reparse, FIFO, socket, device, and other special-entry names.
+// It neither filters by entry kind nor grants authority. Validation callers query and
+// reject metadata explicitly; cleanup callers obtain consuming authority separately.
 
 pub(super) fn enumerate(directory: &DirectoryAuthority) -> Result<Vec<ComponentName>> {
     let mut names = Vec::new();
@@ -1176,13 +1180,15 @@ mod unix_contract {
         const TMPFS: i64 = 0x0102_1994;
         const NFS: i64 = 0x0000_6969;
         const CASEFOLD: i64 = 0x4000_0000;
-        for (magic, expected) in [(EXT, LinuxFilesystem::Ext), (XFS, LinuxFilesystem::Xfs), (BTRFS, LinuxFilesystem::Btrfs), (TMPFS, LinuxFilesystem::Tmpfs)] {
+        for (magic, expected) in [(EXT, LinuxFilesystem::Ext), (XFS, LinuxFilesystem::Xfs), (BTRFS, LinuxFilesystem::Btrfs)] {
             let temp = TestDir::new("linux-accepted");
             let _guard = test_seam::install_unix_probe(linux_sample(magic, 7, 11, Ok(0)));
             let authority = capture_absolute_directory(temp.path(), DirectoryAccess::Read).expect("accepted Linux family");
             assert!(matches!(&authority.namespace_snapshot().root_filesystem, LocalFilesystemSnapshot::Linux { family, fsid: 7, device: 11 } if *family == expected));
             assert_eq!(authority.namespace_snapshot().root_case_mode, CaseMode::Sensitive);
         }
+        // tmpfs is fail-closed until a separately reviewed native case-semantics proof exists.
+        assert_probe_rejected(linux_sample(TMPFS, 7, 11, Ok(0)), SecureFilesystemReason::UnknownFilesystem);
         {
             let temp = TestDir::new("linux-casefold");
             let _guard = test_seam::install_unix_probe(linux_sample(EXT, 7, 11, Ok(CASEFOLD)));
@@ -1288,6 +1294,8 @@ mod unix_contract {
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::Read).expect("capture");
         assert!(matches!(query_child_nofollow(&root, &name("link")), Ok(ChildState::Present(EntryMetadata { kind: EntryKind::SymlinkOrReparse, .. }))));
         assert!(matches!(query_child_nofollow(&root, &name("pipe")), Ok(ChildState::Present(EntryMetadata { kind: EntryKind::Fifo, .. }))));
+        let enumerated = enumerate(&root).expect("enumerate every validated component");
+        assert_eq!(enumerated, vec![name("link"), name("pipe")]);
     }
 
     #[test]
@@ -1554,7 +1562,7 @@ Task 2B does not claim file, directory, quarantine, or platform behavior. Its re
 
 ### Task 4 — Unix recursive namespace, filesystem/case proof, and platform-dispatched file I/O
 
-The test-only commit adds exactly these named tests to the single `safe_fs/tests.rs`: `recursive_authority_revalidates_anchor_and_entire_child_scope`, `query_symlink_fifo_and_special_entries_is_nonblocking_present_metadata`, `platform_dispatched_file_bytes_copy_seek_flush_and_sync`, Linux-only `linux_filesystem_and_case_probe_matrix_is_enforced` and `linux_revalidation_rejects_fsid_device_and_case_changes`, and macOS-only `macos_local_and_case_probe_matrix_is_enforced` and `macos_revalidation_rejects_fsid_device_and_case_changes`. Against the approved unsupported adapter and already-reviewed test-only seam, the host-specific probe matrix compiles, runs once, and fails only when acquisition returns the typed refusal.
+The test-only commit adds exactly seven platform-gated named tests to the single `safe_fs/tests.rs`: `recursive_authority_revalidates_anchor_and_entire_child_scope`, `query_symlink_fifo_and_special_entries_is_nonblocking_present_metadata`, `platform_dispatched_file_bytes_copy_seek_flush_and_sync`, Linux-only `linux_filesystem_and_case_probe_matrix_is_enforced` and `linux_revalidation_rejects_fsid_device_and_case_changes`, and macOS-only `macos_local_and_case_probe_matrix_is_enforced` and `macos_revalidation_rejects_fsid_device_and_case_changes`. Exactly one host-specific probe matrix is the focused behavioral RED: it compiles, runs once on the current Linux or macOS host, and fails only when acquisition returns the typed refusal. The raw Linux matrix accepts Ext/XFS/Btrfs, exercises the Ext directory casefold ioctl result, and rejects tmpfs as `UnknownFilesystem` until a separately reviewed native case-semantics proof exists.
 
 ```bash
 git add crates/opentake-project/src/safe_fs/tests.rs
@@ -1618,7 +1626,7 @@ Task 4 reports are `$SAFETY_ROOT/logs/c1b-task-4-$GREEN_SHA-attempt-$REVIEW_ATTE
 
 ### Task 5 — consuming quarantine, recursive cleanup, and publish
 
-The test-only commit adds named tests `source_swap_before_quarantine_restores_without_deletion`, `restore_collision_fail_leaks_original_and_quarantine`, `final_unix_name_window_is_explicit_same_account_boundary`, `nested_recursive_quarantine_cleanup_removes_files_symlink_fifo_and_directories`, and `destination_collision_preserves_stage_and_every_destination_kind`.
+The test-only commit adds exactly these six named tests: `source_swap_before_quarantine_restores_without_deletion`, `restore_collision_fail_leaks_original_and_quarantine`, `final_unix_name_window_is_explicit_same_account_boundary`, `cleanup_capability_records_identity_before_consuming_delete`, `nested_recursive_quarantine_cleanup_removes_files_symlink_fifo_and_directories`, and `destination_collision_preserves_stage_and_every_destination_kind`.
 
 ```bash
 git add crates/opentake-project/src/safe_fs/tests.rs
@@ -1638,6 +1646,7 @@ printf 'test_sha=%s\nparent_sha=%s\nexit=%s\n' "$TEST_SHA" "$(git rev-parse "$TE
 GREEN adds the complete consuming capability algorithms and their `#[cfg(test)]` bounded race-hook call sites from section 4; the section-5 seam itself was already present in the fail-closed scaffold.
 
 ```bash
+cargo test -p opentake-project --lib safe_fs::tests::unix_contract::cleanup_capability_records_identity_before_consuming_delete -- --exact --test-threads=1
 cargo test -p opentake-project --lib safe_fs::tests::unix_contract -- --test-threads=1
 cargo test -p opentake-project --lib safe_fs::tests -- --test-threads=1
 cargo fmt --all --check
@@ -1658,7 +1667,7 @@ Task 5 reports are `$SAFETY_ROOT/logs/c1b-task-5-$GREEN_SHA-attempt-$REVIEW_ATTE
 
 ## 8. Residual platform limits
 
-1. Linux's allowlist intentionally rejects unknown filesystem magic. A family is removed if native evidence cannot prove stable `f_fsid + st_dev + ordered dev/inode chain` behavior.
+1. Linux's allowlist is only Ext/XFS/Btrfs and intentionally rejects every other magic. In particular, tmpfs maps to `UnknownFilesystem` until a separate design review and native proof establish its per-directory case semantics; a family is removed if native evidence cannot prove stable `f_fsid + st_dev + ordered dev/inode chain` behavior.
 2. Unix final unlink/remove and rename source identity are name-linearized, not handle-bound. If a same-account namespace attacker enters the threat model, C1D requires a new journal/quarantine design.
 3. Native Linux and macOS behavior receipts and native Windows receipts are required at the exact implementation SHA. Cross-compilation does not replace them.
 4. No local instruction in this appendix grants push, PR, or workflow-dispatch authority. The implementation stops at the native receipt gate when those receipts cannot be obtained without new external authority.

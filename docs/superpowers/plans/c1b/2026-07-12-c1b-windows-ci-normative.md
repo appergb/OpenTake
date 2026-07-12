@@ -1,4 +1,4 @@
-# C1B Windows, Native CI, and Evidence Normative Appendix — Attempt 4
+# C1B Windows, Native CI, and Evidence Normative Appendix — Attempt 5
 
 ## 0. 绑定范围与来源
 
@@ -13,7 +13,7 @@
 - safety root：`/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-safety/20260712-wave1bc-filesystem`
 - integration repo root：`/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-full-convergence`
 
-Attempt 4 必须删除 Attempt 1–3 的以下决定：
+Attempt 5 必须删除 Attempt 1–4 的以下决定：
 
 1. 统一使用 common appendix 的递归 `DirectoryAuthority`；每个打开/创建的目录 authority 都能作为下一层 parent。
 2. 不再把 file capability 做成只能查 metadata 的死端。它提供受控 `read`、`write_all`、`rewind`、`flush`，raw HANDLE 不外泄。
@@ -26,7 +26,7 @@ Attempt 4 必须删除 Attempt 1–3 的以下决定：
 
 ### 1.1 Authority 形状
 
-Common facade 以 common/Unix appendix section 2 为唯一来源。Attempt 4 的 Windows adapter 只包含下面这些既有 common symbols；名称和参数逐项一致，`windows.rs` 不包含兼容别名或第二 facade：
+Common facade 以 common/Unix appendix section 2 为唯一来源。Attempt 5 的 Windows adapter 只包含下面这些既有 common symbols；名称和参数逐项一致，`windows.rs` 不包含兼容别名或第二 facade：
 
 ```text
 platform::{NativeNamespaceAnchor, NativeDirectory, NativeFile};
@@ -62,7 +62,7 @@ platform::delete_quarantined_empty_directory(QuarantinedCapability) -> Result<()
 
 `DirectoryAuthority` 是唯一递归目录 authority；absolute capture、nofollow child open、exclusive child create 都返回它，且每个结果都能作为下一层 parent。`FileCapability` 的 `Read`/`Write`/`Seek`/flush/sync 只委托上述 `platform::*_file`，不保存第二个 `std::fs::File`。Windows 的 `NativeDirectory` 以 `Arc<DirectoryNode>` 保留当前 HANDLE 与 parent chain；外层 authority、file/stage/quarantine/cleanup capability 全部不实现 `Clone`，raw HANDLE 不外泄。
 
-Windows 私有 `DirectoryAccess::{Read, MutateChildren}` 只决定目录自身 child rights。`create_stage_dir_new` 创建的 `NativeDirectory` 从 `NtCreateFile(FILE_CREATE)` 起就带 `DELETE`，`quarantine_stage`、`publish_stage_noreplace` 和 directory delete 都消费并移动这一个 directory HANDLE。cleanup leaf/subdir 由 `open_cleanup_child_nofollow` 第一次打开时取得 DELETE，并把同一个 source HANDLE 放进 consuming capability；禁止重开或 duplicate source HANDLE。为了让递归 child capability 拥有 parent authority，adapter 只允许 `DuplicateHandle(..., DUPLICATE_SAME_ACCESS)` 复制 retained parent directory HANDLE（同一 kernel object，不按名称重开）。普通 ancestor/destination parent 不请求 self-delete。所有 retained HANDLE 的 share mask 都是 `FILE_SHARE_READ | FILE_SHARE_WRITE`，刻意省略 `FILE_SHARE_DELETE`。
+Windows 私有 `DirectoryAccess::{Read, MutateChildren, Stage}` 决定目录自身 child rights；`Stage` 只允许 exclusive stage create 的 returned authority，absolute capture/open child拒绝该值。`create_stage_dir_new` 创建的 `NativeDirectory` 从 `NtCreateFile(FILE_CREATE)` 起就带 `DELETE`，`quarantine_stage`、`publish_stage_noreplace` 和 directory delete 都消费并移动这一个 directory HANDLE。cleanup leaf/subdir 由 `open_cleanup_child_nofollow` 第一次打开时取得 DELETE，并把同一个 source HANDLE 放进 consuming capability；禁止重开或 duplicate source HANDLE。为了让递归 child capability 拥有 parent authority，adapter 只允许 `DuplicateHandle(..., DUPLICATE_SAME_ACCESS)` 复制 retained parent directory HANDLE（同一 kernel object，不按名称重开）。普通 ancestor/destination parent 不请求 self-delete。所有 retained HANDLE 的 share mask 都是 `FILE_SHARE_READ | FILE_SHARE_WRITE`，刻意省略 `FILE_SHARE_DELETE`。
 
 Windows delete/rename 是 retained-HANDLE identity binding。Unix cleanup 采用 common/Unix appendix 的 consuming capability facade 与 quarantine → nofollow reopen/identity verify → one-shot no-replace restore/fail-leak 协议；final publish 仍在批准 design 的 same-account boundary 内按名称 no-replace，且不声称 Unix handle-identity atomicity。
 
@@ -108,6 +108,7 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
+use windows_sys::core::BOOL;
 use windows_sys::Wdk::Foundation::{OBJECT_ATTRIBUTES, OBJ_CASE_INSENSITIVE};
 use windows_sys::Wdk::Storage::FileSystem::*;
 use windows_sys::Win32::Foundation::{
@@ -127,7 +128,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, GetDriveTypeW, GetFileInformationByHandleEx, GetVolumeInformationByHandleW,
     GetVolumeNameForVolumeMountPointW, GetVolumePathNameW, FileAttributeTagInfo,
     FileIdInfo, FileRemoteProtocolInfo, FileStandardInfo, DELETE, DRIVE_FIXED, DRIVE_REMOVABLE,
-    FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_NORMAL,
+    FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_NORMAL, READ_CONTROL,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_ID_INFO, FILE_REMOTE_PROTOCOL_INFO,
     FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
@@ -144,6 +145,8 @@ const COMMON_OPTIONS: NTCREATEFILE_CREATE_OPTIONS =
 const DIRECTORY_BUFFER_BYTES: usize = 64 * 1024;
 const REPARSE_HEADER_BYTES: usize = 8;
 const STATUS_SUCCESS: NTSTATUS = 0;
+const BOOL_FALSE: BOOL = 0;
+const BOOL_TRUE: BOOL = 1;
 
 impl CaseMode {
     fn object_attributes(self) -> u32 {
@@ -242,7 +245,12 @@ impl NtName {
     }
 }
 
-fn object_attributes(parent: HANDLE, name: &NtName, case: CaseMode, security: *const c_void) -> OBJECT_ATTRIBUTES {
+fn object_attributes(
+    parent: HANDLE,
+    name: &NtName,
+    case: CaseMode,
+    security: *const SECURITY_DESCRIPTOR,
+) -> OBJECT_ATTRIBUTES {
     OBJECT_ATTRIBUTES {
         Length: u32::try_from(size_of::<OBJECT_ATTRIBUTES>()).expect("OBJECT_ATTRIBUTES size fits u32"),
         RootDirectory: parent,
@@ -290,7 +298,7 @@ fn nt_create_relative(
     disposition: NTCREATEFILE_CREATE_DISPOSITION,
     options: NTCREATEFILE_CREATE_OPTIONS,
     attributes: FILE_FLAGS_AND_ATTRIBUTES,
-    security: *const c_void,
+    security: *const SECURITY_DESCRIPTOR,
     operation: SafeFsOperation,
 ) -> Result<OwnedHandle> {
     let nt_name = NtName::new(name)?;
@@ -522,9 +530,9 @@ let attrs = OBJECT_ATTRIBUTES {
 | `open_file(Read)` | `FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE` | R\|W，无 DELETE | `FILE_OPEN` | common + `FILE_NON_DIRECTORY_FILE` | parent mode | Tag 非 reparse；Standard.Directory=false；Id；remote/volume 相同 |
 | `open_file(ReadWrite)` | 上行 + `FILE_WRITE_DATA` | R\|W，无 DELETE | `FILE_OPEN` | common + NON_DIRECTORY | parent mode | 同上；FileCapability access=ReadWrite |
 | `read_link_component` | `FILE_READ_ATTRIBUTES | SYNCHRONIZE` | R\|W，无 DELETE | `FILE_OPEN` | common；不加 type constraint | parent mode | Tag 必须是 reparse，随后 `NtFsControlFile(FSCTL_GET_REPARSE_POINT)` |
-| `enumerate` | 使用 retained directory handle | N/A | N/A | N/A | N/A | `NtQueryDirectoryFile(FileDirectoryInformation)`；每个 name 再经 component validator + relative nofollow query，不信 dirent attributes |
-| `create_file_new(OwnerOnly)` | `FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE` | R\|W，无 DELETE | `FILE_CREATE` | common + NON_DIRECTORY | parent mode | DELETE 仅供 post-create DACL rollback，成功 capability 不暴露 delete；protected file DACL；Tag/Id/Standard；verify |
-| `create_dir_new(MutateChildren, OwnerOnly)` | `FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD | DELETE | SYNCHRONIZE` | R\|W，无 DELETE | `FILE_CREATE` | common + DIRECTORY | parent mode | DELETE 仅供 post-create DACL rollback；protected inheritable dir DACL；Tag/Id/Standard/case/volume；verify |
+| `enumerate` | 使用 retained directory handle | N/A | N/A | N/A | N/A | `NtQueryDirectoryFile(FileDirectoryInformation)`；每个 name 再经 component validator + relative nofollow metadata query，不信 dirent attributes；包括 reparse name，但不打开/授予它 |
+| `create_file_new(OwnerOnly)` | `FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | DELETE | SYNCHRONIZE` | R\|W，无 DELETE | `FILE_CREATE` | common + NON_DIRECTORY | parent mode | `READ_CONTROL` 供 owner/DACL post-verify；DELETE 仅供失败 rollback；protected file DACL；Tag/Id/Standard；verify |
+| `create_dir_new(MutateChildren, OwnerOnly)` | `FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD | DELETE | SYNCHRONIZE` | R\|W，无 DELETE | `FILE_CREATE` | common + DIRECTORY | parent mode | `READ_CONTROL` 供 owner/DACL post-verify；DELETE 仅供失败 rollback；protected inheritable dir DACL；Tag/Id/Standard/case/volume；verify |
 | `create_dir_new(Stage, OwnerOnly)` | 上行 + `DELETE` | R\|W，无 DELETE | `FILE_CREATE` | common + DIRECTORY | parent mode | 同一 returned HANDLE retained 到 cleanup/publish；不得按名称重开 DELETE handle |
 | `delete_file_handle` | source capability 在 open/create 时已含 `DELETE`；若普通 leaf 需要 cleanup，首次 open 就用 private Delete access variant | 原 retained mask | N/A | N/A | N/A | identity/type 已由 handle 固定；`FILE_DISPOSITION_INFORMATION { DeleteFile:true }` + class `FileDispositionInformation`，成功后 drop 触发 delete |
 | `delete_empty_dir_handle` | Stage/cleanup dir 已含 `DELETE` | 原 retained mask | N/A | N/A | N/A | 同一 handle 上 FileDispositionInformation；非空 `STATUS_DIRECTORY_NOT_EMPTY` 保持 typed OS error |
@@ -581,7 +589,8 @@ const FILE_WRITE_CONTRACT: OpenContract = OpenContract {
     delete_right: false,
 };
 const CREATE_FILE_CONTRACT: OpenContract = OpenContract {
-    desired: FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE,
+    desired: FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES |
+        READ_CONTROL | DELETE | SYNCHRONIZE,
     disposition: FILE_CREATE,
     options: COMMON_OPTIONS | FILE_NON_DIRECTORY_FILE,
     attributes: FILE_ATTRIBUTE_NORMAL,
@@ -589,7 +598,8 @@ const CREATE_FILE_CONTRACT: OpenContract = OpenContract {
 };
 const CREATE_DIR_CONTRACT: OpenContract = OpenContract {
     desired: FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES |
-        FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD | DELETE | SYNCHRONIZE,
+        READ_CONTROL | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY |
+        FILE_DELETE_CHILD | DELETE | SYNCHRONIZE,
     disposition: FILE_CREATE,
     options: COMMON_OPTIONS | FILE_DIRECTORY_FILE,
     attributes: 0,
@@ -670,7 +680,7 @@ const NAME_OFFSET: usize = offset_of!(FILE_DIRECTORY_INFORMATION, FileName);
 4. `NextEntryOffset == 0` 表示本批最后一项；该 record 的 name end 仍须在 `used` 内。
 5. 非零 `NextEntryOffset` 必须 `>= NAME_OFFSET + FileNameLength`、是 8 的倍数、`cursor + offset <= used` 且严格前进。
 6. 整批最多 `used / NAME_OFFSET + 1` 次迭代；超限即 malformed，防止 offset loop。
-7. 收集的每个 name 必须再调用 retained parent 的 `query_child_nofollow`；查询失败、消失或 reparse 均使 enumeration fail closed，不输出仅凭 directory buffer 得到的 authority。
+7. 收集的每个 name 必须再调用 retained parent 的 `query_child_nofollow`；查询失败或消失使 enumeration fail closed。regular file、directory、symlink/reparse 的 name 都输出；这只是 validated component list，不输出 authority、不跟随 link、不授予 open/delete 权限。common `cleanup_quarantined_tree` 随后用 `open_cleanup_child_nofollow` 为每个 name 建立类型化 retained capability。
 
 native parser tests 直接喂：单项、多项、unpaired UTF-16、odd byte length、name overrun、zero-progress、misaligned next、next beyond used、truncated header、warning-with-zero-bytes、valid last record with trailing capacity。
 
@@ -790,10 +800,7 @@ pub(super) fn enumerate(directory: &DirectoryAuthority) -> Result<Vec<ComponentN
         let used = validated_directory_used(status, &iosb)?;
         for name in parse_directory_batch(&buffer.0[..used])? {
             match query_child_nofollow(directory, &name)? {
-                ChildState::Present(metadata) if metadata.kind != EntryKind::SymlinkOrReparse => output.push(name),
-                ChildState::Present(_) => return Err(SafeFsError::SymlinkOrReparsePoint {
-                    operation: SafeFsOperation::EnumerateDirectory,
-                }),
+                ChildState::Present(_) => output.push(name),
                 ChildState::Absent => return Err(SafeFsError::NotFound {
                     operation: SafeFsOperation::EnumerateDirectory,
                 }),
@@ -915,7 +922,8 @@ fn nt_error(operation: SafeFsOperation, status: NTSTATUS) -> SafeFsError {
         STATUS_OBJECT_NAME_NOT_FOUND | STATUS_OBJECT_PATH_NOT_FOUND =>
             SafeFsError::NotFound { operation },
         STATUS_OBJECT_NAME_COLLISION if matches!(operation,
-            SafeFsOperation::CreateDirectory | SafeFsOperation::CreateFile |
+            SafeFsOperation::CreateDirectory | SafeFsOperation::CreateStageDirectory |
+            SafeFsOperation::CreateFile |
             SafeFsOperation::RenameNoReplaceSameParent) =>
             SafeFsError::AlreadyExists { operation },
         STATUS_REPARSE_POINT_ENCOUNTERED =>
@@ -993,7 +1001,7 @@ struct OwnerOnlySecurity {
     sid: Vec<usize>,
     acl: Vec<usize>,
     descriptor: Box<SECURITY_DESCRIPTOR>,
-    ace_flags: u8,
+    ace_flags: ACE_FLAGS,
 }
 
 impl OwnerOnlySecurity {
@@ -1042,13 +1050,15 @@ impl OwnerOnlySecurity {
         let mut descriptor = Box::<SECURITY_DESCRIPTOR>::new(unsafe { std::mem::zeroed() });
         // SAFETY: boxed descriptor stable; ACL storage remains owned by returned Self.
         if unsafe { InitializeSecurityDescriptor((&mut *descriptor as *mut SECURITY_DESCRIPTOR).cast(), SECURITY_DESCRIPTOR_REVISION) } == 0 ||
-            unsafe { SetSecurityDescriptorDacl((&mut *descriptor as *mut SECURITY_DESCRIPTOR).cast(), true,
-                acl.as_mut_ptr().cast(), false) } == 0 ||
+            unsafe { SetSecurityDescriptorDacl((&mut *descriptor as *mut SECURITY_DESCRIPTOR).cast(), BOOL_TRUE,
+                acl.as_mut_ptr().cast(), BOOL_FALSE) } == 0 ||
             unsafe { SetSecurityDescriptorControl((&mut *descriptor as *mut SECURITY_DESCRIPTOR).cast(),
                 SE_DACL_PROTECTED, SE_DACL_PROTECTED) } == 0 { return Err(last_win32(op)); }
         Ok(Self { sid, acl, descriptor, ace_flags })
     }
-    fn descriptor_ptr(&self) -> *const c_void { (&*self.descriptor as *const SECURITY_DESCRIPTOR).cast() }
+    fn descriptor_ptr(&self) -> *const SECURITY_DESCRIPTOR {
+        &*self.descriptor as *const SECURITY_DESCRIPTOR
+    }
 }
 
 fn verify_owner_only(handle: HANDLE, expected: &OwnerOnlySecurity) -> Result<()> {
@@ -1067,13 +1077,15 @@ fn verify_owner_only(handle: HANDLE, expected: &OwnerOnlySecurity) -> Result<()>
     }
     let descriptor = words.as_mut_ptr().cast::<SECURITY_DESCRIPTOR>();
     let mut control = 0u16; let mut revision = 0u32;
-    let mut owner = null_mut(); let mut owner_defaulted = false;
-    let mut dacl = null_mut(); let mut present = false; let mut defaulted = false;
+    let mut owner = null_mut(); let mut owner_defaulted: BOOL = BOOL_FALSE;
+    let mut dacl = null_mut(); let mut present: BOOL = BOOL_FALSE;
+    let mut defaulted: BOOL = BOOL_FALSE;
     // SAFETY: kernel returned a self-relative security descriptor in words.
     if unsafe { GetSecurityDescriptorControl(descriptor.cast(), &mut control, &mut revision) } == 0 ||
         unsafe { GetSecurityDescriptorOwner(descriptor.cast(), &mut owner, &mut owner_defaulted) } == 0 ||
         unsafe { GetSecurityDescriptorDacl(descriptor.cast(), &mut present, &mut dacl, &mut defaulted) } == 0 ||
-        control & SE_DACL_PROTECTED == 0 || owner_defaulted || !present || defaulted || dacl.is_null() ||
+        control & SE_DACL_PROTECTED == 0 || owner_defaulted != BOOL_FALSE ||
+        present == BOOL_FALSE || defaulted != BOOL_FALSE || dacl.is_null() ||
         unsafe { EqualSid(owner, expected.sid.as_ptr().cast()) } == 0 {
         return Err(SafeFsError::InvalidNativeBuffer { operation: op, reason: NativeBufferReason::SecurityDescriptorMalformed });
     }
@@ -1089,7 +1101,14 @@ fn verify_owner_only(handle: HANDLE, expected: &OwnerOnlySecurity) -> Result<()>
     // SAFETY: one ACCESS_ALLOWED ACE was required by creation contract; header checked before fields.
     let allowed = unsafe { &*(ace.cast::<ACCESS_ALLOWED_ACE>()) };
     let sid_ptr = (&allowed.SidStart as *const u32).cast();
-    if allowed.Header.AceType != ACCESS_ALLOWED_ACE_TYPE || allowed.Header.AceFlags != expected.ace_flags ||
+    let expected_header_flags = u8::try_from(expected.ace_flags).map_err(|_| {
+        SafeFsError::InvalidNativeBuffer {
+            operation: op,
+            reason: NativeBufferReason::SecurityDescriptorMalformed,
+        }
+    })?;
+    if allowed.Header.AceType != ACCESS_ALLOWED_ACE_TYPE ||
+        allowed.Header.AceFlags != expected_header_flags ||
         allowed.Mask != FILE_ALL_ACCESS || unsafe { EqualSid(sid_ptr, expected.sid.as_ptr().cast()) } == 0 {
         return Err(SafeFsError::InvalidNativeBuffer { operation: op, reason: NativeBufferReason::SecurityDescriptorMalformed });
     }
@@ -1106,7 +1125,7 @@ fn duplicate_directory(source: &DirectoryAuthority) -> Result<DirectoryAuthority
     let mut duplicated = null_mut();
     // SAFETY: source HANDLE retained; current-process source/target; output writable; same access only.
     if unsafe { DuplicateHandle(GetCurrentProcess(), source.native.node.handle.raw(), GetCurrentProcess(),
-        &mut duplicated, 0, false, DUPLICATE_SAME_ACCESS) } == 0 { return Err(last_win32(SafeFsOperation::OpenDirectory)); }
+        &mut duplicated, 0, BOOL_FALSE, DUPLICATE_SAME_ACCESS) } == 0 { return Err(last_win32(SafeFsOperation::OpenDirectory)); }
     let handle = OwnedHandle::new(duplicated, SafeFsOperation::OpenDirectory)?;
     let old = &source.native.node;
     let node = Arc::new(DirectoryNode {
@@ -1202,6 +1221,7 @@ pub(super) fn open_cleanup_child_nofollow(
     }
 }
 
+// Installed once by Task 7A for create rollback; Task 7C reuses this exact body.
 fn mark_delete_handle(handle: HANDLE, operation: SafeFsOperation) -> Result<()> {
     let info = FILE_DISPOSITION_INFORMATION { DeleteFile: true };
     let mut iosb = IO_STATUS_BLOCK::default();
@@ -1213,7 +1233,13 @@ fn mark_delete_handle(handle: HANDLE, operation: SafeFsOperation) -> Result<()> 
     complete_nt(operation, status, &iosb)
 }
 
-fn dispose_retained(mut native: NativeFile, expected_kind: EntryKind, operation: SafeFsOperation) -> Result<()> {
+fn dispose_retained(
+    mut native: NativeFile,
+    parent: &DirectoryAuthority,
+    name: &ComponentName,
+    expected_kind: EntryKind,
+    operation: SafeFsOperation,
+) -> Result<()> {
     if !native.delete_right {
         return Err(SafeFsError::Os {
             operation,
@@ -1223,6 +1249,7 @@ fn dispose_retained(mut native: NativeFile, expected_kind: EntryKind, operation:
     if native.opened.kind != expected_kind {
         return Err(SafeFsError::UnsupportedEntryType { operation, kind: native.opened.kind });
     }
+    run_before_retained_delete_hook(native.handle.raw(), parent, name)?;
     mark_delete_handle(native.handle.raw(), operation)?;
     native.delete_right = false;
     drop(native);
@@ -1231,7 +1258,7 @@ fn dispose_retained(mut native: NativeFile, expected_kind: EntryKind, operation:
 
 pub(super) fn delete_quarantined_entry(cleanup: CleanupCapability) -> Result<()> {
     match cleanup {
-        CleanupCapability::Entry { native, opened, access: CleanupAccess::Delete, .. } => {
+        CleanupCapability::Entry { parent, native, name, opened, access: CleanupAccess::Delete } => {
             if native.opened.identity != opened.identity {
                 return Err(SafeFsError::IdentityChanged {
                     operation: SafeFsOperation::DeleteQuarantinedEntry,
@@ -1239,7 +1266,7 @@ pub(super) fn delete_quarantined_entry(cleanup: CleanupCapability) -> Result<()>
                     actual: native.opened.identity,
                 });
             }
-            dispose_retained(native, opened.kind, SafeFsOperation::DeleteQuarantinedEntry)
+            dispose_retained(native, &parent, &name, opened.kind, SafeFsOperation::DeleteQuarantinedEntry)
         }
         CleanupCapability::Directory(_) => Err(SafeFsError::UnsupportedEntryType {
             operation: SafeFsOperation::DeleteQuarantinedEntry,
@@ -1483,7 +1510,21 @@ fn absolute_component_names(path: &Path) -> Result<Vec<ComponentName>> {
     }).collect()
 }
 
-fn probe_volume(path: &Path) -> Result<(OwnedHandle, VolumeProof, LocalFilesystemSnapshot)> {
+fn root_capture_desired(access: DirectoryAccess) -> Result<FILE_ACCESS_RIGHTS> {
+    let base = FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+    match access {
+        DirectoryAccess::Read => Ok(base),
+        DirectoryAccess::MutateChildren => Ok(base | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD),
+        DirectoryAccess::Stage => Err(SafeFsError::AccessMismatch {
+            operation: SafeFsOperation::CaptureNamespaceRoot,
+        }),
+    }
+}
+
+fn probe_volume(
+    path: &Path,
+    access: DirectoryAccess,
+) -> Result<(OwnedHandle, VolumeProof, LocalFilesystemSnapshot)> {
     let input = wide_z(path.as_os_str())?;
     let mut mapping_buffer = vec![0u16; 32_768];
     // SAFETY: nul input and writable mapped-path buffer with declared capacity.
@@ -1506,8 +1547,9 @@ fn probe_volume(path: &Path) -> Result<(OwnedHandle, VolumeProof, LocalFilesyste
         return Err(last_win32(SafeFsOperation::ProbeVolume));
     }
     let guid = fixed_wide(&guid_buffer)?;
+    let desired = root_capture_desired(access)?;
     // SAFETY: mapped root path is nul terminated; security/template null; synchronous directory open.
-    let raw = unsafe { CreateFileW(mapping_z.as_ptr(), FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
+    let raw = unsafe { CreateFileW(mapping_z.as_ptr(), desired,
         SHARE, null(), OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, null_mut()) };
     let root = OwnedHandle::new(raw, SafeFsOperation::ProbeVolume)?;
     let mut volume_serial32 = 0u32;
@@ -1580,7 +1622,7 @@ pub(super) fn capture_absolute_directory(path: &Path, access: DirectoryAccess) -
         return Err(SafeFsError::AccessMismatch { operation: SafeFsOperation::CaptureNamespaceRoot });
     }
     let _validated_absolute = absolute_component_names(path)?;
-    let (root_handle, volume, filesystem) = probe_volume(path)?;
+    let (root_handle, volume, filesystem) = probe_volume(path, access)?;
     let mapping_path = PathBuf::from(OsString::from_wide(&volume.mapping));
     let relative = path.strip_prefix(&mapping_path).map_err(|_| SafeFsError::UnsupportedSecureFilesystem {
         operation: SafeFsOperation::CaptureNamespaceRoot,
@@ -1834,11 +1876,12 @@ mod tests {
     #[test]
     fn unicode_and_object_attribute_lifetimes() {
         let nt_name = NtName::new(&name("leaf")).unwrap();
-        let attrs = object_attributes(7usize as HANDLE, &nt_name, CaseMode::Insensitive, 9usize as *const c_void);
+        let security = 9usize as *const SECURITY_DESCRIPTOR;
+        let attrs = object_attributes(7usize as HANDLE, &nt_name, CaseMode::Insensitive, security);
         assert_eq!(nt_name.unicode.Length, 8);
         assert_eq!(attrs.RootDirectory, 7usize as HANDLE);
         assert_eq!(attrs.Attributes, OBJ_CASE_INSENSITIVE);
-        assert_eq!(attrs.SecurityDescriptor, 9usize as *const c_void);
+        assert_eq!(attrs.SecurityDescriptor, security);
         // SAFETY: NtName owns four UTF-16 units for the assertion lifetime.
         assert_eq!(unsafe { std::slice::from_raw_parts(nt_name.unicode.Buffer, 4) }, &[108, 101, 97, 102]);
     }
@@ -1863,11 +1906,30 @@ mod tests {
         assert_eq!(QUERY_CONTRACT.disposition, FILE_OPEN);
         assert_eq!(CREATE_FILE_CONTRACT.disposition, FILE_CREATE);
         assert_eq!(CREATE_DIR_CONTRACT.disposition, FILE_CREATE);
+        assert_ne!(CREATE_FILE_CONTRACT.desired & READ_CONTROL, 0);
+        assert_ne!(CREATE_DIR_CONTRACT.desired & READ_CONTROL, 0);
+        assert_ne!(CREATE_STAGE_CONTRACT.desired & READ_CONTROL, 0);
         assert_ne!(CREATE_STAGE_CONTRACT.desired & DELETE, 0);
         assert_ne!(CLEANUP_FILE_CONTRACT.desired & DELETE, 0);
         assert_ne!(CLEANUP_DIR_CONTRACT.desired & DELETE, 0);
         assert_ne!(CLEANUP_REPARSE_CONTRACT.desired & DELETE, 0);
         assert_eq!(CLEANUP_REPARSE_CONTRACT.options & (FILE_DIRECTORY_FILE | FILE_NON_DIRECTORY_FILE), 0);
+    }
+
+    #[test]
+    fn volume_root_contract_is_access_dependent() {
+        let read = root_capture_desired(DirectoryAccess::Read).unwrap();
+        let mutate = root_capture_desired(DirectoryAccess::MutateChildren).unwrap();
+        assert_ne!(read & SYNCHRONIZE, 0);
+        assert_eq!(read & (FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD), 0);
+        assert_ne!(mutate & SYNCHRONIZE, 0);
+        assert_ne!(mutate & FILE_ADD_FILE, 0);
+        assert_ne!(mutate & FILE_ADD_SUBDIRECTORY, 0);
+        assert_ne!(mutate & FILE_DELETE_CHILD, 0);
+        assert!(matches!(root_capture_desired(DirectoryAccess::Stage),
+            Err(SafeFsError::AccessMismatch {
+                operation: SafeFsOperation::CaptureNamespaceRoot,
+            })));
     }
 
     #[test]
@@ -2024,37 +2086,12 @@ mod tests {
     }
 
     #[test]
-    fn owner_only_dacl_is_exact_and_rollback_is_closed() {
-        let temp = TestDir::new("dacl"); let authority = root(&temp);
-        let file = create_file_new(&authority, &name("file"), CreatePermissions::OwnerOnly).unwrap();
-        let expected = OwnerOnlySecurity::new(false).unwrap();
-        verify_owner_only(file.native.handle.raw(), &expected).unwrap();
-        let mut wrong = OwnerOnlySecurity::new(false).unwrap(); wrong.ace_flags ^= OBJECT_INHERIT_ACE;
-        assert!(verify_owner_only(file.native.handle.raw(), &wrong).is_err());
-        mark_delete_handle(file.native.handle.raw(), SafeFsOperation::DeleteQuarantinedEntry).unwrap();
-        drop(file);
-        assert!(matches!(query_child_nofollow(&authority, &name("file")).unwrap(), ChildState::Absent));
-    }
-
-    #[test]
     fn create_new_preserves_every_existing_kind() {
         let temp = TestDir::new("exclusive"); fs::write(temp.path().join("file"), b"before").unwrap(); fs::create_dir(temp.path().join("dir")).unwrap();
         let authority = root(&temp);
         assert!(matches!(create_file_new(&authority, &name("file"), CreatePermissions::OwnerOnly), Err(SafeFsError::AlreadyExists { .. })));
         assert_eq!(fs::read(temp.path().join("file")).unwrap(), b"before");
         assert!(matches!(create_dir_new(&authority, &name("dir"), CreatePermissions::OwnerOnly, DirectoryAccess::Read), Err(SafeFsError::AlreadyExists { .. })));
-    }
-
-    #[test]
-    fn retained_delete_ignores_name_rebound() {
-        let temp = TestDir::new("delete"); let authority = root(&temp);
-        let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::OwnerOnly).unwrap();
-        let mut leaf = create_file_new(stage.directory(), &name("leaf"), CreatePermissions::OwnerOnly).unwrap(); leaf.write_all(b"original").unwrap(); drop(leaf);
-        assert!(fs::rename(temp.path().join("stage"), temp.path().join("replacement")).is_err());
-        let quarantine = quarantine_stage(stage, &authority, name("quarantine")).unwrap();
-        let leaf = open_cleanup_child_nofollow(&quarantine, &name("leaf")).unwrap(); delete_quarantined_entry(leaf).unwrap();
-        delete_quarantined_empty_directory(quarantine).unwrap();
-        assert!(matches!(query_child_nofollow(&authority, &name("quarantine")).unwrap(), ChildState::Absent));
     }
 
     #[test]
@@ -2065,14 +2102,6 @@ mod tests {
         assert_eq!((buffer.as_ptr() as usize) % align_of::<FILE_RENAME_INFORMATION>(), 0);
         // SAFETY: builder returned aligned initialized header.
         assert_eq!(unsafe { (*(buffer.as_ptr().cast::<FILE_RENAME_INFORMATION>())).RootDirectory }, authority.native.node.handle.raw());
-    }
-
-    #[test]
-    fn rename_never_replaces_any_target_kind() {
-        let temp = TestDir::new("collision"); fs::write(temp.path().join("target"), b"keep").unwrap();
-        let authority = root(&temp); let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::OwnerOnly).unwrap();
-        assert!(matches!(publish_stage_noreplace(stage, &authority, name("target")), Err(SafeFsError::AlreadyExists { .. })));
-        assert_eq!(fs::read(temp.path().join("target")).unwrap(), b"keep");
     }
 
     #[test]
@@ -2092,6 +2121,8 @@ mod tests {
         }
         assert!(matches!(nt_error(SafeFsOperation::QueryCaseMode, STATUS_NOT_SUPPORTED),
             SafeFsError::UnsupportedSecureFilesystem { reason: SecureFilesystemReason::CaseSemanticsUnavailable, .. }));
+        assert!(matches!(nt_error(SafeFsOperation::CreateStageDirectory, STATUS_OBJECT_NAME_COLLISION),
+            SafeFsError::AlreadyExists { operation: SafeFsOperation::CreateStageDirectory }));
     }
 
     #[test]
@@ -2116,7 +2147,7 @@ git diff --check
 
 ## 13. 完整 GitHub Actions YAML
 
-Attempt 4 用以下完整 `.github/workflows/ci.yml`，保留现有 rust/web jobs并加入 exact-SHA native matrix。`workflow_dispatch` 只有该 workflow 已存在 default branch 时才可调用；在它首次进入 default branch 前，中间 SHA 只能通过授权 PR 的 head-SHA path 取得 receipt。
+Attempt 5 用以下完整 `.github/workflows/ci.yml`，保留现有 rust/web jobs并加入 exact-SHA native matrix。`workflow_dispatch` 只有该 workflow 已存在 default branch 时才可调用；在它首次进入 default branch 前，中间 SHA 只能通过授权 PR 的 head-SHA path 取得 receipt。
 
 ```yaml
 name: CI
@@ -2447,7 +2478,7 @@ expect_red() {
 }
 ```
 
-固定 commit/gate sequence 只有一套：Task 3 CI RED/GREEN 使用 section 18.7；Task 6A compile-complete refusal scaffold 使用 section 18.1；Task 6B 单一 acquisition/I/O RED 与 sections 2–7/11 GREEN 使用 section 18.2；Task 7 DACL/delete/rename RED 与 sections 8–10 GREEN 使用 sections 18.3–18.6；Task 8 convergence/evidence 使用 section 18.8。
+固定 commit/gate sequence 只有一套：Task 3 CI + evidence validators RED/GREEN 使用 sections 18.7–18.8；Task 6A compile-complete refusal scaffold 使用 section 18.1；Task 6B 单一 acquisition/I/O RED 与 sections 2–7/11（含 section 18.4 production revalidation body/hook）GREEN 使用 section 18.2；Task 7A OwnerOnly/DACL/rollback、Task 7B quarantine/publish rename、Task 7C retained cleanup/delete/reparse 各自独立 RED→GREEN，使用 sections 18.3–18.6；Task 8 只创建实际 convergence gate并调用已提交 validators。不存在总括 Task 7 commit；证据目录逐项为 `c1b-task-7a-*`、`c1b-task-7b-*`、`c1b-task-7c-*`。
 
 每个 commit 前 `git diff --cached --name-only` 必须等于该步骤列出的 paths；每个 GREEN 前保存对应 RED commit SHA/log/receipt。任何 RED 在 `running 1 test` 前失败都要先修 test harness 并产生新的 test-only commit；不得把 harness compile failure记录成行为 RED。本稿不授权 push/PR；到首次 native receipt gate 若无远端 authority，按 section 14 写 BLOCKED 并停止。
 
@@ -2461,11 +2492,11 @@ expect_red() {
 
 以上风险都不是允许 pathname fallback、ordinary rename、跳过 native receipt 或擅自远端 publication 的理由。
 
-## 18. Attempt 4 executable patches
+## 18. Attempt 5 executable patches
 
 Sections 2–15 freeze the final platform algorithms and evidence contracts. This section supplies the exact compile-scaffold, task-specific source/test patches, and repository-versioned validators used by the single task sequence in section 16; it does not define a second facade or an alternate task order.
 
-本节关闭 Attempt 3 的全部 Windows/CI finding，并给 sections 2–15 的最终算法配置唯一的 task-specific patch sequence。全计划只使用主计划 Task 6A、6B、7、8 编号，report/receipt path 也只使用这些编号。
+本节关闭 Attempt 3–4 的全部 Windows/CI finding，并给 sections 2–15 的最终算法配置唯一的 task-specific patch sequence。全计划只使用主计划 Task 6A、6B、7A、7B、7C、8 编号，report/receipt path 也只使用这些编号。
 
 ### 18.1 Task 6A：先提交 compile-complete fail-closed Windows scaffold
 
@@ -2581,7 +2612,7 @@ expect_red 'safe_fs::windows::tests::nested_retained_io_roundtrip' "$EVIDENCE/wi
 Select-String -Path "$EVIDENCE/windows-io-red.log" -Pattern 'UnsupportedSecureFilesystem|UnsupportedTarget'
 ```
 
-Task 6B GREEN `feat(project): capture Windows filesystem capabilities` 完整加入 sections 2–7 与 11 的 real production bodies、parser/reparse/NTSTATUS pure helpers以及 read/create/open/enumerate I/O；不加入 section 8–10 的 DACL/delete/rename 实现。为保持 common platform surface compile-complete，GREEN 必须保留下面这些精确 refusal bodies；Task 7 才替换它们：
+Task 6B GREEN `feat(project): capture Windows filesystem capabilities` 完整加入 sections 2–7 与 11 的 real production bodies、parser/reparse/NTSTATUS pure helpers、read/create/open/enumerate I/O，以及 section 18.4 的完整 `collect_revalidation_proof`/`revalidate_namespace` production body 和 `cfg(test)` hook storage。它不加入 section 8–10 的 DACL/delete/rename 实现。为保持 common platform surface 和后续 test-only commits compile-complete，GREEN 必须保留下列 final-signature refusal bodies与 test seams；7A/7B/7C 只替换各自拥有的 implementation，不改签名：
 
 ```rust
 fn owner_only_refusal<T>() -> Result<T> {
@@ -2628,9 +2659,62 @@ pub(super) fn delete_quarantined_empty_directory(_: QuarantinedCapability) -> Re
         reason: SecureFilesystemReason::UnsupportedTarget,
     })
 }
+
+#[cfg(test)]
+static FORCE_DACL_VERIFY_FAILURE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+fn force_next_owner_verification_failure() {
+    FORCE_DACL_VERIFY_FAILURE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+type BeforeRetainedDeleteHook =
+    Arc<dyn Fn(HANDLE, &DirectoryAuthority, &ComponentName) -> Result<()> + Send + Sync>;
+#[cfg(test)]
+static BEFORE_RETAINED_DELETE_HOOK:
+    std::sync::OnceLock<std::sync::Mutex<Option<BeforeRetainedDeleteHook>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+struct BeforeRetainedDeleteHookGuard;
+#[cfg(test)]
+impl Drop for BeforeRetainedDeleteHookGuard {
+    fn drop(&mut self) {
+        *BEFORE_RETAINED_DELETE_HOOK.get_or_init(Default::default)
+            .lock().expect("retained-delete hook mutex poisoned") = None;
+    }
+}
+
+#[cfg(test)]
+fn install_before_retained_delete_hook(
+    hook: BeforeRetainedDeleteHook,
+) -> BeforeRetainedDeleteHookGuard {
+    let mut slot = BEFORE_RETAINED_DELETE_HOOK.get_or_init(Default::default)
+        .lock().expect("retained-delete hook mutex poisoned");
+    assert!(slot.is_none(), "retained-delete tests require --test-threads=1");
+    *slot = Some(hook);
+    BeforeRetainedDeleteHookGuard
+}
+
+fn run_before_retained_delete_hook(
+    handle: HANDLE,
+    parent: &DirectoryAuthority,
+    name: &ComponentName,
+) -> Result<()> {
+    #[cfg(test)]
+    {
+        let hook = BEFORE_RETAINED_DELETE_HOOK.get_or_init(Default::default)
+            .lock().expect("retained-delete hook mutex poisoned").clone();
+        if let Some(hook) = hook { return hook(handle, parent, name); }
+    }
+    let _ = (handle, parent, name);
+    Ok(())
+}
 ```
 
-`create_file_new`、`create_dir_new` 与 `create_stage_dir_new` 在 Task 6B 中先调用 `require_inherited_permissions(permissions)?`；`Inherit` 继续执行 real create，`OwnerOnly` 必须在任何 namespace mutation 前拒绝。Task 7 删除该 refusal helper 并由 section 8 的 `OwnerOnlySecurity` 取代。Task 6B GREEN 后 `nested_retained_io_roundtrip` 和全部 pure parser/contract tests 通过；此时不把 DACL/mutation tests 加入 test module。
+`create_file_new`、`create_dir_new` 与 `create_stage_dir_new` 在 Task 6B 中先调用 `require_inherited_permissions(permissions)?`；`Inherit` 继续执行 real create，`OwnerOnly` 必须在任何 namespace mutation 前拒绝。Task 7A 删除该 refusal helper 并由 section 8 的 `OwnerOnlySecurity` 取代。Task 6B GREEN 后 `nested_retained_io_roundtrip` 和全部 pure parser/contract tests 通过；此时不把 DACL/mutation tests 加入 test module。section 18.4 的 production body 与 hook storage 必须已在本 GREEN；后续 test-only commits只增加对应 `#[test]` bodies。
 
 Task 6B 对 section 11 create/parent-duplication 的 compile-complete bodies 固定如下；它们替换前文引用 section 8/9 symbols 的版本：
 
@@ -2639,7 +2723,7 @@ fn duplicate_directory(source: &DirectoryAuthority) -> Result<DirectoryAuthority
     let mut duplicated = null_mut();
     // SAFETY: retained source HANDLE; current-process source/target; output writable; same access only.
     if unsafe { DuplicateHandle(GetCurrentProcess(), source.native.node.handle.raw(), GetCurrentProcess(),
-        &mut duplicated, 0, false, DUPLICATE_SAME_ACCESS) } == 0 {
+        &mut duplicated, 0, BOOL_FALSE, DUPLICATE_SAME_ACCESS) } == 0 {
         return Err(last_win32(SafeFsOperation::OpenDirectory));
     }
     let handle = OwnedHandle::new(duplicated, SafeFsOperation::OpenDirectory)?;
@@ -2751,23 +2835,89 @@ pub(super) fn create_file_new(parent: &DirectoryAuthority, name: &ComponentName,
 }
 ```
 
-Task 7 保留 `duplicate_directory`，只替换上述两个 create implementation 的 permission/security branch；不得重复定义 helper。
+Task 7A 保留 `duplicate_directory`，只替换上述两个 create implementation 的 permission/security branch；不得重复定义 helper。
 
-### 18.3 Task 7：唯一 OwnerOnly/DACL/delete/rename 实现 task
+### 18.3 Task 7A：OwnerOnly/DACL 与 create rollback
 
-Task 7 test-only commit `test(project): specify Windows retained-handle security and mutations` 才加入 section 12 除 `nested_retained_io_roundtrip` 外的完整 tests，以及本节 18.4–18.6 的 probe、success、collision、cleanup、rollback tests。以下三个 behavior tests 分别命中 Task 6B 的 compile-complete refusal，且每个都满足 `expect_red` 的 `running 1 test` 约束：
+Task 7A test-only commit `test(project): specify Windows owner-only creation and rollback` 只向 `crates/opentake-project/src/safe_fs/windows.rs` 的既有 test module 加入下面一个 test。它只引用 Task 6B 已存在的 public facade 与 final-signature `force_next_owner_verification_failure`，不引用 `OwnerOnlySecurity`、`verify_owner_only` 或尚未实现的 delete/rename helpers：
 
-```powershell
-expect_red 'safe_fs::windows::tests::owner_only_dacl_is_exact_and_rollback_is_closed' "$EVIDENCE/windows-dacl-red.log"
-expect_red 'safe_fs::windows::tests::retained_delete_ignores_name_rebound' "$EVIDENCE/windows-delete-red.log"
-expect_red 'safe_fs::windows::tests::rename_never_replaces_any_target_kind' "$EVIDENCE/windows-rename-red.log"
+```rust
+#[test]
+fn owner_only_file_directory_stage_succeed_and_rollback() {
+    let temp = TestDir::new("owner-only");
+    let authority = root(&temp);
+
+    let file = create_file_new(&authority, &name("file"), CreatePermissions::OwnerOnly)
+        .expect("owner-only file creation succeeds");
+    drop(file);
+    let directory = create_dir_new(&authority, &name("directory"),
+        CreatePermissions::OwnerOnly, DirectoryAccess::MutateChildren)
+        .expect("owner-only directory creation succeeds");
+    drop(directory);
+    let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::OwnerOnly)
+        .expect("owner-only stage creation succeeds");
+    drop(stage);
+    for value in ["file", "directory", "stage"] {
+        assert!(matches!(query_child_nofollow(&authority, &name(value)).unwrap(), ChildState::Present(_)));
+    }
+
+    force_next_owner_verification_failure();
+    assert!(matches!(create_file_new(&authority, &name("rollback-file"), CreatePermissions::OwnerOnly),
+        Err(SafeFsError::InvalidNativeBuffer {
+            operation: SafeFsOperation::VerifySecurityDescriptor,
+            reason: NativeBufferReason::SecurityDescriptorMalformed,
+        })));
+    force_next_owner_verification_failure();
+    assert!(matches!(create_dir_new(&authority, &name("rollback-directory"),
+        CreatePermissions::OwnerOnly, DirectoryAccess::MutateChildren),
+        Err(SafeFsError::InvalidNativeBuffer {
+            operation: SafeFsOperation::VerifySecurityDescriptor,
+            reason: NativeBufferReason::SecurityDescriptorMalformed,
+        })));
+    force_next_owner_verification_failure();
+    assert!(matches!(create_stage_dir_new(&authority, &name("rollback-stage"),
+        CreatePermissions::OwnerOnly),
+        Err(SafeFsError::InvalidNativeBuffer {
+            operation: SafeFsOperation::VerifySecurityDescriptor,
+            reason: NativeBufferReason::SecurityDescriptorMalformed,
+        })));
+    for value in ["rollback-file", "rollback-directory", "rollback-stage"] {
+        assert!(matches!(query_child_nofollow(&authority, &name(value)).unwrap(), ChildState::Absent));
+    }
+}
 ```
 
-Task 7 GREEN `feat(project): add Windows capability-relative security and mutations` 独占 sections 8–10：删除 Task 6B refusal helper；加入 `OwnerOnlySecurity`、post-create exact DACL verification与同一 retained HANDLE rollback；加入 reparse-safe cleanup、FileDispositionInformation delete、FileRenameInformation no-replace rename。Task 6B 不拥有 section 8，Task 7 不重写 sections 2–7/11。Task 7 全组 GREEN 后才申请 exact-SHA native receipts。
+RED protocol：cached path 必须恰为 `crates/opentake-project/src/safe_fs/windows.rs`；commit `test(project): specify Windows owner-only creation and rollback`；exclusive directory 为 `$SAFETY_ROOT/logs/c1b-task-7a-<RED_SHA>-attempt-<M>`。运行：
 
-### 18.4 Fresh revalidation 的 production-used test probe
+```powershell
+expect_red 'safe_fs::windows::tests::owner_only_file_directory_stage_succeed_and_rollback' "$EVIDENCE/windows-owner-only-red.log"
+Select-String -Path "$EVIDENCE/windows-owner-only-red.log" -Pattern 'VerifySecurityDescriptor|UnsupportedSecureFilesystem|UnsupportedTarget'
+```
 
-section 11 的旧 `revalidate_namespace` body 由下面代码替换。`quarantine_stage` 与 `publish_stage_noreplace` 已在 section 10 的修正版中于 rename 前调用该函数，因此 mapping probe failure 发生在 namespace mutation 前。test hook 只在 `cfg(test)` 下存在，但 production 与 test 共用同一个 `collect_revalidation_proof` control path。
+必须出现 `running 1 test`、仅一项 FAILED，且 panic 的 source error 是 Task 6B 的 `VerifySecurityDescriptor/UnsupportedTarget`；compile/name-resolution failure 不合格。
+
+Task 7A GREEN commit `feat(project): enforce Windows owner-only creation` 只修改同一 `windows.rs`：删除 `owner_only_refusal`/`require_inherited_permissions`，安装 section 8 的 pinned-ABI exact `OwnerOnlySecurity`、`verify_owner_only`、`verify_created_owner_only` 与 private `mark_delete_handle` rollback primitive，并把 section 11 三个 create bodies切到 security descriptor branch。`OBJECT_ATTRIBUTES.SecurityDescriptor` 全程是 `*const SECURITY_DESCRIPTOR`；所有 BOOL storage/arguments（含 `SetSecurityDescriptorDacl`）是 `windows_sys::core::BOOL=i32`；`ace_flags` 保持 `ACE_FLAGS=u32`，仅在与 `ACE_HEADER.AceFlags:u8` 比较前 `u8::try_from`。`CREATE_FILE_CONTRACT`、`CREATE_DIR_CONTRACT`、`CREATE_STAGE_CONTRACT` 必须都含 `READ_CONTROL`。file、directory、stage 成功 post-verify；三类注入失败都对刚创建的同一 DELETE HANDLE 设置 disposition、drop、证明 name absent。
+
+Task 7A 的 wrapper 只能是下面 final body；Task 6B 已安装的 atomic flag/setter 不得重复定义：
+
+```rust
+fn verify_created_owner_only(handle: HANDLE, expected: &OwnerOnlySecurity) -> Result<()> {
+    #[cfg(test)]
+    if FORCE_DACL_VERIFY_FAILURE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        return Err(SafeFsError::InvalidNativeBuffer {
+            operation: SafeFsOperation::VerifySecurityDescriptor,
+            reason: NativeBufferReason::SecurityDescriptorMalformed,
+        });
+    }
+    verify_owner_only(handle, expected)
+}
+```
+
+Task 7A GREEN 不实现 quarantine/publish/public cleanup。GREEN SHA 的 exact Windows test、target check、`git diff --check` 和双 reviewer 都写入 exclusive `$SAFETY_ROOT/logs/c1b-task-7a-<GREEN_SHA>-attempt-<M>`；两份 review 必须明确检查三种成功、三种 rollback、ABI signature 和 `READ_CONTROL`，均 `APPROVE/0/0/0` 才进入 7B。
+
+### 18.4 Task 6B-owned fresh revalidation production body 与 Task 7B tests
+
+Task 6B GREEN 必须用下面代码替换 section 11 的旧 `revalidate_namespace` body，并同时加入全部 `cfg(test)` hook storage/guard/install symbols。Task 7B GREEN 的 `quarantine_stage` 与 `publish_stage_noreplace` 只调用这里已存在的函数，不得重新定义或 override 本 body；mapping probe failure 因而发生在 namespace mutation 前。Task 7B test-only commit只加入本节末尾两个 `#[test]` bodies，绝不修改 production 或 hook code。
 
 ```rust
 #[derive(Clone)]
@@ -2839,7 +2989,7 @@ pub(super) fn revalidate_namespace(directory: &DirectoryAuthority) -> Result<()>
 }
 ```
 
-完整 field-by-field blocking test 如下；没有 real mount privilege 依赖：
+完整 field-by-field blocking tests 如下；没有 real mount privilege 依赖，并且只在 Task 7B test-only commit 加入：
 
 ```rust
 #[test]
@@ -2882,7 +3032,7 @@ fn quarantine_and_publish_refuse_changed_probe_without_mutation() {
     for publish in [false, true] {
         let temp = TestDir::new(if publish { "publish-probe" } else { "quarantine-probe" });
         let authority = root(&temp);
-        let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::OwnerOnly).unwrap();
+        let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::Inherit).unwrap();
         let mut changed = collect_revalidation_proof(&authority).unwrap();
         changed.volume.guid.push(b'x' as u16);
         let _guard = install_revalidation_hook(Arc::new(move |_| Ok(changed.clone())));
@@ -2900,16 +3050,16 @@ fn quarantine_and_publish_refuse_changed_probe_without_mutation() {
 }
 ```
 
-### 18.5 Rename、collision 与 reparse cleanup 的完整 native 成功/失败证明
+### 18.5 Task 7B：quarantine/publish retained rename
 
-下面 tests 加入 Task 7 test-only commit；它们替代 section 12 中同名的单-file collision subset：
+Task 7B test-only commit `test(project): specify Windows retained quarantine and publish` 只加入本节两个 tests和 section 18.4 末尾两个 mapping `#[test]` bodies；所有 stage 都用 `CreatePermissions::Inherit`，因此 RED 必须越过 Task 7A DACL 并命中 Task 6B 的 `UnsupportedAtomicPublish` refusal：
 
 ```rust
 #[test]
 fn quarantine_and_publish_success_do_not_self_conflict() {
     let quarantine_temp = TestDir::new("quarantine-success");
     let authority = root(&quarantine_temp);
-    let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::OwnerOnly).unwrap();
+    let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::Inherit).unwrap();
     let quarantined = quarantine_stage(stage, &authority, name("quarantine")).expect("retained rename succeeds");
     drop(quarantined);
     assert!(!quarantine_temp.path().join("stage").exists());
@@ -2917,7 +3067,7 @@ fn quarantine_and_publish_success_do_not_self_conflict() {
 
     let publish_temp = TestDir::new("publish-success");
     let authority = root(&publish_temp);
-    let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::OwnerOnly).unwrap();
+    let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::Inherit).unwrap();
     publish_stage_noreplace(stage, &authority, name("destination")).expect("retained publish succeeds");
     assert!(!publish_temp.path().join("stage").exists());
     assert!(publish_temp.path().join("destination").is_dir());
@@ -2946,7 +3096,7 @@ fn rename_never_replaces_any_target_kind() {
             ChildState::Present(value) => value,
             ChildState::Absent => panic!("target fixture absent"),
         };
-        let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::OwnerOnly).unwrap();
+        let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::Inherit).unwrap();
         assert!(matches!(publish_stage_noreplace(stage, &authority, name("target")),
             Err(SafeFsError::AlreadyExists { .. })));
         let after = match query_child_nofollow(&authority, &name("target")).unwrap() {
@@ -2964,74 +3114,108 @@ fn rename_never_replaces_any_target_kind() {
 }
 
 #[test]
-fn cleanup_deletes_reparse_entry_without_traversing_target() {
-    let temp = TestDir::new("cleanup-reparse");
+fn create_stage_collision_is_typed_and_preserves_original() {
+    let temp = TestDir::new("stage-collision");
+    let authority = root(&temp);
+    let original = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::Inherit).unwrap();
+    let before = original.opened.clone();
+    drop(original);
+    assert!(matches!(create_stage_dir_new(&authority, &name("stage"), CreatePermissions::Inherit),
+        Err(SafeFsError::AlreadyExists {
+            operation: SafeFsOperation::CreateStageDirectory,
+        })));
+    let after = match query_child_nofollow(&authority, &name("stage")).unwrap() {
+        ChildState::Present(value) => value,
+        ChildState::Absent => panic!("original stage disappeared"),
+    };
+    assert_eq!(after.identity, before.identity);
+}
+```
+
+RED cached path 只能是 `crates/opentake-project/src/safe_fs/windows.rs`，exclusive evidence 为 `$SAFETY_ROOT/logs/c1b-task-7b-<RED_SHA>-attempt-<M>`；运行：
+
+```powershell
+expect_red 'safe_fs::windows::tests::quarantine_and_publish_success_do_not_self_conflict' "$EVIDENCE/windows-rename-red.log"
+Select-String -Path "$EVIDENCE/windows-rename-red.log" -Pattern 'QuarantineNoReplace|UnsupportedAtomicPublish|PrimitiveUnavailable'
+```
+
+必须恰好一个 executed FAILED，且由 `quarantine_stage` 的 typed refusal 触发。Task 7B GREEN commit `feat(project): add Windows retained quarantine and publish` 只安装 section 10 的 `RenameInformationBuffer`、`NtSetInformationFile(FileRenameInformation)`、no-replace collision mapping、`quarantine_stage`/`publish_stage_noreplace`；它调用 Task 6B 已安装的 `revalidate_namespace`，不替换 section 18.4 body/hook，也不实现 cleanup/delete。`CreateStageDirectory + STATUS_OBJECT_NAME_COLLISION` 必须映射 `AlreadyExists`，native test另建同名 stage并验证原 identity/tree不变。
+
+GREEN 运行本节全部 rename/collision tests、18.4 两个 mapping tests、target check、`git diff --check`；exclusive review directory `$SAFETY_ROOT/logs/c1b-task-7b-<GREEN_SHA>-attempt-<M>`。两名 fresh reviewer 必须检查 Inherit fixture确实越过 DACL、rename唯一使用 retained source HANDLE与 parent `RootDirectory`、无 post-success reopen、revalidation production body所有权无 override，均 `APPROVE/0/0/0` 后进入 7C。
+
+### 18.6 Task 7C：retained cleanup/delete/reparse 与真实 name rebound
+
+Task 7C test-only commit `test(project): specify Windows retained cleanup and delete` 只加入下面两个 tests。它们只引用 Task 6B/7A/7B 已存在的 final-signature symbols；stage/file/directory 都用 `CreatePermissions::Inherit`，因此 RED 必须命中 `open_cleanup_child_nofollow` 的 `OpenCleanupEntry/UnsupportedTarget` refusal，而不是 DACL 或 rename：
+
+```rust
+#[test]
+fn cleanup_quarantined_tree_deletes_nested_reparse_without_traversal() {
+    let temp = TestDir::new("cleanup-tree");
     let external = temp.path().join("external");
     fs::create_dir(&external).unwrap();
     fs::write(external.join("keep"), b"outside-bytes").unwrap();
     let authority = root(&temp);
-    let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::OwnerOnly).unwrap();
-    let stage_path = temp.path().join("stage");
+    let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::Inherit).unwrap();
+    let nested = create_dir_new(stage.directory(), &name("nested"), CreatePermissions::Inherit,
+        DirectoryAccess::MutateChildren).unwrap();
+    let mut file = create_file_new(&nested, &name("data"), CreatePermissions::Inherit).unwrap();
+    file.write_all(b"inside").unwrap();
+    drop(file);
+    drop(nested);
     let output = Command::new("cmd").args(["/C", "mklink", "/J"])
-        .arg(stage_path.join("link")).arg(&external).output().unwrap();
+        .arg(temp.path().join("stage/nested/link"))
+        .arg(&external).output().unwrap();
     assert!(output.status.success(), "mklink failed: {}", String::from_utf8_lossy(&output.stderr));
     let quarantine = quarantine_stage(stage, &authority, name("quarantine")).unwrap();
-    let cleanup = open_cleanup_child_nofollow(&quarantine, &name("link")).unwrap();
-    delete_quarantined_entry(cleanup).unwrap();
-    assert_eq!(fs::read(external.join("keep")).unwrap(), b"outside-bytes");
-    delete_quarantined_empty_directory(quarantine).unwrap();
+    super::super::cleanup_quarantined_tree(quarantine).expect("common recursive cleanup succeeds");
+    assert!(matches!(query_child_nofollow(&authority, &name("quarantine")).unwrap(), ChildState::Absent));
     assert_eq!(fs::read(external.join("keep")).unwrap(), b"outside-bytes");
 }
-```
 
-`open_cleanup_child_nofollow` 对 `SymlinkOrReparse` 必须选择 `CLEANUP_REPARSE_CONTRACT`：`FILE_OPEN_REPARSE_POINT | FILE_OPEN_FOR_BACKUP_INTENT | FILE_SYNCHRONOUS_IO_NONALERT`，不带 `FILE_DIRECTORY_FILE`/`FILE_NON_DIRECTORY_FILE`，desired access 含 `FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE`。它校验同一 retained HANDLE 的 tag/identity 后构造 `CleanupCapability::Entry`；`delete_quarantined_entry` 只对该 HANDLE 设置 disposition。禁止读取 link target、禁止跟随、禁止 joined-path delete。
-
-### 18.6 Exact DACL rollback test seam
-
-post-create verification 使用下面 wrapper；生产路径默认直接调用 `verify_owner_only`，test-only injection 只让验证返回失败，随后 production create body 必须对刚创建的同一 retained DELETE HANDLE 调 `mark_delete_handle` 并 drop：
-
-```rust
-#[cfg(test)]
-static FORCE_DACL_VERIFY_FAILURE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-fn verify_created_owner_only(handle: HANDLE, expected: &OwnerOnlySecurity) -> Result<()> {
-    #[cfg(test)]
-    if FORCE_DACL_VERIFY_FAILURE.swap(false, std::sync::atomic::Ordering::SeqCst) {
-        return Err(SafeFsError::InvalidNativeBuffer {
-            operation: SafeFsOperation::VerifySecurityDescriptor,
-            reason: NativeBufferReason::SecurityDescriptorMalformed,
-        });
-    }
-    verify_owner_only(handle, expected)
-}
-```
-
-section 11 的两个 create bodies 必须调用 `verify_created_owner_only`，不再直接调用 `verify_owner_only`。完整 rollback assertion：
-
-```rust
 #[test]
-fn owner_only_dacl_is_exact_and_rollback_is_closed() {
-    let temp = TestDir::new("dacl");
+fn retained_delete_survives_real_name_rebound() {
+    let temp = TestDir::new("delete-rebound");
     let authority = root(&temp);
-    let file = create_file_new(&authority, &name("good"), CreatePermissions::OwnerOnly).unwrap();
-    let expected = OwnerOnlySecurity::new(false).unwrap();
-    verify_owner_only(file.native.handle.raw(), &expected).unwrap();
+    let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::Inherit).unwrap();
+    let mut file = create_file_new(stage.directory(), &name("leaf"), CreatePermissions::Inherit).unwrap();
+    file.write_all(b"original").unwrap();
     drop(file);
-
-    FORCE_DACL_VERIFY_FAILURE.store(true, std::sync::atomic::Ordering::SeqCst);
-    assert!(matches!(create_file_new(&authority, &name("rollback"), CreatePermissions::OwnerOnly),
-        Err(SafeFsError::InvalidNativeBuffer {
-            operation: SafeFsOperation::VerifySecurityDescriptor,
-            reason: NativeBufferReason::SecurityDescriptorMalformed,
-        })));
-    assert!(matches!(query_child_nofollow(&authority, &name("rollback")).unwrap(), ChildState::Absent));
+    let quarantine = quarantine_stage(stage, &authority, name("quarantine")).unwrap();
+    let quarantine_path = temp.path().join("quarantine");
+    let _guard = install_before_retained_delete_hook(Arc::new(move |source, parent, _old_name| {
+        let buffer = RenameInformationBuffer::new(parent.native.node.handle.raw(), &name("moved-original"))?;
+        let mut iosb = IO_STATUS_BLOCK::default();
+        // SAFETY: source is the retained DELETE handle; parent/buffer/iosb stay live for this synchronous test rename.
+        let status = unsafe { NtSetInformationFile(source, &mut iosb, buffer.as_ptr(),
+            buffer.len_u32(), FileRenameInformation) };
+        complete_nt(SafeFsOperation::RenameNoReplaceSameParent, status, &iosb)?;
+        fs::write(quarantine_path.join("leaf"), b"replacement")
+            .map_err(|error| SafeFsError::io(SafeFsOperation::CreateFile, error))?;
+        Ok(())
+    }));
+    let cleanup = open_cleanup_child_nofollow(&quarantine, &name("leaf")).unwrap();
+    delete_quarantined_entry(cleanup).unwrap();
+    assert_eq!(fs::read(temp.path().join("quarantine/leaf")).unwrap(), b"replacement");
+    assert!(!temp.path().join("quarantine/moved-original").exists());
 }
 ```
+
+Task 7C production `delete_quarantined_entry` 必须在对 retained HANDLE 调 Task 7A-owned `mark_delete_handle` 前调用 `run_before_retained_delete_hook(handle, &parent, &name)`；non-test path恒为 no-op。test hook使用同一 retained source HANDLE把 original rename到 `moved-original`，再在旧 name创建不同 bytes；随后的 disposition 必须只删除 retained original，replacement保持。禁止用“外部 rename 被 share mask 拒绝”代替这项 proof。
+
+`enumerate` 已由 Task 6B 返回每个 validated component，包括 reparse name；它只做 nofollow metadata query，不打开/授予 capability。`open_cleanup_child_nofollow` 对 `SymlinkOrReparse` 必须选择 `CLEANUP_REPARSE_CONTRACT`，验证同一 retained HANDLE 的 tag/identity后构造 `CleanupCapability::Entry`。common `cleanup_quarantined_tree` 的 native test必须真实递归 nested directory、file与junction，目标 `external/keep` byte-identical。
+
+RED cached path/exclusive evidence 固定为 `windows.rs` 与 `$SAFETY_ROOT/logs/c1b-task-7c-<RED_SHA>-attempt-<M>`：
+
+```powershell
+expect_red 'safe_fs::windows::tests::cleanup_quarantined_tree_deletes_nested_reparse_without_traversal' "$EVIDENCE/windows-cleanup-red.log"
+Select-String -Path "$EVIDENCE/windows-cleanup-red.log" -Pattern 'OpenCleanupEntry|UnsupportedSecureFilesystem|UnsupportedTarget'
+```
+
+Task 7C GREEN commit `feat(project): add Windows retained cleanup and delete` 只安装 section 9 的 cleanup open/disposition/public delete bodies和 hook call；不得重新定义 Task 7A 的 `mark_delete_handle`、Task 7B rename或Task 6B revalidation。GREEN 运行本节两个 tests、完整 Windows safe_fs group、archive security、target check和`git diff --check`。exclusive `$SAFETY_ROOT/logs/c1b-task-7c-<GREEN_SHA>-attempt-<M>` 双 review必须检查实际 common recursion、reparse target未变、真实 retained HANDLE rebound与replacement保留，均 `APPROVE/0/0/0` 后才能请求 final exact-SHA native receipts。
 
 ### 18.7 Repository-versioned CI validator 与完整 RED/GREEN test
 
-Task 3（主计划编号保持 Task 3）test-only commit 只加入以下两个文件。`scripts/validate-c1b-ci.rb` 完整内容：
+Task 3（主计划编号保持 Task 3）同时拥有 CI 与 final-evidence validator 的 TDD。下列 `scripts/validate-c1b-ci.rb` body 是 GREEN body；test-only RED 先加入两个 tests和两个 fail-closed scaffold，见本节末尾 exact protocol。
 
 ```ruby
 #!/usr/bin/env ruby
@@ -3183,19 +3367,71 @@ end
 puts "c1b-ci-validator-tests=ok"
 ```
 
-RED commit 运行 `ruby scripts/tests/validate-c1b-ci-test.rb`；父 workflow 尚无 `safe-filesystem` 时，必须输出 `missing safe-filesystem job and immutable SHA binding` 并非零退出。GREEN commit 只修改 `.github/workflows/ci.yml` 为 section 13 exact YAML；随后：
+Task 3 的 commit/evidence/review protocol 是唯一允许序列，不由执行者补写。RED scaffold 精确内容分别是 `abort "unsupported C1B CI schema"` 与 `abort "unsupported C1B evidence schema"`；不得先放入部分 production validator：
+
+```bash
+TASK3_RED_DIR="$SAFETY_ROOT/logs/c1b-task-3-red-$(date -u +%Y%m%dT%H%M%SZ)-$(openssl rand -hex 4)"
+mkdir "$TASK3_RED_DIR"
+git add -- \
+  scripts/validate-c1b-ci.rb \
+  scripts/validate-c1b-evidence.rb \
+  scripts/tests/validate-c1b-ci-test.rb \
+  scripts/tests/validate-c1b-evidence-test.rb
+test "$(git diff --cached --name-only)" = "$(printf '%s\n' \
+  scripts/tests/validate-c1b-ci-test.rb \
+  scripts/tests/validate-c1b-evidence-test.rb \
+  scripts/validate-c1b-ci.rb \
+  scripts/validate-c1b-evidence.rb)"
+git commit -m 'test(ci): specify immutable C1B receipts and evidence'
+TASK3_RED_SHA=$(git rev-parse HEAD)
+printf '%s\n' "$TASK3_RED_SHA" >"$TASK3_RED_DIR/red-commit.sha"
+set +e
+ruby scripts/tests/validate-c1b-ci-test.rb >"$TASK3_RED_DIR/semantic-red.log" 2>&1
+TASK3_RED_EXIT=$?
+ruby scripts/tests/validate-c1b-evidence-test.rb >"$TASK3_RED_DIR/evidence-red.log" 2>&1
+TASK3_EVIDENCE_RED_EXIT=$?
+set -e
+printf '%s\n' "$TASK3_RED_EXIT" >"$TASK3_RED_DIR/semantic-red.raw-exit"
+printf '%s\n' "$TASK3_EVIDENCE_RED_EXIT" >"$TASK3_RED_DIR/evidence-red.raw-exit"
+test "$TASK3_RED_EXIT" -ne 0
+test "$TASK3_EVIDENCE_RED_EXIT" -ne 0
+test "$(grep -Fc 'unsupported C1B CI schema' "$TASK3_RED_DIR/semantic-red.log")" -eq 1
+test "$(grep -Fc 'unsupported C1B evidence schema' "$TASK3_RED_DIR/evidence-red.log")" -eq 1
+```
+
+RED receipt `red-receipt.json` 必须 exclusive-create，并固定保存：`task="3"`、`attempt>=1`、`red_sha`、上述两个 exact commands/exits/expected messages、UTC start/finish、repo cwd、relative log/raw-exit。`red_sha` 必须等于当前 `HEAD`；两次 failure 必须分别来自 fail-closed scaffold，Ruby parse/name error 不合格。
+
+GREEN 只把两个 validator scaffold替换为本节 CI body与 section 18.8 evidence body，并修改 `.github/workflows/ci.yml` 为 section 13 exact YAML；tests不再改动：
+
+```bash
+git add -- .github/workflows/ci.yml scripts/validate-c1b-ci.rb scripts/validate-c1b-evidence.rb
+test "$(git diff --cached --name-only)" = "$(printf '%s\n' \
+  .github/workflows/ci.yml \
+  scripts/validate-c1b-ci.rb \
+  scripts/validate-c1b-evidence.rb)"
+git commit -m 'ci: verify C1B receipts and evidence on exact SHAs'
+TASK3_GREEN_SHA=$(git rev-parse HEAD)
+test "$TASK3_GREEN_SHA" != "$TASK3_RED_SHA"
+TASK3_GREEN_DIR="$SAFETY_ROOT/logs/c1b-task-3-$TASK3_GREEN_SHA-attempt-1"
+mkdir "$TASK3_GREEN_DIR"
+```
+
+随后在 `TASK3_GREEN_DIR` 分别写 `.log` 与 `.raw-exit`：
 
 ```bash
 ruby scripts/validate-c1b-ci.rb .github/workflows/ci.yml
 ruby scripts/tests/validate-c1b-ci-test.rb
+ruby scripts/tests/validate-c1b-evidence-test.rb
 actionlint .github/workflows/ci.yml
 ```
 
-三者均为 0；若 `actionlint` 未安装，只能将该项记录为 tool-unavailable，并仍须运行前两项，不能把 YAML parse 当作替代。
+四者均为 0；若 `actionlint` 未安装，只能将该项记录为 tool-unavailable，并仍须运行前三项，不能把 YAML parse 当作替代。
+
+Task 3 GREEN 还必须运行 `git diff --check "$TASK3_RED_SHA^".."$TASK3_GREEN_SHA"` 与 `git status --porcelain=v1`（clean），并将 exact command、UTC timestamps、cwd、exit 与 log paths 写入 `command-ledger.json`。随后在 exclusive `TASK3_GREEN_DIR` 生成 `spec-security-review.md` 与 `implementation-review.md`：两名 fresh reviewer 都绑定完整 `TASK3_GREEN_SHA`，覆盖 RED receipt、workflow exact-SHA semantics、validator mutation fixtures、YAML/Ruby syntax，并各自 `APPROVE/0/0/0` 才可继续。任一 finding 产生新 GREEN commit 和 `attempt-2+` 目录；禁止覆盖 attempt-1。
 
 ### 18.8 Repository-versioned final evidence validator
 
-Task 8 convergence commit 加入 `scripts/validate-c1b-evidence.rb`；完整内容如下：
+Task 3 GREEN 把 fail-closed `scripts/validate-c1b-evidence.rb` scaffold替换为下面完整 body；Task 8 只消费，不修改它：
 
 ```ruby
 #!/usr/bin/env ruby
@@ -3203,16 +3439,55 @@ Task 8 convergence commit 加入 `scripts/validate-c1b-evidence.rb`；完整内�
 
 require "json"
 require "open3"
+require "pathname"
+require "time"
 
 SHA = /\A[0-9a-f]{40}\z/
 EXPECTED_IDS = %w[linux-x86_64 macos-native windows-x86_64].freeze
-EXPECTED_COMMANDS = %w[cargo-fmt cargo-clippy safe-fs-unit archive-security].freeze
+LOCAL_COMMANDS = {
+  "cargo-fmt" => "cargo fmt --all --check",
+  "cargo-clippy" => "cargo clippy --workspace --all-targets -- -D warnings",
+  "cargo-test-workspace" => "cargo test --workspace",
+  "tauri-no-default-check" => "cargo check -p opentake-tauri --no-default-features --all-targets",
+  "bundle-export-surface" => "cargo test -p opentake-tauri --test bundle_export_surface -- --test-threads=1",
+  "archive-security" => "cargo test -p opentake-project --test archive_security -- --test-threads=1",
+  "check-macos" => "cargo check -p opentake-project --lib --tests --target aarch64-apple-darwin",
+  "check-linux" => "cargo check -p opentake-project --lib --tests --target x86_64-unknown-linux-gnu",
+  "check-windows" => "cargo check -p opentake-project --lib --tests --target x86_64-pc-windows-msvc",
+  "git-diff-check" => "git diff --check",
+}.freeze
+NATIVE_COMMANDS = {
+  "cargo-fmt" => "cargo fmt --all --check",
+  "cargo-clippy" => "cargo clippy -p opentake-project --lib --tests -- -D warnings",
+  "safe-fs-unit" => "cargo test -p opentake-project --lib safe_fs -- --test-threads=1",
+  "archive-security" => "cargo test -p opentake-project --test archive_security -- --test-threads=1",
+}.freeze
 
 gate, expected_sha, spec_report, implementation_report, repo = ARGV
 abort "usage: validate-c1b-evidence.rb GATE_DIR SHA SPEC_REPORT IMPLEMENTATION_REPORT REPO" unless repo
 expected_sha = expected_sha.downcase
 raise "final SHA must be lowercase 40-hex" unless SHA.match?(expected_sha)
 raise "gate directory missing" unless Dir.exist?(gate)
+gate = File.realpath(gate)
+repo = File.realpath(repo)
+
+def confined_file!(root, relative, label)
+  raise "#{label} path must be relative" if Pathname.new(relative).absolute?
+  candidate = File.expand_path(relative, root)
+  prefix = root.end_with?(File::SEPARATOR) ? root : root + File::SEPARATOR
+  raise "#{label} escapes gate" unless candidate.start_with?(prefix)
+  raise "#{label} missing" unless File.file?(candidate)
+  raise "#{label} resolves outside gate" unless File.realpath(candidate).start_with?(prefix)
+  candidate
+end
+
+def timestamp!(value, label)
+  parsed = Time.iso8601(value)
+  raise "#{label} must be UTC" unless parsed.utc_offset.zero?
+  parsed
+rescue ArgumentError
+  raise "#{label} is not RFC3339"
+end
 
 head, head_status = Open3.capture2("git", "-C", repo, "rev-parse", "HEAD")
 raise "cannot read repository HEAD" unless head_status.success?
@@ -3223,18 +3498,27 @@ raise "repository is not clean" unless status.empty?
 
 ledger_path = File.join(gate, "command-ledger.json")
 ledger = JSON.parse(File.read(ledger_path))
-raise "command ledger must be a non-empty array" unless ledger.is_a?(Array) && !ledger.empty?
+raise "command ledger must contain exactly ten rows" unless ledger.is_a?(Array) && ledger.length == LOCAL_COMMANDS.length
 ledger_ids = ledger.map { |row| row.fetch("id") }
-raise "duplicate local command id" unless ledger_ids.uniq.length == ledger_ids.length
+raise "local command id/order mismatch" unless ledger_ids == LOCAL_COMMANDS.keys
 ledger.each do |row|
-  raise "local command exit is nonzero: #{row.fetch('id')}" unless row.fetch("exit_code") == 0
+  id = row.fetch("id")
+  raise "local command substituted: #{id}" unless row.fetch("command") == LOCAL_COMMANDS.fetch(id)
+  raise "local command exit is nonzero: #{id}" unless row.fetch("exit_code") == 0
   raise "local command cwd mismatch" unless row.fetch("cwd") == repo
-  %w[log raw_exit].each do |field|
-    path = File.join(gate, row.fetch(field))
-    raise "missing #{field} for #{row.fetch('id')}" unless File.file?(path)
-  end
-  raw_exit = File.read(File.join(gate, row.fetch("raw_exit"))).strip
-  raise "raw exit mismatch for #{row.fetch('id')}" unless raw_exit == "0"
+  started = timestamp!(row.fetch("started_at_utc"), "#{id} started_at_utc")
+  finished = timestamp!(row.fetch("finished_at_utc"), "#{id} finished_at_utc")
+  raise "local command timestamps reversed: #{id}" if finished < started
+  raise "local log name mismatch: #{id}" unless row.fetch("log") == "#{id}.log"
+  raise "local raw-exit name mismatch: #{id}" unless row.fetch("raw_exit") == "#{id}.raw-exit"
+  confined_file!(gate, row.fetch("log"), "#{id} log")
+  raw_exit = confined_file!(gate, row.fetch("raw_exit"), "#{id} raw exit")
+  raise "raw exit mismatch for #{id}" unless File.read(raw_exit).strip == "0"
+end
+
+%w[pre-status.txt post-status.txt].each do |status_name|
+  status_path = confined_file!(gate, status_name, status_name)
+  raise "#{status_name} is not clean" unless File.read(status_path).empty?
 end
 
 receipt_paths = Dir.glob(File.join(gate, "native-receipts", "*", "*", "receipt.json"))
@@ -3248,20 +3532,33 @@ receipts.each do |path, receipt|
   checked = receipt.fetch("checked_out_sha").downcase
   raise "receipt SHA malformed: #{path}" unless SHA.match?(requested) && SHA.match?(checked)
   raise "receipt SHA mismatch: #{path}" unless requested == checked && checked == expected_sha
+  run_id = receipt.fetch("run_id").to_s
+  run_attempt = receipt.fetch("run_attempt").to_s
+  raise "receipt run_id malformed: #{path}" unless run_id.match?(/\A[1-9][0-9]*\z/)
+  raise "receipt run_attempt malformed: #{path}" unless run_attempt.match?(/\A[1-9][0-9]*\z/)
+  expected_receipt_path = File.join(gate, "native-receipts", run_id, receipt.fetch("receipt_id"), "receipt.json")
+  raise "receipt path/run_id mismatch: #{path}" unless File.realpath(path) == File.realpath(expected_receipt_path)
   commands = receipt.fetch("commands")
   command_ids = commands.map { |command| command.fetch("id") }
-  raise "receipt command set mismatch: #{path}" unless command_ids == EXPECTED_COMMANDS
-  raise "duplicate receipt command: #{path}" unless command_ids.uniq.length == command_ids.length
+  raise "receipt command set/order mismatch: #{path}" unless command_ids == NATIVE_COMMANDS.keys
   commands.each do |command|
-    raise "native command failed: #{path}:#{command.fetch('id')}" unless command.fetch("exit_code") == 0
+    id = command.fetch("id")
+    raise "native command substituted: #{path}:#{id}" unless command.fetch("command") == NATIVE_COMMANDS.fetch(id)
+    raise "native command failed: #{path}:#{id}" unless command.fetch("exit_code") == 0
     receipt_dir = File.dirname(path)
-    log = File.join(receipt_dir, command.fetch("log"))
-    raw_exit = File.join(receipt_dir, command.fetch("raw_exit"))
-    raise "native log missing: #{log}" unless File.file?(log)
-    raise "native raw exit missing: #{raw_exit}" unless File.file?(raw_exit)
+    raise "native log name mismatch: #{id}" unless command.fetch("log") == "#{id}.log"
+    raise "native raw-exit name mismatch: #{id}" unless command.fetch("raw_exit") == "#{id}.raw-exit"
+    log = confined_file!(gate, File.join(Pathname.new(receipt_dir).relative_path_from(Pathname.new(gate)).to_s,
+      command.fetch("log")), "native #{id} log")
+    raw_exit = confined_file!(gate, File.join(Pathname.new(receipt_dir).relative_path_from(Pathname.new(gate)).to_s,
+      command.fetch("raw_exit")), "native #{id} raw exit")
     raise "native raw exit mismatch: #{raw_exit}" unless File.read(raw_exit).strip == "0"
   end
   raise "native aggregate failed: #{path}" unless receipt.fetch("aggregate_exit") == 0
+  aggregate = confined_file!(gate,
+    File.join(Pathname.new(File.dirname(path)).relative_path_from(Pathname.new(gate)).to_s,
+      "final-aggregate.raw-exit"), "native aggregate")
+  raise "native aggregate raw exit mismatch: #{path}" unless File.read(aggregate).strip == "0"
 end
 
 {
@@ -3281,11 +3578,181 @@ end
 results_path = File.join(gate, "results.md")
 raise "results.md missing" unless File.file?(results_path)
 results = File.read(results_path)
-raise "results missing final SHA" unless results.include?(expected_sha)
-EXPECTED_IDS.each { |id| raise "results missing #{id}" unless results.include?(id) }
+raise "results missing baseline SHA" unless results.match?(/^Baseline SHA:\s*[0-9a-f]{40}$/)
+raise "results missing final SHA" unless results.match?(/^Final SHA:\s*#{expected_sha}$/)
+raise "results missing clean pre-status" unless results.match?(/^Pre-status:\s*clean$/)
+raise "results missing clean post-status" unless results.match?(/^Post-status:\s*clean$/)
+LOCAL_COMMANDS.each do |id, command|
+  row = "| #{id} | #{command} | 0 |"
+  raise "results missing exact local row #{id}" unless results.include?(row)
+end
+receipts.each do |_path, receipt|
+  row = "| #{receipt.fetch('receipt_id')} | #{receipt.fetch('run_id')} | #{receipt.fetch('run_attempt')} | #{expected_sha} | 0 |"
+  raise "results missing exact native row #{receipt.fetch('receipt_id')}" unless results.include?(row)
+end
+raise "results missing spec report path" unless results.include?(spec_report)
+raise "results missing implementation report path" unless results.include?(implementation_report)
+raise "results missing aggregate" unless results.match?(/^Aggregate:\s*0$/)
 
 puts "c1b-evidence-validation=ok sha=#{expected_sha}"
 ```
+
+Task 3 test-only commit 同时加入 `scripts/tests/validate-c1b-evidence-test.rb`。该 test 不依赖 preexisting final gate；它在 `Dir.mktmpdir` 中从当前 clean repository HEAD 构造完整 canonical synthetic gate，再派生每个 mutation：
+
+```ruby
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "fileutils"
+require "json"
+require "open3"
+require "rbconfig"
+require "tmpdir"
+
+validator = File.expand_path("../validate-c1b-evidence.rb", __dir__)
+repo = File.expand_path("../..", __dir__)
+sha, sha_status = Open3.capture2("git", "-C", repo, "rev-parse", "HEAD")
+raise "cannot resolve test HEAD" unless sha_status.success?
+sha = sha.strip.downcase
+
+LOCAL_COMMANDS = {
+  "cargo-fmt" => "cargo fmt --all --check",
+  "cargo-clippy" => "cargo clippy --workspace --all-targets -- -D warnings",
+  "cargo-test-workspace" => "cargo test --workspace",
+  "tauri-no-default-check" => "cargo check -p opentake-tauri --no-default-features --all-targets",
+  "bundle-export-surface" => "cargo test -p opentake-tauri --test bundle_export_surface -- --test-threads=1",
+  "archive-security" => "cargo test -p opentake-project --test archive_security -- --test-threads=1",
+  "check-macos" => "cargo check -p opentake-project --lib --tests --target aarch64-apple-darwin",
+  "check-linux" => "cargo check -p opentake-project --lib --tests --target x86_64-unknown-linux-gnu",
+  "check-windows" => "cargo check -p opentake-project --lib --tests --target x86_64-pc-windows-msvc",
+  "git-diff-check" => "git diff --check",
+}.freeze
+NATIVE_COMMANDS = {
+  "cargo-fmt" => "cargo fmt --all --check",
+  "cargo-clippy" => "cargo clippy -p opentake-project --lib --tests -- -D warnings",
+  "safe-fs-unit" => "cargo test -p opentake-project --lib safe_fs -- --test-threads=1",
+  "archive-security" => "cargo test -p opentake-project --test archive_security -- --test-threads=1",
+}.freeze
+RECEIPT_IDS = %w[linux-x86_64 macos-native windows-x86_64].freeze
+
+def run_validator(validator, gate, sha, spec, implementation, repo)
+  Open3.capture3(RbConfig.ruby, validator, gate, sha, spec, implementation, repo)
+end
+
+def rewrite_json(path)
+  value = JSON.parse(File.read(path))
+  yield value
+  File.write(path, JSON.pretty_generate(value) + "\n")
+end
+
+def build_gate(root, label, sha, repo)
+  gate = File.join(root, label)
+  FileUtils.mkdir_p(gate)
+  timestamp = "2026-07-13T00:00:00Z"
+  ledger = LOCAL_COMMANDS.map do |id, command|
+    File.write(File.join(gate, "#{id}.log"), "synthetic #{id}\n")
+    File.write(File.join(gate, "#{id}.raw-exit"), "0\n")
+    {
+      "id" => id, "command" => command, "cwd" => repo,
+      "started_at_utc" => timestamp, "finished_at_utc" => timestamp,
+      "exit_code" => 0, "log" => "#{id}.log", "raw_exit" => "#{id}.raw-exit",
+    }
+  end
+  File.write(File.join(gate, "command-ledger.json"), JSON.pretty_generate(ledger) + "\n")
+  File.write(File.join(gate, "pre-status.txt"), "")
+  File.write(File.join(gate, "post-status.txt"), "")
+
+  run_id = "12345"
+  RECEIPT_IDS.each do |receipt_id|
+    directory = File.join(gate, "native-receipts", run_id, receipt_id)
+    FileUtils.mkdir_p(directory)
+    commands = NATIVE_COMMANDS.map do |id, command|
+      File.write(File.join(directory, "#{id}.log"), "synthetic #{id}\n")
+      File.write(File.join(directory, "#{id}.raw-exit"), "0\n")
+      { "id" => id, "command" => command, "exit_code" => 0,
+        "log" => "#{id}.log", "raw_exit" => "#{id}.raw-exit" }
+    end
+    File.write(File.join(directory, "final-aggregate.raw-exit"), "0\n")
+    receipt = {
+      "schema" => "opentake-c1b-native-receipt-v1", "receipt_id" => receipt_id,
+      "run_id" => run_id, "run_attempt" => "1", "requested_sha" => sha,
+      "checked_out_sha" => sha, "commands" => commands, "aggregate_exit" => 0,
+    }
+    File.write(File.join(directory, "receipt.json"), JSON.pretty_generate(receipt) + "\n")
+  end
+
+  spec = File.join(gate, "spec-security-review.md")
+  implementation = File.join(gate, "implementation-review.md")
+  report = ->(role) { "Role: #{role}\nCommit: #{sha}\nVerdict: APPROVE\nCritical: 0\nImportant: 0\nMinor: 0\n" }
+  File.write(spec, report.call("spec-security"))
+  File.write(implementation, report.call("implementation"))
+  results = [
+    "Baseline SHA: #{'0' * 40}", "Final SHA: #{sha}", "Pre-status: clean", "Post-status: clean",
+    *LOCAL_COMMANDS.map { |id, command| "| #{id} | #{command} | 0 |" },
+    *RECEIPT_IDS.map { |id| "| #{id} | #{run_id} | 1 | #{sha} | 0 |" },
+    "Spec report: #{spec}", "Implementation report: #{implementation}", "Aggregate: 0",
+  ].join("\n") + "\n"
+  File.write(File.join(gate, "results.md"), results)
+  [gate, spec, implementation]
+end
+
+mutations = {
+  "missing-local-row" => lambda { |copy|
+    rewrite_json(File.join(copy, "command-ledger.json")) { |rows| rows.pop }
+  },
+  "renamed-local-id" => lambda { |copy|
+    rewrite_json(File.join(copy, "command-ledger.json")) { |rows| rows[0]["id"] = "renamed" }
+  },
+  "duplicate-local-id" => lambda { |copy|
+    rewrite_json(File.join(copy, "command-ledger.json")) { |rows| rows[1]["id"] = rows[0]["id"] }
+  },
+  "reordered-local-rows" => lambda { |copy|
+    rewrite_json(File.join(copy, "command-ledger.json")) { |rows| rows[0], rows[1] = rows[1], rows[0] }
+  },
+  "substituted-local-command" => lambda { |copy|
+    rewrite_json(File.join(copy, "command-ledger.json")) { |rows| rows[0]["command"] = "true" }
+  },
+  "invalid-timestamp" => lambda { |copy|
+    rewrite_json(File.join(copy, "command-ledger.json")) { |rows| rows[0]["started_at_utc"] = "not-time" }
+  },
+  "escaped-log" => lambda { |copy|
+    rewrite_json(File.join(copy, "command-ledger.json")) { |rows| rows[0]["log"] = "../outside.log" }
+  },
+  "dirty-pre-status" => lambda { |copy| File.write(File.join(copy, "pre-status.txt"), " M changed\n") },
+  "dirty-post-status" => lambda { |copy| File.write(File.join(copy, "post-status.txt"), "?? new\n") },
+  "substituted-native-command" => lambda { |copy|
+    receipt = Dir.glob(File.join(copy, "native-receipts", "*", "*", "receipt.json")).first
+    rewrite_json(receipt) { |value| value.fetch("commands")[0]["command"] = "true" }
+  },
+  "zero-run-attempt" => lambda { |copy|
+    receipt = Dir.glob(File.join(copy, "native-receipts", "*", "*", "receipt.json")).first
+    rewrite_json(receipt) { |value| value["run_attempt"] = "0" }
+  },
+  "missing-results-row" => lambda { |copy|
+    path = File.join(copy, "results.md")
+    File.write(path, File.read(path).lines.reject { |line| line.include?("| cargo-fmt |") }.join)
+  },
+}
+
+Dir.mktmpdir("c1b-evidence-validator") do |temporary|
+  gate, spec, implementation = build_gate(temporary, "canonical", sha, repo)
+  out, err, status = run_validator(validator, gate, sha, spec, implementation, repo)
+  raise "canonical gate rejected: #{out}#{err}" unless status.success?
+
+  mutations.each do |label, mutate|
+    copy, copy_spec, copy_implementation = build_gate(temporary, label, sha, repo)
+    mutate.call(copy)
+    _out, _err, result = run_validator(
+      validator, copy, sha, copy_spec, copy_implementation, repo
+    )
+    raise "validator accepted mutation #{label}" if result.success?
+  end
+end
+
+puts "c1b-evidence-validator-tests=ok"
+```
+
+上述 test与fail-closed scaffold在 Task 3 RED；完整 validator在 Task 3 GREEN。Task 8 不增加、修改或提交任何 validator/test code，只创建最终 SHA 的真实 exclusive gate，并调用已经 committed at Task 3 的两个 validators。因此 validator code SHA 与被验证 final SHA 一致，不存在“先有 final gate、后提交 validator 导致 SHA 改变”的循环。
 
 最终调用固定为：
 
@@ -3297,6 +3764,10 @@ ruby scripts/validate-c1b-evidence.rb \
   >"$GATE_DIR/results-validation.log" 2>&1
 printf '%s\n' "$?" >"$GATE_DIR/results-validation.raw-exit"
 test "$(cat "$GATE_DIR/results-validation.raw-exit")" = 0
+ruby scripts/tests/validate-c1b-evidence-test.rb \
+  >"$GATE_DIR/results-mutation-validation.log" 2>&1
+printf '%s\n' "$?" >"$GATE_DIR/results-mutation-validation.raw-exit"
+test "$(cat "$GATE_DIR/results-mutation-validation.raw-exit")" = 0
 ```
 
 该 validator 同时覆盖 final SHA、三份 receipt 的 requested/checked-out SHA、duplicate IDs、每个 command/aggregate exit、两份 review report 的 commit/0 findings、clean worktree、ledger/native log 与 raw-exit 存在性、`results.md`。任何不满足项都非零退出；不能在 validation 后修改 evidence 或 commit。
