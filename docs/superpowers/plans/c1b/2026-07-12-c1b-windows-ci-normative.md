@@ -1,4 +1,4 @@
-# C1B Windows, Native CI, and Evidence Normative Appendix — Attempt 5
+# C1B Windows, Native CI, and Evidence Normative Appendix — Attempt 6
 
 ## 0. 绑定范围与来源
 
@@ -13,7 +13,7 @@
 - safety root：`/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-safety/20260712-wave1bc-filesystem`
 - integration repo root：`/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-full-convergence`
 
-Attempt 5 必须删除 Attempt 1–4 的以下决定：
+Attempt 6 必须删除 Attempt 1–5 的以下决定：
 
 1. 统一使用 common appendix 的递归 `DirectoryAuthority`；每个打开/创建的目录 authority 都能作为下一层 parent。
 2. 不再把 file capability 做成只能查 metadata 的死端。它提供受控 `read`、`write_all`、`rewind`、`flush`，raw HANDLE 不外泄。
@@ -26,7 +26,7 @@ Attempt 5 必须删除 Attempt 1–4 的以下决定：
 
 ### 1.1 Authority 形状
 
-Common facade 以 common/Unix appendix section 2 为唯一来源。Attempt 5 的 Windows adapter 只包含下面这些既有 common symbols；名称和参数逐项一致，`windows.rs` 不包含兼容别名或第二 facade：
+Common facade 以 common/Unix appendix section 2 为唯一来源。Attempt 6 的 Windows adapter 只包含下面这些既有 common symbols；名称和参数逐项一致，`windows.rs` 不包含兼容别名或第二 facade：
 
 ```text
 platform::{NativeNamespaceAnchor, NativeDirectory, NativeFile};
@@ -114,7 +114,7 @@ use windows_sys::Wdk::Storage::FileSystem::*;
 use windows_sys::Win32::Foundation::{
     CloseHandle, DuplicateHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, NTSTATUS,
     DUPLICATE_SAME_ACCESS, STATUS_ACCESS_DENIED,
-    STATUS_BUFFER_OVERFLOW, STATUS_CANNOT_DELETE, STATUS_DELETE_PENDING,
+    STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_CANNOT_DELETE, STATUS_DELETE_PENDING,
     STATUS_DIRECTORY_NOT_EMPTY, STATUS_END_OF_FILE, STATUS_FILE_IS_A_DIRECTORY,
     STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_PARAMETER, STATUS_NO_MORE_FILES,
     STATUS_NOT_A_DIRECTORY, STATUS_NOT_SUPPORTED, STATUS_OBJECT_NAME_COLLISION,
@@ -136,7 +136,9 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::Ioctl::{FSCTL_GET_REPARSE_POINT, MAXIMUM_REPARSE_DATA_BUFFER_SIZE};
-use windows_sys::Win32::System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR;
+use windows_sys::Win32::System::SystemServices::{
+    ACCESS_ALLOWED_ACE_TYPE, FILE_CS_FLAG_CASE_SENSITIVE_DIR, SECURITY_DESCRIPTOR_REVISION,
+};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 const SHARE: FILE_SHARE_MODE = FILE_SHARE_READ | FILE_SHARE_WRITE;
@@ -278,15 +280,12 @@ fn checked_information(operation: SafeFsOperation, iosb: &IO_STATUS_BLOCK, capac
 }
 
 fn complete_nt(operation: SafeFsOperation, returned: NTSTATUS, iosb: &IO_STATUS_BLOCK) -> Result<()> {
-    if returned == STATUS_PENDING {
-        return Err(SafeFsError::InvalidNativeBuffer {
-            operation,
-            reason: NativeBufferReason::PendingOnSynchronousHandle,
-        });
-    }
-    if returned < STATUS_SUCCESS { return Err(nt_error(operation, returned)); }
+    // Every caller handles its explicitly accepted terminal/warning status before this helper.
+    // The generic synchronous completion contract accepts STATUS_SUCCESS only. In particular,
+    // STATUS_PENDING preserves its raw NTSTATUS as Os and no output/IOSB byte count is trusted.
+    if returned != STATUS_SUCCESS { return Err(nt_error(operation, returned)); }
     let final_status = iosb_status(iosb);
-    if final_status < STATUS_SUCCESS { return Err(nt_error(operation, final_status)); }
+    if final_status != STATUS_SUCCESS { return Err(nt_error(operation, final_status)); }
     Ok(())
 }
 
@@ -507,11 +506,11 @@ let attrs = OBJECT_ATTRIBUTES {
 
 所有 `NtCreateFile` handle 同时包含 `SYNCHRONIZE` desired access 和 `FILE_SYNCHRONOUS_IO_NONALERT` create option；event/APC/context 均为空。每次调用新建零初始化 `IO_STATUS_BLOCK`，不得跨 call 复用。
 
-`complete_nt_io(operation, returned_status, &iosb)` 的规则：
+`complete_nt(operation, returned_status, &iosb)` 的规则：
 
 1. `returned_status == STATUS_PENDING` 在同步 handle 上属于 invariant failure；记录 raw status 并返回 `Os`，不得读取未完成 output，不另建 event，也不偷偷异步等待。
 2. `returned_status < 0` 先走本稿第 7 节的 raw-NTSTATUS 分类；失败时不信任 `iosb.Information` 或 output bytes。
-3. 成功/警告状态只在该 operation 明确允许时接受；随后读取 `iosb.Anonymous.Status`，若它是失败状态，以它为最终 raw status。
+3. 通用 helper 只接受 `STATUS_SUCCESS`。`STATUS_END_OF_FILE`/`STATUS_NO_MORE_FILES`/`STATUS_BUFFER_OVERFLOW` 只由 read/enumerate 在调用 helper 前按本附录明文处理；任何其他非零 success/informational/warning status 都保留 raw NTSTATUS 返回 `Os`。只有 returned status 是 `STATUS_SUCCESS` 后才读 `iosb.Anonymous.Status`，且 final status 也必须是 `STATUS_SUCCESS`。
 4. `NtReadFile`/`NtWriteFile`/`NtQueryDirectoryFile`/`NtFsControlFile` 的有效 byte count 只取 `iosb.Information`，先 checked-convert 到 `usize` 并验证不超过 caller buffer。
 5. `NtReadFile` 的 `STATUS_END_OF_FILE` 转 `Ok(0)`；每次最大 length 为 `u32::MAX`，更大 slice 分块。
 6. `NtWriteFile` 若成功但 `Information == 0` 且 input 非空，返回 `WriteZero`；`write_all` 循环直到完成。
@@ -938,7 +937,7 @@ fn nt_error(operation: SafeFsOperation, status: NTSTATUS) -> SafeFsError {
                 operation,
                 reason: AtomicPublishReason::PrimitiveUnavailable,
             },
-        STATUS_INVALID_PARAMETER | STATUS_INFO_LENGTH_MISMATCH =>
+        STATUS_INVALID_PARAMETER | STATUS_INFO_LENGTH_MISMATCH | STATUS_BUFFER_TOO_SMALL =>
             SafeFsError::InvalidNativeBuffer {
                 operation,
                 reason: if operation == SafeFsOperation::RenameNoReplaceSameParent {
@@ -957,6 +956,7 @@ fn nt_error(operation: SafeFsOperation, status: NTSTATUS) -> SafeFsError {
     }
 }
 
+#[allow(dead_code)] // Task 6B parent symbol; Task 7B removes this when public rename calls it.
 fn map_rename_failure(
     status: NTSTATUS,
     preflight_absent: bool,
@@ -999,7 +999,7 @@ post-create 用 `GetKernelObjectSecurity(OWNER_SECURITY_INFORMATION | DACL_SECUR
 ```rust
 struct OwnerOnlySecurity {
     sid: Vec<usize>,
-    acl: Vec<usize>,
+    _acl: Vec<usize>,
     descriptor: Box<SECURITY_DESCRIPTOR>,
     ace_flags: ACE_FLAGS,
 }
@@ -1054,11 +1054,83 @@ impl OwnerOnlySecurity {
                 acl.as_mut_ptr().cast(), BOOL_FALSE) } == 0 ||
             unsafe { SetSecurityDescriptorControl((&mut *descriptor as *mut SECURITY_DESCRIPTOR).cast(),
                 SE_DACL_PROTECTED, SE_DACL_PROTECTED) } == 0 { return Err(last_win32(op)); }
-        Ok(Self { sid, acl, descriptor, ace_flags })
+        Ok(Self { sid, _acl: acl, descriptor, ace_flags })
     }
     fn descriptor_ptr(&self) -> *const SECURITY_DESCRIPTOR {
         &*self.descriptor as *const SECURITY_DESCRIPTOR
     }
+}
+
+fn malformed_security() -> SafeFsError {
+    SafeFsError::InvalidNativeBuffer {
+        operation: SafeFsOperation::VerifySecurityDescriptor,
+        reason: NativeBufferReason::SecurityDescriptorMalformed,
+    }
+}
+
+fn checked_subslice(base: usize, length: usize, pointer: usize, needed: usize) -> Result<std::ops::Range<usize>> {
+    let end = base.checked_add(length).ok_or_else(malformed_security)?;
+    let pointer_end = pointer.checked_add(needed).ok_or_else(malformed_security)?;
+    if pointer < base || pointer_end > end { return Err(malformed_security()); }
+    Ok(pointer - base..pointer_end - base)
+}
+
+fn checked_sid_length(buffer: &[u8], sid: *const c_void) -> Result<usize> {
+    const SID_PREFIX: usize = 8; // revision + sub-authority count + identifier authority
+    let range = checked_subslice(buffer.as_ptr() as usize, buffer.len(), sid as usize, SID_PREFIX)?;
+    let count = usize::from(buffer[range.start + 1]);
+    let length = SID_PREFIX.checked_add(count.checked_mul(size_of::<u32>()).ok_or_else(malformed_security)?)
+        .ok_or_else(malformed_security)?;
+    checked_subslice(buffer.as_ptr() as usize, buffer.len(), sid as usize, length)?;
+    // SAFETY: the SID prefix and every declared sub-authority are inside `buffer`.
+    if unsafe { IsValidSid(sid.cast_mut()) } == 0 { return Err(malformed_security()); }
+    // SAFETY: IsValidSid accepted the fully bounded SID.
+    if usize::try_from(unsafe { GetLengthSid(sid.cast_mut()) }).map_err(|_| malformed_security())? != length {
+        return Err(malformed_security());
+    }
+    Ok(length)
+}
+
+fn verify_single_owner_ace(
+    descriptor_bytes: &[u8],
+    dacl: *mut ACL,
+    acl_bytes_in_use: usize,
+    ace: *mut c_void,
+    expected: &OwnerOnlySecurity,
+) -> Result<()> {
+    let descriptor_base = descriptor_bytes.as_ptr() as usize;
+    let dacl_start = dacl as usize;
+    let dacl_range = checked_subslice(descriptor_base, descriptor_bytes.len(), dacl_start,
+        acl_bytes_in_use.max(size_of::<ACL>()))?;
+    if acl_bytes_in_use < size_of::<ACL>() || dacl_range.len() != acl_bytes_in_use {
+        return Err(malformed_security());
+    }
+    let ace_start = ace as usize;
+    checked_subslice(dacl_start, acl_bytes_in_use, ace_start, size_of::<ACE_HEADER>())?;
+    // SAFETY: only the fixed ACE_HEADER bytes were bounds-checked; use unaligned read before
+    // assuming an ACCESS_ALLOWED_ACE layout.
+    let header = unsafe { std::ptr::read_unaligned(ace.cast::<ACE_HEADER>()) };
+    if u32::from(header.AceType) != ACCESS_ALLOWED_ACE_TYPE { return Err(malformed_security()); }
+    let ace_size = usize::from(header.AceSize);
+    let sid_offset = offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+    let minimum = sid_offset.checked_add(8).ok_or_else(malformed_security)?;
+    if ace_size < minimum { return Err(malformed_security()); }
+    checked_subslice(dacl_start, acl_bytes_in_use, ace_start, ace_size)?;
+    let sid_ptr = ace_start.checked_add(sid_offset).ok_or_else(malformed_security)? as *const c_void;
+    let sid_length = checked_sid_length(descriptor_bytes, sid_ptr)?;
+    if sid_offset.checked_add(sid_length).ok_or_else(malformed_security)? != ace_size {
+        return Err(malformed_security());
+    }
+    // SAFETY: type, complete fixed ACCESS_ALLOWED_ACE prefix, AceSize, ACL bounds, SID range,
+    // and IsValidSid were all established above.
+    let allowed = unsafe { std::ptr::read_unaligned(ace.cast::<ACCESS_ALLOWED_ACE>()) };
+    let expected_header_flags = u8::try_from(expected.ace_flags).map_err(|_| malformed_security())?;
+    if allowed.Header.AceFlags != expected_header_flags || allowed.Mask != FILE_ALL_ACCESS ||
+        unsafe { EqualSid(sid_ptr.cast_mut(), expected.sid.as_ptr().cast()) } == 0
+    {
+        return Err(malformed_security());
+    }
+    Ok(())
 }
 
 fn verify_owner_only(handle: HANDLE, expected: &OwnerOnlySecurity) -> Result<()> {
@@ -1075,7 +1147,12 @@ fn verify_owner_only(handle: HANDLE, expected: &OwnerOnlySecurity) -> Result<()>
     if unsafe { GetKernelObjectSecurity(handle, information, words.as_mut_ptr().cast(), needed, &mut needed) } == 0 {
         return Err(last_win32(op));
     }
-    let descriptor = words.as_mut_ptr().cast::<SECURITY_DESCRIPTOR>();
+    let descriptor_bytes = unsafe {
+        // SAFETY: the second successful query initialized exactly `needed` bytes in aligned storage.
+        std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), needed as usize)
+    };
+    if descriptor_bytes.len() < size_of::<SECURITY_DESCRIPTOR>() { return Err(malformed_security()); }
+    let descriptor = descriptor_bytes.as_mut_ptr().cast::<SECURITY_DESCRIPTOR>();
     let mut control = 0u16; let mut revision = 0u32;
     let mut owner = null_mut(); let mut owner_defaulted: BOOL = BOOL_FALSE;
     let mut dacl = null_mut(); let mut present: BOOL = BOOL_FALSE;
@@ -1085,34 +1162,74 @@ fn verify_owner_only(handle: HANDLE, expected: &OwnerOnlySecurity) -> Result<()>
         unsafe { GetSecurityDescriptorOwner(descriptor.cast(), &mut owner, &mut owner_defaulted) } == 0 ||
         unsafe { GetSecurityDescriptorDacl(descriptor.cast(), &mut present, &mut dacl, &mut defaulted) } == 0 ||
         control & SE_DACL_PROTECTED == 0 || owner_defaulted != BOOL_FALSE ||
-        present == BOOL_FALSE || defaulted != BOOL_FALSE || dacl.is_null() ||
-        unsafe { EqualSid(owner, expected.sid.as_ptr().cast()) } == 0 {
-        return Err(SafeFsError::InvalidNativeBuffer { operation: op, reason: NativeBufferReason::SecurityDescriptorMalformed });
+        present == BOOL_FALSE || defaulted != BOOL_FALSE || dacl.is_null() || owner.is_null() {
+        return Err(malformed_security());
     }
+    #[cfg(test)]
+    let descriptor_fixture = take_owner_descriptor_fixture();
+    #[cfg(test)]
+    if descriptor_fixture == Some(OwnerDescriptorFixture::NullOwner) { owner = null_mut(); }
+    #[cfg(test)]
+    if descriptor_fixture == Some(OwnerDescriptorFixture::InvalidOwner) {
+        owner = descriptor_bytes.as_mut_ptr().wrapping_add(descriptor_bytes.len() - 1).cast();
+    }
+    if owner.is_null() { return Err(malformed_security()); }
+    checked_sid_length(descriptor_bytes, owner.cast_const())?;
+    // SAFETY: owner SID has been range-checked inside the returned descriptor and IsValidSid passed.
+    if unsafe { EqualSid(owner, expected.sid.as_ptr().cast()) } == 0 { return Err(malformed_security()); }
     let mut acl_info = ACL_SIZE_INFORMATION::default();
-    // SAFETY: dacl validated non-null; output fixed and writable.
+    #[cfg(test)]
+    if descriptor_fixture == Some(OwnerDescriptorFixture::DaclOutOfRange) {
+        dacl = descriptor_bytes.as_mut_ptr().wrapping_add(descriptor_bytes.len() + 1).cast();
+    }
+    checked_subslice(descriptor_bytes.as_ptr() as usize, descriptor_bytes.len(), dacl as usize, size_of::<ACL>())?;
+    // SAFETY: DACL fixed header is inside descriptor bytes; output fixed and writable.
     if unsafe { GetAclInformation(dacl, (&mut acl_info as *mut ACL_SIZE_INFORMATION).cast(),
-        size_of::<ACL_SIZE_INFORMATION>() as u32, AclSizeInformation) } == 0 || acl_info.AceCount != 1 {
-        return Err(SafeFsError::InvalidNativeBuffer { operation: op, reason: NativeBufferReason::SecurityDescriptorMalformed });
+        size_of::<ACL_SIZE_INFORMATION>() as u32, AclSizeInformation) } == 0 {
+        return Err(malformed_security());
     }
+    #[cfg(test)]
+    if descriptor_fixture == Some(OwnerDescriptorFixture::WrongAceCount) { acl_info.AceCount = 2; }
+    if acl_info.AceCount != 1 { return Err(malformed_security()); }
+    #[cfg(test)]
+    if descriptor_fixture == Some(OwnerDescriptorFixture::AclBytesOutOfRange) {
+        acl_info.AclBytesInUse = u32::MAX;
+    }
+    let acl_bytes_in_use = usize::try_from(acl_info.AclBytesInUse).map_err(|_| malformed_security())?;
+    checked_subslice(descriptor_bytes.as_ptr() as usize, descriptor_bytes.len(), dacl as usize,
+        acl_bytes_in_use.max(size_of::<ACL>()))?;
     let mut ace = null_mut();
-    // SAFETY: validated one-entry ACL.
+    // SAFETY: ACL header and AclBytesInUse are bounded inside descriptor storage.
     if unsafe { GetAce(dacl, 0, &mut ace) } == 0 || ace.is_null() { return Err(last_win32(op)); }
-    // SAFETY: one ACCESS_ALLOWED ACE was required by creation contract; header checked before fields.
-    let allowed = unsafe { &*(ace.cast::<ACCESS_ALLOWED_ACE>()) };
-    let sid_ptr = (&allowed.SidStart as *const u32).cast();
-    let expected_header_flags = u8::try_from(expected.ace_flags).map_err(|_| {
-        SafeFsError::InvalidNativeBuffer {
-            operation: op,
-            reason: NativeBufferReason::SecurityDescriptorMalformed,
-        }
-    })?;
-    if allowed.Header.AceType != ACCESS_ALLOWED_ACE_TYPE ||
-        allowed.Header.AceFlags != expected_header_flags ||
-        allowed.Mask != FILE_ALL_ACCESS || unsafe { EqualSid(sid_ptr, expected.sid.as_ptr().cast()) } == 0 {
-        return Err(SafeFsError::InvalidNativeBuffer { operation: op, reason: NativeBufferReason::SecurityDescriptorMalformed });
+    #[cfg(test)]
+    if descriptor_fixture == Some(OwnerDescriptorFixture::AceOutOfRange) {
+        ace = descriptor_bytes.as_mut_ptr().wrapping_add(descriptor_bytes.len() + 1).cast();
     }
-    Ok(())
+    #[cfg(test)]
+    if let Some(fixture) = descriptor_fixture {
+        // SAFETY: GetAce returned a pointer inside the already bounded one-entry ACL. Each
+        // mutation stays inside that allocation and is consumed immediately by the release
+        // bounds-first verifier; it never reaches a kernel call.
+        unsafe {
+            let header = ace.cast::<ACE_HEADER>();
+            match fixture {
+                OwnerDescriptorFixture::WrongAceType => (*header).AceType = 0x7f,
+                OwnerDescriptorFixture::UndersizedAce => (*header).AceSize = size_of::<ACE_HEADER>() as u16,
+                OwnerDescriptorFixture::OversizedSid => {
+                    let sid = (ace as *mut u8).add(offset_of!(ACCESS_ALLOWED_ACE, SidStart));
+                    *sid.add(1) = u8::MAX;
+                }
+                OwnerDescriptorFixture::InvalidSid => {
+                    let sid = (ace as *mut u8).add(offset_of!(ACCESS_ALLOWED_ACE, SidStart));
+                    *sid = 0;
+                }
+                OwnerDescriptorFixture::NullOwner | OwnerDescriptorFixture::InvalidOwner |
+                OwnerDescriptorFixture::DaclOutOfRange | OwnerDescriptorFixture::AclBytesOutOfRange |
+                OwnerDescriptorFixture::WrongAceCount | OwnerDescriptorFixture::AceOutOfRange => {}
+            }
+        }
+    }
+    verify_single_owner_ace(descriptor_bytes, dacl, acl_bytes_in_use, ace, expected)
 }
 ```
 
@@ -1221,8 +1338,15 @@ pub(super) fn open_cleanup_child_nofollow(
     }
 }
 
-// Installed once by Task 7A for create rollback; Task 7C reuses this exact body.
+// Installed by Task 6B because every FILE_CREATE contract already requests DELETE and every
+// post-NtCreateFile failure must roll back before a capability can be returned. Tasks 7A/7C
+// reuse this exact body; neither redefines it.
 fn mark_delete_handle(handle: HANDLE, operation: SafeFsOperation) -> Result<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_CREATED_DISPOSITION.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        return Err(SafeFsError::io(operation,
+            io::Error::new(io::ErrorKind::Other, "injected created disposition failure")));
+    }
     let info = FILE_DISPOSITION_INFORMATION { DeleteFile: true };
     let mut iosb = IO_STATUS_BLOCK::default();
     // SAFETY: caller owns a live DELETE handle; initialized fixed info and writable iosb stay live.
@@ -1231,6 +1355,107 @@ fn mark_delete_handle(handle: HANDLE, operation: SafeFsOperation) -> Result<()> 
         u32::try_from(size_of::<FILE_DISPOSITION_INFORMATION>()).expect("disposition info fits"),
         FileDispositionInformation) };
     complete_nt(operation, status, &iosb)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowsCreateFailurePoint {
+    Metadata,
+    FilesystemProbe,
+    TypeValidation,
+    CaseProof,
+    SnapshotAssembly,
+    ParentDuplicate,
+    #[allow(dead_code)] // Task 7A test-only removes this attribute when it constructs the variant.
+    SecurityVerification,
+}
+
+#[cfg(test)]
+static WINDOWS_CREATE_FAILURE: std::sync::OnceLock<
+    std::sync::Mutex<Option<WindowsCreateFailurePoint>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+struct WindowsCreateFailureGuard;
+
+#[cfg(test)]
+impl Drop for WindowsCreateFailureGuard {
+    fn drop(&mut self) {
+        *WINDOWS_CREATE_FAILURE.get_or_init(Default::default).lock()
+            .expect("Windows create-failure mutex poisoned") = None;
+    }
+}
+
+#[cfg(test)]
+fn install_windows_create_failure(point: WindowsCreateFailurePoint) -> WindowsCreateFailureGuard {
+    let mut slot = WINDOWS_CREATE_FAILURE.get_or_init(Default::default).lock()
+        .expect("Windows create-failure mutex poisoned");
+    assert!(slot.is_none(), "Windows create-failure tests require --test-threads=1");
+    *slot = Some(point);
+    WindowsCreateFailureGuard
+}
+
+fn inject_windows_create_failure(point: WindowsCreateFailurePoint, operation: SafeFsOperation) -> Result<()> {
+    #[cfg(test)]
+    {
+        let mut slot = WINDOWS_CREATE_FAILURE.get_or_init(Default::default).lock()
+            .expect("Windows create-failure mutex poisoned");
+        if *slot == Some(point) {
+            *slot = None;
+            return Err(SafeFsError::io(operation,
+                io::Error::new(io::ErrorKind::Other, format!("injected Windows {point:?} failure"))));
+        }
+    }
+    let _ = (point, operation);
+    Ok(())
+}
+
+#[cfg(test)]
+static FAIL_NEXT_CREATED_DISPOSITION: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+struct CreatedDispositionFailureGuard;
+
+#[cfg(test)]
+impl Drop for CreatedDispositionFailureGuard {
+    fn drop(&mut self) {
+        FAIL_NEXT_CREATED_DISPOSITION.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+fn install_created_disposition_failure() -> CreatedDispositionFailureGuard {
+    assert!(!FAIL_NEXT_CREATED_DISPOSITION.swap(true, std::sync::atomic::Ordering::SeqCst),
+        "created disposition tests require --test-threads=1");
+    CreatedDispositionFailureGuard
+}
+
+fn rollback_created_handle<T>(handle: OwnedHandle, original: SafeFsError) -> Result<T> {
+    let rollback = mark_delete_handle(handle.raw(), SafeFsOperation::RollbackCreatedEntry);
+    drop(handle);
+    match rollback {
+        Ok(()) => Err(original),
+        Err(_) => Err(SafeFsError::StageIdentityLost {
+            operation: SafeFsOperation::RollbackCreatedEntry,
+            reason: StageIdentityLostReason::CreatedRollbackDeleteFailed,
+        }),
+    }
+}
+
+fn rollback_created_directory<T>(directory: DirectoryAuthority, original: SafeFsError) -> Result<T> {
+    let node = Arc::try_unwrap(directory.native.node).map_err(|_| SafeFsError::StageIdentityLost {
+        operation: SafeFsOperation::RollbackCreatedEntry,
+        reason: StageIdentityLostReason::CreatedRollbackDeleteFailed,
+    })?;
+    let rollback = mark_delete_handle(node.handle.raw(), SafeFsOperation::RollbackCreatedEntry);
+    drop(node.handle);
+    match rollback {
+        Ok(()) => Err(original),
+        Err(_) => Err(SafeFsError::StageIdentityLost {
+            operation: SafeFsOperation::RollbackCreatedEntry,
+            reason: StageIdentityLostReason::CreatedRollbackDeleteFailed,
+        }),
+    }
 }
 
 fn dispose_retained(
@@ -1276,7 +1501,7 @@ pub(super) fn delete_quarantined_entry(cleanup: CleanupCapability) -> Result<()>
 }
 
 pub(super) fn delete_quarantined_empty_directory(quarantined: QuarantinedCapability) -> Result<()> {
-    let QuarantinedCapability { directory, opened, .. } = quarantined;
+    let QuarantinedCapability { parent, directory, quarantine_name, opened, .. } = quarantined;
     if directory.opened.identity != opened.identity || !directory.native.delete_right {
         return Err(SafeFsError::IdentityChanged {
             operation: SafeFsOperation::DeleteQuarantinedEmptyDirectory,
@@ -1293,7 +1518,10 @@ pub(super) fn delete_quarantined_empty_directory(quarantined: QuarantinedCapabil
         access: FileAccess::Read,
         delete_right: true,
     };
-    dispose_retained(native, EntryKind::Directory, SafeFsOperation::DeleteQuarantinedEmptyDirectory)
+    // Directory cleanup follows the same deterministic retained-delete hook policy as leaf cleanup:
+    // the hook may rebind the old name, but disposition always consumes this original DELETE handle.
+    dispose_retained(native, &parent, &quarantine_name, EntryKind::Directory,
+        SafeFsOperation::DeleteQuarantinedEmptyDirectory)
 }
 ```
 
@@ -1333,10 +1561,12 @@ unsafe {
 完整 builder 与 consuming facade bodies：
 
 ```rust
+#[allow(dead_code)] // Task 6B parent symbol; Task 7B removes this when public rename calls it.
 struct RenameInformationBuffer { storage: Vec<usize>, used: u32 }
 
 const _: () = assert!(align_of::<usize>() >= align_of::<FILE_RENAME_INFORMATION>());
 
+#[allow(dead_code)] // Builder is first called by Task 7B test-only bodies.
 impl RenameInformationBuffer {
     fn new(parent: HANDLE, target: &ComponentName) -> Result<Self> {
         let units: Vec<u16> = target.as_os_str().encode_wide().collect();
@@ -1456,7 +1686,7 @@ NtSetInformationFile(
     retained_stage_handle,
     &mut iosb,
     buffer.as_ptr().cast(),
-    buffer.len_u32(),
+    buffer.used,
     FileRenameInformation,
 )
 ```
@@ -1711,19 +1941,31 @@ fn create_directory_contract(parent: &DirectoryAuthority, name: &ComponentName, 
     let pointer = security.as_ref().map_or(null(), OwnerOnlySecurity::descriptor_ptr);
     let handle = nt_create_relative(parent.native.node.handle.raw(), name, parent.case_mode, contract.desired,
         contract.disposition, contract.options, contract.attributes, pointer, operation)?;
-    let filesystem = parent.opened.filesystem.as_ref().ok_or(SafeFsError::UnsupportedSecureFilesystem {
-        operation: SafeFsOperation::ProbeFilesystem, reason: SecureFilesystemReason::FilesystemProbeUnavailable })?;
-    let opened = query_entry_metadata(handle.raw(), filesystem, operation)?;
-    if opened.kind != EntryKind::Directory { return Err(SafeFsError::UnsupportedEntryType { operation, kind: opened.kind }); }
-    if let Some(expected) = &security {
-        if let Err(error) = verify_created_owner_only(handle.raw(), expected) {
-            mark_delete_handle(handle.raw(), SafeFsOperation::DeleteQuarantinedEmptyDirectory)?;
-            drop(handle);
-            return Err(error);
+    let validated = (|| -> Result<(EntryMetadata, CaseMode, NamespaceSnapshot)> {
+        inject_windows_create_failure(WindowsCreateFailurePoint::FilesystemProbe, operation)?;
+        let filesystem = parent.opened.filesystem.as_ref().ok_or(SafeFsError::UnsupportedSecureFilesystem {
+            operation: SafeFsOperation::ProbeFilesystem,
+            reason: SecureFilesystemReason::FilesystemProbeUnavailable,
+        })?;
+        inject_windows_create_failure(WindowsCreateFailurePoint::Metadata, operation)?;
+        let opened = query_entry_metadata(handle.raw(), filesystem, operation)?;
+        inject_windows_create_failure(WindowsCreateFailurePoint::TypeValidation, operation)?;
+        if opened.kind != EntryKind::Directory {
+            return Err(SafeFsError::UnsupportedEntryType { operation, kind: opened.kind });
         }
-    }
-    let case_mode = query_case_mode(handle.raw())?;
-    let snapshot = append_snapshot(&parent.snapshot, name.clone(), &opened, case_mode)?;
+        if let Some(expected) = &security {
+            verify_created_owner_only(handle.raw(), expected)?;
+        }
+        inject_windows_create_failure(WindowsCreateFailurePoint::CaseProof, operation)?;
+        let case_mode = query_case_mode(handle.raw())?;
+        inject_windows_create_failure(WindowsCreateFailurePoint::SnapshotAssembly, operation)?;
+        let snapshot = append_snapshot(&parent.snapshot, name.clone(), &opened, case_mode)?;
+        Ok((opened, case_mode, snapshot))
+    })();
+    let (opened, case_mode, snapshot) = match validated {
+        Ok(value) => value,
+        Err(error) => return rollback_created_handle(handle, error),
+    };
     let node = Arc::new(DirectoryNode { handle, parent: Some(Arc::clone(&parent.native.node)), name: Some(name.clone()), case_mode,
         metadata: opened.clone(), volume: parent.native.node.volume.clone() });
     Ok(DirectoryAuthority { anchor: Arc::clone(&parent.anchor), native: NativeDirectory { node, access, delete_right: contract.delete_right },
@@ -1740,9 +1982,17 @@ pub(super) fn create_dir_new(parent: &DirectoryAuthority, name: &ComponentName, 
 
 pub(super) fn create_stage_dir_new(parent: &DirectoryAuthority, name: &ComponentName,
     permissions: CreatePermissions) -> Result<StageCapability> {
-    let owned_parent = duplicate_directory(parent)?;
     let directory = create_directory_contract(parent, name, permissions, DirectoryAccess::Stage,
         contract_for_operation(OpenOperation::CreateStage))?;
+    if let Err(error) = inject_windows_create_failure(WindowsCreateFailurePoint::ParentDuplicate,
+        SafeFsOperation::CreateStageDirectory)
+    {
+        return rollback_created_directory(directory, error);
+    }
+    let owned_parent = match duplicate_directory(parent) {
+        Ok(parent) => parent,
+        Err(error) => return rollback_created_directory(directory, error),
+    };
     let opened = directory.opened.clone();
     Ok(StageCapability { parent: owned_parent, directory, original_name: name.clone(), opened })
 }
@@ -1756,17 +2006,30 @@ pub(super) fn create_file_new(parent: &DirectoryAuthority, name: &ComponentName,
     let handle = nt_create_relative(parent.native.node.handle.raw(), name, parent.case_mode, contract.desired,
         contract.disposition, contract.options, contract.attributes, pointer,
         SafeFsOperation::CreateFile)?;
-    let filesystem = parent.opened.filesystem.as_ref().ok_or(SafeFsError::UnsupportedSecureFilesystem {
-        operation: SafeFsOperation::ProbeFilesystem, reason: SecureFilesystemReason::FilesystemProbeUnavailable })?;
-    let opened = query_entry_metadata(handle.raw(), filesystem, SafeFsOperation::CreateFile)?;
-    if opened.kind != EntryKind::RegularFile { return Err(SafeFsError::UnsupportedEntryType { operation: SafeFsOperation::CreateFile, kind: opened.kind }); }
-    if let Some(expected) = &security {
-        if let Err(error) = verify_created_owner_only(handle.raw(), expected) {
-            mark_delete_handle(handle.raw(), SafeFsOperation::DeleteQuarantinedEntry)?;
-            drop(handle);
-            return Err(error);
+    let validated = (|| -> Result<EntryMetadata> {
+        inject_windows_create_failure(WindowsCreateFailurePoint::FilesystemProbe, SafeFsOperation::CreateFile)?;
+        let filesystem = parent.opened.filesystem.as_ref().ok_or(SafeFsError::UnsupportedSecureFilesystem {
+            operation: SafeFsOperation::ProbeFilesystem,
+            reason: SecureFilesystemReason::FilesystemProbeUnavailable,
+        })?;
+        inject_windows_create_failure(WindowsCreateFailurePoint::Metadata, SafeFsOperation::CreateFile)?;
+        let opened = query_entry_metadata(handle.raw(), filesystem, SafeFsOperation::CreateFile)?;
+        inject_windows_create_failure(WindowsCreateFailurePoint::TypeValidation, SafeFsOperation::CreateFile)?;
+        if opened.kind != EntryKind::RegularFile {
+            return Err(SafeFsError::UnsupportedEntryType {
+                operation: SafeFsOperation::CreateFile,
+                kind: opened.kind,
+            });
         }
-    }
+        if let Some(expected) = &security {
+            verify_created_owner_only(handle.raw(), expected)?;
+        }
+        Ok(opened)
+    })();
+    let opened = match validated {
+        Ok(value) => value,
+        Err(error) => return rollback_created_handle(handle, error),
+    };
     Ok(FileCapability { native: NativeFile { handle, opened: opened.clone(), access: FileAccess::ReadWrite, delete_right: false },
         access: FileAccess::ReadWrite, opened })
 }
@@ -1787,7 +2050,16 @@ pub(super) fn read_link_component(parent: &DirectoryAuthority, name: &ComponentN
 
 ## 12. Windows native test 完整清单
 
-以下代码是 `windows.rs` 末尾的完整 test module。它只调用本附录已经定义的 production symbols；本段定义它使用的全部 fixture/helper。
+以下代码是最终 `windows.rs` test module 的 body catalog，但不是一次性加入。下表是唯一 add-set ownership：每个 test 只在一个 test-only commit 出现，且其 parent SHA 已定义所有被引用 symbol。任务不得从 catalog 提前复制后续 test。
+
+| owner | exact test-only add set | parent-symbol rule |
+|---|---|---|
+| Task 6B | `nested_retained_io_roundtrip`; `windows_post_create_metadata_failure_rolls_back_same_handle`; `windows_post_create_filesystem_failure_rolls_back_same_handle`; `windows_post_create_type_failure_rolls_back_same_handle`; `windows_post_create_case_failure_rolls_back_same_handle`; `windows_post_create_snapshot_failure_rolls_back_same_handle`; `windows_post_create_parent_duplicate_failure_rolls_back_same_handle` | The test-only commit adds `TestDir`/`name`/`root`, `assert_file_create_failure_rolls_back`, and compile-only create/disposition failure guards beside the Task 6A refusal scaffold, so all seven bodies compile without Task 6B production. `nested_retained_io_roundtrip` and `windows_post_create_metadata_failure_rolls_back_same_handle` are two separate exact behavioral RED runs, each `running 1 test` and failing at the refusal. GREEN replaces the compile-only seams with the final Task 6B seams; all seven pass, and metadata additionally proves disposition failure returns typed fail-leak with the name retained. |
+| Task 7A | `component_utf16_and_rejections`; `unicode_and_object_attribute_lifetimes`; `operation_contract_spy_all_rows`; `volume_root_contract_is_access_dependent`; `synchronous_nt_completion_rejects_pending_buffer_small_and_warnings`; `query_reports_reparse_as_present_and_open_rejects`; `reparse_parser_bounds_every_field`; `directory_parser_bounds_and_requery`; `metadata_types_and_hardlinks`; `ten_thousand_handles_return_to_baseline`; `ancestor_mapping_cannot_rebind`; `every_volume_field_is_bound`; `create_new_preserves_every_existing_kind`; `ntstatus_mapping_is_operation_specific`; `production_capabilities_own_drop_resources`; `owner_only_file_directory_stage_succeed_and_rollback`; `owner_only_dacl_rejects_wrong_ace_type`; `owner_only_dacl_rejects_undersized_ace`; `owner_only_dacl_rejects_oversized_sid`; `owner_only_dacl_rejects_invalid_sid`; `owner_only_dacl_rejects_null_or_invalid_owner`; `windows_post_create_security_failure_rolls_back_same_handle` | Task 6B GREEN parent exposes every parser/contract symbol plus compiling OwnerOnly refusal. Task 7A test-only adds its DACL fixture setter/guards and removes the temporary `SecurityVerification` variant dead-code allowance, so all 22 compile without Task 7A production. The first 15 pure/regression tests pass on the test-only SHA; only `owner_only_file_directory_stage_succeed_and_rollback` is the focused RED. No name references Task 7A production types. |
+| Task 7B | `every_revalidation_field_is_bound_before_mutation`; `quarantine_and_publish_refuse_changed_probe_without_mutation`; `quarantine_and_publish_success_do_not_self_conflict`; `rename_never_replaces_any_target_kind`; `create_stage_collision_is_typed_and_preserves_original` | Task 6B parent owns production revalidation/hook plus pure `RenameInformationBuffer` and `map_rename_failure`; Task 7A parent exposes compiling rename refusals. These exact five bodies compile before GREEN while embedding buffer-layout and ambiguous-status assertions. |
+| Task 7C | `cleanup_quarantined_tree_deletes_nested_reparse_without_traversal`; `retained_delete_survives_real_name_rebound` | Task 6B parent owns pure `RenameInformationBuffer { used }`; Task 7B parent owns the retained rename execution path. Task 7C test-only adds its own hook type/guard/installer beside the two bodies, while GREEN adds only the runner/call site. Therefore the exact test-only SHA compiles before reaching the cleanup refusal without Task 6B future-symbol dead code. |
+
+Task 6B test-only 加入 `TestDir`/`name`/`root`、普通 helper `assert_file_create_failure_rolls_back`、七个 exact bodies 与 compile-only `#[cfg(test)]` create/disposition-failure seams。helper 与所需 imports 同属 test-only patch，不得延迟到 GREEN。Task 6B GREEN 把 seams替换为 section 9 final body，并加入剩余 catalog helpers与 production revalidation hook symbols；Owner/DACL 与 retained-delete future seams分别延迟到 Task 7A/7C test-only commit，避免 Task 6B `clippy -D warnings` 的 future-symbol dead code。
 
 ```rust
 #[cfg(test)]
@@ -1933,9 +2205,18 @@ mod tests {
     }
 
     #[test]
-    fn synchronous_io_status_is_bounded() {
+    fn synchronous_nt_completion_rejects_pending_buffer_small_and_warnings() {
         assert!(matches!(complete_nt(SafeFsOperation::ReadFile, STATUS_PENDING, &test_iosb(0, 0)),
-            Err(SafeFsError::InvalidNativeBuffer { reason: NativeBufferReason::PendingOnSynchronousHandle, .. })));
+            Err(SafeFsError::Os { raw: RawOsError::NtStatus { status: STATUS_PENDING, .. }, .. })));
+        assert!(matches!(nt_error(SafeFsOperation::EnumerateDirectory, STATUS_BUFFER_TOO_SMALL),
+            SafeFsError::InvalidNativeBuffer { .. }));
+        const UNEXPECTED_INFORMATIONAL_STATUS: NTSTATUS = 1;
+        assert!(matches!(complete_nt(SafeFsOperation::ReadFile, UNEXPECTED_INFORMATIONAL_STATUS,
+            &test_iosb(STATUS_SUCCESS, 0)),
+            Err(SafeFsError::Os { raw: RawOsError::NtStatus { status: UNEXPECTED_INFORMATIONAL_STATUS, .. }, .. })));
+        assert!(matches!(complete_nt(SafeFsOperation::ReadFile, STATUS_SUCCESS,
+            &test_iosb(UNEXPECTED_INFORMATIONAL_STATUS, 0)),
+            Err(SafeFsError::Os { raw: RawOsError::NtStatus { status: UNEXPECTED_INFORMATIONAL_STATUS, .. }, .. })));
         assert!(checked_information(SafeFsOperation::ReadFile, &test_iosb(0, 9), 8).is_err());
         assert!(complete_nt(SafeFsOperation::ReadFile, STATUS_SUCCESS, &test_iosb(STATUS_ACCESS_DENIED, 0)).is_err());
     }
@@ -2089,27 +2370,77 @@ mod tests {
     fn create_new_preserves_every_existing_kind() {
         let temp = TestDir::new("exclusive"); fs::write(temp.path().join("file"), b"before").unwrap(); fs::create_dir(temp.path().join("dir")).unwrap();
         let authority = root(&temp);
-        assert!(matches!(create_file_new(&authority, &name("file"), CreatePermissions::OwnerOnly), Err(SafeFsError::AlreadyExists { .. })));
+        assert!(matches!(create_file_new(&authority, &name("file"), CreatePermissions::Inherit), Err(SafeFsError::AlreadyExists { .. })));
         assert_eq!(fs::read(temp.path().join("file")).unwrap(), b"before");
-        assert!(matches!(create_dir_new(&authority, &name("dir"), CreatePermissions::OwnerOnly, DirectoryAccess::Read), Err(SafeFsError::AlreadyExists { .. })));
+        assert!(matches!(create_dir_new(&authority, &name("dir"), CreatePermissions::Inherit, DirectoryAccess::Read), Err(SafeFsError::AlreadyExists { .. })));
+    }
+
+    fn assert_file_create_failure_rolls_back(point: WindowsCreateFailurePoint, label: &str) {
+        let temp = TestDir::new(label);
+        let authority = root(&temp);
+        let _failure = install_windows_create_failure(point);
+        assert!(create_file_new(&authority, &name("created"), CreatePermissions::Inherit).is_err());
+        assert!(matches!(query_child_nofollow(&authority, &name("created")).unwrap(), ChildState::Absent));
     }
 
     #[test]
-    fn rename_layout_is_exact() {
-        let temp = TestDir::new("layout"); let authority = root(&temp);
-        let buffer = RenameInformationBuffer::new(authority.native.node.handle.raw(), &ComponentName::new(OsString::from_wide(&[0x61, 0xD800])).unwrap()).unwrap();
-        assert_eq!(buffer.used as usize, offset_of!(FILE_RENAME_INFORMATION, FileName) + 4);
-        assert_eq!((buffer.as_ptr() as usize) % align_of::<FILE_RENAME_INFORMATION>(), 0);
-        // SAFETY: builder returned aligned initialized header.
-        assert_eq!(unsafe { (*(buffer.as_ptr().cast::<FILE_RENAME_INFORMATION>())).RootDirectory }, authority.native.node.handle.raw());
+    fn windows_post_create_metadata_failure_rolls_back_same_handle() {
+        assert_file_create_failure_rolls_back(WindowsCreateFailurePoint::Metadata, "rollback-metadata");
+
+        let temp = TestDir::new("rollback-disposition-failure");
+        let authority = root(&temp);
+        let _failure = install_windows_create_failure(WindowsCreateFailurePoint::Metadata);
+        let _disposition = install_created_disposition_failure();
+        let error = match create_file_new(&authority, &name("created"), CreatePermissions::Inherit) {
+            Ok(_) => panic!("injected disposition failure must reject the created file"),
+            Err(error) => error,
+        };
+        assert!(matches!(&error,
+            SafeFsError::StageIdentityLost {
+                operation: SafeFsOperation::RollbackCreatedEntry,
+                reason: StageIdentityLostReason::CreatedRollbackDeleteFailed,
+            }), "unexpected error: {error:?}");
+        assert!(matches!(query_child_nofollow(&authority, &name("created")).unwrap(),
+            ChildState::Present(_)), "failed retained-HANDLE disposition must fail-leak the created entry");
     }
 
     #[test]
-    fn ambiguous_rename_requires_all_three_proofs() {
-        assert!(matches!(map_rename_failure(STATUS_ACCESS_DENIED, true, true, Ok(present())), SafeFsError::AlreadyExists { .. }));
-        assert!(matches!(map_rename_failure(STATUS_ACCESS_DENIED, true, true, Ok(ChildState::Absent)),
-            SafeFsError::Os { raw: RawOsError::NtStatus { status: STATUS_ACCESS_DENIED, .. }, .. }));
-        assert!(matches!(map_rename_failure(STATUS_ACCESS_DENIED, false, true, Ok(present())), SafeFsError::Os { .. }));
+    fn windows_post_create_filesystem_failure_rolls_back_same_handle() {
+        assert_file_create_failure_rolls_back(WindowsCreateFailurePoint::FilesystemProbe, "rollback-filesystem");
+    }
+
+    #[test]
+    fn windows_post_create_type_failure_rolls_back_same_handle() {
+        assert_file_create_failure_rolls_back(WindowsCreateFailurePoint::TypeValidation, "rollback-type");
+    }
+
+    #[test]
+    fn windows_post_create_case_failure_rolls_back_same_handle() {
+        let temp = TestDir::new("rollback-case");
+        let authority = root(&temp);
+        let _failure = install_windows_create_failure(WindowsCreateFailurePoint::CaseProof);
+        assert!(create_dir_new(&authority, &name("created"), CreatePermissions::Inherit,
+            DirectoryAccess::MutateChildren).is_err());
+        assert!(matches!(query_child_nofollow(&authority, &name("created")).unwrap(), ChildState::Absent));
+    }
+
+    #[test]
+    fn windows_post_create_snapshot_failure_rolls_back_same_handle() {
+        let temp = TestDir::new("rollback-snapshot");
+        let authority = root(&temp);
+        let _failure = install_windows_create_failure(WindowsCreateFailurePoint::SnapshotAssembly);
+        assert!(create_dir_new(&authority, &name("created"), CreatePermissions::Inherit,
+            DirectoryAccess::MutateChildren).is_err());
+        assert!(matches!(query_child_nofollow(&authority, &name("created")).unwrap(), ChildState::Absent));
+    }
+
+    #[test]
+    fn windows_post_create_parent_duplicate_failure_rolls_back_same_handle() {
+        let temp = TestDir::new("rollback-duplicate");
+        let authority = root(&temp);
+        let _failure = install_windows_create_failure(WindowsCreateFailurePoint::ParentDuplicate);
+        assert!(create_stage_dir_new(&authority, &name("created"), CreatePermissions::Inherit).is_err());
+        assert!(matches!(query_child_nofollow(&authority, &name("created")).unwrap(), ChildState::Absent));
     }
 
     #[test]
@@ -2147,7 +2478,7 @@ git diff --check
 
 ## 13. 完整 GitHub Actions YAML
 
-Attempt 5 用以下完整 `.github/workflows/ci.yml`，保留现有 rust/web jobs并加入 exact-SHA native matrix。`workflow_dispatch` 只有该 workflow 已存在 default branch 时才可调用；在它首次进入 default branch 前，中间 SHA 只能通过授权 PR 的 head-SHA path 取得 receipt。
+Attempt 6 用以下完整 `.github/workflows/ci.yml`，保留现有 rust/web jobs并加入 exact-SHA native matrix。`workflow_dispatch` 只有该 workflow 已存在 default branch 时才可调用；在它首次进入 default branch 前，中间 SHA 只能通过授权 PR 的 head-SHA path 取得 receipt。
 
 ```yaml
 name: CI
@@ -2162,17 +2493,34 @@ on:
         description: Immutable 40-hex commit SHA already present in this repository
         required: true
         type: string
+      red_task:
+        description: Focused Windows expected-RED slice; none runs normal native gates
+        required: true
+        default: none
+        type: choice
+        options: [none, 6b, 7a, 7b, 7c]
+      red_parent_sha:
+        description: Exact parent SHA for a focused Windows expected-RED slice
+        required: false
+        default: ''
+        type: string
+      red_nonce:
+        description: Unique 16-lower-hex correlation nonce for expected-RED evidence
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ inputs.commit_sha || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ inputs.commit_sha || github.sha }}-${{ inputs.red_task || 'normal' }}-${{ inputs.red_nonce || 'none' }}
   cancel-in-progress: true
 
 jobs:
   rust:
     name: Rust (fmt / clippy / test)
+    if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -2211,6 +2559,7 @@ jobs:
 
   web:
     name: Web (install / build)
+    if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -2231,16 +2580,23 @@ jobs:
 
   safe-filesystem:
     name: Safe filesystem (${{ matrix.receipt_id }})
+    if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'
     strategy:
       fail-fast: false
       matrix:
         include:
           - receipt_id: linux-x86_64
             runner: ubuntu-24.04
+            expected_os: Linux
+            expected_arch: X64
           - receipt_id: macos-native
             runner: macos-14
+            expected_os: macOS
+            expected_arch: ARM64
           - receipt_id: windows-x86_64
             runner: windows-2022
+            expected_os: Windows
+            expected_arch: X64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 35
     env:
@@ -2279,6 +2635,15 @@ jobs:
             target
           key: safe-fs-${{ matrix.receipt_id }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
           restore-keys: safe-fs-${{ matrix.receipt_id }}-
+      - name: Parse Windows expected-RED harness
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'scripts/run-c1b-windows-red.ps1'), [ref]$tokens, [ref]$errors)
+          if ($errors.Count -ne 0) { throw ($errors | Out-String) }
       - name: Run all native gates and retain every exit
         shell: bash
         run: |
@@ -2308,7 +2673,11 @@ jobs:
           RECEIPT_SHA: ${{ steps.bind.outputs.sha }}
           RECEIPT_ID: ${{ matrix.receipt_id }}
           RUNNER_LABEL: ${{ matrix.runner }}
+          EXPECTED_RUNNER_OS: ${{ matrix.expected_os }}
+          EXPECTED_RUNNER_ARCH: ${{ matrix.expected_arch }}
         run: |
+          if ('${{ runner.os }}' -ne $env:EXPECTED_RUNNER_OS) { throw 'runner OS does not match receipt id' }
+          if ('${{ runner.arch }}' -ne $env:EXPECTED_RUNNER_ARCH) { throw 'runner architecture does not match receipt id' }
           $commands = @(
             @{ id = 'cargo-fmt'; command = 'cargo fmt --all --check' },
             @{ id = 'cargo-clippy'; command = 'cargo clippy -p opentake-project --lib --tests -- -D warnings' },
@@ -2352,6 +2721,58 @@ jobs:
           set -euo pipefail
           test -f "$RECEIPT_DIR/final-aggregate.raw-exit"
           test "$(cat "$RECEIPT_DIR/final-aggregate.raw-exit")" = 0
+
+  windows-red-evidence:
+    name: Windows expected RED (${{ inputs.red_task }})
+    if: github.event_name == 'workflow_dispatch' && inputs.red_task != 'none'
+    runs-on: windows-2022
+    timeout-minutes: 35
+    env:
+      TARGET_SHA: ${{ inputs.commit_sha }}
+      PARENT_SHA: ${{ inputs.red_parent_sha }}
+      RED_TASK: ${{ inputs.red_task }}
+      RED_NONCE: ${{ inputs.red_nonce }}
+    steps:
+      - name: Validate immutable RED inputs
+        shell: pwsh
+        run: |
+          if ($env:TARGET_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'commit_sha must be lower 40-hex' }
+          if ($env:PARENT_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'red_parent_sha must be lower 40-hex' }
+          if ($env:RED_NONCE -cnotmatch '^[0-9a-f]{16}$') { throw 'red_nonce must be unique lower 16-hex' }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Assert exact RED commit and parent
+        id: bind-red
+        shell: pwsh
+        run: |
+          $actual = (git rev-parse HEAD).Trim().ToLowerInvariant()
+          $parent = (git rev-parse 'HEAD^').Trim().ToLowerInvariant()
+          $commitRow = @((git rev-list --parents -n 1 HEAD).Trim().Split(' '))
+          $changedPaths = @(git diff-tree --no-commit-id --name-only -r HEAD)
+          if ($actual -cne $env:TARGET_SHA) { throw 'checked-out RED SHA mismatch' }
+          if ($parent -cne $env:PARENT_SHA) { throw 'RED parent SHA mismatch' }
+          if ($commitRow.Count -ne 2) { throw 'RED commit must have exactly one parent' }
+          if ($changedPaths.Count -ne 1 -or $changedPaths[0] -cne 'crates/opentake-project/src/safe_fs/windows.rs') {
+            throw 'RED commit changed paths outside windows.rs'
+          }
+          "sha=$actual" >> $env:GITHUB_OUTPUT
+      - name: Run focused expected-RED contract
+        shell: pwsh
+        run: |
+          ./scripts/run-c1b-windows-red.ps1 `
+            -Task $env:RED_TASK -TestSha $env:TARGET_SHA -ParentSha $env:PARENT_SHA `
+            -Nonce $env:RED_NONCE -EvidenceRoot (Join-Path $env:RUNNER_TEMP 'c1b-red')
+      - name: Upload immutable Windows RED receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c1b-red-${{ inputs.red_task }}-${{ steps.bind-red.outputs.sha }}-${{ inputs.red_nonce }}
+          path: ${{ runner.temp }}/c1b-red/c1b-task-${{ inputs.red_task }}-${{ steps.bind-red.outputs.sha }}-${{ inputs.red_nonce }}/
+          if-no-files-found: error
+          retention-days: 30
 ```
 
 展开后的 blocking job 名精确是：
@@ -2376,7 +2797,12 @@ raise "dispatch input" unless events.fetch("workflow_dispatch").fetch("inputs").
 job = y.fetch("jobs").fetch("safe-filesystem")
 rows = job.fetch("strategy").fetch("matrix").fetch("include")
 raise "matrix" unless rows.map { |r| r.fetch("receipt_id") }.sort == %w[linux-x86_64 macos-native windows-x86_64]
-raise "runners" unless rows.map { |r| r.fetch("runner") }.sort == %w[macos-14 ubuntu-24.04 windows-2022]
+expected = {
+  "linux-x86_64" => ["ubuntu-24.04", "Linux", "X64"],
+  "macos-native" => ["macos-14", "macOS", "ARM64"],
+  "windows-x86_64" => ["windows-2022", "Windows", "X64"],
+}
+rows.each { |r| raise "runner provenance" unless r.values_at("runner", "expected_os", "expected_arch") == expected.fetch(r.fetch("receipt_id")) }
 target = job.fetch("env").fetch("TARGET_SHA")
 %w[workflow_dispatch pull_request github.event.pull_request.head.sha github.sha inputs.commit_sha].each { |token| raise token unless target.include?(token) }
 checkout = job.fetch("steps").find { |s| s["uses"] == "actions/checkout@v4" }
@@ -2394,7 +2820,7 @@ text = job.fetch("steps").map { |s| s["run"].to_s }.join("\n")
 实施请求本身不自动授权 push/PR。执行者在首次需要 native receipt 前运行只读权限探针：
 
 ```bash
-gh auth status
+gh auth status --hostname github.com
 gh repo view appergb/OpenTake --json nameWithOwner,viewerPermission,defaultBranchRef
 ```
 
@@ -2418,6 +2844,310 @@ gh workflow run ci.yml --ref main -f commit_sha="$SHA"
 
 dispatch 输入 SHA 必须已存在于远端 repository；不可调度本地未发布 object。
 
+### 14.1 Windows expected-RED 的 runner-portable 证据回传
+
+Windows test-only commit 不在 macOS 上直接执行下文 PowerShell 片段，也不向 GitHub runner 传入 `/Users/...`。在已有明确 publication/dispatch 授权、Task 3 workflow/harness 已存在 default branch、且 test-only SHA 已存在 `appergb/OpenTake` 时，唯一路径是 section 13 `windows-red-evidence` job：它在 `$RUNNER_TEMP` exclusive-create 目录，执行 repository-versioned `scripts/run-c1b-windows-red.ps1`，然后上传 nonce/SHA-bound artifact。任一前置不满足则按 section 14 记录 `BLOCKED`，不得在本机伪造 RED receipt。
+
+每个 test-only commit 使用下列固定调度与 intake，`TASK` 只能是 `6b|7a|7b|7c`，`TEST_SHA=$(git rev-parse HEAD)`，`PARENT_SHA=$(git rev-parse HEAD^)`，`PARENT_PROOF` 必须指向紧邻前一个已验证 branch gate（Task 6B 也使用 Task 6A 的三平台 gate）：
+
+```bash
+set -euo pipefail
+test "$TEST_SHA" != "$PARENT_SHA"
+[[ "$TEST_SHA" =~ ^[0-9a-f]{40}$ ]]
+[[ "$PARENT_SHA" =~ ^[0-9a-f]{40}$ ]]
+case "$TASK" in 6b|7a|7b|7c) ;; *) exit 64 ;; esac
+test "$(git rev-parse HEAD)" = "$TEST_SHA"
+test "$(git rev-parse HEAD^)" = "$PARENT_SHA"
+test "$(git rev-list --parents -n 1 HEAD | wc -w | tr -d ' ')" = 2
+test "$(git diff-tree --no-commit-id --name-only -r HEAD)" = \
+  'crates/opentake-project/src/safe_fs/windows.rs'
+case "$TASK" in
+  6b) PARENT_TASK=6a; PROOF_KIND=gate; TEST_SUBJECT='test(project): specify Windows capability acquisition and io'; PARENT_SUBJECT='feat(project): add fail-closed Windows platform scaffold' ;;
+  7a) PARENT_TASK=6b; PROOF_KIND=gate; TEST_SUBJECT='test(project): specify Windows owner-only creation and rollback'; PARENT_SUBJECT='feat(project): capture Windows filesystem capabilities' ;;
+  7b) PARENT_TASK=7a; PROOF_KIND=gate; TEST_SUBJECT='test(project): specify Windows retained quarantine and publish'; PARENT_SUBJECT='feat(project): enforce Windows owner-only creation' ;;
+  7c) PARENT_TASK=7b; PROOF_KIND=gate; TEST_SUBJECT='test(project): specify Windows retained cleanup and delete'; PARENT_SUBJECT='feat(project): add Windows capability-relative rename' ;;
+esac
+test "$(git show -s --format=%s "$TEST_SHA")" = "$TEST_SUBJECT"
+test "$(git show -s --format=%s "$PARENT_SHA")" = "$PARENT_SUBJECT"
+ruby -rjson -rpathname -e '
+  safety, proof, kind, parent_task, parent_sha = ARGV.map { |value| value }
+  safety = Pathname.new(safety).realpath
+  proof = Pathname.new(proof).realpath
+  raise "Windows RED parent proof escapes safety root" unless proof.to_s.start_with?(safety.to_s + File::SEPARATOR)
+  read_regular = lambda do |relative|
+    path = proof.join(relative)
+    raise "parent proof file is not confined regular data" unless path.lstat.file? &&
+      path.realpath.to_s.start_with?(proof.to_s + File::SEPARATOR)
+    path.read
+  end
+  approve = lambda do |relative, role|
+    body = read_regular.call(relative)
+    raise "parent report identity mismatch" unless body.match?(/^Role:\s*.*#{Regexp.escape(role)}/i) &&
+      body.match?(/^Task:\s*#{Regexp.escape(parent_task)}\s*$/i) &&
+      body.match?(/^Commit:\s*`?#{parent_sha}`?\s*$/i) && body.match?(/^Verdict:\s*(\*\*)?APPROVE(\*\*)?\s*$/i) &&
+      %w[Critical Important Minor].all? { |severity| body.match?(/^#{severity}:\s*(\*\*)?0(\*\*)?\s*$/i) }
+  end
+  if kind == "review"
+    raise "RED parent review directory mismatch" unless
+      proof.basename.to_s.match?(/\Ac1b-task-#{Regexp.escape(parent_task)}-#{Regexp.escape(parent_sha)}-attempt-[1-9][0-9]*\z/)
+    manifest = JSON.parse(read_regular.call("gate-manifest.json"))
+    raise "RED parent manifest mismatch" unless manifest == {
+      "schema" => "opentake-c1b-reviewed-stage-v1", "task" => parent_task, "sha" => parent_sha,
+      "baseline_sha" => "e67917260ace36e4db1ede4e36eecbc401825bb1" }
+    approve.call("spec-security-review.md", "spec-security")
+    approve.call("implementation-review.md", "implementation")
+  else
+    raise "RED parent gate mismatch" unless
+      proof.basename.to_s.match?(/\Ac1b-task-#{Regexp.escape(parent_task)}-#{Regexp.escape(parent_sha)}-[0-9a-f]{16}\z/)
+    raise "RED parent gate validator failed" unless read_regular.call("results-validation.raw-exit").strip == "0"
+    validation_log = read_regular.call("results-validation.log")
+    raise "RED parent validator success identity mismatch" unless
+      validation_log.match?(/^c1b-evidence-validation=ok task=#{Regexp.escape(parent_task)} predecessor=[0-9a-f]{40} sha=#{parent_sha}$/)
+    results = read_regular.call("results.md")
+    raise "RED parent results mismatch" unless results.match?(/^Task:\s*#{Regexp.escape(parent_task)}$/) &&
+      results.match?(/^Final SHA:\s*#{parent_sha}$/) && results.match?(/^Aggregate:\s*0$/)
+    approve.call("reviews/spec-security-review.md", "spec-security")
+    approve.call("reviews/implementation-review.md", "implementation")
+  end
+' "$SAFETY_ROOT" "$PARENT_PROOF" "$PROOF_KIND" "$PARENT_TASK" "$PARENT_SHA"
+if test "$PROOF_KIND" = gate; then
+  PARENT_REVALIDATION_OUTPUT=$(ruby -rjson -rtmpdir -rfileutils -ropen3 -rrbconfig -e '
+    proof, parent_task, parent_sha, repo, validator = ARGV
+    binding = JSON.parse(File.read(File.join(proof, "predecessor-binding.json")))
+    raise "RED parent binding task mismatch" unless binding.fetch("task") == parent_task
+    Dir.mktmpdir("c1b-red-parent-revalidate") do |directory|
+      clone = File.join(directory, "repo")
+      _out, err, cloned = Open3.capture3("git", "clone", "--quiet", "--shared", "--no-checkout", repo, clone)
+      raise "cannot clone RED parent repository: #{err}" unless cloned.success?
+      _out, err, checked = Open3.capture3("git", "-C", clone, "checkout", "--detach", parent_sha)
+      raise "cannot checkout RED parent SHA: #{err}" unless checked.success?
+      stdout, stderr, status = Open3.capture3(
+        RbConfig.ruby, validator, proof, parent_task, parent_sha,
+        binding.fetch("predecessor_sha"), binding.fetch("predecessor_proof"),
+        "reviews/spec-security-review.md", "reviews/implementation-review.md", clone
+      )
+      raise "live RED parent gate revalidation failed: #{stdout}#{stderr}" unless status.success?
+      puts stdout.strip
+    end
+  ' "$PARENT_PROOF" "$PARENT_TASK" "$PARENT_SHA" "$(pwd -P)" \
+    "$(ruby -e 'puts File.realpath("scripts/validate-c1b-evidence.rb")')")
+else
+  PARENT_REVALIDATION_OUTPUT="review-manifest-validated task=$PARENT_TASK sha=$PARENT_SHA"
+fi
+NONCE=$(openssl rand -hex 8)
+ARTIFACT_NAME="c1b-red-$TASK-$TEST_SHA-$NONCE"
+gh workflow run ci.yml --repo appergb/OpenTake --ref main \
+  -f commit_sha="$TEST_SHA" -f red_task="$TASK" \
+  -f red_parent_sha="$PARENT_SHA" -f red_nonce="$NONCE"
+
+INTAKE=$(mktemp -d "$SAFETY_ROOT/red-intake-$TASK-$TEST_SHA-$NONCE.XXXXXX")
+trap 'rm -rf "$INTAKE"' EXIT
+GH_API_VERSION=2026-03-10
+FOUND=false
+for _ in $(seq 1 90); do
+  gh api --hostname github.com -H "X-GitHub-Api-Version: $GH_API_VERSION" \
+    "/repos/appergb/OpenTake/actions/artifacts?name=$ARTIFACT_NAME&per_page=100" \
+    >"$INTAKE/artifacts.json"
+  if ruby -rjson -e '
+    doc, name = JSON.parse(File.read(ARGV[0])), ARGV[1]
+    rows = doc.fetch("artifacts")
+    exit 75 unless doc.fetch("total_count") == 1 && rows.length == 1
+    row = rows.fetch(0)
+    exit 75 unless row.fetch("name") == name && !row.fetch("expired")
+  ' "$INTAKE/artifacts.json" "$ARTIFACT_NAME"; then FOUND=true; break; fi
+  sleep 10
+done
+test "$FOUND" = true
+ruby -rjson -e '
+  row = JSON.parse(File.read(ARGV[0])).fetch("artifacts").fetch(0)
+  File.write(ARGV[1], JSON.pretty_generate(row) + "\n")
+' "$INTAKE/artifacts.json" "$INTAKE/artifact.json"
+ARTIFACT_ID=$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV[0])).fetch("id")' "$INTAKE/artifact.json")
+RUN_ID=$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV[0])).fetch("workflow_run").fetch("id")' "$INTAKE/artifact.json")
+RUN_COMPLETE=false
+for _ in $(seq 1 90); do
+  gh api --hostname github.com -H "X-GitHub-Api-Version: $GH_API_VERSION" \
+    "/repos/appergb/OpenTake/actions/runs/$RUN_ID" >"$INTAKE/run.json"
+  STATUS=$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV[0])).fetch("status")' "$INTAKE/run.json")
+  if test "$STATUS" = completed; then RUN_COMPLETE=true; break; fi
+  sleep 10
+done
+test "$RUN_COMPLETE" = true
+RUN_HEAD_SHA=$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV[0])).fetch("head_sha")' "$INTAKE/run.json")
+[[ "$RUN_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+gh api --hostname github.com -H "X-GitHub-Api-Version: $GH_API_VERSION" \
+  "/repos/appergb/OpenTake/contents/.github/workflows/ci.yml?ref=$RUN_HEAD_SHA" \
+  >"$INTAKE/workflow-content.json"
+gh api --hostname github.com -H "X-GitHub-Api-Version: $GH_API_VERSION" \
+  "/repos/appergb/OpenTake/contents/scripts/run-c1b-windows-red.ps1?ref=$RUN_HEAD_SHA" \
+  >"$INTAKE/harness-content.json"
+git show "$TEST_SHA:.github/workflows/ci.yml" >"$INTAKE/expected-workflow.yml"
+git show "$TEST_SHA:scripts/run-c1b-windows-red.ps1" >"$INTAKE/expected-harness.ps1"
+ruby -rjson -rbase64 -e '
+  workflow, expected_workflow, harness, expected_harness =
+    JSON.parse(File.read(ARGV[0])), File.binread(ARGV[1]), JSON.parse(File.read(ARGV[2])), File.binread(ARGV[3])
+  raise "contents API encoding mismatch" unless
+    workflow.fetch("encoding") == "base64" && harness.fetch("encoding") == "base64"
+  raise "Windows RED workflow bytes differ from reviewed test-SHA workflow" unless
+    Base64.decode64(workflow.fetch("content")) == expected_workflow
+  raise "Windows RED harness bytes differ from reviewed main workflow version" unless
+    Base64.decode64(harness.fetch("content")) == expected_harness
+' "$INTAKE/workflow-content.json" "$INTAKE/expected-workflow.yml" \
+  "$INTAKE/harness-content.json" "$INTAKE/expected-harness.ps1"
+gh api --hostname github.com -H "X-GitHub-Api-Version: $GH_API_VERSION" \
+  "/repos/appergb/OpenTake/actions/runs/$RUN_ID/jobs?per_page=100" >"$INTAKE/jobs.json"
+gh api --hostname github.com -H "X-GitHub-Api-Version: $GH_API_VERSION" \
+  "/repos/appergb/OpenTake/actions/artifacts/$ARTIFACT_ID/zip" >"$INTAKE/artifact.zip"
+test -s "$INTAKE/artifact.zip"
+ruby -rjson -rdigest -e '
+  expected = JSON.parse(File.read(ARGV[0])).fetch("digest")
+  actual = "sha256:#{Digest::SHA256.file(ARGV[1]).hexdigest}"
+  raise "Windows RED artifact digest mismatch" unless expected == actual
+' "$INTAKE/artifact.json" "$INTAKE/artifact.zip"
+unzip -Z1 "$INTAKE/artifact.zip" | ruby -e '
+  task = ARGV.fetch(0)
+  red_logs = {
+    "6b" => %w[windows-io-red.log windows-create-rollback-red.log],
+    "7a" => %w[windows-owner-only-red.log],
+    "7b" => %w[windows-rename-red.log],
+    "7c" => %w[windows-cleanup-red.log],
+  }.fetch(task)
+  parent_logs = task == "7a" ? %w[
+    component_utf16_and_rejections.pass.log unicode_and_object_attribute_lifetimes.pass.log
+    operation_contract_spy_all_rows.pass.log volume_root_contract_is_access_dependent.pass.log
+    synchronous_nt_completion_rejects_pending_buffer_small_and_warnings.pass.log
+    query_reports_reparse_as_present_and_open_rejects.pass.log reparse_parser_bounds_every_field.pass.log
+    directory_parser_bounds_and_requery.pass.log metadata_types_and_hardlinks.pass.log
+    ten_thousand_handles_return_to_baseline.pass.log ancestor_mapping_cannot_rebind.pass.log
+    every_volume_field_is_bound.pass.log create_new_preserves_every_existing_kind.pass.log
+    ntstatus_mapping_is_operation_specific.pass.log production_capabilities_own_drop_resources.pass.log
+  ] : []
+  allowed = ["red-receipt.json"] + red_logs + parent_logs
+  names = STDIN.each_line.map(&:strip)
+  raise "Windows RED archive entry set mismatch" unless names.length == names.uniq.length && names.sort == allowed.sort
+  raise "unsafe RED archive" if names.any? { |name| name.start_with?("/") || name.include?("/") || name.include?("\\") }
+' "$TASK"
+unzip -q "$INTAKE/artifact.zip" -d "$INTAKE/unpacked"
+ruby -rpathname -e '
+  root = Pathname.new(ARGV.fetch(0)).realpath
+  entries = Dir.children(root)
+  raise "RED archive entry set changed after extraction" if entries.empty?
+  entries.each do |name|
+    path = root.join(name)
+    raise "RED archive extracted non-regular file" unless path.lstat.file? && path.realpath.dirname == root
+  end
+' "$INTAKE/unpacked"
+ruby -rjson -rtime -e '
+  receipt, run, jobs, artifact, unpacked, task, sha, parent, nonce =
+    JSON.parse(File.read(ARGV[0])), JSON.parse(File.read(ARGV[1])), JSON.parse(File.read(ARGV[2])),
+    JSON.parse(File.read(ARGV[3])), ARGV[4], *ARGV[5..]
+  expected_red = {
+    "6b" => [
+      ["safe_fs::windows::tests::nested_retained_io_roundtrip", "windows-io-red.log",
+        "UnsupportedSecureFilesystem|UnsupportedTarget"],
+      ["safe_fs::windows::tests::windows_post_create_metadata_failure_rolls_back_same_handle",
+        "windows-create-rollback-red.log", "UnsupportedSecureFilesystem|UnsupportedTarget"],
+    ],
+    "7a" => [["safe_fs::windows::tests::owner_only_file_directory_stage_succeed_and_rollback",
+      "windows-owner-only-red.log", "VerifySecurityDescriptor|UnsupportedSecureFilesystem|UnsupportedTarget"]],
+    "7b" => [["safe_fs::windows::tests::quarantine_and_publish_success_do_not_self_conflict",
+      "windows-rename-red.log", "QuarantineNoReplace|UnsupportedAtomicPublish|PrimitiveUnavailable"]],
+    "7c" => [["safe_fs::windows::tests::cleanup_quarantined_tree_deletes_nested_reparse_without_traversal",
+      "windows-cleanup-red.log", "OpenCleanupEntry|UnsupportedSecureFilesystem|UnsupportedTarget"]],
+  }.fetch(task)
+  expected_parent = task == "7a" ? %w[
+    component_utf16_and_rejections unicode_and_object_attribute_lifetimes operation_contract_spy_all_rows
+    volume_root_contract_is_access_dependent synchronous_nt_completion_rejects_pending_buffer_small_and_warnings
+    query_reports_reparse_as_present_and_open_rejects reparse_parser_bounds_every_field
+    directory_parser_bounds_and_requery metadata_types_and_hardlinks ten_thousand_handles_return_to_baseline
+    ancestor_mapping_cannot_rebind every_volume_field_is_bound create_new_preserves_every_existing_kind
+    ntstatus_mapping_is_operation_specific production_capabilities_own_drop_resources
+  ] : []
+  raise "RED receipt schema" unless receipt.fetch("schema") == "opentake-c1b-windows-red-v1"
+  raise "RED identity mismatch" unless receipt.values_at("task", "test_sha", "parent_sha", "nonce") ==
+    [task, sha, parent, nonce]
+  raise "RED changed-path contract mismatch" unless receipt.fetch("changed_paths") ==
+    ["crates/opentake-project/src/safe_fs/windows.rs"]
+  raise "RED provenance mismatch" unless receipt.fetch("repository") == "appergb/OpenTake" &&
+    receipt.fetch("workflow") == "CI" && receipt.fetch("job_id") == "windows-red-evidence" &&
+    receipt.fetch("event_name") == "workflow_dispatch" && receipt.fetch("runner_os") == "Windows" &&
+    receipt.fetch("runner_arch") == "X64" && receipt.fetch("run_id").to_s == run.fetch("id").to_s &&
+    receipt.fetch("run_attempt").to_s == run.fetch("run_attempt").to_s &&
+    run.fetch("status") == "completed" && run.fetch("conclusion") == "success" &&
+    run.fetch("event") == "workflow_dispatch" && run.fetch("path").split("@", 2).first == ".github/workflows/ci.yml" &&
+    run.fetch("head_branch") == "main" && run.dig("repository", "full_name") == "appergb/OpenTake" &&
+    Time.parse(artifact.fetch("created_at")) >= Time.parse(run.fetch("created_at")) &&
+    artifact.fetch("name") == "c1b-red-#{task}-#{sha}-#{nonce}" && !artifact.fetch("expired") &&
+    artifact.dig("workflow_run", "id").to_s == run.fetch("id").to_s &&
+    artifact.dig("workflow_run", "head_sha") == run.fetch("head_sha")
+  rows = jobs.fetch("jobs")
+  raise "jobs pagination incomplete" unless jobs.fetch("total_count") == rows.length && rows.length <= 100
+  matches = rows.select { |job| job.fetch("name") == "Windows expected RED (#{task})" && job.fetch("conclusion") == "success" }
+  raise "expected one successful RED job" unless matches.length == 1
+  job = matches.fetch(0)
+  raise "RED job/run identity mismatch" unless job.fetch("run_id").to_s == run.fetch("id").to_s &&
+    job.fetch("run_attempt").to_s == run.fetch("run_attempt").to_s &&
+    job.fetch("status") == "completed" && job.fetch("head_sha") == run.fetch("head_sha") &&
+    job.fetch("labels").include?("windows-2022")
+  red_rows = receipt.fetch("red")
+  raise "RED row count mismatch" unless red_rows.length == expected_red.length
+  red_rows.zip(expected_red).each do |row, (name, log, pattern)|
+    command = "cargo test -p opentake-project --lib #{name} -- --exact --test-threads=1"
+    raise "RED row schema mismatch" unless row.keys.sort == %w[command exit expected log name].sort
+    raise "RED row identity mismatch" unless row.values_at("name", "command", "expected", "log") ==
+      [name, command, pattern, log]
+    raise "RED row exit must be nonzero" unless row.fetch("exit").is_a?(Integer) && row.fetch("exit") != 0
+    body = File.binread(File.join(unpacked, log))
+    raise "RED log did not run exactly one test" unless body.scan(/^running 1 test\r?$/).length == 1
+    raise "RED log result mismatch" unless body.scan(/^test result: FAILED\. 0 passed; 1 failed;/).length == 1
+    raise "RED log selected-test mismatch" unless
+      body.scan(/^test #{Regexp.escape(name)} \.\.\. FAILED\r?$/).length == 1
+    raise "RED log typed refusal missing" unless body.match?(Regexp.new(pattern))
+  end
+  raise "parent-contract identity mismatch" unless receipt.fetch("parent_pass_tests") == expected_parent &&
+    receipt.fetch("parent_pass_count") == expected_parent.length
+  expected_parent.each do |short_name|
+    name = "safe_fs::windows::tests::#{short_name}"
+    body = File.binread(File.join(unpacked, "#{short_name}.pass.log"))
+    raise "parent PASS did not run exactly one test" unless body.scan(/^running 1 test\r?$/).length == 1
+    raise "parent PASS result mismatch" unless body.scan(/^test result: ok\. 1 passed; 0 failed;/).length == 1
+    raise "parent PASS selected-test mismatch" unless
+      body.scan(/^test #{Regexp.escape(name)} \.\.\. ok\r?$/).length == 1
+  end
+' "$INTAKE/unpacked/red-receipt.json" "$INTAKE/run.json" "$INTAKE/jobs.json" "$INTAKE/artifact.json" \
+  "$INTAKE/unpacked" \
+  "$TASK" "$TEST_SHA" "$PARENT_SHA" "$NONCE"
+RED_DIR="$SAFETY_ROOT/red/c1b-task-$TASK-$TEST_SHA-$NONCE"
+mkdir "$RED_DIR"
+cp "$INTAKE/"{artifact.json,artifact.zip,run.json,jobs.json,workflow-content.json,expected-workflow.yml,harness-content.json,expected-harness.ps1} "$RED_DIR/"
+cp "$INTAKE/unpacked/"* "$RED_DIR/"
+ruby -rjson -rdigest -rpathname -e '
+  output, task, parent_task, parent_sha, kind, proof, revalidation = ARGV
+  proof = Pathname.new(proof).realpath
+  relatives = kind == "review" ?
+    %w[gate-manifest.json spec-security-review.md implementation-review.md] :
+    %w[results.md results-validation.log results-validation.raw-exit
+      reviews/spec-security-review.md reviews/implementation-review.md]
+  digests = relatives.each_with_object({}) do |relative, values|
+    path = proof.join(relative)
+    values[relative] = "sha256:#{Digest::SHA256.file(path).hexdigest}"
+  end
+  value = { "schema" => "opentake-c1b-red-parent-proof-v1", "task" => task,
+    "parent_task" => parent_task, "parent_sha" => parent_sha, "proof_kind" => kind,
+    "proof_path" => proof.to_s, "revalidation" => revalidation, "file_digests" => digests }
+  File.open(output, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+    file.write(JSON.pretty_generate(value) + "\n")
+  end
+' "$RED_DIR/parent-proof.json" "$TASK" "$PARENT_TASK" "$PARENT_SHA" "$PROOF_KIND" \
+  "$PARENT_PROOF" "$PARENT_REVALIDATION_OUTPUT"
+test -f "$RED_DIR/red-receipt.json"
+test -f "$RED_DIR/parent-proof.json"
+trap - EXIT
+rm -rf "$INTAKE"
+```
+
+review report 引用该 nonce-bound `RED_DIR`。artifact API 未出现、run/job 未成功、digest/安全解压/身份/精确 RED 数量或 7A 的 15 项 parent-contract 任一不合约，当次 RED 无效；修正 test/harness 后生成新 test-only SHA 和新 nonce，不覆盖旧证据。
+
 ## 15. Exclusive evidence / receipt schema 与绝对路径
 
 固定：
@@ -2434,11 +3164,12 @@ REPO_ROOT='/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-full-convergence'
 /Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-safety/20260712-wave1bc-filesystem/logs/c1b-task-<N>-<SHA>-attempt-<M>/implementation-review.md
 ```
 
-创建必须 exclusive：先 `mkdir "$SAFETY_ROOT/logs/c1b-task-$TASK-$SHA-attempt-$ATTEMPT"`，目录已存在即退出，不使用 `mkdir -p`、不覆盖旧 attempt。两份 report 必须含 `Role`、完整 `Commit`、`Verdict: APPROVE`、`Critical: 0`、`Important: 0`、`Minor: 0`；任一 finding 产生新 commit 与新 attempt directory，两角色全部重审。
+创建必须 exclusive：先 `mkdir "$SAFETY_ROOT/logs/c1b-task-$TASK-$SHA-attempt-$ATTEMPT"`，目录已存在即退出，不使用 `mkdir -p`、不覆盖旧 attempt。两份 report 必须含精确 `Task`、`Role`、完整 `Commit`、`Verdict: APPROVE`、`Critical: 0`、`Important: 0`、`Minor: 0`；任一 finding 产生使用该 task exact GREEN subject 的新 correction commit 和新 attempt directory，两角色全部重审。同 task 可有连续同 subject GREEN correction，不可插入 unrelated 或 merge commit。
 
-最终 branch gate：
+中间 task gate 与最终 branch gate 分别为：
 
 ```text
+/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-safety/20260712-wave1bc-filesystem/branch-gates/c1b-task-<TASK>-<SHA>-<NONCE>/
 /Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-safety/20260712-wave1bc-filesystem/branch-gates/c1b-<UTCSTAMP>-<SHA>-<NONCE>/
 ```
 
@@ -2457,28 +3188,204 @@ REPO_ROOT='/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-full-convergence'
 }
 ```
 
-`native-receipts/<run-id>/<receipt-id>/receipt.json` 保存三份下载 artifact；禁止同一 receipt_id 重复。最终 `results.md` 必须列 baseline SHA、final SHA、pre/post status、每个 local gate exit、三份 run id/attempt/receipt SHA、两份 final audit 路径、aggregate。validation 脚本必须拒绝：非 40-hex SHA、三 OS SHA 不同、requested/checked-out 不同、duplicate receipt_id、任一 command/aggregate 非 0、report commit 不等 final SHA、非 clean status、缺 log/raw-exit。
+任一 per-task gate 都不得用 `gh run download` 解包后丢失 archive，也不得手写三份 receipt JSON。对每个 receipt id，必须用已认证的 `gh api --hostname github.com` 从 `appergb/OpenTake` 读取 run、jobs 和 run-artifacts REST metadata，再调 `/repos/appergb/OpenTake/actions/artifacts/<artifact-id>/zip` 下载并保留 `artifact.zip`。目录固定为 `native-receipts/<run-id>/<receipt-id>/`，内含 `run.json`、`jobs.json`、`artifact.json`、`artifact.zip`、从 ZIP 解出的 `receipt.json` 与 logs/raw-exit。REST artifact `digest` 必须是 `sha256:<64-lower-hex>` 且等于保留 ZIP 的 SHA-256；artifact `workflow_run.head_sha`、run `head_sha`、job `head_sha` 和 receipt requested/checked-out SHA 都必须等于该 gate 的当前 immutable SHA。
+
+三份 receipt 必须属于同一 workflow run/attempt；receipt id、job id 和 artifact id 各自唯一。每份 `results.md` 必须列 exact task、固定 baseline SHA、predecessor SHA、final SHA、pre/post status、每个 local gate exit、三份 run id/attempt/job id/artifact id/name/digest/SHA、两份 gate-local audit 相对路径、aggregate。`command-ledger.json`、`results.md`、review reports、REST metadata、receipt/log/raw-exit 和 `artifact.zip` 全部必须以 gate-relative path 通过 `confined_file!`；任何 absolute/越界 path 或解析到 gate 外的 symlink 必须拒绝。review reports 先复制到 gate 内的 `reviews/`，validator 不接受外部 report path。validation 脚本必须拒绝：`gh` 缺失/未认证/API 失败、repo/run/job/artifact/workflow/head SHA/digest 不合约、predecessor proof/task-chain 不合约、任一本地自造 JSON 无法被 live API 证实、以及 SHA/receipt/command/audit/clean-status 任一不合约。
 
 ## 16. Task slicing 与 RED/GREEN/receipt gate
 
 每个行为 slice 必须是两个 commit：test-only RED，随后 production GREEN。禁止同一 commit 同时加入 test 和实现。Windows runner 上验证单个 RED 的固定函数如下；它同时断言 exit 非零、filter 实际运行恰好一个 test、失败恰好一个，因 absent module/0 tests/compile error 失败都不会通过：
 
-```bash
-expect_red() {
-  name="$1"
-  log="$2"
-  set +e
-  cargo test -p opentake-project --lib "$name" -- --exact --test-threads=1 2>&1 | tee "$log"
-  code=${PIPESTATUS[0]}
-  set -e
-  test "$code" -ne 0
-  test "$(grep -Ec '^running 1 test$' "$log")" -eq 1
-  test "$(grep -Ec '^test result: FAILED\. 0 passed; 1 failed;' "$log")" -eq 1
-  test "$(grep -Ec "^test ${name//::/::} \.\.\. FAILED$" "$log")" -eq 1
+```powershell
+function Invoke-ExpectedRed {
+  param(
+    [Parameter(Mandatory = $true)][string]$Name,
+    [Parameter(Mandatory = $true)][string]$Log,
+    [Parameter(Mandatory = $true)][string]$ExpectedPattern
+  )
+  & cargo test -p opentake-project --lib $Name -- --exact --test-threads=1 2>&1 |
+    Tee-Object -FilePath $Log | Out-Host
+  $code = $LASTEXITCODE
+  if ($code -eq 0) { throw "RED unexpectedly passed: $Name" }
+  $text = Get-Content -Raw -Path $Log
+  if ([regex]::Matches($text, '(?m)^running 1 test\r?$').Count -ne 1) {
+    throw "RED did not execute exactly one test: $Name"
+  }
+  if ([regex]::Matches($text, '(?m)^test result: FAILED\. 0 passed; 1 failed;').Count -ne 1) {
+    throw "RED did not report exactly one failed test: $Name"
+  }
+  $escaped = [regex]::Escape($Name)
+  if ([regex]::Matches($text, "(?m)^test $escaped \.\.\. FAILED\r?$").Count -ne 1) {
+    throw "RED failure was not the selected test: $Name"
+  }
+  if (-not (Select-String -Quiet -Path $Log -Pattern $ExpectedPattern)) {
+    throw "RED did not fail for the required typed refusal: $Name / $ExpectedPattern"
+  }
+  return $code
+}
+
+function Invoke-ExpectedPass {
+  param(
+    [Parameter(Mandatory = $true)][string]$Name,
+    [Parameter(Mandatory = $true)][string]$Log
+  )
+  & cargo test -p opentake-project --lib $Name -- --exact --test-threads=1 2>&1 |
+    Tee-Object -FilePath $Log | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw "required parent-contract test failed: $Name" }
+  $text = Get-Content -Raw -Path $Log
+  if ([regex]::Matches($text, '(?m)^running 1 test\r?$').Count -ne 1 -or
+      [regex]::Matches($text, '(?m)^test result: ok\. 1 passed; 0 failed;').Count -ne 1) {
+    throw "PASS did not execute exactly one successful test: $Name"
+  }
 }
 ```
 
-固定 commit/gate sequence 只有一套：Task 3 CI + evidence validators RED/GREEN 使用 sections 18.7–18.8；Task 6A compile-complete refusal scaffold 使用 section 18.1；Task 6B 单一 acquisition/I/O RED 与 sections 2–7/11（含 section 18.4 production revalidation body/hook）GREEN 使用 section 18.2；Task 7A OwnerOnly/DACL/rollback、Task 7B quarantine/publish rename、Task 7C retained cleanup/delete/reparse 各自独立 RED→GREEN，使用 sections 18.3–18.6；Task 8 只创建实际 convergence gate并调用已提交 validators。不存在总括 Task 7 commit；证据目录逐项为 `c1b-task-7a-*`、`c1b-task-7b-*`、`c1b-task-7c-*`。
+Task 3 GREEN 同时提交 `scripts/run-c1b-windows-red.ps1`。上述两个 function 原样放在下列参数/调度代码之后；脚本是四个 Windows test-only RED 的唯一执行入口，不接受任意 test name 或 command：
+
+```powershell
+param(
+  [Parameter(Mandatory = $true)][ValidateSet('6b', '7a', '7b', '7c')][string]$Task,
+  [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$TestSha,
+  [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ParentSha,
+  [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{16}$')][string]$Nonce,
+  [Parameter(Mandatory = $true)][string]$EvidenceRoot
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$actual = (git rev-parse HEAD).Trim().ToLowerInvariant()
+$actualParent = (git rev-parse 'HEAD^').Trim().ToLowerInvariant()
+$commitRow = @((git rev-list --parents -n 1 HEAD).Trim().Split(' '))
+$changedPaths = @(git diff-tree --no-commit-id --name-only -r HEAD)
+if ($actual -cne $TestSha) { throw 'expected-RED checkout does not match TestSha' }
+if ($actualParent -cne $ParentSha) { throw 'expected-RED parent does not match ParentSha' }
+if ($commitRow.Count -ne 2) { throw 'expected-RED commit must have exactly one parent' }
+if ($changedPaths.Count -ne 1 -or $changedPaths[0] -cne 'crates/opentake-project/src/safe_fs/windows.rs') {
+  throw 'expected-RED commit changed paths outside windows.rs'
+}
+New-Item -ItemType Directory -Path $EvidenceRoot -ErrorAction Stop | Out-Null
+$Evidence = Join-Path $EvidenceRoot "c1b-task-$Task-$TestSha-$Nonce"
+New-Item -ItemType Directory -Path $Evidence -ErrorAction Stop | Out-Null
+$startedAt = (Get-Date).ToUniversalTime().ToString('o')
+$redRows = [System.Collections.Generic.List[object]]::new()
+$parentPassTests = @()
+
+function Invoke-ExpectedRed {
+  param(
+    [Parameter(Mandatory = $true)][string]$Name,
+    [Parameter(Mandatory = $true)][string]$Log,
+    [Parameter(Mandatory = $true)][string]$ExpectedPattern
+  )
+  & cargo test -p opentake-project --lib $Name -- --exact --test-threads=1 2>&1 |
+    Tee-Object -FilePath $Log | Out-Host
+  $code = $LASTEXITCODE
+  if ($code -eq 0) { throw "RED unexpectedly passed: $Name" }
+  $text = Get-Content -Raw -Path $Log
+  if ([regex]::Matches($text, '(?m)^running 1 test\r?$').Count -ne 1) {
+    throw "RED did not execute exactly one test: $Name"
+  }
+  if ([regex]::Matches($text, '(?m)^test result: FAILED\. 0 passed; 1 failed;').Count -ne 1) {
+    throw "RED did not report exactly one failed test: $Name"
+  }
+  $escaped = [regex]::Escape($Name)
+  if ([regex]::Matches($text, "(?m)^test $escaped \.\.\. FAILED\r?$").Count -ne 1) {
+    throw "RED failure was not the selected test: $Name"
+  }
+  if (-not (Select-String -Quiet -Path $Log -Pattern $ExpectedPattern)) {
+    throw "RED did not fail for the required typed refusal: $Name / $ExpectedPattern"
+  }
+  return $code
+}
+
+function Invoke-ExpectedPass {
+  param(
+    [Parameter(Mandatory = $true)][string]$Name,
+    [Parameter(Mandatory = $true)][string]$Log
+  )
+  & cargo test -p opentake-project --lib $Name -- --exact --test-threads=1 2>&1 |
+    Tee-Object -FilePath $Log | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw "required parent-contract test failed: $Name" }
+  $text = Get-Content -Raw -Path $Log
+  if ([regex]::Matches($text, '(?m)^running 1 test\r?$').Count -ne 1 -or
+      [regex]::Matches($text, '(?m)^test result: ok\. 1 passed; 0 failed;').Count -ne 1) {
+    throw "PASS did not execute exactly one successful test: $Name"
+  }
+}
+function Invoke-RedCase {
+  param([string]$Name, [string]$LogName, [string]$ExpectedPattern)
+  $exit = Invoke-ExpectedRed -Name $Name -Log (Join-Path $Evidence $LogName) `
+    -ExpectedPattern $ExpectedPattern
+  $redRows.Add([ordered]@{
+    name = $Name
+    command = "cargo test -p opentake-project --lib $Name -- --exact --test-threads=1"
+    exit = $exit
+    expected = $ExpectedPattern
+    log = $LogName
+  })
+}
+
+switch ($Task) {
+  '6b' {
+    Invoke-RedCase 'safe_fs::windows::tests::nested_retained_io_roundtrip' `
+      'windows-io-red.log' 'UnsupportedSecureFilesystem|UnsupportedTarget'
+    Invoke-RedCase 'safe_fs::windows::tests::windows_post_create_metadata_failure_rolls_back_same_handle' `
+      'windows-create-rollback-red.log' 'UnsupportedSecureFilesystem|UnsupportedTarget'
+  }
+  '7a' {
+    $parentPassTests = @(
+      'component_utf16_and_rejections', 'unicode_and_object_attribute_lifetimes',
+      'operation_contract_spy_all_rows', 'volume_root_contract_is_access_dependent',
+      'synchronous_nt_completion_rejects_pending_buffer_small_and_warnings',
+      'query_reports_reparse_as_present_and_open_rejects', 'reparse_parser_bounds_every_field',
+      'directory_parser_bounds_and_requery', 'metadata_types_and_hardlinks',
+      'ten_thousand_handles_return_to_baseline', 'ancestor_mapping_cannot_rebind',
+      'every_volume_field_is_bound', 'create_new_preserves_every_existing_kind',
+      'ntstatus_mapping_is_operation_specific', 'production_capabilities_own_drop_resources'
+    )
+    foreach ($shortName in $parentPassTests) {
+      $fullName = "safe_fs::windows::tests::$shortName"
+      Invoke-ExpectedPass -Name $fullName -Log (Join-Path $Evidence "$shortName.pass.log")
+    }
+    Invoke-RedCase 'safe_fs::windows::tests::owner_only_file_directory_stage_succeed_and_rollback' `
+      'windows-owner-only-red.log' 'VerifySecurityDescriptor|UnsupportedSecureFilesystem|UnsupportedTarget'
+  }
+  '7b' {
+    Invoke-RedCase 'safe_fs::windows::tests::quarantine_and_publish_success_do_not_self_conflict' `
+      'windows-rename-red.log' 'QuarantineNoReplace|UnsupportedAtomicPublish|PrimitiveUnavailable'
+  }
+  '7c' {
+    Invoke-RedCase 'safe_fs::windows::tests::cleanup_quarantined_tree_deletes_nested_reparse_without_traversal' `
+      'windows-cleanup-red.log' 'OpenCleanupEntry|UnsupportedSecureFilesystem|UnsupportedTarget'
+  }
+}
+
+[ordered]@{
+  schema = 'opentake-c1b-windows-red-v1'
+  repository = $env:GITHUB_REPOSITORY
+  workflow = $env:GITHUB_WORKFLOW
+  run_id = $env:GITHUB_RUN_ID
+  run_attempt = $env:GITHUB_RUN_ATTEMPT
+  job_id = $env:GITHUB_JOB
+  event_name = $env:GITHUB_EVENT_NAME
+  runner_os = $env:RUNNER_OS
+  runner_arch = $env:RUNNER_ARCH
+  task = $Task
+  test_sha = $TestSha
+  parent_sha = $ParentSha
+  nonce = $Nonce
+  changed_paths = @($changedPaths)
+  red = @($redRows)
+  parent_pass_tests = @($parentPassTests)
+  parent_pass_count = $parentPassTests.Count
+  started_at_utc = $startedAt
+  finished_at_utc = (Get-Date).ToUniversalTime().ToString('o')
+} | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM `
+  (Join-Path $Evidence 'red-receipt.json')
+```
+
+Task 3 GREEN 的 Windows matrix 先用 PowerShell parser 解析该文件并要求零 syntax error。expected-RED job 只在授权的 `workflow_dispatch` 且 `red_task != none` 时运行，使用 runner-local `$RUNNER_TEMP` 不读取 macOS `SAFETY_ROOT`；常规 rust/web/native jobs 在该模式下不运行。
+
+固定 commit/gate sequence 只有一套：Task 3 CI + evidence validators RED/GREEN 使用 sections 18.7–18.8；Task 6A compile-complete refusal scaffold 使用 section 18.1；Task 6B 精确七个 test-only bodies（acquisition/I/O 与 metadata rollback 是两个独立 behavior RED）与 sections 2–7/9/11（含 section 18.4 production revalidation body/hook）GREEN 使用 section 18.2；Task 7A OwnerOnly/DACL/rollback、Task 7B quarantine/publish rename、Task 7C retained cleanup/delete/reparse 各自独立 RED→GREEN，使用 sections 18.3–18.6；Task 8 只创建实际 convergence gate并调用已提交 validators。不存在总括 Task 7 commit；证据目录逐项为 `c1b-task-7a-*`、`c1b-task-7b-*`、`c1b-task-7c-*`。
 
 每个 commit 前 `git diff --cached --name-only` 必须等于该步骤列出的 paths；每个 GREEN 前保存对应 RED commit SHA/log/receipt。任何 RED 在 `running 1 test` 前失败都要先修 test harness 并产生新的 test-only commit；不得把 harness compile failure记录成行为 RED。本稿不授权 push/PR；到首次 native receipt gate 若无远端 authority，按 section 14 写 BLOCKED 并停止。
 
@@ -2492,7 +3399,7 @@ expect_red() {
 
 以上风险都不是允许 pathname fallback、ordinary rename、跳过 native receipt 或擅自远端 publication 的理由。
 
-## 18. Attempt 5 executable patches
+## 18. Attempt 6 executable patches
 
 Sections 2–15 freeze the final platform algorithms and evidence contracts. This section supplies the exact compile-scaffold, task-specific source/test patches, and repository-versioned validators used by the single task sequence in section 16; it does not define a second facade or an alternate task order.
 
@@ -2603,16 +3510,62 @@ cargo check -p opentake-project --lib --tests --target x86_64-pc-windows-msvc
 git diff --check
 ```
 
-### 18.2 Task 6B：一个可执行 behavior RED，随后只实现 acquisition/I/O
+提交 `feat(project): add fail-closed Windows platform scaffold` 后记录 `TASK6A_GREEN_SHA=$(git rev-parse HEAD)`，为每次审查 exclusive-create `$SAFETY_ROOT/logs/c1b-task-6a-$TASK6A_GREEN_SHA-attempt-$REVIEW_ATTEMPT/`。两名 fresh reviewer 都必须写 `Task: 6a`、完整 `Commit`、`Verdict: APPROVE` 和三个零 finding。通过后不创建 review-only manifest；立即按 section 18.8 创建 `$SAFETY_ROOT/branch-gates/c1b-task-6a-$TASK6A_GREEN_SHA-<16-lower-hex-NONCE>/`，传 `TASK=6a`、`PREDECESSOR_SHA=Task 5 GREEN SHA`、`PREDECESSOR_PROOF=Task 5 branch gate`，收集三份 authenticated native receipt 并使同一 validator 返回零。Task 6B 的 `PREDECESSOR_PROOF` 必须是这一 Task 6A branch gate；不得只传 Task 6A SHA 或手写 review manifest。
 
-Task 6B test-only commit `test(project): specify Windows capability acquisition and io` 只在 scaffold 末尾加入 section 12 的 `TestDir`、`name`、`root` helper 与 `nested_retained_io_roundtrip`，并保持该 test 使用 `CreatePermissions::Inherit`。不得加入 OwnerOnly、delete、rename 或 mapping-mutation tests。下面命令必须先显示一次 `running 1 test`，再因 `capture_absolute_directory` 返回 `UnsupportedSecureFilesystem` 而恰好失败一次：
+### 18.2 Task 6B：七个 test-only bodies、两个 behavior RED，随后实现 acquisition/I/O/create rollback
 
-```powershell
-expect_red 'safe_fs::windows::tests::nested_retained_io_roundtrip' "$EVIDENCE/windows-io-red.log"
-Select-String -Path "$EVIDENCE/windows-io-red.log" -Pattern 'UnsupportedSecureFilesystem|UnsupportedTarget'
+Task 6B test-only commit `test(project): specify Windows capability acquisition and io` 加入 section 12 Task 6B 行的精确七个 bodies、`TestDir`/`name`/`root`、普通 helper `assert_file_create_failure_rolls_back`，以及下面 compile-only create/disposition-failure seams。该 helper 完整 body与所需 imports必须在同一 test-only commit，不能等到 GREEN。它不引用任何 Task 6B production-private symbol，因而在 Task 6A parent 上 compile-complete。GREEN 必须删除 compile-only seams并用 section 9 final seams原位替换，不得同时保留两份定义：
+
+```rust
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowsCreateFailurePoint {
+    Metadata, FilesystemProbe, TypeValidation, CaseProof, SnapshotAssembly, ParentDuplicate,
+}
+#[cfg(test)]
+static WINDOWS_CREATE_FAILURE: std::sync::OnceLock<
+    std::sync::Mutex<Option<WindowsCreateFailurePoint>>,
+> = std::sync::OnceLock::new();
+#[cfg(test)]
+struct WindowsCreateFailureGuard;
+#[cfg(test)]
+impl Drop for WindowsCreateFailureGuard {
+    fn drop(&mut self) {
+        *WINDOWS_CREATE_FAILURE.get_or_init(Default::default).lock()
+            .expect("Windows create-failure mutex poisoned") = None;
+    }
+}
+#[cfg(test)]
+fn install_windows_create_failure(point: WindowsCreateFailurePoint) -> WindowsCreateFailureGuard {
+    let mut slot = WINDOWS_CREATE_FAILURE.get_or_init(Default::default).lock()
+        .expect("Windows create-failure mutex poisoned");
+    assert!(slot.is_none(), "Windows create-failure tests require --test-threads=1");
+    *slot = Some(point);
+    WindowsCreateFailureGuard
+}
+
+#[cfg(test)]
+static FAIL_NEXT_CREATED_DISPOSITION: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+struct CreatedDispositionFailureGuard;
+#[cfg(test)]
+impl Drop for CreatedDispositionFailureGuard {
+    fn drop(&mut self) {
+        FAIL_NEXT_CREATED_DISPOSITION.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+#[cfg(test)]
+fn install_created_disposition_failure() -> CreatedDispositionFailureGuard {
+    assert!(!FAIL_NEXT_CREATED_DISPOSITION.swap(true, std::sync::atomic::Ordering::SeqCst),
+        "created disposition tests require --test-threads=1");
+    CreatedDispositionFailureGuard
+}
 ```
 
-Task 6B GREEN `feat(project): capture Windows filesystem capabilities` 完整加入 sections 2–7 与 11 的 real production bodies、parser/reparse/NTSTATUS pure helpers、read/create/open/enumerate I/O，以及 section 18.4 的完整 `collect_revalidation_proof`/`revalidate_namespace` production body 和 `cfg(test)` hook storage。它不加入 section 8–10 的 DACL/delete/rename 实现。为保持 common platform surface 和后续 test-only commits compile-complete，GREEN 必须保留下列 final-signature refusal bodies与 test seams；7A/7B/7C 只替换各自拥有的 implementation，不改签名：
+两个独立聚焦 RED 都由 section 16 harness 的 `Task='6b'` 固定分支执行：各自必须显示一次 `running 1 test`、一次 FAILED，并因 Task 6A `capture_absolute_directory` 的 `UnsupportedSecureFilesystem/UnsupportedTarget` 拒绝而非 compile/0-tests 失败。调度与回传只使用 section 14.1，不存在第二份本地 PowerShell receipt 协议。
+
+Task 6B GREEN `feat(project): capture Windows filesystem capabilities` 完整加入 sections 2–7 与 11 的 real production bodies、parser/reparse/NTSTATUS pure helpers、read/create/open/enumerate I/O，以及 section 18.4 的完整 `collect_revalidation_proof`/`revalidate_namespace` production body 和 `cfg(test)` hook storage。它不加入 section 8 的 DACL 或 section 10 的 `NtSetInformationFile`/public rename mutation，但必须安装 section 10 的纯 `RenameInformationBuffer` 与 `map_rename_failure`，使 Task 7B test-only body 在其父提交编译并可断言 layout/mapping；这两个无调用父符号带精确 item-level `#[allow(dead_code)]`，Task 7B test-only commit一加入真实调用就删除属性。Task 6B 还必须安装 section 9 的 `mark_delete_handle`、`WindowsCreateFailurePoint`、`install_windows_create_failure`、`rollback_created_handle` 和 `rollback_created_directory`。所有 create contracts 从 `NtCreateFile(FILE_CREATE)` 开始已持有 `DELETE`，因此 metadata、filesystem、type、case、snapshot 或 post-create parent duplication 任一失败都在返回前用同一 HANDLE disposition rollback。Task 7A 只把 security verification 接入这一已存在的 rollback path，Task 7B 只接线 retained rename execution，Task 7C 只复用 `mark_delete_handle`，三者均不重定义 Task 6B helpers。Task 6B GREEN 只保留下列 final-signature refusal bodies；后续 task 的 test seams在各自 test-only commit加入，避免 future-symbol dead code：
 
 ```rust
 fn owner_only_refusal<T>() -> Result<T> {
@@ -2659,6 +3612,11 @@ pub(super) fn delete_quarantined_empty_directory(_: QuarantinedCapability) -> Re
         reason: SecureFilesystemReason::UnsupportedTarget,
     })
 }
+```
+
+Task 7A test-only commit 与 22 个 owned bodies 同时加入下面 DACL refusal/fixture seam；每个 symbol在该提交已有 test call site，不属于 Task 6B GREEN：
+
+```rust
 
 #[cfg(test)]
 static FORCE_DACL_VERIFY_FAILURE: std::sync::atomic::AtomicBool =
@@ -2668,6 +3626,64 @@ static FORCE_DACL_VERIFY_FAILURE: std::sync::atomic::AtomicBool =
 fn force_next_owner_verification_failure() {
     FORCE_DACL_VERIFY_FAILURE.store(true, std::sync::atomic::Ordering::SeqCst);
 }
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OwnerDescriptorFixture {
+    WrongAceType,
+    UndersizedAce,
+    OversizedSid,
+    InvalidSid,
+    NullOwner,
+    InvalidOwner,
+    DaclOutOfRange,
+    AclBytesOutOfRange,
+    WrongAceCount,
+    AceOutOfRange,
+}
+
+#[cfg(test)]
+static OWNER_DESCRIPTOR_FIXTURE: std::sync::OnceLock<
+    std::sync::Mutex<Option<OwnerDescriptorFixture>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+struct OwnerDescriptorFixtureGuard;
+
+#[cfg(test)]
+impl Drop for OwnerDescriptorFixtureGuard {
+    fn drop(&mut self) {
+        *OWNER_DESCRIPTOR_FIXTURE.get_or_init(Default::default).lock()
+            .expect("owner descriptor fixture mutex poisoned") = None;
+    }
+}
+
+#[cfg(test)]
+fn install_owner_descriptor_fixture(value: OwnerDescriptorFixture) -> OwnerDescriptorFixtureGuard {
+    let mut slot = OWNER_DESCRIPTOR_FIXTURE.get_or_init(Default::default).lock()
+        .expect("owner descriptor fixture mutex poisoned");
+    assert!(slot.is_none(), "owner descriptor tests require --test-threads=1");
+    *slot = Some(value);
+    OwnerDescriptorFixtureGuard
+}
+
+```
+
+Task 7A GREEN 在安装 release verifier时才加入消费 fixture 的 helper，因此它不会在 test-only parent 中形成 dead code：
+
+```rust
+
+#[cfg(test)]
+fn take_owner_descriptor_fixture() -> Option<OwnerDescriptorFixture> {
+    OWNER_DESCRIPTOR_FIXTURE.get_or_init(Default::default).lock()
+        .expect("owner descriptor fixture mutex poisoned").take()
+}
+
+```
+
+Task 7C test-only commit 与两个 owned bodies 同时加入 retained-delete hook type/guard/installer；它们在该提交已有 test call site：
+
+```rust
 
 #[cfg(test)]
 type BeforeRetainedDeleteHook =
@@ -2698,6 +3714,12 @@ fn install_before_retained_delete_hook(
     BeforeRetainedDeleteHookGuard
 }
 
+```
+
+Task 7C GREEN 接线 cleanup implementation 时才加入 hook runner：
+
+```rust
+
 fn run_before_retained_delete_hook(
     handle: HANDLE,
     parent: &DirectoryAuthority,
@@ -2714,7 +3736,7 @@ fn run_before_retained_delete_hook(
 }
 ```
 
-`create_file_new`、`create_dir_new` 与 `create_stage_dir_new` 在 Task 6B 中先调用 `require_inherited_permissions(permissions)?`；`Inherit` 继续执行 real create，`OwnerOnly` 必须在任何 namespace mutation 前拒绝。Task 7A 删除该 refusal helper 并由 section 8 的 `OwnerOnlySecurity` 取代。Task 6B GREEN 后 `nested_retained_io_roundtrip` 和全部 pure parser/contract tests 通过；此时不把 DACL/mutation tests 加入 test module。section 18.4 的 production body 与 hook storage 必须已在本 GREEN；后续 test-only commits只增加对应 `#[test]` bodies。
+`create_file_new`、`create_dir_new` 与 `create_stage_dir_new` 在 Task 6B 中先调用 `require_inherited_permissions(permissions)?`；`Inherit` 继续执行 real create，`OwnerOnly` 必须在任何 namespace mutation 前拒绝。Task 7A 删除该 refusal helper 并由 section 8 的 `OwnerOnlySecurity` 取代。Task 6B GREEN 后七个 Task 6B-owned tests（I/O 加六个 create rollback regressions）全部通过；pure parser/contract 的 production symbols 此时 compile-complete，其 15 个 bodies 由 Task 7A test-only commit 加入并必须在 OwnerOnly RED 前通过。section 18.4 的 production body 与 hook storage 必须已在本 GREEN；后续 test-only commits只增加对应 `#[test]` bodies。
 
 Task 6B 对 section 11 create/parent-duplication 的 compile-complete bodies 固定如下；它们替换前文引用 section 8/9 symbols 的版本：
 
@@ -2762,16 +3784,28 @@ fn create_directory_contract(
     require_inherited_permissions(permissions)?;
     let handle = nt_create_relative(parent.native.node.handle.raw(), name, parent.case_mode,
         contract.desired, contract.disposition, contract.options, contract.attributes, null(), operation)?;
-    let filesystem = parent.opened.filesystem.as_ref().ok_or(SafeFsError::UnsupportedSecureFilesystem {
-        operation: SafeFsOperation::ProbeFilesystem,
-        reason: SecureFilesystemReason::FilesystemProbeUnavailable,
-    })?;
-    let opened = query_entry_metadata(handle.raw(), filesystem, operation)?;
-    if opened.kind != EntryKind::Directory {
-        return Err(SafeFsError::UnsupportedEntryType { operation, kind: opened.kind });
-    }
-    let case_mode = query_case_mode(handle.raw())?;
-    let snapshot = append_snapshot(&parent.snapshot, name.clone(), &opened, case_mode)?;
+    let validated = (|| -> Result<(EntryMetadata, CaseMode, NamespaceSnapshot)> {
+        inject_windows_create_failure(WindowsCreateFailurePoint::FilesystemProbe, operation)?;
+        let filesystem = parent.opened.filesystem.as_ref().ok_or(SafeFsError::UnsupportedSecureFilesystem {
+            operation: SafeFsOperation::ProbeFilesystem,
+            reason: SecureFilesystemReason::FilesystemProbeUnavailable,
+        })?;
+        inject_windows_create_failure(WindowsCreateFailurePoint::Metadata, operation)?;
+        let opened = query_entry_metadata(handle.raw(), filesystem, operation)?;
+        inject_windows_create_failure(WindowsCreateFailurePoint::TypeValidation, operation)?;
+        if opened.kind != EntryKind::Directory {
+            return Err(SafeFsError::UnsupportedEntryType { operation, kind: opened.kind });
+        }
+        inject_windows_create_failure(WindowsCreateFailurePoint::CaseProof, operation)?;
+        let case_mode = query_case_mode(handle.raw())?;
+        inject_windows_create_failure(WindowsCreateFailurePoint::SnapshotAssembly, operation)?;
+        let snapshot = append_snapshot(&parent.snapshot, name.clone(), &opened, case_mode)?;
+        Ok((opened, case_mode, snapshot))
+    })();
+    let (opened, case_mode, snapshot) = match validated {
+        Ok(value) => value,
+        Err(error) => return rollback_created_handle(handle, error),
+    };
     let node = Arc::new(DirectoryNode {
         handle,
         parent: Some(Arc::clone(&parent.native.node)),
@@ -2801,9 +3835,17 @@ pub(super) fn create_dir_new(parent: &DirectoryAuthority, name: &ComponentName,
 pub(super) fn create_stage_dir_new(parent: &DirectoryAuthority, name: &ComponentName,
     permissions: CreatePermissions) -> Result<StageCapability> {
     require_inherited_permissions(permissions)?;
-    let owned_parent = duplicate_directory(parent)?;
     let directory = create_directory_contract(parent, name, CreatePermissions::Inherit,
         DirectoryAccess::Stage, contract_for_operation(OpenOperation::CreateStage))?;
+    if let Err(error) = inject_windows_create_failure(WindowsCreateFailurePoint::ParentDuplicate,
+        SafeFsOperation::CreateStageDirectory)
+    {
+        return rollback_created_directory(directory, error);
+    }
+    let owned_parent = match duplicate_directory(parent) {
+        Ok(value) => value,
+        Err(error) => return rollback_created_directory(directory, error),
+    };
     let opened = directory.opened.clone();
     Ok(StageCapability { parent: owned_parent, directory, original_name: name.clone(), opened })
 }
@@ -2816,17 +3858,27 @@ pub(super) fn create_file_new(parent: &DirectoryAuthority, name: &ComponentName,
     let handle = nt_create_relative(parent.native.node.handle.raw(), name, parent.case_mode,
         contract.desired, contract.disposition, contract.options, contract.attributes, null(),
         SafeFsOperation::CreateFile)?;
-    let filesystem = parent.opened.filesystem.as_ref().ok_or(SafeFsError::UnsupportedSecureFilesystem {
-        operation: SafeFsOperation::ProbeFilesystem,
-        reason: SecureFilesystemReason::FilesystemProbeUnavailable,
-    })?;
-    let opened = query_entry_metadata(handle.raw(), filesystem, SafeFsOperation::CreateFile)?;
-    if opened.kind != EntryKind::RegularFile {
-        return Err(SafeFsError::UnsupportedEntryType {
-            operation: SafeFsOperation::CreateFile,
-            kind: opened.kind,
-        });
-    }
+    let validated = (|| -> Result<EntryMetadata> {
+        inject_windows_create_failure(WindowsCreateFailurePoint::FilesystemProbe, SafeFsOperation::CreateFile)?;
+        let filesystem = parent.opened.filesystem.as_ref().ok_or(SafeFsError::UnsupportedSecureFilesystem {
+            operation: SafeFsOperation::ProbeFilesystem,
+            reason: SecureFilesystemReason::FilesystemProbeUnavailable,
+        })?;
+        inject_windows_create_failure(WindowsCreateFailurePoint::Metadata, SafeFsOperation::CreateFile)?;
+        let opened = query_entry_metadata(handle.raw(), filesystem, SafeFsOperation::CreateFile)?;
+        inject_windows_create_failure(WindowsCreateFailurePoint::TypeValidation, SafeFsOperation::CreateFile)?;
+        if opened.kind != EntryKind::RegularFile {
+            return Err(SafeFsError::UnsupportedEntryType {
+                operation: SafeFsOperation::CreateFile,
+                kind: opened.kind,
+            });
+        }
+        Ok(opened)
+    })();
+    let opened = match validated {
+        Ok(value) => value,
+        Err(error) => return rollback_created_handle(handle, error),
+    };
     Ok(FileCapability {
         native: NativeFile { handle, opened: opened.clone(), access: FileAccess::ReadWrite, delete_right: false },
         access: FileAccess::ReadWrite,
@@ -2839,7 +3891,7 @@ Task 7A 保留 `duplicate_directory`，只替换上述两个 create implementati
 
 ### 18.3 Task 7A：OwnerOnly/DACL 与 create rollback
 
-Task 7A test-only commit `test(project): specify Windows owner-only creation and rollback` 只向 `crates/opentake-project/src/safe_fs/windows.rs` 的既有 test module 加入下面一个 test。它只引用 Task 6B 已存在的 public facade 与 final-signature `force_next_owner_verification_failure`，不引用 `OwnerOnlySecurity`、`verify_owner_only` 或尚未实现的 delete/rename helpers：
+Task 7A test-only commit `test(project): specify Windows owner-only creation and rollback` 向 `crates/opentake-project/src/safe_fs/windows.rs` 加入 section 12 Task 7A 行冻结的精确 22 个 tests（15 个 Task 6B pure bodies加七个 OwnerOnly/DACL/security bodies），并在同一 test-only patch加入 section 18.2 冻结的 `force_next_owner_verification_failure`/owner-descriptor fixture guard+installer，同时删除 `SecurityVerification` variant的 item-level dead-code allowance。前 15 个在 test-only SHA 必须逐项通过，聚焦 RED 仅运行 `owner_only_file_directory_stage_succeed_and_rollback`。这些 test-only symbols不实现 `OwnerOnlySecurity`、`verify_owner_only` 或 delete/rename production：
 
 ```rust
 #[test]
@@ -2885,23 +3937,74 @@ fn owner_only_file_directory_stage_succeed_and_rollback() {
         assert!(matches!(query_child_nofollow(&authority, &name(value)).unwrap(), ChildState::Absent));
     }
 }
+
+fn assert_owner_descriptor_fixture_rejected(fixture: OwnerDescriptorFixture, leaf: &str) {
+    let temp = TestDir::new(leaf);
+    let authority = root(&temp);
+    let _fixture = install_owner_descriptor_fixture(fixture);
+    assert!(matches!(create_file_new(&authority, &name(leaf), CreatePermissions::OwnerOnly),
+        Err(SafeFsError::InvalidNativeBuffer {
+            operation: SafeFsOperation::VerifySecurityDescriptor,
+            reason: NativeBufferReason::SecurityDescriptorMalformed,
+        })));
+    assert!(matches!(query_child_nofollow(&authority, &name(leaf)).unwrap(), ChildState::Absent));
+}
+
+#[test]
+fn owner_only_dacl_rejects_wrong_ace_type() {
+    assert_owner_descriptor_fixture_rejected(OwnerDescriptorFixture::WrongAceType, "wrong-ace-type");
+}
+
+#[test]
+fn owner_only_dacl_rejects_undersized_ace() {
+    assert_owner_descriptor_fixture_rejected(OwnerDescriptorFixture::UndersizedAce, "undersized-ace");
+    assert_owner_descriptor_fixture_rejected(OwnerDescriptorFixture::DaclOutOfRange, "dacl-out-of-range");
+    assert_owner_descriptor_fixture_rejected(OwnerDescriptorFixture::AclBytesOutOfRange, "acl-bytes-out-of-range");
+    assert_owner_descriptor_fixture_rejected(OwnerDescriptorFixture::WrongAceCount, "wrong-ace-count");
+    assert_owner_descriptor_fixture_rejected(OwnerDescriptorFixture::AceOutOfRange, "ace-out-of-range");
+}
+
+#[test]
+fn owner_only_dacl_rejects_oversized_sid() {
+    assert_owner_descriptor_fixture_rejected(OwnerDescriptorFixture::OversizedSid, "oversized-sid");
+}
+
+#[test]
+fn owner_only_dacl_rejects_invalid_sid() {
+    assert_owner_descriptor_fixture_rejected(OwnerDescriptorFixture::InvalidSid, "invalid-sid");
+}
+
+#[test]
+fn owner_only_dacl_rejects_null_or_invalid_owner() {
+    assert_owner_descriptor_fixture_rejected(OwnerDescriptorFixture::NullOwner, "null-owner");
+    assert_owner_descriptor_fixture_rejected(OwnerDescriptorFixture::InvalidOwner, "invalid-owner");
+}
+
+#[test]
+fn windows_post_create_security_failure_rolls_back_same_handle() {
+    let temp = TestDir::new("security-rollback");
+    let authority = root(&temp);
+    let _failure = install_windows_create_failure(WindowsCreateFailurePoint::SecurityVerification);
+    assert!(matches!(create_file_new(&authority, &name("leaf"), CreatePermissions::OwnerOnly),
+        Err(SafeFsError::Io { operation: SafeFsOperation::VerifySecurityDescriptor, .. })));
+    assert!(matches!(query_child_nofollow(&authority, &name("leaf")).unwrap(), ChildState::Absent));
+}
 ```
 
-RED protocol：cached path 必须恰为 `crates/opentake-project/src/safe_fs/windows.rs`；commit `test(project): specify Windows owner-only creation and rollback`；exclusive directory 为 `$SAFETY_ROOT/logs/c1b-task-7a-<RED_SHA>-attempt-<M>`。运行：
+上述 malformed bodies 覆盖 `WrongAceType`、`UndersizedAce`、`OversizedSid`、ACE `InvalidSid`、`NullOwner`、非空越界 `InvalidOwner`、`DaclOutOfRange`、`AclBytesOutOfRange`、`WrongAceCount` 与 `AceOutOfRange`；security-failure body另安装 `SecurityVerification`。Task 7A GREEN 在第二次 `GetKernelObjectSecurity` 成功后、任何 typed ACE/SID dereference 前消费 descriptor fixture：它只在 returned descriptor byte buffer 或已取回的本地 pointer/info 变量内产生指定 malformed layout，然后必须经过与 release 代码相同的 `checked_subslice`/`checked_sid_length`/`verify_single_owner_ace` 路径被拒绝。
 
-```powershell
-expect_red 'safe_fs::windows::tests::owner_only_file_directory_stage_succeed_and_rollback' "$EVIDENCE/windows-owner-only-red.log"
-Select-String -Path "$EVIDENCE/windows-owner-only-red.log" -Pattern 'VerifySecurityDescriptor|UnsupportedSecureFilesystem|UnsupportedTarget'
-```
+RED protocol：cached path 必须恰为 `crates/opentake-project/src/safe_fs/windows.rs`；commit `test(project): specify Windows owner-only creation and rollback`。section 16 harness 的 `Task='7a'` 固定分支先运行列出的 15 个 parent-contract PASS，再运行唯一 owner-only expected RED；section 14.1 将 nonce-bound receipt/logs 回传到 `$SAFETY_ROOT/red/c1b-task-7a-<RED_SHA>-<NONCE>/`。
 
 必须出现 `running 1 test`、仅一项 FAILED，且 panic 的 source error 是 Task 6B 的 `VerifySecurityDescriptor/UnsupportedTarget`；compile/name-resolution failure 不合格。
 
-Task 7A GREEN commit `feat(project): enforce Windows owner-only creation` 只修改同一 `windows.rs`：删除 `owner_only_refusal`/`require_inherited_permissions`，安装 section 8 的 pinned-ABI exact `OwnerOnlySecurity`、`verify_owner_only`、`verify_created_owner_only` 与 private `mark_delete_handle` rollback primitive，并把 section 11 三个 create bodies切到 security descriptor branch。`OBJECT_ATTRIBUTES.SecurityDescriptor` 全程是 `*const SECURITY_DESCRIPTOR`；所有 BOOL storage/arguments（含 `SetSecurityDescriptorDacl`）是 `windows_sys::core::BOOL=i32`；`ace_flags` 保持 `ACE_FLAGS=u32`，仅在与 `ACE_HEADER.AceFlags:u8` 比较前 `u8::try_from`。`CREATE_FILE_CONTRACT`、`CREATE_DIR_CONTRACT`、`CREATE_STAGE_CONTRACT` 必须都含 `READ_CONTROL`。file、directory、stage 成功 post-verify；三类注入失败都对刚创建的同一 DELETE HANDLE 设置 disposition、drop、证明 name absent。
+Task 7A GREEN commit `feat(project): enforce Windows owner-only creation` 只修改同一 `windows.rs`：删除 `owner_only_refusal`/`require_inherited_permissions`，安装 section 8 的 pinned-ABI exact `OwnerOnlySecurity`、bounds-first `verify_owner_only`、`verify_created_owner_only`，并把 section 11 三个 create bodies切到 security descriptor branch。Task 6B-owned `mark_delete_handle` 和 create rollback helpers/seams 不得重定义。`OBJECT_ATTRIBUTES.SecurityDescriptor` 全程是 `*const SECURITY_DESCRIPTOR`；所有 BOOL storage/arguments（含 `SetSecurityDescriptorDacl`）是 `windows_sys::core::BOOL=i32`；`ace_flags` 保持 `ACE_FLAGS=u32`，仅在与 `ACE_HEADER.AceFlags:u8` 比较前 `u8::try_from`。`CREATE_FILE_CONTRACT`、`CREATE_DIR_CONTRACT`、`CREATE_STAGE_CONTRACT` 必须都含 `READ_CONTROL | DELETE`。file、directory、stage 成功 post-verify；security 失败通过同一 Task 6B rollback path 对刚创建的同一 DELETE HANDLE 设置 disposition、drop、证明 name absent。
 
-Task 7A 的 wrapper 只能是下面 final body；Task 6B 已安装的 atomic flag/setter 不得重复定义：
+Task 7A 的 wrapper 只能是下面 final body；同一 Task 7A test-only commit已安装的 atomic flag/setter不得重复定义：
 
 ```rust
 fn verify_created_owner_only(handle: HANDLE, expected: &OwnerOnlySecurity) -> Result<()> {
+    inject_windows_create_failure(WindowsCreateFailurePoint::SecurityVerification,
+        SafeFsOperation::VerifySecurityDescriptor)?;
     #[cfg(test)]
     if FORCE_DACL_VERIFY_FAILURE.swap(false, std::sync::atomic::Ordering::SeqCst) {
         return Err(SafeFsError::InvalidNativeBuffer {
@@ -2913,11 +4016,11 @@ fn verify_created_owner_only(handle: HANDLE, expected: &OwnerOnlySecurity) -> Re
 }
 ```
 
-Task 7A GREEN 不实现 quarantine/publish/public cleanup。GREEN SHA 的 exact Windows test、target check、`git diff --check` 和双 reviewer 都写入 exclusive `$SAFETY_ROOT/logs/c1b-task-7a-<GREEN_SHA>-attempt-<M>`；两份 review 必须明确检查三种成功、三种 rollback、ABI signature 和 `READ_CONTROL`，均 `APPROVE/0/0/0` 才进入 7B。
+Task 7A GREEN 不实现 quarantine/publish/public cleanup。GREEN SHA 的 exact Windows test、target check、`git diff --check` 和双 reviewer 都写入 exclusive `$SAFETY_ROOT/logs/c1b-task-7a-<GREEN_SHA>-attempt-<M>`；两份 review 必须明确检查三种成功、三种 forced-verification rollback、五种 malformed descriptor refusal、security seam rollback、bounds-first ABI signature 和 `READ_CONTROL | DELETE`，均 `APPROVE/0/0/0` 才进入 7B。
 
 ### 18.4 Task 6B-owned fresh revalidation production body 与 Task 7B tests
 
-Task 6B GREEN 必须用下面代码替换 section 11 的旧 `revalidate_namespace` body，并同时加入全部 `cfg(test)` hook storage/guard/install symbols。Task 7B GREEN 的 `quarantine_stage` 与 `publish_stage_noreplace` 只调用这里已存在的函数，不得重新定义或 override 本 body；mapping probe failure 因而发生在 namespace mutation 前。Task 7B test-only commit只加入本节末尾两个 `#[test]` bodies，绝不修改 production 或 hook code。
+Task 6B GREEN 必须用下面代码替换 section 11 的旧 `revalidate_namespace` body，并同时加入全部 `cfg(test)` hook storage/guard/install symbols。Task 7B GREEN 的 `quarantine_stage` 与 `publish_stage_noreplace` 只调用这里已存在的函数，不得重新定义或 override 本 body；mapping probe failure 因而发生在 namespace mutation 前。Task 7B test-only commit 加入本节末尾两个 mapping bodies 和 section 18.5 的三个 bodies，合计 section 12 冻结的精确五个 tests；绝不修改 production 或 hook code。
 
 ```rust
 #[derive(Clone)]
@@ -2934,8 +4037,10 @@ static REVALIDATION_HOOK: std::sync::OnceLock<std::sync::Mutex<Option<Revalidati
     std::sync::OnceLock::new();
 
 #[cfg(test)]
+#[allow(dead_code)] // Task 6B parent seam; Task 7B test-only removes this.
 struct RevalidationHookGuard;
 #[cfg(test)]
+#[allow(dead_code)]
 impl Drop for RevalidationHookGuard {
     fn drop(&mut self) {
         *REVALIDATION_HOOK.get_or_init(Default::default).lock().expect("revalidation hook mutex poisoned") = None;
@@ -2943,6 +4048,7 @@ impl Drop for RevalidationHookGuard {
 }
 
 #[cfg(test)]
+#[allow(dead_code)] // First call site is in Task 7B test-only bodies.
 fn install_revalidation_hook(hook: RevalidationHook) -> RevalidationHookGuard {
     let mut slot = REVALIDATION_HOOK.get_or_init(Default::default).lock().expect("revalidation hook mutex poisoned");
     assert!(slot.is_none(), "revalidation tests require --test-threads=1");
@@ -3052,13 +4158,20 @@ fn quarantine_and_publish_refuse_changed_probe_without_mutation() {
 
 ### 18.5 Task 7B：quarantine/publish retained rename
 
-Task 7B test-only commit `test(project): specify Windows retained quarantine and publish` 只加入本节两个 tests和 section 18.4 末尾两个 mapping `#[test]` bodies；所有 stage 都用 `CreatePermissions::Inherit`，因此 RED 必须越过 Task 7A DACL 并命中 Task 6B 的 `UnsupportedAtomicPublish` refusal：
+Task 7B test-only commit `test(project): specify Windows retained quarantine and publish` 只加入精确五个 tests：`every_revalidation_field_is_bound_before_mutation`、`quarantine_and_publish_refuse_changed_probe_without_mutation`、`quarantine_and_publish_success_do_not_self_conflict`、`rename_never_replaces_any_target_kind`、`create_stage_collision_is_typed_and_preserves_original`。所有 stage 都用 `CreatePermissions::Inherit`，因此 RED 必须越过 Task 7A DACL 并命中 Task 6B 的 `UnsupportedAtomicPublish` refusal。不存在第六个 standalone rename-layout test；布局和 ambiguous-status assertions 集成在下面两个 behavior bodies：
 
 ```rust
 #[test]
 fn quarantine_and_publish_success_do_not_self_conflict() {
     let quarantine_temp = TestDir::new("quarantine-success");
     let authority = root(&quarantine_temp);
+    let layout = RenameInformationBuffer::new(authority.native.node.handle.raw(),
+        &ComponentName::new(OsString::from_wide(&[0x61, 0xD800])).unwrap()).unwrap();
+    assert_eq!(layout.used as usize, offset_of!(FILE_RENAME_INFORMATION, FileName) + 4);
+    assert_eq!((layout.as_ptr() as usize) % align_of::<FILE_RENAME_INFORMATION>(), 0);
+    // SAFETY: builder returned an aligned initialized header whose `used` bytes stay live.
+    assert_eq!(unsafe { (*(layout.as_ptr().cast::<FILE_RENAME_INFORMATION>())).RootDirectory },
+        authority.native.node.handle.raw());
     let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::Inherit).unwrap();
     let quarantined = quarantine_stage(stage, &authority, name("quarantine")).expect("retained rename succeeds");
     drop(quarantined);
@@ -3075,6 +4188,12 @@ fn quarantine_and_publish_success_do_not_self_conflict() {
 
 #[test]
 fn rename_never_replaces_any_target_kind() {
+    assert!(matches!(map_rename_failure(STATUS_ACCESS_DENIED, true, true, Ok(present())),
+        SafeFsError::AlreadyExists { .. }));
+    assert!(matches!(map_rename_failure(STATUS_ACCESS_DENIED, true, true, Ok(ChildState::Absent)),
+        SafeFsError::Os { raw: RawOsError::NtStatus { status: STATUS_ACCESS_DENIED, .. }, .. }));
+    assert!(matches!(map_rename_failure(STATUS_ACCESS_DENIED, false, true, Ok(present())),
+        SafeFsError::Os { .. }));
     for kind in ["file", "empty-dir", "nonempty-dir", "reparse"] {
         let temp = TestDir::new(kind);
         let target = temp.path().join("target");
@@ -3132,14 +4251,9 @@ fn create_stage_collision_is_typed_and_preserves_original() {
 }
 ```
 
-RED cached path 只能是 `crates/opentake-project/src/safe_fs/windows.rs`，exclusive evidence 为 `$SAFETY_ROOT/logs/c1b-task-7b-<RED_SHA>-attempt-<M>`；运行：
+RED cached path 只能是 `crates/opentake-project/src/safe_fs/windows.rs`。使用 section 16 harness 的 `Task='7b'` 固定分支与 section 14.1 回传，exclusive evidence 为 `$SAFETY_ROOT/red/c1b-task-7b-<RED_SHA>-<NONCE>/`。
 
-```powershell
-expect_red 'safe_fs::windows::tests::quarantine_and_publish_success_do_not_self_conflict' "$EVIDENCE/windows-rename-red.log"
-Select-String -Path "$EVIDENCE/windows-rename-red.log" -Pattern 'QuarantineNoReplace|UnsupportedAtomicPublish|PrimitiveUnavailable'
-```
-
-必须恰好一个 executed FAILED，且由 `quarantine_stage` 的 typed refusal 触发。Task 7B GREEN commit `feat(project): add Windows retained quarantine and publish` 只安装 section 10 的 `RenameInformationBuffer`、`NtSetInformationFile(FileRenameInformation)`、no-replace collision mapping、`quarantine_stage`/`publish_stage_noreplace`；它调用 Task 6B 已安装的 `revalidate_namespace`，不替换 section 18.4 body/hook，也不实现 cleanup/delete。`CreateStageDirectory + STATUS_OBJECT_NAME_COLLISION` 必须映射 `AlreadyExists`，native test另建同名 stage并验证原 identity/tree不变。
+必须恰好一个 executed FAILED，且由 `quarantine_stage` 的 typed refusal 触发。Task 7B test-only commit加入 pure helper/hook调用时删除 Task 6B 在 rename builder/mapping 与 revalidation guard/installer上的六个 item-level `#[allow(dead_code)]`，不得新增更宽 lint suppression。Task 7B GREEN commit `feat(project): add Windows capability-relative rename` 复用已由 test-only bodies 编译检查的 `RenameInformationBuffer`、`map_rename_failure` 与 `revalidate_namespace`，只安装 `NtSetInformationFile(FileRenameInformation)` retained execution 以及 `quarantine_stage`/`publish_stage_noreplace`；它不替换 section 18.4 body/hook，也不实现 cleanup/delete。`CreateStageDirectory + STATUS_OBJECT_NAME_COLLISION` 必须映射 `AlreadyExists`，native test另建同名 stage并验证原 identity/tree不变。
 
 GREEN 运行本节全部 rename/collision tests、18.4 两个 mapping tests、target check、`git diff --check`；exclusive review directory `$SAFETY_ROOT/logs/c1b-task-7b-<GREEN_SHA>-attempt-<M>`。两名 fresh reviewer 必须检查 Inherit fixture确实越过 DACL、rename唯一使用 retained source HANDLE与 parent `RootDirectory`、无 post-success reopen、revalidation production body所有权无 override，均 `APPROVE/0/0/0` 后进入 7C。
 
@@ -3187,7 +4301,7 @@ fn retained_delete_survives_real_name_rebound() {
         let mut iosb = IO_STATUS_BLOCK::default();
         // SAFETY: source is the retained DELETE handle; parent/buffer/iosb stay live for this synchronous test rename.
         let status = unsafe { NtSetInformationFile(source, &mut iosb, buffer.as_ptr(),
-            buffer.len_u32(), FileRenameInformation) };
+            buffer.used, FileRenameInformation) };
         complete_nt(SafeFsOperation::RenameNoReplaceSameParent, status, &iosb)?;
         fs::write(quarantine_path.join("leaf"), b"replacement")
             .map_err(|error| SafeFsError::io(SafeFsOperation::CreateFile, error))?;
@@ -3200,18 +4314,13 @@ fn retained_delete_survives_real_name_rebound() {
 }
 ```
 
-Task 7C production `delete_quarantined_entry` 必须在对 retained HANDLE 调 Task 7A-owned `mark_delete_handle` 前调用 `run_before_retained_delete_hook(handle, &parent, &name)`；non-test path恒为 no-op。test hook使用同一 retained source HANDLE把 original rename到 `moved-original`，再在旧 name创建不同 bytes；随后的 disposition 必须只删除 retained original，replacement保持。禁止用“外部 rename 被 share mask 拒绝”代替这项 proof。
+Task 7C production `delete_quarantined_entry` 必须在对 retained HANDLE 调 Task 6B-owned `mark_delete_handle` 前调用 `run_before_retained_delete_hook(handle, &parent, &name)`；non-test path恒为 no-op。test hook使用同一 retained source HANDLE把 original rename到 `moved-original`，再在旧 name创建不同 bytes；随后的 disposition 必须只删除 retained original，replacement保持。禁止用“外部 rename 被 share mask 拒绝”代替这项 proof。
 
 `enumerate` 已由 Task 6B 返回每个 validated component，包括 reparse name；它只做 nofollow metadata query，不打开/授予 capability。`open_cleanup_child_nofollow` 对 `SymlinkOrReparse` 必须选择 `CLEANUP_REPARSE_CONTRACT`，验证同一 retained HANDLE 的 tag/identity后构造 `CleanupCapability::Entry`。common `cleanup_quarantined_tree` 的 native test必须真实递归 nested directory、file与junction，目标 `external/keep` byte-identical。
 
-RED cached path/exclusive evidence 固定为 `windows.rs` 与 `$SAFETY_ROOT/logs/c1b-task-7c-<RED_SHA>-attempt-<M>`：
+RED cached path 固定为 `windows.rs`。使用 section 16 harness 的 `Task='7c'` 固定分支与 section 14.1 回传，exclusive evidence 为 `$SAFETY_ROOT/red/c1b-task-7c-<RED_SHA>-<NONCE>/`。
 
-```powershell
-expect_red 'safe_fs::windows::tests::cleanup_quarantined_tree_deletes_nested_reparse_without_traversal' "$EVIDENCE/windows-cleanup-red.log"
-Select-String -Path "$EVIDENCE/windows-cleanup-red.log" -Pattern 'OpenCleanupEntry|UnsupportedSecureFilesystem|UnsupportedTarget'
-```
-
-Task 7C GREEN commit `feat(project): add Windows retained cleanup and delete` 只安装 section 9 的 cleanup open/disposition/public delete bodies和 hook call；不得重新定义 Task 7A 的 `mark_delete_handle`、Task 7B rename或Task 6B revalidation。GREEN 运行本节两个 tests、完整 Windows safe_fs group、archive security、target check和`git diff --check`。exclusive `$SAFETY_ROOT/logs/c1b-task-7c-<GREEN_SHA>-attempt-<M>` 双 review必须检查实际 common recursion、reparse target未变、真实 retained HANDLE rebound与replacement保留，均 `APPROVE/0/0/0` 后才能请求 final exact-SHA native receipts。
+Task 7C GREEN commit `feat(project): add Windows retained-handle cleanup` 只安装 section 9 的 cleanup open/disposition/public delete bodies和 hook call；不得重新定义 Task 6B 的 `mark_delete_handle`/revalidation 或 Task 7B rename。GREEN 运行本节两个 tests、完整 Windows safe_fs group、archive security、target check和`git diff --check`。exclusive `$SAFETY_ROOT/logs/c1b-task-7c-<GREEN_SHA>-attempt-<M>` 双 review必须检查实际 common recursion、reparse target未变、真实 retained HANDLE rebound与replacement保留，均 `APPROVE/0/0/0` 后才能请求 final exact-SHA native receipts。
 
 ### 18.7 Repository-versioned CI validator 与完整 RED/GREEN test
 
@@ -3226,7 +4335,11 @@ require "yaml"
 module C1bCiValidator
   SHA = /\A[0-9a-f]{40}\z/
   RECEIPTS = %w[linux-x86_64 macos-native windows-x86_64].freeze
-  RUNNERS = %w[ubuntu-24.04 macos-14 windows-2022].freeze
+  PROVENANCE = {
+    "linux-x86_64" => { "runner" => "ubuntu-24.04", "expected_os" => "Linux", "expected_arch" => "X64" },
+    "macos-native" => { "runner" => "macos-14", "expected_os" => "macOS", "expected_arch" => "ARM64" },
+    "windows-x86_64" => { "runner" => "windows-2022", "expected_os" => "Windows", "expected_arch" => "X64" },
+  }.freeze
   TARGET_EXPRESSION = "${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
 
   module_function
@@ -3253,15 +4366,36 @@ module C1bCiValidator
     raise "pull_request trigger missing" unless events.key?("pull_request")
     dispatch = events.dig("workflow_dispatch", "inputs", "commit_sha")
     raise "workflow_dispatch.commit_sha must be required" unless dispatch.is_a?(Hash) && dispatch["required"] == true
+    red_task = events.dig("workflow_dispatch", "inputs", "red_task")
+    raise "workflow_dispatch.red_task contract mismatch" unless red_task.is_a?(Hash) &&
+      red_task.values_at("required", "default", "type") == [true, "none", "choice"] &&
+      red_task.fetch("options") == %w[none 6b 7a 7b 7c]
+    red_parent = events.dig("workflow_dispatch", "inputs", "red_parent_sha")
+    red_nonce = events.dig("workflow_dispatch", "inputs", "red_nonce")
+    raise "workflow_dispatch RED identity inputs missing" unless
+      [red_parent, red_nonce].all? { |input| input.is_a?(Hash) && input["required"] == false && input["default"] == "" }
+    expected_concurrency = "${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ inputs.commit_sha || github.sha }}-${{ inputs.red_task || 'normal' }}-${{ inputs.red_nonce || 'none' }}"
+    raise "workflow concurrency is not RED nonce-bound" unless
+      document.dig("concurrency", "group") == expected_concurrency &&
+      document.dig("concurrency", "cancel-in-progress") == true
 
     job = document.dig("jobs", "safe-filesystem")
     raise "missing safe-filesystem job and immutable SHA binding" unless job.is_a?(Hash)
+    normal_condition = "github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'"
+    %w[rust web safe-filesystem].each do |job_name|
+      raise "#{job_name} must be disabled during expected-RED dispatch" unless
+        document.dig("jobs", job_name, "if") == normal_condition
+    end
     rows = job.dig("strategy", "matrix", "include")
     raise "safe-filesystem matrix missing" unless rows.is_a?(Array)
     receipt_ids = rows.map { |row| row.fetch("receipt_id") }
-    runners = rows.map { |row| row.fetch("runner") }
     raise "duplicate or missing receipt ids" unless receipt_ids.sort == RECEIPTS.sort && receipt_ids.uniq.length == receipt_ids.length
-    raise "native runners do not match contract" unless runners == RUNNERS
+    rows.each do |row|
+      expected = PROVENANCE.fetch(row.fetch("receipt_id"))
+      raise "native runner provenance does not match receipt id" unless
+        row.values_at("runner", "expected_os", "expected_arch") ==
+          expected.values_at("runner", "expected_os", "expected_arch")
+    end
 
     target = job.dig("env", "TARGET_SHA")
     raise "TARGET_SHA must bind push, PR head, and dispatch independently" unless target == TARGET_EXPRESSION
@@ -3278,8 +4412,34 @@ module C1bCiValidator
     receipt = steps.find { |step| step["name"] == "Build exclusive JSON receipt" }
     raise "receipt builder must run under always" unless receipt && receipt["if"] == "always()"
     receipt_text = receipt["run"].to_s
-    %w[requested_sha checked_out_sha aggregate_exit opentake-c1b-native-receipt-v1].each do |token|
+    %w[repository workflow workflow_file job_id event_name receipt_id runner_label runner_os runner_arch
+       requested_sha checked_out_sha aggregate_exit opentake-c1b-native-receipt-v1].each do |token|
       raise "receipt missing #{token}" unless receipt_text.include?(token)
+    end
+    {
+      "repository" => "repository = '${{ github.repository }}'",
+      "workflow" => "workflow = '${{ github.workflow }}'",
+      "job_id" => "job_id = '${{ github.job }}'",
+      "event_name" => "event_name = '${{ github.event_name }}'",
+      "runner_os" => "runner_os = '${{ runner.os }}'",
+      "runner_arch" => "runner_arch = '${{ runner.arch }}'",
+      "receipt_id" => "receipt_id = $env:RECEIPT_ID",
+      "runner_label" => "runner_label = $env:RUNNER_LABEL",
+    }.each do |field, binding|
+      raise "receipt #{field} is not context-bound" unless receipt_text.include?(binding)
+    end
+    expected_env = {
+      "RECEIPT_ID" => "${{ matrix.receipt_id }}",
+      "RUNNER_LABEL" => "${{ matrix.runner }}",
+      "EXPECTED_RUNNER_OS" => "${{ matrix.expected_os }}",
+      "EXPECTED_RUNNER_ARCH" => "${{ matrix.expected_arch }}",
+    }
+    raise "receipt environment is not matrix-bound" unless expected_env.all? { |key, value| receipt.dig("env", key) == value }
+    [
+      "if ('${{ runner.os }}' -ne $env:EXPECTED_RUNNER_OS)",
+      "if ('${{ runner.arch }}' -ne $env:EXPECTED_RUNNER_ARCH)",
+    ].each do |guard|
+      raise "receipt runtime provenance guard missing: #{guard}" unless receipt_text.include?(guard)
     end
     upload = steps.find { |step| step["uses"] == "actions/upload-artifact@v4" }
     raise "receipt artifact upload missing" unless upload && upload["if"] == "always()"
@@ -3288,6 +4448,49 @@ module C1bCiValidator
     enforce = steps.find { |step| step["name"] == "Enforce native aggregate" }
     raise "aggregate enforce step missing" unless enforce && enforce["if"] == "always()" &&
       enforce["run"].to_s.include?("final-aggregate.raw-exit")
+
+    parser = steps.find { |step| step["name"] == "Parse Windows expected-RED harness" }
+    raise "Windows RED harness parser missing" unless parser && parser["if"] == "runner.os == 'Windows'" &&
+      parser["shell"] == "pwsh" && parser["run"].to_s.include?("run-c1b-windows-red.ps1") &&
+      parser["run"].to_s.include?("ParseFile") && parser["run"].to_s.include?("$errors.Count -ne 0")
+
+    red_job = document.dig("jobs", "windows-red-evidence")
+    raise "missing dispatch-only Windows RED job" unless red_job.is_a?(Hash) &&
+      red_job["if"] == "github.event_name == 'workflow_dispatch' && inputs.red_task != 'none'" &&
+      red_job["runs-on"] == "windows-2022"
+    expected_red_env = {
+      "TARGET_SHA" => "${{ inputs.commit_sha }}", "PARENT_SHA" => "${{ inputs.red_parent_sha }}",
+      "RED_TASK" => "${{ inputs.red_task }}", "RED_NONCE" => "${{ inputs.red_nonce }}",
+    }
+    raise "Windows RED job environment is not context-bound" unless
+      expected_red_env.all? { |key, value| red_job.dig("env", key) == value }
+    red_steps = red_job.fetch("steps")
+    red_input = red_steps.find { |step| step["name"] == "Validate immutable RED inputs" }
+    red_input_text = red_input && red_input["run"].to_s
+    raise "Windows RED immutable input guards missing" unless red_input && red_input["shell"] == "pwsh" &&
+      %w[TARGET_SHA PARENT_SHA RED_NONCE].all? { |token| red_input_text.include?(token) } &&
+      red_input_text.include?("^[0-9a-f]{40}$") && red_input_text.include?("^[0-9a-f]{16}$")
+    red_checkout = red_steps.find { |step| step["uses"] == "actions/checkout@v4" }
+    raise "Windows RED checkout is not immutable" unless red_checkout &&
+      red_checkout.dig("with", "ref") == "${{ env.TARGET_SHA }}" &&
+      red_checkout.dig("with", "fetch-depth") == 2 &&
+      red_checkout.dig("with", "persist-credentials") == false
+    red_bind = red_steps.find { |step| step["name"] == "Assert exact RED commit and parent" }
+    red_bind_text = red_bind && red_bind["run"].to_s
+    %w[git\ rev-parse\ HEAD git\ rev-parse\ 'HEAD^' git\ rev-list git\ diff-tree checked-out\ RED\ SHA\ mismatch RED\ parent\ SHA\ mismatch windows.rs].each do |token|
+      raise "Windows RED identity assertion missing #{token}" unless red_bind_text&.include?(token.tr("\\", ""))
+    end
+    red_run = red_steps.find { |step| step["name"] == "Run focused expected-RED contract" }
+    raise "repository Windows RED harness is not invoked" unless red_run && red_run["shell"] == "pwsh" &&
+      red_run["run"].to_s.include?("./scripts/run-c1b-windows-red.ps1") &&
+      %w[-Task -TestSha -ParentSha -Nonce -EvidenceRoot RUNNER_TEMP].all? { |token| red_run["run"].to_s.include?(token) }
+    red_upload = red_steps.find { |step| step["uses"] == "actions/upload-artifact@v4" }
+    expected_red_name = "c1b-red-${{ inputs.red_task }}-${{ steps.bind-red.outputs.sha }}-${{ inputs.red_nonce }}"
+    expected_red_path = "${{ runner.temp }}/c1b-red/c1b-task-${{ inputs.red_task }}-${{ steps.bind-red.outputs.sha }}-${{ inputs.red_nonce }}/"
+    raise "Windows RED artifact is not immutable and nonce-bound" unless red_upload && red_upload["if"] == "always()" &&
+      red_upload.dig("with", "name") == expected_red_name &&
+      red_upload.dig("with", "path") == expected_red_path &&
+      red_upload.dig("with", "if-no-files-found") == "error" && red_upload.dig("with", "retention-days") == 30
 
     merge = "a" * 40
     head = "b" * 40
@@ -3353,6 +4556,28 @@ mutations = {
   "missing-dispatch-input" => ["required: true", "required: false"],
   "receipt-not-always" => ["name: Build exclusive JSON receipt\n        if: always()",
     "name: Build exclusive JSON receipt\n        if: success()"],
+  "receipt-id-wrong-runner" => ["runner: ubuntu-24.04", "runner: windows-2022"],
+  "receipt-id-wrong-os" => ["expected_os: Linux", "expected_os: Windows"],
+  "receipt-id-wrong-arch" => ["expected_arch: X64", "expected_arch: ARM64"],
+  "literal-repository-provenance" => ["repository = '${{ github.repository }}'", "repository = 'appergb/OpenTake'"],
+  "literal-runner-os-provenance" => ["runner_os = '${{ runner.os }}'", "runner_os = $env:EXPECTED_RUNNER_OS"],
+  "runner-label-not-matrix-bound" => ["RUNNER_LABEL: ${{ matrix.runner }}", "RUNNER_LABEL: ubuntu-24.04"],
+  "missing-runner-os-guard" => ["if ('${{ runner.os }}' -ne $env:EXPECTED_RUNNER_OS)", "if ($false)"],
+  "missing-runner-arch-guard" => ["if ('${{ runner.arch }}' -ne $env:EXPECTED_RUNNER_ARCH)", "if ($false)"],
+  "normal-jobs-run-during-red" => ["if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'",
+    "if: always()"],
+  "red-job-wrong-runner" => ["name: Windows expected RED (${{ inputs.red_task }})\n    if: github.event_name == 'workflow_dispatch' && inputs.red_task != 'none'\n    runs-on: windows-2022",
+    "name: Windows expected RED (${{ inputs.red_task }})\n    if: github.event_name == 'workflow_dispatch' && inputs.red_task != 'none'\n    runs-on: ubuntu-24.04"],
+  "red-harness-not-repository-versioned" => ["./scripts/run-c1b-windows-red.ps1", "./scripts/unreviewed-red.ps1"],
+  "red-artifact-not-nonce-bound" => ["-${{ inputs.red_nonce }}", "-fixed"],
+  "red-parser-removed" => ["Parse Windows expected-RED harness", "Skip Windows expected-RED harness"],
+  "red-concurrency-not-nonce-bound" => ["-${{ inputs.red_nonce || 'none' }}", "-fixed"],
+  "red-upload-path-substituted" => ["path: ${{ runner.temp }}/c1b-red/c1b-task-${{ inputs.red_task }}-${{ steps.bind-red.outputs.sha }}-${{ inputs.red_nonce }}/",
+    "path: ${{ runner.temp }}/untrusted/"],
+  "red-input-guard-weakened" => ["if ($env:RED_NONCE -cnotmatch '^[0-9a-f]{16}$')",
+    "if ($false)"],
+  "red-changed-path-guard-removed" => ["git diff-tree --no-commit-id --name-only -r HEAD",
+    "@('crates/opentake-project/src/safe_fs/windows.rs')"],
 }
 Dir.mktmpdir("c1b-ci-validator") do |directory|
   mutations.each do |label, (before, after)|
@@ -3372,6 +4597,7 @@ Task 3 的 commit/evidence/review protocol 是唯一允许序列，不由执行�
 ```bash
 TASK3_RED_DIR="$SAFETY_ROOT/logs/c1b-task-3-red-$(date -u +%Y%m%dT%H%M%SZ)-$(openssl rand -hex 4)"
 mkdir "$TASK3_RED_DIR"
+TASK3_RED_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 git add -- \
   scripts/validate-c1b-ci.rb \
   scripts/validate-c1b-evidence.rb \
@@ -3397,16 +4623,43 @@ test "$TASK3_RED_EXIT" -ne 0
 test "$TASK3_EVIDENCE_RED_EXIT" -ne 0
 test "$(grep -Fc 'unsupported C1B CI schema' "$TASK3_RED_DIR/semantic-red.log")" -eq 1
 test "$(grep -Fc 'unsupported C1B evidence schema' "$TASK3_RED_DIR/evidence-red.log")" -eq 1
+TASK3_RED_FINISHED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+ruby -rjson -e '
+  path, sha, started, finished, cwd, semantic_exit, evidence_exit = ARGV
+  receipt = {
+    "schema" => "opentake-c1b-task3-red-v1", "task" => "3", "attempt" => 1,
+    "red_sha" => sha, "cwd" => cwd, "started_at_utc" => started, "finished_at_utc" => finished,
+    "commands" => [
+      { "command" => "ruby scripts/tests/validate-c1b-ci-test.rb", "exit" => Integer(semantic_exit),
+        "expected" => "unsupported C1B CI schema", "log" => "semantic-red.log",
+        "raw_exit" => "semantic-red.raw-exit" },
+      { "command" => "ruby scripts/tests/validate-c1b-evidence-test.rb", "exit" => Integer(evidence_exit),
+        "expected" => "unsupported C1B evidence schema", "log" => "evidence-red.log",
+        "raw_exit" => "evidence-red.raw-exit" },
+    ],
+  }
+  File.open(path, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+    file.write(JSON.pretty_generate(receipt) + "\n")
+  end
+' "$TASK3_RED_DIR/red-receipt.json" "$TASK3_RED_SHA" "$TASK3_RED_STARTED_AT" \
+  "$TASK3_RED_FINISHED_AT" "$(pwd -P)" "$TASK3_RED_EXIT" "$TASK3_EVIDENCE_RED_EXIT"
+ruby -rjson -e '
+  receipt = JSON.parse(File.read(ARGV[0]))
+  raise "Task3 RED receipt SHA mismatch" unless receipt.fetch("red_sha") == ARGV[1]
+  raise "Task3 RED receipt command mismatch" unless receipt.fetch("commands").length == 2 &&
+    receipt.fetch("commands").all? { |row| row.fetch("exit") != 0 }
+' "$TASK3_RED_DIR/red-receipt.json" "$TASK3_RED_SHA"
 ```
 
 RED receipt `red-receipt.json` 必须 exclusive-create，并固定保存：`task="3"`、`attempt>=1`、`red_sha`、上述两个 exact commands/exits/expected messages、UTC start/finish、repo cwd、relative log/raw-exit。`red_sha` 必须等于当前 `HEAD`；两次 failure 必须分别来自 fail-closed scaffold，Ruby parse/name error 不合格。
 
-GREEN 只把两个 validator scaffold替换为本节 CI body与 section 18.8 evidence body，并修改 `.github/workflows/ci.yml` 为 section 13 exact YAML；tests不再改动：
+GREEN 只把两个 validator scaffold替换为本节 CI body与 section 18.8 evidence body，新增 section 16 exact Windows RED harness，并修改 `.github/workflows/ci.yml` 为 section 13 exact YAML；tests不再改动：
 
 ```bash
-git add -- .github/workflows/ci.yml scripts/validate-c1b-ci.rb scripts/validate-c1b-evidence.rb
+git add -- .github/workflows/ci.yml scripts/run-c1b-windows-red.ps1 scripts/validate-c1b-ci.rb scripts/validate-c1b-evidence.rb
 test "$(git diff --cached --name-only)" = "$(printf '%s\n' \
   .github/workflows/ci.yml \
+  scripts/run-c1b-windows-red.ps1 \
   scripts/validate-c1b-ci.rb \
   scripts/validate-c1b-evidence.rb)"
 git commit -m 'ci: verify C1B receipts and evidence on exact SHAs'
@@ -3427,11 +4680,31 @@ actionlint .github/workflows/ci.yml
 
 四者均为 0；若 `actionlint` 未安装，只能将该项记录为 tool-unavailable，并仍须运行前三项，不能把 YAML parse 当作替代。
 
-Task 3 GREEN 还必须运行 `git diff --check "$TASK3_RED_SHA^".."$TASK3_GREEN_SHA"` 与 `git status --porcelain=v1`（clean），并将 exact command、UTC timestamps、cwd、exit 与 log paths 写入 `command-ledger.json`。随后在 exclusive `TASK3_GREEN_DIR` 生成 `spec-security-review.md` 与 `implementation-review.md`：两名 fresh reviewer 都绑定完整 `TASK3_GREEN_SHA`，覆盖 RED receipt、workflow exact-SHA semantics、validator mutation fixtures、YAML/Ruby syntax，并各自 `APPROVE/0/0/0` 才可继续。任一 finding 产生新 GREEN commit 和 `attempt-2+` 目录；禁止覆盖 attempt-1。
+Task 3 GREEN 还必须运行 `git diff --check "$TASK3_RED_SHA^".."$TASK3_GREEN_SHA"` 与 `git status --porcelain=v1`（clean），并将 exact command、UTC timestamps、cwd、exit 与 log paths 写入 `command-ledger.json`。随后在 exclusive `TASK3_GREEN_DIR` 生成 `spec-security-review.md` 与 `implementation-review.md`：两名 fresh reviewer 都写 `Task: 3`，绑定完整 `TASK3_GREEN_SHA`，覆盖 RED receipt、workflow exact-SHA semantics、validator mutation fixtures、YAML/Ruby syntax，并各自 `APPROVE/0/0/0` 才可继续。任一 finding 产生新 GREEN commit 和 `attempt-2+` 目录；禁止覆盖 attempt-1。
+
+两份 review 通过后，在同一 exclusive review directory 内生成 Task 4 将消费的固定 manifest：
+
+```bash
+for REPORT in "$TASK3_GREEN_DIR/spec-security-review.md" "$TASK3_GREEN_DIR/implementation-review.md"; do
+  grep -Eq '^Task:[[:space:]]*3[[:space:]]*$' "$REPORT"
+  grep -Eiq "^Commit:[[:space:]]*\`?$TASK3_GREEN_SHA\`?[[:space:]]*$" "$REPORT"
+  grep -Eq '^Verdict:[[:space:]]*(\*\*)?APPROVE(\*\*)?[[:space:]]*$' "$REPORT"
+done
+ruby -rjson -e '
+  path, sha = ARGV
+  value = { "schema" => "opentake-c1b-reviewed-stage-v1", "task" => "3", "sha" => sha,
+    "baseline_sha" => "e67917260ace36e4db1ede4e36eecbc401825bb1" }
+  File.open(path, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+    file.write(JSON.pretty_generate(value) + "\n")
+  end
+' "$TASK3_GREEN_DIR/gate-manifest.json" "$TASK3_GREEN_SHA"
+```
 
 ### 18.8 Repository-versioned final evidence validator
 
-Task 3 GREEN 把 fail-closed `scripts/validate-c1b-evidence.rb` scaffold替换为下面完整 body；Task 8 只消费，不修改它：
+Task 3 GREEN 把 fail-closed `scripts/validate-c1b-evidence.rb` scaffold替换为下面完整 body。该 body 从 Task 4 起就是每个 GREEN 门禁的同一参数化 validator：参数顺序固定为 `GATE_DIR TASK GREEN_SHA PREDECESSOR_SHA PREDECESSOR_PROOF SPEC_REPORT_REL IMPLEMENTATION_REPORT_REL REPO`。对 Task 4/5/6A/6B/7A/7B/7C，gate 目录必须是 `$SAFETY_ROOT/branch-gates/c1b-task-<TASK>-<GREEN_SHA>-<16-lower-hex-NONCE>/`，`PREDECESSOR_SHA` 分别是 Task 3/4/5/6A/6B/7A/7B 已审 GREEN SHA，`PREDECESSOR_PROOF` 只有 Task 4 使用 Task 3 的安全根内 review-manifest directory；Task 5 起全部使用紧邻前一 task 已通过 validator 的 branch gate，并在每次消费时再次通过 authenticated GitHub API 验证其三份 native receipt。当前 gate 收集 task-bound 两份 review、十个本地 ledger 行和同一 run/attempt 的三份 REST archive。Task 8 只是最终一次应用：它传 `TASK=8`，`FINAL_SHA=PREDECESSOR_SHA=Task 7C GREEN SHA`，`PREDECESSOR_PROOF=Task 7C branch gate`，不修改 validator/test code。下文出现的 `final` 在前置任务门禁中表示“该任务当前不可变 GREEN SHA”，不限定为 Task 8。
+
+同样，本节后的 REST archive protocol 在每个上述 per-task gate 都执行：将 `FINAL_SHA/FINAL_SPEC_REPORT/FINAL_IMPLEMENTATION_REPORT` 分别绑定为当前 `GREEN_SHA`与当前两份 review。不允许中间 task 改用 `native-receipts/.../results.json`、只收集单一 OS，或等到 Task 8 才回填早期 gate。
 
 ```ruby
 #!/usr/bin/env ruby
@@ -3440,10 +4713,54 @@ Task 3 GREEN 把 fail-closed `scripts/validate-c1b-evidence.rb` scaffold替换�
 require "json"
 require "open3"
 require "pathname"
+require "digest"
+require "base64"
 require "time"
 
 SHA = /\A[0-9a-f]{40}\z/
+C1B_BASELINE_SHA = "e67917260ace36e4db1ede4e36eecbc401825bb1"
+EXPECTED_TASKS = %w[4 5 6a 6b 7a 7b 7c 8].freeze
+PREVIOUS_TASK = { "4" => "3", "5" => "4", "6a" => "5", "6b" => "6a", "7a" => "6b",
+  "7b" => "7a", "7c" => "7b", "8" => "7c" }.freeze
+PREDECESSOR_SUBJECT = {
+  "4" => "ci: verify C1B receipts and evidence on exact SHAs",
+  "5" => "feat(project): add Unix recursive filesystem authorities",
+  "6a" => "feat(project): add Unix consuming quarantine cleanup",
+  "6b" => "feat(project): add fail-closed Windows platform scaffold",
+  "7a" => "feat(project): capture Windows filesystem capabilities",
+  "7b" => "feat(project): enforce Windows owner-only creation",
+  "7c" => "feat(project): add Windows capability-relative rename",
+  "8" => "feat(project): add Windows retained-handle cleanup",
+}.freeze
+SINGLE_GREEN_SUBJECTS = {
+  "6a" => "feat(project): add fail-closed Windows platform scaffold",
+}.freeze
+EXPECTED_SLICE_SUBJECTS = {
+  "4" => ["test(project): specify Unix recursive filesystem authorities",
+    "feat(project): add Unix recursive filesystem authorities"],
+  "5" => ["test(project): specify Unix quarantine and recursive cleanup",
+    "feat(project): add Unix consuming quarantine cleanup"],
+  "6b" => ["test(project): specify Windows capability acquisition and io",
+    "feat(project): capture Windows filesystem capabilities"],
+  "7a" => ["test(project): specify Windows owner-only creation and rollback",
+    "feat(project): enforce Windows owner-only creation"],
+  "7b" => ["test(project): specify Windows retained quarantine and publish",
+    "feat(project): add Windows capability-relative rename"],
+  "7c" => ["test(project): specify Windows retained cleanup and delete",
+    "feat(project): add Windows retained-handle cleanup"],
+}.freeze
 EXPECTED_IDS = %w[linux-x86_64 macos-native windows-x86_64].freeze
+EXPECTED_PROVENANCE = {
+  "linux-x86_64" => { "runner_os" => "Linux", "runner_label" => "ubuntu-24.04", "runner_arch" => "X64" },
+  "macos-native" => { "runner_os" => "macOS", "runner_label" => "macos-14", "runner_arch" => "ARM64" },
+  "windows-x86_64" => { "runner_os" => "Windows", "runner_label" => "windows-2022", "runner_arch" => "X64" },
+}.freeze
+EXPECTED_REPOSITORY = "appergb/OpenTake"
+EXPECTED_WORKFLOW = "CI"
+EXPECTED_WORKFLOW_FILE = ".github/workflows/ci.yml"
+EXPECTED_JOB_ID = "safe-filesystem"
+EXPECTED_EVENTS = %w[push pull_request workflow_dispatch].freeze
+GITHUB_API_VERSION = "2026-03-10"
 LOCAL_COMMANDS = {
   "cargo-fmt" => "cargo fmt --all --check",
   "cargo-clippy" => "cargo clippy --workspace --all-targets -- -D warnings",
@@ -3463,13 +4780,29 @@ NATIVE_COMMANDS = {
   "archive-security" => "cargo test -p opentake-project --test archive_security -- --test-threads=1",
 }.freeze
 
-gate, expected_sha, spec_report, implementation_report, repo = ARGV
-abort "usage: validate-c1b-evidence.rb GATE_DIR SHA SPEC_REPORT IMPLEMENTATION_REPORT REPO" unless repo
+gate, task, expected_sha, predecessor_sha, predecessor_proof, spec_report_relative,
+  implementation_report_relative, repo = ARGV
+abort "usage: validate-c1b-evidence.rb GATE_DIR TASK SHA PREDECESSOR_SHA PREDECESSOR_PROOF SPEC_REPORT_REL IMPLEMENTATION_REPORT_REL REPO" unless repo
+raise "unsupported C1B gate task" unless EXPECTED_TASKS.include?(task)
 expected_sha = expected_sha.downcase
+predecessor_sha = predecessor_sha.downcase
 raise "final SHA must be lowercase 40-hex" unless SHA.match?(expected_sha)
+raise "predecessor SHA must be lowercase 40-hex" unless SHA.match?(predecessor_sha)
 raise "gate directory missing" unless Dir.exist?(gate)
 gate = File.realpath(gate)
 repo = File.realpath(repo)
+predecessor_proof = File.realpath(predecessor_proof)
+raise "gate must be stored directly below branch-gates" unless File.basename(File.dirname(gate)) == "branch-gates"
+safety_root = File.dirname(File.dirname(gate))
+safety_prefix = safety_root.end_with?(File::SEPARATOR) ? safety_root : safety_root + File::SEPARATOR
+raise "predecessor proof escapes safety root" unless predecessor_proof.start_with?(safety_prefix)
+nonce = "[0-9a-f]{16}"
+expected_gate = if task == "8"
+  /\Ac1b-\d{8}T\d{6}Z-#{Regexp.escape(expected_sha)}-#{nonce}\z/
+else
+  /\Ac1b-task-#{Regexp.escape(task)}-#{Regexp.escape(expected_sha)}-#{nonce}\z/
+end
+raise "gate basename does not bind task/SHA/nonce" unless File.basename(gate).match?(expected_gate)
 
 def confined_file!(root, relative, label)
   raise "#{label} path must be relative" if Pathname.new(relative).absolute?
@@ -3481,6 +4814,32 @@ def confined_file!(root, relative, label)
   candidate
 end
 
+binding_path = confined_file!(gate, "predecessor-binding.json", "predecessor binding")
+binding = JSON.parse(File.read(binding_path))
+raise "predecessor binding mismatch" unless binding == {
+  "schema" => "opentake-c1b-predecessor-binding-v1", "task" => task,
+  "predecessor_task" => PREVIOUS_TASK.fetch(task), "predecessor_sha" => predecessor_sha,
+  "predecessor_proof" => predecessor_proof,
+}
+
+def gh_json!(endpoint, label)
+  stdout, stderr, status = Open3.capture3("gh", "api", "--hostname", "github.com",
+    "-H", "X-GitHub-Api-Version: #{GITHUB_API_VERSION}", endpoint)
+  raise "#{label} GitHub API failed: #{stderr.strip}" unless status.success?
+  JSON.parse(stdout)
+rescue Errno::ENOENT
+  raise "authenticated gh CLI is required"
+rescue JSON::ParserError
+  raise "#{label} GitHub API returned invalid JSON"
+end
+
+def gh_authenticated!
+  _stdout, stderr, status = Open3.capture3("gh", "auth", "status", "--hostname", "github.com")
+  raise "gh is not authenticated for github.com: #{stderr.strip}" unless status.success?
+rescue Errno::ENOENT
+  raise "authenticated gh CLI is required"
+end
+
 def timestamp!(value, label)
   parsed = Time.iso8601(value)
   raise "#{label} must be UTC" unless parsed.utc_offset.zero?
@@ -3489,14 +4848,110 @@ rescue ArgumentError
   raise "#{label} is not RFC3339"
 end
 
+def approved_report!(path, role, task, sha)
+  body = File.read(path)
+  raise "#{role} report role mismatch" unless body.match?(/^Role:\s*.*#{Regexp.escape(role)}/i)
+  raise "#{role} report task mismatch" unless body.match?(/^Task:\s*#{Regexp.escape(task)}\s*$/i)
+  raise "#{role} report commit mismatch" unless body.match?(/^Commit:\s*`?#{sha}`?\s*$/i)
+  raise "#{role} report not approved" unless body.match?(/^Verdict:\s*\*\*?APPROVE\*\*?\s*$/i) ||
+    body.match?(/^Verdict:\s*APPROVE\s*$/i)
+  %w[Critical Important Minor].each do |severity|
+    raise "#{role} report has #{severity} findings" unless
+      body.match?(/^#{severity}:\s*\*\*?0\*\*?\s*$/i) || body.match?(/^#{severity}:\s*0\s*$/i)
+  end
+end
+
+gh_authenticated!
 head, head_status = Open3.capture2("git", "-C", repo, "rev-parse", "HEAD")
 raise "cannot read repository HEAD" unless head_status.success?
 raise "repository HEAD mismatch" unless head.strip.downcase == expected_sha
+[C1B_BASELINE_SHA, predecessor_sha, expected_sha].each do |sha|
+  _out, _err, object_status = Open3.capture3("git", "-C", repo, "cat-file", "-e", "#{sha}^{commit}")
+  raise "required gate commit is missing: #{sha}" unless object_status.success?
+end
+_out, _err, baseline_status = Open3.capture3("git", "-C", repo, "merge-base", "--is-ancestor",
+  C1B_BASELINE_SHA, predecessor_sha)
+raise "predecessor is outside the frozen C1B baseline" unless baseline_status.success?
+_out, _err, predecessor_status = Open3.capture3("git", "-C", repo, "merge-base", "--is-ancestor",
+  predecessor_sha, expected_sha)
+raise "gate SHA does not descend from predecessor" unless predecessor_status.success?
+predecessor_subject, predecessor_subject_status = Open3.capture2("git", "-C", repo, "show", "-s",
+  "--format=%s", predecessor_sha)
+raise "cannot resolve predecessor subject" unless predecessor_subject_status.success?
+raise "predecessor is not the required previous stage" unless predecessor_subject.strip == PREDECESSOR_SUBJECT.fetch(task)
+if task == "8"
+  raise "Task 8 must validate the unchanged Task 7C GREEN SHA" unless predecessor_sha == expected_sha
+else
+  raise "implementation task gate must advance beyond predecessor" if predecessor_sha == expected_sha
+  chain, chain_status = Open3.capture2("git", "-C", repo, "rev-list", "--reverse", "--first-parent",
+    "#{predecessor_sha}..#{expected_sha}")
+  raise "cannot resolve task commit chain" unless chain_status.success?
+  commits = chain.lines.map(&:strip).reject(&:empty?)
+  minimum = task == "6a" ? 1 : 2
+  raise "task chain is shorter than its contract" unless commits.length >= minimum
+  commits.each do |commit|
+    row, row_status = Open3.capture2("git", "-C", repo, "rev-list", "--parents", "-n", "1", commit)
+    raise "cannot resolve task commit parent" unless row_status.success?
+    raise "task chain commit must have exactly one parent" unless row.split.length == 2
+  end
+  first_parent, first_parent_status = Open3.capture2("git", "-C", repo, "rev-parse", "#{commits.first}^")
+  raise "cannot resolve first task parent" unless first_parent_status.success?
+  raise "task predecessor must be the exact first task parent" unless first_parent.strip.downcase == predecessor_sha
+  subjects = commits.map do |commit|
+    subject, subject_status = Open3.capture2("git", "-C", repo, "show", "-s", "--format=%s", commit)
+    raise "cannot resolve task commit subject" unless subject_status.success?
+    subject.strip
+  end
+  if task == "6a"
+    raise "Task 6A GREEN/correction subjects mismatch" unless
+      subjects.all? { |subject| subject == SINGLE_GREEN_SUBJECTS.fetch(task) }
+  else
+    red_subject, green_subject = EXPECTED_SLICE_SUBJECTS.fetch(task)
+    first_green = subjects.index(green_subject)
+    raise "task chain lacks GREEN commit" unless first_green && first_green.positive?
+    raise "task RED commit subjects mismatch" unless subjects[0...first_green].all? { |subject| subject == red_subject }
+    raise "task GREEN/correction subjects mismatch" unless subjects[first_green..].all? { |subject| subject == green_subject }
+  end
+end
+
+previous_task = PREVIOUS_TASK.fetch(task)
+predecessor_gate_to_revalidate = nil
+if previous_task == "3"
+  expected_name = /\Ac1b-task-#{Regexp.escape(previous_task)}-#{Regexp.escape(predecessor_sha)}-attempt-[1-9][0-9]*\z/
+  raise "predecessor review directory identity mismatch" unless File.basename(predecessor_proof).match?(expected_name)
+  manifest_path = confined_file!(predecessor_proof, "gate-manifest.json", "predecessor manifest")
+  manifest = JSON.parse(File.read(manifest_path))
+  raise "predecessor manifest mismatch" unless manifest == {
+    "schema" => "opentake-c1b-reviewed-stage-v1", "task" => previous_task,
+    "sha" => predecessor_sha, "baseline_sha" => C1B_BASELINE_SHA,
+  }
+  approved_report!(confined_file!(predecessor_proof, "spec-security-review.md", "predecessor spec report"),
+    "spec-security", previous_task, predecessor_sha)
+  approved_report!(confined_file!(predecessor_proof, "implementation-review.md", "predecessor implementation report"),
+    "implementation", previous_task, predecessor_sha)
+else
+  expected_name = /\Ac1b-task-#{Regexp.escape(previous_task)}-#{Regexp.escape(predecessor_sha)}-[0-9a-f]{16}\z/
+  raise "predecessor gate identity mismatch" unless File.basename(predecessor_proof).match?(expected_name)
+  raw = confined_file!(predecessor_proof, "results-validation.raw-exit", "predecessor validator exit")
+  raise "predecessor gate validator did not pass" unless File.read(raw).strip == "0"
+  validation_log = File.read(confined_file!(predecessor_proof, "results-validation.log", "predecessor validator log"))
+  raise "predecessor validator success identity mismatch" unless
+    validation_log.match?(/^c1b-evidence-validation=ok task=#{Regexp.escape(previous_task)} predecessor=[0-9a-f]{40} sha=#{predecessor_sha}$/)
+  previous_results = File.read(confined_file!(predecessor_proof, "results.md", "predecessor results"))
+  raise "predecessor results task mismatch" unless previous_results.match?(/^Task:\s*#{Regexp.escape(previous_task)}$/)
+  raise "predecessor results SHA mismatch" unless previous_results.match?(/^Final SHA:\s*#{predecessor_sha}$/)
+  raise "predecessor results aggregate mismatch" unless previous_results.match?(/^Aggregate:\s*0$/)
+  approved_report!(confined_file!(predecessor_proof, "reviews/spec-security-review.md", "predecessor spec report"),
+    "spec-security", previous_task, predecessor_sha)
+  approved_report!(confined_file!(predecessor_proof, "reviews/implementation-review.md", "predecessor implementation report"),
+    "implementation", previous_task, predecessor_sha)
+  predecessor_gate_to_revalidate = predecessor_proof
+end
 status, status_result = Open3.capture2("git", "-C", repo, "status", "--porcelain=v1")
 raise "cannot read repository status" unless status_result.success?
 raise "repository is not clean" unless status.empty?
 
-ledger_path = File.join(gate, "command-ledger.json")
+ledger_path = confined_file!(gate, "command-ledger.json", "command ledger")
 ledger = JSON.parse(File.read(ledger_path))
 raise "command ledger must contain exactly ten rows" unless ledger.is_a?(Array) && ledger.length == LOCAL_COMMANDS.length
 ledger_ids = ledger.map { |row| row.fetch("id") }
@@ -3521,13 +4976,33 @@ end
   raise "#{status_name} is not clean" unless File.read(status_path).empty?
 end
 
+def validate_native_receipts!(gate, expected_sha, repo)
 receipt_paths = Dir.glob(File.join(gate, "native-receipts", "*", "*", "receipt.json"))
 raise "expected exactly three native receipts" unless receipt_paths.length == 3
-receipts = receipt_paths.map { |path| [path, JSON.parse(File.read(path))] }
+receipts = receipt_paths.map do |path|
+  relative = Pathname.new(path).relative_path_from(Pathname.new(gate)).to_s
+  confined = confined_file!(gate, relative, "native receipt")
+  [confined, JSON.parse(File.read(confined))]
+end
 ids = receipts.map { |_path, receipt| receipt.fetch("receipt_id") }
 raise "duplicate or missing native receipt id" unless ids.sort == EXPECTED_IDS.sort && ids.uniq.length == ids.length
+seen_run_ids = []
+seen_run_attempts = []
+seen_job_ids = []
+seen_artifact_ids = []
+remote_rows = {}
 receipts.each do |path, receipt|
   raise "receipt schema mismatch: #{path}" unless receipt.fetch("schema") == "opentake-c1b-native-receipt-v1"
+  receipt_id = receipt.fetch("receipt_id")
+  provenance = EXPECTED_PROVENANCE.fetch(receipt_id)
+  provenance.each do |field, expected|
+    raise "receipt #{field} mismatch for #{receipt_id}: #{path}" unless receipt.fetch(field) == expected
+  end
+  raise "receipt repository mismatch: #{path}" unless receipt.fetch("repository") == EXPECTED_REPOSITORY
+  raise "receipt workflow mismatch: #{path}" unless receipt.fetch("workflow") == EXPECTED_WORKFLOW
+  raise "receipt workflow_file mismatch: #{path}" unless receipt.fetch("workflow_file") == EXPECTED_WORKFLOW_FILE
+  raise "receipt job_id mismatch: #{path}" unless receipt.fetch("job_id") == EXPECTED_JOB_ID
+  raise "receipt event_name mismatch: #{path}" unless EXPECTED_EVENTS.include?(receipt.fetch("event_name"))
   requested = receipt.fetch("requested_sha").downcase
   checked = receipt.fetch("checked_out_sha").downcase
   raise "receipt SHA malformed: #{path}" unless SHA.match?(requested) && SHA.match?(checked)
@@ -3536,8 +5011,106 @@ receipts.each do |path, receipt|
   run_attempt = receipt.fetch("run_attempt").to_s
   raise "receipt run_id malformed: #{path}" unless run_id.match?(/\A[1-9][0-9]*\z/)
   raise "receipt run_attempt malformed: #{path}" unless run_attempt.match?(/\A[1-9][0-9]*\z/)
-  expected_receipt_path = File.join(gate, "native-receipts", run_id, receipt.fetch("receipt_id"), "receipt.json")
+  seen_run_ids << run_id
+  seen_run_attempts << run_attempt
+  expected_receipt_path = File.join(gate, "native-receipts", run_id, receipt_id, "receipt.json")
   raise "receipt path/run_id mismatch: #{path}" unless File.realpath(path) == File.realpath(expected_receipt_path)
+  receipt_root = Pathname.new(File.dirname(path)).relative_path_from(Pathname.new(gate)).to_s
+  run_path = confined_file!(gate, File.join(receipt_root, "run.json"), "#{receipt_id} run metadata")
+  jobs_path = confined_file!(gate, File.join(receipt_root, "jobs.json"), "#{receipt_id} jobs metadata")
+  artifact_path = confined_file!(gate, File.join(receipt_root, "artifact.json"), "#{receipt_id} artifact metadata")
+  zip_path = confined_file!(gate, File.join(receipt_root, "artifact.zip"), "#{receipt_id} artifact archive")
+
+  run_endpoint = "/repos/#{EXPECTED_REPOSITORY}/actions/runs/#{run_id}"
+  jobs_endpoint = "#{run_endpoint}/jobs?per_page=100"
+  artifacts_endpoint = "#{run_endpoint}/artifacts?per_page=100"
+  live_run = gh_json!(run_endpoint, "#{receipt_id} run")
+  live_jobs = gh_json!(jobs_endpoint, "#{receipt_id} jobs")
+  live_artifacts = gh_json!(artifacts_endpoint, "#{receipt_id} artifacts")
+  raise "jobs API pagination is incomplete" unless
+    live_jobs.fetch("total_count") == live_jobs.fetch("jobs").length && live_jobs.fetch("total_count") <= 100
+  raise "artifacts API pagination is incomplete" unless
+    live_artifacts.fetch("total_count") == live_artifacts.fetch("artifacts").length &&
+      live_artifacts.fetch("total_count") <= 100
+  raise "saved run metadata differs from authenticated API" unless JSON.parse(File.read(run_path)) == live_run
+  raise "saved jobs metadata differs from authenticated API" unless JSON.parse(File.read(jobs_path)) == live_jobs
+
+  raise "run id mismatch" unless live_run.fetch("id").to_s == run_id
+  raise "run attempt mismatch" unless live_run.fetch("run_attempt").to_s == run_attempt
+  raise "run repository mismatch" unless live_run.dig("repository", "full_name") == EXPECTED_REPOSITORY
+  raise "run workflow mismatch" unless live_run.fetch("name") == EXPECTED_WORKFLOW
+  run_path = live_run.fetch("path")
+  raise "run workflow path mismatch" unless run_path.split("@", 2).first == EXPECTED_WORKFLOW_FILE
+  event_name = live_run.fetch("event")
+  raise "run event mismatch" unless event_name == receipt.fetch("event_name")
+  raise "run is not successful and completed" unless
+    live_run.fetch("status") == "completed" && live_run.fetch("conclusion") == "success"
+  run_identity_sha = live_run.fetch("head_sha").downcase
+  raise "run identity SHA malformed" unless SHA.match?(run_identity_sha)
+  case event_name
+  when "push"
+    raise "push run head SHA mismatch" unless run_identity_sha == expected_sha
+  when "pull_request"
+    pull_request_heads = live_run.fetch("pull_requests").map { |pr| pr.dig("head", "sha")&.downcase }.compact
+    pr_head_bound = run_identity_sha == expected_sha || pull_request_heads.include?(expected_sha)
+    unless pr_head_bound
+      merge_commit = gh_json!("/repos/#{EXPECTED_REPOSITORY}/commits/#{run_identity_sha}", "PR merge commit")
+      parent_shas = merge_commit.fetch("parents").map { |parent| parent.fetch("sha").downcase }
+      pr_head_bound = parent_shas.include?(expected_sha)
+    end
+    raise "PR run is not bound to the checked-out head SHA" unless pr_head_bound
+  when "workflow_dispatch"
+    # Dispatch run identity is the workflow ref, while TARGET_SHA is the explicit immutable input.
+    # Job/artifact metadata bind to run_identity_sha; the archive receipt binds checkout to expected_sha.
+    raise "workflow_dispatch must run from main" unless live_run.fetch("head_branch") == "main"
+  else
+    raise "unsupported run event #{event_name.inspect}"
+  end
+  workflow_endpoint = "/repos/#{EXPECTED_REPOSITORY}/contents/#{EXPECTED_WORKFLOW_FILE}?ref=#{run_identity_sha}"
+  workflow_content = gh_json!(workflow_endpoint, "run workflow content")
+  remote_workflow = Base64.strict_decode64(workflow_content.fetch("content").delete("\n"))
+  local_workflow_path = File.join(repo, EXPECTED_WORKFLOW_FILE)
+  raise "local final workflow missing" unless File.file?(local_workflow_path)
+  raise "run workflow bytes differ from final reviewed workflow" unless
+    remote_workflow == File.binread(local_workflow_path)
+
+  expected_job_name = "Safe filesystem (#{receipt_id})"
+  matching_jobs = live_jobs.fetch("jobs").select { |job| job.fetch("name") == expected_job_name }
+  raise "expected exactly one native job #{expected_job_name}" unless matching_jobs.length == 1
+  job = matching_jobs.fetch(0)
+  raise "native job run mismatch" unless job.fetch("run_id").to_s == run_id
+  raise "native job run-identity SHA mismatch" unless job.fetch("head_sha").downcase == run_identity_sha
+  raise "native job not successful and completed" unless
+    job.fetch("status") == "completed" && job.fetch("conclusion") == "success"
+  seen_job_ids << job.fetch("id").to_s
+
+  expected_artifact_name = "c1b-native-#{receipt_id}-#{expected_sha}"
+  matching_artifacts = live_artifacts.fetch("artifacts").select do |artifact|
+    artifact.fetch("name") == expected_artifact_name
+  end
+  raise "expected exactly one SHA-bound artifact #{expected_artifact_name}" unless matching_artifacts.length == 1
+  artifact = matching_artifacts.fetch(0)
+  raise "saved artifact metadata differs from authenticated API" unless JSON.parse(File.read(artifact_path)) == artifact
+  raise "artifact expired" if artifact.fetch("expired")
+  raise "artifact workflow run id mismatch" unless artifact.dig("workflow_run", "id").to_s == run_id
+  raise "artifact workflow run-identity SHA mismatch" unless
+    artifact.dig("workflow_run", "head_sha").downcase == run_identity_sha
+  digest = artifact.fetch("digest")
+  raise "artifact digest malformed" unless digest.match?(/\Asha256:[0-9a-f]{64}\z/)
+  actual_digest = "sha256:#{Digest::SHA256.file(zip_path).hexdigest}"
+  raise "artifact archive digest mismatch" unless actual_digest == digest
+  seen_artifact_ids << artifact.fetch("id").to_s
+  remote_rows[receipt_id] = {
+    "job_id" => job.fetch("id").to_s,
+    "artifact_id" => artifact.fetch("id").to_s,
+    "artifact_name" => artifact.fetch("name"),
+    "artifact_digest" => digest,
+    "run_identity_sha" => run_identity_sha,
+  }
+
+  archived_receipt, unzip_error, unzip_status = Open3.capture3("unzip", "-p", zip_path, "receipt.json")
+  raise "cannot read receipt.json from retained artifact archive: #{unzip_error.strip}" unless unzip_status.success?
+  raise "extracted receipt differs from retained REST archive" unless JSON.parse(archived_receipt) == receipt
   commands = receipt.fetch("commands")
   command_ids = commands.map { |command| command.fetch("id") }
   raise "receipt command set/order mismatch: #{path}" unless command_ids == NATIVE_COMMANDS.keys
@@ -3560,14 +5133,24 @@ receipts.each do |path, receipt|
       "final-aggregate.raw-exit"), "native aggregate")
   raise "native aggregate raw exit mismatch: #{path}" unless File.read(aggregate).strip == "0"
 end
+raise "native receipts do not belong to one workflow run" unless seen_run_ids.uniq.length == 1
+raise "native receipts do not belong to one workflow attempt" unless seen_run_attempts.uniq.length == 1
+raise "duplicate workflow job ids" unless seen_job_ids.uniq.length == seen_job_ids.length
+raise "duplicate artifact ids" unless seen_artifact_ids.uniq.length == seen_artifact_ids.length
+[receipts, remote_rows]
+end
+
+validate_native_receipts!(predecessor_gate_to_revalidate, predecessor_sha, repo) if predecessor_gate_to_revalidate
+receipts, remote_rows = validate_native_receipts!(gate, expected_sha, repo)
 
 {
-  "spec-security" => spec_report,
-  "implementation" => implementation_report,
-}.each do |role, path|
-  raise "#{role} report missing" unless File.file?(path)
+  "spec-security" => spec_report_relative,
+  "implementation" => implementation_report_relative,
+}.each do |role, relative|
+  path = confined_file!(gate, relative, "#{role} report")
   body = File.read(path)
   raise "#{role} report role mismatch" unless body.match?(/^Role:\s*.*#{Regexp.escape(role)}/i)
+  raise "#{role} report task mismatch" unless body.match?(/^Task:\s*#{Regexp.escape(task)}\s*$/i)
   raise "#{role} report commit mismatch" unless body.match?(/^Commit:\s*`?#{expected_sha}`?\s*$/i)
   raise "#{role} report not approved" unless body.match?(/^Verdict:\s*\*\*?APPROVE\*\*?\s*$/i) || body.match?(/^Verdict:\s*APPROVE\s*$/i)
   %w[Critical Important Minor].each do |severity|
@@ -3575,10 +5158,11 @@ end
   end
 end
 
-results_path = File.join(gate, "results.md")
-raise "results.md missing" unless File.file?(results_path)
+results_path = confined_file!(gate, "results.md", "results")
 results = File.read(results_path)
-raise "results missing baseline SHA" unless results.match?(/^Baseline SHA:\s*[0-9a-f]{40}$/)
+raise "results task mismatch" unless results.match?(/^Task:\s*#{Regexp.escape(task)}$/)
+raise "results baseline SHA mismatch" unless results.match?(/^Baseline SHA:\s*#{C1B_BASELINE_SHA}$/)
+raise "results predecessor SHA mismatch" unless results.match?(/^Predecessor SHA:\s*#{predecessor_sha}$/)
 raise "results missing final SHA" unless results.match?(/^Final SHA:\s*#{expected_sha}$/)
 raise "results missing clean pre-status" unless results.match?(/^Pre-status:\s*clean$/)
 raise "results missing clean post-status" unless results.match?(/^Post-status:\s*clean$/)
@@ -3587,14 +5171,17 @@ LOCAL_COMMANDS.each do |id, command|
   raise "results missing exact local row #{id}" unless results.include?(row)
 end
 receipts.each do |_path, receipt|
-  row = "| #{receipt.fetch('receipt_id')} | #{receipt.fetch('run_id')} | #{receipt.fetch('run_attempt')} | #{expected_sha} | 0 |"
+  remote = remote_rows.fetch(receipt.fetch("receipt_id"))
+  row = "| #{receipt.fetch('receipt_id')} | #{receipt.fetch('run_id')} | #{receipt.fetch('run_attempt')} | " \
+    "#{remote.fetch('job_id')} | #{remote.fetch('artifact_id')} | #{remote.fetch('artifact_name')} | " \
+    "#{remote.fetch('artifact_digest')} | #{expected_sha} | 0 |"
   raise "results missing exact native row #{receipt.fetch('receipt_id')}" unless results.include?(row)
 end
-raise "results missing spec report path" unless results.include?(spec_report)
-raise "results missing implementation report path" unless results.include?(implementation_report)
+raise "results missing spec report path" unless results.include?(spec_report_relative)
+raise "results missing implementation report path" unless results.include?(implementation_report_relative)
 raise "results missing aggregate" unless results.match?(/^Aggregate:\s*0$/)
 
-puts "c1b-evidence-validation=ok sha=#{expected_sha}"
+puts "c1b-evidence-validation=ok task=#{task} predecessor=#{predecessor_sha} sha=#{expected_sha}"
 ```
 
 Task 3 test-only commit 同时加入 `scripts/tests/validate-c1b-evidence-test.rb`。该 test 不依赖 preexisting final gate；它在 `Dir.mktmpdir` 中从当前 clean repository HEAD 构造完整 canonical synthetic gate，再派生每个 mutation：
@@ -3607,6 +5194,8 @@ require "fileutils"
 require "json"
 require "open3"
 require "rbconfig"
+require "digest"
+require "base64"
 require "tmpdir"
 
 validator = File.expand_path("../validate-c1b-evidence.rb", __dir__)
@@ -3614,6 +5203,9 @@ repo = File.expand_path("../..", __dir__)
 sha, sha_status = Open3.capture2("git", "-C", repo, "rev-parse", "HEAD")
 raise "cannot resolve test HEAD" unless sha_status.success?
 sha = sha.strip.downcase
+task = "4"
+baseline = "e67917260ace36e4db1ede4e36eecbc401825bb1"
+predecessor = sha
 
 LOCAL_COMMANDS = {
   "cargo-fmt" => "cargo fmt --all --check",
@@ -3634,9 +5226,84 @@ NATIVE_COMMANDS = {
   "archive-security" => "cargo test -p opentake-project --test archive_security -- --test-threads=1",
 }.freeze
 RECEIPT_IDS = %w[linux-x86_64 macos-native windows-x86_64].freeze
+PROVENANCE = {
+  "linux-x86_64" => { "runner_os" => "Linux", "runner_label" => "ubuntu-24.04", "runner_arch" => "X64" },
+  "macos-native" => { "runner_os" => "macOS", "runner_label" => "macos-14", "runner_arch" => "ARM64" },
+  "windows-x86_64" => { "runner_os" => "Windows", "runner_label" => "windows-2022", "runner_arch" => "X64" },
+}.freeze
 
-def run_validator(validator, gate, sha, spec, implementation, repo)
-  Open3.capture3(RbConfig.ruby, validator, gate, sha, spec, implementation, repo)
+def run_validator(validator, gate, task, sha, predecessor, predecessor_proof,
+  spec, implementation, repo, fake_bin:, fixture:)
+  env = {
+    "PATH" => "#{fake_bin}#{File::PATH_SEPARATOR}#{ENV.fetch('PATH', '')}",
+    "C1B_FAKE_GH_FIXTURE_ROOT" => File.dirname(fixture),
+  }
+  Open3.capture3(env, RbConfig.ruby, validator, gate, task, sha, predecessor, predecessor_proof,
+    spec, implementation, repo)
+end
+
+def install_fake_gh(root)
+  bin = File.join(root, "fake-bin")
+  FileUtils.mkdir_p(bin)
+  script = File.join(bin, "gh")
+  File.write(script, <<~'SH')
+    #!/bin/sh
+    set -eu
+    fixture_root=${C1B_FAKE_GH_FIXTURE_ROOT:?}
+    if [ "$1" = auth ] && [ "$2" = status ] && [ "$3" = --hostname ] && [ "$4" = github.com ]; then
+      exit 0
+    fi
+    [ "$1" = api ] && [ "$2" = --hostname ] && [ "$3" = github.com ]
+    shift 3
+    endpoint=
+    while [ "$#" -gt 0 ]; do endpoint=$1; shift; done
+    fixture_for_run() {
+      wanted=$1
+      for candidate in "$fixture_root"/*-gh-fixture; do
+        [ -d "$candidate" ] || continue
+        [ "$(cat "$candidate/run-id.txt")" = "$wanted" ] && { printf '%s\n' "$candidate"; return 0; }
+      done
+      return 1
+    }
+    fixture_for_sha() {
+      wanted=$1
+      for candidate in "$fixture_root"/*-gh-fixture; do
+        [ -d "$candidate" ] || continue
+        [ "$(cat "$candidate/run-sha.txt")" = "$wanted" ] && { printf '%s\n' "$candidate"; return 0; }
+      done
+      return 1
+    }
+    case "$endpoint" in
+      /repos/appergb/OpenTake/actions/runs/*/jobs?per_page=100)
+        id=$(printf '%s' "$endpoint" | sed -E 's#.*/runs/([0-9]+)/jobs.*#\1#')
+        fixture=$(fixture_for_run "$id") && cat "$fixture/jobs.json"
+        ;;
+      /repos/appergb/OpenTake/actions/runs/*/artifacts?per_page=100)
+        id=$(printf '%s' "$endpoint" | sed -E 's#.*/runs/([0-9]+)/artifacts.*#\1#')
+        fixture=$(fixture_for_run "$id") && cat "$fixture/artifacts.json"
+        ;;
+      /repos/appergb/OpenTake/actions/runs/*)
+        id=$(printf '%s' "$endpoint" | sed -E 's#.*/runs/([0-9]+).*#\1#')
+        fixture=$(fixture_for_run "$id") && cat "$fixture/run.json"
+        ;;
+      /repos/appergb/OpenTake/commits/*)
+        sha=${endpoint##*/}; fixture=$(fixture_for_sha "$sha") && cat "$fixture/run-commit.json"
+        ;;
+      /repos/appergb/OpenTake/contents/.github/workflows/ci.yml?ref=*)
+        sha=${endpoint##*ref=}; fixture=$(fixture_for_sha "$sha") && cat "$fixture/workflow-content.json"
+        ;;
+      /repos/appergb/OpenTake/actions/artifacts/*/zip)
+        id=$(printf '%s' "$endpoint" | sed -E 's#.*/artifacts/([0-9]+)/zip#\1#')
+        for fixture in "$fixture_root"/*-gh-fixture; do
+          [ -f "$fixture/artifact-$id.zip" ] && { cat "$fixture/artifact-$id.zip"; exit 0; }
+        done
+        exit 66
+        ;;
+      *) printf 'unsupported fake endpoint: %s\n' "$endpoint" >&2; exit 64 ;;
+    esac
+  SH
+  File.chmod(0o755, script)
+  bin
 end
 
 def rewrite_json(path)
@@ -3645,9 +5312,29 @@ def rewrite_json(path)
   File.write(path, JSON.pretty_generate(value) + "\n")
 end
 
-def build_gate(root, label, sha, repo)
-  gate = File.join(root, label)
+def build_review_proof(root, task, sha, baseline)
+  directory = File.join(root, "logs", "c1b-task-#{task}-#{sha}-attempt-1")
+  FileUtils.mkdir_p(directory)
+  report = ->(role) { "Role: #{role}\nTask: #{task}\nCommit: #{sha}\nVerdict: APPROVE\nCritical: 0\nImportant: 0\nMinor: 0\n" }
+  File.write(File.join(directory, "spec-security-review.md"), report.call("spec-security"))
+  File.write(File.join(directory, "implementation-review.md"), report.call("implementation"))
+  manifest = { "schema" => "opentake-c1b-reviewed-stage-v1", "task" => task,
+    "sha" => sha, "baseline_sha" => baseline }
+  File.write(File.join(directory, "gate-manifest.json"), JSON.pretty_generate(manifest) + "\n")
+  directory
+end
+
+def build_gate(root, label, task, sha, predecessor, predecessor_proof, baseline, repo)
+  repo = File.realpath(repo)
+  nonce = Digest::SHA256.hexdigest(label)[0, 16]
+  gate_name = task == "8" ? "c1b-20260713T000000Z-#{sha}-#{nonce}" : "c1b-task-#{task}-#{sha}-#{nonce}"
+  gate = File.join(root, "branch-gates", gate_name)
   FileUtils.mkdir_p(gate)
+  binding = { "schema" => "opentake-c1b-predecessor-binding-v1", "task" => task,
+    "predecessor_task" => (task == "4" ? "3" : { "5" => "4", "6a" => "5", "6b" => "6a",
+      "7a" => "6b", "7b" => "7a", "7c" => "7b", "8" => "7c" }.fetch(task)),
+    "predecessor_sha" => predecessor, "predecessor_proof" => File.realpath(predecessor_proof) }
+  File.write(File.join(gate, "predecessor-binding.json"), JSON.pretty_generate(binding) + "\n")
   timestamp = "2026-07-13T00:00:00Z"
   ledger = LOCAL_COMMANDS.map do |id, command|
     File.write(File.join(gate, "#{id}.log"), "synthetic #{id}\n")
@@ -3662,8 +5349,34 @@ def build_gate(root, label, sha, repo)
   File.write(File.join(gate, "pre-status.txt"), "")
   File.write(File.join(gate, "post-status.txt"), "")
 
-  run_id = "12345"
-  RECEIPT_IDS.each do |receipt_id|
+  run_id = sha[0, 12].to_i(16).to_s
+  run_identity_sha = Digest::SHA256.hexdigest("c1b-run-#{sha}")[0, 40]
+  fixture = File.join(root, "#{label}-gh-fixture")
+  FileUtils.mkdir_p(fixture)
+  run = {
+    "id" => run_id.to_i, "run_attempt" => 1, "head_sha" => run_identity_sha,
+    "event" => "pull_request", "status" => "completed", "conclusion" => "success",
+    "name" => "CI", "path" => ".github/workflows/ci.yml@refs/pull/42/merge",
+    "pull_requests" => [{ "head" => { "sha" => sha } }],
+    "repository" => { "full_name" => "appergb/OpenTake" },
+  }
+  run_commit = {
+    "sha" => run_identity_sha,
+    "parents" => [{ "sha" => "a" * 40 }, { "sha" => sha }],
+  }
+  workflow_content = {
+    "encoding" => "base64",
+    "content" => Base64.strict_encode64(File.binread(File.join(repo, ".github/workflows/ci.yml"))),
+  }
+  jobs = RECEIPT_IDS.each_with_index.map do |receipt_id, index|
+    {
+      "id" => sha[0, 8].to_i(16) * 10 + index, "run_id" => run_id.to_i, "head_sha" => run_identity_sha,
+      "name" => "Safe filesystem (#{receipt_id})",
+      "status" => "completed", "conclusion" => "success",
+    }
+  end
+  artifacts = []
+  RECEIPT_IDS.each_with_index do |receipt_id, index|
     directory = File.join(gate, "native-receipts", run_id, receipt_id)
     FileUtils.mkdir_p(directory)
     commands = NATIVE_COMMANDS.map do |id, command|
@@ -3675,25 +5388,64 @@ def build_gate(root, label, sha, repo)
     File.write(File.join(directory, "final-aggregate.raw-exit"), "0\n")
     receipt = {
       "schema" => "opentake-c1b-native-receipt-v1", "receipt_id" => receipt_id,
+      "repository" => "appergb/OpenTake", "workflow" => "CI",
+      "workflow_file" => ".github/workflows/ci.yml", "job_id" => "safe-filesystem",
+      "event_name" => "pull_request",
       "run_id" => run_id, "run_attempt" => "1", "requested_sha" => sha,
       "checked_out_sha" => sha, "commands" => commands, "aggregate_exit" => 0,
     }
+    receipt.merge!(PROVENANCE.fetch(receipt_id))
     File.write(File.join(directory, "receipt.json"), JSON.pretty_generate(receipt) + "\n")
+    archive_files = commands.flat_map { |command| [command.fetch("log"), command.fetch("raw_exit")] } +
+      %w[final-aggregate.raw-exit receipt.json]
+    _zip_out, zip_err, zip_status = Open3.capture3("zip", "-q", "artifact.zip", *archive_files,
+      chdir: directory)
+    raise "cannot build synthetic artifact archive: #{zip_err}" unless zip_status.success?
+    artifact_id = sha[8, 8].to_i(16) * 10 + index
+    artifact = {
+      "id" => artifact_id,
+      "name" => "c1b-native-#{receipt_id}-#{sha}",
+      "expired" => false,
+      "digest" => "sha256:#{Digest::SHA256.file(File.join(directory, 'artifact.zip')).hexdigest}",
+      "workflow_run" => { "id" => run_id.to_i, "head_sha" => run_identity_sha },
+    }
+    artifacts << artifact
+    File.write(File.join(directory, "run.json"), JSON.pretty_generate(run) + "\n")
+    File.write(File.join(directory, "jobs.json"),
+      JSON.pretty_generate({ "total_count" => jobs.length, "jobs" => jobs }) + "\n")
+    File.write(File.join(directory, "artifact.json"), JSON.pretty_generate(artifact) + "\n")
+    FileUtils.cp(File.join(directory, "artifact.zip"), File.join(fixture, "artifact-#{artifact_id}.zip"))
   end
 
-  spec = File.join(gate, "spec-security-review.md")
-  implementation = File.join(gate, "implementation-review.md")
-  report = ->(role) { "Role: #{role}\nCommit: #{sha}\nVerdict: APPROVE\nCritical: 0\nImportant: 0\nMinor: 0\n" }
-  File.write(spec, report.call("spec-security"))
-  File.write(implementation, report.call("implementation"))
+  File.write(File.join(fixture, "run.json"), JSON.pretty_generate(run) + "\n")
+  File.write(File.join(fixture, "run-id.txt"), "#{run_id}\n")
+  File.write(File.join(fixture, "run-sha.txt"), "#{run_identity_sha}\n")
+  File.write(File.join(fixture, "run-commit.json"), JSON.pretty_generate(run_commit) + "\n")
+  File.write(File.join(fixture, "workflow-content.json"), JSON.pretty_generate(workflow_content) + "\n")
+  File.write(File.join(fixture, "jobs.json"),
+    JSON.pretty_generate({ "total_count" => jobs.length, "jobs" => jobs }) + "\n")
+  File.write(File.join(fixture, "artifacts.json"),
+    JSON.pretty_generate({ "total_count" => artifacts.length, "artifacts" => artifacts }) + "\n")
+
+  FileUtils.mkdir_p(File.join(gate, "reviews"))
+  spec = File.join("reviews", "spec-security-review.md")
+  implementation = File.join("reviews", "implementation-review.md")
+  report = ->(role) { "Role: #{role}\nTask: #{task}\nCommit: #{sha}\nVerdict: APPROVE\nCritical: 0\nImportant: 0\nMinor: 0\n" }
+  File.write(File.join(gate, spec), report.call("spec-security"))
+  File.write(File.join(gate, implementation), report.call("implementation"))
   results = [
-    "Baseline SHA: #{'0' * 40}", "Final SHA: #{sha}", "Pre-status: clean", "Post-status: clean",
+    "Task: #{task}", "Baseline SHA: #{baseline}", "Predecessor SHA: #{predecessor}",
+    "Final SHA: #{sha}", "Pre-status: clean", "Post-status: clean",
     *LOCAL_COMMANDS.map { |id, command| "| #{id} | #{command} | 0 |" },
-    *RECEIPT_IDS.map { |id| "| #{id} | #{run_id} | 1 | #{sha} | 0 |" },
+    *RECEIPT_IDS.each_with_index.map do |id, index|
+      artifact = artifacts.fetch(index)
+      "| #{id} | #{run_id} | 1 | #{jobs.fetch(index).fetch('id')} | #{artifact.fetch('id')} | " \
+        "#{artifact.fetch('name')} | #{artifact.fetch('digest')} | #{sha} | 0 |"
+    end,
     "Spec report: #{spec}", "Implementation report: #{implementation}", "Aggregate: 0",
   ].join("\n") + "\n"
   File.write(File.join(gate, "results.md"), results)
-  [gate, spec, implementation]
+  [gate, spec, implementation, fixture]
 end
 
 mutations = {
@@ -3728,24 +5480,230 @@ mutations = {
     receipt = Dir.glob(File.join(copy, "native-receipts", "*", "*", "receipt.json")).first
     rewrite_json(receipt) { |value| value["run_attempt"] = "0" }
   },
+  "relabeled-runner-os" => lambda { |copy|
+    receipt = Dir.glob(File.join(copy, "native-receipts", "*", "linux-x86_64", "receipt.json")).first
+    rewrite_json(receipt) { |value| value["runner_os"] = "Windows" }
+  },
+  "relabeled-runner-label" => lambda { |copy|
+    receipt = Dir.glob(File.join(copy, "native-receipts", "*", "macos-native", "receipt.json")).first
+    rewrite_json(receipt) { |value| value["runner_label"] = "ubuntu-24.04" }
+  },
+  "wrong-runner-architecture" => lambda { |copy|
+    receipt = Dir.glob(File.join(copy, "native-receipts", "*", "windows-x86_64", "receipt.json")).first
+    rewrite_json(receipt) { |value| value["runner_arch"] = "ARM64" }
+  },
+  "wrong-repository" => lambda { |copy|
+    receipt = Dir.glob(File.join(copy, "native-receipts", "*", "*", "receipt.json")).first
+    rewrite_json(receipt) { |value| value["repository"] = "someone/else" }
+  },
+  "wrong-workflow" => lambda { |copy|
+    receipt = Dir.glob(File.join(copy, "native-receipts", "*", "*", "receipt.json")).first
+    rewrite_json(receipt) { |value| value["workflow"] = "Other" }
+  },
+  "wrong-workflow-file" => lambda { |copy|
+    receipt = Dir.glob(File.join(copy, "native-receipts", "*", "*", "receipt.json")).first
+    rewrite_json(receipt) { |value| value["workflow_file"] = ".github/workflows/other.yml" }
+  },
+  "wrong-job" => lambda { |copy|
+    receipt = Dir.glob(File.join(copy, "native-receipts", "*", "*", "receipt.json")).first
+    rewrite_json(receipt) { |value| value["job_id"] = "rust" }
+  },
+  "wrong-event" => lambda { |copy|
+    receipt = Dir.glob(File.join(copy, "native-receipts", "*", "*", "receipt.json")).first
+    rewrite_json(receipt) { |value| value["event_name"] = "schedule" }
+  },
+  "wrong-live-run" => lambda { |copy, fixture|
+    rewrite_json(File.join(fixture, "run.json")) { |value| value["head_sha"] = "f" * 40 }
+    Dir.glob(File.join(copy, "native-receipts", "*", "*", "run.json")).each do |path|
+      rewrite_json(path) { |value| value["head_sha"] = "f" * 40 }
+    end
+  },
+  "wrong-live-pr-head" => lambda { |_copy, fixture|
+    rewrite_json(File.join(fixture, "run.json")) { |value| value["pull_requests"] = [] }
+    rewrite_json(File.join(fixture, "run-commit.json")) do |value|
+      value["parents"] = [{ "sha" => "a" * 40 }, { "sha" => "b" * 40 }]
+    end
+  },
+  "wrong-live-workflow-content" => lambda { |_copy, fixture|
+    rewrite_json(File.join(fixture, "workflow-content.json")) do |value|
+      value["content"] = Base64.strict_encode64("name: Evil\n")
+    end
+  },
+  "wrong-live-job" => lambda { |copy, fixture|
+    rewrite_json(File.join(fixture, "jobs.json")) { |value| value.fetch("jobs")[0]["head_sha"] = "f" * 40 }
+    Dir.glob(File.join(copy, "native-receipts", "*", "*", "jobs.json")).each do |path|
+      rewrite_json(path) { |value| value.fetch("jobs")[0]["head_sha"] = "f" * 40 }
+    end
+  },
+  "paginated-live-jobs" => lambda { |copy, fixture|
+    rewrite_json(File.join(fixture, "jobs.json")) { |value| value["total_count"] = 101 }
+    Dir.glob(File.join(copy, "native-receipts", "*", "*", "jobs.json")).each do |path|
+      rewrite_json(path) { |value| value["total_count"] = 101 }
+    end
+  },
+  "paginated-live-artifacts" => lambda { |_copy, fixture|
+    rewrite_json(File.join(fixture, "artifacts.json")) { |value| value["total_count"] = 101 }
+  },
+  "wrong-live-artifact" => lambda { |copy, fixture|
+    rewrite_json(File.join(fixture, "artifacts.json")) do |value|
+      value.fetch("artifacts")[0]["name"] = "forged-artifact"
+    end
+    artifact = Dir.glob(File.join(copy, "native-receipts", "*", "linux-x86_64", "artifact.json")).first
+    rewrite_json(artifact) { |value| value["name"] = "forged-artifact" }
+  },
+  "wrong-live-digest" => lambda { |copy, fixture|
+    bad = "sha256:#{'0' * 64}"
+    rewrite_json(File.join(fixture, "artifacts.json")) do |value|
+      value.fetch("artifacts")[0]["digest"] = bad
+    end
+    artifact = Dir.glob(File.join(copy, "native-receipts", "*", "linux-x86_64", "artifact.json")).first
+    rewrite_json(artifact) { |value| value["digest"] = bad }
+  },
+  "locally-forged-run-json" => lambda { |copy|
+    run = Dir.glob(File.join(copy, "native-receipts", "*", "*", "run.json")).first
+    rewrite_json(run) { |value| value["head_sha"] = "f" * 40 }
+  },
+  "external-symlink-run-json" => lambda { |copy|
+    run = Dir.glob(File.join(copy, "native-receipts", "*", "*", "run.json")).first
+    outside = File.join(File.dirname(copy), "outside-run.json")
+    File.write(outside, File.read(run))
+    File.unlink(run)
+    File.symlink(outside, run)
+  },
   "missing-results-row" => lambda { |copy|
     path = File.join(copy, "results.md")
     File.write(path, File.read(path).lines.reject { |line| line.include?("| cargo-fmt |") }.join)
   },
+  "wrong-review-task" => lambda { |copy|
+    path = File.join(copy, "reviews", "spec-security-review.md")
+    File.write(path, File.read(path).sub("Task: #{task}", "Task: 5"))
+  },
+  "wrong-results-task" => lambda { |copy|
+    path = File.join(copy, "results.md")
+    File.write(path, File.read(path).sub("Task: #{task}", "Task: 5"))
+  },
+  "wrong-frozen-baseline" => lambda { |copy|
+    path = File.join(copy, "results.md")
+    File.write(path, File.read(path).sub(/Baseline SHA: [0-9a-f]{40}/, "Baseline SHA: #{'0' * 40}"))
+  },
+  "wrong-results-predecessor" => lambda { |copy|
+    path = File.join(copy, "results.md")
+    File.write(path, File.read(path).sub(/Predecessor SHA: [0-9a-f]{40}/,
+      "Predecessor SHA: #{'f' * 40}"))
+  },
+  "wrong-predecessor-binding" => lambda { |copy|
+    rewrite_json(File.join(copy, "predecessor-binding.json")) { |value| value["predecessor_task"] = "2b" }
+  },
+  "wrong-gate-task-name" => lambda { |copy|
+    moved = File.join(File.dirname(copy), "wrong-task-#{File.basename(copy)}")
+    FileUtils.mv(copy, moved)
+    File.symlink(moved, copy)
+  },
 }
 
 Dir.mktmpdir("c1b-evidence-validator") do |temporary|
-  gate, spec, implementation = build_gate(temporary, "canonical", sha, repo)
-  out, err, status = run_validator(validator, gate, sha, spec, implementation, repo)
-  raise "canonical gate rejected: #{out}#{err}" unless status.success?
-
-  mutations.each do |label, mutate|
-    copy, copy_spec, copy_implementation = build_gate(temporary, label, sha, repo)
-    mutate.call(copy)
-    _out, _err, result = run_validator(
-      validator, copy, sha, copy_spec, copy_implementation, repo
+  slice_repo = File.join(temporary, "task4-worktree")
+  raise "cannot create isolated synthetic Task4 clone" unless
+    system("git", "clone", "--quiet", "--shared", "--no-checkout", repo, slice_repo,
+      out: File::NULL, err: File::NULL)
+  raise "cannot checkout synthetic Task4 base" unless
+    system("git", "-C", slice_repo, "checkout", "--detach", predecessor,
+      out: File::NULL, err: File::NULL)
+  begin
+    commit_env = {
+      "GIT_AUTHOR_NAME" => "C1B Validator Test", "GIT_AUTHOR_EMAIL" => "c1b@example.invalid",
+      "GIT_COMMITTER_NAME" => "C1B Validator Test", "GIT_COMMITTER_EMAIL" => "c1b@example.invalid",
+    }
+    raise "cannot create synthetic Task3 GREEN predecessor" unless system(commit_env, "git", "-C", slice_repo,
+      "commit", "--allow-empty", "-m", "ci: verify C1B receipts and evidence on exact SHAs",
+      out: File::NULL, err: File::NULL)
+    predecessor, predecessor_status = Open3.capture2("git", "-C", slice_repo, "rev-parse", "HEAD")
+    raise "cannot resolve synthetic Task3 GREEN predecessor" unless predecessor_status.success?
+    predecessor = predecessor.strip.downcase
+    raise "cannot create synthetic Task4 RED" unless system(commit_env, "git", "-C", slice_repo,
+      "commit", "--allow-empty", "-m", "test(project): specify Unix recursive filesystem authorities",
+      out: File::NULL, err: File::NULL)
+    raise "cannot create synthetic Task4 GREEN" unless system(commit_env, "git", "-C", slice_repo,
+      "commit", "--allow-empty", "-m", "feat(project): add Unix recursive filesystem authorities",
+      out: File::NULL, err: File::NULL)
+    sha, slice_sha_status = Open3.capture2("git", "-C", slice_repo, "rev-parse", "HEAD")
+    raise "cannot resolve synthetic Task4 GREEN" unless slice_sha_status.success?
+    sha = sha.strip.downcase
+    predecessor_proof = build_review_proof(temporary, "3", predecessor, baseline)
+    fake_bin = install_fake_gh(temporary)
+    gate, spec, implementation, fixture =
+      build_gate(temporary, "canonical", task, sha, predecessor, predecessor_proof, baseline, slice_repo)
+    out, err, status = run_validator(validator, gate, task, sha, predecessor, predecessor_proof,
+      spec, implementation, slice_repo, fake_bin: fake_bin, fixture: fixture)
+    raise "canonical gate rejected: #{out}#{err}" unless status.success?
+    _out, _err, wrong_predecessor = run_validator(
+      validator, gate, task, sha, baseline, predecessor_proof, spec, implementation, slice_repo,
+      fake_bin: fake_bin, fixture: fixture
     )
-    raise "validator accepted mutation #{label}" if result.success?
+    raise "validator accepted wrong Task4 predecessor" if wrong_predecessor.success?
+    wrong_proof = File.join(temporary, "logs", "c1b-task-3-#{predecessor}-attempt-2")
+    FileUtils.cp_r(predecessor_proof, wrong_proof)
+    rewrite_json(File.join(wrong_proof, "gate-manifest.json")) { |value| value["task"] = "2b" }
+    _out, _err, wrong_proof_status = run_validator(
+      validator, gate, task, sha, predecessor, wrong_proof, spec, implementation, slice_repo,
+      fake_bin: fake_bin, fixture: fixture
+    )
+    raise "validator accepted wrong predecessor proof manifest" if wrong_proof_status.success?
+
+  missing_gh_env = { "PATH" => File.join(temporary, "missing-gh"),
+    "C1B_FAKE_GH_FIXTURE_ROOT" => temporary }
+    _out, _err, missing_gh = Open3.capture3(missing_gh_env, RbConfig.ruby, validator,
+      gate, task, sha, predecessor, predecessor_proof, spec, implementation, slice_repo)
+    raise "validator accepted evidence without authenticated gh" if missing_gh.success?
+
+    mutations.each do |label, mutate|
+      copy, copy_spec, copy_implementation, copy_fixture =
+        build_gate(temporary, label, task, sha, predecessor, predecessor_proof, baseline, slice_repo)
+      mutate.arity == 1 ? mutate.call(copy) : mutate.call(copy, copy_fixture)
+      _out, _err, result = run_validator(
+        validator, copy, task, sha, predecessor, predecessor_proof, copy_spec, copy_implementation,
+        slice_repo, fake_bin: fake_bin, fixture: copy_fixture
+      )
+      raise "validator accepted mutation #{label}" if result.success?
+    end
+    File.write(File.join(gate, "results-validation.raw-exit"), "0\n")
+    File.write(File.join(gate, "results-validation.log"),
+      "c1b-evidence-validation=ok task=4 predecessor=#{predecessor} sha=#{sha}\n")
+    task4_sha = sha
+    raise "cannot create synthetic Task5 RED" unless system(commit_env, "git", "-C", slice_repo,
+      "commit", "--allow-empty", "-m", "test(project): specify Unix quarantine and recursive cleanup",
+      out: File::NULL, err: File::NULL)
+    raise "cannot create synthetic Task5 GREEN" unless system(commit_env, "git", "-C", slice_repo,
+      "commit", "--allow-empty", "-m", "feat(project): add Unix consuming quarantine cleanup",
+      out: File::NULL, err: File::NULL)
+    task5_sha, task5_status = Open3.capture2("git", "-C", slice_repo, "rev-parse", "HEAD")
+    raise "cannot resolve synthetic Task5 GREEN" unless task5_status.success?
+    task5_sha = task5_sha.strip.downcase
+    task5_gate, task5_spec, task5_implementation, task5_fixture =
+      build_gate(temporary, "task5-canonical", "5", task5_sha, task4_sha, gate, baseline, slice_repo)
+    task5_out, task5_err, task5_result = run_validator(
+      validator, task5_gate, "5", task5_sha, task4_sha, gate, task5_spec, task5_implementation,
+      slice_repo, fake_bin: fake_bin, fixture: task5_fixture
+    )
+    raise "canonical Task5 predecessor-gate chain rejected: #{task5_out}#{task5_err}" unless task5_result.success?
+    File.write(File.join(task5_gate, "results-validation.raw-exit"), "0\n")
+    File.write(File.join(task5_gate, "results-validation.log"),
+      "c1b-evidence-validation=ok task=5 predecessor=#{task4_sha} sha=#{task5_sha}\n")
+    raise "cannot create synthetic Task6A GREEN" unless system(commit_env, "git", "-C", slice_repo,
+      "commit", "--allow-empty", "-m", "feat(project): add fail-closed Windows platform scaffold",
+      out: File::NULL, err: File::NULL)
+    task6a_sha, task6a_status = Open3.capture2("git", "-C", slice_repo, "rev-parse", "HEAD")
+    raise "cannot resolve synthetic Task6A GREEN" unless task6a_status.success?
+    task6a_sha = task6a_sha.strip.downcase
+    task6a_gate, task6a_spec, task6a_implementation, task6a_fixture =
+      build_gate(temporary, "task6a-canonical", "6a", task6a_sha, task5_sha, task5_gate, baseline, slice_repo)
+    task6a_out, task6a_err, task6a_result = run_validator(
+      validator, task6a_gate, "6a", task6a_sha, task5_sha, task5_gate, task6a_spec,
+      task6a_implementation, slice_repo, fake_bin: fake_bin, fixture: task6a_fixture
+    )
+    raise "canonical Task6A predecessor-gate chain rejected: #{task6a_out}#{task6a_err}" unless task6a_result.success?
+  ensure
+    FileUtils.rm_rf(slice_repo)
   end
 end
 
@@ -3754,12 +5712,87 @@ puts "c1b-evidence-validator-tests=ok"
 
 上述 test与fail-closed scaffold在 Task 3 RED；完整 validator在 Task 3 GREEN。Task 8 不增加、修改或提交任何 validator/test code，只创建最终 SHA 的真实 exclusive gate，并调用已经 committed at Task 3 的两个 validators。因此 validator code SHA 与被验证 final SHA 一致，不存在“先有 final gate、后提交 validator 导致 SHA 改变”的循环。
 
-最终调用固定为：
+GitHub 的官方 REST artifact schema 定义 `id`、`name`、`digest`、`archive_download_url` 和 `workflow_run.head_sha`，且 download endpoint 返回 ZIP archive；workflow-run/job endpoints 定义 run `head_sha` 以及 job `run_id`/`head_sha`/`name`/`conclusion`。实施时以 [GitHub REST Actions artifacts](https://docs.github.com/en/rest/actions/artifacts)、[workflow runs](https://docs.github.com/en/rest/actions/workflow-runs) 和 [workflow jobs](https://docs.github.com/en/rest/actions/workflow-jobs) 为字段来源。
+
+每个 per-task GREEN gate（Task 8 含在其中）在调 validator 前必须执行下列 REST archive protocol。`RUN_ID`是已完成的授权 CI run，三个 matrix receipt 必须同属该 run/attempt。所有路径位于当前 exclusive gate；`.artifacts-<id>.json` 是 gate-local temporary，成功选取后立即删除：
+
+```bash
+set -euo pipefail
+gh auth status --hostname github.com
+GH_API_VERSION=2026-03-10
+case "$GATE_TASK" in
+  4) PREDECESSOR_TASK=3 ;; 5) PREDECESSOR_TASK=4 ;; 6a) PREDECESSOR_TASK=5 ;;
+  6b) PREDECESSOR_TASK=6a ;; 7a) PREDECESSOR_TASK=6b ;; 7b) PREDECESSOR_TASK=7a ;;
+  7c) PREDECESSOR_TASK=7b ;; 8) PREDECESSOR_TASK=7c ;; *) exit 64 ;;
+esac
+ruby -rjson -rpathname -e '
+  output, task, predecessor_task, predecessor_sha, proof = ARGV
+  value = { "schema" => "opentake-c1b-predecessor-binding-v1", "task" => task,
+    "predecessor_task" => predecessor_task, "predecessor_sha" => predecessor_sha,
+    "predecessor_proof" => Pathname.new(proof).realpath.to_s }
+  File.open(output, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+    file.write(JSON.pretty_generate(value) + "\n")
+  end
+' "$GATE_DIR/predecessor-binding.json" "$GATE_TASK" "$PREDECESSOR_TASK" \
+  "$PREDECESSOR_SHA" "$PREDECESSOR_PROOF"
+mkdir "$GATE_DIR/reviews"
+cp "$FINAL_SPEC_REPORT" "$GATE_DIR/reviews/spec-security-review.md"
+cp "$FINAL_IMPLEMENTATION_REPORT" "$GATE_DIR/reviews/implementation-review.md"
+
+for RECEIPT_ID in linux-x86_64 macos-native windows-x86_64; do
+  RECEIPT_ROOT="$GATE_DIR/native-receipts/$RUN_ID/$RECEIPT_ID"
+  mkdir "$RECEIPT_ROOT"
+  RUN_ENDPOINT="/repos/appergb/OpenTake/actions/runs/$RUN_ID"
+  gh api --hostname github.com -H "X-GitHub-Api-Version: $GH_API_VERSION" \
+    "$RUN_ENDPOINT" >"$RECEIPT_ROOT/run.json"
+  gh api --hostname github.com -H "X-GitHub-Api-Version: $GH_API_VERSION" \
+    "$RUN_ENDPOINT/jobs?per_page=100" >"$RECEIPT_ROOT/jobs.json"
+  ALL_ARTIFACTS="$GATE_DIR/.artifacts-$RECEIPT_ID.json"
+  gh api --hostname github.com -H "X-GitHub-Api-Version: $GH_API_VERSION" \
+    "$RUN_ENDPOINT/artifacts?per_page=100" >"$ALL_ARTIFACTS"
+  ARTIFACT_NAME="c1b-native-$RECEIPT_ID-$FINAL_SHA"
+  ruby -rjson -e '
+    source, name, destination = ARGV
+    document = JSON.parse(File.read(source))
+    artifacts = document.fetch("artifacts")
+    raise "artifact API pagination is incomplete" unless
+      document.fetch("total_count") == artifacts.length && document.fetch("total_count") <= 100
+    matches = artifacts.select { |row| row.fetch("name") == name }
+    raise "expected exactly one artifact #{name}" unless matches.length == 1
+    File.write(destination, JSON.pretty_generate(matches.fetch(0)) + "\n")
+  ' "$ALL_ARTIFACTS" "$ARTIFACT_NAME" "$RECEIPT_ROOT/artifact.json"
+  rm "$ALL_ARTIFACTS"
+  ARTIFACT_ID=$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("id")' \
+    "$RECEIPT_ROOT/artifact.json")
+  gh api --hostname github.com \
+    -H "X-GitHub-Api-Version: $GH_API_VERSION" \
+    "/repos/appergb/OpenTake/actions/artifacts/$ARTIFACT_ID/zip" \
+    >"$RECEIPT_ROOT/artifact.zip"
+  test -s "$RECEIPT_ROOT/artifact.zip"
+  unzip -Z1 "$RECEIPT_ROOT/artifact.zip" | ruby -e '
+    allowed = %w[cargo-fmt.log cargo-fmt.raw-exit cargo-clippy.log cargo-clippy.raw-exit
+      safe-fs-unit.log safe-fs-unit.raw-exit archive-security.log archive-security.raw-exit
+      final-aggregate.raw-exit receipt.json]
+    names = STDIN.each_line.map(&:strip)
+    raise "artifact archive entry set mismatch" unless names.sort == allowed.sort
+    raise "unsafe archive entry" if names.any? { |name| name.start_with?("/") || name.split(/[\\\/]/).include?("..") }
+  '
+  unzip -q "$RECEIPT_ROOT/artifact.zip" -d "$RECEIPT_ROOT"
+  ruby -rjson -rdigest -e '
+    metadata, archive = ARGV
+    expected = JSON.parse(File.read(metadata)).fetch("digest")
+    actual = "sha256:#{Digest::SHA256.file(archive).hexdigest}"
+    raise "REST artifact digest mismatch" unless expected == actual
+  ' "$RECEIPT_ROOT/artifact.json" "$RECEIPT_ROOT/artifact.zip"
+done
+```
+
+每个 gate 的调用固定为（`GATE_TASK`、`FINAL_SHA`、`PREDECESSOR_SHA`、`PREDECESSOR_PROOF` 按本节参数表赋值）：
 
 ```bash
 ruby scripts/validate-c1b-evidence.rb \
-  "$GATE_DIR" "$FINAL_SHA" \
-  "$FINAL_SPEC_REPORT" "$FINAL_IMPLEMENTATION_REPORT" \
+  "$GATE_DIR" "$GATE_TASK" "$FINAL_SHA" "$PREDECESSOR_SHA" "$PREDECESSOR_PROOF" \
+  'reviews/spec-security-review.md' 'reviews/implementation-review.md' \
   '/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-full-convergence' \
   >"$GATE_DIR/results-validation.log" 2>&1
 printf '%s\n' "$?" >"$GATE_DIR/results-validation.raw-exit"
@@ -3770,4 +5803,4 @@ printf '%s\n' "$?" >"$GATE_DIR/results-mutation-validation.raw-exit"
 test "$(cat "$GATE_DIR/results-mutation-validation.raw-exit")" = 0
 ```
 
-该 validator 同时覆盖 final SHA、三份 receipt 的 requested/checked-out SHA、duplicate IDs、每个 command/aggregate exit、两份 review report 的 commit/0 findings、clean worktree、ledger/native log 与 raw-exit 存在性、`results.md`。任何不满足项都非零退出；不能在 validation 后修改 evidence 或 commit。
+该 validator 每次都直接执行 authenticated `gh api --hostname github.com`，覆盖 final SHA、run/attempt/repository/workflow/event、三个成功 job、三个 SHA-bound artifact name/id/digest/`workflow_run.head_sha`、保留 ZIP 的 SHA-256 与 archive 内 receipt，以及原有 command/aggregate/audit/clean-worktree/results 条件。所有证据文件通过 gate-relative `confined_file!`，解析到 gate 外的 symlink 必须失败。任何不满足项都非零退出；不能在 validation 后修改 evidence 或 commit。
