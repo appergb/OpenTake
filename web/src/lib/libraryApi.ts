@@ -28,6 +28,7 @@ export interface LibraryEntry {
   favoritedAt: number;
   source?: string;
   thumb?: string;
+  storedPath?: string;
 }
 
 /** 导入到当前项目后返回的新资产引用(#55 LibraryImportDto)。 */

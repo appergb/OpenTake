@@ -387,16 +387,30 @@ export async function getMedia(): Promise<MediaList> {
 }
 
 /**
- * `toggle_favorite`: add (`favorite = true`) or remove (`favorite = false`) media
- * assets from the per-project favorites set (#91), returning the refreshed
- * catalog. Favorites persist in the project manifest — not browser storage — so
- * they travel with the project. Unknown ids are ignored by the backend. Outside
- * Tauri there is no project, so this resolves to an empty catalog.
+ * `toggle_favorite`: copy or remove one project asset in the durable global
+ * library and persist its content hash in the project's compatibility mirror.
+ * Outside Tauri there is no project, so this resolves to an empty catalog.
  */
-export async function toggleFavorite(assetIds: string[], favorite: boolean): Promise<MediaList> {
+export async function toggleFavorite(assetId: string, favorite: boolean): Promise<MediaList> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<MediaList>("toggle_favorite", { assetIds, favorite });
+  if (invokeImpl) return invokeImpl<MediaList>("toggle_favorite", { assetId, favorite });
   return { items: [], folders: [] };
+}
+
+export async function syncProjectFavorites(
+  legacyAssetIds: string[],
+): Promise<import("./types").FavoriteSyncResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<import("./types").FavoriteSyncResult>("sync_project_favorites", {
+      legacyAssetIds,
+    });
+  }
+  return {
+    media: { items: [], folders: [] },
+    migratedLegacyAssetIds: [],
+    failures: [],
+  };
 }
 
 /**

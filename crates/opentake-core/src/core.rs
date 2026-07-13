@@ -26,7 +26,7 @@
 //! persistence logic — those live in `opentake-ops` / `opentake-project` and are
 //! reached through the session.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -159,6 +159,22 @@ impl CoreSessionSlot {
         self.editor = editor;
         self.project_epoch += 1;
         self.timeline_snapshot()
+    }
+}
+
+fn ensure_project_identity(
+    session: &CoreSessionSlot,
+    expected_project_epoch: u64,
+    expected_project_dir: &Path,
+) -> Result<()> {
+    if session.project_epoch == expected_project_epoch
+        && session.editor.project_dir() == Some(expected_project_dir)
+    {
+        Ok(())
+    } else {
+        Err(crate::CoreError::Media(
+            "project changed during global library workflow".to_string(),
+        ))
     }
 }
 
@@ -449,6 +465,32 @@ impl AppCore {
         Ok(entry)
     }
 
+    /// Import only while the project that initiated an external workflow still
+    /// owns the session. This closes the project-switch window between file I/O
+    /// and the manifest mutation.
+    pub fn import_media_file_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+    ) -> Result<MediaManifestEntry> {
+        let id = self.ids.next_id();
+        let (entry, count) = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            let entry = session.editor.import_media_file(path, id, name, probe)?;
+            let count = session.editor.media().entries.len();
+            (entry, count)
+        };
+        self.events.emit(&CoreEvent::MediaChanged {
+            project_epoch: expected_project_epoch,
+            count,
+        });
+        Ok(entry)
+    }
+
     /// Toggle favorite state for `asset_ids` (#91), emitting
     /// [`CoreEvent::MediaChanged`] after releasing the lock (only when something
     /// changed) so the media mirror refreshes. Favoriting is a manifest mutation
@@ -464,6 +506,28 @@ impl AppCore {
         if changed > 0 {
             self.events.emit(&CoreEvent::MediaChanged {
                 project_epoch,
+                count,
+            });
+        }
+        Ok(changed)
+    }
+
+    pub fn set_media_favorite_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        asset_ids: &[String],
+        favorite: bool,
+    ) -> Result<usize> {
+        let (changed, count) = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            let changed = session.editor.set_media_favorite(asset_ids, favorite)?;
+            (changed, session.editor.media().entries.len())
+        };
+        if changed > 0 {
+            self.events.emit(&CoreEvent::MediaChanged {
+                project_epoch: expected_project_epoch,
                 count,
             });
         }
@@ -494,6 +558,32 @@ impl AppCore {
         Ok(changed)
     }
 
+    /// Project-identity-checked variant for workflows that perform global
+    /// library I/O before updating the current project mirror.
+    pub fn set_media_global_favorite_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        asset_id: &str,
+        library_id: Option<String>,
+    ) -> Result<bool> {
+        let (changed, count) = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            let changed = session
+                .editor
+                .set_media_global_favorite(asset_id, library_id)?;
+            (changed, session.editor.media().entries.len())
+        };
+        if changed {
+            self.events.emit(&CoreEvent::MediaChanged {
+                project_epoch: expected_project_epoch,
+                count,
+            });
+        }
+        Ok(changed)
+    }
+
     /// Clear every current-project mapping for a removed global-library id.
     pub fn clear_media_global_favorite_id(&self, library_id: &str) -> Result<usize> {
         let (changed, count, project_epoch) = {
@@ -509,6 +599,45 @@ impl AppCore {
             });
         }
         Ok(changed)
+    }
+
+    pub fn clear_media_global_favorite_id_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        library_id: &str,
+    ) -> Result<usize> {
+        let (changed, count) = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            let changed = session.editor.clear_media_global_favorite_id(library_id)?;
+            (changed, session.editor.media().entries.len())
+        };
+        if changed > 0 {
+            self.events.emit(&CoreEvent::MediaChanged {
+                project_epoch: expected_project_epoch,
+                count,
+            });
+        }
+        Ok(changed)
+    }
+
+    /// Save only if the originating project still owns the session lock.
+    pub fn save_project_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+    ) -> Result<PathBuf> {
+        let written = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            session.editor.save_project(None)?
+        };
+        self.events.emit(&CoreEvent::ProjectSaved {
+            path: written.to_string_lossy().into_owned(),
+            project_epoch: expected_project_epoch,
+        });
+        Ok(written)
     }
 
     /// Relink an existing asset (by id) to a new file, keeping the same id, and
@@ -916,6 +1045,51 @@ mod tests {
         assert!(err.is_err());
         assert!(core.media().entries.is_empty());
         assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn project_scoped_media_mutations_reject_a_replacement_project() {
+        let sequence = CoreIdGen::default().next_id();
+        let root = std::env::temp_dir().join(format!(
+            "opentake-core-project-scoped-media-{}-{sequence}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let project_a = root.join("A.opentake");
+        let project_b = root.join("B.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(project_a.clone())).unwrap();
+        let entry = core
+            .import_media_file("/abs/a.mp4", "a", &ProbedMedia::default())
+            .unwrap();
+        core.save_project(None).unwrap();
+        let expected_epoch = core.runtime_snapshot().project_epoch;
+        opentake_project::Project::new(&project_b).save().unwrap();
+        core.open_project(project_b).unwrap();
+        let before = core.media();
+
+        assert!(core
+            .set_media_global_favorite_for_project(
+                expected_epoch,
+                &project_a,
+                &entry.id,
+                Some("content-hash".into()),
+            )
+            .is_err());
+        assert!(core
+            .import_media_file_for_project(
+                expected_epoch,
+                &project_a,
+                "/abs/rendered.mp4",
+                "rendered",
+                &ProbedMedia::default(),
+            )
+            .is_err());
+        assert!(core
+            .save_project_for_project(expected_epoch, &project_a)
+            .is_err());
+        assert_eq!(core.media(), before);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

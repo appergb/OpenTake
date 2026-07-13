@@ -590,9 +590,9 @@ export interface MediaItem {
   /** `true` when the source file is offline (moved/deleted). Derived from file
    *  existence on the backend; clears after a successful relink. */
   missing?: boolean;
-  /** `true` when the user has favorited this asset (#91). Backs the media panel's
-   *  "mine" tab; persisted per-project in the manifest (not browser storage), so
-   *  it always arrives from `get_media` / `toggle_favorite`. */
+  /** Project-side compatibility mirror for the asset's global favorite mapping.
+   *  The Mine grid reads the global library; cards receive this state from
+   *  `get_media` / `toggle_favorite`. */
   favorite: boolean;
 }
 
@@ -628,6 +628,17 @@ export interface MediaList {
    *  `mediaPanelToast`) instead of dropping them silently. Optional because the
    *  browser-fallback catalogs omit it. */
   skipped?: string[];
+}
+
+export interface FavoriteSyncFailure {
+  assetId: string;
+  message: string;
+}
+
+export interface FavoriteSyncResult {
+  media: MediaList;
+  migratedLegacyAssetIds: string[];
+  failures: FavoriteSyncFailure[];
 }
 
 // MARK: - BYOK secret store (mirror of src-tauri SecretStatus)

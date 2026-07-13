@@ -15,7 +15,7 @@
 //! [`crate::media::MediaState`] engine for probing rather than re-opening one.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::Serialize;
 use tauri::State;
@@ -29,20 +29,45 @@ use crate::media::MediaState;
 /// across commands behind an `Arc` (it has no `Clone`); `Send + Sync` so it
 /// lives in Tauri managed state.
 pub struct LibraryState {
-    store: Arc<LibraryStore>,
+    store: Option<Arc<LibraryStore>>,
+    init_error: Option<String>,
+    workflow_lock: Mutex<()>,
 }
 
 impl LibraryState {
     /// Wrap a store for managed state.
     pub fn new(store: LibraryStore) -> Self {
         LibraryState {
-            store: Arc::new(store),
+            store: Some(Arc::new(store)),
+            init_error: None,
+            workflow_lock: Mutex::new(()),
+        }
+    }
+
+    /// Keep ordinary editing available when the platform data directory cannot
+    /// be resolved, while making every library command fail explicitly.
+    pub fn unavailable(error: impl Into<String>) -> Self {
+        LibraryState {
+            store: None,
+            init_error: Some(error.into()),
+            workflow_lock: Mutex::new(()),
         }
     }
 
     /// The shared store handle.
-    pub fn store(&self) -> &LibraryStore {
-        &self.store
+    pub fn store(&self) -> Result<&LibraryStore, String> {
+        self.store.as_deref().ok_or_else(|| {
+            self.init_error
+                .clone()
+                .unwrap_or_else(|| "global library is unavailable".to_string())
+        })
+    }
+
+    /// Serialize workflows that span the global manifest and current project.
+    pub fn lock_workflow(&self) -> MutexGuard<'_, ()> {
+        self.workflow_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -66,6 +91,9 @@ pub struct LibraryEntryDto {
     pub source: Option<String>,
     /// Optional thumbnail reference (path or data URI).
     pub thumb: Option<String>,
+    /// Durable copy owned by the global library. Preview this instead of the
+    /// original source so favorites remain usable when the source goes offline.
+    pub stored_path: Option<String>,
 }
 
 impl From<LibraryEntry> for LibraryEntryDto {
@@ -77,8 +105,20 @@ impl From<LibraryEntry> for LibraryEntryDto {
             favorited_at: e.favorited_at,
             source: e.source,
             thumb: e.thumb,
+            stored_path: None,
         }
     }
+}
+
+fn entry_dto(store: &LibraryStore, entry: LibraryEntry) -> Result<LibraryEntryDto, String> {
+    let stored_path = store
+        .stored_path(&entry.id)
+        .map_err(|error| error.to_string())?
+        .map(|path| path.to_string_lossy().into_owned());
+    Ok(LibraryEntryDto {
+        stored_path,
+        ..LibraryEntryDto::from(entry)
+    })
 }
 
 /// The asset minted in the current project by `library_import_to_project`. The
@@ -105,13 +145,16 @@ pub fn library_list(
     library: State<'_, LibraryState>,
     category: Option<String>,
 ) -> Result<Vec<LibraryEntryDto>, String> {
-    let store = library.store();
+    let store = library.store()?;
     let entries = match category.as_deref() {
         None | Some("") => store.entries(),
         Some(c) => store.entries_in_category(Some(c)),
     }
     .map_err(|e| e.to_string())?;
-    Ok(entries.into_iter().map(LibraryEntryDto::from).collect())
+    entries
+        .into_iter()
+        .map(|entry| entry_dto(store, entry))
+        .collect()
 }
 
 /// `library_favorite`: copy a local file into the global library (dedup by
@@ -126,6 +169,8 @@ pub fn library_favorite(
     category: Option<String>,
     thumb: Option<String>,
 ) -> Result<LibraryEntryDto, String> {
+    let _workflow = library.lock_workflow();
+    let store = library.store()?;
     let source_path = PathBuf::from(&source);
     if !source_path.is_file() {
         return Err(format!("source file not found: {source}"));
@@ -137,18 +182,19 @@ pub fn library_favorite(
         favorited_at: now_epoch_secs(),
         thumb,
     };
-    library
-        .store()
-        .favorite(&req)
-        .map(LibraryEntryDto::from)
-        .map_err(|e| e.to_string())
+    let entry = store.favorite(&req).map_err(|e| e.to_string())?;
+    entry_dto(store, entry)
 }
 
 /// `library_unfavorite`: remove an entry (and its stored copy) by id. Returns
 /// `true` if an entry was removed, `false` if the id was unknown (idempotent).
 #[tauri::command]
-pub fn library_unfavorite(library: State<'_, LibraryState>, id: String) -> Result<bool, String> {
-    library.store().remove(&id).map_err(|e| e.to_string())
+pub fn library_unfavorite(
+    core: State<'_, AppCore>,
+    library: State<'_, LibraryState>,
+    id: String,
+) -> Result<bool, String> {
+    remove_from_library_and_project(&core, &library, &id)
 }
 
 /// `library_categorize`: set (or clear, with `category = None`) the category of
@@ -159,12 +205,13 @@ pub fn library_categorize(
     id: String,
     category: Option<String>,
 ) -> Result<LibraryEntryDto, String> {
-    library
-        .store()
+    let _workflow = library.lock_workflow();
+    let store = library.store()?;
+    let entry = store
         .set_category(&id, category)
         .map_err(|e| e.to_string())?
-        .map(LibraryEntryDto::from)
-        .ok_or_else(|| format!("unknown library entry: {id}"))
+        .ok_or_else(|| format!("unknown library entry: {id}"))?;
+    entry_dto(store, entry)
 }
 
 /// `library_rename`: rename a category — move every entry whose category equals
@@ -176,8 +223,9 @@ pub fn library_rename(
     from: String,
     to: Option<String>,
 ) -> Result<usize, String> {
+    let _workflow = library.lock_workflow();
     library
-        .store()
+        .store()?
         .rename_category(&from, to)
         .map_err(|e| e.to_string())
 }
@@ -186,8 +234,65 @@ pub fn library_rename(
 /// from library" affordance. Removes the entry and its stored copy by id;
 /// returns `true` if something was removed.
 #[tauri::command]
-pub fn library_delete(library: State<'_, LibraryState>, id: String) -> Result<bool, String> {
-    library.store().remove(&id).map_err(|e| e.to_string())
+pub fn library_delete(
+    core: State<'_, AppCore>,
+    library: State<'_, LibraryState>,
+    id: String,
+) -> Result<bool, String> {
+    remove_from_library_and_project(&core, &library, &id)
+}
+
+fn remove_from_library_and_project(
+    core: &AppCore,
+    library: &LibraryState,
+    id: &str,
+) -> Result<bool, String> {
+    let _workflow = library.lock_workflow();
+    let project = core.runtime_snapshot();
+    if project.project_dir.is_some() {
+        core.ensure_project_mutable()
+            .map_err(|error| error.to_string())?;
+    }
+    if let Some(project_dir) = project.project_dir.as_deref() {
+        let cleared = core
+            .clear_media_global_favorite_id_for_project(project.project_epoch, project_dir, id)
+            .map_err(|e| e.to_string())?;
+        if cleared > 0 {
+            if let Err(error) = core.save_project_for_project(project.project_epoch, project_dir) {
+                crate::media::restore_project_favorites(
+                    core,
+                    project.project_epoch,
+                    project_dir,
+                    &project.media,
+                );
+                return Err(format!(
+                    "project favorite mirror could not be saved: {error}"
+                ));
+            }
+        }
+    }
+    let removed = match library.store()?.remove(id) {
+        Ok(removed) => removed,
+        Err(error) => {
+            if let Some(project_dir) = project.project_dir.as_deref() {
+                crate::media::restore_project_favorites(
+                    core,
+                    project.project_epoch,
+                    project_dir,
+                    &project.media,
+                );
+                if let Err(rollback_error) =
+                    core.save_project_for_project(project.project_epoch, project_dir)
+                {
+                    return Err(format!(
+                        "global favorite could not be removed: {error}; project rollback also failed: {rollback_error}"
+                    ));
+                }
+            }
+            return Err(format!("global favorite could not be removed: {error}"));
+        }
+    };
+    Ok(removed)
 }
 
 /// `library_import_to_project`: bring a library entry into the *current* project.
@@ -202,9 +307,26 @@ pub fn library_import_to_project(
     library: State<'_, LibraryState>,
     id: String,
 ) -> Result<LibraryImportDto, String> {
-    let stored = library
-        .store()
-        .stored_path(&id)
+    library_import_to_project_impl(&core, &media, &library, &id)
+}
+
+fn library_import_to_project_impl(
+    core: &AppCore,
+    media: &MediaState,
+    library: &LibraryState,
+    id: &str,
+) -> Result<LibraryImportDto, String> {
+    let _workflow = library.lock_workflow();
+    core.ensure_project_mutable()
+        .map_err(|error| error.to_string())?;
+    let project = core.runtime_snapshot();
+    let project_dir = project
+        .project_dir
+        .clone()
+        .ok_or_else(|| "save the project before importing a global favorite".to_string())?;
+    let store = library.store()?;
+    let stored = store
+        .stored_path(id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("library entry has no stored file: {id}"))?;
     if !stored.is_file() {
@@ -223,8 +345,25 @@ pub fn library_import_to_project(
     let probe = probe_or_default(media.engine(), &stored);
     let name = display_name(&stored);
     let entry = core
-        .import_media_file(&stored, name.clone(), &probe)
+        .import_media_file_for_project(
+            project.project_epoch,
+            &project_dir,
+            &stored,
+            name.clone(),
+            &probe,
+        )
         .map_err(|e| e.to_string())?;
+    core.set_media_global_favorite_for_project(
+        project.project_epoch,
+        &project_dir,
+        &entry.id,
+        Some(id.to_string()),
+    )
+    .map_err(|error| error.to_string())?;
+    core.save_project_for_project(project.project_epoch, &project_dir)
+        .map_err(|error| {
+            format!("library item was imported but its project mapping could not be saved: {error}")
+        })?;
 
     Ok(LibraryImportDto {
         id: entry.id,
@@ -265,4 +404,97 @@ fn now_epoch_secs() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn engine_for(root: &std::path::Path) -> MediaState {
+        MediaState::new(opentake_media::MediaEngine::new(
+            root.join("cache"),
+            root.join("models"),
+        ))
+    }
+
+    #[test]
+    fn library_list_dto_exposes_the_durable_stored_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("clip.mp4");
+        std::fs::write(&source, b"library bytes").unwrap();
+        let store = LibraryStore::new(tmp.path().join("library"));
+        let entry = store
+            .favorite(&FavoriteRequest {
+                source: &source,
+                kind: "video",
+                category: None,
+                favorited_at: 1.0,
+                thumb: None,
+            })
+            .unwrap();
+
+        let dto = entry_dto(&store, entry).unwrap();
+
+        assert_eq!(
+            dto.stored_path.as_deref(),
+            store
+                .stored_path(&dto.id)
+                .unwrap()
+                .as_deref()
+                .and_then(std::path::Path::to_str)
+        );
+    }
+
+    #[test]
+    fn library_import_marks_and_persists_the_new_project_asset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("clip.mp4");
+        std::fs::write(&source, b"library bytes").unwrap();
+        let library = LibraryState::new(LibraryStore::new(tmp.path().join("library")));
+        let entry = library
+            .store()
+            .unwrap()
+            .favorite(&FavoriteRequest {
+                source: &source,
+                kind: "video",
+                category: None,
+                favorited_at: 1.0,
+                thumb: None,
+            })
+            .unwrap();
+        let bundle = tmp.path().join("Import.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone())).unwrap();
+
+        let imported =
+            library_import_to_project_impl(&core, &engine_for(tmp.path()), &library, &entry.id)
+                .expect("import library item");
+
+        assert_eq!(
+            core.media().library_favorite_id(&imported.id),
+            Some(entry.id.as_str())
+        );
+        let reopened = AppCore::new();
+        reopened.open_project(&bundle).unwrap();
+        assert_eq!(
+            reopened.media().library_favorite_id(&imported.id),
+            Some(entry.id.as_str())
+        );
+
+        assert!(remove_from_library_and_project(&core, &library, &entry.id).unwrap());
+        let reopened_after_remove = AppCore::new();
+        reopened_after_remove.open_project(bundle).unwrap();
+        assert_eq!(
+            reopened_after_remove
+                .media()
+                .library_favorite_id(&imported.id),
+            None
+        );
+    }
+
+    #[test]
+    fn unavailable_library_returns_the_initialization_error() {
+        let library = LibraryState::unavailable("app data missing");
+        assert!(matches!(library.store(), Err(message) if message == "app data missing"));
+    }
 }

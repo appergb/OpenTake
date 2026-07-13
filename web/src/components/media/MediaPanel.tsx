@@ -1,8 +1,8 @@
 /**
  * MediaPanel (SPEC §7 + 剪映式顶栏改造)。顶部横排主标签（素材/音频/文本/贴纸/
  * 特效/转场/字幕/智能包裹，仅素材/音频可用，其余置灰占位）取代了原左侧竖排
- * Media/Captions/Music 标签条。素材/音频下再分「导入 / 我的」二级标签：导入=全部
- * （音频标签仅 type==='audio'），我的=星标收藏（后端 manifest 持久化，见 favorites.ts）。
+ * Media/Captions/Music 标签条。素材/音频下再分「导入 / 我的」二级标签：导入=当前
+ * 项目素材（音频标签仅 type==='audio'），我的=跨项目全局收藏库。
  * 内容区仍是 actions/search/context 工具栏 + 资产网格；网格项 HTML5-draggable 到
  * 时间线（见 `MediaGrid` / `TimelineRegion`）。
  */
@@ -28,7 +28,8 @@ import {
 import { Icon } from "../ui/Icon";
 import { HoverButton } from "../ui/HoverButton";
 import { useEditorUiStore, type MediaSubTabId } from "../../store/uiStore";
-import { useMediaStore, refreshMedia } from "../../store/mediaStore";
+import { useMediaStore } from "../../store/mediaStore";
+import { sourceName, useLibraryStore } from "../../store/libraryStore";
 import {
   importFolderViaDialog,
   importFilesViaDialog,
@@ -50,6 +51,7 @@ import { SoundLibraryTab } from "./SoundLibraryTab";
 import { CaptionsTab } from "./CaptionsTab";
 import { MediaSearchResults } from "./MediaSearch";
 import { migrateLocalFavorites } from "./favorites";
+import { LibraryEntryGrid } from "./LibraryView";
 
 /** MIME-ish type used on dataTransfer when dragging a media item to the timeline. */
 export const MEDIA_DND_TYPE = "application/x-opentake-media";
@@ -126,12 +128,32 @@ export function MediaPanel() {
   // self-guards (empty store / no matching items → no-op), so this settles after
   // the first successful migration and safely re-checks on project switch.
   const items = useMediaStore((s) => s.items);
+  const projectEpoch = useProjectStore((s) => s.projectEpoch);
+  const projectPath = useProjectStore((s) => s.projectPath);
   useEffect(() => {
-    if (items.length === 0) return;
-    void migrateLocalFavorites(items).then((applied) => {
-      if (applied) void refreshMedia();
-    });
-  }, [items]);
+    if (!projectPath) return;
+    void migrateLocalFavorites(items, projectEpoch)
+      .then((outcome) => {
+        if (useProjectStore.getState().projectEpoch !== projectEpoch) return;
+        if (outcome.media) {
+          useMediaStore.setState({
+            items: outcome.media.items,
+            folders: outcome.media.folders,
+          });
+        }
+        if (outcome.failures.length > 0) {
+          useMediaStore.getState().setError(
+            outcome.failures.map((failure) => `${failure.assetId}: ${failure.message}`).join("; "),
+          );
+        }
+        if (outcome.synced) void useLibraryStore.getState().refresh();
+      })
+      .catch((error: unknown) => {
+        if (useProjectStore.getState().projectEpoch === projectEpoch) {
+          useMediaStore.getState().setError(String(error));
+        }
+      });
+  }, [items, projectEpoch, projectPath]);
 
   // 仅 material/audio 渲染素材库内容；其余禁用标签理论上点不到，兜底显示占位。
   const isLibraryTab = mediaTab === "material" || mediaTab === "audio";
@@ -160,6 +182,10 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   const folders = useMediaStore((s) => s.folders);
   const importing = useMediaStore((s) => s.importing);
   const error = useMediaStore((s) => s.error);
+  const libraryEntries = useLibraryStore((s) => s.entries);
+  const libraryLoading = useLibraryStore((s) => s.loading);
+  const libraryError = useLibraryStore((s) => s.error);
+  const refreshLibrary = useLibraryStore((s) => s.refresh);
   const subTab = useEditorUiStore((s) => s.mediaSubTab);
   const setSubTab = useEditorUiStore((s) => s.setMediaSubTab);
   const currentFolderId = useEditorUiStore((s) => s.mediaPanelCurrentFolderId);
@@ -179,6 +205,10 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   useEffect(() => {
     resetFolder.current(null);
   }, [kind, subTab]);
+
+  useEffect(() => {
+    if (subTab === "mine") void refreshLibrary();
+  }, [subTab, refreshLibrary]);
 
   // The extract/sound subtabs exist only on the audio tab; if we land on the
   // material tab still pointing at one, fall back to import.
@@ -218,6 +248,15 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
       }),
     [items, kind, subTab, query, browsing, folderId],
   );
+  const filteredLibraryEntries = useMemo(
+    () =>
+      libraryEntries.filter((entry) => {
+        if (kind === "audio" && entry.type !== "audio") return false;
+        if (query === "") return true;
+        return sourceName(entry.source ?? entry.storedPath).toLowerCase().includes(query);
+      }),
+    [libraryEntries, kind, query],
+  );
 
   // "提取" subtab (audio only): project videos carrying an extractable audio
   // track. Rendered with the same MediaCard, whose hover Extract button already
@@ -240,7 +279,11 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   const isEmpty = totalCount === 0;
   const audioExtractView = isAudio && subTab === "extract";
   const audioSoundView = isAudio && subTab === "sound";
-  const displayCount = audioExtractView ? extractableVideos.length : totalCount;
+  const displayCount = audioExtractView
+    ? extractableVideos.length
+    : subTab === "mine"
+      ? filteredLibraryEntries.length
+      : totalCount;
 
   return (
     <>
@@ -343,14 +386,20 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
                 : t("media.itemCount", { count: displayCount })}
           </span>
         </div>
-        {error && (
+        {(error || (subTab === "mine" && libraryError)) && (
           <div style={{ color: "var(--status-error)", fontSize: "var(--fs-xs)" }}>
-            {t("media.importFailed", { error })}
+            {t("media.importFailed", { error: error ?? libraryError ?? "" })}
           </div>
         )}
       </div>
 
-      {audioSoundView ? (
+      {subTab === "mine" ? (
+        <LibraryEntryGrid
+          entries={filteredLibraryEntries}
+          loading={libraryLoading}
+          totalEmpty={libraryEntries.length === 0}
+        />
+      ) : audioSoundView ? (
         // 音效库（#115 全局库的 sound 分类）搬进音频 tab，一键导入项目。
         <SoundLibraryTab query={query} />
       ) : audioExtractView ? (
@@ -738,6 +787,7 @@ function MediaCard({ item }: { item: MediaItem }) {
   const thumb = item.missing ? null : assetUrl(lazyThumbnail);
   const [hovered, setHovered] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [favoritePending, setFavoritePending] = useState(false);
 
   useEffect(() => {
     setLazyThumbnail(item.thumbnail ?? mediaThumbnailCache.get(thumbnailKey) ?? null);
@@ -958,14 +1008,24 @@ function MediaCard({ item }: { item: MediaItem }) {
         <button
           type="button"
           aria-pressed={favorite}
+          aria-busy={favoritePending}
+          disabled={favoritePending}
           title={favorite ? t("media.unfavorite") : t("media.favorite")}
           onClick={(e) => {
             e.stopPropagation();
-            // Persist to the project manifest; the backend's media_changed event
-            // plus this refresh update every card's `favorite` flag.
-            void toggleFavorite([item.id], !favorite)
-              .then(() => refreshMedia())
-              .catch(() => {});
+            setFavoritePending(true);
+            setFeedback(null);
+            void toggleFavorite(item.id, !favorite)
+              .then(async (media) => {
+                useMediaStore.setState({ items: media.items, folders: media.folders });
+                await useLibraryStore.getState().refresh();
+              })
+              .catch((error: unknown) => {
+                const message = String(error);
+                setFeedback(message);
+                useMediaStore.getState().setError(message);
+              })
+              .finally(() => setFavoritePending(false));
           }}
           style={{
             position: "absolute",
@@ -981,7 +1041,8 @@ function MediaCard({ item }: { item: MediaItem }) {
             borderRadius: "var(--radius-xs)",
             background: "rgba(0,0,0,0.6)",
             color: favorite ? "var(--accent-timecode)" : "var(--text-secondary)",
-            cursor: "pointer",
+            cursor: favoritePending ? "wait" : "pointer",
+            opacity: favoritePending ? 0.55 : 1,
           }}
         >
           <Icon icon={Star} size={12} strokeWidth={2} fill={favorite ? "currentColor" : "none"} />

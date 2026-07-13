@@ -290,10 +290,15 @@ impl LibraryStore {
             return Ok(false);
         }
         manifest.version = MANIFEST_VERSION;
-        if let Some(path) = self.stored_path(id)? {
+        let stored_path = self.stored_path(id)?;
+        self.store_manifest(&manifest)?;
+        // Commit the manifest first. A failed manifest write must not leave an
+        // entry that still exists on disk pointing at a copy we already deleted.
+        // A failed best-effort cleanup after the commit only leaves an orphaned
+        // content-addressed file, which is safe and can be reclaimed later.
+        if let Some(path) = stored_path {
             let _ = std::fs::remove_file(path);
         }
-        self.store_manifest(&manifest)?;
         Ok(true)
     }
 
@@ -554,6 +559,25 @@ mod tests {
         assert!(store.stored_path(&e.id).unwrap().is_none());
         // Removing again is a no-op.
         assert!(!store.remove(&e.id).unwrap());
+    }
+
+    #[test]
+    fn failed_remove_manifest_commit_preserves_entry_and_stored_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("lib");
+        let source = src_file(tmp.path(), "a.mp4", b"must survive failed removal");
+        let store = LibraryStore::new(&lib);
+        let entry = store.favorite(&req(&source, "video", None)).unwrap();
+        let stored = store.stored_path(&entry.id).unwrap().unwrap();
+        std::fs::create_dir(lib.join(format!("{MANIFEST_NAME}.tmp"))).unwrap();
+
+        assert!(store.remove(&entry.id).is_err());
+        assert!(store.contains(&entry.id).unwrap());
+        assert_eq!(
+            store.stored_path(&entry.id).unwrap().as_deref(),
+            Some(stored.as_path())
+        );
+        assert!(stored.is_file());
     }
 
     #[test]

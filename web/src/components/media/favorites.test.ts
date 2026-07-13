@@ -1,25 +1,18 @@
-/**
- * migrateLocalFavorites 单测（#91）：把遗留 localStorage 星标迁进后端 manifest。
- * 只对命中当前 items 且未收藏的 id 调 toggle_favorite，并把命中的 id 从 localStorage
- * 移除（清空后删键），其余留给拥有它们的其他项目。vitest node 环境无 localStorage，
- * 这里注入内存 stub；后端 api 用 vi.mock 拦截以观察调用。
- */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// vi.hoisted so the mock fn exists before vi.mock's hoisted factory runs.
-const { toggleFavorite } = vi.hoisted(() => ({
-  toggleFavorite: vi.fn(async () => ({ items: [], folders: [] })),
+const { syncProjectFavorites } = vi.hoisted(() => ({
+  syncProjectFavorites: vi.fn(),
 }));
-vi.mock("../../lib/api", () => ({ toggleFavorite }));
+vi.mock("../../lib/api", () => ({ syncProjectFavorites }));
 
 function makeLocalStorage(): Storage {
   const map = new Map<string, string>();
   return {
-    getItem: (k) => (map.has(k) ? (map.get(k) as string) : null),
-    setItem: (k, v) => void map.set(k, String(v)),
-    removeItem: (k) => void map.delete(k),
+    getItem: (key) => map.get(key) ?? null,
+    setItem: (key, value) => void map.set(key, String(value)),
+    removeItem: (key) => void map.delete(key),
     clear: () => map.clear(),
-    key: (i) => [...map.keys()][i] ?? null,
+    key: (index) => [...map.keys()][index] ?? null,
     get length() {
       return map.size;
     },
@@ -31,41 +24,63 @@ const KEY = "opentake.favorites";
 describe("migrateLocalFavorites", () => {
   beforeEach(() => {
     vi.resetModules();
-    toggleFavorite.mockClear();
     vi.stubGlobal("localStorage", makeLocalStorage());
+    syncProjectFavorites.mockReset().mockResolvedValue({
+      media: { items: [], folders: [] },
+      migratedLegacyAssetIds: [],
+      failures: [],
+    });
   });
 
-  it("favorites only the unfavorited matches and drains migrated ids", async () => {
-    localStorage.setItem(KEY, JSON.stringify(["a", "b", "other"]));
+  it("sends only current-project legacy ids and removes only confirmed migrations", async () => {
+    localStorage.setItem(KEY, JSON.stringify(["a", "b", "other-project"]));
+    syncProjectFavorites.mockResolvedValueOnce({
+      media: { items: [], folders: [] },
+      migratedLegacyAssetIds: ["a"],
+      failures: [{ assetId: "b", message: "offline" }],
+    });
     const { migrateLocalFavorites } = await import("./favorites");
 
-    const applied = await migrateLocalFavorites([
-      { id: "a", favorite: false }, // needs favoriting
-      { id: "b", favorite: true }, // already a favorite -> skip the backend call
-    ]);
+    const outcome = await migrateLocalFavorites([{ id: "a" }, { id: "b" }], 4);
 
-    expect(applied).toBe(true);
-    expect(toggleFavorite).toHaveBeenCalledTimes(1);
-    expect(toggleFavorite).toHaveBeenCalledWith(["a"], true);
-    // a and b were present in this project -> removed; "other" stays for its project.
-    expect(JSON.parse(localStorage.getItem(KEY) as string)).toEqual(["other"]);
+    expect(syncProjectFavorites).toHaveBeenCalledWith(["a", "b"]);
+    expect(outcome.failures).toEqual([{ assetId: "b", message: "offline" }]);
+    expect(JSON.parse(localStorage.getItem(KEY) as string)).toEqual(["b", "other-project"]);
   });
 
-  it("removes the key once every stored id is migrated", async () => {
+  it("reconciles manifest favorites once per project epoch even without local data", async () => {
+    const { migrateLocalFavorites } = await import("./favorites");
+
+    expect((await migrateLocalFavorites([{ id: "a" }], 10)).synced).toBe(true);
+    expect((await migrateLocalFavorites([{ id: "a" }], 10)).synced).toBe(false);
+    expect((await migrateLocalFavorites([{ id: "a" }], 11)).synced).toBe(true);
+
+    expect(syncProjectFavorites).toHaveBeenNthCalledWith(1, []);
+    expect(syncProjectFavorites).toHaveBeenNthCalledWith(2, []);
+  });
+
+  it("retains local ids and allows retry when synchronization rejects", async () => {
+    localStorage.setItem(KEY, JSON.stringify(["a"]));
+    syncProjectFavorites.mockRejectedValueOnce(new Error("library unavailable"));
+    const { migrateLocalFavorites } = await import("./favorites");
+
+    await expect(migrateLocalFavorites([{ id: "a" }], 7)).rejects.toThrow(
+      "library unavailable",
+    );
+    await migrateLocalFavorites([{ id: "a" }], 7);
+
+    expect(syncProjectFavorites).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(localStorage.getItem(KEY) as string)).toEqual(["a"]);
+  });
+
+  it("waits for the project media mirror before consuming an epoch with legacy ids", async () => {
     localStorage.setItem(KEY, JSON.stringify(["a"]));
     const { migrateLocalFavorites } = await import("./favorites");
-    await migrateLocalFavorites([{ id: "a", favorite: false }]);
-    expect(localStorage.getItem(KEY)).toBeNull();
-  });
 
-  it("is a no-op with no legacy data or no matching items", async () => {
-    const { migrateLocalFavorites } = await import("./favorites");
-    // No localStorage entry at all.
-    expect(await migrateLocalFavorites([{ id: "a", favorite: false }])).toBe(false);
-    // Stored ids that don't match the current project's items are left untouched.
-    localStorage.setItem(KEY, JSON.stringify(["ghost"]));
-    expect(await migrateLocalFavorites([{ id: "a", favorite: false }])).toBe(false);
-    expect(toggleFavorite).not.toHaveBeenCalled();
-    expect(JSON.parse(localStorage.getItem(KEY) as string)).toEqual(["ghost"]);
+    expect((await migrateLocalFavorites([], 12)).synced).toBe(false);
+    expect(syncProjectFavorites).not.toHaveBeenCalled();
+
+    await migrateLocalFavorites([{ id: "a" }], 12);
+    expect(syncProjectFavorites).toHaveBeenCalledWith(["a"]);
   });
 });
