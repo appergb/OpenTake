@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { syncProjectFavorites } = vi.hoisted(() => ({
   syncProjectFavorites: vi.fn(),
@@ -37,6 +37,10 @@ async function setCurrentProject(projectEpoch: number, projectPath: string) {
 }
 
 describe("migrateLocalFavorites", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   beforeEach(() => {
     vi.resetModules();
     vi.stubGlobal("localStorage", makeLocalStorage());
@@ -90,6 +94,33 @@ describe("migrateLocalFavorites", () => {
 
     expect(syncProjectFavorites).toHaveBeenCalledTimes(2);
     expect(JSON.parse(localStorage.getItem(KEY) as string)).toEqual(["a"]);
+  });
+
+  it("retries a partial failure in the same project after the loop backoff", async () => {
+    let now = 1000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    localStorage.setItem(KEY, JSON.stringify(["a"]));
+    syncProjectFavorites
+      .mockResolvedValueOnce({
+        media: { items: [], folders: [] },
+        migratedLegacyAssetIds: [],
+        failures: [{ assetId: "a", message: "offline" }],
+      })
+      .mockResolvedValueOnce({
+        media: { items: [], folders: [] },
+        migratedLegacyAssetIds: ["a"],
+        failures: [],
+      });
+    const project = await setCurrentProject(8, "/project-8.opentake");
+    const { migrateLocalFavorites } = await import("./favorites");
+
+    expect((await migrateLocalFavorites([{ id: "a" }], project)).failures).toHaveLength(1);
+    expect((await migrateLocalFavorites([{ id: "a" }], project)).synced).toBe(false);
+    now += 251;
+    expect((await migrateLocalFavorites([{ id: "a" }], project)).failures).toHaveLength(0);
+
+    expect(syncProjectFavorites).toHaveBeenCalledTimes(2);
+    expect(localStorage.getItem(KEY)).toBeNull();
   });
 
   it("waits for the project media mirror before completing an identity with legacy ids", async () => {

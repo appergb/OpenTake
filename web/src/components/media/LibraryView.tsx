@@ -550,7 +550,8 @@ export function LibraryEntryCard({ entry }: { entry: LibraryEntry }) {
 }
 
 export function libraryEntryPreviewSource(entry: LibraryEntry): string | undefined {
-  return entry.thumb ?? entry.storedPath ?? entry.source;
+  const thumb = entry.thumb;
+  return thumb?.startsWith("data:") || thumb?.startsWith("blob:") ? thumb : undefined;
 }
 
 function CardAction({

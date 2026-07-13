@@ -16,13 +16,16 @@
 //! still owns each atomic library-manifest operation. It reuses the
 //! [`crate::media::MediaState`] engine for probing rather than re-opening one.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use same_file::Handle;
 use serde::Serialize;
 use tauri::State;
 
-use opentake_core::{importable_clip_type, AppCore, ProbedMedia};
+use opentake_core::{importable_clip_type, AppCore, DeferredCoreEvents, ProbedMedia};
 use opentake_media::library::{FavoriteRequest, LibraryEntry, LibraryStore};
 
 use crate::media::MediaState;
@@ -98,8 +101,8 @@ pub struct LibraryEntryDto {
     pub source: Option<String>,
     /// Optional thumbnail reference (path or data URI).
     pub thumb: Option<String>,
-    /// Durable copy owned by the global library. Preview this instead of the
-    /// original source so favorites remain usable when the source goes offline.
+    /// Reserved compatibility field. Library ambient paths are never exposed as
+    /// media authority; previews use only content URLs supplied in `thumb`.
     pub stored_path: Option<String>,
 }
 
@@ -117,22 +120,8 @@ impl From<LibraryEntry> for LibraryEntryDto {
     }
 }
 
-fn entry_dto(store: &LibraryStore, entry: LibraryEntry) -> Result<LibraryEntryDto, String> {
-    let stored_path = store
-        .stored_path(&entry.id)
-        .map_err(|error| error.to_string())?
-        .map(|path| path.to_string_lossy().into_owned());
-    Ok(LibraryEntryDto {
-        stored_path,
-        ..LibraryEntryDto::from(entry)
-    })
-}
-
-fn entry_dto_with_path(entry: LibraryEntry, stored_path: Option<&PathBuf>) -> LibraryEntryDto {
-    LibraryEntryDto {
-        stored_path: stored_path.map(|path| path.to_string_lossy().into_owned()),
-        ..LibraryEntryDto::from(entry)
-    }
+fn entry_dto(entry: LibraryEntry) -> LibraryEntryDto {
+    LibraryEntryDto::from(entry)
 }
 
 /// The asset minted in the current project by `library_import_to_project`. The
@@ -165,14 +154,7 @@ pub fn library_list(
         Some(c) => store.entries_in_category(Some(c)),
     }
     .map_err(|e| e.to_string())?;
-    let stored_paths = store.stored_paths().map_err(|error| error.to_string())?;
-    Ok(entries
-        .into_iter()
-        .map(|entry| {
-            let stored_path = stored_paths.get(&entry.id);
-            entry_dto_with_path(entry, stored_path)
-        })
-        .collect())
+    Ok(entries.into_iter().map(entry_dto).collect())
 }
 
 /// `library_favorite`: copy a local file into the global library (dedup by
@@ -201,7 +183,7 @@ pub fn library_favorite(
         thumb,
     };
     let entry = store.favorite(&req).map_err(|e| e.to_string())?;
-    entry_dto(store, entry)
+    Ok(entry_dto(entry))
 }
 
 /// `library_unfavorite`: remove an entry (and its stored copy) by id. Returns
@@ -229,7 +211,7 @@ pub fn library_categorize(
         .set_category(&id, category)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("unknown library entry: {id}"))?;
-    entry_dto(store, entry)
+    Ok(entry_dto(entry))
 }
 
 /// `library_rename`: rename a category — move every entry whose category equals
@@ -275,26 +257,37 @@ fn remove_from_library_and_project(
     let removed = store
         .remove(id)
         .map_err(|error| format!("global favorite could not be removed: {error}"))?;
+    let mut events = DeferredCoreEvents::default();
     if let Some(project_dir) = project.project_dir.as_deref() {
         let cleared = core
-            .clear_media_global_favorite_id_for_project(project.project_epoch, project_dir, id)
+            .clear_media_global_favorite_id_for_project_deferred(
+                project.project_epoch,
+                project_dir,
+                id,
+                &mut events,
+            )
             .map_err(|e| e.to_string())?;
         if cleared > 0 {
-            if let Err(error) =
-                core.save_media_manifest_for_project(project.project_epoch, project_dir)
-            {
+            if let Err(error) = core.save_media_manifest_for_project_deferred(
+                project.project_epoch,
+                project_dir,
+                &mut events,
+            ) {
                 crate::media::restore_project_favorites(
                     core,
                     project.project_epoch,
                     project_dir,
                     &project.media,
+                    &mut events,
                 );
+                core.emit_deferred(events);
                 return Err(format!(
                     "project favorite mirror could not be saved: {error}"
                 ));
             }
         }
     }
+    core.emit_deferred(events);
     Ok(removed)
 }
 
@@ -320,6 +313,33 @@ fn library_import_to_project_impl(
     id: &str,
 ) -> Result<LibraryImportDto, String> {
     let _workflow = library.lock_workflow();
+    let mut events = DeferredCoreEvents::default();
+    let result = {
+        let _project_identity = core.lock_project_identity_workflow();
+        library_import_to_project_with_events(core, media, library, id, &mut events)
+    };
+    core.emit_deferred(events);
+    result
+}
+
+fn library_import_to_project_with_events(
+    core: &AppCore,
+    media: &MediaState,
+    library: &LibraryState,
+    id: &str,
+    events: &mut DeferredCoreEvents,
+) -> Result<LibraryImportDto, String> {
+    library_import_to_project_with_hook(core, media, library, id, events, |_| {})
+}
+
+fn library_import_to_project_with_hook(
+    core: &AppCore,
+    media: &MediaState,
+    library: &LibraryState,
+    id: &str,
+    events: &mut DeferredCoreEvents,
+    after_project_commit: impl FnOnce(&Path),
+) -> Result<LibraryImportDto, String> {
     core.ensure_project_mutable()
         .map_err(|error| error.to_string())?;
     let project = core.runtime_snapshot();
@@ -328,41 +348,118 @@ fn library_import_to_project_impl(
         .clone()
         .ok_or_else(|| "save the project before importing a global favorite".to_string())?;
     let store = library.store()?;
-    let stored = store
-        .stored_path(id)
+    let stored_name = store
+        .stored_file_name(id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("library entry has no stored file: {id}"))?;
-    if !stored.is_file() {
-        return Err(format!(
-            "library file missing on disk: {}",
-            stored.display()
-        ));
-    }
-    if importable_clip_type(&stored).is_none() {
+    if importable_clip_type(Path::new(&stored_name)).is_none() {
         return Err(format!(
             "library file is not an importable media type: {}",
-            stored.display()
+            Path::new(&stored_name).display()
         ));
     }
+    let extension = Path::new(&stored_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| value.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        .unwrap_or("bin");
+    let media_dir = opentake_project::layout::media_dir(&project_dir);
+    std::fs::create_dir_all(&media_dir).map_err(|error| error.to_string())?;
+    static IMPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = IMPORT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let imported_path = media_dir.join(format!(
+        "library-{id}-{}-{sequence}.{extension}",
+        std::process::id()
+    ));
+    let mut imported_options = std::fs::OpenOptions::new();
+    imported_options.read(true).write(true).create_new(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        imported_options.share_mode(0x1 | 0x2);
+    }
+    let imported_file = imported_options
+        .open(&imported_path)
+        .map_err(|error| error.to_string())?;
+    let imported_handle = Handle::from_file(imported_file).map_err(|error| error.to_string())?;
+    let mut imported = ProjectImportGuard {
+        path: imported_path,
+        handle: imported_handle,
+        committed: false,
+    };
+    store
+        .copy_stored_verified(id, imported.handle.as_file_mut())
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("library entry has no stored file: {id}"))?;
+    imported
+        .handle
+        .as_file_mut()
+        .flush()
+        .map_err(|error| error.to_string())?;
+    imported
+        .handle
+        .as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    if !imported.matches_path().map_err(|error| error.to_string())? {
+        return Err("project import leaf identity changed before probe".to_string());
+    }
 
-    let probe = probe_or_default(media.engine(), &stored);
-    let name = display_name(&stored);
+    let probe = probe_or_default(media.engine(), &imported.path);
+    if !imported.matches_path().map_err(|error| error.to_string())? {
+        return Err("project import leaf identity changed during probe".to_string());
+    }
+    let name = display_name(Path::new(&stored_name));
     let entry = core
-        .import_library_media_for_project(
+        .import_library_media_for_project_deferred(
             project.project_epoch,
             &project_dir,
-            &stored,
+            &imported.path,
             name.clone(),
             &probe,
             id,
+            events,
         )
         .map_err(|e| e.to_string())?;
+    after_project_commit(&imported.path);
+    if !imported.matches_path().map_err(|error| error.to_string())? {
+        core.restore_media_manifest_for_project_deferred(
+            project.project_epoch,
+            &project_dir,
+            project.media,
+            events,
+        )
+        .map_err(|error| error.to_string())?;
+        return Err("project import leaf identity changed during commit".to_string());
+    }
+    imported.committed = true;
 
     Ok(LibraryImportDto {
         id: entry.id,
         name: entry.name,
-        path: stored.to_string_lossy().into_owned(),
+        path: imported.path.to_string_lossy().into_owned(),
     })
+}
+
+struct ProjectImportGuard {
+    path: PathBuf,
+    handle: Handle,
+    committed: bool,
+}
+
+impl ProjectImportGuard {
+    fn matches_path(&self) -> std::io::Result<bool> {
+        Ok(self.handle == Handle::from_path(&self.path)?)
+    }
+}
+
+impl Drop for ProjectImportGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = self.handle.as_file().set_len(0);
+            let _ = self.handle.as_file().sync_all();
+        }
+    }
 }
 
 /// Probe a stored library file, degrading to defaults on any probe failure (no
@@ -429,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn library_list_dto_exposes_the_durable_stored_copy() {
+    fn library_list_dto_never_exposes_an_ambient_library_path() {
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("clip.mp4");
         std::fs::write(&source, b"library bytes").unwrap();
@@ -444,16 +541,9 @@ mod tests {
             })
             .unwrap();
 
-        let dto = entry_dto(&store, entry).unwrap();
+        let dto = entry_dto(entry);
 
-        assert_eq!(
-            dto.stored_path.as_deref(),
-            store
-                .stored_path(&dto.id)
-                .unwrap()
-                .as_deref()
-                .and_then(std::path::Path::to_str)
-        );
+        assert_eq!(dto.stored_path, None);
     }
 
     #[test]
@@ -473,7 +563,17 @@ mod tests {
 
         assert!(library.store().is_ok());
         assert_eq!(
-            std::fs::read_dir(files.join(".staging")).unwrap().count(),
+            std::fs::read_dir(files.join(".staging"))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.metadata().is_ok_and(|metadata| metadata.len() > 0))
+                .count(),
+            0
+        );
+        assert_eq!(
+            std::fs::metadata(files.join(format!("{}.mp4", "0".repeat(64))))
+                .unwrap()
+                .len(),
             0
         );
     }
@@ -523,6 +623,80 @@ mod tests {
                 .library_favorite_id(&imported.id),
             None
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_leaf_replacement_rolls_back_while_identity_lease_blocks_replacement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("clip.mp4");
+        std::fs::write(&source, b"trusted library bytes").unwrap();
+        let library = LibraryState::new(LibraryStore::new(tmp.path().join("library")));
+        let entry = library
+            .store()
+            .unwrap()
+            .favorite(&FavoriteRequest {
+                source: &source,
+                kind: "video",
+                category: None,
+                favorited_at: 1.0,
+                thumb: None,
+            })
+            .unwrap();
+        let bundle = tmp.path().join("ImportSwap.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle)).unwrap();
+        let before = core.media();
+        let replacement_core = core.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::sync::Mutex::new(None);
+        let moved_path = std::sync::Mutex::new(None);
+        let mut events = DeferredCoreEvents::default();
+        let lease = core.lock_project_identity_workflow();
+
+        let error = library_import_to_project_with_hook(
+            &core,
+            &engine_for(tmp.path()),
+            &library,
+            &entry.id,
+            &mut events,
+            |path| {
+                let moved = path.with_extension("moved");
+                std::fs::rename(path, &moved).unwrap();
+                std::fs::write(path, b"replacement bytes").unwrap();
+                *moved_path.lock().unwrap() = Some(moved);
+                *worker.lock().unwrap() = Some(std::thread::spawn(move || {
+                    replacement_core.new_project();
+                    done_tx.send(()).unwrap();
+                }));
+                assert!(done_rx
+                    .recv_timeout(std::time::Duration::from_millis(50))
+                    .is_err());
+            },
+        )
+        .expect_err("leaf replacement must fail closed");
+
+        assert!(
+            error.contains("leaf identity changed during commit"),
+            "{error}"
+        );
+        assert_eq!(core.media(), before);
+        let moved = moved_path.lock().unwrap().clone().unwrap();
+        assert_eq!(std::fs::metadata(moved).unwrap().len(), 0);
+        let replacement = std::fs::read_dir(opentake_project::layout::media_dir(
+            core.runtime_snapshot().project_dir.as_ref().unwrap(),
+        ))
+        .unwrap()
+        .find_map(|item| {
+            let path = item.ok()?.path();
+            (std::fs::read(&path).ok()?.as_slice() == b"replacement bytes").then_some(path)
+        });
+        assert!(replacement.is_some(), "replacement leaf was modified");
+        drop(lease);
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("project replacement proceeds after import lease releases");
+        worker.lock().unwrap().take().unwrap().join().unwrap();
     }
 
     #[test]

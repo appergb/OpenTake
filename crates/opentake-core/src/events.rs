@@ -85,7 +85,7 @@ pub enum CoreEvent {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct SubscriptionId(u64);
 
-type Listener = Box<dyn Fn(&CoreEvent) + Send + 'static>;
+type Listener = Arc<dyn Fn(&CoreEvent) + Send + Sync + 'static>;
 
 struct Inner {
     next_id: u64,
@@ -123,11 +123,14 @@ impl EventBus {
     ///
     /// The listener must be `Send` so the bus stays usable across threads (the
     /// core runs commands under a `Mutex` that may be touched from any thread).
-    pub fn subscribe(&self, listener: impl Fn(&CoreEvent) + Send + 'static) -> SubscriptionId {
+    pub fn subscribe(
+        &self,
+        listener: impl Fn(&CoreEvent) + Send + Sync + 'static,
+    ) -> SubscriptionId {
         let mut inner = self.inner.lock().expect("event bus mutex poisoned");
         let id = SubscriptionId(inner.next_id);
         inner.next_id += 1;
-        inner.listeners.push((id, Box::new(listener)));
+        inner.listeners.push((id, Arc::new(listener)));
         id
     }
 
@@ -140,8 +143,15 @@ impl EventBus {
     /// Deliver `event` to every current subscriber, in registration order.
     /// A no-op (never panics) when there are no subscribers.
     pub fn emit(&self, event: &CoreEvent) {
-        let inner = self.inner.lock().expect("event bus mutex poisoned");
-        for (_, listener) in &inner.listeners {
+        let listeners: Vec<Listener> = self
+            .inner
+            .lock()
+            .expect("event bus mutex poisoned")
+            .listeners
+            .iter()
+            .map(|(_, listener)| Arc::clone(listener))
+            .collect();
+        for listener in listeners {
             listener(event);
         }
     }

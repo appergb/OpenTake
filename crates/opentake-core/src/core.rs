@@ -178,6 +178,24 @@ fn ensure_project_identity(
     }
 }
 
+/// Events produced by an identity-bound external workflow. The workflow queues
+/// them while its project lease is held, then emits only after releasing that
+/// lease so synchronous subscribers may safely re-enter project lifecycle APIs.
+#[derive(Default)]
+pub struct DeferredCoreEvents {
+    events: Vec<CoreEvent>,
+}
+
+impl DeferredCoreEvents {
+    pub fn clear(&mut self) {
+        self.events.clear();
+    }
+
+    fn push(&mut self, event: CoreEvent) {
+        self.events.push(event);
+    }
+}
+
 /// The cloneable handle to the one authoritative editing session.
 #[derive(Clone)]
 pub struct AppCore {
@@ -231,8 +249,17 @@ impl AppCore {
     }
 
     /// Subscribe to [`CoreEvent`]s. Convenience for `self.events().subscribe`.
-    pub fn subscribe(&self, listener: impl Fn(&CoreEvent) + Send + 'static) -> SubscriptionId {
+    pub fn subscribe(
+        &self,
+        listener: impl Fn(&CoreEvent) + Send + Sync + 'static,
+    ) -> SubscriptionId {
         self.events.subscribe(listener)
+    }
+
+    pub fn emit_deferred(&self, events: DeferredCoreEvents) {
+        for event in events.events {
+            self.events.emit(&event);
+        }
     }
 
     /// The injected capability backends (preview/export/media/gen).
@@ -548,6 +575,31 @@ impl AppCore {
         probe: &ProbedMedia,
         library_id: &str,
     ) -> Result<MediaManifestEntry> {
+        let mut events = DeferredCoreEvents::default();
+        let entry = self.import_library_media_for_project_deferred(
+            expected_project_epoch,
+            expected_project_dir,
+            path,
+            name,
+            probe,
+            library_id,
+            &mut events,
+        )?;
+        self.emit_deferred(events);
+        Ok(entry)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn import_library_media_for_project_deferred(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+        library_id: &str,
+        events: &mut DeferredCoreEvents,
+    ) -> Result<MediaManifestEntry> {
         let id = self.ids.next_id();
         let (entry, count) = {
             let mut session = self.lock();
@@ -572,11 +624,11 @@ impl AppCore {
                 }
             }
         };
-        self.events.emit(&CoreEvent::MediaChanged {
+        events.push(CoreEvent::MediaChanged {
             project_epoch: expected_project_epoch,
             count,
         });
-        self.events.emit(&CoreEvent::ProjectSaved {
+        events.push(CoreEvent::ProjectSaved {
             path: expected_project_dir.to_string_lossy().into_owned(),
             project_epoch: expected_project_epoch,
         });
@@ -611,6 +663,26 @@ impl AppCore {
         asset_ids: &[String],
         favorite: bool,
     ) -> Result<usize> {
+        let mut events = DeferredCoreEvents::default();
+        let changed = self.set_media_favorite_for_project_deferred(
+            expected_project_epoch,
+            expected_project_dir,
+            asset_ids,
+            favorite,
+            &mut events,
+        )?;
+        self.emit_deferred(events);
+        Ok(changed)
+    }
+
+    pub fn set_media_favorite_for_project_deferred(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        asset_ids: &[String],
+        favorite: bool,
+        events: &mut DeferredCoreEvents,
+    ) -> Result<usize> {
         let (changed, count) = {
             let mut session = self.lock();
             ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
@@ -618,7 +690,7 @@ impl AppCore {
             (changed, session.editor.media().entries.len())
         };
         if changed > 0 {
-            self.events.emit(&CoreEvent::MediaChanged {
+            events.push(CoreEvent::MediaChanged {
                 project_epoch: expected_project_epoch,
                 count,
             });
@@ -659,6 +731,26 @@ impl AppCore {
         asset_id: &str,
         library_id: Option<String>,
     ) -> Result<bool> {
+        let mut events = DeferredCoreEvents::default();
+        let changed = self.set_media_global_favorite_for_project_deferred(
+            expected_project_epoch,
+            expected_project_dir,
+            asset_id,
+            library_id,
+            &mut events,
+        )?;
+        self.emit_deferred(events);
+        Ok(changed)
+    }
+
+    pub fn set_media_global_favorite_for_project_deferred(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        asset_id: &str,
+        library_id: Option<String>,
+        events: &mut DeferredCoreEvents,
+    ) -> Result<bool> {
         let (changed, count) = {
             let mut session = self.lock();
             ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
@@ -668,7 +760,7 @@ impl AppCore {
             (changed, session.editor.media().entries.len())
         };
         if changed {
-            self.events.emit(&CoreEvent::MediaChanged {
+            events.push(CoreEvent::MediaChanged {
                 project_epoch: expected_project_epoch,
                 count,
             });
@@ -699,6 +791,24 @@ impl AppCore {
         expected_project_dir: &Path,
         library_id: &str,
     ) -> Result<usize> {
+        let mut events = DeferredCoreEvents::default();
+        let changed = self.clear_media_global_favorite_id_for_project_deferred(
+            expected_project_epoch,
+            expected_project_dir,
+            library_id,
+            &mut events,
+        )?;
+        self.emit_deferred(events);
+        Ok(changed)
+    }
+
+    pub fn clear_media_global_favorite_id_for_project_deferred(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        library_id: &str,
+        events: &mut DeferredCoreEvents,
+    ) -> Result<usize> {
         let (changed, count) = {
             let mut session = self.lock();
             ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
@@ -706,7 +816,7 @@ impl AppCore {
             (changed, session.editor.media().entries.len())
         };
         if changed > 0 {
-            self.events.emit(&CoreEvent::MediaChanged {
+            events.push(CoreEvent::MediaChanged {
                 project_epoch: expected_project_epoch,
                 count,
             });
@@ -721,16 +831,50 @@ impl AppCore {
         expected_project_epoch: u64,
         expected_project_dir: &Path,
     ) -> Result<PathBuf> {
+        let mut events = DeferredCoreEvents::default();
+        let written = self.save_media_manifest_for_project_deferred(
+            expected_project_epoch,
+            expected_project_dir,
+            &mut events,
+        )?;
+        self.emit_deferred(events);
+        Ok(written)
+    }
+
+    pub fn save_media_manifest_for_project_deferred(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        events: &mut DeferredCoreEvents,
+    ) -> Result<PathBuf> {
         let written = {
             let mut session = self.lock();
             ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
             session.editor.save_media_manifest()?
         };
-        self.events.emit(&CoreEvent::ProjectSaved {
+        events.push(CoreEvent::ProjectSaved {
             path: written.to_string_lossy().into_owned(),
             project_epoch: expected_project_epoch,
         });
         Ok(written)
+    }
+
+    /// Restore an exact media snapshot and persist it while the expected
+    /// project still owns the session. External workflows use this only to
+    /// roll back a postcondition failure before deferred events are emitted.
+    pub fn restore_media_manifest_for_project_deferred(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        manifest: MediaManifest,
+        events: &mut DeferredCoreEvents,
+    ) -> Result<()> {
+        let mut session = self.lock();
+        ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+        session.editor.restore_media(manifest);
+        session.editor.save_media_manifest()?;
+        events.clear();
+        Ok(())
     }
 
     /// Relink an existing asset (by id) to a new file, keeping the same id, and

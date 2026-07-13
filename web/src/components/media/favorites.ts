@@ -39,6 +39,8 @@ export interface FavoriteMigrationOutcome {
 
 const completedProjects = new Set<string>();
 const inFlight = new Map<string, Promise<FavoriteMigrationOutcome>>();
+const retryAfter = new Map<string, number>();
+const RETRY_BACKOFF_MS = 250;
 
 function projectKey(project: MediaProjectIdentity): string {
   return JSON.stringify([project.projectEpoch, project.projectPath]);
@@ -73,6 +75,9 @@ export function migrateLocalFavorites(
   if (completedProjects.has(key)) {
     return Promise.resolve({ synced: false, failures: [] });
   }
+  if ((retryAfter.get(key) ?? 0) > Date.now()) {
+    return Promise.resolve({ synced: false, failures: [] });
+  }
   const existing = inFlight.get(key);
   if (existing) return existing;
 
@@ -92,7 +97,12 @@ export function migrateLocalFavorites(
         return { synced: false, failures: [] };
       }
       removeMigratedLegacyIds(result.migratedLegacyAssetIds);
-      completedProjects.add(key);
+      if (result.failures.length === 0) {
+        retryAfter.delete(key);
+        completedProjects.add(key);
+      } else {
+        retryAfter.set(key, Date.now() + RETRY_BACKOFF_MS);
+      }
       return { synced: true, media: result.media, failures: result.failures };
     })
     .finally(() => {
