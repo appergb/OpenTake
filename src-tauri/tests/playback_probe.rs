@@ -13,11 +13,14 @@
 //! OPENTAKE_PROBE_VIDEO=/path/to/real_video_with_audio.mp4 \
 //!   cargo test -p opentake-tauri --test playback_probe -- --ignored --nocapture
 //! ```
-//! `probe_realtime_playback_with_audio_clock` needs `OPENTAKE_PROBE_VIDEO` (a
+//! `probe_realtime_playback_with_audio_or_safe_fallback` needs
+//! `OPENTAKE_PROBE_VIDEO` (a
 //! real asset with an audio track). A live cpal callback drives playback; when
 //! the host accepts the stream but never invokes its callback, the probe also
 //! verifies the production wall-clock fallback rather than allowing a frozen
-//! audio clock. It soft-skips (prints and returns) when the env var is unset.
+//! audio clock. Set `OPENTAKE_REQUIRE_AUDIO_CALLBACK=1` on an audio-qualified
+//! host to make callback fallback a hard failure. It soft-skips (prints and
+//! returns) when the media env var is unset.
 //! The other two probes generate their own fixtures at runtime via ffmpeg into
 //! the OS temp dir and soft-skip when ffmpeg is unavailable.
 #![cfg(feature = "playback-engine")]
@@ -96,9 +99,14 @@ fn run_engine(
     )
     .expect("engine ready (GPU acquire + first frame)");
     if let Some(audio) = audio.as_ref() {
-        audio.resume().expect("prepared audio callback resumes");
+        audio
+            .prepare_resume()
+            .expect("prepared audio callback resumes muted");
     }
     engine.resume(0).expect("prepared engine resumes");
+    if let Some(audio) = audio.as_ref() {
+        audio.commit_resume();
+    }
     let deadline = Instant::now() + Duration::from_secs_f64(secs);
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
@@ -133,7 +141,7 @@ fn ffmpeg_ready() -> bool {
 /// continuously; frame rate meets target and the playhead advances.
 #[test]
 #[ignore = "real-device probe: needs GPU + audio device + a real video asset"]
-fn probe_realtime_playback_with_audio_clock() {
+fn probe_realtime_playback_with_audio_or_safe_fallback() {
     let Ok(src) = std::env::var("OPENTAKE_PROBE_VIDEO") else {
         eprintln!(
             "skip: set OPENTAKE_PROBE_VIDEO to a real video file (with audio) to run this probe"
@@ -164,6 +172,12 @@ fn probe_realtime_playback_with_audio_clock() {
         "wall-fallback"
     };
     eprintln!("[probe] frames={frames} playhead={playhead} clock={clock_mode}");
+    if std::env::var("OPENTAKE_REQUIRE_AUDIO_CALLBACK").as_deref() == Ok("1") {
+        assert!(
+            audio_active,
+            "strict audio qualification requires a live device callback"
+        );
+    }
     // 3s @30fps targets 90 frames. Pre-#192-fix, the render thread stacked a
     // full frame period on top of render time and measured ~67 frames/3s
     // (~22fps) on this asset+machine; post-fix it consistently measures

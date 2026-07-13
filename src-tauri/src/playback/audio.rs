@@ -49,6 +49,7 @@ const MAX_SESSION_PREMIX_BYTES: usize = 256 * 1024 * 1024;
 const MIX_CANCEL_CHUNK_FRAMES: usize = 4 * 1024;
 const CALLBACK_START_TIMEOUT: Duration = Duration::from_secs(1);
 const CALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const CALLBACKS_REQUIRED_FOR_LIVENESS: u64 = 2;
 
 struct AudioPrepareJob<T> {
     build: Box<dyn FnOnce() -> T + Send + 'static>,
@@ -327,13 +328,20 @@ impl AudioPlayback {
         self.control(AudioCmd::Pause)
     }
 
-    pub fn resume(&self) -> Result<(), String> {
+    /// Prove that callbacks continue while output remains logically muted. The
+    /// hardware stream stays running for the whole retained session, avoiding
+    /// asynchronous backend play/pause acknowledgement races. The caller can
+    /// then seek/resume the video clock before committing audible output.
+    pub fn prepare_resume(&self) -> Result<(), String> {
+        self.paused.store(true, Ordering::Release);
+        self.control(AudioCmd::Resume)
+    }
+
+    /// Commit a successfully prepared resume after the render clock has been
+    /// positioned. The already-running callback begins consuming at `pos` on
+    /// its next block.
+    pub fn commit_resume(&self) {
         self.paused.store(false, Ordering::Release);
-        if let Err(error) = self.control(AudioCmd::Resume) {
-            self.paused.store(true, Ordering::Release);
-            return Err(error);
-        }
-        Ok(())
     }
 
     fn control(
@@ -473,21 +481,16 @@ fn audio_thread(
             while let Ok(command) = control_rx.recv() {
                 match command {
                     AudioCmd::Pause(reply) => {
-                        let _ =
-                            reply.send(stream.pause().map_err(|e| format!("stream pause: {e}")));
+                        // Logical pause is established by `paused=true` before
+                        // this barrier. Keep the hardware stream running muted
+                        // so a later resume can prove current callback liveness
+                        // without trusting an asynchronous backend play ack.
+                        let _ = reply.send(Ok(()));
                     }
                     AudioCmd::Resume(reply) => {
                         let before = callback_epoch.load(Ordering::Acquire);
-                        let result = stream
-                            .play()
-                            .map_err(|e| format!("stream resume: {e}"))
-                            .and_then(|()| {
-                                require_callback_after(
-                                    &callback_epoch,
-                                    before,
-                                    CALLBACK_START_TIMEOUT,
-                                )
-                            });
+                        let result =
+                            require_callback_after(&callback_epoch, before, CALLBACK_START_TIMEOUT);
                         let _ = reply.send(result);
                     }
                     AudioCmd::Stop => break,
@@ -528,26 +531,22 @@ fn build_and_play(
         Arc::clone(callback_epoch),
     )?;
     // A successful backend `play()` request does not guarantee that the output
-    // callback is live. Installing an AudioClock before its first callback can
+    // callback is live. Installing an AudioClock before sustained callbacks can
     // freeze the playhead at frame zero forever. Prepared sessions start muted
-    // for this handshake, then pause without advancing `pos`.
+    // for this handshake and keep the hardware stream running silently, so
+    // resume never depends on an asynchronous backend play/pause transition.
     let before = callback_epoch.load(Ordering::Acquire);
     stream.play().map_err(|e| format!("stream play: {e}"))?;
     require_callback_after(callback_epoch, before, CALLBACK_START_TIMEOUT)?;
-    if paused.load(Ordering::Acquire) {
-        stream
-            .pause()
-            .map_err(|e| format!("stream prepared pause: {e}"))?;
-    }
     Ok(stream)
 }
 
 fn require_callback_after(epoch: &AtomicU64, before: u64, timeout: Duration) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
-    while epoch.load(Ordering::Acquire) == before {
+    while epoch.load(Ordering::Acquire).wrapping_sub(before) < CALLBACKS_REQUIRED_FOR_LIVENESS {
         if Instant::now() >= deadline {
             return Err(format!(
-                "audio output callback did not start within {} ms",
+                "audio output callback did not remain live within {} ms",
                 timeout.as_millis()
             ));
         }
@@ -898,6 +897,27 @@ fn build_clock_with_state(
         return Ok((Arc::new(InstantClock::new(start_frame)), None));
     }
 
+    Ok(clock_from_mixed(
+        mixed,
+        rate,
+        fps,
+        start_frame,
+        start_paused,
+        AudioPlayback::start,
+    ))
+}
+
+fn clock_from_mixed<F>(
+    mixed: Vec<f32>,
+    rate: u32,
+    fps: i32,
+    start_frame: i32,
+    start_paused: bool,
+    start: F,
+) -> (Arc<dyn PlaybackClock>, Option<AudioPlayback>)
+where
+    F: FnOnce(Arc<Vec<f32>>, Arc<AtomicU64>, Arc<AtomicBool>) -> Result<AudioPlayback, String>,
+{
     let buffer = Arc::new(mixed);
     let pos = Arc::new(AtomicU64::new(0));
     let paused = Arc::new(AtomicBool::new(start_paused));
@@ -908,11 +928,11 @@ fn build_clock_with_state(
     };
     clock.seek(start_frame); // begin playback at the current playhead
 
-    match AudioPlayback::start(buffer, pos, paused) {
-        Ok(audio) => Ok((Arc::new(clock), Some(audio))),
+    match start(buffer, pos, paused) {
+        Ok(audio) => (Arc::new(clock), Some(audio)),
         Err(e) => {
             eprintln!("[audio] {e}; falling back to wall clock");
-            Ok((Arc::new(InstantClock::new(start_frame)), None))
+            (Arc::new(InstantClock::new(start_frame)), None)
         }
     }
 }
@@ -1280,6 +1300,8 @@ mod tests {
         let worker = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(10));
             worker_epoch.fetch_add(1, Ordering::Release);
+            std::thread::sleep(Duration::from_millis(10));
+            worker_epoch.fetch_add(1, Ordering::Release);
         });
 
         require_callback_after(&epoch, 4, Duration::from_millis(250))
@@ -1292,7 +1314,58 @@ mod tests {
         let epoch = AtomicU64::new(0);
         let error = require_callback_after(&epoch, 0, Duration::from_millis(15))
             .expect_err("missing callback must fail readiness");
-        assert!(error.contains("did not start"));
+        assert!(error.contains("did not remain live"));
+    }
+
+    #[test]
+    fn callback_liveness_rejects_one_trailing_callback() {
+        let epoch = Arc::new(AtomicU64::new(7));
+        let trailing_epoch = Arc::clone(&epoch);
+        let trailing = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(5));
+            trailing_epoch.fetch_add(1, Ordering::Release);
+        });
+
+        require_callback_after(&epoch, 7, Duration::from_millis(25))
+            .expect_err("one trailing callback must not prove resumed liveness");
+        trailing.join().expect("trailing callback worker");
+    }
+
+    #[test]
+    fn failed_audio_start_installs_advancing_wall_clock() {
+        let (clock, audio) = clock_from_mixed(
+            vec![0.0, 0.0],
+            48_000,
+            100,
+            0,
+            false,
+            |_buffer, _pos, _paused| Err("callback readiness timeout".to_string()),
+        );
+
+        assert!(audio.is_none());
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(
+            clock.frame(100) >= 1,
+            "fallback clock must keep playback live"
+        );
+    }
+
+    #[test]
+    fn successful_audio_start_retains_device_clock() {
+        let (clock, audio) = clock_from_mixed(
+            vec![0.0, 0.0],
+            48_000,
+            30,
+            0,
+            false,
+            |_buffer, pos, _paused| {
+                pos.store(48_000, Ordering::Release);
+                Ok(AudioPlayback::test_stub().0)
+            },
+        );
+
+        assert!(audio.is_some());
+        assert_eq!(clock.frame(30), 30);
     }
 
     #[test]

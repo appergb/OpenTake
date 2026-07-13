@@ -150,7 +150,7 @@ impl PlaybackState {
                     ));
                 }
                 if let Some(audio) = running.audio.as_ref() {
-                    if let Err(error) = audio.resume() {
+                    if let Err(error) = audio.prepare_resume() {
                         slot.sessions.control(&identity, SessionControl::Pause);
                         return Err(PlaybackCommandError::engine(error));
                     }
@@ -161,6 +161,9 @@ impl PlaybackState {
                     }
                     slot.sessions.control(&identity, SessionControl::Pause);
                     return Err(PlaybackCommandError::engine(error));
+                }
+                if let Some(audio) = running.audio.as_ref() {
+                    audio.commit_resume();
                 }
                 return Ok(None);
             }
@@ -276,7 +279,7 @@ impl PlaybackState {
             return Err(error);
         }
         if let Some(audio_playback) = audio.as_ref() {
-            if let Err(error) = audio_playback.resume() {
+            if let Err(error) = audio_playback.prepare_resume() {
                 slot.sessions.control(&identity, SessionControl::Stop);
                 drop(slot);
                 let running = RunningPlayback {
@@ -304,6 +307,9 @@ impl PlaybackState {
             };
             running.shutdown()?;
             return Err(PlaybackCommandError::engine(error));
+        }
+        if let Some(audio_playback) = audio.as_ref() {
+            audio_playback.commit_resume();
         }
         slot.running = Some(RunningPlayback {
             identity,
@@ -1104,13 +1110,17 @@ mod tests {
         let current = identity(4, 8, "retained-resume");
         let (state, _gate) = state_with_running(current.clone());
         let (engine, _stopped) = PlaybackEngine::test_stub();
+        let (audio, paused, _audio_stopped) = super::super::audio::AudioPlayback::test_stub();
+        audio.pause().expect("prepare retained audio stub");
         {
             let mut slot = state
                 .slot
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(slot.sessions.control(&current, SessionControl::Pause));
-            slot.running.as_mut().expect("running playback").engine = engine;
+            let running = slot.running.as_mut().expect("running playback");
+            running.engine = engine;
+            running.audio = Some(audio);
         }
         let backlog = state
             .reaper
@@ -1128,6 +1138,7 @@ mod tests {
 
         assert!(result.is_none());
         assert_eq!(state.active_identity(), Some(current));
+        assert!(!paused.load(std::sync::atomic::Ordering::Acquire));
         drop(backlog);
     }
 
