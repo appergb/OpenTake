@@ -10,13 +10,15 @@ commit ancestry. The source convergence starts from the frozen remote `main`
 commit `ac50dc896bea821f66c88c6ed50cf9185e4e31d1` and uses local integration
 commit `cf52c5e495f9aea6b685aa20d863c5418a010ca5` as the code-complete candidate.
 A Windows aggregate CI finding then required the test-gating-only successor
-`301b82d2772559ba6fad25cbb2847ebc07baa494`. The documentation-only successor is the
-exact tree supplied to the fail-closed cloud publisher. Replacement aggregate
-PR #219 then exercised the complete workflow and exposed two additional native
-Windows runtime defects. Code successor
-`71ba39ec57866346e492c5973196f8806e221710` fixes both defects without changing
-the accepted macOS runtime bundle; its documentation-only successors form the final tree
-supplied to the next immutable aggregate publication.
+`301b82d2772559ba6fad25cbb2847ebc07baa494`. Replacement aggregate PR #219
+then exposed two native Windows runtime defects; code successor
+`71ba39ec57866346e492c5973196f8806e221710` fixes both. Aggregate PR #220
+confirmed those corrections, then found the same obsolete rename implementation
+in project-bundle publication; code successor
+`d79bc66b7f4bdbb815523b475ba0ecbb1f6cb281` fixes that final duplicate. These
+Windows-only corrections do not change the accepted macOS runtime bundle. A
+documentation-only successor forms the exact tree supplied to the next
+immutable aggregate publication.
 
 The final cloud gate is intentionally stricter than the legacy PR checks: the
 aggregate pull request and the final `main` push must each pass all four jobs in
@@ -189,6 +191,23 @@ aggregate PR must pass both native Windows jobs and all four total jobs before
 promotion. Failed #219 is retained as audit evidence and must also be closed as
 superseded.
 
+Aggregate PR #220 confirmed the Web, Rust, and `Windows (cancel / reparse
+safety)` jobs all pass. Its library job passed the corrected global media
+library tests, then exposed the same Win32/native rename mismatch in the
+project-bundle `TransactionLeaf` implementation: 19 marker/journal recovery
+tests failed with error 87 while 92 project tests passed.
+
+Code successor `d79bc66b7f4bdbb815523b475ba0ecbb1f6cb281` applies the
+reviewed native `NtSetInformationFile` capability-relative rename to project
+bundle publication while preserving `ReplaceIfExists=true`, DELETE access,
+delete-sharing denial, single-leaf validation, and source/parent retained
+handles. All 152 local `opentake-project` tests passed, as did macOS and
+`x86_64-pc-windows-msvc` all-target clippy with warnings denied, Windows-target
+all-target `cargo check`, formatting, and diff checks. Failed #220 is retained
+as audit evidence and must be closed as superseded; its successful jobs and
+later-stage library failure prove the prior media-library and reserved-output
+corrections reached their intended native paths.
+
 ### Platform boundary
 
 macOS cross-checks for the pure Rust project/capability crates on
@@ -257,8 +276,13 @@ listener, and MCP protocol behavior were verified independently of screenshots.
   Critical/Important = 0/0 and **Ready: Yes**, subject to the mandatory native
   Windows CI gate. Its two comment-only minor observations (FFI alignment and
   synchronous handle lifetime) were incorporated before the commit.
-- The documentation-only successor is reviewed against that accepted code tree before
-  its exact commit/tree is supplied to the cloud publisher.
+- An independent project-transaction review accepted exact successor
+  `d79bc66b7f4bdbb815523b475ba0ecbb1f6cb281` / tree
+  `b2b9bfc42fd4154e11c68bb2eb98bd1d5089d73b` with
+  Critical/Important/Minor = 0/0/0 and **Ready: Yes**, subject to a new native
+  Windows CI gate.
+- The documentation-only successor is reviewed against the accepted code tree
+  before its exact commit/tree is supplied to the cloud publisher.
 
 ## Cloud publication and completion criteria
 
@@ -273,8 +297,8 @@ Completion requires all of the following to be re-read from GitHub:
 - final `main` equals the deterministic expected commit and exact local tree;
 - aggregate and final parent order is exact;
 - #211 through #217 and the aggregate PR are closed as merged;
-- superseded failed aggregate attempts #218 and #219 are closed without being
-  represented as successful merges;
+- superseded failed aggregate attempts #218, #219, and #220 are closed without
+  being represented as successful merges;
 - every original PR head is reachable from final `main`;
 - aggregate pull-request CI and final `main` push CI each contain all four
   expected jobs and every job is `completed/success`; and
