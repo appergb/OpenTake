@@ -149,12 +149,18 @@ impl PlaybackState {
                         "retained playback identity changed",
                     ));
                 }
-                running
-                    .engine
-                    .resume(frame)
-                    .map_err(PlaybackCommandError::engine)?;
                 if let Some(audio) = running.audio.as_ref() {
-                    audio.resume().map_err(PlaybackCommandError::engine)?;
+                    if let Err(error) = audio.resume() {
+                        slot.sessions.control(&identity, SessionControl::Pause);
+                        return Err(PlaybackCommandError::engine(error));
+                    }
+                }
+                if let Err(error) = running.engine.resume(frame) {
+                    if let Some(audio) = running.audio.as_ref() {
+                        let _ = audio.pause();
+                    }
+                    slot.sessions.control(&identity, SessionControl::Pause);
+                    return Err(PlaybackCommandError::engine(error));
                 }
                 return Ok(None);
             }
@@ -269,20 +275,6 @@ impl PlaybackState {
             running.shutdown()?;
             return Err(error);
         }
-        if let Err(error) = engine.resume(frame) {
-            slot.sessions.control(&identity, SessionControl::Stop);
-            drop(slot);
-            let running = RunningPlayback {
-                identity,
-                engine,
-                audio,
-                publication,
-                server: Some(server),
-                reap: cleanup,
-            };
-            running.shutdown()?;
-            return Err(PlaybackCommandError::engine(error));
-        }
         if let Some(audio_playback) = audio.as_ref() {
             if let Err(error) = audio_playback.resume() {
                 slot.sessions.control(&identity, SessionControl::Stop);
@@ -298,6 +290,20 @@ impl PlaybackState {
                 running.shutdown()?;
                 return Err(PlaybackCommandError::engine(error));
             }
+        }
+        if let Err(error) = engine.resume(frame) {
+            slot.sessions.control(&identity, SessionControl::Stop);
+            drop(slot);
+            let running = RunningPlayback {
+                identity,
+                engine,
+                audio,
+                publication,
+                server: Some(server),
+                reap: cleanup,
+            };
+            running.shutdown()?;
+            return Err(PlaybackCommandError::engine(error));
         }
         slot.running = Some(RunningPlayback {
             identity,
@@ -1123,6 +1129,46 @@ mod tests {
         assert!(result.is_none());
         assert_eq!(state.active_identity(), Some(current));
         drop(backlog);
+    }
+
+    #[test]
+    fn retained_audio_resume_failure_restores_paused_session() {
+        let current = identity(4, 9, "retained-audio-failure");
+        let (state, _gate) = state_with_running(current.clone());
+        let (engine, _stopped) = PlaybackEngine::test_stub();
+        let (audio, paused) = super::super::audio::AudioPlayback::test_failing_resume();
+        {
+            let mut slot = state
+                .slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert!(slot.sessions.control(&current, SessionControl::Pause));
+            let running = slot.running.as_mut().expect("running playback");
+            running.engine = engine;
+            running.audio = Some(audio);
+        }
+
+        let error = match state.coordinate_start(
+            current.clone(),
+            current.revision(),
+            17,
+            opentake_media::MediaCancelToken::new(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("missing callback must reject retained resume"),
+        };
+
+        assert_eq!(error.code, super::super::session::PlaybackErrorCode::Engine);
+        assert!(error.message.contains("callback unavailable"));
+        assert!(paused.load(std::sync::atomic::Ordering::Acquire));
+        let slot = state
+            .slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(slot
+            .sessions
+            .start_would_resume(&current, current.revision())
+            .expect("failed resume remains retryable"));
     }
 
     #[test]

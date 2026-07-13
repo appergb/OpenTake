@@ -14,10 +14,12 @@
 //!   cargo test -p opentake-tauri --test playback_probe -- --ignored --nocapture
 //! ```
 //! `probe_realtime_playback_with_audio_clock` needs `OPENTAKE_PROBE_VIDEO` (a
-//! real asset with an audio track, so the cpal master clock drives playback);
-//! it soft-skips (prints and returns) when the env var is unset. The other two
-//! probes generate their own fixtures at runtime via ffmpeg into the OS temp
-//! dir and soft-skip when ffmpeg is unavailable.
+//! real asset with an audio track). A live cpal callback drives playback; when
+//! the host accepts the stream but never invokes its callback, the probe also
+//! verifies the production wall-clock fallback rather than allowing a frozen
+//! audio clock. It soft-skips (prints and returns) when the env var is unset.
+//! The other two probes generate their own fixtures at runtime via ffmpeg into
+//! the OS temp dir and soft-skip when ffmpeg is unavailable.
 #![cfg(feature = "playback-engine")]
 
 use std::collections::HashMap;
@@ -29,7 +31,7 @@ use std::time::{Duration, Instant};
 use opentake_domain::{Clip, ClipType, Timeline, Track};
 use opentake_render::{DecodedFrame, RenderSize};
 use opentake_tauri_lib::playback::{
-    audio::try_build_clock, FrameSink, MediaInfo, PlaybackEngine, PlayheadEmitter,
+    audio::build_clock_paused, FrameSink, MediaInfo, PlaybackEngine, PlayheadEmitter,
 };
 
 /// Collects frames: counts + keeps the last one.
@@ -63,15 +65,17 @@ fn video_clip(id: &str, media: &str, start: i32, dur: i32) -> Clip {
 }
 
 /// Run a timeline for `secs` seconds, returning (frames received, last
-/// playhead, last frame).
+/// playhead, last frame, whether a live audio clock was installed).
 fn run_engine(
     timeline: Timeline,
     media: HashMap<String, MediaInfo>,
     sizes: HashMap<String, (u32, u32)>,
     secs: f64,
-) -> (i32, i32, Option<DecodedFrame>) {
+) -> (i32, i32, Option<DecodedFrame>, bool) {
     let fps = timeline.fps;
-    let (clock, _audio) = try_build_clock(&timeline, &media, fps, 0).expect("probe audio clock");
+    let (clock, audio) =
+        build_clock_paused(&timeline, &media, fps, 0).expect("probe prepared audio clock");
+    let audio_active = audio.is_some();
     let sink = Arc::new(ProbeSink {
         frames: AtomicI32::new(0),
         last: Mutex::new(None),
@@ -79,7 +83,7 @@ fn run_engine(
     let emitter = Arc::new(ProbeEmitter {
         last_frame: AtomicI32::new(-1),
     });
-    let engine = PlaybackEngine::spawn(
+    let engine = PlaybackEngine::spawn_ready(
         timeline,
         media,
         HashMap::new(),
@@ -88,8 +92,13 @@ fn run_engine(
         clock,
         sink.clone(),
         emitter.clone(),
+        0,
     )
-    .expect("engine spawn (GPU acquire)");
+    .expect("engine ready (GPU acquire + first frame)");
+    if let Some(audio) = audio.as_ref() {
+        audio.resume().expect("prepared audio callback resumes");
+    }
+    engine.resume(0).expect("prepared engine resumes");
     let deadline = Instant::now() + Duration::from_secs_f64(secs);
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
@@ -98,7 +107,7 @@ fn run_engine(
     let n = sink.frames.load(Ordering::SeqCst);
     let head = emitter.last_frame.load(Ordering::SeqCst);
     let last = sink.last.lock().unwrap().clone();
-    (n, head, last)
+    (n, head, last, audio_active)
 }
 
 fn nonblack_ratio(f: &DecodedFrame) -> f64 {
@@ -148,8 +157,13 @@ fn probe_realtime_playback_with_audio_clock() {
     let mut sizes = HashMap::new();
     sizes.insert("m-1".to_string(), (1584u32, 1080u32));
 
-    let (frames, playhead, last) = run_engine(tl, media, sizes, 3.0);
-    eprintln!("[probe] frames={frames} playhead={playhead}");
+    let (frames, playhead, last, audio_active) = run_engine(tl, media, sizes, 3.0);
+    let clock_mode = if audio_active {
+        "audio"
+    } else {
+        "wall-fallback"
+    };
+    eprintln!("[probe] frames={frames} playhead={playhead} clock={clock_mode}");
     // 3s @30fps targets 90 frames. Pre-#192-fix, the render thread stacked a
     // full frame period on top of render time and measured ~67 frames/3s
     // (~22fps) on this asset+machine; post-fix it consistently measures
@@ -220,7 +234,7 @@ fn probe_prores_playback() {
     let mut sizes = HashMap::new();
     sizes.insert("m-1".to_string(), (1280u32, 720u32));
 
-    let (frames, _playhead, last) = run_engine(tl, media, sizes, 2.0);
+    let (frames, _playhead, last, _audio_active) = run_engine(tl, media, sizes, 2.0);
     eprintln!("[probe] prores frames={frames}");
     // 2s @30fps targets 60 frames. Post-#192-fix this consistently measures
     // ~50-51 frames/2s on this machine (bounded by the same compositor GPU
@@ -296,7 +310,7 @@ fn probe_color_grade_visible_in_playback() {
     let mut sizes = HashMap::new();
     sizes.insert("m-1".to_string(), (640u32, 360u32));
 
-    let (frames, _playhead, last) = run_engine(tl, media, sizes, 1.5);
+    let (frames, _playhead, last, _audio_active) = run_engine(tl, media, sizes, 1.5);
     // 1.5s @30fps targets 45 frames. Post-#192-fix this measures ~32-39
     // frames/1.5s on this machine across repeated runs (short 1.5s window,
     // so warm-up cost is a larger share and variance is higher than the

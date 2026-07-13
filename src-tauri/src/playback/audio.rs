@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
@@ -46,6 +47,8 @@ const FALLBACK_SAMPLE_RATE: u32 = 48_000;
 const MIX_CHANNELS: usize = 2;
 const MAX_SESSION_PREMIX_BYTES: usize = 256 * 1024 * 1024;
 const MIX_CANCEL_CHUNK_FRAMES: usize = 4 * 1024;
+const CALLBACK_START_TIMEOUT: Duration = Duration::from_secs(1);
+const CALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 struct AudioPrepareJob<T> {
     build: Box<dyn FnOnce() -> T + Send + 'static>,
@@ -290,9 +293,20 @@ impl AudioPlayback {
         let (control_tx, control_rx) = mpsc::channel::<AudioCmd>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
         let thread_paused = paused.clone();
+        let callback_epoch = Arc::new(AtomicU64::new(0));
+        let thread_callback_epoch = Arc::clone(&callback_epoch);
         let handle = thread::Builder::new()
             .name("opentake-audio".to_string())
-            .spawn(move || audio_thread(buffer, pos, thread_paused, control_rx, ready_tx))
+            .spawn(move || {
+                audio_thread(
+                    buffer,
+                    pos,
+                    thread_paused,
+                    thread_callback_epoch,
+                    control_rx,
+                    ready_tx,
+                )
+            })
             .map_err(|e| format!("spawn audio thread: {e}"))?;
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(AudioPlayback {
@@ -314,8 +328,11 @@ impl AudioPlayback {
     }
 
     pub fn resume(&self) -> Result<(), String> {
-        self.control(AudioCmd::Resume)?;
         self.paused.store(false, Ordering::Release);
+        if let Err(error) = self.control(AudioCmd::Resume) {
+            self.paused.store(true, Ordering::Release);
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -372,6 +389,33 @@ impl AudioPlayback {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_failing_resume() -> (Self, Arc<AtomicBool>) {
+        let (control_tx, control_rx) = mpsc::channel();
+        let paused = Arc::new(AtomicBool::new(true));
+        let handle = thread::spawn(move || {
+            while let Ok(command) = control_rx.recv() {
+                match command {
+                    AudioCmd::Pause(reply) => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    AudioCmd::Resume(reply) => {
+                        let _ = reply.send(Err("test audio callback unavailable".to_string()));
+                    }
+                    AudioCmd::Stop => break,
+                }
+            }
+        });
+        (
+            Self {
+                control_tx,
+                paused: Arc::clone(&paused),
+                handle: Some(handle),
+            },
+            paused,
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_blocking_stop() -> (Self, Arc<AtomicBool>, Receiver<()>, Sender<()>) {
         let (control_tx, control_rx) = mpsc::channel();
         let (stopped_tx, stopped_rx) = mpsc::channel();
@@ -419,10 +463,11 @@ fn audio_thread(
     buffer: Arc<Vec<f32>>,
     pos: Arc<AtomicU64>,
     paused: Arc<AtomicBool>,
+    callback_epoch: Arc<AtomicU64>,
     control_rx: Receiver<AudioCmd>,
     ready_tx: Sender<Result<(), String>>,
 ) {
-    match build_and_play(&buffer, &pos, &paused) {
+    match build_and_play(&buffer, &pos, &paused, &callback_epoch) {
         Ok(stream) => {
             let _ = ready_tx.send(Ok(()));
             while let Ok(command) = control_rx.recv() {
@@ -432,8 +477,18 @@ fn audio_thread(
                             reply.send(stream.pause().map_err(|e| format!("stream pause: {e}")));
                     }
                     AudioCmd::Resume(reply) => {
-                        let _ =
-                            reply.send(stream.play().map_err(|e| format!("stream resume: {e}")));
+                        let before = callback_epoch.load(Ordering::Acquire);
+                        let result = stream
+                            .play()
+                            .map_err(|e| format!("stream resume: {e}"))
+                            .and_then(|()| {
+                                require_callback_after(
+                                    &callback_epoch,
+                                    before,
+                                    CALLBACK_START_TIMEOUT,
+                                )
+                            });
+                        let _ = reply.send(result);
                     }
                     AudioCmd::Stop => break,
                 }
@@ -452,6 +507,7 @@ fn build_and_play(
     buffer: &Arc<Vec<f32>>,
     pos: &Arc<AtomicU64>,
     paused: &Arc<AtomicBool>,
+    callback_epoch: &Arc<AtomicU64>,
 ) -> Result<cpal::Stream, String> {
     let host = cpal::default_host();
     let device = host
@@ -469,11 +525,35 @@ fn build_and_play(
         buffer.clone(),
         pos.clone(),
         paused.clone(),
+        Arc::clone(callback_epoch),
     )?;
-    if !paused.load(Ordering::Acquire) {
-        stream.play().map_err(|e| format!("stream play: {e}"))?;
+    // A successful backend `play()` request does not guarantee that the output
+    // callback is live. Installing an AudioClock before its first callback can
+    // freeze the playhead at frame zero forever. Prepared sessions start muted
+    // for this handshake, then pause without advancing `pos`.
+    let before = callback_epoch.load(Ordering::Acquire);
+    stream.play().map_err(|e| format!("stream play: {e}"))?;
+    require_callback_after(callback_epoch, before, CALLBACK_START_TIMEOUT)?;
+    if paused.load(Ordering::Acquire) {
+        stream
+            .pause()
+            .map_err(|e| format!("stream prepared pause: {e}"))?;
     }
     Ok(stream)
+}
+
+fn require_callback_after(epoch: &AtomicU64, before: u64, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    while epoch.load(Ordering::Acquire) == before {
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "audio output callback did not start within {} ms",
+                timeout.as_millis()
+            ));
+        }
+        thread::sleep(CALLBACK_POLL_INTERVAL.min(timeout));
+    }
+    Ok(())
 }
 
 /// Dispatch on the device sample format to the typed stream builder.
@@ -484,21 +564,42 @@ fn build_stream(
     buffer: Arc<Vec<f32>>,
     pos: Arc<AtomicU64>,
     paused: Arc<AtomicBool>,
+    callback_epoch: Arc<AtomicU64>,
 ) -> Result<cpal::Stream, String> {
     // Cover every fixed-size cpal format (all satisfy SizedSample + FromSample<f32>)
     // so a non-F32 default device (I32 is common on Linux/Windows) still gets audio
     // instead of silently falling back to the wall clock.
     match format {
-        cpal::SampleFormat::F32 => out_stream::<f32>(device, config, buffer, pos, paused),
-        cpal::SampleFormat::F64 => out_stream::<f64>(device, config, buffer, pos, paused),
-        cpal::SampleFormat::I8 => out_stream::<i8>(device, config, buffer, pos, paused),
-        cpal::SampleFormat::I16 => out_stream::<i16>(device, config, buffer, pos, paused),
-        cpal::SampleFormat::I32 => out_stream::<i32>(device, config, buffer, pos, paused),
-        cpal::SampleFormat::I64 => out_stream::<i64>(device, config, buffer, pos, paused),
-        cpal::SampleFormat::U8 => out_stream::<u8>(device, config, buffer, pos, paused),
-        cpal::SampleFormat::U16 => out_stream::<u16>(device, config, buffer, pos, paused),
-        cpal::SampleFormat::U32 => out_stream::<u32>(device, config, buffer, pos, paused),
-        cpal::SampleFormat::U64 => out_stream::<u64>(device, config, buffer, pos, paused),
+        cpal::SampleFormat::F32 => {
+            out_stream::<f32>(device, config, buffer, pos, paused, callback_epoch)
+        }
+        cpal::SampleFormat::F64 => {
+            out_stream::<f64>(device, config, buffer, pos, paused, callback_epoch)
+        }
+        cpal::SampleFormat::I8 => {
+            out_stream::<i8>(device, config, buffer, pos, paused, callback_epoch)
+        }
+        cpal::SampleFormat::I16 => {
+            out_stream::<i16>(device, config, buffer, pos, paused, callback_epoch)
+        }
+        cpal::SampleFormat::I32 => {
+            out_stream::<i32>(device, config, buffer, pos, paused, callback_epoch)
+        }
+        cpal::SampleFormat::I64 => {
+            out_stream::<i64>(device, config, buffer, pos, paused, callback_epoch)
+        }
+        cpal::SampleFormat::U8 => {
+            out_stream::<u8>(device, config, buffer, pos, paused, callback_epoch)
+        }
+        cpal::SampleFormat::U16 => {
+            out_stream::<u16>(device, config, buffer, pos, paused, callback_epoch)
+        }
+        cpal::SampleFormat::U32 => {
+            out_stream::<u32>(device, config, buffer, pos, paused, callback_epoch)
+        }
+        cpal::SampleFormat::U64 => {
+            out_stream::<u64>(device, config, buffer, pos, paused, callback_epoch)
+        }
         other => Err(format!("unsupported cpal sample format: {other}")),
     }
 }
@@ -529,6 +630,7 @@ fn out_stream<T>(
     buffer: Arc<Vec<f32>>,
     pos: Arc<AtomicU64>,
     paused: Arc<AtomicBool>,
+    callback_epoch: Arc<AtomicU64>,
 ) -> Result<cpal::Stream, String>
 where
     T: SizedSample + FromSample<f32>,
@@ -539,6 +641,7 @@ where
         .build_output_stream(
             config,
             move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+                callback_epoch.fetch_add(1, Ordering::Release);
                 let out_frames = data.len() / channels;
                 // Atomically claim this block's start frame and advance the master
                 // clock. A concurrent `seek` (store) is honored on the next
@@ -1168,6 +1271,28 @@ mod tests {
         // Half a second of frames → frame 15.
         clock.pos.store(24_000, Ordering::Relaxed);
         assert_eq!(clock.frame(30), 15);
+    }
+
+    #[test]
+    fn callback_liveness_detects_epoch_advance() {
+        let epoch = Arc::new(AtomicU64::new(4));
+        let worker_epoch = Arc::clone(&epoch);
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            worker_epoch.fetch_add(1, Ordering::Release);
+        });
+
+        require_callback_after(&epoch, 4, Duration::from_millis(250))
+            .expect("callback epoch should advance");
+        worker.join().expect("callback worker");
+    }
+
+    #[test]
+    fn callback_liveness_times_out_without_callback() {
+        let epoch = AtomicU64::new(0);
+        let error = require_callback_after(&epoch, 0, Duration::from_millis(15))
+            .expect_err("missing callback must fail readiness");
+        assert!(error.contains("did not start"));
     }
 
     #[test]
