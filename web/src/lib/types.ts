@@ -645,8 +645,8 @@ export interface SecretStatus {
 /** Identity returned by a configured backend's `/api/auth/verify` endpoint. */
 export interface AccountInfo {
   userId: string;
-  email?: string;
-  plan?: string;
+  email?: string | null;
+  plan?: string | null;
 }
 
 /** Live, informational login state. `stored` means a credential exists but this

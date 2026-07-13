@@ -16,6 +16,7 @@ use tauri::State;
 const ACCOUNT_SERVICE: &str = "opentake-account";
 const BACKEND_URL_ACCOUNT: &str = "backend-url";
 const TOKEN_ACCOUNT: &str = "auth-token";
+const TOKEN_BACKEND_ACCOUNT: &str = "auth-token-backend";
 const VERIFY_PATH: &str = "/api/auth/verify";
 const MAX_VERIFY_RESPONSE_BYTES: u64 = 64 * 1024;
 const SUPERSEDED_MSG: &str = "Account login was superseded by a newer account action";
@@ -90,6 +91,13 @@ struct LoginAttempt {
     backend_url: String,
     generation: u64,
     previous_status: AccountStatus,
+    previous_credential: Option<BoundCredential>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BoundCredential {
+    token: String,
+    backend_url: String,
 }
 
 fn advance_generation(runtime: &mut AccountRuntime) -> u64 {
@@ -151,6 +159,63 @@ fn require_backend(backend_url: Option<String>) -> Result<String, String> {
     backend_url.ok_or_else(|| NO_BACKEND_MSG.to_string())
 }
 
+fn load_bound_credential(
+    store: &dyn KeyStore,
+    backend_url: Option<&str>,
+) -> Result<Option<BoundCredential>, String> {
+    let token = store
+        .load(TOKEN_ACCOUNT)
+        .map_err(|error| error.to_string())?;
+    let token_backend = store
+        .load(TOKEN_BACKEND_ACCOUNT)
+        .map_err(|error| error.to_string())?;
+    let Some((token, token_backend, backend_url)) = token
+        .zip(token_backend)
+        .zip(backend_url.map(str::to_string))
+        .map(|((token, token_backend), backend_url)| (token, token_backend, backend_url))
+    else {
+        return Ok(None);
+    };
+    let Ok(token_backend) = normalize_backend_url(&token_backend) else {
+        return Ok(None);
+    };
+    Ok((token_backend == backend_url).then_some(BoundCredential { token, backend_url }))
+}
+
+fn clear_bound_credential(store: &dyn KeyStore) -> Result<(), String> {
+    let token_error = store.delete(TOKEN_ACCOUNT).err();
+    let backend_error = store.delete(TOKEN_BACKEND_ACCOUNT).err();
+    match (token_error, backend_error) {
+        (None, None) => Ok(()),
+        (Some(error), None) | (None, Some(error)) => Err(error.to_string()),
+        (Some(token_error), Some(backend_error)) => Err(format!(
+            "Failed to clear account token ({token_error}) and origin binding ({backend_error})"
+        )),
+    }
+}
+
+fn save_bound_credential(store: &dyn KeyStore, credential: &BoundCredential) -> Result<(), String> {
+    if let Err(error) = store.save(TOKEN_ACCOUNT, &credential.token) {
+        let cleanup = clear_bound_credential(store);
+        return Err(match cleanup {
+            Ok(()) => error.to_string(),
+            Err(cleanup_error) => format!(
+                "Failed to save account token ({error}); credential cleanup also failed ({cleanup_error})"
+            ),
+        });
+    }
+    if let Err(error) = store.save(TOKEN_BACKEND_ACCOUNT, &credential.backend_url) {
+        let cleanup = clear_bound_credential(store);
+        return Err(match cleanup {
+            Ok(()) => error.to_string(),
+            Err(cleanup_error) => format!(
+                "Failed to save account origin binding ({error}); credential cleanup also failed ({cleanup_error})"
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn set_backend_url(
     store: &dyn KeyStore,
     state: &AccountState,
@@ -177,14 +242,12 @@ fn set_backend_url(
     } else {
         runtime.status.clone()
     };
-    let previous_token = store
-        .load(TOKEN_ACCOUNT)
-        .map_err(|error| error.to_string())?;
-    if let Err(error) = store.delete(TOKEN_ACCOUNT) {
+    let previous_credential = load_bound_credential(store, current.as_deref())?;
+    if let Err(error) = clear_bound_credential(store) {
         runtime.status = AccountStatus::Error {
-            message: error.to_string(),
+            message: error.clone(),
         };
-        return Err(error.to_string());
+        return Err(error);
     }
 
     let update_result = match normalized.as_deref() {
@@ -192,42 +255,64 @@ fn set_backend_url(
         None => store.delete(BACKEND_URL_ACCOUNT),
     };
     if let Err(error) = update_result {
-        // Keychain entries cannot be updated atomically. Best-effort rollback
-        // keeps the old backend/token pair together; if rollback itself fails,
-        // publish an explicit error instead of pretending the old session lives.
+        // Keychain entries cannot be updated atomically. Restore credentials
+        // only after the old backend is known to be back in place. If either
+        // half fails, clear both halves so a restart cannot rebind the token.
         let backend_rollback = match current.as_deref() {
             Some(url) => store.save(BACKEND_URL_ACCOUNT, url),
             None => store.delete(BACKEND_URL_ACCOUNT),
         };
-        let token_rollback = match previous_token.as_deref() {
-            Some(token) => store.save(TOKEN_ACCOUNT, token),
-            None => Ok(()),
-        };
-        if backend_rollback.is_ok() && token_rollback.is_ok() {
-            runtime.status = previous_status;
+        let credential_rollback = if backend_rollback.is_ok() {
+            previous_credential.as_ref().map_or(Ok(()), |credential| {
+                save_bound_credential(store, credential)
+            })
         } else {
-            runtime.status = AccountStatus::Error {
-                message: "Account backend update failed and credential rollback was incomplete"
-                    .to_string(),
+            clear_bound_credential(store)
+        };
+        if backend_rollback.is_ok() && credential_rollback.is_ok() {
+            runtime.status = if previous_credential.is_some()
+                || !matches!(
+                    previous_status,
+                    AccountStatus::Online { .. } | AccountStatus::Stored
+                ) {
+                previous_status
+            } else {
+                AccountStatus::Offline
             };
+            return Err(error.to_string());
         }
-        return Err(error.to_string());
+        let _ = clear_bound_credential(store);
+        let message = "Account backend update failed and credential rollback was incomplete";
+        runtime.status = AccountStatus::Error {
+            message: message.to_string(),
+        };
+        return Err(format!("{error}; {message}"));
     }
     runtime.status = AccountStatus::Offline;
     Ok(())
 }
 
 fn stored_credential_status(store: &dyn KeyStore) -> Result<AccountStatus, String> {
-    let has_backend = load_backend_url(store)?.is_some();
+    let backend = load_backend_url(store)?;
+    if load_bound_credential(store, backend.as_deref())?.is_some() {
+        return Ok(AccountStatus::Stored);
+    }
+
+    // A plaintext token without a matching normalized origin is ambiguous and
+    // must never be paired with whichever backend happens to be configured at
+    // restart. Clear both halves instead of silently adopting it.
     let has_token = store
         .load(TOKEN_ACCOUNT)
         .map_err(|error| error.to_string())?
         .is_some();
-    Ok(if has_backend && has_token {
-        AccountStatus::Stored
-    } else {
-        AccountStatus::Offline
-    })
+    let has_binding = store
+        .load(TOKEN_BACKEND_ACCOUNT)
+        .map_err(|error| error.to_string())?
+        .is_some();
+    if has_token || has_binding {
+        clear_bound_credential(store)?;
+    }
+    Ok(AccountStatus::Offline)
 }
 
 fn begin_login(store: &dyn KeyStore, state: &AccountState) -> Result<LoginAttempt, String> {
@@ -238,12 +323,14 @@ fn begin_login(store: &dyn KeyStore, state: &AccountState) -> Result<LoginAttemp
     } else {
         runtime.status.clone()
     };
+    let previous_credential = load_bound_credential(store, Some(&backend_url))?;
     let generation = advance_generation(&mut runtime);
     runtime.status = AccountStatus::Connecting;
     Ok(LoginAttempt {
         backend_url,
         generation,
         previous_status,
+        previous_credential,
     })
 }
 
@@ -269,9 +356,31 @@ fn finish_login_success(
         runtime.status = stored_credential_status(store)?;
         return Err(SUPERSEDED_MSG.to_string());
     }
-    if let Err(error) = store.save(TOKEN_ACCOUNT, token) {
-        runtime.status = attempt.previous_status;
-        return Err(error.to_string());
+    let credential = BoundCredential {
+        token: token.to_string(),
+        backend_url: attempt.backend_url.clone(),
+    };
+    if let Err(error) = save_bound_credential(store, &credential) {
+        let restore_result = attempt
+            .previous_credential
+            .as_ref()
+            .map_or(Ok(()), |previous| {
+                clear_bound_credential(store)?;
+                save_bound_credential(store, previous)
+            });
+        runtime.status = if restore_result.is_ok()
+            && (attempt.previous_credential.is_some()
+                || !matches!(
+                    attempt.previous_status,
+                    AccountStatus::Online { .. } | AccountStatus::Stored
+                )) {
+            attempt.previous_status
+        } else {
+            AccountStatus::Error {
+                message: error.clone(),
+            }
+        };
+        return Err(error);
     }
     runtime.status = AccountStatus::Online { info: info.clone() };
     Ok(info)
@@ -326,11 +435,11 @@ pub async fn account_login(
 fn logout(store: &dyn KeyStore, state: &AccountState) -> Result<(), String> {
     let mut runtime = state.lock();
     advance_generation(&mut runtime);
-    if let Err(error) = store.delete(TOKEN_ACCOUNT) {
+    if let Err(error) = clear_bound_credential(store) {
         runtime.status = AccountStatus::Error {
-            message: error.to_string(),
+            message: error.clone(),
         };
-        return Err(error.to_string());
+        return Err(error);
     }
     runtime.status = AccountStatus::Offline;
     Ok(())
@@ -418,7 +527,7 @@ mod tests {
     use opentake_gen::{GenError, MemoryKeyStore};
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
 
     fn serve_once(response: impl Into<String>) -> (String, thread::JoinHandle<String>) {
@@ -458,22 +567,31 @@ mod tests {
 
     struct BackendSaveFailStore {
         inner: MemoryKeyStore,
-        fail_next_backend_save: AtomicBool,
+        failing_backend_saves: AtomicUsize,
     }
 
     impl BackendSaveFailStore {
         fn new() -> Self {
             Self {
                 inner: MemoryKeyStore::new(),
-                fail_next_backend_save: AtomicBool::new(false),
+                failing_backend_saves: AtomicUsize::new(0),
             }
+        }
+
+        fn fail_backend_saves(&self, count: usize) {
+            self.failing_backend_saves.store(count, Ordering::SeqCst);
         }
     }
 
     impl KeyStore for BackendSaveFailStore {
         fn save(&self, account: &str, value: &str) -> Result<(), GenError> {
             if account == BACKEND_URL_ACCOUNT
-                && self.fail_next_backend_save.swap(false, Ordering::SeqCst)
+                && self
+                    .failing_backend_saves
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok()
             {
                 return Err(GenError::Transport("injected backend save failure".into()));
             }
@@ -576,7 +694,14 @@ mod tests {
         let store = MemoryKeyStore::new();
         let state = AccountState::default();
         set_backend_url(&store, &state, Some("https://one.example.com".into())).unwrap();
-        store.save(TOKEN_ACCOUNT, "old-token").unwrap();
+        save_bound_credential(
+            &store,
+            &BoundCredential {
+                token: "old-token".into(),
+                backend_url: "https://one.example.com".into(),
+            },
+        )
+        .unwrap();
         state.set(AccountStatus::Error {
             message: "old state".into(),
         });
@@ -584,6 +709,7 @@ mod tests {
         set_backend_url(&store, &state, Some("https://two.example.com/".into())).unwrap();
 
         assert_eq!(store.load(TOKEN_ACCOUNT).unwrap(), None);
+        assert_eq!(store.load(TOKEN_BACKEND_ACCOUNT).unwrap(), None);
         assert_eq!(
             store.load(BACKEND_URL_ACCOUNT).unwrap().as_deref(),
             Some("https://two.example.com")
@@ -596,7 +722,14 @@ mod tests {
         let store = MemoryKeyStore::new();
         let state = AccountState::default();
         set_backend_url(&store, &state, Some("https://accounts.example.com".into())).unwrap();
-        store.save(TOKEN_ACCOUNT, "verified-token").unwrap();
+        save_bound_credential(
+            &store,
+            &BoundCredential {
+                token: "verified-token".into(),
+                backend_url: "https://accounts.example.com".into(),
+            },
+        )
+        .unwrap();
         state.set(AccountStatus::Connecting);
 
         set_backend_url(&store, &state, Some("https://accounts.example.com".into())).unwrap();
@@ -604,6 +737,10 @@ mod tests {
         assert_eq!(
             store.load(TOKEN_ACCOUNT).unwrap().as_deref(),
             Some("verified-token")
+        );
+        assert_eq!(
+            store.load(TOKEN_BACKEND_ACCOUNT).unwrap().as_deref(),
+            Some("https://accounts.example.com")
         );
         assert_eq!(state.get(), AccountStatus::Connecting);
     }
@@ -613,12 +750,16 @@ mod tests {
         let store = MemoryKeyStore::new();
         let state = AccountState::default();
         store.save(TOKEN_ACCOUNT, "verified-token").unwrap();
+        store
+            .save(TOKEN_BACKEND_ACCOUNT, "https://accounts.example.com")
+            .unwrap();
         state.set(AccountStatus::Connecting);
 
         logout(&store, &state).unwrap();
         logout(&store, &state).unwrap();
 
         assert_eq!(store.load(TOKEN_ACCOUNT).unwrap(), None);
+        assert_eq!(store.load(TOKEN_BACKEND_ACCOUNT).unwrap(), None);
         assert_eq!(state.get(), AccountStatus::Offline);
     }
 
@@ -700,6 +841,10 @@ mod tests {
             store.load(TOKEN_ACCOUNT).unwrap().as_deref(),
             Some("newer-token")
         );
+        assert_eq!(
+            store.load(TOKEN_BACKEND_ACCOUNT).unwrap().as_deref(),
+            Some("https://accounts.example.com")
+        );
         assert_eq!(state.get(), AccountStatus::Online { info: newer_info });
 
         logout(&store, &state).unwrap();
@@ -743,7 +888,14 @@ mod tests {
         let store = MemoryKeyStore::new();
         let state = AccountState::default();
         set_backend_url(&store, &state, Some("https://accounts.example.com".into())).unwrap();
-        store.save(TOKEN_ACCOUNT, "old-token").unwrap();
+        save_bound_credential(
+            &store,
+            &BoundCredential {
+                token: "old-token".into(),
+                backend_url: "https://accounts.example.com".into(),
+            },
+        )
+        .unwrap();
         let old_status = AccountStatus::Online {
             info: AccountInfo {
                 user_id: "old-user".into(),
@@ -771,9 +923,16 @@ mod tests {
         let store = BackendSaveFailStore::new();
         let state = AccountState::default();
         set_backend_url(&store, &state, Some("https://one.example.com".into())).unwrap();
-        store.save(TOKEN_ACCOUNT, "old-token").unwrap();
+        save_bound_credential(
+            &store,
+            &BoundCredential {
+                token: "old-token".into(),
+                backend_url: "https://one.example.com".into(),
+            },
+        )
+        .unwrap();
         state.set(AccountStatus::Connecting);
-        store.fail_next_backend_save.store(true, Ordering::SeqCst);
+        store.fail_backend_saves(1);
 
         assert!(set_backend_url(&store, &state, Some("https://two.example.com".into())).is_err());
         assert_eq!(
@@ -784,7 +943,41 @@ mod tests {
             store.load(TOKEN_ACCOUNT).unwrap().as_deref(),
             Some("old-token")
         );
+        assert_eq!(
+            store.load(TOKEN_BACKEND_ACCOUNT).unwrap().as_deref(),
+            Some("https://one.example.com")
+        );
         assert_eq!(state.get(), AccountStatus::Stored);
+    }
+
+    #[test]
+    fn incomplete_backend_rollback_clears_credentials_for_a_fresh_runtime() {
+        let store = BackendSaveFailStore::new();
+        let state = AccountState::default();
+        set_backend_url(&store, &state, Some("https://one.example.com".into())).unwrap();
+        save_bound_credential(
+            &store,
+            &BoundCredential {
+                token: "old-token".into(),
+                backend_url: "https://one.example.com".into(),
+            },
+        )
+        .unwrap();
+        state.set(AccountStatus::Connecting);
+        store.fail_backend_saves(2);
+
+        let error =
+            set_backend_url(&store, &state, Some("https://two.example.com".into())).unwrap_err();
+
+        assert!(error.contains("credential rollback was incomplete"));
+        assert_eq!(store.load(TOKEN_ACCOUNT).unwrap(), None);
+        assert_eq!(store.load(TOKEN_BACKEND_ACCOUNT).unwrap(), None);
+        assert!(matches!(state.get(), AccountStatus::Error { .. }));
+        let fresh_state = AccountState::default();
+        assert_eq!(
+            get_status(&store, &fresh_state).unwrap(),
+            AccountStatus::Offline
+        );
     }
 
     #[test]
@@ -793,13 +986,42 @@ mod tests {
         store
             .save(BACKEND_URL_ACCOUNT, "https://accounts.example.com")
             .unwrap();
-        store.save(TOKEN_ACCOUNT, "verified-token").unwrap();
+        save_bound_credential(
+            &store,
+            &BoundCredential {
+                token: "verified-token".into(),
+                backend_url: "https://accounts.example.com".into(),
+            },
+        )
+        .unwrap();
         let state = AccountState::default();
 
         assert_eq!(get_status(&store, &state).unwrap(), AccountStatus::Stored);
         logout(&store, &state).unwrap();
         assert_eq!(get_status(&store, &state).unwrap(), AccountStatus::Offline);
         assert_eq!(store.load(TOKEN_ACCOUNT).unwrap(), None);
+        assert_eq!(store.load(TOKEN_BACKEND_ACCOUNT).unwrap(), None);
+    }
+
+    #[test]
+    fn fresh_runtime_rejects_unbound_or_mismatched_tokens() {
+        for binding in [None, Some("https://other.example.com")] {
+            let store = MemoryKeyStore::new();
+            store
+                .save(BACKEND_URL_ACCOUNT, "https://accounts.example.com")
+                .unwrap();
+            store.save(TOKEN_ACCOUNT, "ambiguous-token").unwrap();
+            if let Some(binding) = binding {
+                store.save(TOKEN_BACKEND_ACCOUNT, binding).unwrap();
+            }
+
+            assert_eq!(
+                get_status(&store, &AccountState::default()).unwrap(),
+                AccountStatus::Offline
+            );
+            assert_eq!(store.load(TOKEN_ACCOUNT).unwrap(), None);
+            assert_eq!(store.load(TOKEN_BACKEND_ACCOUNT).unwrap(), None);
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AccountStatus } from "../../lib/types";
+import type { AccountInfo, AccountStatus } from "../../lib/types";
 
 const accountApi = vi.hoisted(() => ({
   getBackendUrl: vi.fn(),
@@ -133,6 +133,13 @@ afterEach(async () => {
 });
 
 describe("AccountPane interactions", () => {
+  it("accepts null optional fields from the Rust account DTO", () => {
+    const info: AccountInfo = { userId: "minimal-user", email: null, plan: null };
+
+    expect(info.email).toBeNull();
+    expect(info.plan).toBeNull();
+  });
+
   it("loads a stored credential without network login and keeps logout available", async () => {
     savedBackend = "https://accounts.example.com";
     status = { type: "stored" };
