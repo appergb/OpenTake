@@ -715,7 +715,8 @@ fn commit_atomic_file(root: &Dir, target: &Path, tmp: &mut OwnedLeaf) -> std::io
 /// Atomically replace one relative leaf through a retained directory
 /// capability. Publication is one rename operation, so a crash cannot strand
 /// the canonical name between backup and publish. On Windows the retained temp
-/// handle carries DELETE access and uses `FileRenameInfo.ReplaceIfExists`.
+/// handle carries DELETE access and uses native `FILE_RENAME_INFORMATION`
+/// with `ReplaceIfExists`.
 pub fn write_atomic_capability_file(
     root: &Dir,
     target: impl AsRef<Path>,
