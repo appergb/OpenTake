@@ -51,6 +51,7 @@ pub mod fcpxml_modern;
 pub mod gen_log;
 pub mod layout;
 pub mod otio;
+mod safe_fs;
 pub mod xmlnode;
 
 pub use archive::{archive, ArchiveReport, MissingMedia};
