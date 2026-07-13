@@ -56,6 +56,11 @@ const STREAM_BUFFER_SIZE: usize = 64 * 1024;
 
 #[cfg(test)]
 std::thread_local! {
+    static FAIL_COMMITTED_BACKUP_CLEANUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+std::thread_local! {
     static STORED_INDEX_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -175,7 +180,7 @@ impl PreparedFavorite {
 
     /// Whether publication is still required after the project mapping saves.
     pub fn needs_publish(&self) -> bool {
-        self.stage.is_some()
+        self.stage.is_some() || self.final_leaf.is_some()
     }
 
     fn release_stage(&mut self) {
@@ -332,8 +337,90 @@ impl OwnedLeaf {
         })
     }
 
+    fn create_transaction(dir: &Dir, name: impl AsRef<Path>) -> std::io::Result<Self> {
+        let name = name.as_ref().as_os_str().to_owned();
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(windows)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+            use windows_sys::Win32::Storage::FileSystem::{
+                DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+            options
+                .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        }
+        let file = dir.open_with(&name, &options)?;
+        Ok(Self {
+            name,
+            handle: Handle::from_file(file.into_std())?,
+            cleanup_on_drop: true,
+        })
+    }
+
+    fn open_transaction(dir: &Dir, name: impl AsRef<Path>) -> std::io::Result<Self> {
+        let name = name.as_ref().as_os_str().to_owned();
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).follow(FollowSymlinks::No);
+        #[cfg(windows)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+            use windows_sys::Win32::Storage::FileSystem::{
+                DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+            options
+                .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        }
+        let file = dir.open_with(&name, &options)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "library transaction leaf is not a regular file",
+            ));
+        }
+        Ok(Self {
+            name,
+            handle: Handle::from_file(file.into_std())?,
+            cleanup_on_drop: false,
+        })
+    }
+
+    fn open_identity(dir: &Dir, name: impl AsRef<Path>) -> std::io::Result<Self> {
+        let name = name.as_ref().as_os_str().to_owned();
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        #[cfg(windows)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+            options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+        }
+        let file = dir.open_with(&name, &options)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "library identity leaf is not a regular file",
+            ));
+        }
+        Ok(Self {
+            name,
+            handle: Handle::from_file(file.into_std())?,
+            cleanup_on_drop: false,
+        })
+    }
+
     fn matches_name(&self, dir: &Dir) -> std::io::Result<bool> {
-        let current = Self::open(dir, &self.name)?;
+        let current = Self::open_identity(dir, &self.name)?;
         Ok(self.handle == current.handle)
     }
 
@@ -413,7 +500,10 @@ fn rename_owned(root: &Dir, leaf: &mut OwnedLeaf, target: &Path) -> std::io::Res
             "library leaf identity changed before rename",
         ));
     }
+    #[cfg(not(windows))]
     root.rename(&leaf.name, root, target)?;
+    #[cfg(windows)]
+    rename_transaction_leaf_by_handle(root, leaf, target)?;
     leaf.name = target.as_os_str().to_owned();
     if !leaf.matches_name(root)? {
         return Err(std::io::Error::other(
@@ -423,8 +513,91 @@ fn rename_owned(root: &Dir, leaf: &mut OwnedLeaf, target: &Path) -> std::io::Res
     Ok(())
 }
 
+#[cfg(windows)]
+fn rename_transaction_leaf_by_handle(
+    root: &Dir,
+    leaf: &OwnedLeaf,
+    target: &Path,
+) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO, FILE_RENAME_INFO_0,
+    };
+
+    let mut components = target.components();
+    let target_name = match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(name)), None) => name,
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "manifest transaction target must be one relative leaf",
+            ))
+        }
+    };
+    let wide: Vec<u16> = target_name.encode_wide().collect();
+    if wide.is_empty() || wide.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "manifest transaction target is empty or contains NUL",
+        ));
+    }
+    let file_name_bytes = wide
+        .len()
+        .checked_mul(std::mem::size_of::<u16>())
+        .and_then(|size| u32::try_from(size).ok())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "manifest transaction target is too long",
+            )
+        })?;
+    let info_size = std::mem::offset_of!(FILE_RENAME_INFO, FileName)
+        .checked_add(file_name_bytes as usize)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "manifest rename allocation overflow",
+            )
+        })?;
+    let word_size = std::mem::size_of::<usize>();
+    let mut storage = vec![0_usize; info_size.div_ceil(word_size)];
+    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    let info_size = u32::try_from(info_size).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "manifest rename buffer is too large",
+        )
+    })?;
+    // SAFETY: `storage` is pointer-aligned and sized for the fixed
+    // FILE_RENAME_INFO header plus every UTF-16 code unit. Both raw handles
+    // remain owned and open for the duration of the synchronous Win32 call.
+    let renamed = unsafe {
+        (*info).Anonymous = FILE_RENAME_INFO_0 {
+            ReplaceIfExists: false,
+        };
+        (*info).RootDirectory = root.as_raw_handle();
+        (*info).FileNameLength = file_name_bytes;
+        std::ptr::copy_nonoverlapping(
+            wide.as_ptr(),
+            std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+            wide.len(),
+        );
+        SetFileInformationByHandle(
+            leaf.handle.as_file().as_raw_handle(),
+            FileRenameInfo,
+            info.cast(),
+            info_size,
+        )
+    };
+    if renamed == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn commit_manifest_file(root: &Dir, tmp: &mut OwnedLeaf) -> std::io::Result<()> {
-    let mut backup = match OwnedLeaf::open(root, MANIFEST_NAME) {
+    let mut backup = match OwnedLeaf::open_transaction(root, MANIFEST_NAME) {
         Ok(mut canonical) => {
             let backup_name = unique_manifest_artifact("backup");
             rename_owned(root, &mut canonical, Path::new(&backup_name))?;
@@ -435,12 +608,16 @@ fn commit_manifest_file(root: &Dir, tmp: &mut OwnedLeaf) -> std::io::Result<()> 
     };
     if let Err(error) = rename_owned(root, tmp, Path::new(MANIFEST_NAME)) {
         if let Some(backup) = backup.as_mut() {
-            let _ = rename_owned(root, backup, Path::new(MANIFEST_NAME));
+            if let Err(restore) = rename_owned(root, backup, Path::new(MANIFEST_NAME)) {
+                return Err(std::io::Error::other(format!(
+                    "{error}; library manifest backup restore failed: {restore}"
+                )));
+            }
         }
         return Err(error);
     }
     if !tmp.matches_name(root)? {
-        if let Ok(mut replacement) = OwnedLeaf::open(root, MANIFEST_NAME) {
+        if let Ok(mut replacement) = OwnedLeaf::open_transaction(root, MANIFEST_NAME) {
             let quarantine = unique_manifest_artifact("quarantine");
             let _ = rename_owned(root, &mut replacement, Path::new(&quarantine));
         }
@@ -450,6 +627,58 @@ fn commit_manifest_file(root: &Dir, tmp: &mut OwnedLeaf) -> std::io::Result<()> 
         return Err(std::io::Error::other(
             "library manifest identity changed during commit",
         ));
+    }
+    // The canonical rename is now verified. Disarm it before backup cleanup so
+    // a cleanup error can never truncate the newly committed manifest on drop.
+    tmp.disarm_cleanup();
+    if let Some(backup) = backup.as_ref() {
+        // The commit point has passed. Cleanup must never turn a successful
+        // publication into an error: the caller could otherwise discard the
+        // newly manifest-owned content while the manifest is already durable.
+        let _ = cleanup_committed_backup(backup);
+    }
+    Ok(())
+}
+
+fn cleanup_committed_backup(backup: &OwnedLeaf) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FAIL_COMMITTED_BACKUP_CLEANUP.with(|fail| fail.replace(false)) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "injected committed-backup cleanup failure",
+        ));
+    }
+    #[cfg(windows)]
+    {
+        if delete_transaction_leaf_by_handle(backup).is_ok() {
+            return Ok(());
+        }
+    }
+    backup.truncate_exact()
+}
+
+#[cfg(windows)]
+fn delete_transaction_leaf_by_handle(leaf: &OwnedLeaf) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileDispositionInfo, SetFileInformationByHandle, FILE_DISPOSITION_INFO,
+    };
+
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: `disposition` has the exact ABI type/size required by
+    // FileDispositionInfo, and the retained transaction handle stays open for
+    // the duration of this synchronous call.
+    let deleted = unsafe {
+        SetFileInformationByHandle(
+            leaf.handle.as_file().as_raw_handle(),
+            FileDispositionInfo,
+            std::ptr::addr_of!(disposition).cast(),
+            u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO>())
+                .expect("FILE_DISPOSITION_INFO size fits u32"),
+        )
+    };
+    if deleted == 0 {
+        return Err(std::io::Error::last_os_error());
     }
     Ok(())
 }
@@ -520,7 +749,7 @@ impl LibraryStore {
         let root = &self.capabilities()?.root;
         let mut latest_error = None;
         for backup in self.manifest_backups()?.into_iter().rev() {
-            let mut leaf = OwnedLeaf::open(root, &backup)?;
+            let mut leaf = OwnedLeaf::open_transaction(root, &backup)?;
             let mut bytes = Vec::new();
             leaf.handle.as_file_mut().read_to_end(&mut bytes)?;
             match decode_manifest(&bytes) {
@@ -543,6 +772,13 @@ impl LibraryStore {
                 // before removing any crash-recovery backup.
                 let bytes = read_nofollow(root, MANIFEST_NAME)?;
                 decode_manifest(&bytes)?;
+                if let Ok(backups) = self.manifest_backups() {
+                    for backup in backups {
+                        if let Ok(backup) = OwnedLeaf::open_transaction(root, backup) {
+                            let _ = cleanup_committed_backup(&backup);
+                        }
+                    }
+                }
             }
             Ok(_) => {
                 return Err(MediaError::Io(std::io::Error::new(
@@ -731,10 +967,9 @@ impl LibraryStore {
         Ok(self.stored_index()?.remove(id))
     }
 
-    /// Make content left without manifest ownership invisible after a crash.
-    /// A strictly valid manifest is required first. Cleanup truncates retained
-    /// writable handles; it never unlinks a mutable name or touches a later
-    /// replacement installed at that name.
+    /// Validate storage after a crash while leaving unknown mutable names
+    /// untouched. A strictly valid manifest is required first; unknown leaves
+    /// remain hidden until a later content-verified adoption.
     pub fn reconcile_storage(&self) -> Result<()> {
         let _guard = self
             .write_lock
@@ -772,8 +1007,10 @@ impl LibraryStore {
                     "library staging leaf is not a nofollow regular file",
                 )));
             }
-            let stale = OwnedLeaf::open_writable(&capabilities.staging, &name)?;
-            stale.truncate_exact()?;
+            // Unknown startup leaves stay hidden. Reopening by this mutable
+            // name for cleanup could target a replacement installed after the
+            // directory enumeration, so reconciliation performs no destructive
+            // action without an already-retained owner handle.
         }
         let mut seen_owned_ids = HashSet::new();
         for entry in capabilities.files.entries()? {
@@ -804,10 +1041,7 @@ impl LibraryStore {
                     )));
                 }
             }
-            if !is_manifest_owned {
-                let stale = OwnedLeaf::open_writable(&capabilities.files, &name)?;
-                stale.truncate_exact()?;
-            }
+            let _ = is_manifest_owned;
         }
         Ok(())
     }
@@ -837,7 +1071,7 @@ impl LibraryStore {
         let root = &self.capabilities()?.root;
         let bytes = serde_json::to_vec_pretty(manifest)?;
         let tmp_name = unique_manifest_artifact("tmp");
-        let mut tmp = OwnedLeaf::create(root, &tmp_name)?;
+        let mut tmp = OwnedLeaf::create_transaction(root, &tmp_name)?;
         tmp.handle.as_file_mut().write_all(&bytes)?;
         tmp.sync_all()?;
         commit_manifest_file(root, &mut tmp)?;
@@ -936,10 +1170,31 @@ impl LibraryStore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let manifest = self.load_manifest()?;
+        let manifest = match self.load_manifest() {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                self.active_stages
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&staged_name);
+                drop(stage);
+                return Err(error);
+            }
+        };
 
         if let Some(existing) = manifest.entries.iter().find(|e| e.id == id).cloned() {
-            if self.open_stored_verified(&id)?.is_some() {
+            let stored = match self.open_stored_verified(&id) {
+                Ok(stored) => stored,
+                Err(error) => {
+                    self.active_stages
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .remove(&staged_name);
+                    drop(stage);
+                    return Err(error);
+                }
+            };
+            if stored.is_some() {
                 self.active_stages
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -964,15 +1219,41 @@ impl LibraryStore {
             });
         }
 
-        let stored_name = Self::stored_name(&id, req.source);
         let entry = LibraryEntry {
-            id,
+            id: id.clone(),
             kind: req.kind.to_string(),
             category: req.category.clone(),
             favorited_at: req.favorited_at,
             source: req.source.to_str().map(|s| s.to_string()),
             thumb: req.thumb.clone(),
         };
+        let orphan = match self.open_stored_verified(&id) {
+            Ok(orphan) => orphan,
+            Err(error) => {
+                self.active_stages
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&staged_name);
+                drop(stage);
+                return Err(error);
+            }
+        };
+        if let Some(orphan) = orphan {
+            self.active_stages
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&staged_name);
+            drop(stage);
+            return Ok(PreparedFavorite {
+                entry,
+                capabilities,
+                active_stages: Arc::clone(&self.active_stages),
+                stage: None,
+                stored_name: Some(orphan.name.clone()),
+                final_leaf: Some(orphan),
+            });
+        }
+        let stored_name = Self::stored_name(&id, req.source);
         Ok(PreparedFavorite {
             entry,
             capabilities,
@@ -1040,30 +1321,38 @@ impl LibraryStore {
             });
         }
 
-        let stage = prepared.stage.as_mut().ok_or_else(|| {
-            MediaError::Other(anyhow::anyhow!(
-                "favorite preparation was already published"
-            ))
-        })?;
         let stored_name = prepared.stored_name.as_ref().ok_or_else(|| {
             MediaError::Other(anyhow::anyhow!("favorite preparation has no target"))
         })?;
-        stage.rewind()?;
-        let mut final_leaf = OwnedLeaf::create(&prepared.capabilities.files, stored_name)?;
-        let actual = stream_hash_copy(stage.handle.as_file_mut(), final_leaf.handle.as_file_mut())?;
-        if actual != prepared.entry.id {
-            return Err(MediaError::Other(anyhow::anyhow!(
-                "prepared favorite content changed before publication"
-            )));
+        if prepared.final_leaf.is_none() {
+            let stage = prepared.stage.as_mut().ok_or_else(|| {
+                MediaError::Other(anyhow::anyhow!(
+                    "favorite preparation was already published"
+                ))
+            })?;
+            stage.rewind()?;
+            let mut final_leaf = OwnedLeaf::create(&prepared.capabilities.files, stored_name)?;
+            let actual =
+                stream_hash_copy(stage.handle.as_file_mut(), final_leaf.handle.as_file_mut())?;
+            if actual != prepared.entry.id {
+                return Err(MediaError::Other(anyhow::anyhow!(
+                    "prepared favorite content changed before publication"
+                )));
+            }
+            final_leaf.sync_all()?;
+            prepared.final_leaf = Some(final_leaf);
+            prepared.release_stage();
         }
-        final_leaf.sync_all()?;
-        if !final_leaf.matches_name(&prepared.capabilities.files)? {
+        if !prepared
+            .final_leaf
+            .as_ref()
+            .ok_or_else(|| MediaError::Other(anyhow::anyhow!("favorite has no retained leaf")))?
+            .matches_name(&prepared.capabilities.files)?
+        {
             return Err(MediaError::Other(anyhow::anyhow!(
                 "stored favorite identity changed before manifest commit"
             )));
         }
-        prepared.final_leaf = Some(final_leaf);
-        prepared.release_stage();
 
         manifest.entries.push(prepared.entry.clone());
         self.store_manifest(&manifest)?;
@@ -1371,6 +1660,23 @@ mod tests {
         drop(leaf);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn manifest_transaction_leaf_renames_by_its_delete_capable_handle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = Dir::open_ambient_dir(tmp.path(), ambient_authority()).unwrap();
+        let mut leaf = OwnedLeaf::create_transaction(&dir, "manifest.tmp").unwrap();
+        leaf.handle.as_file_mut().write_all(b"manifest").unwrap();
+
+        rename_owned(&dir, &mut leaf, Path::new("manifest.json")).unwrap();
+
+        assert!(leaf.matches_name(&dir).unwrap());
+        assert_eq!(
+            std::fs::read(tmp.path().join("manifest.json")).unwrap(),
+            b"manifest"
+        );
+    }
+
     fn req<'a>(source: &'a Path, kind: &'a str, category: Option<&str>) -> FavoriteRequest<'a> {
         FavoriteRequest {
             source,
@@ -1531,7 +1837,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_reconciliation_truncates_unowned_handles_without_exposing_them() {
+    fn restart_reconciliation_preserves_unknown_leaves_without_exposing_them() {
         let tmp = tempfile::tempdir().unwrap();
         let library_root = tmp.path().join("lib");
         let source = src_file(tmp.path(), "kept.mp4", b"kept bytes");
@@ -1549,12 +1855,13 @@ mod tests {
 
         assert!(kept_path.is_file());
         assert_eq!(
-            std::fs::metadata(staging_dir.join("crashed.pending"))
-                .unwrap()
-                .len(),
-            0
+            std::fs::read(staging_dir.join("crashed.pending")).unwrap(),
+            b"staged orphan"
         );
-        assert_eq!(std::fs::metadata(&orphan_path).unwrap().len(), 0);
+        assert_eq!(
+            std::fs::read(&orphan_path).unwrap(),
+            b"published before crash"
+        );
         assert_eq!(reopened.entries().unwrap(), vec![kept]);
         assert_eq!(reopened.stored_ids_verified().unwrap().len(), 1);
     }
@@ -1570,7 +1877,7 @@ mod tests {
         std::fs::write(&orphan, b"crash-window bytes").unwrap();
 
         store.reconcile_storage().unwrap();
-        assert_eq!(std::fs::metadata(&orphan).unwrap().len(), 0);
+        assert_eq!(std::fs::read(&orphan).unwrap(), b"crash-window bytes");
 
         let entry = store.favorite(&req(&source, "video", None)).unwrap();
         assert_eq!(entry.id, id);
@@ -1579,6 +1886,52 @@ mod tests {
             std::fs::read(store.stored_path(&entry.id).unwrap().unwrap()).unwrap(),
             b"crash-window bytes"
         );
+    }
+
+    #[test]
+    fn mismatched_crash_orphan_fails_closed_instead_of_becoming_owned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = src_file(tmp.path(), "clip.mp4", b"trusted bytes");
+        let store = LibraryStore::new(tmp.path().join("lib"));
+        let id = store.content_id(&source).unwrap();
+        let orphan = store.files_dir().join(format!("{id}.crashed.mp4"));
+        std::fs::write(&orphan, b"untrusted bytes").unwrap();
+
+        let error = store
+            .favorite(&req(&source, "video", None))
+            .expect_err("mismatched orphan must not be adopted");
+
+        assert!(error.to_string().contains("hash mismatch"), "{error}");
+        assert!(store.entries().unwrap().is_empty());
+        assert_eq!(std::fs::read(orphan).unwrap(), b"untrusted bytes");
+    }
+
+    #[test]
+    fn duplicate_crash_orphan_claims_fail_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = src_file(tmp.path(), "clip.mp4", b"duplicate orphan bytes");
+        let store = LibraryStore::new(tmp.path().join("lib"));
+        let id = store.content_id(&source).unwrap();
+        std::fs::write(
+            store.files_dir().join(format!("{id}.first.mp4")),
+            b"duplicate orphan bytes",
+        )
+        .unwrap();
+        std::fs::write(
+            store.files_dir().join(format!("{id}.second.mp4")),
+            b"duplicate orphan bytes",
+        )
+        .unwrap();
+
+        let error = store
+            .favorite(&req(&source, "video", None))
+            .expect_err("duplicate orphan claims must fail closed");
+
+        assert!(
+            error.to_string().contains("multiple stored copies"),
+            "{error}"
+        );
+        assert!(store.entries().unwrap().is_empty());
     }
 
     #[cfg(unix)]
@@ -1637,10 +1990,8 @@ mod tests {
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"must survive");
         assert_eq!(std::fs::read_dir(&external).unwrap().count(), 1);
         assert_eq!(
-            std::fs::metadata(retained_files.join("orphan.mp4"))
-                .unwrap()
-                .len(),
-            0
+            std::fs::read(retained_files.join("orphan.mp4")).unwrap(),
+            b"orphan"
         );
     }
 
@@ -1694,7 +2045,7 @@ mod tests {
         let source = src_file(tmp.path(), "clip.mp4", b"retained staging bytes");
         let store = Arc::new(LibraryStore::new(tmp.path().join("lib")));
         let staging_path = store.files_dir().join(STAGING_SUBDIR);
-        let retained_staging = store.files_dir().join(".staging.retained");
+        let retained_staging = tmp.path().join("staging.retained");
         let external = tmp.path().join("external-stage");
         std::fs::create_dir(&external).unwrap();
         let sentinel = external.join("sentinel.pending");
@@ -2090,6 +2441,54 @@ mod tests {
         assert_eq!(store.entries().unwrap(), vec![entry]);
         assert_eq!(std::fs::read(legacy_tmp).unwrap(), b"crashed");
         assert_eq!(std::fs::read(unique_tmp).unwrap(), b"crashed");
+    }
+
+    #[test]
+    fn successful_manifest_commits_truncate_retained_backups() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LibraryStore::new(tmp.path().join("lib"));
+        for index in 0..8 {
+            let source = src_file(
+                tmp.path(),
+                &format!("clip-{index}.mp4"),
+                format!("manifest version {index}").as_bytes(),
+            );
+            store.favorite(&req(&source, "video", None)).unwrap();
+        }
+
+        let root = store.capabilities().unwrap().root.entries().unwrap();
+        let backups = root
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| is_manifest_backup(&entry.file_name()))
+            .collect::<Vec<_>>();
+        #[cfg(not(windows))]
+        assert_eq!(backups.len(), 7);
+        #[cfg(windows)]
+        assert!(backups.is_empty());
+        assert!(backups
+            .iter()
+            .all(|entry| entry.metadata().is_ok_and(|metadata| metadata.len() == 0)));
+    }
+
+    #[test]
+    fn committed_backup_cleanup_failure_does_not_fail_or_orphan_publication() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LibraryStore::new(tmp.path().join("lib"));
+        let first_source = src_file(tmp.path(), "first.mp4", b"first manifest entry");
+        let second_source = src_file(tmp.path(), "second.mp4", b"second manifest entry");
+        store.favorite(&req(&first_source, "video", None)).unwrap();
+        FAIL_COMMITTED_BACKUP_CLEANUP.with(|fail| fail.set(true));
+
+        let second = store
+            .favorite(&req(&second_source, "video", None))
+            .expect("post-commit backup cleanup is best effort");
+
+        assert!(store.contains(&second.id).unwrap());
+        assert_eq!(store.entries().unwrap().len(), 2);
+        assert_eq!(
+            std::fs::read(store.stored_path(&second.id).unwrap().unwrap()).unwrap(),
+            b"second manifest entry"
+        );
     }
 
     #[test]

@@ -1210,9 +1210,20 @@ where
                 ));
             }
         }
-        store
-            .publish_favorite(prepared)
-            .map_err(|error| format!("global favorite could not be published: {error}"))?;
+        if let Err(error) = store.publish_favorite(prepared) {
+            restore_project_favorites(core, project.project_epoch, &project_dir, &before, events);
+            core.save_media_manifest_for_project_deferred(
+                project.project_epoch,
+                &project_dir,
+                events,
+            )
+            .map_err(|rollback| {
+                format!(
+                    "global favorite could not be published: {error}; project mapping rollback could not be saved: {rollback}"
+                )
+            })?;
+            return Err(format!("global favorite could not be published: {error}"));
+        }
     } else {
         let library_id = match before.library_favorite_id(asset_id) {
             Some(id) => id.to_string(),
@@ -1371,16 +1382,7 @@ fn sync_project_favorites_impl_with_events(
     let stored_ids = store
         .stored_ids_verified()
         .map_err(|error| error.to_string())?;
-    // Only a mapping backed by a published library entry suppresses a new
-    // prepare/publish attempt. A failed publish can leave a durable project
-    // mapping whose target is absent; treating that stale mapping as complete
-    // would clear the retry input without ever publishing the favorite.
-    let mapped_at_start: HashSet<String> = before
-        .favorite_library_ids
-        .iter()
-        .filter(|(_, library_id)| library_ids.contains(*library_id))
-        .map(|(asset_id, _)| asset_id.clone())
-        .collect();
+    let mapped_at_start: HashSet<String> = before.favorite_library_ids.keys().cloned().collect();
     let mut migrated = BTreeSet::new();
     let mut failures = Vec::new();
     let mut changed = false;
@@ -1415,6 +1417,9 @@ fn sync_project_favorites_impl_with_events(
     }
     for (asset_id, library_id) in &before.favorite_library_ids {
         if !library_ids.contains(library_id) {
+            if legacy_inputs.contains(asset_id) {
+                migrated.insert(asset_id.clone());
+            }
             continue;
         }
         let stored_exists = stored_ids.contains(library_id);
@@ -1519,17 +1524,48 @@ fn sync_project_favorites_impl_with_events(
             ));
         }
     }
+    let mut publish_rollbacks = Vec::new();
     for (asset_id, is_legacy, prepared) in pending_publications {
         match store.publish_favorite(prepared) {
             Ok(_) if is_legacy => {
                 migrated.insert(asset_id);
             }
             Ok(_) => {}
-            Err(error) => failures.push(FavoriteSyncFailureDto {
-                asset_id,
-                message: format!("global favorite could not be published: {error}"),
-            }),
+            Err(error) => {
+                failures.push(FavoriteSyncFailureDto {
+                    asset_id: asset_id.clone(),
+                    message: format!("global favorite could not be published: {error}"),
+                });
+                publish_rollbacks.push(asset_id);
+            }
         }
+    }
+    if !publish_rollbacks.is_empty() {
+        for asset_id in &publish_rollbacks {
+            let mapping = before.library_favorite_id(asset_id).map(str::to_string);
+            core.set_media_global_favorite_for_project_deferred(
+                project.project_epoch,
+                &project_dir,
+                asset_id,
+                mapping.clone(),
+                events,
+            )
+            .map_err(|error| error.to_string())?;
+            if mapping.is_none() && before.is_favorite(asset_id) {
+                core.set_media_favorite_for_project_deferred(
+                    project.project_epoch,
+                    &project_dir,
+                    std::slice::from_ref(asset_id),
+                    true,
+                    events,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+        }
+        core.save_media_manifest_for_project_deferred(project.project_epoch, &project_dir, events)
+            .map_err(|error| {
+                format!("failed favorite mappings could not be rolled back: {error}")
+            })?;
     }
     Ok(FavoriteSyncDto {
         media: MediaListDto::from_core(core, Some(cache_root)),
@@ -1568,7 +1604,7 @@ pub(crate) fn restore_project_favorites(
     events.clear();
 }
 
-fn clip_type_name(kind: ClipType) -> &'static str {
+pub(crate) fn clip_type_name(kind: ClipType) -> &'static str {
     match kind {
         ClipType::Video => "video",
         ClipType::Audio => "audio",
@@ -2396,13 +2432,10 @@ mod tests {
         fs::remove_dir(store.root().join("library.json")).unwrap();
         assert!(store.entries().unwrap().is_empty());
         assert!(store.stored_paths().unwrap().is_empty());
-        assert!(core.media().library_favorite_id(&asset_id).is_some());
+        assert_eq!(core.media().library_favorite_id(&asset_id), None);
         let reopened_stale = AppCore::new();
         reopened_stale.open_project(&bundle).unwrap();
-        assert!(reopened_stale
-            .media()
-            .library_favorite_id(&asset_id)
-            .is_some());
+        assert_eq!(reopened_stale.media().library_favorite_id(&asset_id), None);
 
         let retry = sync_project_favorites_impl(
             &reopened_stale,

@@ -16,13 +16,16 @@
 //! still owns each atomic library-manifest operation. It reuses the
 //! [`crate::media::MediaState`] engine for probing rather than re-opening one.
 
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::io::{Read, Write};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use cap_fs_ext::{ambient_authority, DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::{Dir, OpenOptions};
 use same_file::Handle;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tauri::State;
 
 use opentake_core::{importable_clip_type, AppCore, DeferredCoreEvents, ProbedMedia};
@@ -348,42 +351,41 @@ fn library_import_to_project_with_hook(
         .clone()
         .ok_or_else(|| "save the project before importing a global favorite".to_string())?;
     let store = library.store()?;
-    let stored_name = store
-        .stored_file_name(id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("library entry has no stored file: {id}"))?;
-    if importable_clip_type(Path::new(&stored_name)).is_none() {
-        return Err(format!(
-            "library file is not an importable media type: {}",
-            Path::new(&stored_name).display()
-        ));
-    }
-    let extension = Path::new(&stored_name)
+    let library_entry = store
+        .entries()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|entry| entry.id == id)
+        .ok_or_else(|| format!("unknown library entry: {id}"))?;
+    let source = library_entry
+        .source
+        .as_deref()
+        .ok_or_else(|| format!("library entry has no trusted source metadata: {id}"))?;
+    let source_path = Path::new(source);
+    let extension = source_path
         .extension()
         .and_then(|value| value.to_str())
         .filter(|value| value.bytes().all(|byte| byte.is_ascii_alphanumeric()))
-        .unwrap_or("bin");
-    let media_dir = opentake_project::layout::media_dir(&project_dir);
-    std::fs::create_dir_all(&media_dir).map_err(|error| error.to_string())?;
+        .ok_or_else(|| format!("library entry has no safe source extension: {id}"))?;
+    let expected_kind = importable_clip_type(source_path)
+        .ok_or_else(|| format!("library source metadata is not importable: {source}"))?;
+    if crate::media::clip_type_name(expected_kind) != library_entry.kind {
+        return Err(format!(
+            "library source metadata type does not match manifest kind: {}",
+            library_entry.kind
+        ));
+    }
+    let project_media = ProjectMediaCapability::open(&project_dir, true)?;
+    if let Some(existing) = existing_project_import(&project_media, &project.media, id)? {
+        return Ok(existing);
+    }
     static IMPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let sequence = IMPORT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let imported_path = media_dir.join(format!(
-        "library-{id}-{}-{sequence}.{extension}",
-        std::process::id()
-    ));
-    let mut imported_options = std::fs::OpenOptions::new();
-    imported_options.read(true).write(true).create_new(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        imported_options.share_mode(0x1 | 0x2);
-    }
-    let imported_file = imported_options
-        .open(&imported_path)
-        .map_err(|error| error.to_string())?;
-    let imported_handle = Handle::from_file(imported_file).map_err(|error| error.to_string())?;
+    let imported_name = format!("library-{id}-{}-{sequence}.{extension}", std::process::id());
+    let imported_handle = project_media.create_leaf(Path::new(&imported_name))?;
     let mut imported = ProjectImportGuard {
-        path: imported_path,
+        path: project_media.absolute_path(Path::new(&imported_name)),
+        name: imported_name.into(),
         handle: imported_handle,
         committed: false,
     };
@@ -401,15 +403,15 @@ fn library_import_to_project_with_hook(
         .as_file()
         .sync_all()
         .map_err(|error| error.to_string())?;
-    if !imported.matches_path().map_err(|error| error.to_string())? {
+    if !project_media.matches_leaf(&imported)? {
         return Err("project import leaf identity changed before probe".to_string());
     }
 
     let probe = probe_or_default(media.engine(), &imported.path);
-    if !imported.matches_path().map_err(|error| error.to_string())? {
+    if !project_media.matches_leaf(&imported)? {
         return Err("project import leaf identity changed during probe".to_string());
     }
-    let name = display_name(Path::new(&stored_name));
+    let name = display_name(source_path);
     let entry = core
         .import_library_media_for_project_deferred(
             project.project_epoch,
@@ -422,7 +424,8 @@ fn library_import_to_project_with_hook(
         )
         .map_err(|e| e.to_string())?;
     after_project_commit(&imported.path);
-    if !imported.matches_path().map_err(|error| error.to_string())? {
+    let final_identity = project_media.matches_leaf(&imported);
+    if !matches!(final_identity, Ok(true)) {
         core.restore_media_manifest_for_project_deferred(
             project.project_epoch,
             &project_dir,
@@ -430,7 +433,13 @@ fn library_import_to_project_with_hook(
             events,
         )
         .map_err(|error| error.to_string())?;
-        return Err("project import leaf identity changed during commit".to_string());
+        return Err(match final_identity {
+            Ok(false) => "project import leaf identity changed during commit".to_string(),
+            Err(error) => {
+                format!("project import leaf identity changed during commit: {error}")
+            }
+            Ok(true) => unreachable!(),
+        });
     }
     imported.committed = true;
 
@@ -441,16 +450,249 @@ fn library_import_to_project_with_hook(
     })
 }
 
-struct ProjectImportGuard {
-    path: PathBuf,
-    handle: Handle,
-    committed: bool,
+struct ProjectMediaCapability {
+    parent: Dir,
+    root: Dir,
+    media: Dir,
+    parent_path: PathBuf,
+    root_name: std::ffi::OsString,
+    parent_identity: Handle,
+    root_identity: Handle,
+    media_identity: Handle,
+    project_dir: PathBuf,
 }
 
-impl ProjectImportGuard {
-    fn matches_path(&self) -> std::io::Result<bool> {
-        Ok(self.handle == Handle::from_path(&self.path)?)
+impl ProjectMediaCapability {
+    fn open(project_dir: &Path, create_media: bool) -> Result<Self, String> {
+        let parent_path = project_dir
+            .parent()
+            .ok_or_else(|| "project bundle has no parent directory".to_string())?;
+        let root_name = project_dir
+            .file_name()
+            .ok_or_else(|| "project bundle has no final component".to_string())?
+            .to_owned();
+        let parent = Dir::open_ambient_dir(parent_path, ambient_authority())
+            .map_err(|error| error.to_string())?;
+        let root = parent
+            .open_dir_nofollow(&root_name)
+            .map_err(|error| format!("project bundle is not a trusted directory: {error}"))?;
+        if create_media {
+            match root.create_dir("media") {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        let media = root
+            .open_dir_nofollow("media")
+            .map_err(|error| format!("project media directory is unavailable: {error}"))?;
+        let parent_identity = Handle::from_file(
+            parent
+                .try_clone()
+                .map_err(|error| error.to_string())?
+                .into_std_file(),
+        )
+        .map_err(|error| error.to_string())?;
+        let root_identity = Handle::from_file(
+            root.try_clone()
+                .map_err(|error| error.to_string())?
+                .into_std_file(),
+        )
+        .map_err(|error| error.to_string())?;
+        let media_identity = Handle::from_file(
+            media
+                .try_clone()
+                .map_err(|error| error.to_string())?
+                .into_std_file(),
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(Self {
+            parent,
+            root,
+            media,
+            parent_path: parent_path.to_owned(),
+            root_name,
+            parent_identity,
+            root_identity,
+            media_identity,
+            project_dir: project_dir.to_owned(),
+        })
     }
+
+    fn create_leaf(&self, name: &Path) -> Result<Handle, String> {
+        if !matches!(
+            name.components().collect::<Vec<_>>().as_slice(),
+            [Component::Normal(_)]
+        ) {
+            return Err("project import target must be one relative leaf".to_string());
+        }
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(windows)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            options.share_mode(0x1 | 0x2);
+        }
+        let file = self
+            .media
+            .open_with(name, &options)
+            .map_err(|error| error.to_string())?;
+        Handle::from_file(file.into_std()).map_err(|error| error.to_string())
+    }
+
+    fn open_leaf(&self, name: &std::ffi::OsStr) -> Result<Handle, String> {
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        #[cfg(windows)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            options.share_mode(0x1 | 0x2 | 0x4);
+        }
+        let file = self
+            .media
+            .open_with(name, &options)
+            .map_err(|error| format!("project library media is unavailable: {error}"))?;
+        if !file
+            .metadata()
+            .map_err(|error| error.to_string())?
+            .is_file()
+        {
+            return Err("project library mapping is not a regular file".to_string());
+        }
+        Handle::from_file(file.into_std()).map_err(|error| error.to_string())
+    }
+
+    fn matches_namespace(&self) -> Result<bool, String> {
+        let ambient_parent = Dir::open_ambient_dir(&self.parent_path, ambient_authority())
+            .map_err(|error| error.to_string())?;
+        let ambient_parent =
+            Handle::from_file(ambient_parent.into_std_file()).map_err(|error| error.to_string())?;
+        if ambient_parent != self.parent_identity {
+            return Ok(false);
+        }
+        let current_root = self
+            .parent
+            .open_dir_nofollow(&self.root_name)
+            .map_err(|error| error.to_string())?;
+        let current_root =
+            Handle::from_file(current_root.into_std_file()).map_err(|error| error.to_string())?;
+        if current_root != self.root_identity {
+            return Ok(false);
+        }
+        let current_media = self
+            .root
+            .open_dir_nofollow("media")
+            .map_err(|error| error.to_string())?;
+        let current_media =
+            Handle::from_file(current_media.into_std_file()).map_err(|error| error.to_string())?;
+        Ok(current_media == self.media_identity)
+    }
+
+    fn matches_handle(&self, name: &std::ffi::OsStr, expected: &Handle) -> Result<bool, String> {
+        if !self.matches_namespace()? {
+            return Ok(false);
+        }
+        let current = self.open_leaf(name)?;
+        Ok(&current == expected)
+    }
+
+    fn matches_leaf(&self, leaf: &ProjectImportGuard) -> Result<bool, String> {
+        self.matches_handle(&leaf.name, &leaf.handle)
+    }
+
+    fn absolute_path(&self, name: impl AsRef<Path>) -> PathBuf {
+        self.project_dir.join("media").join(name)
+    }
+}
+
+fn existing_project_import(
+    project_media: &ProjectMediaCapability,
+    manifest: &opentake_domain::MediaManifest,
+    library_id: &str,
+) -> Result<Option<LibraryImportDto>, String> {
+    let mut matches = manifest
+        .favorite_library_ids
+        .iter()
+        .filter(|(_, mapped_id)| mapped_id.as_str() == library_id);
+    let Some((asset_id, _)) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        return Err(format!(
+            "project contains multiple assets for library entry: {library_id}"
+        ));
+    }
+    let entry = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.id == *asset_id)
+        .ok_or_else(|| format!("project library mapping has no media entry: {asset_id}"))?;
+    let relative_path = match &entry.source {
+        opentake_domain::MediaSource::Project { relative_path } => Path::new(relative_path),
+        opentake_domain::MediaSource::External { .. } => {
+            return Err(format!(
+                "project library mapping is not backed by project-owned media: {asset_id}"
+            ))
+        }
+    };
+    let mut components = relative_path.components();
+    let valid_media = matches!(components.next(), Some(Component::Normal(name)) if name == "media");
+    let leaf_name = match components.next() {
+        Some(Component::Normal(name)) => name,
+        _ => {
+            return Err(format!(
+                "project library mapping has an invalid relative path: {asset_id}"
+            ))
+        }
+    };
+    if !valid_media || components.next().is_some() {
+        return Err(format!(
+            "project library mapping escapes the media directory: {asset_id}"
+        ));
+    }
+    let mut handle = project_media.open_leaf(leaf_name)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = handle
+            .as_file_mut()
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let actual = format!("{:x}", hasher.finalize());
+    if actual != library_id {
+        return Err(format!(
+            "project library media content does not match mapping: {asset_id}"
+        ));
+    }
+    if !project_media.matches_handle(leaf_name, &handle)? {
+        return Err(format!(
+            "project library media identity changed during validation: {asset_id}"
+        ));
+    }
+    Ok(Some(LibraryImportDto {
+        id: entry.id.clone(),
+        name: entry.name.clone(),
+        path: project_media
+            .absolute_path(leaf_name)
+            .to_string_lossy()
+            .into_owned(),
+    }))
+}
+
+struct ProjectImportGuard {
+    path: PathBuf,
+    name: std::ffi::OsString,
+    handle: Handle,
+    committed: bool,
 }
 
 impl Drop for ProjectImportGuard {
@@ -563,18 +805,12 @@ mod tests {
 
         assert!(library.store().is_ok());
         assert_eq!(
-            std::fs::read_dir(files.join(".staging"))
-                .unwrap()
-                .filter_map(Result::ok)
-                .filter(|entry| entry.metadata().is_ok_and(|metadata| metadata.len() > 0))
-                .count(),
-            0
+            std::fs::read(files.join(".staging/crashed.pending")).unwrap(),
+            b"stage"
         );
         assert_eq!(
-            std::fs::metadata(files.join(format!("{}.mp4", "0".repeat(64))))
-                .unwrap()
-                .len(),
-            0
+            std::fs::read(files.join(format!("{}.mp4", "0".repeat(64)))).unwrap(),
+            b"final orphan"
         );
     }
 
@@ -699,6 +935,46 @@ mod tests {
         worker.lock().unwrap().take().unwrap().join().unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn project_media_capability_rejects_a_symlink_to_the_original_leaf() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("SymlinkLeaf.opentake");
+        std::fs::create_dir(&bundle).unwrap();
+        let capability = ProjectMediaCapability::open(&bundle, true).unwrap();
+        let mut handle = capability.create_leaf(Path::new("leaf.mp4")).unwrap();
+        handle.as_file_mut().write_all(b"trusted leaf").unwrap();
+        let path = capability.absolute_path("leaf.mp4");
+        let moved = capability.absolute_path("moved.mp4");
+        std::fs::rename(&path, &moved).unwrap();
+        symlink(&moved, &path).unwrap();
+
+        assert!(!matches!(
+            capability.matches_handle(std::ffi::OsStr::new("leaf.mp4"), &handle),
+            Ok(true)
+        ));
+        assert_eq!(std::fs::read(moved).unwrap(), b"trusted leaf");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_media_capability_rejects_an_ambient_parent_replacement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let retained_projects = tmp.path().join("projects-retained");
+        let bundle = projects.join("ParentSwap.opentake");
+        std::fs::create_dir_all(&bundle).unwrap();
+        let capability = ProjectMediaCapability::open(&bundle, true).unwrap();
+
+        std::fs::rename(&projects, &retained_projects).unwrap();
+        std::fs::create_dir_all(projects.join("ParentSwap.opentake/media")).unwrap();
+
+        assert!(!capability.matches_namespace().unwrap());
+        assert!(retained_projects.join("ParentSwap.opentake/media").is_dir());
+    }
+
     #[test]
     fn unavailable_library_returns_the_initialization_error() {
         let library = LibraryState::unavailable("app data missing");
@@ -792,6 +1068,58 @@ mod tests {
         let reopened_after_retry = AppCore::new();
         reopened_after_retry.open_project(bundle).unwrap();
         assert_eq!(reopened_after_retry.media(), core.media());
+    }
+
+    #[test]
+    fn library_import_type_comes_from_manifest_metadata_not_stored_leaf_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("clip.mp4");
+        std::fs::write(&source, b"video bytes with renamed leaf").unwrap();
+        let library = LibraryState::new(LibraryStore::new(tmp.path().join("library")));
+        let entry = library
+            .store()
+            .unwrap()
+            .favorite(&FavoriteRequest {
+                source: &source,
+                kind: "video",
+                category: None,
+                favorited_at: 1.0,
+                thumb: None,
+            })
+            .unwrap();
+        let stored = library
+            .store()
+            .unwrap()
+            .stored_path(&entry.id)
+            .unwrap()
+            .unwrap();
+        let renamed = stored.with_extension("wav");
+        std::fs::rename(stored, &renamed).unwrap();
+        let bundle = tmp.path().join("RenamedLeaf.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle)).unwrap();
+
+        let imported =
+            library_import_to_project_impl(&core, &engine_for(tmp.path()), &library, &entry.id)
+                .expect("stored leaf name is not type authority");
+        let manifest_entry = core
+            .media()
+            .entries
+            .into_iter()
+            .find(|item| item.id == imported.id)
+            .unwrap();
+
+        assert_eq!(manifest_entry.kind, opentake_domain::ClipType::Video);
+        match manifest_entry.source {
+            opentake_domain::MediaSource::Project { relative_path } => {
+                assert!(relative_path.ends_with(".mp4"), "{relative_path}");
+            }
+            other => panic!("expected project source, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(imported.path).unwrap(),
+            b"video bytes with renamed leaf"
+        );
     }
 
     #[test]

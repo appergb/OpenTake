@@ -3455,6 +3455,7 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "whisper-rs",
+ "windows-sys 0.61.2",
  "zip",
 ]
 
@@ -3512,6 +3513,8 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
+ "cap-fs-ext",
+ "cap-std",
  "cpal",
  "futures",
  "image",
@@ -3528,6 +3531,7 @@ dependencies = [
  "same-file",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

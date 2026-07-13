@@ -50,6 +50,9 @@ opentake-agent = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
 same-file = "1.0.6"
+cap-std = "4.0.2"
+cap-fs-ext = "4.0.2"
+sha2 = "0.10"
 # Optional account scaffold: verify a token only against a user-configured
 # backend. Rustls keeps the desktop build independent of a system OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
