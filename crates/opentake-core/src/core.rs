@@ -26,14 +26,15 @@
 //! persistence logic — those live in `opentake-ops` / `opentake-project` and are
 //! reached through the session.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 
 use opentake_domain::{MediaManifest, MediaManifestEntry, Timeline};
 use opentake_ops::command::{EditCommand, EditResult};
 use opentake_ops::IdGen;
-use opentake_project::GenerationLog;
+use opentake_project::{GenerationLog, ProjectCompatibility};
+use same_file::Handle;
 
 use crate::deps::CoreDeps;
 use crate::error::Result;
@@ -85,14 +86,142 @@ impl IdGen for CoreIdGen {
 pub struct TimelineSnapshot {
     /// The timeline at version [`Self::version`].
     pub timeline: Timeline,
+    /// The project session this timeline belongs to.
+    pub project_epoch: u64,
     /// The document version this snapshot was taken at.
     pub version: u64,
+    /// The current project bundle path, if it has been saved/opened.
+    pub project_path: Option<PathBuf>,
+    /// Persisted fields this build cannot safely mutate.
+    pub compatibility: ProjectCompatibility,
+}
+
+/// Identity of the current project session and its document version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProjectRevision {
+    /// Monotonic identity of the current project session.
+    pub project_epoch: u64,
+    /// Monotonic edit version within the current project session.
+    pub version: u64,
+}
+
+/// One-lock snapshot of the state consumed by runtime media operations.
+#[derive(Clone, Debug)]
+pub struct ProjectRuntimeSnapshot {
+    /// The authoritative timeline.
+    pub timeline: Timeline,
+    /// The media catalog paired with [`Self::timeline`].
+    pub media: MediaManifest,
+    /// The bundle directory paired with [`Self::timeline`].
+    pub project_dir: Option<PathBuf>,
+    /// The project session identity paired with [`Self::timeline`].
+    pub project_epoch: u64,
+    /// The document version paired with [`Self::timeline`].
+    pub version: u64,
+}
+
+/// Result of a capability-bound library import whose first manifest commit is
+/// durable. `warning` is populated only when a failed postcondition could not
+/// be rolled back; the entry remains authoritative and must be preserved.
+#[derive(Clone, Debug)]
+pub struct CapabilityImportCommit {
+    pub entry: MediaManifestEntry,
+    pub warning: Option<ImportCommitWarning>,
+}
+
+/// A committed import whose postcondition and exact rollback both failed.
+/// Keeping the causes separate prevents UI layers from parsing an opaque
+/// string while still reporting that the candidate remains authoritative.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImportCommitWarning {
+    PostconditionRollbackFailed {
+        postcondition: String,
+        rollback: String,
+    },
+}
+
+/// One-lock snapshot consumed by self-contained project export.
+#[derive(Clone, Debug)]
+pub struct BundleExportSnapshot {
+    pub timeline: Timeline,
+    pub manifest: MediaManifest,
+    pub generation_log: GenerationLog,
+    pub project_path: Option<PathBuf>,
+    pub project_epoch: u64,
+    pub compatibility: ProjectCompatibility,
+}
+
+struct CoreSessionSlot {
+    project_epoch: u64,
+    editor: EditorSession,
+}
+
+/// Fully loaded project replacement awaiting an atomic session commit.
+///
+/// Fields stay private so callers can only pass the exact prepared value back
+/// to [`AppCore::commit_project_open`].
+pub struct PreparedProjectOpen {
+    path: PathBuf,
+    editor: EditorSession,
+}
+
+impl CoreSessionSlot {
+    fn timeline_snapshot(&self) -> TimelineSnapshot {
+        TimelineSnapshot {
+            timeline: self.editor.timeline(),
+            project_epoch: self.project_epoch,
+            version: self.editor.version(),
+            project_path: self.editor.project_dir().map(PathBuf::from),
+            compatibility: self.editor.compatibility().clone(),
+        }
+    }
+
+    fn replace_editor(&mut self, editor: EditorSession) -> TimelineSnapshot {
+        self.editor = editor;
+        self.project_epoch += 1;
+        self.timeline_snapshot()
+    }
+}
+
+fn ensure_project_identity(
+    session: &CoreSessionSlot,
+    expected_project_epoch: u64,
+    expected_project_dir: &Path,
+) -> Result<()> {
+    if session.project_epoch == expected_project_epoch
+        && session.editor.project_dir() == Some(expected_project_dir)
+    {
+        Ok(())
+    } else {
+        Err(crate::CoreError::Media(
+            "project changed during global library workflow".to_string(),
+        ))
+    }
+}
+
+/// Events produced by an identity-bound external workflow. The workflow queues
+/// them while its project lease is held, then emits only after releasing that
+/// lease so synchronous subscribers may safely re-enter project lifecycle APIs.
+#[derive(Default)]
+pub struct DeferredCoreEvents {
+    events: Vec<CoreEvent>,
+}
+
+impl DeferredCoreEvents {
+    pub fn clear(&mut self) {
+        self.events.clear();
+    }
+
+    fn push(&mut self, event: CoreEvent) {
+        self.events.push(event);
+    }
 }
 
 /// The cloneable handle to the one authoritative editing session.
 #[derive(Clone)]
 pub struct AppCore {
-    session: Arc<Mutex<EditorSession>>,
+    session: Arc<Mutex<CoreSessionSlot>>,
+    project_identity_workflow: Arc<RwLock<()>>,
     events: EventBus,
     deps: Arc<CoreDeps>,
     // `Send + Sync` so `AppCore` stays shareable across threads (Tauri State,
@@ -116,7 +245,11 @@ impl AppCore {
     /// A core with explicit capability backends (the production wiring path).
     pub fn with_deps(deps: CoreDeps) -> Self {
         AppCore {
-            session: Arc::new(Mutex::new(EditorSession::new_project())),
+            session: Arc::new(Mutex::new(CoreSessionSlot {
+                project_epoch: 0,
+                editor: EditorSession::new_project(),
+            })),
+            project_identity_workflow: Arc::new(RwLock::new(())),
             events: EventBus::new(),
             deps: Arc::new(deps),
             ids: Arc::new(CoreIdGen::new("id-")),
@@ -137,8 +270,17 @@ impl AppCore {
     }
 
     /// Subscribe to [`CoreEvent`]s. Convenience for `self.events().subscribe`.
-    pub fn subscribe(&self, listener: impl Fn(&CoreEvent) + Send + 'static) -> SubscriptionId {
+    pub fn subscribe(
+        &self,
+        listener: impl Fn(&CoreEvent) + Send + Sync + 'static,
+    ) -> SubscriptionId {
         self.events.subscribe(listener)
+    }
+
+    pub fn emit_deferred(&self, events: DeferredCoreEvents) {
+        for event in events.events {
+            self.events.emit(&event);
+        }
     }
 
     /// The injected capability backends (preview/export/media/gen).
@@ -150,26 +292,108 @@ impl AppCore {
 
     /// A snapshot of the current timeline + its version (`get_timeline`).
     pub fn get_timeline(&self) -> TimelineSnapshot {
+        self.lock().timeline_snapshot()
+    }
+
+    /// The identity and document version of the current project session.
+    pub fn project_revision(&self) -> ProjectRevision {
         let session = self.lock();
-        TimelineSnapshot {
-            timeline: session.timeline(),
-            version: session.version(),
+        ProjectRevision {
+            project_epoch: session.project_epoch,
+            version: session.editor.version(),
         }
+    }
+
+    /// A runtime snapshot of the current project state.
+    pub fn runtime_snapshot(&self) -> ProjectRuntimeSnapshot {
+        let session = self.lock();
+        ProjectRuntimeSnapshot {
+            timeline: session.editor.timeline(),
+            media: session.editor.media(),
+            project_dir: session.editor.project_dir().map(PathBuf::from),
+            project_epoch: session.project_epoch,
+            version: session.editor.version(),
+        }
+    }
+
+    /// Return a mutable-project runtime snapshot only when the caller's IPC
+    /// identity still names the current project. This is the authorization gate
+    /// for workflows that perform global I/O before their final project commit.
+    pub fn mutable_runtime_snapshot_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+    ) -> Result<ProjectRuntimeSnapshot> {
+        let session = self.lock();
+        ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+        session.editor.ensure_mutable()?;
+        Ok(ProjectRuntimeSnapshot {
+            timeline: session.editor.timeline(),
+            media: session.editor.media(),
+            project_dir: session.editor.project_dir().map(PathBuf::from),
+            project_epoch: session.project_epoch,
+            version: session.editor.version(),
+        })
+    }
+
+    /// Require a caller-retained no-follow bundle handle to match the handle
+    /// retained when the current project session was opened or saved.
+    pub fn ensure_project_root_identity_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        current_root: &Handle,
+    ) -> Result<()> {
+        let session = self.lock();
+        ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+        if session.editor.matches_project_root_identity(current_root)? {
+            Ok(())
+        } else {
+            Err(crate::CoreError::Media(
+                "project bundle identity no longer matches the open session".to_string(),
+            ))
+        }
+    }
+
+    /// Hold the current project identity stable across an external workflow.
+    /// Project replacement and save-as take the exclusive side of this lock.
+    pub fn lock_project_identity_workflow(&self) -> RwLockReadGuard<'_, ()> {
+        self.project_identity_workflow
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Snapshot all self-contained bundle inputs under one session lock.
+    pub fn bundle_export_snapshot(&self) -> BundleExportSnapshot {
+        let session = self.lock();
+        BundleExportSnapshot {
+            timeline: session.editor.timeline(),
+            manifest: session.editor.media(),
+            generation_log: session.editor.generation_log().clone(),
+            project_path: session.editor.project_dir().map(PathBuf::from),
+            project_epoch: session.project_epoch,
+            compatibility: session.editor.compatibility().clone(),
+        }
+    }
+
+    /// Refuse application-layer filesystem work before it can mutate a project.
+    pub fn ensure_project_mutable(&self) -> Result<()> {
+        self.lock().editor.ensure_mutable()
     }
 
     /// The current document version.
     pub fn version(&self) -> u64 {
-        self.lock().version()
+        self.lock().editor.version()
     }
 
     /// Whether an undo / redo is currently available (for enabling UI affordances).
     pub fn can_undo(&self) -> bool {
-        self.lock().can_undo()
+        self.lock().editor.can_undo()
     }
 
     /// Whether a redo is currently available.
     pub fn can_redo(&self) -> bool {
-        self.lock().can_redo()
+        self.lock().editor.can_redo()
     }
 
     // MARK: - The single editing entry point
@@ -181,12 +405,14 @@ impl AppCore {
     /// command actually changed the document. Unchanged commands (and rejected
     /// ones) emit nothing and do not move the version.
     pub fn apply(&self, command: EditCommand) -> Result<EditResult> {
-        let result = {
+        let (result, project_epoch) = {
             let mut session = self.lock();
-            session.apply(command, self.ids.as_ref())?
+            let result = session.editor.apply(command, self.ids.as_ref())?;
+            (result, session.project_epoch)
         };
         if result.changed {
             self.events.emit(&CoreEvent::TimelineChanged {
+                project_epoch,
                 version: result.timeline_version,
             });
         }
@@ -208,17 +434,25 @@ impl AppCore {
 
     // MARK: - Project lifecycle
 
-    /// Replace the current session with a fresh, unsaved project and emit
-    /// [`CoreEvent::ProjectOpened`] (path empty, version 0).
-    pub fn new_project(&self) {
-        {
+    /// Replace the current session with a fresh, unsaved project, emit
+    /// [`CoreEvent::ProjectOpened`] (path empty, version 0), and return its first
+    /// snapshot.
+    pub fn new_project(&self) -> TimelineSnapshot {
+        let _identity = self
+            .project_identity_workflow
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let snapshot = {
             let mut session = self.lock();
-            *session = EditorSession::new_project();
-        }
+            session.replace_editor(EditorSession::new_project())
+        };
+        drop(_identity);
         self.events.emit(&CoreEvent::ProjectOpened {
             path: String::new(),
-            version: 0,
+            project_epoch: snapshot.project_epoch,
+            version: snapshot.version,
         });
+        snapshot
     }
 
     /// Open the `.opentake` bundle at `path`, replacing the current session.
@@ -226,21 +460,31 @@ impl AppCore {
     /// first snapshot itself, so no `TimelineChanged` is emitted —
     /// `core-SPEC.md` §5.4 step 6). Returns the first snapshot for convenience.
     pub fn open_project(&self, path: impl Into<PathBuf>) -> Result<TimelineSnapshot> {
-        let path = path.into();
-        let opened = EditorSession::open_project(&path)?;
+        let prepared = Self::prepare_project_open(path.into())?;
+        Ok(self.commit_project_open(prepared))
+    }
+
+    pub fn prepare_project_open(path: PathBuf) -> Result<PreparedProjectOpen> {
+        let editor = EditorSession::open_project(&path)?;
+        Ok(PreparedProjectOpen { path, editor })
+    }
+
+    pub fn commit_project_open(&self, prepared: PreparedProjectOpen) -> TimelineSnapshot {
+        let _identity = self
+            .project_identity_workflow
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let snapshot = {
             let mut session = self.lock();
-            *session = opened;
-            TimelineSnapshot {
-                timeline: session.timeline(),
-                version: session.version(),
-            }
+            session.replace_editor(prepared.editor)
         };
+        drop(_identity);
         self.events.emit(&CoreEvent::ProjectOpened {
-            path: path.to_string_lossy().into_owned(),
+            path: prepared.path.to_string_lossy().into_owned(),
+            project_epoch: snapshot.project_epoch,
             version: snapshot.version,
         });
-        Ok(snapshot)
+        snapshot
     }
 
     /// Save the current project. `path = None` saves back to the open bundle
@@ -261,12 +505,21 @@ impl AppCore {
         path: Option<PathBuf>,
         thumbnail: Option<Vec<u8>>,
     ) -> Result<PathBuf> {
-        let written = {
+        let _identity = self
+            .project_identity_workflow
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (written, project_epoch) = {
             let mut session = self.lock();
-            session.save_project_with_thumbnail(path, thumbnail)?
+            let written = session
+                .editor
+                .save_project_with_thumbnail(path, thumbnail)?;
+            (written, session.project_epoch)
         };
+        drop(_identity);
         self.events.emit(&CoreEvent::ProjectSaved {
             path: written.to_string_lossy().into_owned(),
+            project_epoch,
         });
         Ok(written)
     }
@@ -276,7 +529,7 @@ impl AppCore {
     /// A snapshot of the current media manifest (`get_media`). The catalog the
     /// media panel renders; reads are infallible.
     pub fn media(&self) -> MediaManifest {
-        self.lock().media()
+        self.lock().editor.media()
     }
 
     /// A snapshot of the current AI generation log. Cloned out from under the
@@ -285,14 +538,14 @@ impl AppCore {
     /// upstream carries `editor.generationLog` into `PalmierProjectExporter`
     /// (`Export/ExportService.swift:186-197`). Reads are infallible.
     pub fn generation_log(&self) -> GenerationLog {
-        self.lock().generation_log().clone()
+        self.lock().editor.generation_log().clone()
     }
 
     /// The open project's `.opentake` bundle directory, or `None` for an unsaved
     /// project. Needed to resolve [`MediaSource::Project`](opentake_domain::MediaSource)
     /// relative paths to on-disk files (preview/composite read the original media).
     pub fn project_dir(&self) -> Option<PathBuf> {
-        self.lock().project_dir().map(|p| p.to_path_buf())
+        self.lock().editor.project_dir().map(|p| p.to_path_buf())
     }
 
     /// Import a local media file as an external reference, minting the asset id
@@ -311,14 +564,219 @@ impl AppCore {
         probe: &ProbedMedia,
     ) -> Result<MediaManifestEntry> {
         let id = self.ids.next_id();
+        let (entry, count, project_epoch) = {
+            let mut session = self.lock();
+            let entry = session.editor.import_media_file(path, id, name, probe)?;
+            let count = session.editor.media().entries.len();
+            (entry, count, session.project_epoch)
+        };
+        self.events.emit(&CoreEvent::MediaChanged {
+            project_epoch,
+            count,
+        });
+        Ok(entry)
+    }
+
+    /// Import media only if the expected project still owns the session lock.
+    ///
+    /// Save-as-media renders without holding the core lock. Its final identity
+    /// check and manifest mutation must therefore share this one critical
+    /// section; a project replacement either happens before it (and the import
+    /// is rejected) or after it (and the entry belongs to the expected project).
+    pub fn import_media_file_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+    ) -> Result<MediaManifestEntry> {
+        self.import_media_file_for_project_checked(
+            expected_project_epoch,
+            expected_project_dir,
+            path,
+            name,
+            probe,
+            || Ok(()),
+        )
+    }
+
+    /// Project-bound import with a postcondition checked while the session lock
+    /// is still held. The editor restores its pre-import manifest if the check
+    /// fails, so callers can safely validate external filesystem state at the
+    /// commit boundary without leaving a live dangling entry.
+    pub fn import_media_file_for_project_checked(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+        postcondition: impl FnOnce() -> Result<()>,
+    ) -> Result<MediaManifestEntry> {
+        let id = self.ids.next_id();
         let (entry, count) = {
             let mut session = self.lock();
-            let entry = session.import_media_file(path, id, name, probe)?;
-            let count = session.media().entries.len();
+            if session.project_epoch != expected_project_epoch
+                || session.editor.project_dir() != Some(expected_project_dir)
+            {
+                return Err(crate::CoreError::Media(
+                    "project changed while saving media".to_string(),
+                ));
+            }
+            let entry =
+                session
+                    .editor
+                    .import_media_file_checked(path, id, name, probe, postcondition)?;
+            let count = session.editor.media().entries.len();
             (entry, count)
         };
-        self.events.emit(&CoreEvent::MediaChanged { count });
+        self.events.emit(&CoreEvent::MediaChanged {
+            project_epoch: expected_project_epoch,
+            count,
+        });
         Ok(entry)
+    }
+
+    /// Import one global-library file, bind its content id, and persist the
+    /// project as a single in-memory transaction. Any import, mapping, or save
+    /// error restores the exact pre-call manifest before the lock is released.
+    pub fn import_library_media_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+        library_id: &str,
+    ) -> Result<MediaManifestEntry> {
+        let mut events = DeferredCoreEvents::default();
+        let entry = self.import_library_media_for_project_deferred(
+            expected_project_epoch,
+            expected_project_dir,
+            path,
+            name,
+            probe,
+            library_id,
+            &mut events,
+        )?;
+        self.emit_deferred(events);
+        Ok(entry)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn import_library_media_for_project_deferred(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+        library_id: &str,
+        events: &mut DeferredCoreEvents,
+    ) -> Result<MediaManifestEntry> {
+        let id = self.ids.next_id();
+        let (entry, count) = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            let before = session.editor.media();
+            let result = (|| {
+                let entry = session.editor.import_media_file(path, id, name, probe)?;
+                session
+                    .editor
+                    .set_media_global_favorite(&entry.id, Some(library_id.to_string()))?;
+                session.editor.save_media_manifest()?;
+                Ok(entry)
+            })();
+            match result {
+                Ok(entry) => {
+                    let count = session.editor.media().entries.len();
+                    (entry, count)
+                }
+                Err(error) => {
+                    session.editor.restore_media(before);
+                    return Err(error);
+                }
+            }
+        };
+        events.push(CoreEvent::MediaChanged {
+            project_epoch: expected_project_epoch,
+            count,
+        });
+        events.push(CoreEvent::ProjectSaved {
+            path: expected_project_dir.to_string_lossy().into_owned(),
+            project_epoch: expected_project_epoch,
+        });
+        Ok(entry)
+    }
+
+    /// Capability-bound variant of the global-library import transaction. The
+    /// caller persists the candidate manifest through retained directory
+    /// authority; a writer error restores the exact live manifest before the
+    /// session lock is released.
+    #[allow(clippy::too_many_arguments)]
+    pub fn import_library_media_for_project_deferred_with_manifest_writer<F, V>(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+        library_id: &str,
+        events: &mut DeferredCoreEvents,
+        mut write_manifest: F,
+        validate_postcondition: V,
+    ) -> Result<CapabilityImportCommit>
+    where
+        F: FnMut(&MediaManifest) -> Result<()>,
+        V: FnOnce() -> Result<()>,
+    {
+        let id = self.ids.next_id();
+        // Both callbacks execute while the session Mutex is held. They must do
+        // only retained filesystem I/O and must never re-enter AppCore, emit an
+        // event, acquire the project-identity lock, or acquire LibraryStore's
+        // workflow/write locks.
+        let (entry, warning, count) = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            let before = session.editor.media();
+            let result = (|| {
+                let entry = session.editor.import_media_file(path, id, name, probe)?;
+                session
+                    .editor
+                    .set_media_global_favorite(&entry.id, Some(library_id.to_string()))?;
+                write_manifest(&session.editor.media())?;
+                let mut warning = None;
+                if let Err(postcondition) = validate_postcondition() {
+                    match write_manifest(&before) {
+                        Ok(()) => return Err(postcondition),
+                        Err(rollback) => {
+                            warning = Some(ImportCommitWarning::PostconditionRollbackFailed {
+                                postcondition: postcondition.to_string(),
+                                rollback: rollback.to_string(),
+                            });
+                        }
+                    }
+                }
+                Ok((entry, warning))
+            })();
+            match result {
+                Ok((entry, warning)) => (entry, warning, session.editor.media().entries.len()),
+                Err(error) => {
+                    session.editor.restore_media(before);
+                    return Err(error);
+                }
+            }
+        };
+        events.push(CoreEvent::MediaChanged {
+            project_epoch: expected_project_epoch,
+            count,
+        });
+        events.push(CoreEvent::ProjectSaved {
+            path: expected_project_dir.to_string_lossy().into_owned(),
+            project_epoch: expected_project_epoch,
+        });
+        Ok(CapabilityImportCommit { entry, warning })
     }
 
     /// Toggle favorite state for `asset_ids` (#91), emitting
@@ -326,17 +784,267 @@ impl AppCore {
     /// changed) so the media mirror refreshes. Favoriting is a manifest mutation
     /// outside undo — see [`EditorSession::set_media_favorite`]. Returns how many
     /// ids changed state.
-    pub fn set_media_favorite(&self, asset_ids: &[String], favorite: bool) -> usize {
-        let (changed, count) = {
+    pub fn set_media_favorite(&self, asset_ids: &[String], favorite: bool) -> Result<usize> {
+        let (changed, count, project_epoch) = {
             let mut session = self.lock();
-            let changed = session.set_media_favorite(asset_ids, favorite);
-            let count = session.media().entries.len();
-            (changed, count)
+            let changed = session.editor.set_media_favorite(asset_ids, favorite)?;
+            let count = session.editor.media().entries.len();
+            (changed, count, session.project_epoch)
         };
         if changed > 0 {
-            self.events.emit(&CoreEvent::MediaChanged { count });
+            self.events.emit(&CoreEvent::MediaChanged {
+                project_epoch,
+                count,
+            });
         }
-        changed
+        Ok(changed)
+    }
+
+    pub fn set_media_favorite_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        asset_ids: &[String],
+        favorite: bool,
+    ) -> Result<usize> {
+        let mut events = DeferredCoreEvents::default();
+        let changed = self.set_media_favorite_for_project_deferred(
+            expected_project_epoch,
+            expected_project_dir,
+            asset_ids,
+            favorite,
+            &mut events,
+        )?;
+        self.emit_deferred(events);
+        Ok(changed)
+    }
+
+    pub fn set_media_favorite_for_project_deferred(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        asset_ids: &[String],
+        favorite: bool,
+        events: &mut DeferredCoreEvents,
+    ) -> Result<usize> {
+        let (changed, count) = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            let changed = session.editor.set_media_favorite(asset_ids, favorite)?;
+            (changed, session.editor.media().entries.len())
+        };
+        if changed > 0 {
+            events.push(CoreEvent::MediaChanged {
+                project_epoch: expected_project_epoch,
+                count,
+            });
+        }
+        Ok(changed)
+    }
+
+    /// Set or clear one project's global-favorite mapping, emitting the same
+    /// media-change signal used by other manifest mutations.
+    pub fn set_media_global_favorite(
+        &self,
+        asset_id: &str,
+        library_id: Option<String>,
+    ) -> Result<bool> {
+        let (changed, count, project_epoch) = {
+            let mut session = self.lock();
+            let changed = session
+                .editor
+                .set_media_global_favorite(asset_id, library_id)?;
+            let count = session.editor.media().entries.len();
+            (changed, count, session.project_epoch)
+        };
+        if changed {
+            self.events.emit(&CoreEvent::MediaChanged {
+                project_epoch,
+                count,
+            });
+        }
+        Ok(changed)
+    }
+
+    /// Project-identity-checked variant for workflows that perform global
+    /// library I/O before updating the current project mirror.
+    pub fn set_media_global_favorite_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        asset_id: &str,
+        library_id: Option<String>,
+    ) -> Result<bool> {
+        let mut events = DeferredCoreEvents::default();
+        let changed = self.set_media_global_favorite_for_project_deferred(
+            expected_project_epoch,
+            expected_project_dir,
+            asset_id,
+            library_id,
+            &mut events,
+        )?;
+        self.emit_deferred(events);
+        Ok(changed)
+    }
+
+    pub fn set_media_global_favorite_for_project_deferred(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        asset_id: &str,
+        library_id: Option<String>,
+        events: &mut DeferredCoreEvents,
+    ) -> Result<bool> {
+        let (changed, count) = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            let changed = session
+                .editor
+                .set_media_global_favorite(asset_id, library_id)?;
+            (changed, session.editor.media().entries.len())
+        };
+        if changed {
+            events.push(CoreEvent::MediaChanged {
+                project_epoch: expected_project_epoch,
+                count,
+            });
+        }
+        Ok(changed)
+    }
+
+    /// Clear every current-project mapping for a removed global-library id.
+    pub fn clear_media_global_favorite_id(&self, library_id: &str) -> Result<usize> {
+        let (changed, count, project_epoch) = {
+            let mut session = self.lock();
+            let changed = session.editor.clear_media_global_favorite_id(library_id)?;
+            let count = session.editor.media().entries.len();
+            (changed, count, session.project_epoch)
+        };
+        if changed > 0 {
+            self.events.emit(&CoreEvent::MediaChanged {
+                project_epoch,
+                count,
+            });
+        }
+        Ok(changed)
+    }
+
+    pub fn clear_media_global_favorite_id_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        library_id: &str,
+    ) -> Result<usize> {
+        let mut events = DeferredCoreEvents::default();
+        let changed = self.clear_media_global_favorite_id_for_project_deferred(
+            expected_project_epoch,
+            expected_project_dir,
+            library_id,
+            &mut events,
+        )?;
+        self.emit_deferred(events);
+        Ok(changed)
+    }
+
+    pub fn clear_media_global_favorite_id_for_project_deferred(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        library_id: &str,
+        events: &mut DeferredCoreEvents,
+    ) -> Result<usize> {
+        let (changed, count) = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            let changed = session.editor.clear_media_global_favorite_id(library_id)?;
+            (changed, session.editor.media().entries.len())
+        };
+        if changed > 0 {
+            events.push(CoreEvent::MediaChanged {
+                project_epoch: expected_project_epoch,
+                count,
+            });
+        }
+        Ok(changed)
+    }
+
+    /// Atomically save only the media manifest if the originating project still
+    /// owns the session lock.
+    pub fn save_media_manifest_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+    ) -> Result<PathBuf> {
+        let mut events = DeferredCoreEvents::default();
+        let written = self.save_media_manifest_for_project_deferred(
+            expected_project_epoch,
+            expected_project_dir,
+            &mut events,
+        )?;
+        self.emit_deferred(events);
+        Ok(written)
+    }
+
+    pub fn save_media_manifest_for_project_deferred(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        events: &mut DeferredCoreEvents,
+    ) -> Result<PathBuf> {
+        let written = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            session.editor.save_media_manifest()?
+        };
+        events.push(CoreEvent::ProjectSaved {
+            path: written.to_string_lossy().into_owned(),
+            project_epoch: expected_project_epoch,
+        });
+        Ok(written)
+    }
+
+    /// Restore an exact media snapshot and persist it while the expected
+    /// project still owns the session. External workflows use this only to
+    /// roll back a postcondition failure before deferred events are emitted.
+    pub fn restore_media_manifest_for_project_deferred(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        manifest: MediaManifest,
+        events: &mut DeferredCoreEvents,
+    ) -> Result<()> {
+        let mut session = self.lock();
+        ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+        session.editor.restore_media(manifest);
+        session.editor.save_media_manifest()?;
+        events.clear();
+        Ok(())
+    }
+
+    /// Restore and persist a manifest through caller-supplied retained
+    /// capability authority. If persistence fails, put the prior live state
+    /// back so memory continues to agree with the last successful disk commit.
+    pub fn restore_media_manifest_for_project_deferred_with_manifest_writer<F>(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        manifest: MediaManifest,
+        events: &mut DeferredCoreEvents,
+        write_manifest: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&MediaManifest) -> Result<()>,
+    {
+        let mut session = self.lock();
+        ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+        let before = session.editor.media();
+        session.editor.restore_media(manifest);
+        if let Err(error) = write_manifest(&session.editor.media()) {
+            session.editor.restore_media(before);
+            return Err(error);
+        }
+        events.clear();
+        Ok(())
     }
 
     /// Relink an existing asset (by id) to a new file, keeping the same id, and
@@ -351,13 +1059,16 @@ impl AppCore {
         path: impl AsRef<std::path::Path>,
         probe: &ProbedMedia,
     ) -> Result<MediaManifestEntry> {
-        let (entry, count) = {
+        let (entry, count, project_epoch) = {
             let mut session = self.lock();
-            let entry = session.relink_media_file(asset_id, path, probe)?;
-            let count = session.media().entries.len();
-            (entry, count)
+            let entry = session.editor.relink_media_file(asset_id, path, probe)?;
+            let count = session.editor.media().entries.len();
+            (entry, count, session.project_epoch)
         };
-        self.events.emit(&CoreEvent::MediaChanged { count });
+        self.events.emit(&CoreEvent::MediaChanged {
+            project_epoch,
+            count,
+        });
         Ok(entry)
     }
 
@@ -367,7 +1078,7 @@ impl AppCore {
     /// guard. Command bodies are panic-free value-type ops, so poisoning is not
     /// expected; recovering keeps a stray panic in one observer from wedging the
     /// whole core.
-    fn lock(&self) -> std::sync::MutexGuard<'_, EditorSession> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, CoreSessionSlot> {
         self.session
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -388,9 +1099,81 @@ mod tests {
             let mut session = core.session.lock().unwrap();
             let mut tl = Timeline::new();
             tl.tracks.push(Track::new("t1", ClipType::Video));
-            session.seed_from_timeline(tl);
+            session.editor.seed_from_timeline(tl);
         }
         core
+    }
+
+    #[test]
+    fn project_identity_workflow_blocks_project_replacement_until_release() {
+        let core = AppCore::new();
+        let workflow = core.lock_project_identity_workflow();
+        let replacement = core.clone();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            replacement.new_project();
+            sent.send(()).unwrap();
+        });
+
+        assert!(received
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+        drop(workflow);
+        received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("replacement proceeds after workflow releases identity");
+        worker.join().unwrap();
+    }
+
+    fn project_bundle(label: &str) -> PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let sequence = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "opentake-core-project-epoch-{}-{label}-{sequence}.opentake",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let core = AppCore::new();
+        {
+            let mut session = core.session.lock().unwrap();
+            let mut timeline = Timeline::new();
+            timeline
+                .tracks
+                .push(Track::new(format!("{label}-track"), ClipType::Video));
+            session.editor.seed_from_timeline(timeline);
+        }
+        core.import_media_file(
+            std::env::temp_dir().join(format!("{label}.mp4")),
+            label,
+            &ProbedMedia::default(),
+        )
+        .unwrap();
+        core.save_project(Some(dir.clone())).unwrap();
+        dir
+    }
+
+    fn assert_runtime_snapshot_matches_project(
+        snapshot: &ProjectRuntimeSnapshot,
+        first_dir: &std::path::Path,
+        second_dir: &std::path::Path,
+        initial_epoch: u64,
+    ) {
+        assert_eq!(snapshot.version, 0);
+        let (label, expected_epoch_parity) = match snapshot.project_dir.as_deref() {
+            Some(path) if path == first_dir => ("first", 0),
+            Some(path) if path == second_dir => ("second", 1),
+            other => panic!("runtime snapshot has unexpected project dir: {other:?}"),
+        };
+        assert_eq!(snapshot.timeline.tracks.len(), 1);
+        assert_eq!(snapshot.timeline.tracks[0].id, format!("{label}-track"));
+        assert_eq!(snapshot.media.entries.len(), 1);
+        assert_eq!(snapshot.media.entries[0].name, label);
+        assert!(snapshot.project_epoch >= initial_epoch);
+        assert_eq!(
+            (snapshot.project_epoch - initial_epoch) % 2,
+            expected_epoch_parity
+        );
     }
 
     fn add_one_clip() -> EditCommand {
@@ -453,7 +1236,13 @@ mod tests {
         assert_eq!(core.version(), 1);
 
         let events = seen.lock().unwrap().clone();
-        assert_eq!(events, vec![CoreEvent::TimelineChanged { version: 1 }]);
+        assert_eq!(
+            events,
+            vec![CoreEvent::TimelineChanged {
+                project_epoch: 0,
+                version: 1
+            }]
+        );
     }
 
     #[test]
@@ -488,7 +1277,7 @@ mod tests {
             .unwrap()
             .iter()
             .map(|e| match e {
-                CoreEvent::TimelineChanged { version } => *version,
+                CoreEvent::TimelineChanged { version, .. } => *version,
                 _ => 0,
             })
             .collect();
@@ -510,6 +1299,77 @@ mod tests {
     }
 
     #[test]
+    fn opening_two_projects_produces_distinct_epochs_at_version_zero() {
+        let first_dir = project_bundle("first");
+        let second_dir = project_bundle("second");
+        let core = AppCore::new();
+
+        let first = core.open_project(&first_dir).unwrap();
+        let second = core.open_project(&second_dir).unwrap();
+
+        assert_eq!(first.version, 0);
+        assert_eq!(second.version, 0);
+        assert_ne!(first.project_epoch, second.project_epoch);
+
+        let _ = std::fs::remove_dir_all(first_dir);
+        let _ = std::fs::remove_dir_all(second_dir);
+    }
+
+    #[test]
+    fn new_project_advances_epoch_even_when_versions_collide() {
+        let core = AppCore::new();
+        let before = core.project_revision();
+
+        core.new_project();
+        let after = core.project_revision();
+
+        assert_eq!(before.version, 0);
+        assert_eq!(after.version, 0);
+        assert!(after.project_epoch > before.project_epoch);
+    }
+
+    #[test]
+    fn runtime_snapshot_never_mixes_timeline_media_and_project_dir() {
+        let first_dir = project_bundle("first");
+        let second_dir = project_bundle("second");
+        let core = AppCore::new();
+        core.open_project(&first_dir).unwrap();
+        let initial_epoch = core.project_revision().project_epoch;
+
+        assert_runtime_snapshot_matches_project(
+            &core.runtime_snapshot(),
+            &first_dir,
+            &second_dir,
+            initial_epoch,
+        );
+
+        let mut spare = EditorSession::open_project(&second_dir).unwrap();
+        let writer_core = core.clone();
+        let writer = std::thread::spawn(move || {
+            for _ in 0..20_000 {
+                let mut session = writer_core.lock();
+                std::mem::swap(&mut session.editor, &mut spare);
+                session.project_epoch += 1;
+                drop(session);
+                std::thread::yield_now();
+            }
+        });
+
+        for _ in 0..10_000 {
+            assert_runtime_snapshot_matches_project(
+                &core.runtime_snapshot(),
+                &first_dir,
+                &second_dir,
+                initial_epoch,
+            );
+        }
+        writer.join().unwrap();
+
+        let _ = std::fs::remove_dir_all(first_dir);
+        let _ = std::fs::remove_dir_all(second_dir);
+    }
+
+    #[test]
     fn new_project_resets_and_emits_project_opened() {
         let core = core_with_track();
         core.apply(add_one_clip()).unwrap();
@@ -519,13 +1379,15 @@ mod tests {
         let sink = Arc::clone(&seen);
         core.subscribe(move |ev| sink.lock().unwrap().push(ev.clone()));
 
-        core.new_project();
+        let snapshot = core.new_project();
         assert_eq!(core.version(), 0);
+        assert_eq!(snapshot.project_epoch, 1);
         assert!(core.get_timeline().timeline.tracks.is_empty());
         assert_eq!(
             seen.lock().unwrap().clone(),
             vec![CoreEvent::ProjectOpened {
                 path: String::new(),
+                project_epoch: 1,
                 version: 0
             }]
         );
@@ -554,13 +1416,17 @@ mod tests {
         let core2 = AppCore::new();
         let snap = core2.open_project(dir.clone()).unwrap();
         assert_eq!(snap.timeline, before);
+        assert_eq!(snap.project_epoch, 1);
         assert_eq!(snap.version, 0);
 
         // First core saw a ProjectSaved event with the dir path.
         let path_str = dir.to_string_lossy().into_owned();
         assert_eq!(
             seen.lock().unwrap().clone(),
-            vec![CoreEvent::ProjectSaved { path: path_str }]
+            vec![CoreEvent::ProjectSaved {
+                path: path_str,
+                project_epoch: 0
+            }]
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -589,7 +1455,10 @@ mod tests {
         assert_eq!(core.version(), 0);
         assert_eq!(
             seen.lock().unwrap().clone(),
-            vec![CoreEvent::MediaChanged { count: 1 }]
+            vec![CoreEvent::MediaChanged {
+                project_epoch: 0,
+                count: 1
+            }]
         );
     }
 
@@ -604,5 +1473,135 @@ mod tests {
         assert!(err.is_err());
         assert!(core.media().entries.is_empty());
         assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn import_media_for_project_rejects_replacement_without_mutating_manifest() {
+        let sequence = CoreIdGen::default().next_id();
+        let root = std::env::temp_dir().join(format!(
+            "opentake-core-conditional-import-{}-{sequence}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let project_a = root.join("A.opentake");
+        let project_b = root.join("B.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(project_a.clone()))
+            .expect("save project A");
+        let expected_epoch = core.runtime_snapshot().project_epoch;
+
+        opentake_project::Project::new(&project_b)
+            .save()
+            .expect("save project B");
+        core.open_project(project_b).expect("switch to project B");
+        let before = serde_json::to_vec(&core.media()).expect("serialize B manifest");
+
+        let error = core
+            .import_media_file_for_project(
+                expected_epoch,
+                &project_a,
+                project_a.join("media/rendered.wav"),
+                "rendered.wav",
+                &ProbedMedia::default(),
+            )
+            .expect_err("stale project import must be rejected");
+
+        assert_eq!(error.to_string(), "project changed while saving media");
+        assert_eq!(
+            serde_json::to_vec(&core.media()).expect("serialize B manifest after rejection"),
+            before
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn project_scoped_media_mutations_reject_a_replacement_project() {
+        let sequence = CoreIdGen::default().next_id();
+        let root = std::env::temp_dir().join(format!(
+            "opentake-core-project-scoped-media-{}-{sequence}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let project_a = root.join("A.opentake");
+        let project_b = root.join("B.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(project_a.clone())).unwrap();
+        let entry = core
+            .import_media_file("/abs/a.mp4", "a", &ProbedMedia::default())
+            .unwrap();
+        core.save_project(None).unwrap();
+        let expected_epoch = core.runtime_snapshot().project_epoch;
+        opentake_project::Project::new(&project_b).save().unwrap();
+        core.open_project(project_b).unwrap();
+        let before = core.media();
+
+        assert!(core
+            .set_media_global_favorite_for_project(
+                expected_epoch,
+                &project_a,
+                &entry.id,
+                Some("content-hash".into()),
+            )
+            .is_err());
+        assert!(core
+            .import_media_file_for_project(
+                expected_epoch,
+                &project_a,
+                "/abs/rendered.mp4",
+                "rendered",
+                &ProbedMedia::default(),
+            )
+            .is_err());
+        assert!(core
+            .import_library_media_for_project(
+                expected_epoch,
+                &project_a,
+                "/abs/library.mp4",
+                "library",
+                &ProbedMedia::default(),
+                "content-hash",
+            )
+            .is_err());
+        assert!(core
+            .save_media_manifest_for_project(expected_epoch, &project_a)
+            .is_err());
+        assert_eq!(core.media(), before);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn global_favorite_interfaces_emit_media_changed_only_on_change() {
+        let core = AppCore::new();
+        let entry = core
+            .import_media_file("/abs/a.mp4", "a", &ProbedMedia::default())
+            .unwrap();
+        let seen: Arc<Mutex<Vec<CoreEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        core.subscribe(move |event| sink.lock().unwrap().push(event.clone()));
+
+        assert!(core
+            .set_media_global_favorite(&entry.id, Some("content-hash".into()))
+            .unwrap());
+        assert!(!core
+            .set_media_global_favorite(&entry.id, Some("content-hash".into()))
+            .unwrap());
+        assert_eq!(
+            core.clear_media_global_favorite_id("content-hash").unwrap(),
+            1
+        );
+
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            vec![
+                CoreEvent::MediaChanged {
+                    project_epoch: 0,
+                    count: 1,
+                },
+                CoreEvent::MediaChanged {
+                    project_epoch: 0,
+                    count: 1,
+                },
+            ]
+        );
     }
 }

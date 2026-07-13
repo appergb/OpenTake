@@ -15,6 +15,7 @@
 //! The rmcp MCP server transport (§1) and the in-app chat client (§5) layer over
 //! the [`mcp`] dispatch shell and land in subsequent phases.
 
+pub mod chat;
 pub mod mcp;
 pub mod plugin;
 pub mod prompt;

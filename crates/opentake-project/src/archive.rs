@@ -63,8 +63,9 @@ pub struct MissingMedia {
 /// `None` when the project has never been saved (only `.external` media can
 /// then be resolved).
 ///
-/// `dest_bundle` is created fresh: if it already exists it is removed first
-/// (matching upstream's atomic replace).
+/// `dest_bundle` must not exist. Any existing file, directory, or symlink
+/// returns [`ProjectError::DestinationExists`] before source resolution or
+/// output mutation.
 pub fn archive(
     timeline: &Timeline,
     manifest: &MediaManifest,
@@ -72,14 +73,14 @@ pub fn archive(
     source_bundle: Option<&Path>,
     dest_bundle: &Path,
 ) -> Result<ArchiveReport> {
-    // Match upstream's "remove then land" semantics (Swift exporter:
-    // `if fm.fileExists(atPath: destURL.path) { try fm.removeItem(at: destURL) }`
-    // before moving the freshly staged bundle into place). Without this, re-
-    // archiving over an existing bundle would leak stale `media/` files, an old
-    // `thumbnail.jpg`, etc. Deleting first yields a pure bundle and honors this
-    // function's doc contract.
-    if dest_bundle.exists() {
-        fs::remove_dir_all(dest_bundle).map_err(|e| ProjectError::io(dest_bundle, e))?;
+    match std::fs::symlink_metadata(dest_bundle) {
+        Ok(_) => {
+            return Err(ProjectError::DestinationExists {
+                path: dest_bundle.to_path_buf(),
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ProjectError::io(dest_bundle, error)),
     }
 
     let media_dir = layout::media_dir(dest_bundle);
@@ -131,6 +132,7 @@ pub fn archive(
         entries: new_entries,
         folders: manifest.folders.clone(),
         favorites: manifest.favorites.clone(),
+        favorite_library_ids: manifest.favorite_library_ids.clone(),
     };
 
     write_json(
@@ -381,9 +383,13 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use opentake_domain::{ClipType, MediaManifestEntry};
+    #[cfg(unix)]
+    use std::collections::BTreeMap;
 
     /// Minimal `External` manifest entry for archive tests.
+    #[cfg(unix)]
     fn external_entry(id: &str, absolute_path: &str) -> MediaManifestEntry {
         MediaManifestEntry {
             id: id.into(),
@@ -472,6 +478,7 @@ mod tests {
             ],
             folders: Vec::new(),
             favorites: Vec::new(),
+            ..MediaManifest::default()
         };
         let log = GenerationLog::new();
         let dest = dir.path().join("Out.opentake");
@@ -490,9 +497,45 @@ mod tests {
         assert_eq!(copied.len(), 2, "expected two copies, got {copied:?}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn archive_preserves_global_favorite_mapping() {
+        let dir = TestDir::new("archive_favorite_mapping");
+        let source = dir.path().join("source.mp4");
+        fs::write(&source, b"favorite").unwrap();
+        let asset_id = "favorite-asset".to_string();
+        let manifest = MediaManifest {
+            entries: vec![external_entry(&asset_id, source.to_str().unwrap())],
+            favorites: vec![asset_id.clone()],
+            favorite_library_ids: BTreeMap::from([(asset_id.clone(), "content-hash".to_string())]),
+            ..MediaManifest::default()
+        };
+        let destination = dir.path().join("Out.opentake");
+
+        archive(
+            &Timeline::new(),
+            &manifest,
+            &GenerationLog::new(),
+            None,
+            &destination,
+        )
+        .unwrap();
+
+        let archived: MediaManifest =
+            serde_json::from_slice(&fs::read(layout::manifest_path(&destination)).unwrap())
+                .unwrap();
+        assert_eq!(archived.favorites, vec![asset_id.clone()]);
+        assert_eq!(
+            archived.library_favorite_id(&asset_id),
+            Some("content-hash")
+        );
+    }
+
     /// A scratch directory under the system temp dir, removed on drop.
+    #[cfg(unix)]
     struct TestDir(PathBuf);
 
+    #[cfg(unix)]
     impl TestDir {
         fn new(tag: &str) -> Self {
             use std::sync::atomic::{AtomicU64, Ordering};
@@ -508,6 +551,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for TestDir {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);

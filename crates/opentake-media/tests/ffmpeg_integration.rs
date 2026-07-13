@@ -349,3 +349,77 @@ fn encode_roundtrip_produces_playable_video() {
     // Ensure the encode module's preset arg builder agrees with reality.
     let _ = encode::preset::even_dimension(63); // referenced for coverage
 }
+
+fn encode_codec_roundtrip(codec: VideoCodec, extension: &str, expected_codec: &str) {
+    if !ffmpeg_available() || !ffprobe_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join(format!("roundtrip.{extension}"));
+    let preset = ExportPreset::new(codec, ExportResolution::P720);
+    let (width, height) = (64_u32, 64_u32);
+    let mut encoder = VideoEncoder::new(&out, width, height, 10, &preset).unwrap();
+    for index in 0..6_u8 {
+        let mut rgba = vec![0_u8; (width * height * 4) as usize];
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[index.saturating_mul(30), 80, 180, 255]);
+        }
+        encoder
+            .push_frame(&opentake_media::RgbaFrame::new(width, height, rgba))
+            .unwrap();
+    }
+    encoder.finish().unwrap();
+
+    let codec_name = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(codec_name.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&codec_name.stdout).trim(),
+        expected_codec
+    );
+    let format_name = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=format_name",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(format_name.status.success());
+    assert!(
+        String::from_utf8_lossy(&format_name.stdout)
+            .split(',')
+            .any(|name| name.trim() == extension),
+        "ffprobe format must include {extension}"
+    );
+    let media = probe(&out).unwrap();
+    assert!(media.has_video);
+    assert_eq!(media.width, Some(width));
+    assert_eq!(media.height, Some(height));
+}
+
+#[test]
+fn encode_h265_roundtrip_produces_hevc_mp4() {
+    encode_codec_roundtrip(VideoCodec::H265, "mp4", "hevc");
+}
+
+#[test]
+fn encode_prores_roundtrip_produces_prores_mov() {
+    encode_codec_roundtrip(VideoCodec::ProRes422, "mov", "prores");
+}

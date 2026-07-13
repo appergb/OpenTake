@@ -17,9 +17,11 @@
 //! non-loopback `Origin` (defence-in-depth, mirroring the MCP server's guard).
 
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::Query;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -30,6 +32,7 @@ use tokio::sync::broadcast;
 use opentake_render::DecodedFrame;
 
 use super::engine::{FrameSink, PlayheadEmitter};
+use super::session::PlaybackIdentity;
 
 /// Broadcast channel depth. 2 keeps latency low: a slow `<img>` consumer drops
 /// stale frames (the receiver sees `Lagged`) rather than back-pressuring the
@@ -50,7 +53,7 @@ const BOUNDARY: &str = "opentake_mjpeg_boundary";
 pub struct PreviewServer {
     port: u16,
     tx: broadcast::Sender<Bytes>,
-    latest: Arc<std::sync::RwLock<Option<Bytes>>>,
+    latest: LatestFrameStore,
 }
 
 /// Shared axum state: the live broadcast sender plus the latest encoded frame
@@ -58,15 +61,171 @@ pub struct PreviewServer {
 #[derive(Clone)]
 struct ServerState {
     tx: broadcast::Sender<Bytes>,
-    latest: Arc<std::sync::RwLock<Option<Bytes>>>,
+    latest: LatestFrameStore,
 }
+
+#[derive(Clone, Debug)]
+struct LatestFrame {
+    identity: PlaybackIdentity,
+    frame: i32,
+    sequence: u64,
+    terminal: bool,
+    jpeg: Bytes,
+}
+
+#[derive(Clone, Default)]
+struct LatestFrameStore(Arc<RwLock<Option<LatestFrame>>>);
+
+impl LatestFrameStore {
+    fn publish(
+        &self,
+        identity: PlaybackIdentity,
+        frame: i32,
+        sequence: u64,
+        terminal: bool,
+        jpeg: Bytes,
+    ) {
+        *self
+            .0
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(LatestFrame {
+            identity,
+            frame,
+            sequence,
+            terminal,
+            jpeg,
+        });
+    }
+
+    fn lookup(&self, query: &FrameQuery) -> Option<Bytes> {
+        let latest = self
+            .0
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        latest.as_ref().and_then(|latest| {
+            (latest.identity.project_epoch == query.project_epoch
+                && latest.identity.timeline_version == query.timeline_version
+                && latest.identity.session_id == query.session_id
+                && latest.frame == query.frame
+                && latest.sequence == query.sequence)
+                .then(|| latest.jpeg.clone())
+        })
+    }
+
+    fn clear_session(&self, identity: &PlaybackIdentity) {
+        let mut latest = self
+            .0
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if latest
+            .as_ref()
+            .is_some_and(|latest| &latest.identity == identity)
+        {
+            *latest = None;
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameQuery {
+    project_epoch: u64,
+    timeline_version: u64,
+    session_id: String,
+    frame: i32,
+    sequence: u64,
+}
+
+impl FrameQuery {
+    fn new(
+        project_epoch: u64,
+        timeline_version: u64,
+        session_id: impl Into<String>,
+        frame: i32,
+        sequence: u64,
+    ) -> Self {
+        Self {
+            project_epoch,
+            timeline_version,
+            session_id: session_id.into(),
+            frame,
+            sequence,
+        }
+    }
+
+    fn valid(&self) -> bool {
+        self.frame >= 0
+            && PlaybackIdentity::new(
+                self.project_epoch,
+                self.timeline_version,
+                self.session_id.clone(),
+            )
+            .is_ok()
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct PublicationGate(Arc<Mutex<bool>>);
+
+impl PublicationGate {
+    pub fn open() -> Self {
+        let gate = Self::default();
+        *gate
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        gate
+    }
+
+    pub fn close(&self) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+    }
+
+    pub fn reopen(&self) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+    }
+
+    pub(crate) fn is_open(&self) -> bool {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn with_open<T>(&self, publish: impl FnOnce() -> T) -> Option<T> {
+        let open = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !*open {
+            return None;
+        }
+        Some(publish())
+    }
+}
+
+#[derive(Clone)]
+struct PendingFrame {
+    identity: PlaybackIdentity,
+    sequence: u64,
+    jpeg: Bytes,
+}
+
+#[derive(Clone, Default)]
+struct PendingFrameStore(Arc<Mutex<Option<PendingFrame>>>);
 
 impl PreviewServer {
     /// Start the MJPEG server on a random loopback port. Must run inside the
     /// Tauri async runtime (call via `tauri::async_runtime::block_on` in setup).
     pub async fn start() -> Result<Arc<Self>, String> {
         let (tx, _rx) = broadcast::channel::<Bytes>(FRAME_CHANNEL_DEPTH);
-        let latest: Arc<std::sync::RwLock<Option<Bytes>>> = Arc::new(std::sync::RwLock::new(None));
+        let latest = LatestFrameStore::default();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -119,11 +278,21 @@ impl PreviewServer {
     }
 
     /// A frame sink that JPEG-encodes composited frames into this server's stream.
-    pub fn sink(&self) -> MjpegSink {
+    pub fn sink(&self, identity: PlaybackIdentity, gate: PublicationGate) -> MjpegSink {
         MjpegSink {
             tx: self.tx.clone(),
-            latest: self.latest.clone(),
+            publication: EncodedFramePublication {
+                identity,
+                gate,
+                pending: PendingFrameStore::default(),
+                latest: self.latest.clone(),
+                sequence: Arc::new(AtomicU64::new(0)),
+            },
         }
+    }
+
+    pub fn clear_session(&self, identity: &PlaybackIdentity) {
+        self.latest.clear_session(identity);
     }
 }
 
@@ -133,16 +302,32 @@ fn origin_is_allowed(headers: &HeaderMap) -> bool {
     match headers.get(axum::http::header::ORIGIN) {
         None => true,
         Some(value) => match value.to_str() {
-            Ok(origin) => {
-                origin.starts_with("http://127.0.0.1")
-                    || origin.starts_with("http://localhost")
-                    || origin.starts_with("https://localhost")
-                    || origin.starts_with("tauri://")
-                    || origin.starts_with("http://tauri.localhost")
-            }
+            Ok(origin) => origin_value_is_allowed(origin),
             Err(_) => false,
         },
     }
+}
+
+fn origin_value_is_allowed(origin: &str) -> bool {
+    let Ok(uri) = origin.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    if uri.path() != "/" || uri.query().is_some() {
+        return false;
+    }
+    let (Some(scheme), Some(host)) = (uri.scheme_str(), uri.host()) else {
+        return false;
+    };
+    matches!(
+        (scheme, host),
+        ("http", "127.0.0.1")
+            | ("http", "localhost")
+            | ("https", "localhost")
+            | ("tauri", "localhost")
+            | ("http", "tauri.localhost")
+            | ("http", "[::1]")
+            | ("https", "[::1]")
+    )
 }
 
 /// `/stream`: relay each broadcast JPEG as a `multipart/x-mixed-replace` part.
@@ -215,20 +400,22 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| ws_stream(socket, state.tx.subscribe()))
 }
 
-/// `/frame`: the latest composited JPEG, one shot. The preview `<img>` reloads
-/// this per `playback_frame` event (cache-busted by a `?f=N` query); WKWebView
-/// allows passive loopback-http image loads where it blocks plain-`ws://`
-/// WebSockets (mixed content in the secure `tauri://` context).
-async fn frame_handler(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+/// `/frame`: one session-scoped composited JPEG. The preview requests the exact
+/// project epoch, timeline version, session id, frame, and publication sequence;
+/// a mismatch returns 204. WKWebView permits this passive loopback image request
+/// while blocking plain `ws://` in the secure `tauri://` context.
+async fn frame_handler(
+    State(state): State<ServerState>,
+    Query(query): Query<FrameQuery>,
+    headers: HeaderMap,
+) -> Response {
     if !origin_is_allowed(&headers) {
         return (StatusCode::FORBIDDEN, "cross-origin preview stream denied").into_response();
     }
-    let latest = state
-        .latest
-        .read()
-        .unwrap_or_else(|p| p.into_inner())
-        .clone();
-    match latest {
+    if !query.valid() {
+        return (StatusCode::NO_CONTENT, "").into_response();
+    }
+    match state.latest.lookup(&query) {
         Some(jpeg) => (
             [
                 (axum::http::header::CONTENT_TYPE, "image/jpeg".to_string()),
@@ -268,11 +455,81 @@ async fn ws_stream(mut socket: WebSocket, mut rx: broadcast::Receiver<Bytes>) {
 #[derive(Clone)]
 pub struct MjpegSink {
     tx: broadcast::Sender<Bytes>,
-    latest: Arc<std::sync::RwLock<Option<Bytes>>>,
+    publication: EncodedFramePublication,
+}
+
+/// The one commit coordinator shared by the encoded-frame sink, exact-frame
+/// HTTP store, and Tauri playhead event. A frame becomes observable only when
+/// its matching playhead tick commits the staged JPEG through this object.
+#[derive(Clone)]
+pub struct EncodedFramePublication {
+    identity: PlaybackIdentity,
+    gate: PublicationGate,
+    pending: PendingFrameStore,
+    latest: LatestFrameStore,
+    sequence: Arc<AtomicU64>,
+}
+
+impl EncodedFramePublication {
+    fn stage(&self, jpeg: Bytes) -> bool {
+        self.gate
+            .with_open(|| {
+                let sequence = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
+                *self
+                    .pending
+                    .0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PendingFrame {
+                    identity: self.identity.clone(),
+                    sequence,
+                    jpeg,
+                });
+            })
+            .is_some()
+    }
+
+    /// Commit the most recently staged encoded frame to `/frame` and return the
+    /// exact event payload that must be emitted for that publication.
+    pub fn commit(&self, frame: i32, last_frame: i32) -> Option<PlaybackFramePublication> {
+        self.gate.with_open(|| {
+            let pending = self
+                .pending
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()?;
+            if pending.identity != self.identity {
+                return None;
+            }
+            let terminal = frame >= last_frame;
+            self.latest.publish(
+                self.identity.clone(),
+                frame,
+                pending.sequence,
+                terminal,
+                pending.jpeg,
+            );
+            Some(PlaybackFramePublication::new(
+                self.identity.clone(),
+                frame,
+                pending.sequence,
+                terminal,
+            ))
+        })?
+    }
+}
+
+impl MjpegSink {
+    pub fn publication(&self) -> EncodedFramePublication {
+        self.publication.clone()
+    }
 }
 
 impl FrameSink for MjpegSink {
     fn push_frame(&self, frame: &DecodedFrame) {
+        if !self.publication.gate.is_open() {
+            return;
+        }
         // Always encode: the polling `/frame` route reads `latest` without ever
         // subscribing to the broadcast channel, so receiver_count()==0 no longer
         // means "nobody is watching". Playback always has exactly one consumer
@@ -281,11 +538,7 @@ impl FrameSink for MjpegSink {
             return;
         };
         let jpeg = Bytes::from(jpeg);
-        {
-            let mut latest = self.latest.write().unwrap_or_else(|p| p.into_inner());
-            *latest = Some(jpeg.clone());
-        }
-        if self.tx.receiver_count() > 0 {
+        if self.publication.stage(jpeg.clone()) && self.tx.receiver_count() > 0 {
             let _ = self.tx.send(jpeg);
         }
     }
@@ -317,27 +570,53 @@ fn encode_jpeg(frame: &DecodedFrame) -> Option<Vec<u8>> {
 
 /// Playhead frame number broadcast to the front end, so it can move the
 /// playhead / timecode while the pixels arrive over the MJPEG stream.
-#[derive(Clone, Copy, serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PlayheadDto {
+pub struct PlaybackFramePublication {
+    project_epoch: u64,
+    timeline_version: u64,
+    session_id: String,
     frame: i32,
+    sequence: u64,
+    terminal: bool,
+}
+
+impl PlaybackFramePublication {
+    fn new(identity: PlaybackIdentity, frame: i32, sequence: u64, terminal: bool) -> Self {
+        Self {
+            project_epoch: identity.project_epoch,
+            timeline_version: identity.timeline_version,
+            session_id: identity.session_id,
+            frame,
+            sequence,
+            terminal,
+        }
+    }
 }
 
 /// A [`PlayheadEmitter`] that emits the current frame as a Tauri `playback_frame`
 /// event. Throttling is unnecessary: one small event per rendered frame.
 pub struct TauriPlayheadEmitter {
     app: AppHandle,
+    publication: EncodedFramePublication,
+    last_frame: i32,
 }
 
 impl TauriPlayheadEmitter {
-    pub fn new(app: AppHandle) -> Self {
-        TauriPlayheadEmitter { app }
+    pub fn new(app: AppHandle, sink: &MjpegSink, last_frame: i32) -> Self {
+        TauriPlayheadEmitter {
+            app,
+            publication: sink.publication(),
+            last_frame,
+        }
     }
 }
 
 impl PlayheadEmitter for TauriPlayheadEmitter {
     fn emit(&self, frame: i32) {
-        let _ = self.app.emit("playback_frame", PlayheadDto { frame });
+        if let Some(publication) = self.publication.commit(frame, self.last_frame) {
+            let _ = self.app.emit("playback_frame", publication);
+        }
     }
 }
 
@@ -395,5 +674,49 @@ mod tests {
         assert!(header.starts_with("\r\n--opentake_mjpeg_boundary\r\n"));
         assert!(header.contains("Content-Type: image/jpeg"));
         assert!(header.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn playhead_event_carries_session_revision_sequence_and_terminal() {
+        let identity = super::super::session::PlaybackIdentity::new(7, 11, "session-42")
+            .expect("valid identity");
+        let dto = PlaybackFramePublication::new(identity, 123, 9, true);
+
+        assert_eq!(
+            serde_json::to_value(dto).expect("serialize"),
+            serde_json::json!({
+                "projectEpoch": 7,
+                "timelineVersion": 11,
+                "sessionId": "session-42",
+                "frame": 123,
+                "sequence": 9,
+                "terminal": true,
+            })
+        );
+    }
+
+    #[test]
+    fn frame_route_never_serves_another_session_latest() {
+        let latest = LatestFrameStore::default();
+        let identity =
+            super::super::session::PlaybackIdentity::new(3, 5, "current").expect("valid identity");
+        latest.publish(identity.clone(), 18, 4, false, Bytes::from_static(b"jpeg"));
+
+        assert!(latest
+            .lookup(&FrameQuery::new(3, 5, "stale", 18, 4))
+            .is_none());
+        assert!(latest
+            .lookup(&FrameQuery::new(2, 5, "current", 18, 4))
+            .is_none());
+        assert!(latest
+            .lookup(&FrameQuery::new(3, 4, "current", 18, 4))
+            .is_none());
+        assert!(latest
+            .lookup(&FrameQuery::new(3, 5, "current", 18, 3))
+            .is_none());
+        assert_eq!(
+            latest.lookup(&FrameQuery::new(3, 5, "current", 18, 4)),
+            Some(Bytes::from_static(b"jpeg"))
+        );
     }
 }

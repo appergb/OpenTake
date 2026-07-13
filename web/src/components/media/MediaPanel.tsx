@@ -1,8 +1,8 @@
 /**
  * MediaPanel (SPEC §7 + 剪映式顶栏改造)。顶部横排主标签（素材/音频/文本/贴纸/
  * 特效/转场/字幕/智能包裹，仅素材/音频可用，其余置灰占位）取代了原左侧竖排
- * Media/Captions/Music 标签条。素材/音频下再分「导入 / 我的」二级标签：导入=全部
- * （音频标签仅 type==='audio'），我的=星标收藏（localStorage 持久化，见 favorites.ts）。
+ * Media/Captions/Music 标签条。素材/音频下再分「导入 / 我的」二级标签：导入=当前
+ * 项目素材（音频标签仅 type==='audio'），我的=跨项目全局收藏库。
  * 内容区仍是 actions/search/context 工具栏 + 资产网格；网格项 HTML5-draggable 到
  * 时间线（见 `MediaGrid` / `TimelineRegion`）。
  */
@@ -28,7 +28,15 @@ import {
 import { Icon } from "../ui/Icon";
 import { HoverButton } from "../ui/HoverButton";
 import { useEditorUiStore, type MediaSubTabId } from "../../store/uiStore";
-import { useMediaStore, refreshMedia } from "../../store/mediaStore";
+import {
+  applyMediaErrorForProject,
+  applyMediaListForProject,
+  captureMediaProjectIdentity,
+  isCurrentMediaProject,
+  useMediaStore,
+  type MediaProjectIdentity,
+} from "../../store/mediaStore";
+import { sourceName, useLibraryStore } from "../../store/libraryStore";
 import {
   importFolderViaDialog,
   importFilesViaDialog,
@@ -42,14 +50,15 @@ import { BoundedCache } from "../../lib/lru";
 import { childFolders, folderTrail, normalizeFolderId } from "../../lib/folderTree";
 import { useProjectStore } from "../../store/projectStore";
 import { addMediaToTimeline } from "../../store/editActions";
-import { extractAudio, generateThumbnail, preloadMedia, toggleFavorite } from "../../lib/api";
+import { extractAudio, generateThumbnail, getWaveform, preloadMedia, toggleFavorite } from "../../lib/api";
 import { saveDialog } from "../../lib/dialog";
 import type { MediaFolder, MediaItem } from "../../lib/types";
 import { MediaTabBar, MediaSubTabBar, MATERIAL_SUB_TABS, AUDIO_SUB_TABS } from "./MediaTabBar";
 import { SoundLibraryTab } from "./SoundLibraryTab";
 import { CaptionsTab } from "./CaptionsTab";
 import { MediaSearchResults } from "./MediaSearch";
-import { migrateLocalFavorites } from "./favorites";
+import { applyFavoriteMigrationOutcome, migrateLocalFavorites } from "./favorites";
+import { LibraryEntryGrid } from "./LibraryView";
 
 /** MIME-ish type used on dataTransfer when dragging a media item to the timeline. */
 export const MEDIA_DND_TYPE = "application/x-opentake-media";
@@ -126,12 +135,20 @@ export function MediaPanel() {
   // self-guards (empty store / no matching items → no-op), so this settles after
   // the first successful migration and safely re-checks on project switch.
   const items = useMediaStore((s) => s.items);
+  const projectEpoch = useProjectStore((s) => s.projectEpoch);
+  const projectPath = useProjectStore((s) => s.projectPath);
   useEffect(() => {
-    if (items.length === 0) return;
-    void migrateLocalFavorites(items).then((applied) => {
-      if (applied) void refreshMedia();
-    });
-  }, [items]);
+    if (!projectPath) return;
+    const project = { projectEpoch, projectPath };
+    void migrateLocalFavorites(items, project)
+      .then((outcome) => {
+        if (!applyFavoriteMigrationOutcome(project, outcome)) return;
+        if (outcome.synced) void useLibraryStore.getState().refresh();
+      })
+      .catch((error: unknown) => {
+        applyMediaErrorForProject(project, String(error));
+      });
+  }, [items, projectEpoch, projectPath]);
 
   // 仅 material/audio 渲染素材库内容；其余禁用标签理论上点不到，兜底显示占位。
   const isLibraryTab = mediaTab === "material" || mediaTab === "audio";
@@ -160,6 +177,10 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   const folders = useMediaStore((s) => s.folders);
   const importing = useMediaStore((s) => s.importing);
   const error = useMediaStore((s) => s.error);
+  const libraryEntries = useLibraryStore((s) => s.entries);
+  const libraryLoading = useLibraryStore((s) => s.loading);
+  const libraryError = useLibraryStore((s) => s.error);
+  const refreshLibrary = useLibraryStore((s) => s.refresh);
   const subTab = useEditorUiStore((s) => s.mediaSubTab);
   const setSubTab = useEditorUiStore((s) => s.setMediaSubTab);
   const currentFolderId = useEditorUiStore((s) => s.mediaPanelCurrentFolderId);
@@ -179,6 +200,10 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   useEffect(() => {
     resetFolder.current(null);
   }, [kind, subTab]);
+
+  useEffect(() => {
+    if (subTab === "mine") void refreshLibrary();
+  }, [subTab, refreshLibrary]);
 
   // The extract/sound subtabs exist only on the audio tab; if we land on the
   // material tab still pointing at one, fall back to import.
@@ -218,6 +243,15 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
       }),
     [items, kind, subTab, query, browsing, folderId],
   );
+  const filteredLibraryEntries = useMemo(
+    () =>
+      libraryEntries.filter((entry) => {
+        if (kind === "audio" && entry.type !== "audio") return false;
+        if (query === "") return true;
+        return sourceName(entry.source ?? entry.storedPath).toLowerCase().includes(query);
+      }),
+    [libraryEntries, kind, query],
+  );
 
   // "提取" subtab (audio only): project videos carrying an extractable audio
   // track. Rendered with the same MediaCard, whose hover Extract button already
@@ -240,7 +274,11 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   const isEmpty = totalCount === 0;
   const audioExtractView = isAudio && subTab === "extract";
   const audioSoundView = isAudio && subTab === "sound";
-  const displayCount = audioExtractView ? extractableVideos.length : totalCount;
+  const displayCount = audioExtractView
+    ? extractableVideos.length
+    : subTab === "mine"
+      ? filteredLibraryEntries.length
+      : totalCount;
 
   return (
     <>
@@ -343,14 +381,20 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
                 : t("media.itemCount", { count: displayCount })}
           </span>
         </div>
-        {error && (
+        {(error || (subTab === "mine" && libraryError)) && (
           <div style={{ color: "var(--status-error)", fontSize: "var(--fs-xs)" }}>
-            {t("media.importFailed", { error })}
+            {t("media.importFailed", { error: error ?? libraryError ?? "" })}
           </div>
         )}
       </div>
 
-      {audioSoundView ? (
+      {subTab === "mine" ? (
+        <LibraryEntryGrid
+          entries={filteredLibraryEntries}
+          loading={libraryLoading}
+          totalEmpty={libraryEntries.length === 0}
+        />
+      ) : audioSoundView ? (
         // 音效库（#115 全局库的 sound 分类）搬进音频 tab，一键导入项目。
         <SoundLibraryTab query={query} />
       ) : audioExtractView ? (
@@ -883,6 +927,12 @@ function MediaCard({ item }: { item: MediaItem }) {
             draggable={false}
             style={{ width: "100%", height: "100%", objectFit: "cover" }}
           />
+        ) : item.type === "audio" ? (
+          <AudioWaveform
+            mediaRef={item.id}
+            missing={item.missing}
+            fallback={<Icon icon={TYPE_ICON[item.type]} size={22} strokeWidth={1.5} />}
+          />
         ) : (
           <Icon icon={TYPE_ICON[item.type]} size={22} strokeWidth={1.5} />
         )}
@@ -949,37 +999,20 @@ function MediaCard({ item }: { item: MediaItem }) {
         )}
         {/* 星标收藏按钮（左上角）。stopPropagation 避免触发卡片的预览/拖拽。
             渲染在 missing 覆盖层之后并给更高 zIndex，确保离线素材仍可取消收藏。 */}
-        <button
-          type="button"
-          aria-pressed={favorite}
+        <MediaFavoriteButton
+          assetId={item.id}
+          favorite={favorite}
           title={favorite ? t("media.unfavorite") : t("media.favorite")}
-          onClick={(e) => {
-            e.stopPropagation();
-            // Persist to the project manifest; the backend's media_changed event
-            // plus this refresh update every card's `favorite` flag.
-            void toggleFavorite([item.id], !favorite)
-              .then(() => refreshMedia())
-              .catch(() => {});
+          onSuccess={async (media, project) => {
+            if (!applyMediaListForProject(project, media)) return;
+            await useLibraryStore.getState().refresh();
           }}
-          style={{
-            position: "absolute",
-            left: 4,
-            top: 4,
-            zIndex: 2,
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            width: 20,
-            height: 20,
-            padding: 0,
-            borderRadius: "var(--radius-xs)",
-            background: "rgba(0,0,0,0.6)",
-            color: favorite ? "var(--accent-timecode)" : "var(--text-secondary)",
-            cursor: "pointer",
+          onError={(message, project) => {
+            if (!applyMediaErrorForProject(project, message)) return;
+            setFeedback(message);
           }}
-        >
-          <Icon icon={Star} size={12} strokeWidth={2} fill={favorite ? "currentColor" : "none"} />
-        </button>
+          onStart={() => setFeedback(null)}
+        />
         {canExtractAudio && hovered && (
           <button
             type="button"
@@ -1035,6 +1068,79 @@ function MediaCard({ item }: { item: MediaItem }) {
   );
 }
 
+interface MediaFavoriteButtonProps {
+  assetId: string;
+  favorite: boolean;
+  title: string;
+  onStart?: () => void;
+  onSuccess: (
+    media: Awaited<ReturnType<typeof toggleFavorite>>,
+    project: MediaProjectIdentity,
+  ) => void | Promise<void>;
+  onError: (message: string, project: MediaProjectIdentity) => void;
+  performToggle?: typeof toggleFavorite;
+}
+
+/** The card's durable-favorite interaction. Its pending state lives here so a
+ * rejection cannot optimistically alter the `favorite` prop rendered from the
+ * Rust mirror. Exported for a real DOM regression of the async contract. */
+export function MediaFavoriteButton({
+  assetId,
+  favorite,
+  title,
+  onStart,
+  onSuccess,
+  onError,
+  performToggle = toggleFavorite,
+}: MediaFavoriteButtonProps) {
+  const [pending, setPending] = useState(false);
+  return (
+    <button
+      type="button"
+      aria-label={title}
+      aria-pressed={favorite}
+      aria-busy={pending}
+      disabled={pending}
+      title={title}
+      onClick={(event) => {
+        event.stopPropagation();
+        const project = captureMediaProjectIdentity();
+        setPending(true);
+        onStart?.();
+        void performToggle(assetId, !favorite, project)
+          .then((media) => {
+            if (!isCurrentMediaProject(project)) return;
+            return onSuccess(media, project);
+          })
+          .catch((error: unknown) => {
+            if (!isCurrentMediaProject(project)) return;
+            onError(String(error), project);
+          })
+          .finally(() => setPending(false));
+      }}
+      style={{
+        position: "absolute",
+        left: 4,
+        top: 4,
+        zIndex: 2,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: 20,
+        height: 20,
+        padding: 0,
+        borderRadius: "var(--radius-xs)",
+        background: "rgba(0,0,0,0.6)",
+        color: favorite ? "var(--accent-timecode)" : "var(--text-secondary)",
+        cursor: pending ? "wait" : "pointer",
+        opacity: pending ? 0.55 : 1,
+      }}
+    >
+      <Icon icon={Star} size={12} strokeWidth={2} fill={favorite ? "currentColor" : "none"} />
+    </button>
+  );
+}
+
 function Placeholder({ label }: { label: string }) {
   return (
     <div
@@ -1050,4 +1156,74 @@ function Placeholder({ label }: { label: string }) {
       {label}
     </div>
   );
+}
+
+/** 音频卡片的波形缩略图（#91-B3）。复用 `get_waveform` 命令拿归一化桶
+ *  (0=响, 1=静)，采样到固定条数渲染竖条。decode 失败 / 无音频轨 / 空桶时回退
+ *  到调用方提供的类型图标，避免卡片缩略图区域变空白。 */
+export function AudioWaveform({
+  mediaRef,
+  missing,
+  fallback,
+  bucketsOverride,
+}: {
+  mediaRef: string;
+  missing?: boolean;
+  fallback: React.ReactNode;
+  bucketsOverride?: number[] | null;
+}) {
+  const [buckets, setBuckets] = useState<number[] | null>(bucketsOverride ?? null);
+  useEffect(() => {
+    if (bucketsOverride !== undefined) return;
+    if (missing) return;
+    let cancelled = false;
+    void getWaveform(mediaRef).then((b) => {
+      if (!cancelled) setBuckets(b);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [mediaRef, missing, bucketsOverride]);
+  if (!buckets || buckets.length === 0) return <>{fallback}</>;
+  const sampled = sampleWaveform(buckets, 48);
+  return (
+    <div
+      data-testid="audio-waveform"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 1,
+        width: "70%",
+        height: "50%",
+      }}
+    >
+      {sampled.map((v, i) => {
+        const h = Math.max(8, (1 - v) * 100);
+        return (
+          <div
+            key={i}
+            style={{
+              flex: 1,
+              height: `${h}%`,
+              minHeight: 2,
+              background: "var(--accent-primary)",
+              opacity: 0.65,
+              borderRadius: 1,
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+/** 把任意长度的波形桶采样到 `target` 条：取每段代表点的值（无插值）。 */
+function sampleWaveform(buckets: number[], target: number): number[] {
+  if (buckets.length <= target) return buckets;
+  const step = buckets.length / target;
+  const out: number[] = new Array(target);
+  for (let i = 0; i < target; i++) {
+    out[i] = buckets[Math.floor(i * step)];
+  }
+  return out;
 }

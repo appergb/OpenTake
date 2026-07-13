@@ -51,16 +51,19 @@ pub mod fcpxml_modern;
 pub mod gen_log;
 pub mod layout;
 pub mod otio;
+mod project_root;
+mod safe_fs;
 pub mod xmlnode;
 
 pub use archive::{archive, ArchiveReport, MissingMedia};
-pub use bundle::{copy_media_dir, Project};
+pub use bundle::{copy_media_dir, Project, ProjectCompatibility};
 pub use edl::export_edl;
 pub use error::{ProjectError, Result};
 pub use fcpxml::{export_xmeml, export_xmeml_with_timecodes};
 pub use fcpxml_modern::export_fcpxml;
 pub use gen_log::{GenerationLog, GenerationLogEntry};
 pub use otio::export_otio;
+pub use project_root::ProjectRoot;
 
 // Re-export the domain types a caller needs to construct/inspect a project, so
 // downstream crates can depend on just `opentake-project` for persistence work.

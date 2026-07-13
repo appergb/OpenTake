@@ -13,8 +13,6 @@ import {
   frameForSourceTime,
   isExternalSeekWhilePlaying,
   playbackFrameFromActiveFrame,
-  shouldFallBackToLegacy,
-  shouldUseRustEngine,
   sourceTimeSec,
   visualAudioIsDuplicated,
 } from "./timelinePlayback";
@@ -47,65 +45,6 @@ describe("isExternalSeekWhilePlaying", () => {
     // delta == 2 (== default eps) → not forwarded; delta == 3 → forwarded.
     expect(isExternalSeekWhilePlaying({ activeFrame: 32, lastEngineFrame: 30 })).toBe(false);
     expect(isExternalSeekWhilePlaying({ activeFrame: 33, lastEngineFrame: 30 })).toBe(true);
-  });
-});
-
-describe("shouldUseRustEngine", () => {
-  const base = { rustEnabled: true, isTauri: true, isPlaying: true, isScrubbing: false };
-
-  it("routes PLAY to Rust when flag on, under Tauri, playing, not scrubbing", () => {
-    expect(shouldUseRustEngine(base)).toBe(true);
-  });
-
-  it("stays on the legacy <video> path when the flag is off", () => {
-    expect(shouldUseRustEngine({ ...base, rustEnabled: false })).toBe(false);
-  });
-
-  it("stays on the legacy path outside Tauri (browser dev server)", () => {
-    expect(shouldUseRustEngine({ ...base, isTauri: false })).toBe(false);
-  });
-
-  it("relinquishes to the legacy scrub path during a scrub", () => {
-    expect(shouldUseRustEngine({ ...base, isScrubbing: true })).toBe(false);
-  });
-
-  it("does not engage while paused", () => {
-    expect(shouldUseRustEngine({ ...base, isPlaying: false })).toBe(false);
-  });
-
-  it("falls through to legacy once the engine has failed this session", () => {
-    expect(shouldUseRustEngine({ ...base, engineFailed: true })).toBe(false);
-  });
-
-  it("still engages when engineFailed is explicitly false or omitted", () => {
-    expect(shouldUseRustEngine({ ...base, engineFailed: false })).toBe(true);
-    expect(shouldUseRustEngine(base)).toBe(true); // undefined engineFailed
-  });
-});
-
-describe("shouldFallBackToLegacy", () => {
-  it("declares failure only on the engine path, past the deadline, with no frames", () => {
-    expect(
-      shouldFallBackToLegacy({ onEnginePath: true, framesSeen: 0, deadlineElapsed: true }),
-    ).toBe(true);
-  });
-
-  it("stands down once any frame has arrived (GPU path is live)", () => {
-    expect(
-      shouldFallBackToLegacy({ onEnginePath: true, framesSeen: 1, deadlineElapsed: true }),
-    ).toBe(false);
-  });
-
-  it("does not fire before the deadline elapses", () => {
-    expect(
-      shouldFallBackToLegacy({ onEnginePath: true, framesSeen: 0, deadlineElapsed: false }),
-    ).toBe(false);
-  });
-
-  it("does not fire once we've already left the engine path (disposed / paused)", () => {
-    expect(
-      shouldFallBackToLegacy({ onEnginePath: false, framesSeen: 0, deadlineElapsed: true }),
-    ).toBe(false);
   });
 });
 
@@ -238,6 +177,54 @@ describe("sourceTimeSec / frameForSourceTime", () => {
     const c = clip({ id: "c", mediaType: "video", startFrame: 30, trimStartFrame: 45, speed: 1.5 });
     const ts = sourceTimeSec(c, 90, 30);
     expect(frameForSourceTime(c, ts, 30)).toBeCloseTo(90);
+  });
+
+  it("maps reversed trimmed clips from the end of the trim window", () => {
+    const c = clip({
+      id: "c",
+      mediaType: "video",
+      startFrame: 100,
+      durationFrames: 20,
+      trimStartFrame: 10,
+      speed: 1,
+      reversed: true,
+    });
+    expect(frameForSourceTime(c, sourceTimeSec(c, 100, 30), 30)).toBeCloseTo(100);
+    expect(sourceTimeSec(c, 100, 30) * 30).toBeCloseTo(29);
+    expect(sourceTimeSec(c, 105, 30) * 30).toBeCloseTo(24);
+    expect(sourceTimeSec(c, 119, 30) * 30).toBeCloseTo(10);
+  });
+
+  it("uses the consumed source window boundary for reversed clips at double speed", () => {
+    const c = clip({
+      id: "c",
+      mediaType: "video",
+      startFrame: 100,
+      durationFrames: 20,
+      trimStartFrame: 10,
+      speed: 2,
+      reversed: true,
+    });
+    expect(frameForSourceTime(c, sourceTimeSec(c, 100, 30), 30)).toBeCloseTo(100);
+    expect(sourceTimeSec(c, 100, 30) * 30).toBeCloseTo(49);
+    expect(sourceTimeSec(c, 105, 30) * 30).toBeCloseTo(39);
+    expect(sourceTimeSec(c, 119, 30) * 30).toBeCloseTo(11);
+  });
+
+  it("uses the consumed source window boundary for reversed clips at fractional speed", () => {
+    const c = clip({
+      id: "c",
+      mediaType: "video",
+      startFrame: 100,
+      durationFrames: 20,
+      trimStartFrame: 10,
+      speed: 0.5,
+      reversed: true,
+    });
+    expect(frameForSourceTime(c, sourceTimeSec(c, 100, 30), 30)).toBeCloseTo(100);
+    expect(sourceTimeSec(c, 100, 30) * 30).toBeCloseTo(19);
+    expect(sourceTimeSec(c, 105, 30) * 30).toBeCloseTo(16);
+    expect(sourceTimeSec(c, 119, 30) * 30).toBeCloseTo(10);
   });
 
   it("clamps source time at 0", () => {

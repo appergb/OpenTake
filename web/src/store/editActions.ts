@@ -12,7 +12,7 @@ import { useProjectStore } from "./projectStore";
 import { refreshMedia } from "./mediaStore";
 import { fitTransformForMedia, trimToPlayheadEdits } from "../lib/clip";
 import type { TrackDropTarget } from "../lib/geometry";
-import { validRange } from "../lib/timelineRange";
+import { validRange, type TimelineRange } from "../lib/timelineRange";
 import { planNudge } from "../lib/timelineNudge";
 import { buildInsertPlan, type InsertPlan } from "../lib/timelineInsert";
 import { expandLinkGroup } from "../components/timeline/hitTest";
@@ -64,7 +64,15 @@ export async function addClips(entries: ClipEntryReq[]) {
  *  `rippleInsertClips`). The overwrite-drop counterpart is {@link addClips}. */
 export async function insertClips(trackIndex: number, atFrame: number, entries: ClipEntryReq[]) {
   if (entries.length === 0) return;
-  return applyAndRefresh({ type: "insertClips", trackIndex, atFrame, entries });
+  const res = await applyAndRefresh({ type: "insertClips", trackIndex, atFrame, entries });
+  if (isTauri && res.changed) await forceRefresh();
+  if (res.affectedClipIds.length > 0) {
+    const ui = useEditorUiStore.getState();
+    ui.selectClips(new Set(res.affectedClipIds));
+    ui.setPreviewMedia(null);
+    ui.setCurrentFrame(Math.max(0, atFrame));
+  }
+  return res;
 }
 
 /** Build the ripple-insert plan for a media item dropped at `atFrame` over
@@ -127,6 +135,26 @@ export async function removeClips(clipIds: string[]) {
 
 export async function splitClip(clipId: string, atFrame: number) {
   await applyAndRefresh({ type: "splitClip", clipId, atFrame });
+}
+
+export const DEFAULT_FREEZE_FRAMES = 30;
+
+export async function freezeFrame(
+  clipId: string,
+  atFrame: number,
+  durationFrames: number = DEFAULT_FREEZE_FRAMES,
+) {
+  return applyAndRefresh({ type: "freezeFrame", clipId, atFrame, durationFrames });
+}
+
+export async function freezeClipAtPlayhead(
+  clip: Clip,
+  durationFrames: number = DEFAULT_FREEZE_FRAMES,
+) {
+  const playhead = Math.round(useEditorUiStore.getState().activeFrame);
+  const inside = playhead > clip.startFrame && playhead < clip.startFrame + clip.durationFrames;
+  const atFrame = inside ? playhead : clip.startFrame + Math.floor(clip.durationFrames / 2);
+  return freezeFrame(clip.id, atFrame, durationFrames);
 }
 
 export async function trimClips(edits: TrimEditReq[]) {
@@ -434,20 +462,99 @@ export async function deleteSelectedClips() {
   ui.clearSelection();
 }
 
-/** Save a clip as a new media asset (#91 §3.5 / 另存为媒体): render it — trims,
- *  speed, effects, color and text baked in — to the project's media/ dir and
- *  import it, so it shows up in the panel as a reusable asset. Backend is
- *  video-only for now and needs a saved project; the render can take a few
- *  seconds, so start + result are toasted. */
-export async function saveClipAsMedia(clipId: string) {
+async function runSaveAsMedia(
+  label: string,
+  successMessage: string,
+  failurePrefix: string,
+  command: (operationId: string) => Promise<unknown>,
+): Promise<void> {
   const ui = useEditorUiStore.getState();
-  ui.pushToast("正在导出片段… / Saving clip as media…");
+  if (ui.saveAsProgress) {
+    ui.pushToast("已有另存任务正在进行 / Another save-as operation is already running");
+    return;
+  }
+  const operationId = api.createExportOperationId("save-as");
+  ui.setSaveAsProgress({
+    operationId,
+    label,
+    done: 0,
+    total: 1,
+    cancellable: false,
+    cancelling: false,
+  });
+  let unlisten: (() => void) | undefined;
   try {
-    await api.saveClipAsMedia(clipId);
+    unlisten = await api.onExportProgress(operationId, ({ done, total }) => {
+      const current = useEditorUiStore.getState().saveAsProgress;
+      if (!current || current.operationId !== operationId) return;
+      useEditorUiStore.getState().setSaveAsProgress({
+        ...current,
+        done: Math.max(0, done),
+        total: Math.max(1, total),
+      });
+    });
+    // Dispatch the IPC command before exposing Cancel. Tauri has then queued
+    // the backend operation before React can render the enabled button.
+    const operation = command(operationId);
+    const current = useEditorUiStore.getState().saveAsProgress;
+    if (current?.operationId === operationId) {
+      ui.setSaveAsProgress({ ...current, cancellable: true });
+    }
+    await operation;
     await refreshMedia();
-    ui.pushToast("已另存为媒体 / Saved as media");
+    ui.pushToast(successMessage);
   } catch (err) {
-    ui.pushToast(`另存失败 / Save as media failed: ${err instanceof Error ? err.message : String(err)}`);
+    const message = err instanceof Error ? err.message : String(err);
+    if (message === api.EXPORT_CANCELLED_SENTINEL) {
+      ui.pushToast("已取消另存 / Save as media cancelled");
+    } else {
+      ui.pushToast(`${failurePrefix}: ${message}`);
+    }
+  } finally {
+    unlisten?.();
+    if (useEditorUiStore.getState().saveAsProgress?.operationId === operationId) {
+      ui.setSaveAsProgress(null);
+    }
+  }
+}
+
+/** Save a clip as a reusable project media asset with visible progress. */
+export async function saveClipAsMedia(clipId: string) {
+  await runSaveAsMedia(
+    "正在另存片段 / Saving clip",
+    "已另存为媒体 / Saved as media",
+    "另存失败 / Save as media failed",
+    (operationId) => api.saveClipAsMedia(clipId, operationId),
+  );
+}
+
+export async function saveMarkedRangeAsMedia(range: TimelineRange) {
+  const normalized = validRange(range);
+  if (!normalized) return;
+  await runSaveAsMedia(
+    "正在另存范围 / Saving range",
+    "范围已另存为媒体 / Range saved as media",
+    "范围另存失败 / Save range as media failed",
+    (operationId) =>
+      api.saveRangeAsMedia(normalized.startFrame, normalized.endFrame, operationId),
+  );
+}
+
+export async function cancelSaveAsMedia(): Promise<void> {
+  const ui = useEditorUiStore.getState();
+  const current = ui.saveAsProgress;
+  if (!current || !current.cancellable || current.cancelling) return;
+  ui.setSaveAsProgress({ ...current, cancelling: true });
+  try {
+    await api.cancelExport(current.operationId);
+  } catch (error) {
+    const latest = useEditorUiStore.getState().saveAsProgress;
+    if (latest?.operationId === current.operationId) {
+      ui.setSaveAsProgress({ ...latest, cancelling: false });
+    }
+    ui.pushToast(
+      `取消失败 / Cancel failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -772,12 +879,18 @@ async function addMediaToTimelineInner(item: MediaItem): Promise<void> {
   }
   const entry = entryForMedia(timeline, item);
   if (!entry) return;
-  await addClips([entry]);
+  const res = await addClips([entry]);
   // Tauri refreshes the mirror via the async `timeline_changed` event, which may
-  // not have fired yet; refresh now so the next queued add computes its append
-  // position from a mirror that already includes this clip. (Browser mode
-  // already refreshed inside `applyAndRefresh` — guard to avoid a double fetch.)
+  // not have fired yet; refresh now so both the next queued add and the preview
+  // see a timeline that already includes this clip. (Browser mode already
+  // refreshed inside `applyAndRefresh` — guard to avoid a double fetch.)
   if (isTauri) await forceRefresh();
+  if (res && res.affectedClipIds.length > 0) {
+    const ui = useEditorUiStore.getState();
+    ui.selectClips(new Set(res.affectedClipIds));
+    ui.setPreviewMedia(null);
+    ui.setCurrentFrame(entry.startFrame);
+  }
 }
 
 async function addMediaToTimelineAtInner(
@@ -816,10 +929,13 @@ async function addMediaToTimelineAtInner(
   }
   if (!entry) return;
   const res = await addClips([entry]);
-  if (res && res.affectedClipIds.length > 0) {
-    useEditorUiStore.getState().selectClips(new Set(res.affectedClipIds));
-  }
   if (isTauri) await forceRefresh();
+  if (res && res.affectedClipIds.length > 0) {
+    const ui = useEditorUiStore.getState();
+    ui.selectClips(new Set(res.affectedClipIds));
+    ui.setPreviewMedia(null);
+    ui.setCurrentFrame(entry.startFrame);
+  }
 }
 
 /** Build the trimmed clip entry for a source `[startSec,endSec)` moment range on
@@ -905,10 +1021,13 @@ async function addMomentToTimelineAtInner(
   }
   if (!entry) return;
   const res = await addClips([entry]);
-  if (res && res.affectedClipIds.length > 0) {
-    useEditorUiStore.getState().selectClips(new Set(res.affectedClipIds));
-  }
   if (isTauri) await forceRefresh();
+  if (res && res.affectedClipIds.length > 0) {
+    const ui = useEditorUiStore.getState();
+    ui.selectClips(new Set(res.affectedClipIds));
+    ui.setPreviewMedia(null);
+    ui.setCurrentFrame(entry.startFrame);
+  }
 }
 
 // MARK: - Text tool (Toolbar "T" button, SPEC §4)

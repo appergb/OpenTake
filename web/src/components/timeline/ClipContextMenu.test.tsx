@@ -10,6 +10,11 @@ const labels = {
   link: "Link",
   unlink: "Unlink",
   swapMedia: "Swap Media",
+  saveAsMedia: "Save as Media",
+  freezeFrame: "Freeze Frame",
+  reverse: "Reverse",
+  reverseOn: "Reverse On",
+  reverseTooLong: "Reverse Too Long",
 };
 
 function clip(overrides: Partial<Clip> = {}): Clip {
@@ -85,6 +90,10 @@ describe("clipContextMenuItems", () => {
       onLink: vi.fn(),
       onUnlink: vi.fn(),
       onSwapMedia: vi.fn(),
+      onSaveAsMedia: vi.fn(),
+      onFreezeFrame: vi.fn(),
+      onReverse: vi.fn(),
+      reverseInfo: { isReversed: false, tooLong: false },
     };
   }
 
@@ -150,5 +159,41 @@ describe("clipContextMenuItems", () => {
     expect(videoItems.map((item) => item.label)).toContain("Swap Media");
     expect(imageItems.map((item) => item.label)).toContain("Swap Media");
     expect(audioItems.map((item) => item.label)).not.toContain("Swap Media");
+    expect(videoItems.map((item) => item.label)).toContain("Freeze Frame");
+    expect(imageItems.map((item) => item.label)).toContain("Freeze Frame");
+    expect(audioItems.map((item) => item.label)).not.toContain("Freeze Frame");
+  });
+
+  it("shows reverse only for video clips", () => {
+    const videoItems = clipContextMenuItems({
+      clip: clip({ mediaType: "video" }),
+      hasClipboardContent: false,
+      labels,
+      ...actions(),
+    });
+    const audioItems = clipContextMenuItems({
+      clip: clip({ mediaType: "audio", sourceClipType: "audio" }),
+      hasClipboardContent: false,
+      labels,
+      ...actions(),
+    });
+
+    expect(videoItems.some((item) => item.label === labels.reverse)).toBe(true);
+    expect(audioItems.some((item) => item.label === labels.reverse)).toBe(false);
+  });
+
+  it("shows save as media for video and audio only", () => {
+    const menuLabels = (mediaType: ClipType) =>
+      clipContextMenuItems({
+        clip: clip({ mediaType, sourceClipType: mediaType }),
+        hasClipboardContent: false,
+        labels,
+        ...actions(),
+      }).map((item) => item.label);
+
+    expect(menuLabels("video")).toContain(labels.saveAsMedia);
+    expect(menuLabels("audio")).toContain(labels.saveAsMedia);
+    expect(menuLabels("image")).not.toContain(labels.saveAsMedia);
+    expect(menuLabels("text")).not.toContain(labels.saveAsMedia);
   });
 });

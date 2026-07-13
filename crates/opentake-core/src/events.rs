@@ -38,6 +38,9 @@ pub enum CoreEvent {
     /// stale mirror re-fetch via `get_timeline` (`core-SPEC.md` §2.3 step 5,
     /// §4.1 rule 3).
     TimelineChanged {
+        /// The project session that changed.
+        #[serde(rename = "projectEpoch")]
+        project_epoch: u64,
         /// The document version after the change. Strictly increasing.
         version: u64,
     },
@@ -49,6 +52,9 @@ pub enum CoreEvent {
     ProjectOpened {
         /// Absolute bundle path, or empty string for an unsaved new project.
         path: String,
+        /// The newly-opened project session.
+        #[serde(rename = "projectEpoch")]
+        project_epoch: u64,
         /// The document version right after open (0).
         version: u64,
     },
@@ -57,12 +63,18 @@ pub enum CoreEvent {
     ProjectSaved {
         /// The bundle path that was written.
         path: String,
+        /// The project session that was written.
+        #[serde(rename = "projectEpoch")]
+        project_epoch: u64,
     },
 
     /// The media manifest changed (one or more assets were imported). Observers
     /// re-fetch the catalog via `get_media` to refresh the media panel. Carries
     /// the manifest entry count after the change for cheap staleness checks.
     MediaChanged {
+        /// The project session whose manifest changed.
+        #[serde(rename = "projectEpoch")]
+        project_epoch: u64,
         /// Number of manifest entries after the change.
         count: usize,
     },
@@ -73,7 +85,7 @@ pub enum CoreEvent {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct SubscriptionId(u64);
 
-type Listener = Box<dyn Fn(&CoreEvent) + Send + 'static>;
+type Listener = Arc<dyn Fn(&CoreEvent) + Send + Sync + 'static>;
 
 struct Inner {
     next_id: u64,
@@ -111,11 +123,14 @@ impl EventBus {
     ///
     /// The listener must be `Send` so the bus stays usable across threads (the
     /// core runs commands under a `Mutex` that may be touched from any thread).
-    pub fn subscribe(&self, listener: impl Fn(&CoreEvent) + Send + 'static) -> SubscriptionId {
+    pub fn subscribe(
+        &self,
+        listener: impl Fn(&CoreEvent) + Send + Sync + 'static,
+    ) -> SubscriptionId {
         let mut inner = self.inner.lock().expect("event bus mutex poisoned");
         let id = SubscriptionId(inner.next_id);
         inner.next_id += 1;
-        inner.listeners.push((id, Box::new(listener)));
+        inner.listeners.push((id, Arc::new(listener)));
         id
     }
 
@@ -128,8 +143,15 @@ impl EventBus {
     /// Deliver `event` to every current subscriber, in registration order.
     /// A no-op (never panics) when there are no subscribers.
     pub fn emit(&self, event: &CoreEvent) {
-        let inner = self.inner.lock().expect("event bus mutex poisoned");
-        for (_, listener) in &inner.listeners {
+        let listeners: Vec<Listener> = self
+            .inner
+            .lock()
+            .expect("event bus mutex poisoned")
+            .listeners
+            .iter()
+            .map(|(_, listener)| Arc::clone(listener))
+            .collect();
+        for listener in listeners {
             listener(event);
         }
     }
@@ -142,7 +164,10 @@ mod tests {
     #[test]
     fn emit_with_no_subscribers_is_noop() {
         let bus = EventBus::new();
-        bus.emit(&CoreEvent::TimelineChanged { version: 1 });
+        bus.emit(&CoreEvent::TimelineChanged {
+            project_epoch: 0,
+            version: 1,
+        });
     }
 
     #[test]
@@ -152,15 +177,27 @@ mod tests {
         let sink = Arc::clone(&seen);
         bus.subscribe(move |ev| sink.lock().unwrap().push(ev.clone()));
 
-        bus.emit(&CoreEvent::TimelineChanged { version: 1 });
-        bus.emit(&CoreEvent::TimelineChanged { version: 2 });
+        bus.emit(&CoreEvent::TimelineChanged {
+            project_epoch: 0,
+            version: 1,
+        });
+        bus.emit(&CoreEvent::TimelineChanged {
+            project_epoch: 0,
+            version: 2,
+        });
 
         let got = seen.lock().unwrap().clone();
         assert_eq!(
             got,
             vec![
-                CoreEvent::TimelineChanged { version: 1 },
-                CoreEvent::TimelineChanged { version: 2 },
+                CoreEvent::TimelineChanged {
+                    project_epoch: 0,
+                    version: 1,
+                },
+                CoreEvent::TimelineChanged {
+                    project_epoch: 0,
+                    version: 2,
+                },
             ]
         );
     }
@@ -172,22 +209,42 @@ mod tests {
         let sink = Arc::clone(&count);
         let id = bus.subscribe(move |_| *sink.lock().unwrap() += 1);
 
-        bus.emit(&CoreEvent::ProjectSaved { path: "p".into() });
+        bus.emit(&CoreEvent::ProjectSaved {
+            path: "p".into(),
+            project_epoch: 1,
+        });
         bus.unsubscribe(id);
-        bus.emit(&CoreEvent::ProjectSaved { path: "p".into() });
+        bus.emit(&CoreEvent::ProjectSaved {
+            path: "p".into(),
+            project_epoch: 1,
+        });
 
         assert_eq!(*count.lock().unwrap(), 1);
     }
 
     #[test]
     fn core_event_serializes_with_kind_tag() {
-        let json = serde_json::to_string(&CoreEvent::TimelineChanged { version: 7 }).unwrap();
-        assert_eq!(json, r#"{"kind":"timeline_changed","version":7}"#);
+        let json = serde_json::to_string(&CoreEvent::TimelineChanged {
+            project_epoch: 3,
+            version: 7,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"timeline_changed","projectEpoch":3,"version":7}"#
+        );
     }
 
     #[test]
     fn media_changed_serializes_with_kind_tag() {
-        let json = serde_json::to_string(&CoreEvent::MediaChanged { count: 3 }).unwrap();
-        assert_eq!(json, r#"{"kind":"media_changed","count":3}"#);
+        let json = serde_json::to_string(&CoreEvent::MediaChanged {
+            project_epoch: 2,
+            count: 3,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"media_changed","projectEpoch":2,"count":3}"#
+        );
     }
 }

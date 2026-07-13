@@ -26,8 +26,6 @@ import {
   clipVolumeAt,
   frameForSourceTime,
   isExternalSeekWhilePlaying,
-  shouldFallBackToLegacy,
-  shouldUseRustEngine,
   sourceTimeSec,
   type ActiveMedia,
 } from "./timelinePlayback";
@@ -39,75 +37,130 @@ import {
   interactiveToleranceSec,
 } from "./interactiveSeek";
 import type { Timeline } from "../../lib/types";
-import { isTauri } from "../../lib/api";
-import { rustEngineEnabled } from "./rustEngine";
+import { isTauri, onPlaybackFrame } from "../../lib/api";
 import {
-  command as mpvCommand,
-  init as mpvInit,
-  observeProperties as mpvObserveProperties,
-  setProperty as mpvSetProperty,
-} from "tauri-plugin-libmpv-api";
-import { timelineToEdl } from "../../lib/mpvEdl";
-import { useMediaStore } from "../../store/mediaStore";
+  clearNativePlaybackPublication,
+  getNativePlaybackPublication,
+  nativePlaybackController,
+  subscribeNativePlaybackPublication,
+} from "./nativePlaybackSession";
+import { rustEngineEnabled } from "./rustEngine";
+import { resolveTimelinePlaybackRoute } from "./playbackRoute";
 
-// --- Community playback engine (libmpv) -----------------------------------
-// PLAY is delegated to an embedded mpv instance (EDL over the primary video
-// track): decode, A/V sync, and presentation are mpv's. The in-house streaming
-// engine's display leg (WS -> canvas) is unreachable from WKWebView's secure
-// context (plain-ws mixed content is silently blocked), so playback now rides
-// the community engine while pause/scrub/export keep the pixel-exact composite.
-// The mpv video paints on the native window UNDER the (transparent) webview;
-// Preview.tsx opens a transparent hole over the canvas box while mpv drives.
-
-let mpvReadyPromise: Promise<void> | null = null;
-// The fallback toast fires at most once per app session — a broken libmpv
-// otherwise re-toasts on every play attempt.
-let mpvFallbackToastShown = false;
-// Per-play-session hooks the resident property observer forwards into.
-let mpvOnTimePos: ((seconds: number) => void) | null = null;
-let mpvOnEnded: (() => void) | null = null;
-
-function ensureMpv(): Promise<void> {
-  if (!mpvReadyPromise) {
-    mpvReadyPromise = (async () => {
-      await mpvInit({
-        initialOptions: {
-          vo: "gpu-next",
-          hwdec: "auto-safe",
-          "keep-open": "yes",
-          pause: "yes",
-          "force-window": "yes",
-        },
-        observedProperties: [
-          ["time-pos", "double"],
-          ["eof-reached", "flag"],
-        ],
-      });
-      await mpvObserveProperties(
-        [
-          ["time-pos", "double"],
-          ["eof-reached", "flag"],
-        ] as const,
-        ({ name, data }) => {
-          if (name === "time-pos" && typeof data === "number") {
-            mpvOnTimePos?.(data);
-          } else if (name === "eof-reached" && data === true) {
-            mpvOnEnded?.();
-          }
-        },
-      );
-    })().catch((e) => {
-      // Allow a later play to retry a failed bring-up (e.g. libmpv missing).
-      mpvReadyPromise = null;
-      throw e;
-    });
-  }
-  return mpvReadyPromise;
+interface NativeFrameListenerSlot {
+  registration: NativeFrameListenerRegistration | null;
+  registrationGeneration: number;
+  references: number;
+  teardownGeneration: number;
 }
 
-function mediaPathOf(mediaRef: string): string | null {
-  const item = useMediaStore.getState().items.find((i) => i.id === mediaRef);
-  return item?.path ?? null;
+interface NativeFrameListenerRegistration {
+  generation: number;
+  ready: Promise<() => void>;
+}
+
+interface NativeFrameListenerLease {
+  ensureReady(): Promise<() => void>;
+  release(): void;
+}
+
+let nativeFrameListener: NativeFrameListenerSlot | null = null;
+
+// StrictMode performs setup → cleanup → setup in one turn. A deferred teardown
+// lets the second setup reclaim the still-pending listen Promise; the generation
+// checks also prevent a resolved old cleanup from unlistening a newer lease.
+function ensureNativeFrameListenerRegistration(
+  slot: NativeFrameListenerSlot,
+): Promise<() => void> {
+  if (slot.registration) return slot.registration.ready;
+
+  const registration: NativeFrameListenerRegistration = {
+    generation: ++slot.registrationGeneration,
+    ready: onPlaybackFrame((event) => {
+      nativePlaybackController.acceptFrame(event);
+    }),
+  };
+  slot.registration = registration;
+  void registration.ready.catch(() => {
+    if (
+      nativeFrameListener === slot &&
+      slot.registration?.generation === registration.generation
+    ) {
+      slot.registration = null;
+    }
+  });
+  return registration.ready;
+}
+
+function acquireNativeFrameListener(): NativeFrameListenerLease {
+  if (!nativeFrameListener) {
+    nativeFrameListener = {
+      registration: null,
+      registrationGeneration: 0,
+      references: 0,
+      teardownGeneration: 0,
+    };
+  }
+  const slot = nativeFrameListener;
+  slot.references += 1;
+  slot.teardownGeneration += 1;
+  ensureNativeFrameListenerRegistration(slot);
+  let released = false;
+  return {
+    ensureReady: () => ensureNativeFrameListenerRegistration(slot),
+    release() {
+      if (released) return;
+      released = true;
+      slot.references = Math.max(0, slot.references - 1);
+      const teardownGeneration = ++slot.teardownGeneration;
+      queueMicrotask(() => {
+        if (
+          nativeFrameListener !== slot ||
+          slot.references !== 0 ||
+          slot.teardownGeneration !== teardownGeneration
+        ) {
+          return;
+        }
+        const registration = slot.registration;
+        if (!registration) {
+          nativeFrameListener = null;
+          return;
+        }
+        void registration.ready.then(
+          (unlisten) => {
+            if (
+              nativeFrameListener !== slot ||
+              slot.references !== 0 ||
+              slot.teardownGeneration !== teardownGeneration ||
+              slot.registration?.generation !== registration.generation
+            ) {
+              return;
+            }
+            nativeFrameListener = null;
+            slot.registration = null;
+            unlisten();
+          },
+          () => {
+            if (
+              nativeFrameListener === slot &&
+              slot.references === 0 &&
+              slot.teardownGeneration === teardownGeneration
+            ) {
+              nativeFrameListener = null;
+            }
+          },
+        );
+      });
+    },
+  };
+}
+
+export async function startNativePlaybackAfterListener<T>(
+  listenerReady: Promise<unknown>,
+  start: () => Promise<T>,
+): Promise<T> {
+  await listenerReady;
+  return start();
 }
 
 // --- Shared element registry ---------------------------------------------
@@ -137,13 +190,6 @@ const DRIFT_SEC = 0.35;
 /** A store `activeFrame` jump beyond this (frames) means an external seek while
  *  playing, so push the new position to the elements instead of reading them. */
 const SEEK_EPSILON_FRAMES = 2;
-/** How long the Rust engine has to emit its FIRST `playback_frame` before the
- *  runtime watchdog gives up and falls back to the legacy `<video>` stack. Covers
- *  a GPU-acquire failure inside the render thread (which returns Ok from
- *  `playback_start`, so the promise doesn't reject) — without this the MJPEG
- *  `<img>` would sit on a black/frozen canvas. Generous: the first frame waits on
- *  a cold ffmpeg decode of the active clips. */
-const ENGINE_START_DEADLINE_MS = 2000;
 const interactiveSeekQueue = createInteractiveSeekQueue();
 let interactiveSeekTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -207,8 +253,27 @@ export function shouldSeekPlayingFollower(args: {
   return Math.abs(args.currentTimeSec - args.desiredTimeSec) > (args.driftSec ?? DRIFT_SEC);
 }
 
+function setWebKitMediaPlayback(
+  element: Pick<HTMLMediaElement, "currentTime" | "pause" | "paused" | "play">,
+  playing: boolean,
+  desiredTimeSec?: number,
+): void {
+  if (!playing) {
+    element.pause();
+    return;
+  }
+  if (!element.paused) return;
+  if (
+    desiredTimeSec !== undefined &&
+    Math.abs(element.currentTime - desiredTimeSec) > 0.05
+  ) {
+    element.currentTime = desiredTimeSec;
+  }
+  void element.play().catch(() => {});
+}
+
 function pauseAll(): void {
-  for (const el of elements.values()) el.pause();
+  for (const el of elements.values()) setWebKitMediaPlayback(el, false);
 }
 
 function nowMs(): number {
@@ -295,19 +360,26 @@ export function useTimelinePlaybackEngine(): void {
   // change on an edit, so without this a just-dropped clip would hold its source
   // frame 0 instead of the playhead frame.
   const timelineVersion = useProjectStore((s) => s.timelineVersion);
+  const projectEpoch = useProjectStore((s) => s.projectEpoch);
   const previousTransportState = useRef({ isPlaying: false, isScrubbing: false });
-  // Last frame the Rust engine emitted (playback_frame), so the watcher below can
-  // tell an external seek (keyboard / transport) apart from the engine's own
-  // per-frame advance and forward it via playback_seek (#162). null = not driving.
   const lastEngineFrameRef = useRef<number | null>(null);
-  // Runtime escape hatch (shared via the store so the MJPEG overlay in Preview.tsx
-  // sees it too): true when a play attempt can't bring the Rust engine up (spawn
-  // rejects, or no frame by the deadline). It routes the CURRENT play session
-  // through the legacy <video> stack instead of a black/frozen canvas. The store
-  // resets it to false at the start of every play (setPlaying/togglePlay), and it
-  // being store state re-runs the switch effect, which then takes the legacy branch.
+  const activeNativeIdentityRef = useRef<ReturnType<
+    typeof nativePlaybackController.currentIdentity
+  >>(null);
+  const nativeFrameListenerLeaseRef = useRef<NativeFrameListenerLease | null>(null);
   const engineFailed = useEditorUiStore((s) => s.rustEngineFailed);
   const setEngineFailed = useEditorUiStore((s) => s.setRustEngineFailed);
+
+  useEffect(() => {
+    const lease = acquireNativeFrameListener();
+    nativeFrameListenerLeaseRef.current = lease;
+    return () => {
+      if (nativeFrameListenerLeaseRef.current === lease) {
+        nativeFrameListenerLeaseRef.current = null;
+      }
+      lease.release();
+    };
+  }, []);
 
   useEffect(() => {
     const prev = previousTransportState.current;
@@ -316,20 +388,15 @@ export function useTimelinePlaybackEngine(): void {
       pauseAll();
       const tl = useProjectStore.getState().timeline;
       const fps = tl.fps > 0 ? tl.fps : 30;
-      // In Rust-engine mode the playhead is authoritative (driven by
-      // playback_frame and settled by setPlaying), so DON'T derive the paused
-      // frame from a <video> the Rust path wasn't driving — that would read a
-      // stale currentTime. When the engine FELL BACK to legacy this session
-      // (engineFailed), the <video> DID drive playback, so read its frozen clock
-      // like the flag-off / non-Tauri legacy path.
-      const engineDrovePlay = shouldUseRustEngine({
-        rustEnabled: rustEngineEnabled(),
-        isTauri,
-        isPlaying: prev.isPlaying,
-        isScrubbing: prev.isScrubbing,
-        engineFailed,
-      });
-      if (prev.isPlaying && !engineDrovePlay) {
+      const project = useProjectStore.getState();
+      const nativeIdentity = activeNativeIdentityRef.current;
+      const nativeDrovePreviousPlay =
+        prev.isPlaying &&
+        !engineFailed &&
+        nativeIdentity !== null &&
+        nativeIdentity.projectEpoch === project.projectEpoch &&
+        nativeIdentity.timelineVersion === project.timelineVersion;
+      if (prev.isPlaying && !nativeDrovePreviousPlay) {
         const visual = activeVideoForPausedSnap(tl, Math.max(0, Math.floor(activeFrame)));
         const el = visual ? previewElements.get(previewElementKey(visual)) : null;
         const pausedFrame = pausedPlayheadFrameFromFrozenVideo(visual, el?.currentTime ?? NaN, fps);
@@ -351,109 +418,91 @@ export function useTimelinePlaybackEngine(): void {
       }
     }
     previousTransportState.current = { isPlaying, isScrubbing };
-  }, [activeFrame, isPlaying, isScrubbing, timelineVersion, engineFailed]);
+  }, [activeFrame, engineFailed, isPlaying, isScrubbing, projectEpoch, timelineVersion]);
 
   useEffect(() => {
-    // Rust streaming playback owns the PLAY state when the flag is on (under
-    // Tauri) AND it hasn't fallen back this session. Scrub, pause, non-Tauri,
-    // flag-off, and a failed engine all fall through to the legacy <video> path
-    // below — left untouched, so the pause-freeze (74c4c82) and
-    // resume-without-force-seek (5fa3f6f) behaviors are preserved.
-    if (
-      shouldUseRustEngine({ rustEnabled: rustEngineEnabled(), isTauri, isPlaying, isScrubbing, engineFailed })
-    ) {
-      // mpv provides BOTH video (native layer) and audio, so the <video>
-      // followers must not also play (double audio + wasted decode).
+    const timeline = useProjectStore.getState().timeline;
+    const route = resolveTimelinePlaybackRoute(timeline, {
+      rustAvailable: isTauri,
+      rustEnabled: rustEngineEnabled() && !engineFailed,
+    });
+    if (route.kind === "unsupported") {
+      cancelPendingInteractiveSeek();
       pauseAll();
-      lastEngineFrameRef.current = null;
-
+      if (isPlaying) useEditorUiStore.getState().setPlaying(false);
+      return;
+    }
+    if (route.kind === "rust" && isPlaying && !isScrubbing) {
+      pauseAll();
       let disposed = false;
-      let framesSeen = 0;
-      let watchdog: ReturnType<typeof setTimeout> | null = null;
+      let identity = activeNativeIdentityRef.current;
+      const unsubscribePublication = subscribeNativePlaybackPublication(() => {
+        const current = getNativePlaybackPublication();
+        if (!current || disposed || !activeNativeIdentityRef.current) return;
+        lastEngineFrameRef.current = current.frame;
+        const ui = useEditorUiStore.getState();
+        ui.setActiveFrame(current.frame);
+      });
 
-      // Runtime fallback: hand this play session to the legacy stack and warn +
-      // toast ONCE. Guarded so a rejection AND a fired watchdog can't double-fire.
-      const fallBackToLegacy = (why: string) => {
-        if (disposed) return;
-        console.warn(`mpv playback engine unavailable (${why}); falling back to <video>.`);
-        if (!mpvFallbackToastShown) {
-          mpvFallbackToastShown = true;
-          useEditorUiStore.getState().pushToast("Preview engine unavailable — using compatibility playback.");
-        }
-        setEngineFailed(true); // re-runs this effect → legacy branch (cleanup runs first)
-      };
-
-      const tl0 = useProjectStore.getState().timeline;
-      const fps0 = tl0.fps > 0 ? tl0.fps : 30;
       const startFrame = Math.max(0, Math.floor(useEditorUiStore.getState().activeFrame));
-      const edl = timelineToEdl(tl0, mediaPathOf);
-
-      if (!edl) {
-        // Nothing mpv-playable on the primary track (e.g. text-only timeline):
-        // the legacy stack handles it without a toast-worthy failure.
-        fallBackToLegacy("timeline has no mpv-playable clips");
-      } else {
-        mpvOnTimePos = (seconds) => {
-          if (disposed) return;
-          if (framesSeen === 0 && watchdog !== null) {
-            clearTimeout(watchdog);
-            watchdog = null;
-          }
-          framesSeen++;
-          const tl = useProjectStore.getState().timeline;
-          const fps = tl.fps > 0 ? tl.fps : 30;
-          const frame = Math.floor(seconds * fps);
-          // Record the engine frame BEFORE setActiveFrame: the external-seek
-          // watcher compares the two, so they must update in lock-step.
-          lastEngineFrameRef.current = frame;
-          const ui = useEditorUiStore.getState();
-          ui.setActiveFrame(frame);
-          const last = Math.max(0, totalFrames(tl) - 1);
-          if (frame >= last) ui.setPlaying(false);
-        };
-        mpvOnEnded = () => {
-          if (!disposed) useEditorUiStore.getState().setPlaying(false);
-        };
-        void ensureMpv()
-          .then(async () => {
-            if (disposed) return;
-            // `start` applies to the NEXT loadfile: load + position atomically,
-            // then unpause once (keep-open holds the last frame at EOF).
-            await mpvSetProperty("start", String(startFrame / fps0));
-            await mpvCommand("loadfile", [edl, "replace"]);
-            if (!disposed) await mpvSetProperty("pause", false);
-          })
-          .catch((e) => fallBackToLegacy(`mpv start failed: ${e}`));
-
-        // Startup watchdog: if no time-pos arrives by the deadline, mpv is dead
-        // (libmpv missing / EDL rejected) — fall back before a frozen frame is
-        // all the user sees. `shouldFallBackToLegacy` keeps the decision pure.
-        watchdog = setTimeout(() => {
-          watchdog = null;
-          if (shouldFallBackToLegacy({ onEnginePath: !disposed, framesSeen, deadlineElapsed: true })) {
-            fallBackToLegacy("no frame within startup deadline");
-          }
-        }, ENGINE_START_DEADLINE_MS);
+      const listenerReady = nativeFrameListenerLeaseRef.current?.ensureReady();
+      if (!listenerReady) {
+        unsubscribePublication();
+        setEngineFailed(true);
+        return;
       }
+      const start = startNativePlaybackAfterListener(listenerReady, () =>
+        nativePlaybackController.start({ projectEpoch, timelineVersion }, startFrame, {
+          onIdentity: (started) => {
+            identity = started;
+            activeNativeIdentityRef.current = started;
+            lastEngineFrameRef.current = null;
+          },
+        }),
+      );
+      void start
+        .then((started) => {
+          if (disposed) {
+            void nativePlaybackController.cleanup(started, "stop", startFrame);
+            return;
+          }
+          identity = started;
+          activeNativeIdentityRef.current = started;
+        })
+        .catch((error) => {
+          if (disposed) return;
+          if (nativePlaybackController.shouldFallback(error)) {
+            clearNativePlaybackPublication();
+            setEngineFailed(true);
+          } else {
+            useEditorUiStore.getState().setPlaying(false);
+          }
+        });
 
       return () => {
         disposed = true;
-        if (watchdog !== null) clearTimeout(watchdog);
-        mpvOnTimePos = null;
-        mpvOnEnded = null;
-        void mpvSetProperty("pause", true).catch(() => {});
-        // Seek the <video> followers to the current frame so the paused display
-        // (the MJPEG <img> overlay unmounts on pause) shows the right frame. The
-        // pause-snap in the other effect now trusts activeFrame directly, so this
-        // no longer relies on cross-effect ordering.
-        const tl = useProjectStore.getState().timeline;
-        const fps = tl.fps > 0 ? tl.fps : 30;
-        const f = Math.max(0, Math.floor(useEditorUiStore.getState().activeFrame));
-        for (const m of activeAt(tl, f)) {
-          const el = previewElements.get(previewElementKey(m));
-          if (el) el.currentTime = sourceTimeSec(m.clip, f, fps);
-        }
+        unsubscribePublication();
+        const current = identity ?? activeNativeIdentityRef.current;
+        if (!current) return;
+        const project = useProjectStore.getState();
+        const ui = useEditorUiStore.getState();
+        const sameRevision =
+          current.projectEpoch === project.projectEpoch &&
+          current.timelineVersion === project.timelineVersion;
+        const action = sameRevision && !ui.rustEngineFailed ? "pause" : "stop";
+        if (ui.isScrubbing) clearNativePlaybackPublication();
+        void nativePlaybackController.cleanup(
+          current,
+          action,
+          Math.max(0, Math.floor(ui.activeFrame)),
+        );
       };
+    }
+
+    if (route.kind === "rust") {
+      cancelPendingInteractiveSeek();
+      pauseAll();
+      return;
     }
 
     if (!isPlaying && !isScrubbing) {
@@ -490,8 +539,7 @@ export function useTimelinePlaybackEngine(): void {
         const previousClipId = lastClipByKey.get(key) ?? null;
         lastClipByKey.set(key, m.clip.id);
         if (el.paused) {
-          if (Math.abs(el.currentTime - desired) > 0.05) el.currentTime = desired;
-          el.play().catch(() => {});
+          setWebKitMediaPlayback(el, true, desired);
         } else if (
           shouldSeekPlayingFollower({
             previousClipId,
@@ -582,36 +630,26 @@ export function useTimelinePlaybackEngine(): void {
       cancelPendingInteractiveSeek();
       pauseAll();
     };
-    // engineFailed is a dep so tripping the runtime fallback tears down the engine
-    // branch and re-enters here on the legacy <video> path for the same session.
-  }, [isPlaying, isScrubbing, engineFailed]);
+  }, [isPlaying, isScrubbing, engineFailed, projectEpoch, timelineVersion, setEngineFailed]);
 
-  // While the Rust engine owns PLAY, an external seek (keyboard step / transport
-  // click) jumps activeFrame away from the engine's per-frame updates. The switch
-  // effect above doesn't depend on activeFrame, so this dedicated watcher tells
-  // the engine to reposition via playback_seek instead of ignoring it (#162). Once
-  // the engine has fallen back (engineFailed), the legacy tick handles external
-  // seeks itself, so shouldUseRustEngine gates this off.
   useEffect(() => {
-    if (
-      !shouldUseRustEngine({ rustEnabled: rustEngineEnabled(), isTauri, isPlaying, isScrubbing, engineFailed })
-    )
+    const route = resolveTimelinePlaybackRoute(useProjectStore.getState().timeline, {
+      rustAvailable: isTauri,
+      rustEnabled: rustEngineEnabled() && !engineFailed,
+    });
+    if (route.kind !== "rust" || !isPlaying || isScrubbing) {
       return;
+    }
+    const identity = activeNativeIdentityRef.current;
     if (
+      identity &&
       isExternalSeekWhilePlaying({
         activeFrame,
         lastEngineFrame: lastEngineFrameRef.current,
       })
     ) {
-      const f = Math.max(0, Math.floor(activeFrame));
-      lastEngineFrameRef.current = f;
-      const fps = (() => {
-        const tl = useProjectStore.getState().timeline;
-        return tl.fps > 0 ? tl.fps : 30;
-      })();
-      void mpvCommand("seek", [f / fps, "absolute"]).catch((e) =>
-        console.warn("mpv seek failed:", e),
-      );
+      lastEngineFrameRef.current = Math.max(0, Math.floor(activeFrame));
+      void nativePlaybackController.seek(identity, activeFrame);
     }
-  }, [activeFrame, isPlaying, isScrubbing, engineFailed]);
+  }, [activeFrame, engineFailed, isPlaying, isScrubbing]);
 }
