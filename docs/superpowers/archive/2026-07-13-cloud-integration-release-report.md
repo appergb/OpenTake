@@ -11,7 +11,12 @@ commit `ac50dc896bea821f66c88c6ed50cf9185e4e31d1` and uses local integration
 commit `cf52c5e495f9aea6b685aa20d863c5418a010ca5` as the code-complete candidate.
 A Windows aggregate CI finding then required the test-gating-only successor
 `301b82d2772559ba6fad25cbb2847ebc07baa494`. The report-only successor is the
-exact tree supplied to the fail-closed cloud publisher.
+exact tree supplied to the fail-closed cloud publisher. Replacement aggregate
+PR #219 then exercised the complete workflow and exposed two additional native
+Windows runtime defects. Code successor
+`71ba39ec57866346e492c5973196f8806e221710` fixes both defects without changing
+the accepted macOS runtime bundle; its report-only successor is the final tree
+supplied to the next immutable aggregate publication.
 
 The final cloud gate is intentionally stricter than the legacy PR checks: the
 aggregate pull request and the final `main` push must each pass all four jobs in
@@ -56,7 +61,9 @@ schema-compatibility read-only mode, project/media state arbitration, bounded
 workers and caches, secure Unix/Windows filesystem capability layers, and two
 native Windows CI jobs. The exact runtime code candidate changes 208 files with
 55,706 additions and 3,833 deletions relative to frozen `main`; the later
-Windows CI correction adds one test-only platform attribute.
+Windows corrections add one test-only platform attribute, repair the
+capability-relative native rename API, and restore Windows reserved-output
+creation semantics.
 
 ## Final playback correction
 
@@ -136,7 +143,7 @@ The report-only successor is structurally compared with this code tree before
 publication; the aggregate PR and final `main` push then repeat the
 repository-defined CI on GitHub-hosted runners.
 
-### Native Windows aggregate correction
+### Native Windows aggregate corrections
 
 The first aggregate PR, #218, exposed one portable-test compilation error before
 either native Windows job could reach its requested security filters. A test in
@@ -149,8 +156,36 @@ attribute. The Unix regression test passed, all 47 media-library tests passed,
 and all-target `opentake-media` clippy with warnings denied passed. A fresh
 release bundle from this successor is byte-identical to the installed runtime
 binary and preserves the executable and bundle digests above. The failed #218
-attempt is retained as audit evidence and must be closed as superseded; a new
-immutable aggregate PR must pass all four jobs before promotion.
+attempt is retained as audit evidence and must be closed as superseded.
+
+Replacement aggregate PR #219 compiled and ran the full workflow. Its Web and
+Rust jobs passed, while both native Windows jobs found independent runtime
+defects:
+
+1. the global media library passed a retained parent directory handle through
+   Win32 `SetFileInformationByHandle(FILE_RENAME_INFO)`, whose documented
+   contract requires a null `RootDirectory`; every handle-relative manifest
+   rename failed with `ERROR_INVALID_PARAMETER` (87); and
+2. project-media output reservation selected Windows `GENERIC_READ |
+   GENERIC_WRITE | DELETE` with `access_mode`, but omitted Rust's semantic
+   `write(true)` flag, so `OpenOptions` rejected `create_new` before reaching
+   the Windows system call.
+
+Code successor `71ba39ec57866346e492c5973196f8806e221710` switches the
+library rename to the native `NtSetInformationFile(FileRenameInformation)`
+contract, retains both source and parent capabilities, uses a complete
+`FILE_RENAME_INFORMATION` buffer, and maps `NTSTATUS` back to an OS error. It
+also synchronizes the output reservation's semantic read/write flags while
+preserving its DELETE access, `CREATE_NEW`, and delete-sharing denial.
+
+The correction passed formatting, diff checks, all 47 local media-library
+tests, all-target media clippy with warnings denied, a focused reserved-output
+identity regression, and a minimal `x86_64-pc-windows-msvc` compile probe for
+the exact `windows-sys` FFI surface. A full repository cross-build remains
+blocked by the third-party MSVC-header limitation below, so a new immutable
+aggregate PR must pass both native Windows jobs and all four total jobs before
+promotion. Failed #219 is retained as audit evidence and must also be closed as
+superseded.
 
 ### Platform boundary
 
@@ -214,6 +249,12 @@ listener, and MCP protocol behavior were verified independently of screenshots.
   Critical/Important = 0/0 and **Ready for new aggregate publish: Yes**. The
   only minor observation concerns a separate future full-Windows-test `mkfifo`
   fixture and does not affect either mandatory Windows workflow job.
+- An independent Windows API review accepted code successor
+  `71ba39ec57866346e492c5973196f8806e221710` / tree
+  `975bc74f2c0bfd7ae31e0c07161ddac781230297` with
+  Critical/Important = 0/0 and **Ready: Yes**, subject to the mandatory native
+  Windows CI gate. Its two comment-only minor observations (FFI alignment and
+  synchronous handle lifetime) were incorporated before the commit.
 - The report-only successor is reviewed against that accepted code tree before
   its exact commit/tree is supplied to the cloud publisher.
 
@@ -230,8 +271,8 @@ Completion requires all of the following to be re-read from GitHub:
 - final `main` equals the deterministic expected commit and exact local tree;
 - aggregate and final parent order is exact;
 - #211 through #217 and the aggregate PR are closed as merged;
-- superseded failed aggregate attempt #218 is closed without being represented
-  as a successful merge;
+- superseded failed aggregate attempts #218 and #219 are closed without being
+  represented as successful merges;
 - every original PR head is reachable from final `main`;
 - aggregate pull-request CI and final `main` push CI each contain all four
   expected jobs and every job is `completed/success`; and
