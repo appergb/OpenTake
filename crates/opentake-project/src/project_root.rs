@@ -603,9 +603,13 @@ impl Drop for BundlePublisher {
             return;
         }
         drop(stage);
-        let _ = remove_directory_artifact(&self.parent, &self.parent_path, &self.stage_name);
-        if !inspect_directory(&self.parent, &self.parent_path, &self.backup_name, true)
-            .unwrap_or(true)
+        let stage_removed =
+            remove_directory_artifact(&self.parent, &self.parent_path, &self.stage_name).is_ok()
+                && !inspect_directory(&self.parent, &self.parent_path, &self.stage_name, true)
+                    .unwrap_or(true);
+        if stage_removed
+            && !inspect_directory(&self.parent, &self.parent_path, &self.backup_name, true)
+                .unwrap_or(true)
         {
             let _ = remove_file_artifact(&self.parent, &self.parent_path, &self.journal_name);
         }
@@ -618,6 +622,7 @@ std::thread_local! {
     static FAIL_JOURNAL_CLEANUP_AFTER_BACKUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAIL_ABORT_CLEANUP_BEFORE_STAGE_REMOVAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAIL_ABORT_CLEANUP_BEFORE_JOURNAL_REMOVAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_STAGE_CLEANUP_AFTER_MARKER_REMOVAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn artifact_name(target: &OsStr, suffix: &str) -> OsString {
@@ -880,6 +885,18 @@ fn remove_directory_artifact(parent: &Dir, parent_path: &Path, name: &OsStr) -> 
     }
     drop(current_identity);
     drop(retained_identity);
+    #[cfg(test)]
+    if FAIL_STAGE_CLEANUP_AFTER_MARKER_REMOVAL.with(|fail| fail.replace(false)) {
+        match retained.remove_file(PUBLISH_MARKER_FILE) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(ProjectError::io(parent_path.join(name), error)),
+        }
+        return Err(ProjectError::io(
+            parent_path.join(name),
+            std::io::Error::other("injected partial stage cleanup failure"),
+        ));
+    }
     retained
         .remove_open_dir_all()
         .map_err(|error| ProjectError::io(parent_path.join(name), error))
@@ -1084,7 +1101,7 @@ fn recover_bundle_transaction(
     } else {
         (false, false)
     };
-    let target_matches = if target_exists {
+    let (target_matches, target_unmarked) = if target_exists {
         let target = ProjectRoot::open_from_parent(
             &parent_path.join(target_name),
             parent
@@ -1092,9 +1109,12 @@ fn recover_bundle_transaction(
                 .map_err(|error| ProjectError::io(parent_path, error))?,
             target_name.to_owned(),
         )?;
-        marker_matches(&target, &journal.nonce)?
+        match target.read_optional(PUBLISH_MARKER_FILE)? {
+            Some(marker) => (marker == journal.nonce.as_bytes(), false),
+            None => (false, true),
+        }
     } else {
-        false
+        (false, false)
     };
 
     if backup_exists {
@@ -1187,11 +1207,13 @@ fn recover_bundle_transaction(
 
     if let Some(stage_name) = stage_name {
         let nonce_named_unmarked_stage = stage_name == &expected_stage_name && stage_unmarked;
-        if !(stage_matches
-            || nonce_named_unmarked_stage
-                && journal.phase == PublishPhase::Prepared
-                && target_exists == journal.had_target)
-        {
+        let recoverable_unmarked_stage = nonce_named_unmarked_stage
+            && (journal.phase == PublishPhase::Prepared && target_exists == journal.had_target
+                || journal.phase == PublishPhase::AbortedRestored
+                    && journal.had_target
+                    && target_exists
+                    && target_unmarked);
+        if !(stage_matches || recoverable_unmarked_stage) {
             return Err(ProjectError::io(
                 parent_path.join(stage_name),
                 std::io::Error::new(
@@ -1226,7 +1248,7 @@ fn recover_bundle_transaction(
             journal.phase = PublishPhase::AbortedRestored;
             write_file_artifact_atomic(parent, parent_path, journal_name, &journal.encode())?;
         } else if journal.phase == PublishPhase::AbortedRestored
-            && (!journal.had_target || !target_exists || !stage_matches)
+            && (!journal.had_target || !target_exists || !target_unmarked)
         {
             return Err(ProjectError::RecoveryRequired {
                 backup: parent_path.join(backup_name),
@@ -1242,14 +1264,13 @@ fn recover_bundle_transaction(
         );
     }
 
-    if target_exists == journal.had_target
-        && matches!(
-            (journal.had_target, journal.phase),
-            (false, PublishPhase::Prepared)
-                | (true, PublishPhase::Prepared)
-                | (true, PublishPhase::AbortedRestored)
-        )
-    {
+    let prepared_without_stage =
+        journal.phase == PublishPhase::Prepared && target_exists == journal.had_target;
+    let restored_without_stage = journal.phase == PublishPhase::AbortedRestored
+        && journal.had_target
+        && target_exists
+        && target_unmarked;
+    if prepared_without_stage || restored_without_stage {
         return remove_file_artifact(parent, parent_path, journal_name);
     }
     Err(ProjectError::RecoveryRequired {
@@ -1880,12 +1901,114 @@ mod tests {
     }
 
     #[test]
-    fn recovery_refuses_a_stage_with_an_unknown_transaction_nonce() {
-        let tmp = TmpDir::new("unknown-stage-nonce");
+    fn drop_preserves_the_journal_when_stage_cleanup_is_partial() {
+        for marker_removed_before_drop in [false, true] {
+            let tmp = TmpDir::new(if marker_removed_before_drop {
+                "drop-partial-stage-unmarked"
+            } else {
+                "drop-partial-stage-marked"
+            });
+            let target = tmp.path().join("New.opentake");
+            let publisher = ProjectRoot::begin_replace(&target).unwrap();
+            publisher
+                .stage()
+                .write_atomic("remaining-child.bin", b"staged data")
+                .unwrap();
+            let stage_path = tmp.path().join(&publisher.stage_name);
+            let journal_path = tmp.path().join(&publisher.journal_name);
+            if marker_removed_before_drop {
+                publisher
+                    .stage()
+                    .dir
+                    .remove_file(PUBLISH_MARKER_FILE)
+                    .unwrap();
+            }
+            FAIL_STAGE_CLEANUP_AFTER_MARKER_REMOVAL.with(|fail| fail.set(true));
+
+            drop(publisher);
+
+            assert!(stage_path.join("remaining-child.bin").is_file());
+            assert!(!stage_path.join(PUBLISH_MARKER_FILE).exists());
+            assert!(journal_path.is_file());
+            let retry = ProjectRoot::begin_replace(&target)
+                .expect("the retained journal lets retry clean its partially removed stage");
+            assert!(!stage_path.exists());
+            drop(retry);
+            assert!(!journal_path.exists());
+            assert!(stage_paths(tmp.path(), "New.opentake").is_empty());
+        }
+    }
+
+    #[test]
+    fn restored_abort_recovers_after_marker_only_partial_stage_cleanup() {
+        let tmp = TmpDir::new("restored-abort-partial-stage");
+        let target = tmp.path().join("Existing.opentake");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("project.json"), b"old timeline").unwrap();
+        let before = tree_receipt(&target);
+        let journal_path = tmp.path().join(".Existing.opentake.opentake-journal");
+
+        let mut publisher = ProjectRoot::begin_replace(&target).unwrap();
+        publisher
+            .stage()
+            .write_atomic("remaining-child.bin", b"staged data")
+            .unwrap();
+        let stage_path = tmp.path().join(&publisher.stage_name);
+        FAIL_STAGE_CLEANUP_AFTER_MARKER_REMOVAL.with(|fail| fail.set(true));
+        let error = publisher
+            .publish_with_hook(|| Err(std::io::Error::other("injected publish failure")))
+            .expect_err("partial recursive stage cleanup must preserve recovery state");
+        assert!(matches!(error, ProjectError::RecoveryRequired { .. }));
+        assert_eq!(
+            PublishJournal::decode(&fs::read(&journal_path).unwrap())
+                .unwrap()
+                .phase,
+            PublishPhase::AbortedRestored
+        );
+        assert!(stage_path.join("remaining-child.bin").is_file());
+        assert!(!stage_path.join(PUBLISH_MARKER_FILE).exists());
+        drop(publisher);
+
+        let retry = ProjectRoot::begin_replace(&target)
+            .expect("the exact nonce stage and restored phase prove partial cleanup ownership");
+        assert!(!stage_path.exists());
+        drop(retry);
+        assert_eq!(tree_receipt(&target), before);
+        assert!(!journal_path.exists());
+        assert!(stage_paths(tmp.path(), "Existing.opentake").is_empty());
+    }
+
+    #[test]
+    fn prepared_recovery_refuses_a_stage_with_an_unknown_transaction_nonce() {
+        let tmp = TmpDir::new("prepared-unknown-stage-nonce");
         let target = tmp.path().join("New.opentake");
         let target_name = target.file_name().unwrap();
         let journal_name = artifact_name(target_name, ".opentake-journal");
         let journal = PublishJournal::new(false);
+        let unknown_stage = stage_artifact_name(target_name, "dead-beef-0");
+        let parent = Dir::open_ambient_dir(tmp.path(), ambient_authority()).unwrap();
+        write_new_file_artifact(&parent, tmp.path(), &journal_name, &journal.encode()).unwrap();
+        parent.create_dir(&unknown_stage).unwrap();
+
+        let error = match ProjectRoot::begin_replace(&target) {
+            Ok(_) => panic!("a stage from another transaction must remain fail closed"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("unknown or multiple stage"));
+        assert!(tmp.path().join(unknown_stage).is_dir());
+        assert!(tmp.path().join(journal_name).is_file());
+    }
+
+    #[test]
+    fn restored_abort_refuses_a_stage_with_an_unknown_transaction_nonce() {
+        let tmp = TmpDir::new("unknown-stage-nonce");
+        let target = tmp.path().join("Existing.opentake");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("project.json"), b"old timeline").unwrap();
+        let target_name = target.file_name().unwrap();
+        let journal_name = artifact_name(target_name, ".opentake-journal");
+        let mut journal = PublishJournal::new(true);
+        journal.phase = PublishPhase::AbortedRestored;
         let unknown_stage = stage_artifact_name(target_name, "dead-beef-0");
         let parent = Dir::open_ambient_dir(tmp.path(), ambient_authority()).unwrap();
         write_new_file_artifact(&parent, tmp.path(), &journal_name, &journal.encode()).unwrap();
