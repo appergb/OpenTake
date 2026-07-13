@@ -34,6 +34,15 @@ export type MediaTabId =
 export type MediaSubTabId = "import" | "mine" | "extract" | "sound";
 export type InspectorTabId = "text" | "video" | "audio" | "aiEdit";
 
+export interface SaveAsProgressState {
+  operationId: number;
+  label: string;
+  done: number;
+  total: number;
+  cancellable: boolean;
+  cancelling: boolean;
+}
+
 const LS = {
   layoutPreset: "layoutPreset",
   agentPanelVisible: "agentPanelVisible",
@@ -69,6 +78,9 @@ interface UiState {
   /** Whether the video-export dialog (§2.4 / #112) is shown. */
   exportDialogOpen: boolean;
   setExportDialogOpen: (open: boolean) => void;
+  /** Visible progress owner for clip/range save-as operations. */
+  saveAsProgress: SaveAsProgressState | null;
+  setSaveAsProgress: (progress: SaveAsProgressState | null) => void;
 
   // Playback / playhead
   currentFrame: number;
@@ -228,6 +240,8 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   exportDialogOpen: false,
   setExportDialogOpen: (exportDialogOpen) => set({ exportDialogOpen }),
+  saveAsProgress: null,
+  setSaveAsProgress: (saveAsProgress) => set({ saveAsProgress }),
 
   currentFrame: 0,
   activeFrame: 0,

@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { TitleBar } from "./components/shell/TitleBar";
 import { ExportDialog } from "./components/shell/ExportDialog";
+import { SaveAsProgress } from "./components/shell/SaveAsProgress";
 import { EditorSplit } from "./components/shell/EditorSplit";
 import { CompatibilityBanner } from "./components/shell/CompatibilityBanner";
 import { HomeView } from "./components/home/HomeView";
@@ -117,6 +118,7 @@ export default function App() {
       )}
       {settingsOpen && <SettingsView />}
       <ExportDialog />
+      <SaveAsProgress />
       <Toast />
     </div>
   );
