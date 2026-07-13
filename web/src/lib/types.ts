@@ -640,6 +640,22 @@ export interface SecretStatus {
   masked: string;
 }
 
+// MARK: - Optional account backend (mirror of src-tauri account.rs)
+
+/** Identity returned by a configured backend's `/api/auth/verify` endpoint. */
+export interface AccountInfo {
+  userId: string;
+  email?: string;
+  plan?: string;
+}
+
+/** Live, informational login state. The cold-start default is `offline`. */
+export type AccountStatus =
+  | { type: "offline" }
+  | { type: "connecting" }
+  | { type: "online"; info: AccountInfo }
+  | { type: "error"; message: string };
+
 // MARK: - In-app chat (mirror of opentake-agent::chat::session, camelCase)
 
 export type ChatRole = "system" | "user" | "assistant" | "tool";

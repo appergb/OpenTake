@@ -6,6 +6,7 @@
 //! event so the front-end read-only mirror can re-sync (`docs/architecture/ARCHITECTURE.md`
 //! §2 — "真相源在 Rust，前端持镜像").
 
+mod account;
 mod captions;
 mod chat;
 mod commands;
@@ -150,6 +151,9 @@ pub fn run() {
             // Shared cancel flag for the in-flight `export_video` (#112 progress
             // + cancel). One export runs at a time, so a single flag suffices.
             app.manage(export::ExportControl::default());
+            // Optional account scaffold. It starts offline and never performs
+            // network I/O until the user configures a backend and logs in.
+            app.manage(account::AccountState::default());
 
             // Streaming playback (#53): start the loopback MJPEG transport on the
             // Tauri async runtime (mirrors the MCP server spawn) and register the
@@ -202,6 +206,11 @@ pub fn run() {
             secret::secret_save,
             secret::secret_load,
             secret::secret_delete,
+            account::account_set_backend_url,
+            account::account_get_backend_url,
+            account::account_login,
+            account::account_logout,
+            account::account_get_status,
             chat::chat_send,
             chat::chat_history,
             chat::chat_cancel,

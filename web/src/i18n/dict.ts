@@ -567,11 +567,26 @@ const zh: Dict = {
   "settings.shortcutsSave": "保存",
   "settings.shortcutsNew": "新建",
 
-  // Account pane
-  "settings.accountSignIn": "使用 Google 登录",
-  "settings.accountSignOut": "退出登录",
-  "settings.accountSignedInAs": "已登录为",
-  "settings.accountNotSignedIn": "未登录",
+  // Optional account backend
+  "account.disclaimer":
+    "OpenTake 没有官方后端。此功能仅用于连接您自部署的服务；不登录不影响本地编辑、导出、AI 或 MCP 功能。",
+  "account.backendUrl": "后端地址",
+  "account.backendUrlDesc":
+    "自部署服务的根地址。远端服务必须使用 HTTPS；本机开发可使用 localhost 或回环 IP 的 HTTP。",
+  "account.backendUrlPlaceholder": "https://your-backend.example.com",
+  "account.saveBackendUrl": "保存地址",
+  "account.clearBackendUrl": "清除",
+  "account.backendUrlSaved": "后端地址已保存。",
+  "account.backendUrlSaveFailed": "保存后端地址失败：{error}",
+  "account.token": "登录令牌",
+  "account.tokenPlaceholder": "粘贴自部署服务签发的令牌",
+  "account.login": "登录",
+  "account.logout": "退出登录",
+  "account.loginFailed": "登录失败：{error}",
+  "account.status.offline": "未登录",
+  "account.status.connecting": "连接中…",
+  "account.status.online": "已登录 · {userId}",
+  "account.status.error": "错误：{message}",
 
   // Home extended
   "home.signIn": "登录",
@@ -1167,11 +1182,26 @@ const en: Dict = {
   "settings.shortcutsSave": "Save",
   "settings.shortcutsNew": "New",
 
-  // Account pane
-  "settings.accountSignIn": "Sign in with Google",
-  "settings.accountSignOut": "Sign out",
-  "settings.accountSignedInAs": "Signed in as",
-  "settings.accountNotSignedIn": "Not signed in",
+  // Optional account backend
+  "account.disclaimer":
+    "OpenTake has no official backend. This connects only to your self-hosted service; signing in is not required for local editing, export, AI, or MCP features.",
+  "account.backendUrl": "Backend URL",
+  "account.backendUrlDesc":
+    "Root origin of your self-hosted service. Remote services must use HTTPS; local development may use HTTP on localhost or a loopback IP.",
+  "account.backendUrlPlaceholder": "https://your-backend.example.com",
+  "account.saveBackendUrl": "Save URL",
+  "account.clearBackendUrl": "Clear",
+  "account.backendUrlSaved": "Backend URL saved.",
+  "account.backendUrlSaveFailed": "Could not save backend URL: {error}",
+  "account.token": "Login token",
+  "account.tokenPlaceholder": "Paste a token issued by your self-hosted service",
+  "account.login": "Log in",
+  "account.logout": "Log out",
+  "account.loginFailed": "Login failed: {error}",
+  "account.status.offline": "Signed out",
+  "account.status.connecting": "Connecting…",
+  "account.status.online": "Signed in · {userId}",
+  "account.status.error": "Error: {message}",
 
   // Home extended
   "home.signIn": "Sign in",

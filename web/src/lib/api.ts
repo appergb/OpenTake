@@ -9,6 +9,8 @@
  */
 
 import type {
+  AccountInfo,
+  AccountStatus,
   CaptionRequest,
   ChatMessage,
   ChatToolCall,
@@ -773,6 +775,41 @@ export async function secretDelete(provider: string): Promise<SecretStatus> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<SecretStatus>("secret_delete", { provider });
   return NO_SECRET;
+}
+
+// MARK: - Optional account backend
+//
+// OpenTake has no official backend. Outside Tauri, and before a user stores a
+// custom backend origin, this surface remains offline and performs no network
+// activity. The plaintext token only crosses the boundary on login and is never
+// returned to JavaScript after verification.
+
+export async function accountSetBackendUrl(url: string | null): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) await invokeImpl<void>("account_set_backend_url", { url });
+}
+
+export async function accountGetBackendUrl(): Promise<string | null> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<string | null>("account_get_backend_url");
+  return null;
+}
+
+export async function accountLogin(token: string): Promise<AccountInfo> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<AccountInfo>("account_login", { token });
+  throw new Error("account login requires the desktop app");
+}
+
+export async function accountLogout(): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) await invokeImpl<void>("account_logout");
+}
+
+export async function accountGetStatus(): Promise<AccountStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<AccountStatus>("account_get_status");
+  return { type: "offline" };
 }
 
 // MARK: - In-app chat (#HANDOFF-3.3)

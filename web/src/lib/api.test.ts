@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  accountGetBackendUrl,
+  accountGetStatus,
+  accountLogin,
+  accountLogout,
+  accountSetBackendUrl,
   decodePlaybackCommandError,
   decodePlaybackFrameEvent,
   decodePrewarmResult,
@@ -7,6 +12,18 @@ import {
   projectNew,
   projectOpen,
 } from "./api";
+
+describe("browser account scaffold defaults", () => {
+  it("stays offline and performs no login outside the desktop shell", async () => {
+    await expect(accountGetBackendUrl()).resolves.toBeNull();
+    await expect(accountGetStatus()).resolves.toEqual({ type: "offline" });
+    await expect(accountSetBackendUrl("https://accounts.example.com")).resolves.toBeUndefined();
+    await expect(accountLogout()).resolves.toBeUndefined();
+    await expect(accountLogin("token")).rejects.toThrow(
+      "account login requires the desktop app",
+    );
+  });
+});
 
 describe("browser project snapshot compatibility defaults", () => {
   it("marks every fallback snapshot as a known writable in-memory project", async () => {

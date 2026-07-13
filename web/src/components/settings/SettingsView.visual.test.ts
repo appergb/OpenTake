@@ -33,4 +33,10 @@ describe("SettingsView minimal embedded visual direction", () => {
     expect(settingsSource).toContain("renderActivePane");
     expect(settingsSource).not.toContain("<GeneralPane />\n            <AppearancePane />\n            <ImportPane />\n            <AiPane />\n            <AboutPane />");
   });
+
+  it("exposes the optional account scaffold as a separate settings pane", () => {
+    expect(settingsSource).toContain('id: "account"');
+    expect(settingsSource).toContain('labelKey: "settings.section.account"');
+    expect(settingsSource).toContain("return <AccountPane />");
+  });
 });
