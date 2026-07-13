@@ -525,9 +525,10 @@ async fn verify_token(backend_url: &str, token: &str) -> Result<AccountInfo, Str
 mod tests {
     use super::*;
     use opentake_gen::{GenError, MemoryKeyStore};
+    use std::collections::VecDeque;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use std::thread;
 
     fn serve_once(response: impl Into<String>) -> (String, thread::JoinHandle<String>) {
@@ -565,35 +566,57 @@ mod tests {
         )
     }
 
-    struct BackendSaveFailStore {
-        inner: MemoryKeyStore,
-        failing_backend_saves: AtomicUsize,
+    #[derive(Clone, Copy)]
+    enum FailureTiming {
+        BeforeApply,
+        AfterApply,
     }
 
-    impl BackendSaveFailStore {
+    struct SaveFailure {
+        account: &'static str,
+        timing: FailureTiming,
+    }
+
+    struct ScriptedSaveFailStore {
+        inner: MemoryKeyStore,
+        failures: Mutex<VecDeque<SaveFailure>>,
+    }
+
+    impl ScriptedSaveFailStore {
         fn new() -> Self {
             Self {
                 inner: MemoryKeyStore::new(),
-                failing_backend_saves: AtomicUsize::new(0),
+                failures: Mutex::new(VecDeque::new()),
             }
         }
 
-        fn fail_backend_saves(&self, count: usize) {
-            self.failing_backend_saves.store(count, Ordering::SeqCst);
+        fn fail_save(&self, account: &'static str, timing: FailureTiming) {
+            self.failures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push_back(SaveFailure { account, timing });
         }
     }
 
-    impl KeyStore for BackendSaveFailStore {
+    impl KeyStore for ScriptedSaveFailStore {
         fn save(&self, account: &str, value: &str) -> Result<(), GenError> {
-            if account == BACKEND_URL_ACCOUNT
-                && self
-                    .failing_backend_saves
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                        remaining.checked_sub(1)
-                    })
-                    .is_ok()
-            {
-                return Err(GenError::Transport("injected backend save failure".into()));
+            let failure = {
+                let mut failures = self
+                    .failures
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                (failures
+                    .front()
+                    .is_some_and(|failure| failure.account == account))
+                .then(|| failures.pop_front().expect("front exists"))
+            };
+            if let Some(failure) = failure {
+                if matches!(failure.timing, FailureTiming::AfterApply) {
+                    self.inner.save(account, value)?;
+                }
+                return Err(GenError::Transport(format!(
+                    "injected save failure for {account}"
+                )));
             }
             self.inner.save(account, value)
         }
@@ -915,12 +938,20 @@ mod tests {
             store.load(TOKEN_ACCOUNT).unwrap().as_deref(),
             Some("old-token")
         );
+        assert_eq!(
+            store.load(TOKEN_BACKEND_ACCOUNT).unwrap().as_deref(),
+            Some("https://accounts.example.com")
+        );
         assert_eq!(state.get(), old_status);
+        assert_eq!(
+            get_status(&store, &AccountState::default()).unwrap(),
+            AccountStatus::Stored
+        );
     }
 
     #[test]
     fn backend_save_failure_rolls_back_the_backend_token_pair() {
-        let store = BackendSaveFailStore::new();
+        let store = ScriptedSaveFailStore::new();
         let state = AccountState::default();
         set_backend_url(&store, &state, Some("https://one.example.com".into())).unwrap();
         save_bound_credential(
@@ -932,7 +963,7 @@ mod tests {
         )
         .unwrap();
         state.set(AccountStatus::Connecting);
-        store.fail_backend_saves(1);
+        store.fail_save(BACKEND_URL_ACCOUNT, FailureTiming::BeforeApply);
 
         assert!(set_backend_url(&store, &state, Some("https://two.example.com".into())).is_err());
         assert_eq!(
@@ -952,7 +983,7 @@ mod tests {
 
     #[test]
     fn incomplete_backend_rollback_clears_credentials_for_a_fresh_runtime() {
-        let store = BackendSaveFailStore::new();
+        let store = ScriptedSaveFailStore::new();
         let state = AccountState::default();
         set_backend_url(&store, &state, Some("https://one.example.com".into())).unwrap();
         save_bound_credential(
@@ -964,20 +995,60 @@ mod tests {
         )
         .unwrap();
         state.set(AccountStatus::Connecting);
-        store.fail_backend_saves(2);
+        store.fail_save(BACKEND_URL_ACCOUNT, FailureTiming::AfterApply);
+        store.fail_save(BACKEND_URL_ACCOUNT, FailureTiming::BeforeApply);
 
         let error =
             set_backend_url(&store, &state, Some("https://two.example.com".into())).unwrap_err();
 
         assert!(error.contains("credential rollback was incomplete"));
+        assert_eq!(
+            store.inner.load(BACKEND_URL_ACCOUNT).unwrap().as_deref(),
+            Some("https://two.example.com")
+        );
         assert_eq!(store.load(TOKEN_ACCOUNT).unwrap(), None);
         assert_eq!(store.load(TOKEN_BACKEND_ACCOUNT).unwrap(), None);
         assert!(matches!(state.get(), AccountStatus::Error { .. }));
+        let fresh_store = store.inner.clone();
         let fresh_state = AccountState::default();
         assert_eq!(
-            get_status(&store, &fresh_state).unwrap(),
+            get_status(&fresh_store, &fresh_state).unwrap(),
             AccountStatus::Offline
         );
+    }
+
+    #[test]
+    fn partial_credential_restore_never_survives_as_stored() {
+        for (account, timing) in [
+            (TOKEN_ACCOUNT, FailureTiming::BeforeApply),
+            (TOKEN_BACKEND_ACCOUNT, FailureTiming::AfterApply),
+        ] {
+            let store = ScriptedSaveFailStore::new();
+            let state = AccountState::default();
+            set_backend_url(&store, &state, Some("https://one.example.com".into())).unwrap();
+            save_bound_credential(
+                &store,
+                &BoundCredential {
+                    token: "old-token".into(),
+                    backend_url: "https://one.example.com".into(),
+                },
+            )
+            .unwrap();
+            state.set(AccountStatus::Stored);
+            store.fail_save(BACKEND_URL_ACCOUNT, FailureTiming::BeforeApply);
+            store.fail_save(account, timing);
+
+            let error = set_backend_url(&store, &state, Some("https://two.example.com".into()))
+                .unwrap_err();
+
+            assert!(error.contains("credential rollback was incomplete"));
+            assert_eq!(store.inner.load(TOKEN_ACCOUNT).unwrap(), None);
+            assert_eq!(store.inner.load(TOKEN_BACKEND_ACCOUNT).unwrap(), None);
+            assert_eq!(
+                get_status(&store.inner.clone(), &AccountState::default()).unwrap(),
+                AccountStatus::Offline
+            );
+        }
     }
 
     #[test]
