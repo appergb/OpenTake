@@ -346,7 +346,7 @@ impl VideoEncoder {
         let _ = self.join_output_pump();
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn child_id(&mut self) -> u32 {
         self.child.as_inner_mut().id()
     }
