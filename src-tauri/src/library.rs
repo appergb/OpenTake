@@ -39,6 +39,11 @@ pub struct LibraryState {
 impl LibraryState {
     /// Wrap a store for managed state.
     pub fn new(store: LibraryStore) -> Self {
+        if let Err(error) = store.reconcile_storage() {
+            return LibraryState::unavailable(format!(
+                "global library unavailable: storage reconciliation failed: {error}"
+            ));
+        }
         LibraryState {
             store: Some(Arc::new(store)),
             init_error: None,
@@ -438,6 +443,25 @@ mod tests {
                 .as_deref()
                 .and_then(std::path::Path::to_str)
         );
+    }
+
+    #[test]
+    fn library_state_startup_reconciles_crash_window_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library");
+        let files = root.join(opentake_media::library::FILES_SUBDIR);
+        std::fs::create_dir_all(files.join(".staging")).unwrap();
+        std::fs::write(files.join(".staging/crashed.pending"), b"stage").unwrap();
+        std::fs::write(
+            files.join(format!("{}.mp4", "0".repeat(64))),
+            b"final orphan",
+        )
+        .unwrap();
+
+        let library = LibraryState::new(LibraryStore::new(root));
+
+        assert!(library.store().is_ok());
+        assert_eq!(std::fs::read_dir(files).unwrap().count(), 0);
     }
 
     #[test]

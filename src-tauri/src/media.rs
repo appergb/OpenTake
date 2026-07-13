@@ -1249,14 +1249,18 @@ fn sync_project_favorites_impl(
         .cloned()
         .collect();
     for library_id in stale_ids {
-        changed |= core
-            .clear_media_global_favorite_id_for_project(
-                project.project_epoch,
-                &project_dir,
-                &library_id,
-            )
-            .map_err(|error| error.to_string())?
-            > 0;
+        let cleared = match core.clear_media_global_favorite_id_for_project(
+            project.project_epoch,
+            &project_dir,
+            &library_id,
+        ) {
+            Ok(cleared) => cleared,
+            Err(error) => {
+                restore_project_favorites(core, project.project_epoch, &project_dir, &before);
+                return Err(error.to_string());
+            }
+        };
+        changed |= cleared > 0;
     }
     for (asset_id, library_id) in &before.favorite_library_ids {
         if !library_ids.contains(library_id) {
@@ -1265,10 +1269,16 @@ fn sync_project_favorites_impl(
             }
             continue;
         }
-        let stored_exists = store
-            .stored_path(library_id)
-            .map_err(|error| error.to_string())?
-            .is_some();
+        let stored_exists = match store.stored_path(library_id) {
+            Ok(path) => path.is_some(),
+            Err(error) => {
+                failures.push(FavoriteSyncFailureDto {
+                    asset_id: asset_id.clone(),
+                    message: error.to_string(),
+                });
+                continue;
+            }
+        };
         let repair_result = if stored_exists {
             Ok(())
         } else {
@@ -2163,6 +2173,12 @@ mod tests {
             "{error}"
         );
         assert!(store.entries().unwrap().is_empty());
+        assert_eq!(
+            fs::read_dir(store.root().join(opentake_media::library::FILES_SUBDIR))
+                .unwrap()
+                .count(),
+            0
+        );
         assert!(core.media().library_favorite_id(&asset_id).is_some());
         let reopened_stale = AppCore::new();
         reopened_stale.open_project(&bundle).unwrap();
@@ -2287,6 +2303,62 @@ mod tests {
         let reopened = AppCore::new();
         reopened.open_project(bundle).expect("reopen project");
         assert!(!reopened.media().is_favorite(&asset_id));
+    }
+
+    #[test]
+    fn sync_commits_stale_cleanup_when_another_copy_lookup_fails() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _source_a, asset_a) = saved_core_with_media(tmp.path());
+        let source_b = tmp.path().join("source-b.mp4");
+        fs::write(&source_b, b"favorite B bytes").expect("write second media fixture");
+        let asset_b = core
+            .import_media_file(&source_b, "source-b", &ProbedMedia::default())
+            .expect("import second fixture")
+            .id;
+        let store = LibraryStore::new(tmp.path().join("library"));
+        let global_b = store
+            .favorite(&FavoriteRequest {
+                source: &source_b,
+                kind: "video",
+                category: None,
+                favorited_at: 1.0,
+                thumb: None,
+            })
+            .expect("favorite second fixture");
+        core.set_media_global_favorite(&asset_a, Some("f".repeat(64)))
+            .expect("seed stale mapping A");
+        core.set_media_global_favorite(&asset_b, Some(global_b.id.clone()))
+            .expect("seed valid mapping B");
+        core.save_project(None).expect("persist both mappings");
+        fs::remove_dir_all(store.root().join(opentake_media::library::FILES_SUBDIR))
+            .expect("remove files directory");
+        fs::write(
+            store.root().join(opentake_media::library::FILES_SUBDIR),
+            b"not a directory",
+        )
+        .expect("replace files directory with a regular file");
+
+        let synced = sync_project_favorites_impl(&core, tmp.path(), &store, vec![])
+            .expect("copy lookup errors are per-asset failures");
+
+        assert_eq!(synced.failures.len(), 1);
+        assert_eq!(synced.failures[0].asset_id, asset_b);
+        assert!(synced.failures[0].message.starts_with("io:"));
+        assert_eq!(core.media().library_favorite_id(&asset_a), None);
+        assert_eq!(
+            core.media()
+                .library_favorite_id(&synced.failures[0].asset_id),
+            Some(global_b.id.as_str())
+        );
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen project");
+        assert_eq!(reopened.media().library_favorite_id(&asset_a), None);
+        assert_eq!(
+            reopened
+                .media()
+                .library_favorite_id(&synced.failures[0].asset_id),
+            Some(global_b.id.as_str())
+        );
     }
 
     #[test]

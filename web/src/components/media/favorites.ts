@@ -1,5 +1,11 @@
 import * as api from "../../lib/api";
 import type { FavoriteSyncFailure, MediaList } from "../../lib/types";
+import {
+  applyMediaErrorForProject,
+  applyMediaListForProject,
+  isCurrentMediaProject,
+  type MediaProjectIdentity,
+} from "../../store/mediaStore";
 
 const LS_FAVORITES = "opentake.favorites";
 
@@ -31,20 +37,43 @@ export interface FavoriteMigrationOutcome {
   failures: FavoriteSyncFailure[];
 }
 
-const completedEpochs = new Set<number>();
-const inFlight = new Map<number, Promise<FavoriteMigrationOutcome>>();
+const completedProjects = new Set<string>();
+const inFlight = new Map<string, Promise<FavoriteMigrationOutcome>>();
+
+function projectKey(project: MediaProjectIdentity): string {
+  return JSON.stringify([project.projectEpoch, project.projectPath]);
+}
+
+export function applyFavoriteMigrationOutcome(
+  project: MediaProjectIdentity,
+  outcome: FavoriteMigrationOutcome,
+): boolean {
+  if (!isCurrentMediaProject(project)) return false;
+  if (outcome.media && !applyMediaListForProject(project, outcome.media)) return false;
+  if (outcome.failures.length > 0) {
+    applyMediaErrorForProject(
+      project,
+      outcome.failures.map((failure) => `${failure.assetId}: ${failure.message}`).join("; "),
+    );
+  }
+  return true;
+}
 
 /** Reconcile the current project's persisted favorite mirrors with the global
- * library once per project epoch. Only localStorage ids belonging to the
+ * library once per project identity. Only localStorage ids belonging to the
  * current project are sent, and only backend-confirmed ids are removed. */
 export function migrateLocalFavorites(
   items: ReadonlyArray<{ id: string }>,
-  projectEpoch: number,
+  project: MediaProjectIdentity,
 ): Promise<FavoriteMigrationOutcome> {
-  if (completedEpochs.has(projectEpoch)) {
+  if (!isCurrentMediaProject(project)) {
     return Promise.resolve({ synced: false, failures: [] });
   }
-  const existing = inFlight.get(projectEpoch);
+  const key = projectKey(project);
+  if (completedProjects.has(key)) {
+    return Promise.resolve({ synced: false, failures: [] });
+  }
+  const existing = inFlight.get(key);
   if (existing) return existing;
 
   const legacyIds = loadLegacyFavorites();
@@ -59,13 +88,16 @@ export function migrateLocalFavorites(
   const operation = api
     .syncProjectFavorites(matchingLegacyIds)
     .then((result): FavoriteMigrationOutcome => {
+      if (!isCurrentMediaProject(project)) {
+        return { synced: false, failures: [] };
+      }
       removeMigratedLegacyIds(result.migratedLegacyAssetIds);
-      completedEpochs.add(projectEpoch);
+      completedProjects.add(key);
       return { synced: true, media: result.media, failures: result.failures };
     })
     .finally(() => {
-      inFlight.delete(projectEpoch);
+      inFlight.delete(key);
     });
-  inFlight.set(projectEpoch, operation);
+  inFlight.set(key, operation);
   return operation;
 }

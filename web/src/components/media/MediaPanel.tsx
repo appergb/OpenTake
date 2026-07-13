@@ -57,7 +57,7 @@ import { MediaTabBar, MediaSubTabBar, MATERIAL_SUB_TABS, AUDIO_SUB_TABS } from "
 import { SoundLibraryTab } from "./SoundLibraryTab";
 import { CaptionsTab } from "./CaptionsTab";
 import { MediaSearchResults } from "./MediaSearch";
-import { migrateLocalFavorites } from "./favorites";
+import { applyFavoriteMigrationOutcome, migrateLocalFavorites } from "./favorites";
 import { LibraryEntryGrid } from "./LibraryView";
 
 /** MIME-ish type used on dataTransfer when dragging a media item to the timeline. */
@@ -139,26 +139,14 @@ export function MediaPanel() {
   const projectPath = useProjectStore((s) => s.projectPath);
   useEffect(() => {
     if (!projectPath) return;
-    void migrateLocalFavorites(items, projectEpoch)
+    const project = { projectEpoch, projectPath };
+    void migrateLocalFavorites(items, project)
       .then((outcome) => {
-        if (useProjectStore.getState().projectEpoch !== projectEpoch) return;
-        if (outcome.media) {
-          useMediaStore.setState({
-            items: outcome.media.items,
-            folders: outcome.media.folders,
-          });
-        }
-        if (outcome.failures.length > 0) {
-          useMediaStore.getState().setError(
-            outcome.failures.map((failure) => `${failure.assetId}: ${failure.message}`).join("; "),
-          );
-        }
+        if (!applyFavoriteMigrationOutcome(project, outcome)) return;
         if (outcome.synced) void useLibraryStore.getState().refresh();
       })
       .catch((error: unknown) => {
-        if (useProjectStore.getState().projectEpoch === projectEpoch) {
-          useMediaStore.getState().setError(String(error));
-        }
+        applyMediaErrorForProject(project, String(error));
       });
   }, [items, projectEpoch, projectPath]);
 

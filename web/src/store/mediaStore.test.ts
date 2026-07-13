@@ -22,7 +22,12 @@ vi.mock("../lib/api", () => ({
   getMedia: srv.getMedia,
 }));
 
-import { useMediaStore, refreshMedia, resetProjectMediaState } from "./mediaStore";
+import {
+  applyMediaListForProject,
+  useMediaStore,
+  refreshMedia,
+  resetProjectMediaState,
+} from "./mediaStore";
 import { useProjectStore } from "./projectStore";
 
 const item = (
@@ -148,6 +153,33 @@ describe("mediaStore", () => {
     expect(useMediaStore.getState().items.map((entry) => entry.id)).toEqual(["project-b"]);
     expect(useMediaStore.getState().folders.map((entry) => entry.id)).toEqual([
       "project-b-folder",
+    ]);
+  });
+
+  it("does not let an older same-project refresh overwrite a migration result", async () => {
+    const older = deferred<MediaList>();
+    srv.getMedia.mockImplementationOnce(() => older.promise);
+    const staleRefresh = refreshMedia();
+    const project = {
+      projectEpoch: 1,
+      projectPath: "/tmp/project-a.opentake",
+    };
+
+    expect(
+      applyMediaListForProject(project, {
+        items: [item("migrated", null)],
+        folders: [folder("migrated-folder", null)],
+      }),
+    ).toBe(true);
+    older.resolve({
+      items: [item("pre-migration", null)],
+      folders: [folder("old-folder", null)],
+    });
+
+    expect(await staleRefresh).toBe(false);
+    expect(useMediaStore.getState().items.map((entry) => entry.id)).toEqual(["migrated"]);
+    expect(useMediaStore.getState().folders.map((entry) => entry.id)).toEqual([
+      "migrated-folder",
     ]);
   });
 });
