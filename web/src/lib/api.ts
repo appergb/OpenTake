@@ -391,19 +391,49 @@ export async function getMedia(): Promise<MediaList> {
  * library and persist its content hash in the project's compatibility mirror.
  * Outside Tauri there is no project, so this resolves to an empty catalog.
  */
-export async function toggleFavorite(assetId: string, favorite: boolean): Promise<MediaList> {
+interface FavoriteProjectIdentity {
+  projectEpoch: number;
+  projectPath: string | null;
+}
+
+function favoriteProjectArgs(project: FavoriteProjectIdentity): {
+  expectedProjectEpoch: number;
+  expectedProjectPath: string;
+} {
+  if (project.projectPath === null) {
+    throw new Error("save the project before changing global favorites");
+  }
+  return {
+    expectedProjectEpoch: project.projectEpoch,
+    expectedProjectPath: project.projectPath,
+  };
+}
+
+export async function toggleFavorite(
+  assetId: string,
+  favorite: boolean,
+  project: FavoriteProjectIdentity,
+): Promise<MediaList> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<MediaList>("toggle_favorite", { assetId, favorite });
+  if (invokeImpl) {
+    return invokeImpl<MediaList>("toggle_favorite", {
+      assetId,
+      favorite,
+      ...favoriteProjectArgs(project),
+    });
+  }
   return { items: [], folders: [] };
 }
 
 export async function syncProjectFavorites(
   legacyAssetIds: string[],
+  project: FavoriteProjectIdentity,
 ): Promise<import("./types").FavoriteSyncResult> {
   await ensureTauri();
   if (invokeImpl) {
     return invokeImpl<import("./types").FavoriteSyncResult>("sync_project_favorites", {
       legacyAssetIds,
+      ...favoriteProjectArgs(project),
     });
   }
   return {

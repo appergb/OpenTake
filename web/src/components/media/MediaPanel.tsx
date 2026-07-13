@@ -1107,7 +1107,7 @@ export function MediaFavoriteButton({
         const project = captureMediaProjectIdentity();
         setPending(true);
         onStart?.();
-        void performToggle(assetId, !favorite)
+        void performToggle(assetId, !favorite, project)
           .then((media) => {
             if (!isCurrentMediaProject(project)) return;
             return onSuccess(media, project);

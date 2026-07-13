@@ -79,6 +79,7 @@ describe("AudioWaveform", () => {
 
 describe("MediaFavoriteButton", () => {
   it("disables while pending and keeps the rendered star unchanged after rejection", async () => {
+    useProjectStore.setState({ projectEpoch: 7, projectPath: "/project-7.opentake" });
     let rejectToggle: (reason: unknown) => void = () => undefined;
     const pendingToggle = new Promise<never>((_resolve, reject) => {
       rejectToggle = reject;
@@ -111,7 +112,10 @@ describe("MediaFavoriteButton", () => {
 
     await act(async () => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
 
-    expect(performToggle).toHaveBeenCalledWith("asset-1", false);
+    expect(performToggle).toHaveBeenCalledWith("asset-1", false, {
+      projectEpoch: 7,
+      projectPath: "/project-7.opentake",
+    });
     expect(button.disabled).toBe(true);
     expect(button.getAttribute("aria-busy")).toBe("true");
     expect(button.getAttribute("aria-pressed")).toBe("true");

@@ -1054,17 +1054,22 @@ pub fn toggle_favorite(
     library: State<'_, LibraryState>,
     asset_id: String,
     favorite: bool,
+    expected_project_epoch: u64,
+    expected_project_path: String,
 ) -> Result<MediaListDto, String> {
     let _workflow = library.lock_workflow();
-    toggle_favorite_impl(
+    toggle_favorite_impl_for_project(
         &core,
         media.engine().cache_root(),
         library.store()?,
         &asset_id,
         favorite,
+        expected_project_epoch,
+        Path::new(&expected_project_path),
     )
 }
 
+#[cfg(test)]
 fn toggle_favorite_impl(
     core: &AppCore,
     cache_root: &Path,
@@ -1072,11 +1077,55 @@ fn toggle_favorite_impl(
     asset_id: &str,
     favorite: bool,
 ) -> Result<MediaListDto, String> {
-    toggle_favorite_impl_with(core, cache_root, store, asset_id, favorite, |request| {
-        store
-            .prepare_favorite(request)
-            .map_err(|error| error.to_string())
-    })
+    core.ensure_project_mutable()
+        .map_err(|error| error.to_string())?;
+    let project = core.runtime_snapshot();
+    let project_dir = project
+        .project_dir
+        .ok_or_else(|| "save the project before changing global favorites".to_string())?;
+    toggle_favorite_impl_for_project(
+        core,
+        cache_root,
+        store,
+        asset_id,
+        favorite,
+        project.project_epoch,
+        &project_dir,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct ExpectedFavoriteProject<'a> {
+    epoch: u64,
+    dir: &'a Path,
+}
+
+fn toggle_favorite_impl_for_project(
+    core: &AppCore,
+    cache_root: &Path,
+    store: &LibraryStore,
+    asset_id: &str,
+    favorite: bool,
+    expected_project_epoch: u64,
+    expected_project_dir: &Path,
+) -> Result<MediaListDto, String> {
+    let _project_identity = core.lock_project_identity_workflow();
+    toggle_favorite_impl_with(
+        core,
+        cache_root,
+        store,
+        asset_id,
+        favorite,
+        ExpectedFavoriteProject {
+            epoch: expected_project_epoch,
+            dir: expected_project_dir,
+        },
+        |request| {
+            store
+                .prepare_favorite(request)
+                .map_err(|error| error.to_string())
+        },
+    )
 }
 
 fn toggle_favorite_impl_with<F>(
@@ -1085,14 +1134,15 @@ fn toggle_favorite_impl_with<F>(
     store: &LibraryStore,
     asset_id: &str,
     favorite: bool,
+    expected_project: ExpectedFavoriteProject<'_>,
     favorite_file: F,
 ) -> Result<MediaListDto, String>
 where
     F: for<'a> FnOnce(&FavoriteRequest<'a>) -> Result<PreparedFavorite, String>,
 {
-    core.ensure_project_mutable()
+    let project = core
+        .mutable_runtime_snapshot_for_project(expected_project.epoch, expected_project.dir)
         .map_err(|error| error.to_string())?;
-    let project = core.runtime_snapshot();
     let project_dir = project
         .project_dir
         .clone()
@@ -1197,25 +1247,53 @@ pub fn sync_project_favorites(
     media: State<'_, MediaState>,
     library: State<'_, LibraryState>,
     legacy_asset_ids: Vec<String>,
+    expected_project_epoch: u64,
+    expected_project_path: String,
 ) -> Result<FavoriteSyncDto, String> {
     let _workflow = library.lock_workflow();
-    sync_project_favorites_impl(
+    sync_project_favorites_impl_for_project(
         &core,
         media.engine().cache_root(),
         library.store()?,
         legacy_asset_ids,
+        expected_project_epoch,
+        Path::new(&expected_project_path),
     )
 }
 
+#[cfg(test)]
 fn sync_project_favorites_impl(
     core: &AppCore,
     cache_root: &Path,
     store: &LibraryStore,
     legacy_asset_ids: Vec<String>,
 ) -> Result<FavoriteSyncDto, String> {
-    core.ensure_project_mutable()
-        .map_err(|error| error.to_string())?;
     let project = core.runtime_snapshot();
+    let project_dir = project
+        .project_dir
+        .ok_or_else(|| "save the project before synchronizing global favorites".to_string())?;
+    sync_project_favorites_impl_for_project(
+        core,
+        cache_root,
+        store,
+        legacy_asset_ids,
+        project.project_epoch,
+        &project_dir,
+    )
+}
+
+fn sync_project_favorites_impl_for_project(
+    core: &AppCore,
+    cache_root: &Path,
+    store: &LibraryStore,
+    legacy_asset_ids: Vec<String>,
+    expected_project_epoch: u64,
+    expected_project_dir: &Path,
+) -> Result<FavoriteSyncDto, String> {
+    let _project_identity = core.lock_project_identity_workflow();
+    let project = core
+        .mutable_runtime_snapshot_for_project(expected_project_epoch, expected_project_dir)
+        .map_err(|error| error.to_string())?;
     let project_dir = project
         .project_dir
         .clone()
@@ -1236,6 +1314,7 @@ fn sync_project_favorites_impl(
         .into_iter()
         .map(|entry| entry.id)
         .collect();
+    let stored_paths = store.stored_paths().map_err(|error| error.to_string())?;
     let mapped_at_start: HashSet<String> = before.favorite_library_ids.keys().cloned().collect();
     let mut migrated = BTreeSet::new();
     let mut failures = Vec::new();
@@ -1269,16 +1348,7 @@ fn sync_project_favorites_impl(
             }
             continue;
         }
-        let stored_exists = match store.stored_path(library_id) {
-            Ok(path) => path.is_some(),
-            Err(error) => {
-                failures.push(FavoriteSyncFailureDto {
-                    asset_id: asset_id.clone(),
-                    message: error.to_string(),
-                });
-                continue;
-            }
-        };
+        let stored_exists = stored_paths.contains_key(library_id);
         let repair_result = if stored_exists {
             Ok(())
         } else {
@@ -2033,6 +2103,50 @@ mod tests {
     }
 
     #[test]
+    fn stale_project_identity_cannot_mutate_replacement_project_or_global_library() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let project_a_root = tmp.path().join("project-a");
+        let project_b_root = tmp.path().join("project-b");
+        fs::create_dir(&project_a_root).unwrap();
+        fs::create_dir(&project_b_root).unwrap();
+        let (core, _bundle_a, _source_a, asset_a) = saved_core_with_media(&project_a_root);
+        let project_a = core.runtime_snapshot();
+        let project_a_dir = project_a.project_dir.clone().unwrap();
+        let (_other, bundle_b, _source_b, _asset_b) = saved_core_with_media(&project_b_root);
+        core.open_project(bundle_b).expect("replace A with B");
+        let project_b_before = core.media();
+        let library_root = tmp.path().join("library");
+        let store = LibraryStore::new(&library_root);
+        let library_before = recursive_tree(&library_root);
+
+        let toggle_error = toggle_favorite_impl_for_project(
+            &core,
+            tmp.path(),
+            &store,
+            &asset_a,
+            true,
+            project_a.project_epoch,
+            &project_a_dir,
+        )
+        .expect_err("stale A toggle must be rejected before library I/O");
+        let sync_error = sync_project_favorites_impl_for_project(
+            &core,
+            tmp.path(),
+            &store,
+            vec![asset_a],
+            project_a.project_epoch,
+            &project_a_dir,
+        )
+        .expect_err("stale A sync must be rejected before library I/O");
+
+        assert!(toggle_error.contains("project changed"), "{toggle_error}");
+        assert!(sync_error.contains("project changed"), "{sync_error}");
+        assert_eq!(core.media(), project_b_before);
+        assert_eq!(store.entries().unwrap(), Vec::new());
+        assert_eq!(recursive_tree(&library_root), library_before);
+    }
+
+    #[test]
     fn global_favorite_is_copied_mapped_and_durable_on_reopen() {
         let tmp = tempfile::tempdir().expect("temp root");
         let (core, bundle, _source, asset_id) = saved_core_with_media(tmp.path());
@@ -2110,12 +2224,22 @@ mod tests {
         let manifest_before = fs::read(&manifest_path).unwrap();
         fs::remove_file(&manifest_path).unwrap();
         fs::create_dir(&manifest_path).unwrap();
+        let project = core.runtime_snapshot();
+        let project_dir = project.project_dir.clone().unwrap();
 
-        let error =
-            toggle_favorite_impl_with(&core, tmp.path(), &store, &asset_id, true, |_request| {
-                Ok(prepared)
-            })
-            .expect_err("project manifest publish must fail");
+        let error = toggle_favorite_impl_with(
+            &core,
+            tmp.path(),
+            &store,
+            &asset_id,
+            true,
+            ExpectedFavoriteProject {
+                epoch: project.project_epoch,
+                dir: &project_dir,
+            },
+            |_request| Ok(prepared),
+        )
+        .expect_err("project manifest publish must fail");
 
         assert!(
             error.contains("global favorite mapping could not be saved"),
@@ -2137,8 +2261,6 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp root");
         let (core, bundle, _source, asset_id) = saved_core_with_media(tmp.path());
         let store = LibraryStore::new(tmp.path().join("library"));
-        fs::create_dir_all(store.root()).unwrap();
-        fs::create_dir(store.root().join("library.json.tmp")).unwrap();
         let before = core.media();
         let manifest_path = bundle.join(opentake_project::layout::MANIFEST_FILE);
         let manifest_before = fs::read(&manifest_path).unwrap();
@@ -2162,23 +2284,37 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp root");
         let (core, bundle, _source, asset_id) = saved_core_with_media(tmp.path());
         let store = LibraryStore::new(tmp.path().join("library"));
-        fs::create_dir_all(store.root()).unwrap();
-        fs::create_dir(store.root().join("library.json.tmp")).unwrap();
+        let project = core.runtime_snapshot();
+        let project_dir = project.project_dir.clone().unwrap();
 
-        let error = toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, true)
-            .expect_err("blocked library manifest publish must fail");
+        let error = toggle_favorite_impl_with(
+            &core,
+            tmp.path(),
+            &store,
+            &asset_id,
+            true,
+            ExpectedFavoriteProject {
+                epoch: project.project_epoch,
+                dir: &project_dir,
+            },
+            |request| {
+                let prepared = store
+                    .prepare_favorite(request)
+                    .map_err(|error| error.to_string())?;
+                fs::create_dir(store.root().join("library.json"))
+                    .map_err(|error| error.to_string())?;
+                Ok(prepared)
+            },
+        )
+        .expect_err("blocked library manifest publish must fail");
 
         assert!(
             error.contains("global favorite could not be published"),
             "{error}"
         );
+        fs::remove_dir(store.root().join("library.json")).unwrap();
         assert!(store.entries().unwrap().is_empty());
-        assert_eq!(
-            fs::read_dir(store.root().join(opentake_media::library::FILES_SUBDIR))
-                .unwrap()
-                .count(),
-            0
-        );
+        assert!(store.stored_paths().unwrap().is_empty());
         assert!(core.media().library_favorite_id(&asset_id).is_some());
         let reopened_stale = AppCore::new();
         reopened_stale.open_project(&bundle).unwrap();
@@ -2187,7 +2323,6 @@ mod tests {
             .library_favorite_id(&asset_id)
             .is_some());
 
-        fs::remove_dir(store.root().join("library.json.tmp")).unwrap();
         sync_project_favorites_impl(&reopened_stale, tmp.path(), &store, vec![])
             .expect("sync clears unpublished mapping");
 
@@ -2234,8 +2369,10 @@ mod tests {
             .expect("project mapping")
             .to_string();
         fs::remove_file(source).expect("take original source offline");
-        fs::create_dir(library_root.join("library.json.tmp"))
-            .expect("block atomic manifest commit");
+        let manifest_path = library_root.join("library.json");
+        let manifest_before = fs::read(&manifest_path).unwrap();
+        fs::remove_file(&manifest_path).unwrap();
+        fs::create_dir(&manifest_path).expect("block manifest read");
 
         let error = toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, false)
             .expect_err("global remove must fail");
@@ -2244,6 +2381,8 @@ mod tests {
             error.contains("global favorite could not be removed"),
             "{error}"
         );
+        fs::remove_dir(&manifest_path).unwrap();
+        fs::write(&manifest_path, manifest_before).unwrap();
         assert!(store.contains(&library_id).unwrap());
         assert!(store.stored_path(&library_id).unwrap().unwrap().is_file());
         assert_eq!(

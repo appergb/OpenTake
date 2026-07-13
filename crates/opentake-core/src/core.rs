@@ -28,7 +28,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 
 use opentake_domain::{MediaManifest, MediaManifestEntry, Timeline};
 use opentake_ops::command::{EditCommand, EditResult};
@@ -182,6 +182,7 @@ fn ensure_project_identity(
 #[derive(Clone)]
 pub struct AppCore {
     session: Arc<Mutex<CoreSessionSlot>>,
+    project_identity_workflow: Arc<RwLock<()>>,
     events: EventBus,
     deps: Arc<CoreDeps>,
     // `Send + Sync` so `AppCore` stays shareable across threads (Tauri State,
@@ -209,6 +210,7 @@ impl AppCore {
                 project_epoch: 0,
                 editor: EditorSession::new_project(),
             })),
+            project_identity_workflow: Arc::new(RwLock::new(())),
             events: EventBus::new(),
             deps: Arc::new(deps),
             ids: Arc::new(CoreIdGen::new("id-")),
@@ -264,6 +266,34 @@ impl AppCore {
             project_epoch: session.project_epoch,
             version: session.editor.version(),
         }
+    }
+
+    /// Return a mutable-project runtime snapshot only when the caller's IPC
+    /// identity still names the current project. This is the authorization gate
+    /// for workflows that perform global I/O before their final project commit.
+    pub fn mutable_runtime_snapshot_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+    ) -> Result<ProjectRuntimeSnapshot> {
+        let session = self.lock();
+        ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+        session.editor.ensure_mutable()?;
+        Ok(ProjectRuntimeSnapshot {
+            timeline: session.editor.timeline(),
+            media: session.editor.media(),
+            project_dir: session.editor.project_dir().map(PathBuf::from),
+            project_epoch: session.project_epoch,
+            version: session.editor.version(),
+        })
+    }
+
+    /// Hold the current project identity stable across an external workflow.
+    /// Project replacement and save-as take the exclusive side of this lock.
+    pub fn lock_project_identity_workflow(&self) -> RwLockReadGuard<'_, ()> {
+        self.project_identity_workflow
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Snapshot all self-contained bundle inputs under one session lock.
@@ -341,10 +371,15 @@ impl AppCore {
     /// [`CoreEvent::ProjectOpened`] (path empty, version 0), and return its first
     /// snapshot.
     pub fn new_project(&self) -> TimelineSnapshot {
+        let _identity = self
+            .project_identity_workflow
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let snapshot = {
             let mut session = self.lock();
             session.replace_editor(EditorSession::new_project())
         };
+        drop(_identity);
         self.events.emit(&CoreEvent::ProjectOpened {
             path: String::new(),
             project_epoch: snapshot.project_epoch,
@@ -368,10 +403,15 @@ impl AppCore {
     }
 
     pub fn commit_project_open(&self, prepared: PreparedProjectOpen) -> TimelineSnapshot {
+        let _identity = self
+            .project_identity_workflow
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let snapshot = {
             let mut session = self.lock();
             session.replace_editor(prepared.editor)
         };
+        drop(_identity);
         self.events.emit(&CoreEvent::ProjectOpened {
             path: prepared.path.to_string_lossy().into_owned(),
             project_epoch: snapshot.project_epoch,
@@ -398,6 +438,10 @@ impl AppCore {
         path: Option<PathBuf>,
         thumbnail: Option<Vec<u8>>,
     ) -> Result<PathBuf> {
+        let _identity = self
+            .project_identity_workflow
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (written, project_epoch) = {
             let mut session = self.lock();
             let written = session
@@ -405,6 +449,7 @@ impl AppCore {
                 .save_project_with_thumbnail(path, thumbnail)?;
             (written, session.project_epoch)
         };
+        drop(_identity);
         self.events.emit(&CoreEvent::ProjectSaved {
             path: written.to_string_lossy().into_owned(),
             project_epoch,
@@ -743,6 +788,27 @@ mod tests {
             session.editor.seed_from_timeline(tl);
         }
         core
+    }
+
+    #[test]
+    fn project_identity_workflow_blocks_project_replacement_until_release() {
+        let core = AppCore::new();
+        let workflow = core.lock_project_identity_workflow();
+        let replacement = core.clone();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            replacement.new_project();
+            sent.send(()).unwrap();
+        });
+
+        assert!(received
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+        drop(workflow);
+        received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("replacement proceeds after workflow releases identity");
+        worker.join().unwrap();
     }
 
     fn project_bundle(label: &str) -> PathBuf {

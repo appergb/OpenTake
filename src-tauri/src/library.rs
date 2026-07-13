@@ -128,6 +128,13 @@ fn entry_dto(store: &LibraryStore, entry: LibraryEntry) -> Result<LibraryEntryDt
     })
 }
 
+fn entry_dto_with_path(entry: LibraryEntry, stored_path: Option<&PathBuf>) -> LibraryEntryDto {
+    LibraryEntryDto {
+        stored_path: stored_path.map(|path| path.to_string_lossy().into_owned()),
+        ..LibraryEntryDto::from(entry)
+    }
+}
+
 /// The asset minted in the current project by `library_import_to_project`. The
 /// front end re-fetches the full catalog via `get_media` after a successful
 /// import; this is the just-created project-side asset for an optimistic update.
@@ -158,10 +165,14 @@ pub fn library_list(
         Some(c) => store.entries_in_category(Some(c)),
     }
     .map_err(|e| e.to_string())?;
-    entries
+    let stored_paths = store.stored_paths().map_err(|error| error.to_string())?;
+    Ok(entries
         .into_iter()
-        .map(|entry| entry_dto(store, entry))
-        .collect()
+        .map(|entry| {
+            let stored_path = stored_paths.get(&entry.id);
+            entry_dto_with_path(entry, stored_path)
+        })
+        .collect())
 }
 
 /// `library_favorite`: copy a local file into the global library (dedup by
@@ -461,7 +472,10 @@ mod tests {
         let library = LibraryState::new(LibraryStore::new(root));
 
         assert!(library.store().is_ok());
-        assert_eq!(std::fs::read_dir(files).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_dir(files.join(".staging")).unwrap().count(),
+            0
+        );
     }
 
     #[test]

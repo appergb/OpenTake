@@ -59,7 +59,7 @@ describe("migrateLocalFavorites", () => {
 
     const outcome = await migrateLocalFavorites([{ id: "a" }, { id: "b" }], project);
 
-    expect(syncProjectFavorites).toHaveBeenCalledWith(["a", "b"]);
+    expect(syncProjectFavorites).toHaveBeenCalledWith(["a", "b"], project);
     expect(outcome.failures).toEqual([{ assetId: "b", message: "offline" }]);
     expect(JSON.parse(localStorage.getItem(KEY) as string)).toEqual(["b", "other-project"]);
   });
@@ -73,8 +73,8 @@ describe("migrateLocalFavorites", () => {
     const project11 = await setCurrentProject(11, "/project-11.opentake");
     expect((await migrateLocalFavorites([{ id: "a" }], project11)).synced).toBe(true);
 
-    expect(syncProjectFavorites).toHaveBeenNthCalledWith(1, []);
-    expect(syncProjectFavorites).toHaveBeenNthCalledWith(2, []);
+    expect(syncProjectFavorites).toHaveBeenNthCalledWith(1, [], project10);
+    expect(syncProjectFavorites).toHaveBeenNthCalledWith(2, [], project11);
   });
 
   it("retains local ids and allows retry when synchronization rejects", async () => {
@@ -101,7 +101,7 @@ describe("migrateLocalFavorites", () => {
     expect(syncProjectFavorites).not.toHaveBeenCalled();
 
     await migrateLocalFavorites([{ id: "a" }], project);
-    expect(syncProjectFavorites).toHaveBeenCalledWith(["a"]);
+    expect(syncProjectFavorites).toHaveBeenCalledWith(["a"], project);
   });
 
   it("treats same-epoch bundle paths as distinct migration identities", async () => {

@@ -86,7 +86,7 @@ export function migrateLocalFavorites(
   const projectIds = new Set(items.map((item) => item.id));
   const matchingLegacyIds = [...legacyIds].filter((id) => projectIds.has(id));
   const operation = api
-    .syncProjectFavorites(matchingLegacyIds)
+    .syncProjectFavorites(matchingLegacyIds, project)
     .then((result): FavoriteMigrationOutcome => {
       if (!isCurrentMediaProject(project)) {
         return { synced: false, failures: [] };

@@ -8,7 +8,7 @@
 //!   library.json          manifest: { version, entries: [LibraryEntry, …] }
 //!   files/<hash><ext>      copy-on-favorite content, content-addressed
 //!   files/.staging/*       unpublished content, reclaimed on startup
-//!   library.json.tmp       transient; atomically renamed over library.json
+//!   .library.json.*.tmp    per-transaction temp, atomically committed/cleaned
 //! ```
 //!
 //! Design choices:
@@ -25,26 +25,18 @@
 //! command layer (#55) constructs it from `app_data_dir`. [`default_library_dir`]
 //! provides the `dirs`-based production default.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::ffi::{OsStr, OsString};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use cap_fs_ext::{ambient_authority, DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::{Dir, OpenOptions};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::{MediaError, Result};
-
-#[cfg(windows)]
-fn is_windows_reparse_point(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-#[cfg(not(windows))]
-fn is_windows_reparse_point(_metadata: &std::fs::Metadata) -> bool {
-    false
-}
 
 /// Manifest filename under the library root.
 pub const MANIFEST_NAME: &str = "library.json";
@@ -59,6 +51,11 @@ pub const MANIFEST_VERSION: u32 = 1;
 const APP_DIR: &str = "OpenTake";
 /// Library directory name under the application directory.
 const LIBRARY_DIR: &str = "Library";
+
+#[cfg(test)]
+std::thread_local! {
+    static STORED_INDEX_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// One favorited asset in the global library.
 ///
@@ -130,8 +127,10 @@ pub struct FavoriteOutcome {
 /// its private stage best-effort; even if cleanup fails, it is never in Mine.
 pub struct PreparedFavorite {
     entry: LibraryEntry,
-    staged_path: Option<PathBuf>,
-    stored_path: Option<PathBuf>,
+    capabilities: Arc<LibraryCapabilities>,
+    active_stages: Arc<Mutex<HashSet<OsString>>>,
+    staged_name: Option<OsString>,
+    stored_name: Option<OsString>,
     owns_stored_path: bool,
 }
 
@@ -143,31 +142,45 @@ impl PreparedFavorite {
 
     /// Whether publication is still required after the project mapping saves.
     pub fn needs_publish(&self) -> bool {
-        self.staged_path.is_some()
+        self.staged_name.is_some()
+    }
+
+    fn release_stage(&mut self) {
+        let Some(name) = self.staged_name.take() else {
+            return;
+        };
+        let _ = self.capabilities.staging.remove_file_or_symlink(&name);
+        self.active_stages
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&name);
     }
 }
 
 impl Drop for PreparedFavorite {
     fn drop(&mut self) {
-        if let Some(path) = self.staged_path.take() {
-            let _ = std::fs::remove_file(&path);
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::remove_dir(parent);
-            }
-        }
+        self.release_stage();
         if self.owns_stored_path {
-            if let Some(path) = self.stored_path.take() {
-                let _ = std::fs::remove_file(path);
+            if let Some(name) = self.stored_name.take() {
+                let _ = self.capabilities.files.remove_file_or_symlink(name);
             }
             self.owns_stored_path = false;
         }
     }
 }
 
+struct LibraryCapabilities {
+    root: Dir,
+    files: Dir,
+    staging: Dir,
+}
+
 /// The global library store, rooted at a directory. Cloneable handles are not
 /// provided; share one instance behind an `Arc` if multiple owners are needed.
 pub struct LibraryStore {
     root: PathBuf,
+    capabilities: std::result::Result<Arc<LibraryCapabilities>, String>,
+    active_stages: Arc<Mutex<HashSet<OsString>>>,
     /// Serializes manifest read-modify-write across in-process threads.
     write_lock: Mutex<()>,
 }
@@ -179,11 +192,174 @@ pub fn default_library_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join(APP_DIR).join(LIBRARY_DIR))
 }
 
+fn open_capabilities(root_path: &Path) -> std::io::Result<LibraryCapabilities> {
+    let parent_path = root_path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "library root must have a parent directory",
+        )
+    })?;
+    let root_name = root_path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "library root must have a final component",
+        )
+    })?;
+    Dir::create_ambient_dir_all(parent_path, ambient_authority())?;
+    let parent = Dir::open_ambient_dir(parent_path, ambient_authority())?;
+    ensure_child_dir(&parent, root_name)?;
+    let root = parent.open_dir_nofollow(root_name)?;
+    ensure_child_dir(&root, FILES_SUBDIR)?;
+    let files = root.open_dir_nofollow(FILES_SUBDIR)?;
+    ensure_child_dir(&files, STAGING_SUBDIR)?;
+    let staging = files.open_dir_nofollow(STAGING_SUBDIR)?;
+    Ok(LibraryCapabilities {
+        root,
+        files,
+        staging,
+    })
+}
+
+fn ensure_child_dir(parent: &Dir, name: impl AsRef<Path>) -> std::io::Result<()> {
+    match parent.create_dir(name.as_ref()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn read_nofollow(dir: &Dir, name: impl AsRef<Path>) -> std::io::Result<Vec<u8>> {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let mut file = dir.open_with(name, &options)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn write_new_nofollow(dir: &Dir, name: impl AsRef<Path>, bytes: &[u8]) -> std::io::Result<()> {
+    let name = name.as_ref();
+    let mut options = OpenOptions::new();
+    options
+        .write(true)
+        .create_new(true)
+        .follow(FollowSymlinks::No);
+    let mut file = dir.open_with(name, &options)?;
+    let result = file.write_all(bytes).and_then(|_| file.sync_all());
+    if result.is_err() {
+        drop(file);
+        let _ = dir.remove_file_or_symlink(name);
+    }
+    result
+}
+
+fn copy_new_nofollow(
+    source_dir: &Dir,
+    source_name: impl AsRef<Path>,
+    target_dir: &Dir,
+    target_name: impl AsRef<Path>,
+) -> std::io::Result<()> {
+    let source_name = source_name.as_ref();
+    let target_name = target_name.as_ref();
+    let mut read_options = OpenOptions::new();
+    read_options.read(true).follow(FollowSymlinks::No);
+    let mut source = source_dir.open_with(source_name, &read_options)?;
+    let mut write_options = OpenOptions::new();
+    write_options
+        .write(true)
+        .create_new(true)
+        .follow(FollowSymlinks::No);
+    let mut target = target_dir.open_with(target_name, &write_options)?;
+    let result = std::io::copy(&mut source, &mut target).and_then(|_| target.sync_all());
+    if result.is_err() {
+        drop(target);
+        let _ = target_dir.remove_file_or_symlink(target_name);
+    }
+    result
+}
+
+fn unique_manifest_artifact(suffix: &str) -> OsString {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+    OsString::from(format!(
+        ".{MANIFEST_NAME}.{}.{sequence:020}.{suffix}",
+        std::process::id()
+    ))
+}
+
+struct CapabilityArtifactGuard<'a> {
+    dir: &'a Dir,
+    name: OsString,
+}
+
+impl Drop for CapabilityArtifactGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.dir.remove_file_or_symlink(&self.name);
+    }
+}
+
+fn is_manifest_artifact(name: &OsStr) -> bool {
+    let text = name.to_string_lossy();
+    text == format!("{MANIFEST_NAME}.tmp")
+        || (text.starts_with(&format!(".{MANIFEST_NAME}."))
+            && (text.ends_with(".tmp") || text.ends_with(".backup")))
+}
+
+fn is_manifest_backup(name: &OsStr) -> bool {
+    let text = name.to_string_lossy();
+    text.starts_with(&format!(".{MANIFEST_NAME}.")) && text.ends_with(".backup")
+}
+
+#[cfg(not(windows))]
+fn commit_manifest_file(root: &Dir, tmp_name: &OsStr) -> std::io::Result<()> {
+    // Unix renameat replaces the destination atomically within the retained
+    // root directory capability.
+    root.rename(tmp_name, root, MANIFEST_NAME)
+}
+
+#[cfg(windows)]
+fn commit_manifest_file(root: &Dir, tmp_name: &OsStr) -> std::io::Result<()> {
+    // std/cap-std rename does not replace an existing destination on Windows.
+    // Preserve crash atomicity with a retained-root two-phase protocol: a crash
+    // with the canonical name absent leaves an immutable backup that startup
+    // reconciliation restores before accepting writes.
+    match root.symlink_metadata(MANIFEST_NAME) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return root.rename(tmp_name, root, MANIFEST_NAME);
+        }
+        Err(error) => return Err(error),
+        Ok(_) => {}
+    }
+    let backup_name = unique_manifest_artifact("backup");
+    root.rename(MANIFEST_NAME, root, &backup_name)?;
+    if let Err(error) = root.rename(tmp_name, root, MANIFEST_NAME) {
+        let restore = root.rename(&backup_name, root, MANIFEST_NAME);
+        return match restore {
+            Ok(()) => Err(error),
+            Err(restore_error) => Err(std::io::Error::new(
+                restore_error.kind(),
+                format!(
+                    "manifest commit failed ({error}); backup restore also failed ({restore_error})"
+                ),
+            )),
+        };
+    }
+    let _ = root.remove_file_or_symlink(backup_name);
+    Ok(())
+}
+
 impl LibraryStore {
     /// Open (or lazily create) a store rooted at `root`.
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        let capabilities = open_capabilities(&root)
+            .map(Arc::new)
+            .map_err(|error| format!("could not secure global library root: {error}"));
         LibraryStore {
-            root: root.into(),
+            root,
+            capabilities,
+            active_stages: Arc::new(Mutex::new(HashSet::new())),
             write_lock: Mutex::new(()),
         }
     }
@@ -203,12 +379,149 @@ impl LibraryStore {
         &self.root
     }
 
-    fn manifest_path(&self) -> PathBuf {
-        self.root.join(MANIFEST_NAME)
+    fn capabilities(&self) -> Result<&Arc<LibraryCapabilities>> {
+        self.capabilities
+            .as_ref()
+            .map_err(|message| MediaError::Other(anyhow::anyhow!(message.clone())))
     }
 
     fn files_dir(&self) -> PathBuf {
         self.root.join(FILES_SUBDIR)
+    }
+
+    fn manifest_backups(&self) -> Result<Vec<OsString>> {
+        let root = &self.capabilities()?.root;
+        let mut backups = Vec::new();
+        for entry in root.entries()? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if !is_manifest_backup(&name) {
+                continue;
+            }
+            let file_type = entry.file_type()?;
+            if !file_type.is_file() || file_type.is_symlink() {
+                return Err(MediaError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "library manifest backup is not a nofollow regular file",
+                )));
+            }
+            backups.push(name);
+        }
+        backups.sort();
+        Ok(backups)
+    }
+
+    fn latest_valid_manifest_backup(&self) -> Result<Option<(OsString, Manifest)>> {
+        let root = &self.capabilities()?.root;
+        let mut latest_error = None;
+        for backup in self.manifest_backups()?.into_iter().rev() {
+            let bytes = read_nofollow(root, &backup)?;
+            match serde_json::from_slice(&bytes) {
+                Ok(manifest) => return Ok(Some((backup, manifest))),
+                Err(error) if latest_error.is_none() => latest_error = Some(error),
+                Err(_) => {}
+            }
+        }
+        match latest_error {
+            Some(error) => Err(MediaError::Json(error)),
+            None => Ok(None),
+        }
+    }
+
+    fn reconcile_manifest_artifacts(&self) -> Result<()> {
+        let root = &self.capabilities()?.root;
+        match root.symlink_metadata(MANIFEST_NAME) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                // A regular canonical leaf can still be corrupt. Validate it
+                // before removing any crash-recovery backup.
+                let bytes = read_nofollow(root, MANIFEST_NAME)?;
+                let _: Manifest = serde_json::from_slice(&bytes)?;
+            }
+            Ok(_) => {
+                return Err(MediaError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "library manifest is not a nofollow regular file",
+                )))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if let Some((backup, _manifest)) = self.latest_valid_manifest_backup()? {
+                    root.rename(&backup, root, MANIFEST_NAME)?;
+                }
+            }
+            Err(error) => return Err(MediaError::Io(error)),
+        }
+        for entry in root.entries()? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if !is_manifest_artifact(&name) {
+                continue;
+            }
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() && !file_type.is_symlink() {
+                return Err(MediaError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "library manifest artifact is an unexpected directory",
+                )));
+            }
+            root.remove_file_or_symlink(name)?;
+        }
+        Ok(())
+    }
+
+    fn stored_name(id: &str, source: &Path) -> OsString {
+        let safe_extension = source.extension().and_then(OsStr::to_str).filter(|value| {
+            !value.is_empty()
+                && value.len() <= 16
+                && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        });
+        match safe_extension {
+            Some(extension) => OsString::from(format!("{id}.{extension}")),
+            None => OsString::from(id),
+        }
+    }
+
+    fn staging_name(id: &str, source: &Path) -> OsString {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let file_name = Self::stored_name(id, source).to_string_lossy().into_owned();
+        OsString::from(format!(
+            "{file_name}.{}.{}.pending",
+            std::process::id(),
+            sequence
+        ))
+    }
+
+    fn stored_index(&self) -> Result<HashMap<String, OsString>> {
+        #[cfg(test)]
+        STORED_INDEX_SCANS.with(|count| count.set(count.get() + 1));
+        let capabilities = self.capabilities()?;
+        let mut index = HashMap::new();
+        for entry in capabilities.files.entries()? {
+            let entry = entry?;
+            if entry.file_name() == STAGING_SUBDIR {
+                continue;
+            }
+            let file_type = entry.file_type()?;
+            if !file_type.is_file() || file_type.is_symlink() {
+                return Err(MediaError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "library content path is not a nofollow regular file",
+                )));
+            }
+            let name = entry.file_name();
+            let path = Path::new(&name);
+            let Some(id) = path.file_stem().and_then(OsStr::to_str).map(str::to_owned) else {
+                continue;
+            };
+            if index.insert(id.clone(), name).is_some() {
+                return Err(MediaError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("multiple stored copies claim library id {id}"),
+                )));
+            }
+        }
+        Ok(index)
     }
 
     /// Remove content left without manifest ownership by a prior crash. A
@@ -219,92 +532,80 @@ impl LibraryStore {
             .write_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.reconcile_manifest_artifacts()?;
         let manifest = self.load_manifest()?;
         let valid_ids: HashSet<&str> = manifest
             .entries
             .iter()
             .map(|entry| entry.id.as_str())
             .collect();
-        let files_dir = self.files_dir();
-        let metadata = match std::fs::symlink_metadata(&files_dir) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(MediaError::Io(error)),
-        };
-        if metadata.file_type().is_symlink()
-            || is_windows_reparse_point(&metadata)
-            || !metadata.is_dir()
-        {
-            return Err(MediaError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "library files path is not a real directory",
-            )));
-        }
-        let read = std::fs::read_dir(files_dir)?;
-        for entry in read {
+        let capabilities = self.capabilities()?;
+        let active_stages = self
+            .active_stages
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        for entry in capabilities.staging.entries()? {
             let entry = entry?;
-            let path = entry.path();
-            let metadata = std::fs::symlink_metadata(&path)?;
-            let file_type = metadata.file_type();
-            if file_type.is_symlink() || is_windows_reparse_point(&metadata) {
-                return Err(MediaError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "library content path is not a real file or directory",
-                )));
-            }
-            if entry.file_name() == STAGING_SUBDIR {
-                if file_type.is_dir() {
-                    std::fs::remove_dir_all(path)?;
-                } else {
-                    std::fs::remove_file(path)?;
-                }
+            let name = entry.file_name();
+            if active_stages.contains(&name) {
                 continue;
             }
-            let is_manifest_owned = path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .is_some_and(|id| valid_ids.contains(id));
-            if !is_manifest_owned && file_type.is_file() {
-                std::fs::remove_file(path)?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() && !file_type.is_symlink() {
+                return Err(MediaError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "library staging contains an unexpected directory",
+                )));
+            }
+            capabilities.staging.remove_file_or_symlink(&name)?;
+        }
+        let mut seen_owned_ids = HashSet::new();
+        for entry in capabilities.files.entries()? {
+            let entry = entry?;
+            if entry.file_name() == STAGING_SUBDIR {
+                continue;
+            }
+            let file_type = entry.file_type()?;
+            if !file_type.is_file() || file_type.is_symlink() {
+                return Err(MediaError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "library content path is not a nofollow regular file",
+                )));
+            }
+            let name = entry.file_name();
+            let content_id = Path::new(&name).file_stem().and_then(OsStr::to_str);
+            let is_manifest_owned = content_id.is_some_and(|id| valid_ids.contains(id));
+            if let Some(id) = content_id.filter(|id| valid_ids.contains(*id)) {
+                if !seen_owned_ids.insert(id.to_string()) {
+                    return Err(MediaError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("multiple stored copies claim library id {id}"),
+                    )));
+                }
+            }
+            if !is_manifest_owned {
+                entry.remove_file()?;
             }
         }
         Ok(())
     }
 
-    fn stored_target(&self, id: &str, source: &Path) -> PathBuf {
-        let ext = source
-            .extension()
-            .and_then(|value| value.to_str())
-            .map(|value| format!(".{value}"))
-            .unwrap_or_default();
-        self.files_dir().join(format!("{id}{ext}"))
-    }
-
-    fn staging_path(&self, id: &str, source: &Path) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let file_name = self
-            .stored_target(id, source)
-            .file_name()
-            .map(|value| value.to_string_lossy().into_owned())
-            .unwrap_or_else(|| id.to_string());
-        self.files_dir().join(STAGING_SUBDIR).join(format!(
-            "{file_name}.{}.{}.pending",
-            std::process::id(),
-            sequence
-        ))
-    }
-
     /// Read the manifest, returning an empty one if it does not exist yet.
     fn load_manifest(&self) -> Result<Manifest> {
-        let path = self.manifest_path();
-        match std::fs::read(&path) {
+        let root = &self.capabilities()?.root;
+        match read_nofollow(root, MANIFEST_NAME) {
             Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Manifest {
-                version: MANIFEST_VERSION,
-                entries: Vec::new(),
-            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if let Some((_backup, manifest)) = self.latest_valid_manifest_backup()? {
+                    Ok(manifest)
+                } else {
+                    Ok(Manifest {
+                        version: MANIFEST_VERSION,
+                        entries: Vec::new(),
+                    })
+                }
+            }
             Err(e) => Err(MediaError::Io(e)),
         }
     }
@@ -312,12 +613,19 @@ impl LibraryStore {
     /// Atomically persist the manifest: write a temp file, then rename over the
     /// real path. The rename is atomic on the same filesystem.
     fn store_manifest(&self, manifest: &Manifest) -> Result<()> {
-        std::fs::create_dir_all(&self.root)?;
+        let root = &self.capabilities()?.root;
         let bytes = serde_json::to_vec_pretty(manifest)?;
-        let final_path = self.manifest_path();
-        let tmp_path = self.root.join(format!("{MANIFEST_NAME}.tmp"));
-        std::fs::write(&tmp_path, &bytes)?;
-        std::fs::rename(&tmp_path, &final_path)?;
+        let tmp_name = unique_manifest_artifact("tmp");
+        let _tmp_cleanup = CapabilityArtifactGuard {
+            dir: root,
+            name: tmp_name.clone(),
+        };
+        write_new_nofollow(root, &tmp_name, &bytes)?;
+        commit_manifest_file(root, &tmp_name)?;
+        // The canonical manifest is committed at this point. Artifact cleanup
+        // is maintenance only; surfacing its failure would make RAII delete a
+        // final copy that the committed manifest now owns.
+        let _ = self.reconcile_manifest_artifacts();
         Ok(())
     }
 
@@ -350,15 +658,21 @@ impl LibraryStore {
     }
 
     fn store_copy(&self, id: &str, source: &Path, bytes: &[u8]) -> Result<()> {
-        let files_dir = self.files_dir();
-        std::fs::create_dir_all(&files_dir)?;
-        let stored = self.stored_target(id, source);
-        if stored.exists() {
+        let capabilities = self.capabilities()?;
+        let stored = Self::stored_name(id, source);
+        if self.stored_index()?.contains_key(id) {
             return Ok(());
         }
-        let tmp = files_dir.join(format!(".{id}.tmp"));
-        std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, &stored)?;
+        match write_new_nofollow(&capabilities.files, &stored, bytes) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let index = self.stored_index()?;
+                if !index.contains_key(id) {
+                    return Err(MediaError::Io(error));
+                }
+            }
+            Err(error) => return Err(MediaError::Io(error)),
+        }
         Ok(())
     }
 
@@ -401,14 +715,16 @@ impl LibraryStore {
             }
             return Ok(PreparedFavorite {
                 entry: existing,
-                staged_path: None,
-                stored_path: None,
+                capabilities: Arc::clone(self.capabilities()?),
+                active_stages: Arc::clone(&self.active_stages),
+                staged_name: None,
+                stored_name: None,
                 owns_stored_path: false,
             });
         }
 
-        let staged_path = self.staging_path(&id, req.source);
-        let stored_path = self.stored_target(&id, req.source);
+        let staged_name = Self::staging_name(&id, req.source);
+        let stored_name = Self::stored_name(&id, req.source);
         let entry = LibraryEntry {
             id,
             kind: req.kind.to_string(),
@@ -417,17 +733,25 @@ impl LibraryStore {
             source: req.source.to_str().map(|s| s.to_string()),
             thumb: req.thumb.clone(),
         };
-        if let Some(parent) = staged_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        if let Err(error) = std::fs::write(&staged_path, bytes) {
-            let _ = std::fs::remove_file(&staged_path);
+        let capabilities = Arc::clone(self.capabilities()?);
+        self.active_stages
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(staged_name.clone());
+        if let Err(error) = write_new_nofollow(&capabilities.staging, &staged_name, &bytes) {
+            self.active_stages
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&staged_name);
+            let _ = capabilities.staging.remove_file_or_symlink(&staged_name);
             return Err(MediaError::Io(error));
         }
         Ok(PreparedFavorite {
             entry,
-            staged_path: Some(staged_path),
-            stored_path: Some(stored_path),
+            capabilities,
+            active_stages: Arc::clone(&self.active_stages),
+            staged_name: Some(staged_name),
+            stored_name: Some(stored_name),
             owns_stored_path: false,
         })
     }
@@ -437,6 +761,11 @@ impl LibraryStore {
     /// publication time. RAII owns the staged or final copy until the manifest
     /// commit succeeds; startup reconciliation removes crash-window leftovers.
     pub fn publish_favorite(&self, mut prepared: PreparedFavorite) -> Result<FavoriteOutcome> {
+        if !Arc::ptr_eq(self.capabilities()?, &prepared.capabilities) {
+            return Err(MediaError::Other(anyhow::anyhow!(
+                "favorite preparation belongs to a different library capability"
+            )));
+        }
         let _guard = self
             .write_lock
             .lock()
@@ -450,31 +779,25 @@ impl LibraryStore {
             .cloned()
         {
             if self.stored_path(&existing.id)?.is_none() {
-                let staged_path = prepared
-                    .staged_path
-                    .as_ref()
-                    .ok_or_else(|| {
-                        MediaError::Other(anyhow::anyhow!(
-                            "existing library entry has no durable copy"
-                        ))
-                    })?
-                    .clone();
-                let stored_path = prepared
-                    .stored_path
-                    .as_ref()
-                    .ok_or_else(|| {
-                        MediaError::Other(anyhow::anyhow!("favorite preparation has no target"))
-                    })?
-                    .clone();
-                // If the concurrent publisher already installed the copy, keep
-                // RAII ownership of this redundant stage through the return so
-                // Drop (or next-start reconciliation) still owns its cleanup.
-                if !stored_path.exists() {
-                    std::fs::rename(&staged_path, &stored_path)?;
-                    prepared.staged_path = None;
-                    if let Some(parent) = staged_path.parent() {
-                        let _ = std::fs::remove_dir(parent);
+                let staged_name = prepared.staged_name.as_ref().ok_or_else(|| {
+                    MediaError::Other(anyhow::anyhow!(
+                        "existing library entry has no durable copy"
+                    ))
+                })?;
+                let stored_name = prepared.stored_name.as_ref().ok_or_else(|| {
+                    MediaError::Other(anyhow::anyhow!("favorite preparation has no target"))
+                })?;
+                match copy_new_nofollow(
+                    &prepared.capabilities.staging,
+                    staged_name,
+                    &prepared.capabilities.files,
+                    stored_name,
+                ) {
+                    Ok(()) => {
+                        prepared.release_stage();
                     }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(MediaError::Io(error)),
                 }
             }
             return Ok(FavoriteOutcome {
@@ -483,36 +806,27 @@ impl LibraryStore {
             });
         }
 
-        let staged_path = prepared
-            .staged_path
-            .as_ref()
-            .ok_or_else(|| {
-                MediaError::Other(anyhow::anyhow!(
-                    "favorite preparation was already published"
-                ))
-            })?
-            .clone();
-        let stored_path = prepared
-            .stored_path
-            .as_ref()
-            .ok_or_else(|| {
-                MediaError::Other(anyhow::anyhow!("favorite preparation has no target"))
-            })?
-            .clone();
-        if stored_path.exists() {
-            std::fs::remove_file(&stored_path)?;
-        }
-        std::fs::rename(&staged_path, &stored_path)?;
-        prepared.staged_path = None;
+        let staged_name = prepared.staged_name.as_ref().ok_or_else(|| {
+            MediaError::Other(anyhow::anyhow!(
+                "favorite preparation was already published"
+            ))
+        })?;
+        let stored_name = prepared.stored_name.as_ref().ok_or_else(|| {
+            MediaError::Other(anyhow::anyhow!("favorite preparation has no target"))
+        })?;
+        copy_new_nofollow(
+            &prepared.capabilities.staging,
+            staged_name,
+            &prepared.capabilities.files,
+            stored_name,
+        )?;
         prepared.owns_stored_path = true;
-        if let Some(parent) = staged_path.parent() {
-            let _ = std::fs::remove_dir(parent);
-        }
+        prepared.release_stage();
 
         manifest.entries.push(prepared.entry.clone());
         self.store_manifest(&manifest)?;
         prepared.owns_stored_path = false;
-        prepared.stored_path = None;
+        prepared.stored_name = None;
         Ok(FavoriteOutcome {
             entry: prepared.entry.clone(),
             created: true,
@@ -557,23 +871,21 @@ impl LibraryStore {
 
     /// Absolute path to the stored copy for an entry id, if present on disk.
     pub fn stored_path(&self, id: &str) -> Result<Option<PathBuf>> {
-        let dir = self.files_dir();
-        let read = match std::fs::read_dir(&dir) {
-            Ok(r) => r,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(MediaError::Io(e)),
-        };
-        for entry in read {
-            let path = entry?.path();
-            if path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .is_some_and(|stem| stem == id)
-            {
-                return Ok(Some(path));
-            }
-        }
-        Ok(None)
+        Ok(self
+            .stored_index()?
+            .remove(id)
+            .map(|name| self.files_dir().join(name)))
+    }
+
+    /// Validate and enumerate stored copies once, returning absolute display
+    /// paths keyed by content id. Callers rendering or reconciling many entries
+    /// should use this batch form instead of rescanning for each id.
+    pub fn stored_paths(&self) -> Result<HashMap<String, PathBuf>> {
+        Ok(self
+            .stored_index()?
+            .into_iter()
+            .map(|(id, name)| (id, self.files_dir().join(name)))
+            .collect())
     }
 
     /// Remove an entry from the manifest and delete its stored copy. Returns
@@ -591,14 +903,14 @@ impl LibraryStore {
             return Ok(false);
         }
         manifest.version = MANIFEST_VERSION;
-        let stored_path = self.stored_path(id)?;
+        let stored_name = self.stored_index()?.remove(id);
         self.store_manifest(&manifest)?;
         // Commit the manifest first. A failed manifest write must not leave an
         // entry that still exists on disk pointing at a copy we already deleted.
         // A failed best-effort cleanup after the commit only leaves an orphaned
         // content-addressed file, which is safe and can be reclaimed later.
-        if let Some(path) = stored_path {
-            let _ = std::fs::remove_file(path);
+        if let Some(name) = stored_name {
+            let _ = self.capabilities()?.files.remove_file_or_symlink(name);
         }
         Ok(true)
     }
@@ -720,8 +1032,7 @@ mod tests {
         assert_eq!(first.id, second.id);
         // Only one manifest entry and one stored file.
         assert_eq!(store.entries().unwrap().len(), 1);
-        let count = std::fs::read_dir(lib.join(FILES_SUBDIR)).unwrap().count();
-        assert_eq!(count, 1);
+        assert_eq!(store.stored_paths().unwrap().len(), 1);
         // The kept entry is the first favorite (source a).
         assert_eq!(second.source.as_deref(), a.to_str());
     }
@@ -791,7 +1102,12 @@ mod tests {
         drop(prepared);
         assert!(store.entries().unwrap().is_empty());
         assert!(store.stored_path(&id).unwrap().is_none());
-        assert!(!store.files_dir().join(STAGING_SUBDIR).exists());
+        assert_eq!(
+            std::fs::read_dir(store.files_dir().join(STAGING_SUBDIR))
+                .unwrap()
+                .count(),
+            0
+        );
 
         let prepared = store
             .prepare_favorite(&req(&source, "video", None))
@@ -815,15 +1131,22 @@ mod tests {
             .prepare_favorite(&req(&source, "video", None))
             .unwrap();
         let id = prepared.entry().id.clone();
-        std::fs::create_dir(store.root.join(format!("{MANIFEST_NAME}.tmp"))).unwrap();
+        std::fs::create_dir(store.root.join(MANIFEST_NAME)).unwrap();
 
         store
             .publish_favorite(prepared)
             .expect_err("blocked manifest commit must fail");
 
+        std::fs::remove_dir(store.root.join(MANIFEST_NAME)).unwrap();
         assert!(store.entries().unwrap().is_empty());
         assert!(store.stored_path(&id).unwrap().is_none());
-        assert_eq!(std::fs::read_dir(store.files_dir()).unwrap().count(), 0);
+        assert!(store.stored_paths().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_dir(store.files_dir().join(STAGING_SUBDIR))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 
     #[test]
@@ -844,10 +1167,10 @@ mod tests {
         reopened.reconcile_storage().unwrap();
 
         assert!(kept_path.is_file());
-        assert!(!staging_dir.exists());
+        assert_eq!(std::fs::read_dir(&staging_dir).unwrap().count(), 0);
         assert!(!orphan_path.exists());
         assert_eq!(reopened.entries().unwrap(), vec![kept]);
-        assert_eq!(std::fs::read_dir(reopened.files_dir()).unwrap().count(), 1);
+        assert_eq!(reopened.stored_paths().unwrap().len(), 1);
     }
 
     #[cfg(unix)]
@@ -869,9 +1192,244 @@ mod tests {
             .reconcile_storage()
             .expect_err("symlinked files root must be rejected");
 
-        assert!(error.to_string().contains("not a real directory"));
+        assert!(error.to_string().contains("secure global library root"));
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"must survive");
         assert_eq!(std::fs::read_dir(&external).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_files_capability_defeats_a_barrier_coordinated_root_swap() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let library_root = tmp.path().join("lib");
+        let external = tmp.path().join("external");
+        std::fs::create_dir(&external).unwrap();
+        let sentinel = external.join("sentinel.mp4");
+        std::fs::write(&sentinel, b"must survive").unwrap();
+        let store = Arc::new(LibraryStore::new(&library_root));
+        let retained_files = library_root.join("files.retained");
+        std::fs::write(store.files_dir().join("orphan.mp4"), b"orphan").unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let worker = {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                store.reconcile_storage()
+            })
+        };
+
+        std::fs::rename(store.files_dir(), &retained_files).unwrap();
+        symlink(&external, store.files_dir()).unwrap();
+        barrier.wait();
+        worker.join().unwrap().unwrap();
+
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"must survive");
+        assert_eq!(std::fs::read_dir(&external).unwrap().count(), 1);
+        assert!(!retained_files.join("orphan.mp4").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_root_capability_defeats_a_barrier_coordinated_namespace_swap() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let source = src_file(tmp.path(), "clip.mp4", b"retained root bytes");
+        let library_root = tmp.path().join("lib");
+        let retained_root = tmp.path().join("lib.retained");
+        let external = tmp.path().join("external");
+        std::fs::create_dir(&external).unwrap();
+        let sentinel = external.join("sentinel.json");
+        std::fs::write(&sentinel, b"must survive").unwrap();
+        let store = Arc::new(LibraryStore::new(&library_root));
+        let barrier = Arc::new(Barrier::new(2));
+        let worker = {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                store.favorite(&req(&source, "video", None))
+            })
+        };
+
+        std::fs::rename(&library_root, &retained_root).unwrap();
+        symlink(&external, &library_root).unwrap();
+        barrier.wait();
+        let entry = worker.join().unwrap().unwrap();
+
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"must survive");
+        assert_eq!(std::fs::read_dir(&external).unwrap().count(), 1);
+        assert!(retained_root.join(MANIFEST_NAME).is_file());
+        assert!(std::fs::read_dir(retained_root.join(FILES_SUBDIR))
+            .unwrap()
+            .any(|item| item
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&entry.id)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_staging_capability_defeats_a_barrier_coordinated_namespace_swap() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let source = src_file(tmp.path(), "clip.mp4", b"retained staging bytes");
+        let store = Arc::new(LibraryStore::new(tmp.path().join("lib")));
+        let staging_path = store.files_dir().join(STAGING_SUBDIR);
+        let retained_staging = store.files_dir().join(".staging.retained");
+        let external = tmp.path().join("external-stage");
+        std::fs::create_dir(&external).unwrap();
+        let sentinel = external.join("sentinel.pending");
+        std::fs::write(&sentinel, b"must survive").unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let worker = {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                drop(
+                    store
+                        .prepare_favorite(&req(&source, "video", None))
+                        .unwrap(),
+                );
+            })
+        };
+
+        std::fs::rename(&staging_path, &retained_staging).unwrap();
+        symlink(&external, &staging_path).unwrap();
+        barrier.wait();
+        worker.join().unwrap();
+
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"must survive");
+        assert_eq!(std::fs::read_dir(&external).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(&retained_staging).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_reads_never_follow_a_swapped_leaf_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let library_root = tmp.path().join("lib");
+        let external_manifest = tmp.path().join("external.json");
+        std::fs::write(&external_manifest, br#"{"version":1,"entries":[]}"#).unwrap();
+        let store = LibraryStore::new(&library_root);
+        symlink(&external_manifest, library_root.join(MANIFEST_NAME)).unwrap();
+
+        store
+            .entries()
+            .expect_err("manifest leaf symlink must fail closed");
+
+        assert_eq!(
+            std::fs::read(&external_manifest).unwrap(),
+            br#"{"version":1,"entries":[]}"#
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reconciliation_rejects_a_junctioned_files_root_without_touching_its_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let library_root = tmp.path().join("lib");
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&library_root).unwrap();
+        std::fs::create_dir(&external).unwrap();
+        let sentinel = external.join("sentinel.mp4");
+        std::fs::write(&sentinel, b"must survive").unwrap();
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(library_root.join(FILES_SUBDIR))
+            .arg(&external)
+            .status()
+            .unwrap();
+        assert!(status.success(), "create junction fixture");
+        let store = LibraryStore::new(library_root);
+
+        store
+            .reconcile_storage()
+            .expect_err("junctioned files root must be rejected");
+
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"must survive");
+        assert_eq!(std::fs::read_dir(&external).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn reconciliation_does_not_sweep_a_live_prepared_favorite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = src_file(tmp.path(), "clip.mp4", b"live stage");
+        let store = LibraryStore::new(tmp.path().join("lib"));
+        let prepared = store
+            .prepare_favorite(&req(&source, "video", None))
+            .unwrap();
+
+        store.reconcile_storage().unwrap();
+        let outcome = store.publish_favorite(prepared).unwrap();
+
+        assert!(outcome.created);
+        assert!(store.stored_path(&outcome.entry.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn stored_lookup_rejects_a_directory_claiming_a_manifest_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = src_file(tmp.path(), "clip.mp4", b"directory collision");
+        let store = LibraryStore::new(tmp.path().join("lib"));
+        let entry = store.favorite(&req(&source, "video", None)).unwrap();
+        std::fs::remove_file(store.stored_path(&entry.id).unwrap().unwrap()).unwrap();
+        std::fs::create_dir(store.files_dir().join(format!("{}.mp4", entry.id))).unwrap();
+
+        let error = store
+            .stored_path(&entry.id)
+            .expect_err("directory must not be accepted as durable content");
+
+        assert!(error.to_string().contains("nofollow regular file"));
+        assert!(store.reconcile_storage().is_err());
+    }
+
+    #[test]
+    fn stored_lookup_rejects_duplicate_extensions_for_one_content_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = src_file(tmp.path(), "clip.mp4", b"duplicate collision");
+        let store = LibraryStore::new(tmp.path().join("lib"));
+        let entry = store.favorite(&req(&source, "video", None)).unwrap();
+        std::fs::write(
+            store.files_dir().join(format!("{}.mov", entry.id)),
+            b"duplicate",
+        )
+        .unwrap();
+
+        let error = store
+            .stored_paths()
+            .expect_err("duplicate candidates must fail closed");
+
+        assert!(error.to_string().contains("multiple stored copies"));
+        assert!(store.reconcile_storage().is_err());
+    }
+
+    #[test]
+    fn batch_stored_path_index_enumerates_the_directory_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LibraryStore::new(tmp.path().join("lib"));
+        for index in 0..32 {
+            let source = src_file(
+                tmp.path(),
+                &format!("clip-{index}.mp4"),
+                format!("bytes-{index}").as_bytes(),
+            );
+            store.favorite(&req(&source, "video", None)).unwrap();
+        }
+        STORED_INDEX_SCANS.with(|count| count.set(0));
+
+        let paths = store.stored_paths().unwrap();
+
+        assert_eq!(paths.len(), 32);
+        STORED_INDEX_SCANS.with(|count| assert_eq!(count.get(), 1));
     }
 
     #[test]
@@ -905,7 +1463,12 @@ mod tests {
         assert_eq!(outcomes.iter().filter(|outcome| outcome.created).count(), 1);
         assert_eq!(store.entries().unwrap().len(), 1);
         assert_eq!(outcomes[0].entry.id, outcomes[1].entry.id);
-        assert!(!store.files_dir().join(STAGING_SUBDIR).exists());
+        assert_eq!(
+            std::fs::read_dir(store.files_dir().join(STAGING_SUBDIR))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 
     #[test]
@@ -925,12 +1488,7 @@ mod tests {
         assert!(error.to_string().contains("source content changed"));
         assert_eq!(store.entries().unwrap(), vec![entry.clone()]);
         assert!(store.stored_path(&entry.id).unwrap().is_none());
-        assert_eq!(
-            std::fs::read_dir(tmp.path().join("lib").join(FILES_SUBDIR))
-                .unwrap()
-                .count(),
-            0
-        );
+        assert!(store.stored_paths().unwrap().is_empty());
     }
 
     #[test]
@@ -1065,15 +1623,83 @@ mod tests {
         let store = LibraryStore::new(&lib);
         let entry = store.favorite(&req(&source, "video", None)).unwrap();
         let stored = store.stored_path(&entry.id).unwrap().unwrap();
-        std::fs::create_dir(lib.join(format!("{MANIFEST_NAME}.tmp"))).unwrap();
+        let manifest_path = lib.join(MANIFEST_NAME);
+        let manifest_before = std::fs::read(&manifest_path).unwrap();
+        std::fs::remove_file(&manifest_path).unwrap();
+        std::fs::create_dir(&manifest_path).unwrap();
 
         assert!(store.remove(&entry.id).is_err());
+        std::fs::remove_dir(&manifest_path).unwrap();
+        std::fs::write(&manifest_path, manifest_before).unwrap();
         assert!(store.contains(&entry.id).unwrap());
         assert_eq!(
             store.stored_path(&entry.id).unwrap().as_deref(),
             Some(stored.as_path())
         );
         assert!(stored.is_file());
+    }
+
+    #[test]
+    fn stale_transaction_temp_does_not_block_a_later_manifest_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = src_file(tmp.path(), "clip.mp4", b"fresh transaction");
+        let store = LibraryStore::new(tmp.path().join("lib"));
+        let legacy_tmp = store.root.join(format!("{MANIFEST_NAME}.tmp"));
+        let unique_tmp = store.root.join(format!(".{MANIFEST_NAME}.0.{:020}.tmp", 7));
+        std::fs::write(&legacy_tmp, b"crashed").unwrap();
+        std::fs::write(&unique_tmp, b"crashed").unwrap();
+
+        let entry = store.favorite(&req(&source, "video", None)).unwrap();
+
+        assert_eq!(store.entries().unwrap(), vec![entry]);
+        assert!(!legacy_tmp.exists());
+        assert!(!unique_tmp.exists());
+    }
+
+    #[test]
+    fn startup_restores_a_retained_manifest_backup_when_canonical_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = src_file(tmp.path(), "clip.mp4", b"recover backup");
+        let library_root = tmp.path().join("lib");
+        let store = LibraryStore::new(&library_root);
+        let entry = store.favorite(&req(&source, "video", None)).unwrap();
+        let backup = library_root.join(format!(
+            ".{MANIFEST_NAME}.{}.{:020}.backup",
+            std::process::id(),
+            42
+        ));
+        std::fs::rename(library_root.join(MANIFEST_NAME), &backup).unwrap();
+        let reopened = LibraryStore::new(&library_root);
+
+        reopened.reconcile_storage().unwrap();
+
+        assert_eq!(reopened.entries().unwrap(), vec![entry]);
+        assert!(library_root.join(MANIFEST_NAME).is_file());
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn invalid_canonical_manifest_preserves_a_recoverable_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let library_root = tmp.path().join("lib");
+        let store = LibraryStore::new(&library_root);
+        let backup = library_root.join(format!(
+            ".{MANIFEST_NAME}.{}.{:020}.backup",
+            std::process::id(),
+            43
+        ));
+        std::fs::write(&backup, br#"{"version":1,"entries":[]}"#).unwrap();
+        std::fs::write(library_root.join(MANIFEST_NAME), b"not json").unwrap();
+
+        store
+            .reconcile_storage()
+            .expect_err("invalid canonical manifest must fail closed");
+
+        assert!(backup.is_file());
+        assert_eq!(
+            std::fs::read(library_root.join(MANIFEST_NAME)).unwrap(),
+            b"not json"
+        );
     }
 
     #[test]
