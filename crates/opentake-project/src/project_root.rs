@@ -1521,9 +1521,12 @@ fn delete_by_handle(leaf: &TransactionLeaf) -> std::io::Result<()> {
 fn rename_by_handle(root: &Dir, leaf: &TransactionLeaf, target: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO, FILE_RENAME_INFO_0,
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FileRenameInformation, NtSetInformationFile, FILE_RENAME_INFORMATION,
+        FILE_RENAME_INFORMATION_0,
     };
+    use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
     let target = match target.components().collect::<Vec<_>>().as_slice() {
         [Component::Normal(name)] => *name,
@@ -1546,25 +1549,28 @@ fn rename_by_handle(root: &Dir, leaf: &TransactionLeaf, target: &Path) -> std::i
         .checked_mul(std::mem::size_of::<u16>())
         .and_then(|size| u32::try_from(size).ok())
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "target too long"))?;
-    let info_size = std::mem::offset_of!(FILE_RENAME_INFO, FileName)
+    let info_size = std::mem::size_of::<FILE_RENAME_INFORMATION>()
         .checked_add(file_name_bytes as usize)
         .ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "rename allocation overflow",
             )
-        })?
-        .max(std::mem::size_of::<FILE_RENAME_INFO>());
+        })?;
+    const _: () =
+        assert!(std::mem::align_of::<usize>() >= std::mem::align_of::<FILE_RENAME_INFORMATION>());
     let word_size = std::mem::size_of::<usize>();
     let mut storage = vec![0_usize; info_size.div_ceil(word_size)];
-    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
     let info_size = u32::try_from(info_size).map_err(|_| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "rename buffer too large")
     })?;
-    // SAFETY: storage is aligned and sized for the header plus UTF-16 target;
-    // both retained handles remain open throughout the synchronous call.
-    let renamed = unsafe {
-        (*info).Anonymous = FILE_RENAME_INFO_0 {
+    // SAFETY: storage is aligned and sized for the complete native header plus
+    // the UTF-16 target. Both retained handles remain open throughout the call.
+    // TransactionLeaf is opened without FILE_FLAG_OVERLAPPED, so the operation
+    // completes synchronously and cannot outlive the stack IO_STATUS_BLOCK.
+    let status = unsafe {
+        (*info).Anonymous = FILE_RENAME_INFORMATION_0 {
             ReplaceIfExists: true,
         };
         (*info).RootDirectory = root.as_raw_handle();
@@ -1574,15 +1580,19 @@ fn rename_by_handle(root: &Dir, leaf: &TransactionLeaf, target: &Path) -> std::i
             std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
             wide.len(),
         );
-        SetFileInformationByHandle(
+        let mut io_status = IO_STATUS_BLOCK::default();
+        NtSetInformationFile(
             leaf.handle.as_file().as_raw_handle(),
-            FileRenameInfo,
+            &mut io_status,
             info.cast(),
             info_size,
+            FileRenameInformation,
         )
     };
-    if renamed == 0 {
-        return Err(std::io::Error::last_os_error());
+    if status < 0 {
+        // SAFETY: this converts only the NTSTATUS value returned above.
+        let error = unsafe { RtlNtStatusToDosError(status) };
+        return Err(std::io::Error::from_raw_os_error(error as i32));
     }
     Ok(())
 }
