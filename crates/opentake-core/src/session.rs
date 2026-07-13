@@ -37,7 +37,8 @@ use std::path::{Path, PathBuf};
 use opentake_domain::{ClipType, MediaAsset, MediaManifest, MediaManifestEntry, Timeline};
 use opentake_ops::command::{self, EditCommand, EditResult};
 use opentake_ops::{EditorState, IdGen};
-use opentake_project::{GenerationLog, Project, ProjectCompatibility};
+use opentake_project::{GenerationLog, Project, ProjectCompatibility, ProjectRoot};
+use same_file::Handle;
 
 use crate::error::{CoreError, Result};
 
@@ -114,6 +115,10 @@ pub struct EditorSession {
     /// Absolute path to the `.opentake` bundle, or `None` for an unsaved project.
     project_dir: Option<PathBuf>,
 
+    /// Retained no-follow authority for the concrete opened/saved bundle.
+    /// Same-project reads and writes never re-resolve [`Self::project_dir`].
+    project_root: Option<ProjectRoot>,
+
     /// Append-only AI generation audit log (persisted as `generation-log.json`).
     generation_log: GenerationLog,
 
@@ -135,6 +140,7 @@ impl EditorSession {
         EditorSession {
             state: EditorState::default(),
             project_dir: None,
+            project_root: None,
             generation_log: GenerationLog::new(),
             compatibility: ProjectCompatibility::default(),
         }
@@ -148,7 +154,8 @@ impl EditorSession {
     /// Propagates [`opentake_project::ProjectError`] (missing/corrupt
     /// `project.json`, etc.) as [`CoreError::Project`].
     pub fn open_project(path: impl AsRef<Path>) -> Result<Self> {
-        let project = Project::open(path)?;
+        let project_root = ProjectRoot::open(path)?;
+        let project = Project::open_from_root(&project_root)?;
         let compatibility = project.compatibility().clone();
         // EditorState::new wraps timeline + manifest with empty history at
         // version 0 — exactly the post-open state we want.
@@ -156,6 +163,7 @@ impl EditorSession {
         Ok(EditorSession {
             state,
             project_dir: Some(project.bundle_path),
+            project_root: Some(project_root),
             generation_log: project.generation_log.unwrap_or_default(),
             compatibility,
         })
@@ -179,13 +187,26 @@ impl EditorSession {
     /// those references silently dangle after Save-As, since `bundle.rs::save`
     /// "never creates or deletes `media/`". A plain save (target equals the
     /// current dir) copies nothing; a missing source `media/` is a no-op; a
-    /// partial-copy failure propagates as a real error (never a half-copied
-    /// bundle) — see [`opentake_project::copy_media_dir`].
+    /// partial-copy failure propagates as a real error. Both source and
+    /// destination traversal use the retained [`ProjectRoot`] authorities.
     ///
     /// Errors with [`CoreError::NoProjectOpen`] when neither a path nor a
     /// remembered project dir is available.
     pub fn save_project(&mut self, path: Option<PathBuf>) -> Result<PathBuf> {
         self.save_project_with_thumbnail(path, None)
+    }
+
+    /// Persist the current media manifest as the sole durable component commit.
+    /// Used by library workflows, which do not mutate any other project state.
+    pub fn save_media_manifest(&mut self) -> Result<PathBuf> {
+        self.ensure_mutable()?;
+        let target = self.project_dir.clone().ok_or(CoreError::NoProjectOpen)?;
+        let root = self.project_root.as_ref().ok_or(CoreError::NoProjectOpen)?;
+        let mut project =
+            Project::new_with_compatibility(target.clone(), self.compatibility.clone());
+        project.manifest = self.state.manifest.clone();
+        project.save_manifest_to_root(root)?;
+        Ok(target)
     }
 
     /// Like [`Self::save_project`] but also writes a cover `thumbnail.jpg` when
@@ -206,9 +227,21 @@ impl EditorSession {
         // Remember the currently-open bundle before we adopt any new target, so
         // a save-as knows the source `media/` to carry across.
         let previous_dir = self.project_dir.clone();
-        let target = match path.or_else(|| previous_dir.clone()) {
+        let requested_target = match path.or_else(|| previous_dir.clone()) {
             Some(p) => p,
             None => return Err(CoreError::NoProjectOpen),
+        };
+        let same_target = if previous_dir.as_deref() == Some(requested_target.as_path()) {
+            true
+        } else if let Some(root) = &self.project_root {
+            root.matches_path(&requested_target)?
+        } else {
+            false
+        };
+        let target = if same_target {
+            previous_dir.clone().unwrap_or(requested_target)
+        } else {
+            requested_target
         };
 
         let mut project =
@@ -223,21 +256,18 @@ impl EditorSession {
         if !self.generation_log.entries.is_empty() {
             project.generation_log = Some(self.generation_log.clone());
         }
-        project.save()?;
-
-        // Save-as (target differs from the previously-open bundle): fold the
-        // source bundle's `media/` into the new one before adopting it, so
-        // internal media survives the move. `copy_media_dir` is itself a no-op
-        // when source == dest, but only copy when we truly had a prior bundle at
-        // a different path (a first save of a never-saved project has no source
-        // media/ to carry).
-        if let Some(source_dir) = &previous_dir {
-            if source_dir != &target {
-                opentake_project::copy_media_dir(source_dir, &target)?;
-            }
-        }
+        let new_root = if same_target {
+            let root = self.project_root.as_ref().ok_or(CoreError::NoProjectOpen)?;
+            project.save_to_root(root)?;
+            None
+        } else {
+            Some(project.publish_complete_to(&target, self.project_root.as_ref())?)
+        };
 
         self.project_dir = Some(target.clone());
+        if let Some(root) = new_root {
+            self.project_root = Some(root);
+        }
         Ok(target)
     }
 
@@ -419,6 +449,13 @@ impl EditorSession {
         self.state.manifest.clone()
     }
 
+    /// Restore a previously captured manifest after an application-layer
+    /// transaction fails. Kept crate-private so ordinary callers cannot bypass
+    /// the command/session invariants.
+    pub(crate) fn restore_media(&mut self, manifest: MediaManifest) {
+        self.state.manifest = manifest;
+    }
+
     /// The manifest entry for `asset_id`, if present (lookup without cloning the
     /// whole manifest).
     pub fn media_entry(&self, asset_id: &str) -> Option<&MediaManifestEntry> {
@@ -453,6 +490,14 @@ impl EditorSession {
     /// The current bundle path, if the project has one.
     pub fn project_dir(&self) -> Option<&Path> {
         self.project_dir.as_deref()
+    }
+
+    /// Compare a caller's retained no-follow bundle handle with the handle
+    /// retained when this exact session opened or saved the project.
+    pub(crate) fn matches_project_root_identity(&self, current: &Handle) -> Result<bool> {
+        self.ensure_mutable()?;
+        let expected = self.project_root.as_ref().ok_or(CoreError::NoProjectOpen)?;
+        Ok(expected.matches_identity(current))
     }
 
     /// Read-only access to the generation log.
@@ -561,6 +606,43 @@ mod tests {
         assert!(!reopened.can_undo());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_project_save_uses_the_root_retained_when_the_session_opened() {
+        let root = std::env::temp_dir().join(format!(
+            "opentake-core-session-retained-save-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let projects = root.join("projects");
+        let retained = root.join("projects-retained");
+        let bundle = projects.join("A.opentake");
+        let _ = std::fs::remove_dir_all(&root);
+        let mut project = Project::new(&bundle);
+        project.timeline = one_video_track();
+        project.save().unwrap();
+        let mut session = EditorSession::open_project(&bundle).unwrap();
+
+        std::fs::rename(&projects, &retained).unwrap();
+        Project::new(&bundle).save().unwrap();
+        session
+            .apply(add_one_clip_cmd(), &SeqIdGen::new("retained-"))
+            .unwrap();
+        session.save_project(None).unwrap();
+
+        assert!(Project::open(&bundle).unwrap().timeline.tracks.is_empty());
+        assert_eq!(
+            Project::open(retained.join("A.opentake"))
+                .unwrap()
+                .timeline
+                .tracks[0]
+                .clips
+                .len(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -918,6 +1000,37 @@ mod tests {
         let after = std::fs::metadata(&media_file).unwrap();
         assert_eq!(before.len(), after.len());
         assert!(media_file.is_file());
+    }
+
+    #[test]
+    fn path_alias_to_the_retained_root_is_a_same_project_save() {
+        let tmp = TmpDir::new("same-root-alias");
+        let bundle = tmp.path().join("Same.opentake");
+        let mut session = seed_bundle_with_internal_media(&bundle, "clip.png", b"media bytes");
+        std::fs::create_dir_all(bundle.join("chat-sessions")).unwrap();
+        std::fs::write(bundle.join("chat-sessions/thread.json"), b"chat bytes").unwrap();
+        std::fs::write(bundle.join("thumbnail.jpg"), b"cover bytes").unwrap();
+        let alias_hop = tmp.path().join("alias-hop");
+        std::fs::create_dir_all(&alias_hop).unwrap();
+        let alias = alias_hop.join("..").join("Same.opentake");
+
+        let written = session.save_project(Some(alias)).unwrap();
+
+        assert_eq!(written, bundle);
+        assert_eq!(session.project_dir(), Some(bundle.as_path()));
+        assert_eq!(
+            std::fs::read(bundle.join("media/clip.png")).unwrap(),
+            b"media bytes"
+        );
+        assert_eq!(
+            std::fs::read(bundle.join("chat-sessions/thread.json")).unwrap(),
+            b"chat bytes"
+        );
+        assert_eq!(
+            std::fs::read(bundle.join("thumbnail.jpg")).unwrap(),
+            b"cover bytes"
+        );
+        assert!(!tmp.path().join(".Same.opentake.opentake-backup").exists());
     }
 
     #[test]

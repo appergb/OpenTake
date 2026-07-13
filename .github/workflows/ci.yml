@@ -142,3 +142,34 @@ jobs:
 
       - name: pnpm test
         run: pnpm -C web test
+
+  windows-library-security:
+    name: Windows (library capability security)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup component add rustfmt clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-library-security-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-library-security-
+
+      - name: Test retained-handle and junction defenses
+        run: cargo test -p opentake-media library::tests -- --test-threads=1
+
+      - name: Test complete bundle publication and recovery
+        run: cargo test -p opentake-project -- --test-threads=1
+
+      - name: Test Tauri project-library commit guards
+        run: cargo test -p opentake-tauri library::tests -- --test-threads=1
+
+      - name: Clippy capability-backed library
+        run: cargo clippy -p opentake-media --all-targets -- -D warnings

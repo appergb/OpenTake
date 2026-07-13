@@ -129,23 +129,23 @@ pub fn run() {
                 models_dir.clone(),
             );
 
-            // Global asset library (#37/#54): a cross-project copy-on-favorite
-            // store under <app_data_dir>/OpenTake/Library, falling back to the OS
-            // temp dir if the platform data path is unavailable so favoriting
-            // still works. Lazily created on first write by the store itself.
-            let library_root = app
-                .path()
-                .app_data_dir()
-                .unwrap_or_else(|_| std::env::temp_dir())
-                .join("OpenTake")
-                .join("Library");
-            let library_store = LibraryStore::new(library_root);
+            // A global favorite must never silently become a temporary file.
+            // Keep the editor usable if app-data resolution fails, but make all
+            // library commands return the same explicit initialization error.
+            let library_state = match app.path().app_data_dir() {
+                Ok(data_dir) => crate::library::LibraryState::new(LibraryStore::new(
+                    data_dir.join("OpenTake").join("Library"),
+                )),
+                Err(error) => crate::library::LibraryState::unavailable(format!(
+                    "global library unavailable: could not resolve app data directory: {error}"
+                )),
+            };
 
             app.manage(core);
             app.manage(chat_state);
             app.manage(MediaState::new(engine));
             app.manage(PrewarmScheduler::new(initial_project_epoch));
-            app.manage(crate::library::LibraryState::new(library_store));
+            app.manage(library_state);
             // Lazily-acquired GPU context for timeline composite previews (#47).
             app.manage(render::RenderState::new());
             // Shared cancel flag for the in-flight `export_video` (#112 progress
@@ -191,6 +191,7 @@ pub fn run() {
             media::relink_media,
             media::get_media,
             media::toggle_favorite,
+            media::sync_project_favorites,
             media::save_clip_as_media,
             media::extract_audio,
             media::get_waveform,

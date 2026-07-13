@@ -22,6 +22,7 @@
 //! Import and list commands never decode frames; the WebView asks for thumbnails
 //! lazily through `generate_thumbnail`.
 
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -29,10 +30,13 @@ use image::ImageEncoder;
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
-use opentake_core::{importable_clip_type, AppCore, CoreError, EditCommand, ProbedMedia};
+use opentake_core::{
+    importable_clip_type, AppCore, CoreError, DeferredCoreEvents, EditCommand, ProbedMedia,
+};
 use opentake_domain::{
     ClipType, GenerationInput, MediaManifest, MediaManifestEntry, MediaSource, Timeline,
 };
+use opentake_media::library::{FavoriteRequest, LibraryStore, PreparedFavorite};
 #[cfg(test)]
 use opentake_media::MediaCancelToken;
 use opentake_media::{
@@ -45,6 +49,8 @@ use opentake_media::{
     waveform::store::CACHE_SUBDIR,
     FrameRequest, MediaEngine, RgbaFrame,
 };
+
+use crate::library::LibraryState;
 
 pub mod prewarm;
 
@@ -224,6 +230,21 @@ pub struct MediaListDto {
     /// observe whether each poster was queued, coalesced, cached, or rejected.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prewarm: Vec<ImportPrewarmDto>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FavoriteSyncFailureDto {
+    pub asset_id: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FavoriteSyncDto {
+    pub media: MediaListDto,
+    pub migrated_legacy_asset_ids: Vec<String>,
+    pub failures: Vec<FavoriteSyncFailureDto>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -1214,29 +1235,578 @@ pub fn get_media(core: State<'_, AppCore>, media: State<'_, MediaState>) -> Medi
     MediaListDto::from_core(&core, Some(media.engine().cache_root()))
 }
 
-/// `toggle_favorite`: add or remove `asset_ids` from the per-project favorites
-/// set (#91), returning the refreshed catalog so the panel's "mine" tab and the
-/// per-card favorite affordance update. Favorites persist in the project manifest
-/// (not browser storage); unknown ids are ignored by the core.
+/// Persist one project asset in the content-addressed global library and mirror
+/// that identity in the current project manifest.
 #[tauri::command]
 pub fn toggle_favorite(
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
-    asset_ids: Vec<String>,
+    library: State<'_, LibraryState>,
+    asset_id: String,
     favorite: bool,
+    expected_project_epoch: u64,
+    expected_project_path: String,
 ) -> Result<MediaListDto, String> {
-    toggle_favorite_impl(&core, media.engine().cache_root(), asset_ids, favorite)
-        .map_err(|e| e.to_string())
+    let _workflow = library.lock_workflow();
+    toggle_favorite_impl_for_project(
+        &core,
+        media.engine().cache_root(),
+        library.store()?,
+        &asset_id,
+        favorite,
+        expected_project_epoch,
+        Path::new(&expected_project_path),
+    )
 }
 
+#[cfg(test)]
 fn toggle_favorite_impl(
     core: &AppCore,
     cache_root: &Path,
-    asset_ids: Vec<String>,
+    store: &LibraryStore,
+    asset_id: &str,
     favorite: bool,
-) -> Result<MediaListDto, CoreError> {
-    core.set_media_favorite(&asset_ids, favorite)?;
+) -> Result<MediaListDto, String> {
+    core.ensure_project_mutable()
+        .map_err(|error| error.to_string())?;
+    let project = core.runtime_snapshot();
+    let project_dir = project
+        .project_dir
+        .ok_or_else(|| "save the project before changing global favorites".to_string())?;
+    toggle_favorite_impl_for_project(
+        core,
+        cache_root,
+        store,
+        asset_id,
+        favorite,
+        project.project_epoch,
+        &project_dir,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct ExpectedFavoriteProject<'a> {
+    epoch: u64,
+    dir: &'a Path,
+}
+
+fn toggle_favorite_impl_for_project(
+    core: &AppCore,
+    cache_root: &Path,
+    store: &LibraryStore,
+    asset_id: &str,
+    favorite: bool,
+    expected_project_epoch: u64,
+    expected_project_dir: &Path,
+) -> Result<MediaListDto, String> {
+    let mut events = DeferredCoreEvents::default();
+    let result = {
+        let _project_identity = core.lock_project_identity_workflow();
+        toggle_favorite_impl_with(
+            core,
+            cache_root,
+            store,
+            asset_id,
+            favorite,
+            ExpectedFavoriteProject {
+                epoch: expected_project_epoch,
+                dir: expected_project_dir,
+            },
+            &mut events,
+            |request| {
+                store
+                    .prepare_favorite(request)
+                    .map_err(|error| error.to_string())
+            },
+        )
+    };
+    core.emit_deferred(events);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn toggle_favorite_impl_with<F>(
+    core: &AppCore,
+    cache_root: &Path,
+    store: &LibraryStore,
+    asset_id: &str,
+    favorite: bool,
+    expected_project: ExpectedFavoriteProject<'_>,
+    events: &mut DeferredCoreEvents,
+    favorite_file: F,
+) -> Result<MediaListDto, String>
+where
+    F: for<'a> FnOnce(&FavoriteRequest<'a>) -> Result<PreparedFavorite, String>,
+{
+    let project = core
+        .mutable_runtime_snapshot_for_project(expected_project.epoch, expected_project.dir)
+        .map_err(|error| error.to_string())?;
+    let project_dir = project
+        .project_dir
+        .clone()
+        .ok_or_else(|| "save the project before changing global favorites".to_string())?;
+    let before = project.media;
+    let entry = before
+        .entries
+        .iter()
+        .find(|entry| entry.id == asset_id)
+        .cloned()
+        .ok_or_else(|| format!("media asset not found: {asset_id}"))?;
+
+    if favorite {
+        let source = resolve_source_path(&entry, Some(&project_dir))
+            .ok_or_else(|| "media source could not be resolved".to_string())?;
+        if !source.is_file() {
+            return Err("media source is offline; relink before favoriting".to_string());
+        }
+        let kind = clip_type_name(entry.kind);
+        let request = FavoriteRequest {
+            source: &source,
+            kind,
+            category: None,
+            favorited_at: now_epoch_secs(),
+            thumb: None,
+        };
+        let prepared = favorite_file(&request)?;
+        let library_id = prepared.entry().id.clone();
+        let needs_publish = prepared.needs_publish();
+        let changed = match core.set_media_global_favorite_for_project_deferred(
+            project.project_epoch,
+            &project_dir,
+            asset_id,
+            Some(library_id),
+            events,
+        ) {
+            Ok(changed) => changed,
+            Err(error) => return Err(error.to_string()),
+        };
+        if changed || needs_publish {
+            if let Err(error) = core.save_media_manifest_for_project_deferred(
+                project.project_epoch,
+                &project_dir,
+                events,
+            ) {
+                restore_project_favorites(
+                    core,
+                    project.project_epoch,
+                    &project_dir,
+                    &before,
+                    events,
+                );
+                return Err(format!(
+                    "global favorite mapping could not be saved: {error}"
+                ));
+            }
+        }
+        if let Err(error) = store.publish_favorite(prepared) {
+            restore_project_favorites(core, project.project_epoch, &project_dir, &before, events);
+            core.save_media_manifest_for_project_deferred(
+                project.project_epoch,
+                &project_dir,
+                events,
+            )
+            .map_err(|rollback| {
+                format!(
+                    "global favorite could not be published: {error}; project mapping rollback could not be saved: {rollback}"
+                )
+            })?;
+            return Err(format!("global favorite could not be published: {error}"));
+        }
+    } else {
+        let library_id = match before.library_favorite_id(asset_id) {
+            Some(id) => id.to_string(),
+            None if before.is_favorite(asset_id) => {
+                let source = resolve_source_path(&entry, Some(&project_dir))
+                    .ok_or_else(|| "media source could not be resolved".to_string())?;
+                if !source.is_file() {
+                    return Err("favorite migration needs the source to be relinked".to_string());
+                }
+                store
+                    .content_id(source)
+                    .map_err(|error| error.to_string())?
+            }
+            None => return Ok(MediaListDto::from_core(core, Some(cache_root))),
+        };
+        store
+            .remove(&library_id)
+            .map_err(|error| format!("global favorite could not be removed: {error}"))?;
+        let cleared = core
+            .clear_media_global_favorite_id_for_project_deferred(
+                project.project_epoch,
+                &project_dir,
+                &library_id,
+                events,
+            )
+            .map_err(|error| error.to_string())?;
+        let legacy_cleared = core
+            .set_media_global_favorite_for_project_deferred(
+                project.project_epoch,
+                &project_dir,
+                asset_id,
+                None,
+                events,
+            )
+            .map_err(|error| error.to_string())?;
+        if cleared > 0 || legacy_cleared {
+            if let Err(error) = core.save_media_manifest_for_project_deferred(
+                project.project_epoch,
+                &project_dir,
+                events,
+            ) {
+                restore_project_favorites(
+                    core,
+                    project.project_epoch,
+                    &project_dir,
+                    &before,
+                    events,
+                );
+                return Err(format!(
+                    "project favorite mirror could not be saved: {error}"
+                ));
+            }
+        }
+    }
     Ok(MediaListDto::from_core(core, Some(cache_root)))
+}
+
+#[tauri::command]
+pub fn sync_project_favorites(
+    core: State<'_, AppCore>,
+    media: State<'_, MediaState>,
+    library: State<'_, LibraryState>,
+    legacy_asset_ids: Vec<String>,
+    expected_project_epoch: u64,
+    expected_project_path: String,
+) -> Result<FavoriteSyncDto, String> {
+    let _workflow = library.lock_workflow();
+    sync_project_favorites_impl_for_project(
+        &core,
+        media.engine().cache_root(),
+        library.store()?,
+        legacy_asset_ids,
+        expected_project_epoch,
+        Path::new(&expected_project_path),
+    )
+}
+
+#[cfg(test)]
+fn sync_project_favorites_impl(
+    core: &AppCore,
+    cache_root: &Path,
+    store: &LibraryStore,
+    legacy_asset_ids: Vec<String>,
+) -> Result<FavoriteSyncDto, String> {
+    let project = core.runtime_snapshot();
+    let project_dir = project
+        .project_dir
+        .ok_or_else(|| "save the project before synchronizing global favorites".to_string())?;
+    sync_project_favorites_impl_for_project(
+        core,
+        cache_root,
+        store,
+        legacy_asset_ids,
+        project.project_epoch,
+        &project_dir,
+    )
+}
+
+fn sync_project_favorites_impl_for_project(
+    core: &AppCore,
+    cache_root: &Path,
+    store: &LibraryStore,
+    legacy_asset_ids: Vec<String>,
+    expected_project_epoch: u64,
+    expected_project_dir: &Path,
+) -> Result<FavoriteSyncDto, String> {
+    let mut events = DeferredCoreEvents::default();
+    let result = {
+        let _project_identity = core.lock_project_identity_workflow();
+        sync_project_favorites_impl_with_events(
+            core,
+            cache_root,
+            store,
+            legacy_asset_ids,
+            expected_project_epoch,
+            expected_project_dir,
+            &mut events,
+        )
+    };
+    core.emit_deferred(events);
+    result
+}
+
+fn sync_project_favorites_impl_with_events(
+    core: &AppCore,
+    cache_root: &Path,
+    store: &LibraryStore,
+    legacy_asset_ids: Vec<String>,
+    expected_project_epoch: u64,
+    expected_project_dir: &Path,
+    events: &mut DeferredCoreEvents,
+) -> Result<FavoriteSyncDto, String> {
+    let project = core
+        .mutable_runtime_snapshot_for_project(expected_project_epoch, expected_project_dir)
+        .map_err(|error| error.to_string())?;
+    let project_dir = project
+        .project_dir
+        .clone()
+        .ok_or_else(|| "save the project before synchronizing global favorites".to_string())?;
+    let before = project.media;
+    let project_ids: HashSet<&str> = before
+        .entries
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect();
+    let legacy_inputs: BTreeSet<String> = legacy_asset_ids
+        .into_iter()
+        .filter(|id| project_ids.contains(id.as_str()))
+        .collect();
+    let library_ids: HashSet<String> = store
+        .entries()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect();
+    let stored_ids = store
+        .stored_ids_verified()
+        .map_err(|error| error.to_string())?;
+    let mapped_at_start: HashSet<String> = before.favorite_library_ids.keys().cloned().collect();
+    let mut migrated = BTreeSet::new();
+    let mut failures = Vec::new();
+    let mut changed = false;
+    let mut pending_publications: Vec<(String, bool, PreparedFavorite)> = Vec::new();
+
+    let stale_ids: BTreeSet<String> = before
+        .favorite_library_ids
+        .values()
+        .filter(|id| !library_ids.contains(*id))
+        .cloned()
+        .collect();
+    for library_id in stale_ids {
+        let cleared = match core.clear_media_global_favorite_id_for_project_deferred(
+            project.project_epoch,
+            &project_dir,
+            &library_id,
+            events,
+        ) {
+            Ok(cleared) => cleared,
+            Err(error) => {
+                restore_project_favorites(
+                    core,
+                    project.project_epoch,
+                    &project_dir,
+                    &before,
+                    events,
+                );
+                return Err(error.to_string());
+            }
+        };
+        changed |= cleared > 0;
+    }
+    for (asset_id, library_id) in &before.favorite_library_ids {
+        if !library_ids.contains(library_id) {
+            if legacy_inputs.contains(asset_id) {
+                migrated.insert(asset_id.clone());
+            }
+            continue;
+        }
+        let stored_exists = stored_ids.contains(library_id);
+        let repair_result = if stored_exists {
+            Ok(())
+        } else {
+            let entry = before
+                .entries
+                .iter()
+                .find(|entry| entry.id == asset_id.as_str())
+                .ok_or_else(|| format!("media asset not found: {asset_id}"));
+            entry.and_then(|entry| {
+                let source = resolve_source_path(entry, Some(&project_dir))
+                    .ok_or_else(|| "media source could not be resolved".to_string())?;
+                if !source.is_file() {
+                    return Err("media source is offline; relink before favoriting".to_string());
+                }
+                store
+                    .repair_stored_copy(library_id, &source)
+                    .map_err(|error| error.to_string())
+            })
+        };
+        match repair_result {
+            Ok(()) if legacy_inputs.contains(asset_id) => {
+                migrated.insert(asset_id.clone());
+            }
+            Ok(()) => {}
+            Err(message) => failures.push(FavoriteSyncFailureDto {
+                asset_id: asset_id.clone(),
+                message,
+            }),
+        }
+    }
+
+    let mut candidates: BTreeSet<String> = before
+        .favorites
+        .iter()
+        .filter(|id| !mapped_at_start.contains(*id))
+        .cloned()
+        .collect();
+    candidates.extend(
+        legacy_inputs
+            .iter()
+            .filter(|id| !mapped_at_start.contains(*id))
+            .cloned(),
+    );
+    for asset_id in candidates {
+        let Some(entry) = before.entries.iter().find(|entry| entry.id == asset_id) else {
+            continue;
+        };
+        let result = (|| -> Result<PreparedFavorite, String> {
+            let source = resolve_source_path(entry, Some(&project_dir))
+                .ok_or_else(|| "media source could not be resolved".to_string())?;
+            if !source.is_file() {
+                return Err("media source is offline; relink before favoriting".to_string());
+            }
+            let kind = clip_type_name(entry.kind);
+            let request = FavoriteRequest {
+                source: &source,
+                kind,
+                category: None,
+                favorited_at: now_epoch_secs(),
+                thumb: None,
+            };
+            let prepared = store
+                .prepare_favorite(&request)
+                .map_err(|error| error.to_string())?;
+            changed |= core
+                .set_media_global_favorite_for_project_deferred(
+                    project.project_epoch,
+                    &project_dir,
+                    &asset_id,
+                    Some(prepared.entry().id.clone()),
+                    events,
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(prepared)
+        })();
+        match result {
+            Ok(prepared) => pending_publications.push((
+                asset_id.clone(),
+                legacy_inputs.contains(&asset_id),
+                prepared,
+            )),
+            Err(message) => failures.push(FavoriteSyncFailureDto { asset_id, message }),
+        }
+    }
+
+    if changed
+        || pending_publications
+            .iter()
+            .any(|(_, _, item)| item.needs_publish())
+    {
+        if let Err(error) = core.save_media_manifest_for_project_deferred(
+            project.project_epoch,
+            &project_dir,
+            events,
+        ) {
+            restore_project_favorites(core, project.project_epoch, &project_dir, &before, events);
+            return Err(format!(
+                "favorite synchronization could not be saved: {error}"
+            ));
+        }
+    }
+    let mut publish_rollbacks = Vec::new();
+    for (asset_id, is_legacy, prepared) in pending_publications {
+        match store.publish_favorite(prepared) {
+            Ok(_) if is_legacy => {
+                migrated.insert(asset_id);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                failures.push(FavoriteSyncFailureDto {
+                    asset_id: asset_id.clone(),
+                    message: format!("global favorite could not be published: {error}"),
+                });
+                publish_rollbacks.push(asset_id);
+            }
+        }
+    }
+    if !publish_rollbacks.is_empty() {
+        for asset_id in &publish_rollbacks {
+            let mapping = before.library_favorite_id(asset_id).map(str::to_string);
+            core.set_media_global_favorite_for_project_deferred(
+                project.project_epoch,
+                &project_dir,
+                asset_id,
+                mapping.clone(),
+                events,
+            )
+            .map_err(|error| error.to_string())?;
+            if mapping.is_none() && before.is_favorite(asset_id) {
+                core.set_media_favorite_for_project_deferred(
+                    project.project_epoch,
+                    &project_dir,
+                    std::slice::from_ref(asset_id),
+                    true,
+                    events,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+        }
+        core.save_media_manifest_for_project_deferred(project.project_epoch, &project_dir, events)
+            .map_err(|error| {
+                format!("failed favorite mappings could not be rolled back: {error}")
+            })?;
+    }
+    Ok(FavoriteSyncDto {
+        media: MediaListDto::from_core(core, Some(cache_root)),
+        migrated_legacy_asset_ids: migrated.into_iter().collect(),
+        failures,
+    })
+}
+
+pub(crate) fn restore_project_favorites(
+    core: &AppCore,
+    project_epoch: u64,
+    project_dir: &Path,
+    before: &MediaManifest,
+    events: &mut DeferredCoreEvents,
+) {
+    events.clear();
+    for entry in &before.entries {
+        let mapping = before.library_favorite_id(&entry.id).map(str::to_string);
+        let _ = core.set_media_global_favorite_for_project_deferred(
+            project_epoch,
+            project_dir,
+            &entry.id,
+            mapping,
+            events,
+        );
+        if before.is_favorite(&entry.id) && before.library_favorite_id(&entry.id).is_none() {
+            let _ = core.set_media_favorite_for_project_deferred(
+                project_epoch,
+                project_dir,
+                std::slice::from_ref(&entry.id),
+                true,
+                events,
+            );
+        }
+    }
+    events.clear();
+}
+
+pub(crate) fn clip_type_name(kind: ClipType) -> &'static str {
+    match kind {
+        ClipType::Video => "video",
+        ClipType::Audio => "audio",
+        ClipType::Image => "image",
+        ClipType::Text => "text",
+        ClipType::Lottie => "lottie",
+    }
+}
+
+fn now_epoch_secs() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// Build the render inputs for "save clip as media" (#91 §3.5): a single-clip
@@ -1802,6 +2372,20 @@ mod tests {
         core
     }
 
+    fn saved_core_with_media(root: &Path) -> (AppCore, PathBuf, PathBuf, String) {
+        let bundle = root.join("Favorite.opentake");
+        let source = root.join("source.mp4");
+        fs::write(&source, b"favorite bytes").expect("write media fixture");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save initial project");
+        let entry = core
+            .import_media_file(&source, "source", &ProbedMedia::default())
+            .expect("import fixture");
+        core.save_project(None).expect("persist imported media");
+        (core, bundle, source, entry.id)
+    }
+
     fn recursive_tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
         fn walk(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
             if !dir.exists() {
@@ -1835,17 +2419,543 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create temp root");
         let core = unknown_core(tmp.path());
         let before = core.media();
+        let store = LibraryStore::new(tmp.path().join("library"));
 
-        let error = toggle_favorite_impl(
-            &core,
-            &tmp.path().join("cache"),
-            vec!["asset-1".into()],
-            true,
-        )
-        .expect_err("favorite must be rejected");
+        let error = toggle_favorite_impl(&core, &tmp.path().join("cache"), &store, "asset-1", true)
+            .expect_err("favorite must be rejected");
 
-        assert_eq!(error.code(), "validation");
+        assert!(error.contains("compatibility read-only"), "{error}");
         assert_eq!(core.media(), before);
+    }
+
+    #[test]
+    fn stale_project_identity_cannot_mutate_replacement_project_or_global_library() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let project_a_root = tmp.path().join("project-a");
+        let project_b_root = tmp.path().join("project-b");
+        fs::create_dir(&project_a_root).unwrap();
+        fs::create_dir(&project_b_root).unwrap();
+        let (core, _bundle_a, _source_a, asset_a) = saved_core_with_media(&project_a_root);
+        let project_a = core.runtime_snapshot();
+        let project_a_dir = project_a.project_dir.clone().unwrap();
+        let (_other, bundle_b, _source_b, _asset_b) = saved_core_with_media(&project_b_root);
+        core.open_project(bundle_b).expect("replace A with B");
+        let project_b_before = core.media();
+        let library_root = tmp.path().join("library");
+        let store = LibraryStore::new(&library_root);
+        let library_before = recursive_tree(&library_root);
+
+        let toggle_error = toggle_favorite_impl_for_project(
+            &core,
+            tmp.path(),
+            &store,
+            &asset_a,
+            true,
+            project_a.project_epoch,
+            &project_a_dir,
+        )
+        .expect_err("stale A toggle must be rejected before library I/O");
+        let sync_error = sync_project_favorites_impl_for_project(
+            &core,
+            tmp.path(),
+            &store,
+            vec![asset_a],
+            project_a.project_epoch,
+            &project_a_dir,
+        )
+        .expect_err("stale A sync must be rejected before library I/O");
+
+        assert!(toggle_error.contains("project changed"), "{toggle_error}");
+        assert!(sync_error.contains("project changed"), "{sync_error}");
+        assert_eq!(core.media(), project_b_before);
+        assert_eq!(store.entries().unwrap(), Vec::new());
+        assert_eq!(recursive_tree(&library_root), library_before);
+    }
+
+    #[test]
+    fn global_favorite_is_copied_mapped_and_durable_on_reopen() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _source, asset_id) = saved_core_with_media(tmp.path());
+        let store = LibraryStore::new(tmp.path().join("library"));
+
+        toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, true)
+            .expect("favorite globally");
+
+        let library_id = core
+            .media()
+            .library_favorite_id(&asset_id)
+            .expect("project mapping")
+            .to_string();
+        assert!(store.contains(&library_id).unwrap());
+        assert!(store.stored_path(&library_id).unwrap().unwrap().is_file());
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen project");
+        assert_eq!(
+            reopened.media().library_favorite_id(&asset_id),
+            Some(library_id.as_str())
+        );
+    }
+
+    #[test]
+    fn global_library_failure_preserves_the_legacy_project_marker() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _source, asset_id) = saved_core_with_media(tmp.path());
+        core.set_media_favorite(std::slice::from_ref(&asset_id), true)
+            .expect("seed legacy marker");
+        core.save_project(None).expect("persist legacy marker");
+        let library_root = tmp.path().join("library");
+        fs::create_dir_all(&library_root).unwrap();
+        fs::write(library_root.join("library.json"), b"not json").unwrap();
+        let store = LibraryStore::new(library_root);
+
+        toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, true)
+            .expect_err("corrupt library must reject favorite");
+
+        assert!(core.media().is_favorite(&asset_id));
+        assert_eq!(core.media().library_favorite_id(&asset_id), None);
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen project");
+        assert!(reopened.media().is_favorite(&asset_id));
+        assert_eq!(reopened.media().library_favorite_id(&asset_id), None);
+    }
+
+    #[test]
+    fn failed_project_commit_never_removes_a_preexisting_returned_library_id() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _project_source, asset_id) = saved_core_with_media(tmp.path());
+        let store = LibraryStore::new(tmp.path().join("library"));
+        let other_source = tmp.path().join("other-project.mp4");
+        fs::write(&other_source, b"other project bytes").unwrap();
+        let existing = store
+            .favorite(&FavoriteRequest {
+                source: &other_source,
+                kind: "video",
+                category: None,
+                favorited_at: 1.0,
+                thumb: None,
+            })
+            .unwrap();
+        let prepared = store
+            .prepare_favorite(&FavoriteRequest {
+                source: &other_source,
+                kind: "video",
+                category: None,
+                favorited_at: 2.0,
+                thumb: None,
+            })
+            .unwrap();
+        assert!(!prepared.needs_publish());
+        let before = core.media();
+        let manifest_path = bundle.join(opentake_project::layout::MANIFEST_FILE);
+        let manifest_before = fs::read(&manifest_path).unwrap();
+        fs::remove_file(&manifest_path).unwrap();
+        fs::create_dir(&manifest_path).unwrap();
+        let project = core.runtime_snapshot();
+        let project_dir = project.project_dir.clone().unwrap();
+        let mut events = DeferredCoreEvents::default();
+
+        let error = toggle_favorite_impl_with(
+            &core,
+            tmp.path(),
+            &store,
+            &asset_id,
+            true,
+            ExpectedFavoriteProject {
+                epoch: project.project_epoch,
+                dir: &project_dir,
+            },
+            &mut events,
+            |_request| Ok(prepared),
+        )
+        .expect_err("project manifest publish must fail");
+
+        assert!(
+            error.contains("global favorite mapping could not be saved"),
+            "{error}"
+        );
+        assert!(store.contains(&existing.id).unwrap());
+        assert_eq!(store.entries().unwrap(), vec![existing.clone()]);
+        assert!(store.stored_path(&existing.id).unwrap().unwrap().is_file());
+        assert_eq!(core.media(), before);
+        fs::remove_dir(&manifest_path).unwrap();
+        fs::write(&manifest_path, manifest_before).unwrap();
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).unwrap();
+        assert_eq!(reopened.media(), before);
+    }
+
+    #[test]
+    fn failed_project_commit_keeps_new_favorite_invisible_when_library_manifest_is_blocked() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _source, asset_id) = saved_core_with_media(tmp.path());
+        let store = LibraryStore::new(tmp.path().join("library"));
+        let before = core.media();
+        let manifest_path = bundle.join(opentake_project::layout::MANIFEST_FILE);
+        let manifest_before = fs::read(&manifest_path).unwrap();
+        fs::remove_file(&manifest_path).unwrap();
+        fs::create_dir(&manifest_path).unwrap();
+
+        toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, true)
+            .expect_err("project manifest publish must fail");
+
+        assert!(store.entries().unwrap().is_empty());
+        assert_eq!(core.media(), before);
+        fs::remove_dir(&manifest_path).unwrap();
+        fs::write(&manifest_path, manifest_before).unwrap();
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).unwrap();
+        assert_eq!(reopened.media(), before);
+    }
+
+    #[test]
+    fn failed_global_publish_retries_to_a_complete_durable_favorite() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _source, asset_id) = saved_core_with_media(tmp.path());
+        let store = LibraryStore::new(tmp.path().join("library"));
+        let project = core.runtime_snapshot();
+        let project_dir = project.project_dir.clone().unwrap();
+        let mut events = DeferredCoreEvents::default();
+
+        let error = toggle_favorite_impl_with(
+            &core,
+            tmp.path(),
+            &store,
+            &asset_id,
+            true,
+            ExpectedFavoriteProject {
+                epoch: project.project_epoch,
+                dir: &project_dir,
+            },
+            &mut events,
+            |request| {
+                let prepared = store
+                    .prepare_favorite(request)
+                    .map_err(|error| error.to_string())?;
+                fs::create_dir(store.root().join("library.json"))
+                    .map_err(|error| error.to_string())?;
+                Ok(prepared)
+            },
+        )
+        .expect_err("blocked library manifest publish must fail");
+
+        assert!(
+            error.contains("global favorite could not be published"),
+            "{error}"
+        );
+        fs::remove_dir(store.root().join("library.json")).unwrap();
+        assert!(store.entries().unwrap().is_empty());
+        assert!(store.stored_paths().unwrap().is_empty());
+        assert_eq!(core.media().library_favorite_id(&asset_id), None);
+        let reopened_stale = AppCore::new();
+        reopened_stale.open_project(&bundle).unwrap();
+        assert_eq!(reopened_stale.media().library_favorite_id(&asset_id), None);
+
+        let retry = sync_project_favorites_impl(
+            &reopened_stale,
+            tmp.path(),
+            &store,
+            vec![asset_id.clone()],
+        )
+        .expect("sync retries unpublished favorite");
+
+        assert!(retry.failures.is_empty());
+        assert_eq!(retry.migrated_legacy_asset_ids, vec![asset_id.clone()]);
+        let retried_library_id = reopened_stale
+            .media()
+            .library_favorite_id(&asset_id)
+            .expect("retry persists project mapping")
+            .to_string();
+        assert_eq!(store.entries().unwrap().len(), 1);
+        assert!(store.contains(&retried_library_id).unwrap());
+        assert!(store
+            .stored_path(&retried_library_id)
+            .unwrap()
+            .expect("retry publishes stored copy")
+            .is_file());
+        let reopened_converged = AppCore::new();
+        reopened_converged.open_project(bundle).unwrap();
+        assert_eq!(
+            reopened_converged.media().library_favorite_id(&asset_id),
+            Some(retried_library_id.as_str())
+        );
+    }
+
+    #[test]
+    fn deferred_favorite_events_allow_project_reentry_without_deadlock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _source, asset_id) = saved_core_with_media(tmp.path());
+        let store = Arc::new(LibraryStore::new(tmp.path().join("library")));
+        let media_reentered = Arc::new(AtomicBool::new(false));
+        let saved_reentered = Arc::new(AtomicBool::new(false));
+        let callback_core = core.clone();
+        let callback_bundle = bundle.clone();
+        let media_gate = Arc::clone(&media_reentered);
+        let saved_gate = Arc::clone(&saved_reentered);
+        core.subscribe(move |event| match event {
+            opentake_core::CoreEvent::MediaChanged { .. }
+                if !media_gate.swap(true, Ordering::SeqCst) =>
+            {
+                callback_core.new_project();
+                callback_core.open_project(&callback_bundle).unwrap();
+                callback_core.save_project(None).unwrap();
+            }
+            opentake_core::CoreEvent::ProjectSaved { .. }
+                if !saved_gate.swap(true, Ordering::SeqCst) =>
+            {
+                callback_core.new_project();
+                callback_core.open_project(&callback_bundle).unwrap();
+                callback_core.save_project(None).unwrap();
+            }
+            _ => {}
+        });
+        let worker_core = core.clone();
+        let worker_store = Arc::clone(&store);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result =
+                toggle_favorite_impl(&worker_core, tmp.path(), &worker_store, &asset_id, true);
+            done_tx.send(result).unwrap();
+        });
+
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("favorite event callback deadlocked")
+            .expect("favorite succeeds");
+        worker.join().unwrap();
+        assert!(media_reentered.load(Ordering::SeqCst));
+        assert!(saved_reentered.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn offline_unfavorite_uses_persisted_id_and_is_durable() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, source, asset_id) = saved_core_with_media(tmp.path());
+        let store = LibraryStore::new(tmp.path().join("library"));
+        toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, true)
+            .expect("favorite globally");
+        fs::remove_file(source).expect("take source offline");
+
+        toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, false)
+            .expect("unfavorite through persisted id");
+
+        assert!(store.entries().unwrap().is_empty());
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen project");
+        assert!(!reopened.media().is_favorite(&asset_id));
+        assert_eq!(reopened.media().library_favorite_id(&asset_id), None);
+    }
+
+    #[test]
+    fn failed_global_remove_restores_and_persists_project_favorite() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, source, asset_id) = saved_core_with_media(tmp.path());
+        let library_root = tmp.path().join("library");
+        let store = LibraryStore::new(&library_root);
+        toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, true)
+            .expect("favorite globally");
+        let library_id = core
+            .media()
+            .library_favorite_id(&asset_id)
+            .expect("project mapping")
+            .to_string();
+        fs::remove_file(source).expect("take original source offline");
+        let manifest_path = library_root.join("library.json");
+        let manifest_before = fs::read(&manifest_path).unwrap();
+        fs::remove_file(&manifest_path).unwrap();
+        fs::create_dir(&manifest_path).expect("block manifest read");
+
+        let error = toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, false)
+            .expect_err("global remove must fail");
+
+        assert!(
+            error.contains("global favorite could not be removed"),
+            "{error}"
+        );
+        fs::remove_dir(&manifest_path).unwrap();
+        fs::write(&manifest_path, manifest_before).unwrap();
+        assert!(store.contains(&library_id).unwrap());
+        assert!(store.stored_path(&library_id).unwrap().unwrap().is_file());
+        assert_eq!(
+            core.media().library_favorite_id(&asset_id),
+            Some(library_id.as_str())
+        );
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen project");
+        assert_eq!(
+            reopened.media().library_favorite_id(&asset_id),
+            Some(library_id.as_str())
+        );
+    }
+
+    #[test]
+    fn reopened_stale_mapping_converges_without_resurrecting_removed_global_favorite() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _source, asset_id) = saved_core_with_media(tmp.path());
+        let store = LibraryStore::new(tmp.path().join("library"));
+        toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, true)
+            .expect("favorite globally");
+        let library_id = core
+            .media()
+            .library_favorite_id(&asset_id)
+            .unwrap()
+            .to_string();
+        store
+            .remove(&library_id)
+            .expect("remove from another project");
+        let reopened_after_global_delete = AppCore::new();
+        reopened_after_global_delete
+            .open_project(&bundle)
+            .expect("reopen crash-window project");
+        assert_eq!(
+            reopened_after_global_delete
+                .media()
+                .library_favorite_id(&asset_id),
+            Some(library_id.as_str())
+        );
+
+        let synced = sync_project_favorites_impl(
+            &reopened_after_global_delete,
+            tmp.path(),
+            &store,
+            vec![asset_id.clone()],
+        )
+        .expect("reconcile stale mapping");
+
+        assert_eq!(synced.migrated_legacy_asset_ids, vec![asset_id.clone()]);
+        assert!(store.entries().unwrap().is_empty());
+        assert_eq!(
+            reopened_after_global_delete
+                .media()
+                .library_favorite_id(&asset_id),
+            None
+        );
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen project");
+        assert!(!reopened.media().is_favorite(&asset_id));
+    }
+
+    #[test]
+    fn sync_commits_stale_cleanup_when_another_copy_lookup_fails() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _source_a, asset_a) = saved_core_with_media(tmp.path());
+        let source_b = tmp.path().join("source-b.mp4");
+        fs::write(&source_b, b"favorite B bytes").expect("write second media fixture");
+        let asset_b = core
+            .import_media_file(&source_b, "source-b", &ProbedMedia::default())
+            .expect("import second fixture")
+            .id;
+        let store = LibraryStore::new(tmp.path().join("library"));
+        let global_b = store
+            .favorite(&FavoriteRequest {
+                source: &source_b,
+                kind: "video",
+                category: None,
+                favorited_at: 1.0,
+                thumb: None,
+            })
+            .expect("favorite second fixture");
+        core.set_media_global_favorite(&asset_a, Some("f".repeat(64)))
+            .expect("seed stale mapping A");
+        core.set_media_global_favorite(&asset_b, Some(global_b.id.clone()))
+            .expect("seed valid mapping B");
+        core.save_project(None).expect("persist both mappings");
+        fs::remove_dir_all(store.root().join(opentake_media::library::FILES_SUBDIR))
+            .expect("remove files directory");
+        fs::write(
+            store.root().join(opentake_media::library::FILES_SUBDIR),
+            b"not a directory",
+        )
+        .expect("replace files directory with a regular file");
+
+        let synced = sync_project_favorites_impl(&core, tmp.path(), &store, vec![])
+            .expect("copy lookup errors are per-asset failures");
+
+        assert_eq!(synced.failures.len(), 1);
+        assert_eq!(synced.failures[0].asset_id, asset_b);
+        assert!(synced.failures[0].message.starts_with("io:"));
+        assert_eq!(core.media().library_favorite_id(&asset_a), None);
+        assert_eq!(
+            core.media()
+                .library_favorite_id(&synced.failures[0].asset_id),
+            Some(global_b.id.as_str())
+        );
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen project");
+        assert_eq!(reopened.media().library_favorite_id(&asset_a), None);
+        assert_eq!(
+            reopened
+                .media()
+                .library_favorite_id(&synced.failures[0].asset_id),
+            Some(global_b.id.as_str())
+        );
+    }
+
+    #[test]
+    fn sync_rejects_changed_source_when_repairing_expected_library_id() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, source, asset_id) = saved_core_with_media(tmp.path());
+        let store = LibraryStore::new(tmp.path().join("library"));
+        toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, true)
+            .expect("favorite globally");
+        let library_id = core
+            .media()
+            .library_favorite_id(&asset_id)
+            .unwrap()
+            .to_string();
+        let stored = store.stored_path(&library_id).unwrap().unwrap();
+        fs::remove_file(stored).expect("remove durable copy");
+        fs::write(&source, b"changed in place").expect("change source bytes");
+
+        let synced = sync_project_favorites_impl(&core, tmp.path(), &store, vec![asset_id.clone()])
+            .expect("sync returns per-asset failure");
+
+        assert!(synced.migrated_legacy_asset_ids.is_empty());
+        assert_eq!(synced.failures.len(), 1);
+        assert_eq!(synced.failures[0].asset_id, asset_id);
+        assert!(synced.failures[0]
+            .message
+            .contains("source content changed"));
+        assert_eq!(store.entries().unwrap().len(), 1);
+        assert_eq!(store.entries().unwrap()[0].id, library_id);
+        assert!(store.stored_path(&library_id).unwrap().is_none());
+        assert_eq!(
+            core.media()
+                .library_favorite_id(&synced.failures[0].asset_id),
+            Some(library_id.as_str())
+        );
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen project");
+        assert_eq!(
+            reopened
+                .media()
+                .library_favorite_id(&synced.failures[0].asset_id),
+            Some(library_id.as_str())
+        );
+    }
+
+    #[test]
+    fn sync_migrates_a_legacy_manifest_favorite_once_and_persists_it() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _source, asset_id) = saved_core_with_media(tmp.path());
+        let store = LibraryStore::new(tmp.path().join("library"));
+        core.set_media_favorite(std::slice::from_ref(&asset_id), true)
+            .expect("seed legacy favorite");
+        core.save_project(None).expect("persist legacy favorite");
+
+        let first = sync_project_favorites_impl(&core, tmp.path(), &store, vec![asset_id.clone()])
+            .expect("migrate legacy favorite");
+        let second = sync_project_favorites_impl(&core, tmp.path(), &store, vec![asset_id.clone()])
+            .expect("repeat migration");
+
+        assert_eq!(first.migrated_legacy_asset_ids, vec![asset_id.clone()]);
+        assert_eq!(second.migrated_legacy_asset_ids, vec![asset_id.clone()]);
+        assert_eq!(store.entries().unwrap().len(), 1);
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen project");
+        assert!(reopened.media().library_favorite_id(&asset_id).is_some());
     }
 
     #[test]
@@ -3005,9 +4115,9 @@ mod tests {
     }
 
     #[test]
-    fn toggle_favorite_marks_item_and_ignores_unknown_ids() {
-        // #91: favoriting flows through the core into the DTO's `favorite` flag —
-        // the media panel's "mine" tab reads this, not browser storage.
+    fn compatibility_favorite_marker_projects_into_the_media_dto() {
+        // The per-project marker remains a compatibility mirror for old project
+        // files and card state. The Mine grid itself reads the global library.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let clip = root.join("clip.mp4");
