@@ -33,7 +33,7 @@ use opentake_core::{importable_clip_type, AppCore, CoreError, EditCommand, Probe
 use opentake_domain::{
     ClipType, GenerationInput, MediaManifest, MediaManifestEntry, MediaSource, Timeline,
 };
-use opentake_media::library::{FavoriteRequest, LibraryStore};
+use opentake_media::library::{FavoriteOutcome, FavoriteRequest, LibraryStore};
 use opentake_media::{
     cache_key::{file_identity_key, KEY_HEX_LEN},
     decode_frame_at, decode_frames_at,
@@ -1072,6 +1072,24 @@ fn toggle_favorite_impl(
     asset_id: &str,
     favorite: bool,
 ) -> Result<MediaListDto, String> {
+    toggle_favorite_impl_with(core, cache_root, store, asset_id, favorite, |request| {
+        store
+            .favorite_with_outcome(request)
+            .map_err(|error| error.to_string())
+    })
+}
+
+fn toggle_favorite_impl_with<F>(
+    core: &AppCore,
+    cache_root: &Path,
+    store: &LibraryStore,
+    asset_id: &str,
+    favorite: bool,
+    favorite_file: F,
+) -> Result<MediaListDto, String>
+where
+    F: for<'a> FnOnce(&FavoriteRequest<'a>) -> Result<FavoriteOutcome, String>,
+{
     core.ensure_project_mutable()
         .map_err(|error| error.to_string())?;
     let project = core.runtime_snapshot();
@@ -1093,12 +1111,6 @@ fn toggle_favorite_impl(
         if !source.is_file() {
             return Err("media source is offline; relink before favoriting".to_string());
         }
-        let content_id = store
-            .content_id(&source)
-            .map_err(|error| error.to_string())?;
-        let existed = store
-            .contains(&content_id)
-            .map_err(|error| error.to_string())?;
         let kind = clip_type_name(entry.kind);
         let request = FavoriteRequest {
             source: &source,
@@ -1107,28 +1119,28 @@ fn toggle_favorite_impl(
             favorited_at: now_epoch_secs(),
             thumb: None,
         };
-        let library_entry = store
-            .favorite(&request)
-            .map_err(|error| error.to_string())?;
+        let favorite_outcome = favorite_file(&request)?;
         let changed = match core.set_media_global_favorite_for_project(
             project.project_epoch,
             &project_dir,
             asset_id,
-            Some(library_entry.id.clone()),
+            Some(favorite_outcome.entry.id.clone()),
         ) {
             Ok(changed) => changed,
             Err(error) => {
-                if !existed {
-                    let _ = store.remove(&library_entry.id);
+                if favorite_outcome.created {
+                    let _ = store.remove(&favorite_outcome.entry.id);
                 }
                 return Err(error.to_string());
             }
         };
         if changed {
-            if let Err(error) = core.save_project_for_project(project.project_epoch, &project_dir) {
+            if let Err(error) =
+                core.save_media_manifest_for_project(project.project_epoch, &project_dir)
+            {
                 restore_project_favorites(core, project.project_epoch, &project_dir, &before);
-                if !existed {
-                    let _ = store.remove(&library_entry.id);
+                if favorite_outcome.created {
+                    let _ = store.remove(&favorite_outcome.entry.id);
                 }
                 return Err(format!(
                     "global favorite mapping could not be saved: {error}"
@@ -1169,7 +1181,9 @@ fn toggle_favorite_impl(
             )
             .map_err(|error| error.to_string())?;
         if cleared > 0 || legacy_cleared {
-            if let Err(error) = core.save_project_for_project(project.project_epoch, &project_dir) {
+            if let Err(error) =
+                core.save_media_manifest_for_project(project.project_epoch, &project_dir)
+            {
                 restore_project_favorites(core, project.project_epoch, &project_dir, &before);
                 return Err(format!(
                     "project favorite mirror could not be saved: {error}"
@@ -1342,7 +1356,9 @@ fn sync_project_favorites_impl(
     }
 
     if changed {
-        if let Err(error) = core.save_project_for_project(project.project_epoch, &project_dir) {
+        if let Err(error) =
+            core.save_media_manifest_for_project(project.project_epoch, &project_dir)
+        {
             restore_project_favorites(core, project.project_epoch, &project_dir, &before);
             return Err(format!(
                 "favorite synchronization could not be saved: {error}"
@@ -2037,6 +2053,75 @@ mod tests {
         reopened.open_project(bundle).expect("reopen project");
         assert!(reopened.media().is_favorite(&asset_id));
         assert_eq!(reopened.media().library_favorite_id(&asset_id), None);
+    }
+
+    #[test]
+    fn failed_project_commit_never_removes_a_preexisting_returned_library_id() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _project_source, asset_id) = saved_core_with_media(tmp.path());
+        let store = LibraryStore::new(tmp.path().join("library"));
+        let other_source = tmp.path().join("other-project.mp4");
+        fs::write(&other_source, b"other project bytes").unwrap();
+        let existing = store
+            .favorite(&FavoriteRequest {
+                source: &other_source,
+                kind: "video",
+                category: None,
+                favorited_at: 1.0,
+                thumb: None,
+            })
+            .unwrap();
+        let before = core.media();
+        let manifest_path = bundle.join(opentake_project::layout::MANIFEST_FILE);
+        let manifest_before = fs::read(&manifest_path).unwrap();
+        fs::remove_file(&manifest_path).unwrap();
+        fs::create_dir(&manifest_path).unwrap();
+
+        let error =
+            toggle_favorite_impl_with(&core, tmp.path(), &store, &asset_id, true, |_request| {
+                Ok(FavoriteOutcome {
+                    entry: existing.clone(),
+                    created: false,
+                })
+            })
+            .expect_err("project manifest publish must fail");
+
+        assert!(
+            error.contains("global favorite mapping could not be saved"),
+            "{error}"
+        );
+        assert!(store.contains(&existing.id).unwrap());
+        assert_eq!(store.entries().unwrap(), vec![existing.clone()]);
+        assert!(store.stored_path(&existing.id).unwrap().unwrap().is_file());
+        assert_eq!(core.media(), before);
+        fs::remove_dir(&manifest_path).unwrap();
+        fs::write(&manifest_path, manifest_before).unwrap();
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).unwrap();
+        assert_eq!(reopened.media(), before);
+    }
+
+    #[test]
+    fn failed_project_commit_removes_only_the_library_entry_created_by_this_call() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _source, asset_id) = saved_core_with_media(tmp.path());
+        let store = LibraryStore::new(tmp.path().join("library"));
+        let before = core.media();
+        let manifest_path = bundle.join(opentake_project::layout::MANIFEST_FILE);
+        let manifest_before = fs::read(&manifest_path).unwrap();
+        fs::remove_file(&manifest_path).unwrap();
+        fs::create_dir(&manifest_path).unwrap();
+
+        toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, true)
+            .expect_err("project manifest publish must fail");
+
+        assert!(store.entries().unwrap().is_empty());
+        assert_eq!(core.media(), before);
+        fs::remove_dir(&manifest_path).unwrap();
+        fs::write(&manifest_path, manifest_before).unwrap();
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).unwrap();
+        assert_eq!(reopened.media(), before);
     }
 
     #[test]

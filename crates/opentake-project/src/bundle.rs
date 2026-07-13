@@ -196,6 +196,18 @@ impl Project {
         self.save_to(&self.bundle_path)
     }
 
+    /// Persist only `media.json` through one atomic replacement.
+    ///
+    /// Media-library workflows mutate no timeline, generation log, thumbnail,
+    /// or bundled media bytes. Restricting their durable commit to this one
+    /// component prevents a later unrelated component failure from turning an
+    /// error result into a partially saved manifest.
+    pub fn save_manifest(&self) -> Result<()> {
+        self.compatibility.ensure_writable()?;
+        create_dir_all(&self.bundle_path)?;
+        write_json_atomic(&self.bundle_path, layout::MANIFEST_FILE, &self.manifest)
+    }
+
     /// Like [`Self::save`] but targets an explicit `bundle` directory (used by
     /// the archiver to stage a self-contained copy). Does not mutate `self`.
     pub fn save_to(&self, bundle: impl AsRef<Path>) -> Result<()> {

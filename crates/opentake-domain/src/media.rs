@@ -166,10 +166,10 @@ pub struct MediaManifest {
     pub version: i64,
     pub entries: Vec<MediaManifestEntry>,
     pub folders: Vec<MediaFolder>,
-    /// Ids of favorited assets (#91) — a per-project set backing the media
-    /// panel's "mine" tab. Persisted here rather than in browser localStorage so
-    /// favorites travel with the project. Older projects have no `favorites` key,
-    /// so decode defaults it to empty and serialization skips it when empty.
+    /// Legacy per-project favorite ids retained as a compatibility/migration
+    /// mirror. The Mine tab reads the global content-addressed library; sync
+    /// migrates these ids into that store. Older projects have no `favorites`
+    /// key, so decode defaults it to empty and serialization skips it when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub favorites: Vec<String>,
     /// Project asset id → content-addressed global-library id. This keeps the

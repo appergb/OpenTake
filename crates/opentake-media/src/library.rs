@@ -96,6 +96,17 @@ pub struct FavoriteRequest<'a> {
     pub thumb: Option<String>,
 }
 
+/// Result of one favorite transaction. `created` is decided from the same byte
+/// snapshot and under the same manifest lock as `entry`, so callers can safely
+/// roll back only content that this exact call introduced.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FavoriteOutcome {
+    /// The entry selected by the actual source bytes read by this transaction.
+    pub entry: LibraryEntry,
+    /// `true` only when this transaction appended `entry` to the manifest.
+    pub created: bool,
+}
+
 /// The global library store, rooted at a directory. Cloneable handles are not
 /// provided; share one instance behind an `Arc` if multiple owners are needed.
 pub struct LibraryStore {
@@ -219,6 +230,13 @@ impl LibraryStore {
     /// The whole read-modify-write runs under the in-process write lock so two
     /// concurrent favorites cannot clobber each other's manifest update.
     pub fn favorite(&self, req: &FavoriteRequest<'_>) -> Result<LibraryEntry> {
+        Ok(self.favorite_with_outcome(req)?.entry)
+    }
+
+    /// Favorite a file and report whether this transaction created its manifest
+    /// entry. The source is read exactly once; ownership is never inferred from
+    /// a separate preflight hash that could observe different bytes.
+    pub fn favorite_with_outcome(&self, req: &FavoriteRequest<'_>) -> Result<FavoriteOutcome> {
         let bytes = std::fs::read(req.source)?;
         let id = hash_hex(&bytes);
 
@@ -234,7 +252,10 @@ impl LibraryStore {
             if self.stored_path(&id)?.is_none() {
                 self.store_copy(&id, req.source, &bytes)?;
             }
-            return Ok(existing);
+            return Ok(FavoriteOutcome {
+                entry: existing,
+                created: false,
+            });
         }
 
         // Copy the content into the library under its hashed name. The extension
@@ -251,7 +272,10 @@ impl LibraryStore {
         };
         manifest.entries.push(entry.clone());
         self.store_manifest(&manifest)?;
-        Ok(entry)
+        Ok(FavoriteOutcome {
+            entry,
+            created: true,
+        })
     }
 
     /// Restore a missing durable copy for an existing content id.
@@ -459,6 +483,26 @@ mod tests {
         assert_eq!(count, 1);
         // The kept entry is the first favorite (source a).
         assert_eq!(second.source.as_deref(), a.to_str());
+    }
+
+    #[test]
+    fn favorite_outcome_ownership_uses_the_returned_content_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first_source = src_file(tmp.path(), "first.mp4", b"shared bytes");
+        let returned_source = src_file(tmp.path(), "returned.mp4", b"shared bytes");
+        let store = LibraryStore::new(tmp.path().join("lib"));
+
+        let created = store
+            .favorite_with_outcome(&req(&first_source, "video", None))
+            .unwrap();
+        let reused = store
+            .favorite_with_outcome(&req(&returned_source, "video", None))
+            .unwrap();
+
+        assert!(created.created);
+        assert!(!reused.created);
+        assert_eq!(reused.entry, created.entry);
+        assert_eq!(store.entries().unwrap(), vec![created.entry]);
     }
 
     #[test]

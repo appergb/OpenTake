@@ -188,6 +188,18 @@ impl EditorSession {
         self.save_project_with_thumbnail(path, None)
     }
 
+    /// Persist the current media manifest as the sole durable component commit.
+    /// Used by library workflows, which do not mutate any other project state.
+    pub fn save_media_manifest(&mut self) -> Result<PathBuf> {
+        self.ensure_mutable()?;
+        let target = self.project_dir.clone().ok_or(CoreError::NoProjectOpen)?;
+        let mut project =
+            Project::new_with_compatibility(target.clone(), self.compatibility.clone());
+        project.manifest = self.state.manifest.clone();
+        project.save_manifest()?;
+        Ok(target)
+    }
+
     /// Like [`Self::save_project`] but also writes a cover `thumbnail.jpg` when
     /// `thumbnail` carries JPEG bytes. The caller (which owns the media engine /
     /// GPU) captures the representative frame — see

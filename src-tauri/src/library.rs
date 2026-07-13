@@ -2,16 +2,18 @@
 //!
 //! These commands sit on top of [`opentake_media::library::LibraryStore`] (#54),
 //! a cross-project, copy-on-favorite store rooted at `<data dir>/OpenTake/Library`.
-//! The store owns all persistence (atomic manifest, content-addressed files,
-//! in-process write lock); each command here is a thin shim that locks nothing of
-//! its own, calls a store method, and maps the boundary `MediaError` to a
-//! `String` so the WebView gets a plain rejected Promise (`AGENTS.md`: "边界层转
-//! Tauri 的 `Err(String)`").
+//! The store owns its persistence primitives (atomic manifest,
+//! content-addressed files, in-process write lock). Commands that span the
+//! global store and current project additionally take a workflow lock, then map
+//! boundary `MediaError`s to `String` so the WebView gets a plain rejected
+//! Promise (`AGENTS.md`: "边界层转 Tauri 的 `Err(String)`").
 //!
 //! `library_import_to_project` bridges the global library back into the *current*
 //! project: it resolves the stored copy for an entry id, probes it via the media
 //! engine, and appends it to the [`AppCore`] manifest with a fresh project asset
-//! id (so the same favorite can be imported into many projects). It reuses the
+//! id (so the same favorite can be imported into many projects). Cross-store and
+//! project mutations hold [`LibraryState::workflow_lock`]; the store's own lock
+//! still owns each atomic library-manifest operation. It reuses the
 //! [`crate::media::MediaState`] engine for probing rather than re-opening one.
 
 use std::path::PathBuf;
@@ -262,7 +264,9 @@ fn remove_from_library_and_project(
             .clear_media_global_favorite_id_for_project(project.project_epoch, project_dir, id)
             .map_err(|e| e.to_string())?;
         if cleared > 0 {
-            if let Err(error) = core.save_project_for_project(project.project_epoch, project_dir) {
+            if let Err(error) =
+                core.save_media_manifest_for_project(project.project_epoch, project_dir)
+            {
                 crate::media::restore_project_favorites(
                     core,
                     project.project_epoch,
@@ -542,19 +546,20 @@ mod tests {
             })
             .unwrap();
         let bundle = tmp.path().join("ImportFailure.opentake");
-        let backup = tmp.path().join("ImportFailure-backup.opentake");
         let core = AppCore::new();
         core.save_project(Some(bundle.clone())).unwrap();
         let before = core.media();
-        std::fs::rename(&bundle, &backup).unwrap();
-        std::fs::write(&bundle, b"block project directory creation").unwrap();
+        let manifest_path = bundle.join(opentake_project::layout::MANIFEST_FILE);
+        let manifest_before = std::fs::read(&manifest_path).unwrap();
+        std::fs::remove_file(&manifest_path).unwrap();
+        std::fs::create_dir(&manifest_path).unwrap();
 
         library_import_to_project_impl(&core, &engine_for(tmp.path()), &library, &entry.id)
-            .expect_err("real filesystem save failure must roll back import");
+            .expect_err("atomic media manifest publish failure must roll back import");
 
         assert_eq!(core.media(), before);
-        std::fs::remove_file(&bundle).unwrap();
-        std::fs::rename(&backup, &bundle).unwrap();
+        std::fs::remove_dir(&manifest_path).unwrap();
+        std::fs::write(&manifest_path, manifest_before).unwrap();
         let reopened_after_failure = AppCore::new();
         reopened_after_failure.open_project(&bundle).unwrap();
         assert_eq!(reopened_after_failure.media(), before);
@@ -575,5 +580,56 @@ mod tests {
         let reopened_after_retry = AppCore::new();
         reopened_after_retry.open_project(bundle).unwrap();
         assert_eq!(reopened_after_retry.media(), core.media());
+    }
+
+    #[test]
+    fn library_import_does_not_rewrite_an_unrelated_generation_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("clip.mp4");
+        std::fs::write(&source, b"library bytes").unwrap();
+        let library = LibraryState::new(LibraryStore::new(tmp.path().join("library")));
+        let entry = library
+            .store()
+            .unwrap()
+            .favorite(&FavoriteRequest {
+                source: &source,
+                kind: "video",
+                category: None,
+                favorited_at: 1.0,
+                thumb: None,
+            })
+            .unwrap();
+        let bundle = tmp.path().join("GenerationLog.opentake");
+        let mut project = opentake_project::Project::new(&bundle);
+        let mut log = opentake_project::GenerationLog::new();
+        log.entries.push(opentake_project::GenerationLogEntry::new(
+            "log-1",
+            "model",
+            Some(1),
+            Some(2.0),
+        ));
+        project.generation_log = Some(log);
+        project.save().unwrap();
+        let core = AppCore::new();
+        core.open_project(&bundle).unwrap();
+        let generation_log_path = bundle.join(opentake_project::layout::GENERATION_LOG_FILE);
+        let generation_log_before = std::fs::read(&generation_log_path).unwrap();
+        std::fs::remove_file(&generation_log_path).unwrap();
+        std::fs::create_dir(&generation_log_path).unwrap();
+
+        let imported =
+            library_import_to_project_impl(&core, &engine_for(tmp.path()), &library, &entry.id)
+                .expect("manifest-only import must not touch generation log");
+
+        assert!(generation_log_path.is_dir());
+        std::fs::remove_dir(&generation_log_path).unwrap();
+        std::fs::write(&generation_log_path, generation_log_before).unwrap();
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).unwrap();
+        assert_eq!(
+            reopened.media().library_favorite_id(&imported.id),
+            Some(entry.id.as_str())
+        );
+        assert_eq!(reopened.media(), core.media());
     }
 }

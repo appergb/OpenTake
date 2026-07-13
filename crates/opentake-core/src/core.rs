@@ -513,7 +513,7 @@ impl AppCore {
                 session
                     .editor
                     .set_media_global_favorite(&entry.id, Some(library_id.to_string()))?;
-                session.editor.save_project(None)?;
+                session.editor.save_media_manifest()?;
                 Ok(entry)
             })();
             match result {
@@ -669,8 +669,9 @@ impl AppCore {
         Ok(changed)
     }
 
-    /// Save only if the originating project still owns the session lock.
-    pub fn save_project_for_project(
+    /// Atomically save only the media manifest if the originating project still
+    /// owns the session lock.
+    pub fn save_media_manifest_for_project(
         &self,
         expected_project_epoch: u64,
         expected_project_dir: &Path,
@@ -678,7 +679,7 @@ impl AppCore {
         let written = {
             let mut session = self.lock();
             ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
-            session.editor.save_project(None)?
+            session.editor.save_media_manifest()?
         };
         self.events.emit(&CoreEvent::ProjectSaved {
             path: written.to_string_lossy().into_owned(),
@@ -1143,7 +1144,7 @@ mod tests {
             )
             .is_err());
         assert!(core
-            .save_project_for_project(expected_epoch, &project_a)
+            .save_media_manifest_for_project(expected_epoch, &project_a)
             .is_err());
         assert_eq!(core.media(), before);
         let _ = std::fs::remove_dir_all(root);
