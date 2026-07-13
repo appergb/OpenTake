@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use image::ImageEncoder;
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use opentake_core::{importable_clip_type, AppCore, CoreError, EditCommand, ProbedMedia};
 use opentake_domain::{
@@ -709,6 +709,44 @@ fn schedule_import_poster(
     }
 }
 
+pub(crate) fn import_saved_media(
+    core: &AppCore,
+    engine: &MediaEngine,
+    prewarm: &prewarm::PrewarmScheduler,
+    expected_project_epoch: u64,
+    expected_project_dir: &Path,
+    path: &Path,
+) -> Result<MediaListDto, String> {
+    let current = core.runtime_snapshot();
+    if current.project_epoch != expected_project_epoch
+        || current.project_dir.as_deref() != Some(expected_project_dir)
+    {
+        return Err("project changed while saving media".to_string());
+    }
+    let entry = import_one(core, engine, path)
+        .map_err(|error| error.to_string())?
+        .ok_or("failed to import saved media")?;
+    let project_dir = core
+        .project_dir()
+        .ok_or("project closed while importing saved media")?;
+    match &entry.source {
+        MediaSource::Project { relative_path }
+            if project_dir.join(relative_path) == path
+                && Path::new(relative_path)
+                    .components()
+                    .next()
+                    .is_some_and(|component| component.as_os_str() == "media") => {}
+        _ => return Err("saved media must be imported as a project-relative source".to_string()),
+    }
+    let result = schedule_import_poster(core, engine, prewarm, &entry, path);
+    Ok(MediaListDto::from_core_with_import_results(
+        core,
+        Some(engine.cache_root()),
+        Vec::new(),
+        vec![result],
+    ))
+}
+
 /// `import_folder`: bring a local directory into the library.
 ///
 /// - `recursive = false` (default): flat — import the top-level media files into
@@ -1073,13 +1111,15 @@ fn build_single_clip_export(
 /// there must be a bundle `media/` dir to write into.
 #[tauri::command]
 pub fn save_clip_as_media(
+    app: AppHandle,
     core: State<'_, AppCore>,
+    control: State<'_, crate::export::ExportControl>,
     media: State<'_, MediaState>,
     prewarm: State<'_, prewarm::PrewarmScheduler>,
     clip_id: String,
 ) -> Result<MediaListDto, String> {
     save_clip_as_media_impl(&core, || {
-        save_clip_as_media_workflow(&core, media.engine(), &prewarm, &clip_id)
+        save_clip_as_media_workflow(&app, &core, &control, media.engine(), &prewarm, &clip_id)
     })
 }
 
@@ -1092,50 +1132,89 @@ fn save_clip_as_media_impl(
 }
 
 fn save_clip_as_media_workflow(
+    app: &AppHandle,
     core: &AppCore,
+    control: &crate::export::ExportControl,
     engine: &MediaEngine,
     prewarm: &prewarm::PrewarmScheduler,
     clip_id: &str,
 ) -> Result<MediaListDto, String> {
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    let project_dir = core
-        .project_dir()
+    let snapshot = core.runtime_snapshot();
+    let project_dir = snapshot
+        .project_dir
+        .clone()
         .ok_or("save your project before saving a clip as media")?;
-
     let (single_timeline, subset, media_type) =
-        build_single_clip_export(&timeline, &manifest, clip_id)?;
-    if media_type != ClipType::Video {
-        return Err("only video clips can be saved as media for now".to_string());
-    }
+        build_single_clip_export(&snapshot.timeline, &snapshot.media, clip_id)?;
+    let ext = save_clip_extension(media_type)?;
+    let _guard = control.try_begin()?;
+    let out_path =
+        crate::export::unique_project_media_path(&project_dir, &format!("clip_{clip_id}"), ext)?;
+    let project_dir_option = Some(project_dir.clone());
 
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let media_dir = project_dir.join("media");
-    std::fs::create_dir_all(&media_dir).map_err(|e| format!("failed to create media dir: {e}"))?;
-    let out_path = media_dir.join(format!("clip_{clip_id}_{stamp}.mp4"));
-
-    let req = crate::export::ExportRequest {
-        out_path: out_path.to_string_lossy().into_owned(),
-        codec: crate::export::ExportCodec::H264,
-        quality: crate::export::ExportQuality::P1080,
+    let on_progress = |done: i32, total: i32| {
+        crate::export::emit_export_progress(app, done, total);
     };
-    crate::export::run_export(&single_timeline, &subset, &Some(project_dir), &req)
-        .map_err(|e| format!("render failed: {e}"))?;
 
-    // Import the rendered file, then admit its poster without blocking import.
-    let entry = import_one(core, engine, &out_path)
-        .map_err(|e| e.to_string())?
-        .ok_or("failed to import the rendered clip")?;
-    let result = schedule_import_poster(core, engine, prewarm, &entry, &out_path);
-    Ok(MediaListDto::from_core_with_import_results(
-        core,
-        Some(engine.cache_root()),
-        Vec::new(),
-        vec![result],
-    ))
+    let export_result = match ext {
+        "mp4" => {
+            let req = crate::export::ExportRequest {
+                out_path: out_path.to_string_lossy().into_owned(),
+                codec: crate::export::ExportCodec::H264,
+                quality: crate::export::ExportQuality::P1080,
+            };
+            crate::export::run_export_with_control(
+                &single_timeline,
+                &subset,
+                &project_dir_option,
+                &req,
+                Some(control),
+                Some(&on_progress),
+                None,
+            )
+            .map(|_| ())
+        }
+        "wav" => crate::export::mix_timeline_audio_for_manifest(
+            &single_timeline,
+            &subset,
+            &project_dir_option,
+        )
+        .and_then(|pcm| pcm.ok_or_else(|| "audio clip contains no decodable audio".to_string()))
+        .and_then(|pcm| {
+            if control.is_cancelled() {
+                return Err(crate::export::CANCELLED_SENTINEL.to_string());
+            }
+            crate::export::write_wav_s16le(&pcm.samples_f32, pcm.spec.sample_rate, &out_path)?;
+            if control.is_cancelled() {
+                return Err(crate::export::CANCELLED_SENTINEL.to_string());
+            }
+            crate::export::emit_export_progress(app, 1, 1);
+            Ok(())
+        }),
+        _ => unreachable!("save clip extension is fixed by clip type"),
+    };
+
+    crate::export::cleanup_partial_output(
+        &out_path,
+        export_result.and_then(|_| {
+            import_saved_media(
+                core,
+                engine,
+                prewarm,
+                snapshot.project_epoch,
+                &project_dir,
+                &out_path,
+            )
+        }),
+    )
+}
+
+fn save_clip_extension(media_type: ClipType) -> Result<&'static str, String> {
+    match media_type {
+        ClipType::Video => Ok("mp4"),
+        ClipType::Audio => Ok("wav"),
+        _ => Err("only video and audio clips can be saved as media".to_string()),
+    }
 }
 
 /// Validate the user-chosen output path for [`extract_audio`] (Issue #39
@@ -1651,6 +1730,97 @@ mod tests {
         assert!(!called.get());
         assert!(!sentinel.exists());
         assert_eq!(recursive_tree(&media_tree), before);
+    }
+
+    #[test]
+    fn single_clip_save_accepts_video_and_audio_but_rejects_image() {
+        assert_eq!(save_clip_extension(ClipType::Video).unwrap(), "mp4");
+        assert_eq!(save_clip_extension(ClipType::Audio).unwrap(), "wav");
+        assert_eq!(
+            save_clip_extension(ClipType::Image).unwrap_err(),
+            "only video and audio clips can be saved as media"
+        );
+    }
+
+    #[test]
+    fn audio_clip_save_writes_wav_and_imports_project_relative_source() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let bundle = tmp.path().join("AudioSave.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save project");
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(core.runtime_snapshot().project_epoch);
+        let output = crate::export::unique_project_media_path(&bundle, "clip_audio", "wav")
+            .expect("project output");
+        crate::export::write_wav_s16le(&[0.0; 480], 48_000, &output).expect("write audio output");
+
+        import_saved_media(
+            &core,
+            &engine,
+            &scheduler,
+            core.runtime_snapshot().project_epoch,
+            &bundle,
+            &output,
+        )
+        .expect("import saved audio");
+
+        let entry = core
+            .media()
+            .entries
+            .into_iter()
+            .find(|candidate| candidate.name.starts_with("clip_audio"))
+            .expect("imported entry");
+        let relative_path = match entry.source {
+            MediaSource::Project { relative_path } => relative_path,
+            source => panic!("saved audio was not project-relative: {source:?}"),
+        };
+        assert_eq!(bundle.join(&relative_path), output);
+        assert_eq!(
+            output.extension().and_then(|value| value.to_str()),
+            Some("wav")
+        );
+
+        let _ = fs::remove_dir_all(engine.cache_root());
+        assert!(bundle.join(relative_path).is_file());
+    }
+
+    #[test]
+    fn range_saved_media_survives_export_cache_deletion() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let bundle = tmp.path().join("RangeSave.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save project");
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(core.runtime_snapshot().project_epoch);
+        let output = crate::export::unique_project_media_path(&bundle, "range_10_20", "mp4")
+            .expect("project output");
+        fs::write(&output, b"rendered range").expect("write range output");
+
+        import_saved_media(
+            &core,
+            &engine,
+            &scheduler,
+            core.runtime_snapshot().project_epoch,
+            &bundle,
+            &output,
+        )
+        .expect("import saved range");
+        let entry = core
+            .media()
+            .entries
+            .into_iter()
+            .find(|candidate| candidate.name.starts_with("range_10_20"))
+            .expect("imported range");
+        let relative_path = match entry.source {
+            MediaSource::Project { relative_path } => relative_path,
+            source => panic!("saved range was not project-relative: {source:?}"),
+        };
+
+        let _ = fs::remove_dir_all(engine.cache_root());
+        assert_eq!(bundle.join(&relative_path), output);
+        assert!(bundle.join(relative_path).is_file());
     }
 
     #[test]

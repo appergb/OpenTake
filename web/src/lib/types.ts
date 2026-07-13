@@ -676,5 +676,3 @@ export interface ChatMessage {
   createdAt: number;
   toolCallId?: string;
 }
-
-export type ExportFormat = "video" | "audioWav";

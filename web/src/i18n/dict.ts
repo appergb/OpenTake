@@ -409,6 +409,8 @@ const zh: Dict = {
   "contextMenu.freezeFramePrompt": "冻结时长（帧）",
   // Disabled placeholders (issue #93 acceptance: menu must list these even if stub)
   "contextMenu.saveAsMedia": "另存为媒体",
+  "contextMenu.saveRangeAsMedia": "将范围另存为媒体",
+  "contextMenu.clearRange": "清除范围",
   "contextMenu.extractAudio": "提取音频",
   "swapMedia.noCandidates": "没有同类型素材可替换",
 
@@ -1028,6 +1030,8 @@ const en: Dict = {
   "contextMenu.freezeFramePrompt": "Freeze duration (frames)",
   // Disabled placeholders (issue #93 acceptance: menu must list these even if stub)
   "contextMenu.saveAsMedia": "Save as Media",
+  "contextMenu.saveRangeAsMedia": "Save Range as Media",
+  "contextMenu.clearRange": "Clear Range",
   "contextMenu.extractAudio": "Extract Audio",
   "swapMedia.noCandidates": "No compatible media to swap",
 

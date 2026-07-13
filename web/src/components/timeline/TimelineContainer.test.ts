@@ -209,6 +209,17 @@ describe("volumeKeyframeMenuItems", () => {
   });
 });
 
+describe("marked range context routing", () => {
+  it("routes only frames in the half-open marked range", () => {
+    const range = { startFrame: 10, endFrame: 20 };
+
+    expect(timelineContainer.rangeAtContextFrame?.(range, 10)).toEqual(range);
+    expect(timelineContainer.rangeAtContextFrame?.(range, 19)).toEqual(range);
+    expect(timelineContainer.rangeAtContextFrame?.(range, 20)).toBeNull();
+    expect(timelineContainer.rangeAtContextFrame?.(range, 9)).toBeNull();
+  });
+});
+
 describe("accessibleClipRects", () => {
   it("maps canvas clips to stable accessible button rectangles", () => {
     const tl = timeline([

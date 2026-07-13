@@ -11,7 +11,9 @@ import { useClipboardStore } from "../../store/clipboardStore";
 import * as edit from "../../store/editActions";
 import { useT } from "../../i18n";
 import type { Clip, ClipPropertiesReq, Interpolation } from "../../lib/types";
+import type { TimelineRange } from "../../lib/timelineRange";
 import type { FadeEdge } from "./hitTest";
+import { rangeContextMenuItems } from "./TimelineRangeContextMenu";
 
 type MenuItem = {
   label: string;
@@ -154,7 +156,7 @@ export function clipContextMenuItems({
     });
   }
 
-  // Save-as-media and reverse currently stay video-only.
+  // Reverse stays video-only.
   if (clip.mediaType === "video") {
     const tooLongAndNotReversed = reverseInfo.tooLong && !reverseInfo.isReversed;
     items.push({
@@ -170,7 +172,9 @@ export function clipContextMenuItems({
         onReverse();
       },
     });
+  }
 
+  if (clip.mediaType === "video" || clip.mediaType === "audio") {
     items.push({
       label: labels.saveAsMedia,
       action: () => {
@@ -204,12 +208,14 @@ export function ClipContextMenu({
   fadeEdge,
   x,
   y,
+  range,
   onClose,
 }: {
   clipId: string;
   fadeEdge?: FadeEdge;
   x: number;
   y: number;
+  range?: TimelineRange;
   onClose: () => void;
 }) {
   const t = useT();
@@ -336,6 +342,19 @@ export function ClipContextMenu({
         tooLong: currentClip.durationFrames > Math.round(timeline.fps * 60),
       },
     });
+  }
+  if (range) {
+    items.push(
+      ...rangeContextMenuItems({
+        range,
+        labels: {
+          save: t("contextMenu.saveRangeAsMedia"),
+          clear: t("contextMenu.clearRange"),
+        },
+        onSave: edit.saveMarkedRangeAsMedia,
+        onClear: useEditorUiStore.getState().clearTimelineRange,
+      }),
+    );
   }
 
   return (

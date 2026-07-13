@@ -416,13 +416,23 @@ export async function extractAudio(mediaId: string, outPath: string): Promise<st
  * `save_clip_as_media` (#91 §3.5): render one timeline clip — effects, color,
  * text, speed baked in — to a new .mp4 in the project bundle's media/ dir and
  * import it as a fresh asset. This intentionally keeps the original single-clip
- * semantics; range export lives behind `export_range` on the backend and is not
- * the clip-context menu path.
+ * semantics; marked ranges use the separate `save_range_as_media` contract.
  */
 export async function saveClipAsMedia(clipId: string): Promise<MediaList> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<MediaList>("save_clip_as_media", { clipId });
   throw new Error("saving a clip as media requires the desktop app");
+}
+
+export async function saveRangeAsMedia(
+  inFrame: number,
+  outFrame: number,
+): Promise<MediaList> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<MediaList>("save_range_as_media", { inFrame, outFrame });
+  }
+  throw new Error("saving a range as media requires the desktop app");
 }
 
 // MARK: - Transcription (whisper model + on-device transcribe, #183 + captions)

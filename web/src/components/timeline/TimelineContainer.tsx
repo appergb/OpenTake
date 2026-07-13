@@ -38,6 +38,7 @@ import {
   type FadeEdge,
 } from "./hitTest";
 import { ClipContextMenu } from "./ClipContextMenu";
+import { TimelineRangeContextMenu } from "./TimelineRangeContextMenu";
 import { SwapMediaPicker } from "./SwapMediaPicker";
 import { MEDIA_DND_TYPE } from "../media/MediaPanel";
 import { getDraggingMedia, setDraggingMedia } from "../../lib/mediaDragState";
@@ -57,6 +58,11 @@ import {
 } from "../../lib/api";
 import { assetUrl } from "../../lib/asset";
 import type { Clip, ClipType, Interpolation, Timeline } from "../../lib/types";
+import {
+  rangeContains,
+  validRange,
+  type TimelineRange,
+} from "../../lib/timelineRange";
 import type { ClipThumbnailStrip } from "./clipRenderer";
 
 /** Where a move/duplicate drag will land. `newTrack` inserts before `index`
@@ -94,8 +100,24 @@ type DragState =
   | null;
 
 type TimelineContextMenu =
-  | { kind: "clip"; clipId: string; x: number; y: number; fadeEdge?: FadeEdge }
+  | {
+      kind: "clip";
+      clipId: string;
+      x: number;
+      y: number;
+      fadeEdge?: FadeEdge;
+      range?: TimelineRange;
+    }
+  | { kind: "range"; range: TimelineRange; x: number; y: number }
   | { kind: "audioVolumeKeyframe"; clipId: string; frame: number; x: number; y: number };
+
+export function rangeAtContextFrame(
+  range: TimelineRange | null,
+  frame: number,
+): TimelineRange | null {
+  const normalized = validRange(range);
+  return normalized && rangeContains(normalized, frame) ? normalized : null;
+}
 
 type VolumeKeyframeInterpolation = Extract<Interpolation, "linear" | "smooth" | "hold">;
 
@@ -1693,6 +1715,10 @@ export function TimelineContainer() {
   const onContextMenu = useCallback(
     (e: React.MouseEvent) => {
       const { docX, docY } = toDoc(e);
+      const contextRange = rangeAtContextFrame(
+        selectedTimelineRange,
+        frameAt(docX, zoomScale),
+      );
       const keyframeHit = audioVolumeKfHit(timeline, docX, docY, zoomScale, trackHeights);
       if (keyframeHit) {
         e.preventDefault();
@@ -1715,11 +1741,24 @@ export function TimelineContainer() {
         docWidth,
         docHeight,
       );
-      if (!hit) return; // empty space: keep the default (suppressed) menu
+      if (!hit) {
+        if (contextRange) {
+          e.preventDefault();
+          setMenu({ kind: "range", range: contextRange, x: e.clientX, y: e.clientY });
+        }
+        return;
+      }
       e.preventDefault();
       const fadeHit = fadeKneeHit(timeline, docX, docY, zoomScale, trackHeights);
       if (fadeHit?.clipId === hit.clip.id) {
-        setMenu({ kind: "clip", clipId: hit.clip.id, fadeEdge: fadeHit.edge, x: e.clientX, y: e.clientY });
+        setMenu({
+          kind: "clip",
+          clipId: hit.clip.id,
+          fadeEdge: fadeHit.edge,
+          range: contextRange ?? undefined,
+          x: e.clientX,
+          y: e.clientY,
+        });
         return;
       }
       // If the clip isn't already selected, select it with the same linked-group
@@ -1727,7 +1766,13 @@ export function TimelineContainer() {
       if (!selectedClipIds.has(hit.clip.id)) {
         selectClips(clipSelectionForInteraction(timeline, selectedClipIds, hit.clip.id, {}));
       }
-      setMenu({ kind: "clip", clipId: hit.clip.id, x: e.clientX, y: e.clientY });
+      setMenu({
+        kind: "clip",
+        clipId: hit.clip.id,
+        range: contextRange ?? undefined,
+        x: e.clientX,
+        y: e.clientY,
+      });
     },
     [
       toDoc,
@@ -1738,6 +1783,7 @@ export function TimelineContainer() {
       selectClips,
       docWidth,
       docHeight,
+      selectedTimelineRange,
     ],
   );
 
@@ -2000,6 +2046,7 @@ export function TimelineContainer() {
                 setMenu({
                   kind: "clip",
                   clipId: rect.clipId,
+                  range: rangeAtContextFrame(selectedTimelineRange, activeFrame) ?? undefined,
                   x: bounds.left + bounds.width / 2,
                   y: bounds.top + bounds.height / 2,
                 });
@@ -2013,6 +2060,11 @@ export function TimelineContainer() {
               setMenu({
                 kind: "clip",
                 clipId: rect.clipId,
+                range:
+                  rangeAtContextFrame(
+                    selectedTimelineRange,
+                    frameAt(toDoc(event).docX, zoomScale),
+                  ) ?? undefined,
                 x: event.clientX,
                 y: event.clientY,
               });
@@ -2039,6 +2091,16 @@ export function TimelineContainer() {
         <ClipContextMenu
           clipId={menu.clipId}
           fadeEdge={menu.fadeEdge}
+          range={menu.range}
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+        />
+      )}
+
+      {menu?.kind === "range" && (
+        <TimelineRangeContextMenu
+          range={menu.range}
           x={menu.x}
           y={menu.y}
           onClose={() => setMenu(null)}

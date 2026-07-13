@@ -104,15 +104,6 @@ impl ExportQuality {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-pub enum ExportFormat {
-    #[default]
-    #[serde(rename = "video")]
-    Video,
-    #[serde(rename = "audioWav")]
-    AudioWav,
-}
-
 /// Parameters for an export, projected from the front-end. `#[serde(default)]`
 /// on the optional knobs keeps older callers (and partial payloads) working: a
 /// bare `{ "outPath": "..." }` exports H.264 / 1080p.
@@ -152,15 +143,24 @@ pub struct ExportSummary {
 /// composite/encode step, so reusing that channel is the lower-churn option.
 pub const CANCELLED_SENTINEL: &str = "export cancelled";
 
-/// Shared cancel flag for the in-flight export, managed as Tauri app state
-/// (`app.manage(ExportControl::default())`). One export runs at a time in this
-/// cut, so a single flag (rather than a per-export token) is sufficient: the
-/// command handler resets it to `false` at the start of every `export_video`
-/// call, and the frame loop polls it (`Ordering::Relaxed` — a plain progress
-/// signal, not synchronizing any other memory) once per frame.
+/// Shared cancel flag and single-export lease, managed as Tauri app state.
+/// Every user-facing export/save command must acquire [`Self::try_begin`]; this
+/// prevents a second command from clearing the first command's cancel flag.
 #[derive(Default)]
 pub struct ExportControl {
     cancel: Arc<AtomicBool>,
+    busy: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ExportGuard<'a> {
+    busy: &'a AtomicBool,
+}
+
+impl Drop for ExportGuard<'_> {
+    fn drop(&mut self) {
+        self.busy.store(false, Ordering::Release);
+    }
 }
 
 impl ExportControl {
@@ -176,8 +176,16 @@ impl ExportControl {
 
     /// True once [`ExportControl::request_cancel`] has been called since the
     /// last [`ExportControl::reset`].
-    fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn try_begin(&self) -> Result<ExportGuard<'_>, String> {
+        self.busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "another export is already in progress".to_string())?;
+        self.reset();
+        Ok(ExportGuard { busy: &self.busy })
     }
 }
 
@@ -195,6 +203,10 @@ pub fn cancel_export(control: State<'_, ExportControl>) {
 struct ExportProgress {
     done: i32,
     total: i32,
+}
+
+pub(crate) fn emit_export_progress(app: &AppHandle, done: i32, total: i32) {
+    let _ = app.emit("export://progress", ExportProgress { done, total });
 }
 
 /// Minimum spacing between progress emissions, matching upstream's 200ms
@@ -409,6 +421,30 @@ const AUDIO_DECODE_SPEC: PcmSpec = PcmSpec {
     format: PcmFormat::F32,
 };
 
+fn retime_pcm_to_len(samples: &[f32], target_len: usize) -> Vec<f32> {
+    if samples.is_empty() || target_len == 0 {
+        return Vec::new();
+    }
+    if samples.len() == 1 {
+        return vec![samples[0]; target_len];
+    }
+    if target_len == 1 {
+        return vec![samples[0]];
+    }
+
+    let source_span = (samples.len() - 1) as f64;
+    let target_span = (target_len - 1) as f64;
+    (0..target_len)
+        .map(|index| {
+            let source = index as f64 * source_span / target_span;
+            let lo = source.floor() as usize;
+            let hi = source.ceil() as usize;
+            let fraction = (source - lo as f64) as f32;
+            samples[lo] + (samples[hi] - samples[lo]) * fraction
+        })
+        .collect()
+}
+
 /// Project one audio clip into a [`ClipAudio`] for the mixdown: decode its
 /// visible source window, place it at its frame-derived sample offset, and build
 /// the per-sample `volume_at` gain envelope.
@@ -443,6 +479,13 @@ fn project_clip_audio(
         return Ok(None);
     }
 
+    let target_len = ((clip.duration_frames as f64) / timeline_fps as f64 * MIX_SAMPLE_RATE as f64)
+        .round() as usize;
+    let samples = retime_pcm_to_len(&pcm.samples_f32, target_len);
+    if samples.is_empty() {
+        return Ok(None);
+    }
+
     // Placement: the clip's timeline start frame, in mix samples.
     let start_sample = ((clip.start_frame.max(0) as f64) / timeline_fps as f64
         * MIX_SAMPLE_RATE as f64)
@@ -451,9 +494,9 @@ fn project_clip_audio(
     // Per-sample gain from `volume_at`, sampled at the timeline frame each mix
     // sample falls on. Unity throughout collapses to an empty envelope.
     let samples_per_frame = MIX_SAMPLE_RATE as f64 / timeline_fps as f64;
-    let mut gains = Vec::with_capacity(pcm.samples_f32.len());
+    let mut gains = Vec::with_capacity(samples.len());
     let mut all_unity = true;
-    for k in 0..pcm.samples_f32.len() {
+    for k in 0..samples.len() {
         let tl_frame = clip.start_frame + (k as f64 / samples_per_frame).floor() as i32;
         let g = clip.volume_at(tl_frame) as f32;
         if (g - 1.0).abs() > f32::EPSILON {
@@ -464,7 +507,7 @@ fn project_clip_audio(
 
     Ok(Some(ClipAudio {
         start_sample,
-        samples: pcm.samples_f32,
+        samples,
         gains: if all_unity { Vec::new() } else { gains },
     }))
 }
@@ -507,6 +550,15 @@ fn mix_timeline_audio(
     }))
 }
 
+pub(crate) fn mix_timeline_audio_for_manifest(
+    timeline: &opentake_domain::Timeline,
+    manifest: &opentake_domain::MediaManifest,
+    project_dir: &Option<PathBuf>,
+) -> Result<Option<PcmBuffer>, String> {
+    let (_sizes, media) = project_media(manifest, project_dir);
+    mix_timeline_audio(timeline, &media)
+}
+
 /// `export_video`: render the whole timeline to a video file on disk.
 ///
 /// Composites every frame at the full export resolution and encodes them to
@@ -530,11 +582,11 @@ pub fn export_video(
     control: State<'_, ExportControl>,
     req: ExportRequest,
 ) -> Result<ExportSummary, String> {
+    let _guard = control.try_begin()?;
     // Snapshot the session up front; no session lock is held during GPU/encode.
     let timeline = core.get_timeline().timeline;
     let manifest = core.media();
     let project_dir = core.project_dir();
-    control.reset();
     let on_progress = |done: i32, total: i32| {
         let _ = app.emit("export://progress", ExportProgress { done, total });
     };
@@ -570,7 +622,7 @@ pub fn run_export(
 /// [`PROGRESS_INTERVAL`], plus once more at 100% when the loop finishes) are
 /// both optional so callers with no Tauri context (the integration test) can
 /// omit them.
-fn run_export_with_control(
+pub(crate) fn run_export_with_control(
     timeline: &opentake_domain::Timeline,
     manifest: &opentake_domain::MediaManifest,
     project_dir: &Option<PathBuf>,
@@ -717,7 +769,7 @@ fn slice_pcm(pcm: PcmBuffer, start_frame: i32, end_frame: i32, fps: i32) -> PcmB
     }
 }
 
-fn write_wav_s16le(samples: &[f32], sample_rate: u32, out: &Path) -> Result<(), String> {
+pub(crate) fn write_wav_s16le(samples: &[f32], sample_rate: u32, out: &Path) -> Result<(), String> {
     let data = opentake_media::encode::mono_f32_to_s16le(samples);
     let mut buf = Vec::with_capacity(44 + data.len());
     let data_len = data.len() as u32;
@@ -739,54 +791,89 @@ fn write_wav_s16le(samples: &[f32], sample_rate: u32, out: &Path) -> Result<(), 
     std::fs::write(out, &buf).map_err(|e| format!("write wav: {e}"))
 }
 
-fn unique_export_range_path(
-    saves_dir: &Path,
-    name_id: &str,
-    start: i32,
-    end: i32,
+pub(crate) fn unique_project_media_path(
+    project_dir: &Path,
+    stem: &str,
     ext: &str,
-) -> PathBuf {
+) -> Result<PathBuf, String> {
+    if !matches!(ext, "mp4" | "wav") {
+        return Err("unsupported save-as-media extension".to_string());
+    }
+    let mut safe_stem: String = stem
+        .chars()
+        .take(64)
+        .map(|value| {
+            if value.is_ascii_alphanumeric() || matches!(value, '_' | '-') {
+                value
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe_stem.is_empty() {
+        safe_stem.push_str("media");
+    }
+    let media_dir = project_dir.join("media");
+    std::fs::create_dir_all(&media_dir)
+        .map_err(|error| format!("failed to create project media dir: {error}"))?;
+
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
-    saves_dir.join(format!(
-        "save_{name_id}_{start}_{end}_{:x}.{ext}",
-        (nanos << 16) | (counter & 0xffff)
-    ))
+    loop {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = media_dir.join(format!("{safe_stem}_{nanos:x}_{counter:x}.{ext}"));
+        if !path.exists() {
+            return Ok(path);
+        }
+    }
+}
+
+pub(crate) fn cleanup_partial_output<T>(
+    path: &Path,
+    result: Result<T, String>,
+) -> Result<T, String> {
+    if result.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    result
+}
+
+fn validate_save_range(total_frames: i32, in_frame: i32, out_frame: i32) -> Result<(), String> {
+    if in_frame < 0 || out_frame <= in_frame || out_frame > total_frames {
+        return Err(format!(
+            "save range must satisfy 0 <= inFrame < outFrame <= {total_frames}"
+        ));
+    }
+    Ok(())
 }
 
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub fn export_range(
+pub fn save_range_as_media(
     app: AppHandle,
     core: State<'_, AppCore>,
     control: State<'_, ExportControl>,
     media: State<'_, crate::media::MediaState>,
-    track_index: Option<usize>,
-    clip_id: Option<String>,
+    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
     in_frame: i32,
     out_frame: i32,
-    format: ExportFormat,
 ) -> Result<crate::media::MediaListDto, String> {
-    export_range_impl(&core, || {
-        export_range_workflow(
+    save_range_as_media_impl(&core, || {
+        save_range_as_media_workflow(
             &app,
             &core,
             &control,
             media.engine(),
-            track_index,
-            clip_id,
+            &prewarm,
             in_frame,
             out_frame,
-            format,
         )
     })
 }
 
-fn export_range_impl(
+fn save_range_as_media_impl(
     core: &AppCore,
     workflow: impl FnOnce() -> Result<crate::media::MediaListDto, String>,
 ) -> Result<crate::media::MediaListDto, String> {
@@ -794,109 +881,60 @@ fn export_range_impl(
     workflow()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn export_range_workflow(
+fn save_range_as_media_workflow(
     app: &AppHandle,
     core: &AppCore,
     control: &ExportControl,
     engine: &opentake_media::MediaEngine,
-    track_index: Option<usize>,
-    clip_id: Option<String>,
+    prewarm: &crate::media::prewarm::PrewarmScheduler,
     in_frame: i32,
     out_frame: i32,
-    format: ExportFormat,
 ) -> Result<crate::media::MediaListDto, String> {
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    let project_dir = core.project_dir();
-    let (clip_id_resolved, start, end, is_audio_clip) = match &clip_id {
-        Some(id) => {
-            let clip = match track_index {
-                Some(i) => timeline
-                    .tracks
-                    .get(i)
-                    .and_then(|t| t.clips.iter().find(|c| c.id == *id))
-                    .ok_or_else(|| format!("clip not found: {id} in track {i}"))?,
-                None => timeline
-                    .tracks
-                    .iter()
-                    .flat_map(|t| t.clips.iter())
-                    .find(|c| c.id == *id)
-                    .ok_or_else(|| format!("clip not found: {id}"))?,
-            };
-            let clip_start = clip.start_frame;
-            let clip_end = clip.start_frame + clip.duration_frames.max(0);
-            let start = if in_frame > 0 { in_frame } else { clip_start }
-                .max(clip_start)
-                .min(clip_end);
-            let end = if out_frame > 0 { out_frame } else { clip_end }
-                .max(start)
-                .min(clip_end);
-            (
-                Some(id.clone()),
-                start,
-                end,
-                clip.media_type == ClipType::Audio,
-            )
-        }
-        None => {
-            if out_frame <= in_frame {
-                return Err("export_range requires in_frame < out_frame".into());
-            }
-            (None, in_frame.max(0), out_frame.max(0), false)
-        }
-    };
+    let snapshot = core.runtime_snapshot();
+    let project_dir = snapshot
+        .project_dir
+        .clone()
+        .ok_or("save your project before saving a range as media")?;
+    let total_frames = snapshot.timeline.total_frames();
+    validate_save_range(total_frames, in_frame, out_frame)?;
 
-    if end <= start {
-        return Err("export_range: empty frame range".into());
-    }
-
-    let is_audio = matches!(format, ExportFormat::AudioWav) || is_audio_clip;
-    let ext = if is_audio { "wav" } else { "mp4" };
-    let saves_dir = engine.cache_root().join("saves");
-    std::fs::create_dir_all(&saves_dir).map_err(|e| format!("create saves dir: {e}"))?;
-    let name_id = clip_id_resolved.as_deref().unwrap_or("range");
-    let out_path = unique_export_range_path(&saves_dir, name_id, start, end, ext);
-
-    control.reset();
+    let _guard = control.try_begin()?;
+    let out_path = unique_project_media_path(
+        &project_dir,
+        &format!("range_{in_frame}_{out_frame}"),
+        "mp4",
+    )?;
     let on_progress = |done: i32, total: i32| {
         let _ = app.emit("export://progress", ExportProgress { done, total });
     };
-
-    if is_audio {
-        let (_sizes, media_map) = project_media(&manifest, &project_dir);
-        let pcm = mix_timeline_audio(&timeline, &media_map)?
-            .ok_or_else(|| "no audio in range to export".to_string())?;
-        let pcm = slice_pcm(pcm, start, end, timeline.fps);
-        if pcm.samples_f32.is_empty() {
-            return Err("no audio in range to export".into());
-        }
-        write_wav_s16le(&pcm.samples_f32, pcm.spec.sample_rate, &out_path)?;
-    } else {
-        let req = ExportRequest {
-            out_path: out_path.to_string_lossy().into_owned(),
-            codec: ExportCodec::H264,
-            quality: ExportQuality::P1080,
-        };
+    let req = ExportRequest {
+        out_path: out_path.to_string_lossy().into_owned(),
+        codec: ExportCodec::H264,
+        quality: ExportQuality::P1080,
+    };
+    let project_dir_option = Some(project_dir.clone());
+    cleanup_partial_output(
+        &out_path,
         run_export_with_control(
-            &timeline,
-            &manifest,
-            &project_dir,
+            &snapshot.timeline,
+            &snapshot.media,
+            &project_dir_option,
             &req,
             Some(control),
             Some(&on_progress),
-            Some((start, end)),
-        )?;
-    }
-
-    crate::media::import_one(core, engine, &out_path)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "save-as-media import failed".to_string())?;
-
-    Ok(crate::media::MediaListDto::from_core(
-        core,
-        Some(engine.cache_root()),
-    ))
+            Some((in_frame, out_frame)),
+        )
+        .and_then(|_| {
+            crate::media::import_saved_media(
+                core,
+                engine,
+                prewarm,
+                snapshot.project_epoch,
+                &project_dir,
+                &out_path,
+            )
+        }),
+    )
 }
 
 // MARK: - Self-contained `.opentake` bundle export (#29 / upstream `.palmier`)
@@ -1053,7 +1091,7 @@ mod tests {
     }
 
     #[test]
-    fn export_range_refuses_before_save_output_creation() {
+    fn save_range_refuses_before_output_creation() {
         let tmp = tempfile::tempdir().expect("create temp root");
         let core = unknown_core(tmp.path());
         let saves = tmp.path().join("cache/saves");
@@ -1063,7 +1101,7 @@ mod tests {
         let called = std::cell::Cell::new(false);
         let sentinel = saves.join("range-workflow-ran-before-guard.bin");
 
-        let error = export_range_impl(&core, || {
+        let error = save_range_as_media_impl(&core, || {
             called.set(true);
             fs::write(&sentinel, b"bad ordering").expect("write workflow sentinel");
             Err("workflow should not run".into())
@@ -1108,6 +1146,7 @@ mod tests {
         let control = ExportControl::default();
         let clone = ExportControl {
             cancel: control.cancel.clone(),
+            busy: control.busy.clone(),
         };
         clone.request_cancel();
         assert!(control.is_cancelled());
@@ -1258,12 +1297,6 @@ mod tests {
         assert_eq!(req.quality, ExportQuality::P720);
     }
 
-    #[test]
-    fn save_clip_export_format_parses_audio_wav() {
-        let format: ExportFormat = serde_json::from_str(r#""audioWav""#).expect("parse");
-        assert_eq!(format, ExportFormat::AudioWav);
-    }
-
     use opentake_domain::{Timeline, Track};
 
     #[test]
@@ -1281,13 +1314,72 @@ mod tests {
     }
 
     #[test]
-    fn export_range_path_is_unique_for_same_range() {
-        let saves_dir = Path::new("/tmp/saves");
-        let first = unique_export_range_path(saves_dir, "clip-1", 10, 20, "mp4");
-        let second = unique_export_range_path(saves_dir, "clip-1", 10, 20, "mp4");
+    fn project_media_path_is_unique_sanitized_and_inside_media_dir() {
+        let project = tempfile::tempdir().expect("project");
+        let first = unique_project_media_path(project.path(), "../clip / unsafe", "mp4")
+            .expect("first path");
+        let second = unique_project_media_path(project.path(), "../clip / unsafe", "mp4")
+            .expect("second path");
+
         assert_ne!(first, second);
-        assert!(first.to_string_lossy().contains("save_clip-1_10_20_"));
-        assert!(second.to_string_lossy().contains("save_clip-1_10_20_"));
+        assert_eq!(first.parent(), Some(project.path().join("media").as_path()));
+        assert_eq!(
+            first.extension().and_then(|value| value.to_str()),
+            Some("mp4")
+        );
+        let name = first
+            .file_name()
+            .and_then(|value| value.to_str())
+            .expect("file name");
+        assert!(!name.contains('/'));
+        assert!(!name.contains(".."));
+    }
+
+    #[test]
+    fn export_control_rejects_second_save_as_media() {
+        let control = ExportControl::default();
+        let first = control.try_begin().expect("first export starts");
+        let error = control
+            .try_begin()
+            .expect_err("second export must be rejected");
+        assert_eq!(error, "another export is already in progress");
+        drop(first);
+        assert!(
+            control.try_begin().is_ok(),
+            "guard drop must release the export slot"
+        );
+    }
+
+    #[test]
+    fn retime_pcm_matches_speed_two_clip_timeline_duration() {
+        let decoded_at_speed_two = vec![0.0, 0.25, 0.5, 0.75, 1.0, 0.75, 0.5, 0.25];
+        let timeline_len = decoded_at_speed_two.len() / 2;
+        let retimed = retime_pcm_to_len(&decoded_at_speed_two, timeline_len);
+
+        assert_eq!(retimed.len(), timeline_len);
+        assert_eq!(retimed.first(), decoded_at_speed_two.first());
+        assert_eq!(retimed.last(), decoded_at_speed_two.last());
+    }
+
+    #[test]
+    fn failed_save_removes_partial_output() {
+        let project = tempfile::tempdir().expect("project");
+        let output = project.path().join("media/partial.mp4");
+        fs::create_dir_all(output.parent().expect("parent")).expect("media dir");
+        fs::write(&output, b"partial").expect("partial output");
+
+        let result = cleanup_partial_output::<()>(&output, Err("render failed".to_string()));
+
+        assert_eq!(result.unwrap_err(), "render failed");
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn save_range_validates_half_open_bounds_before_output_path_creation() {
+        assert!(validate_save_range(100, 10, 20).is_ok());
+        assert!(validate_save_range(100, -1, 20).is_err());
+        assert!(validate_save_range(100, 20, 20).is_err());
+        assert!(validate_save_range(100, 20, 101).is_err());
     }
 
     #[test]

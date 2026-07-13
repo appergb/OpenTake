@@ -181,4 +181,19 @@ describe("clipContextMenuItems", () => {
     expect(videoItems.some((item) => item.label === labels.reverse)).toBe(true);
     expect(audioItems.some((item) => item.label === labels.reverse)).toBe(false);
   });
+
+  it("shows save as media for video and audio only", () => {
+    const menuLabels = (mediaType: ClipType) =>
+      clipContextMenuItems({
+        clip: clip({ mediaType, sourceClipType: mediaType }),
+        hasClipboardContent: false,
+        labels,
+        ...actions(),
+      }).map((item) => item.label);
+
+    expect(menuLabels("video")).toContain(labels.saveAsMedia);
+    expect(menuLabels("audio")).toContain(labels.saveAsMedia);
+    expect(menuLabels("image")).not.toContain(labels.saveAsMedia);
+    expect(menuLabels("text")).not.toContain(labels.saveAsMedia);
+  });
 });
