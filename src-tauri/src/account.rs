@@ -596,6 +596,18 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push_back(SaveFailure { account, timing });
         }
+
+        fn assert_failures_consumed(&self) {
+            let failures = self
+                .failures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert!(
+                failures.is_empty(),
+                "unconsumed scripted save failures: {}",
+                failures.len()
+            );
+        }
     }
 
     impl KeyStore for ScriptedSaveFailStore {
@@ -979,6 +991,7 @@ mod tests {
             Some("https://one.example.com")
         );
         assert_eq!(state.get(), AccountStatus::Stored);
+        store.assert_failures_consumed();
     }
 
     #[test]
@@ -1015,13 +1028,14 @@ mod tests {
             get_status(&fresh_store, &fresh_state).unwrap(),
             AccountStatus::Offline
         );
+        store.assert_failures_consumed();
     }
 
     #[test]
     fn partial_credential_restore_never_survives_as_stored() {
         for (account, timing) in [
-            (TOKEN_ACCOUNT, FailureTiming::BeforeApply),
-            (TOKEN_BACKEND_ACCOUNT, FailureTiming::AfterApply),
+            (TOKEN_ACCOUNT, FailureTiming::AfterApply),
+            (TOKEN_BACKEND_ACCOUNT, FailureTiming::BeforeApply),
         ] {
             let store = ScriptedSaveFailStore::new();
             let state = AccountState::default();
@@ -1048,6 +1062,7 @@ mod tests {
                 get_status(&store.inner.clone(), &AccountState::default()).unwrap(),
                 AccountStatus::Offline
             );
+            store.assert_failures_consumed();
         }
     }
 
