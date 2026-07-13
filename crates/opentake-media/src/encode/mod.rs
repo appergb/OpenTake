@@ -15,6 +15,7 @@ pub use preset::{even_dimension, ExportPreset, ExportResolution, VideoCodec};
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 
 use crate::decode::pcm::PcmBuffer;
 use crate::error::{MediaError, Result};
@@ -106,11 +107,13 @@ pub struct VideoEncoder {
     /// ffmpeg `-c:a` token for the mux pass (from the preset).
     acodec: &'static str,
     pending_audio: Option<PcmBuffer>,
+    child_reaped: bool,
 }
 
 impl VideoEncoder {
     /// Start an encoder writing to `out`. `w`/`h` must already be even.
     pub fn new(out: &Path, w: u32, h: u32, fps: i32, preset: &ExportPreset) -> Result<Self> {
+        reject_link_output(out)?;
         let mut child = crate::ff::ffmpeg()
             .args(encode_args(out, w, h, fps, preset))
             .spawn()
@@ -123,6 +126,7 @@ impl VideoEncoder {
             out_path: out.to_path_buf(),
             acodec: preset.acodec_arg(),
             pending_audio: None,
+            child_reaped: false,
         })
     }
 
@@ -165,9 +169,7 @@ impl VideoEncoder {
     /// could still be writing `out_path` at the moment the caller deletes it.
     /// Best-effort: the child may have already exited on its own.
     pub fn abort(mut self) {
-        self.stdin.take();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.reap_child();
     }
 
     /// Finish encoding: close stdin, wait for the video pass, then — when a
@@ -180,8 +182,7 @@ impl VideoEncoder {
     /// effort). Without audio this is exactly the old video-only `finish`.
     pub fn finish(mut self) -> Result<()> {
         // Drop stdin to signal EOF to ffmpeg, then wait for the video pass.
-        self.stdin.take();
-        let status = self.child.wait().map_err(MediaError::Io)?;
+        let status = self.wait_for_child()?;
         if !status.success() {
             return Err(MediaError::Encode(format!("ffmpeg exited {status}")));
         }
@@ -191,6 +192,35 @@ impl VideoEncoder {
         };
 
         self.mux_audio(&pcm)
+    }
+
+    fn wait_for_child(&mut self) -> Result<ExitStatus> {
+        self.stdin.take();
+        match self.child.wait() {
+            Ok(status) => {
+                self.child_reaped = true;
+                Ok(status)
+            }
+            Err(error) => {
+                self.reap_child();
+                Err(MediaError::Io(error))
+            }
+        }
+    }
+
+    fn reap_child(&mut self) {
+        self.stdin.take();
+        if self.child_reaped {
+            return;
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.child_reaped = true;
+    }
+
+    #[cfg(test)]
+    fn child_id(&mut self) -> u32 {
+        self.child.as_inner_mut().id()
     }
 
     /// Second ffmpeg pass: mux `pcm` (mono f32, written as s16le) into the
@@ -210,12 +240,13 @@ impl VideoEncoder {
             let bytes = mix::mono_f32_to_s16le(&pcm.samples_f32);
             std::fs::write(&pcm_tmp, &bytes).map_err(MediaError::Io)?;
 
+            reject_link_output(out)?;
             let args = mux_args(&video_tmp, &pcm_tmp, out, pcm.spec.sample_rate, self.acodec);
             let mut child = crate::ff::ffmpeg()
                 .args(args)
                 .spawn()
                 .map_err(|e| MediaError::Encode(format!("mux spawn: {e}")))?;
-            let status = child.wait().map_err(MediaError::Io)?;
+            let status = wait_and_reap(&mut child)?;
             if !status.success() {
                 return Err(MediaError::Encode(format!("ffmpeg mux exited {status}")));
             }
@@ -234,6 +265,51 @@ impl VideoEncoder {
     }
 }
 
+fn reject_link_output(out: &Path) -> Result<()> {
+    let metadata = match std::fs::symlink_metadata(out) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(MediaError::Io(error)),
+    };
+    #[cfg(not(windows))]
+    let is_link = metadata.file_type().is_symlink();
+    #[cfg(windows)]
+    let is_link = {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_type().is_symlink()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    };
+    if is_link {
+        return Err(MediaError::Encode(
+            "refusing to encode through a symlink or reparse point".to_string(),
+        ));
+    }
+    if !metadata.is_file() {
+        return Err(MediaError::Encode(
+            "encoder output must be a regular file".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+impl Drop for VideoEncoder {
+    fn drop(&mut self) {
+        self.reap_child();
+    }
+}
+
+fn wait_and_reap(child: &mut ffmpeg_sidecar::child::FfmpegChild) -> Result<ExitStatus> {
+    match child.wait() {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(MediaError::Io(error))
+        }
+    }
+}
+
 /// Build a sibling temp path next to `out`: `<out>.<tag>.tmp`. Stays on the same
 /// filesystem so the rename in `mux_audio` is atomic and cheap.
 fn sibling_temp(out: &Path, tag: &str) -> PathBuf {
@@ -248,6 +324,59 @@ fn sibling_temp(out: &Path, tag: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn process_is_running(pid: u32) -> bool {
+        std::process::Command::new("ps")
+            .args(["-p", &pid.to_string()])
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_live_encoder_reaps_child_and_releases_output() {
+        assert!(
+            crate::ff::ffmpeg_available(),
+            "encoder lifecycle test requires FFmpeg"
+        );
+        let temp = tempfile::tempdir().expect("encoder temp dir");
+        let output = temp.path().join("live.mp4");
+        let preset = ExportPreset::new(VideoCodec::H264, ExportResolution::P720);
+        let mut encoder = VideoEncoder::new(&output, 16, 16, 30, &preset).expect("start encoder");
+        let pid = encoder.child_id();
+
+        assert!(process_is_running(pid), "encoder child must be live");
+        drop(encoder);
+
+        assert!(
+            !process_is_running(pid),
+            "drop must kill and wait for FFmpeg"
+        );
+        if output.exists() {
+            std::fs::remove_file(&output).expect("reaped encoder releases output file");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn encoder_rejects_preexisting_output_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("encoder temp dir");
+        let outside = temp.path().join("outside.mp4");
+        std::fs::write(&outside, b"keep").expect("outside fixture");
+        let output = temp.path().join("linked.mp4");
+        symlink(&outside, &output).expect("output symlink");
+        let preset = ExportPreset::new(VideoCodec::H264, ExportResolution::P720);
+
+        let error = VideoEncoder::new(&output, 16, 16, 30, &preset)
+            .err()
+            .expect("encoder must reject output links");
+
+        assert!(error.to_string().contains("symlink"));
+        assert_eq!(std::fs::read(&outside).expect("outside readable"), b"keep");
+    }
 
     #[test]
     fn encode_args_declare_rawvideo_stdin_input() {

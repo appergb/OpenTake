@@ -30,9 +30,13 @@
 //! shared projection into a `pub(crate)` helper once both paths are stable.
 
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -144,71 +148,119 @@ pub struct ExportSummary {
 /// composite/encode step, so reusing that channel is the lower-churn option.
 pub const CANCELLED_SENTINEL: &str = "export cancelled";
 
-/// Shared cancel flag and single-export lease, managed as Tauri app state.
-/// Every user-facing export/save command must acquire [`Self::try_begin`]; this
-/// prevents a second command from clearing the first command's cancel flag.
+/// Single-export lease and its cancellation generation, managed as Tauri state.
+/// Claiming a lease and publishing its fresh token happen under one mutex, so a
+/// concurrent cancel can only target the previous operation or the new one; it
+/// can never be erased by a later reset.
 #[derive(Default)]
 pub struct ExportControl {
-    cancel: Arc<AtomicBool>,
-    busy: Arc<AtomicBool>,
-    media_cancel: Arc<Mutex<MediaCancelToken>>,
+    operation: Mutex<ExportOperationState>,
 }
 
-#[derive(Debug)]
+#[derive(Default)]
+struct ExportOperationState {
+    next_generation: u64,
+    active: Option<ActiveExport>,
+}
+
+struct ActiveExport {
+    generation: u64,
+    cancel: MediaCancelToken,
+}
+
 pub(crate) struct ExportGuard<'a> {
-    busy: &'a AtomicBool,
+    control: &'a ExportControl,
+    generation: u64,
+}
+
+impl std::fmt::Debug for ExportGuard<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExportGuard")
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Drop for ExportGuard<'_> {
     fn drop(&mut self) {
-        self.busy.store(false, Ordering::Release);
+        let mut state = self
+            .control
+            .operation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state
+            .active
+            .as_ref()
+            .is_some_and(|active| active.generation == self.generation)
+        {
+            state.active = None;
+        }
     }
 }
 
 impl ExportControl {
-    /// Arm for a new export: clears any stale cancel request from a previous run.
-    fn reset(&self) {
-        self.cancel.store(false, Ordering::Relaxed);
-        *self
-            .media_cancel
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = MediaCancelToken::new();
-    }
-
     /// Request cancellation of the in-flight export.
     fn request_cancel(&self) {
-        self.cancel.store(true, Ordering::Relaxed);
-        self.media_cancel
+        let state = self
+            .operation
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .cancel();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(active) = &state.active {
+            active.cancel.cancel();
+        }
     }
 
-    /// True once [`ExportControl::request_cancel`] has been called since the
-    /// last [`ExportControl::reset`].
+    /// True once cancellation was requested for the active generation.
     pub(crate) fn is_cancelled(&self) -> bool {
-        self.cancel.load(Ordering::Relaxed)
-    }
-
-    fn media_cancel_token(&self) -> MediaCancelToken {
-        self.media_cancel
+        self.operation
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+            .active
+            .as_ref()
+            .is_some_and(|active| active.cancel.is_cancelled())
+    }
+
+    pub(crate) fn media_cancel_token(&self) -> MediaCancelToken {
+        self.operation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active
+            .as_ref()
+            .map(|active| active.cancel.clone())
+            .unwrap_or_default()
     }
 
     pub(crate) fn try_begin(&self) -> Result<ExportGuard<'_>, String> {
-        self.busy
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| "another export is already in progress".to_string())?;
-        self.reset();
-        Ok(ExportGuard { busy: &self.busy })
+        self.try_begin_with_hook(|| {})
+    }
+
+    fn try_begin_with_hook(&self, after_publish: impl FnOnce()) -> Result<ExportGuard<'_>, String> {
+        let mut state = self
+            .operation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.active.is_some() {
+            return Err("another export is already in progress".to_string());
+        }
+        let generation = state.next_generation;
+        state.next_generation = state.next_generation.wrapping_add(1);
+        state.active = Some(ActiveExport {
+            generation,
+            cancel: MediaCancelToken::new(),
+        });
+        after_publish();
+        drop(state);
+        Ok(ExportGuard {
+            control: self,
+            generation,
+        })
     }
 }
 
-/// `cancel_export`: request that the in-flight export (if any) stop at the next
-/// frame boundary. A no-op when nothing is exporting — the flag is simply
-/// cleared again at the start of the next `export_video` call.
+/// `cancel_export`: request that the in-flight export (if any) stop at its next
+/// cancellation checkpoint. A no-op when nothing is exporting; every new
+/// operation receives its own uncancelled generation.
 #[tauri::command]
 pub fn cancel_export(control: State<'_, ExportControl>) {
     control.request_cancel();
@@ -444,6 +496,7 @@ pub(crate) const AUDIO_PROGRESS_TOTAL: i32 = 1_000;
 const AUDIO_DECODE_END: i32 = 800;
 const AUDIO_MIX_START: i32 = 850;
 const AUDIO_MIX_END: i32 = 980;
+const AUDIO_WAV_START: i32 = AUDIO_MIX_END;
 const AUDIO_CANCEL_CHUNK_SAMPLES: usize = 8 * 1024;
 
 fn decode_pcm_with_export_control<F>(
@@ -969,26 +1022,240 @@ fn slice_pcm(pcm: PcmBuffer, start_frame: i32, end_frame: i32, fps: i32) -> PcmB
     }
 }
 
+#[cfg(test)]
 pub(crate) fn write_wav_s16le(samples: &[f32], sample_rate: u32, out: &Path) -> Result<(), String> {
-    let data = opentake_media::encode::mono_f32_to_s16le(samples);
-    let mut buf = Vec::with_capacity(44 + data.len());
-    let data_len = data.len() as u32;
+    write_wav_s16le_cancellable(
+        samples,
+        sample_rate,
+        out,
+        &MediaCancelToken::new(),
+        None,
+        None,
+    )
+}
+
+pub(crate) fn write_wav_s16le_cancellable(
+    samples: &[f32],
+    sample_rate: u32,
+    out: &Path,
+    cancel: &MediaCancelToken,
+    on_progress: Option<&dyn Fn(i32, i32)>,
+    checkpoint_hook: Option<&dyn Fn(usize)>,
+) -> Result<(), String> {
+    let data_bytes = samples
+        .len()
+        .checked_mul(2)
+        .ok_or_else(|| "wav output is too large".to_string())?;
+    let data_len = u32::try_from(data_bytes).map_err(|_| "wav output is too large".to_string())?;
     let chunk_size = 36 + data_len;
-    buf.extend_from_slice(b"RIFF");
-    buf.extend_from_slice(&chunk_size.to_le_bytes());
-    buf.extend_from_slice(b"WAVE");
-    buf.extend_from_slice(b"fmt ");
-    buf.extend_from_slice(&16u32.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&sample_rate.to_le_bytes());
-    buf.extend_from_slice(&(sample_rate * 2).to_le_bytes());
-    buf.extend_from_slice(&2u16.to_le_bytes());
-    buf.extend_from_slice(&16u16.to_le_bytes());
-    buf.extend_from_slice(b"data");
-    buf.extend_from_slice(&data_len.to_le_bytes());
-    buf.extend_from_slice(&data);
-    std::fs::write(out, &buf).map_err(|e| format!("write wav: {e}"))
+    let mut header = Vec::with_capacity(44);
+    header.extend_from_slice(b"RIFF");
+    header.extend_from_slice(&chunk_size.to_le_bytes());
+    header.extend_from_slice(b"WAVE");
+    header.extend_from_slice(b"fmt ");
+    header.extend_from_slice(&16u32.to_le_bytes());
+    header.extend_from_slice(&1u16.to_le_bytes());
+    header.extend_from_slice(&1u16.to_le_bytes());
+    header.extend_from_slice(&sample_rate.to_le_bytes());
+    header.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+    header.extend_from_slice(&2u16.to_le_bytes());
+    header.extend_from_slice(&16u16.to_le_bytes());
+    header.extend_from_slice(b"data");
+    header.extend_from_slice(&data_len.to_le_bytes());
+
+    let result = (|| {
+        if cancel.checkpoint() {
+            return Err(CANCELLED_SENTINEL.to_string());
+        }
+        let mut file = open_reserved_output_nofollow(out)?;
+        file.write_all(&header)
+            .map_err(|error| format!("write wav header: {error}"))?;
+        for (chunk_index, chunk) in samples.chunks(AUDIO_CANCEL_CHUNK_SAMPLES).enumerate() {
+            let done = chunk_index.saturating_mul(AUDIO_CANCEL_CHUNK_SAMPLES);
+            if let Some(hook) = checkpoint_hook {
+                hook(done);
+            }
+            if cancel.checkpoint() {
+                return Err(CANCELLED_SENTINEL.to_string());
+            }
+            let data = opentake_media::encode::mono_f32_to_s16le(chunk);
+            file.write_all(&data)
+                .map_err(|error| format!("write wav samples: {error}"))?;
+            if let Some(report) = on_progress {
+                let span = (AUDIO_PROGRESS_TOTAL - AUDIO_WAV_START) as usize;
+                let completed = (done + chunk.len()).min(samples.len());
+                let mapped = AUDIO_WAV_START
+                    + (completed.saturating_mul(span) / samples.len().max(1)) as i32;
+                report(mapped, AUDIO_PROGRESS_TOTAL);
+            }
+        }
+        if cancel.checkpoint() {
+            return Err(CANCELLED_SENTINEL.to_string());
+        }
+        file.flush()
+            .map_err(|error| format!("flush wav output: {error}"))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(out);
+    }
+    result
+}
+
+fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+fn ensure_project_media_dir(project_dir: &Path) -> Result<PathBuf, String> {
+    let project_root = project_dir
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve project directory: {error}"))?;
+    let media_dir = project_dir.join("media");
+    match std::fs::symlink_metadata(&media_dir) {
+        Ok(metadata) => {
+            if metadata_is_symlink_or_reparse(&metadata) || !metadata.is_dir() {
+                return Err("project media path must be a real directory".to_string());
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            std::fs::create_dir(&media_dir)
+                .map_err(|error| format!("failed to create project media dir: {error}"))?;
+        }
+        Err(error) => return Err(format!("failed to inspect project media dir: {error}")),
+    }
+
+    let metadata = std::fs::symlink_metadata(&media_dir)
+        .map_err(|error| format!("failed to inspect project media dir: {error}"))?;
+    if metadata_is_symlink_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err("project media path must be a real directory".to_string());
+    }
+    let resolved = media_dir
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve project media dir: {error}"))?;
+    if resolved.parent() != Some(project_root.as_path()) {
+        return Err("project media directory escapes the project".to_string());
+    }
+    Ok(media_dir)
+}
+
+#[cfg(unix)]
+fn reserve_output_file(path: &Path) -> Result<File, String> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| "project media output has no parent".to_string())?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| "project media output has no file name".to_string())?;
+    let file_name = CString::new(file_name.as_bytes())
+        .map_err(|_| "project media output contains a NUL byte".to_string())?;
+    let mut parent_options = OpenOptions::new();
+    parent_options
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let parent_handle = parent_options.open(parent).map_err(|error| {
+        format!("open project media directory without following links: {error}")
+    })?;
+    // SAFETY: `parent_handle` is an open directory, `file_name` is a validated
+    // single C string, and a successful descriptor is immediately owned by File.
+    let descriptor = unsafe {
+        libc::openat(
+            parent_handle.as_raw_fd(),
+            file_name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
+        )
+    };
+    if descriptor < 0 {
+        return Err(format!(
+            "failed to reserve project media output: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: `openat` returned a new owned descriptor and no other owner exists.
+    let file = unsafe { File::from_raw_fd(descriptor) };
+    let opened = file
+        .metadata()
+        .map_err(|error| format!("failed to inspect reserved media output: {error}"))?;
+    let visible = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("failed to revalidate reserved media output: {error}"))?;
+    let identity_matches = opened.dev() == visible.dev() && opened.ino() == visible.ino();
+    if !identity_matches || metadata_is_symlink_or_reparse(&visible) || !visible.is_file() {
+        // SAFETY: the directory descriptor and validated child name remain live;
+        // unlinkat removes only the object created through this retained parent.
+        let _ = unsafe { libc::unlinkat(parent_handle.as_raw_fd(), file_name.as_ptr(), 0) };
+        return Err("project media output changed during reservation".to_string());
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn reserve_output_file(path: &Path) -> Result<File, String> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| format!("failed to reserve project media output: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("failed to inspect reserved media output: {error}"))?;
+    if metadata_is_symlink_or_reparse(&metadata) || !metadata.is_file() {
+        let _ = std::fs::remove_file(path);
+        return Err("project media output must be a regular file".to_string());
+    }
+    Ok(file)
+}
+
+fn open_reserved_output_nofollow(path: &Path) -> Result<File, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("failed to inspect project media output: {error}"))?;
+    if metadata_is_symlink_or_reparse(&metadata) || !metadata.is_file() {
+        return Err("project media output must be a regular file".to_string());
+    }
+
+    let mut options = OpenOptions::new();
+    options.write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| format!("open project media output: {error}"))?;
+    let opened = file
+        .metadata()
+        .map_err(|error| format!("inspect opened project media output: {error}"))?;
+    if metadata_is_symlink_or_reparse(&opened) || !opened.is_file() {
+        return Err("project media output must be a regular file".to_string());
+    }
+    Ok(file)
 }
 
 pub(crate) fn unique_project_media_path(
@@ -1013,9 +1280,7 @@ pub(crate) fn unique_project_media_path(
     if safe_stem.is_empty() {
         safe_stem.push_str("media");
     }
-    let media_dir = project_dir.join("media");
-    std::fs::create_dir_all(&media_dir)
-        .map_err(|error| format!("failed to create project media dir: {error}"))?;
+    let media_dir = ensure_project_media_dir(project_dir)?;
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     loop {
@@ -1025,8 +1290,13 @@ pub(crate) fn unique_project_media_path(
             .unwrap_or(0);
         let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = media_dir.join(format!("{safe_stem}_{nanos:x}_{counter:x}.{ext}"));
-        if !path.exists() {
-            return Ok(path);
+        match reserve_output_file(&path) {
+            Ok(file) => {
+                drop(file);
+                return Ok(path);
+            }
+            Err(_) if path.exists() => continue,
+            Err(error) => return Err(error),
         }
     }
 }
@@ -1317,40 +1587,91 @@ mod tests {
     #[test]
     fn export_control_starts_uncancelled() {
         let control = ExportControl::default();
+        let _guard = control.try_begin().expect("start export");
         assert!(!control.is_cancelled());
     }
 
     #[test]
     fn export_control_request_cancel_flips_the_flag() {
         let control = ExportControl::default();
+        let _guard = control.try_begin().expect("start export");
         control.request_cancel();
         assert!(control.is_cancelled());
     }
 
     #[test]
-    fn export_control_reset_clears_a_prior_cancel() {
-        // Mirrors `export_video`'s "reset at the start of every call" — a stale
-        // cancel from a finished export must not poison the next one.
+    fn export_control_new_generation_does_not_inherit_prior_cancel() {
         let control = ExportControl::default();
+        let first = control.try_begin().expect("start first export");
         control.request_cancel();
-        control.reset();
+        assert!(control.is_cancelled());
+        drop(first);
+        let _second = control.try_begin().expect("start second export");
         assert!(!control.is_cancelled());
     }
 
     #[test]
-    fn export_control_cancel_is_observable_through_a_clone() {
-        // `cancel_export` (a separate Tauri command) sets the flag on its own
-        // `State<ExportControl>` handle; a clone shares the same underlying
-        // `Arc<AtomicBool>`, matching how Tauri hands out the same managed
-        // instance to every command.
-        let control = ExportControl::default();
-        let clone = ExportControl {
-            cancel: control.cancel.clone(),
-            busy: control.busy.clone(),
-            media_cancel: control.media_cancel.clone(),
-        };
-        clone.request_cancel();
+    fn export_control_cancel_is_observable_across_threads() {
+        let control = Arc::new(ExportControl::default());
+        let _guard = control.try_begin().expect("start export");
+        let canceller = Arc::clone(&control);
+        std::thread::spawn(move || canceller.request_cancel())
+            .join()
+            .expect("cancel thread");
         assert!(control.is_cancelled());
+    }
+
+    #[test]
+    fn export_control_cancel_cannot_be_erased_during_lease_publication() {
+        use std::sync::mpsc;
+
+        let control = Arc::new(ExportControl::default());
+        let worker_control = Arc::clone(&control);
+        let (published_tx, published_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let (guard_ready_tx, guard_ready_rx) = mpsc::channel();
+        let (release_guard_tx, release_guard_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let guard = worker_control
+                .try_begin_with_hook(|| {
+                    published_tx.send(()).expect("lease generation published");
+                    resume_rx.recv().expect("resume lease publication");
+                })
+                .expect("start export");
+            guard_ready_tx.send(()).expect("guard ready");
+            release_guard_rx.recv().expect("release guard");
+            drop(guard);
+        });
+
+        published_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("new generation is installed before begin returns");
+        let cancel_control = Arc::clone(&control);
+        let (cancel_started_tx, cancel_started_rx) = mpsc::channel();
+        let (cancel_done_tx, cancel_done_rx) = mpsc::channel();
+        let canceller = std::thread::spawn(move || {
+            cancel_started_tx.send(()).expect("cancel started");
+            cancel_control.request_cancel();
+            cancel_done_tx.send(()).expect("cancel completed");
+        });
+        cancel_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("cancel invoked while begin is paused");
+        resume_tx.send(()).expect("resume begin");
+        guard_ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("begin returned");
+        cancel_done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("cancel targets the published generation");
+
+        assert!(
+            control.is_cancelled(),
+            "begin must not clear the cancellation"
+        );
+        release_guard_tx.send(()).expect("release operation guard");
+        canceller.join().expect("cancel thread joins");
+        worker.join().expect("begin thread joins");
     }
 
     #[test]
@@ -1534,6 +1855,91 @@ mod tests {
             .expect("file name");
         assert!(!name.contains('/'));
         assert!(!name.contains(".."));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_media_symlink_is_rejected_without_writing_outside_bundle() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("fixture root");
+        let project = root.path().join("Project.opentake");
+        let outside = root.path().join("outside");
+        fs::create_dir(&project).expect("project directory");
+        fs::create_dir(&outside).expect("outside directory");
+        symlink(&outside, project.join("media")).expect("redirect project media directory");
+
+        let error = unique_project_media_path(&project, "escaped", "mp4")
+            .expect_err("media symlink must be rejected");
+
+        assert!(error.contains("real directory"), "{error}");
+        assert_eq!(fs::read_dir(&outside).expect("read outside").count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preexisting_output_symlink_is_never_reserved_or_truncated() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("fixture root");
+        let media = root.path().join("media");
+        fs::create_dir(&media).expect("media directory");
+        let outside = root.path().join("outside.bin");
+        fs::write(&outside, b"keep").expect("outside fixture");
+        let candidate = media.join("candidate.wav");
+        symlink(&outside, &candidate).expect("candidate symlink");
+
+        let error = reserve_output_file(&candidate).expect_err("create-new rejects symlink");
+
+        assert!(error.contains("reserve"), "{error}");
+        assert_eq!(
+            fs::read(&outside).expect("outside remains readable"),
+            b"keep"
+        );
+    }
+
+    #[test]
+    fn wav_cancellation_inside_write_loop_removes_partial_output() {
+        use std::sync::mpsc;
+
+        let project = tempfile::tempdir().expect("project");
+        let output = unique_project_media_path(project.path(), "cancelled_audio", "wav")
+            .expect("reserved output");
+        let samples = vec![0.25_f32; AUDIO_CANCEL_CHUNK_SAMPLES * 4];
+        let cancel = MediaCancelToken::new();
+        let worker_cancel = cancel.clone();
+        let worker_output = output.clone();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let hook = move |_done: usize| {
+                entered_tx.send(()).expect("WAV loop entered");
+                release_rx.recv().expect("release WAV loop");
+            };
+            let result = write_wav_s16le_cancellable(
+                &samples,
+                48_000,
+                &worker_output,
+                &worker_cancel,
+                None,
+                Some(&hook),
+            );
+            done_tx.send(result).expect("publish WAV result");
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("actual WAV write loop reached its checkpoint");
+        cancel.cancel();
+        release_tx.send(()).expect("release WAV loop");
+        let result = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("WAV cancellation must return promptly");
+
+        assert_eq!(result.unwrap_err(), CANCELLED_SENTINEL);
+        assert!(!output.exists(), "cancelled WAV must remove partial output");
+        worker.join().expect("WAV worker joins");
     }
 
     #[test]

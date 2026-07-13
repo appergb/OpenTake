@@ -1209,13 +1209,15 @@ fn save_clip_as_media_workflow(
         )
         .and_then(|pcm| pcm.ok_or_else(|| "audio clip contains no decodable audio".to_string()))
         .and_then(|pcm| {
-            if control.is_cancelled() {
-                return Err(crate::export::CANCELLED_SENTINEL.to_string());
-            }
-            crate::export::write_wav_s16le(&pcm.samples_f32, pcm.spec.sample_rate, &out_path)?;
-            if control.is_cancelled() {
-                return Err(crate::export::CANCELLED_SENTINEL.to_string());
-            }
+            let cancel = control.media_cancel_token();
+            crate::export::write_wav_s16le_cancellable(
+                &pcm.samples_f32,
+                pcm.spec.sample_rate,
+                &out_path,
+                &cancel,
+                Some(&on_progress),
+                None,
+            )?;
             crate::export::emit_export_progress(
                 app,
                 crate::export::AUDIO_PROGRESS_TOTAL,

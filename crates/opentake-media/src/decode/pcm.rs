@@ -46,6 +46,9 @@ impl PcmFormat {
 
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const STDERR_DETAIL_LIMIT: usize = 64 * 1024;
+const PCM_CONVERT_CHUNK_FRAMES: usize = 8 * 1024;
+const PCM_PROGRESS_TOTAL: usize = 4_000;
+const PCM_DECODE_PROGRESS_END: usize = 3_000;
 
 /// Byte-level progress reported while FFmpeg streams decoded PCM to stdout.
 pub type PcmProgressCallback = Arc<dyn Fn(usize, usize) + Send + Sync>;
@@ -299,7 +302,18 @@ fn pcm_args(path: &Path, spec: &PcmSpec, range: Option<(f64, f64)>) -> Vec<Strin
 }
 
 /// Convert interleaved raw PCM bytes to mono f32, averaging `channels`.
+#[cfg(test)]
 fn raw_to_mono_f32(bytes: &[u8], spec: &PcmSpec) -> Result<Vec<f32>> {
+    raw_to_mono_f32_cancellable(bytes, spec, &MediaCancelToken::new(), None, None)
+}
+
+fn raw_to_mono_f32_cancellable(
+    bytes: &[u8],
+    spec: &PcmSpec,
+    cancel: &MediaCancelToken,
+    progress: Option<&(dyn Fn(usize, usize) + Send + Sync)>,
+    checkpoint_hook: Option<&dyn Fn(usize)>,
+) -> Result<Vec<f32>> {
     let bps = spec.format.bytes_per_sample();
     let ch = spec.channels.max(1) as usize;
     let frame_bytes = bps * ch;
@@ -311,6 +325,19 @@ fn raw_to_mono_f32(bytes: &[u8], spec: &PcmSpec) -> Result<Vec<f32>> {
     out.try_reserve_exact(frames)
         .map_err(|error| allocation_error(format!("mono f32 reserve {frames}: {error}")))?;
     for f in 0..frames {
+        if f.is_multiple_of(PCM_CONVERT_CHUNK_FRAMES) {
+            if let Some(hook) = checkpoint_hook {
+                hook(f);
+            }
+            if cancel.checkpoint() {
+                return Err(MediaError::Cancelled);
+            }
+            if let Some(report) = progress {
+                let converted =
+                    f.saturating_mul(PCM_PROGRESS_TOTAL - PCM_DECODE_PROGRESS_END) / frames.max(1);
+                report(PCM_DECODE_PROGRESS_END + converted, PCM_PROGRESS_TOTAL);
+            }
+        }
         let base = f * frame_bytes;
         let mut sum = 0.0f32;
         for c in 0..ch {
@@ -327,6 +354,12 @@ fn raw_to_mono_f32(bytes: &[u8], spec: &PcmSpec) -> Result<Vec<f32>> {
             sum += s;
         }
         out.push(sum / ch as f32);
+    }
+    if cancel.checkpoint() {
+        return Err(MediaError::Cancelled);
+    }
+    if let Some(report) = progress {
+        report(PCM_PROGRESS_TOTAL, PCM_PROGRESS_TOTAL);
     }
     Ok(out)
 }
@@ -354,8 +387,18 @@ pub fn extract_pcm_cancellable_with_progress(
     cancel: &MediaCancelToken,
     progress: Option<PcmProgressCallback>,
 ) -> Result<PcmBuffer> {
-    let raw = decode_raw_pcm_cancellable(path, spec, range, cancel, progress)?;
-    let samples = raw_to_mono_f32(&raw, spec)?;
+    let decode_progress = progress.as_ref().map(|report| {
+        let report = Arc::clone(report);
+        Arc::new(move |done: usize, total: usize| {
+            let mapped = done
+                .min(total.max(1))
+                .saturating_mul(PCM_DECODE_PROGRESS_END)
+                / total.max(1);
+            report(mapped, PCM_PROGRESS_TOTAL);
+        }) as PcmProgressCallback
+    });
+    let raw = decode_raw_pcm_cancellable(path, spec, range, cancel, decode_progress)?;
+    let samples = raw_to_mono_f32_cancellable(&raw, spec, cancel, progress.as_deref(), None)?;
     Ok(PcmBuffer {
         spec: *spec,
         samples_f32: samples,
@@ -534,6 +577,11 @@ mod tests {
             "large decode must report multiple chunks"
         );
         assert!(observed.iter().any(|(done, total)| done < total));
+        assert_eq!(
+            observed.last(),
+            Some(&(PCM_PROGRESS_TOTAL, PCM_PROGRESS_TOTAL))
+        );
+        assert!(observed.windows(2).all(|pair| pair[0].0 <= pair[1].0));
     }
 
     #[test]
@@ -579,6 +627,40 @@ mod tests {
         assert!(matches!(result, Err(MediaError::Cancelled)));
         worker.join().expect("decoder worker must be reaped");
         assert_eq!(cancel.active_reader_count(), 0);
+    }
+
+    #[test]
+    fn cancellation_inside_raw_conversion_stops_the_actual_sample_loop() {
+        let spec = f32_mono_spec();
+        let frames = PCM_CONVERT_CHUNK_FRAMES * 4;
+        let raw = vec![0_u8; frames * spec.format.bytes_per_sample()];
+        let cancel = MediaCancelToken::new();
+        let worker_cancel = cancel.clone();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let hook = move |_frame: usize| {
+                entered_tx.send(()).expect("conversion checkpoint entered");
+                release_rx.recv().expect("release conversion checkpoint");
+            };
+            let result =
+                raw_to_mono_f32_cancellable(&raw, &spec, &worker_cancel, None, Some(&hook));
+            done_tx.send(result).expect("publish conversion result");
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("actual conversion loop reached its checkpoint");
+        cancel.cancel();
+        release_tx.send(()).expect("release conversion loop");
+        let result = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("conversion cancellation must return promptly");
+
+        assert!(matches!(result, Err(MediaError::Cancelled)));
+        assert_eq!(cancel.checkpoint_count(), 1);
+        worker.join().expect("conversion worker joins");
     }
 
     #[test]

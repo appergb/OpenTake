@@ -3425,6 +3425,7 @@ dependencies = [
  "cpal",
  "futures",
  "image",
+ "libc",
  "objc2-app-kit",
  "opentake-agent",
  "opentake-core",
