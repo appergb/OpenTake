@@ -1455,7 +1455,10 @@ fn reserve_output_file(path: &Path, parent_handle: &File) -> Result<File, String
 #[cfg(not(unix))]
 fn reserve_output_file(path: &Path, parent_handle: &File) -> Result<File, String> {
     let mut options = OpenOptions::new();
-    options.create_new(true);
+    // Keep Rust's semantic access flags in sync with the platform-specific
+    // access_mode below. OpenOptions validates create_new before issuing the
+    // Windows call and rejects creation unless write or append was requested.
+    options.read(true).write(true).create_new(true);
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
@@ -1473,8 +1476,6 @@ fn reserve_output_file(path: &Path, parent_handle: &File) -> Result<File, String
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
-    #[cfg(not(windows))]
-    options.read(true).write(true);
     let file = options
         .open(path)
         .map_err(|error| format!("failed to reserve project media output: {error}"))?;
