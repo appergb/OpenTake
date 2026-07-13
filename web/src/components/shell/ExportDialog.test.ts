@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   defaultBundleName,
@@ -120,4 +121,9 @@ describe("progressPercent", () => {
   it("clamps done beyond total to 100", () => {
     expect(progressPercent(400, 300)).toBe(100);
   });
+});
+
+it("offers no bundle mode while the secure native workflow is under construction", () => {
+  const source = readFileSync(new URL("./ExportDialog.tsx", import.meta.url), "utf8");
+  expect(source).not.toMatch(/\bid\s*:\s*["']bundle["']/);
 });

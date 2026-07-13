@@ -2,6 +2,16 @@ import { describe, expect, it } from "vitest";
 import { createFallbackStore } from "./fallback";
 
 describe("browser fallback edit store", () => {
+  it("applies reversed through setClipProperties", async () => {
+    const fallback = createFallbackStore();
+    const id = fallback.getTimeline().timeline.tracks[0].clips[0].id;
+
+    await fallback.editApply({ type: "setClipProperties", clipIds: [id], properties: { reversed: true } });
+
+    const clip = fallback.getTimeline().timeline.tracks[0].clips[0];
+    expect(clip.reversed).toBe(true);
+  });
+
   it("supports insertTrack and addClips for media drops", () => {
     const fallback = createFallbackStore();
     fallback.reset();

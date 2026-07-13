@@ -22,6 +22,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use base64::Engine as _;
@@ -29,7 +30,7 @@ use serde::Serialize;
 use tauri::State;
 
 use opentake_core::{AppCore, EditCommand};
-use opentake_domain::{ClipType, MediaSource, TextStyle};
+use opentake_domain::{ClipType, MediaSource, TextStyle, Timeline};
 use opentake_media::{decode_frame_at, FrameRequest};
 use opentake_ops::command::RenameEntry;
 use opentake_render::gpu::texture::upload_rgba;
@@ -250,21 +251,14 @@ fn encode_png_data_url(frame: &DecodedFrame) -> Result<String, String> {
 /// for the preview) and [`capture_frame_to_media`] (which writes it to disk and
 /// imports it as a still). Out-of-range frames / an empty timeline composite to
 /// opaque black — the correct clear color, not an error.
-fn composite_rgba(
-    core: &AppCore,
+fn composite_rgba_for_snapshot(
+    timeline: &Timeline,
+    manifest: &opentake_domain::MediaManifest,
+    project_dir: &Option<PathBuf>,
     render: &RenderState,
     frame: i32,
     max_size: u32,
 ) -> Result<DecodedFrame, String> {
-    // Snapshot the session under its own lock, released before any GPU work.
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    // A saved project copies its media into the bundle and rewrites entries to
-    // `MediaSource::Project { relative_path }` (see opentake-project archive), so
-    // resolving paths must join the bundle dir — skipping them left a reopened
-    // project's preview black.
-    let project_dir = core.project_dir();
-
     // Project text clips (content + style + box) so the resolver can rasterize
     // them on demand. Keyed by clip id, matching `TextureSource::Text { clip_id }`.
     let mut text: HashMap<String, TextInfo> = HashMap::new();
@@ -310,8 +304,8 @@ fn composite_rgba(
     let render_size = preview_render_size(timeline.width, timeline.height, max_size);
 
     let metrics = ManifestMetrics { sizes };
-    let plan = build_render_plan(&timeline, render_size, &metrics);
-    let frame_plan = plan.frame(&timeline, frame);
+    let plan = build_render_plan(timeline, render_size, &metrics);
+    let frame_plan = plan.frame(timeline, frame);
 
     // Acquire (or reuse) the GPU context, then composite + read back. The lock is
     // held across the render so the `Rc`-based texture cache never crosses threads.
@@ -354,6 +348,18 @@ fn composite_rgba(
             &mut resolver,
         )
         .map_err(|e| format!("composite render failed: {e}"))
+}
+
+fn composite_rgba(
+    core: &AppCore,
+    render: &RenderState,
+    frame: i32,
+    max_size: u32,
+) -> Result<DecodedFrame, String> {
+    let timeline = core.get_timeline().timeline;
+    let manifest = core.media();
+    let project_dir = core.project_dir();
+    composite_rgba_for_snapshot(&timeline, &manifest, &project_dir, render, frame, max_size)
 }
 
 /// `composite_frame`: render the timeline at `frame` to a PNG data URL.
@@ -408,12 +414,40 @@ pub fn capture_frame_to_media(
     folder_id: Option<String>,
     source_media_id: Option<String>,
 ) -> Result<crate::media::MediaListDto, String> {
-    let engine = media.engine();
+    capture_frame_to_media_impl(&core, || {
+        capture_frame_to_media_workflow(
+            &core,
+            &render,
+            media.engine(),
+            frame,
+            &name_base,
+            folder_id,
+            source_media_id.as_deref(),
+        )
+    })
+}
 
+fn capture_frame_to_media_impl(
+    core: &AppCore,
+    workflow: impl FnOnce() -> Result<crate::media::MediaListDto, String>,
+) -> Result<crate::media::MediaListDto, String> {
+    core.ensure_project_mutable().map_err(|e| e.to_string())?;
+    workflow()
+}
+
+fn capture_frame_to_media_workflow(
+    core: &AppCore,
+    render: &RenderState,
+    engine: &opentake_media::MediaEngine,
+    frame: i32,
+    name_base: &str,
+    folder_id: Option<String>,
+    source_media_id: Option<&str>,
+) -> Result<crate::media::MediaListDto, String> {
     // Frame → RGBA. Timeline tab composites; video tab decodes the source frame.
-    let composite = match &source_media_id {
-        None => composite_rgba(&core, &render, frame, 0)?,
-        Some(id) => decode_source_frame(&core, id, frame)?,
+    let composite = match source_media_id {
+        None => composite_rgba(core, render, frame, 0)?,
+        Some(id) => decode_source_frame(core, id, frame)?,
     };
 
     // Write the PNG next to the media cache so a subsequent project save can copy
@@ -428,7 +462,8 @@ pub fn capture_frame_to_media(
     // Import through the SAME path as a user import (posters + manifest entry +
     // MediaChanged event), then rename to the upstream "{nameBase} {frame}" and
     // move into the current folder.
-    let entry = crate::media::import_one(&core, engine, &png_path)
+    let entry = crate::media::import_one(core, engine, &png_path)
+        .map_err(|e| e.to_string())?
         .ok_or_else(|| "capture import failed".to_string())?;
     let name = format!("{name_base} {frame}");
     core.apply(EditCommand::RenameMedia {
@@ -447,7 +482,7 @@ pub fn capture_frame_to_media(
     }
 
     Ok(crate::media::MediaListDto::from_core(
-        &core,
+        core,
         Some(engine.cache_root()),
     ))
 }
@@ -493,10 +528,117 @@ fn decode_source_frame(core: &AppCore, media_id: &str, frame: i32) -> Result<Dec
 /// colliding when the same frame is captured twice. Not cryptographic — just a
 /// disambiguator so two captures of the same frame don't overwrite each other.
 fn uuid_like() -> u128 {
-    std::time::SystemTime::now()
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
-        .unwrap_or(0)
+        .unwrap_or(0);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
+    (nanos << 16) | (counter & 0xffff)
+}
+
+fn freeze_capture_png_path(
+    captures_dir: &std::path::Path,
+    clip_id: &str,
+    at_frame: i32,
+) -> PathBuf {
+    let safe_id = clip_id
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    captures_dir.join(format!("freeze_{safe_id}_{at_frame}_{}.png", uuid_like()))
+}
+
+pub fn capture_freeze_frame(
+    core: &AppCore,
+    render: &RenderState,
+    media: &crate::media::MediaState,
+    clip_id: &str,
+    at_frame: i32,
+) -> Result<String, String> {
+    capture_freeze_frame_impl(core, || {
+        capture_freeze_frame_workflow(core, render, media.engine(), clip_id, at_frame)
+    })
+}
+
+fn capture_freeze_frame_impl(
+    core: &AppCore,
+    workflow: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    core.ensure_project_mutable().map_err(|e| e.to_string())?;
+    workflow()
+}
+
+fn capture_freeze_frame_workflow(
+    core: &AppCore,
+    render: &RenderState,
+    engine: &opentake_media::MediaEngine,
+    clip_id: &str,
+    at_frame: i32,
+) -> Result<String, String> {
+    let timeline = core.get_timeline().timeline;
+    let manifest = core.media();
+    let project_dir = core.project_dir();
+    let (solo_timeline, solo_manifest) =
+        build_freeze_capture_snapshot(&timeline, &manifest, clip_id)?;
+    let composite = composite_rgba_for_snapshot(
+        &solo_timeline,
+        &solo_manifest,
+        &project_dir,
+        render,
+        at_frame,
+        0,
+    )?;
+    let captures_dir = engine.cache_root().join("captures");
+    std::fs::create_dir_all(&captures_dir).map_err(|e| format!("create captures dir: {e}"))?;
+    let png_path = freeze_capture_png_path(&captures_dir, clip_id, at_frame);
+    let bytes = encode_png_bytes(&composite)?;
+    std::fs::write(&png_path, &bytes).map_err(|e| format!("write freeze png: {e}"))?;
+    let entry = crate::media::import_one(core, engine, &png_path)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "freeze frame import failed".to_string())?;
+    Ok(entry.id)
+}
+
+fn build_freeze_capture_snapshot(
+    timeline: &Timeline,
+    manifest: &opentake_domain::MediaManifest,
+    clip_id: &str,
+) -> Result<(Timeline, opentake_domain::MediaManifest), String> {
+    let track = timeline
+        .tracks
+        .iter()
+        .find(|track| track.clips.iter().any(|clip| clip.id == clip_id))
+        .ok_or_else(|| format!("clip not found: {clip_id}"))?;
+    let clip = track
+        .clips
+        .iter()
+        .find(|clip| clip.id == clip_id)
+        .ok_or_else(|| format!("clip not found: {clip_id}"))?;
+
+    let mut solo_track = track.clone();
+    solo_track.clips = vec![clip.clone()];
+    solo_track.hidden = false;
+    solo_track.muted = false;
+
+    let mut solo_timeline = timeline.clone();
+    solo_timeline.tracks = vec![solo_track];
+
+    let mut subset = manifest.clone();
+    subset.entries.retain(|entry| entry.id == clip.media_ref);
+    subset.folders.clear();
+    subset.favorites.clear();
+    if subset.entries.is_empty() {
+        return Err(format!("media not found for clip: {}", clip.media_ref));
+    }
+
+    Ok((solo_timeline, subset))
 }
 
 fn project_frame_time_secs(source_frame: i64, timeline_fps: i32) -> f64 {
@@ -511,6 +653,103 @@ fn project_frame_time_secs(source_frame: i64, timeline_fps: i32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opentake_domain::{Clip, MediaManifest, MediaManifestEntry, Track};
+    use std::fs;
+
+    fn unknown_core(root: &std::path::Path) -> AppCore {
+        let bundle = root.join("Unknown.opentake");
+        let project = opentake_project::Project::new(&bundle);
+        project.save().expect("save known fixture");
+        let path = bundle.join("project.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read timeline fixture"))
+                .expect("decode timeline fixture");
+        value["futureTimeline"] = serde_json::json!(true);
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&value).expect("encode unknown fixture"),
+        )
+        .expect("write unknown fixture");
+        let core = AppCore::new();
+        core.open_project(bundle).expect("unknown project opens");
+        core
+    }
+
+    fn recursive_tree(root: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
+        fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+            if !dir.exists() {
+                return;
+            }
+            let mut paths = fs::read_dir(dir)
+                .expect("read tree")
+                .map(|entry| entry.expect("read tree entry").path())
+                .collect::<Vec<_>>();
+            paths.sort();
+            for path in paths {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("tree path under root")
+                    .into();
+                if path.is_dir() {
+                    out.push((relative, b"<dir>".to_vec()));
+                    walk(root, &path, out);
+                } else {
+                    out.push((relative, fs::read(&path).expect("read tree file")));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    #[test]
+    fn capture_frame_to_media_refuses_before_capture_creation() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let core = unknown_core(tmp.path());
+        let captures = tmp.path().join("cache/captures");
+        fs::create_dir_all(captures.join("existing")).expect("create captures fixture");
+        fs::write(captures.join("existing/keep.png"), b"before").expect("write captures fixture");
+        let before = recursive_tree(&captures);
+        let called = std::cell::Cell::new(false);
+        let sentinel = captures.join("frame-workflow-ran-before-guard.png");
+
+        let error = capture_frame_to_media_impl(&core, || {
+            called.set(true);
+            fs::write(&sentinel, b"bad ordering").expect("write workflow sentinel");
+            Err("workflow should not run".into())
+        })
+        .expect_err("capture frame must be rejected");
+
+        assert!(error.contains("compatibility read-only"), "{error}");
+        assert!(!called.get());
+        assert!(!sentinel.exists());
+        assert_eq!(recursive_tree(&captures), before);
+    }
+
+    #[test]
+    fn capture_freeze_frame_refuses_before_capture_creation() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let core = unknown_core(tmp.path());
+        let captures = tmp.path().join("cache/captures");
+        fs::create_dir_all(captures.join("existing")).expect("create captures fixture");
+        fs::write(captures.join("existing/keep.png"), b"before").expect("write captures fixture");
+        let before = recursive_tree(&captures);
+        let called = std::cell::Cell::new(false);
+        let sentinel = captures.join("freeze-workflow-ran-before-guard.png");
+
+        let error = capture_freeze_frame_impl(&core, || {
+            called.set(true);
+            fs::write(&sentinel, b"bad ordering").expect("write workflow sentinel");
+            Err("workflow should not run".into())
+        })
+        .expect_err("freeze frame must be rejected");
+
+        assert!(error.contains("compatibility read-only"), "{error}");
+        assert!(!called.get());
+        assert!(!sentinel.exists());
+        assert_eq!(recursive_tree(&captures), before);
+    }
 
     #[test]
     fn project_frame_time_uses_timeline_fps_not_source_fps() {
@@ -557,5 +796,77 @@ mod tests {
             .expect("valid base64");
         // PNG magic number.
         assert_eq!(&bytes[..4], &[0x89, b'P', b'N', b'G']);
+    }
+
+    #[test]
+    fn freeze_capture_snapshot_isolates_target_clip_and_media() {
+        let mut timeline = Timeline::new();
+        let mut target_track = Track::new("v1", ClipType::Video);
+        target_track.hidden = true;
+        target_track.muted = true;
+        target_track
+            .clips
+            .push(Clip::new("clip-1", "asset-1", 100, 60));
+        let mut overlay_track = Track::new("v2", ClipType::Video);
+        overlay_track
+            .clips
+            .push(Clip::new("clip-2", "asset-2", 100, 60));
+        timeline.tracks = vec![target_track, overlay_track];
+
+        let mut manifest = MediaManifest::default();
+        manifest.entries.push(MediaManifestEntry {
+            id: "asset-1".into(),
+            name: "asset-1".into(),
+            kind: ClipType::Video,
+            source: MediaSource::External {
+                absolute_path: "/tmp/a.mov".into(),
+            },
+            duration: 1.0,
+            generation_input: None,
+            source_width: Some(1920),
+            source_height: Some(1080),
+            source_fps: Some(30.0),
+            has_audio: Some(false),
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+        manifest.entries.push(MediaManifestEntry {
+            id: "asset-2".into(),
+            name: "asset-2".into(),
+            kind: ClipType::Video,
+            source: MediaSource::External {
+                absolute_path: "/tmp/b.mov".into(),
+            },
+            duration: 1.0,
+            generation_input: None,
+            source_width: Some(1920),
+            source_height: Some(1080),
+            source_fps: Some(30.0),
+            has_audio: Some(false),
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+
+        let (solo_timeline, solo_manifest) =
+            build_freeze_capture_snapshot(&timeline, &manifest, "clip-1").expect("snapshot");
+        assert_eq!(solo_timeline.tracks.len(), 1);
+        assert_eq!(solo_timeline.tracks[0].clips.len(), 1);
+        assert_eq!(solo_timeline.tracks[0].clips[0].id, "clip-1");
+        assert!(!solo_timeline.tracks[0].hidden);
+        assert!(!solo_timeline.tracks[0].muted);
+        assert_eq!(solo_manifest.entries.len(), 1);
+        assert_eq!(solo_manifest.entries[0].id, "asset-1");
+    }
+
+    #[test]
+    fn freeze_capture_png_path_is_unique_for_same_clip_and_frame() {
+        let captures_dir = PathBuf::from("/tmp/captures");
+        let first = freeze_capture_png_path(&captures_dir, "clip:1", 42);
+        let second = freeze_capture_png_path(&captures_dir, "clip:1", 42);
+        assert_ne!(first, second);
+        assert!(first.to_string_lossy().contains("freeze_clip_1_42_"));
+        assert!(second.to_string_lossy().contains("freeze_clip_1_42_"));
     }
 }

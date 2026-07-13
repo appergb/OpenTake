@@ -27,6 +27,18 @@ use opentake_media::TranscriptionResult;
 
 use crate::tools::result::Block;
 
+/// Maximum inline `import_media.source.bytes` payload size before base64 decode.
+/// The tool contract advertises `bytes` for small handoffs only; larger assets
+/// should use `source.path` or a future async URL downloader.
+pub const IMPORT_BYTES_BASE64_MAX: usize = 15 * 1024 * 1024;
+
+/// Maximum decoded inline media payload written to a project bundle.
+pub const IMPORT_BYTES_DECODED_MAX: usize = 11 * 1024 * 1024;
+
+/// Maximum Streamable-HTTP request body accepted by the local MCP server.
+/// Leaves 1 MiB of JSON envelope headroom around the advertised base64 cap.
+pub const MCP_REQUEST_BODY_MAX: usize = IMPORT_BYTES_BASE64_MAX + 1024 * 1024;
+
 /// One composited timeline frame produced by [`MediaBridge::inspect_timeline`],
 /// ready to become MCP image content. `bytes` are already-encoded image data
 /// (JPEG in the production path) — the agent crate never links an image encoder;

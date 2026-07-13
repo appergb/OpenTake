@@ -14,14 +14,16 @@
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::thread::sleep;
-use std::time::Duration;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::{self, sleep};
+use std::time::{Duration, Instant};
 
 use opentake_domain::{
     Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track,
 };
+use opentake_media::{decode_frame_at, FrameRequest, MediaCancelToken};
 use opentake_render::{DecodedFrame, RenderSize};
+use opentake_tauri_lib::playback::engine::BoundedReaper;
 use opentake_tauri_lib::playback::{
     project_media, project_text, FrameSink, InstantClock, PlaybackClock, PlaybackEngine,
     PlayheadEmitter, RenderLoop,
@@ -67,6 +69,41 @@ fn make_video(path: &Path, w: u32, h: u32, fps: u32, frames: u32, hue: i32) -> b
         .unwrap_or(false)
 }
 
+fn make_distinct_cfr_video(path: &Path, w: u32, h: u32, fps: u32, frames: u32) {
+    let output = Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc2=size={w}x{h}:rate={fps}"),
+            "-frames:v",
+            &frames.to_string(),
+            "-c:v",
+            "libx264",
+            "-g",
+            &frames.to_string(),
+            "-keyint_min",
+            &frames.to_string(),
+            "-sc_threshold",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-fps_mode",
+            "cfr",
+            "-y",
+        ])
+        .arg(path)
+        .output()
+        .expect("required ffmpeg must start for exact-bootstrap fixture");
+    assert!(
+        output.status.success(),
+        "generate exact-bootstrap CFR fixture: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn external_entry(id: &str, path: &Path, w: i32, h: i32, fps: f64) -> MediaManifestEntry {
     MediaManifestEntry {
         id: id.into(),
@@ -105,19 +142,322 @@ fn try_render_loop(
     }
 }
 
-/// Render `target` repeatedly until the frame has any non-zero pixel (decode
-/// warmed up) or the budget is exhausted. Returns the non-black frame's RGBA.
+fn has_visible_rgb(rgba: &[u8]) -> bool {
+    rgba.chunks_exact(4)
+        .any(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
+}
+
+/// Render `target` repeatedly until the frame has a non-black RGB pixel.
 fn render_until_content(rl: &mut RenderLoop, target: i32, w: u32, h: u32) -> Option<Vec<u8>> {
     for _ in 0..WARMUP_TRIES {
         let f = rl.render_frame(target).expect("render_frame");
         assert_eq!(f.width, w, "composite width matches render size");
         assert_eq!(f.height, h, "composite height matches render size");
-        if f.rgba.iter().any(|&b| b != 0) {
+        if has_visible_rgb(&f.rgba) {
             return Some(f.rgba);
         }
         sleep(WARMUP_SLEEP);
     }
     None
+}
+
+fn required_render_loop(
+    timeline: Timeline,
+    manifest: &MediaManifest,
+    render_size: RenderSize,
+) -> RenderLoop {
+    let (sizes, media) = project_media(manifest, &None);
+    let text = project_text(&timeline);
+    RenderLoop::new(timeline, media, text, sizes, render_size)
+        .expect("exact-bootstrap integration requires a GPU adapter")
+}
+
+struct ManualClock(AtomicI32);
+
+impl ManualClock {
+    fn new(frame: i32) -> Self {
+        Self(AtomicI32::new(frame))
+    }
+
+    fn set(&self, frame: i32) {
+        self.0.store(frame, Ordering::Release);
+    }
+}
+
+impl PlaybackClock for ManualClock {
+    fn frame(&self, _fps: i32) -> i32 {
+        self.0.load(Ordering::Acquire)
+    }
+
+    fn seek(&self, frame: i32) {
+        self.set(frame);
+    }
+}
+
+#[test]
+fn cold_bootstrap_uses_exact_trimmed_source_frame() {
+    assert!(
+        ffmpeg_ready(),
+        "exact-bootstrap integration requires ffmpeg"
+    );
+    let dir = tempfile::tempdir().expect("fixture tempdir");
+    let src = dir.path().join("distinct-cfr.mp4");
+    let (w, h, fps, frames, source_frame) = (160u32, 90u32, 12u32, 12u32, 5i32);
+    make_distinct_cfr_video(&src, w, h, fps, frames);
+
+    let exact_request = |frame: i32| FrameRequest {
+        time_secs: frame as f64 / fps as f64,
+        max_size: (w, h),
+        tolerance_secs: 0.0,
+        apply_rotation: true,
+    };
+    let (_, predecessor) = decode_frame_at(&src, &exact_request(source_frame - 1))
+        .expect("decode predecessor fixture frame");
+    let (_, target) =
+        decode_frame_at(&src, &exact_request(source_frame)).expect("decode target fixture frame");
+    assert_ne!(
+        target.rgba, predecessor.rgba,
+        "CFR fixture must have distinct adjacent frame pixels"
+    );
+
+    let mut timeline = Timeline::new();
+    timeline.fps = fps as i32;
+    let mut track = Track::new("t1", ClipType::Video);
+    let mut clip = Clip::new("clip-1", "asset-1", 0, frames as i32 - source_frame);
+    clip.trim_start_frame = source_frame;
+    track.clips.push(clip);
+    timeline.tracks.push(track);
+    let mut manifest = MediaManifest::new();
+    manifest.entries.push(external_entry(
+        "asset-1", &src, w as i32, h as i32, fps as f64,
+    ));
+
+    let mut render_loop = required_render_loop(timeline, &manifest, RenderSize::new(w, h));
+    let first = render_loop
+        .render_frame(0)
+        .expect("cold bootstrap must render the trimmed source frame");
+
+    assert_eq!(first.rgba, target.rgba, "first composite must match target");
+    assert_ne!(
+        first.rgba, predecessor.rgba,
+        "first composite must not use the predecessor"
+    );
+}
+
+#[test]
+fn cold_bootstrap_decode_failure_is_reported_instead_of_publishing_black() {
+    let dir = tempfile::tempdir().expect("fixture tempdir");
+    let missing = dir.path().join("missing.mp4");
+    let (w, h, fps) = (160u32, 90u32, 12u32);
+
+    let mut timeline = Timeline::new();
+    timeline.fps = fps as i32;
+    let mut track = Track::new("t1", ClipType::Video);
+    let mut clip = Clip::new("clip-1", "asset-1", 0, 3);
+    clip.trim_start_frame = 4;
+    track.clips.push(clip);
+    timeline.tracks.push(track);
+    let mut manifest = MediaManifest::new();
+    manifest.entries.push(external_entry(
+        "asset-1", &missing, w as i32, h as i32, fps as f64,
+    ));
+
+    let mut render_loop = required_render_loop(timeline, &manifest, RenderSize::new(w, h));
+    let error = match render_loop.render_frame(0) {
+        Ok(frame) => panic!(
+            "cold bootstrap decode failure published {}x{} black frame",
+            frame.width, frame.height
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("bootstrap") && error.contains("asset-1"),
+        "error must identify bootstrap media failure: {error}"
+    );
+}
+
+#[test]
+fn cancelling_initial_ready_bootstrap_releases_the_readiness_worker() {
+    assert!(ffmpeg_ready(), "cancellation integration requires ffmpeg");
+    let dir = tempfile::tempdir().expect("fixture tempdir");
+    let fifo = dir.path().join("blocked-initial-source");
+    let status = Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo must start");
+    assert!(status.success(), "mkfifo must create the blocked source");
+
+    let mut timeline = Timeline::new();
+    timeline.fps = 30;
+    let mut track = Track::new("t1", ClipType::Video);
+    track.clips.push(Clip::new("clip-1", "asset-1", 0, 4));
+    timeline.tracks.push(track);
+    let mut manifest = MediaManifest::new();
+    manifest
+        .entries
+        .push(external_entry("asset-1", &fifo, 2, 2, 30.0));
+    let (sizes, media) = project_media(&manifest, &None);
+    let text = project_text(&timeline);
+
+    struct NoopSink;
+    impl FrameSink for NoopSink {
+        fn push_frame(&self, _frame: &DecodedFrame) {}
+    }
+    struct NoopEmitter;
+    impl PlayheadEmitter for NoopEmitter {
+        fn emit(&self, _frame: i32) {}
+    }
+
+    let cancel = MediaCancelToken::new();
+    let ready_cancel = cancel.clone();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let result = PlaybackEngine::spawn_ready_cancellable(
+            timeline,
+            media,
+            text,
+            sizes,
+            RenderSize::new(2, 2),
+            Arc::new(ManualClock::new(0)),
+            Arc::new(NoopSink),
+            Arc::new(NoopEmitter),
+            0,
+            ready_cancel,
+        );
+        let _ = ready_tx.send(result.map(|engine| engine.stop()));
+    });
+
+    let spawn_deadline = Instant::now() + Duration::from_secs(3);
+    while cancel.spawned_child_count() == 0 && Instant::now() < spawn_deadline {
+        sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        cancel.spawned_child_count(),
+        1,
+        "initial exact bootstrap must reach the blocked ffmpeg child"
+    );
+
+    cancel.cancel();
+    let error = ready_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("external cancellation must release spawn_ready")
+        .expect_err("cancelled initial readiness must not install an engine");
+    assert!(
+        error.contains("cancelled"),
+        "typed cause must survive: {error}"
+    );
+    assert_eq!(
+        cancel.active_reader_count(),
+        0,
+        "cancelled initial bootstrap must join its event reader"
+    );
+}
+
+#[test]
+fn stopping_running_engine_cancels_blocked_cold_bootstrap() {
+    assert!(ffmpeg_ready(), "cancellation integration requires ffmpeg");
+    let dir = tempfile::tempdir().expect("fixture tempdir");
+    let fifo = dir.path().join("blocked-source");
+    let status = Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo must start");
+    assert!(
+        status.success(),
+        "mkfifo must create the blocked media source"
+    );
+
+    let mut timeline = Timeline::new();
+    timeline.fps = 30;
+    let mut track = Track::new("t1", ClipType::Video);
+    track.clips.push(Clip::new("clip-1", "asset-1", 1, 4));
+    timeline.tracks.push(track);
+    let mut manifest = MediaManifest::new();
+    manifest
+        .entries
+        .push(external_entry("asset-1", &fifo, 2, 2, 30.0));
+    let (sizes, media) = project_media(&manifest, &None);
+    let text = project_text(&timeline);
+
+    struct NoopSink;
+    impl FrameSink for NoopSink {
+        fn push_frame(&self, _frame: &DecodedFrame) {}
+    }
+    struct NoopEmitter;
+    impl PlayheadEmitter for NoopEmitter {
+        fn emit(&self, _frame: i32) {}
+    }
+
+    let clock = Arc::new(ManualClock::new(0));
+    let engine = PlaybackEngine::spawn_ready(
+        timeline,
+        media,
+        text,
+        sizes,
+        RenderSize::new(2, 2),
+        clock.clone(),
+        Arc::new(NoopSink),
+        Arc::new(NoopEmitter),
+        0,
+    )
+    .expect("frame zero prepares before the clip becomes visible");
+    engine.resume(0).expect("resume prepared engine");
+    clock.set(1);
+    sleep(Duration::from_millis(250));
+
+    let reaper = BoundedReaper::new();
+    let render_permit = reaper
+        .try_reserve()
+        .expect("reserve the blocked engine teardown");
+    let dummy_permit = reaper
+        .try_reserve()
+        .expect("reserve the second bounded teardown slot");
+    assert!(
+        reaper.try_reserve().is_err(),
+        "both teardown slots must be occupied before cancellation"
+    );
+
+    let render_handle = engine
+        .request_stop()
+        .expect("running engine owns a render handle");
+    let joined = Arc::new(Mutex::new(None));
+    let joined_result = Arc::clone(&joined);
+    let join_wrapper = thread::spawn(move || {
+        *joined_result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(render_handle.join().is_ok());
+    });
+    render_permit
+        .enqueue(vec![join_wrapper])
+        .expect("enqueue cancelled render handle");
+
+    let (dummy_release_tx, dummy_release_rx) = mpsc::channel();
+    let dummy_handle = thread::spawn(move || {
+        let _ = dummy_release_rx.recv();
+    });
+    dummy_permit
+        .enqueue(vec![dummy_handle])
+        .expect("enqueue held second teardown");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let recovered = loop {
+        match reaper.try_reserve() {
+            Ok(permit) => break permit,
+            Err(_) if Instant::now() < deadline => sleep(Duration::from_millis(10)),
+            Err(error) => panic!("cancelled bootstrap did not recover reaper capacity: {error}"),
+        }
+    };
+    assert!(
+        joined
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some_and(|ok| ok),
+        "render thread must not panic during cancellation"
+    );
+    drop(recovered);
+    dummy_release_tx
+        .send(())
+        .expect("release held teardown slot");
 }
 
 #[test]
@@ -153,15 +493,20 @@ fn render_loop_streams_frames_advances_and_seeks() {
     assert_eq!(rl.total_frames(), frames as i32);
     assert_eq!(rl.fps(), fps as i32);
 
-    // Frame 0 composites real content (not the clear color).
-    let frame0 = render_until_content(&mut rl, 0, w, h)
-        .expect("frame 0 should composite non-black within the warm-up budget");
+    // spawn_ready may publish only a complete first frame, never the compositor
+    // clear that the non-blocking stream returns during cold decoder startup.
+    let frame0 = rl.render_frame(0).expect("render_frame(0)");
+    assert!(
+        has_visible_rgb(&frame0.rgba),
+        "frame 0 should be visible on the first render"
+    );
+    let frame0 = frame0.rgba;
 
     // A later frame differs (testsrc animates a moving pattern + timestamp).
     let mut differs = false;
     for _ in 0..WARMUP_TRIES {
         let f = rl.render_frame(8).expect("render_frame(8)");
-        if f.rgba.iter().any(|&b| b != 0) && f.rgba != frame0 {
+        if has_visible_rgb(&f.rgba) && f.rgba != frame0 {
             differs = true;
             break;
         }
@@ -221,7 +566,7 @@ fn render_loop_composites_two_tracks_concurrently() {
     // must come back with real content (no panic, no all-black).
     let composed = render_until_content(&mut rl, 0, w, h)
         .expect("two-track composite should render non-black within the warm-up budget");
-    assert!(composed.iter().any(|&b| b != 0));
+    assert!(has_visible_rgb(&composed));
 }
 
 /// The threaded `PlaybackEngine` end-to-end: spawn it over a real GPU + ffmpeg
@@ -265,12 +610,23 @@ fn playback_engine_thread_streams_frames_to_sink_and_emitter() {
     let text = project_text(&tl);
 
     let frame_count = Arc::new(AtomicUsize::new(0));
+    let first_frame = Arc::new(Mutex::new(None::<Vec<u8>>));
     let last_emitted = Arc::new(AtomicI32::new(-1));
 
-    struct CountingSink(Arc<AtomicUsize>);
+    struct CountingSink {
+        count: Arc<AtomicUsize>,
+        first_frame: Arc<Mutex<Option<Vec<u8>>>>,
+    }
     impl FrameSink for CountingSink {
-        fn push_frame(&self, _frame: &DecodedFrame) {
-            self.0.fetch_add(1, Ordering::Relaxed);
+        fn push_frame(&self, frame: &DecodedFrame) {
+            self.count.fetch_add(1, Ordering::Relaxed);
+            let mut first = self
+                .first_frame
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if first.is_none() {
+                *first = Some(frame.rgba.clone());
+            }
         }
     }
     struct RecordingEmitter(Arc<AtomicI32>);
@@ -281,29 +637,28 @@ fn playback_engine_thread_streams_frames_to_sink_and_emitter() {
     }
 
     let clock: Arc<dyn PlaybackClock> = Arc::new(InstantClock::new(0));
-    let sink: Arc<dyn FrameSink> = Arc::new(CountingSink(frame_count.clone()));
+    let sink: Arc<dyn FrameSink> = Arc::new(CountingSink {
+        count: frame_count.clone(),
+        first_frame: first_frame.clone(),
+    });
     let emitter: Arc<dyn PlayheadEmitter> = Arc::new(RecordingEmitter(last_emitted.clone()));
 
-    let engine = PlaybackEngine::spawn(tl, media, text, sizes, size, clock, sink, emitter)
-        .expect("engine spawns");
-    // The wall clock advances the playhead; POLL for the first frame rather than
-    // sleeping a fixed budget. The first composite waits on a cold ffmpeg-decode +
-    // GPU warm-up, which under the parallel `cargo test --workspace` GPU contention
-    // (many gpu_* / export tests at once) can take well over half a second — a
-    // fixed 600ms sleep flaked here. Same ~2s warm-up budget the direct-render
-    // tests above use; still fails fast (loops break on first frame) on a genuine
-    // "produces nothing" regression.
-    let mut produced = false;
-    for _ in 0..WARMUP_TRIES {
-        if frame_count.load(Ordering::Relaxed) > 0 {
-            produced = true;
-            break;
-        }
-        sleep(WARMUP_SLEEP);
-    }
+    let engine = PlaybackEngine::spawn_ready(tl, media, text, sizes, size, clock, sink, emitter, 0)
+        .expect("engine prepares first frame");
+    assert_eq!(frame_count.load(Ordering::Relaxed), 0);
+    engine.resume(0).expect("install publishes buffered frame");
+    let produced = frame_count.load(Ordering::Relaxed) > 0;
     engine.stop();
 
     assert!(produced, "the engine thread produced no frames");
+    assert!(
+        first_frame
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .is_some_and(|rgba| has_visible_rgb(rgba)),
+        "the engine's first publication must be visible"
+    );
     assert!(
         last_emitted.load(Ordering::Relaxed) >= 0,
         "the engine thread emitted no playhead frame"

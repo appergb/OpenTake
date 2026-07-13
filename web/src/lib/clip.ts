@@ -431,10 +431,14 @@ export function rotateDeltaIntoLocalFrame(
 /** Which edge a trim drag grabs. */
 export type TrimEdge = "left" | "right";
 
-type TrimClip = Pick<Clip, "durationFrames" | "speed" | "trimStartFrame" | "trimEndFrame" | "mediaType">;
+type TrimClip = Pick<Clip, "durationFrames" | "speed" | "trimStartFrame" | "trimEndFrame" | "mediaType" | "reversed">;
 
 function isUnbounded(clip: TrimClip): boolean {
   return clip.mediaType === "image" || clip.mediaType === "text";
+}
+
+function isReversedVideo(clip: TrimClip): boolean {
+  return clip.mediaType === "video" && clip.reversed === true;
 }
 
 /**
@@ -449,15 +453,17 @@ export function clampTrimDeltaFrames(clip: TrimClip, edge: TrimEdge, delta: numb
     // Positive delta shrinks duration (left edge moves right): keep ≥1 frame.
     let d = Math.min(delta, clip.durationFrames - 1);
     if (!isUnbounded(clip)) {
-      // Negative delta extends into leading source; bounded by what's trimmed.
-      d = Math.max(d, -Math.floor(clip.trimStartFrame / speed));
+      // Negative delta extends into source; reversed video consumes from trimEnd.
+      const available = isReversedVideo(clip) ? clip.trimEndFrame : clip.trimStartFrame;
+      d = Math.max(d, -Math.floor(available / speed));
     }
     return d;
   }
   // Right: negative delta shrinks duration (right edge moves left): keep ≥1 frame.
   let d = Math.max(delta, -(clip.durationFrames - 1));
   if (!isUnbounded(clip)) {
-    d = Math.min(d, Math.floor(clip.trimEndFrame / speed));
+    const available = isReversedVideo(clip) ? clip.trimStartFrame : clip.trimEndFrame;
+    d = Math.min(d, Math.floor(available / speed));
   }
   return d;
 }
@@ -475,6 +481,20 @@ export function trimSourceValues(
 ): { trimStartFrame: number; trimEndFrame: number } {
   const speed = clip.speed > 0 ? clip.speed : 1;
   const sourceDelta = Math.round(delta * speed);
+  if (isReversedVideo(clip)) {
+    if (edge === "left") {
+      const ne = clip.trimEndFrame + sourceDelta;
+      return {
+        trimStartFrame: clip.trimStartFrame,
+        trimEndFrame: Math.max(0, ne),
+      };
+    }
+    const ns = clip.trimStartFrame - sourceDelta;
+    return {
+      trimStartFrame: Math.max(0, ns),
+      trimEndFrame: clip.trimEndFrame,
+    };
+  }
   if (edge === "left") {
     const ns = clip.trimStartFrame + sourceDelta;
     return {

@@ -179,6 +179,8 @@ pub struct ClipProperties {
     pub flip_horizontal: Option<bool>,
     /// Vertical flip flag (writes to `transform.flip_vertical`).
     pub flip_vertical: Option<bool>,
+    /// Reverse playback flag. Per-clip and not propagated to linked audio partners.
+    pub reversed: Option<bool>,
 }
 
 /// Which keyframe track [`EditCommand::SetKeyframes`] targets.
@@ -244,6 +246,13 @@ pub enum EditCommand {
     RemoveClips { clip_ids: Vec<String> },
     /// Split a clip at a frame (splits linked partners too).
     SplitClip { clip_id: String, at_frame: i32 },
+    /// Freeze Frame: split at `at_frame`, then ripple-insert a still image clip.
+    FreezeFrame {
+        clip_id: String,
+        at_frame: i32,
+        duration_frames: i32,
+        media_ref: String,
+    },
     /// Overwrite-style trim: resize clips in place from new source-frame trims.
     TrimClips { edits: Vec<TrimEdit> },
     /// Assign clip properties (timing changes propagate to linked partners).
@@ -492,6 +501,12 @@ pub fn apply(
         } => duplicate_clips_cmd(state, clip_ids, offset_frames, target_track_indexes, ids),
         EditCommand::RemoveClips { clip_ids } => remove_clips(state, clip_ids),
         EditCommand::SplitClip { clip_id, at_frame } => split(state, clip_id, at_frame, ids),
+        EditCommand::FreezeFrame {
+            clip_id,
+            at_frame,
+            duration_frames,
+            media_ref,
+        } => freeze_frame(state, clip_id, at_frame, duration_frames, media_ref, ids),
         EditCommand::TrimClips { edits } => trim(state, edits),
         EditCommand::SetClipProperties {
             clip_ids,
@@ -1027,6 +1042,59 @@ fn split(
     )
 }
 
+fn freeze_frame(
+    state: &mut EditorState,
+    clip_id: String,
+    at_frame: i32,
+    duration_frames: i32,
+    media_ref: String,
+    ids: &dyn IdGen,
+) -> Result<EditResult, EditError> {
+    let loc = state
+        .find_clip(&clip_id)
+        .ok_or_else(|| EditError::Invalid(format!("Clip not found: {clip_id}")))?;
+    let clip = &state.timeline.tracks[loc.track_index].clips[loc.clip_index];
+    if !(at_frame > clip.start_frame && at_frame < clip.end_frame()) {
+        return Err(EditError::Invalid(format!(
+            "Frame {at_frame} must be strictly inside clip range ({}..{})",
+            clip.start_frame,
+            clip.end_frame()
+        )));
+    }
+    if duration_frames < 1 {
+        return Err(EditError::Invalid(format!(
+            "durationFrames must be >= 1 (got {duration_frames})"
+        )));
+    }
+    if !matches!(clip.media_type, ClipType::Video | ClipType::Image) {
+        return Err(EditError::Invalid(format!(
+            "Freeze Frame requires a video or image clip (got {:?})",
+            clip.media_type
+        )));
+    }
+    let track_id = state.timeline.tracks[loc.track_index].id.clone();
+    transact(
+        state,
+        "Freeze Frame",
+        |_| format!("Froze {clip_id} at frame {at_frame} for {duration_frames} frame(s)"),
+        |st| {
+            let Some(ti) = st.track_index(&track_id) else {
+                return Err(EditError::Invalid("Track vanished".into()));
+            };
+            let mut affected = ops::split_clip(&mut st.timeline, &clip_id, at_frame, ids);
+            let spec = PlaceSpec::new(media_ref, ClipType::Image, at_frame, duration_frames);
+            affected.extend(ops::ripple::ripple_insert(
+                &mut st.timeline,
+                std::slice::from_ref(&spec),
+                ti,
+                at_frame,
+                ids,
+            ));
+            Ok(affected)
+        },
+    )
+}
+
 fn trim(state: &mut EditorState, edits: Vec<TrimEdit>) -> Result<EditResult, EditError> {
     if edits.is_empty() {
         return Err(EditError::Invalid("Missing or empty trim edits".into()));
@@ -1188,6 +1256,9 @@ fn apply_property_changes(
     }
     if let Some(f) = props.flip_vertical {
         clip.transform.flip_vertical = f;
+    }
+    if let Some(reversed) = props.reversed {
+        clip.reversed = reversed;
     }
     if let Some(c) = &props.text_content {
         clip.text_content = Some(c.clone());
@@ -3590,6 +3661,63 @@ mod text_style_property_tests {
 }
 
 #[cfg(test)]
+mod reversed_property_tests {
+    use super::*;
+    use crate::id::SeqIdGen;
+    use opentake_domain::{Clip, ClipType, Track};
+
+    fn state_with_video_clips() -> EditorState {
+        let mut tl = Timeline::new();
+        let mut t = Track::new("v1", ClipType::Video);
+        t.clips.push(Clip::new("c1", "asset", 0, 30));
+        t.clips.push(Clip::new("c2", "asset", 40, 30));
+        tl.tracks.push(t);
+        EditorState::from_timeline(tl)
+    }
+
+    #[test]
+    fn set_clip_properties_reversed_sets_only_requested_clip() {
+        let mut state = state_with_video_clips();
+        let ids = SeqIdGen::default();
+        let video_id = state.timeline.tracks[0].clips[0].id.clone();
+        let untouched_id = state.timeline.tracks[0].clips[1].id.clone();
+        let before = state.timeline.clone();
+
+        let result = apply(
+            &mut state,
+            EditCommand::SetClipProperties {
+                clip_ids: vec![video_id.clone()],
+                properties: Box::new(ClipProperties {
+                    reversed: Some(true),
+                    ..Default::default()
+                }),
+            },
+            &ids,
+        )
+        .unwrap();
+
+        assert!(result.changed);
+        let clip = state
+            .timeline
+            .tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .find(|clip| clip.id == video_id)
+            .unwrap();
+        assert!(clip.reversed);
+        let untouched = state
+            .timeline
+            .tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .find(|clip| clip.id == untouched_id)
+            .unwrap();
+        assert!(!untouched.reversed);
+        assert_ne!(state.timeline, before);
+    }
+}
+
+#[cfg(test)]
 mod reset_transform_tests {
     use super::*;
     use crate::id::SeqIdGen;
@@ -4218,5 +4346,144 @@ mod add_texts_auto_track_tests {
                 assert!(clip.start_frame + clip.duration_frames <= 20);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod freeze_frame_tests {
+    use super::*;
+    use crate::id::SeqIdGen;
+    use opentake_domain::{Clip, Track};
+
+    fn state_with_video_clip() -> (EditorState, SeqIdGen) {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+        let mut t = Track::new("v1", ClipType::Video);
+        t.clips.push(Clip::new("c1", "asset1", 100, 60));
+        state.timeline.tracks.push(t);
+        (state, ids)
+    }
+
+    fn freeze(clip_id: &str, at_frame: i32, duration_frames: i32) -> EditCommand {
+        EditCommand::FreezeFrame {
+            clip_id: clip_id.to_string(),
+            at_frame,
+            duration_frames,
+            media_ref: format!("freeze:{clip_id}:{at_frame}"),
+        }
+    }
+
+    #[test]
+    fn freeze_frame_splits_and_inserts_image_clip() {
+        let (mut state, ids) = state_with_video_clip();
+        let res = apply(&mut state, freeze("c1", 130, 30), &ids).unwrap();
+        assert!(res.changed);
+        assert_eq!(res.action_name, "Freeze Frame");
+        let track = &state.timeline.tracks[0];
+        assert_eq!(track.clips.len(), 3);
+        assert_eq!(track.clips[0].id, "c1");
+        assert_eq!(track.clips[0].start_frame, 100);
+        assert_eq!(track.clips[0].end_frame(), 130);
+        assert_eq!(track.clips[1].start_frame, 130);
+        assert_eq!(track.clips[1].duration_frames, 30);
+        assert_eq!(track.clips[1].media_type, ClipType::Image);
+        assert_eq!(track.clips[1].media_ref, "freeze:c1:130");
+        assert_eq!(track.clips[2].start_frame, 160);
+        assert_eq!(track.clips[2].end_frame(), 190);
+    }
+
+    #[test]
+    fn freeze_frame_preserves_real_media_ref() {
+        let (mut state, ids) = state_with_video_clip();
+        apply(
+            &mut state,
+            EditCommand::FreezeFrame {
+                clip_id: "c1".to_string(),
+                at_frame: 130,
+                duration_frames: 15,
+                media_ref: "asset-xyz".to_string(),
+            },
+            &ids,
+        )
+        .unwrap();
+        assert_eq!(state.timeline.tracks[0].clips[1].media_ref, "asset-xyz");
+    }
+
+    #[test]
+    fn freeze_frame_at_start_endpoint_rejected() {
+        let (mut state, ids) = state_with_video_clip();
+        assert!(apply(&mut state, freeze("c1", 100, 30), &ids).is_err());
+        assert_eq!(state.timeline.tracks[0].clips.len(), 1);
+    }
+
+    #[test]
+    fn freeze_frame_at_end_endpoint_rejected() {
+        let (mut state, ids) = state_with_video_clip();
+        assert!(apply(&mut state, freeze("c1", 160, 30), &ids).is_err());
+        assert_eq!(state.timeline.tracks[0].clips.len(), 1);
+    }
+
+    #[test]
+    fn freeze_frame_zero_duration_rejected() {
+        let (mut state, ids) = state_with_video_clip();
+        assert!(apply(&mut state, freeze("c1", 130, 0), &ids).is_err());
+        assert_eq!(state.timeline.tracks[0].clips.len(), 1);
+    }
+
+    #[test]
+    fn freeze_frame_audio_clip_rejected() {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+        let mut t = Track::new("a1", ClipType::Audio);
+        let mut c = Clip::new("ac", "asset", 100, 60);
+        c.media_type = ClipType::Audio;
+        c.source_clip_type = ClipType::Audio;
+        t.clips.push(c);
+        state.timeline.tracks.push(t);
+        assert!(apply(&mut state, freeze("ac", 130, 30), &ids).is_err());
+    }
+
+    #[test]
+    fn freeze_frame_text_clip_rejected() {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+        let mut t = Track::new("t1", ClipType::Text);
+        let mut c = Clip::new("tc", "asset", 100, 60);
+        c.media_type = ClipType::Text;
+        t.clips.push(c);
+        state.timeline.tracks.push(t);
+        assert!(apply(&mut state, freeze("tc", 130, 30), &ids).is_err());
+    }
+
+    #[test]
+    fn freeze_frame_missing_clip_rejected() {
+        let (mut state, ids) = state_with_video_clip();
+        assert!(apply(&mut state, freeze("nope", 130, 30), &ids).is_err());
+    }
+
+    #[test]
+    fn freeze_frame_undo_restores_original_in_one_step() {
+        let (mut state, ids) = state_with_video_clip();
+        let before = state.snapshot();
+        apply(&mut state, freeze("c1", 130, 30), &ids).unwrap();
+        assert_eq!(state.undo_depth(), 1);
+        apply(&mut state, EditCommand::Undo, &ids).unwrap();
+        assert_eq!(state.timeline, before.timeline);
+    }
+
+    #[test]
+    fn freeze_frame_shifts_a_follower_on_same_track() {
+        let (mut state, ids) = state_with_video_clip();
+        state.timeline.tracks[0]
+            .clips
+            .push(Clip::new("c2", "asset2", 160, 60));
+        apply(&mut state, freeze("c1", 130, 30), &ids).unwrap();
+        let c2 = state.timeline.tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == "c2")
+            .unwrap();
+        assert_eq!(c2.start_frame, 190);
+        assert_eq!(c2.end_frame(), 250);
     }
 }

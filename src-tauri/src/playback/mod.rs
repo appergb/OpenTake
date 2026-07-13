@@ -18,6 +18,7 @@ pub mod commands;
 pub mod engine;
 pub mod project;
 pub mod resolver;
+pub mod session;
 pub mod transport;
 
 pub use engine::{

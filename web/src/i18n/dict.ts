@@ -20,6 +20,14 @@ const zh: Dict = {
   "app.name": "OpenTake",
   "app.tagline": "为 AI 打造的视频编辑器。生成与剪辑,一处搞定。",
 
+  // Project schema compatibility
+  "compatibility.title": "兼容性只读模式",
+  "compatibility.description":
+    "此项目包含当前版本无法安全保存的字段。仍可查看项目内容，但编辑和保存已停用。",
+  "compatibility.blockerCount.one": "{count} 个兼容性问题",
+  "compatibility.blockerCount.many": "{count} 个兼容性问题",
+  "project.saveFailed": "保存失败：{error}",
+
   // TitleBar
   "title.toggleAgent": "切换 Agent 面板",
   "title.export": "导出",
@@ -104,6 +112,7 @@ const zh: Dict = {
   "view.layoutDefault": "默认布局",
   "view.layoutMedia": "媒体布局",
   "view.layoutVertical": "竖屏布局",
+  "view.agentPanel": "Agent 面板",
   "view.mediaPanel": "媒体面板",
   "view.inspector": "检查器",
 
@@ -393,8 +402,15 @@ const zh: Dict = {
   "contextMenu.link": "链接",
   "contextMenu.unlink": "取消链接",
   "contextMenu.swapMedia": "替换媒体",
+  "contextMenu.reverse": "倒放",
+  "contextMenu.reverseOn": "取消倒放",
+  "contextMenu.reverseTooLong": "片段过长，无法倒放",
+  "contextMenu.freezeFrame": "冻结帧",
+  "contextMenu.freezeFramePrompt": "冻结时长（帧）",
   // Disabled placeholders (issue #93 acceptance: menu must list these even if stub)
   "contextMenu.saveAsMedia": "另存为媒体",
+  "contextMenu.saveRangeAsMedia": "将范围另存为媒体",
+  "contextMenu.clearRange": "清除范围",
   "contextMenu.extractAudio": "提取音频",
   "swapMedia.noCandidates": "没有同类型素材可替换",
 
@@ -415,9 +431,29 @@ const zh: Dict = {
   "preview.captureFrameSaved": "当前帧已存入素材库",
   "preview.captureFrameUnavailable": "当前环境无法生成合成帧",
   "preview.captureFrameFailed": "截帧失败",
+  "preview.unsupportedPlayback": "当前时间线无法完整预览",
+  "preview.unsupportedPlayback.lottie": "Lottie 动画暂不支持",
+  "preview.unsupportedPlayback.enabled-effect": "已启用的效果暂不支持",
+  "preview.unsupportedPlayback.polygon-mask": "多边形蒙版暂不支持",
+  "preview.unsupportedPlayback.mask-overflow": "每个片段最多支持 4 个蒙版",
+  "preview.unsupportedPlayback.composited-reverse": "合成内容暂不支持倒放",
+  "preview.unsupportedPlayback.composited-speed": "合成内容暂不支持变速",
+  "preview.unsupportedPlayback.rust-unavailable": "桌面合成引擎不可用",
+  "preview.unsupportedPlayback.rust-disabled": "桌面合成引擎已停用",
+  "preview.terminalFrameFailed": "终帧加载失败，已保留最后一帧",
 
   // Agent panel
   "agent.placeholder": "AI 助手 · 即将推出",
+  "agent.title": "Agent",
+  "agent.empty": "向 Agent 描述你想完成的剪辑操作。",
+  "agent.desktopOnly": "Agent 仅在桌面版中可用。",
+  "agent.inputPlaceholder": "描述你想做的编辑…",
+  "agent.send": "发送",
+  "agent.cancel": "停止",
+  "agent.clear": "新对话",
+  "agent.openSettings": "打开设置",
+  "agent.toolArgs": "参数",
+  "agent.toolResult": "结果",
 
   // Home
   "home.welcome": "欢迎使用 OpenTake",
@@ -533,11 +569,29 @@ const zh: Dict = {
   "settings.shortcutsSave": "保存",
   "settings.shortcutsNew": "新建",
 
-  // Account pane
-  "settings.accountSignIn": "使用 Google 登录",
-  "settings.accountSignOut": "退出登录",
-  "settings.accountSignedInAs": "已登录为",
-  "settings.accountNotSignedIn": "未登录",
+  // Optional account backend
+  "account.disclaimer":
+    "OpenTake 没有官方后端。此功能仅用于连接您自部署的服务；不登录不影响本地编辑、导出、AI 或 MCP 功能。",
+  "account.backendUrl": "后端地址",
+  "account.backendUrlDesc":
+    "自部署服务的根地址。远端服务必须使用 HTTPS；本机开发可使用 localhost 或回环 IP 的 HTTP。",
+  "account.backendUrlPlaceholder": "https://your-backend.example.com",
+  "account.saveBackendUrl": "保存地址",
+  "account.clearBackendUrl": "清除",
+  "account.backendUrlSaved": "后端地址已保存。",
+  "account.backendUrlSaveFailed": "保存后端地址失败：{error}",
+  "account.backendUrlUnsaved": "地址尚未保存；登录已禁用，当前已保存地址：{url}",
+  "account.loginTarget": "登录令牌将只发送到：{url}",
+  "account.token": "登录令牌",
+  "account.tokenPlaceholder": "粘贴自部署服务签发的令牌",
+  "account.login": "登录",
+  "account.logout": "退出登录",
+  "account.loginFailed": "登录失败：{error}",
+  "account.status.offline": "未登录",
+  "account.status.stored": "已保存登录凭据 · 本次启动尚未验证",
+  "account.status.connecting": "连接中…",
+  "account.status.online": "已登录 · {userId}",
+  "account.status.error": "错误：{message}",
 
   // Home extended
   "home.signIn": "登录",
@@ -587,6 +641,8 @@ const zh: Dict = {
   "library.cat.image": "图片",
   "library.cat.effect": "特效",
   "library.import": "导入当前项目",
+  "library.importCommittedWarning":
+    "素材已提交，但完整性复核和自动回滚均失败；请立即保存副本并重新打开项目检查。",
   "library.categorize": "设置分类",
   "library.categorizePrompt": "输入分类名(留空表示取消分类):",
   "library.unfavorite": "取消收藏",
@@ -598,6 +654,13 @@ const zh: Dict = {
 const en: Dict = {
   "app.name": "OpenTake",
   "app.tagline": "A video editor built for AI. Generate and edit, all in one place.",
+
+  "compatibility.title": "Compatibility read-only mode",
+  "compatibility.description":
+    "This project contains fields this version cannot safely save. You can still inspect the project, but editing and saving are disabled.",
+  "compatibility.blockerCount.one": "{count} compatibility issue",
+  "compatibility.blockerCount.many": "{count} compatibility issues",
+  "project.saveFailed": "Save failed: {error}",
 
   "title.toggleAgent": "Toggle Agent Panel",
   "title.export": "Export",
@@ -681,6 +744,7 @@ const en: Dict = {
   "view.layoutDefault": "Default Layout",
   "view.layoutMedia": "Media Layout",
   "view.layoutVertical": "Vertical Layout",
+  "view.agentPanel": "Agent Panel",
   "view.mediaPanel": "Media Panel",
   "view.inspector": "Inspector",
 
@@ -964,8 +1028,15 @@ const en: Dict = {
   "contextMenu.link": "Link",
   "contextMenu.unlink": "Unlink",
   "contextMenu.swapMedia": "Swap Media",
+  "contextMenu.reverse": "Reverse",
+  "contextMenu.reverseOn": "Reverse Off",
+  "contextMenu.reverseTooLong": "Reverse Unavailable for Long Clips",
+  "contextMenu.freezeFrame": "Freeze Frame",
+  "contextMenu.freezeFramePrompt": "Freeze duration (frames)",
   // Disabled placeholders (issue #93 acceptance: menu must list these even if stub)
   "contextMenu.saveAsMedia": "Save as Media",
+  "contextMenu.saveRangeAsMedia": "Save Range as Media",
+  "contextMenu.clearRange": "Clear Range",
   "contextMenu.extractAudio": "Extract Audio",
   "swapMedia.noCandidates": "No compatible media to swap",
 
@@ -985,8 +1056,28 @@ const en: Dict = {
   "preview.captureFrameSaved": "Frame added to media",
   "preview.captureFrameUnavailable": "Composite frame unavailable",
   "preview.captureFrameFailed": "Capture frame failed",
+  "preview.unsupportedPlayback": "This timeline cannot be previewed completely",
+  "preview.unsupportedPlayback.lottie": "Lottie animation is not supported yet",
+  "preview.unsupportedPlayback.enabled-effect": "Enabled effects are not supported yet",
+  "preview.unsupportedPlayback.polygon-mask": "Polygon masks are not supported yet",
+  "preview.unsupportedPlayback.mask-overflow": "A clip can use at most four masks",
+  "preview.unsupportedPlayback.composited-reverse": "Composited content cannot be reversed yet",
+  "preview.unsupportedPlayback.composited-speed": "Composited content cannot be speed-adjusted yet",
+  "preview.unsupportedPlayback.rust-unavailable": "The desktop compositor is unavailable",
+  "preview.unsupportedPlayback.rust-disabled": "The desktop compositor is disabled",
+  "preview.terminalFrameFailed": "The terminal frame failed; the last good frame was retained",
 
   "agent.placeholder": "AI assistant · coming soon",
+  "agent.title": "Agent",
+  "agent.empty": "Describe the edit you want the Agent to make.",
+  "agent.desktopOnly": "Agent is available only in the desktop app.",
+  "agent.inputPlaceholder": "Describe the edit you want…",
+  "agent.send": "Send",
+  "agent.cancel": "Stop",
+  "agent.clear": "New Chat",
+  "agent.openSettings": "Open Settings",
+  "agent.toolArgs": "Arguments",
+  "agent.toolResult": "Result",
 
   "home.welcome": "Welcome to OpenTake",
   "home.newProject": "New Project",
@@ -1100,11 +1191,29 @@ const en: Dict = {
   "settings.shortcutsSave": "Save",
   "settings.shortcutsNew": "New",
 
-  // Account pane
-  "settings.accountSignIn": "Sign in with Google",
-  "settings.accountSignOut": "Sign out",
-  "settings.accountSignedInAs": "Signed in as",
-  "settings.accountNotSignedIn": "Not signed in",
+  // Optional account backend
+  "account.disclaimer":
+    "OpenTake has no official backend. This connects only to your self-hosted service; signing in is not required for local editing, export, AI, or MCP features.",
+  "account.backendUrl": "Backend URL",
+  "account.backendUrlDesc":
+    "Root origin of your self-hosted service. Remote services must use HTTPS; local development may use HTTP on localhost or a loopback IP.",
+  "account.backendUrlPlaceholder": "https://your-backend.example.com",
+  "account.saveBackendUrl": "Save URL",
+  "account.clearBackendUrl": "Clear",
+  "account.backendUrlSaved": "Backend URL saved.",
+  "account.backendUrlSaveFailed": "Could not save backend URL: {error}",
+  "account.backendUrlUnsaved": "URL is not saved; login is disabled. Saved target: {url}",
+  "account.loginTarget": "The login token will be sent only to: {url}",
+  "account.token": "Login token",
+  "account.tokenPlaceholder": "Paste a token issued by your self-hosted service",
+  "account.login": "Log in",
+  "account.logout": "Log out",
+  "account.loginFailed": "Login failed: {error}",
+  "account.status.offline": "Signed out",
+  "account.status.stored": "Credential saved · not verified in this session",
+  "account.status.connecting": "Connecting…",
+  "account.status.online": "Signed in · {userId}",
+  "account.status.error": "Error: {message}",
 
   // Home extended
   "home.signIn": "Sign in",
@@ -1153,6 +1262,8 @@ const en: Dict = {
   "library.cat.image": "Image",
   "library.cat.effect": "Effects",
   "library.import": "Import to project",
+  "library.importCommittedWarning":
+    "The asset was committed, but integrity verification and automatic rollback both failed. Save a copy and reopen the project to verify it.",
   "library.categorize": "Set category",
   "library.categorizePrompt": "Category name (leave empty to clear):",
   "library.unfavorite": "Remove from library",
