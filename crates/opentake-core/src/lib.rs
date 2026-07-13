@@ -44,8 +44,8 @@ pub mod session;
 
 // --- Assembly façade ---
 pub use crate::core::{
-    AppCore, BundleExportSnapshot, DeferredCoreEvents, ProjectRevision, ProjectRuntimeSnapshot,
-    TimelineSnapshot,
+    AppCore, BundleExportSnapshot, CapabilityImportCommit, DeferredCoreEvents, ProjectRevision,
+    ProjectRuntimeSnapshot, TimelineSnapshot,
 };
 pub use session::{
     importable_clip_type, EditorSession, ProbedMedia, SUPPORTED_AUDIO_EXTENSIONS,

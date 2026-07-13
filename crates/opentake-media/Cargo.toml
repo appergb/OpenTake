@@ -56,6 +56,9 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 # Default build/test must stay offline and must NOT link onnxruntime or compile
 # whisper.cpp. The heavy ML backends sit behind features; tests use mock impls.
 default = []
+# Test-only cross-crate fault boundaries. Shipped builds do not expose these
+# hooks; integration tests opt in through a dev-dependency feature union.
+test-faults = []
 # Real SigLIP2 inference via ONNX Runtime. `download-binaries` lets ort fetch a
 # prebuilt onnxruntime *when this feature is explicitly enabled* — it is off by
 # default, so plain `cargo build`/`cargo test` never touch the network.

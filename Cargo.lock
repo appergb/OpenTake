@@ -3487,11 +3487,15 @@ dependencies = [
 name = "opentake-project"
 version = "1.0.0"
 dependencies = [
+ "cap-fs-ext",
+ "cap-std",
  "opentake-domain",
+ "same-file",
  "serde",
  "serde_ignored",
  "serde_json",
  "thiserror 2.0.18",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

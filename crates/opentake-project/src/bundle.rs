@@ -30,6 +30,7 @@ use serde_json::Value;
 use crate::error::{ProjectError, Result};
 use crate::gen_log::GenerationLog;
 use crate::layout;
+use crate::ProjectRoot;
 
 /// Persisted schema details this build cannot safely write back.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -123,28 +124,34 @@ impl Project {
     /// [`ProjectError::Json`] if `project.json` or `media.json` fails to parse.
     /// A malformed `generation-log.json` is ignored.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let bundle = path.as_ref();
-        if !bundle.is_dir() {
-            return Err(ProjectError::NotABundle(bundle.to_path_buf()));
-        }
+        let root = ProjectRoot::open(path)?;
+        Self::open_from_root(&root)
+    }
 
-        let timeline_path = layout::timeline_path(bundle);
-        if !timeline_path.is_file() {
-            return Err(ProjectError::MissingTimeline {
+    /// Decode every project component from one retained root capability.
+    pub fn open_from_root(root: &ProjectRoot) -> Result<Self> {
+        Self::open_from_root_with_hook(root, |_| {})
+    }
+
+    fn open_from_root_with_hook(
+        root: &ProjectRoot,
+        mut after_component: impl FnMut(&str),
+    ) -> Result<Self> {
+        let bundle = root.path();
+        let timeline_bytes = root.read_optional(layout::TIMELINE_FILE)?.ok_or_else(|| {
+            ProjectError::MissingTimeline {
                 file: layout::TIMELINE_FILE,
                 bundle: bundle.to_path_buf(),
-            });
-        }
-        let timeline_bytes = read_file(&timeline_path)?;
+            }
+        })?;
         let (timeline, timeline_blockers) =
             decode_component::<Timeline>(&timeline_bytes, layout::TIMELINE_FILE)?;
+        after_component(layout::TIMELINE_FILE);
         let mut compatibility = ProjectCompatibility::default();
         compatibility.extend(timeline_blockers);
 
         // media.json: strict when present, empty default when absent.
-        let manifest_path = layout::manifest_path(bundle);
-        let manifest = if manifest_path.is_file() {
-            let bytes = read_file(&manifest_path)?;
+        let manifest = if let Some(bytes) = root.read_optional(layout::MANIFEST_FILE)? {
             let (manifest, blockers) =
                 decode_component::<MediaManifest>(&bytes, layout::MANIFEST_FILE)?;
             compatibility.extend(blockers);
@@ -152,28 +159,35 @@ impl Project {
         } else {
             MediaManifest::new()
         };
+        after_component(layout::MANIFEST_FILE);
 
         // generation-log.json: lenient — a parse error degrades to None.
-        let gen_log_path = layout::generation_log_path(bundle);
-        let generation_log = if gen_log_path.is_file() {
-            match read_file(&gen_log_path).and_then(|bytes| {
-                decode_component::<GenerationLog>(&bytes, layout::GENERATION_LOG_FILE)
-            }) {
-                Ok((log, blockers)) => {
-                    compatibility.extend(blockers);
-                    Some(log)
-                }
-                Err(_) => {
-                    compatibility.extend([format!(
-                        "{}:invalid-or-unreadable",
-                        layout::GENERATION_LOG_FILE
-                    )]);
-                    None
+        let generation_log = match root.read_optional(layout::GENERATION_LOG_FILE) {
+            Ok(Some(bytes)) => {
+                match decode_component::<GenerationLog>(&bytes, layout::GENERATION_LOG_FILE) {
+                    Ok((log, blockers)) => {
+                        compatibility.extend(blockers);
+                        Some(log)
+                    }
+                    Err(_) => {
+                        compatibility.extend([format!(
+                            "{}:invalid-or-unreadable",
+                            layout::GENERATION_LOG_FILE
+                        )]);
+                        None
+                    }
                 }
             }
-        } else {
-            None
+            Ok(None) => None,
+            Err(_) => {
+                compatibility.extend([format!(
+                    "{}:invalid-or-unreadable",
+                    layout::GENERATION_LOG_FILE
+                )]);
+                None
+            }
         };
+        after_component(layout::GENERATION_LOG_FILE);
 
         Ok(Project {
             bundle_path: bundle.to_path_buf(),
@@ -193,7 +207,8 @@ impl Project {
     /// atomically (temp file + rename). Existing `media/` and `chat-sessions/`
     /// directories are left untouched.
     pub fn save(&self) -> Result<()> {
-        self.save_to(&self.bundle_path)
+        let root = ProjectRoot::create(&self.bundle_path)?;
+        self.save_to_root(&root)
     }
 
     /// Persist only `media.json` through one atomic replacement.
@@ -203,25 +218,34 @@ impl Project {
     /// component prevents a later unrelated component failure from turning an
     /// error result into a partially saved manifest.
     pub fn save_manifest(&self) -> Result<()> {
+        let root = ProjectRoot::create(&self.bundle_path)?;
+        self.save_manifest_to_root(&root)
+    }
+
+    /// Persist only `media.json` through a retained bundle root.
+    pub fn save_manifest_to_root(&self, root: &ProjectRoot) -> Result<()> {
         self.compatibility.ensure_writable()?;
-        create_dir_all(&self.bundle_path)?;
-        write_json_atomic(&self.bundle_path, layout::MANIFEST_FILE, &self.manifest)
+        write_json_atomic_root(root, layout::MANIFEST_FILE, &self.manifest)
     }
 
     /// Like [`Self::save`] but targets an explicit `bundle` directory (used by
     /// the archiver to stage a self-contained copy). Does not mutate `self`.
     pub fn save_to(&self, bundle: impl AsRef<Path>) -> Result<()> {
-        self.compatibility.ensure_writable()?;
-        let bundle = bundle.as_ref();
-        create_dir_all(bundle)?;
+        let root = ProjectRoot::create(bundle)?;
+        self.save_to_root(&root)
+    }
 
-        write_json_atomic(bundle, layout::TIMELINE_FILE, &self.timeline)?;
-        write_json_atomic(bundle, layout::MANIFEST_FILE, &self.manifest)?;
+    /// Persist this snapshot exclusively through `root` authority.
+    pub fn save_to_root(&self, root: &ProjectRoot) -> Result<()> {
+        self.compatibility.ensure_writable()?;
+
+        write_json_atomic_root(root, layout::TIMELINE_FILE, &self.timeline)?;
+        write_json_atomic_root(root, layout::MANIFEST_FILE, &self.manifest)?;
         if let Some(log) = &self.generation_log {
-            write_json_atomic(bundle, layout::GENERATION_LOG_FILE, log)?;
+            write_json_atomic_root(root, layout::GENERATION_LOG_FILE, log)?;
         }
         if let Some(bytes) = &self.thumbnail {
-            write_bytes_atomic(&layout::thumbnail_path(bundle), bytes)?;
+            root.write_atomic(layout::THUMBNAIL_FILE, bytes)?;
         }
         Ok(())
     }
@@ -409,33 +433,17 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
 
 // --- IO helpers (each tags the failing path) ---
 
-fn read_file(path: &Path) -> Result<Vec<u8>> {
-    fs::read(path).map_err(|e| ProjectError::io(path, e))
-}
-
 fn create_dir_all(path: &Path) -> Result<()> {
     fs::create_dir_all(path).map_err(|e| ProjectError::io(path, e))
 }
 
-/// Serialize `value` to pretty JSON and write it atomically into
-/// `dir/file_name`.
-fn write_json_atomic<T: Serialize>(dir: &Path, file_name: &str, value: &T) -> Result<()> {
+fn write_json_atomic_root<T: Serialize>(
+    root: &ProjectRoot,
+    file_name: &str,
+    value: &T,
+) -> Result<()> {
     let json = serde_json::to_vec_pretty(value).map_err(|e| ProjectError::json(file_name, e))?;
-    write_bytes_atomic(&dir.join(file_name), &json)
-}
-
-/// Write `bytes` to `dest` via a sibling temp file + rename, so a partial write
-/// never clobbers an existing good file.
-fn write_bytes_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = temp_sibling(dest);
-    fs::write(&tmp, bytes).map_err(|e| ProjectError::io(&tmp, e))?;
-    match fs::rename(&tmp, dest) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(ProjectError::io(dest, e))
-        }
-    }
+    root.write_atomic(file_name, &json)
 }
 
 /// A temp path next to `dest` (same directory, so `rename` is atomic on the
@@ -482,6 +490,86 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_root_prevents_component_mixing_during_ambient_aba() {
+        let tmp = TmpDir::new("open-aba");
+        let projects = tmp.path().join("projects");
+        let retained = tmp.path().join("projects-retained");
+        let replacement = tmp.path().join("projects-replacement");
+        let bundle = projects.join("A.opentake");
+        let replacement_bundle = replacement.join("A.opentake");
+        let mut original = Project::new(&bundle);
+        original.timeline.fps = 24;
+        original.manifest.favorites.push("from-original".into());
+        original.save().unwrap();
+        let mut other = Project::new(&replacement_bundle);
+        other.timeline.fps = 60;
+        other.manifest.favorites.push("from-replacement".into());
+        other.save().unwrap();
+        let root = ProjectRoot::open(&bundle).unwrap();
+
+        let opened = Project::open_from_root_with_hook(&root, |component| {
+            if component == layout::TIMELINE_FILE {
+                fs::rename(&projects, &retained).unwrap();
+                fs::rename(&replacement, &projects).unwrap();
+            } else if component == layout::MANIFEST_FILE {
+                fs::rename(&projects, &replacement).unwrap();
+                fs::rename(&retained, &projects).unwrap();
+            }
+        })
+        .unwrap();
+
+        assert_eq!(opened.timeline.fps, 24);
+        assert_eq!(opened.manifest.favorites, ["from-original"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn final_bundle_symlink_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TmpDir::new("root-symlink");
+        let real = tmp.path().join("Real.opentake");
+        Project::new(&real).save().unwrap();
+        let link = tmp.path().join("Link.opentake");
+        symlink(&real, &link).unwrap();
+
+        assert!(matches!(
+            Project::open(link),
+            Err(ProjectError::NotABundle(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_root_save_never_writes_an_ambient_replacement() {
+        let tmp = TmpDir::new("save-aba");
+        let projects = tmp.path().join("projects");
+        let retained = tmp.path().join("projects-retained");
+        let bundle = projects.join("A.opentake");
+        let mut original = Project::new(&bundle);
+        original.timeline.fps = 24;
+        original.save().unwrap();
+        let root = ProjectRoot::open(&bundle).unwrap();
+        fs::rename(&projects, &retained).unwrap();
+        let mut replacement = Project::new(&bundle);
+        replacement.timeline.fps = 60;
+        replacement.save().unwrap();
+
+        original.timeline.fps = 48;
+        original.save_to_root(&root).unwrap();
+
+        assert_eq!(Project::open(&bundle).unwrap().timeline.fps, 60);
+        assert_eq!(
+            Project::open(retained.join("A.opentake"))
+                .unwrap()
+                .timeline
+                .fps,
+            48
+        );
     }
 
     #[test]

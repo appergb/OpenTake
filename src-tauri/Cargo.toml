@@ -78,6 +78,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["NSHapt
 
 [dev-dependencies]
 tempfile = "3"
+opentake-media = { workspace = true, features = ["test-faults"] }
 
 [features]
 # `default` now includes `playback-engine`: the continuous Rust streaming engine

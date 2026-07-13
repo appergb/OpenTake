@@ -120,6 +120,15 @@ pub struct ProjectRuntimeSnapshot {
     pub version: u64,
 }
 
+/// Result of a capability-bound library import whose first manifest commit is
+/// durable. `warning` is populated only when a failed postcondition could not
+/// be rolled back; the entry remains authoritative and must be preserved.
+#[derive(Clone, Debug)]
+pub struct CapabilityImportCommit {
+    pub entry: MediaManifestEntry,
+    pub warning: Option<String>,
+}
+
 /// One-lock snapshot consumed by self-contained project export.
 #[derive(Clone, Debug)]
 pub struct BundleExportSnapshot {
@@ -660,7 +669,7 @@ impl AppCore {
     /// authority; a writer error restores the exact live manifest before the
     /// session lock is released.
     #[allow(clippy::too_many_arguments)]
-    pub fn import_library_media_for_project_deferred_with_manifest_writer<F>(
+    pub fn import_library_media_for_project_deferred_with_manifest_writer<F, V>(
         &self,
         expected_project_epoch: u64,
         expected_project_dir: &Path,
@@ -669,13 +678,19 @@ impl AppCore {
         probe: &ProbedMedia,
         library_id: &str,
         events: &mut DeferredCoreEvents,
-        write_manifest: F,
-    ) -> Result<MediaManifestEntry>
+        mut write_manifest: F,
+        validate_postcondition: V,
+    ) -> Result<CapabilityImportCommit>
     where
-        F: FnOnce(&MediaManifest) -> Result<()>,
+        F: FnMut(&MediaManifest) -> Result<()>,
+        V: FnOnce() -> Result<()>,
     {
         let id = self.ids.next_id();
-        let (entry, count) = {
+        // Both callbacks execute while the session Mutex is held. They must do
+        // only retained filesystem I/O and must never re-enter AppCore, emit an
+        // event, acquire the project-identity lock, or acquire LibraryStore's
+        // workflow/write locks.
+        let (entry, warning, count) = {
             let mut session = self.lock();
             ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
             let before = session.editor.media();
@@ -685,10 +700,21 @@ impl AppCore {
                     .editor
                     .set_media_global_favorite(&entry.id, Some(library_id.to_string()))?;
                 write_manifest(&session.editor.media())?;
-                Ok(entry)
+                let mut warning = None;
+                if let Err(postcondition) = validate_postcondition() {
+                    match write_manifest(&before) {
+                        Ok(()) => return Err(postcondition),
+                        Err(rollback) => {
+                            warning = Some(format!(
+                                "{postcondition}; manifest rollback failed and the import remains committed: {rollback}"
+                            ));
+                        }
+                    }
+                }
+                Ok((entry, warning))
             })();
             match result {
-                Ok(entry) => (entry, session.editor.media().entries.len()),
+                Ok((entry, warning)) => (entry, warning, session.editor.media().entries.len()),
                 Err(error) => {
                     session.editor.restore_media(before);
                     return Err(error);
@@ -703,7 +729,7 @@ impl AppCore {
             path: expected_project_dir.to_string_lossy().into_owned(),
             project_epoch: expected_project_epoch,
         });
-        Ok(entry)
+        Ok(CapabilityImportCommit { entry, warning })
     }
 
     /// Toggle favorite state for `asset_ids` (#91), emitting

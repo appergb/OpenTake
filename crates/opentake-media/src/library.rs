@@ -59,25 +59,25 @@ std::thread_local! {
     static FAIL_COMMITTED_BACKUP_CLEANUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(test, feature = "test-faults"))]
 std::thread_local! {
     static FAIL_REMOVED_STORED_CLEANUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAIL_ATOMIC_CAPABILITY_REPLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Debug-build fault injection for the post-commit remove cleanup boundary.
+/// Test-only fault injection for the post-commit remove cleanup boundary.
 /// This is public only so the Tauri integration test can prove that project
 /// mapping cleanup still completes after the global manifest commit point.
 #[doc(hidden)]
-#[cfg(debug_assertions)]
+#[cfg(any(test, feature = "test-faults"))]
 pub fn fail_next_removed_stored_cleanup_for_test() {
     FAIL_REMOVED_STORED_CLEANUP.with(|fail| fail.set(true));
 }
 
-/// Debug-build fault injection immediately before a capability-bound atomic
+/// Test-only fault injection immediately before a capability-bound atomic
 /// replacement. The already-existing canonical leaf must remain unchanged.
 #[doc(hidden)]
-#[cfg(debug_assertions)]
+#[cfg(any(test, feature = "test-faults"))]
 pub fn fail_next_atomic_capability_replace_for_test() {
     FAIL_ATOMIC_CAPABILITY_REPLACE.with(|fail| fail.set(true));
 }
@@ -718,7 +718,7 @@ pub fn write_atomic_capability_file(
     let mut tmp = OwnedLeaf::create_transaction(root, &tmp_name)?;
     tmp.handle.as_file_mut().write_all(bytes)?;
     tmp.sync_all()?;
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "test-faults"))]
     if FAIL_ATOMIC_CAPABILITY_REPLACE.with(|fail| fail.replace(false)) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -1543,7 +1543,7 @@ impl LibraryStore {
         // content-addressed file, which is safe and can be reclaimed later.
         if let Some(stored) = stored {
             let cleanup = || -> std::io::Result<()> {
-                #[cfg(debug_assertions)]
+                #[cfg(any(test, feature = "test-faults"))]
                 if FAIL_REMOVED_STORED_CLEANUP.with(|fail| fail.replace(false)) {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::PermissionDenied,

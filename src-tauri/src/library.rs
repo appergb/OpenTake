@@ -140,6 +140,10 @@ pub struct LibraryImportDto {
     pub name: String,
     /// Absolute path of the imported (library-stored) source file.
     pub path: String,
+    /// Present only when the import committed but a postcondition rollback
+    /// could not be published; callers must treat the returned asset as live.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// `library_list`: every favorited entry, or only those in `category` when
@@ -316,12 +320,13 @@ fn library_import_to_project_impl(
     library: &LibraryState,
     id: &str,
 ) -> Result<LibraryImportDto, String> {
-    let _workflow = library.lock_workflow();
+    let workflow = library.lock_workflow();
     let mut events = DeferredCoreEvents::default();
     let result = {
         let _project_identity = core.lock_project_identity_workflow();
         library_import_to_project_with_events(core, media, library, id, &mut events)
     };
+    drop(workflow);
     core.emit_deferred(events);
     result
 }
@@ -432,7 +437,8 @@ fn library_import_to_project_with_hook(
         return Err("project import leaf identity changed during probe".to_string());
     }
     let name = display_name(source_path);
-    let entry = core
+    let hook = std::cell::RefCell::new(hook);
+    let commit = core
         .import_library_media_for_project_deferred_with_manifest_writer(
             project.project_epoch,
             &project_dir,
@@ -442,52 +448,36 @@ fn library_import_to_project_with_hook(
             id,
             events,
             |manifest| {
-                hook(ImportHookPhase::BeforeManifestWrite, &imported.path);
+                (hook.borrow_mut())(ImportHookPhase::BeforeManifestWrite, &imported.path);
                 let result = project_media
                     .write_manifest(manifest)
                     .map_err(CoreError::Media);
-                hook(ImportHookPhase::AfterManifestWrite, &imported.path);
+                (hook.borrow_mut())(ImportHookPhase::AfterManifestWrite, &imported.path);
                 result
+            },
+            || {
+                (hook.borrow_mut())(ImportHookPhase::AfterProjectCommit, &imported.path);
+                match project_media.matches_leaf(&imported) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(CoreError::Media(
+                        "project import leaf identity changed during commit".to_string(),
+                    )),
+                    Err(error) => Err(CoreError::Media(format!(
+                        "project import leaf identity changed during commit: {error}"
+                    ))),
+                }
             },
         )
         .map_err(|e| e.to_string())?;
-    hook(ImportHookPhase::AfterProjectCommit, &imported.path);
-    let final_identity = project_media.matches_leaf(&imported);
-    if !matches!(final_identity, Ok(true)) {
-        let rollback = core.restore_media_manifest_for_project_deferred_with_manifest_writer(
-            project.project_epoch,
-            &project_dir,
-            project.media,
-            events,
-            |manifest| {
-                project_media
-                    .write_manifest(manifest)
-                    .map_err(CoreError::Media)
-            },
-        );
-        if let Err(rollback_error) = rollback {
-            // The initial capability writer already committed. A failed
-            // rollback deliberately leaves both live and disk state on that
-            // committed manifest; preserve its referenced media leaf too.
-            imported.committed = true;
-            return Err(format!(
-                "project import identity check failed, but manifest rollback failed and the import remains committed: {rollback_error}"
-            ));
-        }
-        return Err(match final_identity {
-            Ok(false) => "project import leaf identity changed during commit".to_string(),
-            Err(error) => {
-                format!("project import leaf identity changed during commit: {error}")
-            }
-            Ok(true) => unreachable!(),
-        });
-    }
     imported.committed = true;
+    let warning = commit.warning;
+    let entry = commit.entry;
 
     Ok(LibraryImportDto {
         id: entry.id,
         name: entry.name,
         path: imported.path.to_string_lossy().into_owned(),
+        warning,
     })
 }
 
@@ -776,6 +766,7 @@ fn existing_project_import(
             .absolute_path(leaf_name)
             .to_string_lossy()
             .into_owned(),
+        warning: None,
     }))
 }
 
@@ -972,6 +963,11 @@ mod tests {
             library_import_to_project_impl(&core, &engine_for(tmp.path()), &library, &entry.id)
                 .expect("import library item");
 
+        assert_eq!(imported.warning, None);
+        assert!(serde_json::to_value(&imported)
+            .unwrap()
+            .get("warning")
+            .is_none());
         assert_eq!(
             core.media().library_favorite_id(&imported.id),
             Some(entry.id.as_str())
@@ -992,6 +988,34 @@ mod tests {
                 .library_favorite_id(&imported.id),
             None
         );
+    }
+
+    #[test]
+    fn deferred_import_events_allow_core_and_library_reentry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("clip.mp4");
+        std::fs::write(&source, b"library bytes").unwrap();
+        let library = Arc::new(LibraryState::new(LibraryStore::new(
+            tmp.path().join("library"),
+        )));
+        let entry = favorite_video(&library, &source);
+        let core = Arc::new(AppCore::new());
+        core.save_project(Some(tmp.path().join("Reentrant.opentake")))
+            .unwrap();
+        let callback_core = Arc::clone(&core);
+        let callback_library = Arc::clone(&library);
+        let callbacks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let callback_count = Arc::clone(&callbacks);
+        core.subscribe(move |_| {
+            let _snapshot = callback_core.runtime_snapshot();
+            let _workflow = callback_library.lock_workflow();
+            callback_count.fetch_add(1, Ordering::SeqCst);
+        });
+
+        library_import_to_project_impl(&core, &engine_for(tmp.path()), &library, &entry.id)
+            .expect("deferred event subscribers may re-enter after workflow locks are released");
+
+        assert_eq!(callbacks.load(Ordering::SeqCst), 2);
     }
 
     #[cfg(unix)]
@@ -1272,7 +1296,78 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn failed_postcommit_rollback_preserves_the_durably_imported_leaf() {
+    fn postcondition_rollback_does_not_erase_an_intervening_unrelated_import() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("clip.mp4");
+        let unrelated = tmp.path().join("unrelated.mp4");
+        std::fs::write(&source, b"trusted library bytes").unwrap();
+        std::fs::write(&unrelated, b"unrelated media bytes").unwrap();
+        let library = LibraryState::new(LibraryStore::new(tmp.path().join("library")));
+        let entry = favorite_video(&library, &source);
+        let bundle = tmp.path().join("ConcurrentRollback.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let worker_core = core.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::sync::Mutex::new(None);
+        let mut events = DeferredCoreEvents::default();
+
+        library_import_to_project_with_hook(
+            &core,
+            &engine_for(tmp.path()),
+            &library,
+            &entry.id,
+            &mut events,
+            |phase, path| {
+                if phase != ImportHookPhase::AfterProjectCommit {
+                    return;
+                }
+                let moved = path.with_extension("moved");
+                std::fs::rename(path, moved).unwrap();
+                std::fs::write(path, b"replacement bytes").unwrap();
+                let unrelated = unrelated.clone();
+                let done_tx = done_tx.clone();
+                let worker_core = worker_core.clone();
+                *worker.lock().unwrap() = Some(std::thread::spawn(move || {
+                    let imported = worker_core
+                        .import_media_file(&unrelated, "unrelated", &ProbedMedia::default())
+                        .unwrap();
+                    worker_core.save_project(None).unwrap();
+                    done_tx.send(imported.id).unwrap();
+                }));
+                assert!(done_rx
+                    .recv_timeout(std::time::Duration::from_millis(50))
+                    .is_err());
+            },
+        )
+        .expect_err("leaf replacement must roll back the library import");
+
+        let unrelated_id = done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("ordinary import proceeds after the core transaction releases");
+        worker.lock().unwrap().take().unwrap().join().unwrap();
+        assert!(core
+            .media()
+            .entries
+            .iter()
+            .any(|candidate| candidate.id == unrelated_id));
+        assert!(core
+            .media()
+            .favorite_library_ids
+            .values()
+            .all(|library_id| library_id != &entry.id));
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).unwrap();
+        assert!(reopened
+            .media()
+            .entries
+            .iter()
+            .any(|candidate| candidate.id == unrelated_id));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_postcommit_rollback_reports_the_durable_import_as_committed() {
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("clip.mp4");
         std::fs::write(&source, b"trusted library bytes").unwrap();
@@ -1286,7 +1381,7 @@ mod tests {
         core.save_project(Some(bundle.clone())).unwrap();
         let mut events = DeferredCoreEvents::default();
 
-        let error = library_import_to_project_with_hook(
+        let committed = library_import_to_project_with_hook(
             &core,
             &engine_for(tmp.path()),
             &library,
@@ -1300,15 +1395,22 @@ mod tests {
                 }
             },
         )
-        .expect_err("identity failure plus injected rollback failure");
+        .expect("failed rollback leaves the first commit authoritative");
 
-        assert!(error.contains("import remains committed"), "{error}");
+        assert!(
+            committed
+                .warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("rollback failed")),
+            "rollback failure must be surfaced to the caller"
+        );
         std::fs::rename(&projects, &replacement_projects).unwrap();
         std::fs::rename(&retained_projects, &projects).unwrap();
         let imported = core
             .media()
             .entries
-            .first()
+            .iter()
+            .find(|candidate| candidate.id == committed.id)
             .expect("live import remains committed")
             .clone();
         let relative = match &imported.source {
