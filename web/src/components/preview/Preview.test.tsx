@@ -1,9 +1,11 @@
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Clip, ClipType, Timeline, Track } from "../../lib/types";
+import type { Clip, ClipType, PlaybackFrameEvent, Timeline, Track } from "../../lib/types";
 
 const store = vi.hoisted(() => ({
+  projectEpoch: 3,
+  timelineVersion: 7,
   timeline: { fps: 30, width: 1920, height: 1080, settingsConfigured: true, tracks: [] } as Timeline,
   ui: {
     activeFrame: 42,
@@ -23,6 +25,7 @@ const store = vi.hoisted(() => ({
     togglePlay: vi.fn(),
     requestMediaPreviewToggle: vi.fn(),
     mediaPreviewToggleRequest: 0,
+    rustEngineFailed: false,
   },
   media: {
     items: [] as Array<{
@@ -34,6 +37,7 @@ const store = vi.hoisted(() => ({
       path: string;
     }>,
   },
+  nativeFrame: null as PlaybackFrameEvent | null,
 }));
 
 vi.mock("../../store/projectStore", () => ({
@@ -57,6 +61,11 @@ vi.mock("../../store/mediaStore", () => ({
 
 vi.mock("../../lib/asset", () => ({
   assetUrl: (path: string | null | undefined) => (path ? `asset://${path}` : null),
+}));
+
+vi.mock("./nativePlaybackSession", () => ({
+  useNativePlaybackPublication: () => store.nativeFrame,
+  nativePlaybackController: { stop: vi.fn() },
 }));
 
 import { Preview } from "./Preview";
@@ -123,6 +132,7 @@ describe("Preview timeline rendering", () => {
       { id: "base", name: "base", type: "video", duration: 10, hasAudio: true, path: "/base.mov" },
       { id: "pip", name: "pip", type: "video", duration: 10, hasAudio: true, path: "/pip.mov" },
     ];
+    store.nativeFrame = null;
   });
 
   it("keeps paused timeline on DOM video without a composite image overlay", () => {
@@ -137,8 +147,80 @@ describe("Preview timeline rendering", () => {
     const html = renderToStaticMarkup(<Preview />);
 
     expect(html).toContain("<video");
-    expect(html).not.toContain("<img");
+    expect(html.match(/data-rust-frame-slot=/g)).toHaveLength(2);
     expect(html).not.toContain("data:image/png");
+  });
+
+  it("keeps timeline DOM video visible while playing", () => {
+    store.timeline = timeline([
+      track({
+        id: "v1",
+        type: "video",
+        clips: [clip({ id: "base-clip", mediaRef: "base", mediaType: "video" })],
+      }),
+    ]);
+
+    store.ui.isPlaying = true;
+    const playingHtml = renderToStaticMarkup(<Preview />);
+
+    expect(playingHtml).toContain("<video");
+    expect(playingHtml).toContain('data-playback-surface="webkit"');
+  });
+
+  it("renders a user visible unsupported surface instead of incomplete DOM media", () => {
+    store.timeline = timeline([
+      track({
+        id: "v1",
+        type: "text",
+        clips: [clip({ id: "text-clip", mediaRef: "base", mediaType: "text", reversed: true })],
+      }),
+    ]);
+
+    const html = renderToStaticMarkup(<Preview />);
+
+    expect(html).toContain('data-testid="unsupported-playback-surface"');
+    expect(html).toContain("当前时间线无法完整预览");
+    expect(html).not.toContain("<video");
+  });
+
+  it("disables play and capture for unsupported playback", () => {
+    store.timeline = timeline([
+      track({
+        id: "v1",
+        type: "text",
+        clips: [clip({ id: "text-clip", mediaRef: "base", mediaType: "text", reversed: true })],
+      }),
+    ]);
+
+    const html = renderToStaticMarkup(<Preview />);
+
+    expect(html).toMatch(/aria-label="播放\/暂停 \(空格\)"[^>]*disabled/);
+    expect(html).toMatch(/aria-label="截取当前帧到素材库"[^>]*disabled/);
+  });
+
+  it("ignores native publications on a WebKit playback route", () => {
+    store.timeline = timeline([
+      track({
+        id: "v1",
+        type: "video",
+        clips: [clip({ id: "base-clip", mediaRef: "base", mediaType: "video" })],
+      }),
+    ]);
+    store.ui.isPlaying = true;
+    store.nativeFrame = {
+      projectEpoch: 3,
+      timelineVersion: 4,
+      sessionId: "session-5",
+      frame: 42,
+      sequence: 8,
+      terminal: false,
+    };
+
+    const html = renderToStaticMarkup(<Preview />);
+
+    expect(html).toContain("<video");
+    expect(html).toContain('data-playback-surface="webkit"');
+    expect(html).not.toContain("sessionId=session-5");
   });
 
   it("renders every visible visual layer on the shared timeline canvas", () => {

@@ -11,13 +11,14 @@ import { LAYOUT, ZOOM } from "../../lib/theme";
 import {
   contentHeight,
   contentWidth,
+  clipRect,
   dropTargetAt,
   frameAt,
   totalFrames,
   trackAt,
 } from "../../lib/geometry";
 import { gapAtFrame } from "../../lib/timelineGap";
-import { firstAudioIndex } from "../../lib/zones";
+import { firstAudioIndex, trackDisplayLabel } from "../../lib/zones";
 import { clampTrimDeltaFrames, trimSourceValues } from "../../lib/clip";
 import { collectTargets, findSnap, findSnapDelta } from "../../lib/snap";
 import { paintTimeline, type DragPaint, type MediaGhostPaint } from "./timelineCanvas";
@@ -37,6 +38,7 @@ import {
   type FadeEdge,
 } from "./hitTest";
 import { ClipContextMenu } from "./ClipContextMenu";
+import { TimelineRangeContextMenu } from "./TimelineRangeContextMenu";
 import { SwapMediaPicker } from "./SwapMediaPicker";
 import { MEDIA_DND_TYPE } from "../media/MediaPanel";
 import { getDraggingMedia, setDraggingMedia } from "../../lib/mediaDragState";
@@ -47,9 +49,20 @@ import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
 import * as edit from "../../store/editActions";
 import { forceRefresh } from "../../store/sync";
-import { generateThumbnail, getWaveform, isTauri } from "../../lib/api";
+import {
+  generateThumbnail,
+  getWaveform,
+  isTauri,
+  preloadMedia,
+  type PrewarmResult,
+} from "../../lib/api";
 import { assetUrl } from "../../lib/asset";
 import type { Clip, ClipType, Interpolation, Timeline } from "../../lib/types";
+import {
+  rangeContains,
+  validRange,
+  type TimelineRange,
+} from "../../lib/timelineRange";
 import type { ClipThumbnailStrip } from "./clipRenderer";
 
 /** Where a move/duplicate drag will land. `newTrack` inserts before `index`
@@ -87,8 +100,24 @@ type DragState =
   | null;
 
 type TimelineContextMenu =
-  | { kind: "clip"; clipId: string; x: number; y: number; fadeEdge?: FadeEdge }
+  | {
+      kind: "clip";
+      clipId: string;
+      x: number;
+      y: number;
+      fadeEdge?: FadeEdge;
+      range?: TimelineRange;
+    }
+  | { kind: "range"; range: TimelineRange; x: number; y: number }
   | { kind: "audioVolumeKeyframe"; clipId: string; frame: number; x: number; y: number };
+
+export function rangeAtContextFrame(
+  range: TimelineRange | null,
+  frame: number,
+): TimelineRange | null {
+  const normalized = validRange(range);
+  return normalized && rangeContains(normalized, frame) ? normalized : null;
+}
 
 type VolumeKeyframeInterpolation = Extract<Interpolation, "linear" | "smooth" | "hold">;
 
@@ -166,6 +195,222 @@ export function collectMoveSnapTargets(
   activeFrame: number,
 ) {
   return collectTargets(timeline, excluded, activeFrame, true);
+}
+
+export function prewarmResultNeedsRetry(result: PrewarmResult | null): boolean {
+  return result === "queued" || result === "duplicate" || result === "busy";
+}
+
+export function prewarmResultAllowsCacheRead(result: PrewarmResult | null): boolean {
+  return result === "cached";
+}
+
+export function timelinePrewarmKey(
+  projectEpoch: number,
+  mediaRef: string,
+  sourceKey: string,
+): string {
+  return JSON.stringify([projectEpoch, mediaRef, sourceKey]);
+}
+
+export function timelinePrewarmShouldStart(
+  key: string,
+  inFlight: Set<string>,
+  admissions: Map<string, PrewarmResult | null>,
+  retryCounts: Map<string, number>,
+): boolean {
+  if (inFlight.has(key)) return false;
+  if (prewarmResultAllowsCacheRead(admissions.get(key) ?? null)) return false;
+  return (retryCounts.get(key) ?? 0) <= 8;
+}
+
+export function timelineVisualCacheIsCurrent(
+  currentKey: string,
+  cachedKey: string | undefined,
+): boolean {
+  return cachedKey === currentKey;
+}
+
+export function timelineVisualRequestShouldStart(
+  currentKey: string,
+  cachedKey: string | undefined,
+  inFlight: Set<string>,
+): boolean {
+  return !timelineVisualCacheIsCurrent(currentKey, cachedKey) && !inFlight.has(currentKey);
+}
+
+export function clipAccessTargetSize(width: number, height: number): { width: number; height: number } {
+  return { width: Math.max(24, width), height: Math.max(24, height) };
+}
+
+export function clipAccessTargetRect(
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+  minLeft: number,
+  maxRight: number,
+  minTop = 0,
+  maxBottom = Number.POSITIVE_INFINITY,
+): { left: number; top: number; width: number; height: number } {
+  const target = clipAccessTargetSize(width, height);
+  const centeredLeft = left - (target.width - width) / 2;
+  const centeredTop = top - (target.height - height) / 2;
+  const availableWidth = Math.max(0, maxRight - minLeft);
+  const availableHeight = Math.max(0, maxBottom - minTop);
+  const clampedLeft = Number.isFinite(maxRight) && availableWidth >= target.width
+    ? Math.max(minLeft, Math.min(maxRight - target.width, centeredLeft))
+    : Math.max(minLeft, centeredLeft);
+  const clampedTop = Number.isFinite(maxBottom) && availableHeight >= target.height
+    ? Math.max(minTop, Math.min(maxBottom - target.height, centeredTop))
+    : Math.max(minTop, centeredTop);
+  return { left: clampedLeft, top: clampedTop, ...target };
+}
+
+export function clipSelectionForInteraction(
+  timeline: Timeline,
+  selectedClipIds: Set<string>,
+  clipId: string,
+  modifiers: { shiftKey?: boolean; altKey?: boolean },
+): Set<string> {
+  const linked = !modifiers.altKey;
+  const already = selectedClipIds.has(clipId);
+  const group = linked
+    ? expandLinkGroup(timeline, new Set([clipId]))
+    : new Set([clipId]);
+  if (modifiers.shiftKey) {
+    const next = new Set(selectedClipIds);
+    if (already) group.forEach((id) => next.delete(id));
+    else group.forEach((id) => next.add(id));
+    return next;
+  }
+  if (modifiers.altKey && !already) return new Set([clipId]);
+  if (!already) return group;
+  return selectedClipIds;
+}
+
+/**
+ * Canvas clips keep their precise edit geometry, while the surrounding pointer
+ * target grows to WCAG 2.2's 24px minimum. Exact clip hits always win; only the
+ * padded halo is treated as a body hit, so it cannot accidentally grab a trim
+ * handle. When neighbouring halos overlap, the nearest visible clip wins.
+ */
+export function hitTestAccessibleClip(
+  timeline: Timeline,
+  docX: number,
+  docY: number,
+  pixelsPerFrame: number,
+  trackHeights: Record<string, number>,
+  documentWidth = Math.max(24, totalFrames(timeline) * pixelsPerFrame),
+  documentHeight = contentHeight(timeline, 0, trackHeights),
+): ClipHit | null {
+  const exact = hitTestClip(timeline, docX, docY, pixelsPerFrame, trackHeights);
+  if (exact) return exact;
+
+  let nearest: { hit: ClipHit; distance: number } | null = null;
+  for (let trackIndex = 0; trackIndex < timeline.tracks.length; trackIndex++) {
+    const track = timeline.tracks[trackIndex];
+    if (track.hidden) continue;
+    for (let clipIndex = 0; clipIndex < track.clips.length; clipIndex++) {
+      const clip = track.clips[clipIndex];
+      const rect = clipRect(timeline, trackIndex, clip, pixelsPerFrame, trackHeights);
+      const target = clipAccessTargetRect(
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        0,
+        documentWidth,
+        0,
+        documentHeight,
+      );
+      if (
+        docX < target.left ||
+        docX > target.left + target.width ||
+        docY < target.top ||
+        docY > target.top + target.height
+      ) {
+        continue;
+      }
+      const dx = docX < rect.x ? rect.x - docX : Math.max(0, docX - (rect.x + rect.width));
+      const dy = docY < rect.y ? rect.y - docY : Math.max(0, docY - (rect.y + rect.height));
+      const distance = dx * dx + dy * dy;
+      if (!nearest || distance < nearest.distance) {
+        nearest = {
+          hit: {
+            trackIndex,
+            clipIndex,
+            clip,
+            region: "body",
+            localX: Math.max(0, Math.min(rect.width, docX - rect.x)),
+          },
+          distance,
+        };
+      }
+    }
+  }
+  return nearest?.hit ?? null;
+}
+
+export interface AccessibleClipRect {
+  clipId: string;
+  trackIndex: number;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  label: string;
+}
+
+export function accessibleClipRects(
+  timeline: Timeline,
+  pixelsPerFrame: number,
+  trackHeights: Record<string, number>,
+  scrollLeft: number,
+  scrollTop: number,
+  viewWidth: number,
+  viewHeight: number,
+): AccessibleClipRect[] {
+  const rects: AccessibleClipRect[] = [];
+  const right = LAYOUT.trackHeaderWidth + viewWidth;
+  const documentWidth = contentWidth(totalFrames(timeline), pixelsPerFrame, viewWidth);
+  const documentHeight = contentHeight(timeline, viewHeight, trackHeights);
+  for (let trackIndex = 0; trackIndex < timeline.tracks.length; trackIndex++) {
+    const track = timeline.tracks[trackIndex];
+    for (const clip of track.clips) {
+      const clipGeometry = clipRect(timeline, trackIndex, clip, pixelsPerFrame, trackHeights);
+      const rect = clipAccessTargetRect(
+        clipGeometry.x,
+        clipGeometry.y,
+        clipGeometry.width,
+        clipGeometry.height,
+        0,
+        documentWidth,
+        0,
+        documentHeight,
+      );
+      const left = LAYOUT.trackHeaderWidth + rect.left - scrollLeft;
+      const top = rect.top - scrollTop;
+      if (
+        left + rect.width < LAYOUT.trackHeaderWidth ||
+        left > right ||
+        top + rect.height < 0 ||
+        top > viewHeight
+      ) {
+        continue;
+      }
+      rects.push({
+        clipId: clip.id,
+        trackIndex,
+        left,
+        top,
+        width: rect.width,
+        height: rect.height,
+        label: `Clip ${clip.id} on ${trackDisplayLabel(timeline, trackIndex)}`,
+      });
+    }
+  }
+  return rects;
 }
 
 export interface MoveParticipant {
@@ -307,6 +552,7 @@ function moveParticipantsForIds(timeline: Timeline, ids: string[]): MoveParticip
 
 export function TimelineContainer() {
   const timeline = useProjectStore((s) => s.timeline);
+  const projectEpoch = useProjectStore((s) => s.projectEpoch);
   const zoomScale = useEditorUiStore((s) => s.zoomScale);
   const setZoomScale = useEditorUiStore((s) => s.setZoomScale);
   const setMinZoomScale = useEditorUiStore((s) => s.setMinZoomScale);
@@ -344,6 +590,16 @@ export function TimelineContainer() {
       ),
     [mediaItems],
   );
+  const visualCacheKeys = useMemo(
+    () =>
+      new Map(
+        Array.from(thumbnailSourceKeys, ([ref, sourceKey]) => [
+          ref,
+          timelinePrewarmKey(projectEpoch, ref, sourceKey),
+        ]),
+      ),
+    [projectEpoch, thumbnailSourceKeys],
+  );
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const contentCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -369,21 +625,74 @@ export function TimelineContainer() {
   const waveformsRef = useRef<Map<string, number[]>>(new Map());
   // Visual thumbnail cache (media id → decoded sprite/single image).
   const thumbnailsRef = useRef<Map<string, ClipThumbnailStrip>>(new Map());
-  const thumbnailSourceKeysRef = useRef<Map<string, string>>(new Map());
-  const latestThumbnailSourceKeysRef = useRef(thumbnailSourceKeys);
+  const waveformCacheKeysRef = useRef<Map<string, string>>(new Map());
+  const thumbnailCacheKeysRef = useRef<Map<string, string>>(new Map());
+  const latestVisualCacheKeysRef = useRef(visualCacheKeys);
   // Refs of media whose waveform fetch is currently in flight — kept separate from
   // the resolved-cache `waveformsRef` so a failed/empty fetch can be retried on a
   // later effect run instead of being permanently suppressed by a placeholder (#127).
   const inFlightRef = useRef<Set<string>>(new Set());
   const thumbnailPosterInFlightRef = useRef<Set<string>>(new Set());
   const thumbnailSpriteInFlightRef = useRef<Set<string>>(new Set());
+  const prewarmInFlightRef = useRef<Set<string>>(new Set());
+  const timelinePrewarmRef = useRef<Map<string, PrewarmResult | null>>(new Map());
+  const prewarmRetryRef = useRef<Map<string, number>>(new Map());
+  const cacheRetryTimerRef = useRef<number | null>(null);
+  const [cacheRetryTick, setCacheRetryTick] = useState(0);
   // Guards `setWaveformVersion` against firing after unmount (the cache write itself
   // is mount-independent and must NOT be discarded on re-render — see #127).
   const mountedRef = useRef(true);
-  useEffect(() => () => { mountedRef.current = false; }, []);
+  useEffect(() => () => {
+    mountedRef.current = false;
+    if (cacheRetryTimerRef.current !== null) window.clearTimeout(cacheRetryTimerRef.current);
+  }, []);
   const [waveformVersion, setWaveformVersion] = useState(0);
   const [thumbnailVersion, setThumbnailVersion] = useState(0);
-  latestThumbnailSourceKeysRef.current = thumbnailSourceKeys;
+  latestVisualCacheKeysRef.current = visualCacheKeys;
+  const currentWaveforms = useMemo(() => {
+    const current = new Map<string, number[]>();
+    for (const [ref, samples] of waveformsRef.current) {
+      const key = visualCacheKeys.get(ref);
+      if (key && timelineVisualCacheIsCurrent(key, waveformCacheKeysRef.current.get(ref))) {
+        current.set(ref, samples);
+      }
+    }
+    return current;
+  }, [visualCacheKeys, waveformVersion]);
+  const currentThumbnails = useMemo(() => {
+    const current = new Map<string, ClipThumbnailStrip>();
+    for (const [ref, strip] of thumbnailsRef.current) {
+      const key = visualCacheKeys.get(ref);
+      if (key && timelineVisualCacheIsCurrent(key, thumbnailCacheKeysRef.current.get(ref))) {
+        current.set(ref, strip);
+      }
+    }
+    return current;
+  }, [visualCacheKeys, thumbnailVersion]);
+
+  const scheduleCacheRetry = useCallback(() => {
+    if (cacheRetryTimerRef.current !== null) return;
+    cacheRetryTimerRef.current = window.setTimeout(() => {
+      cacheRetryTimerRef.current = null;
+      if (mountedRef.current) setCacheRetryTick((value) => value + 1);
+    }, 800);
+  }, []);
+
+  const recordPrewarmResult = useCallback(
+    (key: string, result: PrewarmResult | null) => {
+      timelinePrewarmRef.current.set(key, result);
+      if (prewarmResultAllowsCacheRead(result)) {
+        prewarmRetryRef.current.delete(key);
+        if (mountedRef.current) setCacheRetryTick((value) => value + 1);
+        return;
+      }
+      if (!prewarmResultNeedsRetry(result)) return;
+      const count = (prewarmRetryRef.current.get(key) ?? 0) + 1;
+      prewarmRetryRef.current.set(key, count);
+      if (count <= 8) scheduleCacheRetry();
+    },
+    [scheduleCacheRetry],
+  );
 
   const total = useMemo(() => totalFrames(timeline), [timeline]);
   const docWidth = useMemo(
@@ -393,6 +702,10 @@ export function TimelineContainer() {
   const docHeight = useMemo(
     () => contentHeight(timeline, viewport.height, trackHeights),
     [timeline, viewport.height, trackHeights],
+  );
+  const accessibilityRects = useMemo(
+    () => accessibleClipRects(timeline, zoomScale, trackHeights, scrollLeft, scrollTop, viewport.width, viewport.height),
+    [timeline, zoomScale, trackHeights, scrollLeft, scrollTop, viewport.width, viewport.height],
   );
   const firstAudio = useMemo(() => firstAudioIndex(timeline), [timeline]);
 
@@ -538,8 +851,8 @@ export function TimelineContainer() {
       scrollTop,
       viewWidth: viewport.width,
       viewHeight: viewport.height,
-      waveforms: waveformsRef.current,
-      thumbnails: thumbnailsRef.current,
+      waveforms: currentWaveforms,
+      thumbnails: currentThumbnails,
       missingMediaRefs,
       emptyLabel: t("timeline.dropHint"),
       drag,
@@ -562,57 +875,130 @@ export function TimelineContainer() {
     firstAudio,
     waveformVersion,
     thumbnailVersion,
+    currentWaveforms,
+    currentThumbnails,
     missingMediaRefs,
     dragTick,
     t,
   ]);
 
-  // Load waveform samples for every audio clip's source on demand (cached by
-  // media id), then trigger a repaint. The real bars replace the faint band
-  // once the Rust `get_waveform` cache resolves.
+  // Admit every timeline source through the bounded project-scoped scheduler.
+  // Audio waveform reads below wait for `cached`; queued/duplicate/busy results
+  // are polled without starting a second synchronous decoder on the UI path.
   useEffect(() => {
     const wanted = new Set<string>();
     for (const track of timeline.tracks) {
       for (const clip of track.clips) {
-        if (clip.mediaType === "audio") wanted.add(clip.mediaRef);
+        if (!missingMediaRefs.has(clip.mediaRef)) wanted.add(clip.mediaRef);
       }
     }
     for (const ref of wanted) {
+      const sourceKey = thumbnailSourceKeys.get(ref);
+      if (!sourceKey) continue;
+      const key = timelinePrewarmKey(projectEpoch, ref, sourceKey);
+      if (
+        !timelinePrewarmShouldStart(
+          key,
+          prewarmInFlightRef.current,
+          timelinePrewarmRef.current,
+          prewarmRetryRef.current,
+        )
+      ) {
+        continue;
+      }
+      prewarmInFlightRef.current.add(key);
+      void preloadMedia(ref)
+        .then((result) => recordPrewarmResult(key, result))
+        .finally(() => prewarmInFlightRef.current.delete(key));
+    }
+  }, [
+    timeline,
+    projectEpoch,
+    missingMediaRefs,
+    thumbnailSourceKeys,
+    cacheRetryTick,
+    recordPrewarmResult,
+  ]);
+
+  // Load waveform samples only after the scheduler confirms the cache is ready,
+  // then trigger a repaint. The real bars replace the faint band without doing
+  // an expensive decode inside the drop/paint interaction.
+  useEffect(() => {
+    const wanted = new Set<string>();
+    for (const track of timeline.tracks) {
+      for (const clip of track.clips) {
+        if (clip.mediaType === "audio" && !missingMediaRefs.has(clip.mediaRef)) {
+          wanted.add(clip.mediaRef);
+        }
+      }
+    }
+    for (const ref of wanted) {
+      const sourceKey = thumbnailSourceKeys.get(ref);
+      const key = visualCacheKeys.get(ref);
+      const admission = key ? timelinePrewarmRef.current.get(key) : null;
+      if (
+        !sourceKey ||
+        !key ||
+        !prewarmResultAllowsCacheRead(admission ?? null)
+      ) {
+        continue;
+      }
       // Skip only if already resolved (cached) or a fetch is in flight. A failed or
       // empty fetch leaves no placeholder, so a later effect run retries it.
-      if (waveformsRef.current.has(ref) || inFlightRef.current.has(ref)) continue;
-      inFlightRef.current.add(ref);
+      if (
+        !timelineVisualRequestShouldStart(
+          key,
+          waveformCacheKeysRef.current.get(ref),
+          inFlightRef.current,
+        )
+      ) {
+        continue;
+      }
+      inFlightRef.current.add(key);
       void getWaveform(ref)
         .then((samples) => {
-          // Write the cache even if `timeline` changed meanwhile — a ref write is
-          // idempotent and mount-independent. Discarding valid results on every edit
-          // was exactly what dropped waveforms intermittently (#127). Only the
-          // repaint bump is guarded against unmount.
-          if (samples && samples.length > 0) {
+          // Same-project timeline edits keep the key stable, while a project/source
+          // replacement changes it and rejects the stale async result.
+          if (
+            samples &&
+            samples.length > 0 &&
+            latestVisualCacheKeysRef.current.get(ref) === key
+          ) {
             waveformsRef.current.set(ref, samples);
+            waveformCacheKeysRef.current.set(ref, key);
             if (mountedRef.current) setWaveformVersion((v) => v + 1);
           }
         })
         .finally(() => {
           // Clear in-flight so a failed/empty ref is retried on the next effect run.
-          inFlightRef.current.delete(ref);
+          inFlightRef.current.delete(key);
         });
     }
-  }, [timeline]);
+  }, [timeline, missingMediaRefs, thumbnailSourceKeys, visualCacheKeys, cacheRetryTick]);
 
   useEffect(() => {
-    latestThumbnailSourceKeysRef.current = thumbnailSourceKeys;
-    let changed = false;
-    for (const ref of thumbnailsRef.current.keys()) {
-      const sourceKey = thumbnailSourceKeys.get(ref);
-      if (!sourceKey || thumbnailSourceKeysRef.current.get(ref) !== sourceKey) {
-        thumbnailsRef.current.delete(ref);
-        thumbnailSourceKeysRef.current.delete(ref);
-        changed = true;
+    latestVisualCacheKeysRef.current = visualCacheKeys;
+    let waveformChanged = false;
+    for (const ref of waveformsRef.current.keys()) {
+      const key = visualCacheKeys.get(ref);
+      if (!key || !timelineVisualCacheIsCurrent(key, waveformCacheKeysRef.current.get(ref))) {
+        waveformsRef.current.delete(ref);
+        waveformCacheKeysRef.current.delete(ref);
+        waveformChanged = true;
       }
     }
-    if (changed && mountedRef.current) setThumbnailVersion((v) => v + 1);
-  }, [thumbnailSourceKeys]);
+    let thumbnailChanged = false;
+    for (const ref of thumbnailsRef.current.keys()) {
+      const key = visualCacheKeys.get(ref);
+      if (!key || !timelineVisualCacheIsCurrent(key, thumbnailCacheKeysRef.current.get(ref))) {
+        thumbnailsRef.current.delete(ref);
+        thumbnailCacheKeysRef.current.delete(ref);
+        thumbnailChanged = true;
+      }
+    }
+    if (waveformChanged && mountedRef.current) setWaveformVersion((v) => v + 1);
+    if (thumbnailChanged && mountedRef.current) setThumbnailVersion((v) => v + 1);
+  }, [visualCacheKeys]);
 
   // Load visual thumbnails in two phases: a poster first so dropped clips paint
   // immediately, then a video sprite that upgrades the same cache entry.
@@ -628,7 +1014,7 @@ export function TimelineContainer() {
 
     const storeThumbnail = async (
       ref: string,
-      sourceKey: string,
+      key: string,
       result: Awaited<ReturnType<typeof generateThumbnail>>,
       requireSprite: boolean,
     ): Promise<boolean> => {
@@ -644,8 +1030,7 @@ export function TimelineContainer() {
       const url = assetUrl(path);
       if (!url) return false;
       const image = await loadImageElement(url);
-      const latestSourceKey = latestThumbnailSourceKeysRef.current.get(ref);
-      if (latestSourceKey !== sourceKey) return false;
+      if (latestVisualCacheKeysRef.current.get(ref) !== key) return false;
       const strip: ClipThumbnailStrip = {
         image,
         kind: hasSprite ? "sprite" : "single",
@@ -655,47 +1040,53 @@ export function TimelineContainer() {
         times: result.times,
       };
       thumbnailsRef.current.set(ref, strip);
-      thumbnailSourceKeysRef.current.set(ref, sourceKey);
+      thumbnailCacheKeysRef.current.set(ref, key);
       if (mountedRef.current) setThumbnailVersion((v) => v + 1);
       return true;
     };
 
-    const startSpriteLoad = (ref: string, sourceKey: string) => {
-      if (thumbnailSpriteInFlightRef.current.has(ref)) return;
-      thumbnailSpriteInFlightRef.current.add(ref);
+    const startSpriteLoad = (ref: string, key: string) => {
+      if (thumbnailSpriteInFlightRef.current.has(key)) return;
+      thumbnailSpriteInFlightRef.current.add(key);
       void generateThumbnail(ref, { includeSprite: true })
-        .then((result) => storeThumbnail(ref, sourceKey, result, true))
+        .then((result) => storeThumbnail(ref, key, result, true))
         .catch((err) => {
           console.warn(`thumbnail sprite load failed for ${ref}:`, err);
         })
         .finally(() => {
-          thumbnailSpriteInFlightRef.current.delete(ref);
+          thumbnailSpriteInFlightRef.current.delete(key);
         });
     };
 
     for (const [ref, mediaType] of wanted) {
-      const sourceKey = thumbnailSourceKeys.get(ref);
-      if (!sourceKey) continue;
-      const existing = thumbnailsRef.current.get(ref);
+      const key = visualCacheKeys.get(ref);
+      if (!key) continue;
+      const cachedKey = thumbnailCacheKeysRef.current.get(ref);
+      const existing = timelineVisualCacheIsCurrent(key, cachedKey)
+        ? thumbnailsRef.current.get(ref)
+        : undefined;
 
-      if (!existing && !thumbnailPosterInFlightRef.current.has(ref)) {
-        thumbnailPosterInFlightRef.current.add(ref);
+      if (
+        !existing &&
+        timelineVisualRequestShouldStart(key, cachedKey, thumbnailPosterInFlightRef.current)
+      ) {
+        thumbnailPosterInFlightRef.current.add(key);
         void generateThumbnail(ref, { includeSprite: false })
           .then(async (result) => {
-            const stored = await storeThumbnail(ref, sourceKey, result, false);
-            if (stored && mediaType === "video") startSpriteLoad(ref, sourceKey);
+            const stored = await storeThumbnail(ref, key, result, false);
+            if (stored && mediaType === "video") startSpriteLoad(ref, key);
           })
           .catch((err) => {
             console.warn(`thumbnail poster load failed for ${ref}:`, err);
           })
           .finally(() => {
-            thumbnailPosterInFlightRef.current.delete(ref);
+            thumbnailPosterInFlightRef.current.delete(key);
           });
       } else if (mediaType === "video" && existing && existing.kind !== "sprite") {
-        startSpriteLoad(ref, sourceKey);
+        startSpriteLoad(ref, key);
       }
     }
-  }, [timeline, missingMediaRefs, thumbnailSourceKeys]);
+  }, [timeline, missingMediaRefs, visualCacheKeys]);
 
   // Paint ruler canvas (sticky top).
   useEffect(() => {
@@ -816,7 +1207,15 @@ export function TimelineContainer() {
         return;
       }
 
-      const hit = hitTestClip(timeline, docX, docY, zoomScale, trackHeights);
+      const hit = hitTestAccessibleClip(
+        timeline,
+        docX,
+        docY,
+        zoomScale,
+        trackHeights,
+        docWidth,
+        docHeight,
+      );
       const fadeHit =
         !e.metaKey && !e.shiftKey
           ? fadeKneeHit(timeline, docX, docY, zoomScale, trackHeights)
@@ -870,25 +1269,7 @@ export function TimelineContainer() {
 
       if (hit) {
         // Selection logic (linkedOn = !Option).
-        const linked = !e.altKey;
-        const already = selectedClipIds.has(hit.clip.id);
-        let nextSel: Set<string>;
-        if (e.shiftKey) {
-          nextSel = new Set(selectedClipIds);
-          const group = linked
-            ? expandLinkGroup(timeline, new Set([hit.clip.id]))
-            : new Set([hit.clip.id]);
-          if (already) group.forEach((id) => nextSel.delete(id));
-          else group.forEach((id) => nextSel.add(id));
-        } else if (e.altKey && !already) {
-          nextSel = new Set([hit.clip.id]);
-        } else if (!already) {
-          nextSel = linked
-            ? expandLinkGroup(timeline, new Set([hit.clip.id]))
-            : new Set([hit.clip.id]);
-        } else {
-          nextSel = selectedClipIds;
-        }
+        const nextSel = clipSelectionForInteraction(timeline, selectedClipIds, hit.clip.id, e);
         selectClips(nextSel);
 
         // Fade knees sit in a 14px upstream hit square that can overlap the 4px
@@ -951,7 +1332,21 @@ export function TimelineContainer() {
         curDocY: docY,
       };
     },
-    [toDoc, timeline, zoomScale, trackHeights, toolMode, selectedClipIds, selectClips, clearSelection, selectGap, setCurrentFrame, setScrubbing],
+    [
+      toDoc,
+      timeline,
+      zoomScale,
+      trackHeights,
+      toolMode,
+      selectedClipIds,
+      selectClips,
+      clearSelection,
+      selectGap,
+      setCurrentFrame,
+      setScrubbing,
+      docWidth,
+      docHeight,
+    ],
   );
 
   const onPointerMove = useCallback(
@@ -1320,6 +1715,10 @@ export function TimelineContainer() {
   const onContextMenu = useCallback(
     (e: React.MouseEvent) => {
       const { docX, docY } = toDoc(e);
+      const contextRange = rangeAtContextFrame(
+        selectedTimelineRange,
+        frameAt(docX, zoomScale),
+      );
       const keyframeHit = audioVolumeKfHit(timeline, docX, docY, zoomScale, trackHeights);
       if (keyframeHit) {
         e.preventDefault();
@@ -1333,22 +1732,59 @@ export function TimelineContainer() {
         });
         return;
       }
-      const hit = hitTestClip(timeline, docX, docY, zoomScale, trackHeights);
-      if (!hit) return; // empty space: keep the default (suppressed) menu
+      const hit = hitTestAccessibleClip(
+        timeline,
+        docX,
+        docY,
+        zoomScale,
+        trackHeights,
+        docWidth,
+        docHeight,
+      );
+      if (!hit) {
+        if (contextRange) {
+          e.preventDefault();
+          setMenu({ kind: "range", range: contextRange, x: e.clientX, y: e.clientY });
+        }
+        return;
+      }
       e.preventDefault();
       const fadeHit = fadeKneeHit(timeline, docX, docY, zoomScale, trackHeights);
       if (fadeHit?.clipId === hit.clip.id) {
-        setMenu({ kind: "clip", clipId: hit.clip.id, fadeEdge: fadeHit.edge, x: e.clientX, y: e.clientY });
+        setMenu({
+          kind: "clip",
+          clipId: hit.clip.id,
+          fadeEdge: fadeHit.edge,
+          range: contextRange ?? undefined,
+          x: e.clientX,
+          y: e.clientY,
+        });
         return;
       }
-      // If the clip isn't already selected, select just it so menu actions
-      // target the right clip.
+      // If the clip isn't already selected, select it with the same linked-group
+      // semantics as a primary click so menu actions target the expected group.
       if (!selectedClipIds.has(hit.clip.id)) {
-        selectClips(new Set([hit.clip.id]));
+        selectClips(clipSelectionForInteraction(timeline, selectedClipIds, hit.clip.id, {}));
       }
-      setMenu({ kind: "clip", clipId: hit.clip.id, x: e.clientX, y: e.clientY });
+      setMenu({
+        kind: "clip",
+        clipId: hit.clip.id,
+        range: contextRange ?? undefined,
+        x: e.clientX,
+        y: e.clientY,
+      });
     },
-    [toDoc, timeline, zoomScale, trackHeights, selectedClipIds, selectClips],
+    [
+      toDoc,
+      timeline,
+      zoomScale,
+      trackHeights,
+      selectedClipIds,
+      selectClips,
+      docWidth,
+      docHeight,
+      selectedTimelineRange,
+    ],
   );
 
   // Media dropped from the panel lands AT the cursor: its start frame = the drop
@@ -1584,6 +2020,67 @@ export function TimelineContainer() {
         height={viewport.height}
       />
 
+      <div
+        role="group"
+        aria-label="Timeline clips"
+        style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 45 }}
+      >
+        {accessibilityRects.map((rect) => (
+          <button
+            key={rect.clipId}
+            type="button"
+            className="timeline-clip-access-button"
+            aria-label={rect.label}
+            aria-pressed={selectedClipIds.has(rect.clipId)}
+            data-clip-id={rect.clipId}
+            onClick={(event) =>
+              selectClips(clipSelectionForInteraction(timeline, selectedClipIds, rect.clipId, event))
+            }
+            onKeyDown={(event) => {
+              if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+                event.preventDefault();
+                if (!selectedClipIds.has(rect.clipId)) {
+                  selectClips(clipSelectionForInteraction(timeline, selectedClipIds, rect.clipId, {}));
+                }
+                const bounds = event.currentTarget.getBoundingClientRect();
+                setMenu({
+                  kind: "clip",
+                  clipId: rect.clipId,
+                  range: rangeAtContextFrame(selectedTimelineRange, activeFrame) ?? undefined,
+                  x: bounds.left + bounds.width / 2,
+                  y: bounds.top + bounds.height / 2,
+                });
+              }
+            }}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              if (!selectedClipIds.has(rect.clipId)) {
+                selectClips(clipSelectionForInteraction(timeline, selectedClipIds, rect.clipId, {}));
+              }
+              setMenu({
+                kind: "clip",
+                clipId: rect.clipId,
+                range:
+                  rangeAtContextFrame(
+                    selectedTimelineRange,
+                    frameAt(toDoc(event).docX, zoomScale),
+                  ) ?? undefined,
+                x: event.clientX,
+                y: event.clientY,
+              });
+            }}
+            style={{
+              position: "absolute",
+              left: rect.left,
+              top: rect.top,
+              width: rect.width,
+              height: rect.height,
+              pointerEvents: "none",
+            }}
+          />
+        ))}
+      </div>
+
       {/* Marquee box. */}
       {drag?.kind === "marquee" && (
         <MarqueeBox drag={drag} scrollLeft={scrollLeft} scrollTop={scrollTop} />
@@ -1594,6 +2091,16 @@ export function TimelineContainer() {
         <ClipContextMenu
           clipId={menu.clipId}
           fadeEdge={menu.fadeEdge}
+          range={menu.range}
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+        />
+      )}
+
+      {menu?.kind === "range" && (
+        <TimelineRangeContextMenu
+          range={menu.range}
           x={menu.x}
           y={menu.y}
           onClose={() => setMenu(null)}

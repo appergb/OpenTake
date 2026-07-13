@@ -184,6 +184,7 @@ export interface Clip {
   trimStartFrame: number;
   trimEndFrame: number;
   speed: number;
+  reversed?: boolean;
   volume: number;
   fadeInFrames: number;
   fadeOutFrames: number;
@@ -241,6 +242,7 @@ export interface ClipPropertiesReq {
   trimStartFrame?: number;
   trimEndFrame?: number;
   speed?: number;
+  reversed?: boolean;
   volume?: number;
   opacity?: number;
   transform?: Transform;
@@ -310,6 +312,7 @@ export type EditRequest =
     }
   | { type: "removeClips"; clipIds: string[] }
   | { type: "splitClip"; clipId: string; atFrame: number }
+  | { type: "freezeFrame"; clipId: string; atFrame: number; durationFrames: number }
   | { type: "trimClips"; edits: TrimEditReq[] }
   | { type: "setClipProperties"; clipIds: string[]; properties: ClipPropertiesReq }
   | { type: "setKeyframes"; clipId: string; property: KeyframeProperty; payload: KeyframePayloadReq }
@@ -400,7 +403,39 @@ export interface EditResult {
 
 export interface TimelineSnapshot {
   timeline: Timeline;
+  projectEpoch?: number;
   version: number;
+}
+
+/** Runtime IPC snapshots always carry project identity. `TimelineSnapshot`
+ * keeps the optional field only for the browser fallback fixture schema. */
+export interface RuntimeTimelineSnapshot extends TimelineSnapshot {
+  projectEpoch: number;
+  projectPath: string | null;
+  compatibilityReadOnly: boolean;
+  compatibilityBlockers: string[];
+}
+
+export interface ProjectRevision {
+  projectEpoch: number;
+  timelineVersion: number;
+}
+
+export interface PlaybackIdentity extends ProjectRevision {
+  sessionId: string;
+}
+
+export interface PlaybackFrameEvent extends PlaybackIdentity {
+  frame: number;
+  sequence: number;
+  terminal: boolean;
+}
+
+export type PlaybackCommandErrorCode = "superseded" | "cancelled" | "busy" | "engine";
+
+export interface PlaybackCommandError {
+  code: PlaybackCommandErrorCode;
+  message: string;
 }
 
 // MARK: - Transcription (mirror of src-tauri transcribe.rs DTOs)
@@ -555,9 +590,9 @@ export interface MediaItem {
   /** `true` when the source file is offline (moved/deleted). Derived from file
    *  existence on the backend; clears after a successful relink. */
   missing?: boolean;
-  /** `true` when the user has favorited this asset (#91). Backs the media panel's
-   *  "mine" tab; persisted per-project in the manifest (not browser storage), so
-   *  it always arrives from `get_media` / `toggle_favorite`. */
+  /** Project-side compatibility mirror for the asset's global favorite mapping.
+   *  The Mine grid reads the global library; cards receive this state from
+   *  `get_media` / `toggle_favorite`. */
   favorite: boolean;
 }
 
@@ -595,6 +630,17 @@ export interface MediaList {
   skipped?: string[];
 }
 
+export interface FavoriteSyncFailure {
+  assetId: string;
+  message: string;
+}
+
+export interface FavoriteSyncResult {
+  media: MediaList;
+  migratedLegacyAssetIds: string[];
+  failures: FavoriteSyncFailure[];
+}
+
 // MARK: - BYOK secret store (mirror of src-tauri SecretStatus)
 
 /** Masked status of a provider's stored API key. The plaintext key never
@@ -603,4 +649,43 @@ export interface MediaList {
 export interface SecretStatus {
   hasKey: boolean;
   masked: string;
+}
+
+// MARK: - Optional account backend (mirror of src-tauri account.rs)
+
+/** Identity returned by a configured backend's `/api/auth/verify` endpoint. */
+export interface AccountInfo {
+  userId: string;
+  email?: string | null;
+  plan?: string | null;
+}
+
+/** Live, informational login state. `stored` means a credential exists but this
+ * process has not made an automatic network request to restore identity. */
+export type AccountStatus =
+  | { type: "offline" }
+  | { type: "stored" }
+  | { type: "connecting" }
+  | { type: "online"; info: AccountInfo }
+  | { type: "error"; message: string };
+
+// MARK: - In-app chat (mirror of opentake-agent::chat::session, camelCase)
+
+export type ChatRole = "system" | "user" | "assistant" | "tool";
+
+export interface ChatToolCall {
+  id: string;
+  name: string;
+  args: unknown;
+  result?: unknown;
+  isError?: boolean;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: ChatRole;
+  content: string;
+  toolCalls: ChatToolCall[];
+  createdAt: number;
+  toolCallId?: string;
 }

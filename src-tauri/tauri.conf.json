@@ -56,9 +56,6 @@
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"
-    },
-    "resources": [
-      "lib/libmpv-wrapper.dylib"
-    ]
+    }
   }
 }

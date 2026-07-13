@@ -7,15 +7,25 @@
 //! box texture 1:1 onto the canvas at the clip's transform (position / rotation /
 //! flip / opacity all handled by the compositor, exactly as for video/image).
 //!
-//! Style coverage: font family + weight, size (canvas-relative like upstream),
-//! color, horizontal alignment, optional background fill, drop shadow (offset +
-//! box blur), and border stroke — the `TextStyle` fields. Glyph layout +
-//! word-wrap + font fallback come from cosmic-text; raster from swash.
+//! Style coverage: font family + weight + style, size (canvas-relative like
+//! upstream), color, horizontal alignment, optional background fill, drop shadow
+//! (offset + box blur), and border stroke — the `TextStyle` fields. Glyph layout
+//! + word-wrap + font fallback come from cosmic-text; raster from swash.
+//!
+//! Style coverage limits / future work (SPEC §4.2, ROADMAP Phase 8):
+//! - **Rich text** (multi-span styles): cosmic-text `Buffer::set_rich_text` takes
+//!   an iterator of `(text, Attrs)` spans; the current path uses `set_text`
+//!   (single style per clip) — switching needs a `TextRasterRequest` shape change.
+//! - **Emoji / CJK fallback**: cosmic-text 0.12 `Attrs` has no `family_emoji` /
+//!   `family_asian` (added in 0.14+); fallback relies on fontdb's default
+//!   sans-serif. TODO when the crate is bumped.
+//! - **Vertical text**: unsupported (upstream doesn't expose it via `TextStyle`);
+//!   v1 leaves it horizontal.
 
 use std::cell::RefCell;
 
 use cosmic_text::{
-    Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache, Weight,
+    Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, Style, SwashCache, Weight,
 };
 use opentake_domain::{Rgba, TextAlignment};
 
@@ -82,6 +92,11 @@ impl TextRasterizer for CosmicTextRasterizer {
 }
 
 /// Box pixel size from the normalized box + canvas, clamped to sane bounds.
+/// The box comes from `clip.transform` (top-left + width/height) — i.e. upstream
+/// `layer.frame = (tl.x*W, tl.y*H, transform.width*W, transform.height*H)` at
+/// `TextLayerController.applyStyle` L157-163 — **not** `TextLayout.naturalSize`
+/// (that measures glyph bounds for clip placement only; the shadow padding
+/// `12*2` and `+4` slack live there, not in this rasterizer's box).
 fn box_pixels(box_norm: (f64, f64, f64, f64), canvas: (u32, u32)) -> Option<(u32, u32)> {
     let (_, _, bw, bh) = box_norm;
     let w = (bw * canvas.0 as f64).round();
@@ -101,15 +116,43 @@ fn to_align(a: TextAlignment) -> Align {
     }
 }
 
-/// Split an `Attrs` family/weight out of a font name. Upstream names are often
-/// PostScript ("Helvetica-Bold"); cosmic-text matches by *family*, so we use the
-/// part before the first `-` as the family and infer bold from the suffix.
+/// Map the domain text style to cosmic-text `Attrs`. Upstream names are often
+/// PostScript ("Helvetica-Bold"); `fontdb::Family::Name` matches by *Typographic
+/// Family* and **rejects** suffixes like _Bold_/_Italic_, so we split the family
+/// off the first `-` and infer weight + style from the suffix. fontdb has no
+/// PostScript-name lookup and no `Style::Specific`; this is the closest match
+/// within the cosmic-text API — upstream `NSFont(name:size:)` is stricter, so a
+/// PostScript name whose family+weight pair is absent from the font database
+/// falls back to the nearest weight (matches upstream's `?? boldSystemFont`
+/// fallback when `NSFont(name:)` returns nil).
 fn attrs_for<'a>(font_name: &'a str) -> Attrs<'a> {
     let raw = font_name.trim();
-    let weight = if raw.to_ascii_lowercase().contains("bold") {
+    let lower = raw.to_ascii_lowercase();
+    let weight = if lower.contains("black") || lower.contains("heavy") {
+        Weight::BLACK
+    } else if lower.contains("extrabold") {
+        Weight::EXTRA_BOLD
+    } else if lower.contains("semibold") || lower.contains("demibold") {
+        Weight::SEMIBOLD
+    } else if lower.contains("medium") {
+        Weight::MEDIUM
+    } else if lower.contains("extralight") || lower.contains("ultralight") {
+        Weight::EXTRA_LIGHT
+    } else if lower.contains("light") {
+        Weight::LIGHT
+    } else if lower.contains("thin") {
+        Weight::THIN
+    } else if lower.contains("bold") {
         Weight::BOLD
     } else {
         Weight::NORMAL
+    };
+    let style = if lower.contains("oblique") {
+        Style::Oblique
+    } else if lower.contains("italic") {
+        Style::Italic
+    } else {
+        Style::Normal
     };
     let base = raw.split('-').next().unwrap_or(raw).trim();
     let family = if base.is_empty() {
@@ -117,7 +160,7 @@ fn attrs_for<'a>(font_name: &'a str) -> Attrs<'a> {
     } else {
         Family::Name(base)
     };
-    Attrs::new().family(family).weight(weight)
+    Attrs::new().family(family).weight(weight).style(style)
 }
 
 /// 0..1 channel to 0..=255.
@@ -197,14 +240,20 @@ fn rasterize_box(inner: &mut Inner, req: &TextRasterRequest<'_>) -> Option<Decod
 
     if style.shadow.enabled {
         let scale = req.canvas.1 as f64 / CANVAS_BASIS_HEIGHT;
-        let radius = ((style.shadow.blur * scale) / 2.0).round() as u32;
+        // Upstream `layer.shadowRadius = max(0, blur * scale)` (L183); the box-blur
+        // half-window below uses the same value as the box radius — 3 stacked box
+        // passes approximate the Gaussian CoreImage applies for that radius.
+        let radius = (style.shadow.blur * scale).round() as u32;
         let blurred = if radius > 0 {
             box_blur(&mask, bw, bh, radius)
         } else {
             mask.clone()
         };
-        // Upstream Y is up; image space is Y-down, so a positive offset_y moves the
-        // shadow up on screen → subtract in image rows.
+        // Upstream `textRoot.isGeometryFlipped = true` flips Y to top-origin, so a
+        // shadow `offset_y = -2` renders the shadow *below* the glyphs (CALayer
+        // shadowOffset is in the layer's flipped space). cosmic-text is already
+        // top-origin (image rows go down), so the equivalent is `dy = +2` → negate
+        // the authored offset_y when translating to image rows.
         let dx = (style.shadow.offset_x * scale).round() as i32;
         let dy = -(style.shadow.offset_y * scale).round() as i32;
         composite_mask(&mut out, bw, bh, &blurred, dx, dy, style.shadow.color);
@@ -281,35 +330,48 @@ fn stroke_rect(out: &mut [u8], w: u32, h: u32, color: Rgba) {
     fill_rect(out, w, h, w.saturating_sub(t), 0, t, h, color); // right
 }
 
-/// Separable box blur of a coverage mask (used for the drop shadow).
+/// Separable box blur of a coverage mask (used for the drop shadow). Three
+/// stacked passes per axis approximate a Gaussian — the standard "3-box ≈ 1
+/// Gaussian" result (Wikipedia "Box blur"). Upstream's `CALayer.shadowRadius` is
+/// a Gaussian blur with `radius = shadow.blur * scale`, so we feed that same
+/// value in as the box half-window radius (no `/2`).
 fn box_blur(mask: &[u8], w: u32, h: u32, radius: u32) -> Vec<u8> {
-    let r = radius as i32;
-    let win = (2 * r + 1) as u32;
-    // Horizontal pass.
+    if radius == 0 || mask.is_empty() {
+        return mask.to_vec();
+    }
+    let mut cur = mask.to_vec();
     let mut tmp = vec![0u8; mask.len()];
-    for y in 0..h as i32 {
-        for x in 0..w as i32 {
+    for _ in 0..3 {
+        blur_axis(&cur, &mut tmp, w, h, radius, true);
+        core::mem::swap(&mut cur, &mut tmp);
+    }
+    for _ in 0..3 {
+        blur_axis(&cur, &mut tmp, w, h, radius, false);
+        core::mem::swap(&mut cur, &mut tmp);
+    }
+    cur
+}
+
+/// One separable box-blur pass along a single axis (`horizontal` picks H vs V).
+/// Sliding-window sum with edge clamping; window = `2*radius + 1`.
+fn blur_axis(src: &[u8], dst: &mut [u8], w: u32, h: u32, radius: u32, horizontal: bool) {
+    let r = radius as i32;
+    let win = (2 * r + 1) as f64;
+    let (wmax, hmax) = (w as i32, h as i32);
+    for y in 0..hmax {
+        for x in 0..wmax {
             let mut sum = 0u32;
             for k in -r..=r {
-                let sx = (x + k).clamp(0, w as i32 - 1);
-                sum += mask[(y as u32 * w + sx as u32) as usize] as u32;
+                let (sx, sy) = if horizontal {
+                    ((x + k).clamp(0, wmax - 1), y)
+                } else {
+                    (x, (y + k).clamp(0, hmax - 1))
+                };
+                sum += src[(sy as u32 * w + sx as u32) as usize] as u32;
             }
-            tmp[(y as u32 * w + x as u32) as usize] = (sum / win) as u8;
+            dst[(y as u32 * w + x as u32) as usize] = (sum as f64 / win) as u8;
         }
     }
-    // Vertical pass.
-    let mut out = vec![0u8; mask.len()];
-    for y in 0..h as i32 {
-        for x in 0..w as i32 {
-            let mut sum = 0u32;
-            for k in -r..=r {
-                let sy = (y + k).clamp(0, h as i32 - 1);
-                sum += tmp[(sy as u32 * w + x as u32) as usize] as u32;
-            }
-            out[(y as u32 * w + x as u32) as usize] = (sum / win) as u8;
-        }
-    }
-    out
 }
 
 #[cfg(test)]

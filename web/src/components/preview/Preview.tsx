@@ -3,7 +3,7 @@
  * bar with project-setting badges. Transport drives the local playhead.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   SkipBack,
   SkipForward,
@@ -36,12 +36,11 @@ import {
 import { useT } from "../../i18n";
 import {
   captureFrameToMedia,
+  compositeFrame,
+  getPreviewEndpoint,
   isTauri,
   previewPoster,
 } from "../../lib/api";
-import { rustEngineEnabled } from "./rustEngine";
-import { setVideoMarginRatio } from "tauri-plugin-libmpv-api";
-import { shouldUseRustEngine } from "./timelinePlayback";
 import { findCropEditingClip, findSelectedVisualClip, mediaCanvasAspect } from "../../lib/clip";
 import { setTimelineSettings } from "../../store/editActions";
 import { applyScrollZoom, type CanvasOffset } from "../../lib/previewZoom";
@@ -52,6 +51,7 @@ import {
   isAspectPresetActive,
   isQualityPresetActive,
   isZoomPresetActive,
+  previewQualityMaxSize,
   qualityBadgeLabel,
   zoomBadgeLabel,
   type AspectPreset,
@@ -59,15 +59,19 @@ import {
   type ZoomPreset,
 } from "../../lib/previewPresets";
 import type { MediaItem } from "../../lib/types";
+import { useNativePlaybackPublication } from "./nativePlaybackSession";
+import { resolveTimelinePlaybackRoute, type UnsupportedPlaybackReason } from "./playbackRoute";
+import { rustEngineEnabled } from "./rustEngine";
+import { RustFrameBuffer } from "./RustFrameBuffer.tsx";
 
 export function Preview() {
   const t = useT();
   const timeline = useProjectStore((s) => s.timeline);
+  const projectEpoch = useProjectStore((s) => s.projectEpoch);
+  const timelineVersion = useProjectStore((s) => s.timelineVersion);
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
   const setCurrentFrame = useEditorUiStore((s) => s.setCurrentFrame);
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
-  const isScrubbing = useEditorUiStore((s) => s.isScrubbing);
-  const rustEngineFailed = useEditorUiStore((s) => s.rustEngineFailed);
   const setScrubbing = useEditorUiStore((s) => s.setScrubbing);
   const togglePlayTimeline = useEditorUiStore((s) => s.togglePlay);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
@@ -81,6 +85,7 @@ export function Preview() {
   const canvasOffset = useEditorUiStore((s) => s.canvasOffset);
   const setCanvasZoom = useEditorUiStore((s) => s.setCanvasZoom);
   const setCanvasOffset = useEditorUiStore((s) => s.setCanvasOffset);
+  const previewQualityShortEdge = useEditorUiStore((s) => s.previewQualityShortEdge);
   const previewItem = useMediaStore((s) =>
     previewMediaId ? s.items.find((m) => m.id === previewMediaId) ?? null : null,
   );
@@ -128,6 +133,8 @@ export function Preview() {
   const [mediaTime, setMediaTime] = useState(0);
   const [mediaDuration, setMediaDuration] = useState(0);
   const [mediaPlaying, setMediaPlaying] = useState(false);
+  const nativeFrameEvent = useNativePlaybackPublication();
+  const [previewFrameEndpoint, setPreviewFrameEndpoint] = useState<string | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   // The zoomed canvas box element — the wheel handler measures its rect so the
   // zoom anchors on the cursor's position within the canvas (not the padded stage).
@@ -138,6 +145,15 @@ export function Preview() {
     setMediaDuration(0);
     setMediaPlaying(false);
   }, [previewMediaId]);
+  useEffect(() => {
+    let disposed = false;
+    void getPreviewEndpoint().then((endpoint) => {
+      if (!disposed) setPreviewFrameEndpoint(endpoint);
+    });
+    return () => {
+      disposed = true;
+    };
+  }, []);
   useEffect(() => {
     const el = stageRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
@@ -183,6 +199,19 @@ export function Preview() {
     : totalFrames(timeline);
   const activeShownFrame = previewing ? Math.round(mediaTime * fps) : activeFrame;
   const playing = previewing ? mediaPlaying : isPlaying;
+  const playbackRoute = resolveTimelinePlaybackRoute(timeline, {
+    rustAvailable: isTauri,
+    rustEnabled: rustEngineEnabled(),
+  });
+  const timelinePlaybackAllowed = playbackRoute.kind !== "unsupported";
+  const requestCompositeStill = useCallback(
+    (frame: number) =>
+      compositeFrame(
+        frame,
+        previewQualityMaxSize(previewQualityShortEdge, timeline.width, timeline.height),
+      ),
+    [previewQualityShortEdge, timeline.height, timeline.width],
+  );
 
   const seekTo = (frame: number) => {
     const clamped = Math.max(0, Math.min(total, frame));
@@ -205,6 +234,7 @@ export function Preview() {
       if (el.paused) void el.play();
       else el.pause();
     } else {
+      if (!timelinePlaybackAllowed) return;
       // Rewinds from the parked end frame on replay (see store togglePlay).
       togglePlayTimeline();
     }
@@ -215,7 +245,8 @@ export function Preview() {
   // `isTimeline || activePreviewTab.clipType == .video`,
   // PreviewContainerView.swift:95).
   const canCaptureVideoTab = previewing && previewItem?.type === "video";
-  const canCapture = (timelineHasContent && !previewing) || canCaptureVideoTab;
+  const canCapture =
+    (timelineHasContent && !previewing && timelinePlaybackAllowed) || canCaptureVideoTab;
 
   // Capture the current frame INTO the media library as a new still (upstream
   // `captureCurrentFrameToMedia`): composite the timeline (timeline tab) or decode
@@ -263,48 +294,6 @@ export function Preview() {
       ? { width: fittedCanvas.width * canvasZoom, height: fittedCanvas.height * canvasZoom }
       : fittedCanvas;
   const canvasTransform = `translate(${canvasOffset.width}px, ${canvasOffset.height}px)`;
-  // mpv paints on the native window BELOW the webview. While it owns PLAY the
-  // canvas box (and the stage behind it) turn transparent so the video shows
-  // through; pause/scrub restore the opaque composite surfaces (mpv is paused
-  // underneath and hidden by them).
-  const mpvDriving =
-    !previewItem &&
-    shouldUseRustEngine({
-      rustEnabled: rustEngineEnabled(),
-      isTauri,
-      isPlaying,
-      isScrubbing,
-      engineFailed: rustEngineFailed,
-    });
-
-  // Keep mpv's video letterboxed exactly onto the (aspect-fit, zoomed) canvas
-  // box: margins are window-relative ratios, re-synced on layout changes.
-  useEffect(() => {
-    if (!mpvDriving) return;
-    const el = canvasBoxRef.current;
-    if (!el) return;
-    const sync = () => {
-      const r = el.getBoundingClientRect();
-      const W = window.innerWidth;
-      const H = window.innerHeight;
-      if (W <= 0 || H <= 0 || r.width <= 0 || r.height <= 0) return;
-      const clamp01 = (v: number) => Math.min(0.99, Math.max(0, v));
-      void setVideoMarginRatio({
-        left: clamp01(r.left / W),
-        right: clamp01(1 - r.right / W),
-        top: clamp01(r.top / H),
-        bottom: clamp01(1 - r.bottom / H),
-      }).catch((e: unknown) => console.warn("mpv margin sync failed:", e));
-    };
-    sync();
-    const ro = new ResizeObserver(sync);
-    ro.observe(el);
-    window.addEventListener("resize", sync);
-    return () => {
-      ro.disconnect();
-      window.removeEventListener("resize", sync);
-    };
-  }, [mpvDriving, scaledCanvas?.width, scaledCanvas?.height]);
 
   const timelineCanvasStyle = {
     ...timelinePreviewCanvasStyle(timeline.width, timeline.height),
@@ -371,7 +360,7 @@ export function Preview() {
         style={{
           flex: 1,
           minHeight: 0,
-          background: mpvDriving ? "transparent" : "var(--bg-surface)",
+          background: "var(--bg-surface)",
           position: "relative",
           display: "flex",
           alignItems: "center",
@@ -394,20 +383,24 @@ export function Preview() {
             style={{
               ...timelineCanvasStyle,
               position: "relative",
-              ...(mpvDriving ? { background: "transparent" } : {}),
             }}
           >
-            {timelineHasContent ? (
+            {timelineHasContent && playbackRoute.kind === "unsupported" ? (
+              <UnsupportedPlaybackSurface reasons={playbackRoute.reasons} />
+            ) : timelineHasContent ? (
               <>
-                <div
-                  style={{
-                    position: "absolute",
-                    inset: 0,
-                    visibility: mpvDriving ? "hidden" : "visible",
-                  }}
-                >
+                {playbackRoute.kind === "webkit" && (
                   <TimelinePlayback timeline={timeline} fps={fps} />
-                </div>
+                )}
+                <RustFrameBuffer
+                  event={nativeFrameEvent}
+                  endpoint={previewFrameEndpoint}
+                  projectEpoch={projectEpoch}
+                  timelineVersion={timelineVersion}
+                  engineDriving={playbackRoute.kind === "rust" && isPlaying}
+                  requestCompositeStill={requestCompositeStill}
+                  onTerminalFailure={() => pushToast(t("preview.terminalFrameFailed"))}
+                />
                 {/* Below-fit canvas outline (upstream PreviewContainerView.swift:
                     44-47: Rectangle stroke white @ Opacity.moderate=0.25 when
                     canvasZoom < 1.0, else invisible). pointer-events:none so it
@@ -502,7 +495,11 @@ export function Preview() {
           <HoverButton title={t("preview.stepBack")} onClick={() => seekTo(activeShownFrame - 1)}>
             <Icon icon={StepBack} size={13} />
           </HoverButton>
-          <HoverButton title={t("preview.playPause")} onClick={togglePlay}>
+          <HoverButton
+            title={t("preview.playPause")}
+            disabled={!previewing && !timelinePlaybackAllowed}
+            onClick={togglePlay}
+          >
             <Icon icon={playing ? Pause : Play} size={14} />
           </HoverButton>
           <HoverButton title={t("preview.stepForward")} onClick={() => seekTo(activeShownFrame + 1)}>
@@ -523,6 +520,37 @@ export function Preview() {
         <ProjectSettingsBadges fps={timeline.fps} width={timeline.width} height={timeline.height} />
       </div>
     </>
+  );
+}
+
+function unsupportedReasonKey(reason: UnsupportedPlaybackReason): string {
+  return `preview.unsupportedPlayback.${reason.code}`;
+}
+
+function UnsupportedPlaybackSurface({ reasons }: { reasons: UnsupportedPlaybackReason[] }) {
+  const t = useT();
+  return (
+    <div
+      data-testid="unsupported-playback-surface"
+      role="status"
+      style={{
+        position: "absolute",
+        inset: 0,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: "var(--space-sm)",
+        padding: "var(--space-xl)",
+        color: "var(--text-secondary)",
+        textAlign: "center",
+      }}
+    >
+      <strong style={{ color: "var(--text-primary)" }}>{t("preview.unsupportedPlayback")}</strong>
+      <span style={{ fontSize: "var(--fs-xs)" }}>
+        {reasons.map((reason) => t(unsupportedReasonKey(reason))).join(" · ")}
+      </span>
+    </div>
   );
 }
 

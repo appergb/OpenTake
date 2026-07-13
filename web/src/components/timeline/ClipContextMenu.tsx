@@ -11,7 +11,9 @@ import { useClipboardStore } from "../../store/clipboardStore";
 import * as edit from "../../store/editActions";
 import { useT } from "../../i18n";
 import type { Clip, ClipPropertiesReq, Interpolation } from "../../lib/types";
+import type { TimelineRange } from "../../lib/timelineRange";
 import type { FadeEdge } from "./hitTest";
+import { rangeContextMenuItems } from "./TimelineRangeContextMenu";
 
 type MenuItem = {
   label: string;
@@ -37,6 +39,10 @@ type ClipMenuLabels = {
   unlink: string;
   swapMedia: string;
   saveAsMedia: string;
+  freezeFrame: string;
+  reverse: string;
+  reverseOn: string;
+  reverseTooLong: string;
 };
 
 export function clipContextMenuItems({
@@ -53,6 +59,9 @@ export function clipContextMenuItems({
   onUnlink,
   onSwapMedia,
   onSaveAsMedia,
+  onFreezeFrame,
+  onReverse,
+  reverseInfo,
 }: {
   clip: Clip;
   hasClipboardContent: boolean;
@@ -67,6 +76,9 @@ export function clipContextMenuItems({
   onUnlink: (ids: string[]) => void | Promise<void>;
   onSwapMedia: () => void;
   onSaveAsMedia: () => void;
+  onFreezeFrame: () => void | Promise<void>;
+  onReverse: () => void;
+  reverseInfo: { isReversed: boolean; tooLong: boolean };
 }): MenuItem[] {
   const items: MenuItem[] = [
     {
@@ -134,11 +146,35 @@ export function clipContextMenuItems({
         onSwapMedia();
       },
     });
+
+    items.push({
+      label: labels.freezeFrame,
+      action: () => {
+        ensureSelected();
+        void onFreezeFrame();
+      },
+    });
   }
 
-  // Save-as-media: bake this clip (trims, speed, effects, color, text) into a
-  // new reusable asset. Video only for now — the render path produces an .mp4.
+  // Reverse stays video-only.
   if (clip.mediaType === "video") {
+    const tooLongAndNotReversed = reverseInfo.tooLong && !reverseInfo.isReversed;
+    items.push({
+      label: tooLongAndNotReversed
+        ? labels.reverseTooLong
+        : reverseInfo.isReversed
+          ? labels.reverseOn
+          : labels.reverse,
+      checked: reverseInfo.isReversed,
+      action: () => {
+        if (tooLongAndNotReversed) return;
+        ensureSelected();
+        onReverse();
+      },
+    });
+  }
+
+  if (clip.mediaType === "video" || clip.mediaType === "audio") {
     items.push({
       label: labels.saveAsMedia,
       action: () => {
@@ -172,12 +208,14 @@ export function ClipContextMenu({
   fadeEdge,
   x,
   y,
+  range,
   onClose,
 }: {
   clipId: string;
   fadeEdge?: FadeEdge;
   x: number;
   y: number;
+  range?: TimelineRange;
   onClose: () => void;
 }) {
   const t = useT();
@@ -235,7 +273,8 @@ export function ClipContextMenu({
     setPos({ left, top });
   }, [x, y, clipMissing]);
 
-  if (clipMissing) return null;
+  if (!clip) return null;
+  const currentClip: Clip = clip;
 
   // The menu acts on the current selection; if the right-clicked clip isn't
   // selected, select just it (mirrors typical NLE behavior).
@@ -247,7 +286,7 @@ export function ClipContextMenu({
   let items: MenuItem[];
   if (fadeEdge) {
     items = fadeInterpolationMenuItems(
-      clip!,
+      currentClip,
       fadeEdge,
       (properties) => {
         void edit.setClipProperties([clipId], properties);
@@ -270,6 +309,10 @@ export function ClipContextMenu({
         unlink: t("contextMenu.unlink"),
         swapMedia: t("contextMenu.swapMedia"),
         saveAsMedia: t("contextMenu.saveAsMedia"),
+        freezeFrame: t("contextMenu.freezeFrame"),
+        reverse: t("contextMenu.reverse"),
+        reverseOn: t("contextMenu.reverseOn"),
+        reverseTooLong: t("contextMenu.reverseTooLong"),
       },
       ensureSelected,
       selectedClipIds: () => [...useEditorUiStore.getState().selectedClipIds],
@@ -281,7 +324,37 @@ export function ClipContextMenu({
       onUnlink: edit.unlinkClips,
       onSwapMedia: () => setPendingSwapClipId(clipId),
       onSaveAsMedia: () => void edit.saveClipAsMedia(clipId),
+      onFreezeFrame: async () => {
+        const input = window.prompt(
+          t("contextMenu.freezeFramePrompt"),
+          String(edit.DEFAULT_FREEZE_FRAMES),
+        );
+        if (input == null) return;
+        const frames = parseInt(input, 10);
+        if (!Number.isFinite(frames) || frames < 1) return;
+        await edit.freezeClipAtPlayhead(currentClip, frames);
+      },
+      onReverse: () => {
+        void edit.setClipProperties([clipId], { reversed: !currentClip.reversed });
+      },
+      reverseInfo: {
+        isReversed: Boolean(currentClip.reversed),
+        tooLong: currentClip.durationFrames > Math.round(timeline.fps * 60),
+      },
     });
+  }
+  if (range) {
+    items.push(
+      ...rangeContextMenuItems({
+        range,
+        labels: {
+          save: t("contextMenu.saveRangeAsMedia"),
+          clear: t("contextMenu.clearRange"),
+        },
+        onSave: edit.saveMarkedRangeAsMedia,
+        onClear: useEditorUiStore.getState().clearTimelineRange,
+      }),
+    );
   }
 
   return (

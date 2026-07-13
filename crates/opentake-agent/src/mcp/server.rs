@@ -17,7 +17,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 
 use rmcp::model::{
-    CallToolRequestParam, CallToolResult, Implementation, ListToolsResult, PaginatedRequestParam,
+    CallToolRequestParams, CallToolResult, Implementation, ListToolsResult, PaginatedRequestParams,
     ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
@@ -27,7 +27,7 @@ use serde_json::{Map, Value};
 use crate::mcp::convert::to_call_tool_result;
 use crate::mcp::core_handle::CoreHandle;
 use crate::mcp::dispatch::Dispatcher;
-use crate::mcp::media_bridge::MediaBridge;
+use crate::mcp::media_bridge::{MediaBridge, MCP_REQUEST_BODY_MAX};
 use crate::plugin::registry::PluginRegistry;
 use crate::prompt::assemble::assemble_system_prompt;
 use crate::tools::descriptions::{description, input_schema};
@@ -97,32 +97,26 @@ impl McpServer {
 
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation {
-                name: "opentake".to_string(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                ..Implementation::default()
-            },
-            instructions: Some(self.instructions.clone()),
-            ..ServerInfo::default()
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new("opentake", env!("CARGO_PKG_VERSION")))
+            .with_instructions(self.instructions.clone())
     }
 
     async fn list_tools(
         &self,
-        _request: Option<PaginatedRequestParam>,
+        _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         Ok(ListToolsResult {
             tools: Self::tools(),
             next_cursor: None,
+            meta: None,
         })
     }
 
     async fn call_tool(
         &self,
-        request: CallToolRequestParam,
+        request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let dispatcher = self.dispatcher.clone();
@@ -216,6 +210,8 @@ pub fn build_router_with_bridge(
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService,
     };
+    use tower::ServiceBuilder;
+    use tower_http::limit::RequestBodyLimitLayer;
 
     let service = StreamableHttpService::new(
         move || {
@@ -228,6 +224,9 @@ pub fn build_router_with_bridge(
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     );
+    let service = ServiceBuilder::new()
+        .layer(RequestBodyLimitLayer::new(MCP_REQUEST_BODY_MAX))
+        .service(service);
 
     axum::Router::new()
         .route(

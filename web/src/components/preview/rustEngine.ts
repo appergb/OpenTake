@@ -1,17 +1,17 @@
 /**
  * Runtime gate for the Rust streaming playback engine (#53).
  *
- * DEFAULT-ON: PLAY (and its paused/scrub frames) go through the Rust path
- * (continuous decode → wgpu composite → WebSocket transport + cpal master clock).
+ * Existing production callers remain default-ON until the capability route is
+ * wired in Task 6.2. PLAY then goes through the Rust path (continuous decode →
+ * wgpu composite → exact `/frame` JPEG transport + cpal master clock).
  * Because compositing happens in wgpu, the preview shows the FULL GPU result —
  * color grade, chroma key, masks, shader effects — exactly like the export. The
  * legacy single-rAF `<video>` stack (DOM/CSS composite, no GPU effects) is the
  * ESCAPE HATCH: it takes over on explicit opt-out or when the engine can't start
  * (runtime watchdog in previewEngine.ts).
  *
- * (The macOS one-frame bug was the transport, not the engine: an `<img>` on a
- * multipart MJPEG stream, which WebKit only paints once. The transport is now a
- * WebSocket → canvas, which WebKit streams fine.)
+ * The macOS one-frame bug was the old multipart `<img>` transport. The active
+ * path now reloads a session-scoped, cache-busted exact-frame endpoint.
  *
  * Opt OUT / force ON from the devtools console (no rebuild), to A/B the paths:
  *
@@ -19,22 +19,20 @@
  *   localStorage.setItem('opentake.rustEngine', '1')  // force Rust engine
  *   localStorage.removeItem('opentake.rustEngine')     // back to default (ON)
  *
- * Only the exact string "0" opts out; anything else (a missing key, an unreadable
- * localStorage, or a stray value) resolves to the default-ON engine. Whether the
- * engine is actually USED still additionally requires a Tauri context (see
- * `shouldUseRustEngine`), so this stays inert in a plain browser shell.
+ * Exact "0" opts out and exact "1" opts in. Missing/stray values use the
+ * caller's automatic default; existing no-argument callers remain default-ON
+ * until the pure playback-route contract is wired in Task 6.2.
  */
 const FLAG_KEY = "opentake.rustEngine";
 
-export function rustEngineEnabled(): boolean {
+export function rustEngineEnabled(autoDefault = true): boolean {
   try {
-    if (typeof localStorage === "undefined") return true;
-    // Explicit opt-out is the only value that disables the default path; a
-    // missing key (null) or any other value keeps the engine on.
-    return localStorage.getItem(FLAG_KEY) !== "0";
+    if (typeof localStorage === "undefined") return autoDefault;
+    const value = localStorage.getItem(FLAG_KEY);
+    if (value === "0") return false;
+    if (value === "1") return true;
+    return autoDefault;
   } catch {
-    // localStorage can throw in locked-down/private contexts. Inability to read
-    // the opt-out flag must not silently disable the shipped default → treat as on.
-    return true;
+    return autoDefault;
   }
 }

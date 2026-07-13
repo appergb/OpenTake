@@ -404,6 +404,50 @@ fn source_frame_video_with_trim_and_speed() {
 }
 
 #[test]
+fn source_frame_video_reversed_respects_trim_window() {
+    let mut clip = video_clip("c0", 0, 20);
+    clip.trim_start_frame = 10;
+    clip.reversed = true;
+    let tl = single_video_timeline(clip);
+    let plan = build_render_plan(&tl, RS, &TestMetrics::default());
+    let cp = &plan.clip_plans[0];
+
+    assert_eq!(source_frame_index(cp, 0), 29);
+    assert_eq!(source_frame_index(cp, 5), 24);
+    assert_eq!(source_frame_index(cp, 19), 10);
+}
+
+#[test]
+fn source_frame_video_reversed_uses_consumed_window_at_double_speed() {
+    let mut clip = video_clip("c0", 0, 20);
+    clip.trim_start_frame = 10;
+    clip.speed = 2.0;
+    clip.reversed = true;
+    let tl = single_video_timeline(clip);
+    let plan = build_render_plan(&tl, RS, &TestMetrics::default());
+    let cp = &plan.clip_plans[0];
+
+    assert_eq!(source_frame_index(cp, 0), 49);
+    assert_eq!(source_frame_index(cp, 5), 39);
+    assert_eq!(source_frame_index(cp, 19), 11);
+}
+
+#[test]
+fn source_frame_video_reversed_uses_consumed_window_at_fractional_speed() {
+    let mut clip = video_clip("c0", 0, 20);
+    clip.trim_start_frame = 10;
+    clip.speed = 0.5;
+    clip.reversed = true;
+    let tl = single_video_timeline(clip);
+    let plan = build_render_plan(&tl, RS, &TestMetrics::default());
+    let cp = &plan.clip_plans[0];
+
+    assert_eq!(source_frame_index(cp, 0), 19);
+    assert_eq!(source_frame_index(cp, 5), 16);
+    assert_eq!(source_frame_index(cp, 19), 10);
+}
+
+#[test]
 fn source_frame_round_half_away_from_zero() {
     let mut clip = video_clip("c0", 0, 30);
     clip.speed = 0.5;

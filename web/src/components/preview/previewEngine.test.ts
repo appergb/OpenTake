@@ -1,8 +1,153 @@
-import { describe, expect, it } from "vitest";
+import React, { StrictMode, act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const nativeApiHarness = vi.hoisted(() => {
+  const harness = {
+    activeListeners: 0,
+    deferred: false,
+    listenerAttempts: [] as Array<{
+      resolve(): void;
+      reject(): void;
+    }>,
+    order: [] as string[],
+    unlistenCalls: 0,
+    onPlaybackFrame: vi.fn(),
+    playbackStart: vi.fn(),
+    playbackPause: vi.fn(),
+    playbackSeek: vi.fn(),
+    playbackStop: vi.fn(),
+  };
+  const unlisten = () => {
+    harness.activeListeners -= 1;
+    harness.unlistenCalls += 1;
+  };
+  harness.onPlaybackFrame.mockImplementation(() => {
+    if (!harness.deferred) {
+      harness.activeListeners += 1;
+      harness.order.push("listener-ready");
+      return Promise.resolve(unlisten);
+    }
+    return new Promise<() => void>((resolve, reject) => {
+      let settled = false;
+      harness.listenerAttempts.push({
+        resolve() {
+          if (settled) return;
+          settled = true;
+          harness.activeListeners += 1;
+          harness.order.push("listener-ready");
+          resolve(unlisten);
+        },
+        reject() {
+          if (settled) return;
+          settled = true;
+          harness.order.push("listener-rejected");
+          reject(new Error("listener registration rejected"));
+        },
+      });
+    });
+  });
+  harness.playbackStart.mockImplementation(async () => {
+    harness.order.push("start");
+  });
+  harness.playbackPause.mockResolvedValue(undefined);
+  harness.playbackSeek.mockResolvedValue(undefined);
+  harness.playbackStop.mockResolvedValue(undefined);
+  return harness;
+});
+
+vi.mock("../../lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/api")>();
+  return {
+    ...actual,
+    isTauri: true,
+    onPlaybackFrame: nativeApiHarness.onPlaybackFrame,
+    playbackStart: nativeApiHarness.playbackStart,
+    playbackPause: nativeApiHarness.playbackPause,
+    playbackSeek: nativeApiHarness.playbackSeek,
+    playbackStop: nativeApiHarness.playbackStop,
+  };
+});
+
 import * as previewEngine from "./previewEngine";
 import { pausedSeekToleranceSec, previewElementKey, shouldSyncPausedMediaToFrame } from "./previewEngine";
 import type { ActiveMedia } from "./timelinePlayback";
 import type { Clip, ClipType, Timeline, Track } from "../../lib/types";
+import { useProjectStore } from "../../store/projectStore";
+import { useEditorUiStore } from "../../store/uiStore";
+import { nativePlaybackController } from "./nativePlaybackSession";
+
+function installReactHost(): Element {
+  const document = {
+    nodeType: 9,
+    defaultView: globalThis,
+    addEventListener() {},
+    removeEventListener() {},
+    activeElement: null,
+    documentElement: null as unknown,
+  };
+  const container = {
+    nodeType: 1,
+    nodeName: "DIV",
+    tagName: "DIV",
+    namespaceURI: "http://www.w3.org/1999/xhtml",
+    ownerDocument: document,
+    addEventListener() {},
+    removeEventListener() {},
+    appendChild() {},
+    removeChild() {},
+    firstChild: null,
+  };
+  document.documentElement = container;
+  vi.stubGlobal("window", globalThis);
+  vi.stubGlobal("document", document);
+  vi.stubGlobal("HTMLIFrameElement", function HTMLIFrameElement() {});
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("getSelection", () => null);
+  return container as unknown as Element;
+}
+
+function PlaybackHookHarness(): null {
+  previewEngine.useTimelinePlaybackEngine();
+  return null;
+}
+
+async function mountPlaybackHook(strict = false): Promise<Root> {
+  const root = createRoot(installReactHost());
+  await act(async () => {
+    root.render(
+      strict
+        ? React.createElement(StrictMode, null, React.createElement(PlaybackHookHarness))
+        : React.createElement(PlaybackHookHarness),
+    );
+    await Promise.resolve();
+  });
+  return root;
+}
+
+async function unmountPlaybackHook(root: Root): Promise<void> {
+  await act(async () => {
+    root.unmount();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+beforeEach(async () => {
+  await nativePlaybackController.stopCurrent();
+  nativeApiHarness.activeListeners = 0;
+  nativeApiHarness.deferred = false;
+  nativeApiHarness.listenerAttempts = [];
+  nativeApiHarness.order = [];
+  nativeApiHarness.unlistenCalls = 0;
+  nativeApiHarness.onPlaybackFrame.mockClear();
+  nativeApiHarness.playbackStart.mockClear();
+  nativeApiHarness.playbackPause.mockClear();
+  nativeApiHarness.playbackSeek.mockClear();
+  nativeApiHarness.playbackStop.mockClear();
+});
+
+afterEach(() => vi.unstubAllGlobals());
 
 function clip(over: Partial<Clip> & { id: string; mediaType: ClipType }): Clip {
   return {
@@ -50,7 +195,162 @@ function timeline(tracks: Track[]): Timeline {
   return { fps: 30, width: 1920, height: 1080, settingsConfigured: true, tracks };
 }
 
+function rustTimeline(overrides: Partial<Clip> = {}): Timeline {
+  return timeline([
+    track({
+      id: "text-track",
+      type: "text",
+      clips: [clip({ id: "text-clip", mediaType: "text", ...overrides })],
+    }),
+  ]);
+}
+
 describe("shouldSyncPausedMediaToFrame", () => {
+  it("registers one listener before start across a StrictMode cleanup and remount", async () => {
+    nativeApiHarness.deferred = true;
+    useProjectStore.setState({ projectEpoch: 4, timelineVersion: 7, timeline: rustTimeline() });
+    useEditorUiStore.setState({
+      activeFrame: 0,
+      currentFrame: 0,
+      isPlaying: true,
+      isScrubbing: false,
+      rustEngineFailed: false,
+    });
+
+    const root = await mountPlaybackHook(true);
+
+    expect(nativeApiHarness.onPlaybackFrame).toHaveBeenCalledTimes(1);
+    expect(nativeApiHarness.activeListeners).toBe(0);
+    expect(nativeApiHarness.playbackStart).not.toHaveBeenCalled();
+
+    await act(async () => {
+      nativeApiHarness.listenerAttempts[0]?.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(nativeApiHarness.onPlaybackFrame).toHaveBeenCalledTimes(1);
+    expect(nativeApiHarness.activeListeners).toBe(1);
+    expect(nativeApiHarness.unlistenCalls).toBe(0);
+    expect(nativeApiHarness.playbackStart).toHaveBeenCalled();
+    expect(nativeApiHarness.order[0]).toBe("listener-ready");
+    expect(nativeApiHarness.order.slice(1).every((entry) => entry === "start")).toBe(true);
+
+    await unmountPlaybackHook(root);
+    expect(nativeApiHarness.activeListeners).toBe(0);
+    expect(nativeApiHarness.unlistenCalls).toBe(1);
+  });
+
+  it("re-registers the native frame listener when PLAY retries after registration rejection", async () => {
+    nativeApiHarness.deferred = true;
+    useProjectStore.setState({ projectEpoch: 4, timelineVersion: 7, timeline: rustTimeline() });
+    useEditorUiStore.setState({
+      activeFrame: 0,
+      currentFrame: 0,
+      isPlaying: true,
+      isScrubbing: false,
+      rustEngineFailed: false,
+    });
+
+    const root = await mountPlaybackHook();
+
+    expect(nativeApiHarness.onPlaybackFrame).toHaveBeenCalledTimes(1);
+    expect(nativeApiHarness.playbackStart).not.toHaveBeenCalled();
+
+    await act(async () => {
+      nativeApiHarness.listenerAttempts[0]?.reject();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(useEditorUiStore.getState().isPlaying).toBe(false);
+
+    await act(async () => {
+      useEditorUiStore.getState().setPlaying(true);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(nativeApiHarness.onPlaybackFrame).toHaveBeenCalledTimes(2);
+    expect(nativeApiHarness.playbackStart).not.toHaveBeenCalled();
+
+    await act(async () => {
+      nativeApiHarness.listenerAttempts[1]?.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(nativeApiHarness.activeListeners).toBe(1);
+    expect(nativeApiHarness.playbackStart).toHaveBeenCalledTimes(1);
+    expect(nativeApiHarness.order).toEqual([
+      "listener-rejected",
+      "listener-ready",
+      "start",
+    ]);
+
+    await unmountPlaybackHook(root);
+    expect(nativeApiHarness.activeListeners).toBe(0);
+    expect(nativeApiHarness.unlistenCalls).toBe(1);
+  });
+
+  it("keeps one pending registration across a rapid remount and replaces it after rejection", async () => {
+    nativeApiHarness.deferred = true;
+    useProjectStore.setState({ projectEpoch: 4, timelineVersion: 7, timeline: timeline([]) });
+    useEditorUiStore.setState({
+      activeFrame: 0,
+      currentFrame: 0,
+      isPlaying: false,
+      isScrubbing: false,
+      rustEngineFailed: false,
+    });
+
+    const firstRoot = await mountPlaybackHook();
+    expect(nativeApiHarness.onPlaybackFrame).toHaveBeenCalledTimes(1);
+    await unmountPlaybackHook(firstRoot);
+
+    const secondRoot = await mountPlaybackHook();
+    expect(nativeApiHarness.onPlaybackFrame).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      nativeApiHarness.listenerAttempts[0]?.reject();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await unmountPlaybackHook(secondRoot);
+
+    const thirdRoot = await mountPlaybackHook();
+    expect(nativeApiHarness.onPlaybackFrame).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      nativeApiHarness.listenerAttempts[1]?.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(nativeApiHarness.activeListeners).toBe(1);
+    expect(nativeApiHarness.unlistenCalls).toBe(0);
+    await unmountPlaybackHook(thirdRoot);
+    expect(nativeApiHarness.activeListeners).toBe(0);
+    expect(nativeApiHarness.unlistenCalls).toBe(1);
+  });
+
+  it("uses the capability route as the final engine guard", async () => {
+    useProjectStore.setState({
+      projectEpoch: 4,
+      timelineVersion: 7,
+      timeline: rustTimeline({ reversed: true }),
+    });
+    useEditorUiStore.setState({
+      activeFrame: 0,
+      currentFrame: 0,
+      isPlaying: true,
+      isScrubbing: false,
+      rustEngineFailed: false,
+    });
+
+    const root = await mountPlaybackHook();
+
+    expect(useEditorUiStore.getState().isPlaying).toBe(false);
+    expect(nativeApiHarness.playbackStart).not.toHaveBeenCalled();
+    await unmountPlaybackHook(root);
+  });
+
   it("does not seek on the play-to-pause edge", () => {
     expect(
       shouldSyncPausedMediaToFrame({
@@ -170,6 +470,93 @@ describe("shouldSeekPlayingFollower", () => {
         desiredTimeSec: 1.1,
       }),
     ).toBe(true);
+  });
+});
+
+describe("WebKit playback transport", () => {
+  it("drives a registered media element through play and pause from the owning clock", async () => {
+    const tl = timeline([
+      track({
+        id: "v1",
+        type: "video",
+        clips: [clip({ id: "clip-1", mediaRef: "asset", mediaType: "video" })],
+      }),
+    ]);
+    const active = {
+      trackIndex: 0,
+      track: tl.tracks[0],
+      clip: tl.tracks[0].clips[0],
+    } as ActiveMedia;
+    const key = previewElementKey(active);
+    let paused = true;
+    const play = vi.fn(async () => {
+      paused = false;
+    });
+    const pause = vi.fn(() => {
+      paused = true;
+    });
+    const element = {
+      currentTime: 0,
+      muted: false,
+      volume: 1,
+      get paused() {
+        return paused;
+      },
+      play,
+      pause,
+    } as unknown as HTMLMediaElement;
+    const rafCallbacks = new Map<number, FrameRequestCallback>();
+    let nextRafId = 1;
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) => {
+        const id = nextRafId++;
+        rafCallbacks.set(id, callback);
+        return id;
+      }),
+    );
+    vi.stubGlobal(
+      "cancelAnimationFrame",
+      vi.fn((id: number) => {
+        rafCallbacks.delete(id);
+      }),
+    );
+    vi.stubGlobal("localStorage", {
+      getItem: () => "0",
+      setItem() {},
+      removeItem() {},
+    });
+    useProjectStore.setState({ timeline: tl, timelineVersion: 1 });
+    useEditorUiStore.setState({
+      currentFrame: 0,
+      activeFrame: 0,
+      isPlaying: false,
+      isScrubbing: false,
+      rustEngineFailed: true,
+    });
+    previewEngine.previewElements.set(key, element);
+
+    useEditorUiStore.getState().togglePlay();
+    const root = await mountPlaybackHook();
+    const firstFrame = rafCallbacks.values().next().value as FrameRequestCallback | undefined;
+    expect(firstFrame).toBeTypeOf("function");
+    await act(async () => {
+      firstFrame?.(16);
+      await Promise.resolve();
+    });
+    expect(useEditorUiStore.getState().isPlaying).toBe(true);
+    expect(play).toHaveBeenCalled();
+
+    await act(async () => {
+      useEditorUiStore.getState().togglePlay();
+      await Promise.resolve();
+    });
+    expect(useEditorUiStore.getState().isPlaying).toBe(false);
+    expect(pause).toHaveBeenCalled();
+    expect(previewEngine).not.toHaveProperty("setWebKitMediaPlayback");
+
+    await unmountPlaybackHook(root);
+    previewEngine.previewElements.remove(key);
   });
 });
 

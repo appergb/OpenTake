@@ -2,6 +2,11 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const homeSource = readFileSync(new URL("./HomeView.tsx", import.meta.url), "utf8");
+const projectLauncherSource = homeSource.slice(
+  homeSource.indexOf("function ProjectLauncher"),
+  homeSource.indexOf("function ProjectHero"),
+);
+const projectGridCardSource = homeSource.slice(homeSource.indexOf("function ProjectGridCard"));
 const tokenSource = readFileSync(new URL("../../styles/tokens.css", import.meta.url), "utf8");
 const globalSource = readFileSync(new URL("../../styles/global.css", import.meta.url), "utf8");
 
@@ -66,6 +71,14 @@ describe("HomeView Vercel embedded visual direction", () => {
     expect(homeSource).toContain("gridTemplateColumns: \"repeat(4, minmax(0, 1fr))\"");
     expect(homeSource).toContain("ProjectGridCard");
     expect(homeSource).not.toContain("width: \"min(720px, 100%)\"");
+  });
+
+  it("keeps long recent project names from widening the project grid", () => {
+    expect(projectLauncherSource).toContain("flex: 1,\n        minWidth: 0,\n        minHeight: 0");
+    expect(projectLauncherSource).toContain("overflowX: \"hidden\"");
+    expect(projectGridCardSource).toContain("minWidth: 0");
+    expect(projectGridCardSource).toContain("textOverflow: \"ellipsis\"");
+    expect(projectGridCardSource).toContain("whiteSpace: \"nowrap\"");
   });
 
   it("enlarges the sidebar logo to a prominent size", () => {

@@ -61,6 +61,8 @@ const srv = vi.hoisted(() => {
         trimEndFrame?: number;
         transform?: Transform;
       }>;
+      trackIndex?: number;
+      atFrame?: number;
       a?: number;
       b?: number;
     }): { changed: boolean; affectedClipIds: string[] } {
@@ -91,6 +93,37 @@ const srv = vi.hoisted(() => {
             trimStartFrame: e.trimStartFrame ?? 0,
             trimEndFrame: e.trimEndFrame ?? 0,
             transform: e.transform,
+          });
+          affectedClipIds.push(id);
+        }
+        state.version += 1;
+        return { changed: true, affectedClipIds };
+      }
+      if (
+        cmd.type === "insertClips" &&
+        cmd.entries &&
+        cmd.trackIndex !== undefined &&
+        cmd.atFrame !== undefined
+      ) {
+        const track = state.tracks[cmd.trackIndex];
+        if (!track) return { changed: false, affectedClipIds: [] };
+        const duration = cmd.entries.reduce((sum, entry) => sum + entry.durationFrames, 0);
+        for (const existing of track.clips) {
+          if (existing.startFrame >= cmd.atFrame) existing.startFrame += duration;
+        }
+        const affectedClipIds: string[] = [];
+        for (const entry of cmd.entries) {
+          const id = `c${++state.seq}`;
+          track.clips.push({
+            id,
+            mediaRef: entry.mediaRef ?? "",
+            mediaType: entry.mediaType ?? "video",
+            sourceClipType: entry.sourceClipType ?? "video",
+            startFrame: entry.startFrame,
+            durationFrames: entry.durationFrames,
+            trimStartFrame: entry.trimStartFrame ?? 0,
+            trimEndFrame: entry.trimEndFrame ?? 0,
+            transform: entry.transform,
           });
           affectedClipIds.push(id);
         }
@@ -195,7 +228,11 @@ vi.mock("../lib/api", () => ({
         })),
       })),
     },
+    projectEpoch: 1,
     version: srv.state.version,
+    projectPath: null,
+    compatibilityReadOnly: false,
+    compatibilityBlockers: [],
   }),
   canUndo: async () => false,
   canRedo: async () => false,
@@ -207,6 +244,7 @@ import {
   addMediaToTimelineAt,
   addMomentToTimelineAt,
   addTextClip,
+  insertClips,
   insertTrack,
   mediaDurationFrames,
   momentDurationFrames,
@@ -268,7 +306,7 @@ function clipboardClip(transform: Transform): Clip {
 describe("addMediaToTimeline", () => {
   beforeEach(() => {
     srv.reset();
-    useProjectStore.getState().setMirror(EMPTY, 0);
+    useProjectStore.getState().setMirror(EMPTY, 0, 1);
     useClipboardStore.getState().clear();
     useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, selectedClipIds: new Set() });
   });
@@ -296,6 +334,47 @@ describe("addMediaToTimeline", () => {
     expect(videoTracks).toHaveLength(2);
     expect(videoTracks[0].clips.map((c) => [c.mediaRef, c.startFrame])).toEqual([["overlay", 0]]);
     expect(videoTracks[1].clips.map((c) => [c.mediaRef, c.startFrame])).toEqual([["base", 0]]);
+  });
+
+  it("moves the playhead to the dropped clip so preview shows the new media", async () => {
+    await addMediaToTimeline(video("base"));
+    useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, previewMediaId: "base" });
+
+    await addMediaToTimelineAt(video("later"), 180, 0);
+
+    const ui = useEditorUiStore.getState();
+    expect(ui.previewMediaId).toBeNull();
+    expect(ui.currentFrame).toBe(180);
+    expect(ui.activeFrame).toBe(180);
+  });
+
+  it("selects ripple-inserted media and moves the playhead to the insertion frame", async () => {
+    await addMediaToTimeline(video("base"));
+    useEditorUiStore.setState({
+      activeFrame: 240,
+      currentFrame: 240,
+      previewMediaId: "base",
+      selectedClipIds: new Set(["old-selection"]),
+    });
+
+    await insertClips(0, 30, [
+      {
+        mediaRef: "ripple",
+        mediaType: "video",
+        sourceClipType: "video",
+        trackIndex: 0,
+        startFrame: 30,
+        durationFrames: 60,
+      },
+    ]);
+
+    const inserted = useProjectStore.getState().timeline.tracks[0]?.clips.find((clip) => clip.mediaRef === "ripple");
+    const ui = useEditorUiStore.getState();
+    expect(inserted).toBeDefined();
+    expect(Array.from(ui.selectedClipIds)).toEqual([inserted?.id]);
+    expect(ui.previewMediaId).toBeNull();
+    expect(ui.currentFrame).toBe(30);
+    expect(ui.activeFrame).toBe(30);
   });
 
   it("adds vertical media with the upstream aspect-fit transform", async () => {
@@ -466,7 +545,7 @@ describe("momentDurationFrames", () => {
 describe("addMomentToTimelineAt (trimmed source-range drop from a search hit)", () => {
   beforeEach(() => {
     srv.reset();
-    useProjectStore.getState().setMirror(EMPTY, 0);
+    useProjectStore.getState().setMirror(EMPTY, 0, 1);
     useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, selectedClipIds: new Set() });
   });
 
@@ -519,7 +598,7 @@ describe("addMomentToTimelineAt (trimmed source-range drop from a search hit)", 
 describe("addTextClip (Toolbar 'T' button)", () => {
   beforeEach(() => {
     srv.reset();
-    useProjectStore.getState().setMirror(EMPTY, 0);
+    useProjectStore.getState().setMirror(EMPTY, 0, 1);
     useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, selectedClipIds: new Set() });
   });
 

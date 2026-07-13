@@ -37,7 +37,11 @@ pub fn split_clip(clip: &Clip, at_frame: i32, right_id: impl Into<String>) -> Op
 
     let mut left = clip.clone();
     left.duration_frames = split_offset;
-    left.trim_end_frame = clip.trim_end_frame + right_source;
+    if clip.reversed {
+        left.trim_start_frame = clip.trim_start_frame + right_source;
+    } else {
+        left.trim_end_frame = clip.trim_end_frame + right_source;
+    }
     left.fade_out_frames = 0;
     left.clamp_fades_to_duration();
 
@@ -45,7 +49,11 @@ pub fn split_clip(clip: &Clip, at_frame: i32, right_id: impl Into<String>) -> Op
     right.id = right_id.into();
     right.start_frame = at_frame;
     right.duration_frames = clip.duration_frames - split_offset;
-    right.trim_start_frame = clip.trim_start_frame + left_source;
+    if clip.reversed {
+        right.trim_end_frame = clip.trim_end_frame + left_source;
+    } else {
+        right.trim_start_frame = clip.trim_start_frame + left_source;
+    }
     right.fade_in_frames = 0;
     right.clamp_fades_to_duration();
 
@@ -148,6 +156,23 @@ mod tests {
             left.trim_end_frame,
             right.trim_end_frame + right.source_frames_consumed()
         );
+    }
+
+    #[test]
+    fn split_reversed_clip_preserves_source_window() {
+        let mut c = base_clip();
+        c.reversed = true;
+
+        let (left, right) = split_clip(&c, 112, "r").unwrap();
+
+        assert!(left.reversed);
+        assert!(right.reversed);
+        assert_eq!(left.trim_start_frame, 5 + 18);
+        assert_eq!(left.trim_end_frame, 7);
+        assert_eq!(right.trim_start_frame, 5);
+        assert_eq!(right.trim_end_frame, 7 + 12);
+        assert_eq!(left.source_duration_frames(), c.source_duration_frames());
+        assert_eq!(right.source_duration_frames(), c.source_duration_frames());
     }
 
     #[test]

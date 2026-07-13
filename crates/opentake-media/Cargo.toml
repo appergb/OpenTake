@@ -14,11 +14,16 @@ thiserror = "2"
 anyhow = "1"
 sha2 = "0.10"
 dirs = "6"
+cap-std = "4.0.2"
+cap-fs-ext = "4.0.2"
+same-file = "1.0.6"
+
 half = "2"
 byteorder = "1"
 ndarray = "0.16"
 tracing = "0.1"
 unicode-normalization = "0.1"
+tempfile = "3"
 
 # Media IO. We drive the system ffmpeg/ffprobe over the CLI rather than linking
 # libav*: the local toolchain is ffmpeg 8.1 (libavcodec 62), which the C-binding
@@ -45,10 +50,19 @@ image = { version = "0.25", default-features = false, features = [
 # matches the HF reference; no network at runtime (loads a local tokenizer.json).
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 [features]
 # Default build/test must stay offline and must NOT link onnxruntime or compile
 # whisper.cpp. The heavy ML backends sit behind features; tests use mock impls.
 default = []
+# Test-only cross-crate fault boundaries. Shipped builds do not expose these
+# hooks; integration tests opt in through a dev-dependency feature union.
+test-faults = []
 # Real SigLIP2 inference via ONNX Runtime. `download-binaries` lets ort fetch a
 # prebuilt onnxruntime *when this feature is explicitly enabled* — it is off by
 # default, so plain `cargo build`/`cargo test` never touch the network.
@@ -90,6 +104,3 @@ optional = true
 [dependencies.sha1]
 version = "0.10"
 optional = true
-
-[dev-dependencies]
-tempfile = "3"
