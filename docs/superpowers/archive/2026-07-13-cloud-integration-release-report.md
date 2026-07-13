@@ -17,8 +17,11 @@ confirmed those corrections, then found the same obsolete rename implementation
 in project-bundle publication; code successor
 `d79bc66b7f4bdbb815523b475ba0ecbb1f6cb281` fixes that final duplicate. These
 Windows-only corrections do not change the accepted macOS runtime bundle. A
-documentation-only successor forms the exact tree supplied to the next
-immutable aggregate publication.
+fourth aggregate PR then passed every Windows runtime test and exposed only a
+Windows all-target clippy visibility issue in a Unix-only test helper. Code
+successor `6d85c76263d2feaf2ff346535521b7741e7ed396` applies the
+one-line platform gate. A documentation-only successor forms the exact tree
+supplied to the next immutable aggregate publication.
 
 The final cloud gate is intentionally stricter than the legacy PR checks: the
 aggregate pull request and the final `main` push must each pass all four jobs in
@@ -208,6 +211,21 @@ as audit evidence and must be closed as superseded; its successful jobs and
 later-stage library failure prove the prior media-library and reserved-output
 corrections reached their intended native paths.
 
+Aggregate PR #221 passed its Rust, Web, and `Windows (cancel / reparse safety)`
+jobs. Its Windows library job also passed all 43 media-library, 111 project,
+and 14 Tauri library tests. The only failure came from the job's final
+all-target media clippy step: test-only `VideoEncoder::child_id` was compiled on
+Windows but its sole caller is a Unix-only lifecycle test, so warnings-denied
+clippy correctly reported dead code.
+
+Code successor `6d85c76263d2feaf2ff346535521b7741e7ed396` narrows that
+helper from `cfg(test)` to `cfg(all(test, unix))`. Production code is unchanged,
+and Windows lifecycle/cancellation tests do not use the helper. The focused
+Unix encoder lifecycle test, local media all-target clippy with warnings denied,
+formatting, and diff checks passed. Failed #221 is retained as audit evidence
+and must be closed as superseded; its completed native tests are recorded as
+evidence, but the PR is not represented as a successful merge.
+
 ### Platform boundary
 
 macOS cross-checks for the pure Rust project/capability crates on
@@ -281,6 +299,11 @@ listener, and MCP protocol behavior were verified independently of screenshots.
   `b2b9bfc42fd4154e11c68bb2eb98bd1d5089d73b` with
   Critical/Important/Minor = 0/0/0 and **Ready: Yes**, subject to a new native
   Windows CI gate.
+- An independent clippy-gating review accepted successor
+  `6d85c76263d2feaf2ff346535521b7741e7ed396` / tree
+  `b8e6e9c68fecdd9b96ca597f1efb21810d6ed6d5` with
+  Critical/Important/Minor = 0/0/0 and **Ready: Yes**. It confirmed the helper's
+  only caller has the same Unix test gate and production behavior is unchanged.
 - The documentation-only successor is reviewed against the accepted code tree
   before its exact commit/tree is supplied to the cloud publisher.
 
@@ -297,7 +320,7 @@ Completion requires all of the following to be re-read from GitHub:
 - final `main` equals the deterministic expected commit and exact local tree;
 - aggregate and final parent order is exact;
 - #211 through #217 and the aggregate PR are closed as merged;
-- superseded failed aggregate attempts #218, #219, and #220 are closed without
+- superseded failed aggregate attempts #218 through #221 are closed without
   being represented as successful merges;
 - every original PR head is reachable from final `main`;
 - aggregate pull-request CI and final `main` push CI each contain all four
