@@ -143,6 +143,11 @@ impl MediaEngine {
         probe::probe(path)
     }
 
+    /// Probe through an already-open regular-file handle.
+    pub fn probe_file(&self, file: &std::fs::File) -> Result<MediaProbe> {
+        probe::probe_file(file)
+    }
+
     /// Generate (and cache) a video thumbnail sequence.
     pub fn video_thumbnails(
         &self,

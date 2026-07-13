@@ -38,6 +38,7 @@ use opentake_domain::{ClipType, MediaAsset, MediaManifest, MediaManifestEntry, T
 use opentake_ops::command::{self, EditCommand, EditResult};
 use opentake_ops::{EditorState, IdGen};
 use opentake_project::{GenerationLog, Project, ProjectCompatibility};
+use same_file::Handle;
 
 use crate::error::{CoreError, Result};
 
@@ -114,6 +115,11 @@ pub struct EditorSession {
     /// Absolute path to the `.opentake` bundle, or `None` for an unsaved project.
     project_dir: Option<PathBuf>,
 
+    /// Open handle identity of the bundle loaded into this session. Keeping the
+    /// handle alive lets external capability workflows reject a path that was
+    /// rebound before they acquired their own directory capability.
+    project_root_identity: Option<Handle>,
+
     /// Append-only AI generation audit log (persisted as `generation-log.json`).
     generation_log: GenerationLog,
 
@@ -135,6 +141,7 @@ impl EditorSession {
         EditorSession {
             state: EditorState::default(),
             project_dir: None,
+            project_root_identity: None,
             generation_log: GenerationLog::new(),
             compatibility: ProjectCompatibility::default(),
         }
@@ -148,7 +155,19 @@ impl EditorSession {
     /// Propagates [`opentake_project::ProjectError`] (missing/corrupt
     /// `project.json`, etc.) as [`CoreError::Project`].
     pub fn open_project(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let identity_before = Handle::from_path(path).map_err(|error| {
+            CoreError::Media(format!("project bundle identity is unavailable: {error}"))
+        })?;
         let project = Project::open(path)?;
+        let project_root_identity = Handle::from_path(&project.bundle_path).map_err(|error| {
+            CoreError::Media(format!("project bundle identity is unavailable: {error}"))
+        })?;
+        if identity_before != project_root_identity {
+            return Err(CoreError::Media(
+                "project bundle identity changed while opening".to_string(),
+            ));
+        }
         let compatibility = project.compatibility().clone();
         // EditorState::new wraps timeline + manifest with empty history at
         // version 0 — exactly the post-open state we want.
@@ -156,6 +175,7 @@ impl EditorSession {
         Ok(EditorSession {
             state,
             project_dir: Some(project.bundle_path),
+            project_root_identity: Some(project_root_identity),
             generation_log: project.generation_log.unwrap_or_default(),
             compatibility,
         })
@@ -193,10 +213,12 @@ impl EditorSession {
     pub fn save_media_manifest(&mut self) -> Result<PathBuf> {
         self.ensure_mutable()?;
         let target = self.project_dir.clone().ok_or(CoreError::NoProjectOpen)?;
+        self.ensure_project_root_current()?;
         let mut project =
             Project::new_with_compatibility(target.clone(), self.compatibility.clone());
         project.manifest = self.state.manifest.clone();
         project.save_manifest()?;
+        self.ensure_project_root_current()?;
         Ok(target)
     }
 
@@ -222,6 +244,9 @@ impl EditorSession {
             Some(p) => p,
             None => return Err(CoreError::NoProjectOpen),
         };
+        if previous_dir.as_deref() == Some(target.as_path()) {
+            self.ensure_project_root_current()?;
+        }
 
         let mut project =
             Project::new_with_compatibility(target.clone(), self.compatibility.clone());
@@ -249,7 +274,24 @@ impl EditorSession {
             }
         }
 
+        let saved_identity = Handle::from_path(&target).map_err(|error| {
+            CoreError::Media(format!(
+                "saved project bundle identity is unavailable: {error}"
+            ))
+        })?;
+        if previous_dir.as_deref() == Some(target.as_path())
+            && self
+                .project_root_identity
+                .as_ref()
+                .is_some_and(|expected| expected != &saved_identity)
+        {
+            return Err(CoreError::Media(
+                "project bundle identity changed while saving".to_string(),
+            ));
+        }
+
         self.project_dir = Some(target.clone());
+        self.project_root_identity = Some(saved_identity);
         Ok(target)
     }
 
@@ -452,6 +494,17 @@ impl EditorSession {
         self.project_dir.as_deref()
     }
 
+    /// Compare a caller's retained no-follow bundle handle with the handle
+    /// retained when this exact session opened or saved the project.
+    pub(crate) fn matches_project_root_identity(&self, current: &Handle) -> Result<bool> {
+        self.ensure_mutable()?;
+        let expected = self
+            .project_root_identity
+            .as_ref()
+            .ok_or(CoreError::NoProjectOpen)?;
+        Ok(expected == current)
+    }
+
     /// Read-only access to the generation log.
     pub fn generation_log(&self) -> &GenerationLog {
         &self.generation_log
@@ -465,6 +518,23 @@ impl EditorSession {
     pub(crate) fn ensure_mutable(&self) -> Result<()> {
         self.compatibility.ensure_writable()?;
         Ok(())
+    }
+
+    fn ensure_project_root_current(&self) -> Result<()> {
+        let path = self
+            .project_dir
+            .as_deref()
+            .ok_or(CoreError::NoProjectOpen)?;
+        let current = Handle::from_path(path).map_err(|error| {
+            CoreError::Media(format!("project bundle identity is unavailable: {error}"))
+        })?;
+        if self.matches_project_root_identity(&current)? {
+            Ok(())
+        } else {
+            Err(CoreError::Media(
+                "project bundle identity no longer matches the open session".to_string(),
+            ))
+        }
     }
 
     /// Test-only seam: reseat the editable state from a prebuilt timeline (empty

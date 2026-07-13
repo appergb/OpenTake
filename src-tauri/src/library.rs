@@ -28,7 +28,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tauri::State;
 
-use opentake_core::{importable_clip_type, AppCore, DeferredCoreEvents, ProbedMedia};
+use opentake_core::{importable_clip_type, AppCore, CoreError, DeferredCoreEvents, ProbedMedia};
+use opentake_domain::ClipType;
 use opentake_media::library::{FavoriteRequest, LibraryEntry, LibraryStore};
 
 use crate::media::MediaState;
@@ -332,7 +333,16 @@ fn library_import_to_project_with_events(
     id: &str,
     events: &mut DeferredCoreEvents,
 ) -> Result<LibraryImportDto, String> {
-    library_import_to_project_with_hook(core, media, library, id, events, |_| {})
+    library_import_to_project_with_hook(core, media, library, id, events, |_, _| {})
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImportHookPhase {
+    BeforeProbe,
+    AfterProbe,
+    BeforeManifestWrite,
+    AfterManifestWrite,
+    AfterProjectCommit,
 }
 
 fn library_import_to_project_with_hook(
@@ -341,7 +351,7 @@ fn library_import_to_project_with_hook(
     library: &LibraryState,
     id: &str,
     events: &mut DeferredCoreEvents,
-    after_project_commit: impl FnOnce(&Path),
+    mut hook: impl FnMut(ImportHookPhase, &Path),
 ) -> Result<LibraryImportDto, String> {
     core.ensure_project_mutable()
         .map_err(|error| error.to_string())?;
@@ -366,7 +376,8 @@ fn library_import_to_project_with_hook(
         .extension()
         .and_then(|value| value.to_str())
         .filter(|value| value.bytes().all(|byte| byte.is_ascii_alphanumeric()))
-        .ok_or_else(|| format!("library entry has no safe source extension: {id}"))?;
+        .ok_or_else(|| format!("library entry has no safe source extension: {id}"))?
+        .to_ascii_lowercase();
     let expected_kind = importable_clip_type(source_path)
         .ok_or_else(|| format!("library source metadata is not importable: {source}"))?;
     if crate::media::clip_type_name(expected_kind) != library_entry.kind {
@@ -375,8 +386,15 @@ fn library_import_to_project_with_hook(
             library_entry.kind
         ));
     }
-    let project_media = ProjectMediaCapability::open(&project_dir, true)?;
-    if let Some(existing) = existing_project_import(&project_media, &project.media, id)? {
+    let project_media =
+        ProjectMediaCapability::open_verified(core, project.project_epoch, &project_dir, true)?;
+    if let Some(existing) = existing_project_import(
+        &project_media,
+        &project.media,
+        id,
+        expected_kind,
+        &extension,
+    )? {
         return Ok(existing);
     }
     static IMPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -407,13 +425,15 @@ fn library_import_to_project_with_hook(
         return Err("project import leaf identity changed before probe".to_string());
     }
 
-    let probe = probe_or_default(media.engine(), &imported.path);
+    hook(ImportHookPhase::BeforeProbe, &imported.path);
+    let probe = probe_or_default_file(media.engine(), imported.handle.as_file());
+    hook(ImportHookPhase::AfterProbe, &imported.path);
     if !project_media.matches_leaf(&imported)? {
         return Err("project import leaf identity changed during probe".to_string());
     }
     let name = display_name(source_path);
     let entry = core
-        .import_library_media_for_project_deferred(
+        .import_library_media_for_project_deferred_with_manifest_writer(
             project.project_epoch,
             &project_dir,
             &imported.path,
@@ -421,18 +441,39 @@ fn library_import_to_project_with_hook(
             &probe,
             id,
             events,
+            |manifest| {
+                hook(ImportHookPhase::BeforeManifestWrite, &imported.path);
+                let result = project_media
+                    .write_manifest(manifest)
+                    .map_err(CoreError::Media);
+                hook(ImportHookPhase::AfterManifestWrite, &imported.path);
+                result
+            },
         )
         .map_err(|e| e.to_string())?;
-    after_project_commit(&imported.path);
+    hook(ImportHookPhase::AfterProjectCommit, &imported.path);
     let final_identity = project_media.matches_leaf(&imported);
     if !matches!(final_identity, Ok(true)) {
-        core.restore_media_manifest_for_project_deferred(
+        let rollback = core.restore_media_manifest_for_project_deferred_with_manifest_writer(
             project.project_epoch,
             &project_dir,
             project.media,
             events,
-        )
-        .map_err(|error| error.to_string())?;
+            |manifest| {
+                project_media
+                    .write_manifest(manifest)
+                    .map_err(CoreError::Media)
+            },
+        );
+        if let Err(rollback_error) = rollback {
+            // The initial capability writer already committed. A failed
+            // rollback deliberately leaves both live and disk state on that
+            // committed manifest; preserve its referenced media leaf too.
+            imported.committed = true;
+            return Err(format!(
+                "project import identity check failed, but manifest rollback failed and the import remains committed: {rollback_error}"
+            ));
+        }
         return Err(match final_identity {
             Ok(false) => "project import leaf identity changed during commit".to_string(),
             Err(error) => {
@@ -463,7 +504,28 @@ struct ProjectMediaCapability {
 }
 
 impl ProjectMediaCapability {
+    fn open_verified(
+        core: &AppCore,
+        project_epoch: u64,
+        project_dir: &Path,
+        create_media: bool,
+    ) -> Result<Self, String> {
+        Self::open_with_root_gate(project_dir, create_media, |root_identity| {
+            core.ensure_project_root_identity_for_project(project_epoch, project_dir, root_identity)
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    #[cfg(test)]
     fn open(project_dir: &Path, create_media: bool) -> Result<Self, String> {
+        Self::open_with_root_gate(project_dir, create_media, |_| Ok(()))
+    }
+
+    fn open_with_root_gate(
+        project_dir: &Path,
+        create_media: bool,
+        gate: impl FnOnce(&Handle) -> Result<(), String>,
+    ) -> Result<Self, String> {
         let parent_path = project_dir
             .parent()
             .ok_or_else(|| "project bundle has no parent directory".to_string())?;
@@ -476,16 +538,6 @@ impl ProjectMediaCapability {
         let root = parent
             .open_dir_nofollow(&root_name)
             .map_err(|error| format!("project bundle is not a trusted directory: {error}"))?;
-        if create_media {
-            match root.create_dir("media") {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error.to_string()),
-            }
-        }
-        let media = root
-            .open_dir_nofollow("media")
-            .map_err(|error| format!("project media directory is unavailable: {error}"))?;
         let parent_identity = Handle::from_file(
             parent
                 .try_clone()
@@ -499,6 +551,19 @@ impl ProjectMediaCapability {
                 .into_std_file(),
         )
         .map_err(|error| error.to_string())?;
+        // This is the write boundary: no media directory or leaf is created
+        // until the opened root matches the handle retained by AppCore.
+        gate(&root_identity)?;
+        if create_media {
+            match root.create_dir("media") {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        let media = root
+            .open_dir_nofollow("media")
+            .map_err(|error| format!("project media directory is unavailable: {error}"))?;
         let media_identity = Handle::from_file(
             media
                 .try_clone()
@@ -607,12 +672,24 @@ impl ProjectMediaCapability {
     fn absolute_path(&self, name: impl AsRef<Path>) -> PathBuf {
         self.project_dir.join("media").join(name)
     }
+
+    fn write_manifest(&self, manifest: &opentake_domain::MediaManifest) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(manifest).map_err(|error| error.to_string())?;
+        opentake_media::library::write_atomic_capability_file(
+            &self.root,
+            opentake_project::layout::MANIFEST_FILE,
+            &bytes,
+        )
+        .map_err(|error| error.to_string())
+    }
 }
 
 fn existing_project_import(
     project_media: &ProjectMediaCapability,
     manifest: &opentake_domain::MediaManifest,
     library_id: &str,
+    expected_kind: ClipType,
+    expected_extension: &str,
 ) -> Result<Option<LibraryImportDto>, String> {
     let mut matches = manifest
         .favorite_library_ids
@@ -631,6 +708,11 @@ fn existing_project_import(
         .iter()
         .find(|entry| entry.id == *asset_id)
         .ok_or_else(|| format!("project library mapping has no media entry: {asset_id}"))?;
+    if entry.kind != expected_kind {
+        return Err(format!(
+            "project library mapping has an unexpected media type: {asset_id}"
+        ));
+    }
     let relative_path = match &entry.source {
         opentake_domain::MediaSource::Project { relative_path } => Path::new(relative_path),
         opentake_domain::MediaSource::External { .. } => {
@@ -652,6 +734,15 @@ fn existing_project_import(
     if !valid_media || components.next().is_some() {
         return Err(format!(
             "project library mapping escapes the media directory: {asset_id}"
+        ));
+    }
+    let leaf_extension = Path::new(leaf_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("project library mapping has no media extension: {asset_id}"))?;
+    if !leaf_extension.eq_ignore_ascii_case(expected_extension) {
+        return Err(format!(
+            "project library mapping has an unexpected media extension: {asset_id}"
         ));
     }
     let mut handle = project_media.open_leaf(leaf_name)?;
@@ -707,8 +798,11 @@ impl Drop for ProjectImportGuard {
 /// Probe a stored library file, degrading to defaults on any probe failure (no
 /// ffprobe / unreadable) so importing never fails on metadata alone — mirrors the
 /// best-effort import path in [`crate::media`].
-fn probe_or_default(engine: &opentake_media::MediaEngine, path: &std::path::Path) -> ProbedMedia {
-    match engine.probe(path) {
+fn probe_or_default_file(
+    engine: &opentake_media::MediaEngine,
+    file: &std::fs::File,
+) -> ProbedMedia {
+    match engine.probe_file(file) {
         Ok(p) => ProbedMedia {
             duration_secs: p.duration_secs,
             width: p.width.map(|w| w as i32),
@@ -765,6 +859,45 @@ mod tests {
             root.join("cache"),
             root.join("models"),
         ))
+    }
+
+    fn favorite_video(library: &LibraryState, source: &Path) -> LibraryEntry {
+        library
+            .store()
+            .unwrap()
+            .favorite(&FavoriteRequest {
+                source,
+                kind: "video",
+                category: None,
+                favorited_at: 1.0,
+                thumb: None,
+            })
+            .unwrap()
+    }
+
+    fn generate_video(path: &Path, size: &str) -> bool {
+        if !opentake_media::ffmpeg_status::ffmpeg_available() {
+            return false;
+        }
+        let ffmpeg = std::env::var_os("OPENTAKE_FFMPEG")
+            .unwrap_or_else(|| std::ffi::OsString::from("ffmpeg"));
+        std::process::Command::new(ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("color=c=black:s={size}:r=1"),
+                "-t",
+                "1",
+                "-c:v",
+                "mpeg4",
+                "-y",
+            ])
+            .arg(path)
+            .status()
+            .is_ok_and(|status| status.success())
     }
 
     #[test]
@@ -863,6 +996,203 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn import_rejects_a_project_rebound_before_capability_acquisition_without_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("clip.mp4");
+        std::fs::write(&source, b"trusted library bytes").unwrap();
+        let library = LibraryState::new(LibraryStore::new(tmp.path().join("library")));
+        let entry = favorite_video(&library, &source);
+        let projects = tmp.path().join("projects");
+        let retained_projects = tmp.path().join("projects-retained");
+        let bundle = projects.join("Rebound.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let retained_manifest = std::fs::read(bundle.join("media.json")).unwrap();
+
+        std::fs::rename(&projects, &retained_projects).unwrap();
+        let replacement_bundle = projects.join("Rebound.opentake");
+        std::fs::create_dir_all(&replacement_bundle).unwrap();
+
+        let error =
+            library_import_to_project_impl(&core, &engine_for(tmp.path()), &library, &entry.id)
+                .expect_err("pre-acquisition project replacement must fail closed");
+
+        assert!(error.contains("identity no longer matches"), "{error}");
+        assert!(std::fs::read_dir(&replacement_bundle)
+            .unwrap()
+            .next()
+            .is_none());
+        assert_eq!(
+            std::fs::read(
+                retained_projects
+                    .join("Rebound.opentake")
+                    .join("media.json")
+            )
+            .unwrap(),
+            retained_manifest
+        );
+        assert!(core.media().entries.is_empty());
+    }
+
+    #[test]
+    fn failed_capability_manifest_publish_preserves_disk_and_live_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("clip.mp4");
+        std::fs::write(&source, b"trusted library bytes").unwrap();
+        let library = LibraryState::new(LibraryStore::new(tmp.path().join("library")));
+        let entry = favorite_video(&library, &source);
+        let bundle = tmp.path().join("FailedPublish.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let before = core.media();
+        let manifest_path = bundle.join("media.json");
+        let bytes_before = std::fs::read(&manifest_path).unwrap();
+
+        opentake_media::library::fail_next_atomic_capability_replace_for_test();
+        library_import_to_project_impl(&core, &engine_for(tmp.path()), &library, &entry.id)
+            .expect_err("injected manifest publication failure");
+
+        assert_eq!(core.media(), before);
+        assert_eq!(std::fs::read(manifest_path).unwrap(), bytes_before);
+    }
+
+    #[test]
+    fn postcommit_stored_cleanup_failure_still_persists_project_mapping_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("clip.mp4");
+        std::fs::write(&source, b"trusted library bytes").unwrap();
+        let library = LibraryState::new(LibraryStore::new(tmp.path().join("library")));
+        let entry = favorite_video(&library, &source);
+        let bundle = tmp.path().join("CleanupFailure.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let imported =
+            library_import_to_project_impl(&core, &engine_for(tmp.path()), &library, &entry.id)
+                .unwrap();
+
+        opentake_media::library::fail_next_removed_stored_cleanup_for_test();
+        assert!(remove_from_library_and_project(&core, &library, &entry.id).unwrap());
+
+        assert!(library.store().unwrap().entries().unwrap().is_empty());
+        assert_eq!(core.media().library_favorite_id(&imported.id), None);
+        let reopened = AppCore::new();
+        reopened.open_project(&bundle).unwrap();
+        assert_eq!(reopened.media().library_favorite_id(&imported.id), None);
+        assert!(!remove_from_library_and_project(&reopened, &library, &entry.id).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_file_probe_ignores_a_temporary_ambient_project_rebind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("trusted.mp4");
+        let replacement_video = tmp.path().join("replacement.mp4");
+        if !generate_video(&source, "32x18") || !generate_video(&replacement_video, "64x36") {
+            return;
+        }
+        let library = LibraryState::new(LibraryStore::new(tmp.path().join("library")));
+        let entry = favorite_video(&library, &source);
+        let projects = tmp.path().join("projects");
+        let retained_projects = tmp.path().join("projects-retained");
+        let replacement_projects = tmp.path().join("projects-replacement");
+        let bundle = projects.join("ProbeAba.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle)).unwrap();
+        let mut events = DeferredCoreEvents::default();
+
+        let imported = library_import_to_project_with_hook(
+            &core,
+            &engine_for(tmp.path()),
+            &library,
+            &entry.id,
+            &mut events,
+            |phase, path| match phase {
+                ImportHookPhase::BeforeProbe => {
+                    std::fs::rename(&projects, &retained_projects).unwrap();
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::copy(&replacement_video, path).unwrap();
+                }
+                ImportHookPhase::AfterProbe => {
+                    std::fs::rename(&projects, &replacement_projects).unwrap();
+                    std::fs::rename(&retained_projects, &projects).unwrap();
+                }
+                _ => {}
+            },
+        )
+        .expect("temporary ambient rebind cannot redirect retained-file probe");
+        let imported_entry = core
+            .media()
+            .entries
+            .into_iter()
+            .find(|candidate| candidate.id == imported.id)
+            .unwrap();
+
+        assert_eq!(imported_entry.source_width, Some(32));
+        assert_eq!(imported_entry.source_height, Some(18));
+        assert!(
+            std::fs::metadata(replacement_projects.join("ProbeAba.opentake/media"))
+                .unwrap()
+                .is_dir()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capability_manifest_publish_ignores_a_temporary_ambient_project_rebind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("clip.mp4");
+        std::fs::write(&source, b"trusted library bytes").unwrap();
+        let library = LibraryState::new(LibraryStore::new(tmp.path().join("library")));
+        let entry = favorite_video(&library, &source);
+        let projects = tmp.path().join("projects");
+        let retained_projects = tmp.path().join("projects-retained");
+        let replacement_projects = tmp.path().join("projects-replacement");
+        let bundle = projects.join("ManifestAba.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let mut events = DeferredCoreEvents::default();
+
+        let imported = library_import_to_project_with_hook(
+            &core,
+            &engine_for(tmp.path()),
+            &library,
+            &entry.id,
+            &mut events,
+            |phase, _| match phase {
+                ImportHookPhase::BeforeManifestWrite => {
+                    std::fs::rename(&projects, &retained_projects).unwrap();
+                    let replacement = projects.join("ManifestAba.opentake");
+                    std::fs::create_dir_all(&replacement).unwrap();
+                    std::fs::write(replacement.join("media.json"), b"replacement marker").unwrap();
+                }
+                ImportHookPhase::AfterManifestWrite => {
+                    std::fs::rename(&projects, &replacement_projects).unwrap();
+                    std::fs::rename(&retained_projects, &projects).unwrap();
+                }
+                _ => {}
+            },
+        )
+        .expect("retained project root must be the only manifest authority");
+
+        assert_eq!(
+            std::fs::read(
+                replacement_projects
+                    .join("ManifestAba.opentake")
+                    .join("media.json")
+            )
+            .unwrap(),
+            b"replacement marker"
+        );
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).unwrap();
+        assert_eq!(
+            reopened.media().library_favorite_id(&imported.id),
+            Some(entry.id.as_str())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn import_leaf_replacement_rolls_back_while_identity_lease_blocks_replacement() {
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("clip.mp4");
@@ -896,11 +1226,16 @@ mod tests {
             &library,
             &entry.id,
             &mut events,
-            |path| {
+            |phase, path| {
+                if phase != ImportHookPhase::AfterProjectCommit {
+                    return;
+                }
                 let moved = path.with_extension("moved");
                 std::fs::rename(path, &moved).unwrap();
                 std::fs::write(path, b"replacement bytes").unwrap();
                 *moved_path.lock().unwrap() = Some(moved);
+                let replacement_core = replacement_core.clone();
+                let done_tx = done_tx.clone();
                 *worker.lock().unwrap() = Some(std::thread::spawn(move || {
                     replacement_core.new_project();
                     done_tx.send(()).unwrap();
@@ -933,6 +1268,61 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("project replacement proceeds after import lease releases");
         worker.lock().unwrap().take().unwrap().join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_postcommit_rollback_preserves_the_durably_imported_leaf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("clip.mp4");
+        std::fs::write(&source, b"trusted library bytes").unwrap();
+        let library = LibraryState::new(LibraryStore::new(tmp.path().join("library")));
+        let entry = favorite_video(&library, &source);
+        let projects = tmp.path().join("projects");
+        let retained_projects = tmp.path().join("projects-retained");
+        let replacement_projects = tmp.path().join("projects-replacement");
+        let bundle = projects.join("RollbackFailure.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let mut events = DeferredCoreEvents::default();
+
+        let error = library_import_to_project_with_hook(
+            &core,
+            &engine_for(tmp.path()),
+            &library,
+            &entry.id,
+            &mut events,
+            |phase, _| {
+                if phase == ImportHookPhase::AfterProjectCommit {
+                    std::fs::rename(&projects, &retained_projects).unwrap();
+                    std::fs::create_dir_all(projects.join("RollbackFailure.opentake")).unwrap();
+                    opentake_media::library::fail_next_atomic_capability_replace_for_test();
+                }
+            },
+        )
+        .expect_err("identity failure plus injected rollback failure");
+
+        assert!(error.contains("import remains committed"), "{error}");
+        std::fs::rename(&projects, &replacement_projects).unwrap();
+        std::fs::rename(&retained_projects, &projects).unwrap();
+        let imported = core
+            .media()
+            .entries
+            .first()
+            .expect("live import remains committed")
+            .clone();
+        let relative = match &imported.source {
+            opentake_domain::MediaSource::Project { relative_path } => relative_path,
+            other => panic!("expected project media, got {other:?}"),
+        };
+        assert!(std::fs::metadata(bundle.join(relative)).unwrap().len() > 0);
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).unwrap();
+        assert_eq!(reopened.media(), core.media());
+        assert_eq!(
+            reopened.media().library_favorite_id(&imported.id),
+            Some(entry.id.as_str())
+        );
     }
 
     #[cfg(unix)]
@@ -1120,6 +1510,80 @@ mod tests {
             std::fs::read(imported.path).unwrap(),
             b"video bytes with renamed leaf"
         );
+    }
+
+    #[test]
+    fn idempotent_import_rejects_a_wrong_typed_existing_mapping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("clip.mp4");
+        std::fs::write(&source, b"trusted video bytes").unwrap();
+        let library = LibraryState::new(LibraryStore::new(tmp.path().join("library")));
+        let entry = favorite_video(&library, &source);
+        let bundle = tmp.path().join("WrongKind.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let imported =
+            library_import_to_project_impl(&core, &engine_for(tmp.path()), &library, &entry.id)
+                .unwrap();
+        let mut tampered = opentake_project::Project::open(&bundle).unwrap();
+        tampered
+            .manifest
+            .entries
+            .iter_mut()
+            .find(|candidate| candidate.id == imported.id)
+            .unwrap()
+            .kind = ClipType::Audio;
+        tampered.save_manifest().unwrap();
+        let reopened = AppCore::new();
+        reopened.open_project(&bundle).unwrap();
+
+        let error =
+            library_import_to_project_impl(&reopened, &engine_for(tmp.path()), &library, &entry.id)
+                .expect_err("wrong-typed idempotent mapping must fail closed");
+
+        assert!(error.contains("unexpected media type"), "{error}");
+        assert_eq!(reopened.media().entries.len(), 1);
+    }
+
+    #[test]
+    fn idempotent_import_rejects_a_wrong_extension_existing_mapping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("clip.mp4");
+        std::fs::write(&source, b"trusted video bytes").unwrap();
+        let library = LibraryState::new(LibraryStore::new(tmp.path().join("library")));
+        let entry = favorite_video(&library, &source);
+        let bundle = tmp.path().join("WrongExtension.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let imported =
+            library_import_to_project_impl(&core, &engine_for(tmp.path()), &library, &entry.id)
+                .unwrap();
+        let mut tampered = opentake_project::Project::open(&bundle).unwrap();
+        let manifest_entry = tampered
+            .manifest
+            .entries
+            .iter_mut()
+            .find(|candidate| candidate.id == imported.id)
+            .unwrap();
+        let relative = match &manifest_entry.source {
+            opentake_domain::MediaSource::Project { relative_path } => PathBuf::from(relative_path),
+            other => panic!("expected project media, got {other:?}"),
+        };
+        let wrong_relative = relative.with_extension("wav");
+        std::fs::rename(bundle.join(&relative), bundle.join(&wrong_relative)).unwrap();
+        manifest_entry.source = opentake_domain::MediaSource::Project {
+            relative_path: wrong_relative.to_string_lossy().into_owned(),
+        };
+        tampered.save_manifest().unwrap();
+        let reopened = AppCore::new();
+        reopened.open_project(&bundle).unwrap();
+
+        let error =
+            library_import_to_project_impl(&reopened, &engine_for(tmp.path()), &library, &entry.id)
+                .expect_err("wrong-extension idempotent mapping must fail closed");
+
+        assert!(error.contains("unexpected media extension"), "{error}");
+        assert_eq!(reopened.media().entries.len(), 1);
     }
 
     #[test]

@@ -3396,6 +3396,7 @@ dependencies = [
  "opentake-domain",
  "opentake-ops",
  "opentake-project",
+ "same-file",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

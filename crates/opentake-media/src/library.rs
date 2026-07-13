@@ -59,6 +59,29 @@ std::thread_local! {
     static FAIL_COMMITTED_BACKUP_CLEANUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(debug_assertions)]
+std::thread_local! {
+    static FAIL_REMOVED_STORED_CLEANUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_ATOMIC_CAPABILITY_REPLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Debug-build fault injection for the post-commit remove cleanup boundary.
+/// This is public only so the Tauri integration test can prove that project
+/// mapping cleanup still completes after the global manifest commit point.
+#[doc(hidden)]
+#[cfg(debug_assertions)]
+pub fn fail_next_removed_stored_cleanup_for_test() {
+    FAIL_REMOVED_STORED_CLEANUP.with(|fail| fail.set(true));
+}
+
+/// Debug-build fault injection immediately before a capability-bound atomic
+/// replacement. The already-existing canonical leaf must remain unchanged.
+#[doc(hidden)]
+#[cfg(debug_assertions)]
+pub fn fail_next_atomic_capability_replace_for_test() {
+    FAIL_ATOMIC_CAPABILITY_REPLACE.with(|fail| fail.set(true));
+}
+
 #[cfg(test)]
 std::thread_local! {
     static STORED_INDEX_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -479,14 +502,19 @@ fn read_nofollow(dir: &Dir, name: impl AsRef<Path>) -> std::io::Result<Vec<u8>> 
     Ok(bytes)
 }
 
-fn unique_manifest_artifact(suffix: &str) -> OsString {
+fn unique_atomic_artifact(target: &OsStr, suffix: &str) -> OsString {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
     OsString::from(format!(
-        ".{MANIFEST_NAME}.{}.{sequence:020}.{suffix}",
+        ".{}.{}.{sequence:020}.{suffix}",
+        target.to_string_lossy(),
         std::process::id()
     ))
+}
+
+fn unique_manifest_artifact(suffix: &str) -> OsString {
+    unique_atomic_artifact(OsStr::new(MANIFEST_NAME), suffix)
 }
 
 fn is_manifest_backup(name: &OsStr) -> bool {
@@ -503,7 +531,7 @@ fn rename_owned(root: &Dir, leaf: &mut OwnedLeaf, target: &Path) -> std::io::Res
     #[cfg(not(windows))]
     root.rename(&leaf.name, root, target)?;
     #[cfg(windows)]
-    rename_transaction_leaf_by_handle(root, leaf, target)?;
+    rename_transaction_leaf_by_handle(root, leaf, target, false)?;
     leaf.name = target.as_os_str().to_owned();
     if !leaf.matches_name(root)? {
         return Err(std::io::Error::other(
@@ -513,11 +541,29 @@ fn rename_owned(root: &Dir, leaf: &mut OwnedLeaf, target: &Path) -> std::io::Res
     Ok(())
 }
 
+fn replace_owned(root: &Dir, leaf: &mut OwnedLeaf, target: &Path) -> std::io::Result<()> {
+    if !leaf.matches_name(root)? {
+        return Err(std::io::Error::other(
+            "atomic leaf identity changed before replacement",
+        ));
+    }
+    #[cfg(not(windows))]
+    root.rename(&leaf.name, root, target)?;
+    #[cfg(windows)]
+    rename_transaction_leaf_by_handle(root, leaf, target, true)?;
+    // The single replace syscall is the commit point. From here onward no
+    // fallible diagnostic may convert a durable replacement into `Err`, because
+    // callers restore their live state on any writer error.
+    leaf.name = target.as_os_str().to_owned();
+    Ok(())
+}
+
 #[cfg(windows)]
 fn rename_transaction_leaf_by_handle(
     root: &Dir,
     leaf: &OwnedLeaf,
     target: &Path,
+    replace_existing: bool,
 ) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::AsRawHandle;
@@ -574,7 +620,7 @@ fn rename_transaction_leaf_by_handle(
     // remain owned and open for the duration of the synchronous Win32 call.
     let renamed = unsafe {
         (*info).Anonymous = FILE_RENAME_INFO_0 {
-            ReplaceIfExists: false,
+            ReplaceIfExists: replace_existing,
         };
         (*info).RootDirectory = root.as_raw_handle();
         (*info).FileNameLength = file_name_bytes;
@@ -596,36 +642,45 @@ fn rename_transaction_leaf_by_handle(
     Ok(())
 }
 
-fn commit_manifest_file(root: &Dir, tmp: &mut OwnedLeaf) -> std::io::Result<()> {
-    let mut backup = match OwnedLeaf::open_transaction(root, MANIFEST_NAME) {
+fn commit_atomic_file(root: &Dir, target: &Path, tmp: &mut OwnedLeaf) -> std::io::Result<()> {
+    let target_name = match target.components().collect::<Vec<_>>().as_slice() {
+        [std::path::Component::Normal(name)] => *name,
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "atomic target must be one relative leaf",
+            ))
+        }
+    };
+    let mut backup = match OwnedLeaf::open_transaction(root, target) {
         Ok(mut canonical) => {
-            let backup_name = unique_manifest_artifact("backup");
+            let backup_name = unique_atomic_artifact(target_name, "backup");
             rename_owned(root, &mut canonical, Path::new(&backup_name))?;
             Some(canonical)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error),
     };
-    if let Err(error) = rename_owned(root, tmp, Path::new(MANIFEST_NAME)) {
+    if let Err(error) = rename_owned(root, tmp, target) {
         if let Some(backup) = backup.as_mut() {
-            if let Err(restore) = rename_owned(root, backup, Path::new(MANIFEST_NAME)) {
+            if let Err(restore) = rename_owned(root, backup, target) {
                 return Err(std::io::Error::other(format!(
-                    "{error}; library manifest backup restore failed: {restore}"
+                    "{error}; atomic backup restore failed: {restore}"
                 )));
             }
         }
         return Err(error);
     }
     if !tmp.matches_name(root)? {
-        if let Ok(mut replacement) = OwnedLeaf::open_transaction(root, MANIFEST_NAME) {
-            let quarantine = unique_manifest_artifact("quarantine");
+        if let Ok(mut replacement) = OwnedLeaf::open_transaction(root, target) {
+            let quarantine = unique_atomic_artifact(target_name, "quarantine");
             let _ = rename_owned(root, &mut replacement, Path::new(&quarantine));
         }
         if let Some(backup) = backup.as_mut() {
-            let _ = rename_owned(root, backup, Path::new(MANIFEST_NAME));
+            let _ = rename_owned(root, backup, target);
         }
         return Err(std::io::Error::other(
-            "library manifest identity changed during commit",
+            "atomic target identity changed during commit",
         ));
     }
     // The canonical rename is now verified. Disarm it before backup cleanup so
@@ -637,6 +692,41 @@ fn commit_manifest_file(root: &Dir, tmp: &mut OwnedLeaf) -> std::io::Result<()> 
         // newly manifest-owned content while the manifest is already durable.
         let _ = cleanup_committed_backup(backup);
     }
+    Ok(())
+}
+
+/// Atomically replace one relative leaf through a retained directory
+/// capability. Publication is one rename operation, so a crash cannot strand
+/// the canonical name between backup and publish. On Windows the retained temp
+/// handle carries DELETE access and uses `FileRenameInfo.ReplaceIfExists`.
+pub fn write_atomic_capability_file(
+    root: &Dir,
+    target: impl AsRef<Path>,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    let target = target.as_ref();
+    let target_name = match target.components().collect::<Vec<_>>().as_slice() {
+        [std::path::Component::Normal(name)] => *name,
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "atomic target must be one relative leaf",
+            ))
+        }
+    };
+    let tmp_name = unique_atomic_artifact(target_name, "tmp");
+    let mut tmp = OwnedLeaf::create_transaction(root, &tmp_name)?;
+    tmp.handle.as_file_mut().write_all(bytes)?;
+    tmp.sync_all()?;
+    #[cfg(debug_assertions)]
+    if FAIL_ATOMIC_CAPABILITY_REPLACE.with(|fail| fail.replace(false)) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "injected atomic capability replacement failure",
+        ));
+    }
+    replace_owned(root, &mut tmp, target)?;
+    tmp.disarm_cleanup();
     Ok(())
 }
 
@@ -1074,7 +1164,7 @@ impl LibraryStore {
         let mut tmp = OwnedLeaf::create_transaction(root, &tmp_name)?;
         tmp.handle.as_file_mut().write_all(&bytes)?;
         tmp.sync_all()?;
-        commit_manifest_file(root, &mut tmp)?;
+        commit_atomic_file(root, Path::new(MANIFEST_NAME), &mut tmp)?;
         tmp.disarm_cleanup();
         Ok(())
     }
@@ -1452,8 +1542,18 @@ impl LibraryStore {
         // A failed best-effort cleanup after the commit only leaves an orphaned
         // content-addressed file, which is safe and can be reclaimed later.
         if let Some(stored) = stored {
-            stored.handle.as_file().set_len(0)?;
-            stored.handle.as_file().sync_all()?;
+            let cleanup = || -> std::io::Result<()> {
+                #[cfg(debug_assertions)]
+                if FAIL_REMOVED_STORED_CLEANUP.with(|fail| fail.replace(false)) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "injected removed-stored cleanup failure",
+                    ));
+                }
+                stored.handle.as_file().set_len(0)?;
+                stored.handle.as_file().sync_all()
+            };
+            let _ = cleanup();
         }
         Ok(true)
     }
@@ -2375,6 +2475,41 @@ mod tests {
         assert!(store.stored_path(&e.id).unwrap().is_none());
         // Removing again is a no-op.
         assert!(!store.remove(&e.id).unwrap());
+    }
+
+    #[test]
+    fn postcommit_stored_cleanup_failure_does_not_fail_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = src_file(tmp.path(), "cleanup.mp4", b"cleanup boundary");
+        let store = LibraryStore::new(tmp.path().join("lib"));
+        let entry = store.favorite(&req(&source, "video", None)).unwrap();
+
+        fail_next_removed_stored_cleanup_for_test();
+        assert!(store.remove(&entry.id).unwrap());
+
+        assert!(store.entries().unwrap().is_empty());
+        assert!(!store.stored_ids_verified().unwrap().contains(&entry.id));
+        assert!(!store.remove(&entry.id).unwrap());
+        let refavorited = store.favorite(&req(&source, "video", None)).unwrap();
+        assert_eq!(refavorited.id, entry.id);
+        assert!(store.contains(&entry.id).unwrap());
+    }
+
+    #[test]
+    fn failed_capability_replace_preserves_the_existing_canonical_leaf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Dir::open_ambient_dir(tmp.path(), ambient_authority()).unwrap();
+        std::fs::write(tmp.path().join("media.json"), b"old manifest").unwrap();
+
+        fail_next_atomic_capability_replace_for_test();
+        let error = write_atomic_capability_file(&root, "media.json", b"new manifest")
+            .expect_err("injected pre-commit failure");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::read(tmp.path().join("media.json")).unwrap(),
+            b"old manifest"
+        );
     }
 
     #[test]

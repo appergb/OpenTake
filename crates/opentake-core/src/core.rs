@@ -34,6 +34,7 @@ use opentake_domain::{MediaManifest, MediaManifestEntry, Timeline};
 use opentake_ops::command::{EditCommand, EditResult};
 use opentake_ops::IdGen;
 use opentake_project::{GenerationLog, ProjectCompatibility};
+use same_file::Handle;
 
 use crate::deps::CoreDeps;
 use crate::error::Result;
@@ -313,6 +314,25 @@ impl AppCore {
             project_epoch: session.project_epoch,
             version: session.editor.version(),
         })
+    }
+
+    /// Require a caller-retained no-follow bundle handle to match the handle
+    /// retained when the current project session was opened or saved.
+    pub fn ensure_project_root_identity_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        current_root: &Handle,
+    ) -> Result<()> {
+        let session = self.lock();
+        ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+        if session.editor.matches_project_root_identity(current_root)? {
+            Ok(())
+        } else {
+            Err(crate::CoreError::Media(
+                "project bundle identity no longer matches the open session".to_string(),
+            ))
+        }
     }
 
     /// Hold the current project identity stable across an external workflow.
@@ -635,6 +655,57 @@ impl AppCore {
         Ok(entry)
     }
 
+    /// Capability-bound variant of the global-library import transaction. The
+    /// caller persists the candidate manifest through retained directory
+    /// authority; a writer error restores the exact live manifest before the
+    /// session lock is released.
+    #[allow(clippy::too_many_arguments)]
+    pub fn import_library_media_for_project_deferred_with_manifest_writer<F>(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+        library_id: &str,
+        events: &mut DeferredCoreEvents,
+        write_manifest: F,
+    ) -> Result<MediaManifestEntry>
+    where
+        F: FnOnce(&MediaManifest) -> Result<()>,
+    {
+        let id = self.ids.next_id();
+        let (entry, count) = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            let before = session.editor.media();
+            let result = (|| {
+                let entry = session.editor.import_media_file(path, id, name, probe)?;
+                session
+                    .editor
+                    .set_media_global_favorite(&entry.id, Some(library_id.to_string()))?;
+                write_manifest(&session.editor.media())?;
+                Ok(entry)
+            })();
+            match result {
+                Ok(entry) => (entry, session.editor.media().entries.len()),
+                Err(error) => {
+                    session.editor.restore_media(before);
+                    return Err(error);
+                }
+            }
+        };
+        events.push(CoreEvent::MediaChanged {
+            project_epoch: expected_project_epoch,
+            count,
+        });
+        events.push(CoreEvent::ProjectSaved {
+            path: expected_project_dir.to_string_lossy().into_owned(),
+            project_epoch: expected_project_epoch,
+        });
+        Ok(entry)
+    }
+
     /// Toggle favorite state for `asset_ids` (#91), emitting
     /// [`CoreEvent::MediaChanged`] after releasing the lock (only when something
     /// changed) so the media mirror refreshes. Favoriting is a manifest mutation
@@ -873,6 +944,32 @@ impl AppCore {
         ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
         session.editor.restore_media(manifest);
         session.editor.save_media_manifest()?;
+        events.clear();
+        Ok(())
+    }
+
+    /// Restore and persist a manifest through caller-supplied retained
+    /// capability authority. If persistence fails, put the prior live state
+    /// back so memory continues to agree with the last successful disk commit.
+    pub fn restore_media_manifest_for_project_deferred_with_manifest_writer<F>(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        manifest: MediaManifest,
+        events: &mut DeferredCoreEvents,
+        write_manifest: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&MediaManifest) -> Result<()>,
+    {
+        let mut session = self.lock();
+        ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+        let before = session.editor.media();
+        session.editor.restore_media(manifest);
+        if let Err(error) = write_manifest(&session.editor.media()) {
+            session.editor.restore_media(before);
+            return Err(error);
+        }
         events.clear();
         Ok(())
     }

@@ -10,7 +10,8 @@
 //! packaged builds) point at a bundled binary.
 
 use std::ffi::OsString;
-use std::process::Command;
+use std::io::{Seek, SeekFrom};
+use std::process::{Command, Stdio};
 
 use ffmpeg_sidecar::command::FfmpegCommand;
 
@@ -67,6 +68,39 @@ pub fn ffprobe_json(path: &std::path::Path) -> crate::error::Result<serde_json::
     if !out.status.success() {
         return Err(crate::error::MediaError::Ffmpeg(format!(
             "ffprobe exited {}",
+            out.status
+        )));
+    }
+    serde_json::from_slice(&out.stdout)
+        .map_err(|e| crate::error::MediaError::Ffmpeg(format!("ffprobe json: {e}")))
+}
+
+/// Probe an already-open regular file without resolving an ambient pathname.
+/// ffprobe's `fd:` protocol keeps normal file seek semantics (unlike `pipe:`),
+/// which is required by containers whose metadata lives near the end.
+pub fn ffprobe_json_file(file: &std::fs::File) -> crate::error::Result<serde_json::Value> {
+    let mut input = file
+        .try_clone()
+        .map_err(|e| crate::error::MediaError::Ffmpeg(format!("ffprobe input clone: {e}")))?;
+    input
+        .seek(SeekFrom::Start(0))
+        .map_err(|e| crate::error::MediaError::Ffmpeg(format!("ffprobe input rewind: {e}")))?;
+    let out = Command::new(ffprobe_path())
+        .args([
+            "-v",
+            "quiet",
+            "-of",
+            "json",
+            "-show_streams",
+            "-show_format",
+            "fd:",
+        ])
+        .stdin(Stdio::from(input))
+        .output()
+        .map_err(|e| crate::error::MediaError::Ffmpeg(format!("ffprobe spawn: {e}")))?;
+    if !out.status.success() {
+        return Err(crate::error::MediaError::Ffmpeg(format!(
+            "ffprobe fd input exited {}",
             out.status
         )));
     }
