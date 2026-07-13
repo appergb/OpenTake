@@ -9,8 +9,9 @@ reviewed repository tree, while preserving every original PR head in the final
 commit ancestry. The source convergence starts from the frozen remote `main`
 commit `ac50dc896bea821f66c88c6ed50cf9185e4e31d1` and uses local integration
 commit `cf52c5e495f9aea6b685aa20d863c5418a010ca5` as the code-complete candidate.
-The report-only successor is the exact tree supplied to the fail-closed cloud
-publisher.
+A Windows aggregate CI finding then required the test-gating-only successor
+`301b82d2772559ba6fad25cbb2847ebc07baa494`. The report-only successor is the
+exact tree supplied to the fail-closed cloud publisher.
 
 The final cloud gate is intentionally stricter than the legacy PR checks: the
 aggregate pull request and the final `main` push must each pass all four jobs in
@@ -53,9 +54,9 @@ validation and still matched the frozen snapshot.
 The convergence work also includes the reviewed native playback replacement,
 schema-compatibility read-only mode, project/media state arbitration, bounded
 workers and caches, secure Unix/Windows filesystem capability layers, and two
-native Windows CI jobs. Before adding this report, the exact code candidate
-changes 208 files with 55,706 additions and 3,833 deletions relative to frozen
-`main`.
+native Windows CI jobs. The exact runtime code candidate changes 208 files with
+55,706 additions and 3,833 deletions relative to frozen `main`; the later
+Windows CI correction adds one test-only platform attribute.
 
 ## Final playback correction
 
@@ -135,6 +136,22 @@ The report-only successor is structurally compared with this code tree before
 publication; the aggregate PR and final `main` push then repeat the
 repository-defined CI on GitHub-hosted runners.
 
+### Native Windows aggregate correction
+
+The first aggregate PR, #218, exposed one portable-test compilation error before
+either native Windows job could reach its requested security filters. A test in
+`decode/pcm.rs` executes `sh -c "exit 7"`, while its `Command` import was already
+correctly limited to Unix. The test itself lacked the matching `#[cfg(unix)]`,
+so both Windows jobs failed while compiling the full test harness.
+
+Commit `301b82d2772559ba6fad25cbb2847ebc07baa494` adds only that platform
+attribute. The Unix regression test passed, all 47 media-library tests passed,
+and all-target `opentake-media` clippy with warnings denied passed. A fresh
+release bundle from this successor is byte-identical to the installed runtime
+binary and preserves the executable and bundle digests above. The failed #218
+attempt is retained as audit evidence and must be closed as superseded; a new
+immutable aggregate PR must pass all four jobs before promotion.
+
 ### Platform boundary
 
 macOS cross-checks for the pure Rust project/capability crates on
@@ -191,6 +208,12 @@ listener, and MCP protocol behavior were verified independently of screenshots.
   checks covered all 25 audio tests, all 28 serial playback-command tests,
   clippy with warnings denied, safe real-media fallback, strict audio
   rejection, and dependency-diff integrity.
+- A fresh-archive reviewer accepted exact Windows CI correction
+  `301b82d2772559ba6fad25cbb2847ebc07baa494` / tree
+  `66ecb6ef09e66a077d109d3b3d18ca69ab66cb92` with
+  Critical/Important = 0/0 and **Ready for new aggregate publish: Yes**. The
+  only minor observation concerns a separate future full-Windows-test `mkfifo`
+  fixture and does not affect either mandatory Windows workflow job.
 - The report-only successor is reviewed against that accepted code tree before
   its exact commit/tree is supplied to the cloud publisher.
 
@@ -207,6 +230,8 @@ Completion requires all of the following to be re-read from GitHub:
 - final `main` equals the deterministic expected commit and exact local tree;
 - aggregate and final parent order is exact;
 - #211 through #217 and the aggregate PR are closed as merged;
+- superseded failed aggregate attempt #218 is closed without being represented
+  as a successful merge;
 - every original PR head is reachable from final `main`;
 - aggregate pull-request CI and final `main` push CI each contain all four
   expected jobs and every job is `completed/success`; and
