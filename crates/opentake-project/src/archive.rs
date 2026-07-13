@@ -382,9 +382,11 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use opentake_domain::{ClipType, MediaManifestEntry};
 
     /// Minimal `External` manifest entry for archive tests.
+    #[cfg(unix)]
     fn external_entry(id: &str, absolute_path: &str) -> MediaManifestEntry {
         MediaManifestEntry {
             id: id.into(),
@@ -492,8 +494,10 @@ mod tests {
     }
 
     /// A scratch directory under the system temp dir, removed on drop.
+    #[cfg(unix)]
     struct TestDir(PathBuf);
 
+    #[cfg(unix)]
     impl TestDir {
         fn new(tag: &str) -> Self {
             use std::sync::atomic::{AtomicU64, Ordering};
@@ -509,6 +513,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for TestDir {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
