@@ -1754,6 +1754,39 @@ mod tests {
         drop(interrupted);
     }
 
+    fn create_recovery_stage(parent: &Path, name: &OsStr, marker: Option<&str>) -> PathBuf {
+        let path = parent.join(name);
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("remaining-child.bin"), b"preserve me").unwrap();
+        if let Some(marker) = marker {
+            fs::write(path.join(PUBLISH_MARKER_FILE), marker).unwrap();
+        }
+        path
+    }
+
+    fn write_recovery_journal(parent: &Path, target_name: &OsStr, journal: &PublishJournal) {
+        fs::write(
+            parent.join(artifact_name(target_name, ".opentake-journal")),
+            journal.encode(),
+        )
+        .unwrap();
+    }
+
+    fn assert_recovery_refused_without_mutation(target: &Path) {
+        let parent = target.parent().unwrap();
+        fs::write(
+            parent.join(artifact_name(target.file_name().unwrap(), ".opentake-lock")),
+            b"",
+        )
+        .unwrap();
+        let before = tree_receipt(parent);
+        match ProjectRoot::begin_replace(target) {
+            Ok(_) => panic!("invalid recovery evidence must remain fail closed"),
+            Err(error) => assert!(!error.to_string().is_empty()),
+        }
+        assert_eq!(tree_receipt(parent), before);
+    }
+
     #[test]
     fn publish_failure_after_backup_restores_the_old_target_tree() {
         let tmp = TmpDir::new("publish-restore");
@@ -2021,6 +2054,128 @@ mod tests {
         assert!(error.to_string().contains("unknown or multiple stage"));
         assert!(tmp.path().join(unknown_stage).is_dir());
         assert!(tmp.path().join(journal_name).is_file());
+    }
+
+    #[test]
+    fn legacy_marked_stage_remains_recoverable() {
+        let tmp = TmpDir::new("legacy-marked-stage");
+        let target = tmp.path().join("Existing.opentake");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("project.json"), b"old timeline").unwrap();
+        let target_name = target.file_name().unwrap();
+        let journal = PublishJournal::new(true);
+        let legacy_stage = artifact_name(target_name, ".opentake-stage");
+        let legacy_path = create_recovery_stage(tmp.path(), &legacy_stage, Some(&journal.nonce));
+        write_recovery_journal(tmp.path(), target_name, &journal);
+
+        let retry = ProjectRoot::begin_replace(&target)
+            .expect("a marked legacy stage retains its journal ownership evidence");
+        assert!(!legacy_path.exists());
+        drop(retry);
+        assert_eq!(
+            fs::read(target.join("project.json")).unwrap(),
+            b"old timeline"
+        );
+        assert!(!tmp
+            .path()
+            .join(artifact_name(target_name, ".opentake-journal"))
+            .exists());
+        assert!(stage_paths(tmp.path(), "Existing.opentake").is_empty());
+    }
+
+    #[test]
+    fn ambiguous_stage_evidence_is_refused_and_preserved() {
+        enum Case {
+            LegacyUnmarked,
+            ExactWrongMarker,
+            ExactPlusLegacy,
+        }
+
+        for (tag, case) in [
+            ("legacy-unmarked", Case::LegacyUnmarked),
+            ("exact-wrong-marker", Case::ExactWrongMarker),
+            ("exact-plus-legacy", Case::ExactPlusLegacy),
+        ] {
+            let tmp = TmpDir::new(tag);
+            let target = tmp.path().join("Existing.opentake");
+            fs::create_dir_all(&target).unwrap();
+            fs::write(target.join("project.json"), b"old timeline").unwrap();
+            let target_name = target.file_name().unwrap();
+            let journal = PublishJournal::new(true);
+            let exact_stage = stage_artifact_name(target_name, &journal.nonce);
+            let legacy_stage = artifact_name(target_name, ".opentake-stage");
+            match case {
+                Case::LegacyUnmarked => {
+                    create_recovery_stage(tmp.path(), &legacy_stage, None);
+                }
+                Case::ExactWrongMarker => {
+                    create_recovery_stage(tmp.path(), &exact_stage, Some("wrong-marker"));
+                }
+                Case::ExactPlusLegacy => {
+                    create_recovery_stage(tmp.path(), &exact_stage, Some(&journal.nonce));
+                    create_recovery_stage(tmp.path(), &legacy_stage, Some(&journal.nonce));
+                }
+            }
+            write_recovery_journal(tmp.path(), target_name, &journal);
+
+            assert_recovery_refused_without_mutation(&target);
+        }
+    }
+
+    #[test]
+    fn invalid_restored_abort_states_are_refused_and_preserved() {
+        #[derive(Clone, Copy)]
+        enum Case {
+            NoPriorTarget,
+            MissingTarget,
+            WrongTargetMarker,
+            TransactionMarkedTarget,
+            BackupReappeared,
+        }
+
+        for (tag, case) in [
+            ("abort-no-prior-target", Case::NoPriorTarget),
+            ("abort-missing-target", Case::MissingTarget),
+            ("abort-wrong-target-marker", Case::WrongTargetMarker),
+            (
+                "abort-transaction-marked-target",
+                Case::TransactionMarkedTarget,
+            ),
+            ("abort-backup-reappeared", Case::BackupReappeared),
+        ] {
+            let tmp = TmpDir::new(tag);
+            let target = tmp.path().join("Existing.opentake");
+            let target_name = target.file_name().unwrap();
+            let mut journal = PublishJournal::new(!matches!(case, Case::NoPriorTarget));
+            journal.phase = PublishPhase::AbortedRestored;
+            let stage_name = stage_artifact_name(target_name, &journal.nonce);
+            create_recovery_stage(tmp.path(), &stage_name, Some(&journal.nonce));
+            match case {
+                Case::NoPriorTarget | Case::MissingTarget => {}
+                Case::WrongTargetMarker => {
+                    fs::create_dir_all(&target).unwrap();
+                    fs::write(target.join(PUBLISH_MARKER_FILE), b"wrong-marker").unwrap();
+                }
+                Case::TransactionMarkedTarget => {
+                    fs::create_dir_all(&target).unwrap();
+                    fs::write(target.join(PUBLISH_MARKER_FILE), journal.nonce.as_bytes()).unwrap();
+                }
+                Case::BackupReappeared => {
+                    fs::create_dir_all(&target).unwrap();
+                    fs::create_dir_all(
+                        tmp.path()
+                            .join(artifact_name(target_name, ".opentake-backup")),
+                    )
+                    .unwrap();
+                }
+            }
+            if target.is_dir() {
+                fs::write(target.join("project.json"), b"preserve target").unwrap();
+            }
+            write_recovery_journal(tmp.path(), target_name, &journal);
+
+            assert_recovery_refused_without_mutation(&target);
+        }
     }
 
     #[test]
