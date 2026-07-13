@@ -649,9 +649,11 @@ export interface AccountInfo {
   plan?: string;
 }
 
-/** Live, informational login state. The cold-start default is `offline`. */
+/** Live, informational login state. `stored` means a credential exists but this
+ * process has not made an automatic network request to restore identity. */
 export type AccountStatus =
   | { type: "offline" }
+  | { type: "stored" }
   | { type: "connecting" }
   | { type: "online"; info: AccountInfo }
   | { type: "error"; message: string };

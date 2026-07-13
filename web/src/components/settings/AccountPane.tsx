@@ -3,7 +3,7 @@
  * official account service, and this pane never gates local product features.
  */
 
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { LogOut, User } from "lucide-react";
 import { useT } from "../../i18n";
 import {
@@ -63,6 +63,21 @@ export function AccountPane() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const busyRef = useRef(false);
+  const normalizedDraft = urlDraft.trim();
+  const urlDirty = normalizedDraft !== (backendUrl ?? "");
+
+  const beginAction = () => {
+    if (busyRef.current) return false;
+    busyRef.current = true;
+    setBusy(true);
+    return true;
+  };
+
+  const endAction = () => {
+    busyRef.current = false;
+    setBusy(false);
+  };
 
   useEffect(() => {
     let alive = true;
@@ -94,27 +109,27 @@ export function AccountPane() {
   };
 
   const saveUrl = async () => {
-    if (busy) return;
-    setBusy(true);
+    if (!beginAction()) return;
     setMessage(null);
     setError(null);
     try {
       const trimmed = urlDraft.trim();
       const nextUrl = trimmed.length === 0 ? null : trimmed;
       await accountSetBackendUrl(nextUrl);
-      setBackendUrl(await accountGetBackendUrl());
+      const savedUrl = await accountGetBackendUrl();
+      setBackendUrl(savedUrl);
+      setUrlDraft(savedUrl ?? "");
       await refreshStatus();
       setMessage(t("account.backendUrlSaved"));
     } catch (reason) {
       setError(t("account.backendUrlSaveFailed", { error: errorMessage(reason) }));
     } finally {
-      setBusy(false);
+      endAction();
     }
   };
 
   const clearUrl = async () => {
-    if (busy) return;
-    setBusy(true);
+    if (!beginAction()) return;
     setMessage(null);
     setError(null);
     try {
@@ -126,14 +141,13 @@ export function AccountPane() {
     } catch (reason) {
       setError(t("account.backendUrlSaveFailed", { error: errorMessage(reason) }));
     } finally {
-      setBusy(false);
+      endAction();
     }
   };
 
   const login = async () => {
     const trimmed = tokenDraft.trim();
-    if (!backendUrl || trimmed.length === 0 || busy) return;
-    setBusy(true);
+    if (!backendUrl || urlDirty || trimmed.length === 0 || !beginAction()) return;
     setMessage(null);
     setError(null);
     setStatus({ type: "connecting" });
@@ -145,13 +159,12 @@ export function AccountPane() {
       setError(t("account.loginFailed", { error: errorMessage(reason) }));
       await refreshStatus();
     } finally {
-      setBusy(false);
+      endAction();
     }
   };
 
   const logout = async () => {
-    if (busy) return;
-    setBusy(true);
+    if (!beginAction()) return;
     setMessage(null);
     setError(null);
     try {
@@ -161,7 +174,7 @@ export function AccountPane() {
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
-      setBusy(false);
+      endAction();
     }
   };
 
@@ -169,6 +182,8 @@ export function AccountPane() {
     switch (status.type) {
       case "offline":
         return t("account.status.offline");
+      case "stored":
+        return t("account.status.stored");
       case "connecting":
         return t("account.status.connecting");
       case "online":
@@ -273,6 +288,16 @@ export function AccountPane() {
             {message}
           </div>
         )}
+        {urlDirty && (
+          <div role="status" style={{ fontSize: "var(--fs-xs)", color: "var(--status-warning)" }}>
+            {t("account.backendUrlUnsaved", { url: backendUrl ?? t("account.status.offline") })}
+          </div>
+        )}
+        {!urlDirty && backendUrl && (
+          <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)" }}>
+            {t("account.loginTarget", { url: backendUrl })}
+          </div>
+        )}
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
@@ -309,7 +334,7 @@ export function AccountPane() {
           />
           <button
             type="button"
-            disabled={busy || !backendUrl || tokenDraft.trim().length === 0}
+            disabled={busy || !backendUrl || urlDirty || tokenDraft.trim().length === 0}
             onClick={() => void login()}
             className="hover-area"
             style={{
@@ -320,12 +345,12 @@ export function AccountPane() {
               color: "var(--text-primary)",
               fontSize: "var(--fs-sm)",
               fontWeight: "var(--fw-medium)",
-              opacity: busy || !backendUrl ? 0.4 : 1,
+              opacity: busy || !backendUrl || urlDirty || tokenDraft.trim().length === 0 ? 0.4 : 1,
             }}
           >
             {t("account.login")}
           </button>
-          {status.type === "online" && (
+          {(status.type === "online" || status.type === "stored") && (
             <button
               type="button"
               disabled={busy}
