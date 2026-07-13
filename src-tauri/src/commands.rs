@@ -1,9 +1,10 @@
 //! The `#[tauri::command]` surface.
 //!
 //! Each command is a thin shim: it locks nothing of its own, delegates to an
-//! `opentake_core::dto::handle_*` function (which wraps [`AppCore`]), and maps
-//! the boundary `CmdError` to a `String` so the front end gets a plain rejected
-//! Promise (`AGENTS.md`: "边界层转 Tauri 的 `Err(String)`").
+//! `opentake_core::dto::handle_*` function (which wraps [`AppCore`]). Most
+//! boundary `CmdError`s become strings; playback-aware project lifecycle
+//! commands preserve the structured playback error code so overlap is reported
+//! as `busy` before core mutation.
 //!
 //! `EditCommand` itself is not `Deserialize` (it carries engine value types with
 //! no serde derives), so the editing entry point takes a local serde-friendly
@@ -13,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
 use opentake_core::dto::{
-    handle_edit_apply, handle_get_timeline, handle_project_new, handle_project_open, handle_redo,
-    handle_undo, EditResultDto, TimelineSnapshotDto,
+    handle_edit_apply, handle_get_timeline, handle_project_new, handle_redo, handle_undo,
+    EditResultDto, TimelineSnapshotDto,
 };
 use opentake_core::{AppCore, CmdError, EditCommand};
 
@@ -47,16 +48,116 @@ pub fn redo(core: State<'_, AppCore>) -> Result<EditResultDto, String> {
     handle_redo(&core).map_err(msg)
 }
 
-/// `project_new`: replace the session with a fresh, unsaved project.
+/// `project_new`: replace the session with a fresh, unsaved project and return
+/// its first snapshot.
+#[cfg(feature = "playback-engine")]
 #[tauri::command]
-pub fn project_new(core: State<'_, AppCore>) {
-    handle_project_new(&core);
+pub fn project_new(
+    core: State<'_, AppCore>,
+    playback: State<'_, crate::playback::PlaybackState>,
+    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
+) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
+    project_new_with_playback_and_prewarm(&core, &playback, &prewarm)
+}
+
+#[cfg(all(feature = "playback-engine", test))]
+pub(crate) fn project_new_with_playback(
+    core: &AppCore,
+    playback: &crate::playback::PlaybackState,
+) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
+    let prewarm =
+        crate::media::prewarm::PrewarmScheduler::new(core.project_revision().project_epoch);
+    project_new_with_playback_and_prewarm(core, playback, &prewarm)
+}
+
+#[cfg(feature = "playback-engine")]
+fn project_new_with_playback_and_prewarm(
+    core: &AppCore,
+    playback: &crate::playback::PlaybackState,
+    prewarm: &crate::media::prewarm::PrewarmScheduler,
+) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
+    let transition = playback.begin_project_transition()?;
+    if let Err(error) = prewarm.begin_project_transition() {
+        playback.cancel_project_transition(transition);
+        return Err(crate::playback::session::PlaybackCommandError::busy(error));
+    }
+    let snapshot = handle_project_new(core);
+    playback.activate_project(transition, snapshot.project_epoch);
+    prewarm.activate_project(snapshot.project_epoch);
+    Ok(snapshot)
+}
+
+#[cfg(not(feature = "playback-engine"))]
+#[tauri::command]
+pub fn project_new(
+    core: State<'_, AppCore>,
+    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
+) -> Result<TimelineSnapshotDto, String> {
+    prewarm.begin_project_transition()?;
+    let snapshot = handle_project_new(&core);
+    prewarm.activate_project(snapshot.project_epoch);
+    Ok(snapshot)
 }
 
 /// `project_open`: open a `.opentake` bundle, returning the first snapshot.
+#[cfg(feature = "playback-engine")]
 #[tauri::command]
-pub fn project_open(core: State<'_, AppCore>, path: String) -> Result<TimelineSnapshotDto, String> {
-    handle_project_open(&core, path).map_err(msg)
+pub fn project_open(
+    core: State<'_, AppCore>,
+    path: String,
+    playback: State<'_, crate::playback::PlaybackState>,
+    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
+) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
+    project_open_with_playback_and_prewarm(&core, path, &playback, &prewarm)
+}
+
+#[cfg(all(feature = "playback-engine", test))]
+pub(crate) fn project_open_with_playback(
+    core: &AppCore,
+    path: String,
+    playback: &crate::playback::PlaybackState,
+) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
+    let prewarm =
+        crate::media::prewarm::PrewarmScheduler::new(core.project_revision().project_epoch);
+    project_open_with_playback_and_prewarm(core, path, playback, &prewarm)
+}
+
+#[cfg(feature = "playback-engine")]
+fn project_open_with_playback_and_prewarm(
+    core: &AppCore,
+    path: String,
+    playback: &crate::playback::PlaybackState,
+    prewarm: &crate::media::prewarm::PrewarmScheduler,
+) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
+    playback.ensure_project_transition_available()?;
+    let prepared =
+        AppCore::prepare_project_open(std::path::PathBuf::from(path)).map_err(|error| {
+            crate::playback::session::PlaybackCommandError::engine(error.to_string())
+        })?;
+    let transition = playback.begin_project_transition()?;
+    if let Err(error) = prewarm.begin_project_transition() {
+        playback.cancel_project_transition(transition);
+        return Err(crate::playback::session::PlaybackCommandError::busy(error));
+    }
+    let snapshot = TimelineSnapshotDto::from(core.commit_project_open(prepared));
+    playback.activate_project(transition, snapshot.project_epoch);
+    prewarm.activate_project(snapshot.project_epoch);
+    Ok(snapshot)
+}
+
+#[cfg(not(feature = "playback-engine"))]
+#[tauri::command]
+pub fn project_open(
+    core: State<'_, AppCore>,
+    path: String,
+    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
+) -> Result<TimelineSnapshotDto, String> {
+    let prepared = AppCore::prepare_project_open(std::path::PathBuf::from(path))
+        .map_err(|error| error.to_string())?;
+    prewarm.begin_project_transition()?;
+    let snapshot = TimelineSnapshotDto::from(core.commit_project_open(prepared));
+    prewarm.activate_project(snapshot.project_epoch);
+    Ok(snapshot)
 }
 
 /// `project_save`: `path = None` saves back to the open bundle; `Some` is save-as.
@@ -73,11 +174,12 @@ pub fn project_open(core: State<'_, AppCore>, path: String) -> Result<TimelineSn
 /// yields `None`, leaving any existing cover untouched, and never fails the save.
 #[tauri::command]
 pub fn project_save(core: State<'_, AppCore>, path: Option<String>) -> Result<String, String> {
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    let project_dir = core.project_dir();
-    let thumbnail =
-        opentake_media::capture_project_thumbnail(&timeline, &manifest, project_dir.as_deref());
+    let snapshot = core.runtime_snapshot();
+    let thumbnail = opentake_media::capture_project_thumbnail(
+        &snapshot.timeline,
+        &snapshot.media,
+        snapshot.project_dir.as_deref(),
+    );
 
     let target = path.map(std::path::PathBuf::from);
     core.save_project_with_thumbnail(target, thumbnail)
@@ -109,17 +211,19 @@ pub fn get_default_project_dir(app: AppHandle) -> Result<String, String> {
 /// the pure `export_xmeml`, and writes the file.
 #[tauri::command]
 pub fn export_xmeml(core: State<'_, AppCore>, path: String) -> Result<(), String> {
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    let project_dir = core.project_dir();
+    let snapshot = core.runtime_snapshot();
     // Resolve each source file's start timecode via ffprobe (upstream reads the
     // QuickTime `tmcd` track; here `opentake_media::read_start_timecode_frame`
     // reads `tags.timecode`). Per-file failures are silently dropped -> 0.
-    let start_timecodes = resolve_start_timecodes(&timeline, &manifest, project_dir.as_deref());
+    let start_timecodes = resolve_start_timecodes(
+        &snapshot.timeline,
+        &snapshot.media,
+        snapshot.project_dir.as_deref(),
+    );
     let xml = opentake_project::export_xmeml_with_timecodes(
-        &timeline,
-        &manifest,
-        project_dir.as_deref(),
+        &snapshot.timeline,
+        &snapshot.media,
+        snapshot.project_dir.as_deref(),
         &start_timecodes,
     );
     std::fs::write(&path, xml).map_err(|e| e.to_string())
@@ -174,9 +278,8 @@ pub fn export_fcpxml(core: State<'_, AppCore>, path: String) -> Result<(), Strin
 /// dropped — see `opentake_project::edl` for the documented limitations.
 #[tauri::command]
 pub fn export_edl(core: State<'_, AppCore>, path: String) -> Result<(), String> {
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    let edl = opentake_project::export_edl(&timeline, &manifest);
+    let snapshot = core.runtime_snapshot();
+    let edl = opentake_project::export_edl(&snapshot.timeline, &snapshot.media);
     std::fs::write(&path, edl).map_err(|e| e.to_string())
 }
 
@@ -187,10 +290,12 @@ pub fn export_edl(core: State<'_, AppCore>, path: String) -> Result<(), String> 
 /// (effects, transforms, keyframes).
 #[tauri::command]
 pub fn export_otio(core: State<'_, AppCore>, path: String) -> Result<(), String> {
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    let project_dir = core.project_dir();
-    let json = opentake_project::export_otio(&timeline, &manifest, project_dir.as_deref());
+    let snapshot = core.runtime_snapshot();
+    let json = opentake_project::export_otio(
+        &snapshot.timeline,
+        &snapshot.media,
+        snapshot.project_dir.as_deref(),
+    );
     std::fs::write(&path, json).map_err(|e| e.to_string())
 }
 
@@ -201,10 +306,12 @@ pub fn export_otio(core: State<'_, AppCore>, path: String) -> Result<(), String>
 /// `opentake_project::fcpxml_modern`.
 #[tauri::command]
 pub fn export_fcpxml_modern(core: State<'_, AppCore>, path: String) -> Result<(), String> {
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    let project_dir = core.project_dir();
-    let xml = opentake_project::export_fcpxml(&timeline, &manifest, project_dir.as_deref());
+    let snapshot = core.runtime_snapshot();
+    let xml = opentake_project::export_fcpxml(
+        &snapshot.timeline,
+        &snapshot.media,
+        snapshot.project_dir.as_deref(),
+    );
     std::fs::write(&path, xml).map_err(|e| e.to_string())
 }
 
@@ -286,8 +393,30 @@ pub fn can_redo(core: State<'_, AppCore>) -> bool {
 /// routes it through [`AppCore::apply`] (which performs the snapshot/commit/
 /// version transaction and emits `TimelineChanged`).
 #[tauri::command]
-pub fn edit_apply(core: State<'_, AppCore>, command: EditRequest) -> Result<EditResultDto, String> {
-    let cmd = command.into_command()?;
+pub fn edit_apply(
+    core: State<'_, AppCore>,
+    render: State<'_, crate::render::RenderState>,
+    media: State<'_, crate::media::MediaState>,
+    command: EditRequest,
+) -> Result<EditResultDto, String> {
+    let cmd = match command {
+        EditRequest::FreezeFrame {
+            clip_id,
+            at_frame,
+            duration_frames,
+        } => {
+            validate_freeze_frame_request(&core, &clip_id, at_frame, duration_frames)?;
+            let media_ref =
+                crate::render::capture_freeze_frame(&core, &render, &media, &clip_id, at_frame)?;
+            EditCommand::FreezeFrame {
+                clip_id,
+                at_frame,
+                duration_frames,
+                media_ref,
+            }
+        }
+        other => other.into_command()?,
+    };
     handle_edit_apply(&core, cmd).map_err(msg)
 }
 
@@ -299,6 +428,40 @@ pub fn check_path_exists(path: String) -> bool {
 
 fn msg(e: CmdError) -> String {
     e.message
+}
+
+fn validate_freeze_frame_request(
+    core: &AppCore,
+    clip_id: &str,
+    at_frame: i32,
+    duration_frames: i32,
+) -> Result<(), String> {
+    let timeline = core.get_timeline().timeline;
+    let clip = timeline
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .find(|clip| clip.id == clip_id)
+        .ok_or_else(|| format!("Clip not found: {clip_id}"))?;
+    if !(at_frame > clip.start_frame && at_frame < clip.end_frame()) {
+        return Err(format!(
+            "Frame {at_frame} must be strictly inside clip range ({}..{})",
+            clip.start_frame,
+            clip.end_frame()
+        ));
+    }
+    if duration_frames < 1 {
+        return Err(format!(
+            "durationFrames must be >= 1 (got {duration_frames})"
+        ));
+    }
+    if !matches!(clip.media_type, ClipType::Video | ClipType::Image) {
+        return Err(format!(
+            "Freeze Frame requires a video or image clip (got {:?})",
+            clip.media_type
+        ));
+    }
+    Ok(())
 }
 
 // MARK: - EditRequest (serde-friendly mirror of EditCommand)
@@ -330,6 +493,12 @@ pub enum EditRequest {
     RemoveClips { clip_ids: Vec<String> },
     #[serde(rename_all = "camelCase")]
     SplitClip { clip_id: String, at_frame: i32 },
+    #[serde(rename_all = "camelCase")]
+    FreezeFrame {
+        clip_id: String,
+        at_frame: i32,
+        duration_frames: i32,
+    },
     #[serde(rename_all = "camelCase")]
     TrimClips { edits: Vec<TrimEditDto> },
     #[serde(rename_all = "camelCase")]
@@ -486,6 +655,9 @@ impl EditRequest {
             EditRequest::RemoveClips { clip_ids } => EditCommand::RemoveClips { clip_ids },
             EditRequest::SplitClip { clip_id, at_frame } => {
                 EditCommand::SplitClip { clip_id, at_frame }
+            }
+            EditRequest::FreezeFrame { .. } => {
+                return Err("freezeFrame must be handled by edit_apply".into())
             }
             EditRequest::TrimClips { edits } => EditCommand::TrimClips {
                 edits: edits.into_iter().map(TrimEditDto::into_edit).collect(),
@@ -760,6 +932,8 @@ pub struct ClipPropertiesDto {
     #[serde(default)]
     pub transform: Option<Transform>,
     #[serde(default)]
+    pub reversed: Option<bool>,
+    #[serde(default)]
     pub text_content: Option<String>,
     #[serde(default)]
     pub text_style: Option<TextStyle>,
@@ -789,6 +963,7 @@ impl ClipPropertiesDto {
             volume: self.volume,
             opacity: self.opacity,
             transform: self.transform,
+            reversed: self.reversed,
             text_content: self.text_content,
             text_style: self.text_style,
             crop: self.crop,
@@ -1014,10 +1189,70 @@ impl KeyframeValueDto {
     }
 }
 
+#[cfg(all(test, feature = "playback-engine"))]
+mod project_prewarm_lifecycle_tests {
+    use super::project_open_with_playback_and_prewarm;
+    use crate::media::prewarm::PrewarmScheduler;
+    use crate::playback::PlaybackState;
+    use opentake_core::AppCore;
+
+    #[test]
+    fn failed_project_prepare_changes_no_playback_or_prewarm_state() {
+        let core = AppCore::new();
+        let before = core.project_revision();
+        let playback = PlaybackState::new();
+        let prewarm = PrewarmScheduler::new(before.project_epoch);
+        let missing = tempfile::tempdir()
+            .expect("tempdir")
+            .path()
+            .join("missing.opentake")
+            .to_string_lossy()
+            .into_owned();
+
+        let error = project_open_with_playback_and_prewarm(&core, missing, &playback, &prewarm)
+            .expect_err("missing project must fail in prepare");
+
+        assert_eq!(
+            error.code,
+            crate::playback::session::PlaybackErrorCode::Engine
+        );
+        assert_eq!(core.project_revision(), before);
+        assert_eq!(prewarm.project_state(), (before.project_epoch, false));
+        assert!(playback.active_identity().is_none());
+    }
+
+    #[test]
+    fn successful_open_activates_prepared_epoch_in_both_coordinators() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let bundle = fixture.path().join("prepared.opentake");
+        let source = AppCore::new();
+        source
+            .save_project(Some(bundle.clone()))
+            .expect("save project fixture");
+
+        let core = AppCore::new();
+        let before = core.project_revision();
+        let playback = PlaybackState::new();
+        let prewarm = PrewarmScheduler::new(before.project_epoch);
+        let snapshot = project_open_with_playback_and_prewarm(
+            &core,
+            bundle.to_string_lossy().into_owned(),
+            &playback,
+            &prewarm,
+        )
+        .expect("commit prepared project");
+
+        assert_ne!(snapshot.project_epoch, before.project_epoch);
+        assert_eq!(prewarm.project_state(), (snapshot.project_epoch, false));
+    }
+}
+
 #[cfg(test)]
 mod edit_request_serde_tests {
-    use super::EditRequest;
-    use opentake_core::EditCommand;
+    use super::{validate_freeze_frame_request, EditRequest};
+    use opentake_core::{AppCore, EditCommand};
+    use opentake_domain::ClipType;
+    use opentake_ops::ClipEntry;
 
     // Regression: the front end sends camelCase keys (clipIds/clipId/atFrame…).
     // serde's enum-level `rename_all` does NOT rename struct-variant fields, so
@@ -1060,6 +1295,107 @@ mod edit_request_serde_tests {
             }
             other => panic!("expected SetClipProperties, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn deserializes_set_clip_properties_with_reversed() {
+        let request: EditRequest = serde_json::from_str(
+            r#"{"type":"setClipProperties","clipIds":["c1"],"properties":{"reversed":true}}"#,
+        )
+        .expect("setClipProperties with reversed camelCase");
+
+        match request.into_command().expect("setClipProperties command") {
+            EditCommand::SetClipProperties { properties, .. } => {
+                assert_eq!(properties.reversed, Some(true));
+            }
+            other => panic!("expected SetClipProperties, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_freeze_frame() {
+        let request = serde_json::from_str::<EditRequest>(
+            r#"{"type":"freezeFrame","clipId":"clip-1","atFrame":120,"durationFrames":30}"#,
+        )
+        .expect("freezeFrame camelCase");
+
+        match request {
+            EditRequest::FreezeFrame {
+                clip_id,
+                at_frame,
+                duration_frames,
+            } => {
+                assert_eq!(clip_id, "clip-1");
+                assert_eq!(at_frame, 120);
+                assert_eq!(duration_frames, 30);
+            }
+            other => panic!("expected FreezeFrame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn freeze_frame_preflight_rejects_bad_requests_before_capture() {
+        let core = AppCore::new();
+
+        core.apply(EditCommand::InsertTrack {
+            kind: ClipType::Video,
+            at: None,
+        })
+        .expect("video track");
+        let err = validate_freeze_frame_request(&core, "nope", 10, 1).unwrap_err();
+        assert!(err.contains("Clip not found"));
+
+        let added = core
+            .apply(EditCommand::AddClips {
+                entries: vec![ClipEntry {
+                    media_ref: "asset-1".into(),
+                    media_type: ClipType::Video,
+                    source_clip_type: ClipType::Video,
+                    track_index: 0,
+                    start_frame: 100,
+                    duration_frames: 60,
+                    trim_start_frame: None,
+                    trim_end_frame: None,
+                    has_audio: false,
+                    add_linked_audio: false,
+                    transform: None,
+                }],
+            })
+            .expect("video clip");
+        let clip_id = added.affected_clip_ids[0].clone();
+        let err = validate_freeze_frame_request(&core, &clip_id, 100, 30).unwrap_err();
+        assert!(err.contains("strictly inside clip range"));
+
+        let err = validate_freeze_frame_request(&core, &clip_id, 120, 0).unwrap_err();
+        assert!(err.contains("durationFrames must be >= 1"));
+
+        let audio = AppCore::new();
+        audio
+            .apply(EditCommand::InsertTrack {
+                kind: ClipType::Audio,
+                at: None,
+            })
+            .expect("audio track");
+        let added = audio
+            .apply(EditCommand::AddClips {
+                entries: vec![ClipEntry {
+                    media_ref: "asset-a1".into(),
+                    media_type: ClipType::Audio,
+                    source_clip_type: ClipType::Audio,
+                    track_index: 0,
+                    start_frame: 100,
+                    duration_frames: 60,
+                    trim_start_frame: None,
+                    trim_end_frame: None,
+                    has_audio: true,
+                    add_linked_audio: false,
+                    transform: None,
+                }],
+            })
+            .expect("audio clip");
+        let audio_clip_id = added.affected_clip_ids[0].clone();
+        let err = validate_freeze_frame_request(&audio, &audio_clip_id, 120, 30).unwrap_err();
+        assert!(err.contains("video or image clip"));
     }
 
     #[test]

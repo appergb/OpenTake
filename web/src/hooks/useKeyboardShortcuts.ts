@@ -14,6 +14,9 @@ import * as edit from "../store/editActions";
 import { saveCurrentProject } from "../store/projectActions";
 import { ZOOM } from "../lib/theme";
 import type { AppView } from "../store/uiStore";
+import { isTauri } from "../lib/api";
+import { resolveTimelinePlaybackRoute } from "../components/preview/playbackRoute";
+import { rustEngineEnabled } from "../components/preview/rustEngine";
 
 /** Per-keypress zoom step for ⌘+ / ⌘- (剪映: Cmd + +/-). */
 const ZOOM_KEY_STEP = 1.3;
@@ -39,6 +42,7 @@ export function shouldHandleTransportSpaceKey(e: KeyboardEvent, view: AppView): 
 interface TransportSpaceUi {
   view: AppView;
   previewMediaId: string | null;
+  timelinePlaybackAllowed: boolean;
   requestMediaPreviewToggle: () => void;
   togglePlay: () => void;
 }
@@ -53,9 +57,21 @@ export function handleTransportSpaceKeyDown(
   if (e.repeat) return true;
   if (ui.previewMediaId) {
     ui.requestMediaPreviewToggle();
-  } else {
+  } else if (ui.timelinePlaybackAllowed) {
     ui.togglePlay(); // rewinds from the parked end frame on replay
   }
+  return true;
+}
+
+export function handleProjectSaveKeyDown(
+  e: KeyboardEvent,
+  save: () => void = () => {
+    void saveCurrentProject();
+  },
+): boolean {
+  if (e.code !== "KeyS" || (!e.metaKey && !e.ctrlKey)) return false;
+  e.preventDefault();
+  if (!e.repeat) save();
   return true;
 }
 
@@ -63,7 +79,15 @@ export function useKeyboardShortcuts() {
   useEffect(() => {
     const handleSpaceKeyDown = (e: KeyboardEvent) => {
       const ui = useEditorUiStore.getState();
-      handleTransportSpaceKeyDown(e, ui);
+      const timeline = useProjectStore.getState().timeline;
+      const route = resolveTimelinePlaybackRoute(timeline, {
+        rustAvailable: isTauri,
+        rustEnabled: rustEngineEnabled(),
+      });
+      handleTransportSpaceKeyDown(e, {
+        ...ui,
+        timelinePlaybackAllowed: route.kind !== "unsupported",
+      });
     };
     const handler = (e: KeyboardEvent) => {
       if (isTextEntry(e.target)) return;
@@ -91,6 +115,8 @@ export function useKeyboardShortcuts() {
         ui.setScroll(Math.max(0, f * (next - old) + ui.scrollLeft), ui.scrollTop);
       };
 
+      if (handleProjectSaveKeyDown(e)) return;
+
       // Cmd-modified actions.
       if (mod) {
         switch (e.code) {
@@ -115,10 +141,6 @@ export function useKeyboardShortcuts() {
             // ⌘K (existing) and ⌘B (剪映 split-at-playhead) both split.
             e.preventDefault();
             edit.splitAtPlayhead();
-            return;
-          case "KeyS":
-            e.preventDefault();
-            void saveCurrentProject();
             return;
           case "Digit1":
             e.preventDefault();

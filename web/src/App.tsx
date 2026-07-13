@@ -1,7 +1,9 @@
 import { useEffect } from "react";
 import { TitleBar } from "./components/shell/TitleBar";
 import { ExportDialog } from "./components/shell/ExportDialog";
+import { SaveAsProgress } from "./components/shell/SaveAsProgress";
 import { EditorSplit } from "./components/shell/EditorSplit";
+import { CompatibilityBanner } from "./components/shell/CompatibilityBanner";
 import { HomeView } from "./components/home/HomeView";
 import { SettingsView } from "./components/settings/SettingsView";
 import { LibraryView } from "./components/media/LibraryView";
@@ -98,12 +100,10 @@ export default function App() {
         height: "100%",
         width: "100%",
         position: "relative",
-        // Editor view: transparent root — each panel paints itself, and the
-        // preview hole must see through to the native mpv layer. Full-screen
-        // views (home/library) keep the base backdrop.
-        background: view === "editor" ? "transparent" : "var(--bg-base)",
+        background: "var(--bg-base)",
       }}
     >
+      <CompatibilityBanner />
       {view === "home" ? (
         <HomeView />
       ) : view === "library" ? (
@@ -118,6 +118,7 @@ export default function App() {
       )}
       {settingsOpen && <SettingsView />}
       <ExportDialog />
+      <SaveAsProgress />
       <Toast />
     </div>
   );

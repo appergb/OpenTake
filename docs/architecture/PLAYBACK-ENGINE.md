@@ -1,69 +1,128 @@
-# 流式播放引擎（#53 / ROADMAP Phase 4）
+# Playback engine architecture
 
-> Rust 流式合成播放：把时间线**连续播放**从「前端单 rAF 时钟驱动原生 `<video>`/`<audio>`」升级为「Rust 连续解码 → wgpu 合成（与导出同一像素路径）→ MJPEG 传给 WebView，cpal 音频做主时钟」。**暂停 / scrub 仍走原 `<video>` 单帧路径**（不回退 `74c4c82` 暂停冻结 / `5fa3f6f` resume 不 force-seek）。整数帧贯穿。
->
-> 全部代码在 `playback-engine` cargo feature（**默认关**）+ 前端运行期 flag（**默认关**）后；翻开前对既有行为零影响。
+> Current reviewed state: 2026-07-11. The original 2026-07-04 default-off
+> MJPEG design is historical; this document records the Wave 1A implementation.
 
-## 为什么
+## Capability route is the sole authority
 
-旧的 `<video>` 多轨播放：高码率卡顿、ProRes 等 WebView 放不了、A/V 精度有限、**播放时看不到合成效果**（调色/特效/多轨叠加只在暂停态 `composite_frame` 有）。流式引擎在播放态用 Rust 解码+wgpu 合成，解决以上四点。对应 #92 / #100 / #131 / #142 / #151 的播放侧。
+`resolveTimelinePlaybackRoute` selects exactly one route before runtime
+preference or fallback is considered:
 
-## 架构
+- `webkit`: ordinary visible video/image/audio, including temporal-only reverse
+  or speed changes that do not require compositing.
+- `rust`: content requiring the implemented compositor path: text, color grade,
+  chroma key, and up to four linear/circle masks.
+- `unsupported`: Lottie, enabled generic effects, polygon masks, more than four
+  masks, or any timeline that combines compositing with reverse or a non-unit
+  speed. Rust unavailable/disabled is also unsupported for Rust-only content.
 
+Unsupported capability is fail closed. It receives a localized explanation and
+disabled Play/Capture/Space controls; it is not silently rendered by an engine
+that would omit authored content. Only a typed Rust `engine` failure may use the
+WebKit runtime fallback; `busy`, `cancelled`, and `superseded` are control states.
+
+## WebKit route
+
+WebKit is the normal route for ordinary media. One frontend clock drives the
+mounted `<video>`/`<audio>` elements; pause/resume keeps the same decoded DOM
+surface. Reverse and positive-speed media can remain on this route when no
+compositor-only content is present. This route has no libmpv dependency or
+transparent native-player hole.
+
+## Rust route and exact publication
+
+Rust continuously decodes, builds the RenderPlan, composites with wgpu, and
+uses cpal audio (or a wall clock when audio is unavailable). Transport to the
+preview is a session-scoped finite request, not `<img src=MJPEG>`:
+
+```text
+rendered RGBA -> JPEG stage -> PublicationGate commit
+  -> playback_frame {projectEpoch, timelineVersion, sessionId, frame, sequence, terminal}
+  -> GET /frame with those exact fields -> 200 JPEG or 204 on mismatch
 ```
-PLAY 态:
-  cpal 音频专线程 ── frames_played(AtomicU64) ──┐  (主时钟)
-                                                ▼
-  渲染专线程(自持 wgpu device):
-    每轮: target = clock.frame() → plan.frame(timeline,target)
-        → StreamingResolver.sync_active(按 clip_id 管 VideoStream, try_recv drain 到目标帧, 落后复用上一帧)
-        → Compositor.render_to_rgba(同导出像素路径)
-        → MjpegSink: JPEG → broadcast → axum /stream(multipart/x-mixed-replace)
-        → emit "playback_frame"{frame}
-  前端: <img src=MJPEG> 显像素; playback_frame 事件推 activeFrame(播放头/时间码)
 
-SCRUB / PAUSE 态: 引擎停, 回原 <video> + composite_frame 路径(零改动)。
-```
+The encoded JPEG, exact-frame store entry, sequence, terminal flag, and Tauri
+event share one publication coordinator. `PublicationGate` is closed before
+timeout quarantine, stop, project/timeline invalidation, or teardown, so an
+in-flight old encoder cannot publish into a replacement session. The live
+transport gate verifies complete finite JPEG responses, exact identity, and
+fail-closed Origin handling; `/stream` and `/ws` remain diagnostic/server
+surfaces, not the production preview image contract.
 
-- **主时钟 = cpal 音频**：整条时间线预混成交错立体声 buffer（设备采样率），cpal 回调 lock-free 从 `buffer[pos..]` 拷贝并 `pos.fetch_add`（唯一推进点）；视频追音频（落后丢/复用、超前缓存）。**无音频/无设备 → 回退墙钟 `InstantClock`**，视频仍播。
-- **预览 = 导出**：复用 `build_render_plan` + `RenderPlan::frame` + `Compositor::render_to_rgba`；timeline→source 帧用现成 `source_frame_index`（trim/speed/整数帧）。
-- **隔离**：渲染线程自持独立 wgpu device，不碰暂停态 `composite_frame` 的 `RenderState`；cpal Stream（macOS `!Send`）独占音频线程。
+## Lifecycle, control, and bootstrap
 
-## 文件
+Playback identity is `{projectEpoch, timelineVersion, sessionId}`. Start takes
+one atomic runtime snapshot, prepares off the async executor, and rechecks the
+revision during installation. Pause, seek, stop, events, and frame requests are
+accepted only for the exact identity; an exact paused revision may retain and
+resume its session.
 
-| 文件 | 角色 |
-|---|---|
-| `crates/opentake-media/src/decode/stream.rs` | 连续视频解码原语（PR1，已在 main） |
-| `crates/opentake-media/src/decode/audio_stream.rs` | 交错（立体声）PCM 解码（#160） |
-| `src-tauri/src/playback/resolver.rs` | StreamingResolver：按 clip_id 管流 + drain 到目标帧（PR1） |
-| `src-tauri/src/playback/engine.rs` | RenderLoop + 渲染线程 + clock/sink/emitter traits + InstantClock + loop_step（PR1） |
-| `src-tauri/src/playback/audio.rs` | cpal AudioClock + 立体声预混 + 设备声道映射（#63/#160） |
-| `src-tauri/src/playback/transport.rs` | axum MJPEG 服务 + Origin 守卫 + MjpegSink + TauriPlayheadEmitter（#64） |
-| `src-tauri/src/playback/commands.rs` | PlaybackState + playback_start/pause/stop/seek + get_preview_endpoint |
-| `web/src/components/preview/previewEngine.ts` | PLAY→Rust 切换缝（守卫分支）+ 中途 seek watcher（#162） |
-| `web/src/components/preview/Preview.tsx` | MJPEG `<img>` overlay |
-| `web/src/components/preview/rustEngine.ts` | `rustEngineEnabled()` 运行期 flag |
+Audio preparation has one persistent admitted worker and checked memory bounds;
+teardown uses one persistent reaper with at most two outstanding jobs. Queue,
+panic, cancellation, timeout, and project-boundary paths release capacity and
+return typed control errors. Publication is closed and audio muted before reap.
 
-## 灰度开关 + 真机验收
+The 2026-07-10 Promise-tail interrupt established that pause/stop must not wait
+behind obsolete slow startup. Wave 1A superseded that helper with the current
+identity-scoped controller plus backend cancellation and bounded reaping. The
+current invariant is still tail interruption: control/project boundaries
+invalidate old work first, and later completion cannot control or publish into
+the replacement.
 
-1. 编译：feature `playback-engine`（CI 已加 lint+test 步 + Linux `libasound2-dev`）。
-2. 运行期开关（默认关）：DevTools 控制台
-   ```js
-   localStorage.setItem('opentake.rustEngine', '1')   // 开
-   localStorage.removeItem('opentake.rustEngine')      // 回 <video>
-   ```
-3. 真机：`./web/node_modules/.bin/tauri build` → `cp -R target/release/bundle/macos/OpenTake.app /Applications/` → `open -a OpenTake` → 翻 flag → 验：
-   - 多轨/高码率工程播放**不卡**；
-   - ProRes 等 `<video>` 放不了的格式**能预览**；
-   - 播放时**可见**调色/特效/多轨叠加；
-   - **A/V 同步**在片段边界 / 变速下稳定（左右声道正确）；
-   - **scrub / 暂停 / resume 行为不变**（不回退 74c4c82 / 5fa3f6f）。
-   全绿后把 `rustEngineEnabled()` 改默认开（独立小 PR）。
+Cold Rust startup requests the exact nonnegative source frame with zero
+tolerance. Missing media, decode failure, worker failure, and premature stream
+disconnect propagate instead of publishing a black clear. Cancellation remains
+attached through audio preparation and first-frame readiness, and pending-to-
+running installation is atomic under the playback slot.
 
-## 取舍 / Follow-up
+## Retained-frame handoff
 
-- 音频当前**预混**（启动全量解码，已用 `spawn_blocking` 移出 IPC 线程）；分块/后台填充流式解码 → #160 另半。
-- CSP 暂留 `null`（已允许回环 `<img>`，功能 OK）；加固为 → #161（高风险白屏，须真机逐项验证）。
-- Lottie 合成接入 → #65（`opentake-motion` 无 Lottie 渲染器，是独立大工程）。
-- WebView2（Windows）multipart 长连接可靠性未验；`FrameSink` 已 trait 化，必要时换 WS/自定义 scheme。
-```
+The frontend owns two stable image slots. A matching event loads into the
+inactive slot; only that slot's matching completed `currentSrc` may be promoted.
+The previous visible slot remains painted during loading. Terminal publication
+is stopped only after the terminal image crosses the browser paint boundary;
+bounded retries retain the last good frame on failure. A matching paused
+composite releases the terminal Rust frame only after the replacement is loaded.
+Stale identity, sequence, load, cleanup, and paint callbacks are ignored.
+
+## Project/source identity and prewarm/cache
+
+One project epoch spans runtime snapshots, playback, and media prewarm. The
+prewarm scheduler has three persistent workers and a bounded 24-job queue;
+admission results are `queued`, `duplicate`, `cached`, `busy`, or
+`staleProject`. Project transition cancels old queued/running work and guarded
+same-directory publication rejects stale staged bytes.
+
+Poster, preview, waveform, and timeline filmstrip identity includes project
+epoch plus media/source identity. Reusing the same media id with a different
+source path cannot satisfy or block the replacement request, while edits inside
+the same project retain valid caches.
+
+## Reviewed evidence
+
+- Task 5.1-5.6 final commits `2eff907c`, `e2daeb279a33`, `ba5b1ceac463`,
+  `24ab2590ce96`, `f99da16c27b4`, and `3fe09766819b`: approved.
+- Task 6.1 `8b47e64a8e6c`: approved capability resolver.
+- Task 6.2 `dc83284319bd`: approved after repaired exact-bundle external QA.
+- Task 6.3 `1f2bf4e49877`: approved with final same-ID/different-path UI QA.
+- 2026-07-11 pre-document gate: focused Web 5 files/62 tests; full Web
+  54/570; playback integration 7/7; transport 6/6; workspace Rust passed.
+  Workspace still reports seven deliberate ignored probes: one ffmpeg/ffprobe
+  environment probe and six real-device probes (three export, three playback).
+
+Artifact hashes and the separation between older installed-app evidence and
+fresh detached bundles are recorded in
+[2026-07-10 playback/cache QA](../superpowers/archive/2026-07-10-playback-cache-installed-app-qa.md).
+
+## Not yet complete
+
+- Installed-app export UI artifact verification is not yet complete; unit and
+  integration export evidence does not replace that acceptance test.
+- Windows WebView2 transport, CSP hardening, and sidecar/bundled FFmpeg behavior
+  are not verified by the macOS detached-bundle QA.
+- Signing, notarization, asset-protocol scope, search-model integrity, and other
+  packaging/security hardening remain open.
+- Lottie, generic effects, polygon/overflow masks, and composited reverse/speed
+  are deliberately unsupported until their renderer paths exist.
+- ProRes/high-bitrate and A/V real-device probe coverage remains ignored in the
+  workspace gate and must not be described as newly verified by that gate.

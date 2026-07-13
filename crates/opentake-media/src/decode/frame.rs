@@ -11,12 +11,18 @@
 //! integration tests.
 
 use std::path::Path;
+use std::thread;
+use std::time::Duration;
 
 use ffmpeg_sidecar::event::FfmpegEvent;
+use image::ImageEncoder;
 
+use crate::cancel::MediaCancelToken;
 use crate::error::{MediaError, Result};
 use crate::ff;
 use crate::frame::RgbaFrame;
+
+const FRAME_CHILD_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// A frame decode request.
 #[derive(Clone, Debug)]
@@ -117,27 +123,155 @@ fn frame_args(path: &Path, req: &FrameRequest) -> Vec<String> {
 
 /// Decode the frame at/after `req.time_secs`, returning `(actual_secs, frame)`.
 pub fn decode_frame_at(path: &Path, req: &FrameRequest) -> Result<(f64, RgbaFrame)> {
+    decode_frame_at_cancellable(path, req, &MediaCancelToken::new())
+}
+
+pub fn decode_frame_at_cancellable(
+    path: &Path,
+    req: &FrameRequest,
+    cancel: &MediaCancelToken,
+) -> Result<(f64, RgbaFrame)> {
+    if cancel.is_cancelled() {
+        return Err(MediaError::Cancelled);
+    }
     let mut child = ff::ffmpeg()
         .args(frame_args(path, req))
         .spawn()
         .map_err(|e| MediaError::Ffmpeg(format!("spawn: {e}")))?;
+    cancel.child_spawned();
 
-    let mut result: Option<(f64, RgbaFrame)> = None;
-    let iter = child
-        .iter()
-        .map_err(|e| MediaError::Ffmpeg(format!("iter: {e}")))?;
-    for event in iter {
-        if let FfmpegEvent::OutputFrame(f) = event {
-            if f.width == 0 || f.height == 0 {
-                continue;
+    let iter = match child.iter() {
+        Ok(iter) => iter,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(MediaError::Ffmpeg(format!("iter: {error}")));
+        }
+    };
+    let reader_cancel = cancel.clone();
+    let requested_time = req.time_secs;
+    let reader = match thread::Builder::new()
+        .name("opentake-frame-events".to_string())
+        .spawn(move || {
+            reader_cancel.reader_started();
+            let result = iter
+                .filter_map(|event| match event {
+                    FfmpegEvent::OutputFrame(frame) if frame.width > 0 && frame.height > 0 => {
+                        let actual = requested_time.max(frame.timestamp as f64);
+                        Some((
+                            actual,
+                            RgbaFrame::new(frame.width, frame.height, frame.data),
+                        ))
+                    }
+                    _ => None,
+                })
+                .next();
+            reader_cancel.reader_finished();
+            result
+        }) {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(MediaError::Ffmpeg(format!(
+                "spawn frame event reader: {error}"
+            )));
+        }
+    };
+
+    loop {
+        if cancel.checkpoint() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(MediaError::Cancelled);
+        }
+        if reader.is_finished() {
+            // The iterator stops after the first frame. Explicitly terminate
+            // the single-frame command before joining so no producer remains
+            // blocked trying to publish a later event into a dropped receiver.
+            let _ = child.kill();
+            let _ = child.wait();
+            let result = reader
+                .join()
+                .map_err(|_| MediaError::Ffmpeg("frame event reader panicked".to_string()))?;
+            if cancel.is_cancelled() {
+                return Err(MediaError::Cancelled);
             }
-            let actual = req.time_secs.max(f.timestamp as f64);
-            result = Some((actual, RgbaFrame::new(f.width, f.height, f.data)));
-            break;
+            return result
+                .ok_or_else(|| MediaError::Decode(format!("no frame at {:.3}s", req.time_secs)));
+        }
+        match child.as_inner_mut().try_wait() {
+            Ok(Some(_)) => {
+                let result = reader
+                    .join()
+                    .map_err(|_| MediaError::Ffmpeg("frame event reader panicked".to_string()))?;
+                if cancel.is_cancelled() {
+                    return Err(MediaError::Cancelled);
+                }
+                return result.ok_or_else(|| {
+                    MediaError::Decode(format!("no frame at {:.3}s", req.time_secs))
+                });
+            }
+            Ok(None) => thread::sleep(FRAME_CHILD_POLL_INTERVAL),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(MediaError::Io(error));
+            }
         }
     }
-    let _ = child.wait();
-    result.ok_or_else(|| MediaError::Decode(format!("no frame at {:.3}s", req.time_secs)))
+}
+
+/// Decode one cancellable frame and encode it as PNG bytes without publishing
+/// a cache file. Project-scoped prewarm jobs stage these bytes and let their
+/// epoch guard perform the final atomic rename.
+pub fn decode_frame_png_cancellable(
+    path: &Path,
+    req: &FrameRequest,
+    cancel: &MediaCancelToken,
+) -> Result<(f64, Vec<u8>)> {
+    let (actual, frame) = decode_frame_at_cancellable(path, req, cancel)?;
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut bytes)
+        .write_image(
+            &frame.rgba,
+            frame.width,
+            frame.height,
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|error| MediaError::Encode(format!("png: {error}")))?;
+    Ok((actual, bytes))
+}
+
+pub fn decode_frames_at_cancellable(
+    path: &Path,
+    times_secs: &[f64],
+    base: &FrameRequest,
+    cancel: &MediaCancelToken,
+) -> Vec<Result<(f64, RgbaFrame)>> {
+    let mut out = Vec::with_capacity(times_secs.len());
+    let mut last_time = f64::NEG_INFINITY;
+    for &time in times_secs {
+        if cancel.checkpoint() {
+            out.push(Err(MediaError::Cancelled));
+            break;
+        }
+        let request = FrameRequest {
+            time_secs: time,
+            ..base.clone()
+        };
+        match decode_frame_at_cancellable(path, &request, cancel) {
+            Ok((actual, frame)) if actual > last_time => {
+                last_time = actual;
+                out.push(Ok((actual, frame)));
+            }
+            Ok(_) | Err(MediaError::Decode(_)) => {}
+            Err(error) => out.push(Err(error)),
+        }
+    }
+    out
 }
 
 /// Decode a batch of ascending `times_secs`. De-duplicates frames whose decoded
@@ -175,7 +309,53 @@ pub fn decode_frames_at(
 mod tests {
     use super::*;
 
+    use std::process::Command;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
     // --- fit_within: pure scaling math ---
+
+    #[test]
+    fn cancelling_frame_decode_with_no_iterator_events_kills_child_and_joins_reader() {
+        assert!(
+            crate::ff::ffmpeg_available(),
+            "required cancellation test needs a runnable FFmpeg"
+        );
+        let temp = tempfile::tempdir().expect("create frame cancellation fixture directory");
+        let fifo = temp.path().join("blocking-video-input");
+        let status = Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("spawn mkfifo");
+        assert!(
+            status.success(),
+            "mkfifo must create a blocking media input"
+        );
+
+        let cancel = MediaCancelToken::new();
+        let worker_cancel = cancel.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result =
+                decode_frame_at_cancellable(&fifo, &FrameRequest::default(), &worker_cancel);
+            done_tx.send(result).expect("publish frame decoder result");
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while cancel.spawned_child_count() == 0 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let spawned = cancel.spawned_child_count();
+        cancel.cancel();
+        assert_eq!(spawned, 1, "the test must cancel a live FFmpeg child");
+
+        let result = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("cancellation must not wait for the first iterator event");
+        assert!(matches!(result, Err(MediaError::Cancelled)));
+        worker.join().expect("frame decoder worker must be reaped");
+        assert_eq!(cancel.active_reader_count(), 0);
+    }
 
     #[test]
     fn fit_within_no_box_keeps_size() {

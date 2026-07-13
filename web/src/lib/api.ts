@@ -9,18 +9,25 @@
  */
 
 import type {
+  AccountInfo,
+  AccountStatus,
   CaptionRequest,
+  ChatMessage,
+  ChatToolCall,
   ClipType,
   EditRequest,
   EditResult,
   GenerateCaptionsResult,
   MediaList,
   ModelStatus,
+  PlaybackCommandError,
+  PlaybackFrameEvent,
+  PlaybackIdentity,
+  RuntimeTimelineSnapshot,
   SearchIndexStatus,
   SearchModelStatus,
   SearchResults,
   SecretStatus,
-  TimelineSnapshot,
   Transcript,
 } from "./types";
 
@@ -48,10 +55,16 @@ async function ensureTauri(): Promise<void> {
 
 // MARK: - Commands
 
-export async function getTimeline(): Promise<TimelineSnapshot> {
+export async function getTimeline(): Promise<RuntimeTimelineSnapshot> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<TimelineSnapshot>("get_timeline");
-  return fallback.getTimeline();
+  if (invokeImpl) return invokeImpl<RuntimeTimelineSnapshot>("get_timeline");
+  return {
+    ...fallback.getTimeline(),
+    projectEpoch: 0,
+    projectPath: null,
+    compatibilityReadOnly: false,
+    compatibilityBlockers: [],
+  };
 }
 
 export async function editApply(command: EditRequest): Promise<EditResult> {
@@ -94,19 +107,31 @@ export async function canRedo(): Promise<boolean> {
   return false;
 }
 
-export async function projectNew(): Promise<void> {
+export async function projectNew(): Promise<RuntimeTimelineSnapshot> {
   await ensureTauri();
   if (invokeImpl) {
-    await invokeImpl<void>("project_new");
-    return;
+    return invokeImpl<RuntimeTimelineSnapshot>("project_new");
   }
   fallback.reset();
+  return {
+    ...fallback.getTimeline(),
+    projectEpoch: 0,
+    projectPath: null,
+    compatibilityReadOnly: false,
+    compatibilityBlockers: [],
+  };
 }
 
-export async function projectOpen(path: string): Promise<TimelineSnapshot> {
+export async function projectOpen(path: string): Promise<RuntimeTimelineSnapshot> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<TimelineSnapshot>("project_open", { path });
-  return fallback.getTimeline();
+  if (invokeImpl) return invokeImpl<RuntimeTimelineSnapshot>("project_open", { path });
+  return {
+    ...fallback.getTimeline(),
+    projectEpoch: 0,
+    projectPath: null,
+    compatibilityReadOnly: false,
+    compatibilityBlockers: [],
+  };
 }
 
 export async function projectSave(path: string | null): Promise<string> {
@@ -250,11 +275,26 @@ export interface ExportSummary {
   height: number;
   fps: number;
   frameCount: number;
+  hasAudio: boolean;
 }
 
-export async function exportVideo(req: ExportRequest): Promise<ExportSummary> {
+let nextExportOperationId = 0;
+
+/** Mint a process-local request identity that is carried by start, progress,
+ * and cancel IPC. The random UUID is preferred; the sequence fallback remains
+ * collision-free for this WebView lifetime. */
+export function createExportOperationId(scope: "video" | "save-as"): string {
+  const randomId = globalThis.crypto?.randomUUID?.();
+  const suffix = randomId ?? `${Date.now().toString(36)}-${++nextExportOperationId}`;
+  return `${scope}:${suffix}`;
+}
+
+export async function exportVideo(
+  req: ExportRequest,
+  operationId: string,
+): Promise<ExportSummary> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<ExportSummary>("export_video", { req });
+  if (invokeImpl) return invokeImpl<ExportSummary>("export_video", { req, operationId });
   throw new Error("video export requires the desktop app (GPU + ffmpeg)");
 }
 
@@ -266,14 +306,15 @@ export const EXPORT_CANCELLED_SENTINEL = "export cancelled";
 /** Request that the in-flight `export_video` stop at the next frame boundary.
  *  No-op outside Tauri (there is no export to cancel) and a no-op backend-side
  *  when nothing is exporting. */
-export async function cancelExport(): Promise<void> {
+export async function cancelExport(operationId: string): Promise<void> {
   await ensureTauri();
-  if (invokeImpl) await invokeImpl<void>("cancel_export");
+  if (invokeImpl) await invokeImpl<void>("cancel_export", { operationId });
 }
 
 /** Progress payload for `"export://progress"`: `done` of `total` frames
  *  composited so far. */
 export interface ExportProgress {
+  operationId: string;
   done: number;
   total: number;
 }
@@ -282,14 +323,22 @@ export interface ExportProgress {
  *  (at most every ~200ms, plus a final 100% emit). Returns an unlisten function;
  *  no-op (no-op unlisten) outside Tauri. */
 export async function onExportProgress(
+  operationId: string,
   handler: (progress: ExportProgress) => void,
 ): Promise<() => void> {
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("export://progress", (e) => {
-    const p = e.payload as { done?: number; total?: number } | undefined;
-    if (p && typeof p.done === "number" && typeof p.total === "number") {
-      handler({ done: p.done, total: p.total });
+    const p = e.payload as
+      | { operationId?: string; done?: number; total?: number }
+      | undefined;
+    if (
+      p &&
+      p.operationId === operationId &&
+      typeof p.done === "number" &&
+      typeof p.total === "number"
+    ) {
+      handler({ operationId: p.operationId, done: p.done, total: p.total });
     }
   });
 }
@@ -362,16 +411,60 @@ export async function getMedia(): Promise<MediaList> {
 }
 
 /**
- * `toggle_favorite`: add (`favorite = true`) or remove (`favorite = false`) media
- * assets from the per-project favorites set (#91), returning the refreshed
- * catalog. Favorites persist in the project manifest — not browser storage — so
- * they travel with the project. Unknown ids are ignored by the backend. Outside
- * Tauri there is no project, so this resolves to an empty catalog.
+ * `toggle_favorite`: copy or remove one project asset in the durable global
+ * library and persist its content hash in the project's compatibility mirror.
+ * Outside Tauri there is no project, so this resolves to an empty catalog.
  */
-export async function toggleFavorite(assetIds: string[], favorite: boolean): Promise<MediaList> {
+interface FavoriteProjectIdentity {
+  projectEpoch: number;
+  projectPath: string | null;
+}
+
+function favoriteProjectArgs(project: FavoriteProjectIdentity): {
+  expectedProjectEpoch: number;
+  expectedProjectPath: string;
+} {
+  if (project.projectPath === null) {
+    throw new Error("save the project before changing global favorites");
+  }
+  return {
+    expectedProjectEpoch: project.projectEpoch,
+    expectedProjectPath: project.projectPath,
+  };
+}
+
+export async function toggleFavorite(
+  assetId: string,
+  favorite: boolean,
+  project: FavoriteProjectIdentity,
+): Promise<MediaList> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<MediaList>("toggle_favorite", { assetIds, favorite });
+  if (invokeImpl) {
+    return invokeImpl<MediaList>("toggle_favorite", {
+      assetId,
+      favorite,
+      ...favoriteProjectArgs(project),
+    });
+  }
   return { items: [], folders: [] };
+}
+
+export async function syncProjectFavorites(
+  legacyAssetIds: string[],
+  project: FavoriteProjectIdentity,
+): Promise<import("./types").FavoriteSyncResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<import("./types").FavoriteSyncResult>("sync_project_favorites", {
+      legacyAssetIds,
+      ...favoriteProjectArgs(project),
+    });
+  }
+  return {
+    media: { items: [], folders: [] },
+    migratedLegacyAssetIds: [],
+    failures: [],
+  };
 }
 
 /**
@@ -390,13 +483,32 @@ export async function extractAudio(mediaId: string, outPath: string): Promise<st
 /**
  * `save_clip_as_media` (#91 §3.5): render one timeline clip — effects, color,
  * text, speed baked in — to a new .mp4 in the project bundle's media/ dir and
- * import it as a fresh asset. Returns the refreshed catalog. Video clips only
- * for now; needs a saved project. Requires the desktop app (GPU render + ffmpeg).
+ * import it as a fresh asset. This intentionally keeps the original single-clip
+ * semantics; marked ranges use the separate `save_range_as_media` contract.
  */
-export async function saveClipAsMedia(clipId: string): Promise<MediaList> {
+export async function saveClipAsMedia(
+  clipId: string,
+  operationId: string,
+): Promise<MediaList> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<MediaList>("save_clip_as_media", { clipId });
+  if (invokeImpl) {
+    return invokeImpl<MediaList>("save_clip_as_media", { clipId, operationId });
+  }
   throw new Error("saving a clip as media requires the desktop app");
+}
+
+export async function saveRangeAsMedia(
+  inFrame: number,
+  outFrame: number,
+  operationId: string,
+): Promise<MediaList> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<MediaList>("save_range_as_media", {
+      request: { inFrame, outFrame, operationId },
+    });
+  }
+  throw new Error("saving a range as media requires the desktop app");
 }
 
 // MARK: - Transcription (whisper model + on-device transcribe, #183 + captions)
@@ -604,20 +716,34 @@ export async function previewPoster(
   }
 }
 
-/** Fire-and-forget preview warm-up for a media asset when it's selected or drag
- *  starts: the backend decodes its hi-res first-frame poster into the on-disk
- *  cache on a worker thread, so a subsequent preview shows a sharp first frame
- *  with no decode on the interaction path. Deliberately light — it no longer
- *  warms the heavy 240-frame filmstrip sprite or waveform (which never sped
- *  actual `<video>` playback). No-op in the browser fallback / for non-video;
- *  errors are swallowed (best-effort). */
-export async function preloadMedia(mediaRef: string): Promise<void> {
+export type PrewarmResult = "queued" | "duplicate" | "cached" | "busy" | "staleProject";
+
+const PREWARM_RESULTS = new Set<PrewarmResult>([
+  "queued",
+  "duplicate",
+  "cached",
+  "busy",
+  "staleProject",
+]);
+
+export function decodePrewarmResult(value: unknown): PrewarmResult | null {
+  return typeof value === "string" && PREWARM_RESULTS.has(value as PrewarmResult)
+    ? (value as PrewarmResult)
+    : null;
+}
+
+/** Queue the project-scoped poster/waveform warm-up owned by the bounded Rust
+ * scheduler. The structured admission result lets callers distinguish a cache
+ * hit from queued/duplicate/busy work without starting a synchronous decoder.
+ * Browser fallback is already cache-safe; transport errors remain best-effort. */
+export async function preloadMedia(mediaRef: string): Promise<PrewarmResult | null> {
   await ensureTauri();
-  if (!invokeImpl) return;
+  if (!invokeImpl) return "cached";
   try {
-    await invokeImpl<void>("preload_media", { mediaRef });
+    return decodePrewarmResult(await invokeImpl<unknown>("preload_media", { mediaRef }));
   } catch (e) {
     console.warn(`preload_media failed for ${mediaRef}:`, e);
+    return null;
   }
 }
 
@@ -737,29 +863,117 @@ export async function secretDelete(provider: string): Promise<SecretStatus> {
   return NO_SECRET;
 }
 
+// MARK: - Optional account backend
+//
+// OpenTake has no official backend. Outside Tauri, and before a user stores a
+// custom backend origin, this surface remains offline and performs no network
+// activity. The plaintext token only crosses the boundary on login and is never
+// returned to JavaScript after verification.
+
+export async function accountSetBackendUrl(url: string | null): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) await invokeImpl<void>("account_set_backend_url", { url });
+}
+
+export async function accountGetBackendUrl(): Promise<string | null> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<string | null>("account_get_backend_url");
+  return null;
+}
+
+export async function accountLogin(token: string): Promise<AccountInfo> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<AccountInfo>("account_login", { token });
+  throw new Error("account login requires the desktop app");
+}
+
+export async function accountLogout(): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) await invokeImpl<void>("account_logout");
+}
+
+export async function accountGetStatus(): Promise<AccountStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<AccountStatus>("account_get_status");
+  return { type: "offline" };
+}
+
+// MARK: - In-app chat (#HANDOFF-3.3)
+
+export interface ChatDelta {
+  sessionId: string;
+  delta: string;
+}
+
+export interface ChatToolCallEvent {
+  sessionId: string;
+  toolCall: ChatToolCall;
+}
+
+export interface ChatDoneEvent {
+  sessionId: string;
+  message: ChatMessage;
+}
+
+export async function chatSend(
+  sessionId: string,
+  text: string,
+  chatProvider: string,
+): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<void>("chat_send", { sessionId, text, chatProvider });
+  throw new Error("chat requires the desktop app (LLM + tool dispatch)");
+}
+
+export async function chatHistory(sessionId: string): Promise<ChatMessage[]> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<ChatMessage[]>("chat_history", { sessionId });
+  return [];
+}
+
+export async function chatCancel(sessionId: string): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) await invokeImpl<void>("chat_cancel", { sessionId });
+}
+
 // MARK: - Events
 
 /** Subscribe to `timeline_changed`. Returns an unlisten function. No-op (and a
  *  no-op unlisten) when not in Tauri. */
 export async function onTimelineChanged(
-  handler: (version: number) => void,
+  handler: (projectEpoch: number, version: number) => void,
 ): Promise<() => void> {
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("timeline_changed", (e) => {
-    const payload = e.payload as { version?: number } | undefined;
-    if (payload && typeof payload.version === "number") handler(payload.version);
+    const payload = e.payload as { projectEpoch?: number; version?: number } | undefined;
+    if (
+      payload &&
+      typeof payload.projectEpoch === "number" &&
+      typeof payload.version === "number"
+    ) {
+      handler(payload.projectEpoch, payload.version);
+    }
   });
 }
 
 export async function onProjectOpened(
-  handler: (path: string, version: number) => void,
+  handler: (path: string, projectEpoch: number, version: number) => void,
 ): Promise<() => void> {
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("project_opened", (e) => {
-    const p = e.payload as { path?: string; version?: number } | undefined;
-    if (p) handler(p.path ?? "", p.version ?? 0);
+    const p = e.payload as
+      | { path?: string; projectEpoch?: number; version?: number }
+      | undefined;
+    if (
+      p &&
+      typeof p.path === "string" &&
+      typeof p.projectEpoch === "number" &&
+      typeof p.version === "number"
+    ) {
+      handler(p.path, p.projectEpoch, p.version);
+    }
   });
 }
 
@@ -782,6 +996,45 @@ export async function onGoHome(handler: () => void): Promise<() => void> {
   return listenImpl("go_home", () => handler());
 }
 
+export async function onChatDelta(
+  handler: (event: ChatDelta) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("chat_delta", (e) => {
+    const payload = e.payload as { sessionId?: string; delta?: string } | undefined;
+    if (payload && typeof payload.sessionId === "string" && typeof payload.delta === "string") {
+      handler({ sessionId: payload.sessionId, delta: payload.delta });
+    }
+  });
+}
+
+export async function onChatToolCall(
+  handler: (event: ChatToolCallEvent) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("chat_tool_call", (e) => {
+    const payload = e.payload as { sessionId?: string; toolCall?: ChatToolCall } | undefined;
+    if (payload && typeof payload.sessionId === "string" && payload.toolCall) {
+      handler({ sessionId: payload.sessionId, toolCall: payload.toolCall });
+    }
+  });
+}
+
+export async function onChatDone(
+  handler: (event: ChatDoneEvent) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("chat_done", (e) => {
+    const payload = e.payload as { sessionId?: string; message?: ChatMessage } | undefined;
+    if (payload && typeof payload.sessionId === "string" && payload.message) {
+      handler({ sessionId: payload.sessionId, message: payload.message });
+    }
+  });
+}
+
 // MARK: - Streaming playback engine (#53)
 //
 // Continuous playback runs in Rust (decode → wgpu composite → MJPEG stream) with
@@ -793,32 +1046,39 @@ export async function onGoHome(handler: () => void): Promise<() => void> {
 
 /** Start (or restart) Rust streaming playback from `fromFrame` (the current
  *  playhead). No-op outside Tauri. */
-export async function playbackStart(fromFrame: number): Promise<void> {
+export async function playbackStart(
+  fromFrame: number,
+  identity: PlaybackIdentity,
+): Promise<void> {
   await ensureTauri();
   if (invokeImpl)
-    await invokeImpl<void>("playback_start", { fromFrame: Math.floor(fromFrame) });
+    await invokeImpl<void>("playback_start", {
+      fromFrame: Math.floor(fromFrame),
+      identity,
+    });
 }
 
-/** Pause Rust playback: the render thread stops (the front end then freezes the
- *  <video> on the last frame). No-op outside Tauri. */
-export async function playbackPause(): Promise<void> {
+/** Pause the matching retained Rust playback session. No-op outside Tauri. */
+export async function playbackPause(identity: PlaybackIdentity, frame: number): Promise<void> {
   await ensureTauri();
-  if (invokeImpl) await invokeImpl<void>("playback_pause");
+  if (invokeImpl)
+    await invokeImpl<void>("playback_pause", { identity, frame: Math.floor(frame) });
 }
 
 /** Stop Rust playback and tear down the engine. No-op outside Tauri. */
-export async function playbackStop(): Promise<void> {
+export async function playbackStop(identity: PlaybackIdentity): Promise<void> {
   await ensureTauri();
-  if (invokeImpl) await invokeImpl<void>("playback_stop");
+  if (invokeImpl) await invokeImpl<void>("playback_stop", { identity });
 }
 
 /** Seek the running Rust engine to `frame` (no-op when not playing / outside Tauri). */
-export async function playbackSeek(frame: number): Promise<void> {
+export async function playbackSeek(identity: PlaybackIdentity, frame: number): Promise<void> {
   await ensureTauri();
-  if (invokeImpl) await invokeImpl<void>("playback_seek", { frame: Math.floor(frame) });
+  if (invokeImpl)
+    await invokeImpl<void>("playback_seek", { identity, frame: Math.floor(frame) });
 }
 
-/** The MJPEG stream URL to point a playback <img> at, or null outside Tauri. */
+/** The loopback `/frame` endpoint used for identity-scoped JPEG requests. */
 export async function getPreviewEndpoint(): Promise<string | null> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<string>("get_preview_endpoint");
@@ -828,14 +1088,47 @@ export async function getPreviewEndpoint(): Promise<string | null> {
 /** Subscribe to `playback_frame` (the Rust master clock's current frame). Returns
  *  an unlisten function; no-op (no-op unlisten) outside Tauri. */
 export async function onPlaybackFrame(
-  handler: (frame: number) => void,
+  handler: (event: PlaybackFrameEvent) => void,
 ): Promise<() => void> {
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("playback_frame", (e) => {
-    const payload = e.payload as { frame?: number } | undefined;
-    if (payload && typeof payload.frame === "number") handler(payload.frame);
+    const event = decodePlaybackFrameEvent(e.payload);
+    if (event) handler(event);
   });
+}
+
+export function decodePlaybackFrameEvent(payload: unknown): PlaybackFrameEvent | null {
+  if (!payload || typeof payload !== "object") return null;
+  const event = payload as Partial<PlaybackFrameEvent>;
+  if (
+    !Number.isSafeInteger(event.projectEpoch) ||
+    (event.projectEpoch ?? -1) < 0 ||
+    !Number.isSafeInteger(event.timelineVersion) ||
+    (event.timelineVersion ?? -1) < 0 ||
+    typeof event.sessionId !== "string" ||
+    !/^[A-Za-z0-9-]{1,128}$/.test(event.sessionId) ||
+    !Number.isSafeInteger(event.frame) ||
+    (event.frame ?? -1) < 0 ||
+    !Number.isSafeInteger(event.sequence) ||
+    (event.sequence ?? -1) < 0 ||
+    typeof event.terminal !== "boolean"
+  ) {
+    return null;
+  }
+  return event as PlaybackFrameEvent;
+}
+
+export function decodePlaybackCommandError(error: unknown): PlaybackCommandError | null {
+  if (!error || typeof error !== "object") return null;
+  const candidate = error as Partial<PlaybackCommandError>;
+  if (
+    !["superseded", "cancelled", "busy", "engine"].includes(candidate.code ?? "") ||
+    typeof candidate.message !== "string"
+  ) {
+    return null;
+  }
+  return candidate as PlaybackCommandError;
 }
 
 // MARK: - Browser fallback (mirror, not authoritative)

@@ -19,6 +19,9 @@ pub enum ProjectError {
     #[error("not a project bundle directory: {0}")]
     NotABundle(PathBuf),
 
+    #[error("bundle export destination already exists: {path}")]
+    DestinationExists { path: PathBuf },
+
     /// A filesystem operation failed. `path` records what we were touching.
     #[error("io error at {path}: {source}")]
     Io {
@@ -36,6 +39,27 @@ pub enum ProjectError {
         file: String,
         /// The underlying serde error.
         source: serde_json::Error,
+    },
+
+    /// Writing would discard persisted fields this build does not understand.
+    #[error(
+        "project is compatibility read-only because this build does not understand: {blockers:?}"
+    )]
+    CompatibilityReadOnly {
+        /// Sorted, file-qualified persisted fields that require a newer build.
+        blockers: Vec<String>,
+    },
+
+    /// Publication could not install the staged bundle or restore the prior
+    /// target. The retained backup is deliberately left in place and the next
+    /// save attempt will recover it before doing new work.
+    #[error(
+        "bundle publication requires recovery from {backup}: publish failed: {publish}; restore failed: {restore}"
+    )]
+    RecoveryRequired {
+        backup: PathBuf,
+        publish: String,
+        restore: String,
     },
 }
 

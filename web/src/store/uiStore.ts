@@ -34,6 +34,15 @@ export type MediaTabId =
 export type MediaSubTabId = "import" | "mine" | "extract" | "sound";
 export type InspectorTabId = "text" | "video" | "audio" | "aiEdit";
 
+export interface SaveAsProgressState {
+  operationId: string;
+  label: string;
+  done: number;
+  total: number;
+  cancellable: boolean;
+  cancelling: boolean;
+}
+
 const LS = {
   layoutPreset: "layoutPreset",
   agentPanelVisible: "agentPanelVisible",
@@ -69,6 +78,9 @@ interface UiState {
   /** Whether the video-export dialog (§2.4 / #112) is shown. */
   exportDialogOpen: boolean;
   setExportDialogOpen: (open: boolean) => void;
+  /** Visible progress owner for clip/range save-as operations. */
+  saveAsProgress: SaveAsProgressState | null;
+  setSaveAsProgress: (progress: SaveAsProgressState | null) => void;
 
   // Playback / playhead
   currentFrame: number;
@@ -211,6 +223,9 @@ interface UiState {
   setMediaTab: (tab: MediaTabId) => void;
   setMediaSubTab: (tab: MediaSubTabId) => void;
   setInspectorTab: (tab: InspectorTabId) => void;
+  /** Clear project-scoped runtime state when a different project/session starts.
+   *  Preserve user layout and panel visibility preferences. */
+  resetProjectRuntimeState: () => void;
 
   // Toast (transient message)
   toast: { message: string; id: number } | null;
@@ -225,6 +240,8 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   exportDialogOpen: false,
   setExportDialogOpen: (exportDialogOpen) => set({ exportDialogOpen }),
+  saveAsProgress: null,
+  setSaveAsProgress: (saveAsProgress) => set({ saveAsProgress }),
 
   currentFrame: 0,
   activeFrame: 0,
@@ -409,6 +426,33 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   // `if newTab != .video { editor.cropEditingActive = false }`).
   setInspectorTab: (inspectorTab) =>
     set({ inspectorTab, cropEditingActive: inspectorTab === "video" ? get().cropEditingActive : false }),
+  resetProjectRuntimeState: () =>
+    set({
+      currentFrame: 0,
+      activeFrame: 0,
+      isPlaying: false,
+      isScrubbing: false,
+      rustEngineFailed: false,
+      selectedClipIds: new Set(),
+      selectedMediaAssetIds: new Set(),
+      selectedFolderIds: new Set(),
+      isMarqueeSelecting: false,
+      selectedTimelineRange: null,
+      selectedGap: null,
+      scrollLeft: 0,
+      scrollTop: 0,
+      toolMode: "pointer",
+      trackDisplayHeights: {},
+      canvasZoom: 1,
+      canvasOffset: { width: 0, height: 0 },
+      previewMediaId: null,
+      focusedPanel: "timeline",
+      maximizedPanel: null,
+      cropEditingActive: false,
+      cropAspectLock: "free",
+      mediaPanelCurrentFolderId: null,
+      pendingSwapClipId: null,
+    }),
 
   toast: null,
   pushToast: (message) => set({ toast: { message, id: Date.now() } }),

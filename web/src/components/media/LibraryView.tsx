@@ -178,7 +178,7 @@ export function LibraryView() {
           </div>
         )}
 
-        <Grid entries={visible} loading={loading} totalEmpty={entries.length === 0} />
+        <LibraryEntryGrid entries={visible} loading={loading} totalEmpty={entries.length === 0} />
       </main>
     </div>
   );
@@ -363,7 +363,7 @@ function SortSelect({ value, onChange }: { value: SortKey; onChange: (s: SortKey
   );
 }
 
-function Grid({
+export function LibraryEntryGrid({
   entries,
   loading,
   totalEmpty,
@@ -408,14 +408,14 @@ function Grid({
         }}
       >
         {entries.map((e) => (
-          <EntryCard key={e.id} entry={e} />
+          <LibraryEntryCard key={e.id} entry={e} />
         ))}
       </div>
     </div>
   );
 }
 
-function EntryCard({ entry }: { entry: LibraryEntry }) {
+export function LibraryEntryCard({ entry }: { entry: LibraryEntry }) {
   const t = useT();
   const importToProject = useLibraryStore((s) => s.importToProject);
   const unfavorite = useLibraryStore((s) => s.unfavorite);
@@ -428,9 +428,9 @@ function EntryCard({ entry }: { entry: LibraryEntry }) {
   const cardRef = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
 
-  const name = sourceName(entry.source) || entry.id;
-  // 缩略图:库条目 thumb 优先,否则按 source 让 WebView 解码原文件(asset 协议)。
-  const thumb = assetUrl(entry.thumb ?? entry.source);
+  const name = sourceName(entry.source ?? entry.storedPath) || entry.id;
+  // 缩略图优先；否则使用库拥有的持久副本，原始 source 只作最后回退。
+  const thumb = assetUrl(libraryEntryPreviewSource(entry));
 
   useEffect(() => {
     const el = cardRef.current;
@@ -547,6 +547,11 @@ function EntryCard({ entry }: { entry: LibraryEntry }) {
       </div>
     </div>
   );
+}
+
+export function libraryEntryPreviewSource(entry: LibraryEntry): string | undefined {
+  const thumb = entry.thumb;
+  return thumb?.startsWith("data:") || thumb?.startsWith("blob:") ? thumb : undefined;
 }
 
 function CardAction({
