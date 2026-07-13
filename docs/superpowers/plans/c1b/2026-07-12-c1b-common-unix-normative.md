@@ -1484,7 +1484,7 @@ fn component_accepts_safe_names_and_rejects_too_long_and_unsafe_names() {
         assert!(matches!(RelativeComponents::new(std::path::Path::new("C:\\asset.mov")), Err(SafeFsError::InvalidRelativePath(RelativePathViolation::AbsoluteOrPrefix))));
         assert!(matches!(ComponentName::new("C:asset.mov"), Err(SafeFsError::InvalidComponent(ComponentViolation::AbsoluteOrPrefix))));
         for prefix in ["COM", "LPT"] {
-            for digit in ['1', '9', '¹', '²', '³'] {
+            for digit in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '¹', '²', '³'] {
                 for extension in ["", ".txt"] {
                     let name = format!("{prefix}{digit}{extension}");
                     assert!(matches!(ComponentName::new(&name), Err(SafeFsError::InvalidComponent(ComponentViolation::WindowsDeviceName))));
