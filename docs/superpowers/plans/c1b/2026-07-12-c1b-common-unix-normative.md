@@ -2058,7 +2058,7 @@ rg -n '^running 1 test$' "$RED_DIR/output.log"
 rg -n '^test safe_fs::tests::component_accepts_safe_names_and_rejects_too_long_and_unsafe_names \.\.\. FAILED$' "$RED_DIR/output.log"
 rg -n '^test result: FAILED\. 0 passed; 1 failed;' "$RED_DIR/output.log"
 rg -n 'safe component accepted|UnsupportedTarget' "$RED_DIR/output.log"
-if rg -n '^running 0 tests$|^error(\[|:)|could not compile' "$RED_DIR/output.log"; then
+if rg -n -P '^running 0 tests$|^error\[|^error: (?!test failed, to rerun pass `-p opentake-project --lib`$)|could not compile' "$RED_DIR/output.log"; then
   echo 'Task 2B RED was not a behavioral one-test failure' >&2
   exit 1
 fi
@@ -2116,7 +2116,7 @@ for LOG in "$RED_DIR/output.log" "$RED_DIR/rollback-output.log"; do
   rg -n '^running 1 test$' "$LOG"
   rg -n '^test .* \.\.\. FAILED$' "$LOG"
   rg -n 'UnsupportedTarget' "$LOG"
-  if rg -n '^running 0 tests$|^error(\[|:)|could not compile' "$LOG"; then
+  if rg -n -P '^running 0 tests$|^error\[|^error: (?!test failed, to rerun pass `-p opentake-project --lib`$)|could not compile' "$LOG"; then
     echo "Task 4 RED was not a behavioral one-test failure: $LOG" >&2
     exit 1
   fi
@@ -2191,7 +2191,7 @@ rg -n '^running 1 test$' "$RED_DIR/output.log"
 rg -n '^test safe_fs::tests::unix_contract::nested_recursive_quarantine_cleanup_removes_files_symlink_fifo_and_directories \.\.\. FAILED$' "$RED_DIR/output.log"
 rg -n '^test result: FAILED\. 0 passed; 1 failed;' "$RED_DIR/output.log"
 rg -n 'UnsupportedAtomicPublish|PrimitiveUnavailable' "$RED_DIR/output.log"
-if rg -n '^running 0 tests$|^error(\[|:)|could not compile' "$RED_DIR/output.log"; then
+if rg -n -P '^running 0 tests$|^error\[|^error: (?!test failed, to rerun pass `-p opentake-project --lib`$)|could not compile' "$RED_DIR/output.log"; then
   echo 'Task 5 RED was not a behavioral one-test failure' >&2
   exit 1
 fi
