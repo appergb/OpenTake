@@ -267,7 +267,7 @@ fn validate_os_component(value: &OsStr) -> Result<()> {
     if units.last().is_some_and(|unit| *unit == b'.' as u16 || *unit == b' ' as u16) { return Err(SafeFsError::InvalidComponent(ComponentViolation::WindowsTrailingDotOrSpace)); }
     let stem: Vec<u16> = units.iter().copied().take_while(|unit| *unit != b'.' as u16).map(|unit| if (b'a' as u16..=b'z' as u16).contains(&unit) { unit - 32 } else { unit }).collect();
     let reserved: &[&[u16]] = &[&[67,79,78], &[80,82,78], &[65,85,88], &[78,85,76]];
-    let numbered = stem.len() == 4 && (&stem[..3] == [67,79,77] || &stem[..3] == [76,80,84]) && (b'1' as u16..=b'9' as u16).contains(&stem[3]);
+    let numbered = stem.len() == 4 && (stem[..3] == [67,79,77] || stem[..3] == [76,80,84]) && (b'1' as u16..=b'9' as u16).contains(&stem[3]);
     if reserved.contains(&stem.as_slice()) || numbered { return Err(SafeFsError::InvalidComponent(ComponentViolation::WindowsDeviceName)); }
     Ok(())
 }
@@ -374,15 +374,17 @@ pub(crate) struct QuarantinedCapability {
     pub(super) opened: EntryMetadata,
 }
 
+pub(super) struct CleanupEntry {
+    pub(super) parent: DirectoryAuthority,
+    pub(super) native: platform::NativeFile,
+    pub(super) name: ComponentName,
+    pub(super) opened: EntryMetadata,
+    pub(super) access: CleanupAccess,
+}
+
 pub(super) enum CleanupCapability {
-    Entry {
-        parent: DirectoryAuthority,
-        native: platform::NativeFile,
-        name: ComponentName,
-        opened: EntryMetadata,
-        access: CleanupAccess,
-    },
-    Directory(QuarantinedCapability),
+    Entry(Box<CleanupEntry>),
+    Directory(Box<QuarantinedCapability>),
 }
 
 impl fmt::Debug for DirectoryAuthority { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("DirectoryAuthority(<redacted>)") } }
@@ -493,8 +495,8 @@ pub(crate) fn cleanup_quarantined_tree(root: QuarantinedCapability) -> Result<()
     let names = enumerate(root.directory())?;
     for name in names {
         match open_cleanup_child_nofollow(&root, &name)? {
-            CleanupCapability::Directory(child) => cleanup_quarantined_tree(child)?,
-            entry @ CleanupCapability::Entry { .. } => delete_quarantined_entry(entry)?,
+            CleanupCapability::Directory(child) => cleanup_quarantined_tree(*child)?,
+            entry @ CleanupCapability::Entry(_) => delete_quarantined_entry(entry)?,
         }
     }
     delete_quarantined_empty_directory(root)
@@ -1225,14 +1227,15 @@ pub(super) fn open_cleanup_child_nofollow(parent: &QuarantinedCapability, name: 
     if metadata.kind == EntryKind::Directory {
         let directory = opened_child_directory(parent.directory(), name, DirectoryAccess::Stage, SafeFsOperation::OpenCleanupEntry)?;
         if directory.opened.identity != metadata.identity { return Err(SafeFsError::IdentityChanged { operation: SafeFsOperation::OpenCleanupEntry, expected: metadata.identity, actual: directory.opened.identity }); }
-        return Ok(CleanupCapability::Directory(nested_quarantined(parent, name, directory)?));
+        return Ok(CleanupCapability::Directory(Box::new(nested_quarantined(parent, name, directory)?)));
     }
     let parent_copy = duplicate_directory(parent.directory(), DirectoryAccess::MutateChildren)?;
-    Ok(CleanupCapability::Entry { parent: parent_copy, native: NativeFile::NameOnly { name: name.clone(), expected: metadata.identity.clone(), kind: metadata.kind }, name: name.clone(), opened: metadata, access: CleanupAccess::Delete })
+    Ok(CleanupCapability::Entry(Box::new(CleanupEntry { parent: parent_copy, native: NativeFile::NameOnly { name: name.clone(), expected: metadata.identity.clone(), kind: metadata.kind }, name: name.clone(), opened: metadata, access: CleanupAccess::Delete })))
 }
 
 pub(super) fn delete_quarantined_entry(entry: CleanupCapability) -> Result<()> {
-    let CleanupCapability::Entry { parent, native, name, opened, access: CleanupAccess::Delete } = entry else { return Err(SafeFsError::AccessMismatch { operation: SafeFsOperation::DeleteQuarantinedEntry }); };
+    let CleanupCapability::Entry(entry) = entry else { return Err(SafeFsError::AccessMismatch { operation: SafeFsOperation::DeleteQuarantinedEntry }); };
+    let CleanupEntry { parent, native, name, opened, access: CleanupAccess::Delete } = *entry;
     let NativeFile::NameOnly { name: native_name, expected, kind } = native else { return Err(SafeFsError::AccessMismatch { operation: SafeFsOperation::DeleteQuarantinedEntry }); };
     if name != native_name || opened.identity != expected || opened.kind != kind { return Err(SafeFsError::StageIdentityLost { operation: SafeFsOperation::DeleteQuarantinedEntry, reason: StageIdentityLostReason::QuarantineNameChanged }); }
     let retained_parent = rustix::fs::fstat(&parent.native.fd).map_err(|error| io(SafeFsOperation::DeleteQuarantinedEntry, error))?;
@@ -1253,7 +1256,7 @@ pub(super) fn delete_quarantined_empty_directory(directory: QuarantinedCapabilit
 }
 ```
 
-The Unix implementation has no path fallback. `NativeFile::NameOnly` is intentionally not byte-readable; it exists so special-node cleanup remains nonblocking while retaining parent/name/identity provenance. `StageCapability.directory.native` and Windows `CleanupCapability::Entry.native` remain the originally acquired handles; the common wrapper never replaces them.
+The Unix implementation has no path fallback. `NativeFile::NameOnly` is intentionally not byte-readable; it exists so special-node cleanup remains nonblocking while retaining parent/name/identity provenance. `StageCapability.directory.native` and Windows `CleanupEntry.native` remain the originally acquired handles; boxing the two cleanup enum payloads changes only layout, and the common wrapper never replaces the move-only handles.
 
 ## 5. Deterministic seam and single test location
 
@@ -1843,7 +1846,10 @@ mod unix_contract {
         let expected = present_identity(quarantined.directory(), "leaf");
         let entry = open_cleanup_child_nofollow(&quarantined, &name("leaf")).expect("cleanup entry");
         match &entry {
-            CleanupCapability::Entry { opened, access: CleanupAccess::Delete, .. } => assert_eq!(opened.identity, expected),
+            CleanupCapability::Entry(entry) => {
+                assert_eq!(entry.access, CleanupAccess::Delete);
+                assert_eq!(entry.opened.identity, expected);
+            }
             CleanupCapability::Directory(_) => panic!("expected leaf cleanup capability"),
         }
         delete_quarantined_entry(entry).expect("delete retained cleanup entry");

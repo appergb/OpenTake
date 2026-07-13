@@ -35,7 +35,7 @@ pub(crate) struct DirectoryAuthority { /* native: NativeDirectory; move-only */ 
 pub(crate) struct FileCapability { /* native: NativeFile; move-only */ }
 pub(crate) struct StageCapability { /* parent + directory; directory HANDLE has DELETE */ }
 pub(crate) struct QuarantinedCapability { /* same parent + directory HANDLE */ }
-pub(crate) enum CleanupCapability { /* Entry owns NativeFile; Directory owns QuarantinedCapability */ }
+pub(crate) enum CleanupCapability { /* Entry owns Box<CleanupEntry>; Directory owns Box<QuarantinedCapability> */ }
 
 platform::capture_absolute_directory(&Path, DirectoryAccess) -> Result<DirectoryAuthority>;
 platform::revalidate_namespace(&DirectoryAuthority) -> Result<()>;
@@ -1320,21 +1320,21 @@ pub(super) fn open_cleanup_child_nofollow(
             case_mode: child_case,
             snapshot: child_snapshot,
         };
-        Ok(CleanupCapability::Directory(QuarantinedCapability {
+        Ok(CleanupCapability::Directory(Box::new(QuarantinedCapability {
             parent: duplicated_parent,
             directory,
             original_name: name.clone(),
             quarantine_name: name.clone(),
             opened,
-        }))
+        })))
     } else {
-        Ok(CleanupCapability::Entry {
+        Ok(CleanupCapability::Entry(Box::new(CleanupEntry {
             parent: duplicate_directory(parent)?,
             native: NativeFile { handle, opened: opened.clone(), access: FileAccess::Read, delete_right: true },
             name: name.clone(),
             opened,
             access: CleanupAccess::Delete,
-        })
+        })))
     }
 }
 
@@ -1483,7 +1483,8 @@ fn dispose_retained(
 
 pub(super) fn delete_quarantined_entry(cleanup: CleanupCapability) -> Result<()> {
     match cleanup {
-        CleanupCapability::Entry { parent, native, name, opened, access: CleanupAccess::Delete } => {
+        CleanupCapability::Entry(entry) => {
+            let CleanupEntry { parent, native, name, opened, access: CleanupAccess::Delete } = *entry;
             if native.opened.identity != opened.identity {
                 return Err(SafeFsError::IdentityChanged {
                     operation: SafeFsOperation::DeleteQuarantinedEntry,
