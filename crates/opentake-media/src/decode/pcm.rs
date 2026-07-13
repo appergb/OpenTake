@@ -771,6 +771,7 @@ mod tests {
         assert!(matches!(result, Err(MediaError::Ffmpeg(_))));
     }
 
+    #[cfg(unix)]
     #[test]
     fn nonzero_ffmpeg_exit_with_partial_stdout_is_a_hard_error() {
         let status = Command::new("sh")
