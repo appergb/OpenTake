@@ -32,7 +32,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 #[cfg(test)]
@@ -173,6 +173,7 @@ struct ActiveExport {
 pub(crate) struct ExportGuard<'a> {
     control: &'a ExportControl,
     generation: u64,
+    cancel: MediaCancelToken,
 }
 
 impl std::fmt::Debug for ExportGuard<'_> {
@@ -247,16 +248,58 @@ impl ExportControl {
         }
         let generation = state.next_generation;
         state.next_generation = state.next_generation.wrapping_add(1);
+        let cancel = MediaCancelToken::new();
         state.active = Some(ActiveExport {
             generation,
-            cancel: MediaCancelToken::new(),
+            cancel: cancel.clone(),
         });
         after_publish();
         drop(state);
         Ok(ExportGuard {
             control: self,
             generation,
+            cancel,
         })
+    }
+}
+
+impl ExportGuard<'_> {
+    /// Observe cancellation for this exact export generation.
+    pub(crate) fn checkpoint(&self) -> Result<(), String> {
+        if self.cancel.checkpoint() {
+            Err(CANCELLED_SENTINEL.to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn cancel_token(&self) -> &MediaCancelToken {
+        &self.cancel
+    }
+
+    /// Linearize the final save-as commit against cancellation.
+    ///
+    /// This runs inside the core manifest transaction's postcondition. If
+    /// cancellation already won, the transaction rolls back. Otherwise the
+    /// generation is removed while holding the same mutex used by
+    /// `request_cancel`, so every later cancel is a no-op for this completed
+    /// operation.
+    pub(crate) fn commit(&mut self) -> Result<(), String> {
+        let mut state = self
+            .control
+            .operation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let active = state
+            .active
+            .as_ref()
+            .filter(|active| active.generation == self.generation)
+            .ok_or_else(|| "export generation is no longer active".to_string())?;
+        if active.cancel.is_cancelled() {
+            return Err(CANCELLED_SENTINEL.to_string());
+        }
+        state.active = None;
+        Ok(())
     }
 }
 
@@ -1268,11 +1311,13 @@ fn open_media_directory_nofollow(path: &Path) -> Result<File, String> {
         use std::os::windows::fs::OpenOptionsExt;
         const FILE_SHARE_READ: u32 = 0x1;
         const FILE_SHARE_WRITE: u32 = 0x2;
-        const FILE_SHARE_DELETE: u32 = 0x4;
         const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         options
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            // Denying delete sharing pins this directory name for the entire
+            // ProjectMediaOutput lifetime, so the subsequent full-path
+            // create_new cannot be redirected through a junction handoff.
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
     }
     let directory = options.open(path).map_err(|error| {
@@ -1353,11 +1398,13 @@ fn reserve_output_file(path: &Path, parent_handle: &File) -> Result<File, String
         const GENERIC_WRITE: u32 = 0x4000_0000;
         const FILE_SHARE_READ: u32 = 0x1;
         const FILE_SHARE_WRITE: u32 = 0x2;
-        const FILE_SHARE_DELETE: u32 = 0x4;
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         options
             .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            // Keep final-name replacement impossible through commit. We still
+            // request DELETE ourselves so RAII cleanup can use the retained
+            // handle if finalization fails.
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
     #[cfg(not(windows))]
@@ -1392,6 +1439,20 @@ pub(crate) struct ProjectMediaOutput {
     directory_identity: FileIdentity,
     file_identity: FileIdentity,
     keep: bool,
+}
+
+/// Private, immutable-by-path snapshot used only for ffprobe. The directory is
+/// mode 0700 on Unix and randomly named on every platform; ffprobe never sees
+/// the attacker-exchangeable final project pathname.
+pub(crate) struct StableProbeCopy {
+    _workspace: tempfile::TempDir,
+    path: PathBuf,
+}
+
+impl StableProbeCopy {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 impl ProjectMediaOutput {
@@ -1429,11 +1490,85 @@ impl ProjectMediaOutput {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_commit(&self) -> Result<(), String> {
         self.file
             .sync_all()
             .map_err(|error| format!("sync project media output: {error}"))?;
         self.verify_identity()
+    }
+
+    pub(crate) fn prepare_commit_cancellable(
+        &self,
+        guard: &ExportGuard<'_>,
+        after_sync: impl FnOnce(),
+    ) -> Result<(), String> {
+        guard.checkpoint()?;
+        self.file
+            .sync_all()
+            .map_err(|error| format!("sync project media output: {error}"))?;
+        after_sync();
+        guard.checkpoint()?;
+        self.verify_identity()?;
+        guard.checkpoint()
+    }
+
+    pub(crate) fn stable_probe_copy(
+        &self,
+        cancel: &MediaCancelToken,
+    ) -> Result<StableProbeCopy, String> {
+        if cancel.checkpoint() {
+            return Err(CANCELLED_SENTINEL.to_string());
+        }
+        let extension = self
+            .path
+            .extension()
+            .ok_or_else(|| "saved media output has no extension".to_string())?;
+        let workspace = tempfile::Builder::new()
+            .prefix("opentake-probe-")
+            .tempdir()
+            .map_err(|error| format!("create private media probe workspace: {error}"))?;
+        let path = workspace
+            .path()
+            .join(Path::new("probe").with_extension(extension));
+        let mut destination = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| format!("create private media probe copy: {error}"))?;
+        let mut source = self
+            .file
+            .try_clone()
+            .map_err(|error| format!("clone retained media output for probe: {error}"))?;
+        source
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| format!("rewind retained media output for probe: {error}"))?;
+        let mut buffer = [0_u8; 128 * 1024];
+        loop {
+            if cancel.checkpoint() {
+                return Err(CANCELLED_SENTINEL.to_string());
+            }
+            let read = source
+                .read(&mut buffer)
+                .map_err(|error| format!("read retained media output for probe: {error}"))?;
+            if read == 0 {
+                break;
+            }
+            destination
+                .write_all(&buffer[..read])
+                .map_err(|error| format!("write private media probe copy: {error}"))?;
+        }
+        destination
+            .flush()
+            .map_err(|error| format!("flush private media probe copy: {error}"))?;
+        if cancel.checkpoint() {
+            return Err(CANCELLED_SENTINEL.to_string());
+        }
+        Ok(StableProbeCopy {
+            _workspace: workspace,
+            path,
+        })
     }
 
     pub(crate) fn mark_kept(mut self) -> PathBuf {
@@ -1509,32 +1644,20 @@ fn remove_reserved_output(
     file: &File,
     _name: &std::ffi::OsStr,
 ) -> io::Result<()> {
-    use std::ffi::c_void;
     use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileDispositionInfo, SetFileInformationByHandle, FILE_DISPOSITION_INFO,
+    };
 
-    #[repr(C)]
-    struct FileDispositionInfo {
-        delete_file: i32,
-    }
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn SetFileInformationByHandle(
-            file: *mut c_void,
-            info_class: i32,
-            info: *const c_void,
-            size: u32,
-        ) -> i32;
-    }
-    const FILE_DISPOSITION_INFO_CLASS: i32 = 4;
-    let info = FileDispositionInfo { delete_file: 1 };
-    // SAFETY: the retained file handle stays live for the call and `info`
-    // matches Windows' FILE_DISPOSITION_INFO layout.
+    let info = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: the retained file handle stays live for the call and the buffer
+    // is the SDK layout supplied by windows-sys for FileDispositionInfo.
     let removed = unsafe {
         SetFileInformationByHandle(
             file.as_raw_handle(),
-            FILE_DISPOSITION_INFO_CLASS,
-            (&info as *const FileDispositionInfo).cast(),
-            std::mem::size_of::<FileDispositionInfo>() as u32,
+            FileDispositionInfo,
+            (&info as *const FILE_DISPOSITION_INFO).cast(),
+            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
         )
     };
     if removed == 0 {
@@ -1556,6 +1679,15 @@ pub(crate) fn reserve_project_media_output(
     project_dir: &Path,
     stem: &str,
     ext: &str,
+) -> Result<ProjectMediaOutput, String> {
+    reserve_project_media_output_with_after_open(project_dir, stem, ext, |_| {})
+}
+
+fn reserve_project_media_output_with_after_open(
+    project_dir: &Path,
+    stem: &str,
+    ext: &str,
+    after_directory_open: impl FnOnce(&Path),
 ) -> Result<ProjectMediaOutput, String> {
     if !matches!(ext, "mp4" | "wav") {
         return Err("unsupported save-as-media extension".to_string());
@@ -1582,6 +1714,7 @@ pub(crate) fn reserve_project_media_output(
             .map_err(|error| format!("clone project media directory handle: {error}"))?,
     )
     .map_err(|error| format!("identify project media directory: {error}"))?;
+    after_directory_open(&media_dir);
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     loop {
@@ -1625,6 +1758,16 @@ pub(crate) fn reserve_project_media_output(
             Err(error) => return Err(error),
         }
     }
+}
+
+#[cfg(all(test, windows))]
+fn reserve_project_media_output_with_hook(
+    project_dir: &Path,
+    stem: &str,
+    ext: &str,
+    after_directory_open: impl FnOnce(&Path),
+) -> Result<ProjectMediaOutput, String> {
+    reserve_project_media_output_with_after_open(project_dir, stem, ext, after_directory_open)
 }
 
 #[cfg(test)]
@@ -1704,7 +1847,7 @@ fn save_range_as_media_workflow(
     let total_frames = snapshot.timeline.total_frames();
     validate_save_range(total_frames, in_frame, out_frame)?;
 
-    let _guard = control.try_begin()?;
+    let mut guard = control.try_begin()?;
     let output = reserve_project_media_output(
         &project_dir,
         &format!("range_{in_frame}_{out_frame}"),
@@ -1736,22 +1879,18 @@ fn save_range_as_media_workflow(
             defer_completion: true,
         },
     )?;
-    if control.is_cancelled() {
-        return Err(CANCELLED_SENTINEL.to_string());
-    }
-    output.prepare_commit()?;
-    let result = crate::media::import_saved_media_checked(
-        core,
-        engine,
-        prewarm,
-        snapshot.project_epoch,
-        &project_dir,
-        &out_path,
-        || output.verify_identity(),
-    )?;
-    let _committed_path = output.mark_kept();
-    on_progress(AUDIO_PROGRESS_TOTAL, AUDIO_PROGRESS_TOTAL);
-    Ok(result)
+    crate::media::finalize_saved_media(
+        crate::media::SavedMediaFinalizationContext {
+            core,
+            engine,
+            prewarm,
+            expected_project_epoch: snapshot.project_epoch,
+            expected_project_dir: &project_dir,
+            on_progress: on_progress.as_ref(),
+        },
+        output,
+        &mut guard,
+    )
 }
 
 // MARK: - Self-contained `.opentake` bundle export (#29 / upstream `.palmier`)
@@ -1955,6 +2094,31 @@ mod tests {
         drop(first);
         let _second = control.try_begin().expect("start second export");
         assert!(!control.is_cancelled());
+    }
+
+    #[test]
+    fn export_guard_cancel_wins_before_commit() {
+        let control = ExportControl::default();
+        let mut guard = control.try_begin().expect("start export");
+        control.request_cancel();
+
+        assert_eq!(
+            guard
+                .commit()
+                .expect_err("cancelled generation cannot commit"),
+            CANCELLED_SENTINEL
+        );
+    }
+
+    #[test]
+    fn export_guard_commit_wins_before_late_cancel() {
+        let control = ExportControl::default();
+        let mut guard = control.try_begin().expect("start export");
+        guard.commit().expect("commit active generation");
+
+        control.request_cancel();
+        assert!(!control.is_cancelled());
+        assert!(!guard.cancel_token().is_cancelled());
     }
 
     #[test]
@@ -2254,6 +2418,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn reserved_output_detects_final_name_swap_without_deleting_replacement() {
         let project = tempfile::tempdir().expect("project");
@@ -2279,18 +2444,13 @@ mod tests {
             fs::read(&visible_path).expect("replacement remains"),
             b"replacement"
         );
-        #[cfg(windows)]
-        assert!(
-            !moved_original.exists(),
-            "Windows retained-handle disposition removes the reserved file"
-        );
-        #[cfg(unix)]
         assert!(
             moved_original.exists(),
             "Unix cleanup must not guess the reserved file's attacker-chosen new name"
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn reserved_output_detects_parent_swap_and_cleans_through_retained_parent() {
         let project = tempfile::tempdir().expect("project");
@@ -2344,6 +2504,78 @@ mod tests {
 
         assert!(error.contains("real directory"), "{error}");
         assert_eq!(fs::read_dir(&outside).expect("read target").count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_directory_handoff_blocks_junction_replacement_before_child_create() {
+        use std::sync::Barrier;
+
+        let root = tempfile::tempdir().expect("fixture root");
+        let project = root.path().join("Project.opentake");
+        let media = project.join("media");
+        let moved_media = project.join("media-moved");
+        let outside = root.path().join("outside");
+        fs::create_dir(&project).expect("project directory");
+        fs::create_dir(&outside).expect("outside directory");
+        let barrier = Arc::new(Barrier::new(2));
+        let attack_barrier = Arc::clone(&barrier);
+        let attack_media = media.clone();
+        let attack_moved = moved_media.clone();
+        let attack_outside = outside.clone();
+
+        let output =
+            reserve_project_media_output_with_hook(&project, "handoff", "wav", move |_| {
+                let attacker = std::thread::spawn(move || {
+                    attack_barrier.wait();
+                    let rename = fs::rename(&attack_media, &attack_moved);
+                    if rename.is_ok() {
+                        let status = std::process::Command::new("cmd")
+                            .arg("/C")
+                            .arg("mklink")
+                            .arg("/J")
+                            .arg(&attack_media)
+                            .arg(&attack_outside)
+                            .status()
+                            .expect("attempt replacement junction");
+                        return Err(format!(
+                            "directory rename unexpectedly succeeded; junction status={status}"
+                        ));
+                    }
+                    Ok(())
+                });
+                barrier.wait();
+                attacker
+                    .join()
+                    .expect("junction attacker joins")
+                    .expect("retained directory handle must deny rename/delete sharing");
+            })
+            .expect("reserve output after blocked handoff attack");
+
+        assert_eq!(output.path().parent(), Some(media.as_path()));
+        assert_eq!(fs::read_dir(&outside).expect("read outside").count(), 0);
+        assert!(!moved_media.exists());
+        drop(output);
+        assert_eq!(fs::read_dir(&outside).expect("reread outside").count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_retained_output_handle_blocks_final_name_replacement() {
+        let project = tempfile::tempdir().expect("project");
+        let output = reserve_project_media_output(project.path(), "identity", "wav")
+            .expect("reserve output");
+        let visible_path = output.path().to_path_buf();
+        let moved = visible_path.with_extension("moved");
+
+        assert!(
+            fs::rename(&visible_path, &moved).is_err(),
+            "output handle must deny delete sharing through commit"
+        );
+        assert!(visible_path.is_file());
+        assert!(!moved.exists());
+        drop(output);
+        assert!(!visible_path.exists());
     }
 
     #[test]

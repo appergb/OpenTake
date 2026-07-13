@@ -114,9 +114,9 @@ jobs:
       - name: Reserved output identity and reparse safety
         shell: pwsh
         run: |
-          cargo test -p opentake-tauri --lib reserved_output_detects_final_name_swap_without_deleting_replacement
-          cargo test -p opentake-tauri --lib reserved_output_detects_parent_swap_and_cleans_through_retained_parent
           cargo test -p opentake-tauri --lib windows_project_media_junction_is_rejected_without_writing_target
+          cargo test -p opentake-tauri --lib windows_directory_handoff_blocks_junction_replacement_before_child_create
+          cargo test -p opentake-tauri --lib windows_retained_output_handle_blocks_final_name_replacement
 
   web:
     name: Web (install / build)

@@ -41,7 +41,7 @@ use opentake_media::{
         MAX_VIDEO_THUMBNAILS, THUMB_MAX_SIZE, THUMB_TOLERANCE_SECS,
     },
     waveform::store::CACHE_SUBDIR,
-    FrameRequest, MediaEngine, RgbaFrame,
+    FrameRequest, MediaCancelToken, MediaEngine, RgbaFrame,
 };
 
 pub mod prewarm;
@@ -615,6 +615,35 @@ fn probe_media(engine: &MediaEngine, path: &Path) -> ProbedMedia {
     }
 }
 
+fn probe_saved_media_with_hooks(
+    engine: &MediaEngine,
+    output: &crate::export::ProjectMediaOutput,
+    cancel: &MediaCancelToken,
+    before_probe: impl FnOnce(),
+    after_probe: impl FnOnce(),
+) -> Result<ProbedMedia, String> {
+    let stable = output.stable_probe_copy(cancel)?;
+    if cancel.checkpoint() {
+        return Err(crate::export::CANCELLED_SENTINEL.to_string());
+    }
+    before_probe();
+    let probe = probe_media(engine, stable.path());
+    after_probe();
+    if cancel.checkpoint() {
+        return Err(crate::export::CANCELLED_SENTINEL.to_string());
+    }
+    Ok(probe)
+}
+
+#[cfg(test)]
+pub(crate) fn probe_saved_media(
+    engine: &MediaEngine,
+    output: &crate::export::ProjectMediaOutput,
+    cancel: &MediaCancelToken,
+) -> Result<ProbedMedia, String> {
+    probe_saved_media_with_hooks(engine, output, cancel, || {}, || {})
+}
+
 /// Display name for an imported file: its stem, or the full file name when there
 /// is no stem (mirrors upstream `url.deletingPathExtension().lastPathComponent`).
 fn display_name(path: &Path) -> String {
@@ -719,34 +748,18 @@ pub(crate) fn import_saved_media(
     expected_project_dir: &Path,
     path: &Path,
 ) -> Result<MediaListDto, String> {
+    let probe = probe_media(engine, path);
     import_saved_media_with_hooks(
-        core,
-        engine,
-        prewarm,
-        expected_project_epoch,
-        expected_project_dir,
-        path,
+        SavedMediaImportContext {
+            core,
+            engine,
+            prewarm,
+            expected_project_epoch,
+            expected_project_dir,
+            path,
+            probe: &probe,
+        },
         (|| {}, || Ok(())),
-    )
-}
-
-pub(crate) fn import_saved_media_checked(
-    core: &AppCore,
-    engine: &MediaEngine,
-    prewarm: &prewarm::PrewarmScheduler,
-    expected_project_epoch: u64,
-    expected_project_dir: &Path,
-    path: &Path,
-    postcondition: impl FnOnce() -> Result<(), String>,
-) -> Result<MediaListDto, String> {
-    import_saved_media_with_hooks(
-        core,
-        engine,
-        prewarm,
-        expected_project_epoch,
-        expected_project_dir,
-        path,
-        (|| {}, postcondition),
     )
 }
 
@@ -760,26 +773,46 @@ fn import_saved_media_with_before_transaction(
     path: &Path,
     before_transaction: impl FnOnce(),
 ) -> Result<MediaListDto, String> {
+    let probe = probe_media(engine, path);
     import_saved_media_with_hooks(
+        SavedMediaImportContext {
+            core,
+            engine,
+            prewarm,
+            expected_project_epoch,
+            expected_project_dir,
+            path,
+            probe: &probe,
+        },
+        (before_transaction, || Ok(())),
+    )
+}
+
+struct SavedMediaImportContext<'a> {
+    core: &'a AppCore,
+    engine: &'a MediaEngine,
+    prewarm: &'a prewarm::PrewarmScheduler,
+    expected_project_epoch: u64,
+    expected_project_dir: &'a Path,
+    path: &'a Path,
+    // Save-as callers supply metadata from the retained file's private stable
+    // copy; this transaction must never re-probe the exchangeable final path.
+    probe: &'a ProbedMedia,
+}
+
+fn import_saved_media_with_hooks(
+    context: SavedMediaImportContext<'_>,
+    hooks: (impl FnOnce(), impl FnOnce() -> Result<(), String>),
+) -> Result<MediaListDto, String> {
+    let SavedMediaImportContext {
         core,
         engine,
         prewarm,
         expected_project_epoch,
         expected_project_dir,
         path,
-        (before_transaction, || Ok(())),
-    )
-}
-
-fn import_saved_media_with_hooks(
-    core: &AppCore,
-    engine: &MediaEngine,
-    prewarm: &prewarm::PrewarmScheduler,
-    expected_project_epoch: u64,
-    expected_project_dir: &Path,
-    path: &Path,
-    hooks: (impl FnOnce(), impl FnOnce() -> Result<(), String>),
-) -> Result<MediaListDto, String> {
+        probe,
+    } = context;
     path.strip_prefix(expected_project_dir)
         .ok()
         .filter(|relative| {
@@ -791,7 +824,6 @@ fn import_saved_media_with_hooks(
         })
         .ok_or("saved media output must be inside the expected project media directory")?;
     importable_clip_type(path).ok_or("failed to import saved media")?;
-    let probe = probe_media(engine, path);
     let (before_transaction, postcondition) = hooks;
     before_transaction();
     let entry = core
@@ -800,7 +832,7 @@ fn import_saved_media_with_hooks(
             expected_project_dir,
             path,
             display_name(path),
-            &probe,
+            probe,
             || postcondition().map_err(CoreError::Media),
         )
         .map_err(|error| error.to_string())?;
@@ -811,6 +843,78 @@ fn import_saved_media_with_hooks(
         Vec::new(),
         vec![result],
     ))
+}
+
+pub(crate) struct SavedMediaFinalizationContext<'a> {
+    pub(crate) core: &'a AppCore,
+    pub(crate) engine: &'a MediaEngine,
+    pub(crate) prewarm: &'a prewarm::PrewarmScheduler,
+    pub(crate) expected_project_epoch: u64,
+    pub(crate) expected_project_dir: &'a Path,
+    pub(crate) on_progress: &'a dyn Fn(i32, i32),
+}
+
+pub(crate) fn finalize_saved_media(
+    context: SavedMediaFinalizationContext<'_>,
+    output: crate::export::ProjectMediaOutput,
+    guard: &mut crate::export::ExportGuard<'_>,
+) -> Result<MediaListDto, String> {
+    finalize_saved_media_with_hooks(context, output, guard, (|| {}, || {}, || {}, || {}, || {}))
+}
+
+fn finalize_saved_media_with_hooks(
+    context: SavedMediaFinalizationContext<'_>,
+    output: crate::export::ProjectMediaOutput,
+    guard: &mut crate::export::ExportGuard<'_>,
+    hooks: (
+        impl FnOnce(),
+        impl FnOnce(),
+        impl FnOnce(),
+        impl FnOnce(),
+        impl FnOnce(),
+    ),
+) -> Result<MediaListDto, String> {
+    let SavedMediaFinalizationContext {
+        core,
+        engine,
+        prewarm,
+        expected_project_epoch,
+        expected_project_dir,
+        on_progress,
+    } = context;
+    let (after_sync, before_probe, after_probe, before_transaction, before_commit) = hooks;
+    output.prepare_commit_cancellable(guard, after_sync)?;
+    let probe = probe_saved_media_with_hooks(
+        engine,
+        &output,
+        guard.cancel_token(),
+        before_probe,
+        after_probe,
+    )?;
+    guard.checkpoint()?;
+    let path = output.path().to_path_buf();
+    let result = import_saved_media_with_hooks(
+        SavedMediaImportContext {
+            core,
+            engine,
+            prewarm,
+            expected_project_epoch,
+            expected_project_dir,
+            path: &path,
+            probe: &probe,
+        },
+        (before_transaction, || {
+            output.verify_identity()?;
+            before_commit();
+            guard.commit()
+        }),
+    )?;
+    let _committed_path = output.mark_kept();
+    on_progress(
+        crate::export::AUDIO_PROGRESS_TOTAL,
+        crate::export::AUDIO_PROGRESS_TOTAL,
+    );
+    Ok(result)
 }
 
 /// `import_folder`: bring a local directory into the library.
@@ -1213,7 +1317,7 @@ fn save_clip_as_media_workflow(
     let (single_timeline, subset, media_type) =
         build_single_clip_export(&snapshot.timeline, &snapshot.media, clip_id)?;
     let ext = save_clip_extension(media_type)?;
-    let _guard = control.try_begin()?;
+    let mut guard = control.try_begin()?;
     let output =
         crate::export::reserve_project_media_output(&project_dir, &format!("clip_{clip_id}"), ext)?;
     let out_path = output.path().to_path_buf();
@@ -1269,25 +1373,18 @@ fn save_clip_as_media_workflow(
         _ => unreachable!("save clip extension is fixed by clip type"),
     }
 
-    if control.is_cancelled() {
-        return Err(crate::export::CANCELLED_SENTINEL.to_string());
-    }
-    output.prepare_commit()?;
-    let result = import_saved_media_checked(
-        core,
-        engine,
-        prewarm,
-        snapshot.project_epoch,
-        &project_dir,
-        &out_path,
-        || output.verify_identity(),
-    )?;
-    let _committed_path = output.mark_kept();
-    on_progress(
-        crate::export::AUDIO_PROGRESS_TOTAL,
-        crate::export::AUDIO_PROGRESS_TOTAL,
-    );
-    Ok(result)
+    finalize_saved_media(
+        SavedMediaFinalizationContext {
+            core,
+            engine,
+            prewarm,
+            expected_project_epoch: snapshot.project_epoch,
+            expected_project_dir: &project_dir,
+            on_progress: on_progress.as_ref(),
+        },
+        output,
+        &mut guard,
+    )
 }
 
 fn save_clip_extension(media_type: ClipType) -> Result<&'static str, String> {
@@ -1916,6 +2013,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn final_identity_swap_rolls_back_live_and_persisted_saved_media_import() {
         let tmp = tempfile::tempdir().expect("temp root");
@@ -1946,21 +2044,29 @@ mod tests {
         output.prepare_commit().expect("pre-import identity valid");
         let engine = engine_for(tmp.path());
         let scheduler = prewarm::PrewarmScheduler::new(snapshot.project_epoch);
+        let probe = probe_saved_media(&engine, &output, &MediaCancelToken::new())
+            .expect("probe retained saved media");
 
-        let result = import_saved_media_checked(
-            &core,
-            &engine,
-            &scheduler,
-            snapshot.project_epoch,
-            &bundle,
-            &output_path,
-            || {
-                fs::rename(&output_path, &moved_original)
-                    .map_err(|error| format!("swap reserved output: {error}"))?;
-                fs::write(&output_path, b"replacement")
-                    .map_err(|error| format!("install replacement: {error}"))?;
-                output.verify_identity()
+        let result = import_saved_media_with_hooks(
+            SavedMediaImportContext {
+                core: &core,
+                engine: &engine,
+                prewarm: &scheduler,
+                expected_project_epoch: snapshot.project_epoch,
+                expected_project_dir: &bundle,
+                path: &output_path,
+                probe: &probe,
             },
+            (
+                || {},
+                || {
+                    fs::rename(&output_path, &moved_original)
+                        .map_err(|error| format!("swap reserved output: {error}"))?;
+                    fs::write(&output_path, b"replacement")
+                        .map_err(|error| format!("install replacement: {error}"))?;
+                    output.verify_identity()
+                },
+            ),
         );
 
         let error = result.expect_err("post-import identity swap must abort transaction");
@@ -1984,11 +2090,234 @@ mod tests {
             before_live,
             "reopened project must not contain a dangling saved-media entry"
         );
-        drop(output);
         assert_eq!(
             fs::read(&output_path).expect("replacement remains untouched"),
             b"replacement"
         );
+        fs::remove_file(&output_path).expect("remove attacker replacement");
+        fs::rename(&moved_original, &output_path).expect("restore retained final name");
+        drop(output);
+        assert!(!output_path.exists(), "failed output must be removed");
+        assert!(!moved_original.exists(), "no failed artifact may remain");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transient_probe_path_swap_commits_metadata_from_retained_output() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let bundle = tmp.path().join("ProbeIdentity.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save project");
+        let snapshot = core.runtime_snapshot();
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(snapshot.project_epoch);
+        let output =
+            crate::export::reserve_project_media_output(&bundle, "probe_swap_restore", "wav")
+                .expect("reserve output");
+        let output_path = output.path().to_path_buf();
+        let moved_output = output_path.with_extension("retained");
+        let replacement = tmp.path().join("replacement.wav");
+        let mut writer = output.writer().expect("clone retained output");
+        crate::export::write_wav_s16le_cancellable_to_file(
+            &[0.0; 480],
+            48_000,
+            &mut writer,
+            &MediaCancelToken::new(),
+            None,
+            None,
+        )
+        .expect("write 10ms retained WAV");
+        drop(writer);
+        fs::File::create(&replacement).expect("create replacement WAV");
+        crate::export::write_wav_s16le(&[0.0; 4_800], 48_000, &replacement)
+            .expect("write 100ms replacement WAV");
+        let retained_duration = engine
+            .probe(&output_path)
+            .expect("ffprobe retained WAV")
+            .duration_secs;
+        let replacement_duration = engine
+            .probe(&replacement)
+            .expect("ffprobe replacement WAV")
+            .duration_secs;
+        assert!(replacement_duration > retained_duration * 5.0);
+
+        let control = crate::export::ExportControl::default();
+        let mut guard = control.try_begin().expect("begin save generation");
+        let result = finalize_saved_media_with_hooks(
+            SavedMediaFinalizationContext {
+                core: &core,
+                engine: &engine,
+                prewarm: &scheduler,
+                expected_project_epoch: snapshot.project_epoch,
+                expected_project_dir: &bundle,
+                on_progress: &|_, _| {},
+            },
+            output,
+            &mut guard,
+            (
+                || {},
+                || {
+                    fs::rename(&output_path, &moved_output).expect("move retained final name");
+                    fs::copy(&replacement, &output_path).expect("install probe replacement");
+                },
+                || {
+                    fs::remove_file(&output_path).expect("remove probe replacement");
+                    fs::rename(&moved_output, &output_path).expect("restore retained final name");
+                },
+                || {},
+                || {},
+            ),
+        )
+        .expect("stable retained probe must commit");
+
+        let imported = result
+            .items
+            .iter()
+            .find(|item| item.name.starts_with("probe_swap_restore"))
+            .expect("saved media imported");
+        assert!((imported.duration - retained_duration).abs() < 0.001);
+        assert!((imported.duration - replacement_duration).abs() > 0.05);
+        core.save_project(None).expect("persist imported manifest");
+        let reopened = AppCore::new();
+        reopened
+            .open_project(bundle)
+            .expect("reopen project after stable probe import");
+        let reopened_entry = reopened
+            .media()
+            .entries
+            .into_iter()
+            .find(|entry| entry.name.starts_with("probe_swap_restore"))
+            .expect("reopened saved media entry");
+        assert!((reopened_entry.duration - retained_duration).abs() < 0.001);
+        assert!(output_path.is_file());
+        assert!(!moved_output.exists());
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FinalizationCancelStage {
+        Sync,
+        Probe,
+        Import,
+        Commit,
+    }
+
+    fn assert_finalization_cancelled_at(stage: FinalizationCancelStage) {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let bundle = tmp.path().join("CancelledFinalization.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save project");
+        let snapshot = core.runtime_snapshot();
+        let before_live = snapshot.media.clone();
+        let manifest_path = bundle.join("media.json");
+        let before_disk = fs::read(&manifest_path).expect("read persisted manifest");
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(snapshot.project_epoch);
+        let output =
+            crate::export::reserve_project_media_output(&bundle, "cancelled_finalization", "wav")
+                .expect("reserve output");
+        let output_path = output.path().to_path_buf();
+        let mut writer = output.writer().expect("clone output");
+        crate::export::write_wav_s16le_cancellable_to_file(
+            &[0.0; 480],
+            48_000,
+            &mut writer,
+            &MediaCancelToken::new(),
+            None,
+            None,
+        )
+        .expect("write output");
+        drop(writer);
+
+        let control = crate::export::ExportControl::default();
+        let mut guard = control.try_begin().expect("begin save generation");
+        let cancel = guard.cancel_token().clone();
+        let sync_cancel = cancel.clone();
+        let probe_cancel = cancel.clone();
+        let import_cancel = cancel.clone();
+        let commit_cancel = cancel;
+        let terminal_progress = std::cell::Cell::new(false);
+        let result = finalize_saved_media_with_hooks(
+            SavedMediaFinalizationContext {
+                core: &core,
+                engine: &engine,
+                prewarm: &scheduler,
+                expected_project_epoch: snapshot.project_epoch,
+                expected_project_dir: &bundle,
+                on_progress: &|done, total| {
+                    if done == total {
+                        terminal_progress.set(true);
+                    }
+                },
+            },
+            output,
+            &mut guard,
+            (
+                move || {
+                    if stage == FinalizationCancelStage::Sync {
+                        sync_cancel.cancel();
+                    }
+                },
+                || {},
+                move || {
+                    if stage == FinalizationCancelStage::Probe {
+                        probe_cancel.cancel();
+                    }
+                },
+                move || {
+                    if stage == FinalizationCancelStage::Import {
+                        import_cancel.cancel();
+                    }
+                },
+                move || {
+                    if stage == FinalizationCancelStage::Commit {
+                        commit_cancel.cancel();
+                    }
+                },
+            ),
+        );
+
+        assert_eq!(
+            result.expect_err("cancellation must abort finalization"),
+            crate::export::CANCELLED_SENTINEL
+        );
+        assert!(
+            !terminal_progress.get(),
+            "cancelled save must not emit 100%"
+        );
+        assert!(!output_path.exists(), "cancelled output must be removed");
+        assert_eq!(core.media(), before_live, "live manifest must roll back");
+        assert_eq!(
+            fs::read(&manifest_path).expect("reread persisted manifest"),
+            before_disk,
+            "persisted manifest must remain unchanged"
+        );
+        let reopened = AppCore::new();
+        reopened
+            .open_project(bundle)
+            .expect("reopen project after cancellation");
+        assert_eq!(reopened.media(), before_live);
+    }
+
+    #[test]
+    fn cancellation_during_sync_aborts_finalization_without_terminal_progress() {
+        assert_finalization_cancelled_at(FinalizationCancelStage::Sync);
+    }
+
+    #[test]
+    fn cancellation_during_probe_aborts_finalization_without_terminal_progress() {
+        assert_finalization_cancelled_at(FinalizationCancelStage::Probe);
+    }
+
+    #[test]
+    fn cancellation_before_import_rolls_back_without_terminal_progress() {
+        assert_finalization_cancelled_at(FinalizationCancelStage::Import);
+    }
+
+    #[test]
+    fn cancellation_inside_core_commit_rolls_back_without_terminal_progress() {
+        assert_finalization_cancelled_at(FinalizationCancelStage::Commit);
     }
 
     #[test]
