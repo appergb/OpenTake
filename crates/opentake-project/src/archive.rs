@@ -132,6 +132,7 @@ pub fn archive(
         entries: new_entries,
         folders: manifest.folders.clone(),
         favorites: manifest.favorites.clone(),
+        favorite_library_ids: manifest.favorite_library_ids.clone(),
     };
 
     write_json(
@@ -384,6 +385,8 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use opentake_domain::{ClipType, MediaManifestEntry};
+    #[cfg(unix)]
+    use std::collections::BTreeMap;
 
     /// Minimal `External` manifest entry for archive tests.
     #[cfg(unix)]
@@ -475,6 +478,7 @@ mod tests {
             ],
             folders: Vec::new(),
             favorites: Vec::new(),
+            ..MediaManifest::default()
         };
         let log = GenerationLog::new();
         let dest = dir.path().join("Out.opentake");
@@ -491,6 +495,40 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(copied.len(), 2, "expected two copies, got {copied:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_preserves_global_favorite_mapping() {
+        let dir = TestDir::new("archive_favorite_mapping");
+        let source = dir.path().join("source.mp4");
+        fs::write(&source, b"favorite").unwrap();
+        let asset_id = "favorite-asset".to_string();
+        let manifest = MediaManifest {
+            entries: vec![external_entry(&asset_id, source.to_str().unwrap())],
+            favorites: vec![asset_id.clone()],
+            favorite_library_ids: BTreeMap::from([(asset_id.clone(), "content-hash".to_string())]),
+            ..MediaManifest::default()
+        };
+        let destination = dir.path().join("Out.opentake");
+
+        archive(
+            &Timeline::new(),
+            &manifest,
+            &GenerationLog::new(),
+            None,
+            &destination,
+        )
+        .unwrap();
+
+        let archived: MediaManifest =
+            serde_json::from_slice(&fs::read(layout::manifest_path(&destination)).unwrap())
+                .unwrap();
+        assert_eq!(archived.favorites, vec![asset_id.clone()]);
+        assert_eq!(
+            archived.library_favorite_id(&asset_id),
+            Some("content-hash")
+        );
     }
 
     /// A scratch directory under the system temp dir, removed on drop.

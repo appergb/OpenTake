@@ -16,6 +16,7 @@
 //! the manifest. Filesystem existence checks (`resolveURL` / `isMissing`) belong
 //! to the project/media layer and are intentionally NOT ported here.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -171,6 +172,14 @@ pub struct MediaManifest {
     /// so decode defaults it to empty and serialization skips it when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub favorites: Vec<String>,
+    /// Project asset id → content-addressed global-library id. This keeps the
+    /// project favorite mirror reversible even when the original source is offline.
+    #[serde(
+        default,
+        rename = "favoriteLibraryIds",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub favorite_library_ids: BTreeMap<String, String>,
 }
 
 impl Default for MediaManifest {
@@ -180,6 +189,7 @@ impl Default for MediaManifest {
             entries: Vec::new(),
             folders: Vec::new(),
             favorites: Vec::new(),
+            favorite_library_ids: BTreeMap::new(),
         }
     }
 }
@@ -220,11 +230,65 @@ impl MediaManifest {
         changed
     }
 
+    /// The global-library content id mirrored for `asset_id`, if any.
+    pub fn library_favorite_id(&self, asset_id: &str) -> Option<&str> {
+        self.favorite_library_ids.get(asset_id).map(String::as_str)
+    }
+
+    /// Set or clear one project's global-favorite mirror. Setting an unknown
+    /// asset is ignored so the mapping cannot acquire a dangling key.
+    pub fn set_global_favorite(&mut self, asset_id: &str, library_id: Option<String>) -> bool {
+        match library_id {
+            Some(library_id) => {
+                if !self.entries.iter().any(|entry| entry.id == asset_id) {
+                    return false;
+                }
+                let favorite_changed = if self.is_favorite(asset_id) {
+                    false
+                } else {
+                    self.favorites.push(asset_id.to_string());
+                    true
+                };
+                let mapping_changed = self.library_favorite_id(asset_id) != Some(&library_id);
+                if mapping_changed {
+                    self.favorite_library_ids
+                        .insert(asset_id.to_string(), library_id);
+                }
+                favorite_changed || mapping_changed
+            }
+            None => {
+                let mapping_changed = self.favorite_library_ids.remove(asset_id).is_some();
+                let before = self.favorites.len();
+                self.favorites.retain(|id| id != asset_id);
+                mapping_changed || self.favorites.len() != before
+            }
+        }
+    }
+
+    /// Clear every project mirror that points at `library_id`. Returns the
+    /// number of distinct asset mappings removed.
+    pub fn clear_global_favorite_id(&mut self, library_id: &str) -> usize {
+        let asset_ids: Vec<_> = self
+            .favorite_library_ids
+            .iter()
+            .filter(|(_, id)| id.as_str() == library_id)
+            .map(|(asset_id, _)| asset_id.clone())
+            .collect();
+        for asset_id in &asset_ids {
+            self.favorite_library_ids.remove(asset_id);
+        }
+        self.favorites
+            .retain(|asset_id| !asset_ids.iter().any(|id| id == asset_id));
+        asset_ids.len()
+    }
+
     /// Drop favorites whose entry no longer exists — call after removing assets so
     /// the set never carries dangling ids.
     pub fn prune_favorites(&mut self) {
         self.favorites
             .retain(|id| self.entries.iter().any(|e| &e.id == id));
+        self.favorite_library_ids
+            .retain(|id, _| self.entries.iter().any(|entry| &entry.id == id));
     }
 }
 
@@ -241,6 +305,8 @@ impl<'de> Deserialize<'de> for MediaManifest {
             folders: Option<Vec<MediaFolder>>,
             // Absent in older projects (added in #91) => empty set.
             favorites: Option<Vec<String>>,
+            #[serde(default, rename = "favoriteLibraryIds")]
+            favorite_library_ids: BTreeMap<String, String>,
         }
         let raw = Raw::deserialize(deserializer)?;
         Ok(MediaManifest {
@@ -248,6 +314,7 @@ impl<'de> Deserialize<'de> for MediaManifest {
             entries: raw.entries.unwrap_or_default(),
             folders: raw.folders.unwrap_or_default(),
             favorites: raw.favorites.unwrap_or_default(),
+            favorite_library_ids: raw.favorite_library_ids,
         })
     }
 }
@@ -650,6 +717,53 @@ mod tests {
         assert!(json.contains("\"favorites\":[\"ext\"]"));
         let back: MediaManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.favorites, vec!["ext".to_string()]);
+    }
+
+    #[test]
+    fn global_favorite_mapping_round_trips_and_preserves_legacy_favorites() {
+        let mut manifest = sample_manifest();
+        manifest.set_favorites(&["proj".into()], true);
+
+        assert!(manifest.set_global_favorite("ext", Some("content-hash".into())));
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(json.contains("\"favoriteLibraryIds\":{\"ext\":\"content-hash\"}"));
+
+        let decoded: MediaManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.library_favorite_id("ext"), Some("content-hash"));
+        assert!(decoded.is_favorite("ext"));
+        assert!(decoded.is_favorite("proj"));
+
+        let legacy: MediaManifest = serde_json::from_str(
+            r#"{"version":2,"entries":[],"folders":[],"favorites":["legacy"]}"#,
+        )
+        .unwrap();
+        assert!(legacy.favorite_library_ids.is_empty());
+        assert_eq!(legacy.favorites, vec!["legacy"]);
+    }
+
+    #[test]
+    fn clearing_library_id_removes_all_project_mirrors() {
+        let mut manifest = sample_manifest();
+        assert!(manifest.set_global_favorite("ext", Some("shared-hash".into())));
+        assert!(manifest.set_global_favorite("proj", Some("shared-hash".into())));
+
+        assert_eq!(manifest.clear_global_favorite_id("shared-hash"), 2);
+        assert!(!manifest.is_favorite("ext"));
+        assert!(!manifest.is_favorite("proj"));
+        assert!(manifest.favorite_library_ids.is_empty());
+        assert_eq!(manifest.clear_global_favorite_id("shared-hash"), 0);
+    }
+
+    #[test]
+    fn prune_favorites_prunes_library_id_mapping() {
+        let mut manifest = sample_manifest();
+        assert!(manifest.set_global_favorite("ext", Some("content-hash".into())));
+        manifest.entries.retain(|entry| entry.id != "ext");
+
+        manifest.prune_favorites();
+
+        assert!(!manifest.is_favorite("ext"));
+        assert_eq!(manifest.library_favorite_id("ext"), None);
     }
 
     // --- MediaResolver ---

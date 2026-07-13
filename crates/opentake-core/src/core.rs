@@ -470,6 +470,47 @@ impl AppCore {
         Ok(changed)
     }
 
+    /// Set or clear one project's global-favorite mapping, emitting the same
+    /// media-change signal used by other manifest mutations.
+    pub fn set_media_global_favorite(
+        &self,
+        asset_id: &str,
+        library_id: Option<String>,
+    ) -> Result<bool> {
+        let (changed, count, project_epoch) = {
+            let mut session = self.lock();
+            let changed = session
+                .editor
+                .set_media_global_favorite(asset_id, library_id)?;
+            let count = session.editor.media().entries.len();
+            (changed, count, session.project_epoch)
+        };
+        if changed {
+            self.events.emit(&CoreEvent::MediaChanged {
+                project_epoch,
+                count,
+            });
+        }
+        Ok(changed)
+    }
+
+    /// Clear every current-project mapping for a removed global-library id.
+    pub fn clear_media_global_favorite_id(&self, library_id: &str) -> Result<usize> {
+        let (changed, count, project_epoch) = {
+            let mut session = self.lock();
+            let changed = session.editor.clear_media_global_favorite_id(library_id)?;
+            let count = session.editor.media().entries.len();
+            (changed, count, session.project_epoch)
+        };
+        if changed > 0 {
+            self.events.emit(&CoreEvent::MediaChanged {
+                project_epoch,
+                count,
+            });
+        }
+        Ok(changed)
+    }
+
     /// Relink an existing asset (by id) to a new file, keeping the same id, and
     /// emit [`CoreEvent::MediaChanged`] after releasing the lock so observers
     /// refresh. See [`EditorSession::relink_media_file`]: re-importing would mint
@@ -875,5 +916,41 @@ mod tests {
         assert!(err.is_err());
         assert!(core.media().entries.is_empty());
         assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn global_favorite_interfaces_emit_media_changed_only_on_change() {
+        let core = AppCore::new();
+        let entry = core
+            .import_media_file("/abs/a.mp4", "a", &ProbedMedia::default())
+            .unwrap();
+        let seen: Arc<Mutex<Vec<CoreEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        core.subscribe(move |event| sink.lock().unwrap().push(event.clone()));
+
+        assert!(core
+            .set_media_global_favorite(&entry.id, Some("content-hash".into()))
+            .unwrap());
+        assert!(!core
+            .set_media_global_favorite(&entry.id, Some("content-hash".into()))
+            .unwrap());
+        assert_eq!(
+            core.clear_media_global_favorite_id("content-hash").unwrap(),
+            1
+        );
+
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            vec![
+                CoreEvent::MediaChanged {
+                    project_epoch: 0,
+                    count: 1,
+                },
+                CoreEvent::MediaChanged {
+                    project_epoch: 0,
+                    count: 1,
+                },
+            ]
+        );
     }
 }

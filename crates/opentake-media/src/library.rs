@@ -188,6 +188,30 @@ impl LibraryStore {
         Ok(self.load_manifest()?.entries.iter().any(|e| e.id == id))
     }
 
+    /// Compute the content-addressed id without changing the library. Used to
+    /// migrate legacy project favorites that predate persisted library ids.
+    pub fn content_id(&self, path: impl AsRef<Path>) -> Result<String> {
+        Ok(hash_hex(&std::fs::read(path)?))
+    }
+
+    fn store_copy(&self, id: &str, source: &Path, bytes: &[u8]) -> Result<()> {
+        let files_dir = self.files_dir();
+        std::fs::create_dir_all(&files_dir)?;
+        let ext = source
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| format!(".{value}"))
+            .unwrap_or_default();
+        let stored = files_dir.join(format!("{id}{ext}"));
+        if stored.exists() {
+            return Ok(());
+        }
+        let tmp = files_dir.join(format!("{id}{ext}.tmp"));
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, &stored)?;
+        Ok(())
+    }
+
     /// Favorite a file: copy its bytes into the library (dedup by content hash)
     /// and record an entry. If the same content is already favorited, the
     /// existing entry is returned unchanged and no duplicate file is written.
@@ -206,26 +230,16 @@ impl LibraryStore {
         let mut manifest = self.load_manifest()?;
         manifest.version = MANIFEST_VERSION;
 
-        if let Some(existing) = manifest.entries.iter().find(|e| e.id == id) {
-            return Ok(existing.clone());
+        if let Some(existing) = manifest.entries.iter().find(|e| e.id == id).cloned() {
+            if self.stored_path(&id)?.is_none() {
+                self.store_copy(&id, req.source, &bytes)?;
+            }
+            return Ok(existing);
         }
 
         // Copy the content into the library under its hashed name. The extension
         // is preserved for readability/tooling; identity is the hash, not the ext.
-        let files_dir = self.files_dir();
-        std::fs::create_dir_all(&files_dir)?;
-        let ext = req
-            .source
-            .extension()
-            .and_then(|s| s.to_str())
-            .map(|s| format!(".{s}"))
-            .unwrap_or_default();
-        let stored = files_dir.join(format!("{id}{ext}"));
-        if !stored.exists() {
-            let tmp = files_dir.join(format!("{id}{ext}.tmp"));
-            std::fs::write(&tmp, &bytes)?;
-            std::fs::rename(&tmp, &stored)?;
-        }
+        self.store_copy(&id, req.source, &bytes)?;
 
         let entry = LibraryEntry {
             id,
@@ -345,6 +359,7 @@ fn hash_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::{Arc, Barrier};
 
     fn src_file(dir: &Path, name: &str, content: &[u8]) -> PathBuf {
         let p = dir.join(name);
@@ -403,6 +418,74 @@ mod tests {
         assert_eq!(count, 1);
         // The kept entry is the first favorite (source a).
         assert_eq!(second.source.as_deref(), a.to_str());
+    }
+
+    #[test]
+    fn content_id_matches_favorite_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = src_file(tmp.path(), "clip.mp4", b"same identity");
+        let store = LibraryStore::new(tmp.path().join("lib"));
+
+        let id = store.content_id(&source).unwrap();
+        let entry = store.favorite(&req(&source, "video", None)).unwrap();
+
+        assert_eq!(id, entry.id);
+    }
+
+    #[test]
+    fn favorite_repairs_missing_stored_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = src_file(tmp.path(), "clip.mp4", b"repair me");
+        let store = LibraryStore::new(tmp.path().join("lib"));
+        let first = store.favorite(&req(&source, "video", None)).unwrap();
+        let stored = store.stored_path(&first.id).unwrap().unwrap();
+        std::fs::remove_file(&stored).unwrap();
+
+        let repaired = store.favorite(&req(&source, "video", None)).unwrap();
+
+        assert_eq!(repaired, first);
+        let repaired_path = store.stored_path(&first.id).unwrap().unwrap();
+        assert_eq!(std::fs::read(repaired_path).unwrap(), b"repair me");
+        assert_eq!(store.entries().unwrap(), vec![first]);
+    }
+
+    #[test]
+    fn concurrent_favorites_do_not_lose_entries() {
+        const THREADS: usize = 16;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(LibraryStore::new(tmp.path().join("lib")));
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let sources: Vec<_> = (0..THREADS)
+            .map(|index| {
+                src_file(
+                    tmp.path(),
+                    &format!("clip-{index}.mp4"),
+                    format!("content-{index}").as_bytes(),
+                )
+            })
+            .collect();
+
+        let handles: Vec<_> = sources
+            .into_iter()
+            .map(|source| {
+                let store = Arc::clone(&store);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.favorite(&req(&source, "video", None)).unwrap()
+                })
+            })
+            .collect();
+        let entries: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        let stored = store.entries().unwrap();
+        assert_eq!(stored.len(), THREADS);
+        assert!(entries
+            .iter()
+            .all(|entry| stored.iter().any(|stored| stored.id == entry.id)));
     }
 
     #[test]

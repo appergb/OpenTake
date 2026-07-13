@@ -371,6 +371,26 @@ impl EditorSession {
         Ok(self.state.manifest.set_favorites(asset_ids, favorite))
     }
 
+    /// Set or clear one asset's content-addressed global favorite id. This is a
+    /// manifest mutation outside undo, matching [`Self::set_media_favorite`].
+    pub fn set_media_global_favorite(
+        &mut self,
+        asset_id: &str,
+        library_id: Option<String>,
+    ) -> Result<bool> {
+        self.ensure_mutable()?;
+        Ok(self
+            .state
+            .manifest
+            .set_global_favorite(asset_id, library_id))
+    }
+
+    /// Clear every current-project mirror of a removed global-library entry.
+    pub fn clear_media_global_favorite_id(&mut self, library_id: &str) -> Result<usize> {
+        self.ensure_mutable()?;
+        Ok(self.state.manifest.clear_global_favorite_id(library_id))
+    }
+
     /// A clone of the current media manifest (read-only mirror for the media
     /// panel). The manifest is the persisted id→file catalog.
     pub fn media(&self) -> MediaManifest {
@@ -731,6 +751,29 @@ mod tests {
         let err = s.import_media_file("/abs/doc.txt", "x", "doc", &ProbedMedia::default());
         assert!(matches!(err, Err(CoreError::Unsupported("media"))));
         assert!(s.media().entries.is_empty());
+    }
+
+    #[test]
+    fn global_favorite_interfaces_keep_project_mirrors_in_sync() {
+        let mut session = EditorSession::new_project();
+        session
+            .import_media_file("/abs/clip.mp4", "asset-1", "clip", &ProbedMedia::default())
+            .unwrap();
+
+        assert!(session
+            .set_media_global_favorite("asset-1", Some("content-hash".into()))
+            .unwrap());
+        assert_eq!(
+            session.media().library_favorite_id("asset-1"),
+            Some("content-hash")
+        );
+        assert_eq!(
+            session
+                .clear_media_global_favorite_id("content-hash")
+                .unwrap(),
+            1
+        );
+        assert!(!session.media().is_favorite("asset-1"));
     }
 
     // --- Save-as copies the project-internal media/ directory (Item 1) ---
