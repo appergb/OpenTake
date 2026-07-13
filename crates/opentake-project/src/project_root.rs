@@ -363,6 +363,7 @@ impl BundlePublisher {
             &backup_name,
             &journal_name,
         )?;
+        clear_idle_publish_marker(&parent, &parent_path, &target_name)?;
         let target_exists = inspect_directory(&parent, &parent_path, &target_name, false)?;
         let journal = PublishJournal::new(target_exists);
         write_new_file_artifact(&parent, &parent_path, &journal_name, &journal.encode())?;
@@ -404,6 +405,14 @@ impl BundlePublisher {
     }
 
     pub(crate) fn publish(mut self) -> Result<ProjectRoot> {
+        #[cfg(test)]
+        if FAIL_PUBLISH_AFTER_BACKUP.with(|fail| fail.replace(false)) {
+            return self.publish_with_hook(|| {
+                Err(std::io::Error::other(
+                    "injected publication failure after backup",
+                ))
+            });
+        }
         self.publish_with_hook(|| Ok(()))
     }
 
@@ -568,8 +577,18 @@ impl BundlePublisher {
                 && remove_file_artifact(&self.parent, &self.parent_path, &self.journal_name)
                     .is_ok();
             if journal_cleaned {
-                let _ =
-                    remove_file_artifact(&root.dir, &root.path, OsStr::new(PUBLISH_MARKER_FILE));
+                #[cfg(test)]
+                let skip_marker_cleanup =
+                    FAIL_COMMITTED_MARKER_CLEANUP.with(|fail| fail.replace(false));
+                #[cfg(not(test))]
+                let skip_marker_cleanup = false;
+                if !skip_marker_cleanup {
+                    let _ = remove_file_artifact(
+                        &root.dir,
+                        &root.path,
+                        OsStr::new(PUBLISH_MARKER_FILE),
+                    );
+                }
             }
         }
         Ok(root)
@@ -623,6 +642,9 @@ std::thread_local! {
     static FAIL_ABORT_CLEANUP_BEFORE_STAGE_REMOVAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAIL_ABORT_CLEANUP_BEFORE_JOURNAL_REMOVAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAIL_STAGE_CLEANUP_AFTER_MARKER_REMOVAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_COMMITTED_MARKER_CLEANUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_IDLE_MARKER_CLEANUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_PUBLISH_AFTER_BACKUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn artifact_name(target: &OsStr, suffix: &str) -> OsString {
@@ -1015,6 +1037,37 @@ fn marker_matches(root: &ProjectRoot, nonce: &str) -> Result<bool> {
         Some(bytes) => Ok(bytes == nonce.as_bytes()),
         None => Ok(false),
     }
+}
+
+fn clear_idle_publish_marker(parent: &Dir, parent_path: &Path, target_name: &OsStr) -> Result<()> {
+    if !inspect_directory(parent, parent_path, target_name, false)? {
+        return Ok(());
+    }
+    let target = ProjectRoot::open_from_parent(
+        &parent_path.join(target_name),
+        parent
+            .try_clone()
+            .map_err(|error| ProjectError::io(parent_path, error))?,
+        target_name.to_owned(),
+    )?;
+    if target.read_optional(PUBLISH_MARKER_FILE)?.is_none() {
+        return Ok(());
+    }
+    #[cfg(test)]
+    if FAIL_IDLE_MARKER_CLEANUP.with(|fail| fail.replace(false)) {
+        return Err(ProjectError::io(
+            target.path.join(PUBLISH_MARKER_FILE),
+            std::io::Error::other("injected idle publish marker cleanup failure"),
+        ));
+    }
+    remove_file_artifact(&target.dir, &target.path, OsStr::new(PUBLISH_MARKER_FILE))?;
+    if target.read_optional(PUBLISH_MARKER_FILE)?.is_some() {
+        return Err(ProjectError::io(
+            target.path.join(PUBLISH_MARKER_FILE),
+            std::io::Error::other("idle publish marker remained after cleanup"),
+        ));
+    }
+    Ok(())
 }
 
 fn recover_bundle_transaction(
@@ -1896,6 +1949,84 @@ mod tests {
     }
 
     #[test]
+    fn public_save_to_normalizes_a_prior_marker_before_partial_abort_recovery() {
+        let tmp = TmpDir::new("two-generation-stale-marker");
+        let target = tmp.path().join("Existing.opentake");
+        let journal = tmp.path().join(".Existing.opentake.opentake-journal");
+        let backup = tmp.path().join(".Existing.opentake.opentake-backup");
+        let mut generation_a = crate::Project::new(tmp.path().join("GenerationA.opentake"));
+        generation_a.timeline.fps = 24;
+        FAIL_COMMITTED_MARKER_CLEANUP.with(|fail| fail.set(true));
+        generation_a.save_to(&target).unwrap();
+        assert!(target.join(PUBLISH_MARKER_FILE).is_file());
+        let expected_timeline = fs::read(target.join(crate::layout::TIMELINE_FILE)).unwrap();
+        let expected_manifest = fs::read(target.join(crate::layout::MANIFEST_FILE)).unwrap();
+
+        let mut generation_b = crate::Project::new(tmp.path().join("GenerationB.opentake"));
+        generation_b.timeline.fps = 60;
+        FAIL_PUBLISH_AFTER_BACKUP.with(|fail| fail.set(true));
+        FAIL_STAGE_CLEANUP_AFTER_MARKER_REMOVAL.with(|fail| fail.set(true));
+        generation_b
+            .save_to(&target)
+            .expect_err("generation B must fail after restoring generation A");
+
+        assert!(!target.join(PUBLISH_MARKER_FILE).exists());
+        assert_eq!(
+            fs::read(target.join(crate::layout::TIMELINE_FILE)).unwrap(),
+            expected_timeline
+        );
+        assert_eq!(
+            fs::read(target.join(crate::layout::MANIFEST_FILE)).unwrap(),
+            expected_manifest
+        );
+        assert!(journal.is_file());
+        assert!(!backup.exists());
+        assert_eq!(stage_paths(tmp.path(), "Existing.opentake").len(), 1);
+
+        generation_a
+            .save_to(&target)
+            .expect("the public retry must recover B and republish generation A");
+        assert_eq!(crate::Project::open(&target).unwrap().timeline.fps, 24);
+        assert!(!journal.exists());
+        assert!(!backup.exists());
+        assert!(stage_paths(tmp.path(), "Existing.opentake").is_empty());
+        assert!(!target.join(PUBLISH_MARKER_FILE).exists());
+    }
+
+    #[test]
+    fn public_save_to_creates_no_transaction_when_idle_marker_cleanup_fails() {
+        let tmp = TmpDir::new("stale-marker-cleanup-failure");
+        let target = tmp.path().join("Existing.opentake");
+        let mut generation_a = crate::Project::new(tmp.path().join("GenerationA.opentake"));
+        generation_a.timeline.fps = 24;
+        FAIL_COMMITTED_MARKER_CLEANUP.with(|fail| fail.set(true));
+        generation_a.save_to(&target).unwrap();
+        assert!(target.join(PUBLISH_MARKER_FILE).is_file());
+        let before = tree_receipt(tmp.path());
+
+        let mut generation_b = crate::Project::new(tmp.path().join("GenerationB.opentake"));
+        generation_b.timeline.fps = 60;
+        FAIL_IDLE_MARKER_CLEANUP.with(|fail| fail.set(true));
+        let error = generation_b
+            .save_to(&target)
+            .expect_err("generation B must not start without removing the idle marker");
+
+        assert!(error
+            .to_string()
+            .contains("injected idle publish marker cleanup failure"));
+        assert_eq!(tree_receipt(tmp.path()), before);
+        assert!(!tmp
+            .path()
+            .join(".Existing.opentake.opentake-journal")
+            .exists());
+        assert!(!tmp
+            .path()
+            .join(".Existing.opentake.opentake-backup")
+            .exists());
+        assert!(stage_paths(tmp.path(), "Existing.opentake").is_empty());
+    }
+
+    #[test]
     fn retry_removes_a_nonce_named_stage_created_before_its_marker() {
         let tmp = TmpDir::new("premarker-stage");
         let target = tmp.path().join("New.opentake");
@@ -2123,12 +2254,12 @@ mod tests {
     }
 
     #[test]
-    fn invalid_restored_abort_states_are_refused_and_preserved() {
+    fn invalid_or_foreign_restored_abort_states_are_refused_and_preserved() {
         #[derive(Clone, Copy)]
         enum Case {
             NoPriorTarget,
             MissingTarget,
-            WrongTargetMarker,
+            ForeignTargetMarker,
             TransactionMarkedTarget,
             BackupReappeared,
         }
@@ -2136,7 +2267,7 @@ mod tests {
         for (tag, case) in [
             ("abort-no-prior-target", Case::NoPriorTarget),
             ("abort-missing-target", Case::MissingTarget),
-            ("abort-wrong-target-marker", Case::WrongTargetMarker),
+            ("abort-foreign-target-marker", Case::ForeignTargetMarker),
             (
                 "abort-transaction-marked-target",
                 Case::TransactionMarkedTarget,
@@ -2152,7 +2283,9 @@ mod tests {
             create_recovery_stage(tmp.path(), &stage_name, Some(&journal.nonce));
             match case {
                 Case::NoPriorTarget | Case::MissingTarget => {}
-                Case::WrongTargetMarker => {
+                // Normal transactions clear prior-generation markers in begin;
+                // a different nonce here is therefore foreign/corrupt evidence.
+                Case::ForeignTargetMarker => {
                     fs::create_dir_all(&target).unwrap();
                     fs::write(target.join(PUBLISH_MARKER_FILE), b"wrong-marker").unwrap();
                 }
