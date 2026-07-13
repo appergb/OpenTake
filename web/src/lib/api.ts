@@ -275,11 +275,26 @@ export interface ExportSummary {
   height: number;
   fps: number;
   frameCount: number;
+  hasAudio: boolean;
 }
 
-export async function exportVideo(req: ExportRequest): Promise<ExportSummary> {
+let nextExportOperationId = 0;
+
+/** Mint a process-local request identity that is carried by start, progress,
+ * and cancel IPC. The random UUID is preferred; the sequence fallback remains
+ * collision-free for this WebView lifetime. */
+export function createExportOperationId(scope: "video" | "save-as"): string {
+  const randomId = globalThis.crypto?.randomUUID?.();
+  const suffix = randomId ?? `${Date.now().toString(36)}-${++nextExportOperationId}`;
+  return `${scope}:${suffix}`;
+}
+
+export async function exportVideo(
+  req: ExportRequest,
+  operationId: string,
+): Promise<ExportSummary> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<ExportSummary>("export_video", { req });
+  if (invokeImpl) return invokeImpl<ExportSummary>("export_video", { req, operationId });
   throw new Error("video export requires the desktop app (GPU + ffmpeg)");
 }
 
@@ -291,14 +306,15 @@ export const EXPORT_CANCELLED_SENTINEL = "export cancelled";
 /** Request that the in-flight `export_video` stop at the next frame boundary.
  *  No-op outside Tauri (there is no export to cancel) and a no-op backend-side
  *  when nothing is exporting. */
-export async function cancelExport(): Promise<void> {
+export async function cancelExport(operationId: string): Promise<void> {
   await ensureTauri();
-  if (invokeImpl) await invokeImpl<void>("cancel_export");
+  if (invokeImpl) await invokeImpl<void>("cancel_export", { operationId });
 }
 
 /** Progress payload for `"export://progress"`: `done` of `total` frames
  *  composited so far. */
 export interface ExportProgress {
+  operationId: string;
   done: number;
   total: number;
 }
@@ -307,14 +323,22 @@ export interface ExportProgress {
  *  (at most every ~200ms, plus a final 100% emit). Returns an unlisten function;
  *  no-op (no-op unlisten) outside Tauri. */
 export async function onExportProgress(
+  operationId: string,
   handler: (progress: ExportProgress) => void,
 ): Promise<() => void> {
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("export://progress", (e) => {
-    const p = e.payload as { done?: number; total?: number } | undefined;
-    if (p && typeof p.done === "number" && typeof p.total === "number") {
-      handler({ done: p.done, total: p.total });
+    const p = e.payload as
+      | { operationId?: string; done?: number; total?: number }
+      | undefined;
+    if (
+      p &&
+      p.operationId === operationId &&
+      typeof p.done === "number" &&
+      typeof p.total === "number"
+    ) {
+      handler({ operationId: p.operationId, done: p.done, total: p.total });
     }
   });
 }
@@ -418,19 +442,27 @@ export async function extractAudio(mediaId: string, outPath: string): Promise<st
  * import it as a fresh asset. This intentionally keeps the original single-clip
  * semantics; marked ranges use the separate `save_range_as_media` contract.
  */
-export async function saveClipAsMedia(clipId: string): Promise<MediaList> {
+export async function saveClipAsMedia(
+  clipId: string,
+  operationId: string,
+): Promise<MediaList> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<MediaList>("save_clip_as_media", { clipId });
+  if (invokeImpl) {
+    return invokeImpl<MediaList>("save_clip_as_media", { clipId, operationId });
+  }
   throw new Error("saving a clip as media requires the desktop app");
 }
 
 export async function saveRangeAsMedia(
   inFrame: number,
   outFrame: number,
+  operationId: string,
 ): Promise<MediaList> {
   await ensureTauri();
   if (invokeImpl) {
-    return invokeImpl<MediaList>("save_range_as_media", { inFrame, outFrame });
+    return invokeImpl<MediaList>("save_range_as_media", {
+      request: { inFrame, outFrame, operationId },
+    });
   }
   throw new Error("saving a range as media requires the desktop app");
 }

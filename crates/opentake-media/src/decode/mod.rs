@@ -11,7 +11,10 @@ pub use frame::{
     decode_frame_at, decode_frame_at_cancellable, decode_frames_at, decode_frames_at_cancellable,
     fit_within, FrameRequest,
 };
-pub use pcm::{extract_pcm, extract_pcm_cancellable, PcmBuffer, PcmFormat, PcmSpec};
+pub use pcm::{
+    extract_pcm, extract_pcm_cancellable, extract_pcm_cancellable_with_progress, PcmBuffer,
+    PcmFormat, PcmProgressCallback, PcmSpec,
+};
 pub use stream::{
     spawn_video_stream, StreamDecodeControl, StreamVideoFrame, VideoStream, VideoStreamRequest,
     DEFAULT_VIDEO_STREAM_QUEUE_CAPACITY,

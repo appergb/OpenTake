@@ -3351,6 +3351,7 @@ dependencies = [
  "futures-util",
  "half",
  "image",
+ "libc",
  "ndarray",
  "opentake-domain",
  "ort",
@@ -3425,6 +3426,7 @@ dependencies = [
  "cpal",
  "futures",
  "image",
+ "libc",
  "objc2-app-kit",
  "opentake-agent",
  "opentake-core",
@@ -3435,6 +3437,7 @@ dependencies = [
  "opentake-project",
  "opentake-render",
  "reqwest 0.12.28",
+ "same-file",
  "serde",
  "serde_json",
  "tauri",
@@ -3442,6 +3445,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tempfile",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

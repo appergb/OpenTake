@@ -14,8 +14,8 @@
  * Progress + cancel (mirrors upstream's 200ms `AVAssetExportSession.progress`
  * poll + cooperative cancel): while busy, a determinate bar tracks the
  * `"export://progress"` event (`done`/`total` frames) and the footer's Cancel
- * button is enabled, calling `api.cancelExport()`. A cancelled result closes
- * the dialog with a neutral toast, distinct from the failure toast. Success /
+ * button is enabled, calling `api.cancelExport(operationId)`. A cancelled
+ * result closes the dialog with a neutral toast, distinct from the failure toast. Success /
  * failure both still `pushToast` and close on success.
  */
 
@@ -134,6 +134,7 @@ export function ExportDialog() {
   // Guards against unsubscribing a listener from a stale/overlapping export run
   // (belt-and-suspenders; only one export runs at a time in practice).
   const progressUnlisten = useRef<(() => void) | null>(null);
+  const activeOperationId = useRef<string | null>(null);
 
   // Re-seed the resolution default from the timeline each time the dialog opens.
   useEffect(() => {
@@ -236,15 +237,22 @@ export function ExportDialog() {
 
     setBusy(true);
     setProgress(null);
-    progressUnlisten.current = await api.onExportProgress(({ done, total }) => {
-      setProgress({ done, total });
-    });
+    const operationId = api.createExportOperationId("video");
     try {
-      const summary = await api.exportVideo({
-        outPath: withExt(chosen, ext),
-        codec,
-        quality,
+      progressUnlisten.current = await api.onExportProgress(operationId, ({ done, total }) => {
+        setProgress({ done, total });
       });
+      // Expose this identity immediately before dispatching start in the same
+      // turn; a pre-listener click cannot target a later operation.
+      activeOperationId.current = operationId;
+      const summary = await api.exportVideo(
+        {
+          outPath: withExt(chosen, ext),
+          codec,
+          quality,
+        },
+        operationId,
+      );
       pushToast(
         t("export.done", {
           width: summary.width,
@@ -266,6 +274,7 @@ export function ExportDialog() {
     } finally {
       progressUnlisten.current?.();
       progressUnlisten.current = null;
+      if (activeOperationId.current === operationId) activeOperationId.current = null;
       setProgress(null);
       setBusy(false);
     }
@@ -342,7 +351,8 @@ export function ExportDialog() {
       return;
     }
     // Bundling has no cooperative cancel; only the video path can stop mid-run.
-    if (mode === "video") await api.cancelExport();
+    const operationId = activeOperationId.current;
+    if (mode === "video" && operationId) await api.cancelExport(operationId);
   }
 
   return (

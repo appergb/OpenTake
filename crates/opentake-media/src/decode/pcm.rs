@@ -12,6 +12,7 @@
 use std::io::Read;
 use std::path::Path;
 use std::process::{ChildStderr, ChildStdout, ExitStatus};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -45,6 +46,12 @@ impl PcmFormat {
 
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const STDERR_DETAIL_LIMIT: usize = 64 * 1024;
+const PCM_CONVERT_CHUNK_FRAMES: usize = 8 * 1024;
+const PCM_PROGRESS_TOTAL: usize = 4_000;
+const PCM_DECODE_PROGRESS_END: usize = 3_000;
+
+/// Byte-level progress reported while FFmpeg streams decoded PCM to stdout.
+pub type PcmProgressCallback = Arc<dyn Fn(usize, usize) + Send + Sync>;
 
 struct PipeReaders {
     stdout: JoinHandle<Result<StdoutRead>>,
@@ -99,7 +106,9 @@ fn expected_pcm_bytes(path: &Path, spec: &PcmSpec, range: Option<(f64, f64)>) ->
 fn read_stdout(
     mut stdout: ChildStdout,
     cap: usize,
+    progress_total: usize,
     cancel: MediaCancelToken,
+    progress: Option<PcmProgressCallback>,
 ) -> Result<StdoutRead> {
     cancel.reader_started();
     let result = (|| {
@@ -118,6 +127,9 @@ fn read_stdout(
                 break;
             }
             total_read = total_read.saturating_add(read);
+            if let Some(report) = &progress {
+                report(total_read.min(progress_total), progress_total);
+            }
             let remaining = cap.saturating_sub(bytes.len());
             let retained = remaining.min(read);
             bytes.extend_from_slice(&chunk[..retained]);
@@ -290,7 +302,18 @@ fn pcm_args(path: &Path, spec: &PcmSpec, range: Option<(f64, f64)>) -> Vec<Strin
 }
 
 /// Convert interleaved raw PCM bytes to mono f32, averaging `channels`.
+#[cfg(test)]
 fn raw_to_mono_f32(bytes: &[u8], spec: &PcmSpec) -> Result<Vec<f32>> {
+    raw_to_mono_f32_cancellable(bytes, spec, &MediaCancelToken::new(), None, None)
+}
+
+fn raw_to_mono_f32_cancellable(
+    bytes: &[u8],
+    spec: &PcmSpec,
+    cancel: &MediaCancelToken,
+    progress: Option<&(dyn Fn(usize, usize) + Send + Sync)>,
+    checkpoint_hook: Option<&dyn Fn(usize)>,
+) -> Result<Vec<f32>> {
     let bps = spec.format.bytes_per_sample();
     let ch = spec.channels.max(1) as usize;
     let frame_bytes = bps * ch;
@@ -302,6 +325,19 @@ fn raw_to_mono_f32(bytes: &[u8], spec: &PcmSpec) -> Result<Vec<f32>> {
     out.try_reserve_exact(frames)
         .map_err(|error| allocation_error(format!("mono f32 reserve {frames}: {error}")))?;
     for f in 0..frames {
+        if f.is_multiple_of(PCM_CONVERT_CHUNK_FRAMES) {
+            if let Some(hook) = checkpoint_hook {
+                hook(f);
+            }
+            if cancel.checkpoint() {
+                return Err(MediaError::Cancelled);
+            }
+            if let Some(report) = progress {
+                let converted =
+                    f.saturating_mul(PCM_PROGRESS_TOTAL - PCM_DECODE_PROGRESS_END) / frames.max(1);
+                report(PCM_DECODE_PROGRESS_END + converted, PCM_PROGRESS_TOTAL);
+            }
+        }
         let base = f * frame_bytes;
         let mut sum = 0.0f32;
         for c in 0..ch {
@@ -319,6 +355,12 @@ fn raw_to_mono_f32(bytes: &[u8], spec: &PcmSpec) -> Result<Vec<f32>> {
         }
         out.push(sum / ch as f32);
     }
+    if cancel.checkpoint() {
+        return Err(MediaError::Cancelled);
+    }
+    if let Some(report) = progress {
+        report(PCM_PROGRESS_TOTAL, PCM_PROGRESS_TOTAL);
+    }
     Ok(out)
 }
 
@@ -335,8 +377,28 @@ pub fn extract_pcm_cancellable(
     range: Option<(f64, f64)>,
     cancel: &MediaCancelToken,
 ) -> Result<PcmBuffer> {
-    let raw = decode_raw_pcm_cancellable(path, spec, range, cancel)?;
-    let samples = raw_to_mono_f32(&raw, spec)?;
+    extract_pcm_cancellable_with_progress(path, spec, range, cancel, None)
+}
+
+pub fn extract_pcm_cancellable_with_progress(
+    path: &Path,
+    spec: &PcmSpec,
+    range: Option<(f64, f64)>,
+    cancel: &MediaCancelToken,
+    progress: Option<PcmProgressCallback>,
+) -> Result<PcmBuffer> {
+    let decode_progress = progress.as_ref().map(|report| {
+        let report = Arc::clone(report);
+        Arc::new(move |done: usize, total: usize| {
+            let mapped = done
+                .min(total.max(1))
+                .saturating_mul(PCM_DECODE_PROGRESS_END)
+                / total.max(1);
+            report(mapped, PCM_PROGRESS_TOTAL);
+        }) as PcmProgressCallback
+    });
+    let raw = decode_raw_pcm_cancellable(path, spec, range, cancel, decode_progress)?;
+    let samples = raw_to_mono_f32_cancellable(&raw, spec, cancel, progress.as_deref(), None)?;
     Ok(PcmBuffer {
         spec: *spec,
         samples_f32: samples,
@@ -348,6 +410,7 @@ pub(super) fn decode_raw_pcm_cancellable(
     spec: &PcmSpec,
     range: Option<(f64, f64)>,
     cancel: &MediaCancelToken,
+    progress: Option<PcmProgressCallback>,
 ) -> Result<Vec<u8>> {
     if cancel.is_cancelled() {
         return Err(MediaError::Cancelled);
@@ -399,7 +462,7 @@ pub(super) fn decode_raw_pcm_cancellable(
     let stderr_cancel = cancel.clone();
     let stdout_reader = match thread::Builder::new()
         .name("opentake-pcm-stdout".to_string())
-        .spawn(move || read_stdout(stdout, reader_cap, stdout_cancel))
+        .spawn(move || read_stdout(stdout, reader_cap, expected_bytes, stdout_cancel, progress))
     {
         Ok(reader) => reader,
         Err(error) => {
@@ -430,6 +493,7 @@ pub(super) fn decode_raw_pcm_cancellable(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     use std::process::Command;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
@@ -442,6 +506,25 @@ mod tests {
             channels: 1,
             format: PcmFormat::F32,
         }
+    }
+
+    fn write_silence_wav(path: &Path, sample_rate: u32, samples: usize) {
+        let data_len = samples.checked_mul(2).expect("wav data length") as u32;
+        let mut wav = Vec::with_capacity(44 + data_len as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_len.to_le_bytes());
+        wav.resize(44 + data_len as usize, 0);
+        std::fs::write(path, wav).expect("write wav fixture");
     }
 
     #[test]
@@ -461,6 +544,48 @@ mod tests {
         assert_eq!(cancel.spawned_child_count(), 0);
     }
 
+    #[test]
+    fn pcm_decode_reports_non_terminal_progress_for_multiple_stdout_chunks() {
+        assert!(
+            crate::ff::ffmpeg_available(),
+            "required progress test needs a runnable FFmpeg"
+        );
+        let temp = tempfile::tempdir().expect("create progress fixture directory");
+        let input = temp.path().join("two-seconds.wav");
+        write_silence_wav(&input, 48_000, 96_000);
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let callback_observed = Arc::clone(&observed);
+        let progress: PcmProgressCallback = Arc::new(move |done, total| {
+            callback_observed
+                .lock()
+                .expect("progress lock")
+                .push((done, total));
+        });
+
+        let pcm = extract_pcm_cancellable_with_progress(
+            &input,
+            &f32_mono_spec(),
+            Some((0.0, 2.0)),
+            &MediaCancelToken::new(),
+            Some(progress),
+        )
+        .expect("decode progress fixture");
+
+        let observed = observed.lock().expect("progress lock");
+        assert_eq!(pcm.samples_f32.len(), 96_000);
+        assert!(
+            observed.len() > 1,
+            "large decode must report multiple chunks"
+        );
+        assert!(observed.iter().any(|(done, total)| done < total));
+        assert_eq!(
+            observed.last(),
+            Some(&(PCM_PROGRESS_TOTAL, PCM_PROGRESS_TOTAL))
+        );
+        assert!(observed.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+    }
+
+    #[cfg(unix)]
     #[test]
     fn cancelling_running_pcm_decode_kills_child_and_reaps_readers() {
         assert!(
@@ -504,6 +629,104 @@ mod tests {
         assert!(matches!(result, Err(MediaError::Cancelled)));
         worker.join().expect("decoder worker must be reaped");
         assert_eq!(cancel.active_reader_count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_cancelling_running_pcm_child_reaps_both_pipe_readers() {
+        assert!(
+            crate::ff::ffmpeg_available(),
+            "required cancellation test needs a runnable FFmpeg"
+        );
+        let cancel = MediaCancelToken::new();
+        let mut child = crate::ff::ffmpeg()
+            .args([
+                "-re",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=48000:cl=mono",
+                "-t",
+                "30",
+                "-f",
+                "f32le",
+                "-",
+            ])
+            .spawn()
+            .expect("spawn blocking PCM FFmpeg");
+        cancel.child_spawned();
+        let stdout = child.take_stdout().expect("PCM stdout");
+        let stderr = child.take_stderr().expect("PCM stderr");
+        let stdout_cancel = cancel.clone();
+        let stderr_cancel = cancel.clone();
+        let readers = PipeReaders {
+            stdout: std::thread::spawn(move || {
+                read_stdout(stdout, 1024 * 1024, 1024 * 1024, stdout_cancel, None)
+            }),
+            stderr: std::thread::spawn(move || read_stderr(stderr, stderr_cancel)),
+        };
+        let worker_cancel = cancel.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = wait_for_pcm_child(&mut child, readers, &worker_cancel);
+            let reaped = child
+                .as_inner_mut()
+                .try_wait()
+                .expect("inspect cancelled PCM child")
+                .is_some();
+            done_tx
+                .send((result.map(|_| ()), reaped))
+                .expect("publish PCM cancellation");
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while cancel.active_reader_count() < 2 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(cancel.active_reader_count(), 2);
+        cancel.cancel();
+        let (result, reaped) = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("cancelled PCM wait must return promptly");
+
+        assert!(matches!(result, Err(MediaError::Cancelled)));
+        assert!(reaped, "cancelled PCM child must be killed and waited");
+        worker.join().expect("PCM cancellation worker joins");
+        assert_eq!(cancel.active_reader_count(), 0);
+    }
+
+    #[test]
+    fn cancellation_inside_raw_conversion_stops_the_actual_sample_loop() {
+        let spec = f32_mono_spec();
+        let frames = PCM_CONVERT_CHUNK_FRAMES * 4;
+        let raw = vec![0_u8; frames * spec.format.bytes_per_sample()];
+        let cancel = MediaCancelToken::new();
+        let worker_cancel = cancel.clone();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let hook = move |_frame: usize| {
+                entered_tx.send(()).expect("conversion checkpoint entered");
+                release_rx.recv().expect("release conversion checkpoint");
+            };
+            let result =
+                raw_to_mono_f32_cancellable(&raw, &spec, &worker_cancel, None, Some(&hook));
+            done_tx.send(result).expect("publish conversion result");
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("actual conversion loop reached its checkpoint");
+        cancel.cancel();
+        release_tx.send(()).expect("release conversion loop");
+        let result = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("conversion cancellation must return promptly");
+
+        assert!(matches!(result, Err(MediaError::Cancelled)));
+        assert_eq!(cancel.checkpoint_count(), 1);
+        worker.join().expect("conversion worker joins");
     }
 
     #[test]
