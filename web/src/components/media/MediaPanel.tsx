@@ -28,7 +28,14 @@ import {
 import { Icon } from "../ui/Icon";
 import { HoverButton } from "../ui/HoverButton";
 import { useEditorUiStore, type MediaSubTabId } from "../../store/uiStore";
-import { useMediaStore } from "../../store/mediaStore";
+import {
+  applyMediaErrorForProject,
+  applyMediaListForProject,
+  captureMediaProjectIdentity,
+  isCurrentMediaProject,
+  useMediaStore,
+  type MediaProjectIdentity,
+} from "../../store/mediaStore";
 import { sourceName, useLibraryStore } from "../../store/libraryStore";
 import {
   importFolderViaDialog,
@@ -1008,13 +1015,13 @@ function MediaCard({ item }: { item: MediaItem }) {
           assetId={item.id}
           favorite={favorite}
           title={favorite ? t("media.unfavorite") : t("media.favorite")}
-          onSuccess={async (media) => {
-            useMediaStore.setState({ items: media.items, folders: media.folders });
+          onSuccess={async (media, project) => {
+            if (!applyMediaListForProject(project, media)) return;
             await useLibraryStore.getState().refresh();
           }}
-          onError={(message) => {
+          onError={(message, project) => {
+            if (!applyMediaErrorForProject(project, message)) return;
             setFeedback(message);
-            useMediaStore.getState().setError(message);
           }}
           onStart={() => setFeedback(null)}
         />
@@ -1078,8 +1085,11 @@ interface MediaFavoriteButtonProps {
   favorite: boolean;
   title: string;
   onStart?: () => void;
-  onSuccess: (media: Awaited<ReturnType<typeof toggleFavorite>>) => void | Promise<void>;
-  onError: (message: string) => void;
+  onSuccess: (
+    media: Awaited<ReturnType<typeof toggleFavorite>>,
+    project: MediaProjectIdentity,
+  ) => void | Promise<void>;
+  onError: (message: string, project: MediaProjectIdentity) => void;
   performToggle?: typeof toggleFavorite;
 }
 
@@ -1106,11 +1116,18 @@ export function MediaFavoriteButton({
       title={title}
       onClick={(event) => {
         event.stopPropagation();
+        const project = captureMediaProjectIdentity();
         setPending(true);
         onStart?.();
         void performToggle(assetId, !favorite)
-          .then(onSuccess)
-          .catch((error: unknown) => onError(String(error)))
+          .then((media) => {
+            if (!isCurrentMediaProject(project)) return;
+            return onSuccess(media, project);
+          })
+          .catch((error: unknown) => {
+            if (!isCurrentMediaProject(project)) return;
+            onError(String(error), project);
+          })
           .finally(() => setPending(false));
       }}
       style={{

@@ -36,6 +36,9 @@ use crate::error::{MediaError, Result};
 pub const MANIFEST_NAME: &str = "library.json";
 /// Subdirectory holding the content-addressed copies.
 pub const FILES_SUBDIR: &str = "files";
+/// Hidden directory for favorite content that is not yet visible in the
+/// library manifest.
+const STAGING_SUBDIR: &str = ".staging";
 /// On-disk manifest schema version (bumped on incompatible changes).
 pub const MANIFEST_VERSION: u32 = 1;
 /// Application directory name under the platform data dir.
@@ -96,15 +99,48 @@ pub struct FavoriteRequest<'a> {
     pub thumb: Option<String>,
 }
 
-/// Result of one favorite transaction. `created` is decided from the same byte
-/// snapshot and under the same manifest lock as `entry`, so callers can safely
-/// roll back only content that this exact call introduced.
+/// Result of one favorite transaction. `created` reports whether publication
+/// appended the entry to the manifest; callers must not use it as ownership
+/// proof for a later compensating delete.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FavoriteOutcome {
     /// The entry selected by the actual source bytes read by this transaction.
     pub entry: LibraryEntry,
     /// `true` only when this transaction appended `entry` to the manifest.
     pub created: bool,
+}
+
+/// A favorite prepared from one immutable source-byte snapshot. A new entry's
+/// content stays under the hidden staging directory until [`LibraryStore`] is
+/// explicitly asked to publish it. Dropping an unpublished preparation removes
+/// its private stage best-effort; even if cleanup fails, it is never in Mine.
+pub struct PreparedFavorite {
+    entry: LibraryEntry,
+    staged_path: Option<PathBuf>,
+    stored_path: Option<PathBuf>,
+}
+
+impl PreparedFavorite {
+    /// Entry identity derived from the exact source bytes read during prepare.
+    pub fn entry(&self) -> &LibraryEntry {
+        &self.entry
+    }
+
+    /// Whether publication is still required after the project mapping saves.
+    pub fn needs_publish(&self) -> bool {
+        self.staged_path.is_some()
+    }
+}
+
+impl Drop for PreparedFavorite {
+    fn drop(&mut self) {
+        if let Some(path) = self.staged_path.take() {
+            let _ = std::fs::remove_file(&path);
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
+        }
+    }
 }
 
 /// The global library store, rooted at a directory. Cloneable handles are not
@@ -150,6 +186,31 @@ impl LibraryStore {
 
     fn files_dir(&self) -> PathBuf {
         self.root.join(FILES_SUBDIR)
+    }
+
+    fn stored_target(&self, id: &str, source: &Path) -> PathBuf {
+        let ext = source
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| format!(".{value}"))
+            .unwrap_or_default();
+        self.files_dir().join(format!("{id}{ext}"))
+    }
+
+    fn staging_path(&self, id: &str, source: &Path) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let file_name = self
+            .stored_target(id, source)
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| id.to_string());
+        self.files_dir().join(STAGING_SUBDIR).join(format!(
+            "{file_name}.{}.{}.pending",
+            std::process::id(),
+            sequence
+        ))
     }
 
     /// Read the manifest, returning an empty one if it does not exist yet.
@@ -208,16 +269,11 @@ impl LibraryStore {
     fn store_copy(&self, id: &str, source: &Path, bytes: &[u8]) -> Result<()> {
         let files_dir = self.files_dir();
         std::fs::create_dir_all(&files_dir)?;
-        let ext = source
-            .extension()
-            .and_then(|value| value.to_str())
-            .map(|value| format!(".{value}"))
-            .unwrap_or_default();
-        let stored = files_dir.join(format!("{id}{ext}"));
+        let stored = self.stored_target(id, source);
         if stored.exists() {
             return Ok(());
         }
-        let tmp = files_dir.join(format!("{id}{ext}.tmp"));
+        let tmp = files_dir.join(format!(".{id}.tmp"));
         std::fs::write(&tmp, bytes)?;
         std::fs::rename(&tmp, &stored)?;
         Ok(())
@@ -227,8 +283,9 @@ impl LibraryStore {
     /// and record an entry. If the same content is already favorited, the
     /// existing entry is returned unchanged and no duplicate file is written.
     ///
-    /// The whole read-modify-write runs under the in-process write lock so two
-    /// concurrent favorites cannot clobber each other's manifest update.
+    /// Preparation and publication each run under the in-process write lock;
+    /// publication re-reads the manifest so concurrent favorites cannot clobber
+    /// each other or create duplicate entries.
     pub fn favorite(&self, req: &FavoriteRequest<'_>) -> Result<LibraryEntry> {
         Ok(self.favorite_with_outcome(req)?.entry)
     }
@@ -237,6 +294,14 @@ impl LibraryStore {
     /// entry. The source is read exactly once; ownership is never inferred from
     /// a separate preflight hash that could observe different bytes.
     pub fn favorite_with_outcome(&self, req: &FavoriteRequest<'_>) -> Result<FavoriteOutcome> {
+        let prepared = self.prepare_favorite(req)?;
+        self.publish_favorite(prepared)
+    }
+
+    /// Read/hash one source snapshot and prepare a favorite without publishing a
+    /// new manifest entry. Existing entries are returned without staging; new
+    /// content is durable but hidden until [`Self::publish_favorite`].
+    pub fn prepare_favorite(&self, req: &FavoriteRequest<'_>) -> Result<PreparedFavorite> {
         let bytes = std::fs::read(req.source)?;
         let id = hash_hex(&bytes);
 
@@ -245,23 +310,21 @@ impl LibraryStore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut manifest = self.load_manifest()?;
-        manifest.version = MANIFEST_VERSION;
+        let manifest = self.load_manifest()?;
 
         if let Some(existing) = manifest.entries.iter().find(|e| e.id == id).cloned() {
             if self.stored_path(&id)?.is_none() {
                 self.store_copy(&id, req.source, &bytes)?;
             }
-            return Ok(FavoriteOutcome {
+            return Ok(PreparedFavorite {
                 entry: existing,
-                created: false,
+                staged_path: None,
+                stored_path: None,
             });
         }
 
-        // Copy the content into the library under its hashed name. The extension
-        // is preserved for readability/tooling; identity is the hash, not the ext.
-        self.store_copy(&id, req.source, &bytes)?;
-
+        let staged_path = self.staging_path(&id, req.source);
+        let stored_path = self.stored_target(&id, req.source);
         let entry = LibraryEntry {
             id,
             kind: req.kind.to_string(),
@@ -270,10 +333,82 @@ impl LibraryStore {
             source: req.source.to_str().map(|s| s.to_string()),
             thumb: req.thumb.clone(),
         };
-        manifest.entries.push(entry.clone());
+        if let Some(parent) = staged_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if let Err(error) = std::fs::write(&staged_path, bytes) {
+            let _ = std::fs::remove_file(&staged_path);
+            return Err(MediaError::Io(error));
+        }
+        Ok(PreparedFavorite {
+            entry,
+            staged_path: Some(staged_path),
+            stored_path: Some(stored_path),
+        })
+    }
+
+    /// Publish a prepared favorite after its project mapping is durable. The
+    /// manifest is re-read under the write lock so concurrent prepares dedup at
+    /// publication time. A manifest failure can leave only an invisible content
+    /// file; the project mapping then converges through stale-id sync.
+    pub fn publish_favorite(&self, mut prepared: PreparedFavorite) -> Result<FavoriteOutcome> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut manifest = self.load_manifest()?;
+        manifest.version = MANIFEST_VERSION;
+        if let Some(existing) = manifest
+            .entries
+            .iter()
+            .find(|entry| entry.id == prepared.entry.id)
+            .cloned()
+        {
+            if self.stored_path(&existing.id)?.is_none() {
+                let staged_path = prepared.staged_path.take().ok_or_else(|| {
+                    MediaError::Other(anyhow::anyhow!(
+                        "existing library entry has no durable copy"
+                    ))
+                })?;
+                let stored_path = prepared.stored_path.take().ok_or_else(|| {
+                    MediaError::Other(anyhow::anyhow!("favorite preparation has no target"))
+                })?;
+                if stored_path.exists() {
+                    let _ = std::fs::remove_file(&staged_path);
+                } else {
+                    std::fs::rename(&staged_path, &stored_path)?;
+                }
+                if let Some(parent) = staged_path.parent() {
+                    let _ = std::fs::remove_dir(parent);
+                }
+            }
+            return Ok(FavoriteOutcome {
+                entry: existing,
+                created: false,
+            });
+        }
+
+        let staged_path = prepared.staged_path.take().ok_or_else(|| {
+            MediaError::Other(anyhow::anyhow!(
+                "favorite preparation was already published"
+            ))
+        })?;
+        let stored_path = prepared.stored_path.take().ok_or_else(|| {
+            MediaError::Other(anyhow::anyhow!("favorite preparation has no target"))
+        })?;
+        if stored_path.exists() {
+            let _ = std::fs::remove_file(&staged_path);
+        } else {
+            std::fs::rename(&staged_path, &stored_path)?;
+        }
+        if let Some(parent) = staged_path.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+
+        manifest.entries.push(prepared.entry.clone());
         self.store_manifest(&manifest)?;
         Ok(FavoriteOutcome {
-            entry,
+            entry: prepared.entry.clone(),
             created: true,
         })
     }
@@ -532,6 +667,71 @@ mod tests {
         let repaired_path = store.stored_path(&first.id).unwrap().unwrap();
         assert_eq!(std::fs::read(repaired_path).unwrap(), b"repair me");
         assert_eq!(store.entries().unwrap(), vec![first]);
+    }
+
+    #[test]
+    fn prepared_favorite_stays_hidden_until_publish_and_drop_cleans_stage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = src_file(tmp.path(), "clip.mp4", b"prepared bytes");
+        let store = LibraryStore::new(tmp.path().join("lib"));
+
+        let prepared = store
+            .prepare_favorite(&req(&source, "video", None))
+            .unwrap();
+        let id = prepared.entry().id.clone();
+        assert!(prepared.needs_publish());
+        assert!(store.entries().unwrap().is_empty());
+        assert!(store.stored_path(&id).unwrap().is_none());
+        drop(prepared);
+        assert!(store.entries().unwrap().is_empty());
+        assert!(store.stored_path(&id).unwrap().is_none());
+        assert!(!store.files_dir().join(STAGING_SUBDIR).exists());
+
+        let prepared = store
+            .prepare_favorite(&req(&source, "video", None))
+            .unwrap();
+        let outcome = store.publish_favorite(prepared).unwrap();
+        assert!(outcome.created);
+        assert_eq!(outcome.entry.id, id);
+        assert_eq!(store.entries().unwrap(), vec![outcome.entry]);
+        assert_eq!(
+            std::fs::read(store.stored_path(&id).unwrap().unwrap()).unwrap(),
+            b"prepared bytes"
+        );
+    }
+
+    #[test]
+    fn concurrent_prepared_favorites_dedup_when_published() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = src_file(tmp.path(), "clip.mp4", b"shared prepared bytes");
+        let store = Arc::new(LibraryStore::new(tmp.path().join("lib")));
+        let first = store
+            .prepare_favorite(&req(&source, "video", None))
+            .unwrap();
+        let second = store
+            .prepare_favorite(&req(&source, "video", None))
+            .unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = [first, second]
+            .into_iter()
+            .map(|prepared| {
+                let store = Arc::clone(&store);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.publish_favorite(prepared).unwrap()
+                })
+            })
+            .collect();
+        let outcomes: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.created).count(), 1);
+        assert_eq!(store.entries().unwrap().len(), 1);
+        assert_eq!(outcomes[0].entry.id, outcomes[1].entry.id);
+        assert!(!store.files_dir().join(STAGING_SUBDIR).exists());
     }
 
     #[test]
