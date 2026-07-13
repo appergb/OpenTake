@@ -72,7 +72,7 @@ export function TimelinePlayback({ timeline, fps }: { timeline: Timeline; fps: n
   };
 
   return (
-    <div style={timelinePreviewLayerStyle}>
+    <div data-playback-surface="webkit" style={timelinePreviewLayerStyle}>
       {visuals.map((visual) => {
         const key = previewElementKey(visual);
         const url = urlFor(visual.clip.mediaRef);

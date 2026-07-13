@@ -13,3 +13,4 @@ opentake-domain = { workspace = true }
 opentake-ops = { workspace = true }
 opentake-project = { workspace = true }
 thiserror = "2"
+same-file = "1.0.6"

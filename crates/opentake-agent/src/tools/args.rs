@@ -152,6 +152,7 @@ pub struct SetClipPropertiesArgs {
     pub font_size: Option<f64>,
     pub color: Option<String>,
     pub alignment: Option<String>,
+    pub reversed: Option<bool>,
 }
 impl ToolArgs for SetClipPropertiesArgs {
     const ALLOWED_KEYS: &'static [&'static str] = &[
@@ -168,6 +169,7 @@ impl ToolArgs for SetClipPropertiesArgs {
         "fontSize",
         "color",
         "alignment",
+        "reversed",
     ];
 }
 
@@ -902,6 +904,16 @@ mod tests {
         assert_eq!(a.clip_ids, vec!["a"]);
         assert_eq!(a.speed, Some(1.5));
         assert_eq!(a.volume, None);
+    }
+
+    #[test]
+    fn set_clip_properties_accepts_reversed() {
+        let v = serde_json::json!({
+            "clipIds": ["c1"],
+            "reversed": true
+        });
+        let a: SetClipPropertiesArgs = decode_tool_args(&v, "").unwrap();
+        assert_eq!(a.reversed, Some(true));
     }
 
     #[test]

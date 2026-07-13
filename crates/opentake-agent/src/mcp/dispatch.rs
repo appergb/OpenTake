@@ -38,6 +38,7 @@ use crate::mcp::core_handle::CoreHandle;
 use crate::mcp::gen_catalog;
 use crate::mcp::media_bridge::{
     frame_to_block, ImportSource, InspectResult, MediaBridge, SearchCandidate, TranscriptSource,
+    IMPORT_BYTES_BASE64_MAX,
 };
 use crate::plugin::registry::PluginRegistry;
 use crate::signal::engine;
@@ -94,6 +95,17 @@ impl Dispatcher {
             bridge,
             agent_undo: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Whether this dispatcher can satisfy render/import tools that require the
+    /// injected [`MediaBridge`].
+    pub fn has_media_bridge(&self) -> bool {
+        self.bridge.is_some()
+    }
+
+    /// Snapshot the current timeline from the bound core handle.
+    pub fn timeline(&self) -> Timeline {
+        self.handle.timeline()
     }
 
     /// Run one tool through the full pipeline and return its neutral result.
@@ -377,6 +389,12 @@ impl Dispatcher {
         let import_source = if let Some(path) = source.path.clone() {
             ImportSource::Path(path)
         } else if let Some(base64) = source.bytes.clone() {
+            let base64_len = base64.trim().len();
+            if base64_len > IMPORT_BYTES_BASE64_MAX {
+                return Ok(ToolResult::error(format!(
+                    "source.bytes is too large: {base64_len} base64 bytes, max {IMPORT_BYTES_BASE64_MAX}; use source.path for larger files"
+                )));
+            }
             let Some(mime_type) = source.mime_type.clone() else {
                 return Ok(ToolResult::error(
                     "source.mimeType is required when source.bytes is set",
@@ -1465,6 +1483,7 @@ impl Dispatcher {
             opacity: a.opacity,
             transform: None,
             text_content: a.content.clone(),
+            reversed: a.reversed,
             ..Default::default()
         };
         let Some(transform_patch) = a.transform else {
@@ -4358,6 +4377,31 @@ mod tests {
             r.text_joined().contains("mimeType is required"),
             "{}",
             r.text_joined()
+        );
+    }
+
+    #[test]
+    fn import_media_bytes_rejects_oversized_base64_before_bridge() {
+        let (d, bridge) = dispatcher_with_fake_bridge();
+        let too_large = "A".repeat(crate::mcp::media_bridge::IMPORT_BYTES_BASE64_MAX + 1);
+        let r = d.dispatch(
+            "import_media",
+            serde_json::json!({
+                "source": {
+                    "bytes": too_large,
+                    "mimeType": "image/png"
+                }
+            }),
+        );
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("source.bytes is too large"),
+            "{}",
+            r.text_joined()
+        );
+        assert!(
+            bridge.import_calls.lock().unwrap().is_empty(),
+            "oversized bytes must not reach the bridge"
         );
     }
 

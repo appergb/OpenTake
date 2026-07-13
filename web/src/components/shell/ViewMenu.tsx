@@ -7,7 +7,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { Menu, PanelLeft, PanelRight, Columns3, Check } from "lucide-react";
+import { Bot, Menu, PanelLeft, PanelRight, Columns3, Check } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { useEditorUiStore, type LayoutPreset } from "../../store/uiStore";
 import { useT } from "../../i18n";
@@ -29,6 +29,8 @@ export function ViewMenu() {
   const toggleMedia = useEditorUiStore((s) => s.toggleMediaPanel);
   const inspectorVisible = useEditorUiStore((s) => s.inspectorPanelVisible);
   const toggleInspector = useEditorUiStore((s) => s.toggleInspectorPanel);
+  const agentVisible = useEditorUiStore((s) => s.agentPanelVisible);
+  const toggleAgent = useEditorUiStore((s) => s.toggleAgentPanel);
 
   // Dismiss on outside click or Escape.
   useEffect(() => {
@@ -103,6 +105,13 @@ export function ViewMenu() {
           <MenuDivider />
 
           <MenuSectionLabel>{t("view.panels")}</MenuSectionLabel>
+          <MenuItem
+            icon={Bot}
+            label={t("view.agentPanel")}
+            shortcut="⌘⌥A"
+            checked={agentVisible}
+            onClick={toggleAgent}
+          />
           <MenuItem
             icon={PanelLeft}
             label={t("view.mediaPanel")}

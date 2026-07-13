@@ -49,6 +49,13 @@ opentake-agent = { workspace = true }
 # the agent's `inspect_timeline` bridge encodes composited frames as JPEG.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
+same-file = "1.0.6"
+cap-std = "4.0.2"
+cap-fs-ext = "4.0.2"
+sha2 = "0.10"
+# Optional account scaffold: verify a token only against a user-configured
+# backend. Rustls keeps the desktop build independent of a system OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Streaming playback transport (#53 / #64), behind the `playback-engine` feature.
 # Versions already resolved in the workspace lockfile (via opentake-agent), so
@@ -62,7 +69,6 @@ futures = { version = "0.3", optional = true }
 # CoreAudio on macOS, ALSA on Linux (CI installs libasound2-dev for the
 # playback-engine job). Off by default with the rest of the feature.
 cpal = { version = "0.15", optional = true }
-tauri-plugin-libmpv = "0.3.2"
 
 # macOS trackpad haptics for snap feedback (1:1 with upstream's
 # NSHapticFeedbackManager). objc2-app-kit 0.3 is already in the lockfile via
@@ -70,8 +76,15 @@ tauri-plugin-libmpv = "0.3.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSHapticFeedback"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 tempfile = "3"
+opentake-media = { workspace = true, features = ["test-faults"] }
 
 [features]
 # `default` now includes `playback-engine`: the continuous Rust streaming engine

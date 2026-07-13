@@ -3,21 +3,21 @@
 //! future `inspect_timeline` frame) map to base64 image content. The `is_error`
 //! flag drives `CallToolResult::error` vs `success`.
 
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 
 use crate::tools::result::{Block, ToolResult};
 
-/// Map one neutral [`Block`] to an rmcp [`Content`].
-fn block_to_content(block: Block) -> Content {
+/// Map one neutral [`Block`] to an rmcp [`ContentBlock`].
+fn block_to_content(block: Block) -> ContentBlock {
     match block {
-        Block::Text { text } => Content::text(text),
-        Block::Image { base64, media_type } => Content::image(base64, media_type),
+        Block::Text { text } => ContentBlock::text(text),
+        Block::Image { base64, media_type } => ContentBlock::image(base64, media_type),
     }
 }
 
 /// Map a [`ToolResult`] to an rmcp [`CallToolResult`].
 pub fn to_call_tool_result(result: ToolResult) -> CallToolResult {
-    let content: Vec<Content> = result.content.into_iter().map(block_to_content).collect();
+    let content: Vec<ContentBlock> = result.content.into_iter().map(block_to_content).collect();
     if result.is_error {
         CallToolResult::error(content)
     } else {

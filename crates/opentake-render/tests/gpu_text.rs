@@ -9,12 +9,15 @@
 
 use std::rc::Rc;
 
-use opentake_domain::{Clip, ClipType, Point, TextStyle, Timeline, Track, Transform};
+use opentake_domain::{
+    Clip, ClipType, Point, TextAlignment, TextLayout, TextStyle, Timeline, Track, Transform,
+};
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::wgpu;
 use opentake_render::{
-    build_render_plan, Compositor, CosmicTextRasterizer, GpuTexture, RenderDevice, RenderSize,
-    SourceMetrics, TextRasterRequest, TextRasterizer, TextureCache, TextureResolver, TextureSource,
+    build_render_plan, Compositor, CosmicTextRasterizer, DecodedFrame, GpuTexture, RenderDevice,
+    RenderSize, SourceMetrics, TextRasterRequest, TextRasterizer, TextureCache, TextureResolver,
+    TextureSource,
 };
 
 const RS: RenderSize = RenderSize {
@@ -147,4 +150,230 @@ fn text_clip_composites_visible_pixels() {
     // Frame is the canvas size and opaque.
     assert_eq!(frame.width, RS.width);
     assert_eq!(frame.height, RS.height);
+}
+
+fn lit_count(frame: &DecodedFrame) -> u32 {
+    frame.rgba.chunks_exact(4).filter(|px| px[3] > 0).count() as u32
+}
+
+fn x_centroid(frame: &DecodedFrame) -> f64 {
+    let mut sum = 0u64;
+    let mut n = 0u64;
+    for y in 0..frame.height {
+        for x in 0..frame.width {
+            if frame.rgba[((y * frame.width + x) * 4 + 3) as usize] > 0 {
+                sum += x as u64;
+                n += 1;
+            }
+        }
+    }
+    if n == 0 {
+        0.0
+    } else {
+        sum as f64 / n as f64
+    }
+}
+
+fn y_span(frame: &DecodedFrame) -> u32 {
+    let mut y0 = frame.height;
+    let mut y1 = 0u32;
+    for y in 0..frame.height {
+        for x in 0..frame.width {
+            if frame.rgba[((y * frame.width + x) * 4 + 3) as usize] > 0 {
+                y0 = y0.min(y);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    if y1 < y0 {
+        0
+    } else {
+        y1 - y0 + 1
+    }
+}
+
+#[test]
+fn font_size_scales_with_canvas_height() {
+    let r = CosmicTextRasterizer::new();
+    if !r.has_fonts() {
+        eprintln!("[skip] no system fonts");
+        return;
+    }
+    let mut style = TextStyle {
+        font_size: 96.0,
+        ..TextStyle::default()
+    };
+    style.shadow.enabled = false;
+    let mk = |canvas: (u32, u32)| {
+        let f = r
+            .rasterize(&TextRasterRequest {
+                clip_id: "t",
+                content: "Hello",
+                style: &style,
+                box_norm: (0.0, 0.0, 1.0, 1.0),
+                canvas,
+            })
+            .expect("frame");
+        lit_count(&f)
+    };
+    let n540 = mk((960, 540));
+    let n1080 = mk((1920, 1080));
+    let n2160 = mk((3840, 2160));
+    assert!(
+        n540 < n1080,
+        "540p ({n540}) must paint fewer pixels than 1080p ({n1080})"
+    );
+    assert!(
+        n1080 < n2160,
+        "1080p ({n1080}) must paint fewer pixels than 2160p ({n2160})"
+    );
+}
+
+#[test]
+fn shadow_paints_pixels_outside_glyph_footprint() {
+    let r = CosmicTextRasterizer::new();
+    if !r.has_fonts() {
+        eprintln!("[skip] no system fonts");
+        return;
+    }
+    let canvas = (640, 360);
+    let mut style = TextStyle {
+        font_size: 120.0,
+        ..TextStyle::default()
+    };
+    style.shadow.enabled = false;
+    let no_shadow = r
+        .rasterize(&TextRasterRequest {
+            clip_id: "t",
+            content: "Hi",
+            style: &style,
+            box_norm: (0.0, 0.0, 1.0, 1.0),
+            canvas,
+        })
+        .expect("frame");
+    let n_no = lit_count(&no_shadow);
+    style.shadow.enabled = true;
+    style.shadow.blur = 8.0;
+    let with_shadow = r
+        .rasterize(&TextRasterRequest {
+            clip_id: "t",
+            content: "Hi",
+            style: &style,
+            box_norm: (0.0, 0.0, 1.0, 1.0),
+            canvas,
+        })
+        .expect("frame");
+    let n_yes = lit_count(&with_shadow);
+    assert!(
+        n_yes > n_no,
+        "shadow ({n_yes}) must add lit pixels beyond glyphs ({n_no})"
+    );
+}
+
+#[test]
+fn alignment_shifts_glyph_x_centroid() {
+    let r = CosmicTextRasterizer::new();
+    if !r.has_fonts() {
+        eprintln!("[skip] no system fonts");
+        return;
+    }
+    let canvas = (800, 200);
+    let centroid = |align: TextAlignment| -> f64 {
+        let mut s = TextStyle {
+            font_size: 80.0,
+            ..TextStyle::default()
+        };
+        s.alignment = align;
+        s.shadow.enabled = false;
+        let f = r
+            .rasterize(&TextRasterRequest {
+                clip_id: "t",
+                content: "Hi",
+                style: &s,
+                box_norm: (0.0, 0.0, 1.0, 1.0),
+                canvas,
+            })
+            .expect("frame");
+        x_centroid(&f)
+    };
+    let left = centroid(TextAlignment::Left);
+    let center = centroid(TextAlignment::Center);
+    let right = centroid(TextAlignment::Right);
+    assert!(left < center, "left ({left}) < center ({center})");
+    assert!(center < right, "center ({center}) < right ({right})");
+}
+
+#[test]
+fn long_text_wraps_in_narrow_box() {
+    let r = CosmicTextRasterizer::new();
+    if !r.has_fonts() {
+        eprintln!("[skip] no system fonts");
+        return;
+    }
+    let canvas = (400, 400);
+    let mut style = TextStyle {
+        font_size: 60.0,
+        ..TextStyle::default()
+    };
+    style.shadow.enabled = false;
+    let long = r
+        .rasterize(&TextRasterRequest {
+            clip_id: "t",
+            content: "The quick brown fox jumps over the lazy dog",
+            style: &style,
+            box_norm: (0.0, 0.0, 1.0, 1.0),
+            canvas,
+        })
+        .expect("frame");
+    let short = r
+        .rasterize(&TextRasterRequest {
+            clip_id: "t",
+            content: "Hi",
+            style: &style,
+            box_norm: (0.0, 0.0, 1.0, 1.0),
+            canvas,
+        })
+        .expect("frame");
+    let long_span = y_span(&long);
+    let short_span = y_span(&short);
+    assert!(
+        long_span > short_span,
+        "wrapped long text y-span ({long_span}) > single line ({short_span})"
+    );
+}
+
+#[test]
+fn rasterize_is_deterministic_ssim_one() {
+    let r = CosmicTextRasterizer::new();
+    if !r.has_fonts() {
+        eprintln!("[skip] no system fonts");
+        return;
+    }
+    let style = TextStyle::default();
+    let req = TextRasterRequest {
+        clip_id: "t",
+        content: "Hello World",
+        style: &style,
+        box_norm: (0.0, 0.0, 1.0, 1.0),
+        canvas: (640, 360),
+    };
+    let a = r.rasterize(&req).expect("frame");
+    let b = r.rasterize(&req).expect("frame");
+    assert_eq!((a.width, a.height), (b.width, b.height));
+    assert_eq!(
+        a.rgba, b.rgba,
+        "rasterize must be deterministic (SSIM = 1.0)"
+    );
+}
+
+#[test]
+fn natural_size_shadow_padding_matches_upstream() {
+    let on = TextStyle::default();
+    let mut off = on.clone();
+    off.shadow.enabled = false;
+    let (w_on, _) = TextLayout::natural_size("Hi", &on, 10000.0, 1080.0);
+    let (w_off, _) = TextLayout::natural_size("Hi", &off, 10000.0, 1080.0);
+    assert_eq!(w_on - w_off, TextLayout::SHADOW_PADDING * 2.0);
+    assert_eq!(TextLayout::SHADOW_PADDING, 12.0);
+    assert_eq!(TextLayout::REFERENCE_CANVAS_HEIGHT, 1080.0);
 }

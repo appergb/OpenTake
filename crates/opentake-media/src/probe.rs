@@ -38,6 +38,14 @@ pub fn probe(path: &Path) -> Result<MediaProbe> {
     Ok(parse_probe(&json))
 }
 
+/// Probe an already-open regular file. No path fallback is attempted: callers
+/// use this when the open handle is the authority that must survive namespace
+/// rebinding.
+pub fn probe_file(file: &std::fs::File) -> Result<MediaProbe> {
+    let json = ff::ffprobe_json_file(file)?;
+    Ok(parse_probe(&json))
+}
+
 /// Parse the rate string ffprobe emits, e.g. `"30000/1001"` or `"25/1"`.
 /// `"0/0"` (unknown) → `None`.
 fn parse_rate(s: &str) -> Option<f64> {
@@ -156,6 +164,42 @@ pub fn parse_probe(json: &serde_json::Value) -> MediaProbe {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn retained_regular_file_probe_rewinds_and_uses_fd_protocol() {
+        if !crate::ff::ffmpeg_available() || !crate::ff::ffprobe_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let media = tmp.path().join("retained.mp4");
+        let generated = std::process::Command::new(crate::ff::ffmpeg_path())
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=32x18:r=1",
+                "-t",
+                "1",
+                "-c:v",
+                "mpeg4",
+                "-y",
+            ])
+            .arg(&media)
+            .status()
+            .unwrap();
+        assert!(generated.success());
+        let mut file = std::fs::File::open(&media).unwrap();
+        use std::io::{Seek, SeekFrom};
+        file.seek(SeekFrom::End(0)).unwrap();
+
+        let probed = probe_file(&file).expect("ffprobe retained regular file through fd:");
+
+        assert_eq!(probed.width, Some(32));
+        assert_eq!(probed.height, Some(18));
+        assert!(probed.has_video);
+    }
 
     #[test]
     fn parse_rate_handles_fractions_and_unknown() {

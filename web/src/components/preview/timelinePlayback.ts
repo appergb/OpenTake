@@ -13,6 +13,28 @@
 import { volumeAt } from "../../lib/clip";
 import type { Clip, Timeline, Track } from "../../lib/types";
 
+function clipSpeed(clip: Clip): number {
+  return clip.speed > 0 ? clip.speed : 1;
+}
+
+function safeFpsValue(fps: number): number {
+  return fps > 0 ? fps : 30;
+}
+
+function clipLastSourceFrame(clip: Clip): number {
+  const durationFrames = Math.max(1, clip.durationFrames);
+  const sourceFramesConsumed = Math.max(1, Math.round(durationFrames * clipSpeed(clip)));
+  return clip.trimStartFrame + sourceFramesConsumed - 1;
+}
+
+function sourceFrameForTimelineFrame(clip: Clip, frame: number): number {
+  const offset = Math.round((frame - clip.startFrame) * clipSpeed(clip));
+  const first = clip.trimStartFrame;
+  const last = clipLastSourceFrame(clip);
+  if (clip.reversed) return Math.min(last, Math.max(first, last - offset));
+  return Math.min(last, Math.max(first, first + offset));
+}
+
 /** A clip selected for playback at a frame, with its track context. */
 export interface ActiveMedia {
   clip: Clip;
@@ -87,9 +109,8 @@ export function activeAudioClips(timeline: Timeline, frame: number): ActiveMedia
  * (opentake-render plan/build.rs) in seconds. Clamped at 0.
  */
 export function sourceTimeSec(clip: Clip, frame: number, fps: number): number {
-  const speed = clip.speed > 0 ? clip.speed : 1;
-  const safeFps = fps > 0 ? fps : 30;
-  const srcFrame = clip.trimStartFrame + (frame - clip.startFrame) * speed;
+  const safeFps = safeFpsValue(fps);
+  const srcFrame = sourceFrameForTimelineFrame(clip, frame);
   return Math.max(0, srcFrame / safeFps);
 }
 
@@ -99,9 +120,10 @@ export function sourceTimeSec(clip: Clip, frame: number, fps: number): number {
  * master media element's clock (upstream's periodic time observer).
  */
 export function frameForSourceTime(clip: Clip, timeSec: number, fps: number): number {
-  const speed = clip.speed > 0 ? clip.speed : 1;
-  const safeFps = fps > 0 ? fps : 30;
+  const speed = clipSpeed(clip);
+  const safeFps = safeFpsValue(fps);
   const srcFrame = timeSec * safeFps;
+  if (clip.reversed) return clip.startFrame + (clipLastSourceFrame(clip) - srcFrame) / speed;
   return clip.startFrame + (srcFrame - clip.trimStartFrame) / speed;
 }
 
@@ -187,50 +209,4 @@ export function isExternalSeekWhilePlaying(args: {
   if (args.lastEngineFrame === null) return false;
   const eps = args.epsilonFrames ?? 2;
   return Math.abs(Math.floor(args.activeFrame) - args.lastEngineFrame) > eps;
-}
-
-/**
- * The gate that routes PLAY to the Rust streaming engine instead of the legacy
- * `<video>` path: the runtime flag is on, we're under Tauri, and we're actively
- * PLAYING (not scrubbing). Scrub/pause/non-Tauri/flag-off all return false →
- * legacy path. Pure so the switch condition — shared by the engine switch, the
- * external-seek watcher, and the MJPEG overlay — lives (and is tested) in one
- * place instead of being copy-pasted.
- *
- * `engineFailed` is the runtime ESCAPE HATCH: once a play attempt fails to start
- * the Rust engine (spawn error, or no frame within the startup deadline) the
- * front end trips this so the SAME play session falls through to the legacy
- * `<video>` stack instead of showing a frozen/black canvas. It resets on the next
- * play. Optional so existing callers (and tests) that never fail keep the engine.
- */
-export function shouldUseRustEngine(args: {
-  rustEnabled: boolean;
-  isTauri: boolean;
-  isPlaying: boolean;
-  isScrubbing: boolean;
-  engineFailed?: boolean;
-}): boolean {
-  return (
-    args.rustEnabled &&
-    args.isTauri &&
-    args.isPlaying &&
-    !args.isScrubbing &&
-    !args.engineFailed
-  );
-}
-
-/**
- * Whether the Rust engine's startup watchdog should declare failure and fall back
- * to the legacy stack: we're still meant to be on the engine path, yet no
- * `playback_frame` has arrived by the deadline. `framesSeen` is how many frames
- * the engine has emitted since this play started; any frame at all means the GPU
- * path is live, so the watchdog stands down. Pure so the fallback trigger is
- * unit-tested without timers.
- */
-export function shouldFallBackToLegacy(args: {
-  onEnginePath: boolean;
-  framesSeen: number;
-  deadlineElapsed: boolean;
-}): boolean {
-  return args.onEnginePath && args.deadlineElapsed && args.framesSeen === 0;
 }

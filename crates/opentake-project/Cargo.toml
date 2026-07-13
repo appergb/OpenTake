@@ -9,8 +9,15 @@ description = ".opentake project bundle read/write (serde) + media manifest/arch
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_ignored = { workspace = true }
 opentake-domain = { workspace = true }
 thiserror = "2"
+cap-std = "4.0.2"
+cap-fs-ext = "4.0.2"
+same-file = "1.0.6"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }

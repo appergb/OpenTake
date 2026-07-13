@@ -122,6 +122,16 @@ Built-in Agent chat panel shares tool definitions and system prompt with MCP.
 | Transcription | whisper-rs (word/segment timestamps) |
 | Semantic Search | candle / ort + SigLIP2 dual-encoder |
 
+Playback routing is capability-based. Ordinary media uses WebKit playback;
+timelines that require supported compositing use the Rust compositor; and
+timelines with unsupported authored combinations fail closed instead of being
+shown with missing effects. Rust frames are published through a session-scoped
+exact `/frame` endpoint guarded by `PublicationGate`, then handed off through a
+two-slot retained-frame buffer. Media poster, preview, waveform, and filmstrip
+prewarm/cache work is project- and source-identity scoped. See the
+[dated playback/cache QA record](docs/superpowers/archive/2026-07-10-playback-cache-installed-app-qa.md)
+for the reviewed 2026-07-10/11 evidence and its artifact boundaries.
+
 ### 🌐 BYOK AI Generation
 
 **Bring Your Own Key**: Direct connection to fal.ai / Replicate / OpenAI. Zero backend, zero operational cost. Optional self-hosted proxy.
@@ -265,7 +275,6 @@ Key files for comparison:
 - **Rust** ≥ 1.82 (via [rustup](https://rustup.rs))
 - **Node.js** ≥ 20 + **pnpm**
 - **FFmpeg** ≥ 6.0 (`brew install ffmpeg` / `winget install ffmpeg` / `apt install ffmpeg`)
-- **libmpv** for timeline playback (`brew install mpv` / `apt install libmpv-dev`; playback degrades to a compatibility path without it)
 
 ### Build
 
@@ -281,9 +290,6 @@ cargo clippy
 # Frontend
 cd web && pnpm install && pnpm build
 cd ..
-
-# One-time (from the repo root): download the libmpv wrapper into src-tauri/lib/
-./web/node_modules/.bin/tauri-plugin-libmpv-api setup-lib
 
 # Launch Tauri dev mode
 cargo tauri dev

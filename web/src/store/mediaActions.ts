@@ -11,9 +11,16 @@
  */
 
 import * as api from "../lib/api";
-import { useMediaStore, refreshMedia } from "./mediaStore";
+import {
+  beginMediaImport,
+  endMediaImport,
+  refreshMedia,
+  useMediaStore,
+  type MediaImportOperation,
+} from "./mediaStore";
 import { useSettingsStore } from "./settingsStore";
 import { useEditorUiStore } from "./uiStore";
+import { useProjectStore } from "./projectStore";
 import { openDialog } from "../lib/dialog";
 import { t } from "../i18n";
 import type { MediaList } from "../lib/types";
@@ -36,6 +43,23 @@ function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
+interface ProjectIdentity {
+  projectEpoch: number;
+  projectPath: string | null;
+}
+
+function captureProjectIdentity(): ProjectIdentity {
+  const { projectEpoch, projectPath } = useProjectStore.getState();
+  return { projectEpoch, projectPath };
+}
+
+function isCurrentProject(identity: ProjectIdentity): boolean {
+  const current = useProjectStore.getState();
+  return (
+    current.projectEpoch === identity.projectEpoch && current.projectPath === identity.projectPath
+  );
+}
+
 /** Toast the count of files an import skipped as unsupported, if any (mirrors
  *  upstream `mediaPanelToast`). A no-op when nothing was skipped so a clean
  *  import stays quiet. */
@@ -45,27 +69,42 @@ function reportSkipped(list: MediaList): void {
   useEditorUiStore.getState().pushToast(t("media.importSkipped", { count: skipped.length }));
 }
 
+function warmNewTimelineMedia(list: MediaList, beforeIds: Set<string>): void {
+  for (const item of list.items) {
+    if (beforeIds.has(item.id) || item.missing) continue;
+    if (item.type !== "video" && item.type !== "audio") continue;
+    void api.preloadMedia(item.id);
+  }
+}
+
 /** Pick a folder and import every supported file inside it. */
 export async function importFolderViaDialog(): Promise<void> {
+  const project = captureProjectIdentity();
+  let importOperation: MediaImportOperation | null = null;
   const open = await openDialog();
-  if (!open) return;
+  if (!open || !isCurrentProject(project)) return;
   const store = useMediaStore.getState();
   store.setError(null);
   try {
+    const beforeIds = new Set(store.items.map((item) => item.id));
     const selected = await open({
       directory: true,
       multiple: false,
       defaultPath: useSettingsStore.getState().defaultImportFolder ?? undefined,
     });
     if (typeof selected !== "string") return; // cancelled
-    store.setImporting(true);
+    if (!isCurrentProject(project)) return;
+    importOperation = beginMediaImport();
     const list = await api.importFolder(selected, true);
+    if (!isCurrentProject(project)) return;
+    warmNewTimelineMedia(list, beforeIds);
     await refreshMedia();
+    if (!isCurrentProject(project)) return;
     reportSkipped(list);
   } catch (error: unknown) {
-    store.setError(getErrorMessage(error));
+    if (isCurrentProject(project)) store.setError(getErrorMessage(error));
   } finally {
-    store.setImporting(false);
+    if (importOperation) endMediaImport(importOperation);
   }
 }
 
@@ -76,8 +115,9 @@ export async function importFolderViaDialog(): Promise<void> {
  * Rust emits `media_changed`; we also refresh so the offline wash clears at once.
  */
 export async function relinkMediaViaDialog(mediaRef: string): Promise<void> {
+  const project = captureProjectIdentity();
   const open = await openDialog();
-  if (!open) return;
+  if (!open || !isCurrentProject(project)) return;
   const store = useMediaStore.getState();
   store.setError(null);
   try {
@@ -90,20 +130,25 @@ export async function relinkMediaViaDialog(mediaRef: string): Promise<void> {
       ],
     });
     if (typeof selected !== "string") return; // cancelled
+    if (!isCurrentProject(project)) return;
     await api.relinkMedia(mediaRef, selected);
+    if (!isCurrentProject(project)) return;
     await refreshMedia();
   } catch (error: unknown) {
-    store.setError(getErrorMessage(error));
+    if (isCurrentProject(project)) store.setError(getErrorMessage(error));
   }
 }
 
 /** Pick one or more media files and import them. */
 export async function importFilesViaDialog(): Promise<void> {
+  const project = captureProjectIdentity();
+  let importOperation: MediaImportOperation | null = null;
   const open = await openDialog();
-  if (!open) return;
+  if (!open || !isCurrentProject(project)) return;
   const store = useMediaStore.getState();
   store.setError(null);
   try {
+    const beforeIds = new Set(store.items.map((item) => item.id));
     const selected = await open({
       directory: false,
       multiple: true,
@@ -114,13 +159,17 @@ export async function importFilesViaDialog(): Promise<void> {
     });
     const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
     if (paths.length === 0) return; // cancelled
-    store.setImporting(true);
+    if (!isCurrentProject(project)) return;
+    importOperation = beginMediaImport();
     const list = await api.importMedia(paths);
+    if (!isCurrentProject(project)) return;
+    warmNewTimelineMedia(list, beforeIds);
     await refreshMedia();
+    if (!isCurrentProject(project)) return;
     reportSkipped(list);
   } catch (error: unknown) {
-    store.setError(getErrorMessage(error));
+    if (isCurrentProject(project)) store.setError(getErrorMessage(error));
   } finally {
-    store.setImporting(false);
+    if (importOperation) endMediaImport(importOperation);
   }
 }
