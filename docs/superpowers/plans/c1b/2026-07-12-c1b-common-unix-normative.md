@@ -197,7 +197,7 @@ impl SafeFsError {
 ```rust
 use super::error::{ComponentViolation, RelativePathViolation, Result, SafeFsError};
 use std::ffi::{OsStr, OsString};
-use std::path::{Component, Path};
+use std::path::Path;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ComponentName(OsString);
@@ -205,19 +205,9 @@ pub(crate) struct ComponentName(OsString);
 impl ComponentName {
     pub(crate) fn new(value: impl AsRef<OsStr>) -> Result<Self> {
         let value = value.as_ref();
-        let mut parts = Path::new(value).components();
-        let normal = match parts.next() {
-            None => return Err(SafeFsError::InvalidComponent(ComponentViolation::Empty)),
-            Some(Component::CurDir) => return Err(SafeFsError::InvalidComponent(ComponentViolation::CurrentDirectory)),
-            Some(Component::ParentDir) => return Err(SafeFsError::InvalidComponent(ComponentViolation::ParentDirectory)),
-            Some(Component::RootDir | Component::Prefix(_)) => return Err(SafeFsError::InvalidComponent(ComponentViolation::AbsoluteOrPrefix)),
-            Some(Component::Normal(normal)) => normal,
-        };
-        if parts.next().is_some() {
-            return Err(SafeFsError::InvalidComponent(ComponentViolation::MultipleComponents));
-        }
-        validate_os_component(normal)?;
-        Ok(Self(normal.to_os_string()))
+        validate_component_syntax(value)?;
+        validate_os_component(value)?;
+        Ok(Self(value.to_os_string()))
     }
 
     pub(crate) fn as_os_str(&self) -> &OsStr { &self.0 }
@@ -228,23 +218,43 @@ pub(crate) struct RelativeComponents(Vec<ComponentName>);
 
 impl RelativeComponents {
     pub(crate) fn new(path: &Path) -> Result<Self> {
-        let mut values = Vec::new();
-        for part in path.components() {
-            match part {
-                Component::Normal(value) => values.push(ComponentName::new(value).map_err(|error| match error {
-                    SafeFsError::InvalidComponent(reason) => SafeFsError::InvalidRelativePath(RelativePathViolation::InvalidComponent(reason)),
-                    other => other,
-                })?),
-                Component::CurDir => return Err(SafeFsError::InvalidRelativePath(RelativePathViolation::CurrentDirectory)),
-                Component::ParentDir => return Err(SafeFsError::InvalidRelativePath(RelativePathViolation::ParentDirectory)),
-                Component::RootDir | Component::Prefix(_) => return Err(SafeFsError::InvalidRelativePath(RelativePathViolation::AbsoluteOrPrefix)),
-            }
-        }
-        if values.is_empty() { return Err(SafeFsError::InvalidRelativePath(RelativePathViolation::Empty)); }
-        Ok(Self(values))
+        Ok(Self(parse_relative_components(path)?))
     }
 
     pub(crate) fn iter(&self) -> impl ExactSizeIterator<Item = &ComponentName> { self.0.iter() }
+}
+
+fn relative_component_error(error: SafeFsError) -> SafeFsError {
+    match error {
+        SafeFsError::InvalidComponent(reason) => SafeFsError::InvalidRelativePath(RelativePathViolation::InvalidComponent(reason)),
+        other => other,
+    }
+}
+
+#[cfg(unix)]
+fn validate_component_syntax(value: &OsStr) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = value.as_bytes();
+    if bytes.is_empty() { return Err(SafeFsError::InvalidComponent(ComponentViolation::Empty)); }
+    if bytes == b"." { return Err(SafeFsError::InvalidComponent(ComponentViolation::CurrentDirectory)); }
+    if bytes == b".." { return Err(SafeFsError::InvalidComponent(ComponentViolation::ParentDirectory)); }
+    if bytes.first() == Some(&b'/') { return Err(SafeFsError::InvalidComponent(ComponentViolation::AbsoluteOrPrefix)); }
+    if bytes.contains(&b'/') { return Err(SafeFsError::InvalidComponent(ComponentViolation::MultipleComponents)); }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn parse_relative_components(path: &Path) -> Result<Vec<ComponentName>> {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.is_empty() { return Err(SafeFsError::InvalidRelativePath(RelativePathViolation::Empty)); }
+    if bytes.first() == Some(&b'/') { return Err(SafeFsError::InvalidRelativePath(RelativePathViolation::AbsoluteOrPrefix)); }
+    bytes.split(|byte| *byte == b'/').map(|part| {
+        if part.is_empty() { return Err(SafeFsError::InvalidRelativePath(RelativePathViolation::InvalidComponent(ComponentViolation::Empty))); }
+        if part == b"." { return Err(SafeFsError::InvalidRelativePath(RelativePathViolation::CurrentDirectory)); }
+        if part == b".." { return Err(SafeFsError::InvalidRelativePath(RelativePathViolation::ParentDirectory)); }
+        ComponentName::new(OsStr::from_bytes(part)).map_err(relative_component_error)
+    }).collect()
 }
 
 #[cfg(unix)]
@@ -253,6 +263,46 @@ fn validate_os_component(value: &OsStr) -> Result<()> {
     if value.as_bytes().contains(&0) { return Err(SafeFsError::InvalidComponent(ComponentViolation::EmbeddedNul)); }
     if value.as_bytes().len() > 255 { return Err(SafeFsError::InvalidComponent(ComponentViolation::TooLong)); }
     Ok(())
+}
+
+#[cfg(windows)]
+fn is_windows_separator(unit: u16) -> bool { unit == b'/' as u16 || unit == b'\\' as u16 }
+
+#[cfg(windows)]
+fn is_windows_drive_prefix(units: &[u16]) -> bool {
+    units.len() >= 2
+        && ((b'A' as u16..=b'Z' as u16).contains(&units[0]) || (b'a' as u16..=b'z' as u16).contains(&units[0]))
+        && units[1] == b':' as u16
+}
+
+#[cfg(windows)]
+fn validate_component_syntax(value: &OsStr) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    let units: Vec<u16> = value.encode_wide().collect();
+    if units.is_empty() { return Err(SafeFsError::InvalidComponent(ComponentViolation::Empty)); }
+    if units == [b'.' as u16] { return Err(SafeFsError::InvalidComponent(ComponentViolation::CurrentDirectory)); }
+    if units == [b'.' as u16, b'.' as u16] { return Err(SafeFsError::InvalidComponent(ComponentViolation::ParentDirectory)); }
+    if units.first().is_some_and(|unit| is_windows_separator(*unit)) || is_windows_drive_prefix(&units) {
+        return Err(SafeFsError::InvalidComponent(ComponentViolation::AbsoluteOrPrefix));
+    }
+    if units.iter().any(|unit| is_windows_separator(*unit)) { return Err(SafeFsError::InvalidComponent(ComponentViolation::WindowsSeparator)); }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn parse_relative_components(path: &Path) -> Result<Vec<ComponentName>> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    let units: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if units.is_empty() { return Err(SafeFsError::InvalidRelativePath(RelativePathViolation::Empty)); }
+    if units.first().is_some_and(|unit| is_windows_separator(*unit)) || is_windows_drive_prefix(&units) {
+        return Err(SafeFsError::InvalidRelativePath(RelativePathViolation::AbsoluteOrPrefix));
+    }
+    units.split(|unit| is_windows_separator(*unit)).map(|part| {
+        if part.is_empty() { return Err(SafeFsError::InvalidRelativePath(RelativePathViolation::InvalidComponent(ComponentViolation::Empty))); }
+        if part == [b'.' as u16] { return Err(SafeFsError::InvalidRelativePath(RelativePathViolation::CurrentDirectory)); }
+        if part == [b'.' as u16, b'.' as u16] { return Err(SafeFsError::InvalidRelativePath(RelativePathViolation::ParentDirectory)); }
+        ComponentName::new(OsString::from_wide(part)).map_err(relative_component_error)
+    }).collect()
 }
 
 #[cfg(windows)]
@@ -267,14 +317,25 @@ fn validate_os_component(value: &OsStr) -> Result<()> {
     if units.last().is_some_and(|unit| *unit == b'.' as u16 || *unit == b' ' as u16) { return Err(SafeFsError::InvalidComponent(ComponentViolation::WindowsTrailingDotOrSpace)); }
     let stem: Vec<u16> = units.iter().copied().take_while(|unit| *unit != b'.' as u16).map(|unit| if (b'a' as u16..=b'z' as u16).contains(&unit) { unit - 32 } else { unit }).collect();
     let reserved: &[&[u16]] = &[&[67,79,78], &[80,82,78], &[65,85,88], &[78,85,76]];
-    let numbered = stem.len() == 4 && (stem[..3] == [67,79,77] || stem[..3] == [76,80,84]) && (b'1' as u16..=b'9' as u16).contains(&stem[3]);
+    let device_digit = |unit: u16| (b'1' as u16..=b'9' as u16).contains(&unit) || matches!(unit, 0x00b9 | 0x00b2 | 0x00b3);
+    let numbered = stem.len() == 4 && (stem[..3] == [67,79,77] || stem[..3] == [76,80,84]) && device_digit(stem[3]);
     if reserved.contains(&stem.as_slice()) || numbered { return Err(SafeFsError::InvalidComponent(ComponentViolation::WindowsDeviceName)); }
     Ok(())
 }
 
 #[cfg(not(any(unix, windows)))]
-fn validate_os_component(value: &OsStr) -> Result<()> {
-    if value.is_empty() { Err(SafeFsError::InvalidComponent(ComponentViolation::Empty)) } else { Ok(()) }
+fn validate_component_syntax(_: &OsStr) -> Result<()> {
+    Err(SafeFsError::UnsupportedSecureFilesystem { operation: super::error::SafeFsOperation::QueryChild, reason: super::error::SecureFilesystemReason::UnsupportedTarget })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn parse_relative_components(_: &Path) -> Result<Vec<ComponentName>> {
+    Err(SafeFsError::UnsupportedSecureFilesystem { operation: super::error::SafeFsOperation::QueryChild, reason: super::error::SecureFilesystemReason::UnsupportedTarget })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn validate_os_component(_: &OsStr) -> Result<()> {
+    Err(SafeFsError::UnsupportedSecureFilesystem { operation: super::error::SafeFsOperation::QueryChild, reason: super::error::SecureFilesystemReason::UnsupportedTarget })
 }
 ```
 
@@ -1391,6 +1452,7 @@ The release build has neither race hooks, create/rollback-failure injection, nor
 
 ```rust
 use super::*;
+use super::error::RelativePathViolation;
 
 #[test]
 fn component_accepts_safe_names_and_rejects_too_long_and_unsafe_names() {
@@ -1401,6 +1463,35 @@ fn component_accepts_safe_names_and_rejects_too_long_and_unsafe_names() {
     assert!(matches!(ComponentName::new("."), Err(SafeFsError::InvalidComponent(ComponentViolation::CurrentDirectory))));
     assert!(matches!(ComponentName::new(".."), Err(SafeFsError::InvalidComponent(ComponentViolation::ParentDirectory))));
     assert!(matches!(ComponentName::new("a/b"), Err(SafeFsError::InvalidComponent(ComponentViolation::MultipleComponents | ComponentViolation::WindowsSeparator))));
+    for unsafe_name in ["asset.mov/", "asset.mov//", "asset.mov/."] {
+        assert!(matches!(ComponentName::new(unsafe_name), Err(SafeFsError::InvalidComponent(ComponentViolation::MultipleComponents | ComponentViolation::WindowsSeparator))));
+    }
+    for unsafe_path in ["asset.mov/", "asset.mov//"] {
+        assert!(matches!(RelativeComponents::new(std::path::Path::new(unsafe_path)), Err(SafeFsError::InvalidRelativePath(RelativePathViolation::InvalidComponent(ComponentViolation::Empty)))));
+    }
+    assert!(matches!(RelativeComponents::new(std::path::Path::new("asset.mov/.")), Err(SafeFsError::InvalidRelativePath(RelativePathViolation::CurrentDirectory))));
+    assert!(matches!(RelativeComponents::new(std::path::Path::new("a/./b")), Err(SafeFsError::InvalidRelativePath(RelativePathViolation::CurrentDirectory))));
+
+    #[cfg(windows)]
+    {
+        for unsafe_name in ["asset.mov\\", "asset.mov\\\\", "asset.mov\\."] {
+            assert!(matches!(ComponentName::new(unsafe_name), Err(SafeFsError::InvalidComponent(ComponentViolation::WindowsSeparator))));
+        }
+        for unsafe_path in ["asset.mov\\", "asset.mov\\\\"] {
+            assert!(matches!(RelativeComponents::new(std::path::Path::new(unsafe_path)), Err(SafeFsError::InvalidRelativePath(RelativePathViolation::InvalidComponent(ComponentViolation::Empty)))));
+        }
+        assert!(matches!(RelativeComponents::new(std::path::Path::new("a\\.\\b")), Err(SafeFsError::InvalidRelativePath(RelativePathViolation::CurrentDirectory))));
+        assert!(matches!(RelativeComponents::new(std::path::Path::new("C:\\asset.mov")), Err(SafeFsError::InvalidRelativePath(RelativePathViolation::AbsoluteOrPrefix))));
+        assert!(matches!(ComponentName::new("C:asset.mov"), Err(SafeFsError::InvalidComponent(ComponentViolation::AbsoluteOrPrefix))));
+        for prefix in ["COM", "LPT"] {
+            for digit in ['1', '9', '¹', '²', '³'] {
+                for extension in ["", ".txt"] {
+                    let name = format!("{prefix}{digit}{extension}");
+                    assert!(matches!(ComponentName::new(&name), Err(SafeFsError::InvalidComponent(ComponentViolation::WindowsDeviceName))));
+                }
+            }
+        }
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1974,7 +2065,7 @@ fi
 printf 'test_sha=%s\nparent_sha=%s\nexit=%s\n' "$TEST_SHA" "$(git rev-parse "$TEST_SHA^")" "$STATUS" >"$RED_DIR/receipt.txt"
 ```
 
-GREEN replaces only the temporary fail-closed `component.rs` with the complete validator in section 2. All acquisition adapters remain the section-3 refusal implementation, so Task 2B claims component/common compile behavior only.
+GREEN replaces only the temporary fail-closed `component.rs` with the complete validator in section 2. An implementation-review correction keeps the original RED and same GREEN subject while synchronizing that validator and the existing single test: raw Unix bytes or Windows UTF-16 are checked before normalization can discard empty/repeated/trailing separators or `.`/`..` segments, Windows `COM`/`LPT` stems reject both ASCII digits and superscript `¹`/`²`/`³`, and unsupported targets remain fail closed. The section-2 source and required single test body must each match their implementation after `rustfmt`. All acquisition adapters remain the section-3 refusal implementation, so Task 2B claims component/common compile behavior only.
 
 ```bash
 cargo test -p opentake-project --lib safe_fs::tests::component_accepts_safe_names_and_rejects_too_long_and_unsafe_names -- --exact --test-threads=1
@@ -1987,12 +2078,16 @@ cargo check -p opentake-project --lib --tests --target x86_64-unknown-linux-gnu
 cargo check -p opentake-project --lib --tests --target x86_64-pc-windows-msvc
 cargo check --workspace --all-targets
 git diff --check
-git add crates/opentake-project/src/safe_fs/component.rs
+git add \
+  crates/opentake-project/src/safe_fs/component.rs \
+  crates/opentake-project/src/safe_fs/tests.rs \
+  docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1b-safe-filesystem.md \
+  docs/superpowers/plans/c1b/2026-07-12-c1b-common-unix-normative.md
 git commit -m "feat(project): validate C1B filesystem components"
 GREEN_SHA=$(git rev-parse HEAD)
 ```
 
-Task 2B does not claim file, directory, quarantine, or platform behavior. Its reports are `$SAFETY_ROOT/logs/c1b-task-2b-$GREEN_SHA-attempt-$REVIEW_ATTEMPT/{spec-security-review.md,implementation-review.md}` and its RED receipt is `$SAFETY_ROOT/red/c1b-task-2b-$TEST_SHA/receipt.txt`. Reviews bind `GREEN_SHA` and must be 0/0/0 before Task 4.
+Task 2B does not claim file, directory, quarantine, or platform behavior. Its reports are `$SAFETY_ROOT/logs/c1b-task-2b-$GREEN_SHA-attempt-$REVIEW_ATTEMPT/{spec-security-review.md,implementation-review.md}` and its RED receipt is `$SAFETY_ROOT/red/c1b-task-2b-$TEST_SHA/receipt.txt`. Reviews bind `GREEN_SHA`, verify raw-syntax rejection and every ASCII/superscript Windows DOS-device case in the one named test, verify formatted section-2/test source conformance, and must be 0/0/0 before Task 4.
 
 ### Task 4 — Unix recursive namespace, filesystem/case proof, and platform-dispatched file I/O
 

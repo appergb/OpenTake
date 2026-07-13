@@ -88,7 +88,7 @@ Commit only the appendix add set as `feat(project): add fail-closed C1B filesyst
 
 ## Task 2B — Common types, component validation, and unsupported adapter
 
-Execute Common/Unix appendix section 7, Task 2B exactly. First make a test-only commit containing the single named component contract. Its evidence must show `running 1 test`, exactly one failure, and nonzero exit; `0 tests`, compile failure, or a missing module invalidates the RED. GREEN replaces only the temporary component refusal with the complete common validator. All acquisition adapters remain fail closed.
+Execute Common/Unix appendix section 7, Task 2B exactly. First make a test-only commit containing the single named component contract. Its evidence must show `running 1 test`, exactly one failure, and nonzero exit; `0 tests`, compile failure, or a missing module invalidates the RED. GREEN replaces only the temporary component refusal with the complete common validator. Validation must preserve raw Unix bytes or Windows UTF-16 syntax before any normalization, reject empty/repeated/trailing separators and every `.`/`..` relative segment, and reject Windows `COM`/`LPT` ASCII and superscript `¹`/`²`/`³` device stems with or without extensions. All acquisition adapters remain fail closed.
 
 Commit `feat(project): validate C1B filesystem components`; run common tests, three-target compile/clippy, workspace check, and two fresh reviews. This task does not claim open/create/I/O/mutation behavior.
 
