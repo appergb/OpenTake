@@ -636,7 +636,7 @@ impl SavedMediaMetadata {
                 if summary.width == 0
                     || summary.height == 0
                     || summary.fps <= 0
-                    || summary.frame_count < 0
+                    || summary.frame_count <= 0
                 {
                     return Err("invalid completed video metadata".to_string());
                 }
@@ -1260,6 +1260,9 @@ fn build_single_clip_export(
         .iter()
         .find(|c| c.id == clip_id)
         .expect("clip is present in the matched track");
+    if clip.duration_frames <= 0 {
+        return Err("clip duration must be greater than zero".to_string());
+    }
 
     // One track — the clip's own, cloned to keep its type/props — holding only
     // this clip re-based to frame 0; forced visible + unmuted so export renders
@@ -1307,15 +1310,20 @@ pub fn save_clip_as_media(
     clip_id: String,
     operation_id: String,
 ) -> Result<MediaListDto, String> {
+    let progress_app = app.clone();
+    let progress_operation_id = operation_id.clone();
+    let on_progress: crate::export::AudioExportProgress = Arc::new(move |done, total| {
+        crate::export::emit_export_progress(&progress_app, &progress_operation_id, done, total);
+    });
     save_clip_as_media_impl(&core, || {
         save_clip_as_media_workflow(
-            &app,
             &core,
             &control,
             media.engine(),
             &prewarm,
             &clip_id,
             &operation_id,
+            on_progress,
         )
     })
 }
@@ -1329,13 +1337,13 @@ fn save_clip_as_media_impl(
 }
 
 fn save_clip_as_media_workflow(
-    app: &AppHandle,
     core: &AppCore,
     control: &crate::export::ExportControl,
     engine: &MediaEngine,
     prewarm: &prewarm::PrewarmScheduler,
     clip_id: &str,
     operation_id: &str,
+    on_progress: crate::export::AudioExportProgress,
 ) -> Result<MediaListDto, String> {
     let snapshot = core.runtime_snapshot();
     let project_dir = snapshot
@@ -1350,12 +1358,6 @@ fn save_clip_as_media_workflow(
         crate::export::reserve_project_media_output(&project_dir, &format!("clip_{clip_id}"), ext)?;
     let out_path = output.path().to_path_buf();
     let project_dir_option = Some(project_dir.clone());
-
-    let progress_app = app.clone();
-    let progress_operation_id = guard.operation_id().to_string();
-    let on_progress: crate::export::AudioExportProgress = Arc::new(move |done, total| {
-        crate::export::emit_export_progress(&progress_app, &progress_operation_id, done, total);
-    });
 
     let metadata = match ext {
         "mp4" => {
@@ -1973,6 +1975,115 @@ mod tests {
                 fps: Some(30.0),
                 has_audio: true,
             }
+        );
+    }
+
+    #[test]
+    fn completed_video_metadata_rejects_nonpositive_frame_counts() {
+        for frame_count in [0, -1] {
+            let metadata = SavedMediaMetadata::Video(crate::export::ExportSummary {
+                out_path: "/unused/generated.mp4".to_string(),
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                frame_count,
+                has_audio: false,
+            });
+
+            assert_eq!(
+                metadata
+                    .to_probe()
+                    .expect_err("saved video needs at least one encoded frame"),
+                "invalid completed video metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_duration_video_save_is_rejected_without_output_or_manifest_progress() {
+        use std::sync::Mutex;
+
+        use opentake_domain::{Clip, Track};
+
+        let tmp = tempfile::tempdir().expect("temp root");
+        let bundle = tmp.path().join("ZeroDurationSave.opentake");
+        let source = tmp.path().join("source.mp4");
+        touch(&source);
+        let mut project = opentake_project::Project::new(&bundle);
+        let mut track = Track::new("video", ClipType::Video);
+        track.clips.push(Clip::new("zero", "source", 0, 0));
+        project.timeline.tracks.push(track);
+        project.manifest.entries.push(MediaManifestEntry {
+            id: "source".into(),
+            name: "source".into(),
+            kind: ClipType::Video,
+            source: MediaSource::External {
+                absolute_path: source.to_string_lossy().into_owned(),
+            },
+            duration: 0.0,
+            generation_input: None,
+            source_width: Some(320),
+            source_height: Some(240),
+            source_fps: Some(30.0),
+            has_audio: Some(false),
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+        project.save().expect("save zero-duration fixture");
+
+        let core = AppCore::new();
+        core.open_project(bundle.clone()).expect("open fixture");
+        let before_live = core.media();
+        let manifest_path = bundle.join("media.json");
+        let before_disk = fs::read(&manifest_path).expect("read persisted manifest");
+        let media_dir = bundle.join("media");
+        let before_outputs = recursive_tree(&media_dir);
+        let progress = Arc::new(Mutex::new(Vec::<(i32, i32)>::new()));
+        let observed = Arc::clone(&progress);
+        let on_progress: crate::export::AudioExportProgress = Arc::new(move |done, total| {
+            observed
+                .lock()
+                .expect("record save progress")
+                .push((done, total));
+        });
+        let control = crate::export::ExportControl::default();
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(core.runtime_snapshot().project_epoch);
+
+        let error = save_clip_as_media_workflow(
+            &core,
+            &control,
+            &engine,
+            &scheduler,
+            "zero",
+            "save-as:zero-duration",
+            on_progress,
+        )
+        .expect_err("zero-duration video save must fail");
+
+        assert_eq!(error, "clip duration must be greater than zero");
+        assert_eq!(recursive_tree(&media_dir), before_outputs);
+        assert_eq!(core.media(), before_live, "live manifest must not change");
+        assert_eq!(
+            fs::read(&manifest_path).expect("reread persisted manifest"),
+            before_disk,
+            "persisted manifest must not change"
+        );
+        assert!(
+            progress
+                .lock()
+                .expect("inspect save progress")
+                .iter()
+                .all(|(done, total)| done != total),
+            "failed save must not emit terminal progress"
+        );
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen fixture");
+        assert_eq!(reopened.media(), before_live);
+        assert!(
+            control.try_begin("save-as:after-zero-duration").is_ok(),
+            "failed preflight must not retain the export operation"
         );
     }
 
