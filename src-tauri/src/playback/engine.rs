@@ -523,6 +523,43 @@ impl PlaybackEngine {
             stopped_rx,
         )
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_resume_observer(
+        audio_paused: Arc<std::sync::atomic::AtomicBool>,
+    ) -> (Self, mpsc::Receiver<bool>, mpsc::Receiver<()>) {
+        let (control_tx, control_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let (stopped_tx, stopped_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            while let Ok(command) = control_rx.recv() {
+                match command {
+                    PlaybackCmd::Stop => {
+                        let _ = stopped_tx.send(());
+                        break;
+                    }
+                    PlaybackCmd::Pause(_, reply) => {
+                        let _ = reply.send(());
+                    }
+                    PlaybackCmd::Resume(_, reply) => {
+                        let paused = audio_paused.load(std::sync::atomic::Ordering::Acquire);
+                        let _ = resume_tx.send(paused);
+                        let _ = reply.send(());
+                    }
+                    PlaybackCmd::Seek(_) => {}
+                }
+            }
+        });
+        (
+            Self {
+                control_tx,
+                handle: Some(handle),
+                cancel: MediaCancelToken::new(),
+            },
+            resume_rx,
+            stopped_rx,
+        )
+    }
 }
 
 impl Drop for PlaybackEngine {

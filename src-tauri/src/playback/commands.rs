@@ -1109,9 +1109,10 @@ mod tests {
     fn retained_paused_resume_succeeds_when_reaper_slots_are_occupied() {
         let current = identity(4, 8, "retained-resume");
         let (state, _gate) = state_with_running(current.clone());
-        let (engine, _stopped) = PlaybackEngine::test_stub();
         let (audio, paused, _audio_stopped) = super::super::audio::AudioPlayback::test_stub();
         audio.pause().expect("prepare retained audio stub");
+        let (engine, audio_state_at_resume, _stopped) =
+            PlaybackEngine::test_resume_observer(Arc::clone(&paused));
         {
             let mut slot = state
                 .slot
@@ -1138,8 +1139,69 @@ mod tests {
 
         assert!(result.is_none());
         assert_eq!(state.active_identity(), Some(current));
+        assert!(
+            audio_state_at_resume
+                .recv_timeout(Duration::from_secs(2))
+                .expect("engine resume observes staged audio state"),
+            "audio must remain muted until the engine clock is positioned"
+        );
         assert!(!paused.load(std::sync::atomic::Ordering::Acquire));
         drop(backlog);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fresh_install_positions_engine_before_audio_unmute() {
+        let current = identity(4, 10, "fresh-audio-order");
+        let state = PlaybackState::new();
+        let ticket = {
+            let mut slot = state
+                .slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let StartDecision::Build(ticket) = slot
+                .sessions
+                .begin_start(current.clone(), current.revision())
+                .expect("begin fresh playback")
+            else {
+                panic!("fresh playback must build");
+            };
+            ticket
+        };
+        let cleanup = state.reaper.try_reserve().expect("reserve fresh cleanup");
+        let server = PreviewServer::start().await.expect("start preview server");
+        let publication = PublicationGate::open();
+        let (audio, paused, _audio_stopped) = super::super::audio::AudioPlayback::test_stub();
+        audio.pause().expect("prepare fresh audio stub");
+        let (engine, audio_state_at_resume, _engine_stopped) =
+            PlaybackEngine::test_resume_observer(Arc::clone(&paused));
+        let cancel = opentake_media::MediaCancelToken::new();
+
+        state
+            .install_if_current(
+                ticket,
+                cleanup,
+                current.revision(),
+                PlaybackResources {
+                    engine,
+                    audio: Some(audio),
+                    publication,
+                    server,
+                },
+                23,
+                &cancel,
+            )
+            .expect("install fresh playback");
+
+        assert!(
+            audio_state_at_resume
+                .recv_timeout(Duration::from_secs(2))
+                .expect("engine resume observes staged audio state"),
+            "fresh audio must remain muted until the engine clock is positioned"
+        );
+        assert!(!paused.load(std::sync::atomic::Ordering::Acquire));
+        state
+            .control(current, SessionControl::Stop, 0)
+            .expect("stop fresh playback");
     }
 
     #[test]
