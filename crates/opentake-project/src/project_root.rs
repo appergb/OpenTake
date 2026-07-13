@@ -305,7 +305,6 @@ impl BundlePublisher {
         fs::create_dir_all(&parent_path).map_err(|error| ProjectError::io(&parent_path, error))?;
         let parent = Dir::open_ambient_dir(&parent_path, ambient_authority())
             .map_err(|error| ProjectError::io(&parent_path, error))?;
-        let stage_name = artifact_name(&target_name, ".opentake-stage");
         let backup_name = artifact_name(&target_name, ".opentake-backup");
         let journal_name = artifact_name(&target_name, ".opentake-journal");
         let lock_name = artifact_name(&target_name, ".opentake-lock");
@@ -361,13 +360,13 @@ impl BundlePublisher {
             &parent,
             &parent_path,
             &target_name,
-            &stage_name,
             &backup_name,
             &journal_name,
         )?;
         let target_exists = inspect_directory(&parent, &parent_path, &target_name, false)?;
         let journal = PublishJournal::new(target_exists);
         write_new_file_artifact(&parent, &parent_path, &journal_name, &journal.encode())?;
+        let stage_name = stage_artifact_name(&target_name, &journal.nonce);
         parent
             .create_dir(&stage_name)
             .map_err(|error| ProjectError::io(parent_path.join(&stage_name), error))?;
@@ -560,8 +559,14 @@ impl BundlePublisher {
             true
         };
         if backup_cleaned {
-            let journal_cleaned =
-                remove_file_artifact(&self.parent, &self.parent_path, &self.journal_name).is_ok();
+            #[cfg(test)]
+            let skip_journal_cleanup =
+                FAIL_JOURNAL_CLEANUP_AFTER_BACKUP.with(|fail| fail.replace(false));
+            #[cfg(not(test))]
+            let skip_journal_cleanup = false;
+            let journal_cleaned = !skip_journal_cleanup
+                && remove_file_artifact(&self.parent, &self.parent_path, &self.journal_name)
+                    .is_ok();
             if journal_cleaned {
                 let _ =
                     remove_file_artifact(&root.dir, &root.path, OsStr::new(PUBLISH_MARKER_FILE));
@@ -570,9 +575,22 @@ impl BundlePublisher {
         Ok(root)
     }
 
-    fn cleanup_aborted_publish(&self) -> Result<()> {
-        remove_directory_artifact(&self.parent, &self.parent_path, &self.stage_name)?;
-        remove_file_artifact(&self.parent, &self.parent_path, &self.journal_name)
+    fn cleanup_aborted_publish(&mut self) -> Result<()> {
+        if self.journal.had_target {
+            self.journal.phase = PublishPhase::AbortedRestored;
+            write_file_artifact_atomic(
+                &self.parent,
+                &self.parent_path,
+                &self.journal_name,
+                &self.journal.encode(),
+            )?;
+        }
+        finish_aborted_publish_cleanup(
+            &self.parent,
+            &self.parent_path,
+            Some(&self.stage_name),
+            &self.journal_name,
+        )
     }
 }
 
@@ -597,6 +615,9 @@ impl Drop for BundlePublisher {
 #[cfg(test)]
 std::thread_local! {
     static FAIL_BACKUP_CLEANUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_JOURNAL_CLEANUP_AFTER_BACKUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_ABORT_CLEANUP_BEFORE_STAGE_REMOVAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_ABORT_CLEANUP_BEFORE_JOURNAL_REMOVAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn artifact_name(target: &OsStr, suffix: &str) -> OsString {
@@ -606,12 +627,88 @@ fn artifact_name(target: &OsStr, suffix: &str) -> OsString {
     name
 }
 
+fn stage_artifact_prefix(target: &OsStr) -> OsString {
+    artifact_name(target, ".opentake-stage-")
+}
+
+fn stage_artifact_name(target: &OsStr, nonce: &str) -> OsString {
+    let mut name = stage_artifact_prefix(target);
+    name.push(nonce);
+    name
+}
+
+fn valid_publish_nonce(nonce: &str) -> bool {
+    let mut parts = nonce.split('-');
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(first), Some(second), Some(third), None)
+            if valid_part(first) && valid_part(second) && valid_part(third)
+    )
+}
+
+fn os_starts_with(value: &OsStr, prefix: &OsStr) -> bool {
+    value
+        .as_encoded_bytes()
+        .starts_with(prefix.as_encoded_bytes())
+}
+
+fn stage_artifacts(parent: &Dir, parent_path: &Path, target_name: &OsStr) -> Result<Vec<OsString>> {
+    let legacy_name = artifact_name(target_name, ".opentake-stage");
+    let prefix = stage_artifact_prefix(target_name);
+    let mut artifacts = Vec::new();
+    let entries = parent
+        .entries()
+        .map_err(|error| ProjectError::io(parent_path, error))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| ProjectError::io(parent_path, error))?;
+        let name = entry.file_name();
+        if name == legacy_name || os_starts_with(&name, &prefix) {
+            artifacts.push(name);
+        }
+    }
+    artifacts.sort();
+    Ok(artifacts)
+}
+
+fn finish_aborted_publish_cleanup(
+    parent: &Dir,
+    parent_path: &Path,
+    stage_name: Option<&OsStr>,
+    journal_name: &OsStr,
+) -> Result<()> {
+    #[cfg(test)]
+    if FAIL_ABORT_CLEANUP_BEFORE_STAGE_REMOVAL.with(|fail| fail.replace(false)) {
+        return Err(ProjectError::io(
+            parent_path.join(journal_name),
+            std::io::Error::other("injected abort cleanup failure before stage removal"),
+        ));
+    }
+    if let Some(stage_name) = stage_name {
+        remove_directory_artifact(parent, parent_path, stage_name)?;
+    }
+    #[cfg(test)]
+    if FAIL_ABORT_CLEANUP_BEFORE_JOURNAL_REMOVAL.with(|fail| fail.replace(false)) {
+        return Err(ProjectError::io(
+            parent_path.join(journal_name),
+            std::io::Error::other("injected abort cleanup failure before journal removal"),
+        ));
+    }
+    remove_file_artifact(parent, parent_path, journal_name)
+}
+
 const PUBLISH_MARKER_FILE: &str = ".opentake-publish-marker";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PublishPhase {
     Prepared,
     BackedUp,
+    AbortedRestored,
 }
 
 #[derive(Debug)]
@@ -645,6 +742,7 @@ impl PublishJournal {
             match self.phase {
                 PublishPhase::Prepared => "prepared",
                 PublishPhase::BackedUp => "backed_up",
+                PublishPhase::AbortedRestored => "aborted_restored",
             }
         )
         .into_bytes()
@@ -682,9 +780,9 @@ impl PublishJournal {
             ));
         }
         let nonce = nonce
-            .filter(|nonce| !nonce.is_empty())
+            .filter(|nonce| valid_publish_nonce(nonce))
             .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "missing journal nonce")
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid journal nonce")
             })?
             .to_string();
         let had_target = match had_target {
@@ -700,6 +798,7 @@ impl PublishJournal {
         let phase = match phase {
             Some("prepared") => PublishPhase::Prepared,
             Some("backed_up") => PublishPhase::BackedUp,
+            Some("aborted_restored") => PublishPhase::AbortedRestored,
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -905,13 +1004,12 @@ fn recover_bundle_transaction(
     parent: &Dir,
     parent_path: &Path,
     target_name: &OsStr,
-    stage_name: &OsStr,
     backup_name: &OsStr,
     journal_name: &OsStr,
 ) -> Result<()> {
     let target_exists = inspect_directory(parent, parent_path, target_name, false)?;
     let backup_exists = inspect_directory(parent, parent_path, backup_name, true)?;
-    let stage_exists = inspect_directory(parent, parent_path, stage_name, true)?;
+    let stages = stage_artifacts(parent, parent_path, target_name)?;
     let journal_exists = match parent.symlink_metadata(journal_name) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => true,
         Ok(_) => {
@@ -934,7 +1032,7 @@ fn recover_bundle_transaction(
                 restore: "automatic recovery refused".to_string(),
             });
         }
-        if stage_exists {
+        if let Some(stage_name) = stages.first() {
             return Err(ProjectError::io(
                 parent_path.join(stage_name),
                 std::io::Error::new(
@@ -947,9 +1045,31 @@ fn recover_bundle_transaction(
     }
 
     let journal_bytes = read_file_artifact(parent, parent_path, journal_name)?;
-    let journal = PublishJournal::decode(&journal_bytes)
+    let mut journal = PublishJournal::decode(&journal_bytes)
         .map_err(|error| ProjectError::io(parent_path.join(journal_name), error))?;
-    let stage_matches = if stage_exists {
+    let expected_stage_name = stage_artifact_name(target_name, &journal.nonce);
+    let legacy_stage_name = artifact_name(target_name, ".opentake-stage");
+    if stages.len() > 1
+        || stages
+            .first()
+            .is_some_and(|name| name != &expected_stage_name && name != &legacy_stage_name)
+    {
+        return Err(ProjectError::io(
+            parent_path.join(
+                stages
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| expected_stage_name.clone()),
+            ),
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "bundle transaction has unknown or multiple stage artifacts",
+            ),
+        ));
+    }
+    let stage_name = stages.first();
+    let (stage_matches, stage_unmarked) = if let Some(stage_name) = stage_name {
+        inspect_directory(parent, parent_path, stage_name, true)?;
         let stage = ProjectRoot::open_from_parent(
             &parent_path.join(stage_name),
             parent
@@ -957,9 +1077,12 @@ fn recover_bundle_transaction(
                 .map_err(|error| ProjectError::io(parent_path, error))?,
             stage_name.to_owned(),
         )?;
-        marker_matches(&stage, &journal.nonce)?
+        match stage.read_optional(PUBLISH_MARKER_FILE)? {
+            Some(marker) => (marker == journal.nonce.as_bytes(), false),
+            None => (false, true),
+        }
     } else {
-        false
+        (false, false)
     };
     let target_matches = if target_exists {
         let target = ProjectRoot::open_from_parent(
@@ -976,7 +1099,11 @@ fn recover_bundle_transaction(
 
     if backup_exists {
         if target_exists {
-            if !journal.had_target || journal.phase != PublishPhase::BackedUp || !target_matches {
+            if stage_name.is_some()
+                || !journal.had_target
+                || journal.phase != PublishPhase::BackedUp
+                || !target_matches
+            {
                 return Err(ProjectError::RecoveryRequired {
                     backup: parent_path.join(backup_name),
                     publish: "target plus backup does not match a committed replacement journal"
@@ -997,14 +1124,19 @@ fn recover_bundle_transaction(
                 remove_file_artifact(&target.dir, &target.path, OsStr::new(PUBLISH_MARKER_FILE));
             return Ok(());
         }
-        if !journal.had_target {
+        if !journal.had_target
+            || !matches!(
+                journal.phase,
+                PublishPhase::Prepared | PublishPhase::BackedUp
+            )
+        {
             return Err(ProjectError::RecoveryRequired {
                 backup: parent_path.join(backup_name),
                 publish: "backup exists for a journal that records no prior target".to_string(),
                 restore: "automatic recovery refused".to_string(),
             });
         }
-        if stage_exists && !stage_matches {
+        if stage_name.is_some() && !stage_matches {
             return Err(ProjectError::RecoveryRequired {
                 backup: parent_path.join(backup_name),
                 publish: "stage does not carry the journal nonce".to_string(),
@@ -1018,15 +1150,48 @@ fn recover_bundle_transaction(
                 publish: "prior bundle publication was interrupted".to_string(),
                 restore: restore.to_string(),
             })?;
-        if stage_exists {
-            remove_directory_artifact(parent, parent_path, stage_name)?;
+        journal.phase = PublishPhase::AbortedRestored;
+        write_file_artifact_atomic(parent, parent_path, journal_name, &journal.encode())?;
+        return finish_aborted_publish_cleanup(
+            parent,
+            parent_path,
+            stage_name.map(OsString::as_os_str),
+            journal_name,
+        );
+    }
+
+    if target_matches {
+        if stage_name.is_some()
+            || !matches!(
+                (journal.had_target, journal.phase),
+                (false, PublishPhase::Prepared) | (true, PublishPhase::BackedUp)
+            )
+        {
+            return Err(ProjectError::RecoveryRequired {
+                backup: parent_path.join(backup_name),
+                publish: "marked target does not match a committed journal state".to_string(),
+                restore: "automatic recovery refused".to_string(),
+            });
         }
         remove_file_artifact(parent, parent_path, journal_name)?;
+        let target = ProjectRoot::open_from_parent(
+            &parent_path.join(target_name),
+            parent
+                .try_clone()
+                .map_err(|error| ProjectError::io(parent_path, error))?,
+            target_name.to_owned(),
+        )?;
+        let _ = remove_file_artifact(&target.dir, &target.path, OsStr::new(PUBLISH_MARKER_FILE));
         return Ok(());
     }
 
-    if stage_exists {
-        if !stage_matches {
+    if let Some(stage_name) = stage_name {
+        let nonce_named_unmarked_stage = stage_name == &expected_stage_name && stage_unmarked;
+        if !(stage_matches
+            || nonce_named_unmarked_stage
+                && journal.phase == PublishPhase::Prepared
+                && target_exists == journal.had_target)
+        {
             return Err(ProjectError::io(
                 parent_path.join(stage_name),
                 std::io::Error::new(
@@ -1050,31 +1215,41 @@ fn recover_bundle_transaction(
                 restore: "automatic recovery refused".to_string(),
             });
         }
-        remove_directory_artifact(parent, parent_path, stage_name)?;
-        remove_file_artifact(parent, parent_path, journal_name)?;
-        return Ok(());
+        if journal.phase == PublishPhase::BackedUp {
+            if !journal.had_target || !target_exists || !stage_matches {
+                return Err(ProjectError::RecoveryRequired {
+                    backup: parent_path.join(backup_name),
+                    publish: "backed-up journal does not prove a restored target".to_string(),
+                    restore: "automatic recovery refused".to_string(),
+                });
+            }
+            journal.phase = PublishPhase::AbortedRestored;
+            write_file_artifact_atomic(parent, parent_path, journal_name, &journal.encode())?;
+        } else if journal.phase == PublishPhase::AbortedRestored
+            && (!journal.had_target || !target_exists || !stage_matches)
+        {
+            return Err(ProjectError::RecoveryRequired {
+                backup: parent_path.join(backup_name),
+                publish: "restored-abort journal does not match its target and stage".to_string(),
+                restore: "automatic recovery refused".to_string(),
+            });
+        }
+        return finish_aborted_publish_cleanup(
+            parent,
+            parent_path,
+            Some(stage_name.as_os_str()),
+            journal_name,
+        );
     }
 
-    if target_matches && !journal.had_target && journal.phase == PublishPhase::Prepared {
-        remove_file_artifact(parent, parent_path, journal_name)?;
-        let target = ProjectRoot::open_from_parent(
-            &parent_path.join(target_name),
-            parent
-                .try_clone()
-                .map_err(|error| ProjectError::io(parent_path, error))?,
-            target_name.to_owned(),
-        )?;
-        let _ = remove_file_artifact(&target.dir, &target.path, OsStr::new(PUBLISH_MARKER_FILE));
-        return Ok(());
-    }
-    if target_matches {
-        return Err(ProjectError::RecoveryRequired {
-            backup: parent_path.join(backup_name),
-            publish: "marked target does not match a first-save commit journal".to_string(),
-            restore: "automatic recovery refused".to_string(),
-        });
-    }
-    if target_exists == journal.had_target && journal.phase == PublishPhase::Prepared {
+    if target_exists == journal.had_target
+        && matches!(
+            (journal.had_target, journal.phase),
+            (false, PublishPhase::Prepared)
+                | (true, PublishPhase::Prepared)
+                | (true, PublishPhase::AbortedRestored)
+        )
+    {
         return remove_file_artifact(parent, parent_path, journal_name);
     }
     Err(ProjectError::RecoveryRequired {
@@ -1490,6 +1665,74 @@ mod tests {
         receipt
     }
 
+    fn stage_paths(parent: &Path, target_name: &str) -> Vec<PathBuf> {
+        let prefix = format!(".{target_name}.opentake-stage");
+        let mut paths = fs::read_dir(parent)
+            .unwrap()
+            .map(std::result::Result::unwrap)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
+    #[derive(Clone, Copy)]
+    enum AbortCleanupWindow {
+        BeforeStageRemoval,
+        BeforeJournalRemoval,
+    }
+
+    impl AbortCleanupWindow {
+        fn tag(self) -> &'static str {
+            match self {
+                Self::BeforeStageRemoval => "before-stage",
+                Self::BeforeJournalRemoval => "before-journal",
+            }
+        }
+
+        fn inject(self) {
+            match self {
+                Self::BeforeStageRemoval => {
+                    FAIL_ABORT_CLEANUP_BEFORE_STAGE_REMOVAL.with(|fail| fail.set(true));
+                }
+                Self::BeforeJournalRemoval => {
+                    FAIL_ABORT_CLEANUP_BEFORE_JOURNAL_REMOVAL.with(|fail| fail.set(true));
+                }
+            }
+        }
+
+        fn stage_remains(self) -> bool {
+            matches!(self, Self::BeforeStageRemoval)
+        }
+    }
+
+    fn leave_backed_up_transaction(target: &Path) {
+        let mut interrupted = ProjectRoot::begin_replace(target).unwrap();
+        interrupted
+            .stage()
+            .write_atomic("project.json", b"new timeline")
+            .unwrap();
+        interrupted
+            .parent
+            .rename(
+                &interrupted.target_name,
+                &interrupted.parent,
+                &interrupted.backup_name,
+            )
+            .unwrap();
+        interrupted.journal.phase = PublishPhase::BackedUp;
+        write_file_artifact_atomic(
+            &interrupted.parent,
+            &interrupted.parent_path,
+            &interrupted.journal_name,
+            &interrupted.journal.encode(),
+        )
+        .unwrap();
+        drop(interrupted.stage.take().unwrap());
+        drop(interrupted);
+    }
+
     #[test]
     fn publish_failure_after_backup_restores_the_old_target_tree() {
         let tmp = TmpDir::new("publish-restore");
@@ -1514,10 +1757,7 @@ mod tests {
             .path()
             .join(".Existing.opentake.opentake-backup")
             .exists());
-        assert!(!tmp
-            .path()
-            .join(".Existing.opentake.opentake-stage")
-            .exists());
+        assert!(stage_paths(tmp.path(), "Existing.opentake").is_empty());
         assert!(!tmp
             .path()
             .join(".Existing.opentake.opentake-journal")
@@ -1561,6 +1801,193 @@ mod tests {
             fs::read(target.join("project.json")).unwrap(),
             b"new timeline"
         );
+    }
+
+    #[test]
+    fn postcommit_journal_cleanup_failure_recovers_without_the_backup() {
+        let tmp = TmpDir::new("postcommit-journal-cleanup");
+        let target = tmp.path().join("Existing.opentake");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("project.json"), b"old timeline").unwrap();
+        let backup = tmp.path().join(".Existing.opentake.opentake-backup");
+        let journal = tmp.path().join(".Existing.opentake.opentake-journal");
+
+        let publisher = ProjectRoot::begin_replace(&target).unwrap();
+        publisher
+            .stage()
+            .write_atomic("project.json", b"new timeline")
+            .unwrap();
+        FAIL_JOURNAL_CLEANUP_AFTER_BACKUP.with(|fail| fail.set(true));
+        let root = publisher
+            .publish()
+            .expect("post-commit journal cleanup remains best effort");
+        assert_eq!(
+            root.read_optional("project.json").unwrap().unwrap(),
+            b"new timeline"
+        );
+        assert!(!backup.exists());
+        assert!(journal.is_file());
+        assert!(target.join(PUBLISH_MARKER_FILE).is_file());
+        drop(root);
+
+        let retry = ProjectRoot::begin_replace(&target)
+            .expect("the committed marker and journal reconcile without a backup");
+        assert!(!target.join(PUBLISH_MARKER_FILE).exists());
+        drop(retry);
+        assert!(!journal.exists());
+        assert_eq!(
+            fs::read(target.join("project.json")).unwrap(),
+            b"new timeline"
+        );
+    }
+
+    #[test]
+    fn retry_removes_a_nonce_named_stage_created_before_its_marker() {
+        let tmp = TmpDir::new("premarker-stage");
+        let target = tmp.path().join("New.opentake");
+        let target_name = target.file_name().unwrap();
+        let journal_name = artifact_name(target_name, ".opentake-journal");
+        let journal = PublishJournal::new(false);
+        let stage_name = stage_artifact_name(target_name, &journal.nonce);
+        let parent = Dir::open_ambient_dir(tmp.path(), ambient_authority()).unwrap();
+        write_new_file_artifact(&parent, tmp.path(), &journal_name, &journal.encode()).unwrap();
+        parent.create_dir(&stage_name).unwrap();
+        let interrupted_stage = tmp.path().join(&stage_name);
+
+        let retry = ProjectRoot::begin_replace(&target)
+            .expect("the nonce-derived name proves ownership before the marker write");
+        assert!(!interrupted_stage.exists());
+        drop(retry);
+        assert!(stage_paths(tmp.path(), "New.opentake").is_empty());
+        assert!(!tmp.path().join(journal_name).exists());
+    }
+
+    #[test]
+    fn retry_removes_a_journal_created_before_its_stage() {
+        let tmp = TmpDir::new("prestage-journal");
+        let target = tmp.path().join("New.opentake");
+        let target_name = target.file_name().unwrap();
+        let journal_name = artifact_name(target_name, ".opentake-journal");
+        let journal = PublishJournal::new(false);
+        let parent = Dir::open_ambient_dir(tmp.path(), ambient_authority()).unwrap();
+        write_new_file_artifact(&parent, tmp.path(), &journal_name, &journal.encode()).unwrap();
+
+        let retry = ProjectRoot::begin_replace(&target)
+            .expect("a prepared journal without its not-yet-created stage is safe to discard");
+        drop(retry);
+        assert!(stage_paths(tmp.path(), "New.opentake").is_empty());
+        assert!(!tmp.path().join(journal_name).exists());
+    }
+
+    #[test]
+    fn recovery_refuses_a_stage_with_an_unknown_transaction_nonce() {
+        let tmp = TmpDir::new("unknown-stage-nonce");
+        let target = tmp.path().join("New.opentake");
+        let target_name = target.file_name().unwrap();
+        let journal_name = artifact_name(target_name, ".opentake-journal");
+        let journal = PublishJournal::new(false);
+        let unknown_stage = stage_artifact_name(target_name, "dead-beef-0");
+        let parent = Dir::open_ambient_dir(tmp.path(), ambient_authority()).unwrap();
+        write_new_file_artifact(&parent, tmp.path(), &journal_name, &journal.encode()).unwrap();
+        parent.create_dir(&unknown_stage).unwrap();
+
+        let error = match ProjectRoot::begin_replace(&target) {
+            Ok(_) => panic!("a stage from another transaction must remain fail closed"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("unknown or multiple stage"));
+        assert!(tmp.path().join(unknown_stage).is_dir());
+        assert!(tmp.path().join(journal_name).is_file());
+    }
+
+    #[test]
+    fn direct_abort_recovers_across_both_post_restore_cleanup_windows() {
+        for window in [
+            AbortCleanupWindow::BeforeStageRemoval,
+            AbortCleanupWindow::BeforeJournalRemoval,
+        ] {
+            let tmp = TmpDir::new(&format!("direct-abort-{}", window.tag()));
+            let target = tmp.path().join("Existing.opentake");
+            fs::create_dir_all(&target).unwrap();
+            fs::write(target.join("project.json"), b"old timeline").unwrap();
+            let journal = tmp.path().join(".Existing.opentake.opentake-journal");
+
+            let mut publisher = ProjectRoot::begin_replace(&target).unwrap();
+            publisher
+                .stage()
+                .write_atomic("project.json", b"new timeline")
+                .unwrap();
+            window.inject();
+            let error = publisher
+                .publish_with_hook(|| Err(std::io::Error::other("injected publish failure")))
+                .expect_err("the injected abort cleanup interruption must be reported");
+            assert!(matches!(error, ProjectError::RecoveryRequired { .. }));
+            assert_eq!(
+                PublishJournal::decode(&fs::read(&journal).unwrap())
+                    .unwrap()
+                    .phase,
+                PublishPhase::AbortedRestored
+            );
+            assert_eq!(
+                !stage_paths(tmp.path(), "Existing.opentake").is_empty(),
+                window.stage_remains()
+            );
+            drop(publisher);
+
+            let retry = ProjectRoot::begin_replace(&target)
+                .expect("the next transaction finishes direct-abort cleanup");
+            drop(retry);
+            assert_eq!(
+                fs::read(target.join("project.json")).unwrap(),
+                b"old timeline"
+            );
+            assert!(stage_paths(tmp.path(), "Existing.opentake").is_empty());
+            assert!(!journal.exists());
+        }
+    }
+
+    #[test]
+    fn restart_recovery_survives_both_post_restore_cleanup_windows() {
+        for window in [
+            AbortCleanupWindow::BeforeStageRemoval,
+            AbortCleanupWindow::BeforeJournalRemoval,
+        ] {
+            let tmp = TmpDir::new(&format!("restart-recovery-{}", window.tag()));
+            let target = tmp.path().join("Existing.opentake");
+            fs::create_dir_all(&target).unwrap();
+            fs::write(target.join("project.json"), b"old timeline").unwrap();
+            let journal = tmp.path().join(".Existing.opentake.opentake-journal");
+            let backup = tmp.path().join(".Existing.opentake.opentake-backup");
+            leave_backed_up_transaction(&target);
+
+            window.inject();
+            let error = match ProjectRoot::begin_replace(&target) {
+                Ok(_) => panic!("the injected restart cleanup interruption must be reported"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains("injected abort cleanup failure"));
+            assert!(!backup.exists());
+            assert_eq!(
+                PublishJournal::decode(&fs::read(&journal).unwrap())
+                    .unwrap()
+                    .phase,
+                PublishPhase::AbortedRestored
+            );
+            assert_eq!(
+                !stage_paths(tmp.path(), "Existing.opentake").is_empty(),
+                window.stage_remains()
+            );
+
+            let retry = ProjectRoot::begin_replace(&target)
+                .expect("the next transaction finishes restart recovery cleanup");
+            drop(retry);
+            assert_eq!(
+                fs::read(target.join("project.json")).unwrap(),
+                b"old timeline"
+            );
+            assert!(stage_paths(tmp.path(), "Existing.opentake").is_empty());
+            assert!(!journal.exists());
+        }
     }
 
     #[test]
@@ -1663,10 +2090,7 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(error, ProjectError::RecoveryRequired { .. }));
-        assert!(tmp
-            .path()
-            .join(".Existing.opentake.opentake-stage")
-            .is_dir());
+        assert_eq!(stage_paths(tmp.path(), "Existing.opentake").len(), 1);
         assert!(tmp
             .path()
             .join(".Existing.opentake.opentake-journal")
@@ -1703,10 +2127,7 @@ mod tests {
             fs::read(target.join("project.json")).unwrap(),
             b"old timeline"
         );
-        assert!(!tmp
-            .path()
-            .join(".Existing.opentake.opentake-stage")
-            .exists());
+        assert!(stage_paths(tmp.path(), "Existing.opentake").is_empty());
         assert!(!tmp
             .path()
             .join(".Existing.opentake.opentake-journal")

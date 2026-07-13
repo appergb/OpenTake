@@ -620,7 +620,13 @@ mod tests {
             .expect_err("a symlink in retained project media must fail closed");
 
         assert_eq!(tree_receipt(&target), before);
-        assert!(!tmp.path().join(".Target.opentake.opentake-stage").exists());
+        assert!(!fs::read_dir(tmp.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".Target.opentake.opentake-stage")
+        }));
         assert!(!tmp
             .path()
             .join(".Target.opentake.opentake-journal")
