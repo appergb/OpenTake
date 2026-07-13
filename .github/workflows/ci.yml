@@ -55,16 +55,6 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      # `tauri.conf.json` bundles `lib/libmpv-wrapper.dylib` unconditionally
-      # (macOS-only — used by the libmpv PLAY path). tauri_build's resource
-      # check fails on Linux because the dylib isn't committed for non-macOS.
-      # Create an empty placeholder so the resource path resolves; it's never
-      # actually bundled here since `cargo clippy`/`test` don't run `tauri build`.
-      - name: Create libmpv placeholder for Linux CI
-        run: |
-          mkdir -p src-tauri/lib
-          touch src-tauri/lib/libmpv-wrapper.dylib
-
       - name: cargo fmt
         run: cargo fmt --all --check
 
@@ -79,11 +69,54 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+      - name: live playback transport integration (fail closed)
+        run: |
+          set -euo pipefail
+          cargo test -p opentake-tauri \
+            --features playback-engine \
+            --test playback_transport_integration \
+            -- --test-threads=1
+
       # Prove the minimal build still compiles WITHOUT the engine (the
       # `--no-default-features` escape hatch: drops cpal/axum/tokio + the
       # `playback_*` commands; the front end then falls back to the legacy path).
       - name: cargo clippy (minimal, no default features)
         run: cargo clippy -p opentake-tauri --no-default-features --all-targets -- -D warnings
+
+  windows-security:
+    name: Windows (cancel / reparse safety)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup component add rustfmt
+
+      - name: Install FFmpeg
+        run: choco install ffmpeg --no-progress -y
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-security-cargo-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-security-cargo-
+
+      - name: Portable FFmpeg cancellation lifecycle
+        shell: pwsh
+        run: |
+          cargo test -p opentake-media --lib windows_cancelling_running_pcm_child_reaps_both_pipe_readers
+          cargo test -p opentake-media --lib windows_cancelling_mux_wait_reaps_child
+
+      - name: Reserved output identity and reparse safety
+        shell: pwsh
+        run: |
+          cargo test -p opentake-tauri --lib windows_project_media_junction_is_rejected_without_writing_target
+          cargo test -p opentake-tauri --lib windows_directory_handoff_blocks_junction_replacement_before_child_create
+          cargo test -p opentake-tauri --lib windows_retained_output_handle_blocks_final_name_replacement
 
   web:
     name: Web (install / build)
@@ -109,3 +142,34 @@ jobs:
 
       - name: pnpm test
         run: pnpm -C web test
+
+  windows-library-security:
+    name: Windows (library capability security)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup component add rustfmt clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-library-security-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-library-security-
+
+      - name: Test retained-handle and junction defenses
+        run: cargo test -p opentake-media library::tests -- --test-threads=1
+
+      - name: Test complete bundle publication and recovery
+        run: cargo test -p opentake-project -- --test-threads=1
+
+      - name: Test Tauri project-library commit guards
+        run: cargo test -p opentake-tauri library::tests -- --test-threads=1
+
+      - name: Clippy capability-backed library
+        run: cargo clippy -p opentake-media --all-targets -- -D warnings

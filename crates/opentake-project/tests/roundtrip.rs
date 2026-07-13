@@ -90,13 +90,12 @@ fn sample_project(bundle: &Path) -> Project {
         )],
     };
 
-    Project {
-        bundle_path: bundle.to_path_buf(),
-        timeline,
-        manifest,
-        generation_log: Some(generation_log),
-        thumbnail: Some(b"\xff\xd8\xff\xe0JPEGDATA".to_vec()),
-    }
+    let mut project = Project::new(bundle);
+    project.timeline = timeline;
+    project.manifest = manifest;
+    project.generation_log = Some(generation_log);
+    project.thumbnail = Some(b"\xff\xd8\xff\xe0JPEGDATA".to_vec());
+    project
 }
 
 #[test]

@@ -22,16 +22,23 @@
 //! Import and list commands never decode frames; the WebView asks for thumbnails
 //! lazily through `generate_thumbnail`.
 
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use image::ImageEncoder;
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
 
-use opentake_core::{importable_clip_type, AppCore, EditCommand, ProbedMedia};
+use opentake_core::{
+    importable_clip_type, AppCore, CoreError, DeferredCoreEvents, EditCommand, ProbedMedia,
+};
 use opentake_domain::{
     ClipType, GenerationInput, MediaManifest, MediaManifestEntry, MediaSource, Timeline,
 };
+use opentake_media::library::{FavoriteRequest, LibraryStore, PreparedFavorite};
+#[cfg(test)]
+use opentake_media::MediaCancelToken;
 use opentake_media::{
     cache_key::{file_identity_key, KEY_HEX_LEN},
     decode_frame_at, decode_frames_at,
@@ -42,6 +49,10 @@ use opentake_media::{
     waveform::store::CACHE_SUBDIR,
     FrameRequest, MediaEngine, RgbaFrame,
 };
+
+use crate::library::LibraryState;
+
+pub mod prewarm;
 
 /// Managed-state wrapper over the media engine. The engine is read-only here
 /// (probe only) and shared across commands; `Send + Sync` so it lives in Tauri
@@ -214,6 +225,33 @@ pub struct MediaListDto {
     /// silently. Serialized as `skipped`.
     #[serde(default)]
     pub skipped: Vec<String>,
+    /// Admission decisions for best-effort import poster prewarm. Import stays
+    /// successful even when the bounded queue is busy, while callers can still
+    /// observe whether each poster was queued, coalesced, cached, or rejected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prewarm: Vec<ImportPrewarmDto>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FavoriteSyncFailureDto {
+    pub asset_id: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FavoriteSyncDto {
+    pub media: MediaListDto,
+    pub migrated_legacy_asset_ids: Vec<String>,
+    pub failures: Vec<FavoriteSyncFailureDto>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPrewarmDto {
+    pub media_ref: String,
+    pub result: prewarm::PrewarmResult,
 }
 
 impl MediaListDto {
@@ -222,15 +260,14 @@ impl MediaListDto {
     /// command modules (e.g. capture-to-media in `render.rs`) can return the
     /// current catalog after mutating it.
     pub(crate) fn from_core(core: &AppCore, cache_root: Option<&Path>) -> Self {
-        Self::from_core_with_skipped(core, cache_root, Vec::new())
+        Self::from_core_with_import_results(core, cache_root, Vec::new(), Vec::new())
     }
 
-    /// Build the list from the core's current manifest snapshot, carrying the
-    /// names of files an import skipped as unsupported.
-    fn from_core_with_skipped(
+    fn from_core_with_import_results(
         core: &AppCore,
         cache_root: Option<&Path>,
         skipped: Vec<String>,
+        prewarm: Vec<ImportPrewarmDto>,
     ) -> Self {
         let manifest = core.media();
         let project_dir = core.project_dir();
@@ -257,6 +294,7 @@ impl MediaListDto {
                 })
                 .collect(),
             skipped,
+            prewarm,
         }
     }
 }
@@ -347,6 +385,11 @@ fn write_png(path: &Path, frame: &RgbaFrame) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    let bytes = encode_png(frame)?;
+    std::fs::write(path, bytes).map_err(|e| e.to_string())
+}
+
+fn encode_png(frame: &RgbaFrame) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     image::codecs::png::PngEncoder::new(&mut bytes)
         .write_image(
@@ -356,7 +399,7 @@ fn write_png(path: &Path, frame: &RgbaFrame) -> Result<(), String> {
             image::ExtendedColorType::Rgba8,
         )
         .map_err(|e| format!("png encode: {e}"))?;
-    std::fs::write(path, bytes).map_err(|e| e.to_string())
+    Ok(bytes)
 }
 
 fn cached_thumbnail_path_for_entry(
@@ -595,6 +638,60 @@ fn probe_media(engine: &MediaEngine, path: &Path) -> ProbedMedia {
     }
 }
 
+/// Trusted facts emitted by the producer that wrote a reserved save-as output.
+/// Generated media never needs to be reopened by pathname just to rediscover
+/// facts the encoder/WAV writer already knows.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SavedMediaMetadata {
+    Video(crate::export::ExportSummary),
+    Wav {
+        sample_count: usize,
+        sample_rate: u32,
+    },
+}
+
+impl SavedMediaMetadata {
+    fn to_probe(&self) -> Result<ProbedMedia, String> {
+        match self {
+            Self::Video(summary) => {
+                if summary.width == 0
+                    || summary.height == 0
+                    || summary.fps <= 0
+                    || summary.frame_count <= 0
+                {
+                    return Err("invalid completed video metadata".to_string());
+                }
+                let width = i32::try_from(summary.width)
+                    .map_err(|_| "completed video width exceeds manifest limits")?;
+                let height = i32::try_from(summary.height)
+                    .map_err(|_| "completed video height exceeds manifest limits")?;
+                Ok(ProbedMedia {
+                    duration_secs: f64::from(summary.frame_count) / f64::from(summary.fps),
+                    width: Some(width),
+                    height: Some(height),
+                    fps: Some(f64::from(summary.fps)),
+                    has_audio: summary.has_audio,
+                })
+            }
+            Self::Wav {
+                sample_count,
+                sample_rate,
+            } => {
+                if *sample_rate == 0 {
+                    return Err("invalid completed WAV sample rate".to_string());
+                }
+                Ok(ProbedMedia {
+                    duration_secs: *sample_count as f64 / f64::from(*sample_rate),
+                    width: None,
+                    height: None,
+                    fps: None,
+                    has_audio: true,
+                })
+            }
+        }
+    }
+}
+
 /// Display name for an imported file: its stem, or the full file name when there
 /// is no stem (mirrors upstream `url.deletingPathExtension().lastPathComponent`).
 fn display_name(path: &Path) -> String {
@@ -642,47 +739,221 @@ pub(crate) const IMPORT_ACCEPTED_MIMES: &str =
 /// `None` when the extension is not importable (the file is skipped, not an
 /// error — matches upstream's per-file tolerance during folder/batch import).
 ///
-/// On a successful import the grid poster is warmed best-effort (Item 3): upstream
-/// `MediaAsset.loadMetadata` eagerly generates a 320px poster in
-/// `finalizeImportedAsset` so the panel shows a real frame immediately. Here the
-/// same small (120×68) poster the media grid would otherwise decode lazily on
-/// first render is generated now and disk-cached, so the freshly-returned
-/// [`MediaItemDto`] already carries a `thumbnail` path. A decode failure is
-/// swallowed (the card falls back to a type placeholder, exactly as today) and
-/// never turns an import into an error.
 pub(crate) fn import_one(
     core: &AppCore,
     engine: &MediaEngine,
     path: &Path,
-) -> Option<MediaManifestEntry> {
-    importable_clip_type(path)?;
+) -> Result<Option<MediaManifestEntry>, CoreError> {
+    if importable_clip_type(path).is_none() {
+        return Ok(None);
+    }
     let probe = probe_media(engine, path);
     // `import_media_file` re-validates the extension; the type check above only
     // lets us skip probing unsupported files.
-    let entry = core
-        .import_media_file(path, display_name(path), &probe)
-        .ok()?;
-    warm_import_poster(engine, &entry, path);
-    Some(entry)
+    let entry = core.import_media_file(path, display_name(path), &probe)?;
+    Ok(Some(entry))
 }
 
-/// Best-effort eager poster generation for a freshly imported asset (Item 3).
-/// Decodes and disk-caches the small grid poster the media panel reads via
-/// [`cached_thumbnail_path_for_entry`], so the first grid paint shows a real
-/// frame instead of a placeholder — the port of upstream's eager
-/// `AVAssetImageGenerator` at import. Only video/image assets have a frame; audio
-/// and anything else are no-ops. Every failure path is intentionally ignored: a
-/// warm poster is a nicety, never a precondition for import.
-fn warm_import_poster(engine: &MediaEngine, entry: &MediaManifestEntry, path: &Path) {
-    if !matches!(entry.kind, ClipType::Video | ClipType::Image) {
-        return;
+/// Admit an imported asset's small grid poster to the project-scoped scheduler.
+/// The post-import snapshot proves the entry still belongs to the epoch being
+/// scheduled; if a project replacement won the race, old content is rejected.
+fn schedule_import_poster(
+    core: &AppCore,
+    engine: &MediaEngine,
+    scheduler: &prewarm::PrewarmScheduler,
+    entry: &MediaManifestEntry,
+    path: &Path,
+) -> ImportPrewarmDto {
+    let snapshot = core.runtime_snapshot();
+    let result = if !snapshot.media.entries.iter().any(|candidate| {
+        candidate.id == entry.id && candidate.kind == entry.kind && candidate.source == entry.source
+    }) {
+        prewarm::PrewarmResult::StaleProject
+    } else if let Ok(key) = cache_key_for(path) {
+        let target = poster_path_for(engine.cache_root(), &key);
+        scheduler.schedule_grid_poster(
+            snapshot.project_epoch,
+            entry.kind,
+            key,
+            path.to_path_buf(),
+            target,
+        )
+    } else {
+        prewarm::PrewarmResult::Cached
+    };
+    ImportPrewarmDto {
+        media_ref: entry.id.clone(),
+        result,
     }
-    if !path.is_file() {
-        return;
-    }
-    // Reuse the exact single-poster path the lazy grid request produces, so the
-    // cache the panel later reads is already populated. Ignore errors.
-    let _ = generate_thumbnail_for_entry(engine, entry, path, None, None, false);
+}
+
+#[cfg(test)]
+pub(crate) fn import_saved_media(
+    core: &AppCore,
+    engine: &MediaEngine,
+    prewarm: &prewarm::PrewarmScheduler,
+    expected_project_epoch: u64,
+    expected_project_dir: &Path,
+    path: &Path,
+) -> Result<MediaListDto, String> {
+    let probe = probe_media(engine, path);
+    import_saved_media_with_hooks(
+        SavedMediaImportContext {
+            core,
+            engine,
+            prewarm,
+            expected_project_epoch,
+            expected_project_dir,
+            path,
+            probe: &probe,
+        },
+        (|| {}, || Ok(())),
+    )
+}
+
+#[cfg(test)]
+fn import_saved_media_with_before_transaction(
+    core: &AppCore,
+    engine: &MediaEngine,
+    prewarm: &prewarm::PrewarmScheduler,
+    expected_project_epoch: u64,
+    expected_project_dir: &Path,
+    path: &Path,
+    before_transaction: impl FnOnce(),
+) -> Result<MediaListDto, String> {
+    let probe = probe_media(engine, path);
+    import_saved_media_with_hooks(
+        SavedMediaImportContext {
+            core,
+            engine,
+            prewarm,
+            expected_project_epoch,
+            expected_project_dir,
+            path,
+            probe: &probe,
+        },
+        (before_transaction, || Ok(())),
+    )
+}
+
+struct SavedMediaImportContext<'a> {
+    core: &'a AppCore,
+    engine: &'a MediaEngine,
+    prewarm: &'a prewarm::PrewarmScheduler,
+    expected_project_epoch: u64,
+    expected_project_dir: &'a Path,
+    path: &'a Path,
+    // Save-as callers supply metadata from their encoder/WAV writer. This
+    // transaction must never re-probe the exchangeable final path.
+    probe: &'a ProbedMedia,
+}
+
+fn import_saved_media_with_hooks(
+    context: SavedMediaImportContext<'_>,
+    hooks: (impl FnOnce(), impl FnOnce() -> Result<(), String>),
+) -> Result<MediaListDto, String> {
+    let SavedMediaImportContext {
+        core,
+        engine,
+        prewarm,
+        expected_project_epoch,
+        expected_project_dir,
+        path,
+        probe,
+    } = context;
+    path.strip_prefix(expected_project_dir)
+        .ok()
+        .filter(|relative| {
+            let mut components = relative.components();
+            components
+                .next()
+                .is_some_and(|component| component.as_os_str() == "media")
+                && components.all(|component| matches!(component, std::path::Component::Normal(_)))
+        })
+        .ok_or("saved media output must be inside the expected project media directory")?;
+    importable_clip_type(path).ok_or("failed to import saved media")?;
+    let (before_transaction, postcondition) = hooks;
+    before_transaction();
+    let entry = core
+        .import_media_file_for_project_checked(
+            expected_project_epoch,
+            expected_project_dir,
+            path,
+            display_name(path),
+            probe,
+            || postcondition().map_err(CoreError::Media),
+        )
+        .map_err(|error| error.to_string())?;
+    let result = schedule_import_poster(core, engine, prewarm, &entry, path);
+    Ok(MediaListDto::from_core_with_import_results(
+        core,
+        Some(engine.cache_root()),
+        Vec::new(),
+        vec![result],
+    ))
+}
+
+pub(crate) struct SavedMediaFinalizationContext<'a> {
+    pub(crate) core: &'a AppCore,
+    pub(crate) engine: &'a MediaEngine,
+    pub(crate) prewarm: &'a prewarm::PrewarmScheduler,
+    pub(crate) expected_project_epoch: u64,
+    pub(crate) expected_project_dir: &'a Path,
+    pub(crate) metadata: SavedMediaMetadata,
+    pub(crate) on_progress: &'a dyn Fn(i32, i32),
+}
+
+pub(crate) fn finalize_saved_media(
+    context: SavedMediaFinalizationContext<'_>,
+    output: crate::export::ProjectMediaOutput,
+    guard: &mut crate::export::ExportGuard<'_>,
+) -> Result<MediaListDto, String> {
+    finalize_saved_media_with_hooks(context, output, guard, (|| {}, || {}, || {}, || {}))
+}
+
+fn finalize_saved_media_with_hooks(
+    context: SavedMediaFinalizationContext<'_>,
+    output: crate::export::ProjectMediaOutput,
+    guard: &mut crate::export::ExportGuard<'_>,
+    hooks: (impl FnOnce(), impl FnOnce(), impl FnOnce(), impl FnOnce()),
+) -> Result<MediaListDto, String> {
+    let SavedMediaFinalizationContext {
+        core,
+        engine,
+        prewarm,
+        expected_project_epoch,
+        expected_project_dir,
+        metadata,
+        on_progress,
+    } = context;
+    let (after_sync, after_metadata, before_transaction, before_commit) = hooks;
+    output.prepare_commit_cancellable(guard, after_sync)?;
+    let probe = metadata.to_probe()?;
+    after_metadata();
+    guard.checkpoint()?;
+    let path = output.path().to_path_buf();
+    let result = import_saved_media_with_hooks(
+        SavedMediaImportContext {
+            core,
+            engine,
+            prewarm,
+            expected_project_epoch,
+            expected_project_dir,
+            path: &path,
+            probe: &probe,
+        },
+        (before_transaction, || {
+            output.verify_identity()?;
+            before_commit();
+            guard.commit()
+        }),
+    )?;
+    let _committed_path = output.mark_kept();
+    on_progress(
+        crate::export::AUDIO_PROGRESS_TOTAL,
+        crate::export::AUDIO_PROGRESS_TOTAL,
+    );
+    Ok(result)
 }
 
 /// `import_folder`: bring a local directory into the library.
@@ -698,29 +969,52 @@ fn warm_import_poster(engine: &MediaEngine, entry: &MediaManifestEntry, path: &P
 pub fn import_folder(
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
+    prewarm: State<'_, prewarm::PrewarmScheduler>,
     path: String,
     recursive: Option<bool>,
 ) -> Result<MediaListDto, String> {
+    import_folder_impl(&core, media.engine(), &prewarm, path, recursive)
+}
+
+fn import_folder_impl(
+    core: &AppCore,
+    engine: &MediaEngine,
+    prewarm: &prewarm::PrewarmScheduler,
+    path: String,
+    recursive: Option<bool>,
+) -> Result<MediaListDto, String> {
+    core.ensure_project_mutable().map_err(|e| e.to_string())?;
     let root = PathBuf::from(&path);
     if !root.is_dir() {
         return Err(format!("not a directory: {path}"));
     }
-    let engine = media.engine();
-
     let mut skipped = Vec::new();
+    let mut prewarm_results = Vec::new();
     if recursive.unwrap_or(false) {
-        mirror_dir(&core, engine, &root, None, &mut skipped);
+        mirror_dir_scheduled(
+            core,
+            engine,
+            prewarm,
+            &root,
+            None,
+            &mut skipped,
+            &mut prewarm_results,
+        )
+        .map_err(|e| e.to_string())?;
     } else {
         let (files, skipped_files) = list_top_level(&root);
         for file in &files {
-            let _ = import_one(&core, engine, file);
+            if let Some(entry) = import_one(core, engine, file).map_err(|e| e.to_string())? {
+                prewarm_results.push(schedule_import_poster(core, engine, prewarm, &entry, file));
+            }
         }
         skipped = skipped_files;
     }
-    Ok(MediaListDto::from_core_with_skipped(
-        &core,
+    Ok(MediaListDto::from_core_with_import_results(
+        core,
         Some(engine.cache_root()),
         skipped,
+        prewarm_results,
     ))
 }
 
@@ -735,8 +1029,49 @@ pub(crate) fn mirror_dir(
     dir: &Path,
     parent_folder_id: Option<String>,
     skipped: &mut Vec<String>,
-) {
-    let folder_id = create_folder(core, &dir_name(dir), parent_folder_id);
+) -> Result<(), CoreError> {
+    let mut unused_results = Vec::new();
+    mirror_dir_impl(
+        core,
+        engine,
+        None,
+        dir,
+        parent_folder_id,
+        skipped,
+        &mut unused_results,
+    )
+}
+
+fn mirror_dir_scheduled(
+    core: &AppCore,
+    engine: &MediaEngine,
+    prewarm: &prewarm::PrewarmScheduler,
+    dir: &Path,
+    parent_folder_id: Option<String>,
+    skipped: &mut Vec<String>,
+    prewarm_results: &mut Vec<ImportPrewarmDto>,
+) -> Result<(), CoreError> {
+    mirror_dir_impl(
+        core,
+        engine,
+        Some(prewarm),
+        dir,
+        parent_folder_id,
+        skipped,
+        prewarm_results,
+    )
+}
+
+fn mirror_dir_impl(
+    core: &AppCore,
+    engine: &MediaEngine,
+    prewarm: Option<&prewarm::PrewarmScheduler>,
+    dir: &Path,
+    parent_folder_id: Option<String>,
+    skipped: &mut Vec<String>,
+    prewarm_results: &mut Vec<ImportPrewarmDto>,
+) -> Result<(), CoreError> {
+    let folder_id = create_folder(core, &dir_name(dir), parent_folder_id)?;
 
     // Partition this directory's visible entries into media files + subdirs
     // (both case-insensitive name order) plus the names of unsupported files.
@@ -745,33 +1080,48 @@ pub(crate) fn mirror_dir(
 
     let mut imported_ids = Vec::new();
     for file in &files {
-        if let Some(entry) = import_one(core, engine, file) {
+        if let Some(entry) = import_one(core, engine, file)? {
+            if let Some(prewarm) = prewarm {
+                prewarm_results.push(schedule_import_poster(core, engine, prewarm, &entry, file));
+            }
             imported_ids.push(entry.id);
         }
     }
-    if let Some(fid) = &folder_id {
-        if !imported_ids.is_empty() {
-            let _ = core.apply(EditCommand::MoveToFolder {
-                asset_ids: imported_ids,
-                folder_id: Some(fid.clone()),
-            });
-        }
+    if !imported_ids.is_empty() {
+        core.apply(EditCommand::MoveToFolder {
+            asset_ids: imported_ids,
+            folder_id: Some(folder_id.clone()),
+        })?;
     }
 
     for sub in subdirs {
-        mirror_dir(core, engine, &sub, folder_id.clone(), skipped);
+        mirror_dir_impl(
+            core,
+            engine,
+            prewarm,
+            &sub,
+            Some(folder_id.clone()),
+            skipped,
+            prewarm_results,
+        )?;
     }
+    Ok(())
 }
 
-/// Create a library folder, returning its new id (or `None` if the core rejected
-/// it — e.g. an empty name, which `dir_name` avoids).
-fn create_folder(core: &AppCore, name: &str, parent_folder_id: Option<String>) -> Option<String> {
+/// Create a library folder, returning its new id or propagating the rejection.
+fn create_folder(
+    core: &AppCore,
+    name: &str,
+    parent_folder_id: Option<String>,
+) -> Result<String, CoreError> {
     core.apply(EditCommand::CreateFolder {
         name: name.to_string(),
         parent_folder_id,
-    })
-    .ok()
-    .and_then(|res| res.affected_clip_ids.into_iter().next())
+    })?
+    .affected_clip_ids
+    .into_iter()
+    .next()
+    .ok_or_else(|| CoreError::Media("folder creation returned no id".into()))
 }
 
 /// Directory display name (its last path component), falling back to "folder".
@@ -839,10 +1189,21 @@ fn list_top_level(dir: &Path) -> (Vec<PathBuf>, Vec<String>) {
 pub fn import_media(
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
+    prewarm: State<'_, prewarm::PrewarmScheduler>,
     paths: Vec<String>,
 ) -> Result<MediaListDto, String> {
-    let engine = media.engine();
+    import_media_impl(&core, media.engine(), &prewarm, paths)
+}
+
+fn import_media_impl(
+    core: &AppCore,
+    engine: &MediaEngine,
+    prewarm: &prewarm::PrewarmScheduler,
+    paths: Vec<String>,
+) -> Result<MediaListDto, String> {
+    core.ensure_project_mutable().map_err(|e| e.to_string())?;
     let mut skipped = Vec::new();
+    let mut prewarm_results = Vec::new();
     for p in &paths {
         let path = PathBuf::from(p);
         if !path.is_file() {
@@ -856,12 +1217,15 @@ pub fn import_media(
             skipped.push(display_file_name(&path));
             continue;
         }
-        let _ = import_one(&core, engine, &path);
+        if let Some(entry) = import_one(core, engine, &path).map_err(|e| e.to_string())? {
+            prewarm_results.push(schedule_import_poster(core, engine, prewarm, &entry, &path));
+        }
     }
-    Ok(MediaListDto::from_core_with_skipped(
-        &core,
+    Ok(MediaListDto::from_core_with_import_results(
+        core,
         Some(engine.cache_root()),
         skipped,
+        prewarm_results,
     ))
 }
 
@@ -871,19 +1235,578 @@ pub fn get_media(core: State<'_, AppCore>, media: State<'_, MediaState>) -> Medi
     MediaListDto::from_core(&core, Some(media.engine().cache_root()))
 }
 
-/// `toggle_favorite`: add or remove `asset_ids` from the per-project favorites
-/// set (#91), returning the refreshed catalog so the panel's "mine" tab and the
-/// per-card favorite affordance update. Favorites persist in the project manifest
-/// (not browser storage); unknown ids are ignored by the core. Infallible.
+/// Persist one project asset in the content-addressed global library and mirror
+/// that identity in the current project manifest.
 #[tauri::command]
 pub fn toggle_favorite(
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
-    asset_ids: Vec<String>,
+    library: State<'_, LibraryState>,
+    asset_id: String,
     favorite: bool,
-) -> MediaListDto {
-    core.set_media_favorite(&asset_ids, favorite);
-    MediaListDto::from_core(&core, Some(media.engine().cache_root()))
+    expected_project_epoch: u64,
+    expected_project_path: String,
+) -> Result<MediaListDto, String> {
+    let _workflow = library.lock_workflow();
+    toggle_favorite_impl_for_project(
+        &core,
+        media.engine().cache_root(),
+        library.store()?,
+        &asset_id,
+        favorite,
+        expected_project_epoch,
+        Path::new(&expected_project_path),
+    )
+}
+
+#[cfg(test)]
+fn toggle_favorite_impl(
+    core: &AppCore,
+    cache_root: &Path,
+    store: &LibraryStore,
+    asset_id: &str,
+    favorite: bool,
+) -> Result<MediaListDto, String> {
+    core.ensure_project_mutable()
+        .map_err(|error| error.to_string())?;
+    let project = core.runtime_snapshot();
+    let project_dir = project
+        .project_dir
+        .ok_or_else(|| "save the project before changing global favorites".to_string())?;
+    toggle_favorite_impl_for_project(
+        core,
+        cache_root,
+        store,
+        asset_id,
+        favorite,
+        project.project_epoch,
+        &project_dir,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct ExpectedFavoriteProject<'a> {
+    epoch: u64,
+    dir: &'a Path,
+}
+
+fn toggle_favorite_impl_for_project(
+    core: &AppCore,
+    cache_root: &Path,
+    store: &LibraryStore,
+    asset_id: &str,
+    favorite: bool,
+    expected_project_epoch: u64,
+    expected_project_dir: &Path,
+) -> Result<MediaListDto, String> {
+    let mut events = DeferredCoreEvents::default();
+    let result = {
+        let _project_identity = core.lock_project_identity_workflow();
+        toggle_favorite_impl_with(
+            core,
+            cache_root,
+            store,
+            asset_id,
+            favorite,
+            ExpectedFavoriteProject {
+                epoch: expected_project_epoch,
+                dir: expected_project_dir,
+            },
+            &mut events,
+            |request| {
+                store
+                    .prepare_favorite(request)
+                    .map_err(|error| error.to_string())
+            },
+        )
+    };
+    core.emit_deferred(events);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn toggle_favorite_impl_with<F>(
+    core: &AppCore,
+    cache_root: &Path,
+    store: &LibraryStore,
+    asset_id: &str,
+    favorite: bool,
+    expected_project: ExpectedFavoriteProject<'_>,
+    events: &mut DeferredCoreEvents,
+    favorite_file: F,
+) -> Result<MediaListDto, String>
+where
+    F: for<'a> FnOnce(&FavoriteRequest<'a>) -> Result<PreparedFavorite, String>,
+{
+    let project = core
+        .mutable_runtime_snapshot_for_project(expected_project.epoch, expected_project.dir)
+        .map_err(|error| error.to_string())?;
+    let project_dir = project
+        .project_dir
+        .clone()
+        .ok_or_else(|| "save the project before changing global favorites".to_string())?;
+    let before = project.media;
+    let entry = before
+        .entries
+        .iter()
+        .find(|entry| entry.id == asset_id)
+        .cloned()
+        .ok_or_else(|| format!("media asset not found: {asset_id}"))?;
+
+    if favorite {
+        let source = resolve_source_path(&entry, Some(&project_dir))
+            .ok_or_else(|| "media source could not be resolved".to_string())?;
+        if !source.is_file() {
+            return Err("media source is offline; relink before favoriting".to_string());
+        }
+        let kind = clip_type_name(entry.kind);
+        let request = FavoriteRequest {
+            source: &source,
+            kind,
+            category: None,
+            favorited_at: now_epoch_secs(),
+            thumb: None,
+        };
+        let prepared = favorite_file(&request)?;
+        let library_id = prepared.entry().id.clone();
+        let needs_publish = prepared.needs_publish();
+        let changed = match core.set_media_global_favorite_for_project_deferred(
+            project.project_epoch,
+            &project_dir,
+            asset_id,
+            Some(library_id),
+            events,
+        ) {
+            Ok(changed) => changed,
+            Err(error) => return Err(error.to_string()),
+        };
+        if changed || needs_publish {
+            if let Err(error) = core.save_media_manifest_for_project_deferred(
+                project.project_epoch,
+                &project_dir,
+                events,
+            ) {
+                restore_project_favorites(
+                    core,
+                    project.project_epoch,
+                    &project_dir,
+                    &before,
+                    events,
+                );
+                return Err(format!(
+                    "global favorite mapping could not be saved: {error}"
+                ));
+            }
+        }
+        if let Err(error) = store.publish_favorite(prepared) {
+            restore_project_favorites(core, project.project_epoch, &project_dir, &before, events);
+            core.save_media_manifest_for_project_deferred(
+                project.project_epoch,
+                &project_dir,
+                events,
+            )
+            .map_err(|rollback| {
+                format!(
+                    "global favorite could not be published: {error}; project mapping rollback could not be saved: {rollback}"
+                )
+            })?;
+            return Err(format!("global favorite could not be published: {error}"));
+        }
+    } else {
+        let library_id = match before.library_favorite_id(asset_id) {
+            Some(id) => id.to_string(),
+            None if before.is_favorite(asset_id) => {
+                let source = resolve_source_path(&entry, Some(&project_dir))
+                    .ok_or_else(|| "media source could not be resolved".to_string())?;
+                if !source.is_file() {
+                    return Err("favorite migration needs the source to be relinked".to_string());
+                }
+                store
+                    .content_id(source)
+                    .map_err(|error| error.to_string())?
+            }
+            None => return Ok(MediaListDto::from_core(core, Some(cache_root))),
+        };
+        store
+            .remove(&library_id)
+            .map_err(|error| format!("global favorite could not be removed: {error}"))?;
+        let cleared = core
+            .clear_media_global_favorite_id_for_project_deferred(
+                project.project_epoch,
+                &project_dir,
+                &library_id,
+                events,
+            )
+            .map_err(|error| error.to_string())?;
+        let legacy_cleared = core
+            .set_media_global_favorite_for_project_deferred(
+                project.project_epoch,
+                &project_dir,
+                asset_id,
+                None,
+                events,
+            )
+            .map_err(|error| error.to_string())?;
+        if cleared > 0 || legacy_cleared {
+            if let Err(error) = core.save_media_manifest_for_project_deferred(
+                project.project_epoch,
+                &project_dir,
+                events,
+            ) {
+                restore_project_favorites(
+                    core,
+                    project.project_epoch,
+                    &project_dir,
+                    &before,
+                    events,
+                );
+                return Err(format!(
+                    "project favorite mirror could not be saved: {error}"
+                ));
+            }
+        }
+    }
+    Ok(MediaListDto::from_core(core, Some(cache_root)))
+}
+
+#[tauri::command]
+pub fn sync_project_favorites(
+    core: State<'_, AppCore>,
+    media: State<'_, MediaState>,
+    library: State<'_, LibraryState>,
+    legacy_asset_ids: Vec<String>,
+    expected_project_epoch: u64,
+    expected_project_path: String,
+) -> Result<FavoriteSyncDto, String> {
+    let _workflow = library.lock_workflow();
+    sync_project_favorites_impl_for_project(
+        &core,
+        media.engine().cache_root(),
+        library.store()?,
+        legacy_asset_ids,
+        expected_project_epoch,
+        Path::new(&expected_project_path),
+    )
+}
+
+#[cfg(test)]
+fn sync_project_favorites_impl(
+    core: &AppCore,
+    cache_root: &Path,
+    store: &LibraryStore,
+    legacy_asset_ids: Vec<String>,
+) -> Result<FavoriteSyncDto, String> {
+    let project = core.runtime_snapshot();
+    let project_dir = project
+        .project_dir
+        .ok_or_else(|| "save the project before synchronizing global favorites".to_string())?;
+    sync_project_favorites_impl_for_project(
+        core,
+        cache_root,
+        store,
+        legacy_asset_ids,
+        project.project_epoch,
+        &project_dir,
+    )
+}
+
+fn sync_project_favorites_impl_for_project(
+    core: &AppCore,
+    cache_root: &Path,
+    store: &LibraryStore,
+    legacy_asset_ids: Vec<String>,
+    expected_project_epoch: u64,
+    expected_project_dir: &Path,
+) -> Result<FavoriteSyncDto, String> {
+    let mut events = DeferredCoreEvents::default();
+    let result = {
+        let _project_identity = core.lock_project_identity_workflow();
+        sync_project_favorites_impl_with_events(
+            core,
+            cache_root,
+            store,
+            legacy_asset_ids,
+            expected_project_epoch,
+            expected_project_dir,
+            &mut events,
+        )
+    };
+    core.emit_deferred(events);
+    result
+}
+
+fn sync_project_favorites_impl_with_events(
+    core: &AppCore,
+    cache_root: &Path,
+    store: &LibraryStore,
+    legacy_asset_ids: Vec<String>,
+    expected_project_epoch: u64,
+    expected_project_dir: &Path,
+    events: &mut DeferredCoreEvents,
+) -> Result<FavoriteSyncDto, String> {
+    let project = core
+        .mutable_runtime_snapshot_for_project(expected_project_epoch, expected_project_dir)
+        .map_err(|error| error.to_string())?;
+    let project_dir = project
+        .project_dir
+        .clone()
+        .ok_or_else(|| "save the project before synchronizing global favorites".to_string())?;
+    let before = project.media;
+    let project_ids: HashSet<&str> = before
+        .entries
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect();
+    let legacy_inputs: BTreeSet<String> = legacy_asset_ids
+        .into_iter()
+        .filter(|id| project_ids.contains(id.as_str()))
+        .collect();
+    let library_ids: HashSet<String> = store
+        .entries()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect();
+    let stored_ids = store
+        .stored_ids_verified()
+        .map_err(|error| error.to_string())?;
+    let mapped_at_start: HashSet<String> = before.favorite_library_ids.keys().cloned().collect();
+    let mut migrated = BTreeSet::new();
+    let mut failures = Vec::new();
+    let mut changed = false;
+    let mut pending_publications: Vec<(String, bool, PreparedFavorite)> = Vec::new();
+
+    let stale_ids: BTreeSet<String> = before
+        .favorite_library_ids
+        .values()
+        .filter(|id| !library_ids.contains(*id))
+        .cloned()
+        .collect();
+    for library_id in stale_ids {
+        let cleared = match core.clear_media_global_favorite_id_for_project_deferred(
+            project.project_epoch,
+            &project_dir,
+            &library_id,
+            events,
+        ) {
+            Ok(cleared) => cleared,
+            Err(error) => {
+                restore_project_favorites(
+                    core,
+                    project.project_epoch,
+                    &project_dir,
+                    &before,
+                    events,
+                );
+                return Err(error.to_string());
+            }
+        };
+        changed |= cleared > 0;
+    }
+    for (asset_id, library_id) in &before.favorite_library_ids {
+        if !library_ids.contains(library_id) {
+            if legacy_inputs.contains(asset_id) {
+                migrated.insert(asset_id.clone());
+            }
+            continue;
+        }
+        let stored_exists = stored_ids.contains(library_id);
+        let repair_result = if stored_exists {
+            Ok(())
+        } else {
+            let entry = before
+                .entries
+                .iter()
+                .find(|entry| entry.id == asset_id.as_str())
+                .ok_or_else(|| format!("media asset not found: {asset_id}"));
+            entry.and_then(|entry| {
+                let source = resolve_source_path(entry, Some(&project_dir))
+                    .ok_or_else(|| "media source could not be resolved".to_string())?;
+                if !source.is_file() {
+                    return Err("media source is offline; relink before favoriting".to_string());
+                }
+                store
+                    .repair_stored_copy(library_id, &source)
+                    .map_err(|error| error.to_string())
+            })
+        };
+        match repair_result {
+            Ok(()) if legacy_inputs.contains(asset_id) => {
+                migrated.insert(asset_id.clone());
+            }
+            Ok(()) => {}
+            Err(message) => failures.push(FavoriteSyncFailureDto {
+                asset_id: asset_id.clone(),
+                message,
+            }),
+        }
+    }
+
+    let mut candidates: BTreeSet<String> = before
+        .favorites
+        .iter()
+        .filter(|id| !mapped_at_start.contains(*id))
+        .cloned()
+        .collect();
+    candidates.extend(
+        legacy_inputs
+            .iter()
+            .filter(|id| !mapped_at_start.contains(*id))
+            .cloned(),
+    );
+    for asset_id in candidates {
+        let Some(entry) = before.entries.iter().find(|entry| entry.id == asset_id) else {
+            continue;
+        };
+        let result = (|| -> Result<PreparedFavorite, String> {
+            let source = resolve_source_path(entry, Some(&project_dir))
+                .ok_or_else(|| "media source could not be resolved".to_string())?;
+            if !source.is_file() {
+                return Err("media source is offline; relink before favoriting".to_string());
+            }
+            let kind = clip_type_name(entry.kind);
+            let request = FavoriteRequest {
+                source: &source,
+                kind,
+                category: None,
+                favorited_at: now_epoch_secs(),
+                thumb: None,
+            };
+            let prepared = store
+                .prepare_favorite(&request)
+                .map_err(|error| error.to_string())?;
+            changed |= core
+                .set_media_global_favorite_for_project_deferred(
+                    project.project_epoch,
+                    &project_dir,
+                    &asset_id,
+                    Some(prepared.entry().id.clone()),
+                    events,
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(prepared)
+        })();
+        match result {
+            Ok(prepared) => pending_publications.push((
+                asset_id.clone(),
+                legacy_inputs.contains(&asset_id),
+                prepared,
+            )),
+            Err(message) => failures.push(FavoriteSyncFailureDto { asset_id, message }),
+        }
+    }
+
+    if changed
+        || pending_publications
+            .iter()
+            .any(|(_, _, item)| item.needs_publish())
+    {
+        if let Err(error) = core.save_media_manifest_for_project_deferred(
+            project.project_epoch,
+            &project_dir,
+            events,
+        ) {
+            restore_project_favorites(core, project.project_epoch, &project_dir, &before, events);
+            return Err(format!(
+                "favorite synchronization could not be saved: {error}"
+            ));
+        }
+    }
+    let mut publish_rollbacks = Vec::new();
+    for (asset_id, is_legacy, prepared) in pending_publications {
+        match store.publish_favorite(prepared) {
+            Ok(_) if is_legacy => {
+                migrated.insert(asset_id);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                failures.push(FavoriteSyncFailureDto {
+                    asset_id: asset_id.clone(),
+                    message: format!("global favorite could not be published: {error}"),
+                });
+                publish_rollbacks.push(asset_id);
+            }
+        }
+    }
+    if !publish_rollbacks.is_empty() {
+        for asset_id in &publish_rollbacks {
+            let mapping = before.library_favorite_id(asset_id).map(str::to_string);
+            core.set_media_global_favorite_for_project_deferred(
+                project.project_epoch,
+                &project_dir,
+                asset_id,
+                mapping.clone(),
+                events,
+            )
+            .map_err(|error| error.to_string())?;
+            if mapping.is_none() && before.is_favorite(asset_id) {
+                core.set_media_favorite_for_project_deferred(
+                    project.project_epoch,
+                    &project_dir,
+                    std::slice::from_ref(asset_id),
+                    true,
+                    events,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+        }
+        core.save_media_manifest_for_project_deferred(project.project_epoch, &project_dir, events)
+            .map_err(|error| {
+                format!("failed favorite mappings could not be rolled back: {error}")
+            })?;
+    }
+    Ok(FavoriteSyncDto {
+        media: MediaListDto::from_core(core, Some(cache_root)),
+        migrated_legacy_asset_ids: migrated.into_iter().collect(),
+        failures,
+    })
+}
+
+pub(crate) fn restore_project_favorites(
+    core: &AppCore,
+    project_epoch: u64,
+    project_dir: &Path,
+    before: &MediaManifest,
+    events: &mut DeferredCoreEvents,
+) {
+    events.clear();
+    for entry in &before.entries {
+        let mapping = before.library_favorite_id(&entry.id).map(str::to_string);
+        let _ = core.set_media_global_favorite_for_project_deferred(
+            project_epoch,
+            project_dir,
+            &entry.id,
+            mapping,
+            events,
+        );
+        if before.is_favorite(&entry.id) && before.library_favorite_id(&entry.id).is_none() {
+            let _ = core.set_media_favorite_for_project_deferred(
+                project_epoch,
+                project_dir,
+                std::slice::from_ref(&entry.id),
+                true,
+                events,
+            );
+        }
+    }
+    events.clear();
+}
+
+pub(crate) fn clip_type_name(kind: ClipType) -> &'static str {
+    match kind {
+        ClipType::Video => "video",
+        ClipType::Audio => "audio",
+        ClipType::Image => "image",
+        ClipType::Text => "text",
+        ClipType::Lottie => "lottie",
+    }
+}
+
+fn now_epoch_secs() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// Build the render inputs for "save clip as media" (#91 §3.5): a single-clip
@@ -907,6 +1830,9 @@ fn build_single_clip_export(
         .iter()
         .find(|c| c.id == clip_id)
         .expect("clip is present in the matched track");
+    if clip.duration_frames <= 0 {
+        return Err("clip duration must be greater than zero".to_string());
+    }
 
     // One track — the clip's own, cloned to keep its type/props — holding only
     // this clip re-based to frame 0; forced visible + unmuted so export renders
@@ -946,44 +1872,132 @@ fn build_single_clip_export(
 /// there must be a bundle `media/` dir to write into.
 #[tauri::command]
 pub fn save_clip_as_media(
+    app: AppHandle,
     core: State<'_, AppCore>,
+    control: State<'_, crate::export::ExportControl>,
     media: State<'_, MediaState>,
+    prewarm: State<'_, prewarm::PrewarmScheduler>,
     clip_id: String,
+    operation_id: String,
 ) -> Result<MediaListDto, String> {
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    let project_dir = core
-        .project_dir()
+    let progress_app = app.clone();
+    let progress_operation_id = operation_id.clone();
+    let on_progress: crate::export::AudioExportProgress = Arc::new(move |done, total| {
+        crate::export::emit_export_progress(&progress_app, &progress_operation_id, done, total);
+    });
+    save_clip_as_media_impl(&core, || {
+        save_clip_as_media_workflow(
+            &core,
+            &control,
+            media.engine(),
+            &prewarm,
+            &clip_id,
+            &operation_id,
+            on_progress,
+        )
+    })
+}
+
+fn save_clip_as_media_impl(
+    core: &AppCore,
+    workflow: impl FnOnce() -> Result<MediaListDto, String>,
+) -> Result<MediaListDto, String> {
+    core.ensure_project_mutable().map_err(|e| e.to_string())?;
+    workflow()
+}
+
+fn save_clip_as_media_workflow(
+    core: &AppCore,
+    control: &crate::export::ExportControl,
+    engine: &MediaEngine,
+    prewarm: &prewarm::PrewarmScheduler,
+    clip_id: &str,
+    operation_id: &str,
+    on_progress: crate::export::AudioExportProgress,
+) -> Result<MediaListDto, String> {
+    let snapshot = core.runtime_snapshot();
+    let project_dir = snapshot
+        .project_dir
+        .clone()
         .ok_or("save your project before saving a clip as media")?;
-
     let (single_timeline, subset, media_type) =
-        build_single_clip_export(&timeline, &manifest, &clip_id)?;
-    if media_type != ClipType::Video {
-        return Err("only video clips can be saved as media for now".to_string());
-    }
+        build_single_clip_export(&snapshot.timeline, &snapshot.media, clip_id)?;
+    let ext = save_clip_extension(media_type)?;
+    let mut guard = control.try_begin(operation_id)?;
+    let output =
+        crate::export::reserve_project_media_output(&project_dir, &format!("clip_{clip_id}"), ext)?;
+    let out_path = output.path().to_path_buf();
+    let project_dir_option = Some(project_dir.clone());
 
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let media_dir = project_dir.join("media");
-    std::fs::create_dir_all(&media_dir).map_err(|e| format!("failed to create media dir: {e}"))?;
-    let out_path = media_dir.join(format!("clip_{clip_id}_{stamp}.mp4"));
-
-    let req = crate::export::ExportRequest {
-        out_path: out_path.to_string_lossy().into_owned(),
-        codec: crate::export::ExportCodec::H264,
-        quality: crate::export::ExportQuality::P1080,
+    let metadata = match ext {
+        "mp4" => {
+            let req = crate::export::ExportRequest {
+                out_path: out_path.to_string_lossy().into_owned(),
+                codec: crate::export::ExportCodec::H264,
+                quality: crate::export::ExportQuality::P1080,
+            };
+            let summary = crate::export::run_export_with_control(
+                &single_timeline,
+                &subset,
+                &project_dir_option,
+                &req,
+                crate::export::ExportRunOptions {
+                    control: Some(control),
+                    on_progress: Some(Arc::clone(&on_progress)),
+                    output_file: Some(output.writer()?),
+                    defer_completion: true,
+                    ..crate::export::ExportRunOptions::default()
+                },
+            )?;
+            SavedMediaMetadata::Video(summary)
+        }
+        "wav" => {
+            let pcm = crate::export::mix_timeline_audio_for_manifest_with_control(
+                &single_timeline,
+                &subset,
+                &project_dir_option,
+                control,
+                Some(Arc::clone(&on_progress)),
+            )?
+            .ok_or_else(|| "audio clip contains no decodable audio".to_string())?;
+            let mut writer = output.writer()?;
+            crate::export::write_wav_s16le_cancellable_to_file(
+                &pcm.samples_f32,
+                pcm.spec.sample_rate,
+                &mut writer,
+                guard.cancel_token(),
+                Some(on_progress.as_ref()),
+                None,
+            )?;
+            SavedMediaMetadata::Wav {
+                sample_count: pcm.samples_f32.len(),
+                sample_rate: pcm.spec.sample_rate,
+            }
+        }
+        _ => unreachable!("save clip extension is fixed by clip type"),
     };
-    crate::export::run_export(&single_timeline, &subset, &Some(project_dir), &req)
-        .map_err(|e| format!("render failed: {e}"))?;
 
-    // Import the rendered file as a new asset (probe + poster + manifest append).
-    import_one(&core, media.engine(), &out_path).ok_or("failed to import the rendered clip")?;
-    Ok(MediaListDto::from_core(
-        &core,
-        Some(media.engine().cache_root()),
-    ))
+    finalize_saved_media(
+        SavedMediaFinalizationContext {
+            core,
+            engine,
+            prewarm,
+            expected_project_epoch: snapshot.project_epoch,
+            expected_project_dir: &project_dir,
+            metadata,
+            on_progress: on_progress.as_ref(),
+        },
+        output,
+        &mut guard,
+    )
+}
+
+fn save_clip_extension(media_type: ClipType) -> Result<&'static str, String> {
+    match media_type {
+        ClipType::Video => Ok("mp4"),
+        ClipType::Audio => Ok("wav"),
+        _ => Err("only video and audio clips can be saved as media".to_string()),
+    }
 }
 
 /// Validate the user-chosen output path for [`extract_audio`] (Issue #39
@@ -1225,42 +2239,86 @@ pub fn get_waveform(
     })
 }
 
-/// `preload_media`: warm ONLY what makes the next preview instant — the hi-res
-/// first-frame poster (video) — so a cold click shows a sharp first frame with
-/// no decode on the interaction path. Meant to be called fire-and-forget when a
-/// media item is selected or drag starts; it runs on a Tauri worker thread, so
-/// it never blocks the UI, and is best-effort (a failure just means the cache
-/// stays cold, never an error to the caller).
+/// `preload_media`: enqueue the smallest cache that makes the selected media
+/// immediately useful — a hi-res first-frame poster for video or a waveform for
+/// audio. The bounded project scheduler keeps this fire-and-forget work off the
+/// command thread and returns an explicit admission result.
 ///
-/// Deliberately does NOT warm the 240-frame timeline filmstrip sprite or the
-/// waveform: both are heavy full-source decodes that do nothing to speed actual
-/// `<video>` playback (the asset protocol streams that progressively), and the
-/// sprite/waveform are loaded lazily by their own consumers when a clip is
-/// actually on the timeline.
+/// Deliberately does not warm the 240-frame filmstrip sprite. Video playback is
+/// streamed progressively; audio has no progressive visual fallback, so its
+/// bounded waveform job is the useful equivalent of the video poster.
 #[tauri::command]
 pub fn preload_media(
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
+    prewarm: State<'_, prewarm::PrewarmScheduler>,
     media_ref: String,
-) -> Result<(), String> {
-    let manifest = core.media();
-    let Some(entry) = manifest.entries.iter().find(|e| e.id == media_ref) else {
-        return Ok(());
+) -> Result<prewarm::PrewarmResult, String> {
+    let snapshot = core.runtime_snapshot();
+    let Some(entry) = snapshot.media.entries.iter().find(|e| e.id == media_ref) else {
+        return Ok(prewarm::PrewarmResult::Cached);
     };
-    if entry.kind != ClipType::Video {
-        return Ok(());
-    }
-    let Some(path) = resolve_source_path(entry, core.project_dir().as_deref()) else {
-        return Ok(());
+    let Some(path) = resolve_source_path(entry, snapshot.project_dir.as_deref()) else {
+        return Ok(prewarm::PrewarmResult::Cached);
     };
     if !path.is_file() {
-        return Ok(());
+        return Ok(prewarm::PrewarmResult::Cached);
     }
-    if let Ok(key) = cache_key_for(&path) {
-        // Hi-res preview poster only (best-effort).
-        let _ = video_preview_poster(media.engine(), &path, &key, None);
+    let key = cache_key_for(&path)?;
+    let epoch = snapshot.project_epoch;
+    match entry.kind {
+        ClipType::Video => {
+            let target = preview_poster_path_for(media.engine().cache_root(), &key, 0.0);
+            let cached = image::image_dimensions(&target).is_ok();
+            Ok(prewarm.schedule(
+                epoch,
+                prewarm::PrewarmKind::PreviewPoster,
+                key,
+                cached,
+                move |context| {
+                    let request = FrameRequest {
+                        time_secs: 0.0,
+                        max_size: PREVIEW_POSTER_MAX_SIZE,
+                        tolerance_secs: THUMB_TOLERANCE_SECS,
+                        apply_rotation: true,
+                    };
+                    let cancel = context.cancel_token();
+                    let Ok((_, bytes)) =
+                        opentake_media::decode::frame::decode_frame_png_cancellable(
+                            &path, &request, &cancel,
+                        )
+                    else {
+                        return;
+                    };
+                    let _ = context.commit_staged_bytes(&target, &bytes);
+                },
+            ))
+        }
+        ClipType::Audio => {
+            let target =
+                visual_cache_dir(media.engine().cache_root()).join(format!("{key}.waveform"));
+            let cached =
+                opentake_media::waveform::store::load_waveform(media.engine().cache_root(), &key)
+                    .is_some();
+            let duration = entry.duration;
+            Ok(prewarm.schedule(
+                epoch,
+                prewarm::PrewarmKind::TimelineVisuals,
+                key,
+                cached,
+                move |context| {
+                    let cancel = context.cancel_token();
+                    let Ok(bytes) = opentake_media::waveform::waveform_cache_bytes_cancellable(
+                        &path, duration, &cancel,
+                    ) else {
+                        return;
+                    };
+                    let _ = context.commit_staged_bytes(&target, &bytes);
+                },
+            ))
+        }
+        _ => Ok(prewarm::PrewarmResult::Cached),
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1274,6 +2332,1348 @@ mod tests {
 
     fn touch(path: &Path) {
         fs::write(path, b"x").unwrap();
+    }
+
+    fn unknown_core(root: &Path) -> AppCore {
+        let bundle = root.join("Unknown.opentake");
+        let source = root.join("source.mp4");
+        touch(&source);
+        let mut project = opentake_project::Project::new(&bundle);
+        project.manifest.entries.push(MediaManifestEntry {
+            id: "asset-1".into(),
+            name: "source".into(),
+            kind: ClipType::Video,
+            source: MediaSource::External {
+                absolute_path: source.to_string_lossy().into_owned(),
+            },
+            duration: 1.0,
+            generation_input: None,
+            source_width: Some(320),
+            source_height: Some(240),
+            source_fps: Some(30.0),
+            has_audio: Some(false),
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+        project.save().expect("save known fixture");
+        let path = bundle.join("project.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read timeline fixture"))
+                .expect("decode timeline fixture");
+        value["futureTimeline"] = serde_json::json!(true);
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&value).expect("encode unknown fixture"),
+        )
+        .expect("write unknown fixture");
+        let core = AppCore::new();
+        core.open_project(bundle).expect("unknown project opens");
+        core
+    }
+
+    fn saved_core_with_media(root: &Path) -> (AppCore, PathBuf, PathBuf, String) {
+        let bundle = root.join("Favorite.opentake");
+        let source = root.join("source.mp4");
+        fs::write(&source, b"favorite bytes").expect("write media fixture");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save initial project");
+        let entry = core
+            .import_media_file(&source, "source", &ProbedMedia::default())
+            .expect("import fixture");
+        core.save_project(None).expect("persist imported media");
+        (core, bundle, source, entry.id)
+    }
+
+    fn recursive_tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        fn walk(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+            if !dir.exists() {
+                return;
+            }
+            let mut paths = fs::read_dir(dir)
+                .expect("read tree")
+                .map(|entry| entry.expect("read tree entry").path())
+                .collect::<Vec<_>>();
+            paths.sort();
+            for path in paths {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("tree path under root")
+                    .into();
+                if path.is_dir() {
+                    out.push((relative, b"<dir>".to_vec()));
+                    walk(root, &path, out);
+                } else {
+                    out.push((relative, fs::read(&path).expect("read tree file")));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    #[test]
+    fn favorite_command_refuses_unknown_project_without_manifest_change() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let core = unknown_core(tmp.path());
+        let before = core.media();
+        let store = LibraryStore::new(tmp.path().join("library"));
+
+        let error = toggle_favorite_impl(&core, &tmp.path().join("cache"), &store, "asset-1", true)
+            .expect_err("favorite must be rejected");
+
+        assert!(error.contains("compatibility read-only"), "{error}");
+        assert_eq!(core.media(), before);
+    }
+
+    #[test]
+    fn stale_project_identity_cannot_mutate_replacement_project_or_global_library() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let project_a_root = tmp.path().join("project-a");
+        let project_b_root = tmp.path().join("project-b");
+        fs::create_dir(&project_a_root).unwrap();
+        fs::create_dir(&project_b_root).unwrap();
+        let (core, _bundle_a, _source_a, asset_a) = saved_core_with_media(&project_a_root);
+        let project_a = core.runtime_snapshot();
+        let project_a_dir = project_a.project_dir.clone().unwrap();
+        let (_other, bundle_b, _source_b, _asset_b) = saved_core_with_media(&project_b_root);
+        core.open_project(bundle_b).expect("replace A with B");
+        let project_b_before = core.media();
+        let library_root = tmp.path().join("library");
+        let store = LibraryStore::new(&library_root);
+        let library_before = recursive_tree(&library_root);
+
+        let toggle_error = toggle_favorite_impl_for_project(
+            &core,
+            tmp.path(),
+            &store,
+            &asset_a,
+            true,
+            project_a.project_epoch,
+            &project_a_dir,
+        )
+        .expect_err("stale A toggle must be rejected before library I/O");
+        let sync_error = sync_project_favorites_impl_for_project(
+            &core,
+            tmp.path(),
+            &store,
+            vec![asset_a],
+            project_a.project_epoch,
+            &project_a_dir,
+        )
+        .expect_err("stale A sync must be rejected before library I/O");
+
+        assert!(toggle_error.contains("project changed"), "{toggle_error}");
+        assert!(sync_error.contains("project changed"), "{sync_error}");
+        assert_eq!(core.media(), project_b_before);
+        assert_eq!(store.entries().unwrap(), Vec::new());
+        assert_eq!(recursive_tree(&library_root), library_before);
+    }
+
+    #[test]
+    fn global_favorite_is_copied_mapped_and_durable_on_reopen() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _source, asset_id) = saved_core_with_media(tmp.path());
+        let store = LibraryStore::new(tmp.path().join("library"));
+
+        toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, true)
+            .expect("favorite globally");
+
+        let library_id = core
+            .media()
+            .library_favorite_id(&asset_id)
+            .expect("project mapping")
+            .to_string();
+        assert!(store.contains(&library_id).unwrap());
+        assert!(store.stored_path(&library_id).unwrap().unwrap().is_file());
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen project");
+        assert_eq!(
+            reopened.media().library_favorite_id(&asset_id),
+            Some(library_id.as_str())
+        );
+    }
+
+    #[test]
+    fn global_library_failure_preserves_the_legacy_project_marker() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _source, asset_id) = saved_core_with_media(tmp.path());
+        core.set_media_favorite(std::slice::from_ref(&asset_id), true)
+            .expect("seed legacy marker");
+        core.save_project(None).expect("persist legacy marker");
+        let library_root = tmp.path().join("library");
+        fs::create_dir_all(&library_root).unwrap();
+        fs::write(library_root.join("library.json"), b"not json").unwrap();
+        let store = LibraryStore::new(library_root);
+
+        toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, true)
+            .expect_err("corrupt library must reject favorite");
+
+        assert!(core.media().is_favorite(&asset_id));
+        assert_eq!(core.media().library_favorite_id(&asset_id), None);
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen project");
+        assert!(reopened.media().is_favorite(&asset_id));
+        assert_eq!(reopened.media().library_favorite_id(&asset_id), None);
+    }
+
+    #[test]
+    fn failed_project_commit_never_removes_a_preexisting_returned_library_id() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _project_source, asset_id) = saved_core_with_media(tmp.path());
+        let store = LibraryStore::new(tmp.path().join("library"));
+        let other_source = tmp.path().join("other-project.mp4");
+        fs::write(&other_source, b"other project bytes").unwrap();
+        let existing = store
+            .favorite(&FavoriteRequest {
+                source: &other_source,
+                kind: "video",
+                category: None,
+                favorited_at: 1.0,
+                thumb: None,
+            })
+            .unwrap();
+        let prepared = store
+            .prepare_favorite(&FavoriteRequest {
+                source: &other_source,
+                kind: "video",
+                category: None,
+                favorited_at: 2.0,
+                thumb: None,
+            })
+            .unwrap();
+        assert!(!prepared.needs_publish());
+        let before = core.media();
+        let manifest_path = bundle.join(opentake_project::layout::MANIFEST_FILE);
+        let manifest_before = fs::read(&manifest_path).unwrap();
+        fs::remove_file(&manifest_path).unwrap();
+        fs::create_dir(&manifest_path).unwrap();
+        let project = core.runtime_snapshot();
+        let project_dir = project.project_dir.clone().unwrap();
+        let mut events = DeferredCoreEvents::default();
+
+        let error = toggle_favorite_impl_with(
+            &core,
+            tmp.path(),
+            &store,
+            &asset_id,
+            true,
+            ExpectedFavoriteProject {
+                epoch: project.project_epoch,
+                dir: &project_dir,
+            },
+            &mut events,
+            |_request| Ok(prepared),
+        )
+        .expect_err("project manifest publish must fail");
+
+        assert!(
+            error.contains("global favorite mapping could not be saved"),
+            "{error}"
+        );
+        assert!(store.contains(&existing.id).unwrap());
+        assert_eq!(store.entries().unwrap(), vec![existing.clone()]);
+        assert!(store.stored_path(&existing.id).unwrap().unwrap().is_file());
+        assert_eq!(core.media(), before);
+        fs::remove_dir(&manifest_path).unwrap();
+        fs::write(&manifest_path, manifest_before).unwrap();
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).unwrap();
+        assert_eq!(reopened.media(), before);
+    }
+
+    #[test]
+    fn failed_project_commit_keeps_new_favorite_invisible_when_library_manifest_is_blocked() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _source, asset_id) = saved_core_with_media(tmp.path());
+        let store = LibraryStore::new(tmp.path().join("library"));
+        let before = core.media();
+        let manifest_path = bundle.join(opentake_project::layout::MANIFEST_FILE);
+        let manifest_before = fs::read(&manifest_path).unwrap();
+        fs::remove_file(&manifest_path).unwrap();
+        fs::create_dir(&manifest_path).unwrap();
+
+        toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, true)
+            .expect_err("project manifest publish must fail");
+
+        assert!(store.entries().unwrap().is_empty());
+        assert_eq!(core.media(), before);
+        fs::remove_dir(&manifest_path).unwrap();
+        fs::write(&manifest_path, manifest_before).unwrap();
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).unwrap();
+        assert_eq!(reopened.media(), before);
+    }
+
+    #[test]
+    fn failed_global_publish_retries_to_a_complete_durable_favorite() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _source, asset_id) = saved_core_with_media(tmp.path());
+        let store = LibraryStore::new(tmp.path().join("library"));
+        let project = core.runtime_snapshot();
+        let project_dir = project.project_dir.clone().unwrap();
+        let mut events = DeferredCoreEvents::default();
+
+        let error = toggle_favorite_impl_with(
+            &core,
+            tmp.path(),
+            &store,
+            &asset_id,
+            true,
+            ExpectedFavoriteProject {
+                epoch: project.project_epoch,
+                dir: &project_dir,
+            },
+            &mut events,
+            |request| {
+                let prepared = store
+                    .prepare_favorite(request)
+                    .map_err(|error| error.to_string())?;
+                fs::create_dir(store.root().join("library.json"))
+                    .map_err(|error| error.to_string())?;
+                Ok(prepared)
+            },
+        )
+        .expect_err("blocked library manifest publish must fail");
+
+        assert!(
+            error.contains("global favorite could not be published"),
+            "{error}"
+        );
+        fs::remove_dir(store.root().join("library.json")).unwrap();
+        assert!(store.entries().unwrap().is_empty());
+        assert!(store.stored_paths().unwrap().is_empty());
+        assert_eq!(core.media().library_favorite_id(&asset_id), None);
+        let reopened_stale = AppCore::new();
+        reopened_stale.open_project(&bundle).unwrap();
+        assert_eq!(reopened_stale.media().library_favorite_id(&asset_id), None);
+
+        let retry = sync_project_favorites_impl(
+            &reopened_stale,
+            tmp.path(),
+            &store,
+            vec![asset_id.clone()],
+        )
+        .expect("sync retries unpublished favorite");
+
+        assert!(retry.failures.is_empty());
+        assert_eq!(retry.migrated_legacy_asset_ids, vec![asset_id.clone()]);
+        let retried_library_id = reopened_stale
+            .media()
+            .library_favorite_id(&asset_id)
+            .expect("retry persists project mapping")
+            .to_string();
+        assert_eq!(store.entries().unwrap().len(), 1);
+        assert!(store.contains(&retried_library_id).unwrap());
+        assert!(store
+            .stored_path(&retried_library_id)
+            .unwrap()
+            .expect("retry publishes stored copy")
+            .is_file());
+        let reopened_converged = AppCore::new();
+        reopened_converged.open_project(bundle).unwrap();
+        assert_eq!(
+            reopened_converged.media().library_favorite_id(&asset_id),
+            Some(retried_library_id.as_str())
+        );
+    }
+
+    #[test]
+    fn deferred_favorite_events_allow_project_reentry_without_deadlock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _source, asset_id) = saved_core_with_media(tmp.path());
+        let store = Arc::new(LibraryStore::new(tmp.path().join("library")));
+        let media_reentered = Arc::new(AtomicBool::new(false));
+        let saved_reentered = Arc::new(AtomicBool::new(false));
+        let callback_core = core.clone();
+        let callback_bundle = bundle.clone();
+        let media_gate = Arc::clone(&media_reentered);
+        let saved_gate = Arc::clone(&saved_reentered);
+        core.subscribe(move |event| match event {
+            opentake_core::CoreEvent::MediaChanged { .. }
+                if !media_gate.swap(true, Ordering::SeqCst) =>
+            {
+                callback_core.new_project();
+                callback_core.open_project(&callback_bundle).unwrap();
+                callback_core.save_project(None).unwrap();
+            }
+            opentake_core::CoreEvent::ProjectSaved { .. }
+                if !saved_gate.swap(true, Ordering::SeqCst) =>
+            {
+                callback_core.new_project();
+                callback_core.open_project(&callback_bundle).unwrap();
+                callback_core.save_project(None).unwrap();
+            }
+            _ => {}
+        });
+        let worker_core = core.clone();
+        let worker_store = Arc::clone(&store);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result =
+                toggle_favorite_impl(&worker_core, tmp.path(), &worker_store, &asset_id, true);
+            done_tx.send(result).unwrap();
+        });
+
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("favorite event callback deadlocked")
+            .expect("favorite succeeds");
+        worker.join().unwrap();
+        assert!(media_reentered.load(Ordering::SeqCst));
+        assert!(saved_reentered.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn offline_unfavorite_uses_persisted_id_and_is_durable() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, source, asset_id) = saved_core_with_media(tmp.path());
+        let store = LibraryStore::new(tmp.path().join("library"));
+        toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, true)
+            .expect("favorite globally");
+        fs::remove_file(source).expect("take source offline");
+
+        toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, false)
+            .expect("unfavorite through persisted id");
+
+        assert!(store.entries().unwrap().is_empty());
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen project");
+        assert!(!reopened.media().is_favorite(&asset_id));
+        assert_eq!(reopened.media().library_favorite_id(&asset_id), None);
+    }
+
+    #[test]
+    fn failed_global_remove_restores_and_persists_project_favorite() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, source, asset_id) = saved_core_with_media(tmp.path());
+        let library_root = tmp.path().join("library");
+        let store = LibraryStore::new(&library_root);
+        toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, true)
+            .expect("favorite globally");
+        let library_id = core
+            .media()
+            .library_favorite_id(&asset_id)
+            .expect("project mapping")
+            .to_string();
+        fs::remove_file(source).expect("take original source offline");
+        let manifest_path = library_root.join("library.json");
+        let manifest_before = fs::read(&manifest_path).unwrap();
+        fs::remove_file(&manifest_path).unwrap();
+        fs::create_dir(&manifest_path).expect("block manifest read");
+
+        let error = toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, false)
+            .expect_err("global remove must fail");
+
+        assert!(
+            error.contains("global favorite could not be removed"),
+            "{error}"
+        );
+        fs::remove_dir(&manifest_path).unwrap();
+        fs::write(&manifest_path, manifest_before).unwrap();
+        assert!(store.contains(&library_id).unwrap());
+        assert!(store.stored_path(&library_id).unwrap().unwrap().is_file());
+        assert_eq!(
+            core.media().library_favorite_id(&asset_id),
+            Some(library_id.as_str())
+        );
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen project");
+        assert_eq!(
+            reopened.media().library_favorite_id(&asset_id),
+            Some(library_id.as_str())
+        );
+    }
+
+    #[test]
+    fn reopened_stale_mapping_converges_without_resurrecting_removed_global_favorite() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _source, asset_id) = saved_core_with_media(tmp.path());
+        let store = LibraryStore::new(tmp.path().join("library"));
+        toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, true)
+            .expect("favorite globally");
+        let library_id = core
+            .media()
+            .library_favorite_id(&asset_id)
+            .unwrap()
+            .to_string();
+        store
+            .remove(&library_id)
+            .expect("remove from another project");
+        let reopened_after_global_delete = AppCore::new();
+        reopened_after_global_delete
+            .open_project(&bundle)
+            .expect("reopen crash-window project");
+        assert_eq!(
+            reopened_after_global_delete
+                .media()
+                .library_favorite_id(&asset_id),
+            Some(library_id.as_str())
+        );
+
+        let synced = sync_project_favorites_impl(
+            &reopened_after_global_delete,
+            tmp.path(),
+            &store,
+            vec![asset_id.clone()],
+        )
+        .expect("reconcile stale mapping");
+
+        assert_eq!(synced.migrated_legacy_asset_ids, vec![asset_id.clone()]);
+        assert!(store.entries().unwrap().is_empty());
+        assert_eq!(
+            reopened_after_global_delete
+                .media()
+                .library_favorite_id(&asset_id),
+            None
+        );
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen project");
+        assert!(!reopened.media().is_favorite(&asset_id));
+    }
+
+    #[test]
+    fn sync_commits_stale_cleanup_when_another_copy_lookup_fails() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _source_a, asset_a) = saved_core_with_media(tmp.path());
+        let source_b = tmp.path().join("source-b.mp4");
+        fs::write(&source_b, b"favorite B bytes").expect("write second media fixture");
+        let asset_b = core
+            .import_media_file(&source_b, "source-b", &ProbedMedia::default())
+            .expect("import second fixture")
+            .id;
+        let store = LibraryStore::new(tmp.path().join("library"));
+        let global_b = store
+            .favorite(&FavoriteRequest {
+                source: &source_b,
+                kind: "video",
+                category: None,
+                favorited_at: 1.0,
+                thumb: None,
+            })
+            .expect("favorite second fixture");
+        core.set_media_global_favorite(&asset_a, Some("f".repeat(64)))
+            .expect("seed stale mapping A");
+        core.set_media_global_favorite(&asset_b, Some(global_b.id.clone()))
+            .expect("seed valid mapping B");
+        core.save_project(None).expect("persist both mappings");
+        fs::remove_dir_all(store.root().join(opentake_media::library::FILES_SUBDIR))
+            .expect("remove files directory");
+        fs::write(
+            store.root().join(opentake_media::library::FILES_SUBDIR),
+            b"not a directory",
+        )
+        .expect("replace files directory with a regular file");
+
+        let synced = sync_project_favorites_impl(&core, tmp.path(), &store, vec![])
+            .expect("copy lookup errors are per-asset failures");
+
+        assert_eq!(synced.failures.len(), 1);
+        assert_eq!(synced.failures[0].asset_id, asset_b);
+        assert!(synced.failures[0].message.starts_with("io:"));
+        assert_eq!(core.media().library_favorite_id(&asset_a), None);
+        assert_eq!(
+            core.media()
+                .library_favorite_id(&synced.failures[0].asset_id),
+            Some(global_b.id.as_str())
+        );
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen project");
+        assert_eq!(reopened.media().library_favorite_id(&asset_a), None);
+        assert_eq!(
+            reopened
+                .media()
+                .library_favorite_id(&synced.failures[0].asset_id),
+            Some(global_b.id.as_str())
+        );
+    }
+
+    #[test]
+    fn sync_rejects_changed_source_when_repairing_expected_library_id() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, source, asset_id) = saved_core_with_media(tmp.path());
+        let store = LibraryStore::new(tmp.path().join("library"));
+        toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, true)
+            .expect("favorite globally");
+        let library_id = core
+            .media()
+            .library_favorite_id(&asset_id)
+            .unwrap()
+            .to_string();
+        let stored = store.stored_path(&library_id).unwrap().unwrap();
+        fs::remove_file(stored).expect("remove durable copy");
+        fs::write(&source, b"changed in place").expect("change source bytes");
+
+        let synced = sync_project_favorites_impl(&core, tmp.path(), &store, vec![asset_id.clone()])
+            .expect("sync returns per-asset failure");
+
+        assert!(synced.migrated_legacy_asset_ids.is_empty());
+        assert_eq!(synced.failures.len(), 1);
+        assert_eq!(synced.failures[0].asset_id, asset_id);
+        assert!(synced.failures[0]
+            .message
+            .contains("source content changed"));
+        assert_eq!(store.entries().unwrap().len(), 1);
+        assert_eq!(store.entries().unwrap()[0].id, library_id);
+        assert!(store.stored_path(&library_id).unwrap().is_none());
+        assert_eq!(
+            core.media()
+                .library_favorite_id(&synced.failures[0].asset_id),
+            Some(library_id.as_str())
+        );
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen project");
+        assert_eq!(
+            reopened
+                .media()
+                .library_favorite_id(&synced.failures[0].asset_id),
+            Some(library_id.as_str())
+        );
+    }
+
+    #[test]
+    fn sync_migrates_a_legacy_manifest_favorite_once_and_persists_it() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, _source, asset_id) = saved_core_with_media(tmp.path());
+        let store = LibraryStore::new(tmp.path().join("library"));
+        core.set_media_favorite(std::slice::from_ref(&asset_id), true)
+            .expect("seed legacy favorite");
+        core.save_project(None).expect("persist legacy favorite");
+
+        let first = sync_project_favorites_impl(&core, tmp.path(), &store, vec![asset_id.clone()])
+            .expect("migrate legacy favorite");
+        let second = sync_project_favorites_impl(&core, tmp.path(), &store, vec![asset_id.clone()])
+            .expect("repeat migration");
+
+        assert_eq!(first.migrated_legacy_asset_ids, vec![asset_id.clone()]);
+        assert_eq!(second.migrated_legacy_asset_ids, vec![asset_id.clone()]);
+        assert_eq!(store.entries().unwrap().len(), 1);
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen project");
+        assert!(reopened.media().library_favorite_id(&asset_id).is_some());
+    }
+
+    #[test]
+    fn import_commands_refuse_unknown_project_without_manifest_or_folder_change() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let root = tmp.path();
+        let core = unknown_core(root);
+        let engine = engine_for(root);
+        let explicit = root.join("explicit.mp4");
+        touch(&explicit);
+        let flat = root.join("flat");
+        fs::create_dir(&flat).expect("create flat fixture");
+        touch(&flat.join("flat.mp4"));
+        let recursive = root.join("recursive");
+        fs::create_dir_all(recursive.join("nested")).expect("create recursive fixture");
+        touch(&recursive.join("nested/recursive.mp4"));
+        let empty = root.join("empty");
+        fs::create_dir(&empty).expect("create empty fixture");
+        let before = core.media();
+        let scheduler = prewarm::PrewarmScheduler::new(core.project_revision().project_epoch);
+
+        let explicit_error = import_media_impl(
+            &core,
+            &engine,
+            &scheduler,
+            vec![explicit.to_string_lossy().into_owned()],
+        )
+        .expect_err("explicit import must be rejected");
+        assert!(
+            explicit_error.contains("compatibility read-only"),
+            "{explicit_error}"
+        );
+        assert_eq!(core.media(), before);
+        let flat_error = import_folder_impl(
+            &core,
+            &engine,
+            &scheduler,
+            flat.to_string_lossy().into_owned(),
+            Some(false),
+        )
+        .expect_err("flat import must be rejected");
+        assert!(
+            flat_error.contains("compatibility read-only"),
+            "{flat_error}"
+        );
+        assert_eq!(core.media(), before);
+        let recursive_error = import_folder_impl(
+            &core,
+            &engine,
+            &scheduler,
+            recursive.to_string_lossy().into_owned(),
+            Some(true),
+        )
+        .expect_err("recursive import must be rejected");
+        assert!(
+            recursive_error.contains("compatibility read-only"),
+            "{recursive_error}"
+        );
+        assert_eq!(core.media(), before);
+        let empty_error = import_folder_impl(
+            &core,
+            &engine,
+            &scheduler,
+            empty.to_string_lossy().into_owned(),
+            Some(true),
+        )
+        .expect_err("empty import must be rejected");
+        assert!(
+            empty_error.contains("compatibility read-only"),
+            "{empty_error}"
+        );
+        assert_eq!(core.media(), before);
+    }
+
+    #[test]
+    fn save_clip_as_media_refuses_before_media_output_creation() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let core = unknown_core(tmp.path());
+        let media_tree = core.project_dir().expect("opened project").join("media");
+        fs::create_dir_all(media_tree.join("existing")).expect("create media tree fixture");
+        fs::write(media_tree.join("existing/keep.bin"), b"before")
+            .expect("write media tree fixture");
+        let before = recursive_tree(&media_tree);
+        let called = std::cell::Cell::new(false);
+        let sentinel = media_tree.join("workflow-ran-before-guard.bin");
+
+        let error = save_clip_as_media_impl(&core, || {
+            called.set(true);
+            fs::write(&sentinel, b"bad ordering").expect("write workflow sentinel");
+            Err("workflow should not run".into())
+        })
+        .expect_err("save clip must be rejected");
+
+        assert!(error.contains("compatibility read-only"), "{error}");
+        assert!(!called.get());
+        assert!(!sentinel.exists());
+        assert_eq!(recursive_tree(&media_tree), before);
+    }
+
+    #[test]
+    fn single_clip_save_accepts_video_and_audio_but_rejects_image() {
+        assert_eq!(save_clip_extension(ClipType::Video).unwrap(), "mp4");
+        assert_eq!(save_clip_extension(ClipType::Audio).unwrap(), "wav");
+        assert_eq!(
+            save_clip_extension(ClipType::Image).unwrap_err(),
+            "only video and audio clips can be saved as media"
+        );
+    }
+
+    #[test]
+    fn completed_video_metadata_uses_encoder_facts_without_probe_defaults() {
+        let metadata = SavedMediaMetadata::Video(crate::export::ExportSummary {
+            out_path: "/unused/generated.mp4".to_string(),
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            frame_count: 75,
+            has_audio: true,
+        });
+
+        assert_eq!(
+            metadata.to_probe().expect("valid producer metadata"),
+            ProbedMedia {
+                duration_secs: 2.5,
+                width: Some(1920),
+                height: Some(1080),
+                fps: Some(30.0),
+                has_audio: true,
+            }
+        );
+    }
+
+    #[test]
+    fn completed_video_metadata_rejects_nonpositive_frame_counts() {
+        for frame_count in [0, -1] {
+            let metadata = SavedMediaMetadata::Video(crate::export::ExportSummary {
+                out_path: "/unused/generated.mp4".to_string(),
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                frame_count,
+                has_audio: false,
+            });
+
+            assert_eq!(
+                metadata
+                    .to_probe()
+                    .expect_err("saved video needs at least one encoded frame"),
+                "invalid completed video metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_duration_video_save_is_rejected_without_output_or_manifest_progress() {
+        use std::sync::Mutex;
+
+        use opentake_domain::{Clip, Track};
+
+        let tmp = tempfile::tempdir().expect("temp root");
+        let bundle = tmp.path().join("ZeroDurationSave.opentake");
+        let source = tmp.path().join("source.mp4");
+        touch(&source);
+        let mut project = opentake_project::Project::new(&bundle);
+        let mut track = Track::new("video", ClipType::Video);
+        track.clips.push(Clip::new("zero", "source", 0, 0));
+        project.timeline.tracks.push(track);
+        project.manifest.entries.push(MediaManifestEntry {
+            id: "source".into(),
+            name: "source".into(),
+            kind: ClipType::Video,
+            source: MediaSource::External {
+                absolute_path: source.to_string_lossy().into_owned(),
+            },
+            duration: 0.0,
+            generation_input: None,
+            source_width: Some(320),
+            source_height: Some(240),
+            source_fps: Some(30.0),
+            has_audio: Some(false),
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+        project.save().expect("save zero-duration fixture");
+
+        let core = AppCore::new();
+        core.open_project(bundle.clone()).expect("open fixture");
+        let before_live = core.media();
+        let manifest_path = bundle.join("media.json");
+        let before_disk = fs::read(&manifest_path).expect("read persisted manifest");
+        let media_dir = bundle.join("media");
+        let before_outputs = recursive_tree(&media_dir);
+        let progress = Arc::new(Mutex::new(Vec::<(i32, i32)>::new()));
+        let observed = Arc::clone(&progress);
+        let on_progress: crate::export::AudioExportProgress = Arc::new(move |done, total| {
+            observed
+                .lock()
+                .expect("record save progress")
+                .push((done, total));
+        });
+        let control = crate::export::ExportControl::default();
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(core.runtime_snapshot().project_epoch);
+
+        let error = save_clip_as_media_workflow(
+            &core,
+            &control,
+            &engine,
+            &scheduler,
+            "zero",
+            "save-as:zero-duration",
+            on_progress,
+        )
+        .expect_err("zero-duration video save must fail");
+
+        assert_eq!(error, "clip duration must be greater than zero");
+        assert_eq!(recursive_tree(&media_dir), before_outputs);
+        assert_eq!(core.media(), before_live, "live manifest must not change");
+        assert_eq!(
+            fs::read(&manifest_path).expect("reread persisted manifest"),
+            before_disk,
+            "persisted manifest must not change"
+        );
+        assert!(
+            progress
+                .lock()
+                .expect("inspect save progress")
+                .iter()
+                .all(|(done, total)| done != total),
+            "failed save must not emit terminal progress"
+        );
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen fixture");
+        assert_eq!(reopened.media(), before_live);
+        assert!(
+            control.try_begin("save-as:after-zero-duration").is_ok(),
+            "failed preflight must not retain the export operation"
+        );
+    }
+
+    #[test]
+    fn completed_wav_metadata_uses_mono_sample_count_and_rate() {
+        let metadata = SavedMediaMetadata::Wav {
+            sample_count: 24_000,
+            sample_rate: 48_000,
+        };
+
+        assert_eq!(
+            metadata.to_probe().expect("valid producer metadata"),
+            ProbedMedia {
+                duration_secs: 0.5,
+                width: None,
+                height: None,
+                fps: None,
+                has_audio: true,
+            }
+        );
+    }
+
+    #[test]
+    fn audio_clip_save_writes_wav_and_imports_project_relative_source() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let bundle = tmp.path().join("AudioSave.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save project");
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(core.runtime_snapshot().project_epoch);
+        let output = crate::export::unique_project_media_path(&bundle, "clip_audio", "wav")
+            .expect("project output");
+        crate::export::write_wav_s16le(&[0.0; 480], 48_000, &output).expect("write audio output");
+
+        import_saved_media(
+            &core,
+            &engine,
+            &scheduler,
+            core.runtime_snapshot().project_epoch,
+            &bundle,
+            &output,
+        )
+        .expect("import saved audio");
+
+        let entry = core
+            .media()
+            .entries
+            .into_iter()
+            .find(|candidate| candidate.name.starts_with("clip_audio"))
+            .expect("imported entry");
+        let relative_path = match entry.source {
+            MediaSource::Project { relative_path } => relative_path,
+            source => panic!("saved audio was not project-relative: {source:?}"),
+        };
+        assert_eq!(bundle.join(&relative_path), output);
+        assert_eq!(
+            output.extension().and_then(|value| value.to_str()),
+            Some("wav")
+        );
+
+        let _ = fs::remove_dir_all(engine.cache_root());
+        assert!(bundle.join(relative_path).is_file());
+    }
+
+    #[test]
+    fn project_switch_before_saved_media_transaction_leaves_replacement_unchanged() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let project_a = tmp.path().join("A.opentake");
+        let project_b = tmp.path().join("B.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(project_a.clone()))
+            .expect("save project A");
+        let expected_epoch = core.runtime_snapshot().project_epoch;
+        let output = crate::export::unique_project_media_path(&project_a, "clip_audio", "wav")
+            .expect("project output");
+        crate::export::write_wav_s16le(&[0.0; 480], 48_000, &output)
+            .expect("write rendered output");
+        opentake_project::Project::new(&project_b)
+            .save()
+            .expect("save project B");
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(expected_epoch);
+        let before_transaction = || {
+            core.open_project(project_b.clone())
+                .expect("switch to project B after render");
+        };
+
+        let result = crate::export::cleanup_partial_output(
+            &output,
+            import_saved_media_with_before_transaction(
+                &core,
+                &engine,
+                &scheduler,
+                expected_epoch,
+                &project_a,
+                &output,
+                before_transaction,
+            ),
+        );
+        let before = serde_json::to_vec(&opentake_domain::MediaManifest::default())
+            .expect("serialize expected B manifest");
+
+        assert_eq!(
+            result.expect_err("stale import must fail"),
+            "project changed while saving media"
+        );
+        assert!(!output.exists(), "failed save must clean project A output");
+        assert_eq!(
+            serde_json::to_vec(&core.media()).expect("serialize actual B manifest"),
+            before,
+            "project B manifest must remain byte-for-byte unchanged"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn final_identity_swap_rolls_back_live_and_persisted_saved_media_import() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let bundle = tmp.path().join("IdentityRollback.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save project");
+        let snapshot = core.runtime_snapshot();
+        let before_live = snapshot.media.clone();
+        let manifest_path = bundle.join("media.json");
+        let before_disk = fs::read(&manifest_path).expect("read persisted manifest");
+        let output =
+            crate::export::reserve_project_media_output(&bundle, "post_import_swap", "wav")
+                .expect("reserve saved-media output");
+        let output_path = output.path().to_path_buf();
+        let moved_original = output_path.with_extension("moved");
+        let mut writer = output.writer().expect("clone saved-media writer");
+        crate::export::write_wav_s16le_cancellable_to_file(
+            &[0.0; 480],
+            48_000,
+            &mut writer,
+            &opentake_media::MediaCancelToken::new(),
+            None,
+            None,
+        )
+        .expect("write rendered WAV");
+        drop(writer);
+        output.prepare_commit().expect("pre-import identity valid");
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(snapshot.project_epoch);
+        let probe = SavedMediaMetadata::Wav {
+            sample_count: 480,
+            sample_rate: 48_000,
+        }
+        .to_probe()
+        .expect("construct trusted saved-media metadata");
+
+        let result = import_saved_media_with_hooks(
+            SavedMediaImportContext {
+                core: &core,
+                engine: &engine,
+                prewarm: &scheduler,
+                expected_project_epoch: snapshot.project_epoch,
+                expected_project_dir: &bundle,
+                path: &output_path,
+                probe: &probe,
+            },
+            (
+                || {},
+                || {
+                    fs::rename(&output_path, &moved_original)
+                        .map_err(|error| format!("swap reserved output: {error}"))?;
+                    fs::write(&output_path, b"replacement")
+                        .map_err(|error| format!("install replacement: {error}"))?;
+                    output.verify_identity()
+                },
+            ),
+        );
+
+        let error = result.expect_err("post-import identity swap must abort transaction");
+        assert!(error.contains("output changed"), "{error}");
+        assert_eq!(
+            core.media(),
+            before_live,
+            "failed postcondition must restore the live manifest"
+        );
+        assert_eq!(
+            fs::read(&manifest_path).expect("reread persisted manifest"),
+            before_disk,
+            "failed postcondition must not alter persisted media.json"
+        );
+        let reopened = AppCore::new();
+        reopened
+            .open_project(bundle.clone())
+            .expect("reopen project after rollback");
+        assert_eq!(
+            reopened.media(),
+            before_live,
+            "reopened project must not contain a dangling saved-media entry"
+        );
+        assert_eq!(
+            fs::read(&output_path).expect("replacement remains untouched"),
+            b"replacement"
+        );
+        drop(output);
+        assert_eq!(
+            fs::read(&output_path).expect("replacement remains after cleanup"),
+            b"replacement"
+        );
+        if moved_original.exists() {
+            assert_eq!(
+                fs::metadata(&moved_original)
+                    .expect("inspect moved retained output")
+                    .len(),
+                0,
+                "failed output payload must be destroyed through its retained handle"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transient_final_path_swap_cannot_change_trusted_saved_media_metadata() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let bundle = tmp.path().join("TrustedMetadataIdentity.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save project");
+        let snapshot = core.runtime_snapshot();
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(snapshot.project_epoch);
+        let output =
+            crate::export::reserve_project_media_output(&bundle, "trusted_swap_restore", "wav")
+                .expect("reserve output");
+        let output_path = output.path().to_path_buf();
+        let moved_output = output_path.with_extension("retained");
+        let replacement = tmp.path().join("replacement.wav");
+        let mut writer = output.writer().expect("clone retained output");
+        crate::export::write_wav_s16le_cancellable_to_file(
+            &[0.0; 480],
+            48_000,
+            &mut writer,
+            &MediaCancelToken::new(),
+            None,
+            None,
+        )
+        .expect("write 10ms retained WAV");
+        drop(writer);
+        fs::File::create(&replacement).expect("create replacement WAV");
+        crate::export::write_wav_s16le(&[0.0; 4_800], 48_000, &replacement)
+            .expect("write 100ms replacement WAV");
+        let retained_duration = engine
+            .probe(&output_path)
+            .expect("ffprobe retained WAV")
+            .duration_secs;
+        let replacement_duration = engine
+            .probe(&replacement)
+            .expect("ffprobe replacement WAV")
+            .duration_secs;
+        assert!(replacement_duration > retained_duration * 5.0);
+
+        let control = crate::export::ExportControl::default();
+        let mut guard = control
+            .try_begin("trusted-metadata-test")
+            .expect("begin save generation");
+        let result = finalize_saved_media_with_hooks(
+            SavedMediaFinalizationContext {
+                core: &core,
+                engine: &engine,
+                prewarm: &scheduler,
+                expected_project_epoch: snapshot.project_epoch,
+                expected_project_dir: &bundle,
+                metadata: SavedMediaMetadata::Wav {
+                    sample_count: 480,
+                    sample_rate: 48_000,
+                },
+                on_progress: &|_, _| {},
+            },
+            output,
+            &mut guard,
+            (
+                || {},
+                || {
+                    fs::rename(&output_path, &moved_output).expect("move retained final name");
+                    fs::copy(&replacement, &output_path).expect("install transient replacement");
+                    fs::remove_file(&output_path).expect("remove transient replacement");
+                    fs::rename(&moved_output, &output_path).expect("restore retained final name");
+                },
+                || {},
+                || {},
+            ),
+        )
+        .expect("trusted producer metadata must commit");
+
+        let imported = result
+            .items
+            .iter()
+            .find(|item| item.name.starts_with("trusted_swap_restore"))
+            .expect("saved media imported");
+        assert!((imported.duration - retained_duration).abs() < 0.001);
+        assert!((imported.duration - replacement_duration).abs() > 0.05);
+        core.save_project(None).expect("persist imported manifest");
+        let reopened = AppCore::new();
+        reopened
+            .open_project(bundle)
+            .expect("reopen project after trusted metadata import");
+        let reopened_entry = reopened
+            .media()
+            .entries
+            .into_iter()
+            .find(|entry| entry.name.starts_with("trusted_swap_restore"))
+            .expect("reopened saved media entry");
+        assert!((reopened_entry.duration - retained_duration).abs() < 0.001);
+        assert!(output_path.is_file());
+        assert!(!moved_output.exists());
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FinalizationCancelStage {
+        Sync,
+        Metadata,
+        Import,
+        Commit,
+    }
+
+    fn assert_finalization_cancelled_at(stage: FinalizationCancelStage) {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let bundle = tmp.path().join("CancelledFinalization.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save project");
+        let snapshot = core.runtime_snapshot();
+        let before_live = snapshot.media.clone();
+        let manifest_path = bundle.join("media.json");
+        let before_disk = fs::read(&manifest_path).expect("read persisted manifest");
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(snapshot.project_epoch);
+        let output =
+            crate::export::reserve_project_media_output(&bundle, "cancelled_finalization", "wav")
+                .expect("reserve output");
+        let output_path = output.path().to_path_buf();
+        let mut writer = output.writer().expect("clone output");
+        crate::export::write_wav_s16le_cancellable_to_file(
+            &[0.0; 480],
+            48_000,
+            &mut writer,
+            &MediaCancelToken::new(),
+            None,
+            None,
+        )
+        .expect("write output");
+        drop(writer);
+
+        let control = crate::export::ExportControl::default();
+        let mut guard = control
+            .try_begin("cancel-finalization-test")
+            .expect("begin save generation");
+        let cancel = guard.cancel_token().clone();
+        let sync_cancel = cancel.clone();
+        let metadata_cancel = cancel.clone();
+        let import_cancel = cancel.clone();
+        let commit_cancel = cancel;
+        let terminal_progress = std::cell::Cell::new(false);
+        let result = finalize_saved_media_with_hooks(
+            SavedMediaFinalizationContext {
+                core: &core,
+                engine: &engine,
+                prewarm: &scheduler,
+                expected_project_epoch: snapshot.project_epoch,
+                expected_project_dir: &bundle,
+                metadata: SavedMediaMetadata::Wav {
+                    sample_count: 480,
+                    sample_rate: 48_000,
+                },
+                on_progress: &|done, total| {
+                    if done == total {
+                        terminal_progress.set(true);
+                    }
+                },
+            },
+            output,
+            &mut guard,
+            (
+                move || {
+                    if stage == FinalizationCancelStage::Sync {
+                        sync_cancel.cancel();
+                    }
+                },
+                move || {
+                    if stage == FinalizationCancelStage::Metadata {
+                        metadata_cancel.cancel();
+                    }
+                },
+                move || {
+                    if stage == FinalizationCancelStage::Import {
+                        import_cancel.cancel();
+                    }
+                },
+                move || {
+                    if stage == FinalizationCancelStage::Commit {
+                        commit_cancel.cancel();
+                    }
+                },
+            ),
+        );
+
+        assert_eq!(
+            result.expect_err("cancellation must abort finalization"),
+            crate::export::CANCELLED_SENTINEL
+        );
+        assert!(
+            !terminal_progress.get(),
+            "cancelled save must not emit 100%"
+        );
+        assert!(!output_path.exists(), "cancelled output must be removed");
+        assert_eq!(core.media(), before_live, "live manifest must roll back");
+        assert_eq!(
+            fs::read(&manifest_path).expect("reread persisted manifest"),
+            before_disk,
+            "persisted manifest must remain unchanged"
+        );
+        let reopened = AppCore::new();
+        reopened
+            .open_project(bundle)
+            .expect("reopen project after cancellation");
+        assert_eq!(reopened.media(), before_live);
+    }
+
+    #[test]
+    fn cancellation_during_sync_aborts_finalization_without_terminal_progress() {
+        assert_finalization_cancelled_at(FinalizationCancelStage::Sync);
+    }
+
+    #[test]
+    fn cancellation_after_metadata_aborts_finalization_without_terminal_progress() {
+        assert_finalization_cancelled_at(FinalizationCancelStage::Metadata);
+    }
+
+    #[test]
+    fn cancellation_before_import_rolls_back_without_terminal_progress() {
+        assert_finalization_cancelled_at(FinalizationCancelStage::Import);
+    }
+
+    #[test]
+    fn cancellation_inside_core_commit_rolls_back_without_terminal_progress() {
+        assert_finalization_cancelled_at(FinalizationCancelStage::Commit);
+    }
+
+    #[test]
+    fn range_saved_media_survives_export_cache_deletion() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let bundle = tmp.path().join("RangeSave.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save project");
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(core.runtime_snapshot().project_epoch);
+        let output = crate::export::unique_project_media_path(&bundle, "range_10_20", "mp4")
+            .expect("project output");
+        fs::write(&output, b"rendered range").expect("write range output");
+
+        import_saved_media(
+            &core,
+            &engine,
+            &scheduler,
+            core.runtime_snapshot().project_epoch,
+            &bundle,
+            &output,
+        )
+        .expect("import saved range");
+        let entry = core
+            .media()
+            .entries
+            .into_iter()
+            .find(|candidate| candidate.name.starts_with("range_10_20"))
+            .expect("imported range");
+        let relative_path = match entry.source {
+            MediaSource::Project { relative_path } => relative_path,
+            source => panic!("saved range was not project-relative: {source:?}"),
+        };
+
+        let _ = fs::remove_dir_all(engine.cache_root());
+        assert_eq!(bundle.join(&relative_path), output);
+        assert!(bundle.join(relative_path).is_file());
     }
 
     #[test]
@@ -1435,6 +3835,109 @@ mod tests {
     }
 
     #[test]
+    fn imported_grid_poster_is_coalesced_and_stale_queue_never_publishes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("still.png");
+        image::RgbaImage::from_pixel(32, 24, image::Rgba([10, 20, 30, 255]))
+            .save(&source)
+            .unwrap();
+        let core = AppCore::new();
+        let engine = engine_for(tmp.path());
+        let epoch = core.project_revision().project_epoch;
+        let scheduler = prewarm::PrewarmScheduler::new(epoch);
+
+        // Occupy all three persistent workers so the production import poster
+        // remains queued while ownership rotates.
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Arc::new(std::sync::Mutex::new(release_rx));
+        for index in 0..3 {
+            let entered = entered_tx.clone();
+            let release = std::sync::Arc::clone(&release_rx);
+            assert_eq!(
+                scheduler.schedule(
+                    epoch,
+                    prewarm::PrewarmKind::PreviewPoster,
+                    format!("block-import-{index}"),
+                    false,
+                    move |_| {
+                        entered.send(()).unwrap();
+                        release.lock().unwrap().recv().unwrap();
+                    },
+                ),
+                prewarm::PrewarmResult::Queued
+            );
+        }
+        for _ in 0..3 {
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+        }
+
+        let entry = import_one(&core, &engine, &source).unwrap().unwrap();
+        let target = poster_path_for(engine.cache_root(), &cache_key_for(&source).unwrap());
+        let first = schedule_import_poster(&core, &engine, &scheduler, &entry, &source);
+        let duplicate = schedule_import_poster(&core, &engine, &scheduler, &entry, &source);
+        assert_eq!(first.result, prewarm::PrewarmResult::Queued);
+        assert_eq!(duplicate.result, prewarm::PrewarmResult::Duplicate);
+        assert_eq!(
+            serde_json::to_value(&first).unwrap(),
+            serde_json::json!({"mediaRef": entry.id, "result": "queued"})
+        );
+
+        scheduler.begin_project_transition().unwrap();
+        scheduler.activate_project(epoch + 1);
+        for _ in 0..3 {
+            release_tx.send(()).unwrap();
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while scheduler.in_flight_count() != 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(scheduler.in_flight_count(), 0);
+        assert!(!target.exists(), "stale queued import poster was published");
+    }
+
+    #[test]
+    fn completed_project_swap_rejects_same_id_from_old_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old_source = tmp.path().join("old.png");
+        let new_source = tmp.path().join("new.png");
+        image::RgbaImage::from_pixel(16, 16, image::Rgba([255, 0, 0, 255]))
+            .save(&old_source)
+            .unwrap();
+        image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 0, 255, 255]))
+            .save(&new_source)
+            .unwrap();
+        let engine = engine_for(tmp.path());
+
+        let core = AppCore::new();
+        let old_entry = import_one(&core, &engine, &old_source).unwrap().unwrap();
+        let old_epoch = core.project_revision().project_epoch;
+        let scheduler = prewarm::PrewarmScheduler::new(old_epoch);
+
+        // A separate project has its own id generator, so its first persisted
+        // asset legitimately reuses the old project's id with another source.
+        let replacement = AppCore::new();
+        let new_entry = import_one(&replacement, &engine, &new_source)
+            .unwrap()
+            .unwrap();
+        assert_eq!(new_entry.id, old_entry.id);
+        assert_ne!(new_entry.source, old_entry.source);
+        let bundle = tmp.path().join("replacement.opentake");
+        replacement.save_project(Some(bundle.clone())).unwrap();
+
+        scheduler.begin_project_transition().unwrap();
+        let snapshot = core.open_project(bundle).unwrap();
+        scheduler.activate_project(snapshot.project_epoch);
+        let old_target = poster_path_for(engine.cache_root(), &cache_key_for(&old_source).unwrap());
+
+        let admission = schedule_import_poster(&core, &engine, &scheduler, &old_entry, &old_source);
+        assert_eq!(admission.result, prewarm::PrewarmResult::StaleProject);
+        assert!(!old_target.exists());
+    }
+
+    #[test]
     fn thumbnail_dto_serializes_camel_case() {
         let dto = ThumbnailDto {
             media_ref: "m".into(),
@@ -1469,8 +3972,19 @@ mod tests {
 
         let core = AppCore::new();
         let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(core.project_revision().project_epoch);
         let mut skipped = Vec::new();
-        mirror_dir(&core, &engine, &root, None, &mut skipped);
+        let mut prewarm_results = Vec::new();
+        mirror_dir_scheduled(
+            &core,
+            &engine,
+            &scheduler,
+            &root,
+            None,
+            &mut skipped,
+            &mut prewarm_results,
+        )
+        .unwrap();
 
         let m = core.media();
         // Folders: Trip (root) + Day1 + Empty, nested under Trip.
@@ -1500,8 +4014,19 @@ mod tests {
         touch(&root.join("x.png"));
         let core = AppCore::new();
         let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(core.project_revision().project_epoch);
         let mut skipped = Vec::new();
-        mirror_dir(&core, &engine, &root, None, &mut skipped);
+        let mut prewarm_results = Vec::new();
+        mirror_dir_scheduled(
+            &core,
+            &engine,
+            &scheduler,
+            &root,
+            None,
+            &mut skipped,
+            &mut prewarm_results,
+        )
+        .unwrap();
 
         let dto = MediaListDto::from_core(&core, None);
         assert_eq!(dto.folders.len(), 1);
@@ -1590,16 +4115,16 @@ mod tests {
     }
 
     #[test]
-    fn toggle_favorite_marks_item_and_ignores_unknown_ids() {
-        // #91: favoriting flows through the core into the DTO's `favorite` flag —
-        // the media panel's "mine" tab reads this, not browser storage.
+    fn compatibility_favorite_marker_projects_into_the_media_dto() {
+        // The per-project marker remains a compatibility mirror for old project
+        // files and card state. The Mine grid itself reads the global library.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let clip = root.join("clip.mp4");
         touch(&clip);
         let core = AppCore::new();
         let media = MediaState::new(engine_for(root));
-        let entry = import_one(&core, media.engine(), &clip).unwrap();
+        let entry = import_one(&core, media.engine(), &clip).unwrap().unwrap();
 
         // A freshly imported asset is not favorited.
         let before = MediaListDto::from_core(&core, None);
@@ -1608,17 +4133,19 @@ mod tests {
 
         // Favoriting it surfaces in the DTO.
         assert_eq!(
-            core.set_media_favorite(std::slice::from_ref(&entry.id), true),
+            core.set_media_favorite(std::slice::from_ref(&entry.id), true)
+                .unwrap(),
             1
         );
         assert!(MediaListDto::from_core(&core, None).items[0].favorite);
 
         // Unknown ids never create phantom favorites.
-        assert_eq!(core.set_media_favorite(&["ghost".into()], true), 0);
+        assert_eq!(core.set_media_favorite(&["ghost".into()], true).unwrap(), 0);
 
         // Unfavoriting flips it back.
         assert_eq!(
-            core.set_media_favorite(std::slice::from_ref(&entry.id), false),
+            core.set_media_favorite(std::slice::from_ref(&entry.id), false)
+                .unwrap(),
             1
         );
         assert!(!MediaListDto::from_core(&core, None).items[0].favorite);
@@ -1694,6 +4221,7 @@ mod tests {
             items: vec![],
             folders: vec![],
             skipped: vec![],
+            prewarm: vec![],
         };
         let json = serde_json::to_string(&empty).unwrap();
         assert!(json.contains("\"skipped\":[]"));
@@ -1702,6 +4230,7 @@ mod tests {
             items: vec![],
             folders: vec![],
             skipped: vec!["a.txt".into(), "b.pdf".into()],
+            prewarm: vec![],
         };
         let json = serde_json::to_string(&with_skips).unwrap();
         assert!(json.contains("\"skipped\":[\"a.txt\",\"b.pdf\"]"));
@@ -1713,10 +4242,11 @@ mod tests {
         // Non-import surfaces report no skips.
         assert!(MediaListDto::from_core(&core, None).skipped.is_empty());
         // Import surfaces thread the skipped file names through unchanged.
-        let dto = MediaListDto::from_core_with_skipped(
+        let dto = MediaListDto::from_core_with_import_results(
             &core,
             None,
             vec!["note.txt".into(), "archive.zip".into()],
+            Vec::new(),
         );
         assert_eq!(dto.skipped, vec!["note.txt", "archive.zip"]);
     }
@@ -1729,7 +4259,7 @@ mod tests {
         let engine = engine_for(root);
         let f = root.join("a.png");
         touch(&f);
-        import_one(&core, &engine, &f);
+        import_one(&core, &engine, &f).unwrap();
 
         let list = MediaListDto::from_core(&core, None);
         assert_eq!(list.items.len(), 1);
@@ -1746,7 +4276,7 @@ mod tests {
         let engine = engine_for(root);
         let orig = root.join("clip.mp4");
         touch(&orig);
-        let id = import_one(&core, &engine, &orig).unwrap().id;
+        let id = import_one(&core, &engine, &orig).unwrap().unwrap().id;
 
         // Source goes missing → the panel reads it as offline.
         fs::remove_file(&orig).unwrap();
@@ -1781,7 +4311,7 @@ mod tests {
         let engine = engine_for(root);
         let orig = root.join("clip.mp4");
         touch(&orig);
-        let id = import_one(&core, &engine, &orig).unwrap().id;
+        let id = import_one(&core, &engine, &orig).unwrap().unwrap().id;
 
         // Relinking a video asset to an audio file is rejected (upstream parity).
         let wrong = root.join("song.mp3");

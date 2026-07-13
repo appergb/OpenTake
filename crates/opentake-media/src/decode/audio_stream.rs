@@ -9,17 +9,16 @@
 //! This is the one-shot preload form (decode a clip's window up front); the
 //! chunked / background streaming form is the remaining half of #160.
 
-use std::io::Read;
 use std::path::Path;
 
-use crate::decode::pcm::{PcmFormat, PcmSpec};
+use crate::cancel::MediaCancelToken;
+use crate::decode::pcm::{decode_raw_pcm_cancellable, PcmFormat, PcmSpec};
 use crate::error::{MediaError, Result};
-use crate::ff;
-use crate::probe;
 
 /// Build the ffmpeg args to decode the first audio track to raw interleaved PCM
 /// on stdout, honoring an optional `[lo, hi)` absolute-seconds range. Mirrors
 /// `pcm::pcm_args` but is kept self-contained (no shared mono path).
+#[cfg(test)]
 fn interleaved_args(path: &Path, spec: &PcmSpec, range: Option<(f64, f64)>) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     if let Some((lo, hi)) = range {
@@ -49,17 +48,28 @@ fn interleaved_args(path: &Path, spec: &PcmSpec, range: Option<(f64, f64)>) -> V
 
 /// Convert raw interleaved PCM bytes to interleaved f32, **without** folding
 /// channels (the playback mixer pans/sums per channel later).
-fn raw_to_interleaved_f32(bytes: &[u8], spec: &PcmSpec) -> Vec<f32> {
+fn raw_to_interleaved_f32(bytes: &[u8], spec: &PcmSpec) -> Result<Vec<f32>> {
+    let bytes_per_sample = spec.format.bytes_per_sample();
+    let samples = bytes.len() / bytes_per_sample;
+    let mut out = Vec::new();
+    out.try_reserve_exact(samples).map_err(|error| {
+        MediaError::Decode(format!(
+            "audio_allocation_failed: interleaved f32 reserve {samples}: {error}"
+        ))
+    })?;
     match spec.format {
-        PcmFormat::F32 => bytes
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect(),
-        PcmFormat::S16Le => bytes
-            .chunks_exact(2)
-            .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
-            .collect(),
+        PcmFormat::F32 => out.extend(
+            bytes
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+        ),
+        PcmFormat::S16Le => out.extend(
+            bytes
+                .chunks_exact(2)
+                .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0),
+        ),
     }
+    Ok(out)
 }
 
 /// Decode `path`'s first audio track to interleaved f32 at the requested spec
@@ -70,31 +80,17 @@ pub fn decode_pcm_interleaved(
     spec: &PcmSpec,
     range: Option<(f64, f64)>,
 ) -> Result<Vec<f32>> {
-    // Cheap guard: confirm an audio track exists before spawning the decoder.
-    if let Ok(p) = probe::probe(path) {
-        if !p.has_audio {
-            return Err(MediaError::no_track("audio", path));
-        }
-    }
+    decode_pcm_interleaved_cancellable(path, spec, range, &MediaCancelToken::new())
+}
 
-    let mut child = ff::ffmpeg()
-        .args(interleaved_args(path, spec, range))
-        .spawn()
-        .map_err(|e| MediaError::Ffmpeg(format!("spawn: {e}")))?;
-
-    // Read raw PCM straight off stdout (the event parser is tuned for video).
-    let mut raw = Vec::new();
-    if let Some(mut stdout) = child.take_stdout() {
-        stdout
-            .read_to_end(&mut raw)
-            .map_err(|e| MediaError::Ffmpeg(format!("read stdout: {e}")))?;
-    }
-    let status = child.wait().map_err(MediaError::Io)?;
-    if !status.success() && raw.is_empty() {
-        return Err(MediaError::no_track("audio", path));
-    }
-
-    Ok(raw_to_interleaved_f32(&raw, spec))
+pub fn decode_pcm_interleaved_cancellable(
+    path: &Path,
+    spec: &PcmSpec,
+    range: Option<(f64, f64)>,
+    cancel: &MediaCancelToken,
+) -> Result<Vec<f32>> {
+    let raw = decode_raw_pcm_cancellable(path, spec, range, cancel, None)?;
+    raw_to_interleaved_f32(&raw, spec)
 }
 
 #[cfg(test)]
@@ -140,7 +136,7 @@ mod tests {
         for v in [1.0f32, -1.0, 0.5, 0.0] {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
-        let out = raw_to_interleaved_f32(&bytes, &spec(2, PcmFormat::F32));
+        let out = raw_to_interleaved_f32(&bytes, &spec(2, PcmFormat::F32)).unwrap();
         assert_eq!(out, vec![1.0, -1.0, 0.5, 0.0]);
     }
 
@@ -150,7 +146,7 @@ mod tests {
         for v in [0i16, 16384, -32768, 0] {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
-        let out = raw_to_interleaved_f32(&bytes, &spec(2, PcmFormat::S16Le));
+        let out = raw_to_interleaved_f32(&bytes, &spec(2, PcmFormat::S16Le)).unwrap();
         assert_eq!(out.len(), 4);
         assert!((out[0] - 0.0).abs() < 1e-6);
         assert!((out[1] - 0.5).abs() < 1e-3);
@@ -160,7 +156,7 @@ mod tests {
     #[test]
     fn trailing_partial_sample_is_ignored() {
         // 5 bytes of f32 = 1 full sample + 1 stray byte → 1 sample.
-        let out = raw_to_interleaved_f32(&[0, 0, 0, 63, 7], &spec(1, PcmFormat::F32));
+        let out = raw_to_interleaved_f32(&[0, 0, 0, 63, 7], &spec(1, PcmFormat::F32)).unwrap();
         assert_eq!(out.len(), 1);
     }
 }

@@ -83,6 +83,7 @@ pub struct ClipPlan {
     pub needs_premultiply: bool,
     /// Playback speed (source-frame index conversion; SPEC §2.5).
     pub speed: f64,
+    pub reversed: bool,
     pub trim_start_frame: i32,
     pub media_type: ClipType,
     /// For [`TextureSource::Lottie`], the source's internal frame count (modulo

@@ -1,7 +1,7 @@
 /**
  * Settings view. Reachable from both the Home sidebar and the editor title bar.
  * Panes (single scrollable page in this phase): General (language), Appearance
- * (theme), Import (default folder), AI (BYOK key), and About (version / license).
+ * (theme), Import, AI (BYOK), MCP, optional Account, and About.
  * Preferences persist via `settingsStore` / `i18nStore`;
  * the BYOK key is stored in the OS keychain via the `secret_*` Tauri commands
  * (see `lib/api.ts`) — the plaintext key never reaches this component's
@@ -9,7 +9,20 @@
  */
 
 import { useEffect, useState, type CSSProperties } from "react";
-import { Bot, Check, Copy, Download, FolderOpen, Info, Palette, Plug, Settings as SettingsIcon, Trash2, X } from "lucide-react";
+import {
+  Bot,
+  Check,
+  Copy,
+  Download,
+  FolderOpen,
+  Info,
+  Palette,
+  Plug,
+  Settings as SettingsIcon,
+  Trash2,
+  User,
+  X,
+} from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { Dropdown } from "../ui/Dropdown";
 import { useT, useI18nStore, LOCALES } from "../../i18n";
@@ -23,6 +36,7 @@ import { useEditorUiStore } from "../../store/uiStore";
 import { openDialog } from "../../lib/dialog";
 import { secretSave, secretLoad, secretDelete } from "../../lib/api";
 import type { SecretStatus } from "../../lib/types";
+import { AccountPane } from "./AccountPane";
 
 const settingsPanelStyle: CSSProperties = {
   width: 960,
@@ -49,7 +63,14 @@ const settingsControlStyle: CSSProperties = {
   border: "none",
 };
 
-type SettingsPaneId = "general" | "appearance" | "import" | "ai" | "mcp" | "about";
+type SettingsPaneId =
+  | "general"
+  | "appearance"
+  | "import"
+  | "ai"
+  | "mcp"
+  | "account"
+  | "about";
 
 const SETTINGS_PANES: Array<{ id: SettingsPaneId; icon: typeof SettingsIcon; labelKey: string }> = [
   { id: "general", icon: SettingsIcon, labelKey: "settings.section.general" },
@@ -57,6 +78,7 @@ const SETTINGS_PANES: Array<{ id: SettingsPaneId; icon: typeof SettingsIcon; lab
   { id: "import", icon: Download, labelKey: "settings.section.import" },
   { id: "ai", icon: Bot, labelKey: "settings.section.ai" },
   { id: "mcp", icon: Plug, labelKey: "settings.section.mcp" },
+  { id: "account", icon: User, labelKey: "settings.section.account" },
   { id: "about", icon: Info, labelKey: "settings.section.about" },
 ];
 
@@ -228,6 +250,8 @@ function renderActivePane(activePane: SettingsPaneId) {
       return <AiPane />;
     case "mcp":
       return <McpPane />;
+    case "account":
+      return <AccountPane />;
     case "about":
       return <AboutPane />;
   }

@@ -108,6 +108,7 @@ function newClipFromEntry(id: string, entry: AddClipEntry): Clip {
     trimStartFrame: entry.trimStartFrame ?? 0,
     trimEndFrame: entry.trimEndFrame ?? 0,
     speed: 1,
+    reversed: false,
     volume: 1,
     fadeInFrames: 0,
     fadeOutFrames: 0,
@@ -136,6 +137,7 @@ function newClip(
     trimStartFrame: 0,
     trimEndFrame: 0,
     speed: 1,
+    reversed: false,
     volume: 1,
     fadeInFrames: 0,
     fadeOutFrames: 0,
@@ -503,6 +505,7 @@ export function createFallbackStore() {
             if (p.opacity !== undefined) (c.opacity = p.opacity), (changed = true);
             if (p.volume !== undefined) (c.volume = p.volume), (changed = true);
             if (p.speed !== undefined) (c.speed = p.speed), (changed = true);
+            if (p.reversed !== undefined) (c.reversed = p.reversed), (changed = true);
             if (p.transform !== undefined) (c.transform = p.transform), (changed = true);
             if (p.crop !== undefined) (c.crop = p.crop), (changed = true);
             if (p.textContent !== undefined) (c.textContent = p.textContent), (changed = true);

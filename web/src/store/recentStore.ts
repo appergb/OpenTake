@@ -73,14 +73,7 @@ export const useRecentStore = create<RecentState>((set, get) => ({
     // Clear active project from memory if it matches the removed path
     const projStore = useProjectStore.getState();
     if (projStore.projectPath === path) {
-      projStore.setProjectPath(null);
-      projStore.setMirror({
-        fps: 30,
-        width: 1920,
-        height: 1080,
-        settingsConfigured: false,
-        tracks: [],
-      }, 0);
+      projStore.clearProjectSnapshot();
     }
   },
   validateRecents: async () => {

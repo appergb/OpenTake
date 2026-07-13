@@ -6,7 +6,9 @@
 //! event so the front-end read-only mirror can re-sync (`docs/architecture/ARCHITECTURE.md`
 //! §2 — "真相源在 Rust，前端持镜像").
 
+mod account;
 mod captions;
+mod chat;
 mod commands;
 // `pub` so the ffmpeg-gated integration test (`tests/export_integration.rs`) can
 // drive the export orchestrator (`export::run_export`) against the library
@@ -16,7 +18,6 @@ mod haptic;
 mod library;
 mod mcp;
 mod media;
-mod mpv_bootstrap;
 mod render;
 mod search;
 mod secret;
@@ -37,6 +38,7 @@ use tauri::{Emitter, Manager, WindowEvent};
 #[cfg(target_os = "macos")]
 use tauri::RunEvent;
 
+use crate::media::prewarm::PrewarmScheduler;
 use crate::media::MediaState;
 
 /// Build and run the Tauri application. The `main.rs` binary calls this.
@@ -53,7 +55,6 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_libmpv::init())
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 // Background-run: don't quit, hide and return to Home.
@@ -77,12 +78,9 @@ pub fn run() {
                 .handle()
                 .set_activation_policy(tauri::ActivationPolicy::Regular);
 
-            // Mirror the libmpv wrapper to the plugin's exe-adjacent search path
-            // BEFORE the first play can dlopen it (see `mpv_bootstrap`).
-            mpv_bootstrap::ensure_wrapper(app.handle());
-
             // The one authoritative editing session, shared with every command.
             let core = AppCore::new();
+            let initial_project_epoch = core.project_revision().project_epoch;
 
             // Forward core events to the WebView. The closure runs on whatever
             // thread emitted the event (after the core released its lock), so
@@ -120,31 +118,42 @@ pub fn run() {
                 .join("workflows");
             mcp::spawn(
                 core.clone(),
+                workflows_dir.clone(),
+                cache_root.clone(),
+                models_dir.clone(),
+            );
+            let chat_state = chat::ChatState::new(
+                core.clone(),
                 workflows_dir,
                 cache_root.clone(),
                 models_dir.clone(),
             );
 
-            // Global asset library (#37/#54): a cross-project copy-on-favorite
-            // store under <app_data_dir>/OpenTake/Library, falling back to the OS
-            // temp dir if the platform data path is unavailable so favoriting
-            // still works. Lazily created on first write by the store itself.
-            let library_root = app
-                .path()
-                .app_data_dir()
-                .unwrap_or_else(|_| std::env::temp_dir())
-                .join("OpenTake")
-                .join("Library");
-            let library_store = LibraryStore::new(library_root);
+            // A global favorite must never silently become a temporary file.
+            // Keep the editor usable if app-data resolution fails, but make all
+            // library commands return the same explicit initialization error.
+            let library_state = match app.path().app_data_dir() {
+                Ok(data_dir) => crate::library::LibraryState::new(LibraryStore::new(
+                    data_dir.join("OpenTake").join("Library"),
+                )),
+                Err(error) => crate::library::LibraryState::unavailable(format!(
+                    "global library unavailable: could not resolve app data directory: {error}"
+                )),
+            };
 
             app.manage(core);
+            app.manage(chat_state);
             app.manage(MediaState::new(engine));
-            app.manage(crate::library::LibraryState::new(library_store));
+            app.manage(PrewarmScheduler::new(initial_project_epoch));
+            app.manage(library_state);
             // Lazily-acquired GPU context for timeline composite previews (#47).
             app.manage(render::RenderState::new());
             // Shared cancel flag for the in-flight `export_video` (#112 progress
             // + cancel). One export runs at a time, so a single flag suffices.
             app.manage(export::ExportControl::default());
+            // Optional account scaffold. It starts offline and never performs
+            // network I/O until the user configures a backend and logs in.
+            app.manage(account::AccountState::default());
 
             // Streaming playback (#53): start the loopback MJPEG transport on the
             // Tauri async runtime (mirrors the MCP server spawn) and register the
@@ -182,6 +191,7 @@ pub fn run() {
             media::relink_media,
             media::get_media,
             media::toggle_favorite,
+            media::sync_project_favorites,
             media::save_clip_as_media,
             media::extract_audio,
             media::get_waveform,
@@ -192,11 +202,19 @@ pub fn run() {
             render::composite_frame,
             render::capture_frame_to_media,
             export::export_video,
+            export::save_range_as_media,
             export::cancel_export,
-            export::export_bundle,
             secret::secret_save,
             secret::secret_load,
             secret::secret_delete,
+            account::account_set_backend_url,
+            account::account_get_backend_url,
+            account::account_login,
+            account::account_logout,
+            account::account_get_status,
+            chat::chat_send,
+            chat::chat_history,
+            chat::chat_cancel,
             transcribe::transcribe_model_status,
             transcribe::download_transcribe_model,
             transcribe::transcribe_media,
@@ -288,6 +306,32 @@ fn resolve_media_tools() {
 /// `kind` tag the front end listens for; the payload is the event itself
 /// (serialized with its `kind`-tagged shape).
 fn forward_event(app: &tauri::AppHandle, event: &CoreEvent) {
+    if let CoreEvent::ProjectOpened { project_epoch, .. } = event {
+        if let Some(prewarm) = app.try_state::<PrewarmScheduler>() {
+            prewarm.activate_project(*project_epoch);
+        }
+    }
+    #[cfg(feature = "playback-engine")]
+    {
+        if let Some(playback) = app.try_state::<playback::PlaybackState>() {
+            let invalidated = match event {
+                CoreEvent::TimelineChanged {
+                    project_epoch,
+                    version,
+                } => playback.invalidate_timeline(*project_epoch, *version),
+                CoreEvent::ProjectOpened { project_epoch, .. } => {
+                    playback.activate_project_event(*project_epoch)
+                }
+                CoreEvent::ProjectSaved { .. } | CoreEvent::MediaChanged { .. } => None,
+            };
+            if let (Some(identity), Some(server)) = (
+                invalidated,
+                app.try_state::<std::sync::Arc<playback::PreviewServer>>(),
+            ) {
+                server.clear_session(&identity);
+            }
+        }
+    }
     let name = match event {
         CoreEvent::TimelineChanged { .. } => "timeline_changed",
         CoreEvent::ProjectOpened { .. } => "project_opened",

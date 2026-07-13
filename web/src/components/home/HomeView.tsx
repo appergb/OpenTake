@@ -313,6 +313,7 @@ function ProjectLauncher({ recents }: { recents: RecentProject[] }) {
       onClick={() => setSelectedPath(null)}
       style={{
         flex: 1,
+        minWidth: 0,
         minHeight: 0,
         padding: "var(--titlebar-safe-top) var(--space-xl-xxl) var(--space-xl-xxl)",
         display: "flex",
@@ -341,6 +342,8 @@ function ProjectLauncher({ recents }: { recents: RecentProject[] }) {
           gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
           gap: "var(--space-sm)",
           minHeight: 0,
+          minWidth: 0,
+          overflowX: "hidden",
           overflowY: "auto",
         }}
       >
@@ -448,6 +451,7 @@ function ProjectGridCard({
       className="home-project-card"
       style={{
         position: "relative",
+        minWidth: 0,
         minHeight: 96,
         padding: "var(--space-md)",
         borderRadius: "var(--radius-md)",
@@ -458,7 +462,16 @@ function ProjectGridCard({
         cursor: "default",
       }}
     >
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "var(--space-md)" }}>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "flex-start",
+          gap: "var(--space-md)",
+          minWidth: 0,
+          width: "100%",
+        }}
+      >
         <div
           style={{
             width: 24,
@@ -474,7 +487,7 @@ function ProjectGridCard({
         >
           <Icon icon={Film} size={13} />
         </div>
-        <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ minWidth: 0, width: "100%" }}>
           <div
             style={{
               fontSize: "var(--fs-sm-md)",

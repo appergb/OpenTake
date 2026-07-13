@@ -8,6 +8,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use opentake_agent::mcp::core_handle::{AppCoreHandle, CoreHandle};
+use opentake_agent::mcp::media_bridge::MCP_REQUEST_BODY_MAX;
 use opentake_agent::mcp::server::build_router;
 use opentake_agent::plugin::registry::PluginRegistry;
 use opentake_core::AppCore;
@@ -86,5 +87,34 @@ async fn non_local_origin_is_rejected() {
         resp.status(),
         reqwest::StatusCode::FORBIDDEN,
         "remote Origin must be rejected by the loopback guard"
+    );
+}
+
+#[tokio::test]
+async fn oversized_request_body_is_rejected() {
+    let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(AppCore::new()));
+    let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+    let router = build_router(handle, registry);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/mcp"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .body("x".repeat(MCP_REQUEST_BODY_MAX + 1))
+        .send()
+        .await
+        .expect("request sent");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+        "oversized MCP body must be rejected before dispatch"
     );
 }

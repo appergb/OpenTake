@@ -11,9 +11,10 @@ import { forceRefresh } from "./sync";
 import { useEditorUiStore } from "./uiStore";
 import { useProjectStore } from "./projectStore";
 import { useRecentStore } from "./recentStore";
-import { refreshMedia } from "./mediaStore";
+import { refreshMedia, resetProjectMediaState } from "./mediaStore";
 import { openDialog, saveDialog } from "../lib/dialog";
 import { t } from "../i18n";
+import { stopNativePlaybackForProjectBoundary } from "../components/preview/nativePlaybackSession";
 
 const PROJECT_EXT = "opentake";
 
@@ -35,8 +36,12 @@ function withExt(path: string): string {
 export async function newProjectAndEnter(): Promise<void> {
   const save = await saveDialog();
   if (!save) {
-    await api.projectNew();
+    await stopNativePlaybackForProjectBoundary();
+    const snapshot = await api.projectNew();
+    useProjectStore.getState().replaceProjectSnapshot(snapshot);
+    resetProjectMediaState();
     await forceRefresh();
+    useEditorUiStore.getState().resetProjectRuntimeState();
     useEditorUiStore.getState().setView("editor");
     return;
   }
@@ -55,42 +60,139 @@ export async function newProjectAndEnter(): Promise<void> {
   if (typeof chosen !== "string") return; // cancelled
 
   const path = withExt(chosen);
-  await api.projectNew();
+  await stopNativePlaybackForProjectBoundary();
+  const snapshot = await api.projectNew();
+  useProjectStore.getState().replaceProjectSnapshot(snapshot);
+  resetProjectMediaState();
   await api.projectSave(path);
+  await forceRefresh();
   useProjectStore.getState().setProjectPath(path);
   useProjectStore.getState().markSaved();
   useRecentStore.getState().add(path);
-  await forceRefresh();
+  useEditorUiStore.getState().resetProjectRuntimeState();
   useEditorUiStore.getState().setView("editor");
+}
+
+interface SaveSnapshot {
+  snapshotMutationRevision: number;
+  projectEpoch: number;
+  projectPath: string;
+  timelineVersion: number;
+}
+
+let saveInFlight: Promise<void> | null = null;
+let activeSaveSnapshot: SaveSnapshot | null = null;
+let queuedExplicitSave: SaveSnapshot | null = null;
+
+function captureSaveSnapshot(): SaveSnapshot | null {
+  const current = useProjectStore.getState();
+  if (!current.projectPath) return null;
+  return {
+    snapshotMutationRevision: current.snapshotMutationRevision,
+    projectEpoch: current.projectEpoch,
+    projectPath: current.projectPath,
+    timelineVersion: current.timelineVersion,
+  };
+}
+
+function sameSnapshot(left: SaveSnapshot, right: SaveSnapshot): boolean {
+  return (
+    left.snapshotMutationRevision === right.snapshotMutationRevision &&
+    left.projectEpoch === right.projectEpoch &&
+    left.projectPath === right.projectPath &&
+    left.timelineVersion === right.timelineVersion
+  );
+}
+
+function sameProject(snapshot: SaveSnapshot): boolean {
+  const current = useProjectStore.getState();
+  return (
+    current.projectEpoch === snapshot.projectEpoch && current.projectPath === snapshot.projectPath
+  );
+}
+
+function currentProjectNeedsSave(): boolean {
+  const current = useProjectStore.getState();
+  return Boolean(current.projectPath) && current.timelineVersion !== current.lastSavedVersion;
+}
+
+async function runSaveCoordinator(): Promise<void> {
+  while (true) {
+    const explicitRequest = queuedExplicitSave;
+    queuedExplicitSave = null;
+    const snapshot = captureSaveSnapshot();
+    if (!snapshot) return;
+    if (explicitRequest && !sameProject(explicitRequest)) return;
+    activeSaveSnapshot = snapshot;
+
+    try {
+      await api.projectSave(null);
+    } catch (error) {
+      activeSaveSnapshot = null;
+      const afterFailure = captureSaveSnapshot();
+      const failureIsCurrent = Boolean(afterFailure && sameSnapshot(snapshot, afterFailure));
+      if (failureIsCurrent) {
+        const message = error instanceof Error ? error.message : String(error);
+        useEditorUiStore.getState().pushToast(t("project.saveFailed", { error: message }));
+      }
+      if (queuedExplicitSave) continue;
+      if (failureIsCurrent) return;
+      if (sameProject(snapshot) && currentProjectNeedsSave()) continue;
+      return;
+    }
+
+    activeSaveSnapshot = null;
+    const after = useProjectStore.getState();
+    if (
+      sameProject(snapshot) &&
+      after.snapshotMutationRevision === snapshot.snapshotMutationRevision &&
+      after.timelineVersion === snapshot.timelineVersion
+    ) {
+      after.markSaved(snapshot.timelineVersion);
+    }
+    if (queuedExplicitSave) continue;
+    if (sameProject(snapshot) && currentProjectNeedsSave()) continue;
+    return;
+  }
 }
 
 /**
  * Save the open project back to its bundle (`project_save(None)`). Used by the
- * Cmd/Ctrl+S shortcut and the debounced autosave. No-op when no project is open
- * (Home view) or outside Tauri. The backend already knows the bundle path from
- * the initial save, so no path is passed. Best-effort: a failure leaves the
- * dirty state so the next autosave/Cmd+S retries.
+ * Cmd/Ctrl+S shortcut and the debounced autosave. Concurrent triggers share one
+ * coordinator; if the document advances while a save is in flight, one fresh
+ * save follows before the new version can be marked persisted. Completions are
+ * bound to the initiating project identity so an old project cannot mark or
+ * toast a newly opened project.
  */
-export async function saveCurrentProject(): Promise<void> {
-  const { projectPath } = useProjectStore.getState();
-  if (!projectPath) return;
-  try {
-    await api.projectSave(null);
-    useProjectStore.getState().markSaved();
-  } catch {
-    // Keep the document dirty so a later save retries; surfaced via UI later.
+export function saveCurrentProject(): Promise<void> {
+  const request = captureSaveSnapshot();
+  if (!request) return Promise.resolve();
+  if (saveInFlight) {
+    if (!activeSaveSnapshot || !sameSnapshot(request, activeSaveSnapshot)) {
+      queuedExplicitSave = request;
+    }
+    return saveInFlight;
   }
+  queuedExplicitSave = request;
+  const run = runSaveCoordinator();
+  const tracked = run.finally(() => {
+    if (saveInFlight === tracked) saveInFlight = null;
+  });
+  saveInFlight = tracked;
+  return tracked;
 }
 
 /** Open `path` (a `.opentake` bundle), refresh the mirror, record it, and enter
  *  the editor. Used by both the dialog flow and the recents list. */
 export async function openProjectPath(path: string): Promise<void> {
+  await stopNativePlaybackForProjectBoundary();
   const snap = await api.projectOpen(path);
-  useProjectStore.getState().setMirror(snap.timeline, snap.version);
-  useProjectStore.getState().setProjectPath(path);
+  useProjectStore.getState().replaceProjectSnapshot(snap);
+  resetProjectMediaState();
   useProjectStore.getState().markSaved();
-  useRecentStore.getState().add(path);
+  if (snap.projectPath) useRecentStore.getState().add(snap.projectPath);
   await refreshMedia();
+  useEditorUiStore.getState().resetProjectRuntimeState();
   useEditorUiStore.getState().setView("editor");
 }
 

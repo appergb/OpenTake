@@ -58,6 +58,7 @@ impl CoreError {
     pub fn code(&self) -> &'static str {
         match self {
             CoreError::Edit(_) | CoreError::Media(_) => "validation",
+            CoreError::Project(ProjectError::CompatibilityReadOnly { .. }) => "validation",
             CoreError::Project(_) | CoreError::NoProjectOpen | CoreError::Unsupported(_) => {
                 "internal"
             }

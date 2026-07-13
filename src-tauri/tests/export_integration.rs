@@ -148,6 +148,51 @@ fn probe_frame_count(path: &Path) -> Option<u64> {
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
+fn probe_duration(path: &Path) -> Option<f64> {
+    let out = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+fn parse_rate(value: &str) -> Option<f64> {
+    let (numerator, denominator) = value.split_once('/')?;
+    let numerator: f64 = numerator.parse().ok()?;
+    let denominator: f64 = denominator.parse().ok()?;
+    (denominator > 0.0).then_some(numerator / denominator)
+}
+
+fn assert_summary_matches_real_probe(
+    summary: &opentake_tauri_lib::export::ExportSummary,
+    path: &Path,
+) {
+    let width: u32 = probe_field(path, "stream=width").unwrap().parse().unwrap();
+    let height: u32 = probe_field(path, "stream=height").unwrap().parse().unwrap();
+    let fps = parse_rate(&probe_field(path, "stream=avg_frame_rate").unwrap()).unwrap();
+    let frame_count = probe_frame_count(path).unwrap();
+    let duration = probe_duration(path).unwrap();
+    let trusted_duration = f64::from(summary.frame_count) / f64::from(summary.fps);
+
+    assert_eq!(summary.width, width);
+    assert_eq!(summary.height, height);
+    assert!((f64::from(summary.fps) - fps).abs() < 0.001);
+    assert_eq!(u64::try_from(summary.frame_count).unwrap(), frame_count);
+    assert!(
+        (trusted_duration - duration).abs() <= 1.0 / f64::from(summary.fps) + 0.001,
+        "producer duration {trusted_duration} must match ffprobe duration {duration}"
+    );
+    assert_eq!(summary.has_audio, has_audio_stream(path));
+}
+
 /// Build a 1080p timeline with one short video clip referencing `asset-1`.
 fn build_timeline(frames: i32, src_w: i32, src_h: i32, src_fps: f64) -> Timeline {
     let mut tl = Timeline::new(); // 30fps / 1920x1080 by default
@@ -250,6 +295,7 @@ fn export_full_timeline_produces_playable_mp4() {
     assert!(out.exists(), "output file should exist");
     assert_eq!(summary.frame_count, frames as i32);
     assert_eq!(summary.fps, sfps as i32);
+    assert_summary_matches_real_probe(&summary, &out);
 
     let pw: u32 = probe_field(&out, "stream=width").unwrap().parse().unwrap();
     let ph: u32 = probe_field(&out, "stream=height").unwrap().parse().unwrap();
@@ -319,6 +365,7 @@ fn export_4k_render_target_clears_downlevel_texture_limit() {
     };
 
     assert!(out.exists(), "4K output file should exist");
+    assert_summary_matches_real_probe(&summary, &out);
     // The render target / encode exceeds the old 2048 cap on at least one axis.
     assert!(
         summary.width > 2048 || summary.height > 2048,
@@ -373,6 +420,7 @@ fn export_with_audio_clip_mux_aac_stream() {
 
     assert!(out.exists(), "output file should exist");
     assert_eq!(summary.frame_count, frames as i32);
+    assert_summary_matches_real_probe(&summary, &out);
 
     // Video stream is still H.264 at the reported size.
     let vcodec = probe_field(&out, "stream=codec_name").unwrap();

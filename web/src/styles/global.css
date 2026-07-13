@@ -16,10 +16,7 @@ body,
 }
 
 body {
-  /* Transparent so the native-layer mpv video (playback engine) can show
-     through the preview hole; every panel paints its own background
-     (PanelShell/TitleBar), so the chrome stays opaque. */
-  background: transparent;
+  background: var(--bg-base);
   color: var(--text-primary);
   font-family: var(--font-ui);
   font-size: var(--fs-md);
@@ -61,6 +58,23 @@ button {
   border: none;
   padding: 0;
   cursor: default;
+}
+
+.timeline-clip-access-button {
+  border: 2px solid transparent;
+  border-radius: var(--radius-sm);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.timeline-clip-access-button:focus-visible {
+  opacity: 1;
+  outline: none;
+  background: rgba(72, 170, 255, 0.16);
+  border-color: var(--accent-primary);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.22),
+    0 0 0 4px rgba(72, 170, 255, 0.22);
 }
 
 input,

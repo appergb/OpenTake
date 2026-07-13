@@ -37,7 +37,8 @@ use std::path::{Path, PathBuf};
 use opentake_domain::{ClipType, MediaAsset, MediaManifest, MediaManifestEntry, Timeline};
 use opentake_ops::command::{self, EditCommand, EditResult};
 use opentake_ops::{EditorState, IdGen};
-use opentake_project::{GenerationLog, Project};
+use opentake_project::{GenerationLog, Project, ProjectCompatibility, ProjectRoot};
+use same_file::Handle;
 
 use crate::error::{CoreError, Result};
 
@@ -114,8 +115,15 @@ pub struct EditorSession {
     /// Absolute path to the `.opentake` bundle, or `None` for an unsaved project.
     project_dir: Option<PathBuf>,
 
+    /// Retained no-follow authority for the concrete opened/saved bundle.
+    /// Same-project reads and writes never re-resolve [`Self::project_dir`].
+    project_root: Option<ProjectRoot>,
+
     /// Append-only AI generation audit log (persisted as `generation-log.json`).
     generation_log: GenerationLog,
+
+    /// Persisted fields this build cannot safely write back.
+    compatibility: ProjectCompatibility,
 }
 
 impl Default for EditorSession {
@@ -132,7 +140,9 @@ impl EditorSession {
         EditorSession {
             state: EditorState::default(),
             project_dir: None,
+            project_root: None,
             generation_log: GenerationLog::new(),
+            compatibility: ProjectCompatibility::default(),
         }
     }
 
@@ -144,14 +154,18 @@ impl EditorSession {
     /// Propagates [`opentake_project::ProjectError`] (missing/corrupt
     /// `project.json`, etc.) as [`CoreError::Project`].
     pub fn open_project(path: impl AsRef<Path>) -> Result<Self> {
-        let project = Project::open(path)?;
+        let project_root = ProjectRoot::open(path)?;
+        let project = Project::open_from_root(&project_root)?;
+        let compatibility = project.compatibility().clone();
         // EditorState::new wraps timeline + manifest with empty history at
         // version 0 — exactly the post-open state we want.
         let state = EditorState::new(project.timeline, project.manifest);
         Ok(EditorSession {
             state,
             project_dir: Some(project.bundle_path),
+            project_root: Some(project_root),
             generation_log: project.generation_log.unwrap_or_default(),
+            compatibility,
         })
     }
 
@@ -173,13 +187,26 @@ impl EditorSession {
     /// those references silently dangle after Save-As, since `bundle.rs::save`
     /// "never creates or deletes `media/`". A plain save (target equals the
     /// current dir) copies nothing; a missing source `media/` is a no-op; a
-    /// partial-copy failure propagates as a real error (never a half-copied
-    /// bundle) — see [`opentake_project::copy_media_dir`].
+    /// partial-copy failure propagates as a real error. Both source and
+    /// destination traversal use the retained [`ProjectRoot`] authorities.
     ///
     /// Errors with [`CoreError::NoProjectOpen`] when neither a path nor a
     /// remembered project dir is available.
     pub fn save_project(&mut self, path: Option<PathBuf>) -> Result<PathBuf> {
         self.save_project_with_thumbnail(path, None)
+    }
+
+    /// Persist the current media manifest as the sole durable component commit.
+    /// Used by library workflows, which do not mutate any other project state.
+    pub fn save_media_manifest(&mut self) -> Result<PathBuf> {
+        self.ensure_mutable()?;
+        let target = self.project_dir.clone().ok_or(CoreError::NoProjectOpen)?;
+        let root = self.project_root.as_ref().ok_or(CoreError::NoProjectOpen)?;
+        let mut project =
+            Project::new_with_compatibility(target.clone(), self.compatibility.clone());
+        project.manifest = self.state.manifest.clone();
+        project.save_manifest_to_root(root)?;
+        Ok(target)
     }
 
     /// Like [`Self::save_project`] but also writes a cover `thumbnail.jpg` when
@@ -196,15 +223,29 @@ impl EditorSession {
         path: Option<PathBuf>,
         thumbnail: Option<Vec<u8>>,
     ) -> Result<PathBuf> {
+        self.ensure_mutable()?;
         // Remember the currently-open bundle before we adopt any new target, so
         // a save-as knows the source `media/` to carry across.
         let previous_dir = self.project_dir.clone();
-        let target = match path.or_else(|| previous_dir.clone()) {
+        let requested_target = match path.or_else(|| previous_dir.clone()) {
             Some(p) => p,
             None => return Err(CoreError::NoProjectOpen),
         };
+        let same_target = if previous_dir.as_deref() == Some(requested_target.as_path()) {
+            true
+        } else if let Some(root) = &self.project_root {
+            root.matches_path(&requested_target)?
+        } else {
+            false
+        };
+        let target = if same_target {
+            previous_dir.clone().unwrap_or(requested_target)
+        } else {
+            requested_target
+        };
 
-        let mut project = Project::new(target.clone());
+        let mut project =
+            Project::new_with_compatibility(target.clone(), self.compatibility.clone());
         project.timeline = self.state.timeline.clone();
         project.manifest = self.state.manifest.clone();
         // Cover image (upstream `snapshotThumbnail` → `thumbnail.jpg`): only set
@@ -215,21 +256,18 @@ impl EditorSession {
         if !self.generation_log.entries.is_empty() {
             project.generation_log = Some(self.generation_log.clone());
         }
-        project.save()?;
-
-        // Save-as (target differs from the previously-open bundle): fold the
-        // source bundle's `media/` into the new one before adopting it, so
-        // internal media survives the move. `copy_media_dir` is itself a no-op
-        // when source == dest, but only copy when we truly had a prior bundle at
-        // a different path (a first save of a never-saved project has no source
-        // media/ to carry).
-        if let Some(source_dir) = &previous_dir {
-            if source_dir != &target {
-                opentake_project::copy_media_dir(source_dir, &target)?;
-            }
-        }
+        let new_root = if same_target {
+            let root = self.project_root.as_ref().ok_or(CoreError::NoProjectOpen)?;
+            project.save_to_root(root)?;
+            None
+        } else {
+            Some(project.publish_complete_to(&target, self.project_root.as_ref())?)
+        };
 
         self.project_dir = Some(target.clone());
+        if let Some(root) = new_root {
+            self.project_root = Some(root);
+        }
         Ok(target)
     }
 
@@ -238,6 +276,7 @@ impl EditorSession {
     /// `opentake-ops`. `Undo`/`Redo` are ordinary commands here (the ops layer
     /// models them as such), so the session needs no separate undo plumbing.
     pub fn apply(&mut self, command: EditCommand, ids: &dyn IdGen) -> Result<EditResult> {
+        self.ensure_mutable()?;
         Ok(command::apply(&mut self.state, command, ids)?)
     }
 
@@ -268,6 +307,23 @@ impl EditorSession {
         name: impl Into<String>,
         probe: &ProbedMedia,
     ) -> Result<MediaManifestEntry> {
+        self.import_media_file_checked(path, id, name, probe, || Ok(()))
+    }
+
+    /// Import one file and roll the manifest back if `postcondition` fails.
+    /// Save-as-media uses this to bind its final retained-file identity check to
+    /// the live manifest mutation: an attacker-triggered swap can never leave a
+    /// dangling entry behind after the command reports failure.
+    pub fn import_media_file_checked(
+        &mut self,
+        path: impl AsRef<Path>,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+        postcondition: impl FnOnce() -> Result<()>,
+    ) -> Result<MediaManifestEntry> {
+        self.ensure_mutable()?;
+        let manifest_before = self.state.manifest.clone();
         let path = path.as_ref();
         let kind = importable_clip_type(path).ok_or(CoreError::Unsupported("media"))?;
 
@@ -291,16 +347,22 @@ impl EditorSession {
         // references it stays valid — instead of appending a second entry for the
         // same source. `source` is the resolved path (external abs or project
         // relative), identical for the same file under the same project.
-        if let Some(existing) = self
+        let entry = if let Some(existing) = self
             .state
             .manifest
             .entries
             .iter()
             .find(|e| e.source == entry.source)
         {
-            return Ok(existing.clone());
+            existing.clone()
+        } else {
+            self.state.manifest.entries.push(entry.clone());
+            entry
+        };
+        if let Err(error) = postcondition() {
+            self.state.manifest = manifest_before;
+            return Err(error);
         }
-        self.state.manifest.entries.push(entry.clone());
         Ok(entry)
     }
 
@@ -317,6 +379,7 @@ impl EditorSession {
         path: impl AsRef<Path>,
         probe: &ProbedMedia,
     ) -> Result<MediaManifestEntry> {
+        self.ensure_mutable()?;
         let path = path.as_ref();
         let kind = importable_clip_type(path).ok_or(CoreError::Unsupported("media"))?;
         let entry = self
@@ -355,14 +418,42 @@ impl EditorSession {
     /// action, not a timeline edit, so it never enters undo and leaves the
     /// timeline version untouched. Unknown ids are ignored. Returns the number of
     /// ids whose favorite state actually changed.
-    pub fn set_media_favorite(&mut self, asset_ids: &[String], favorite: bool) -> usize {
-        self.state.manifest.set_favorites(asset_ids, favorite)
+    pub fn set_media_favorite(&mut self, asset_ids: &[String], favorite: bool) -> Result<usize> {
+        self.ensure_mutable()?;
+        Ok(self.state.manifest.set_favorites(asset_ids, favorite))
+    }
+
+    /// Set or clear one asset's content-addressed global favorite id. This is a
+    /// manifest mutation outside undo, matching [`Self::set_media_favorite`].
+    pub fn set_media_global_favorite(
+        &mut self,
+        asset_id: &str,
+        library_id: Option<String>,
+    ) -> Result<bool> {
+        self.ensure_mutable()?;
+        Ok(self
+            .state
+            .manifest
+            .set_global_favorite(asset_id, library_id))
+    }
+
+    /// Clear every current-project mirror of a removed global-library entry.
+    pub fn clear_media_global_favorite_id(&mut self, library_id: &str) -> Result<usize> {
+        self.ensure_mutable()?;
+        Ok(self.state.manifest.clear_global_favorite_id(library_id))
     }
 
     /// A clone of the current media manifest (read-only mirror for the media
     /// panel). The manifest is the persisted id→file catalog.
     pub fn media(&self) -> MediaManifest {
         self.state.manifest.clone()
+    }
+
+    /// Restore a previously captured manifest after an application-layer
+    /// transaction fails. Kept crate-private so ordinary callers cannot bypass
+    /// the command/session invariants.
+    pub(crate) fn restore_media(&mut self, manifest: MediaManifest) {
+        self.state.manifest = manifest;
     }
 
     /// The manifest entry for `asset_id`, if present (lookup without cloning the
@@ -401,9 +492,27 @@ impl EditorSession {
         self.project_dir.as_deref()
     }
 
+    /// Compare a caller's retained no-follow bundle handle with the handle
+    /// retained when this exact session opened or saved the project.
+    pub(crate) fn matches_project_root_identity(&self, current: &Handle) -> Result<bool> {
+        self.ensure_mutable()?;
+        let expected = self.project_root.as_ref().ok_or(CoreError::NoProjectOpen)?;
+        Ok(expected.matches_identity(current))
+    }
+
     /// Read-only access to the generation log.
     pub fn generation_log(&self) -> &GenerationLog {
         &self.generation_log
+    }
+
+    /// Compatibility state inherited from the opened project.
+    pub fn compatibility(&self) -> &ProjectCompatibility {
+        &self.compatibility
+    }
+
+    pub(crate) fn ensure_mutable(&self) -> Result<()> {
+        self.compatibility.ensure_writable()?;
+        Ok(())
     }
 
     /// Test-only seam: reseat the editable state from a prebuilt timeline (empty
@@ -497,6 +606,43 @@ mod tests {
         assert!(!reopened.can_undo());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_project_save_uses_the_root_retained_when_the_session_opened() {
+        let root = std::env::temp_dir().join(format!(
+            "opentake-core-session-retained-save-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let projects = root.join("projects");
+        let retained = root.join("projects-retained");
+        let bundle = projects.join("A.opentake");
+        let _ = std::fs::remove_dir_all(&root);
+        let mut project = Project::new(&bundle);
+        project.timeline = one_video_track();
+        project.save().unwrap();
+        let mut session = EditorSession::open_project(&bundle).unwrap();
+
+        std::fs::rename(&projects, &retained).unwrap();
+        Project::new(&bundle).save().unwrap();
+        session
+            .apply(add_one_clip_cmd(), &SeqIdGen::new("retained-"))
+            .unwrap();
+        session.save_project(None).unwrap();
+
+        assert!(Project::open(&bundle).unwrap().timeline.tracks.is_empty());
+        assert_eq!(
+            Project::open(retained.join("A.opentake"))
+                .unwrap()
+                .timeline
+                .tracks[0]
+                .clips
+                .len(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -711,6 +857,29 @@ mod tests {
         assert!(s.media().entries.is_empty());
     }
 
+    #[test]
+    fn global_favorite_interfaces_keep_project_mirrors_in_sync() {
+        let mut session = EditorSession::new_project();
+        session
+            .import_media_file("/abs/clip.mp4", "asset-1", "clip", &ProbedMedia::default())
+            .unwrap();
+
+        assert!(session
+            .set_media_global_favorite("asset-1", Some("content-hash".into()))
+            .unwrap());
+        assert_eq!(
+            session.media().library_favorite_id("asset-1"),
+            Some("content-hash")
+        );
+        assert_eq!(
+            session
+                .clear_media_global_favorite_id("content-hash")
+                .unwrap(),
+            1
+        );
+        assert!(!session.media().is_favorite("asset-1"));
+    }
+
     // --- Save-as copies the project-internal media/ directory (Item 1) ---
 
     /// A per-call-unique scratch dir under the system temp dir, removed on drop.
@@ -831,6 +1000,37 @@ mod tests {
         let after = std::fs::metadata(&media_file).unwrap();
         assert_eq!(before.len(), after.len());
         assert!(media_file.is_file());
+    }
+
+    #[test]
+    fn path_alias_to_the_retained_root_is_a_same_project_save() {
+        let tmp = TmpDir::new("same-root-alias");
+        let bundle = tmp.path().join("Same.opentake");
+        let mut session = seed_bundle_with_internal_media(&bundle, "clip.png", b"media bytes");
+        std::fs::create_dir_all(bundle.join("chat-sessions")).unwrap();
+        std::fs::write(bundle.join("chat-sessions/thread.json"), b"chat bytes").unwrap();
+        std::fs::write(bundle.join("thumbnail.jpg"), b"cover bytes").unwrap();
+        let alias_hop = tmp.path().join("alias-hop");
+        std::fs::create_dir_all(&alias_hop).unwrap();
+        let alias = alias_hop.join("..").join("Same.opentake");
+
+        let written = session.save_project(Some(alias)).unwrap();
+
+        assert_eq!(written, bundle);
+        assert_eq!(session.project_dir(), Some(bundle.as_path()));
+        assert_eq!(
+            std::fs::read(bundle.join("media/clip.png")).unwrap(),
+            b"media bytes"
+        );
+        assert_eq!(
+            std::fs::read(bundle.join("chat-sessions/thread.json")).unwrap(),
+            b"chat bytes"
+        );
+        assert_eq!(
+            std::fs::read(bundle.join("thumbnail.jpg")).unwrap(),
+            b"cover bytes"
+        );
+        assert!(!tmp.path().join(".Same.opentake.opentake-backup").exists());
     }
 
     #[test]

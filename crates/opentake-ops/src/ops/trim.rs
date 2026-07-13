@@ -31,13 +31,19 @@ pub fn trim_clip_internal(
     let prev_end = clip.trim_end_frame;
     let prev_duration = clip.duration_frames;
     let speed = clip.speed;
+    let reversed = clip.reversed;
 
     let delta_start_source = trim_start_frame - prev_start;
     let delta_end_source = trim_end_frame - prev_end;
     let delta_start_timeline = (delta_start_source as f64 / speed).round() as i32;
     let delta_end_timeline = (delta_end_source as f64 / speed).round() as i32;
     let new_duration = prev_duration - delta_start_timeline - delta_end_timeline;
-    let new_start_frame = clip.start_frame + delta_start_timeline;
+    let new_start_frame = clip.start_frame
+        + if reversed {
+            delta_end_timeline
+        } else {
+            delta_start_timeline
+        };
 
     let c = &mut timeline.tracks[ti].clips[ci];
     c.trim_start_frame = trim_start_frame;
@@ -171,5 +177,25 @@ mod tests {
         // right edge: newEnd = cur_trim_end - round(delta*speed).
         let (ts, te) = trim_values(ClipType::Video, 1.0, 0, 50, TrimEdge::Right, 10);
         assert_eq!((ts, te), (0, 40));
+    }
+
+    #[test]
+    fn trim_reversed_clip_keeps_visible_window() {
+        let mut c = Clip::new("c", "a", 100, 30);
+        c.trim_start_frame = 5;
+        c.trim_end_frame = 7;
+        c.reversed = true;
+        let source_before = c.source_duration_frames();
+        let mut tl = tl(c);
+
+        trim_clip_internal(&mut tl, "c", 5, 17);
+
+        let c = &tl.tracks[0].clips[0];
+        assert!(c.reversed);
+        assert_eq!(c.trim_start_frame, 5);
+        assert_eq!(c.trim_end_frame, 17);
+        assert_eq!(c.start_frame, 110);
+        assert_eq!(c.duration_frames, 20);
+        assert_eq!(c.source_duration_frames(), source_before);
     }
 }

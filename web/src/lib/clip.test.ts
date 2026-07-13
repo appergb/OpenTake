@@ -68,13 +68,23 @@ function timeline(tracks: Track[]): Timeline {
   return { fps: 30, width: 1920, height: 1080, settingsConfigured: true, tracks };
 }
 
-function tc(over: Partial<{ durationFrames: number; speed: number; trimStartFrame: number; trimEndFrame: number; mediaType: ClipType }> = {}) {
+function tc(
+  over: Partial<{
+    durationFrames: number;
+    speed: number;
+    trimStartFrame: number;
+    trimEndFrame: number;
+    mediaType: ClipType;
+    reversed: boolean;
+  }> = {},
+) {
   return {
     durationFrames: over.durationFrames ?? 100,
     speed: over.speed ?? 1,
     trimStartFrame: over.trimStartFrame ?? 0,
     trimEndFrame: over.trimEndFrame ?? 0,
     mediaType: over.mediaType ?? ("video" as ClipType),
+    reversed: over.reversed ?? false,
   };
 }
 
@@ -97,6 +107,17 @@ describe("trimSourceValues", () => {
   it("right edge: newEnd = trimEnd - round(delta*speed)", () => {
     expect(trimSourceValues(tc({ trimEndFrame: 50 }), "right", 10)).toEqual({ trimStartFrame: 0, trimEndFrame: 40 });
   });
+
+  it("reversedTrimRightKeepsSourceWindow", () => {
+    expect(trimSourceValues(tc({ reversed: true, trimStartFrame: 15, trimEndFrame: 7 }), "right", 10)).toEqual({
+      trimStartFrame: 5,
+      trimEndFrame: 7,
+    });
+    expect(trimSourceValues(tc({ reversed: true, trimStartFrame: 5, trimEndFrame: 7 }), "left", 10)).toEqual({
+      trimStartFrame: 5,
+      trimEndFrame: 17,
+    });
+  });
 });
 
 describe("clampTrimDeltaFrames", () => {
@@ -112,6 +133,10 @@ describe("clampTrimDeltaFrames", () => {
   });
   it("right: caps positive extend by available trailing source (video)", () => {
     expect(clampTrimDeltaFrames(tc({ trimEndFrame: 8 }), "right", 50)).toBe(8);
+  });
+  it("reversed video swaps which source edge bounds each drag direction", () => {
+    expect(clampTrimDeltaFrames(tc({ reversed: true, trimEndFrame: 8 }), "left", -50)).toBe(-8);
+    expect(clampTrimDeltaFrames(tc({ reversed: true, trimStartFrame: 6 }), "right", 50)).toBe(6);
   });
   it("image/text left: no source floor on negative extend", () => {
     expect(clampTrimDeltaFrames(tc({ trimStartFrame: 0, mediaType: "image" as ClipType }), "left", -50)).toBe(-50);
