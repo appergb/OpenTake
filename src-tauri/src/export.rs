@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -43,8 +43,9 @@ use opentake_core::AppCore;
 use opentake_domain::{Clip, ClipType, MediaSource, TextStyle};
 use opentake_media::encode::{mix, ClipAudio, MIX_SAMPLE_RATE};
 use opentake_media::{
-    decode_frame_at, extract_pcm, ExportPreset, ExportResolution as EncodeResolution, FrameRequest,
-    PcmBuffer, PcmFormat, PcmSpec, RgbaFrame, VideoCodec, VideoEncoder,
+    decode_frame_at, extract_pcm, extract_pcm_cancellable_with_progress, ExportPreset,
+    ExportResolution as EncodeResolution, FrameRequest, MediaCancelToken, PcmBuffer, PcmFormat,
+    PcmProgressCallback, PcmSpec, RgbaFrame, VideoCodec, VideoEncoder,
 };
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::{
@@ -150,6 +151,7 @@ pub const CANCELLED_SENTINEL: &str = "export cancelled";
 pub struct ExportControl {
     cancel: Arc<AtomicBool>,
     busy: Arc<AtomicBool>,
+    media_cancel: Arc<Mutex<MediaCancelToken>>,
 }
 
 #[derive(Debug)]
@@ -167,17 +169,32 @@ impl ExportControl {
     /// Arm for a new export: clears any stale cancel request from a previous run.
     fn reset(&self) {
         self.cancel.store(false, Ordering::Relaxed);
+        *self
+            .media_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = MediaCancelToken::new();
     }
 
     /// Request cancellation of the in-flight export.
     fn request_cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
+        self.media_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .cancel();
     }
 
     /// True once [`ExportControl::request_cancel`] has been called since the
     /// last [`ExportControl::reset`].
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
+    }
+
+    fn media_cancel_token(&self) -> MediaCancelToken {
+        self.media_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     pub(crate) fn try_begin(&self) -> Result<ExportGuard<'_>, String> {
@@ -421,28 +438,78 @@ const AUDIO_DECODE_SPEC: PcmSpec = PcmSpec {
     format: PcmFormat::F32,
 };
 
+pub(crate) type AudioExportProgress = Arc<dyn Fn(i32, i32) + Send + Sync>;
+
+pub(crate) const AUDIO_PROGRESS_TOTAL: i32 = 1_000;
+const AUDIO_DECODE_END: i32 = 800;
+const AUDIO_MIX_START: i32 = 850;
+const AUDIO_MIX_END: i32 = 980;
+const AUDIO_CANCEL_CHUNK_SAMPLES: usize = 8 * 1024;
+
+fn decode_pcm_with_export_control<F>(
+    control: &ExportControl,
+    path: &Path,
+    range: Option<(f64, f64)>,
+    progress: Option<PcmProgressCallback>,
+    decode: F,
+) -> opentake_media::Result<PcmBuffer>
+where
+    F: FnOnce(
+        &Path,
+        &PcmSpec,
+        Option<(f64, f64)>,
+        &MediaCancelToken,
+        Option<PcmProgressCallback>,
+    ) -> opentake_media::Result<PcmBuffer>,
+{
+    let cancel = control.media_cancel_token();
+    decode(path, &AUDIO_DECODE_SPEC, range, &cancel, progress)
+}
+
+fn check_audio_cancel(control: &ExportControl) -> Result<(), String> {
+    if control.is_cancelled() {
+        Err(CANCELLED_SENTINEL.to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 fn retime_pcm_to_len(samples: &[f32], target_len: usize) -> Vec<f32> {
+    retime_pcm_to_len_with_control(samples, target_len, None)
+        .expect("retime without cancellation cannot fail")
+}
+
+fn retime_pcm_to_len_with_control(
+    samples: &[f32],
+    target_len: usize,
+    control: Option<&ExportControl>,
+) -> Result<Vec<f32>, String> {
     if samples.is_empty() || target_len == 0 {
-        return Vec::new();
-    }
-    if samples.len() == 1 {
-        return vec![samples[0]; target_len];
-    }
-    if target_len == 1 {
-        return vec![samples[0]];
+        return Ok(Vec::new());
     }
 
     let source_span = (samples.len() - 1) as f64;
-    let target_span = (target_len - 1) as f64;
-    (0..target_len)
-        .map(|index| {
+    let target_span = target_len.saturating_sub(1) as f64;
+    let mut retimed = Vec::with_capacity(target_len);
+    for index in 0..target_len {
+        if index.is_multiple_of(AUDIO_CANCEL_CHUNK_SAMPLES) {
+            if let Some(control) = control {
+                check_audio_cancel(control)?;
+            }
+        }
+        let value = if samples.len() == 1 || target_len == 1 {
+            samples[0]
+        } else {
             let source = index as f64 * source_span / target_span;
             let lo = source.floor() as usize;
             let hi = source.ceil() as usize;
             let fraction = (source - lo as f64) as f32;
             samples[lo] + (samples[hi] - samples[lo]) * fraction
-        })
-        .collect()
+        };
+        retimed.push(value);
+    }
+    Ok(retimed)
 }
 
 /// Project one audio clip into a [`ClipAudio`] for the mixdown: decode its
@@ -456,6 +523,8 @@ fn project_clip_audio(
     clip: &Clip,
     media: &HashMap<String, MediaInfo>,
     timeline_fps: i32,
+    control: Option<&ExportControl>,
+    decode_progress: Option<PcmProgressCallback>,
 ) -> Result<Option<ClipAudio>, String> {
     if clip.duration_frames <= 0 || timeline_fps <= 0 {
         return Ok(None);
@@ -468,20 +537,34 @@ fn project_clip_audio(
         return Ok(None);
     };
 
-    let pcm = match extract_pcm(&info.path, &AUDIO_DECODE_SPEC, Some((lo, hi))) {
+    let decoded = match control {
+        Some(control) => decode_pcm_with_export_control(
+            control,
+            &info.path,
+            Some((lo, hi)),
+            decode_progress,
+            extract_pcm_cancellable_with_progress,
+        ),
+        None => extract_pcm(&info.path, &AUDIO_DECODE_SPEC, Some((lo, hi))),
+    };
+    let pcm = match decoded {
         Ok(p) => p,
         // A clip pointing at a video with no audio track simply contributes
         // silence — not an export failure.
         Err(opentake_media::MediaError::NoTrack(_, _)) => return Ok(None),
+        Err(opentake_media::MediaError::Cancelled) => return Err(CANCELLED_SENTINEL.to_string()),
         Err(e) => return Err(format!("audio decode failed for {}: {e}", clip.media_ref)),
     };
+    if let Some(control) = control {
+        check_audio_cancel(control)?;
+    }
     if pcm.samples_f32.is_empty() {
         return Ok(None);
     }
 
     let target_len = ((clip.duration_frames as f64) / timeline_fps as f64 * MIX_SAMPLE_RATE as f64)
         .round() as usize;
-    let samples = retime_pcm_to_len(&pcm.samples_f32, target_len);
+    let samples = retime_pcm_to_len_with_control(&pcm.samples_f32, target_len, control)?;
     if samples.is_empty() {
         return Ok(None);
     }
@@ -497,6 +580,11 @@ fn project_clip_audio(
     let mut gains = Vec::with_capacity(samples.len());
     let mut all_unity = true;
     for k in 0..samples.len() {
+        if k.is_multiple_of(AUDIO_CANCEL_CHUNK_SAMPLES) {
+            if let Some(control) = control {
+                check_audio_cancel(control)?;
+            }
+        }
         let tl_frame = clip.start_frame + (k as f64 / samples_per_frame).floor() as i32;
         let g = clip.volume_at(tl_frame) as f32;
         if (g - 1.0).abs() > f32::EPSILON {
@@ -512,6 +600,68 @@ fn project_clip_audio(
     }))
 }
 
+fn mix_clips_with_control(
+    clips: &[ClipAudio],
+    control: &ExportControl,
+    progress: Option<&dyn Fn(usize, usize)>,
+) -> Result<Vec<f32>, String> {
+    for (index, clip) in clips.iter().enumerate() {
+        if !clip.gains.is_empty() && clip.gains.len() != clip.samples.len() {
+            return Err(format!(
+                "audio mix failed: clip {index}: gains len {} != samples len {}",
+                clip.gains.len(),
+                clip.samples.len()
+            ));
+        }
+    }
+    let total = clips
+        .iter()
+        .map(|clip| clip.start_sample + clip.samples.len())
+        .max()
+        .unwrap_or(0);
+    let work_total = clips
+        .iter()
+        .map(|clip| clip.samples.len())
+        .sum::<usize>()
+        .saturating_add(total)
+        .max(1);
+    let mut completed = 0_usize;
+    let mut mixed = vec![0.0_f32; total];
+
+    for clip in clips {
+        for (offset, &sample) in clip.samples.iter().enumerate() {
+            if completed.is_multiple_of(AUDIO_CANCEL_CHUNK_SAMPLES) {
+                check_audio_cancel(control)?;
+                if let Some(report) = progress {
+                    report(completed, work_total);
+                }
+            }
+            let gain = if clip.gains.is_empty() {
+                1.0
+            } else {
+                clip.gains[offset]
+            };
+            mixed[clip.start_sample + offset] += sample * gain;
+            completed += 1;
+        }
+    }
+    for sample in &mut mixed {
+        if completed.is_multiple_of(AUDIO_CANCEL_CHUNK_SAMPLES) {
+            check_audio_cancel(control)?;
+            if let Some(report) = progress {
+                report(completed, work_total);
+            }
+        }
+        *sample = sample.clamp(-1.0, 1.0);
+        completed += 1;
+    }
+    check_audio_cancel(control)?;
+    if let Some(report) = progress {
+        report(work_total, work_total);
+    }
+    Ok(mixed)
+}
+
 /// Decode + mix every audio-bearing clip on the timeline into one mono buffer.
 ///
 /// Walks audio and video clips (video clips can carry an audio track), projects
@@ -521,8 +671,18 @@ fn project_clip_audio(
 fn mix_timeline_audio(
     timeline: &opentake_domain::Timeline,
     media: &HashMap<String, MediaInfo>,
+    control: Option<&ExportControl>,
+    on_progress: Option<AudioExportProgress>,
 ) -> Result<Option<PcmBuffer>, String> {
+    let eligible_count = timeline
+        .tracks
+        .iter()
+        .filter(|track| !track.muted)
+        .flat_map(|track| &track.clips)
+        .filter(|clip| matches!(clip.media_type, ClipType::Audio | ClipType::Video))
+        .count();
     let mut clips_audio: Vec<ClipAudio> = Vec::new();
+    let mut eligible_index = 0_usize;
     for track in &timeline.tracks {
         if track.muted {
             continue;
@@ -532,7 +692,28 @@ fn mix_timeline_audio(
             if clip.media_type != ClipType::Audio && clip.media_type != ClipType::Video {
                 continue;
             }
-            if let Some(ca) = project_clip_audio(clip, media, timeline.fps)? {
+            let decode_progress = match (control, &on_progress) {
+                (Some(_), Some(emit)) => {
+                    let emit = Arc::clone(emit);
+                    let index = eligible_index;
+                    Some(Arc::new(move |done: usize, total: usize| {
+                        let total = total.max(1);
+                        let numerator = index
+                            .saturating_mul(AUDIO_DECODE_END as usize)
+                            .saturating_mul(total)
+                            .saturating_add(
+                                done.min(total).saturating_mul(AUDIO_DECODE_END as usize),
+                            );
+                        let denominator = eligible_count.saturating_mul(total).max(1);
+                        emit((numerator / denominator) as i32, AUDIO_PROGRESS_TOTAL);
+                    }) as PcmProgressCallback)
+                }
+                _ => None,
+            };
+            eligible_index += 1;
+            if let Some(ca) =
+                project_clip_audio(clip, media, timeline.fps, control, decode_progress)?
+            {
                 clips_audio.push(ca);
             }
         }
@@ -540,7 +721,23 @@ fn mix_timeline_audio(
     if clips_audio.is_empty() {
         return Ok(None);
     }
-    let mixed = mix::mix_clips(&clips_audio).map_err(|e| format!("audio mix failed: {e}"))?;
+    let mixed = match control {
+        Some(control) => {
+            if let Some(emit) = &on_progress {
+                emit(AUDIO_MIX_START, AUDIO_PROGRESS_TOTAL);
+            }
+            let mix_progress = |done: usize, total: usize| {
+                if let Some(emit) = &on_progress {
+                    let span = (AUDIO_MIX_END - AUDIO_MIX_START) as usize;
+                    let mapped = AUDIO_MIX_START
+                        + (done.min(total.max(1)).saturating_mul(span) / total.max(1)) as i32;
+                    emit(mapped, AUDIO_PROGRESS_TOTAL);
+                }
+            };
+            mix_clips_with_control(&clips_audio, control, Some(&mix_progress))?
+        }
+        None => mix::mix_clips(&clips_audio).map_err(|e| format!("audio mix failed: {e}"))?,
+    };
     if mixed.is_empty() {
         return Ok(None);
     }
@@ -550,13 +747,15 @@ fn mix_timeline_audio(
     }))
 }
 
-pub(crate) fn mix_timeline_audio_for_manifest(
+pub(crate) fn mix_timeline_audio_for_manifest_with_control(
     timeline: &opentake_domain::Timeline,
     manifest: &opentake_domain::MediaManifest,
     project_dir: &Option<PathBuf>,
+    control: &ExportControl,
+    on_progress: Option<AudioExportProgress>,
 ) -> Result<Option<PcmBuffer>, String> {
     let (_sizes, media) = project_media(manifest, project_dir);
-    mix_timeline_audio(timeline, &media)
+    mix_timeline_audio(timeline, &media, Some(control), on_progress)
 }
 
 /// `export_video`: render the whole timeline to a video file on disk.
@@ -729,7 +928,8 @@ pub(crate) fn run_export_with_control(
 
     // Decode + linearly mix every audio-bearing clip, then hand the mixed PCM to
     // the encoder so `finish` mux's it into the container. No audio → video-only.
-    if let Some(pcm) = mix_timeline_audio(timeline, &media)? {
+    let mixed_audio = mix_timeline_audio(timeline, &media, control, None)?;
+    if let Some(pcm) = mixed_audio {
         let pcm = if frame_range.is_some() {
             slice_pcm(pcm, start_frame, end_frame, plan.fps)
         } else {
@@ -1147,6 +1347,7 @@ mod tests {
         let clone = ExportControl {
             cancel: control.cancel.clone(),
             busy: control.busy.clone(),
+            media_cancel: control.media_cancel.clone(),
         };
         clone.request_cancel();
         assert!(control.is_cancelled());
@@ -1351,6 +1552,53 @@ mod tests {
     }
 
     #[test]
+    fn export_cancel_interrupts_blocking_audio_decoder_before_completion() {
+        use std::sync::mpsc;
+
+        let control = Arc::new(ExportControl::default());
+        let worker_control = Arc::clone(&control);
+        let allow_natural_completion = Arc::new(AtomicBool::new(false));
+        let worker_allow_natural_completion = Arc::clone(&allow_natural_completion);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _guard = worker_control.try_begin().expect("start audio save");
+            let result = decode_pcm_with_export_control(
+                &worker_control,
+                Path::new("/blocking.wav"),
+                Some((0.0, 3_600.0)),
+                None,
+                move |_path, spec, _range, cancel, _progress| {
+                    entered_tx.send(()).expect("decoder entered");
+                    while !cancel.checkpoint() {
+                        if worker_allow_natural_completion.load(Ordering::Acquire) {
+                            return Ok(PcmBuffer {
+                                spec: *spec,
+                                samples_f32: vec![0.0],
+                            });
+                        }
+                        std::thread::yield_now();
+                    }
+                    Err(opentake_media::MediaError::Cancelled)
+                },
+            );
+            done_tx.send(result).expect("publish decoder result");
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("blocking decoder started");
+        control.request_cancel();
+        let result = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("cancel must return before natural decode completion");
+
+        assert!(matches!(result, Err(opentake_media::MediaError::Cancelled)));
+        assert!(!allow_natural_completion.load(Ordering::Acquire));
+        worker.join().expect("decoder worker joins");
+    }
+
+    #[test]
     fn retime_pcm_matches_speed_two_clip_timeline_duration() {
         let decoded_at_speed_two = vec![0.0, 0.25, 0.5, 0.75, 1.0, 0.75, 0.5, 0.25];
         let timeline_len = decoded_at_speed_two.len() / 2;
@@ -1399,7 +1647,7 @@ mod tests {
         // No matching manifest entry → no audio contribution, no decode attempt.
         let clip = Clip::new("c1", "missing-asset", 0, 30);
         let media: HashMap<String, MediaInfo> = HashMap::new();
-        let got = project_clip_audio(&clip, &media, 30).expect("ok");
+        let got = project_clip_audio(&clip, &media, 30, None, None).expect("ok");
         assert!(got.is_none());
     }
 
@@ -1414,7 +1662,9 @@ mod tests {
             },
         );
         // duration 0 short-circuits before any decode is attempted.
-        assert!(project_clip_audio(&clip, &media, 30).expect("ok").is_none());
+        assert!(project_clip_audio(&clip, &media, 30, None, None)
+            .expect("ok")
+            .is_none());
     }
 
     #[test]
@@ -1428,7 +1678,9 @@ mod tests {
         track.clips.push(clip);
         tl.tracks.push(track);
         let media: HashMap<String, MediaInfo> = HashMap::new();
-        assert!(mix_timeline_audio(&tl, &media).expect("ok").is_none());
+        assert!(mix_timeline_audio(&tl, &media, None, None)
+            .expect("ok")
+            .is_none());
     }
 
     #[test]
@@ -1449,7 +1701,9 @@ mod tests {
                 path: PathBuf::from("/nonexistent.wav"),
             },
         );
-        assert!(mix_timeline_audio(&tl, &media).expect("ok").is_none());
+        assert!(mix_timeline_audio(&tl, &media, None, None)
+            .expect("ok")
+            .is_none());
     }
 
     // MARK: - `.opentake` bundle export DTOs

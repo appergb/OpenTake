@@ -26,7 +26,7 @@
 //! persistence logic — those live in `opentake-ops` / `opentake-project` and are
 //! reached through the session.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -444,6 +444,41 @@ impl AppCore {
         };
         self.events.emit(&CoreEvent::MediaChanged {
             project_epoch,
+            count,
+        });
+        Ok(entry)
+    }
+
+    /// Import media only if the expected project still owns the session lock.
+    ///
+    /// Save-as-media renders without holding the core lock. Its final identity
+    /// check and manifest mutation must therefore share this one critical
+    /// section; a project replacement either happens before it (and the import
+    /// is rejected) or after it (and the entry belongs to the expected project).
+    pub fn import_media_file_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+    ) -> Result<MediaManifestEntry> {
+        let id = self.ids.next_id();
+        let (entry, count) = {
+            let mut session = self.lock();
+            if session.project_epoch != expected_project_epoch
+                || session.editor.project_dir() != Some(expected_project_dir)
+            {
+                return Err(crate::CoreError::Media(
+                    "project changed while saving media".to_string(),
+                ));
+            }
+            let entry = session.editor.import_media_file(path, id, name, probe)?;
+            let count = session.editor.media().entries.len();
+            (entry, count)
+        };
+        self.events.emit(&CoreEvent::MediaChanged {
+            project_epoch: expected_project_epoch,
             count,
         });
         Ok(entry)
@@ -916,6 +951,45 @@ mod tests {
         assert!(err.is_err());
         assert!(core.media().entries.is_empty());
         assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn import_media_for_project_rejects_replacement_without_mutating_manifest() {
+        let sequence = CoreIdGen::default().next_id();
+        let root = std::env::temp_dir().join(format!(
+            "opentake-core-conditional-import-{}-{sequence}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let project_a = root.join("A.opentake");
+        let project_b = root.join("B.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(project_a.clone()))
+            .expect("save project A");
+        let expected_epoch = core.runtime_snapshot().project_epoch;
+
+        opentake_project::Project::new(&project_b)
+            .save()
+            .expect("save project B");
+        core.open_project(project_b).expect("switch to project B");
+        let before = serde_json::to_vec(&core.media()).expect("serialize B manifest");
+
+        let error = core
+            .import_media_file_for_project(
+                expected_epoch,
+                &project_a,
+                project_a.join("media/rendered.wav"),
+                "rendered.wav",
+                &ProbedMedia::default(),
+            )
+            .expect_err("stale project import must be rejected");
+
+        assert_eq!(error.to_string(), "project changed while saving media");
+        assert_eq!(
+            serde_json::to_vec(&core.media()).expect("serialize B manifest after rejection"),
+            before
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

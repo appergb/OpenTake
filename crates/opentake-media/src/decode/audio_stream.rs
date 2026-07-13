@@ -89,7 +89,7 @@ pub fn decode_pcm_interleaved_cancellable(
     range: Option<(f64, f64)>,
     cancel: &MediaCancelToken,
 ) -> Result<Vec<f32>> {
-    let raw = decode_raw_pcm_cancellable(path, spec, range, cancel)?;
+    let raw = decode_raw_pcm_cancellable(path, spec, range, cancel, None)?;
     raw_to_interleaved_f32(&raw, spec)
 }
 

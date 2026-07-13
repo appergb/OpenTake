@@ -12,6 +12,7 @@
 use std::io::Read;
 use std::path::Path;
 use std::process::{ChildStderr, ChildStdout, ExitStatus};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -45,6 +46,9 @@ impl PcmFormat {
 
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const STDERR_DETAIL_LIMIT: usize = 64 * 1024;
+
+/// Byte-level progress reported while FFmpeg streams decoded PCM to stdout.
+pub type PcmProgressCallback = Arc<dyn Fn(usize, usize) + Send + Sync>;
 
 struct PipeReaders {
     stdout: JoinHandle<Result<StdoutRead>>,
@@ -99,7 +103,9 @@ fn expected_pcm_bytes(path: &Path, spec: &PcmSpec, range: Option<(f64, f64)>) ->
 fn read_stdout(
     mut stdout: ChildStdout,
     cap: usize,
+    progress_total: usize,
     cancel: MediaCancelToken,
+    progress: Option<PcmProgressCallback>,
 ) -> Result<StdoutRead> {
     cancel.reader_started();
     let result = (|| {
@@ -118,6 +124,9 @@ fn read_stdout(
                 break;
             }
             total_read = total_read.saturating_add(read);
+            if let Some(report) = &progress {
+                report(total_read.min(progress_total), progress_total);
+            }
             let remaining = cap.saturating_sub(bytes.len());
             let retained = remaining.min(read);
             bytes.extend_from_slice(&chunk[..retained]);
@@ -335,7 +344,17 @@ pub fn extract_pcm_cancellable(
     range: Option<(f64, f64)>,
     cancel: &MediaCancelToken,
 ) -> Result<PcmBuffer> {
-    let raw = decode_raw_pcm_cancellable(path, spec, range, cancel)?;
+    extract_pcm_cancellable_with_progress(path, spec, range, cancel, None)
+}
+
+pub fn extract_pcm_cancellable_with_progress(
+    path: &Path,
+    spec: &PcmSpec,
+    range: Option<(f64, f64)>,
+    cancel: &MediaCancelToken,
+    progress: Option<PcmProgressCallback>,
+) -> Result<PcmBuffer> {
+    let raw = decode_raw_pcm_cancellable(path, spec, range, cancel, progress)?;
     let samples = raw_to_mono_f32(&raw, spec)?;
     Ok(PcmBuffer {
         spec: *spec,
@@ -348,6 +367,7 @@ pub(super) fn decode_raw_pcm_cancellable(
     spec: &PcmSpec,
     range: Option<(f64, f64)>,
     cancel: &MediaCancelToken,
+    progress: Option<PcmProgressCallback>,
 ) -> Result<Vec<u8>> {
     if cancel.is_cancelled() {
         return Err(MediaError::Cancelled);
@@ -399,7 +419,7 @@ pub(super) fn decode_raw_pcm_cancellable(
     let stderr_cancel = cancel.clone();
     let stdout_reader = match thread::Builder::new()
         .name("opentake-pcm-stdout".to_string())
-        .spawn(move || read_stdout(stdout, reader_cap, stdout_cancel))
+        .spawn(move || read_stdout(stdout, reader_cap, expected_bytes, stdout_cancel, progress))
     {
         Ok(reader) => reader,
         Err(error) => {
@@ -444,6 +464,25 @@ mod tests {
         }
     }
 
+    fn write_silence_wav(path: &Path, sample_rate: u32, samples: usize) {
+        let data_len = samples.checked_mul(2).expect("wav data length") as u32;
+        let mut wav = Vec::with_capacity(44 + data_len as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_len.to_le_bytes());
+        wav.resize(44 + data_len as usize, 0);
+        std::fs::write(path, wav).expect("write wav fixture");
+    }
+
     #[test]
     fn pre_cancelled_pcm_decode_does_not_spawn_ffmpeg() {
         let cancel = MediaCancelToken::new();
@@ -459,6 +498,42 @@ mod tests {
 
         assert!(matches!(error, MediaError::Cancelled));
         assert_eq!(cancel.spawned_child_count(), 0);
+    }
+
+    #[test]
+    fn pcm_decode_reports_non_terminal_progress_for_multiple_stdout_chunks() {
+        assert!(
+            crate::ff::ffmpeg_available(),
+            "required progress test needs a runnable FFmpeg"
+        );
+        let temp = tempfile::tempdir().expect("create progress fixture directory");
+        let input = temp.path().join("two-seconds.wav");
+        write_silence_wav(&input, 48_000, 96_000);
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let callback_observed = Arc::clone(&observed);
+        let progress: PcmProgressCallback = Arc::new(move |done, total| {
+            callback_observed
+                .lock()
+                .expect("progress lock")
+                .push((done, total));
+        });
+
+        let pcm = extract_pcm_cancellable_with_progress(
+            &input,
+            &f32_mono_spec(),
+            Some((0.0, 2.0)),
+            &MediaCancelToken::new(),
+            Some(progress),
+        )
+        .expect("decode progress fixture");
+
+        let observed = observed.lock().expect("progress lock");
+        assert_eq!(pcm.samples_f32.len(), 96_000);
+        assert!(
+            observed.len() > 1,
+            "large decode must report multiple chunks"
+        );
+        assert!(observed.iter().any(|(done, total)| done < total));
     }
 
     #[test]

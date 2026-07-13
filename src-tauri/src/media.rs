@@ -23,6 +23,7 @@
 //! lazily through `generate_thumbnail`.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use image::ImageEncoder;
 use serde::Serialize;
@@ -717,27 +718,48 @@ pub(crate) fn import_saved_media(
     expected_project_dir: &Path,
     path: &Path,
 ) -> Result<MediaListDto, String> {
-    let current = core.runtime_snapshot();
-    if current.project_epoch != expected_project_epoch
-        || current.project_dir.as_deref() != Some(expected_project_dir)
-    {
-        return Err("project changed while saving media".to_string());
-    }
-    let entry = import_one(core, engine, path)
-        .map_err(|error| error.to_string())?
-        .ok_or("failed to import saved media")?;
-    let project_dir = core
-        .project_dir()
-        .ok_or("project closed while importing saved media")?;
-    match &entry.source {
-        MediaSource::Project { relative_path }
-            if project_dir.join(relative_path) == path
-                && Path::new(relative_path)
-                    .components()
-                    .next()
-                    .is_some_and(|component| component.as_os_str() == "media") => {}
-        _ => return Err("saved media must be imported as a project-relative source".to_string()),
-    }
+    import_saved_media_with_before_transaction(
+        core,
+        engine,
+        prewarm,
+        expected_project_epoch,
+        expected_project_dir,
+        path,
+        || {},
+    )
+}
+
+fn import_saved_media_with_before_transaction(
+    core: &AppCore,
+    engine: &MediaEngine,
+    prewarm: &prewarm::PrewarmScheduler,
+    expected_project_epoch: u64,
+    expected_project_dir: &Path,
+    path: &Path,
+    before_transaction: impl FnOnce(),
+) -> Result<MediaListDto, String> {
+    path.strip_prefix(expected_project_dir)
+        .ok()
+        .filter(|relative| {
+            let mut components = relative.components();
+            components
+                .next()
+                .is_some_and(|component| component.as_os_str() == "media")
+                && components.all(|component| matches!(component, std::path::Component::Normal(_)))
+        })
+        .ok_or("saved media output must be inside the expected project media directory")?;
+    importable_clip_type(path).ok_or("failed to import saved media")?;
+    let probe = probe_media(engine, path);
+    before_transaction();
+    let entry = core
+        .import_media_file_for_project(
+            expected_project_epoch,
+            expected_project_dir,
+            path,
+            display_name(path),
+            &probe,
+        )
+        .map_err(|error| error.to_string())?;
     let result = schedule_import_poster(core, engine, prewarm, &entry, path);
     Ok(MediaListDto::from_core_with_import_results(
         core,
@@ -1155,6 +1177,10 @@ fn save_clip_as_media_workflow(
     let on_progress = |done: i32, total: i32| {
         crate::export::emit_export_progress(app, done, total);
     };
+    let audio_app = app.clone();
+    let audio_progress: crate::export::AudioExportProgress = Arc::new(move |done, total| {
+        crate::export::emit_export_progress(&audio_app, done, total);
+    });
 
     let export_result = match ext {
         "mp4" => {
@@ -1174,10 +1200,12 @@ fn save_clip_as_media_workflow(
             )
             .map(|_| ())
         }
-        "wav" => crate::export::mix_timeline_audio_for_manifest(
+        "wav" => crate::export::mix_timeline_audio_for_manifest_with_control(
             &single_timeline,
             &subset,
             &project_dir_option,
+            control,
+            Some(audio_progress),
         )
         .and_then(|pcm| pcm.ok_or_else(|| "audio clip contains no decodable audio".to_string()))
         .and_then(|pcm| {
@@ -1188,7 +1216,11 @@ fn save_clip_as_media_workflow(
             if control.is_cancelled() {
                 return Err(crate::export::CANCELLED_SENTINEL.to_string());
             }
-            crate::export::emit_export_progress(app, 1, 1);
+            crate::export::emit_export_progress(
+                app,
+                crate::export::AUDIO_PROGRESS_TOTAL,
+                crate::export::AUDIO_PROGRESS_TOTAL,
+            );
             Ok(())
         }),
         _ => unreachable!("save clip extension is fixed by clip type"),
@@ -1783,6 +1815,56 @@ mod tests {
 
         let _ = fs::remove_dir_all(engine.cache_root());
         assert!(bundle.join(relative_path).is_file());
+    }
+
+    #[test]
+    fn project_switch_before_saved_media_transaction_leaves_replacement_unchanged() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let project_a = tmp.path().join("A.opentake");
+        let project_b = tmp.path().join("B.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(project_a.clone()))
+            .expect("save project A");
+        let expected_epoch = core.runtime_snapshot().project_epoch;
+        let output = crate::export::unique_project_media_path(&project_a, "clip_audio", "wav")
+            .expect("project output");
+        crate::export::write_wav_s16le(&[0.0; 480], 48_000, &output)
+            .expect("write rendered output");
+        opentake_project::Project::new(&project_b)
+            .save()
+            .expect("save project B");
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(expected_epoch);
+        let before_transaction = || {
+            core.open_project(project_b.clone())
+                .expect("switch to project B after render");
+        };
+
+        let result = crate::export::cleanup_partial_output(
+            &output,
+            import_saved_media_with_before_transaction(
+                &core,
+                &engine,
+                &scheduler,
+                expected_epoch,
+                &project_a,
+                &output,
+                before_transaction,
+            ),
+        );
+        let before = serde_json::to_vec(&opentake_domain::MediaManifest::default())
+            .expect("serialize expected B manifest");
+
+        assert_eq!(
+            result.expect_err("stale import must fail"),
+            "project changed while saving media"
+        );
+        assert!(!output.exists(), "failed save must clean project A output");
+        assert_eq!(
+            serde_json::to_vec(&core.media()).expect("serialize actual B manifest"),
+            before,
+            "project B manifest must remain byte-for-byte unchanged"
+        );
     }
 
     #[test]
