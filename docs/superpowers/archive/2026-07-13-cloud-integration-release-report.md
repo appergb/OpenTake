@@ -162,10 +162,12 @@ Replacement aggregate PR #219 compiled and ran the full workflow. Its Web and
 Rust jobs passed, while both native Windows jobs found independent runtime
 defects:
 
-1. the global media library passed a retained parent directory handle through
-   Win32 `SetFileInformationByHandle(FILE_RENAME_INFO)`, whose documented
-   contract requires a null `RootDirectory`; every handle-relative manifest
-   rename failed with `ERROR_INVALID_PARAMETER` (87); and
+1. the global media library passed a native-style relative-name buffer and
+   retained parent handle through Win32
+   `SetFileInformationByHandle(FILE_RENAME_INFO)`, while allocating less than
+   the SDK's conservative documented buffer minimum; that combination made
+   every handle-relative manifest rename fail with `ERROR_INVALID_PARAMETER`
+   (87); and
 2. project-media output reservation selected Windows `GENERIC_READ |
    GENERIC_WRITE | DELETE` with `access_mode`, but omitted Rust's semantic
    `write(true)` flag, so `OpenOptions` rejected `create_new` before reaching
