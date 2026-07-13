@@ -10,12 +10,12 @@ commit ancestry. The source convergence starts from the frozen remote `main`
 commit `ac50dc896bea821f66c88c6ed50cf9185e4e31d1` and uses local integration
 commit `cf52c5e495f9aea6b685aa20d863c5418a010ca5` as the code-complete candidate.
 A Windows aggregate CI finding then required the test-gating-only successor
-`301b82d2772559ba6fad25cbb2847ebc07baa494`. The report-only successor is the
+`301b82d2772559ba6fad25cbb2847ebc07baa494`. The documentation-only successor is the
 exact tree supplied to the fail-closed cloud publisher. Replacement aggregate
 PR #219 then exercised the complete workflow and exposed two additional native
 Windows runtime defects. Code successor
 `71ba39ec57866346e492c5973196f8806e221710` fixes both defects without changing
-the accepted macOS runtime bundle; its report-only successor is the final tree
+the accepted macOS runtime bundle; its documentation-only successors form the final tree
 supplied to the next immutable aggregate publication.
 
 The final cloud gate is intentionally stricter than the legacy PR checks: the
@@ -139,7 +139,7 @@ passed the following local checks:
   indirect-merge ancestry, ambiguous-response recovery, and non-force main CAS.
 
 These checks were run from a fresh `git archive` with the exact candidate tree.
-The report-only successor is structurally compared with this code tree before
+The documentation-only successor is structurally compared with this code tree before
 publication; the aggregate PR and final `main` push then repeat the
 repository-defined CI on GitHub-hosted runners.
 
@@ -257,7 +257,7 @@ listener, and MCP protocol behavior were verified independently of screenshots.
   Critical/Important = 0/0 and **Ready: Yes**, subject to the mandatory native
   Windows CI gate. Its two comment-only minor observations (FFI alignment and
   synchronous handle lifetime) were incorporated before the commit.
-- The report-only successor is reviewed against that accepted code tree before
+- The documentation-only successor is reviewed against that accepted code tree before
   its exact commit/tree is supplied to the cloud publisher.
 
 ## Cloud publication and completion criteria

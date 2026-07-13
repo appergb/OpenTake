@@ -626,8 +626,8 @@ fn rename_transaction_leaf_by_handle(
     // SAFETY: `storage` is pointer-aligned and sized for the fixed
     // FILE_RENAME_INFORMATION header plus every UTF-16 code unit. Both raw
     // handles remain owned and open for the duration of the synchronous NT
-    // call. Unlike the Win32 FILE_RENAME_INFO contract, the native contract
-    // accepts a non-null RootDirectory for a capability-relative leaf rename.
+    // call. The native contract explicitly models the retained RootDirectory
+    // used here for a capability-relative leaf rename.
     // OwnedLeaf is opened without FILE_FLAG_OVERLAPPED, so this call completes
     // synchronously and cannot outlive the stack-owned IO_STATUS_BLOCK.
     let status = unsafe {
