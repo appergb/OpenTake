@@ -35,7 +35,7 @@ export type MediaSubTabId = "import" | "mine" | "extract" | "sound";
 export type InspectorTabId = "text" | "video" | "audio" | "aiEdit";
 
 export interface SaveAsProgressState {
-  operationId: number;
+  operationId: string;
   label: string;
   done: number;
   total: number;

@@ -10,7 +10,7 @@ import { SaveAsProgressView } from "./SaveAsProgress";
 describe("SaveAsProgress", () => {
   it("renders visible progress and an enabled cancel button", () => {
     const progress = {
-      operationId: 1,
+      operationId: "save-as:test",
       label: "Saving clip",
       done: 25,
       total: 100,

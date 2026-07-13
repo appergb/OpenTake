@@ -53,7 +53,6 @@ base64 = "0.22"
 # backend. Rustls keeps the desktop build independent of a system OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 same-file = "1"
-tempfile = "3"
 
 # Streaming playback transport (#53 / #64), behind the `playback-engine` feature.
 # Versions already resolved in the workspace lockfile (via opentake-agent), so
@@ -79,6 +78,9 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [features]
 # `default` now includes `playback-engine`: the continuous Rust streaming engine

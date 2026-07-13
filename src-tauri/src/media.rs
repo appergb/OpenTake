@@ -33,6 +33,8 @@ use opentake_core::{importable_clip_type, AppCore, CoreError, EditCommand, Probe
 use opentake_domain::{
     ClipType, GenerationInput, MediaManifest, MediaManifestEntry, MediaSource, Timeline,
 };
+#[cfg(test)]
+use opentake_media::MediaCancelToken;
 use opentake_media::{
     cache_key::{file_identity_key, KEY_HEX_LEN},
     decode_frame_at, decode_frames_at,
@@ -41,7 +43,7 @@ use opentake_media::{
         MAX_VIDEO_THUMBNAILS, THUMB_MAX_SIZE, THUMB_TOLERANCE_SECS,
     },
     waveform::store::CACHE_SUBDIR,
-    FrameRequest, MediaCancelToken, MediaEngine, RgbaFrame,
+    FrameRequest, MediaEngine, RgbaFrame,
 };
 
 pub mod prewarm;
@@ -615,33 +617,58 @@ fn probe_media(engine: &MediaEngine, path: &Path) -> ProbedMedia {
     }
 }
 
-fn probe_saved_media_with_hooks(
-    engine: &MediaEngine,
-    output: &crate::export::ProjectMediaOutput,
-    cancel: &MediaCancelToken,
-    before_probe: impl FnOnce(),
-    after_probe: impl FnOnce(),
-) -> Result<ProbedMedia, String> {
-    let stable = output.stable_probe_copy(cancel)?;
-    if cancel.checkpoint() {
-        return Err(crate::export::CANCELLED_SENTINEL.to_string());
-    }
-    before_probe();
-    let probe = probe_media(engine, stable.path());
-    after_probe();
-    if cancel.checkpoint() {
-        return Err(crate::export::CANCELLED_SENTINEL.to_string());
-    }
-    Ok(probe)
+/// Trusted facts emitted by the producer that wrote a reserved save-as output.
+/// Generated media never needs to be reopened by pathname just to rediscover
+/// facts the encoder/WAV writer already knows.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SavedMediaMetadata {
+    Video(crate::export::ExportSummary),
+    Wav {
+        sample_count: usize,
+        sample_rate: u32,
+    },
 }
 
-#[cfg(test)]
-pub(crate) fn probe_saved_media(
-    engine: &MediaEngine,
-    output: &crate::export::ProjectMediaOutput,
-    cancel: &MediaCancelToken,
-) -> Result<ProbedMedia, String> {
-    probe_saved_media_with_hooks(engine, output, cancel, || {}, || {})
+impl SavedMediaMetadata {
+    fn to_probe(&self) -> Result<ProbedMedia, String> {
+        match self {
+            Self::Video(summary) => {
+                if summary.width == 0
+                    || summary.height == 0
+                    || summary.fps <= 0
+                    || summary.frame_count < 0
+                {
+                    return Err("invalid completed video metadata".to_string());
+                }
+                let width = i32::try_from(summary.width)
+                    .map_err(|_| "completed video width exceeds manifest limits")?;
+                let height = i32::try_from(summary.height)
+                    .map_err(|_| "completed video height exceeds manifest limits")?;
+                Ok(ProbedMedia {
+                    duration_secs: f64::from(summary.frame_count) / f64::from(summary.fps),
+                    width: Some(width),
+                    height: Some(height),
+                    fps: Some(f64::from(summary.fps)),
+                    has_audio: summary.has_audio,
+                })
+            }
+            Self::Wav {
+                sample_count,
+                sample_rate,
+            } => {
+                if *sample_rate == 0 {
+                    return Err("invalid completed WAV sample rate".to_string());
+                }
+                Ok(ProbedMedia {
+                    duration_secs: *sample_count as f64 / f64::from(*sample_rate),
+                    width: None,
+                    height: None,
+                    fps: None,
+                    has_audio: true,
+                })
+            }
+        }
+    }
 }
 
 /// Display name for an imported file: its stem, or the full file name when there
@@ -795,8 +822,8 @@ struct SavedMediaImportContext<'a> {
     expected_project_epoch: u64,
     expected_project_dir: &'a Path,
     path: &'a Path,
-    // Save-as callers supply metadata from the retained file's private stable
-    // copy; this transaction must never re-probe the exchangeable final path.
+    // Save-as callers supply metadata from their encoder/WAV writer. This
+    // transaction must never re-probe the exchangeable final path.
     probe: &'a ProbedMedia,
 }
 
@@ -851,6 +878,7 @@ pub(crate) struct SavedMediaFinalizationContext<'a> {
     pub(crate) prewarm: &'a prewarm::PrewarmScheduler,
     pub(crate) expected_project_epoch: u64,
     pub(crate) expected_project_dir: &'a Path,
+    pub(crate) metadata: SavedMediaMetadata,
     pub(crate) on_progress: &'a dyn Fn(i32, i32),
 }
 
@@ -859,20 +887,14 @@ pub(crate) fn finalize_saved_media(
     output: crate::export::ProjectMediaOutput,
     guard: &mut crate::export::ExportGuard<'_>,
 ) -> Result<MediaListDto, String> {
-    finalize_saved_media_with_hooks(context, output, guard, (|| {}, || {}, || {}, || {}, || {}))
+    finalize_saved_media_with_hooks(context, output, guard, (|| {}, || {}, || {}, || {}))
 }
 
 fn finalize_saved_media_with_hooks(
     context: SavedMediaFinalizationContext<'_>,
     output: crate::export::ProjectMediaOutput,
     guard: &mut crate::export::ExportGuard<'_>,
-    hooks: (
-        impl FnOnce(),
-        impl FnOnce(),
-        impl FnOnce(),
-        impl FnOnce(),
-        impl FnOnce(),
-    ),
+    hooks: (impl FnOnce(), impl FnOnce(), impl FnOnce(), impl FnOnce()),
 ) -> Result<MediaListDto, String> {
     let SavedMediaFinalizationContext {
         core,
@@ -880,17 +902,13 @@ fn finalize_saved_media_with_hooks(
         prewarm,
         expected_project_epoch,
         expected_project_dir,
+        metadata,
         on_progress,
     } = context;
-    let (after_sync, before_probe, after_probe, before_transaction, before_commit) = hooks;
+    let (after_sync, after_metadata, before_transaction, before_commit) = hooks;
     output.prepare_commit_cancellable(guard, after_sync)?;
-    let probe = probe_saved_media_with_hooks(
-        engine,
-        &output,
-        guard.cancel_token(),
-        before_probe,
-        after_probe,
-    )?;
+    let probe = metadata.to_probe()?;
+    after_metadata();
     guard.checkpoint()?;
     let path = output.path().to_path_buf();
     let result = import_saved_media_with_hooks(
@@ -1287,9 +1305,18 @@ pub fn save_clip_as_media(
     media: State<'_, MediaState>,
     prewarm: State<'_, prewarm::PrewarmScheduler>,
     clip_id: String,
+    operation_id: String,
 ) -> Result<MediaListDto, String> {
     save_clip_as_media_impl(&core, || {
-        save_clip_as_media_workflow(&app, &core, &control, media.engine(), &prewarm, &clip_id)
+        save_clip_as_media_workflow(
+            &app,
+            &core,
+            &control,
+            media.engine(),
+            &prewarm,
+            &clip_id,
+            &operation_id,
+        )
     })
 }
 
@@ -1308,6 +1335,7 @@ fn save_clip_as_media_workflow(
     engine: &MediaEngine,
     prewarm: &prewarm::PrewarmScheduler,
     clip_id: &str,
+    operation_id: &str,
 ) -> Result<MediaListDto, String> {
     let snapshot = core.runtime_snapshot();
     let project_dir = snapshot
@@ -1317,25 +1345,26 @@ fn save_clip_as_media_workflow(
     let (single_timeline, subset, media_type) =
         build_single_clip_export(&snapshot.timeline, &snapshot.media, clip_id)?;
     let ext = save_clip_extension(media_type)?;
-    let mut guard = control.try_begin()?;
+    let mut guard = control.try_begin(operation_id)?;
     let output =
         crate::export::reserve_project_media_output(&project_dir, &format!("clip_{clip_id}"), ext)?;
     let out_path = output.path().to_path_buf();
     let project_dir_option = Some(project_dir.clone());
 
     let progress_app = app.clone();
+    let progress_operation_id = guard.operation_id().to_string();
     let on_progress: crate::export::AudioExportProgress = Arc::new(move |done, total| {
-        crate::export::emit_export_progress(&progress_app, done, total);
+        crate::export::emit_export_progress(&progress_app, &progress_operation_id, done, total);
     });
 
-    match ext {
+    let metadata = match ext {
         "mp4" => {
             let req = crate::export::ExportRequest {
                 out_path: out_path.to_string_lossy().into_owned(),
                 codec: crate::export::ExportCodec::H264,
                 quality: crate::export::ExportQuality::P1080,
             };
-            crate::export::run_export_with_control(
+            let summary = crate::export::run_export_with_control(
                 &single_timeline,
                 &subset,
                 &project_dir_option,
@@ -1347,8 +1376,8 @@ fn save_clip_as_media_workflow(
                     defer_completion: true,
                     ..crate::export::ExportRunOptions::default()
                 },
-            )
-            .map(|_| ())?;
+            )?;
+            SavedMediaMetadata::Video(summary)
         }
         "wav" => {
             let pcm = crate::export::mix_timeline_audio_for_manifest_with_control(
@@ -1359,19 +1388,22 @@ fn save_clip_as_media_workflow(
                 Some(Arc::clone(&on_progress)),
             )?
             .ok_or_else(|| "audio clip contains no decodable audio".to_string())?;
-            let cancel = control.media_cancel_token();
             let mut writer = output.writer()?;
             crate::export::write_wav_s16le_cancellable_to_file(
                 &pcm.samples_f32,
                 pcm.spec.sample_rate,
                 &mut writer,
-                &cancel,
+                guard.cancel_token(),
                 Some(on_progress.as_ref()),
                 None,
             )?;
+            SavedMediaMetadata::Wav {
+                sample_count: pcm.samples_f32.len(),
+                sample_rate: pcm.spec.sample_rate,
+            }
         }
         _ => unreachable!("save clip extension is fixed by clip type"),
-    }
+    };
 
     finalize_saved_media(
         SavedMediaFinalizationContext {
@@ -1380,6 +1412,7 @@ fn save_clip_as_media_workflow(
             prewarm,
             expected_project_epoch: snapshot.project_epoch,
             expected_project_dir: &project_dir,
+            metadata,
             on_progress: on_progress.as_ref(),
         },
         output,
@@ -1921,6 +1954,48 @@ mod tests {
     }
 
     #[test]
+    fn completed_video_metadata_uses_encoder_facts_without_probe_defaults() {
+        let metadata = SavedMediaMetadata::Video(crate::export::ExportSummary {
+            out_path: "/unused/generated.mp4".to_string(),
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            frame_count: 75,
+            has_audio: true,
+        });
+
+        assert_eq!(
+            metadata.to_probe().expect("valid producer metadata"),
+            ProbedMedia {
+                duration_secs: 2.5,
+                width: Some(1920),
+                height: Some(1080),
+                fps: Some(30.0),
+                has_audio: true,
+            }
+        );
+    }
+
+    #[test]
+    fn completed_wav_metadata_uses_mono_sample_count_and_rate() {
+        let metadata = SavedMediaMetadata::Wav {
+            sample_count: 24_000,
+            sample_rate: 48_000,
+        };
+
+        assert_eq!(
+            metadata.to_probe().expect("valid producer metadata"),
+            ProbedMedia {
+                duration_secs: 0.5,
+                width: None,
+                height: None,
+                fps: None,
+                has_audio: true,
+            }
+        );
+    }
+
+    #[test]
     fn audio_clip_save_writes_wav_and_imports_project_relative_source() {
         let tmp = tempfile::tempdir().expect("temp root");
         let bundle = tmp.path().join("AudioSave.opentake");
@@ -2044,8 +2119,12 @@ mod tests {
         output.prepare_commit().expect("pre-import identity valid");
         let engine = engine_for(tmp.path());
         let scheduler = prewarm::PrewarmScheduler::new(snapshot.project_epoch);
-        let probe = probe_saved_media(&engine, &output, &MediaCancelToken::new())
-            .expect("probe retained saved media");
+        let probe = SavedMediaMetadata::Wav {
+            sample_count: 480,
+            sample_rate: 48_000,
+        }
+        .to_probe()
+        .expect("construct trusted saved-media metadata");
 
         let result = import_saved_media_with_hooks(
             SavedMediaImportContext {
@@ -2094,18 +2173,27 @@ mod tests {
             fs::read(&output_path).expect("replacement remains untouched"),
             b"replacement"
         );
-        fs::remove_file(&output_path).expect("remove attacker replacement");
-        fs::rename(&moved_original, &output_path).expect("restore retained final name");
         drop(output);
-        assert!(!output_path.exists(), "failed output must be removed");
-        assert!(!moved_original.exists(), "no failed artifact may remain");
+        assert_eq!(
+            fs::read(&output_path).expect("replacement remains after cleanup"),
+            b"replacement"
+        );
+        if moved_original.exists() {
+            assert_eq!(
+                fs::metadata(&moved_original)
+                    .expect("inspect moved retained output")
+                    .len(),
+                0,
+                "failed output payload must be destroyed through its retained handle"
+            );
+        }
     }
 
     #[cfg(unix)]
     #[test]
-    fn transient_probe_path_swap_commits_metadata_from_retained_output() {
+    fn transient_final_path_swap_cannot_change_trusted_saved_media_metadata() {
         let tmp = tempfile::tempdir().expect("temp root");
-        let bundle = tmp.path().join("ProbeIdentity.opentake");
+        let bundle = tmp.path().join("TrustedMetadataIdentity.opentake");
         let core = AppCore::new();
         core.save_project(Some(bundle.clone()))
             .expect("save project");
@@ -2113,7 +2201,7 @@ mod tests {
         let engine = engine_for(tmp.path());
         let scheduler = prewarm::PrewarmScheduler::new(snapshot.project_epoch);
         let output =
-            crate::export::reserve_project_media_output(&bundle, "probe_swap_restore", "wav")
+            crate::export::reserve_project_media_output(&bundle, "trusted_swap_restore", "wav")
                 .expect("reserve output");
         let output_path = output.path().to_path_buf();
         let moved_output = output_path.with_extension("retained");
@@ -2143,7 +2231,9 @@ mod tests {
         assert!(replacement_duration > retained_duration * 5.0);
 
         let control = crate::export::ExportControl::default();
-        let mut guard = control.try_begin().expect("begin save generation");
+        let mut guard = control
+            .try_begin("trusted-metadata-test")
+            .expect("begin save generation");
         let result = finalize_saved_media_with_hooks(
             SavedMediaFinalizationContext {
                 core: &core,
@@ -2151,6 +2241,10 @@ mod tests {
                 prewarm: &scheduler,
                 expected_project_epoch: snapshot.project_epoch,
                 expected_project_dir: &bundle,
+                metadata: SavedMediaMetadata::Wav {
+                    sample_count: 480,
+                    sample_rate: 48_000,
+                },
                 on_progress: &|_, _| {},
             },
             output,
@@ -2159,22 +2253,20 @@ mod tests {
                 || {},
                 || {
                     fs::rename(&output_path, &moved_output).expect("move retained final name");
-                    fs::copy(&replacement, &output_path).expect("install probe replacement");
-                },
-                || {
-                    fs::remove_file(&output_path).expect("remove probe replacement");
+                    fs::copy(&replacement, &output_path).expect("install transient replacement");
+                    fs::remove_file(&output_path).expect("remove transient replacement");
                     fs::rename(&moved_output, &output_path).expect("restore retained final name");
                 },
                 || {},
                 || {},
             ),
         )
-        .expect("stable retained probe must commit");
+        .expect("trusted producer metadata must commit");
 
         let imported = result
             .items
             .iter()
-            .find(|item| item.name.starts_with("probe_swap_restore"))
+            .find(|item| item.name.starts_with("trusted_swap_restore"))
             .expect("saved media imported");
         assert!((imported.duration - retained_duration).abs() < 0.001);
         assert!((imported.duration - replacement_duration).abs() > 0.05);
@@ -2182,12 +2274,12 @@ mod tests {
         let reopened = AppCore::new();
         reopened
             .open_project(bundle)
-            .expect("reopen project after stable probe import");
+            .expect("reopen project after trusted metadata import");
         let reopened_entry = reopened
             .media()
             .entries
             .into_iter()
-            .find(|entry| entry.name.starts_with("probe_swap_restore"))
+            .find(|entry| entry.name.starts_with("trusted_swap_restore"))
             .expect("reopened saved media entry");
         assert!((reopened_entry.duration - retained_duration).abs() < 0.001);
         assert!(output_path.is_file());
@@ -2197,7 +2289,7 @@ mod tests {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FinalizationCancelStage {
         Sync,
-        Probe,
+        Metadata,
         Import,
         Commit,
     }
@@ -2231,10 +2323,12 @@ mod tests {
         drop(writer);
 
         let control = crate::export::ExportControl::default();
-        let mut guard = control.try_begin().expect("begin save generation");
+        let mut guard = control
+            .try_begin("cancel-finalization-test")
+            .expect("begin save generation");
         let cancel = guard.cancel_token().clone();
         let sync_cancel = cancel.clone();
-        let probe_cancel = cancel.clone();
+        let metadata_cancel = cancel.clone();
         let import_cancel = cancel.clone();
         let commit_cancel = cancel;
         let terminal_progress = std::cell::Cell::new(false);
@@ -2245,6 +2339,10 @@ mod tests {
                 prewarm: &scheduler,
                 expected_project_epoch: snapshot.project_epoch,
                 expected_project_dir: &bundle,
+                metadata: SavedMediaMetadata::Wav {
+                    sample_count: 480,
+                    sample_rate: 48_000,
+                },
                 on_progress: &|done, total| {
                     if done == total {
                         terminal_progress.set(true);
@@ -2259,10 +2357,9 @@ mod tests {
                         sync_cancel.cancel();
                     }
                 },
-                || {},
                 move || {
-                    if stage == FinalizationCancelStage::Probe {
-                        probe_cancel.cancel();
+                    if stage == FinalizationCancelStage::Metadata {
+                        metadata_cancel.cancel();
                     }
                 },
                 move || {
@@ -2306,8 +2403,8 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_during_probe_aborts_finalization_without_terminal_progress() {
-        assert_finalization_cancelled_at(FinalizationCancelStage::Probe);
+    fn cancellation_after_metadata_aborts_finalization_without_terminal_progress() {
+        assert_finalization_cancelled_at(FinalizationCancelStage::Metadata);
     }
 
     #[test]

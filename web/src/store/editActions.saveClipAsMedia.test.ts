@@ -1,16 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  operationId: "save-as:test-request",
   refreshMedia: vi.fn<() => Promise<void>>(),
-  saveClipAsMediaApi: vi.fn<(clipId: string) => Promise<unknown>>(),
-  saveRangeAsMediaApi: vi.fn<(inFrame: number, outFrame: number) => Promise<unknown>>(),
+  saveClipAsMediaApi: vi.fn<(clipId: string, operationId: string) => Promise<unknown>>(),
+  saveRangeAsMediaApi:
+    vi.fn<(inFrame: number, outFrame: number, operationId: string) => Promise<unknown>>(),
   onExportProgress: vi.fn(),
   progressUnlisten: vi.fn(),
-  cancelExport: vi.fn<() => Promise<void>>(),
+  cancelExport: vi.fn<(operationId: string) => Promise<void>>(),
 }));
 
 vi.mock("../lib/api", () => ({
   isTauri: true,
+  createExportOperationId: () => mocks.operationId,
   saveClipAsMedia: mocks.saveClipAsMediaApi,
   saveRangeAsMedia: mocks.saveRangeAsMediaApi,
   onExportProgress: mocks.onExportProgress,
@@ -42,7 +45,7 @@ describe("saveClipAsMedia", () => {
   it("uses the single-clip backend command signature", async () => {
     await saveClipAsMedia("clip-123");
 
-    expect(mocks.saveClipAsMediaApi).toHaveBeenCalledWith("clip-123");
+    expect(mocks.saveClipAsMediaApi).toHaveBeenCalledWith("clip-123", mocks.operationId);
     expect(mocks.saveClipAsMediaApi).toHaveBeenCalledTimes(1);
     expect(mocks.refreshMedia).toHaveBeenCalledTimes(1);
     expect(mocks.onExportProgress).toHaveBeenCalledTimes(1);
@@ -57,7 +60,7 @@ describe("saveClipAsMedia", () => {
 
     await saveMarkedRangeAsMedia(range);
 
-    expect(mocks.saveRangeAsMediaApi).toHaveBeenCalledWith(12, 48);
+    expect(mocks.saveRangeAsMediaApi).toHaveBeenCalledWith(12, 48, mocks.operationId);
     expect(mocks.refreshMedia).toHaveBeenCalledTimes(1);
     expect(useEditorUiStore.getState().selectedTimelineRange).toEqual(range);
     expect(useEditorUiStore.getState().selectedClipIds).toEqual(selected);
@@ -73,7 +76,7 @@ describe("saveClipAsMedia", () => {
 
     await cancelSaveAsMedia();
 
-    expect(mocks.cancelExport).toHaveBeenCalledTimes(1);
+    expect(mocks.cancelExport).toHaveBeenCalledWith(mocks.operationId);
     expect(useEditorUiStore.getState().saveAsProgress?.cancelling).toBe(true);
     resolveSave?.();
     await saving;

@@ -462,20 +462,18 @@ export async function deleteSelectedClips() {
   ui.clearSelection();
 }
 
-let nextSaveAsOperationId = 0;
-
 async function runSaveAsMedia(
   label: string,
   successMessage: string,
   failurePrefix: string,
-  command: () => Promise<unknown>,
+  command: (operationId: string) => Promise<unknown>,
 ): Promise<void> {
   const ui = useEditorUiStore.getState();
   if (ui.saveAsProgress) {
     ui.pushToast("已有另存任务正在进行 / Another save-as operation is already running");
     return;
   }
-  const operationId = ++nextSaveAsOperationId;
+  const operationId = api.createExportOperationId("save-as");
   ui.setSaveAsProgress({
     operationId,
     label,
@@ -486,7 +484,7 @@ async function runSaveAsMedia(
   });
   let unlisten: (() => void) | undefined;
   try {
-    unlisten = await api.onExportProgress(({ done, total }) => {
+    unlisten = await api.onExportProgress(operationId, ({ done, total }) => {
       const current = useEditorUiStore.getState().saveAsProgress;
       if (!current || current.operationId !== operationId) return;
       useEditorUiStore.getState().setSaveAsProgress({
@@ -497,7 +495,7 @@ async function runSaveAsMedia(
     });
     // Dispatch the IPC command before exposing Cancel. Tauri has then queued
     // the backend operation before React can render the enabled button.
-    const operation = command();
+    const operation = command(operationId);
     const current = useEditorUiStore.getState().saveAsProgress;
     if (current?.operationId === operationId) {
       ui.setSaveAsProgress({ ...current, cancellable: true });
@@ -526,7 +524,7 @@ export async function saveClipAsMedia(clipId: string) {
     "正在另存片段 / Saving clip",
     "已另存为媒体 / Saved as media",
     "另存失败 / Save as media failed",
-    () => api.saveClipAsMedia(clipId),
+    (operationId) => api.saveClipAsMedia(clipId, operationId),
   );
 }
 
@@ -537,7 +535,8 @@ export async function saveMarkedRangeAsMedia(range: TimelineRange) {
     "正在另存范围 / Saving range",
     "范围已另存为媒体 / Range saved as media",
     "范围另存失败 / Save range as media failed",
-    () => api.saveRangeAsMedia(normalized.startFrame, normalized.endFrame),
+    (operationId) =>
+      api.saveRangeAsMedia(normalized.startFrame, normalized.endFrame, operationId),
   );
 }
 
@@ -547,7 +546,7 @@ export async function cancelSaveAsMedia(): Promise<void> {
   if (!current || !current.cancellable || current.cancelling) return;
   ui.setSaveAsProgress({ ...current, cancelling: true });
   try {
-    await api.cancelExport();
+    await api.cancelExport(current.operationId);
   } catch (error) {
     const latest = useEditorUiStore.getState().saveAsProgress;
     if (latest?.operationId === current.operationId) {

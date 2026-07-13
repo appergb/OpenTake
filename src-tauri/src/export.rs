@@ -32,7 +32,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 #[cfg(test)]
@@ -140,6 +140,9 @@ pub struct ExportSummary {
     pub fps: i32,
     /// Number of frames written.
     pub frame_count: i32,
+    /// Whether a non-empty mixed audio buffer was attached to the encoder and
+    /// therefore muxed into the completed output.
+    pub has_audio: bool,
 }
 
 /// Stable `Err` string [`export_video`] returns when the frame loop stops
@@ -167,12 +170,14 @@ struct ExportOperationState {
 
 struct ActiveExport {
     generation: u64,
+    operation_id: String,
     cancel: MediaCancelToken,
 }
 
 pub(crate) struct ExportGuard<'a> {
     control: &'a ExportControl,
     generation: u64,
+    operation_id: String,
     cancel: MediaCancelToken,
 }
 
@@ -181,6 +186,7 @@ impl std::fmt::Debug for ExportGuard<'_> {
         formatter
             .debug_struct("ExportGuard")
             .field("generation", &self.generation)
+            .field("operation_id", &self.operation_id)
             .finish_non_exhaustive()
     }
 }
@@ -203,14 +209,22 @@ impl Drop for ExportGuard<'_> {
 }
 
 impl ExportControl {
-    /// Request cancellation of the in-flight export.
-    fn request_cancel(&self) {
+    /// Request cancellation only when the caller owns the active operation.
+    /// A delayed cancel for a completed predecessor is an intentional no-op.
+    fn request_cancel(&self, operation_id: &str) -> bool {
         let state = self
             .operation
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(active) = &state.active {
+        if let Some(active) = state
+            .active
+            .as_ref()
+            .filter(|active| active.operation_id == operation_id)
+        {
             active.cancel.cancel();
+            true
+        } else {
+            false
         }
     }
 
@@ -234,11 +248,16 @@ impl ExportControl {
             .unwrap_or_default()
     }
 
-    pub(crate) fn try_begin(&self) -> Result<ExportGuard<'_>, String> {
-        self.try_begin_with_hook(|| {})
+    pub(crate) fn try_begin(&self, operation_id: &str) -> Result<ExportGuard<'_>, String> {
+        self.try_begin_with_hook(operation_id, || {})
     }
 
-    fn try_begin_with_hook(&self, after_publish: impl FnOnce()) -> Result<ExportGuard<'_>, String> {
+    fn try_begin_with_hook(
+        &self,
+        operation_id: &str,
+        after_publish: impl FnOnce(),
+    ) -> Result<ExportGuard<'_>, String> {
+        validate_export_operation_id(operation_id)?;
         let mut state = self
             .operation
             .lock()
@@ -251,6 +270,7 @@ impl ExportControl {
         let cancel = MediaCancelToken::new();
         state.active = Some(ActiveExport {
             generation,
+            operation_id: operation_id.to_string(),
             cancel: cancel.clone(),
         });
         after_publish();
@@ -258,6 +278,7 @@ impl ExportControl {
         Ok(ExportGuard {
             control: self,
             generation,
+            operation_id: operation_id.to_string(),
             cancel,
         })
     }
@@ -275,6 +296,10 @@ impl ExportGuard<'_> {
 
     pub(crate) fn cancel_token(&self) -> &MediaCancelToken {
         &self.cancel
+    }
+
+    pub(crate) fn operation_id(&self) -> &str {
+        &self.operation_id
     }
 
     /// Linearize the final save-as commit against cancellation.
@@ -303,24 +328,49 @@ impl ExportGuard<'_> {
     }
 }
 
+fn validate_export_operation_id(operation_id: &str) -> Result<(), String> {
+    if operation_id.is_empty()
+        || operation_id.len() > 128
+        || !operation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err("invalid export operation id".to_string());
+    }
+    Ok(())
+}
+
 /// `cancel_export`: request that the in-flight export (if any) stop at its next
-/// cancellation checkpoint. A no-op when nothing is exporting; every new
-/// operation receives its own uncancelled generation.
+/// cancellation checkpoint. The request must name the operation that exposed
+/// the cancel control; stale requests cannot target a successor generation.
 #[tauri::command]
-pub fn cancel_export(control: State<'_, ExportControl>) {
-    control.request_cancel();
+pub fn cancel_export(
+    control: State<'_, ExportControl>,
+    operation_id: String,
+) -> Result<bool, String> {
+    validate_export_operation_id(&operation_id)?;
+    Ok(control.request_cancel(&operation_id))
 }
 
 /// Progress payload for the throttled `"export://progress"` event: `done` of
 /// `total` frames composited so far.
 #[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 struct ExportProgress {
+    operation_id: String,
     done: i32,
     total: i32,
 }
 
-pub(crate) fn emit_export_progress(app: &AppHandle, done: i32, total: i32) {
-    let _ = app.emit("export://progress", ExportProgress { done, total });
+pub(crate) fn emit_export_progress(app: &AppHandle, operation_id: &str, done: i32, total: i32) {
+    let _ = app.emit(
+        "export://progress",
+        ExportProgress {
+            operation_id: operation_id.to_string(),
+            done,
+            total,
+        },
+    );
 }
 
 /// Minimum spacing between progress emissions, matching upstream's 200ms
@@ -883,14 +933,23 @@ pub fn export_video(
     core: State<'_, AppCore>,
     control: State<'_, ExportControl>,
     req: ExportRequest,
+    operation_id: String,
 ) -> Result<ExportSummary, String> {
-    let _guard = control.try_begin()?;
+    let guard = control.try_begin(&operation_id)?;
     // Snapshot the session up front; no session lock is held during GPU/encode.
     let timeline = core.get_timeline().timeline;
     let manifest = core.media();
     let project_dir = core.project_dir();
+    let progress_operation_id = guard.operation_id().to_string();
     let on_progress: AudioExportProgress = Arc::new(move |done: i32, total: i32| {
-        let _ = app.emit("export://progress", ExportProgress { done, total });
+        let _ = app.emit(
+            "export://progress",
+            ExportProgress {
+                operation_id: progress_operation_id.clone(),
+                done,
+                total,
+            },
+        );
     });
     run_export_with_control(
         &timeline,
@@ -1077,12 +1136,13 @@ pub(crate) fn run_export_with_control(
         }) as AudioExportProgress
     });
     let mixed_audio = mix_timeline_audio(timeline, &media, control, audio_progress)?;
+    let mut has_audio = false;
     if let Some(pcm) = mixed_audio {
-        let pcm = if options.frame_range.is_some() {
-            slice_pcm(pcm, start_frame, end_frame, plan.fps)
-        } else {
-            pcm
-        };
+        // Once any audio overlaps the exported interval, pad its trailing
+        // silence to the exact video duration. The muxer uses `-shortest`, so
+        // this keeps the completed container's frame_count/fps duration true.
+        let pcm = slice_pcm(pcm, start_frame, end_frame, plan.fps);
+        has_audio = !pcm.samples_f32.is_empty();
         encoder.push_audio(pcm);
     }
 
@@ -1134,6 +1194,7 @@ pub(crate) fn run_export_with_control(
         height: render_size.height,
         fps: plan.fps,
         frame_count: range_total,
+        has_audio,
     })
 }
 
@@ -1155,11 +1216,16 @@ fn slice_pcm(pcm: PcmBuffer, start_frame: i32, end_frame: i32, fps: i32) -> PcmB
     let rate = pcm.spec.sample_rate as f64;
     let lo = ((start_frame.max(0) as f64) / fps as f64 * rate).round() as usize;
     let hi = ((end_frame.max(0) as f64) / fps as f64 * rate).round() as usize;
+    let target_len = hi.saturating_sub(lo);
     let lo = lo.min(pcm.samples_f32.len());
     let hi = hi.max(lo).min(pcm.samples_f32.len());
+    let mut samples_f32 = pcm.samples_f32[lo..hi].to_vec();
+    if !samples_f32.is_empty() {
+        samples_f32.resize(target_len, 0.0);
+    }
     PcmBuffer {
         spec: pcm.spec,
-        samples_f32: pcm.samples_f32[lo..hi].to_vec(),
+        samples_f32,
     }
 }
 
@@ -1441,20 +1507,6 @@ pub(crate) struct ProjectMediaOutput {
     keep: bool,
 }
 
-/// Private, immutable-by-path snapshot used only for ffprobe. The directory is
-/// mode 0700 on Unix and randomly named on every platform; ffprobe never sees
-/// the attacker-exchangeable final project pathname.
-pub(crate) struct StableProbeCopy {
-    _workspace: tempfile::TempDir,
-    path: PathBuf,
-}
-
-impl StableProbeCopy {
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
 impl ProjectMediaOutput {
     pub(crate) fn path(&self) -> &Path {
         &self.path
@@ -1513,64 +1565,6 @@ impl ProjectMediaOutput {
         guard.checkpoint()
     }
 
-    pub(crate) fn stable_probe_copy(
-        &self,
-        cancel: &MediaCancelToken,
-    ) -> Result<StableProbeCopy, String> {
-        if cancel.checkpoint() {
-            return Err(CANCELLED_SENTINEL.to_string());
-        }
-        let extension = self
-            .path
-            .extension()
-            .ok_or_else(|| "saved media output has no extension".to_string())?;
-        let workspace = tempfile::Builder::new()
-            .prefix("opentake-probe-")
-            .tempdir()
-            .map_err(|error| format!("create private media probe workspace: {error}"))?;
-        let path = workspace
-            .path()
-            .join(Path::new("probe").with_extension(extension));
-        let mut destination = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|error| format!("create private media probe copy: {error}"))?;
-        let mut source = self
-            .file
-            .try_clone()
-            .map_err(|error| format!("clone retained media output for probe: {error}"))?;
-        source
-            .seek(SeekFrom::Start(0))
-            .map_err(|error| format!("rewind retained media output for probe: {error}"))?;
-        let mut buffer = [0_u8; 128 * 1024];
-        loop {
-            if cancel.checkpoint() {
-                return Err(CANCELLED_SENTINEL.to_string());
-            }
-            let read = source
-                .read(&mut buffer)
-                .map_err(|error| format!("read retained media output for probe: {error}"))?;
-            if read == 0 {
-                break;
-            }
-            destination
-                .write_all(&buffer[..read])
-                .map_err(|error| format!("write private media probe copy: {error}"))?;
-        }
-        destination
-            .flush()
-            .map_err(|error| format!("flush private media probe copy: {error}"))?;
-        if cancel.checkpoint() {
-            return Err(CANCELLED_SENTINEL.to_string());
-        }
-        Ok(StableProbeCopy {
-            _workspace: workspace,
-            path,
-        })
-    }
-
     pub(crate) fn mark_kept(mut self) -> PathBuf {
         self.keep = true;
         self.path.clone()
@@ -1588,7 +1582,38 @@ impl Drop for ProjectMediaOutput {
         if self.keep {
             return;
         }
-        let _ = remove_reserved_output(&self.directory, &self.file, &self.final_name);
+        if let Err(error) =
+            destroy_and_remove_reserved_output(&self.directory, &self.file, &self.final_name)
+        {
+            eprintln!("[export] failed to fully destroy reserved output: {error}");
+        }
+    }
+}
+
+/// Destroy the payload through the retained application-owned descriptor
+/// before making any pathname deletion decision. Truncation and its sync are
+/// both attempted even if one fails, and handle/identity-safe deletion is
+/// attempted last. This keeps a moved Unix inode from retaining rendered bytes
+/// while still leaving an attacker replacement at the final name untouched.
+fn destroy_and_remove_reserved_output(
+    directory: &File,
+    file: &File,
+    name: &std::ffi::OsStr,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    if let Err(error) = file.set_len(0) {
+        errors.push(format!("truncate retained output: {error}"));
+    }
+    if let Err(error) = file.sync_all() {
+        errors.push(format!("sync retained output truncation: {error}"));
+    }
+    if let Err(error) = remove_reserved_output(directory, file, name) {
+        errors.push(format!("remove retained output: {error}"));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
     }
 }
 
@@ -1799,6 +1824,14 @@ fn validate_save_range(total_frames: i32, in_frame: i32, out_frame: i32) -> Resu
     Ok(())
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveRangeAsMediaRequest {
+    in_frame: i32,
+    out_frame: i32,
+    operation_id: String,
+}
+
 #[tauri::command]
 pub fn save_range_as_media(
     app: AppHandle,
@@ -1806,9 +1839,13 @@ pub fn save_range_as_media(
     control: State<'_, ExportControl>,
     media: State<'_, crate::media::MediaState>,
     prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
-    in_frame: i32,
-    out_frame: i32,
+    request: SaveRangeAsMediaRequest,
 ) -> Result<crate::media::MediaListDto, String> {
+    let SaveRangeAsMediaRequest {
+        in_frame,
+        out_frame,
+        operation_id,
+    } = request;
     save_range_as_media_impl(&core, || {
         save_range_as_media_workflow(
             &app,
@@ -1816,8 +1853,11 @@ pub fn save_range_as_media(
             &control,
             media.engine(),
             &prewarm,
-            in_frame,
-            out_frame,
+            SaveRangeAsMediaRequest {
+                in_frame,
+                out_frame,
+                operation_id,
+            },
         )
     })
 }
@@ -1836,9 +1876,13 @@ fn save_range_as_media_workflow(
     control: &ExportControl,
     engine: &opentake_media::MediaEngine,
     prewarm: &crate::media::prewarm::PrewarmScheduler,
-    in_frame: i32,
-    out_frame: i32,
+    request: SaveRangeAsMediaRequest,
 ) -> Result<crate::media::MediaListDto, String> {
+    let SaveRangeAsMediaRequest {
+        in_frame,
+        out_frame,
+        operation_id,
+    } = request;
     let snapshot = core.runtime_snapshot();
     let project_dir = snapshot
         .project_dir
@@ -1847,7 +1891,7 @@ fn save_range_as_media_workflow(
     let total_frames = snapshot.timeline.total_frames();
     validate_save_range(total_frames, in_frame, out_frame)?;
 
-    let mut guard = control.try_begin()?;
+    let mut guard = control.try_begin(&operation_id)?;
     let output = reserve_project_media_output(
         &project_dir,
         &format!("range_{in_frame}_{out_frame}"),
@@ -1856,9 +1900,17 @@ fn save_range_as_media_workflow(
     let out_path = output.path().to_path_buf();
     let output_file = output.writer()?;
     let progress_app = app.clone();
+    let progress_operation_id = guard.operation_id().to_string();
     let on_progress: AudioExportProgress = Arc::new(move |done: i32, total: i32| {
         let app = &progress_app;
-        let _ = app.emit("export://progress", ExportProgress { done, total });
+        let _ = app.emit(
+            "export://progress",
+            ExportProgress {
+                operation_id: progress_operation_id.clone(),
+                done,
+                total,
+            },
+        );
     });
     let req = ExportRequest {
         out_path: out_path.to_string_lossy().into_owned(),
@@ -1866,7 +1918,7 @@ fn save_range_as_media_workflow(
         quality: ExportQuality::P1080,
     };
     let project_dir_option = Some(project_dir.clone());
-    run_export_with_control(
+    let summary = run_export_with_control(
         &snapshot.timeline,
         &snapshot.media,
         &project_dir_option,
@@ -1886,6 +1938,7 @@ fn save_range_as_media_workflow(
             prewarm,
             expected_project_epoch: snapshot.project_epoch,
             expected_project_dir: &project_dir,
+            metadata: crate::media::SavedMediaMetadata::Video(summary),
             on_progress: on_progress.as_ref(),
         },
         output,
@@ -2073,34 +2126,70 @@ mod tests {
     #[test]
     fn export_control_starts_uncancelled() {
         let control = ExportControl::default();
-        let _guard = control.try_begin().expect("start export");
+        let _guard = control.try_begin("test-export").expect("start export");
         assert!(!control.is_cancelled());
+    }
+
+    #[test]
+    fn export_control_rejects_invalid_external_operation_ids() {
+        let control = ExportControl::default();
+
+        assert_eq!(
+            control.try_begin("").expect_err("empty id must fail"),
+            "invalid export operation id"
+        );
+        assert_eq!(
+            control
+                .try_begin("contains whitespace")
+                .expect_err("unsafe id must fail"),
+            "invalid export operation id"
+        );
+        assert!(control.try_begin("save-as:valid-id_123").is_ok());
+    }
+
+    #[test]
+    fn export_progress_serializes_operation_identity_in_web_shape() {
+        let value = serde_json::to_value(ExportProgress {
+            operation_id: "save-as:test".to_string(),
+            done: 4,
+            total: 10,
+        })
+        .expect("serialize progress payload");
+
+        assert_eq!(value["operationId"], "save-as:test");
+        assert_eq!(value["done"], 4);
+        assert_eq!(value["total"], 10);
+        assert!(value.get("operation_id").is_none());
     }
 
     #[test]
     fn export_control_request_cancel_flips_the_flag() {
         let control = ExportControl::default();
-        let _guard = control.try_begin().expect("start export");
-        control.request_cancel();
+        let _guard = control.try_begin("test-export").expect("start export");
+        assert!(control.request_cancel("test-export"));
         assert!(control.is_cancelled());
     }
 
     #[test]
     fn export_control_new_generation_does_not_inherit_prior_cancel() {
         let control = ExportControl::default();
-        let first = control.try_begin().expect("start first export");
-        control.request_cancel();
+        let first = control
+            .try_begin("first-export")
+            .expect("start first export");
+        assert!(control.request_cancel("first-export"));
         assert!(control.is_cancelled());
         drop(first);
-        let _second = control.try_begin().expect("start second export");
+        let _second = control
+            .try_begin("second-export")
+            .expect("start second export");
         assert!(!control.is_cancelled());
     }
 
     #[test]
     fn export_guard_cancel_wins_before_commit() {
         let control = ExportControl::default();
-        let mut guard = control.try_begin().expect("start export");
-        control.request_cancel();
+        let mut guard = control.try_begin("test-export").expect("start export");
+        assert!(control.request_cancel("test-export"));
 
         assert_eq!(
             guard
@@ -2113,20 +2202,37 @@ mod tests {
     #[test]
     fn export_guard_commit_wins_before_late_cancel() {
         let control = ExportControl::default();
-        let mut guard = control.try_begin().expect("start export");
+        let mut guard = control.try_begin("test-export").expect("start export");
         guard.commit().expect("commit active generation");
 
-        control.request_cancel();
+        assert!(!control.request_cancel("test-export"));
         assert!(!control.is_cancelled());
         assert!(!guard.cancel_token().is_cancelled());
     }
 
     #[test]
+    fn stale_operation_cancel_cannot_cancel_successor_generation() {
+        let control = ExportControl::default();
+        let mut first = control
+            .try_begin("save-as-first")
+            .expect("start first export");
+        first.commit().expect("commit first export");
+        let second = control
+            .try_begin("save-as-second")
+            .expect("start successor export");
+
+        assert!(!control.request_cancel("save-as-first"));
+        assert!(!second.cancel_token().is_cancelled());
+        assert!(control.request_cancel("save-as-second"));
+        assert!(second.cancel_token().is_cancelled());
+    }
+
+    #[test]
     fn export_control_cancel_is_observable_across_threads() {
         let control = Arc::new(ExportControl::default());
-        let _guard = control.try_begin().expect("start export");
+        let _guard = control.try_begin("test-export").expect("start export");
         let canceller = Arc::clone(&control);
-        std::thread::spawn(move || canceller.request_cancel())
+        std::thread::spawn(move || canceller.request_cancel("test-export"))
             .join()
             .expect("cancel thread");
         assert!(control.is_cancelled());
@@ -2144,7 +2250,7 @@ mod tests {
         let (release_guard_tx, release_guard_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
             let guard = worker_control
-                .try_begin_with_hook(|| {
+                .try_begin_with_hook("publication-test", || {
                     published_tx.send(()).expect("lease generation published");
                     resume_rx.recv().expect("resume lease publication");
                 })
@@ -2162,7 +2268,7 @@ mod tests {
         let (cancel_done_tx, cancel_done_rx) = mpsc::channel();
         let canceller = std::thread::spawn(move || {
             cancel_started_tx.send(()).expect("cancel started");
-            cancel_control.request_cancel();
+            cancel_control.request_cancel("publication-test");
             cancel_done_tx.send(()).expect("cancel completed");
         });
         cancel_started_rx
@@ -2354,6 +2460,38 @@ mod tests {
     }
 
     #[test]
+    fn save_range_audio_pads_trailing_silence_to_reported_video_duration() {
+        let pcm = PcmBuffer {
+            spec: PcmSpec {
+                sample_rate: 4,
+                channels: 1,
+                format: PcmFormat::F32,
+            },
+            samples_f32: vec![0.25, 0.5],
+        };
+
+        let sliced = slice_pcm(pcm, 0, 2, 2);
+
+        assert_eq!(sliced.samples_f32, vec![0.25, 0.5, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn save_range_after_all_audio_does_not_attach_a_silent_track() {
+        let pcm = PcmBuffer {
+            spec: PcmSpec {
+                sample_rate: 4,
+                channels: 1,
+                format: PcmFormat::F32,
+            },
+            samples_f32: vec![0.25, 0.5],
+        };
+
+        let sliced = slice_pcm(pcm, 1, 2, 2);
+
+        assert!(sliced.samples_f32.is_empty());
+    }
+
+    #[test]
     fn project_media_path_is_unique_sanitized_and_inside_media_dir() {
         let project = tempfile::tempdir().expect("project");
         let first = unique_project_media_path(project.path(), "../clip / unsafe", "mp4")
@@ -2444,10 +2582,15 @@ mod tests {
             fs::read(&visible_path).expect("replacement remains"),
             b"replacement"
         );
-        assert!(
-            moved_original.exists(),
-            "Unix cleanup must not guess the reserved file's attacker-chosen new name"
-        );
+        if moved_original.exists() {
+            assert_eq!(
+                fs::metadata(&moved_original)
+                    .expect("inspect retained moved output")
+                    .len(),
+                0,
+                "failure cleanup must destroy the retained output payload"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -2630,14 +2773,16 @@ mod tests {
     #[test]
     fn export_control_rejects_second_save_as_media() {
         let control = ExportControl::default();
-        let first = control.try_begin().expect("first export starts");
+        let first = control
+            .try_begin("first-save")
+            .expect("first export starts");
         let error = control
-            .try_begin()
+            .try_begin("second-save")
             .expect_err("second export must be rejected");
         assert_eq!(error, "another export is already in progress");
         drop(first);
         assert!(
-            control.try_begin().is_ok(),
+            control.try_begin("third-save").is_ok(),
             "guard drop must release the export slot"
         );
     }
@@ -2653,7 +2798,9 @@ mod tests {
         let (entered_tx, entered_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let _guard = worker_control.try_begin().expect("start audio save");
+            let _guard = worker_control
+                .try_begin("audio-save")
+                .expect("start audio save");
             let result = decode_pcm_with_export_control(
                 &worker_control,
                 Path::new("/blocking.wav"),
@@ -2679,7 +2826,7 @@ mod tests {
         entered_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("blocking decoder started");
-        control.request_cancel();
+        assert!(control.request_cancel("audio-save"));
         let result = done_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("cancel must return before natural decode completion");
