@@ -493,6 +493,7 @@ pub(super) fn decode_raw_pcm_cancellable(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     use std::process::Command;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
@@ -584,6 +585,7 @@ mod tests {
         assert!(observed.windows(2).all(|pair| pair[0].0 <= pair[1].0));
     }
 
+    #[cfg(unix)]
     #[test]
     fn cancelling_running_pcm_decode_kills_child_and_reaps_readers() {
         assert!(
@@ -626,6 +628,70 @@ mod tests {
             .expect("cancelled decode must kill FFmpeg and join both pipe readers");
         assert!(matches!(result, Err(MediaError::Cancelled)));
         worker.join().expect("decoder worker must be reaped");
+        assert_eq!(cancel.active_reader_count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_cancelling_running_pcm_child_reaps_both_pipe_readers() {
+        assert!(
+            crate::ff::ffmpeg_available(),
+            "required cancellation test needs a runnable FFmpeg"
+        );
+        let cancel = MediaCancelToken::new();
+        let mut child = crate::ff::ffmpeg()
+            .args([
+                "-re",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=48000:cl=mono",
+                "-t",
+                "30",
+                "-f",
+                "f32le",
+                "-",
+            ])
+            .spawn()
+            .expect("spawn blocking PCM FFmpeg");
+        cancel.child_spawned();
+        let stdout = child.take_stdout().expect("PCM stdout");
+        let stderr = child.take_stderr().expect("PCM stderr");
+        let stdout_cancel = cancel.clone();
+        let stderr_cancel = cancel.clone();
+        let readers = PipeReaders {
+            stdout: std::thread::spawn(move || {
+                read_stdout(stdout, 1024 * 1024, 1024 * 1024, stdout_cancel, None)
+            }),
+            stderr: std::thread::spawn(move || read_stderr(stderr, stderr_cancel)),
+        };
+        let worker_cancel = cancel.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = wait_for_pcm_child(&mut child, readers, &worker_cancel);
+            let reaped = child
+                .as_inner_mut()
+                .try_wait()
+                .expect("inspect cancelled PCM child")
+                .is_some();
+            done_tx
+                .send((result.map(|_| ()), reaped))
+                .expect("publish PCM cancellation");
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while cancel.active_reader_count() < 2 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(cancel.active_reader_count(), 2);
+        cancel.cancel();
+        let (result, reaped) = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("cancelled PCM wait must return promptly");
+
+        assert!(matches!(result, Err(MediaError::Cancelled)));
+        assert!(reaped, "cancelled PCM child must be killed and waited");
+        worker.join().expect("PCM cancellation worker joins");
         assert_eq!(cancel.active_reader_count(), 0);
     }
 

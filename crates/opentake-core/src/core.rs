@@ -463,6 +463,29 @@ impl AppCore {
         name: impl Into<String>,
         probe: &ProbedMedia,
     ) -> Result<MediaManifestEntry> {
+        self.import_media_file_for_project_checked(
+            expected_project_epoch,
+            expected_project_dir,
+            path,
+            name,
+            probe,
+            || Ok(()),
+        )
+    }
+
+    /// Project-bound import with a postcondition checked while the session lock
+    /// is still held. The editor restores its pre-import manifest if the check
+    /// fails, so callers can safely validate external filesystem state at the
+    /// commit boundary without leaving a live dangling entry.
+    pub fn import_media_file_for_project_checked(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+        postcondition: impl FnOnce() -> Result<()>,
+    ) -> Result<MediaManifestEntry> {
         let id = self.ids.next_id();
         let (entry, count) = {
             let mut session = self.lock();
@@ -473,7 +496,10 @@ impl AppCore {
                     "project changed while saving media".to_string(),
                 ));
             }
-            let entry = session.editor.import_media_file(path, id, name, probe)?;
+            let entry =
+                session
+                    .editor
+                    .import_media_file_checked(path, id, name, probe, postcondition)?;
             let count = session.editor.media().entries.len();
             (entry, count)
         };

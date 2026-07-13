@@ -19,6 +19,7 @@ byteorder = "1"
 ndarray = "0.16"
 tracing = "0.1"
 unicode-normalization = "0.1"
+tempfile = "3"
 
 # Media IO. We drive the system ffmpeg/ffprobe over the CLI rather than linking
 # libav*: the local toolchain is ffmpeg 8.1 (libavcodec 62), which the C-binding
@@ -44,6 +45,9 @@ image = { version = "0.25", default-features = false, features = [
 # SigLIP text tokenizer (same lineage as swift-transformers). onig regex backend
 # matches the HF reference; no network at runtime (loads a local tokenizer.json).
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 # Default build/test must stay offline and must NOT link onnxruntime or compile
@@ -90,6 +94,3 @@ optional = true
 [dependencies.sha1]
 version = "0.10"
 optional = true
-
-[dev-dependencies]
-tempfile = "3"

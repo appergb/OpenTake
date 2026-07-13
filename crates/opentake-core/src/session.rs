@@ -277,7 +277,23 @@ impl EditorSession {
         name: impl Into<String>,
         probe: &ProbedMedia,
     ) -> Result<MediaManifestEntry> {
+        self.import_media_file_checked(path, id, name, probe, || Ok(()))
+    }
+
+    /// Import one file and roll the manifest back if `postcondition` fails.
+    /// Save-as-media uses this to bind its final retained-file identity check to
+    /// the live manifest mutation: an attacker-triggered swap can never leave a
+    /// dangling entry behind after the command reports failure.
+    pub fn import_media_file_checked(
+        &mut self,
+        path: impl AsRef<Path>,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+        postcondition: impl FnOnce() -> Result<()>,
+    ) -> Result<MediaManifestEntry> {
         self.ensure_mutable()?;
+        let manifest_before = self.state.manifest.clone();
         let path = path.as_ref();
         let kind = importable_clip_type(path).ok_or(CoreError::Unsupported("media"))?;
 
@@ -301,16 +317,22 @@ impl EditorSession {
         // references it stays valid — instead of appending a second entry for the
         // same source. `source` is the resolved path (external abs or project
         // relative), identical for the same file under the same project.
-        if let Some(existing) = self
+        let entry = if let Some(existing) = self
             .state
             .manifest
             .entries
             .iter()
             .find(|e| e.source == entry.source)
         {
-            return Ok(existing.clone());
+            existing.clone()
+        } else {
+            self.state.manifest.entries.push(entry.clone());
+            entry
+        };
+        if let Err(error) = postcondition() {
+            self.state.manifest = manifest_before;
+            return Err(error);
         }
-        self.state.manifest.entries.push(entry.clone());
         Ok(entry)
     }
 

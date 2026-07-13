@@ -710,6 +710,7 @@ fn schedule_import_poster(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn import_saved_media(
     core: &AppCore,
     engine: &MediaEngine,
@@ -718,17 +719,38 @@ pub(crate) fn import_saved_media(
     expected_project_dir: &Path,
     path: &Path,
 ) -> Result<MediaListDto, String> {
-    import_saved_media_with_before_transaction(
+    import_saved_media_with_hooks(
         core,
         engine,
         prewarm,
         expected_project_epoch,
         expected_project_dir,
         path,
-        || {},
+        (|| {}, || Ok(())),
     )
 }
 
+pub(crate) fn import_saved_media_checked(
+    core: &AppCore,
+    engine: &MediaEngine,
+    prewarm: &prewarm::PrewarmScheduler,
+    expected_project_epoch: u64,
+    expected_project_dir: &Path,
+    path: &Path,
+    postcondition: impl FnOnce() -> Result<(), String>,
+) -> Result<MediaListDto, String> {
+    import_saved_media_with_hooks(
+        core,
+        engine,
+        prewarm,
+        expected_project_epoch,
+        expected_project_dir,
+        path,
+        (|| {}, postcondition),
+    )
+}
+
+#[cfg(test)]
 fn import_saved_media_with_before_transaction(
     core: &AppCore,
     engine: &MediaEngine,
@@ -737,6 +759,26 @@ fn import_saved_media_with_before_transaction(
     expected_project_dir: &Path,
     path: &Path,
     before_transaction: impl FnOnce(),
+) -> Result<MediaListDto, String> {
+    import_saved_media_with_hooks(
+        core,
+        engine,
+        prewarm,
+        expected_project_epoch,
+        expected_project_dir,
+        path,
+        (before_transaction, || Ok(())),
+    )
+}
+
+fn import_saved_media_with_hooks(
+    core: &AppCore,
+    engine: &MediaEngine,
+    prewarm: &prewarm::PrewarmScheduler,
+    expected_project_epoch: u64,
+    expected_project_dir: &Path,
+    path: &Path,
+    hooks: (impl FnOnce(), impl FnOnce() -> Result<(), String>),
 ) -> Result<MediaListDto, String> {
     path.strip_prefix(expected_project_dir)
         .ok()
@@ -750,14 +792,16 @@ fn import_saved_media_with_before_transaction(
         .ok_or("saved media output must be inside the expected project media directory")?;
     importable_clip_type(path).ok_or("failed to import saved media")?;
     let probe = probe_media(engine, path);
+    let (before_transaction, postcondition) = hooks;
     before_transaction();
     let entry = core
-        .import_media_file_for_project(
+        .import_media_file_for_project_checked(
             expected_project_epoch,
             expected_project_dir,
             path,
             display_name(path),
             &probe,
+            || postcondition().map_err(CoreError::Media),
         )
         .map_err(|error| error.to_string())?;
     let result = schedule_import_poster(core, engine, prewarm, &entry, path);
@@ -1170,19 +1214,17 @@ fn save_clip_as_media_workflow(
         build_single_clip_export(&snapshot.timeline, &snapshot.media, clip_id)?;
     let ext = save_clip_extension(media_type)?;
     let _guard = control.try_begin()?;
-    let out_path =
-        crate::export::unique_project_media_path(&project_dir, &format!("clip_{clip_id}"), ext)?;
+    let output =
+        crate::export::reserve_project_media_output(&project_dir, &format!("clip_{clip_id}"), ext)?;
+    let out_path = output.path().to_path_buf();
     let project_dir_option = Some(project_dir.clone());
 
-    let on_progress = |done: i32, total: i32| {
-        crate::export::emit_export_progress(app, done, total);
-    };
-    let audio_app = app.clone();
-    let audio_progress: crate::export::AudioExportProgress = Arc::new(move |done, total| {
-        crate::export::emit_export_progress(&audio_app, done, total);
+    let progress_app = app.clone();
+    let on_progress: crate::export::AudioExportProgress = Arc::new(move |done, total| {
+        crate::export::emit_export_progress(&progress_app, done, total);
     });
 
-    let export_result = match ext {
+    match ext {
         "mp4" => {
             let req = crate::export::ExportRequest {
                 out_path: out_path.to_string_lossy().into_owned(),
@@ -1194,53 +1236,58 @@ fn save_clip_as_media_workflow(
                 &subset,
                 &project_dir_option,
                 &req,
-                Some(control),
-                Some(&on_progress),
-                None,
+                crate::export::ExportRunOptions {
+                    control: Some(control),
+                    on_progress: Some(Arc::clone(&on_progress)),
+                    output_file: Some(output.writer()?),
+                    defer_completion: true,
+                    ..crate::export::ExportRunOptions::default()
+                },
             )
-            .map(|_| ())
+            .map(|_| ())?;
         }
-        "wav" => crate::export::mix_timeline_audio_for_manifest_with_control(
-            &single_timeline,
-            &subset,
-            &project_dir_option,
-            control,
-            Some(audio_progress),
-        )
-        .and_then(|pcm| pcm.ok_or_else(|| "audio clip contains no decodable audio".to_string()))
-        .and_then(|pcm| {
+        "wav" => {
+            let pcm = crate::export::mix_timeline_audio_for_manifest_with_control(
+                &single_timeline,
+                &subset,
+                &project_dir_option,
+                control,
+                Some(Arc::clone(&on_progress)),
+            )?
+            .ok_or_else(|| "audio clip contains no decodable audio".to_string())?;
             let cancel = control.media_cancel_token();
-            crate::export::write_wav_s16le_cancellable(
+            let mut writer = output.writer()?;
+            crate::export::write_wav_s16le_cancellable_to_file(
                 &pcm.samples_f32,
                 pcm.spec.sample_rate,
-                &out_path,
+                &mut writer,
                 &cancel,
-                Some(&on_progress),
+                Some(on_progress.as_ref()),
                 None,
             )?;
-            crate::export::emit_export_progress(
-                app,
-                crate::export::AUDIO_PROGRESS_TOTAL,
-                crate::export::AUDIO_PROGRESS_TOTAL,
-            );
-            Ok(())
-        }),
+        }
         _ => unreachable!("save clip extension is fixed by clip type"),
-    };
+    }
 
-    crate::export::cleanup_partial_output(
+    if control.is_cancelled() {
+        return Err(crate::export::CANCELLED_SENTINEL.to_string());
+    }
+    output.prepare_commit()?;
+    let result = import_saved_media_checked(
+        core,
+        engine,
+        prewarm,
+        snapshot.project_epoch,
+        &project_dir,
         &out_path,
-        export_result.and_then(|_| {
-            import_saved_media(
-                core,
-                engine,
-                prewarm,
-                snapshot.project_epoch,
-                &project_dir,
-                &out_path,
-            )
-        }),
-    )
+        || output.verify_identity(),
+    )?;
+    let _committed_path = output.mark_kept();
+    on_progress(
+        crate::export::AUDIO_PROGRESS_TOTAL,
+        crate::export::AUDIO_PROGRESS_TOTAL,
+    );
+    Ok(result)
 }
 
 fn save_clip_extension(media_type: ClipType) -> Result<&'static str, String> {
@@ -1866,6 +1913,81 @@ mod tests {
             serde_json::to_vec(&core.media()).expect("serialize actual B manifest"),
             before,
             "project B manifest must remain byte-for-byte unchanged"
+        );
+    }
+
+    #[test]
+    fn final_identity_swap_rolls_back_live_and_persisted_saved_media_import() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let bundle = tmp.path().join("IdentityRollback.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save project");
+        let snapshot = core.runtime_snapshot();
+        let before_live = snapshot.media.clone();
+        let manifest_path = bundle.join("media.json");
+        let before_disk = fs::read(&manifest_path).expect("read persisted manifest");
+        let output =
+            crate::export::reserve_project_media_output(&bundle, "post_import_swap", "wav")
+                .expect("reserve saved-media output");
+        let output_path = output.path().to_path_buf();
+        let moved_original = output_path.with_extension("moved");
+        let mut writer = output.writer().expect("clone saved-media writer");
+        crate::export::write_wav_s16le_cancellable_to_file(
+            &[0.0; 480],
+            48_000,
+            &mut writer,
+            &opentake_media::MediaCancelToken::new(),
+            None,
+            None,
+        )
+        .expect("write rendered WAV");
+        drop(writer);
+        output.prepare_commit().expect("pre-import identity valid");
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(snapshot.project_epoch);
+
+        let result = import_saved_media_checked(
+            &core,
+            &engine,
+            &scheduler,
+            snapshot.project_epoch,
+            &bundle,
+            &output_path,
+            || {
+                fs::rename(&output_path, &moved_original)
+                    .map_err(|error| format!("swap reserved output: {error}"))?;
+                fs::write(&output_path, b"replacement")
+                    .map_err(|error| format!("install replacement: {error}"))?;
+                output.verify_identity()
+            },
+        );
+
+        let error = result.expect_err("post-import identity swap must abort transaction");
+        assert!(error.contains("output changed"), "{error}");
+        assert_eq!(
+            core.media(),
+            before_live,
+            "failed postcondition must restore the live manifest"
+        );
+        assert_eq!(
+            fs::read(&manifest_path).expect("reread persisted manifest"),
+            before_disk,
+            "failed postcondition must not alter persisted media.json"
+        );
+        let reopened = AppCore::new();
+        reopened
+            .open_project(bundle.clone())
+            .expect("reopen project after rollback");
+        assert_eq!(
+            reopened.media(),
+            before_live,
+            "reopened project must not contain a dangling saved-media entry"
+        );
+        drop(output);
+        assert_eq!(
+            fs::read(&output_path).expect("replacement remains untouched"),
+            b"replacement"
         );
     }
 

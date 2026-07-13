@@ -30,8 +30,9 @@
 //! shared projection into a `pub(crate)` helper once both paths are stable.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 #[cfg(test)]
@@ -40,6 +41,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use same_file::Handle as FileIdentity;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
@@ -497,7 +499,12 @@ const AUDIO_DECODE_END: i32 = 800;
 const AUDIO_MIX_START: i32 = 850;
 const AUDIO_MIX_END: i32 = 980;
 const AUDIO_WAV_START: i32 = AUDIO_MIX_END;
+const AUDIO_WAV_END: i32 = 990;
 const AUDIO_CANCEL_CHUNK_SAMPLES: usize = 8 * 1024;
+const VIDEO_RENDER_END: i32 = 550;
+const VIDEO_AUDIO_END: i32 = 800;
+const VIDEO_FINALIZE_END: i32 = 980;
+const VIDEO_EXPORT_END: i32 = 990;
 
 fn decode_pcm_with_export_control<F>(
     control: &ExportControl,
@@ -839,17 +846,19 @@ pub fn export_video(
     let timeline = core.get_timeline().timeline;
     let manifest = core.media();
     let project_dir = core.project_dir();
-    let on_progress = |done: i32, total: i32| {
+    let on_progress: AudioExportProgress = Arc::new(move |done: i32, total: i32| {
         let _ = app.emit("export://progress", ExportProgress { done, total });
-    };
+    });
     run_export_with_control(
         &timeline,
         &manifest,
         &project_dir,
         &req,
-        Some(&control),
-        Some(&on_progress),
-        None,
+        ExportRunOptions {
+            control: Some(&control),
+            on_progress: Some(on_progress),
+            ..ExportRunOptions::default()
+        },
     )
 }
 
@@ -866,7 +875,13 @@ pub fn run_export(
     project_dir: &Option<PathBuf>,
     req: &ExportRequest,
 ) -> Result<ExportSummary, String> {
-    run_export_with_control(timeline, manifest, project_dir, req, None, None, None)
+    run_export_with_control(
+        timeline,
+        manifest,
+        project_dir,
+        req,
+        ExportRunOptions::default(),
+    )
 }
 
 /// Shared orchestration behind [`run_export`] and [`export_video`]: `control`
@@ -874,15 +889,26 @@ pub fn run_export(
 /// [`PROGRESS_INTERVAL`], plus once more at 100% when the loop finishes) are
 /// both optional so callers with no Tauri context (the integration test) can
 /// omit them.
+#[derive(Default)]
+pub(crate) struct ExportRunOptions<'a> {
+    pub(crate) control: Option<&'a ExportControl>,
+    pub(crate) on_progress: Option<AudioExportProgress>,
+    pub(crate) frame_range: Option<(i32, i32)>,
+    pub(crate) output_file: Option<File>,
+    pub(crate) defer_completion: bool,
+}
+
 pub(crate) fn run_export_with_control(
     timeline: &opentake_domain::Timeline,
     manifest: &opentake_domain::MediaManifest,
     project_dir: &Option<PathBuf>,
     req: &ExportRequest,
-    control: Option<&ExportControl>,
-    on_progress: Option<&dyn Fn(i32, i32)>,
-    frame_range: Option<(i32, i32)>,
+    mut options: ExportRunOptions<'_>,
 ) -> Result<ExportSummary, String> {
+    let control = options.control;
+    let on_progress = options.on_progress;
+    let defer_completion = options.defer_completion;
+    let reserved_output = options.output_file.is_some();
     let out_path = PathBuf::from(&req.out_path);
     let preset = resolve_preset(req.codec, req.quality, &out_path)?;
 
@@ -908,16 +934,26 @@ pub(crate) fn run_export_with_control(
         eprintln!("[render] no system fonts discovered; text clips will render blank");
     }
 
-    let mut encoder = VideoEncoder::new(
-        &out_path,
-        render_size.width,
-        render_size.height,
-        plan.fps,
-        &preset,
-    )
+    let mut encoder = match options.output_file.take() {
+        Some(output) => VideoEncoder::new_with_file(
+            &out_path,
+            output,
+            render_size.width,
+            render_size.height,
+            plan.fps,
+            &preset,
+        ),
+        None => VideoEncoder::new(
+            &out_path,
+            render_size.width,
+            render_size.height,
+            plan.fps,
+            &preset,
+        ),
+    }
     .map_err(|e| format!("encoder init failed: {e}"))?;
 
-    let (start_frame, end_frame) = match frame_range {
+    let (start_frame, end_frame) = match options.frame_range {
         None => (0, plan.total_frames),
         Some((lo, hi)) => {
             let lo = lo.max(0).min(plan.total_frames);
@@ -936,7 +972,9 @@ pub(crate) fn run_export_with_control(
             // Best-effort cleanup of the partial file — a leftover half-encoded
             // video must not look like a finished export. Missing/unwritable is
             // not itself an error worth surfacing over the cancel.
-            let _ = std::fs::remove_file(&out_path);
+            if !reserved_output {
+                let _ = std::fs::remove_file(&out_path);
+            }
             return Err(CANCELLED_SENTINEL.to_string());
         }
 
@@ -968,12 +1006,17 @@ pub(crate) fn run_export_with_control(
             ))
             .map_err(|e| format!("encode frame {f} failed: {e}"))?;
 
-        if let Some(emit) = on_progress {
+        if let Some(emit) = &on_progress {
             let now = Instant::now();
             let done = f - start_frame + 1;
             let is_last = done == range_total;
             if is_last || progress_should_emit(last_progress_emit, now) {
-                emit(done, range_total);
+                let mapped = if range_total == 0 {
+                    VIDEO_RENDER_END
+                } else {
+                    done.saturating_mul(VIDEO_RENDER_END) / range_total
+                };
+                emit(mapped, AUDIO_PROGRESS_TOTAL);
                 last_progress_emit = now;
             }
         }
@@ -981,9 +1024,18 @@ pub(crate) fn run_export_with_control(
 
     // Decode + linearly mix every audio-bearing clip, then hand the mixed PCM to
     // the encoder so `finish` mux's it into the container. No audio → video-only.
-    let mixed_audio = mix_timeline_audio(timeline, &media, control, None)?;
+    let audio_progress = on_progress.as_ref().map(|emit| {
+        let emit = Arc::clone(emit);
+        Arc::new(move |done: i32, total: i32| {
+            let span = VIDEO_AUDIO_END - VIDEO_RENDER_END;
+            let mapped =
+                VIDEO_RENDER_END + done.min(total.max(1)).saturating_mul(span) / total.max(1);
+            emit(mapped, AUDIO_PROGRESS_TOTAL);
+        }) as AudioExportProgress
+    });
+    let mixed_audio = mix_timeline_audio(timeline, &media, control, audio_progress)?;
     if let Some(pcm) = mixed_audio {
-        let pcm = if frame_range.is_some() {
+        let pcm = if options.frame_range.is_some() {
             slice_pcm(pcm, start_frame, end_frame, plan.fps)
         } else {
             pcm
@@ -991,9 +1043,47 @@ pub(crate) fn run_export_with_control(
         encoder.push_audio(pcm);
     }
 
-    encoder
-        .finish()
-        .map_err(|e| format!("encoder finish failed: {e}"))?;
+    let cancel = control
+        .map(ExportControl::media_cancel_token)
+        .unwrap_or_default();
+    let finalize_progress = on_progress.as_ref().map(|emit| {
+        let emit = Arc::clone(emit);
+        move |done: usize, total: usize| {
+            let span = (VIDEO_FINALIZE_END - VIDEO_AUDIO_END) as usize;
+            let mapped = VIDEO_AUDIO_END
+                + (done.min(total.max(1)).saturating_mul(span) / total.max(1)) as i32;
+            emit(mapped, AUDIO_PROGRESS_TOTAL);
+        }
+    });
+    match encoder.finish_cancellable(
+        &cancel,
+        finalize_progress
+            .as_ref()
+            .map(|callback| callback as &opentake_media::encode::EncodeProgressCallback),
+    ) {
+        Ok(()) => {}
+        Err(opentake_media::MediaError::Cancelled) => {
+            if !reserved_output {
+                let _ = std::fs::remove_file(&out_path);
+            }
+            return Err(CANCELLED_SENTINEL.to_string());
+        }
+        Err(error) => {
+            if !reserved_output {
+                let _ = std::fs::remove_file(&out_path);
+            }
+            return Err(format!("encoder finish failed: {error}"));
+        }
+    }
+    if control.is_some_and(ExportControl::is_cancelled) {
+        if !reserved_output {
+            let _ = std::fs::remove_file(&out_path);
+        }
+        return Err(CANCELLED_SENTINEL.to_string());
+    }
+    if let Some(emit) = &on_progress {
+        emit(completion_progress(defer_completion), AUDIO_PROGRESS_TOTAL);
+    }
 
     Ok(ExportSummary {
         out_path: req.out_path.clone(),
@@ -1002,6 +1092,14 @@ pub(crate) fn run_export_with_control(
         fps: plan.fps,
         frame_count: range_total,
     })
+}
+
+fn completion_progress(defer_completion: bool) -> i32 {
+    if defer_completion {
+        VIDEO_EXPORT_END
+    } else {
+        AUDIO_PROGRESS_TOTAL
+    }
 }
 
 fn slice_pcm(pcm: PcmBuffer, start_frame: i32, end_frame: i32, fps: i32) -> PcmBuffer {
@@ -1024,20 +1122,30 @@ fn slice_pcm(pcm: PcmBuffer, start_frame: i32, end_frame: i32, fps: i32) -> PcmB
 
 #[cfg(test)]
 pub(crate) fn write_wav_s16le(samples: &[f32], sample_rate: u32, out: &Path) -> Result<(), String> {
-    write_wav_s16le_cancellable(
+    let mut output = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(out)
+        .map_err(|error| format!("open WAV output: {error}"))?;
+    let result = write_wav_s16le_cancellable_to_file(
         samples,
         sample_rate,
-        out,
+        &mut output,
         &MediaCancelToken::new(),
         None,
         None,
-    )
+    );
+    if result.is_err() {
+        drop(output);
+        let _ = std::fs::remove_file(out);
+    }
+    result
 }
 
-pub(crate) fn write_wav_s16le_cancellable(
+pub(crate) fn write_wav_s16le_cancellable_to_file(
     samples: &[f32],
     sample_rate: u32,
-    out: &Path,
+    file: &mut File,
     cancel: &MediaCancelToken,
     on_progress: Option<&dyn Fn(i32, i32)>,
     checkpoint_hook: Option<&dyn Fn(usize)>,
@@ -1063,11 +1171,14 @@ pub(crate) fn write_wav_s16le_cancellable(
     header.extend_from_slice(b"data");
     header.extend_from_slice(&data_len.to_le_bytes());
 
-    let result = (|| {
+    (|| {
         if cancel.checkpoint() {
             return Err(CANCELLED_SENTINEL.to_string());
         }
-        let mut file = open_reserved_output_nofollow(out)?;
+        file.set_len(0)
+            .map_err(|error| format!("truncate WAV output: {error}"))?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| format!("seek WAV output: {error}"))?;
         file.write_all(&header)
             .map_err(|error| format!("write wav header: {error}"))?;
         for (chunk_index, chunk) in samples.chunks(AUDIO_CANCEL_CHUNK_SAMPLES).enumerate() {
@@ -1082,7 +1193,7 @@ pub(crate) fn write_wav_s16le_cancellable(
             file.write_all(&data)
                 .map_err(|error| format!("write wav samples: {error}"))?;
             if let Some(report) = on_progress {
-                let span = (AUDIO_PROGRESS_TOTAL - AUDIO_WAV_START) as usize;
+                let span = (AUDIO_WAV_END - AUDIO_WAV_START) as usize;
                 let completed = (done + chunk.len()).min(samples.len());
                 let mapped = AUDIO_WAV_START
                     + (completed.saturating_mul(span) / samples.len().max(1)) as i32;
@@ -1095,11 +1206,7 @@ pub(crate) fn write_wav_s16le_cancellable(
         file.flush()
             .map_err(|error| format!("flush wav output: {error}"))?;
         Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(out);
-    }
-    result
+    })()
 }
 
 fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
@@ -1148,35 +1255,57 @@ fn ensure_project_media_dir(project_dir: &Path) -> Result<PathBuf, String> {
     Ok(media_dir)
 }
 
+fn open_media_directory_nofollow(path: &Path) -> Result<File, String> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        const FILE_SHARE_WRITE: u32 = 0x2;
+        const FILE_SHARE_DELETE: u32 = 0x4;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let directory = options.open(path).map_err(|error| {
+        format!("open project media directory without following links: {error}")
+    })?;
+    let metadata = directory
+        .metadata()
+        .map_err(|error| format!("inspect opened project media directory: {error}"))?;
+    if metadata_is_symlink_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err("project media path must be a real directory".to_string());
+    }
+    Ok(directory)
+}
+
 #[cfg(unix)]
-fn reserve_output_file(path: &Path) -> Result<File, String> {
+fn reserve_output_file(path: &Path, parent_handle: &File) -> Result<File, String> {
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::unix::fs::MetadataExt;
 
-    let parent = path
-        .parent()
-        .ok_or_else(|| "project media output has no parent".to_string())?;
     let file_name = path
         .file_name()
         .ok_or_else(|| "project media output has no file name".to_string())?;
-    let file_name = CString::new(file_name.as_bytes())
+    let file_name_c = CString::new(file_name.as_bytes())
         .map_err(|_| "project media output contains a NUL byte".to_string())?;
-    let mut parent_options = OpenOptions::new();
-    parent_options
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    let parent_handle = parent_options.open(parent).map_err(|error| {
-        format!("open project media directory without following links: {error}")
-    })?;
-    // SAFETY: `parent_handle` is an open directory, `file_name` is a validated
+    // SAFETY: `parent_handle` is an open directory, `file_name_c` is a validated
     // single C string, and a successful descriptor is immediately owned by File.
     let descriptor = unsafe {
         libc::openat(
             parent_handle.as_raw_fd(),
-            file_name.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            file_name_c.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
         )
     };
@@ -1188,81 +1317,246 @@ fn reserve_output_file(path: &Path) -> Result<File, String> {
     }
     // SAFETY: `openat` returned a new owned descriptor and no other owner exists.
     let file = unsafe { File::from_raw_fd(descriptor) };
-    let opened = file
-        .metadata()
-        .map_err(|error| format!("failed to inspect reserved media output: {error}"))?;
-    let visible = std::fs::symlink_metadata(path)
-        .map_err(|error| format!("failed to revalidate reserved media output: {error}"))?;
+    let opened = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            let _ = remove_reserved_output(parent_handle, &file, file_name);
+            return Err(format!("failed to inspect reserved media output: {error}"));
+        }
+    };
+    let visible = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            let _ = remove_reserved_output(parent_handle, &file, file_name);
+            return Err(format!(
+                "failed to revalidate reserved media output: {error}"
+            ));
+        }
+    };
     let identity_matches = opened.dev() == visible.dev() && opened.ino() == visible.ino();
     if !identity_matches || metadata_is_symlink_or_reparse(&visible) || !visible.is_file() {
-        // SAFETY: the directory descriptor and validated child name remain live;
-        // unlinkat removes only the object created through this retained parent.
-        let _ = unsafe { libc::unlinkat(parent_handle.as_raw_fd(), file_name.as_ptr(), 0) };
+        let _ = remove_reserved_output(parent_handle, &file, file_name);
         return Err("project media output changed during reservation".to_string());
     }
     Ok(file)
 }
 
 #[cfg(not(unix))]
-fn reserve_output_file(path: &Path) -> Result<File, String> {
+fn reserve_output_file(path: &Path, parent_handle: &File) -> Result<File, String> {
     let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
+    options.create_new(true);
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
+        const DELETE: u32 = 0x0001_0000;
+        const GENERIC_READ: u32 = 0x8000_0000;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        const FILE_SHARE_READ: u32 = 0x1;
+        const FILE_SHARE_WRITE: u32 = 0x2;
+        const FILE_SHARE_DELETE: u32 = 0x4;
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        options
+            .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
+    #[cfg(not(windows))]
+    options.read(true).write(true);
     let file = options
         .open(path)
         .map_err(|error| format!("failed to reserve project media output: {error}"))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("failed to inspect reserved media output: {error}"))?;
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            if let Some(name) = path.file_name() {
+                let _ = remove_reserved_output(parent_handle, &file, name);
+            }
+            return Err(format!("failed to inspect reserved media output: {error}"));
+        }
+    };
     if metadata_is_symlink_or_reparse(&metadata) || !metadata.is_file() {
-        let _ = std::fs::remove_file(path);
+        if let Some(name) = path.file_name() {
+            let _ = remove_reserved_output(parent_handle, &file, name);
+        }
         return Err("project media output must be a regular file".to_string());
     }
     Ok(file)
 }
 
-fn open_reserved_output_nofollow(path: &Path) -> Result<File, String> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| format!("failed to inspect project media output: {error}"))?;
-    if metadata_is_symlink_or_reparse(&metadata) || !metadata.is_file() {
-        return Err("project media output must be a regular file".to_string());
-    }
-
-    let mut options = OpenOptions::new();
-    options.write(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    let file = options
-        .open(path)
-        .map_err(|error| format!("open project media output: {error}"))?;
-    let opened = file
-        .metadata()
-        .map_err(|error| format!("inspect opened project media output: {error}"))?;
-    if metadata_is_symlink_or_reparse(&opened) || !opened.is_file() {
-        return Err("project media output must be a regular file".to_string());
-    }
-    Ok(file)
+pub(crate) struct ProjectMediaOutput {
+    path: PathBuf,
+    media_dir: PathBuf,
+    final_name: OsString,
+    directory: File,
+    file: File,
+    directory_identity: FileIdentity,
+    file_identity: FileIdentity,
+    keep: bool,
 }
 
-pub(crate) fn unique_project_media_path(
+impl ProjectMediaOutput {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn writer(&self) -> Result<File, String> {
+        self.file
+            .try_clone()
+            .map_err(|error| format!("clone project media output: {error}"))
+    }
+
+    pub(crate) fn verify_identity(&self) -> Result<(), String> {
+        let directory_metadata = std::fs::symlink_metadata(&self.media_dir)
+            .map_err(|error| format!("revalidate project media directory: {error}"))?;
+        if metadata_is_symlink_or_reparse(&directory_metadata) || !directory_metadata.is_dir() {
+            return Err("project media directory changed during export".to_string());
+        }
+        let visible_directory = FileIdentity::from_path(&self.media_dir)
+            .map_err(|error| format!("identify visible project media directory: {error}"))?;
+        if visible_directory != self.directory_identity {
+            return Err("project media directory changed during export".to_string());
+        }
+        let file_metadata = std::fs::symlink_metadata(&self.path)
+            .map_err(|error| format!("revalidate project media output: {error}"))?;
+        if metadata_is_symlink_or_reparse(&file_metadata) || !file_metadata.is_file() {
+            return Err("project media output changed during export".to_string());
+        }
+        let visible_file = FileIdentity::from_path(&self.path)
+            .map_err(|error| format!("identify visible project media output: {error}"))?;
+        if visible_file != self.file_identity {
+            return Err("project media output changed during export".to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn prepare_commit(&self) -> Result<(), String> {
+        self.file
+            .sync_all()
+            .map_err(|error| format!("sync project media output: {error}"))?;
+        self.verify_identity()
+    }
+
+    pub(crate) fn mark_kept(mut self) -> PathBuf {
+        self.keep = true;
+        self.path.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn keep(self) -> Result<PathBuf, String> {
+        self.prepare_commit()?;
+        Ok(self.mark_kept())
+    }
+}
+
+impl Drop for ProjectMediaOutput {
+    fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
+        let _ = remove_reserved_output(&self.directory, &self.file, &self.final_name);
+    }
+}
+
+#[cfg(unix)]
+fn remove_reserved_output(directory: &File, file: &File, name: &std::ffi::OsStr) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let name = CString::new(name.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "output name contains NUL"))?;
+    let mut opened: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `file` is a retained live descriptor and `opened` is writable.
+    if unsafe { libc::fstat(file.as_raw_fd(), &mut opened) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Revalidate the directory entry through the retained parent. If an
+    // attacker replaced the name, leave their object untouched instead of
+    // unlinking a path that no longer names our reserved file.
+    let mut visible: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: the retained directory descriptor and validated child name are
+    // live, and `visible` points to writable storage for one `stat` value.
+    let inspected = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            &mut visible,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if inspected < 0 {
+        let error = io::Error::last_os_error();
+        return if error.kind() == io::ErrorKind::NotFound {
+            Ok(())
+        } else {
+            Err(error)
+        };
+    }
+    if opened.st_dev != visible.st_dev || opened.st_ino != visible.st_ino {
+        return Ok(());
+    }
+    // SAFETY: `directory` is the retained no-follow directory and `name` is a
+    // single validated component, so cleanup cannot traverse a swapped path.
+    if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn remove_reserved_output(
+    _directory: &File,
+    file: &File,
+    _name: &std::ffi::OsStr,
+) -> io::Result<()> {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    struct FileDispositionInfo {
+        delete_file: i32,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetFileInformationByHandle(
+            file: *mut c_void,
+            info_class: i32,
+            info: *const c_void,
+            size: u32,
+        ) -> i32;
+    }
+    const FILE_DISPOSITION_INFO_CLASS: i32 = 4;
+    let info = FileDispositionInfo { delete_file: 1 };
+    // SAFETY: the retained file handle stays live for the call and `info`
+    // matches Windows' FILE_DISPOSITION_INFO layout.
+    let removed = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FILE_DISPOSITION_INFO_CLASS,
+            (&info as *const FileDispositionInfo).cast(),
+            std::mem::size_of::<FileDispositionInfo>() as u32,
+        )
+    };
+    if removed == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn remove_reserved_output(
+    _directory: &File,
+    _file: &File,
+    _name: &std::ffi::OsStr,
+) -> io::Result<()> {
+    Ok(())
+}
+
+pub(crate) fn reserve_project_media_output(
     project_dir: &Path,
     stem: &str,
     ext: &str,
-) -> Result<PathBuf, String> {
+) -> Result<ProjectMediaOutput, String> {
     if !matches!(ext, "mp4" | "wav") {
         return Err("unsupported save-as-media extension".to_string());
     }
@@ -1281,6 +1575,13 @@ pub(crate) fn unique_project_media_path(
         safe_stem.push_str("media");
     }
     let media_dir = ensure_project_media_dir(project_dir)?;
+    let directory = open_media_directory_nofollow(&media_dir)?;
+    let directory_identity = FileIdentity::from_file(
+        directory
+            .try_clone()
+            .map_err(|error| format!("clone project media directory handle: {error}"))?,
+    )
+    .map_err(|error| format!("identify project media directory: {error}"))?;
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     loop {
@@ -1289,11 +1590,36 @@ pub(crate) fn unique_project_media_path(
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
         let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = media_dir.join(format!("{safe_stem}_{nanos:x}_{counter:x}.{ext}"));
-        match reserve_output_file(&path) {
+        let final_name = OsString::from(format!("{safe_stem}_{nanos:x}_{counter:x}.{ext}"));
+        let path = media_dir.join(&final_name);
+        match reserve_output_file(&path, &directory) {
             Ok(file) => {
-                drop(file);
-                return Ok(path);
+                let file_identity = file
+                    .try_clone()
+                    .map_err(|error| format!("clone project media output handle: {error}"))
+                    .and_then(|clone| {
+                        FileIdentity::from_file(clone)
+                            .map_err(|error| format!("identify project media output: {error}"))
+                    });
+                let file_identity = match file_identity {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        let _ = remove_reserved_output(&directory, &file, &final_name);
+                        return Err(error);
+                    }
+                };
+                let output = ProjectMediaOutput {
+                    path,
+                    media_dir: media_dir.clone(),
+                    final_name,
+                    directory,
+                    file,
+                    directory_identity,
+                    file_identity,
+                    keep: false,
+                };
+                output.verify_identity()?;
+                return Ok(output);
             }
             Err(_) if path.exists() => continue,
             Err(error) => return Err(error),
@@ -1301,6 +1627,16 @@ pub(crate) fn unique_project_media_path(
     }
 }
 
+#[cfg(test)]
+pub(crate) fn unique_project_media_path(
+    project_dir: &Path,
+    stem: &str,
+    ext: &str,
+) -> Result<PathBuf, String> {
+    reserve_project_media_output(project_dir, stem, ext)?.keep()
+}
+
+#[cfg(test)]
 pub(crate) fn cleanup_partial_output<T>(
     path: &Path,
     result: Result<T, String>,
@@ -1369,42 +1705,53 @@ fn save_range_as_media_workflow(
     validate_save_range(total_frames, in_frame, out_frame)?;
 
     let _guard = control.try_begin()?;
-    let out_path = unique_project_media_path(
+    let output = reserve_project_media_output(
         &project_dir,
         &format!("range_{in_frame}_{out_frame}"),
         "mp4",
     )?;
-    let on_progress = |done: i32, total: i32| {
+    let out_path = output.path().to_path_buf();
+    let output_file = output.writer()?;
+    let progress_app = app.clone();
+    let on_progress: AudioExportProgress = Arc::new(move |done: i32, total: i32| {
+        let app = &progress_app;
         let _ = app.emit("export://progress", ExportProgress { done, total });
-    };
+    });
     let req = ExportRequest {
         out_path: out_path.to_string_lossy().into_owned(),
         codec: ExportCodec::H264,
         quality: ExportQuality::P1080,
     };
     let project_dir_option = Some(project_dir.clone());
-    cleanup_partial_output(
+    run_export_with_control(
+        &snapshot.timeline,
+        &snapshot.media,
+        &project_dir_option,
+        &req,
+        ExportRunOptions {
+            control: Some(control),
+            on_progress: Some(Arc::clone(&on_progress)),
+            frame_range: Some((in_frame, out_frame)),
+            output_file: Some(output_file),
+            defer_completion: true,
+        },
+    )?;
+    if control.is_cancelled() {
+        return Err(CANCELLED_SENTINEL.to_string());
+    }
+    output.prepare_commit()?;
+    let result = crate::media::import_saved_media_checked(
+        core,
+        engine,
+        prewarm,
+        snapshot.project_epoch,
+        &project_dir,
         &out_path,
-        run_export_with_control(
-            &snapshot.timeline,
-            &snapshot.media,
-            &project_dir_option,
-            &req,
-            Some(control),
-            Some(&on_progress),
-            Some((in_frame, out_frame)),
-        )
-        .and_then(|_| {
-            crate::media::import_saved_media(
-                core,
-                engine,
-                prewarm,
-                snapshot.project_epoch,
-                &project_dir,
-                &out_path,
-            )
-        }),
-    )
+        || output.verify_identity(),
+    )?;
+    let _committed_path = output.mark_kept();
+    on_progress(AUDIO_PROGRESS_TOTAL, AUDIO_PROGRESS_TOTAL);
+    Ok(result)
 }
 
 // MARK: - Self-contained `.opentake` bundle export (#29 / upstream `.palmier`)
@@ -1696,6 +2043,13 @@ mod tests {
     }
 
     #[test]
+    fn save_as_defers_terminal_progress_until_identity_checked_import() {
+        assert_eq!(completion_progress(true), VIDEO_EXPORT_END);
+        assert!(completion_progress(true) < AUDIO_PROGRESS_TOTAL);
+        assert_eq!(completion_progress(false), AUDIO_PROGRESS_TOTAL);
+    }
+
+    #[test]
     fn quality_maps_to_both_resolution_selectors() {
         assert_eq!(
             ExportQuality::P720.render_resolution(),
@@ -1888,8 +2242,10 @@ mod tests {
         fs::write(&outside, b"keep").expect("outside fixture");
         let candidate = media.join("candidate.wav");
         symlink(&outside, &candidate).expect("candidate symlink");
+        let directory = open_media_directory_nofollow(&media).expect("open media directory");
 
-        let error = reserve_output_file(&candidate).expect_err("create-new rejects symlink");
+        let error =
+            reserve_output_file(&candidate, &directory).expect_err("create-new rejects symlink");
 
         assert!(error.contains("reserve"), "{error}");
         assert_eq!(
@@ -1899,16 +2255,109 @@ mod tests {
     }
 
     #[test]
+    fn reserved_output_detects_final_name_swap_without_deleting_replacement() {
+        let project = tempfile::tempdir().expect("project");
+        let output = reserve_project_media_output(project.path(), "identity", "wav")
+            .expect("reserve output");
+        let visible_path = output.path().to_path_buf();
+        output
+            .writer()
+            .expect("clone output")
+            .write_all(b"reserved")
+            .expect("write reserved output");
+        let moved_original = visible_path.with_extension("moved");
+        fs::rename(&visible_path, &moved_original).expect("move retained output");
+        fs::write(&visible_path, b"replacement").expect("install replacement");
+
+        let error = output
+            .verify_identity()
+            .expect_err("visible replacement must fail identity validation");
+        assert!(error.contains("output changed"), "{error}");
+        drop(output);
+
+        assert_eq!(
+            fs::read(&visible_path).expect("replacement remains"),
+            b"replacement"
+        );
+        #[cfg(windows)]
+        assert!(
+            !moved_original.exists(),
+            "Windows retained-handle disposition removes the reserved file"
+        );
+        #[cfg(unix)]
+        assert!(
+            moved_original.exists(),
+            "Unix cleanup must not guess the reserved file's attacker-chosen new name"
+        );
+    }
+
+    #[test]
+    fn reserved_output_detects_parent_swap_and_cleans_through_retained_parent() {
+        let project = tempfile::tempdir().expect("project");
+        let output = reserve_project_media_output(project.path(), "identity", "wav")
+            .expect("reserve output");
+        let final_name = output.path().file_name().expect("reserved name").to_owned();
+        let media = project.path().join("media");
+        let moved_media = project.path().join("media-moved");
+        fs::rename(&media, &moved_media).expect("move original media directory");
+        fs::create_dir(&media).expect("install replacement media directory");
+        fs::write(media.join("keep.txt"), b"replacement").expect("replacement marker");
+
+        let error = output
+            .verify_identity()
+            .expect_err("visible parent replacement must fail identity validation");
+        assert!(error.contains("directory changed"), "{error}");
+        drop(output);
+
+        assert!(
+            !moved_media.join(final_name).exists(),
+            "drop must clean the reserved file through retained handles"
+        );
+        assert_eq!(
+            fs::read(media.join("keep.txt")).expect("replacement marker remains"),
+            b"replacement"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_project_media_junction_is_rejected_without_writing_target() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let project = root.path().join("Project.opentake");
+        let outside = root.path().join("outside");
+        fs::create_dir(&project).expect("project directory");
+        fs::create_dir(&outside).expect("outside directory");
+        let junction = project.join("media");
+        let status = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&junction)
+            .arg(&outside)
+            .status()
+            .expect("create media junction");
+        assert!(status.success(), "mklink /J must create test junction");
+
+        let error = reserve_project_media_output(&project, "escaped", "wav")
+            .err()
+            .expect("media junction must be rejected");
+
+        assert!(error.contains("real directory"), "{error}");
+        assert_eq!(fs::read_dir(&outside).expect("read target").count(), 0);
+    }
+
+    #[test]
     fn wav_cancellation_inside_write_loop_removes_partial_output() {
         use std::sync::mpsc;
 
         let project = tempfile::tempdir().expect("project");
-        let output = unique_project_media_path(project.path(), "cancelled_audio", "wav")
+        let output = reserve_project_media_output(project.path(), "cancelled_audio", "wav")
             .expect("reserved output");
+        let output_path = output.path().to_path_buf();
+        let mut writer = output.writer().expect("clone reserved output");
         let samples = vec![0.25_f32; AUDIO_CANCEL_CHUNK_SAMPLES * 4];
         let cancel = MediaCancelToken::new();
         let worker_cancel = cancel.clone();
-        let worker_output = output.clone();
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
@@ -1917,10 +2366,10 @@ mod tests {
                 entered_tx.send(()).expect("WAV loop entered");
                 release_rx.recv().expect("release WAV loop");
             };
-            let result = write_wav_s16le_cancellable(
+            let result = write_wav_s16le_cancellable_to_file(
                 &samples,
                 48_000,
-                &worker_output,
+                &mut writer,
                 &worker_cancel,
                 None,
                 Some(&hook),
@@ -1938,8 +2387,12 @@ mod tests {
             .expect("WAV cancellation must return promptly");
 
         assert_eq!(result.unwrap_err(), CANCELLED_SENTINEL);
-        assert!(!output.exists(), "cancelled WAV must remove partial output");
         worker.join().expect("WAV worker joins");
+        drop(output);
+        assert!(
+            !output_path.exists(),
+            "cancelled WAV must remove reserved partial output"
+        );
     }
 
     #[test]
