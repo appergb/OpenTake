@@ -2058,9 +2058,14 @@ rg -n '^running 1 test$' "$RED_DIR/output.log"
 rg -n '^test safe_fs::tests::component_accepts_safe_names_and_rejects_too_long_and_unsafe_names \.\.\. FAILED$' "$RED_DIR/output.log"
 rg -n '^test result: FAILED\. 0 passed; 1 failed;' "$RED_DIR/output.log"
 rg -n 'safe component accepted|UnsupportedTarget' "$RED_DIR/output.log"
-if rg -n -P '^running 0 tests$|^error\[|^error: (?!test failed, to rerun pass `-p opentake-project --lib`$)|could not compile' "$RED_DIR/output.log"; then
+RG_STATUS=0
+rg -n -P '^running 0 tests$|^error\[|^error: (?!test failed, to rerun pass `-p opentake-project --lib`$)|could not compile' "$RED_DIR/output.log" || RG_STATUS=$?
+if [ "$RG_STATUS" -eq 0 ]; then
   echo 'Task 2B RED was not a behavioral one-test failure' >&2
   exit 1
+elif [ "$RG_STATUS" -ne 1 ]; then
+  echo "Task 2B RED classifier failed with rg exit $RG_STATUS" >&2
+  exit "$RG_STATUS"
 fi
 printf 'test_sha=%s\nparent_sha=%s\nexit=%s\n' "$TEST_SHA" "$(git rev-parse "$TEST_SHA^")" "$STATUS" >"$RED_DIR/receipt.txt"
 ```
@@ -2116,9 +2121,14 @@ for LOG in "$RED_DIR/output.log" "$RED_DIR/rollback-output.log"; do
   rg -n '^running 1 test$' "$LOG"
   rg -n '^test .* \.\.\. FAILED$' "$LOG"
   rg -n 'UnsupportedTarget' "$LOG"
-  if rg -n -P '^running 0 tests$|^error\[|^error: (?!test failed, to rerun pass `-p opentake-project --lib`$)|could not compile' "$LOG"; then
+  RG_STATUS=0
+  rg -n -P '^running 0 tests$|^error\[|^error: (?!test failed, to rerun pass `-p opentake-project --lib`$)|could not compile' "$LOG" || RG_STATUS=$?
+  if [ "$RG_STATUS" -eq 0 ]; then
     echo "Task 4 RED was not a behavioral one-test failure: $LOG" >&2
     exit 1
+  elif [ "$RG_STATUS" -ne 1 ]; then
+    echo "Task 4 RED classifier failed for $LOG with rg exit $RG_STATUS" >&2
+    exit "$RG_STATUS"
   fi
 done
 rg -n "$RED_TEST" "$RED_DIR/output.log"
@@ -2191,9 +2201,14 @@ rg -n '^running 1 test$' "$RED_DIR/output.log"
 rg -n '^test safe_fs::tests::unix_contract::nested_recursive_quarantine_cleanup_removes_files_symlink_fifo_and_directories \.\.\. FAILED$' "$RED_DIR/output.log"
 rg -n '^test result: FAILED\. 0 passed; 1 failed;' "$RED_DIR/output.log"
 rg -n 'UnsupportedAtomicPublish|PrimitiveUnavailable' "$RED_DIR/output.log"
-if rg -n -P '^running 0 tests$|^error\[|^error: (?!test failed, to rerun pass `-p opentake-project --lib`$)|could not compile' "$RED_DIR/output.log"; then
+RG_STATUS=0
+rg -n -P '^running 0 tests$|^error\[|^error: (?!test failed, to rerun pass `-p opentake-project --lib`$)|could not compile' "$RED_DIR/output.log" || RG_STATUS=$?
+if [ "$RG_STATUS" -eq 0 ]; then
   echo 'Task 5 RED was not a behavioral one-test failure' >&2
   exit 1
+elif [ "$RG_STATUS" -ne 1 ]; then
+  echo "Task 5 RED classifier failed with rg exit $RG_STATUS" >&2
+  exit "$RG_STATUS"
 fi
 printf 'test_sha=%s\nparent_sha=%s\nexit=%s\n' "$TEST_SHA" "$(git rev-parse "$TEST_SHA^")" "$STATUS" >"$RED_DIR/receipt.txt"
 ```
