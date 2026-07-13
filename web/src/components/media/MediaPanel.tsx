@@ -787,7 +787,6 @@ function MediaCard({ item }: { item: MediaItem }) {
   const thumb = item.missing ? null : assetUrl(lazyThumbnail);
   const [hovered, setHovered] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
-  const [favoritePending, setFavoritePending] = useState(false);
 
   useEffect(() => {
     setLazyThumbnail(item.thumbnail ?? mediaThumbnailCache.get(thumbnailKey) ?? null);
@@ -1005,48 +1004,20 @@ function MediaCard({ item }: { item: MediaItem }) {
         )}
         {/* 星标收藏按钮（左上角）。stopPropagation 避免触发卡片的预览/拖拽。
             渲染在 missing 覆盖层之后并给更高 zIndex，确保离线素材仍可取消收藏。 */}
-        <button
-          type="button"
-          aria-pressed={favorite}
-          aria-busy={favoritePending}
-          disabled={favoritePending}
+        <MediaFavoriteButton
+          assetId={item.id}
+          favorite={favorite}
           title={favorite ? t("media.unfavorite") : t("media.favorite")}
-          onClick={(e) => {
-            e.stopPropagation();
-            setFavoritePending(true);
-            setFeedback(null);
-            void toggleFavorite(item.id, !favorite)
-              .then(async (media) => {
-                useMediaStore.setState({ items: media.items, folders: media.folders });
-                await useLibraryStore.getState().refresh();
-              })
-              .catch((error: unknown) => {
-                const message = String(error);
-                setFeedback(message);
-                useMediaStore.getState().setError(message);
-              })
-              .finally(() => setFavoritePending(false));
+          onSuccess={async (media) => {
+            useMediaStore.setState({ items: media.items, folders: media.folders });
+            await useLibraryStore.getState().refresh();
           }}
-          style={{
-            position: "absolute",
-            left: 4,
-            top: 4,
-            zIndex: 2,
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            width: 20,
-            height: 20,
-            padding: 0,
-            borderRadius: "var(--radius-xs)",
-            background: "rgba(0,0,0,0.6)",
-            color: favorite ? "var(--accent-timecode)" : "var(--text-secondary)",
-            cursor: favoritePending ? "wait" : "pointer",
-            opacity: favoritePending ? 0.55 : 1,
+          onError={(message) => {
+            setFeedback(message);
+            useMediaStore.getState().setError(message);
           }}
-        >
-          <Icon icon={Star} size={12} strokeWidth={2} fill={favorite ? "currentColor" : "none"} />
-        </button>
+          onStart={() => setFeedback(null)}
+        />
         {canExtractAudio && hovered && (
           <button
             type="button"
@@ -1099,6 +1070,69 @@ function MediaCard({ item }: { item: MediaItem }) {
         </span>
       )}
     </div>
+  );
+}
+
+interface MediaFavoriteButtonProps {
+  assetId: string;
+  favorite: boolean;
+  title: string;
+  onStart?: () => void;
+  onSuccess: (media: Awaited<ReturnType<typeof toggleFavorite>>) => void | Promise<void>;
+  onError: (message: string) => void;
+  performToggle?: typeof toggleFavorite;
+}
+
+/** The card's durable-favorite interaction. Its pending state lives here so a
+ * rejection cannot optimistically alter the `favorite` prop rendered from the
+ * Rust mirror. Exported for a real DOM regression of the async contract. */
+export function MediaFavoriteButton({
+  assetId,
+  favorite,
+  title,
+  onStart,
+  onSuccess,
+  onError,
+  performToggle = toggleFavorite,
+}: MediaFavoriteButtonProps) {
+  const [pending, setPending] = useState(false);
+  return (
+    <button
+      type="button"
+      aria-label={title}
+      aria-pressed={favorite}
+      aria-busy={pending}
+      disabled={pending}
+      title={title}
+      onClick={(event) => {
+        event.stopPropagation();
+        setPending(true);
+        onStart?.();
+        void performToggle(assetId, !favorite)
+          .then(onSuccess)
+          .catch((error: unknown) => onError(String(error)))
+          .finally(() => setPending(false));
+      }}
+      style={{
+        position: "absolute",
+        left: 4,
+        top: 4,
+        zIndex: 2,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: 20,
+        height: 20,
+        padding: 0,
+        borderRadius: "var(--radius-xs)",
+        background: "rgba(0,0,0,0.6)",
+        color: favorite ? "var(--accent-timecode)" : "var(--text-secondary)",
+        cursor: pending ? "wait" : "pointer",
+        opacity: pending ? 0.55 : 1,
+      }}
+    >
+      <Icon icon={Star} size={12} strokeWidth={2} fill={favorite ? "currentColor" : "none"} />
+    </button>
   );
 }
 

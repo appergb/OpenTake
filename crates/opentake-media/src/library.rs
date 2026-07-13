@@ -254,6 +254,42 @@ impl LibraryStore {
         Ok(entry)
     }
 
+    /// Restore a missing durable copy for an existing content id.
+    ///
+    /// The source is accepted only when its current bytes still hash to
+    /// `expected_id`. Unlike [`Self::favorite`], this never creates a manifest
+    /// entry, so a source that changed in place cannot create an orphan under a
+    /// new id while leaving the project's original mapping unresolved.
+    pub fn repair_stored_copy(&self, expected_id: &str, source: impl AsRef<Path>) -> Result<()> {
+        let source = source.as_ref();
+        let bytes = std::fs::read(source)?;
+        let actual_id = hash_hex(&bytes);
+        if actual_id != expected_id {
+            return Err(MediaError::Other(anyhow::anyhow!(
+                "source content changed: expected {expected_id}, got {actual_id}"
+            )));
+        }
+
+        let _guard = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self
+            .load_manifest()?
+            .entries
+            .iter()
+            .any(|entry| entry.id == expected_id)
+        {
+            return Err(MediaError::Other(anyhow::anyhow!(
+                "unknown library entry: {expected_id}"
+            )));
+        }
+        if self.stored_path(expected_id)?.is_none() {
+            self.store_copy(expected_id, source, &bytes)?;
+        }
+        Ok(())
+    }
+
     /// Absolute path to the stored copy for an entry id, if present on disk.
     pub fn stored_path(&self, id: &str) -> Result<Option<PathBuf>> {
         let dir = self.files_dir();
@@ -452,6 +488,48 @@ mod tests {
         let repaired_path = store.stored_path(&first.id).unwrap().unwrap();
         assert_eq!(std::fs::read(repaired_path).unwrap(), b"repair me");
         assert_eq!(store.entries().unwrap(), vec![first]);
+    }
+
+    #[test]
+    fn expected_id_repair_rejects_changed_source_without_creating_an_orphan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = src_file(tmp.path(), "clip.mp4", b"original bytes");
+        let store = LibraryStore::new(tmp.path().join("lib"));
+        let entry = store.favorite(&req(&source, "video", None)).unwrap();
+        let stored = store.stored_path(&entry.id).unwrap().unwrap();
+        std::fs::remove_file(stored).unwrap();
+        std::fs::write(&source, b"changed bytes").unwrap();
+
+        let error = store
+            .repair_stored_copy(&entry.id, &source)
+            .expect_err("changed source must not repair a different content id");
+
+        assert!(error.to_string().contains("source content changed"));
+        assert_eq!(store.entries().unwrap(), vec![entry.clone()]);
+        assert!(store.stored_path(&entry.id).unwrap().is_none());
+        assert_eq!(
+            std::fs::read_dir(tmp.path().join("lib").join(FILES_SUBDIR))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn expected_id_repair_restores_unchanged_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = src_file(tmp.path(), "clip.mp4", b"stable bytes");
+        let store = LibraryStore::new(tmp.path().join("lib"));
+        let entry = store.favorite(&req(&source, "video", None)).unwrap();
+        std::fs::remove_file(store.stored_path(&entry.id).unwrap().unwrap()).unwrap();
+
+        store.repair_stored_copy(&entry.id, &source).unwrap();
+
+        assert_eq!(store.entries().unwrap(), vec![entry.clone()]);
+        assert_eq!(
+            std::fs::read(store.stored_path(&entry.id).unwrap().unwrap()).unwrap(),
+            b"stable bytes"
+        );
     }
 
     #[test]

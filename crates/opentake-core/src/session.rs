@@ -397,6 +397,13 @@ impl EditorSession {
         self.state.manifest.clone()
     }
 
+    /// Restore a previously captured manifest after an application-layer
+    /// transaction fails. Kept crate-private so ordinary callers cannot bypass
+    /// the command/session invariants.
+    pub(crate) fn restore_media(&mut self, manifest: MediaManifest) {
+        self.state.manifest = manifest;
+    }
+
     /// The manifest entry for `asset_id`, if present (lookup without cloning the
     /// whole manifest).
     pub fn media_entry(&self, asset_id: &str) -> Option<&MediaManifestEntry> {

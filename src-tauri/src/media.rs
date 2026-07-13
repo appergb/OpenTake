@@ -1150,6 +1150,9 @@ fn toggle_favorite_impl(
             }
             None => return Ok(MediaListDto::from_core(core, Some(cache_root))),
         };
+        store
+            .remove(&library_id)
+            .map_err(|error| format!("global favorite could not be removed: {error}"))?;
         let cleared = core
             .clear_media_global_favorite_id_for_project(
                 project.project_epoch,
@@ -1172,16 +1175,6 @@ fn toggle_favorite_impl(
                     "project favorite mirror could not be saved: {error}"
                 ));
             }
-        }
-        if let Err(error) = store.remove(&library_id) {
-            restore_project_favorites(core, project.project_epoch, &project_dir, &before);
-            let rollback = core.save_project_for_project(project.project_epoch, &project_dir);
-            return Err(match rollback {
-                Ok(_) => format!("global favorite could not be removed: {error}"),
-                Err(rollback_error) => format!(
-                    "global favorite could not be removed: {error}; project rollback also failed: {rollback_error}"
-                ),
-            });
         }
     }
     Ok(MediaListDto::from_core(core, Some(cache_root)))
@@ -1279,14 +1272,7 @@ fn sync_project_favorites_impl(
                     return Err("media source is offline; relink before favoriting".to_string());
                 }
                 store
-                    .favorite(&FavoriteRequest {
-                        source: &source,
-                        kind: clip_type_name(entry.kind),
-                        category: None,
-                        favorited_at: now_epoch_secs(),
-                        thumb: None,
-                    })
-                    .map(|_| ())
+                    .repair_stored_copy(library_id, &source)
                     .map_err(|error| error.to_string())
             })
         };
@@ -2111,7 +2097,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_does_not_resurrect_a_removed_mapped_favorite() {
+    fn reopened_stale_mapping_converges_without_resurrecting_removed_global_favorite() {
         let tmp = tempfile::tempdir().expect("temp root");
         let (core, bundle, _source, asset_id) = saved_core_with_media(tmp.path());
         let store = LibraryStore::new(tmp.path().join("library"));
@@ -2125,16 +2111,79 @@ mod tests {
         store
             .remove(&library_id)
             .expect("remove from another project");
+        let reopened_after_global_delete = AppCore::new();
+        reopened_after_global_delete
+            .open_project(&bundle)
+            .expect("reopen crash-window project");
+        assert_eq!(
+            reopened_after_global_delete
+                .media()
+                .library_favorite_id(&asset_id),
+            Some(library_id.as_str())
+        );
 
-        let synced = sync_project_favorites_impl(&core, tmp.path(), &store, vec![asset_id.clone()])
-            .expect("reconcile stale mapping");
+        let synced = sync_project_favorites_impl(
+            &reopened_after_global_delete,
+            tmp.path(),
+            &store,
+            vec![asset_id.clone()],
+        )
+        .expect("reconcile stale mapping");
 
         assert_eq!(synced.migrated_legacy_asset_ids, vec![asset_id.clone()]);
         assert!(store.entries().unwrap().is_empty());
-        assert_eq!(core.media().library_favorite_id(&asset_id), None);
+        assert_eq!(
+            reopened_after_global_delete
+                .media()
+                .library_favorite_id(&asset_id),
+            None
+        );
         let reopened = AppCore::new();
         reopened.open_project(bundle).expect("reopen project");
         assert!(!reopened.media().is_favorite(&asset_id));
+    }
+
+    #[test]
+    fn sync_rejects_changed_source_when_repairing_expected_library_id() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let (core, bundle, source, asset_id) = saved_core_with_media(tmp.path());
+        let store = LibraryStore::new(tmp.path().join("library"));
+        toggle_favorite_impl(&core, tmp.path(), &store, &asset_id, true)
+            .expect("favorite globally");
+        let library_id = core
+            .media()
+            .library_favorite_id(&asset_id)
+            .unwrap()
+            .to_string();
+        let stored = store.stored_path(&library_id).unwrap().unwrap();
+        fs::remove_file(stored).expect("remove durable copy");
+        fs::write(&source, b"changed in place").expect("change source bytes");
+
+        let synced = sync_project_favorites_impl(&core, tmp.path(), &store, vec![asset_id.clone()])
+            .expect("sync returns per-asset failure");
+
+        assert!(synced.migrated_legacy_asset_ids.is_empty());
+        assert_eq!(synced.failures.len(), 1);
+        assert_eq!(synced.failures[0].asset_id, asset_id);
+        assert!(synced.failures[0]
+            .message
+            .contains("source content changed"));
+        assert_eq!(store.entries().unwrap().len(), 1);
+        assert_eq!(store.entries().unwrap()[0].id, library_id);
+        assert!(store.stored_path(&library_id).unwrap().is_none());
+        assert_eq!(
+            core.media()
+                .library_favorite_id(&synced.failures[0].asset_id),
+            Some(library_id.as_str())
+        );
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen project");
+        assert_eq!(
+            reopened
+                .media()
+                .library_favorite_id(&synced.failures[0].asset_id),
+            Some(library_id.as_str())
+        );
     }
 
     #[test]

@@ -248,11 +248,15 @@ fn remove_from_library_and_project(
     id: &str,
 ) -> Result<bool, String> {
     let _workflow = library.lock_workflow();
+    let store = library.store()?;
     let project = core.runtime_snapshot();
     if project.project_dir.is_some() {
         core.ensure_project_mutable()
             .map_err(|error| error.to_string())?;
     }
+    let removed = store
+        .remove(id)
+        .map_err(|error| format!("global favorite could not be removed: {error}"))?;
     if let Some(project_dir) = project.project_dir.as_deref() {
         let cleared = core
             .clear_media_global_favorite_id_for_project(project.project_epoch, project_dir, id)
@@ -271,27 +275,6 @@ fn remove_from_library_and_project(
             }
         }
     }
-    let removed = match library.store()?.remove(id) {
-        Ok(removed) => removed,
-        Err(error) => {
-            if let Some(project_dir) = project.project_dir.as_deref() {
-                crate::media::restore_project_favorites(
-                    core,
-                    project.project_epoch,
-                    project_dir,
-                    &project.media,
-                );
-                if let Err(rollback_error) =
-                    core.save_project_for_project(project.project_epoch, project_dir)
-                {
-                    return Err(format!(
-                        "global favorite could not be removed: {error}; project rollback also failed: {rollback_error}"
-                    ));
-                }
-            }
-            return Err(format!("global favorite could not be removed: {error}"));
-        }
-    };
     Ok(removed)
 }
 
@@ -345,25 +328,15 @@ fn library_import_to_project_impl(
     let probe = probe_or_default(media.engine(), &stored);
     let name = display_name(&stored);
     let entry = core
-        .import_media_file_for_project(
+        .import_library_media_for_project(
             project.project_epoch,
             &project_dir,
             &stored,
             name.clone(),
             &probe,
+            id,
         )
         .map_err(|e| e.to_string())?;
-    core.set_media_global_favorite_for_project(
-        project.project_epoch,
-        &project_dir,
-        &entry.id,
-        Some(id.to_string()),
-    )
-    .map_err(|error| error.to_string())?;
-    core.save_project_for_project(project.project_epoch, &project_dir)
-        .map_err(|error| {
-            format!("library item was imported but its project mapping could not be saved: {error}")
-        })?;
 
     Ok(LibraryImportDto {
         id: entry.id,
@@ -409,6 +382,24 @@ fn now_epoch_secs() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn saved_core_with_mapping(
+        root: &std::path::Path,
+        library_id: &str,
+    ) -> (AppCore, PathBuf, String) {
+        let source = root.join("source.mp4");
+        std::fs::write(&source, b"project media").unwrap();
+        let bundle = root.join("Mapped.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let entry = core
+            .import_media_file(&source, "source", &ProbedMedia::default())
+            .unwrap();
+        core.set_media_global_favorite(&entry.id, Some(library_id.to_string()))
+            .unwrap();
+        core.save_project(None).unwrap();
+        (core, bundle, entry.id)
+    }
 
     fn engine_for(root: &std::path::Path) -> MediaState {
         MediaState::new(opentake_media::MediaEngine::new(
@@ -496,5 +487,93 @@ mod tests {
     fn unavailable_library_returns_the_initialization_error() {
         let library = LibraryState::unavailable("app data missing");
         assert!(matches!(library.store(), Err(message) if message == "app data missing"));
+    }
+
+    #[test]
+    fn unavailable_remove_leaves_live_and_reopened_project_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, bundle, asset_id) = saved_core_with_mapping(tmp.path(), "persisted-library-id");
+        let before = core.media();
+        let library = LibraryState::unavailable("app data missing");
+
+        let error = remove_from_library_and_project(&core, &library, "persisted-library-id")
+            .expect_err("unavailable library must reject before project mutation");
+
+        assert_eq!(error, "app data missing");
+        assert_eq!(core.media(), before);
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).unwrap();
+        assert_eq!(reopened.media(), before);
+        assert_eq!(
+            reopened.media().library_favorite_id(&asset_id),
+            Some("persisted-library-id")
+        );
+    }
+
+    #[test]
+    fn already_missing_global_entry_still_clears_and_persists_stale_mirror() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (core, bundle, asset_id) = saved_core_with_mapping(tmp.path(), "missing-library-id");
+        let library = LibraryState::new(LibraryStore::new(tmp.path().join("library")));
+
+        assert!(!remove_from_library_and_project(&core, &library, "missing-library-id").unwrap());
+
+        assert_eq!(core.media().library_favorite_id(&asset_id), None);
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).unwrap();
+        assert_eq!(reopened.media().library_favorite_id(&asset_id), None);
+    }
+
+    #[test]
+    fn failed_library_import_restores_manifest_and_retry_does_not_duplicate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("clip.mp4");
+        std::fs::write(&source, b"library bytes").unwrap();
+        let library = LibraryState::new(LibraryStore::new(tmp.path().join("library")));
+        let entry = library
+            .store()
+            .unwrap()
+            .favorite(&FavoriteRequest {
+                source: &source,
+                kind: "video",
+                category: None,
+                favorited_at: 1.0,
+                thumb: None,
+            })
+            .unwrap();
+        let bundle = tmp.path().join("ImportFailure.opentake");
+        let backup = tmp.path().join("ImportFailure-backup.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let before = core.media();
+        std::fs::rename(&bundle, &backup).unwrap();
+        std::fs::write(&bundle, b"block project directory creation").unwrap();
+
+        library_import_to_project_impl(&core, &engine_for(tmp.path()), &library, &entry.id)
+            .expect_err("real filesystem save failure must roll back import");
+
+        assert_eq!(core.media(), before);
+        std::fs::remove_file(&bundle).unwrap();
+        std::fs::rename(&backup, &bundle).unwrap();
+        let reopened_after_failure = AppCore::new();
+        reopened_after_failure.open_project(&bundle).unwrap();
+        assert_eq!(reopened_after_failure.media(), before);
+
+        let first =
+            library_import_to_project_impl(&core, &engine_for(tmp.path()), &library, &entry.id)
+                .expect("retry import");
+        let second =
+            library_import_to_project_impl(&core, &engine_for(tmp.path()), &library, &entry.id)
+                .expect("idempotent retry");
+
+        assert_eq!(second.id, first.id);
+        assert_eq!(core.media().entries.len(), 1);
+        assert_eq!(
+            core.media().library_favorite_id(&first.id),
+            Some(entry.id.as_str())
+        );
+        let reopened_after_retry = AppCore::new();
+        reopened_after_retry.open_project(bundle).unwrap();
+        assert_eq!(reopened_after_retry.media(), core.media());
     }
 }

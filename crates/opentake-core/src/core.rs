@@ -491,6 +491,53 @@ impl AppCore {
         Ok(entry)
     }
 
+    /// Import one global-library file, bind its content id, and persist the
+    /// project as a single in-memory transaction. Any import, mapping, or save
+    /// error restores the exact pre-call manifest before the lock is released.
+    pub fn import_library_media_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+        library_id: &str,
+    ) -> Result<MediaManifestEntry> {
+        let id = self.ids.next_id();
+        let (entry, count) = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            let before = session.editor.media();
+            let result = (|| {
+                let entry = session.editor.import_media_file(path, id, name, probe)?;
+                session
+                    .editor
+                    .set_media_global_favorite(&entry.id, Some(library_id.to_string()))?;
+                session.editor.save_project(None)?;
+                Ok(entry)
+            })();
+            match result {
+                Ok(entry) => {
+                    let count = session.editor.media().entries.len();
+                    (entry, count)
+                }
+                Err(error) => {
+                    session.editor.restore_media(before);
+                    return Err(error);
+                }
+            }
+        };
+        self.events.emit(&CoreEvent::MediaChanged {
+            project_epoch: expected_project_epoch,
+            count,
+        });
+        self.events.emit(&CoreEvent::ProjectSaved {
+            path: expected_project_dir.to_string_lossy().into_owned(),
+            project_epoch: expected_project_epoch,
+        });
+        Ok(entry)
+    }
+
     /// Toggle favorite state for `asset_ids` (#91), emitting
     /// [`CoreEvent::MediaChanged`] after releasing the lock (only when something
     /// changed) so the media mirror refreshes. Favoriting is a manifest mutation
@@ -1083,6 +1130,16 @@ mod tests {
                 "/abs/rendered.mp4",
                 "rendered",
                 &ProbedMedia::default(),
+            )
+            .is_err());
+        assert!(core
+            .import_library_media_for_project(
+                expected_epoch,
+                &project_a,
+                "/abs/library.mp4",
+                "library",
+                &ProbedMedia::default(),
+                "content-hash",
             )
             .is_err());
         assert!(core
