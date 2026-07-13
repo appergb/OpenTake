@@ -641,6 +641,8 @@ const zh: Dict = {
   "library.cat.image": "图片",
   "library.cat.effect": "特效",
   "library.import": "导入当前项目",
+  "library.importCommittedWarning":
+    "素材已提交，但完整性复核和自动回滚均失败；请立即保存副本并重新打开项目检查。",
   "library.categorize": "设置分类",
   "library.categorizePrompt": "输入分类名(留空表示取消分类):",
   "library.unfavorite": "取消收藏",
@@ -1260,6 +1262,8 @@ const en: Dict = {
   "library.cat.image": "Image",
   "library.cat.effect": "Effects",
   "library.import": "Import to project",
+  "library.importCommittedWarning":
+    "The asset was committed, but integrity verification and automatic rollback both failed. Save a copy and reopen the project to verify it.",
   "library.categorize": "Set category",
   "library.categorizePrompt": "Category name (leave empty to clear):",
   "library.unfavorite": "Remove from library",

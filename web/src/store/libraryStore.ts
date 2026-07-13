@@ -10,8 +10,10 @@
 
 import { create } from "zustand";
 import * as lib from "../lib/libraryApi";
-import type { LibraryEntry } from "../lib/libraryApi";
+import type { LibraryEntry, LibraryImportWarning } from "../lib/libraryApi";
+import { t } from "../i18n";
 import { refreshMedia } from "./mediaStore";
+import { useEditorUiStore } from "./uiStore";
 
 /** 内置分类(与素材类型/音效一一对应);自建分类从条目的 `category` 聚合而来。
  *  `all` 是聚合视图(跨所有子库可见全部收藏)。`sound` 为音效库(独立于 audio)。 */
@@ -35,6 +37,7 @@ interface LibraryState {
   entries: LibraryEntry[];
   loading: boolean;
   error: string | null;
+  lastImportWarning: LibraryImportWarning | null;
 
   // 视图态
   selectedCategory: string; // BuiltinCategory | 自建分类名
@@ -58,6 +61,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   entries: [],
   loading: false,
   error: null,
+  lastImportWarning: null,
 
   selectedCategory: "all",
   search: "",
@@ -118,14 +122,25 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   // 库与项目媒体是两套数据:导入后用 #55 命令在项目 manifest 里造新 asset,再调
   // mediaStore 的 refreshMedia 拉项目全量目录(库本身不变,无需 refresh 本 store)。
   importToProject: async (id) => {
+    let imported: lib.LibraryImport;
     try {
-      const imported = await lib.libraryImportToProject(id);
-      await refreshMedia();
-      return imported.name;
+      imported = await lib.libraryImportToProject(id);
     } catch (error: unknown) {
-      set({ error: getErrorMessage(error) });
+      set({ error: getErrorMessage(error), lastImportWarning: null });
       return null;
     }
+    set({ error: null, lastImportWarning: imported.warning ?? null });
+    if (imported.warning?.kind === "postconditionRollbackFailed") {
+      useEditorUiStore.getState().pushToast(t("library.importCommittedWarning"));
+    }
+    try {
+      await refreshMedia();
+    } catch (error: unknown) {
+      // The Rust transaction is already committed. A mirror refresh failure
+      // must not turn that success into null or encourage an unsafe retry.
+      set({ error: getErrorMessage(error) });
+    }
+    return imported.name;
   },
 }));
 

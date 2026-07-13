@@ -28,7 +28,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tauri::State;
 
-use opentake_core::{importable_clip_type, AppCore, CoreError, DeferredCoreEvents, ProbedMedia};
+use opentake_core::{
+    importable_clip_type, AppCore, CoreError, DeferredCoreEvents, ImportCommitWarning, ProbedMedia,
+};
 use opentake_domain::ClipType;
 use opentake_media::library::{FavoriteRequest, LibraryEntry, LibraryStore};
 
@@ -143,7 +145,30 @@ pub struct LibraryImportDto {
     /// Present only when the import committed but a postcondition rollback
     /// could not be published; callers must treat the returned asset as live.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub warning: Option<String>,
+    pub warning: Option<LibraryImportWarningDto>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum LibraryImportWarningDto {
+    PostconditionRollbackFailed {
+        postcondition: String,
+        rollback: String,
+    },
+}
+
+impl From<ImportCommitWarning> for LibraryImportWarningDto {
+    fn from(warning: ImportCommitWarning) -> Self {
+        match warning {
+            ImportCommitWarning::PostconditionRollbackFailed {
+                postcondition,
+                rollback,
+            } => Self::PostconditionRollbackFailed {
+                postcondition,
+                rollback,
+            },
+        }
+    }
 }
 
 /// `library_list`: every favorited entry, or only those in `category` when
@@ -409,6 +434,10 @@ fn library_import_to_project_with_hook(
     let mut imported = ProjectImportGuard {
         path: project_media.absolute_path(Path::new(&imported_name)),
         name: imported_name.into(),
+        media: project_media
+            .media
+            .try_clone()
+            .map_err(|error| error.to_string())?,
         handle: imported_handle,
         committed: false,
     };
@@ -470,7 +499,7 @@ fn library_import_to_project_with_hook(
         )
         .map_err(|e| e.to_string())?;
     imported.committed = true;
-    let warning = commit.warning;
+    let warning = commit.warning.map(LibraryImportWarningDto::from);
     let entry = commit.entry;
 
     Ok(LibraryImportDto {
@@ -590,7 +619,13 @@ impl ProjectMediaCapability {
         #[cfg(windows)]
         {
             use cap_std::fs::OpenOptionsExt;
-            options.share_mode(0x1 | 0x2);
+            use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+            use windows_sys::Win32::Storage::FileSystem::{
+                DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+            options
+                .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
         }
         let file = self
             .media
@@ -773,16 +808,77 @@ fn existing_project_import(
 struct ProjectImportGuard {
     path: PathBuf,
     name: std::ffi::OsString,
+    media: Dir,
     handle: Handle,
     committed: bool,
 }
 
+impl ProjectImportGuard {
+    fn owns_name(&self) -> bool {
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        #[cfg(windows)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+            options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+        }
+        self.media
+            .open_with(&self.name, &options)
+            .ok()
+            .and_then(|file| Handle::from_file(file.into_std()).ok())
+            .is_some_and(|current| current == self.handle)
+    }
+}
+
 impl Drop for ProjectImportGuard {
     fn drop(&mut self) {
-        if !self.committed {
-            let _ = self.handle.as_file().set_len(0);
-            let _ = self.handle.as_file().sync_all();
+        if self.committed {
+            return;
         }
+        // The retained handle still denotes the uncommitted candidate even if
+        // its original name was moved or replaced. Scrub those candidate bytes
+        // first, then only unlink when the capability-relative name still maps
+        // to that exact handle. A replacement leaf is never truncated/deleted.
+        let _ = self.handle.as_file().set_len(0);
+        let _ = self.handle.as_file().sync_all();
+        if !self.owns_name() {
+            return;
+        }
+        #[cfg(windows)]
+        if delete_project_import_by_handle(self).is_ok() {
+            return;
+        }
+        if self.owns_name() {
+            let _ = self.media.remove_file(&self.name);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn delete_project_import_by_handle(guard: &ProjectImportGuard) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileDispositionInfo, SetFileInformationByHandle, FILE_DISPOSITION_INFO,
+    };
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: the synchronous call receives a valid DELETE-capable retained
+    // file handle and a correctly sized FILE_DISPOSITION_INFO value.
+    let deleted = unsafe {
+        SetFileInformationByHandle(
+            guard.handle.as_file().as_raw_handle(),
+            FileDispositionInfo,
+            std::ptr::addr_of!(disposition).cast(),
+            u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO>())
+                .expect("FILE_DISPOSITION_INFO size fits u32"),
+        )
+    };
+    if deleted == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 
@@ -1078,6 +1174,15 @@ mod tests {
 
         assert_eq!(core.media(), before);
         assert_eq!(std::fs::read(manifest_path).unwrap(), bytes_before);
+        let media_dir = opentake_project::layout::media_dir(&bundle);
+        let leaked_candidate = std::fs::read_dir(media_dir)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .any(|item| item.file_name().to_string_lossy().starts_with("library-"));
+        assert!(
+            !leaked_candidate,
+            "a precommit manifest failure must remove its zero-byte import candidate"
+        );
     }
 
     #[test]
@@ -1397,13 +1502,21 @@ mod tests {
         )
         .expect("failed rollback leaves the first commit authoritative");
 
+        let warning = committed
+            .warning
+            .as_ref()
+            .expect("rollback failure must be surfaced to the caller");
+        let LibraryImportWarningDto::PostconditionRollbackFailed {
+            postcondition,
+            rollback,
+        } = warning;
         assert!(
-            committed
-                .warning
-                .as_deref()
-                .is_some_and(|warning| warning.contains("rollback failed")),
-            "rollback failure must be surfaced to the caller"
+            postcondition.contains("identity changed"),
+            "{postcondition}"
         );
+        assert!(rollback.contains("injected"), "{rollback}");
+        let warning_json = serde_json::to_value(warning).unwrap();
+        assert_eq!(warning_json["kind"], "postconditionRollbackFailed");
         std::fs::rename(&projects, &replacement_projects).unwrap();
         std::fs::rename(&retained_projects, &projects).unwrap();
         let imported = core

@@ -126,7 +126,18 @@ pub struct ProjectRuntimeSnapshot {
 #[derive(Clone, Debug)]
 pub struct CapabilityImportCommit {
     pub entry: MediaManifestEntry,
-    pub warning: Option<String>,
+    pub warning: Option<ImportCommitWarning>,
+}
+
+/// A committed import whose postcondition and exact rollback both failed.
+/// Keeping the causes separate prevents UI layers from parsing an opaque
+/// string while still reporting that the candidate remains authoritative.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImportCommitWarning {
+    PostconditionRollbackFailed {
+        postcondition: String,
+        rollback: String,
+    },
 }
 
 /// One-lock snapshot consumed by self-contained project export.
@@ -705,9 +716,10 @@ impl AppCore {
                     match write_manifest(&before) {
                         Ok(()) => return Err(postcondition),
                         Err(rollback) => {
-                            warning = Some(format!(
-                                "{postcondition}; manifest rollback failed and the import remains committed: {rollback}"
-                            ));
+                            warning = Some(ImportCommitWarning::PostconditionRollbackFailed {
+                                postcondition: postcondition.to_string(),
+                                rollback: rollback.to_string(),
+                            });
                         }
                     }
                 }

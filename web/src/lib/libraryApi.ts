@@ -32,10 +32,17 @@ export interface LibraryEntry {
 }
 
 /** 导入到当前项目后返回的新资产引用(#55 LibraryImportDto)。 */
+export type LibraryImportWarning = {
+  kind: "postconditionRollbackFailed";
+  postcondition: string;
+  rollback: string;
+};
+
 export interface LibraryImport {
   id: string;
   name: string;
   path: string;
+  warning?: LibraryImportWarning;
 }
 
 /** 列出库条目。`category` 省略/空串=全部;非空=按该分类过滤。 */

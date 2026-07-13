@@ -227,11 +227,22 @@ impl EditorSession {
         // Remember the currently-open bundle before we adopt any new target, so
         // a save-as knows the source `media/` to carry across.
         let previous_dir = self.project_dir.clone();
-        let target = match path.or_else(|| previous_dir.clone()) {
+        let requested_target = match path.or_else(|| previous_dir.clone()) {
             Some(p) => p,
             None => return Err(CoreError::NoProjectOpen),
         };
-        let same_target = previous_dir.as_deref() == Some(target.as_path());
+        let same_target = if previous_dir.as_deref() == Some(requested_target.as_path()) {
+            true
+        } else if let Some(root) = &self.project_root {
+            root.matches_path(&requested_target)?
+        } else {
+            false
+        };
+        let target = if same_target {
+            previous_dir.clone().unwrap_or(requested_target)
+        } else {
+            requested_target
+        };
 
         let mut project =
             Project::new_with_compatibility(target.clone(), self.compatibility.clone());
@@ -250,24 +261,8 @@ impl EditorSession {
             project.save_to_root(root)?;
             None
         } else {
-            let root = ProjectRoot::create(&target)?;
-            project.save_to_root(&root)?;
-            Some(root)
+            Some(project.publish_complete_to(&target, self.project_root.as_ref())?)
         };
-
-        // Save-as (target differs from the previously-open bundle): fold the
-        // source bundle's `media/` into the new one before adopting it, so
-        // internal media survives the move. `copy_media_dir` is itself a no-op
-        // when source == dest, but only copy when we truly had a prior bundle at
-        // a different path (a first save of a never-saved project has no source
-        // media/ to carry).
-        if let Some(source_dir) = &previous_dir {
-            if source_dir != &target {
-                let source_root = self.project_root.as_ref().ok_or(CoreError::NoProjectOpen)?;
-                let destination_root = new_root.as_ref().ok_or(CoreError::NoProjectOpen)?;
-                source_root.copy_media_to(destination_root)?;
-            }
-        }
 
         self.project_dir = Some(target.clone());
         if let Some(root) = new_root {
@@ -983,6 +978,37 @@ mod tests {
         let after = std::fs::metadata(&media_file).unwrap();
         assert_eq!(before.len(), after.len());
         assert!(media_file.is_file());
+    }
+
+    #[test]
+    fn path_alias_to_the_retained_root_is_a_same_project_save() {
+        let tmp = TmpDir::new("same-root-alias");
+        let bundle = tmp.path().join("Same.opentake");
+        let mut session = seed_bundle_with_internal_media(&bundle, "clip.png", b"media bytes");
+        std::fs::create_dir_all(bundle.join("chat-sessions")).unwrap();
+        std::fs::write(bundle.join("chat-sessions/thread.json"), b"chat bytes").unwrap();
+        std::fs::write(bundle.join("thumbnail.jpg"), b"cover bytes").unwrap();
+        let alias_hop = tmp.path().join("alias-hop");
+        std::fs::create_dir_all(&alias_hop).unwrap();
+        let alias = alias_hop.join("..").join("Same.opentake");
+
+        let written = session.save_project(Some(alias)).unwrap();
+
+        assert_eq!(written, bundle);
+        assert_eq!(session.project_dir(), Some(bundle.as_path()));
+        assert_eq!(
+            std::fs::read(bundle.join("media/clip.png")).unwrap(),
+            b"media bytes"
+        );
+        assert_eq!(
+            std::fs::read(bundle.join("chat-sessions/thread.json")).unwrap(),
+            b"chat bytes"
+        );
+        assert_eq!(
+            std::fs::read(bundle.join("thumbnail.jpg")).unwrap(),
+            b"cover bytes"
+        );
+        assert!(!tmp.path().join(".Same.opentake.opentake-backup").exists());
     }
 
     #[test]

@@ -130,5 +130,11 @@ jobs:
       - name: Test retained-handle and junction defenses
         run: cargo test -p opentake-media library::tests -- --test-threads=1
 
+      - name: Test complete bundle publication and recovery
+        run: cargo test -p opentake-project -- --test-threads=1
+
+      - name: Test Tauri project-library commit guards
+        run: cargo test -p opentake-tauri library::tests -- --test-threads=1
+
       - name: Clippy capability-backed library
         run: cargo clippy -p opentake-media --all-targets -- -D warnings

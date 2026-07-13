@@ -49,6 +49,18 @@ pub enum ProjectError {
         /// Sorted, file-qualified persisted fields that require a newer build.
         blockers: Vec<String>,
     },
+
+    /// Publication could not install the staged bundle or restore the prior
+    /// target. The retained backup is deliberately left in place and the next
+    /// save attempt will recover it before doing new work.
+    #[error(
+        "bundle publication requires recovery from {backup}: publish failed: {publish}; restore failed: {restore}"
+    )]
+    RecoveryRequired {
+        backup: PathBuf,
+        publish: String,
+        restore: String,
+    },
 }
 
 impl ProjectError {

@@ -20,7 +20,6 @@
 //! thumbnail when held); it never creates or deletes `media/` or
 //! `chat-sessions/`, which the media and agent layers manage out-of-band.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use opentake_domain::{MediaManifest, Timeline};
@@ -207,8 +206,14 @@ impl Project {
     /// atomically (temp file + rename). Existing `media/` and `chat-sessions/`
     /// directories are left untouched.
     pub fn save(&self) -> Result<()> {
-        let root = ProjectRoot::create(&self.bundle_path)?;
-        self.save_to_root(&root)
+        let encoded = EncodedProject::prepare(self)?;
+        if let Some(root) = ProjectRoot::open_optional(&self.bundle_path)? {
+            encoded.write_to(&root)
+        } else {
+            let publisher = ProjectRoot::begin_replace(&self.bundle_path)?;
+            encoded.write_to(publisher.stage())?;
+            publisher.publish().map(|_| ())
+        }
     }
 
     /// Persist only `media.json` through one atomic replacement.
@@ -218,37 +223,89 @@ impl Project {
     /// component prevents a later unrelated component failure from turning an
     /// error result into a partially saved manifest.
     pub fn save_manifest(&self) -> Result<()> {
+        self.compatibility.ensure_writable()?;
+        let manifest = encode_component(layout::MANIFEST_FILE, &self.manifest)?;
         let root = ProjectRoot::create(&self.bundle_path)?;
-        self.save_manifest_to_root(&root)
+        root.write_atomic(layout::MANIFEST_FILE, &manifest)
     }
 
     /// Persist only `media.json` through a retained bundle root.
     pub fn save_manifest_to_root(&self, root: &ProjectRoot) -> Result<()> {
         self.compatibility.ensure_writable()?;
-        write_json_atomic_root(root, layout::MANIFEST_FILE, &self.manifest)
+        let manifest = encode_component(layout::MANIFEST_FILE, &self.manifest)?;
+        root.write_atomic(layout::MANIFEST_FILE, &manifest)
     }
 
     /// Like [`Self::save`] but targets an explicit `bundle` directory (used by
     /// the archiver to stage a self-contained copy). Does not mutate `self`.
     pub fn save_to(&self, bundle: impl AsRef<Path>) -> Result<()> {
-        let root = ProjectRoot::create(bundle)?;
-        self.save_to_root(&root)
+        let encoded = EncodedProject::prepare(self)?;
+        let publisher = ProjectRoot::begin_replace(bundle.as_ref())?;
+        encoded.write_to(publisher.stage())?;
+        publisher.publish().map(|_| ())
     }
 
     /// Persist this snapshot exclusively through `root` authority.
     pub fn save_to_root(&self, root: &ProjectRoot) -> Result<()> {
-        self.compatibility.ensure_writable()?;
+        EncodedProject::prepare(self)?.write_to(root)
+    }
 
-        write_json_atomic_root(root, layout::TIMELINE_FILE, &self.timeline)?;
-        write_json_atomic_root(root, layout::MANIFEST_FILE, &self.manifest)?;
-        if let Some(log) = &self.generation_log {
-            write_json_atomic_root(root, layout::GENERATION_LOG_FILE, log)?;
+    /// Publish a complete fresh sibling bundle and return the exact root that
+    /// became visible. Sessions adopt this retained authority only after the
+    /// directory publication commit succeeds.
+    pub fn publish_complete_to(
+        &self,
+        bundle: impl AsRef<Path>,
+        media_source: Option<&ProjectRoot>,
+    ) -> Result<ProjectRoot> {
+        let encoded = EncodedProject::prepare(self)?;
+        let publisher = ProjectRoot::begin_replace(bundle.as_ref())?;
+        encoded.write_to(publisher.stage())?;
+        if let Some(source) = media_source {
+            source.copy_media_to(publisher.stage())?;
         }
-        if let Some(bytes) = &self.thumbnail {
-            root.write_atomic(layout::THUMBNAIL_FILE, bytes)?;
+        publisher.publish()
+    }
+}
+
+struct EncodedProject {
+    timeline: Vec<u8>,
+    manifest: Vec<u8>,
+    generation_log: Option<Vec<u8>>,
+    thumbnail: Option<Vec<u8>>,
+}
+
+impl EncodedProject {
+    /// Produce the exact byte snapshot before any destination path is created.
+    fn prepare(project: &Project) -> Result<Self> {
+        project.compatibility.ensure_writable()?;
+        Ok(Self {
+            timeline: encode_component(layout::TIMELINE_FILE, &project.timeline)?,
+            manifest: encode_component(layout::MANIFEST_FILE, &project.manifest)?,
+            generation_log: project
+                .generation_log
+                .as_ref()
+                .map(|log| encode_component(layout::GENERATION_LOG_FILE, log))
+                .transpose()?,
+            thumbnail: project.thumbnail.clone(),
+        })
+    }
+
+    fn write_to(&self, root: &ProjectRoot) -> Result<()> {
+        root.write_atomic(layout::TIMELINE_FILE, &self.timeline)?;
+        root.write_atomic(layout::MANIFEST_FILE, &self.manifest)?;
+        if let Some(log) = &self.generation_log {
+            root.write_atomic(layout::GENERATION_LOG_FILE, log)?;
+        }
+        if let Some(thumbnail) = &self.thumbnail {
+            root.write_atomic(layout::THUMBNAIL_FILE, thumbnail)?;
         }
         Ok(())
     }
+}
+
+fn encode_component<T: Serialize>(file_name: &str, value: &T) -> Result<Vec<u8>> {
+    serde_json::to_vec_pretty(value).map_err(|error| ProjectError::json(file_name, error))
 }
 
 fn decode_component<T: DeserializeOwned>(bytes: &[u8], file: &str) -> Result<(T, Vec<String>)> {
@@ -356,118 +413,26 @@ fn canonical_ignored_path(path: &serde_ignored::Path<'_>, document: &Value) -> S
 ///   `mediaDirWrapper` when the dir doesn't exist; nothing to carry).
 /// - **Same-path save** (source and dest bundle are the same directory) → no-op,
 ///   so autosave never copies `media/` onto itself.
-/// - **Partial-copy failure** → the destination `media/` is never left
-///   half-populated: the tree is staged into a sibling temp directory and
-///   atomically renamed into place only after a fully successful copy; any error
-///   removes the temp staging and propagates, matching the atomic-replace
-///   philosophy [`archive`](crate::archive) uses.
+/// - **Existing destination `media/`** → fail without modifying it. Complete
+///   Save As replacement is owned by [`Project::publish_complete_to`], which
+///   publishes a fresh whole-bundle sibling through the backup/recovery state
+///   machine rather than deleting a live media tree.
 pub fn copy_media_dir(source_bundle: &Path, dest_bundle: &Path) -> Result<()> {
-    // Same bundle (autosave / plain save): nothing to copy. Compare with
-    // `standardize`-free canonical-ish equality via the same-path check the
-    // caller already knows; here we guard the source==dest media dir case so a
-    // direct call is self-protecting too.
     if source_bundle == dest_bundle {
         return Ok(());
     }
-
-    let src_media = layout::media_dir(source_bundle);
-    if !src_media.is_dir() {
-        return Ok(()); // upstream: no media/ dir -> no wrapper -> nothing written
+    let source = ProjectRoot::open(source_bundle)?;
+    if !source.has_media_tree()? {
+        return Ok(());
     }
-
-    let dest_media = layout::media_dir(dest_bundle);
-    create_dir_all(dest_bundle)?;
-
-    // Stage into a sibling temp dir, then atomically swap into `media/` so a
-    // failure mid-copy never leaves a partially populated `media/`.
-    let staging = temp_sibling(&dest_media);
-    // A stale staging dir from a crashed prior run would break create_dir_all's
-    // freshness; clear it first (best-effort).
-    let _ = fs::remove_dir_all(&staging);
-    if let Err(e) = copy_dir_recursive(&src_media, &staging) {
-        let _ = fs::remove_dir_all(&staging);
-        return Err(e);
-    }
-
-    // Replace any existing dest `media/` with the freshly staged tree. `rename`
-    // onto an existing directory fails on most platforms, so remove first; the
-    // window between remove and rename is the same one `write_bytes_atomic`
-    // accepts for JSON components.
-    if dest_media.exists() {
-        if let Err(e) = fs::remove_dir_all(&dest_media) {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(ProjectError::io(&dest_media, e));
-        }
-    }
-    match fs::rename(&staging, &dest_media) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_dir_all(&staging);
-            Err(ProjectError::io(&dest_media, e))
-        }
-    }
-}
-
-/// Recursively copy directory `src` into `dest`, creating `dest` and mirroring
-/// the subtree. Shared by [`copy_media_dir`]; kept here (rather than reused from
-/// [`crate::archive`], whose copy helper is private and coupled to its report
-/// bookkeeping) so bundle save stays self-contained.
-fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
-    create_dir_all(dest)?;
-    let entries = fs::read_dir(src).map_err(|e| ProjectError::io(src, e))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| ProjectError::io(src, e))?;
-        let from = entry.path();
-        let to = dest.join(entry.file_name());
-        let file_type = entry.file_type().map_err(|e| ProjectError::io(&from, e))?;
-        if file_type.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else {
-            fs::copy(&from, &to)
-                .map(|_| ())
-                .map_err(|e| ProjectError::io(&to, e))?;
-        }
-    }
-    Ok(())
-}
-
-// --- IO helpers (each tags the failing path) ---
-
-fn create_dir_all(path: &Path) -> Result<()> {
-    fs::create_dir_all(path).map_err(|e| ProjectError::io(path, e))
-}
-
-fn write_json_atomic_root<T: Serialize>(
-    root: &ProjectRoot,
-    file_name: &str,
-    value: &T,
-) -> Result<()> {
-    let json = serde_json::to_vec_pretty(value).map_err(|e| ProjectError::json(file_name, e))?;
-    root.write_atomic(file_name, &json)
-}
-
-/// A temp path next to `dest` (same directory, so `rename` is atomic on the
-/// same filesystem). Uniqueness comes from the pid plus a process-global
-/// counter — enough to avoid collisions between concurrent writers in one
-/// process without pulling in an RNG dependency.
-fn temp_sibling(dest: &Path) -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let name = dest
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "bundle".to_string());
-    let tmp_name = format!(".{}.{}.{}.tmp", name, std::process::id(), n);
-    match dest.parent() {
-        Some(parent) => parent.join(tmp_name),
-        None => PathBuf::from(tmp_name),
-    }
+    let destination = ProjectRoot::create(dest_bundle)?;
+    source.copy_media_to(&destination)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     /// A per-call-unique scratch dir under the system temp dir, removed on drop.
     struct TmpDir(PathBuf);
@@ -490,6 +455,30 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn tree_receipt(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+        fn visit(base: &Path, path: &Path, receipt: &mut Vec<(PathBuf, Option<Vec<u8>>)>) {
+            let mut entries = fs::read_dir(path)
+                .unwrap()
+                .map(std::result::Result::unwrap)
+                .collect::<Vec<_>>();
+            entries.sort_by_key(std::fs::DirEntry::file_name);
+            for entry in entries {
+                let path = entry.path();
+                let relative = path.strip_prefix(base).unwrap().to_path_buf();
+                if entry.file_type().unwrap().is_dir() {
+                    receipt.push((relative, None));
+                    visit(base, &path, receipt);
+                } else {
+                    receipt.push((relative, Some(fs::read(path).unwrap())));
+                }
+            }
+        }
+
+        let mut receipt = Vec::new();
+        visit(root, root, &mut receipt);
+        receipt
     }
 
     #[cfg(unix)]
@@ -573,6 +562,73 @@ mod tests {
     }
 
     #[test]
+    fn complete_publish_replaces_an_existing_bundle_with_fresh_media() {
+        let tmp = TmpDir::new("complete-replace");
+        let source = tmp.path().join("Source.opentake");
+        let target = tmp.path().join("Target.opentake");
+        let mut project = Project::new(&source);
+        project.timeline.fps = 48;
+        project.save().unwrap();
+        fs::create_dir_all(source.join("media/nested")).unwrap();
+        fs::write(source.join("media/nested/clip.bin"), b"fresh media").unwrap();
+        let source_root = ProjectRoot::open(&source).unwrap();
+        fs::create_dir_all(target.join("media")).unwrap();
+        fs::write(target.join("project.json"), b"old timeline").unwrap();
+        fs::write(target.join("media/stale.bin"), b"stale media").unwrap();
+        fs::write(target.join("stale.txt"), b"stale component").unwrap();
+
+        let published = project
+            .publish_complete_to(&target, Some(&source_root))
+            .expect("complete Save As publication");
+
+        assert_eq!(
+            Project::open_from_root(&published).unwrap().timeline.fps,
+            48
+        );
+        assert_eq!(
+            fs::read(target.join("media/nested/clip.bin")).unwrap(),
+            b"fresh media"
+        );
+        assert!(!target.join("media/stale.bin").exists());
+        assert!(!target.join("stale.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn media_copy_failure_leaves_an_existing_target_tree_byte_exact() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TmpDir::new("complete-copy-failure");
+        let source = tmp.path().join("Source.opentake");
+        let target = tmp.path().join("Target.opentake");
+        let project = Project::new(&source);
+        project.save().unwrap();
+        fs::create_dir_all(source.join("media")).unwrap();
+        symlink(
+            tmp.path().join("outside"),
+            source.join("media/refused-link"),
+        )
+        .unwrap();
+        let source_root = ProjectRoot::open(&source).unwrap();
+        fs::create_dir_all(target.join("media/nested")).unwrap();
+        fs::write(target.join("project.json"), b"old timeline").unwrap();
+        fs::write(target.join("media/nested/clip.bin"), b"old media").unwrap();
+        let before = tree_receipt(&target);
+
+        project
+            .publish_complete_to(&target, Some(&source_root))
+            .expect_err("a symlink in retained project media must fail closed");
+
+        assert_eq!(tree_receipt(&target), before);
+        assert!(!tmp.path().join(".Target.opentake.opentake-stage").exists());
+        assert!(!tmp
+            .path()
+            .join(".Target.opentake.opentake-journal")
+            .exists());
+        assert!(!tmp.path().join(".Target.opentake.opentake-backup").exists());
+    }
+
+    #[test]
     fn copy_media_dir_mirrors_nested_layout() {
         let tmp = TmpDir::new("nested");
         let src = tmp.path().join("Src.opentake");
@@ -616,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_media_dir_replaces_existing_dest_media() {
+    fn copy_media_dir_refuses_existing_dest_media_without_changes() {
         let tmp = TmpDir::new("replace");
         let src = tmp.path().join("Src.opentake");
         let dst = tmp.path().join("Dst.opentake");
@@ -627,12 +683,10 @@ mod tests {
         fs::create_dir_all(layout::media_dir(&dst)).unwrap();
         fs::write(layout::media_dir(&dst).join("stale.png"), b"OLD").unwrap();
 
-        copy_media_dir(&src, &dst).unwrap();
+        let before = tree_receipt(&dst);
+        copy_media_dir(&src, &dst).expect_err("legacy media-only copy must not delete live media");
 
-        assert_eq!(fs::read(dst.join("media").join("new.png")).unwrap(), b"NEW");
-        assert!(
-            !dst.join("media").join("stale.png").exists(),
-            "stale dest media should be replaced, not merged"
-        );
+        assert_eq!(tree_receipt(&dst), before);
+        assert!(!dst.join("media").join("new.png").exists());
     }
 }
