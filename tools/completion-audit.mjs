@@ -18,6 +18,13 @@ export function normalizePath(value) {
   return value.replaceAll("\\", "/").replace(/^\.\//, "");
 }
 
+export function compareAuditText(left, right) {
+  return Buffer.compare(
+    Buffer.from(String(left), "utf8"),
+    Buffer.from(String(right), "utf8"),
+  );
+}
+
 export function stableId(prefix, value) {
   return `${prefix}-${createHash("sha256").update(value).digest("hex").slice(0, 16)}`;
 }
@@ -263,21 +270,25 @@ function resolveConfined(root, path) {
   return absolutePath;
 }
 
-export function captureDirtyCheckout({ name, path, remote = "origin" }) {
-  if (![name, path, remote].every((value) => typeof value === "string" && value)) {
-    throw new Error("captureDirtyCheckout requires non-empty name, path, and remote strings");
-  }
-  const rawStatus = gitRead(
-    name,
-    path,
-    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-    null,
-  );
-  const paths = parsePorcelain(name, rawStatus)
+function readDirtySnapshot(name, path) {
+  return {
+    head: assertFullSha(name, "HEAD", gitText(name, path, ["rev-parse", "HEAD"])),
+    tree: assertFullSha(name, "HEAD tree", gitText(name, path, ["rev-parse", "HEAD^{tree}"])),
+    rawStatus: gitRead(
+      name,
+      path,
+      ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+      null,
+    ),
+  };
+}
+
+function captureDirtyPaths(name, path, rawStatus) {
+  return parsePorcelain(name, rawStatus)
     .sort((left, right) => (
-      left.path.localeCompare(right.path, "en")
-      || (left.source ?? "").localeCompare(right.source ?? "", "en")
-      || left.status.localeCompare(right.status, "en")
+      compareAuditText(left.path, right.path)
+      || compareAuditText(left.source ?? "", right.source ?? "")
+      || compareAuditText(left.status, right.status)
     ))
     .map(({ status, path: dirtyPath, source }) => {
       const tracked = status !== "??" && status !== "!!";
@@ -304,13 +315,39 @@ export function captureDirtyCheckout({ name, path, remote = "origin" }) {
         ...worktreeContent(resolveConfined(path, dirtyPath)),
       };
     });
+}
+
+export function captureDirtyCheckout({
+  name,
+  path,
+  remote = "origin",
+  afterInitialCapture = null,
+}) {
+  if (![name, path, remote].every((value) => typeof value === "string" && value)) {
+    throw new Error("captureDirtyCheckout requires non-empty name, path, and remote strings");
+  }
+  if (afterInitialCapture !== null && typeof afterInitialCapture !== "function") {
+    throw new Error("captureDirtyCheckout afterInitialCapture must be a function");
+  }
+  const initial = readDirtySnapshot(name, path);
+  const { rawStatus } = initial;
+  const paths = captureDirtyPaths(name, path, rawStatus);
+  afterInitialCapture?.();
+  const final = readDirtySnapshot(name, path);
+  const finalPaths = captureDirtyPaths(name, path, final.rawStatus);
+  if (initial.head !== final.head
+      || initial.tree !== final.tree
+      || !initial.rawStatus.equals(final.rawStatus)
+      || JSON.stringify(paths) !== JSON.stringify(finalPaths)) {
+    throw new Error(`${name}: checkout changed while its manifest was being captured`);
+  }
   return {
     name,
     repository: gitText(name, path, ["remote", "get-url", remote]),
     remote,
     status: paths.length === 0 ? "clean" : "dirty",
-    head: assertFullSha(name, "HEAD", gitText(name, path, ["rev-parse", "HEAD"])),
-    tree: assertFullSha(name, "HEAD tree", gitText(name, path, ["rev-parse", "HEAD^{tree}"])),
+    head: initial.head,
+    tree: initial.tree,
     statusSha256: createHash("sha256").update(rawStatus).digest("hex"),
     manifestSha256: createHash("sha256").update(JSON.stringify(paths)).digest("hex"),
     paths,
@@ -346,6 +383,25 @@ const FETCH_PORCELAIN_SHA256 = Object.freeze({
   palmier: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 });
 
+const OPEN_PULL_REQUEST_COMMAND = "gh pr list --repo appergb/OpenTake --state open --json number,title,headRefName,baseRefName,url";
+
+const CAPTURED_OPEN_PULL_REQUESTS = Object.freeze({
+  repository: "appergb/OpenTake",
+  state: "open",
+  transport: "immutable-capture",
+  capturedAt: "2026-07-14T08:24:59Z",
+  command: OPEN_PULL_REQUEST_COMMAND,
+  count: 0,
+  items: Object.freeze([]),
+});
+
+export function capturedOpenPullRequests() {
+  return {
+    ...CAPTURED_OPEN_PULL_REQUESTS,
+    items: CAPTURED_OPEN_PULL_REQUESTS.items.map((item) => ({ ...item })),
+  };
+}
+
 const REQUIREMENT = Object.freeze({
   chromaKey: "requirement-5698f215032c0f0e",
   lutImport: "requirement-308f50408571c49c",
@@ -376,26 +432,1975 @@ const CONTROL = Object.freeze({
   searchIndex: Object.freeze(["control-record-64640989bd95e214"]),
 });
 
-const CHROMA_PATHS = new Set([
-  "Metal/ChromaKey.metal",
-  "Sources/PalmierPro/Compositing/EffectRegistry.swift",
-  "Sources/PalmierPro/Compositing/FrameRenderer.swift",
-  "Sources/PalmierPro/Editor/EditorWindowController.swift",
-  "Sources/PalmierPro/Editor/ViewModel/EditorViewModel+ChromaKey.swift",
-  "Sources/PalmierPro/Inspector/InspectorView.swift",
-  "Sources/PalmierPro/Inspector/Tabs/AdjustTab.swift",
-  "Sources/PalmierPro/Preview/ChromaKeySamplerOverlayView.swift",
-  "Sources/PalmierPro/Preview/PreviewContainerView.swift",
-  "Sources/PalmierPro/Preview/PreviewHitTester.swift",
-]);
+export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
+  [
+  {
+    "status": "M",
+    "path": ".github/workflows/ci.yml",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Replaces a separate clean build plus test sequence with trait-aware swift test, reducing duplicate compilation.",
+    "openTakeEquivalent": ".github/workflows/ci.yml",
+    "rationale": "The CI optimization is Swift-specific; only the invariant of testing production feature combinations is portable.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:build-feature-gating"
+    ]
+  },
+  {
+    "status": "A",
+    "path": ".swift-version",
+    "destination": null,
+    "disposition": "platform-specific",
+    "behavior": "Pins the Xcode Swift language version for reproducible clean CI builds.",
+    "openTakeEquivalent": "rust-toolchain.toml",
+    "rationale": "OpenTake uses Rust/Node toolchains, so the file is not portable.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:toolchain-pin"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Package.resolved",
+    "destination": null,
+    "disposition": "platform-specific",
+    "behavior": "Prunes/resolves dependencies after moving speech and telemetry dependencies behind package traits.",
+    "openTakeEquivalent": "Cargo.lock; package-lock.json",
+    "rationale": "Lockfile churn belongs to SwiftPM, though dependency closure should be verified in OpenTake builds.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:build-feature-gating"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Package.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Adds BundledSpeech and ProductionTelemetry traits and conditionally enables their dependencies/imports.",
+    "openTakeEquivalent": "Cargo.toml feature tables; src-tauri/Cargo.toml",
+    "rationale": "Product-level feature gating is relevant, but SwiftPM declarations are not.",
+    "linkedRequirementIds": [
+      "requirement-681025f8d7d4facf"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:build-feature-gating"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "README.md",
+    "destination": null,
+    "disposition": "obsolete",
+    "behavior": "Replaces the public star-history image token with a sealed token URL.",
+    "openTakeEquivalent": "README.md",
+    "rationale": "Palmier repository analytics artwork has no OpenTake product behavior.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:upstream-doc-only"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Resources/Info.plist",
+    "destination": null,
+    "disposition": "obsolete",
+    "behavior": "Advances marketing/build versions from 0.6.4/65 through 0.6.6/67.",
+    "openTakeEquivalent": "src-tauri/tauri.conf.json; package.json",
+    "rationale": "Upstream release numbers must not be copied into OpenTake.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:release-metadata"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "appcast.xml",
+    "destination": null,
+    "disposition": "obsolete",
+    "behavior": "Publishes signed Sparkle entries for Palmier 0.6.5 and 0.6.6.",
+    "openTakeEquivalent": "none",
+    "rationale": "OpenTake has no equivalent Sparkle feed in this tree and cannot reuse Palmier signatures or URLs.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:release-metadata"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "docs/readme/README.ar.md",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Updates Arabic README star-history artwork to the sealed token URL.",
+    "openTakeEquivalent": "none",
+    "rationale": "Documentation-only upstream analytics change.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:upstream-doc-only"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "docs/readme/README.bn.md",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Updates Bengali README star-history artwork to the sealed token URL.",
+    "openTakeEquivalent": "none",
+    "rationale": "Documentation-only upstream analytics change.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:upstream-doc-only"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "docs/readme/README.es.md",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Updates Spanish README star-history artwork to the sealed token URL.",
+    "openTakeEquivalent": "none",
+    "rationale": "Documentation-only upstream analytics change.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:upstream-doc-only"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "docs/readme/README.fr.md",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Updates French README star-history artwork to the sealed token URL.",
+    "openTakeEquivalent": "none",
+    "rationale": "Documentation-only upstream analytics change.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:upstream-doc-only"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "docs/readme/README.hi.md",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Updates Hindi README star-history artwork to the sealed token URL.",
+    "openTakeEquivalent": "none",
+    "rationale": "Documentation-only upstream analytics change.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:upstream-doc-only"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "docs/readme/README.it.md",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Updates Italian README star-history artwork to the sealed token URL.",
+    "openTakeEquivalent": "none",
+    "rationale": "Documentation-only upstream analytics change.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:upstream-doc-only"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "docs/readme/README.ja.md",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Updates Japanese README star-history artwork to the sealed token URL.",
+    "openTakeEquivalent": "none",
+    "rationale": "Documentation-only upstream analytics change.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:upstream-doc-only"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "docs/readme/README.ko.md",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Updates Korean README star-history artwork to the sealed token URL.",
+    "openTakeEquivalent": "none",
+    "rationale": "Documentation-only upstream analytics change.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:upstream-doc-only"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "docs/readme/README.pt-BR.md",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Updates Brazilian Portuguese README star-history artwork to the sealed token URL.",
+    "openTakeEquivalent": "none",
+    "rationale": "Documentation-only upstream analytics change.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:upstream-doc-only"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "docs/readme/README.ru.md",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Updates Russian README star-history artwork to the sealed token URL.",
+    "openTakeEquivalent": "none",
+    "rationale": "Documentation-only upstream analytics change.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:upstream-doc-only"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "docs/readme/README.tr.md",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Updates Turkish README star-history artwork to the sealed token URL.",
+    "openTakeEquivalent": "none",
+    "rationale": "Documentation-only upstream analytics change.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:upstream-doc-only"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "docs/readme/README.vi.md",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Updates Vietnamese README star-history artwork to the sealed token URL.",
+    "openTakeEquivalent": "none",
+    "rationale": "Documentation-only upstream analytics change.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:upstream-doc-only"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "docs/readme/README.zh-CN.md",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Updates Simplified Chinese README star-history artwork to the sealed token URL.",
+    "openTakeEquivalent": "none",
+    "rationale": "Documentation-only upstream analytics change.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:upstream-doc-only"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "docs/readme/README.zh-TW.md",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Updates Traditional Chinese README star-history artwork to the sealed token URL.",
+    "openTakeEquivalent": "none",
+    "rationale": "Documentation-only upstream analytics change.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:upstream-doc-only"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "scripts/bundle.sh",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Builds the bundle with speech always enabled, production telemetry only for release, and adds a fast code-sign verification.",
+    "openTakeEquivalent": "src-tauri/tauri.conf.json; OpenTake release workflows",
+    "rationale": "Feature composition and signing checks are portable release invariants; the script is macOS/Swift-specific.",
+    "linkedRequirementIds": [
+      "requirement-681025f8d7d4facf"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:build-feature-gating"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Agent/AgentService.swift",
+    "destination": null,
+    "disposition": "cloud-specific",
+    "behavior": "Defaults hosted chat to Sonnet 5 and restores in-app activation telemetry without double-counting restored chats.",
+    "openTakeEquivalent": "crates/opentake-agent/src; none for hosted model/activation telemetry",
+    "rationale": "OpenTake is currently BYOK/local-agent oriented; hosted model choice and activation accounting need an explicit service decision.",
+    "linkedRequirementIds": [
+      "requirement-681025f8d7d4facf"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:hosted-chat-model"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Agent/MCP/MCPHTTPServer.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Separates HTTP connection lifetime from recognized MCP-session activation counting.",
+    "openTakeEquivalent": "crates/opentake-agent/src/mcp/server.rs; src-tauri/src/mcp.rs",
+    "rationale": "OpenTake has MCP transport but no equivalent activation telemetry boundary.",
+    "linkedRequirementIds": [
+      "requirement-681025f8d7d4facf"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:mcp-session-activation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Agent/MCP/MCPService.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Tracks per-session project selection, consolidates project tools, and records MCP activation only on the first recognized tool call.",
+    "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs::Dispatcher; crates/opentake-agent/src/tools/names.rs::ToolName",
+    "rationale": "The dispatcher is session-scoped but does not pin/project-authorize writes or count first-use activation.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:agent-manage-project",
+      "requirement-needed:mcp-session-activation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Agent/Tools/AgentInstructions.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Rewrites instructions for manage_tracks, consolidated manage_project, and queued manage_exports.",
+    "openTakeEquivalent": "crates/opentake-agent/src/tools/descriptions.rs::description",
+    "rationale": "OpenTake's advertised 31-tool set predates all three upstream contract changes.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:agent-manage-project",
+      "requirement-needed:agent-manage-tracks-stable-id",
+      "requirement-needed:agent-manage-exports"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Agent/Tools/ToolDefinitions.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Adds/updates schemas for stable track addressing, project management, export queue control, and audio cleanup/dubbing source arguments.",
+    "openTakeEquivalent": "crates/opentake-agent/src/tools/names.rs::ToolName; crates/opentake-agent/src/tools/descriptions.rs::schema",
+    "rationale": "Missing tool names/schemas are a direct contract gap; generation tools are also still unwired.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:agent-tool-contract-refresh"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Agent/Tools/ToolExecutor+Clips.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Resolves track targets by trackId or exact legacy integer index and rejects fractional/out-of-zone indices.",
+    "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs::{remove_tracks,add_clips,move_clips}",
+    "rationale": "OpenTake still exposes index-based mutations even though get_timeline returns track IDs.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:agent-manage-tracks-stable-id"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Agent/Tools/ToolExecutor+Export.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Routes export commands into the shared queue and implements manage_exports list/cancel/remove/clear operations.",
+    "openTakeEquivalent": "src-tauri/src/export.rs::{ExportControl,cancel_export}; web/src/components/shell/ExportDialog.tsx",
+    "rationale": "Single-export cancellation exists, but queue state and the agent management surface do not.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [
+      "control-record-8592a780adc50cb8"
+    ],
+    "requirementGapIds": [
+      "requirement-needed:agent-manage-exports",
+      "requirement-needed:export-queue"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Agent/Tools/ToolExecutor+Generate.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Accepts sourceMediaRef and targetLanguage, validates audio transforms, and submits cleanup/dubbing generations.",
+    "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs::run_body; crates/opentake-gen/src/provider/elevenlabs.rs::ElevenLabsAdapter",
+    "rationale": "Provider plumbing exists, but agent generation is explicitly not implemented and lacks these arguments.",
+    "linkedRequirementIds": [
+      "requirement-9f64c383bdf1c254"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Agent/Tools/ToolExecutor+Import.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Routes imported asset metadata through the new batched manifest updater.",
+    "openTakeEquivalent": "crates/opentake-core/src/session.rs::EditorSession::import_media_file_checked",
+    "rationale": "OpenTake imports transactionally but directly mutates the manifest rather than batching metadata.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:manifest-metadata-batching"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Agent/Tools/ToolExecutor+ProjectSettings.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Moves project setting mutations under consolidated project management and selected-project write authority.",
+    "openTakeEquivalent": "crates/opentake-core/src/session.rs::EditorSession; src-tauri/src/commands.rs project settings commands",
+    "rationale": "Core settings exist, but no session-pinned agent project authority wraps them.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:agent-manage-project"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Agent/Tools/ToolExecutor+Projects.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Replaces separate list/create/open/close tools with manage_project; allows inactive reads, blocks inactive writes, and saves before close.",
+    "openTakeEquivalent": "crates/opentake-core/src/session.rs::{new_project,open_project,save_project}; crates/opentake-agent/src/tools/names.rs::ToolName",
+    "rationale": "Project primitives exist, but the consolidated agent operation and authority/persistence guarantees do not.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:agent-manage-project",
+      "requirement-needed:project-close-save-barrier"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Agent/Tools/ToolExecutor+ShortId.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Includes stable track IDs and audio-transform source references in short-ID expansion/shortening.",
+    "openTakeEquivalent": "crates/opentake-agent/src/tools/short_id.rs::{current_id_universe,expand_id_prefixes,shorten_ids}",
+    "rationale": "OpenTake has a short-ID engine but its universe/contracts lack the new tool surfaces.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:agent-manage-tracks-stable-id",
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Agent/Tools/ToolExecutor+Timeline.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Returns track receipts for reorder/removal and wraps timeline creation/duplication in explicit single agent undo groups.",
+    "openTakeEquivalent": "crates/opentake-agent/src/tools/encode_timeline.rs::encode_timeline; crates/opentake-agent/src/mcp/dispatch.rs::{apply,undo}",
+    "rationale": "Assistant-only undo already exists, but receipts/consolidated track operations and event-group parity do not.",
+    "linkedRequirementIds": [
+      "requirement-03ec8ed1077fbfd6"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:agent-manage-tracks-stable-id"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Agent/Tools/ToolExecutor.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Centralizes tool telemetry with source/status/duration/change/failure fields, registers new project/export tools, and fixes NSUndoManager group boundaries.",
+    "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs::{dispatch,apply,undo}",
+    "rationale": "The uniform dispatcher and undo stack exist; telemetry and new tool registrations do not.",
+    "linkedRequirementIds": [
+      "requirement-d8779330e21693ad",
+      "requirement-681025f8d7d4facf"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:agent-tool-contract-refresh"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/App/AppState.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Makes visible/frontmost project state available to agent session authorization and project listing.",
+    "openTakeEquivalent": "src-tauri/src/playback/session.rs::PlaybackSessionRegistry; web project store",
+    "rationale": "OpenTake tracks project epochs/sessions, but not the same multi-window agent visibility/write rule.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:agent-project-authority"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Telemetry/Analytics.swift",
+    "destination": null,
+    "disposition": "cloud-specific",
+    "behavior": "Adds tool-call dimensions and MCP/in-app activation events, conditionally compiled for production telemetry.",
+    "openTakeEquivalent": "crates/opentake-core/src/events.rs; none for analytics sink",
+    "rationale": "OpenTake describes telemetry as a possible observer but ships no analytics capture implementation.",
+    "linkedRequirementIds": [
+      "requirement-681025f8d7d4facf"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": []
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Telemetry/Telemetry.swift",
+    "destination": null,
+    "disposition": "cloud-specific",
+    "behavior": "Makes telemetry imports/initialization conditional on the production package trait.",
+    "openTakeEquivalent": "none",
+    "rationale": "Requires an OpenTake privacy/consent and deployment decision before implementation.",
+    "linkedRequirementIds": [
+      "requirement-681025f8d7d4facf"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:telemetry-consent-policy"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Tests/PalmierProTests/Agent/AnalyticsSessionActivationTests.swift",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Verifies one activation per recognized MCP session and avoids connection/restoration double counts.",
+    "openTakeEquivalent": "none",
+    "rationale": "Test evidence for a telemetry behavior OpenTake does not implement.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:mcp-session-activation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Tests/PalmierProTests/Agent/ExportProjectToolTests.swift",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Updates agent project export tests for enqueue/queue-result semantics and cancellation.",
+    "openTakeEquivalent": "src-tauri/src/export.rs tests; none for agent export queue",
+    "rationale": "OpenTake tests single-operation export but lacks the tested agent queue behavior.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:agent-manage-exports",
+      "requirement-needed:export-queue"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Tests/PalmierProTests/Agent/ManageProjectToolTests.swift",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Covers consolidated project actions, selected-project pinning, inactive-write rejection, save-before-close, and activation counting.",
+    "openTakeEquivalent": "crates/opentake-core/src/session.rs tests; none for agent project tool",
+    "rationale": "Core project tests do not establish agent/multi-window authority semantics.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:agent-manage-project",
+      "requirement-needed:project-close-save-barrier"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Tests/PalmierProTests/Agent/ManageTracksTests.swift",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Covers stable-ID addressing, exact legacy indices, invalid fractional/index cases, reorder and removal receipts.",
+    "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs tests; crates/opentake-agent/src/tools/encode_timeline.rs tests",
+    "rationale": "Existing OpenTake tests cover separate index-based tools, not the new contract.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:agent-manage-tracks-stable-id"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Tests/PalmierProTests/Agent/ToolExecutorTests.swift",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Refreshes registered tool/schema expectations for exports, projects, tracks, and generation sources.",
+    "openTakeEquivalent": "crates/opentake-agent/src/tools/names.rs tests; crates/opentake-agent/src/tools/descriptions.rs tests",
+    "rationale": "This is contract evidence; OpenTake's pinned 31-tool expectation is now stale relative to head.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:agent-tool-contract-refresh"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Tests/PalmierProTests/Agent/UndoToolTests.swift",
+    "destination": null,
+    "disposition": "equivalent",
+    "behavior": "Regression-tests automatic event-group closure and one-step undo for agent-created/duplicated timelines.",
+    "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs::undo; crates/opentake-ops/src/command.rs tests",
+    "rationale": "OpenTake snapshots each changed command and keeps a dispatcher-local agent undo stack, avoiding NSUndoManager event groups.",
+    "linkedRequirementIds": [
+      "requirement-03ec8ed1077fbfd6",
+      "requirement-d8779330e21693ad"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": []
+  },
+  {
+    "status": "M",
+    "path": "Metal/ChromaKey.metal",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Adds a chroma-distance floor to suppress near-black key noise and adjusts matte/alpha output.",
+    "openTakeEquivalent": "crates/opentake-render/src/gpu/shader.wgsl chroma branch",
+    "rationale": "OpenTake's RGB similarity/smoothness/spill shader is real but not proven visually equivalent to the new chroma-space floor.",
+    "linkedRequirementIds": [
+      "requirement-5698f215032c0f0e"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:chroma-key-matte-parity"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Compositing/EffectRegistry.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Changes chroma defaults, including softness 0.1, to match sampled-key workflow.",
+    "openTakeEquivalent": "crates/opentake-domain/src/grade.rs::ChromaKey; web/src/components/inspector/Inspector.tsx::completeChromaKey",
+    "rationale": "OpenTake defaults smoothness to 0.35 and includes spill, so a blind default copy would change its visual model.",
+    "linkedRequirementIds": [
+      "requirement-5698f215032c0f0e"
+    ],
+    "linkedControlIds": [
+      "control-record-1dda462442994c48"
+    ],
+    "requirementGapIds": []
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Compositing/FrameRenderer.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Temporarily disables the selected clip's chroma effect while sampling and premultiplies alpha after transforms/effects.",
+    "openTakeEquivalent": "crates/opentake-render/src/gpu/compositor.rs; crates/opentake-render/src/gpu/shader.wgsl",
+    "rationale": "Sampling needs an unkeyed frame; alpha-order parity is render-critical and needs GPU image tests.",
+    "linkedRequirementIds": [
+      "requirement-5698f215032c0f0e"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:chroma-key-eyedropper"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Compositing/LUTLoader.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Raises accepted .cube dimension ceiling from 64 to 128, allowing standard 65-point LUTs.",
+    "openTakeEquivalent": "none",
+    "rationale": "OpenTake has no .cube LUT loader or import path.",
+    "linkedRequirementIds": [
+      "requirement-308f50408571c49c"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": []
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Editor/EditorWindowController.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Cancels chroma sampling on selection/window changes and contributes frontmost-window project state for agent authorization.",
+    "openTakeEquivalent": "web selection state; none for eyedropper/project authority",
+    "rationale": "Both lifecycle cancellations and window authority are missing as explicit contracts.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:chroma-key-eyedropper",
+      "requirement-needed:agent-project-authority"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Sources/PalmierPro/Editor/ViewModel/EditorViewModel+ChromaKey.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Adds sampling mode lifecycle; averages a 9×9 active-frame region, derives hue, and commits hue/tolerance/softness defaults.",
+    "openTakeEquivalent": "web/src/components/inspector/Inspector.tsx::ChromaKeySection; none for sampling",
+    "rationale": "Existing manual color input does not replace click-to-sample behavior.",
+    "linkedRequirementIds": [
+      "requirement-5698f215032c0f0e"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:chroma-key-eyedropper"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Inspector/InspectorView.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Wires the chroma eyedropper action into the inspector and also exposes new audio transform edit state.",
+    "openTakeEquivalent": "web/src/components/inspector/Inspector.tsx::ChromaKeySection",
+    "rationale": "Manual swatch is integrated; eyedropper and transform actions are absent.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [
+      "control-record-f8fda6ae2f426fe7"
+    ],
+    "requirementGapIds": [
+      "requirement-needed:chroma-key-eyedropper",
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Inspector/Tabs/AdjustTab.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Adds the eyedropper control and aligns chroma tolerance/softness labels/defaults.",
+    "openTakeEquivalent": "web/src/components/inspector/Inspector.tsx::ChromaKeySection",
+    "rationale": "Enable and numeric controls exist; sampling control and semantic parity do not.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [
+      "control-record-7b6a6c4db4520595",
+      "control-record-46a4a8652371f465",
+      "control-record-1dda462442994c48"
+    ],
+    "requirementGapIds": [
+      "requirement-needed:chroma-key-eyedropper"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Sources/PalmierPro/Preview/ChromaKeySamplerOverlayView.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Adds crosshair/hover overlay that converts preview clicks into sampled image coordinates and handles escape/tab cancellation.",
+    "openTakeEquivalent": "none",
+    "rationale": "This is missing user-visible preview interaction, not a macOS-only product behavior.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:chroma-key-eyedropper"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Preview/PreviewContainerView.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Installs/removes the sampler overlay with selection/playhead state and suppresses conflicting preview interactions.",
+    "openTakeEquivalent": "web/src/components/preview/Preview.tsx",
+    "rationale": "OpenTake preview has scrub/zoom interaction but no sampling mode.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:chroma-key-eyedropper"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Preview/PreviewHitTester.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Exposes hit-test mapping needed to identify the selected clip pixel under the preview point.",
+    "openTakeEquivalent": "web/src/components/preview; crates/opentake-render frame mapping",
+    "rationale": "Coordinate mapping must be adapted to DOM/canvas and Rust-render paths.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:chroma-key-eyedropper"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Preview/VideoEngine.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Produces unkeyed active-frame samples for the eyedropper and initializes audible scrub support.",
+    "openTakeEquivalent": "web/src/components/preview/previewEngine.ts; src-tauri/src/playback",
+    "rationale": "OpenTake preview is split between web and native paths; both behaviors cross that boundary.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:chroma-key-eyedropper",
+      "requirement-needed:audible-scrub"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/UI/AppTheme.swift",
+    "destination": null,
+    "disposition": "equivalent",
+    "behavior": "Adds shared colors/layout constants used by eyedropper, audio meter, and export activity UI.",
+    "openTakeEquivalent": "web/src/index.css; component-local tokens",
+    "rationale": "Theme constants are implementation details; only new controls/feedback need behavioral coverage.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:upstream-ui-token-delta"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Tests/PalmierProTests/Rendering/ChromaKeyKernelTests.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Adds regression vectors for black retention and keyed-color matte behavior.",
+    "openTakeEquivalent": "crates/opentake-render/tests/gpu_effects.rs::{chroma_key_removes_green,chroma_key_keeps_non_key_color}",
+    "rationale": "OpenTake has GPU chroma tests, but not the new near-black regression/vector semantics.",
+    "linkedRequirementIds": [
+      "requirement-5698f215032c0f0e"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:chroma-key-matte-parity"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Tests/PalmierProTests/Rendering/CompositorRenderTests.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Verifies corrected post-effect alpha premultiplication and compositing output.",
+    "openTakeEquivalent": "crates/opentake-render/tests; crates/opentake-render/src/gpu/compositor.rs",
+    "rationale": "The invariant is cross-platform and needs image-based parity coverage.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:premultiplied-alpha-order"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Tests/PalmierProTests/Rendering/HistogramTests.swift",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Adjusts render histogram expectations after chroma/alpha output correction.",
+    "openTakeEquivalent": "none",
+    "rationale": "Evidence is tied to Palmier renderer output; OpenTake needs its own fixtures.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:chroma-key-matte-parity"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Tests/PalmierProTests/Rendering/LUTLoaderTests.swift",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Proves 65-point LUT parsing and upper-bound validation.",
+    "openTakeEquivalent": "none",
+    "rationale": "Test accompanies missing LUT behavior.",
+    "linkedRequirementIds": [
+      "requirement-308f50408571c49c"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": []
+  },
+  {
+    "status": "M",
+    "path": "Tests/PalmierProTests/Timeline/ClipMutationsTests.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Updates chroma mutation/default expectations used by edit and undo paths.",
+    "openTakeEquivalent": "crates/opentake-ops/src/command.rs chroma tests",
+    "rationale": "Chroma mutation exists, but upstream default/field model changed.",
+    "linkedRequirementIds": [
+      "requirement-5698f215032c0f0e"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": []
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/App/AppDelegate.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Begins termination gating and waits for active MLX speaker/VAD work to drain before exit.",
+    "openTakeEquivalent": "src-tauri/src/playback/session.rs; none for inference-operation gate",
+    "rationale": "Graceful worker drain is portable, but OpenTake uses different inference/runtime processes.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:ml-worker-shutdown"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Audio/Analysis/SpeakerIdentity.swift",
+    "destination": null,
+    "disposition": "platform-specific",
+    "behavior": "Wraps MLX speaker embedding operations in the termination gate and conditionally compiles bundled speech.",
+    "openTakeEquivalent": "OpenTake transcription/speaker analysis paths; none for MLX",
+    "rationale": "MLX-specific code cannot port directly; shutdown and feature-gate invariants remain.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:ml-worker-shutdown",
+      "requirement-needed:build-feature-gating"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Audio/Analysis/VoiceActivity.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Gates VAD MLX work, adds chunk cancellation checks, and conditionally compiles the bundled model.",
+    "openTakeEquivalent": "OpenTake transcription/VAD paths",
+    "rationale": "Per-chunk cancellation is relevant but must target OpenTake's actual backend.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:ml-worker-shutdown"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Audio/AudioEnhancer.swift",
+    "destination": null,
+    "disposition": "platform-specific",
+    "behavior": "Makes speech-enhancement implementation conditional on the bundled-speech package trait.",
+    "openTakeEquivalent": "none",
+    "rationale": "No exact OpenTake enhancer surface exists.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:build-feature-gating"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Sources/PalmierPro/Audio/AudioMeter.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Adds 48 kHz stereo peak analysis, dB mapping, decay, 1.5 s peak hold, clipping indication/reset, and coalesced invalidation.",
+    "openTakeEquivalent": "none",
+    "rationale": "OpenTake has playback audio but no level-meter state or analysis.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-meter"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Sources/PalmierPro/Audio/AudioMeterView.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Adds the timeline-side level/peak/clipping visual meter.",
+    "openTakeEquivalent": "none",
+    "rationale": "User-visible monitoring is absent.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-meter"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Editor/EditorView.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Places the audio meter beside the timeline and binds it to preview playback/scrub audio.",
+    "openTakeEquivalent": "web/src/components/timeline/TimelineContainer.tsx; web/src/components/preview/Preview.tsx",
+    "rationale": "Timeline/preview controls exist but expose no meter.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [
+      "control-record-558afc9b67a29ef9"
+    ],
+    "requirementGapIds": [
+      "requirement-needed:audio-meter"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Sources/PalmierPro/Preview/ScrubAudioEngine.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Implements cached PCM windows and short direction-aware faded grains for step/scrub playback; later delegates device work off-main.",
+    "openTakeEquivalent": "web/src/components/preview/previewEngine.ts::scrubTo; src-tauri/src/playback/audio.rs",
+    "rationale": "OpenTake explicitly silences audio during scrub; native playback audio can be reused but not assumed safe.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [
+      "control-record-5808716793cc1f0f"
+    ],
+    "requirementGapIds": [
+      "requirement-needed:audible-scrub"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Sources/PalmierPro/Preview/ScrubAudioOutput.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Owns Core Audio queue operations off the main thread, coalesces to latest pending grain, and invalidates on lifecycle/device changes.",
+    "openTakeEquivalent": "src-tauri/src/playback/audio.rs",
+    "rationale": "Threading/lifecycle invariant is portable; Core Audio implementation is not.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audible-scrub"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Search/Indexing/VisualIndexer.swift",
+    "destination": null,
+    "disposition": "integrated",
+    "behavior": "Makes visual indexing wait for shared export activity to drain.",
+    "openTakeEquivalent": "crates/opentake-media/src/index_coordinator.rs::ExportPause",
+    "rationale": "OpenTake already provides a shared reference-counted export pause primitive for indexing.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:search-export-coordination"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Search/Models/VisualEmbedder.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Makes model preflight usable from detached work and returns immutable spec/readiness data for later revalidation.",
+    "openTakeEquivalent": "crates/opentake-media/src/search/embedder.rs::EmbedderSpec; crates/opentake-media/src/index_coordinator.rs::work_needed",
+    "rationale": "Spec types exist; the actual detached preflight runtime is explicitly deferred.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:search-preflight-concurrency"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Search/SearchIndexCoordinator.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Runs disk/model preflight off-main, snapshots asset/spec, revalidates before commit, reschedules stale work, drains cancellation, waits export, and reduces production logs.",
+    "openTakeEquivalent": "crates/opentake-media/src/index_coordinator.rs::{work_needed,ExportPause}",
+    "rationale": "The file itself documents that OpenTake ships only the scheduling kernel and defers the queue/runtime.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:search-preflight-concurrency",
+      "requirement-needed:search-export-coordination"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Transcription/TranscriptionBackend.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Exposes source-audio extraction support used by the new audio transformation generation path.",
+    "openTakeEquivalent": "crates/opentake-media/src/transcribe; src-tauri/src/playback/audio.rs",
+    "rationale": "Transcription exists, but extraction for provider upload is a different lifecycle/format contract.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Utilities/Log.swift",
+    "destination": null,
+    "disposition": "equivalent",
+    "behavior": "Compiles debug autoclosures and stderr mirroring only in debug, reducing production overhead.",
+    "openTakeEquivalent": "Rust tracing/logging configuration",
+    "rationale": "Rust logging already uses a different compile/runtime filtering model; no line-for-line port is justified.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:production-logging-policy"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Utilities/MLXRuntime.swift",
+    "destination": null,
+    "disposition": "platform-specific",
+    "behavior": "Adds a gate rejecting new MLX operations after termination starts and awaits the active-operation count reaching zero.",
+    "openTakeEquivalent": "none",
+    "rationale": "Exact runtime is Apple MLX; behavior should be reconsidered against OpenTake's workers/processes.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:ml-worker-shutdown"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Tests/PalmierProTests/Audio/AudioMeterTests.swift",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Verifies peak/dB conversion, decay, hold, clipping reset, and invalidation coalescing.",
+    "openTakeEquivalent": "none",
+    "rationale": "Defines acceptance tests for missing meter behavior.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-meter"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Tests/PalmierProTests/Audio/ScrubAudioOutputStateTests.swift",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Verifies latest-grain coalescing, invalidation, and output state transitions without main-thread Core Audio calls.",
+    "openTakeEquivalent": "src-tauri/src/playback/audio.rs tests",
+    "rationale": "OpenTake playback tests do not cover scrub-grain ownership/state.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audible-scrub"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Tests/PalmierProTests/Search/SearchIndexCoordinatorTests.swift",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Adds stale-snapshot/reschedule and off-main preflight regression coverage.",
+    "openTakeEquivalent": "crates/opentake-media/src/index_coordinator.rs tests",
+    "rationale": "Current OpenTake tests cover eligibility/export-pause only.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:search-preflight-concurrency"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Tests/PalmierProTests/Utilities/MLXOperationGateTests.swift",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Covers rejection after termination and waiting for active MLX operations to drain.",
+    "openTakeEquivalent": "none",
+    "rationale": "Platform-specific test evidence; portable shutdown acceptance still needs definition.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:ml-worker-shutdown"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Editor/TitleBarView.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Adds export activity/history affordance and status dot linked to shared queue jobs.",
+    "openTakeEquivalent": "web/src/components/shell/TitleBar.tsx export menu",
+    "rationale": "Export entry exists; queue activity/history feedback does not.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [
+      "control-record-51cd2ee5dd1aecc9"
+    ],
+    "requirementGapIds": [
+      "requirement-needed:export-queue"
+    ]
+  },
+  {
+    "status": "D",
+    "path": "Sources/PalmierPro/Export/ExportCoordinator.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Removes the prior single-export coordinator in favor of shared FIFO job management.",
+    "openTakeEquivalent": "src-tauri/src/export.rs::ExportControl",
+    "rationale": "OpenTake's control is deliberately operation-scoped and should be extended, not deleted blindly.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:export-queue"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Sources/PalmierPro/Export/ExportQueue.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Adds FIFO jobs, per-project status/progress/history, active/waiting cancellation, destination reservation, remove/clear, and completion publication.",
+    "openTakeEquivalent": "src-tauri/src/export.rs::{ExportControl,ExportGuard}; web/src/components/shell/ExportDialog.tsx",
+    "rationale": "Safe single-operation primitives are a base, but queue semantics are missing.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [
+      "control-record-8592a780adc50cb8"
+    ],
+    "requirementGapIds": [
+      "requirement-needed:export-queue"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Export/ExportService.swift",
+    "destination": null,
+    "disposition": "integrated",
+    "behavior": "Makes all export formats queue-executable and cancellation-aware while preserving existing destination content until staged commit.",
+    "openTakeEquivalent": "src-tauri/src/export.rs::{export_video,ExportGuard} staged-output helpers",
+    "rationale": "OpenTake already uses generation-scoped cancellation and staged commit to protect prior output.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [
+      "control-record-f62dd7b0a91d2321",
+      "control-record-8592a780adc50cb8"
+    ],
+    "requirementGapIds": [
+      "requirement-needed:export-cancellation-safety"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Export/ExportView.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Replaces modal-only progress with queue submission plus log/cancel/remove/clear UI.",
+    "openTakeEquivalent": "web/src/components/shell/ExportDialog.tsx",
+    "rationale": "Form and live cancel exist; multi-job log/history controls do not.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [
+      "control-record-f62dd7b0a91d2321",
+      "control-record-8592a780adc50cb8"
+    ],
+    "requirementGapIds": [
+      "requirement-needed:export-queue"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Export/HDRVideoExporter.swift",
+    "destination": null,
+    "disposition": "equivalent",
+    "behavior": "Threads cooperative cancellation through HDR export work.",
+    "openTakeEquivalent": "src-tauri/src/export.rs::ExportGuard",
+    "rationale": "OpenTake cancellation checks are format-agnostic in its export operation, though HDR parity itself is separate.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:export-cancellation-safety"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Export/PalmierProjectExporter.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Makes project-bundle export cancellable and transactional within queue jobs.",
+    "openTakeEquivalent": "src-tauri/src/export.rs project archive path; web/src/components/shell/ExportDialog.tsx",
+    "rationale": "OpenTake UI explicitly says project bundling has no cooperative cancel even though video export does.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:export-cancellation-safety",
+      "requirement-needed:export-queue"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Models/MediaResolver.swift",
+    "destination": null,
+    "disposition": "equivalent",
+    "behavior": "Makes resolver/export reads cancellation-aware for queued export operations.",
+    "openTakeEquivalent": "crates/opentake-render media resolver; src-tauri/src/export.rs",
+    "rationale": "OpenTake guards decode/render work with operation cancellation through a different resolver design.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:export-cancellation-safety"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Tests/PalmierProTests/Export/ExportQueueTests.swift",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Exercises FIFO order, destination conflicts, per-project views, waiting/active cancellation, remove, clear, and progress.",
+    "openTakeEquivalent": "src-tauri/src/export.rs cancellation tests; none for queue",
+    "rationale": "Existing tests prove control safety, not scheduler behavior.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:export-queue"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Tests/PalmierProTests/Export/ExportServiceRoundTripTests.swift",
+    "destination": null,
+    "disposition": "integrated",
+    "behavior": "Adds cancellation/staging round trips proving an existing destination survives aborted export.",
+    "openTakeEquivalent": "src-tauri/src/export.rs staged-output and stale-generation tests",
+    "rationale": "OpenTake already has high-signal tests for generation isolation and commit refusal after cancel.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:export-cancellation-safety"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Tests/PalmierProTests/Export/PalmierProjectExportTests.swift",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Adds project-bundle cancellation and existing-output preservation coverage.",
+    "openTakeEquivalent": "src-tauri/src/export.rs archive tests; none for bundle cooperative cancel",
+    "rationale": "The bundle-specific cancellation gap remains despite shared staging concepts.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:export-cancellation-safety"
+    ]
+  },
+  {
+    "status": "R100",
+    "path": "Sources/PalmierPro/Account/BackendConfig.swift",
+    "destination": "Sources/PalmierPro/Backend/BackendConfig.swift",
+    "disposition": "equivalent",
+    "behavior": "Moves backend configuration into a shared backend namespace for generation workflows; content is unchanged.",
+    "openTakeEquivalent": "crates/opentake-gen/src/keys.rs; provider configuration",
+    "rationale": "OpenTake already centralizes provider configuration independently of account UI.",
+    "linkedRequirementIds": [
+      "requirement-9f64c383bdf1c254"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": []
+  },
+  {
+    "status": "A",
+    "path": "Sources/PalmierPro/Backend/BackendError.swift",
+    "destination": null,
+    "disposition": "equivalent",
+    "behavior": "Introduces shared backend error decoding used by storage and generation requests.",
+    "openTakeEquivalent": "crates/opentake-gen/src/error.rs",
+    "rationale": "OpenTake already has provider-neutral generation errors.",
+    "linkedRequirementIds": [
+      "requirement-1f36e817d0ba77ea"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": []
+  },
+  {
+    "status": "R084",
+    "path": "Sources/PalmierPro/Generation/BackendStorage.swift",
+    "destination": "Sources/PalmierPro/Backend/BackendStorage.swift",
+    "disposition": "requires-reconciliation",
+    "behavior": "Moves storage upload/download into shared backend code and extends it for transform source media.",
+    "openTakeEquivalent": "crates/opentake-gen/src/transport.rs; provider adapters",
+    "rationale": "BYOK adapters own transport, but reusable source upload/lifetime semantics need work.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Editor/ViewModel/EditorViewModel+AIEdit.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Allows AI Edit on standalone audio or linked A/V and dispatches cleanup/dubbing edit kinds.",
+    "openTakeEquivalent": "web/src/components/inspector; none for AI audio transforms",
+    "rationale": "No equivalent edit action exists in the current web editor.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Generation/Catalog/AudioModelConfig.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Adds cleanup/dubbing input capability, source requirements, target-language validation, and duration-preservation rules.",
+    "openTakeEquivalent": "crates/opentake-gen/src/catalog/entry.rs; crates/opentake-gen/src/params.rs",
+    "rationale": "Catalog machinery exists, but these model capabilities/constraints are absent.",
+    "linkedRequirementIds": [
+      "requirement-9f64c383bdf1c254"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Generation/Catalog/CostEstimator.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Accounts for source-duration cleanup/dubbing requests in estimated cost.",
+    "openTakeEquivalent": "crates/opentake-gen/src/catalog; none for transform costing",
+    "rationale": "Money-impacting estimates must match provider rules before exposing the workflow.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Generation/Catalog/ModelCatalog.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Registers ElevenLabs voice-isolation and dubbing models/categories.",
+    "openTakeEquivalent": "crates/opentake-gen/src/catalog/entry.rs ElevenLabs entries",
+    "rationale": "ElevenLabs TTS/music/SFX exist, but cleanup/dubbing catalog entries do not.",
+    "linkedRequirementIds": [
+      "requirement-9f64c383bdf1c254"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Generation/Edit/AIEditMenu.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Adds cleanup/dub actions with media eligibility and target-language flow.",
+    "openTakeEquivalent": "none",
+    "rationale": "Missing user entry point.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Sources/PalmierPro/Generation/Edit/AudioTransformEditKind.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Defines cleanup versus dubbing behavior, titles, language requirements, and model mapping.",
+    "openTakeEquivalent": "none",
+    "rationale": "Product/domain concept is missing.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Sources/PalmierPro/Generation/Edit/EditSubmitter+AudioTransform.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Extracts the selected/linked source, submits transform generation, and places the result while preserving source length.",
+    "openTakeEquivalent": "crates/opentake-gen/src/client.rs; src-tauri media import/edit paths",
+    "rationale": "Requires a new vertical path across extraction, provider submission, import, and timeline placement.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "C060",
+    "path": "Sources/PalmierPro/Generation/Edit/EditSubmitter.swift",
+    "destination": "Sources/PalmierPro/Generation/Edit/EditSubmitter+Rerun.swift",
+    "disposition": "portable",
+    "behavior": "Splits rerun behavior from the submitter while preserving prior generation inputs, including transform inputs.",
+    "openTakeEquivalent": "crates/opentake-project::GenerationLog; generation rerun UI none",
+    "rationale": "Generation log exists, but rerun execution/UI is not wired.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:generation-rerun"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Sources/PalmierPro/Generation/Edit/EditSubmitter+Seeds.swift",
+    "destination": null,
+    "disposition": "equivalent",
+    "behavior": "Splits seed derivation/reuse helpers out of the submitter during transform refactor.",
+    "openTakeEquivalent": "crates/opentake-gen/src/params.rs seed fields",
+    "rationale": "OpenTake supports provider parameters; exact helper organization is not portable.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:generation-seed-reuse"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Sources/PalmierPro/Generation/Edit/EditSubmitter+Upscale.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Splits upscale submission from the common submitter during transform refactor.",
+    "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs UpscaleMedia stub; generation provider paths",
+    "rationale": "OpenTake advertises upscale but the agent body is explicitly unwired.",
+    "linkedRequirementIds": [
+      "requirement-cce7bd16986c8437"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": []
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Generation/Edit/EditSubmitter.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Refactors common submit flow to dispatch rerun/upscale/audio-transform specializations and persist richer inputs.",
+    "openTakeEquivalent": "crates/opentake-gen/src/client.rs; crates/opentake-project::GenerationLog",
+    "rationale": "Building blocks exist without the full editor submission orchestrator.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation",
+      "requirement-needed:generation-rerun"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Generation/GenerationBackend.swift",
+    "destination": null,
+    "disposition": "cloud-specific",
+    "behavior": "Adds backend procedures/arguments for cleanup and dubbing source uploads, including target language.",
+    "openTakeEquivalent": "crates/opentake-gen/src/provider/elevenlabs.rs::ElevenLabsAdapter",
+    "rationale": "Palmier Convex/backend calls cannot be copied; direct ElevenLabs BYOK endpoints need separate implementation.",
+    "linkedRequirementIds": [
+      "requirement-9f64c383bdf1c254"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Generation/GenerationService.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Persists completed-generation metadata through batched manifest updates.",
+    "openTakeEquivalent": "crates/opentake-core/src/session.rs generation log/media APIs",
+    "rationale": "OpenTake generation integration is incomplete and manifest writes are direct.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:manifest-metadata-batching",
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Sources/PalmierPro/Generation/Preprocessing/AudioTrackExtractor.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Extracts upload-ready audio from video sources for isolation/dubbing.",
+    "openTakeEquivalent": "src-tauri/src/playback/audio.rs decode helpers; none for provider upload extraction",
+    "rationale": "Decode infrastructure exists, but a bounded temporary-file/upload contract is missing.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Sources/PalmierPro/Generation/Preprocessing/TrimmedSource.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Represents exact selected clip/media ranges and preserves source duration across preprocessing.",
+    "openTakeEquivalent": "crates/opentake-domain/src/clip.rs trim fields; media resolution helpers",
+    "rationale": "Timeline trim semantics exist; generation preprocessing does not consume them end-to-end.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "R100",
+    "path": "Sources/PalmierPro/Generation/VideoCompressor.swift",
+    "destination": "Sources/PalmierPro/Generation/Preprocessing/VideoCompressor.swift",
+    "disposition": "equivalent",
+    "behavior": "Moves unchanged video compression under the shared preprocessing namespace.",
+    "openTakeEquivalent": "OpenTake generation/media preprocessing paths",
+    "rationale": "Pure organization change; no framework-structure port needed.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:generation-preprocessing-layout"
+    ]
+  },
+  {
+    "status": "R077",
+    "path": "Sources/PalmierPro/Generation/Edit/VideoTrimExtractor.swift",
+    "destination": "Sources/PalmierPro/Generation/Preprocessing/VideoTrimExtractor.swift",
+    "disposition": "requires-reconciliation",
+    "behavior": "Moves trim extraction to shared preprocessing and adapts it to generic trimmed source/audio-transform use.",
+    "openTakeEquivalent": "OpenTake trim/decode helpers",
+    "rationale": "Behavior is reusable, but OpenTake needs cross-platform ffmpeg-backed extraction.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Generation/Submission/AudioGenerationSubmission.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Supports source-backed audio generation categories, target language, and source-length defaults.",
+    "openTakeEquivalent": "crates/opentake-gen/src/params.rs; crates/opentake-gen/src/provider/elevenlabs.rs",
+    "rationale": "Existing request types do not model these transform inputs.",
+    "linkedRequirementIds": [
+      "requirement-9f64c383bdf1c254"
+    ],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Sources/PalmierPro/Generation/Submission/GenerationInput+AudioSource.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Persists source-media and target-language metadata for rerun/audit of audio transforms.",
+    "openTakeEquivalent": "crates/opentake-domain::MediaManifestEntry::generation_input; crates/opentake-project::GenerationLog",
+    "rationale": "Persistence containers exist, but schema/round-trip fields need extension.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Generation/UI/GenerationView+ModelState.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Selects/validates cleanup and dubbing models based on source kind and language.",
+    "openTakeEquivalent": "web generation UI none; crates/opentake-gen/src/catalog",
+    "rationale": "Catalog alone does not provide model-state UI.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Generation/UI/GenerationView+References.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Allows audio/video transform source selection and derives eligible references.",
+    "openTakeEquivalent": "web media library/store; generation UI none",
+    "rationale": "Missing reference picker behavior.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Generation/UI/GenerationView+Settings.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Adds target-language settings and hides irrelevant prompt controls for transform models.",
+    "openTakeEquivalent": "none",
+    "rationale": "Missing conditional settings UI and validation.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Generation/UI/GenerationView+Submit.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Builds source-backed cleanup/dubbing submissions and validates required language/source before spending.",
+    "openTakeEquivalent": "crates/opentake-gen/src/client.rs; web generation submit none",
+    "rationale": "Cost-bearing validation must be implemented end-to-end.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Generation/UI/GenerationView.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Adds cleanup/dubbing categories and state wiring to the main generation panel.",
+    "openTakeEquivalent": "OpenTake generation panel none",
+    "rationale": "No equivalent integrated generation panel is present.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Generation/UI/ReferenceControls.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Extends reference controls to accept and label audio/video transform sources.",
+    "openTakeEquivalent": "none",
+    "rationale": "Missing source UI.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Inspector/Tabs/AIEditTab.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Presents audio cleanup/dubbing actions for eligible timeline selections and target language.",
+    "openTakeEquivalent": "none",
+    "rationale": "Missing inspector entry point.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Models/MediaManifest.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Extends stored generation input with target language/source transform metadata.",
+    "openTakeEquivalent": "crates/opentake-domain/src/media.rs::{MediaManifest,MediaManifestEntry}",
+    "rationale": "OpenTake schema has generation input support but lacks these new fields.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Timeline/TimelineView+AIEditMenu.swift",
+    "destination": null,
+    "disposition": "portable",
+    "behavior": "Adds cleanup/dub context-menu actions for standalone audio and linked A/V clips.",
+    "openTakeEquivalent": "web/src/components/timeline/TimelineContainer.tsx context menus",
+    "rationale": "Timeline menu exists but has no audio transform actions.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/UI/CapsuleButton.swift",
+    "destination": null,
+    "disposition": "equivalent",
+    "behavior": "Generalizes capsule-button presentation for new audio transform actions.",
+    "openTakeEquivalent": "shared web button styles/components",
+    "rationale": "Styling implementation is not a behavior gap by itself.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/UI/HoverHighlight.swift",
+    "destination": null,
+    "disposition": "equivalent",
+    "behavior": "Generalizes hover highlight used by new generation/reference controls.",
+    "openTakeEquivalent": "CSS hover styles/components",
+    "rationale": "Styling implementation is already idiomatic in web UI.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:audio-transform-generation"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Editor/ViewModel/EditorViewModel+Folders.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Applies folder-derived metadata updates through the batch manifest path.",
+    "openTakeEquivalent": "crates/opentake-core/src/session.rs media folder mutations",
+    "rationale": "Folder mutation exists, but batching/flush semantics do not.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:manifest-metadata-batching"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Editor/ViewModel/EditorViewModel+MediaLibrary.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Queues metadata updates, batches after 20 ms or 64 items, avoids stale/deleted assets, and lowers production logging.",
+    "openTakeEquivalent": "crates/opentake-core/src/session.rs::{set_media_favorite,restore_media,save_media_manifest}",
+    "rationale": "Direct session mutations are safe but can cause repeated copies/writes and lack stale-batch guards.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:manifest-metadata-batching"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Editor/ViewModel/EditorViewModel.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Owns chroma/audio/export state and flushes pending manifest metadata before undo snapshots and saves.",
+    "openTakeEquivalent": "web stores; crates/opentake-core/src/session.rs::EditorSession",
+    "rationale": "Multiple new state machines cross OpenTake's web/Rust boundary; only base edit/session state exists.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:manifest-metadata-batching",
+      "requirement-needed:export-queue",
+      "requirement-needed:audible-scrub"
+    ]
+  },
+  {
+    "status": "M",
+    "path": "Sources/PalmierPro/Project/VideoProject.swift",
+    "destination": null,
+    "disposition": "requires-reconciliation",
+    "behavior": "Ensures close/save snapshots flush pending manifest metadata and repeats save until no concurrent unsaved changes remain.",
+    "openTakeEquivalent": "crates/opentake-core/src/session.rs::{save_project,save_media_manifest}; src-tauri/src/commands.rs project close/save",
+    "rationale": "Atomic save exists, but no documented loop/barrier against concurrent post-snapshot mutation.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:project-close-save-barrier",
+      "requirement-needed:manifest-metadata-batching"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Tests/PalmierProTests/Media/ManifestMetadataTests.swift",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Tests batch coalescing, deletion/replacement staleness, threshold flush, undo/save flush, and restore updates.",
+    "openTakeEquivalent": "crates/opentake-core/src/session.rs tests",
+    "rationale": "OpenTake tests direct manifest operations, not this concurrency/performance contract.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:manifest-metadata-batching"
+    ]
+  },
+  {
+    "status": "A",
+    "path": "Tests/PalmierProTests/Project/ProjectClosePersistenceTests.swift",
+    "destination": null,
+    "disposition": "test-doc-only",
+    "behavior": "Verifies final save before close and catches edits arriving during an in-flight save.",
+    "openTakeEquivalent": "crates/opentake-core/src/session.rs save/reopen tests",
+    "rationale": "Current tests prove round-trip/atomic write but not concurrent close persistence.",
+    "linkedRequirementIds": [],
+    "linkedControlIds": [],
+    "requirementGapIds": [
+      "requirement-needed:project-close-save-barrier"
+    ]
+  }
+].map((entry) => Object.freeze({
+    ...entry,
+    linkedRequirementIds: Object.freeze(entry.linkedRequirementIds),
+    linkedControlIds: Object.freeze(entry.linkedControlIds),
+    requirementGapIds: Object.freeze(entry.requirementGapIds),
+  })),
+);
 
-const AUDIO_SCRUB_PATHS = new Set([
-  "Sources/PalmierPro/Audio/AudioMeter.swift",
-  "Sources/PalmierPro/Audio/AudioMeterView.swift",
-  "Sources/PalmierPro/Editor/EditorView.swift",
-  "Sources/PalmierPro/Preview/ScrubAudioEngine.swift",
-  "Sources/PalmierPro/Preview/ScrubAudioOutput.swift",
-]);
+function reviewedPalmierKey({ status, path, destination }) {
+  return status + "\\0" + path + "\\0" + (destination ?? "");
+}
+
+const PALMIER_REVIEWED_PATH_BY_KEY = new Map(
+  PALMIER_REVIEWED_PATH_LEDGER.map((entry) => [reviewedPalmierKey(entry), entry]),
+);
+
+export function reviewPalmierChangedPaths(changedPaths) {
+  if (!Array.isArray(changedPaths)) {
+    throw new Error("Palmier changed paths must be an array");
+  }
+  if (changedPaths.length !== PALMIER_REVIEWED_PATH_LEDGER.length) {
+    throw new Error("Palmier reviewed ledger expected " + PALMIER_REVIEWED_PATH_LEDGER.length + " paths, found " + changedPaths.length);
+  }
+  const seen = new Set();
+  const reviewed = changedPaths.map((record) => {
+    const key = reviewedPalmierKey(record);
+    const entry = PALMIER_REVIEWED_PATH_BY_KEY.get(key);
+    if (!entry) {
+      throw new Error("Palmier changed path is not in reviewed ledger: " + record.status + " " + record.path);
+    }
+    if (seen.has(key)) {
+      throw new Error("Palmier changed path is duplicated: " + record.path);
+    }
+    seen.add(key);
+    return { ...record, ...entry };
+  });
+  if (seen.size !== PALMIER_REVIEWED_PATH_LEDGER.length) {
+    const missing = PALMIER_REVIEWED_PATH_LEDGER.find((entry) => !seen.has(reviewedPalmierKey(entry)));
+    throw new Error("Palmier reviewed path is missing from Git diff: " + missing.path);
+  }
+  return reviewed;
+}
 
 const CANONICAL_INTEGRATED_PATHS = new Set([
   "src-tauri/capabilities/default.json",
@@ -422,301 +2427,6 @@ const CANONICAL_STALE_PATHS = new Set([
   "src-tauri/Cargo.toml",
 ]);
 
-function topic({
-  disposition,
-  behavior,
-  equivalent,
-  requirements = [],
-  controls = [],
-}) {
-  return {
-    disposition,
-    behavior,
-    openTakeEquivalent: equivalent,
-    linkedRequirementIds: requirements,
-    linkedControlIds: controls,
-  };
-}
-
-function classifyPalmierProductPath(path) {
-  if (path.endsWith("AgentService.swift")) {
-    return topic({
-      disposition: "cloud-specific",
-      behavior: "Changes hosted-chat model selection and in-app activation accounting.",
-      equivalent: "crates/opentake-agent/src/chat (BYOK architecture); no hosted activation sink",
-      requirements: [REQUIREMENT.telemetryDecision],
-    });
-  }
-  if (path.endsWith("BackendConfig.swift")) {
-    return topic({
-      disposition: "equivalent",
-      behavior: "Moves shared hosted backend configuration without changing its content.",
-      equivalent: "crates/opentake-gen/src/keys.rs and provider configuration",
-      requirements: [REQUIREMENT.elevenLabs],
-    });
-  }
-  if (path.endsWith("BackendError.swift")) {
-    return topic({
-      disposition: "equivalent",
-      behavior: "Adds provider-neutral backend error decoding for storage and generation requests.",
-      equivalent: "crates/opentake-gen/src/error.rs",
-      requirements: [REQUIREMENT.generationError],
-    });
-  }
-  if (path.endsWith("ToolExecutor+Generate.swift")) {
-    return topic({
-      disposition: "requires-reconciliation",
-      behavior: "Adds sourceMediaRef and targetLanguage validation for voice isolation and dubbing tool calls.",
-      equivalent: "crates/opentake-agent/src/mcp/dispatch.rs; crates/opentake-gen/src/provider/elevenlabs.rs",
-      requirements: [REQUIREMENT.elevenLabs, REQUIREMENT.generationTools],
-      controls: CONTROL.generation,
-    });
-  }
-  if (path.endsWith("ToolExecutor+Import.swift")) {
-    return topic({
-      disposition: "requirement-needed:manifest-metadata-batching",
-      behavior: "Routes imported asset metadata through a batched manifest updater.",
-      equivalent: "crates/opentake-core/src/session.rs::import_media_file_checked (direct manifest mutation)",
-      requirements: [REQUIREMENT.manifest],
-    });
-  }
-  if (path.endsWith("TitleBarView.swift")) {
-    return topic({
-      disposition: "requirement-needed:cancellable-export-queue",
-      behavior: "Adds export queue activity/history status to the title bar.",
-      equivalent: "web/src/components/shell/TitleBar.tsx (export entry without queue history)",
-      controls: ["control-record-51cd2ee5dd1aecc9"],
-    });
-  }
-  if (path.endsWith("MediaResolver.swift")) {
-    return topic({
-      disposition: "equivalent",
-      behavior: "Makes media resolution reads observe queued-export cancellation.",
-      equivalent: "src-tauri/src/export.rs operation-scoped media cancellation",
-      controls: CONTROL.exportCancel,
-    });
-  }
-  if (CHROMA_PATHS.has(path) || /ChromaKey/.test(path)) {
-    return topic({
-      disposition: "portable",
-      behavior: "Corrects chroma-key compositing and adds preview eyedropper sampling.",
-      equivalent: "crates/opentake-domain/src/grade.rs; crates/opentake-render/src/gpu/shader.wgsl; src-tauri/src/commands.rs; web/src/components/inspector/Inspector.tsx",
-      requirements: [REQUIREMENT.chromaKey],
-      controls: CONTROL.chromaKey,
-    });
-  }
-  if (/LUTLoader/.test(path)) {
-    return topic({
-      disposition: "portable",
-      behavior: "Extends .cube LUT parsing to 65-point tables.",
-      equivalent: "crates/opentake-domain/src/grade.rs; crates/opentake-render/src/gpu/shader.wgsl",
-      requirements: [REQUIREMENT.lutImport],
-    });
-  }
-  if (AUDIO_SCRUB_PATHS.has(path) || /AudioMeter|ScrubAudio/.test(path)) {
-    return topic({
-      disposition: "requirement-needed:audio-scrub-meter",
-      behavior: "Adds non-blocking timeline audio scrubbing and a low-invalidation stereo meter.",
-      equivalent: "src-tauri/src/playback/audio.rs; web/src/components/preview/Preview.tsx (no confirmed meter/scrub-audio parity)",
-    });
-  }
-  if (path.includes("/Export/") || path.endsWith("ToolExecutor+Export.swift")) {
-    return topic({
-      disposition: "requirement-needed:cancellable-export-queue",
-      behavior: "Replaces single export coordination with a cancellable queued export lifecycle and UI.",
-      equivalent: "src-tauri/src/export.rs; web/src/components/shell/ExportDialog.tsx (single in-flight export with cancellation)",
-      controls: CONTROL.exportCancel,
-    });
-  }
-  if (path.includes("/Generation/") || path.endsWith("AIEditTab.swift")
-      || path.endsWith("TimelineView+AIEditMenu.swift")
-      || path.endsWith("EditorViewModel+AIEdit.swift")
-      || path.endsWith("TranscriptionBackend.swift")
-      || path.endsWith("CapsuleButton.swift")
-      || path.endsWith("HoverHighlight.swift")) {
-    return topic({
-      disposition: "portable",
-      behavior: "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
-      equivalent: "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
-      requirements: [
-        REQUIREMENT.voiceIsolation,
-        REQUIREMENT.elevenLabs,
-        REQUIREMENT.generationTools,
-        REQUIREMENT.generationContract,
-      ],
-      controls: CONTROL.generation,
-    });
-  }
-  if (path.includes("/Backend/") || path.endsWith("BackendConfig.swift")
-      || path.endsWith("BackendStorage.swift")) {
-    return topic({
-      disposition: "cloud-specific",
-      behavior: "Centralizes hosted-service configuration, storage, and backend error handling.",
-      equivalent: "crates/opentake-gen/src/provider; platform key/config storage (BYOK architecture differs)",
-    });
-  }
-  if (path.includes("/Agent/MCP/")) {
-    return topic({
-      disposition: "requirement-needed:agent-session-telemetry",
-      behavior: "Tracks activated MCP sessions and consolidates project-tool registration.",
-      equivalent: "crates/opentake-agent/src/mcp/server.rs; src-tauri/src/mcp.rs",
-      requirements: [REQUIREMENT.telemetry],
-    });
-  }
-  if (path.endsWith("ToolExecutor+Timeline.swift") || path.endsWith("UndoToolTests.swift")) {
-    return topic({
-      disposition: "portable",
-      behavior: "Tightens Agent edit transaction boundaries so undo groups match tool calls.",
-      equivalent: "crates/opentake-agent/src/mcp/dispatch.rs; crates/opentake-core/src/session.rs",
-      requirements: [REQUIREMENT.agentUndo],
-    });
-  }
-  if (path.includes("/Agent/Tools/") || path.endsWith("AgentService.swift")) {
-    return topic({
-      disposition: "requirement-needed:agent-project-tool-consolidation",
-      behavior: "Consolidates project management tools, records tool calls, and updates hosted chat instructions/model selection.",
-      equivalent: "crates/opentake-agent/src/mcp/dispatch.rs; crates/opentake-agent/src/chat; web/src/store/chatStore.ts",
-      requirements: [REQUIREMENT.toolCalls],
-    });
-  }
-  if (path.includes("/Search/")) {
-    return topic({
-      disposition: "requires-reconciliation",
-      behavior: "Moves visual-search preflight off the UI actor and makes index work more deterministic.",
-      equivalent: "crates/opentake-media/src/search; src-tauri/src/search.rs; web/src/components/media/MediaSearch.tsx",
-      controls: CONTROL.searchIndex,
-    });
-  }
-  if (path.endsWith("MediaManifest.swift") || path.endsWith("MediaResolver.swift")
-      || path.endsWith("EditorViewModel+Folders.swift")
-      || path.endsWith("EditorViewModel+MediaLibrary.swift")) {
-    return topic({
-      disposition: "portable",
-      behavior: "Batches manifest metadata updates and restores persisted star/favorite history.",
-      equivalent: "crates/opentake-domain/src/media.rs; crates/opentake-project/src/bundle.rs; src-tauri/src/library.rs",
-      requirements: [REQUIREMENT.manifest],
-    });
-  }
-  if (path.endsWith("VideoProject.swift") || path.includes("/App/")
-      || path.endsWith("EditorWindowController.swift")) {
-    return topic({
-      disposition: "requires-reconciliation",
-      behavior: "Consolidates project open/manage/close persistence and application lifecycle handling.",
-      equivalent: "crates/opentake-core/src/session.rs; crates/opentake-project/src/bundle.rs; web/src/store/projectActions.ts",
-      requirements: [REQUIREMENT.projectBundle],
-    });
-  }
-  if (path.includes("/Telemetry/") || path.endsWith("Log.swift")) {
-    return topic({
-      disposition: "platform-specific",
-      behavior: "Reduces production logging overhead and adds hosted telemetry counters.",
-      equivalent: "Rust tracing/logging and optional platform telemetry; no Swift runtime port",
-      requirements: [REQUIREMENT.telemetry],
-    });
-  }
-  if (path.endsWith("MLXRuntime.swift") || path.includes("/Audio/Analysis/")
-      || path.endsWith("AudioEnhancer.swift")) {
-    return topic({
-      disposition: "platform-specific",
-      behavior: "Moves model preflight off the main actor and drains Apple MLX work before termination.",
-      equivalent: "crates/opentake-media/src/ort_worker (cross-platform ONNX worker architecture)",
-    });
-  }
-  if (path.endsWith("EditorViewModel.swift") || path.endsWith("VideoEngine.swift")
-      || path.endsWith("AppTheme.swift")) {
-    return topic({
-      disposition: "requires-reconciliation",
-      behavior: "Carries shared state/UI plumbing for chroma sampling, audio scrub/meter, and manifest updates.",
-      equivalent: "src-tauri/src/playback; web/src/components/preview/Preview.tsx; web/src/components/inspector/Inspector.tsx",
-      requirements: [REQUIREMENT.chromaKey],
-      controls: CONTROL.chromaKey,
-    });
-  }
-  if (path.includes("/UI/") || path.includes("/Inspector/") || path.includes("/Editor/")) {
-    return topic({
-      disposition: "requirement-needed:upstream-editor-ui-delta",
-      behavior: "Adjusts editor presentation and interaction state for the refreshed upstream workflows.",
-      equivalent: "web/src/components/inspector; web/src/components/preview; web/src/components/shell",
-    });
-  }
-  return topic({
-    disposition: "requirement-needed:upstream-behavior-delta",
-    behavior: "Changes an upstream product behavior that has no exact current completion-ledger record.",
-    equivalent: "No exact OpenTake equivalent confirmed during source capture",
-  });
-}
-
-function classifyPalmierPath(path) {
-  if (path.startsWith("Tests/PalmierProTests/")) {
-    let productPath = path
-      .replace(/^Tests\/PalmierProTests\/Rendering\//, "Sources/PalmierPro/Compositing/")
-      .replace(/^Tests\/PalmierProTests\/Audio\//, "Sources/PalmierPro/Audio/")
-      .replace(/^Tests\/PalmierProTests\/Export\//, "Sources/PalmierPro/Export/")
-      .replace(/^Tests\/PalmierProTests\/Search\//, "Sources/PalmierPro/Search/")
-      .replace(/^Tests\/PalmierProTests\/Media\//, "Sources/PalmierPro/Models/")
-      .replace(/^Tests\/PalmierProTests\/Project\//, "Sources/PalmierPro/Project/")
-      .replace(/^Tests\/PalmierProTests\/Agent\//, "Sources/PalmierPro/Agent/Tools/")
-      .replace(/^Tests\/PalmierProTests\/Timeline\//, "Sources/PalmierPro/Editor/")
-      .replace(/^Tests\/PalmierProTests\/Utilities\//, "Sources/PalmierPro/Utilities/");
-    if (/ManifestMetadataTests/.test(path)) {
-      productPath = "Sources/PalmierPro/Models/MediaManifest.swift";
-    } else if (/ProjectClosePersistenceTests/.test(path)) {
-      productPath = "Sources/PalmierPro/Project/VideoProject.swift";
-    } else if (/CompositorRenderTests|HistogramTests|ClipMutationsTests/.test(path)) {
-      productPath = "Metal/ChromaKey.metal";
-    } else if (/MLXOperationGateTests/.test(path)) {
-      productPath = "Sources/PalmierPro/Utilities/MLXRuntime.swift";
-    } else if (/ExportProjectToolTests/.test(path)) {
-      productPath = "Sources/PalmierPro/Agent/Tools/ToolExecutor+Export.swift";
-    } else if (/ManageTracksTests/.test(path)) {
-      productPath = "Sources/PalmierPro/Agent/Tools/ToolExecutor+Clips.swift";
-    } else if (/ManageProjectToolTests/.test(path)) {
-      productPath = "Sources/PalmierPro/Agent/Tools/ToolExecutor+Projects.swift";
-    } else if (/AnalyticsSessionActivationTests/.test(path)) {
-      productPath = "Sources/PalmierPro/Agent/MCP/MCPService.swift";
-    }
-    const product = classifyPalmierProductPath(productPath);
-    return {
-      ...product,
-      disposition: "test-doc-only",
-      behavior: `Regression coverage: ${product.behavior}`,
-      openTakeEquivalent: `${product.openTakeEquivalent}; corresponding Rust/TypeScript tests`,
-    };
-  }
-  if (path.startsWith("docs/readme/")) {
-    return topic({
-      disposition: "test-doc-only",
-      behavior: "Updates localized upstream repository analytics artwork.",
-      equivalent: "No OpenTake runtime equivalent; upstream documentation only",
-    });
-  }
-  if (path === "README.md" || path === "appcast.xml"
-      || path === "Sources/PalmierPro/Resources/Info.plist") {
-    return topic({
-      disposition: "obsolete",
-      behavior: "Updates Palmier-only release, appcast, version, or repository analytics metadata.",
-      equivalent: "OpenTake release metadata is independently versioned and signed",
-    });
-  }
-  if (path === "Package.swift" || path === "scripts/bundle.sh") {
-    return topic({
-      disposition: "requires-reconciliation",
-      behavior: "Adds Swift package traits and release-time speech/telemetry/signing feature composition.",
-      equivalent: "Cargo feature tables; src-tauri packaging; OpenTake release workflows",
-      requirements: [REQUIREMENT.telemetryDecision],
-    });
-  }
-  if (path === ".swift-version" || path === "Package.resolved"
-      || path === ".github/workflows/ci.yml") {
-    return topic({
-      disposition: "platform-specific",
-      behavior: "Updates Swift toolchain, dependency, CI, version, or macOS bundle metadata.",
-      equivalent: "Cargo.toml/Cargo.lock; .github/workflows/ci.yml; src-tauri/tauri.conf.json",
-    });
-  }
-  return classifyPalmierProductPath(path);
-}
-
 function assertPinnedRef(name, path, ref, expectedSha, expectedTree) {
   const actualSha = assertFullSha(name, ref, gitText(name, path, ["rev-parse", ref]));
   const actualTree = assertFullSha(
@@ -729,10 +2439,9 @@ function assertPinnedRef(name, path, ref, expectedSha, expectedTree) {
   }
 }
 
-function readOpenPullRequests() {
-  const repository = "appergb/OpenTake";
+function readLiveOpenPullRequestItems() {
   const args = [
-    "pr", "list", "--repo", repository, "--state", "open",
+    "pr", "list", "--repo", CAPTURED_OPEN_PULL_REQUESTS.repository, "--state", "open",
     "--json", "number,title,headRefName,baseRefName,url",
   ];
   let items;
@@ -748,14 +2457,28 @@ function readOpenPullRequests() {
   if (!Array.isArray(items)) {
     throw new Error("live gh open-PR readback did not return an array");
   }
-  items.sort((left, right) => left.number - right.number);
+  return items;
+}
+
+export function verifyOpenPullRequests({ readLive = readLiveOpenPullRequestItems } = {}) {
+  if (typeof readLive !== "function") {
+    throw new Error("open-PR verification requires a live reader function");
+  }
+  const items = readLive();
+  if (!Array.isArray(items)) {
+    throw new Error("live open-PR reader did not return an array");
+  }
+  const sortedItems = items
+    .map((item) => ({ ...item }))
+    .sort((left, right) => left.number - right.number);
+  if (JSON.stringify(sortedItems) !== JSON.stringify(CAPTURED_OPEN_PULL_REQUESTS.items)) {
+    throw new Error("live open-PR state differs from immutable capture");
+  }
   return {
-    repository,
-    state: "open",
-    transport: "gh-live-readback",
-    command: `gh ${args.join(" ")}`,
-    count: items.length,
-    items,
+    status: "match",
+    capturedAt: CAPTURED_OPEN_PULL_REQUESTS.capturedAt,
+    command: CAPTURED_OPEN_PULL_REQUESTS.command,
+    count: sortedItems.length,
   };
 }
 
@@ -769,7 +2492,7 @@ function branchIndexForRemote(root, remote) {
   ])
     .split("\n")
     .filter((ref) => ref && ref !== remote && ref !== `${remote}/main`)
-    .sort((left, right) => left.localeCompare(right, "en"));
+    .sort(compareAuditText);
   return refs.map((ref) => {
     const tip = assertFullSha(ref, "tip", gitText(ref, root, ["rev-parse", ref]));
     const tree = assertFullSha(ref, "tree", gitText(ref, root, ["rev-parse", `${ref}^{tree}`]));
@@ -923,23 +2646,127 @@ function classifyCanonicalPath(entry) {
   };
 }
 
-export function buildSourceEvidence({ root, palmierPath, canonicalPath }) {
-  assertPinnedRef("target", root, SOURCE_PINS.targetStart, SOURCE_PINS.targetStart, SOURCE_PINS.targetStartTree);
-  assertPinnedRef("target", root, "origin/main", SOURCE_PINS.targetMain, SOURCE_PINS.targetMainTree);
-  assertPinnedRef(
+function evidenceClassificationRows(evidence) {
+  return [
+    ...evidence.sources.flatMap(({ changedPaths }) => changedPaths),
+    ...evidence.canonicalDirtyCheckout.paths,
+  ];
+}
+
+export function validateSourceEvidenceShape(evidence) {
+  if (!evidence || typeof evidence !== "object") {
+    throw new Error("source evidence must be an object");
+  }
+  if (!Array.isArray(evidence.sources) || evidence.sources.length === 0) {
+    throw new Error("source evidence must contain sources");
+  }
+  if (!Array.isArray(evidence.branchIndex)) {
+    throw new Error("source evidence branchIndex must be an array");
+  }
+  if (!evidence.canonicalDirtyCheckout
+      || !Array.isArray(evidence.canonicalDirtyCheckout.paths)) {
+    throw new Error("source evidence canonical dirty paths must be an array");
+  }
+  if (!evidence.openPullRequests
+      || !Array.isArray(evidence.openPullRequests.items)
+      || evidence.openPullRequests.count !== evidence.openPullRequests.items.length
+      || typeof evidence.openPullRequests.capturedAt !== "string") {
+    throw new Error("source evidence open-PR capture is malformed");
+  }
+  for (const source of evidence.sources) {
+    if (!Array.isArray(source.changedPaths)) {
+      throw new Error(`source ${source.name ?? "unknown"} changedPaths must be an array`);
+    }
+  }
+  for (const row of evidenceClassificationRows(evidence)) {
+    if (![row.disposition, row.behavior, row.openTakeEquivalent]
+      .every((value) => typeof value === "string" && value.length > 0)) {
+      throw new Error(`source classification is incomplete for ${row.path ?? "unknown path"}`);
+    }
+    if (!Array.isArray(row.linkedRequirementIds) || !Array.isArray(row.linkedControlIds)) {
+      throw new Error(`source classification links are malformed for ${row.path ?? "unknown path"}`);
+    }
+  }
+  return evidence;
+}
+
+function catalogIds(name, catalog) {
+  if (!catalog || !Array.isArray(catalog.records)) {
+    throw new Error(`${name} catalog must contain a records array`);
+  }
+  const ids = catalog.records.map(({ id }) => id);
+  if (ids.some((id) => typeof id !== "string" || id.length === 0)) {
+    throw new Error(`${name} catalog contains an invalid id`);
+  }
+  if (new Set(ids).size !== ids.length) {
+    throw new Error(`${name} catalog contains duplicate ids`);
+  }
+  return new Set(ids);
+}
+
+export function validateSourceEvidenceCatalogs(evidence, { requirements, controls }) {
+  validateSourceEvidenceShape(evidence);
+  const requirementIds = catalogIds("requirement", requirements);
+  const controlIds = catalogIds("control", controls);
+  for (const row of evidenceClassificationRows(evidence)) {
+    for (const id of row.linkedRequirementIds) {
+      if (!requirementIds.has(id)) {
+        throw new Error(`stale requirement id ${id} on ${row.path}`);
+      }
+    }
+    for (const id of row.linkedControlIds) {
+      if (!controlIds.has(id)) {
+        throw new Error(`stale control id ${id} on ${row.path}`);
+      }
+    }
+  }
+  return evidence;
+}
+
+function readSourceEvidenceCatalogs(root) {
+  return {
+    requirements: JSON.parse(readFileSync(
+      resolve(root, "docs/audit/2026-07-14/requirements.json"),
+      "utf8",
+    )),
+    controls: JSON.parse(readFileSync(
+      resolve(root, "docs/audit/2026-07-14/controls.json"),
+      "utf8",
+    )),
+  };
+}
+
+export function buildSourceEvidence({
+  root,
+  palmierPath,
+  canonicalPath,
+  operations = {},
+}) {
+  const sourceOperations = {
+    assertPinnedRef,
+    captureGitSource,
+    branchIndexForRemote,
+    integratedForkMainSource,
+    captureDirtyCheckout,
+    readSourceEvidenceCatalogs,
+    ...operations,
+  };
+  sourceOperations.assertPinnedRef("target", root, SOURCE_PINS.targetStart, SOURCE_PINS.targetStart, SOURCE_PINS.targetStartTree);
+  sourceOperations.assertPinnedRef("target", root, "origin/main", SOURCE_PINS.targetMain, SOURCE_PINS.targetMainTree);
+  sourceOperations.assertPinnedRef(
     "Palmier Pro",
     palmierPath,
     SOURCE_PINS.palmierPrevious,
     SOURCE_PINS.palmierPrevious,
     SOURCE_PINS.palmierPreviousTree,
   );
-  assertPinnedRef("Palmier Pro", palmierPath, "origin/main", SOURCE_PINS.palmierMain, SOURCE_PINS.palmierMainTree);
+  sourceOperations.assertPinnedRef("Palmier Pro", palmierPath, "origin/main", SOURCE_PINS.palmierMain, SOURCE_PINS.palmierMainTree);
   for (const [remote, pin] of Object.entries(SOURCE_PINS.forkMains)) {
-    assertPinnedRef(remote, root, `${remote}/main`, pin.sha, pin.tree);
+    sourceOperations.assertPinnedRef(remote, root, `${remote}/main`, pin.sha, pin.tree);
   }
-  assertPinnedRef("canonical dirty checkout", canonicalPath, "HEAD", SOURCE_PINS.canonicalHead, SOURCE_PINS.canonicalTree);
+  sourceOperations.assertPinnedRef("canonical dirty checkout", canonicalPath, "HEAD", SOURCE_PINS.canonicalHead, SOURCE_PINS.canonicalTree);
 
-  const target = captureGitSource({
+  const target = sourceOperations.captureGitSource({
     name: "target cloud main vs local start",
     path: root,
     base: SOURCE_PINS.targetStart,
@@ -951,7 +2778,7 @@ export function buildSourceEvidence({ root, palmierPath, canonicalPath }) {
     throw new Error("target cloud main no longer matches the pinned local starting tree");
   }
 
-  const palmier = captureGitSource({
+  const palmier = sourceOperations.captureGitSource({
     name: "Palmier Pro refreshed main",
     path: palmierPath,
     base: SOURCE_PINS.palmierPrevious,
@@ -960,20 +2787,17 @@ export function buildSourceEvidence({ root, palmierPath, canonicalPath }) {
     requireClean: true,
     expectChanges: true,
   });
-  palmier.changedPaths = palmier.changedPaths.map((record) => ({
-    ...record,
-    ...classifyPalmierPath(record.path),
-  }));
+  palmier.changedPaths = reviewPalmierChangedPaths(palmier.changedPaths);
 
   const branches = Object.keys(SOURCE_PINS.forkMains)
-    .sort((left, right) => left.localeCompare(right, "en"))
-    .flatMap((remote) => branchIndexForRemote(root, remote));
+    .sort(compareAuditText)
+    .flatMap((remote) => sourceOperations.branchIndexForRemote(root, remote));
   if (branches.length !== 21) {
     throw new Error(`fork branch index expected 21 non-main heads, found ${branches.length}`);
   }
   const relevant = branches.filter(({ separatelyRelevant }) => separatelyRelevant);
   const relevantSources = relevant.map((branch) => {
-    const source = captureGitSource({
+    const source = sourceOperations.captureGitSource({
       name: branch.ref,
       path: root,
       base: branch.forkMain,
@@ -992,7 +2816,7 @@ export function buildSourceEvidence({ root, palmierPath, canonicalPath }) {
     return source;
   });
 
-  const canonical = captureDirtyCheckout({
+  const canonical = sourceOperations.captureDirtyCheckout({
     name: "canonical dirty OpenTake checkout",
     path: canonicalPath,
   });
@@ -1028,11 +2852,11 @@ export function buildSourceEvidence({ root, palmierPath, canonicalPath }) {
     throw new Error("canonical dirty checkout relationship coverage changed");
   }
 
-  return {
+  const evidence = {
     schema: 1,
     auditDate: "2026-07-14",
     generation: {
-      deterministicOrdering: "UTF-8 normalized path/ref ordering",
+      deterministicOrdering: "UTF-8 byte ordering after slash normalization; filenames are not Unicode-normalized",
       hashAlgorithm: "SHA-256",
       sourceRefs: "full immutable 40-character commit SHAs",
     },
@@ -1048,13 +2872,13 @@ export function buildSourceEvidence({ root, palmierPath, canonicalPath }) {
       palmier: { pre: FETCH_PORCELAIN_SHA256.palmier, post: FETCH_PORCELAIN_SHA256.palmier },
       workingFilesUnchanged: true,
     },
-    openPullRequests: readOpenPullRequests(),
+    openPullRequests: capturedOpenPullRequests(),
     sources: [
       target,
       palmier,
       ...Object.keys(SOURCE_PINS.forkMains)
-        .sort((left, right) => left.localeCompare(right, "en"))
-        .map((remote) => integratedForkMainSource(root, remote)),
+        .sort(compareAuditText)
+        .map((remote) => sourceOperations.integratedForkMainSource(root, remote)),
       ...relevantSources,
     ],
     branchIndex: branches,
@@ -1068,6 +2892,8 @@ export function buildSourceEvidence({ root, palmierPath, canonicalPath }) {
     },
     canonicalDirtyCheckout: canonical,
   };
+  validateSourceEvidenceCatalogs(evidence, sourceOperations.readSourceEvidenceCatalogs(root));
+  return evidence;
 }
 
 function markdown(value) {
@@ -1077,18 +2903,19 @@ function markdown(value) {
 }
 
 export function renderSourceReport(evidence) {
+  validateSourceEvidenceShape(evidence);
   const lines = [
     "# Immutable upstream and downstream source audit",
     "",
     `Audit date: ${evidence.auditDate}`,
     "",
-    "## Preservation and live readback",
+    "## Preservation and immutable captures",
     "",
     `- Serialized fetches: ${evidence.fetchEvidence.serializedOrder.map((command) => `\`${command}\``).join("; ")}.`,
     `- Target porcelain SHA-256: \`${evidence.fetchEvidence.target.pre}\` before and after fetch.`,
     `- Canonical porcelain SHA-256: \`${evidence.fetchEvidence.canonical.pre}\` before and after fetch.`,
     `- Palmier porcelain SHA-256: \`${evidence.fetchEvidence.palmier.pre}\` before and after fetch.`,
-    `- Live target open-PR readback: **${evidence.openPullRequests.count}** from \`${evidence.openPullRequests.command}\`.`,
+    `- Target open-PR capture: **${evidence.openPullRequests.count}** at \`${evidence.openPullRequests.capturedAt}\` from \`${evidence.openPullRequests.command}\`. Live verification is a separate verify-only check and does not alter this evidence.`,
     "",
     "## Immutable source snapshots",
     "",
@@ -1118,12 +2945,12 @@ export function renderSourceReport(evidence) {
     lines.push(
       `### ${source.name}`,
       "",
-      "| Git status | Path | Disposition | Behavior | OpenTake equivalent | Requirement IDs | Control IDs |",
-      "|---|---|---|---|---|---|---|",
+      "| Git status | Path | Disposition | Behavior | OpenTake equivalent | Requirement IDs | Control IDs | Requirement gaps | Review rationale |",
+      "|---|---|---|---|---|---|---|---|---|",
     );
     for (const change of source.changedPaths) {
       const path = change.destination ? `${change.path} → ${change.destination}` : change.path;
-      lines.push(`| ${change.status} | ${markdown(path)} | ${markdown(change.disposition)} | ${markdown(change.behavior)} | ${markdown(change.openTakeEquivalent)} | ${markdown(change.linkedRequirementIds.join(", ") || "none")} | ${markdown(change.linkedControlIds.join(", ") || "none")} |`);
+      lines.push(`| ${change.status} | ${markdown(path)} | ${markdown(change.disposition)} | ${markdown(change.behavior)} | ${markdown(change.openTakeEquivalent)} | ${markdown(change.linkedRequirementIds.join(", ") || "none")} | ${markdown(change.linkedControlIds.join(", ") || "none")} | ${markdown(change.requirementGapIds?.join(", ") || "none")} | ${markdown(change.rationale || "none")} |`);
     }
     lines.push("");
   }
@@ -1685,6 +3512,9 @@ function parseArgs(argv) {
 }
 
 async function runCommand(command, root, args) {
+  if (command === "verify-open-prs") {
+    return verifyOpenPullRequests();
+  }
   if (command === "sources") {
     if (!args.palmier || !args.canonical || !args.report) {
       throw new Error("sources command needs --palmier <path> --canonical <path> --report <path>");
@@ -1757,12 +3587,17 @@ async function runCommand(command, root, args) {
 
 async function main(argv) {
   const args = parseArgs(argv);
-  if (!args.command || !args.root || !args.out) {
-    throw new Error("usage: completion-audit <command> --root <repo> --out <path>");
+  const verifyOnly = args.command === "verify-open-prs";
+  if (!args.command || !args.root || (!verifyOnly && !args.out)) {
+    throw new Error("usage: completion-audit <command> --root <repo> [--out <path>]");
   }
   const root = resolve(args.root);
-  const output = resolve(args.out);
   const result = await runCommand(args.command, root, args);
+  if (verifyOnly) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  const output = resolve(args.out);
   writeJson(output, result);
 }
 

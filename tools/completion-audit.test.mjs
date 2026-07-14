@@ -8,14 +8,23 @@ import { basename, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  PALMIER_REVIEWED_PATH_LEDGER,
   buildFileInventory,
+  buildSourceEvidence,
+  capturedOpenPullRequests,
   captureDirtyCheckout,
   captureGitSource,
   classifyFile,
+  compareAuditText,
   extractControls,
   extractDocumentCandidates,
   normalizePath,
+  renderSourceReport,
+  reviewPalmierChangedPaths,
   stableId,
+  validateSourceEvidenceCatalogs,
+  validateSourceEvidenceShape,
+  verifyOpenPullRequests,
 } from "./completion-audit.mjs";
 
 const require = createRequire(new URL("../web/package.json", import.meta.url));
@@ -42,6 +51,207 @@ function createGitSourceFixture(t) {
   git(root, ["commit", "--quiet", "-m", "head"]);
   const head = git(root, ["rev-parse", "HEAD"]);
   return { root, base, head };
+}
+
+function createSourceEvidenceFixture() {
+  const sha = "1".repeat(40);
+  const tree = "2".repeat(40);
+  const digest = "3".repeat(64);
+  return {
+    schema: 1,
+    auditDate: "2026-07-14",
+    generation: {
+      deterministicOrdering: "UTF-8 byte ordering after slash normalization; filenames are not Unicode-normalized",
+      hashAlgorithm: "SHA-256",
+      sourceRefs: "full immutable 40-character commit SHAs",
+    },
+    fetchEvidence: {
+      serializedOrder: ["git fetch --prune origin"],
+      target: { pre: digest, post: digest },
+      canonical: { pre: digest, post: digest },
+      palmier: { pre: digest, post: digest },
+      workingFilesUnchanged: true,
+    },
+    openPullRequests: capturedOpenPullRequests(),
+    sources: [{
+      name: "reviewed source",
+      repository: "https://example.invalid/source.git",
+      base: sha,
+      head: sha,
+      baseTree: tree,
+      headTree: tree,
+      mergeBase: sha,
+      aheadCount: 0,
+      behindCount: 0,
+      status: "identical",
+      changedPaths: [{
+        status: "M",
+        path: "reviewed.swift",
+        destination: null,
+        disposition: "portable",
+        behavior: "Reviewed behavior.",
+        openTakeEquivalent: "reviewed equivalent",
+        rationale: "Reviewed rationale.",
+        linkedRequirementIds: ["requirement-known"],
+        linkedControlIds: ["control-known"],
+        requirementGapIds: ["requirement-needed:reviewed-gap"],
+      }],
+    }],
+    branchIndex: [],
+    branchSummary: {
+      totalNonMainHeads: 0,
+      integratedTarget: 0,
+      integratedForkMain: 0,
+      empty: 0,
+      emptyForkMainDeltas: 0,
+      relevantUnmerged: 0,
+    },
+    canonicalDirtyCheckout: {
+      repository: "https://example.invalid/canonical.git",
+      head: sha,
+      tree,
+      statusSha256: digest,
+      captureManifestSha256: digest,
+      manifestSha256: digest,
+      paths: [],
+      relationshipCounts: {},
+    },
+  };
+}
+
+function createBuildSourceOperations({
+  palmierPaths = PALMIER_REVIEWED_PATH_LEDGER.map(
+    ({ status, path, destination }) => ({ status, path, destination, disposition: "unverified" }),
+  ),
+} = {}) {
+  const tree = "a".repeat(40);
+  const source = ({ name, base, head, remote = "origin" }, changedPaths, status = "changes") => ({
+    name,
+    repository: `https://example.invalid/${remote}.git`,
+    remote,
+    status,
+    base,
+    head,
+    baseTree: tree,
+    headTree: status === "equivalent-tree" ? tree : "b".repeat(40),
+    mergeBase: base,
+    commitCount: 1,
+    aheadCount: 1,
+    behindCount: 0,
+    changedPaths,
+  });
+  const integratedPaths = [
+    "src-tauri/capabilities/default.json",
+    "src-tauri/src/mpv_bootstrap.rs",
+    "src-tauri/tauri.conf.json",
+    "web/src/components/home/HomeView.tsx",
+    "web/src/components/media/MediaSearch.tsx",
+    "web/src/components/shell/ViewMenu.tsx",
+    "web/src/components/ui/PanelShell.tsx",
+    "web/src/lib/mpvEdl.test.ts",
+    "web/src/lib/mpvEdl.ts",
+    "web/src/styles/global.css",
+  ];
+  const equivalentPaths = [
+    "README.md",
+    "web/package.json",
+    "web/src/store/editActions.ts",
+    "web/src/store/uiStore.ts",
+  ];
+  const stalePaths = [".github/workflows/ci.yml", "src-tauri/Cargo.toml"];
+  const dirtyPaths = [
+    ...integratedPaths.map((path) => ({ status: " M", path })),
+    ...equivalentPaths.map((path) => ({ status: " M", path })),
+    ...stalePaths.map((path) => ({ status: " M", path })),
+    ...Array.from({ length: 4 }, (_, index) => ({
+      status: "??",
+      path: `fixture-untracked-${index}.txt`,
+    })),
+    ...Array.from({ length: 36 }, (_, index) => ({
+      status: " M",
+      path: `fixture-conflict-${String(index).padStart(2, "0")}.txt`,
+    })),
+  ].map((entry) => ({
+    ...entry,
+    source: null,
+    tracked: entry.status !== "??",
+    patchBytes: entry.status === "??" ? null : 1,
+    patchSha256: entry.status === "??" ? null : "c".repeat(64),
+    fileType: "regular",
+    bytes: 1,
+    contentSha256: "d".repeat(64),
+    linkTargetSha256: null,
+  }));
+  const requirements = new Set([
+    "requirement-10e720a4f5ddd734",
+    "requirement-9bceb67f73cd51d4",
+    ...PALMIER_REVIEWED_PATH_LEDGER.flatMap(({ linkedRequirementIds }) => linkedRequirementIds),
+  ]);
+  const controls = new Set([
+    "control-record-64640989bd95e214",
+    ...PALMIER_REVIEWED_PATH_LEDGER.flatMap(({ linkedControlIds }) => linkedControlIds),
+  ]);
+
+  return {
+    assertPinnedRef() {},
+    captureGitSource(input) {
+      if (input.name === "target cloud main vs local start") {
+        return source(input, [], "equivalent-tree");
+      }
+      if (input.name === "Palmier Pro refreshed main") {
+        return source(input, palmierPaths);
+      }
+      throw new Error(`unexpected source capture: ${input.name}`);
+    },
+    branchIndexForRemote(_root, remote) {
+      const count = remote === "H-Chris233" ? 10 : 11;
+      return Array.from({ length: count }, (_, index) => ({
+        ref: `${remote}/fixture-${index}`,
+        remote,
+        tip: String(index + 1).padStart(40, "0"),
+        tree,
+        targetMain: "e".repeat(40),
+        forkMain: "f".repeat(40),
+        targetMergeBase: String(index + 1).padStart(40, "0"),
+        forkMainMergeBase: String(index + 1).padStart(40, "0"),
+        targetAncestor: true,
+        forkMainAncestor: true,
+        targetUniqueCommitCount: 0,
+        forkMainUniqueCommitCount: 0,
+        forkMainChangedPathCount: index === 0 ? 0 : 1,
+        forkMainDelta: index === 0 ? "empty" : "changes",
+        status: "integrated-target",
+        separatelyRelevant: false,
+      }));
+    },
+    integratedForkMainSource(_root, remote) {
+      return source({
+        name: `${remote} main ancestry`,
+        base: "f".repeat(40),
+        head: "e".repeat(40),
+        remote,
+      }, [], "integrated-ancestor");
+    },
+    captureDirtyCheckout() {
+      return {
+        name: "canonical dirty OpenTake checkout",
+        repository: "https://example.invalid/canonical.git",
+        remote: "origin",
+        status: "dirty",
+        head: "c2f807aafd6e46088365eac2de45fe8803a7e1d0",
+        tree: "6fa0ac1bd83719c8215e887e4edcb52c527623dd",
+        statusSha256: "1157939da02403643b66eee0618db0ec04f9a42412a538d0a67d547d75e0dd00",
+        manifestSha256: "e".repeat(64),
+        paths: dirtyPaths,
+      };
+    },
+    readSourceEvidenceCatalogs() {
+      return {
+        requirements: { records: [...requirements].map((id) => ({ id })) },
+        controls: { records: [...controls].map((id) => ({ id })) },
+      };
+    },
+  };
 }
 
 test("captureGitSource records exact immutable Git evidence", (t) => {
@@ -188,6 +398,193 @@ test("captureGitSource rejects equal refs when changes are expected", (t) => {
   );
 });
 
+test("Palmier reviewed ledger is an exact 132-row classification golden", () => {
+  assert.equal(PALMIER_REVIEWED_PATH_LEDGER.length, 132);
+  assert.equal(
+    createHash("sha256")
+      .update(JSON.stringify(PALMIER_REVIEWED_PATH_LEDGER))
+      .digest("hex"),
+    "eea0c2016f0e64f6025b0de94cfab0a21a4ef67ca0b74dd5f3b11508e82cf9a0",
+  );
+  assert.equal(
+    new Set(PALMIER_REVIEWED_PATH_LEDGER.map(
+      ({ status, path, destination }) => `${status}\0${path}\0${destination ?? ""}`,
+    )).size,
+    132,
+  );
+
+  const raw = PALMIER_REVIEWED_PATH_LEDGER.map(({ status, path, destination }) => ({
+    status,
+    path,
+    destination,
+    disposition: "unverified",
+  }));
+  const reviewed = reviewPalmierChangedPaths(raw);
+  assert.equal(reviewed.length, 132);
+  assert.equal(
+    reviewed.find(({ path }) => path === "Metal/ChromaKey.metal").disposition,
+    "requires-reconciliation",
+  );
+  assert.equal(
+    reviewed.find(({ path }) => path === "Sources/PalmierPro/Export/ExportService.swift").disposition,
+    "integrated",
+  );
+  assert.equal(
+    reviewed.find(({ path }) => path === "Sources/PalmierPro/Search/Indexing/VisualIndexer.swift").disposition,
+    "integrated",
+  );
+  assert.equal(
+    reviewed.find(({ path }) => path === "Sources/PalmierPro/Generation/GenerationBackend.swift").disposition,
+    "cloud-specific",
+  );
+  assert.deepEqual(
+    reviewed.find(({ status }) => status === "C060"),
+    {
+      status: "C060",
+      path: "Sources/PalmierPro/Generation/Edit/EditSubmitter.swift",
+      destination: "Sources/PalmierPro/Generation/Edit/EditSubmitter+Rerun.swift",
+      disposition: "portable",
+      behavior: "Splits rerun behavior from the submitter while preserving prior generation inputs, including transform inputs.",
+      openTakeEquivalent: "crates/opentake-project::GenerationLog; generation rerun UI none",
+      rationale: "Generation log exists, but rerun execution/UI is not wired.",
+      linkedRequirementIds: [],
+      linkedControlIds: [],
+      requirementGapIds: ["requirement-needed:generation-rerun"],
+    },
+  );
+
+  assert.throws(
+    () => reviewPalmierChangedPaths(raw.slice(1)),
+    /expected 132 paths, found 131/,
+  );
+  assert.throws(
+    () => reviewPalmierChangedPaths([
+      { ...raw[0], path: "unexpected.swift" },
+      ...raw.slice(1),
+    ]),
+    /not in reviewed ledger/,
+  );
+  const renameIndex = raw.findIndex(({ destination }) => destination);
+  assert.notEqual(renameIndex, -1);
+  assert.throws(
+    () => reviewPalmierChangedPaths(raw.map((record, index) => (
+      index === renameIndex ? { ...record, destination: `${record.destination}.wrong` } : record
+    ))),
+    /not in reviewed ledger/,
+  );
+});
+
+test("immutable PR capture is independent of live verification changes", () => {
+  const before = capturedOpenPullRequests();
+  const reportBefore = renderSourceReport(createSourceEvidenceFixture());
+  assert.deepEqual(before, {
+    repository: "appergb/OpenTake",
+    state: "open",
+    transport: "immutable-capture",
+    capturedAt: "2026-07-14T08:24:59Z",
+    command: "gh pr list --repo appergb/OpenTake --state open --json number,title,headRefName,baseRefName,url",
+    count: 0,
+    items: [],
+  });
+  assert.deepEqual(verifyOpenPullRequests({ readLive: () => [] }), {
+    status: "match",
+    capturedAt: before.capturedAt,
+    command: before.command,
+    count: 0,
+  });
+  assert.throws(
+    () => verifyOpenPullRequests({
+      readLive: () => [{
+        number: 999,
+        title: "Cloud state changed",
+        headRefName: "later",
+        baseRefName: "main",
+        url: "https://example.invalid/pr/999",
+      }],
+    }),
+    /live open-PR state differs from immutable capture/,
+  );
+  assert.deepEqual(capturedOpenPullRequests(), before);
+  assert.equal(renderSourceReport(createSourceEvidenceFixture()), reportBefore);
+});
+
+test("source evidence catalog validation accepts current links and rejects stale IDs", () => {
+  const evidence = createSourceEvidenceFixture();
+  const catalogs = {
+    requirements: { records: [{ id: "requirement-known" }] },
+    controls: { records: [{ id: "control-known" }] },
+  };
+  assert.equal(validateSourceEvidenceCatalogs(evidence, catalogs), evidence);
+
+  const staleRequirement = structuredClone(evidence);
+  staleRequirement.sources[0].changedPaths[0].linkedRequirementIds = ["requirement-stale"];
+  assert.throws(
+    () => validateSourceEvidenceCatalogs(staleRequirement, catalogs),
+    /stale requirement id requirement-stale/,
+  );
+
+  const staleControl = structuredClone(evidence);
+  staleControl.sources[0].changedPaths[0].linkedControlIds = ["control-stale"];
+  assert.throws(
+    () => validateSourceEvidenceCatalogs(staleControl, catalogs),
+    /stale control id control-stale/,
+  );
+});
+
+test("source report renders reviewed classifications and rejects malformed evidence", () => {
+  const evidence = createSourceEvidenceFixture();
+  const report = renderSourceReport(evidence);
+  assert.match(report, /Target open-PR capture: \*\*0\*\* at `2026-07-14T08:24:59Z`/);
+  assert.match(report, /Reviewed behavior\./);
+  assert.match(report, /requirement-needed:reviewed-gap/);
+  assert.match(report, /Reviewed rationale\./);
+  assert.ok(report.endsWith("\n"));
+
+  const malformed = structuredClone(evidence);
+  malformed.sources[0].changedPaths = null;
+  assert.throws(
+    () => renderSourceReport(malformed),
+    /changedPaths must be an array/,
+  );
+  assert.throws(
+    () => validateSourceEvidenceShape(null),
+    /source evidence must be an object/,
+  );
+});
+
+test("buildSourceEvidence assembles fixture snapshots and fails closed on ledger drift", () => {
+  const operations = createBuildSourceOperations();
+  const evidence = buildSourceEvidence({
+    root: "/fixture/target",
+    palmierPath: "/fixture/palmier",
+    canonicalPath: "/fixture/canonical",
+    operations,
+  });
+  assert.equal(evidence.openPullRequests.transport, "immutable-capture");
+  assert.equal(evidence.sources[1].changedPaths.length, 132);
+  assert.equal(evidence.branchIndex.length, 21);
+  assert.equal(evidence.canonicalDirtyCheckout.paths.length, 56);
+
+  assert.throws(
+    () => buildSourceEvidence({
+      root: "/fixture/target",
+      palmierPath: "/fixture/palmier",
+      canonicalPath: "/fixture/canonical",
+      operations: createBuildSourceOperations({
+        palmierPaths: PALMIER_REVIEWED_PATH_LEDGER.slice(1).map(
+          ({ status, path, destination }) => ({
+            status,
+            path,
+            destination,
+            disposition: "unverified",
+          }),
+        ),
+      }),
+    }),
+    /expected 132 paths, found 131/,
+  );
+});
+
 test("captureDirtyCheckout hashes every tracked dirty and untracked path", (t) => {
   const root = mkdtempSync(join(tmpdir(), "opentake-dirty-source-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -220,7 +617,7 @@ test("captureDirtyCheckout hashes every tracked dirty and untracked path", (t) =
   ]);
   assert.deepEqual(
     first.paths.map(({ path }) => path),
-    first.paths.map(({ path }) => path).toSorted((left, right) => left.localeCompare(right, "en")),
+    first.paths.map(({ path }) => path).toSorted(compareAuditText),
   );
   const deleted = first.paths[0];
   const modified = first.paths[1];
@@ -241,6 +638,35 @@ test("captureDirtyCheckout hashes every tracked dirty and untracked path", (t) =
     execFileSync("git", ["-C", root, "status", "--porcelain=v1", "-z"]),
     before,
   );
+});
+
+test("captureDirtyCheckout fails closed when the snapshot changes during capture", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "opentake-dirty-race-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  execFileSync("git", ["init", "--quiet", root]);
+  git(root, ["config", "user.name", "Completion Audit"]);
+  git(root, ["config", "user.email", "audit@example.invalid"]);
+  git(root, ["remote", "add", "origin", "https://example.invalid/race.git"]);
+  writeFileSync(join(root, "tracked.txt"), "base\n");
+  git(root, ["add", "."]);
+  git(root, ["commit", "--quiet", "-m", "base"]);
+  writeFileSync(join(root, "tracked.txt"), "dirty\n");
+
+  assert.throws(
+    () => captureDirtyCheckout({
+      name: "racing canonical",
+      path: root,
+      afterInitialCapture: () => writeFileSync(join(root, "tracked.txt"), "changed again\n"),
+    }),
+    /changed while its manifest was being captured/,
+  );
+});
+
+test("audit ordering is UTF-8 byte deterministic without Unicode normalization", () => {
+  const decomposed = "e\u0301.txt";
+  const composed = "\u00e9.txt";
+  assert.notEqual(compareAuditText(decomposed, composed), 0);
+  assert.deepEqual([composed, decomposed].sort(compareAuditText), [decomposed, composed]);
 });
 
 test("extractControls records labels, handlers, and panel triggers", () => {
