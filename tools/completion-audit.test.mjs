@@ -28,6 +28,50 @@ test("extractControls records labels, handlers, and panel triggers", () => {
   assert.equal(control.panelTrigger, true);
 });
 
+test("extractControls fails closed with normalized parse diagnostic locations", () => {
+  const source = "export function Broken(){return <button onClick={save}>X</div>}";
+
+  assert.throws(
+    () => extractControls("./web\\src\\Broken.tsx", source, ts),
+    (error) => {
+      assert.match(error.message, /^web\/src\/Broken\.tsx:1:\d+:/);
+      assert.match(error.message, /button|closing tag/i);
+      return true;
+    },
+  );
+});
+
+test("extractControls separates user interaction handlers from passive lifecycle callbacks", () => {
+  const source = [
+    "export const Callbacks = () => <section>",
+    "  <img onLoad={loaded} onError={failed} />",
+    "  <audio onTimeUpdate={timed} onPlay={played} onPause={paused} />",
+    "  <video controls onLoadedData={loaded} onEnded={ended} />",
+    "  <div onLoad={loaded} onClick={clicked} onPointerDownCapture={captured} onLostPointerCapture={lost} onError={failed} />",
+    "  <CustomLifecycle onTime={timed} onDuration={duration} onPlayingChange={playing} onTerminalFailure={terminal} onSuccess={success} onStart={started} onError={failed} onLoad={loaded} onStatusChange={status} />",
+    "  <CustomActions onClick={clicked} onContextMenu={contexted} onPointerDown={pointed} onMouseUp={moused} onDoubleClick={doubled} onSubmit={submitted} onChange={changed} onInput={input} onKeyDown={keyed} onSelect={selected} onValueChange={valued} onDelete={deleted} onCommit={committed} onClose={closed} onSeek={sought} onResize={resized} onToggle={toggled} />",
+    "  <button onLoad={loaded} onError={failed}>Native remains</button>",
+    "</section>;",
+  ].join("\n");
+
+  const controls = extractControls("web/src/Callbacks.tsx", source, ts);
+
+  assert.deepEqual(controls.map(({ element }) => element), [
+    "video", "div", "CustomActions", "button",
+  ]);
+  assert.equal(controls[0].handler, "");
+  assert.equal(controls[1].handler, "{clicked} {captured} {lost}");
+  assert.equal(controls[3].handler, "");
+  for (const action of [
+    "clicked", "contexted", "pointed", "moused", "doubled", "submitted", "changed",
+    "input", "keyed", "selected", "valued", "deleted", "committed", "closed", "sought",
+    "resized", "toggled",
+  ]) {
+    assert.match(controls[2].handler, new RegExp(`\\{${action}\\}`));
+  }
+  assert.doesNotMatch(controls.map(({ handler }) => handler).join(" "), /loaded|failed|timed|played|paused|ended|terminal|success|started|status/);
+});
+
 test("extractControls covers native, custom-handler, and ARIA controls in source order", () => {
   const source = [
     "export function View(){return <section>",
@@ -95,21 +139,34 @@ test("extractControls includes every required interactive ARIA role", () => {
   );
 });
 
-test("extractControls recognizes set, toggle, open, show, and onOpen panel patterns", () => {
+test("extractControls constrains toggle panel patterns to visible surfaces", () => {
   const source = [
     "export const Triggers = () => <>",
-    "  <button onClick={setModalVisible} />",
+    "  <button onClick={setOpen} />",
+    "  <button onClick={setSettingsOpen} />",
     "  <button onClick={toggleInspector} />",
-    "  <button onClick={openExportDialog} />",
+    "  <button onClick={toggleAgent} />",
+    "  <button onClick={toggleMedia} />",
+    "  <button onClick={toggleKeyframesPanel} />",
+    "  <button onClick={onToggleKeyframes} />",
+    "  <button onClick={openDialog} />",
     "  <button onClick={showSettings} />",
-    "  <button onClick={onOpenSettings} />",
+    "  <button onClick={onOpen} />",
+    "  <button onClick={handleOpen} />",
+    "  <button onClick={togglePlay} />",
+    "  <button onClick={toggle} />",
+    "  <button onClick={onToggle} />",
+    "  <button onClick={toggleCropEditingActive} />",
     "  <button onClick={setQuery} />",
     "</>;",
   ].join("\n");
 
   assert.deepEqual(
     extractControls("web/src/Triggers.tsx", source, ts).map(({ panelTrigger }) => panelTrigger),
-    [true, true, true, true, true, false],
+    [
+      true, true, true, true, true, true, true, true, true, true, true,
+      false, false, false, false, false,
+    ],
   );
 });
 

@@ -94,7 +94,108 @@ const INTERACTIVE_ROLES = new Set([
   "treeitem",
 ]);
 
-const PANEL_TRIGGER_PATTERN = /\b(?:set[A-Za-z0-9_$]*(?:Open|Visible|Visibility|Panel|Dialog|Modal|Popover|Menu|Drawer|Sheet)|set(?:Show|Showing)[A-Za-z0-9_$]*|toggle[A-Za-z0-9_$]*|open[A-Z_$][A-Za-z0-9_$]*|show[A-Z_$][A-Za-z0-9_$]*|(?:on|handle)(?:Open|Show|Toggle)[A-Za-z0-9_$]*)\b/;
+const MEDIA_ELEMENTS = new Set(["audio", "video"]);
+
+const DOM_INTERACTION_HANDLER_PATTERN = /^on(?:(?:AuxClick|BeforeInput|Blur|Cancel|Change|Click|Close|Composition(?:End|Start|Update)|ContextMenu|Copy|Cut|DoubleClick|Drag(?:End|Enter|Exit|Leave|Over|Start)?|Drop|Focus|Input|Key(?:Down|Press|Up)|Mouse(?:Down|Enter|Leave|Move|Out|Over|Up)|Paste|Pointer(?:Cancel|Down|Enter|Leave|Move|Out|Over|Up)|Reset|Resize|Scroll(?:End)?|Seek|Select|Submit|Touch(?:Cancel|End|Move|Start)|Wheel)(?:Capture)?|GotPointerCapture|LostPointerCapture)$/;
+
+const EXPLICIT_INTERACTION_CALLBACKS = new Set([
+  "onClose",
+  "onCommit",
+  "onDelete",
+  "onOpen",
+  "onOpenChange",
+  "onPress",
+  "onResize",
+  "onSeek",
+  "onToggle",
+  "onValueChange",
+]);
+
+const PASSIVE_CUSTOM_CALLBACKS = new Set([
+  "onAbort",
+  "onAnimationEnd",
+  "onAnimationIteration",
+  "onAnimationStart",
+  "onBusyChange",
+  "onCanPlay",
+  "onCanPlayThrough",
+  "onComplete",
+  "onCompleted",
+  "onData",
+  "onDuration",
+  "onDurationChange",
+  "onEmptied",
+  "onEnded",
+  "onError",
+  "onEvent",
+  "onFailure",
+  "onFrame",
+  "onLoad",
+  "onLoadedData",
+  "onLoadedMetadata",
+  "onLoadingChange",
+  "onLoadStart",
+  "onMessage",
+  "onMount",
+  "onPause",
+  "onPendingChange",
+  "onPlay",
+  "onPlaying",
+  "onPlayingChange",
+  "onProgress",
+  "onRateChange",
+  "onReady",
+  "onRender",
+  "onSeeked",
+  "onSeeking",
+  "onStalled",
+  "onStart",
+  "onStateChange",
+  "onStatus",
+  "onStatusChange",
+  "onSuccess",
+  "onSuspend",
+  "onTerminalFailure",
+  "onTick",
+  "onTime",
+  "onTimeUpdate",
+  "onTransitionCancel",
+  "onTransitionEnd",
+  "onTransitionRun",
+  "onTransitionStart",
+  "onUnmount",
+  "onUpdate",
+  "onVolumeChange",
+  "onWaiting",
+]);
+
+const PANEL_SETTER_PATTERN = /^set(?:[A-Za-z0-9_$]*(?:Open|Visible|Visibility|Panel|Dialog|Modal|Popover|Menu|Drawer|Sheet)|(?:Show|Showing)[A-Za-z0-9_$]*)$/;
+const PANEL_OPEN_SHOW_PATTERN = /^(?:(?:open|show)|(?:on|handle)(?:Open|Show))(?:$|[A-Z0-9_$][A-Za-z0-9_$]*)$/;
+const PANEL_TOGGLE_PATTERN = /^(?:toggle|(?:on|handle)Toggle)([A-Za-z0-9_$]*)$/;
+const PANEL_TOGGLE_SURFACE_PATTERN = /(?:Agent|Inspector|Media|Keyframes?|Panel|View|Menu|Dialog|Modal|Popover|Drawer|Sheet|Sidebar|Settings|Export|Library|Overlay|Window|Picker|Browser|History|Details|Preferences|Account|About|Fullscreen|Visibility|Visible|Open)/;
+
+function isCustomElement(element) {
+  return /^[A-Z]/.test(element) || element.includes(".");
+}
+
+function isInteractionHandler(name, element) {
+  if (!/^on[A-Z]/.test(name)) return false;
+  if (DOM_INTERACTION_HANDLER_PATTERN.test(name) || EXPLICIT_INTERACTION_CALLBACKS.has(name)) {
+    return true;
+  }
+  return isCustomElement(element) && !PASSIVE_CUSTOM_CALLBACKS.has(name);
+}
+
+function isPanelTrigger(handler) {
+  const identifiers = handler.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) ?? [];
+  return identifiers.some((identifier) => {
+    if (PANEL_SETTER_PATTERN.test(identifier) || PANEL_OPEN_SHOW_PATTERN.test(identifier)) {
+      return true;
+    }
+    const toggle = identifier.match(PANEL_TOGGLE_PATTERN);
+    return toggle !== null && PANEL_TOGGLE_SURFACE_PATTERN.test(toggle[1]);
+  });
+}
 
 function jsxAttributeValue(attribute, file, ts) {
   const initializer = attribute.initializer;
@@ -150,6 +251,14 @@ export function extractControls(path, source, ts) {
     true,
     ts.ScriptKind.TSX,
   );
+  if (file.parseDiagnostics.length > 0) {
+    const diagnostics = file.parseDiagnostics.map((diagnostic) => {
+      const position = file.getLineAndCharacterOfPosition(diagnostic.start ?? 0);
+      const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, " ");
+      return `${normalizedPath}:${position.line + 1}:${position.character + 1}: ${message}`;
+    });
+    throw new Error(diagnostics.join("\n"));
+  }
   const controls = [];
 
   function visit(node) {
@@ -164,12 +273,16 @@ export function extractControls(path, source, ts) {
           jsxAttributeValue(property, file, ts),
         );
       }
-      const handlers = [...attributes.entries()].filter(([name]) => /^on[A-Z]/.test(name));
+      const handlers = [...attributes.entries()].filter(
+        ([name]) => isInteractionHandler(name, element),
+      );
       const roleAttribute = attributes.get("role");
       const role = roleAttribute?.readable ?? "";
-      const interactive = CONTROL_ELEMENTS.has(element)
-        || handlers.length > 0
-        || (roleAttribute?.staticValue != null && INTERACTIVE_ROLES.has(roleAttribute.staticValue));
+      const interactiveRole = roleAttribute?.staticValue != null
+        && INTERACTIVE_ROLES.has(roleAttribute.staticValue);
+      const interactive = MEDIA_ELEMENTS.has(element)
+        ? attributes.has("controls") || handlers.length > 0
+        : CONTROL_ELEMENTS.has(element) || handlers.length > 0 || interactiveRole;
       if (interactive) {
         const position = file.getLineAndCharacterOfPosition(opening.getStart(file));
         const line = position.line + 1;
@@ -189,7 +302,7 @@ export function extractControls(path, source, ts) {
           handler,
           disabled: attributes.get("disabled")?.raw ?? null,
           role,
-          panelTrigger: PANEL_TRIGGER_PATTERN.test(handler),
+          panelTrigger: isPanelTrigger(handler),
         });
       }
     }
