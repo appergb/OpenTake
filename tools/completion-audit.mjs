@@ -17,9 +17,34 @@ export function stableId(prefix, value) {
 export function extractDocumentCandidates(path, source) {
   const normalizedPath = normalizePath(path);
   let heading = "";
+  let fence = null;
   const records = [];
   source.split(/\r?\n/).forEach((text, index) => {
     const line = index + 1;
+    if (fence) {
+      const closingMatch = text.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+      if (
+        closingMatch
+        && closingMatch[1][0] === fence.character
+        && closingMatch[1].length >= fence.length
+      ) {
+        fence = null;
+      }
+      return;
+    }
+
+    const openingMatch = text.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (
+      openingMatch
+      && (openingMatch[1][0] !== "`" || !openingMatch[2].includes("`"))
+    ) {
+      fence = {
+        character: openingMatch[1][0],
+        length: openingMatch[1].length,
+      };
+      return;
+    }
+
     const headingMatch = text.match(/^#{1,6}\s+(.+)$/);
     if (headingMatch) heading = headingMatch[1].trim();
     const signal = headingMatch

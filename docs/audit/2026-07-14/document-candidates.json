@@ -538,30 +538,6 @@
       "signal": "heading"
     },
     {
-      "id": "doc-d1c11a80210ff92c",
-      "path": "AGENTS.md",
-      "line": 82,
-      "heading": "Rust core",
-      "text": "# Rust core",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-6577aa18ea393f0a",
-      "path": "AGENTS.md",
-      "line": 87,
-      "heading": "前端",
-      "text": "# 前端",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-8f8249afe00a1003",
-      "path": "AGENTS.md",
-      "line": 90,
-      "heading": "启动 Tauri 开发模式",
-      "text": "# 启动 Tauri 开发模式",
-      "signal": "heading"
-    },
-    {
       "id": "doc-9d39ac614ed0298b",
       "path": "AGENTS.md",
       "line": 96,
@@ -866,14 +842,6 @@
       "signal": "heading"
     },
     {
-      "id": "doc-75e6d4f7c949d593",
-      "path": "CONTRIBUTING.md",
-      "line": 8,
-      "heading": "Prerequisites: Rust >= 1.82, Node.js >= 20, pnpm, FFmpeg >= 6.0",
-      "text": "# Prerequisites: Rust >= 1.82, Node.js >= 20, pnpm, FFmpeg >= 6.0",
-      "signal": "heading"
-    },
-    {
       "id": "doc-612c3d1402fbba60",
       "path": "CONTRIBUTING.md",
       "line": 14,
@@ -1055,14 +1023,6 @@
       "line": 188,
       "heading": "🔗 上流リファレンス",
       "text": "## 🔗 上流リファレンス",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-bb57edfd903d4ff6",
-      "path": "README.ja.md",
-      "line": 193,
-      "heading": "OpenTake の兄弟ディレクトリに上流を clone",
-      "text": "# OpenTake の兄弟ディレクトリに上流を clone",
       "signal": "heading"
     },
     {
@@ -1250,14 +1210,6 @@
       "signal": "heading"
     },
     {
-      "id": "doc-5a7e15e1c2c7c477",
-      "path": "README.md",
-      "line": 243,
-      "heading": "Clone upstream alongside OpenTake (sibling directory)",
-      "text": "# Clone upstream alongside OpenTake (sibling directory)",
-      "signal": "heading"
-    },
-    {
       "id": "doc-0f89d1f695b8e4e8",
       "path": "README.md",
       "line": 271,
@@ -1279,30 +1231,6 @@
       "line": 279,
       "heading": "Build",
       "text": "### Build",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-55a0624bcfe92da2",
-      "path": "README.md",
-      "line": 285,
-      "heading": "Rust core",
-      "text": "# Rust core",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-e140b38cba85711a",
-      "path": "README.md",
-      "line": 290,
-      "heading": "Frontend",
-      "text": "# Frontend",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-2c9ebbc352eb4d73",
-      "path": "README.md",
-      "line": 294,
-      "heading": "Launch Tauri dev mode",
-      "text": "# Launch Tauri dev mode",
       "signal": "heading"
     },
     {
@@ -1503,14 +1431,6 @@
       "line": 205,
       "heading": "🔗 上游参考代码",
       "text": "## 🔗 上游参考代码",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-b9b6c4de2becfac0",
-      "path": "README.zh-CN.md",
-      "line": 210,
-      "heading": "在 OpenTake 同级目录 clone 上游",
-      "text": "# 在 OpenTake 同级目录 clone 上游",
       "signal": "heading"
     },
     {
@@ -1879,14 +1799,6 @@
       "line": 184,
       "heading": "10. 技术选型清单",
       "text": "## 10. 技术选型清单",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-59e25bf7c8aa7cd8",
-      "path": "docs/architecture/ARCHITECTURE.md",
-      "line": 205,
-      "heading": "11. Agent Context Signal + 工作流插件（2026 新增）",
-      "text": "## 11. Agent Context Signal + 工作流插件（2026 新增）",
       "signal": "heading"
     },
     {
@@ -4538,14 +4450,6 @@
       "signal": "heading"
     },
     {
-      "id": "doc-dd0d7378b47cae7c",
-      "path": "docs/modules/opentake-agent/SPEC.md",
-      "line": 67,
-      "heading": "crates/opentake-agent/Cargo.toml（依赖清单，非完整）",
-      "text": "# crates/opentake-agent/Cargo.toml（依赖清单，非完整）",
-      "signal": "heading"
-    },
-    {
       "id": "doc-b8956c08f0c20c92",
       "path": "docs/modules/opentake-agent/SPEC.md",
       "line": 83,
@@ -6450,22 +6354,6 @@
       "signal": "heading"
     },
     {
-      "id": "doc-25f7e3a62cba151a",
-      "path": "docs/modules/opentake-core/deps-di.md",
-      "line": 41,
-      "heading": "占位纪律：可达路径上无 `todo!()`",
-      "text": "let stub = Arc::new(UnsupportedBackends);",
-      "signal": "gap-marker"
-    },
-    {
-      "id": "doc-b3d61b98c4f7c1d3",
-      "path": "docs/modules/opentake-core/deps-di.md",
-      "line": 42,
-      "heading": "占位纪律：可达路径上无 `todo!()`",
-      "text": "CoreDeps { preview: stub.clone(), export: stub.clone(), media: stub, gen: None }",
-      "signal": "gap-marker"
-    },
-    {
       "id": "doc-32a25f417b0beb9f",
       "path": "docs/modules/opentake-core/deps-di.md",
       "line": 55,
@@ -8327,46 +8215,6 @@
       "line": 81,
       "heading": "1.2 Cargo 依赖(建议版本范围,实施时锁定)",
       "text": "### 1.2 Cargo 依赖(建议版本范围,实施时锁定)",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-e405359ad0caa809",
-      "path": "docs/modules/opentake-media/SPEC.md",
-      "line": 100,
-      "heading": "媒体编解码",
-      "text": "# 媒体编解码",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-896656c128d54075",
-      "path": "docs/modules/opentake-media/SPEC.md",
-      "line": 102,
-      "heading": "波形",
-      "text": "# 波形",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-25fb34b16ee6490f",
-      "path": "docs/modules/opentake-media/SPEC.md",
-      "line": 104,
-      "heading": "转写",
-      "text": "# 转写",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-a43709778ef0136d",
-      "path": "docs/modules/opentake-media/SPEC.md",
-      "line": 106,
-      "heading": "语义搜索 / 推理 worker(二选一为主,另一备选)",
-      "text": "# 语义搜索 / 推理 worker(二选一为主,另一备选)",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-38046905feca738c",
-      "path": "docs/modules/opentake-media/SPEC.md",
-      "line": 109,
-      "heading": "下载/解压(模型权重)",
-      "text": "# 下载/解压(模型权重)",
       "signal": "heading"
     },
     {
@@ -11000,22 +10848,6 @@
       "heading": "`.opentake` 包结构（`docs/architecture/ARCHITECTURE.md` §9）",
       "text": "### `.opentake` 包结构（`docs/architecture/ARCHITECTURE.md` §9）",
       "signal": "heading"
-    },
-    {
-      "id": "doc-8882be4568be50ec",
-      "path": "docs/modules/opentake-project/OVERVIEW.md",
-      "line": 49,
-      "heading": "`.opentake` 包结构（`docs/architecture/ARCHITECTURE.md` §9）",
-      "text": "├── project.json         # Timeline（强制；缺失即报错）",
-      "signal": "gap-marker"
-    },
-    {
-      "id": "doc-cd47431c765ea0bb",
-      "path": "docs/modules/opentake-project/OVERVIEW.md",
-      "line": 50,
-      "heading": "`.opentake` 包结构（`docs/architecture/ARCHITECTURE.md` §9）",
-      "text": "├── media.json           # MediaManifest（严格解析；缺失则空清单）",
-      "signal": "gap-marker"
     },
     {
       "id": "doc-dfb2a0d5283cee93",
@@ -14826,14 +14658,6 @@
       "signal": "heading"
     },
     {
-      "id": "doc-60ece68acf7cead0",
-      "path": "docs/specs/agent/1-mcp-server.md",
-      "line": 31,
-      "heading": "crates/opentake-agent/Cargo.toml（依赖清单，非完整）",
-      "text": "# crates/opentake-agent/Cargo.toml（依赖清单，非完整）",
-      "signal": "heading"
-    },
-    {
       "id": "doc-8d42a5a62d35b99a",
       "path": "docs/specs/agent/1-mcp-server.md",
       "line": 47,
@@ -16730,46 +16554,6 @@
       "signal": "heading"
     },
     {
-      "id": "doc-55b4e49f6f9ae73f",
-      "path": "docs/specs/media/1-structure.md",
-      "line": 69,
-      "heading": "媒体编解码",
-      "text": "# 媒体编解码",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-478414142ea81c89",
-      "path": "docs/specs/media/1-structure.md",
-      "line": 71,
-      "heading": "波形",
-      "text": "# 波形",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-caa1a5c194989117",
-      "path": "docs/specs/media/1-structure.md",
-      "line": 73,
-      "heading": "转写",
-      "text": "# 转写",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-e129745579d14907",
-      "path": "docs/specs/media/1-structure.md",
-      "line": 75,
-      "heading": "语义搜索 / 推理 worker(二选一为主,另一备选)",
-      "text": "# 语义搜索 / 推理 worker(二选一为主,另一备选)",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-d0dd24684fde6d13",
-      "path": "docs/specs/media/1-structure.md",
-      "line": 78,
-      "heading": "下载/解压(模型权重)",
-      "text": "# 下载/解压(模型权重)",
-      "signal": "heading"
-    },
-    {
       "id": "doc-e07e242e202376d7",
       "path": "docs/specs/media/1-structure.md",
       "line": 95,
@@ -17818,50 +17602,10 @@
       "signal": "unchecked"
     },
     {
-      "id": "doc-35604e2848f92d85",
-      "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
-      "line": 42,
-      "heading": "Specs Index",
-      "text": "# Specs Index",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-a7d4b5defd702b28",
-      "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
-      "line": 46,
-      "heading": "Agent",
-      "text": "## Agent",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-b66240156eb9163d",
-      "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
-      "line": 60,
-      "heading": "Core",
-      "text": "## Core",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-bf47e9acaa220e07",
-      "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
-      "line": 72,
-      "heading": "Frontend",
-      "text": "## Frontend",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-588c335d3d265028",
-      "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
-      "line": 89,
-      "heading": "Media",
-      "text": "## Media",
-      "signal": "heading"
-    },
-    {
       "id": "doc-41fe99e92566370b",
       "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
       "line": 105,
-      "heading": "Media",
+      "heading": "Task 1: Documentation Indexes And Branch Register",
       "text": "- [ ] **Step 2: Add docs front-door links**",
       "signal": "unchecked"
     },
@@ -17869,71 +17613,23 @@
       "id": "doc-808b43ae4d63bb61",
       "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
       "line": 114,
-      "heading": "Media",
+      "heading": "Task 1: Documentation Indexes And Branch Register",
       "text": "- [ ] **Step 3: Create branch register**",
       "signal": "unchecked"
-    },
-    {
-      "id": "doc-fd17b69be1791e81",
-      "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
-      "line": 119,
-      "heading": "Branch Integration Register",
-      "text": "# Branch Integration Register",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-3f90995ceb9ef2c3",
-      "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
-      "line": 121,
-      "heading": "Policy",
-      "text": "## Policy",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-7936c57b0d9ab9d8",
-      "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
-      "line": 130,
-      "heading": "Current Base",
-      "text": "## Current Base",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-6bcddcc263e9d548",
-      "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
-      "line": 138,
-      "heading": "Queue",
-      "text": "## Queue",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-1cdf0092369ef929",
-      "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
-      "line": 155,
-      "heading": "Evidence Commands",
-      "text": "## Evidence Commands",
-      "signal": "heading"
     },
     {
       "id": "doc-d4bcf289f715252a",
       "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
       "line": 166,
-      "heading": "Evidence Commands",
+      "heading": "Task 1: Documentation Indexes And Branch Register",
       "text": "- [ ] **Step 4: Restore historical DOS archive**",
       "signal": "unchecked"
-    },
-    {
-      "id": "doc-a7eb5065cb08d6e6",
-      "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
-      "line": 177,
-      "heading": "Editing Automation DOS Session Archive",
-      "text": "# Editing Automation DOS Session Archive",
-      "signal": "heading"
     },
     {
       "id": "doc-44ec4a9eb847ba27",
       "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
       "line": 180,
-      "heading": "Editing Automation DOS Session Archive",
+      "heading": "Task 1: Documentation Indexes And Branch Register",
       "text": "- [ ] **Step 5: Verify and commit docs**",
       "signal": "unchecked"
     },
@@ -18146,50 +17842,10 @@
       "signal": "unchecked"
     },
     {
-      "id": "doc-3d6339839ffb7247",
-      "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
-      "line": 868,
-      "heading": "Verification Report",
-      "text": "# Verification Report",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-d294d287fe0be49e",
-      "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
-      "line": 870,
-      "heading": "Branch",
-      "text": "## Branch",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-b90ba6ff216203bd",
-      "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
-      "line": 874,
-      "heading": "Required Commands",
-      "text": "## Required Commands",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-9972cc75a350ab7b",
-      "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
-      "line": 885,
-      "heading": "Security Checks",
-      "text": "## Security Checks",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-2d8b63085e0ae248",
-      "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
-      "line": 893,
-      "heading": "Desktop Runtime",
-      "text": "## Desktop Runtime",
-      "signal": "heading"
-    },
-    {
       "id": "doc-9395479e6183ec21",
       "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
       "line": 904,
-      "heading": "Desktop Runtime",
+      "heading": "Task 6: Project Verification, Security, And Desktop Runtime",
       "text": "- [ ] **Step 2: Run project-level verification**",
       "signal": "unchecked"
     },
@@ -18197,7 +17853,7 @@
       "id": "doc-d50f9b2670995d27",
       "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
       "line": 919,
-      "heading": "Desktop Runtime",
+      "heading": "Task 6: Project Verification, Security, And Desktop Runtime",
       "text": "- [ ] **Step 3: Run available security checks**",
       "signal": "unchecked"
     },
@@ -18205,7 +17861,7 @@
       "id": "doc-2cad304df7f75b86",
       "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
       "line": 932,
-      "heading": "Desktop Runtime",
+      "heading": "Task 6: Project Verification, Security, And Desktop Runtime",
       "text": "- [ ] **Step 4: Run desktop/runtime checks with a dedicated agent**",
       "signal": "unchecked"
     },
@@ -18213,7 +17869,7 @@
       "id": "doc-c85d39f0ab3c501c",
       "path": "docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md",
       "line": 948,
-      "heading": "Desktop Runtime",
+      "heading": "Task 6: Project Verification, Security, And Desktop Runtime",
       "text": "- [ ] **Step 5: Commit verification report**",
       "signal": "unchecked"
     },
@@ -19178,14 +18834,6 @@
       "signal": "unchecked"
     },
     {
-      "id": "doc-df52c1bedfcd1889",
-      "path": "docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md",
-      "line": 667,
-      "heading": "C1A Branch Gate Result",
-      "text": "# C1A Branch Gate Result",
-      "signal": "heading"
-    },
-    {
       "id": "doc-89339cb4dbcd7518",
       "path": "docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md",
       "line": 830,
@@ -19490,14 +19138,6 @@
       "signal": "unchecked"
     },
     {
-      "id": "doc-c7768e6d1dec6a59",
-      "path": "docs/superpowers/plans/2026-07-14-opentake-completion-audit.md",
-      "line": 253,
-      "heading": "Task 3: Planning-document candidate extraction",
-      "text": "const source = \"# Plan\\n## Export\\n- [ ] Add HEVC\\nKnown TODO: cancellation\\n\";",
-      "signal": "gap-marker"
-    },
-    {
       "id": "doc-03a590bfa668f906",
       "path": "docs/superpowers/plans/2026-07-14-opentake-completion-audit.md",
       "line": 262,
@@ -19512,14 +19152,6 @@
       "heading": "Task 3: Planning-document candidate extraction",
       "text": "- [ ] **Step 3: Implement deterministic Markdown extraction**",
       "signal": "unchecked"
-    },
-    {
-      "id": "doc-97b7d70e4e773616",
-      "path": "docs/superpowers/plans/2026-07-14-opentake-completion-audit.md",
-      "line": 279,
-      "heading": "Task 3: Planning-document candidate extraction",
-      "text": ": /\\b(TODO|FIXME|TBD|stub|placeholder|not implemented|unimplemented)\\b|未完成|待办|缺失/i.test(text)",
-      "signal": "gap-marker"
     },
     {
       "id": "doc-7ba40344fe16095b",
@@ -20410,43 +20042,11 @@
       "signal": "heading"
     },
     {
-      "id": "doc-b1e35effac1f5550",
-      "path": "docs/superpowers/plans/c1b/2026-07-12-c1b-windows-ci-normative.md",
-      "line": 4332,
-      "heading": "frozen_string_literal: true",
-      "text": "# frozen_string_literal: true",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-79ce87b57bdddc23",
-      "path": "docs/superpowers/plans/c1b/2026-07-12-c1b-windows-ci-normative.md",
-      "line": 4520,
-      "heading": "frozen_string_literal: true",
-      "text": "# frozen_string_literal: true",
-      "signal": "heading"
-    },
-    {
       "id": "doc-763103a9dc59fe86",
       "path": "docs/superpowers/plans/c1b/2026-07-12-c1b-windows-ci-normative.md",
       "line": 4704,
       "heading": "18.8 Repository-versioned final evidence validator",
       "text": "### 18.8 Repository-versioned final evidence validator",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-2b129edb38543652",
-      "path": "docs/superpowers/plans/c1b/2026-07-12-c1b-windows-ci-normative.md",
-      "line": 4712,
-      "heading": "frozen_string_literal: true",
-      "text": "# frozen_string_literal: true",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-6f6098bbf9084664",
-      "path": "docs/superpowers/plans/c1b/2026-07-12-c1b-windows-ci-normative.md",
-      "line": 5192,
-      "heading": "frozen_string_literal: true",
-      "text": "# frozen_string_literal: true",
       "signal": "heading"
     },
     {
@@ -21983,22 +21583,6 @@
       "line": 33,
       "heading": "Running",
       "text": "## Running",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-ad4e4babef5868f9",
-      "path": "src-tauri/README.md",
-      "line": 36,
-      "heading": "build only (no Tauri CLI needed)",
-      "text": "# build only (no Tauri CLI needed)",
-      "signal": "heading"
-    },
-    {
-      "id": "doc-ba5b2bd58da8d1d2",
-      "path": "src-tauri/README.md",
-      "line": 39,
-      "heading": "dev (front end + shell); needs the Tauri CLI",
-      "text": "# dev (front end + shell); needs the Tauri CLI",
       "signal": "heading"
     },
     {

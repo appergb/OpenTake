@@ -32,6 +32,39 @@ test("extractDocumentCandidates captures headings, checkboxes, and gap signals",
   assert.equal(records[2].heading, "Export");
 });
 
+test("extractDocumentCandidates ignores fenced code and preserves the outer heading", () => {
+  const source = [
+    "# Plan",
+    "```md TODO",
+    "# Fake backtick heading",
+    "~~~",
+    "TODO: fake after mismatched fence",
+    "``",
+    "- [ ] fake after short fence",
+    "   ````",
+    "- [ ] Real after backticks",
+    "## Recovery",
+    "  ~~~~typescript FIXME",
+    "## Fake tilde heading",
+    "```",
+    "FIXME: fake after mismatched fence",
+    "   ~~~",
+    "* [ ] fake after short fence",
+    " ~~~~~",
+    "- [ ] Real after tildes",
+    "",
+  ].join("\r\n");
+
+  const records = extractDocumentCandidates("docs/fences.md", source);
+
+  assert.deepEqual(records.map(({ line, signal, heading }) => [line, signal, heading]), [
+    [1, "heading", "Plan"],
+    [9, "unchecked", "Plan"],
+    [10, "heading", "Recovery"],
+    [18, "unchecked", "Recovery"],
+  ]);
+});
+
 test("classifyFile maps product and evidence files", () => {
   assert.deepEqual(classifyFile("crates/opentake-domain/src/clip.rs"), {
     domain: "opentake-domain",
