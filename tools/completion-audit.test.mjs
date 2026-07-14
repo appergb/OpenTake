@@ -1396,49 +1396,57 @@ test("requirements CLI rejects duplicate candidate identities", (t) => {
 function createDocumentVerificationFixture(t) {
   const root = mkdtempSync(join(tmpdir(), "opentake-completion-audit-verify-documents-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  execFileSync("git", ["init", "--quiet", root]);
+  git(root, ["config", "user.name", "Completion Audit"]);
+  git(root, ["config", "user.email", "audit@example.invalid"]);
   const audit = join(root, "docs", "audit", "2026-07-14");
+  const sourcePath = "docs/requirements.md";
+  const implementationPath = "web/src/Complete.ts";
+  const testPath = "web/src/Complete.test.ts";
   mkdirSync(audit, { recursive: true });
-  const candidates = [{
-    id: "doc-complete",
-    path: "docs/complete.md",
-    line: 4,
-    heading: "Complete",
-    text: "- Complete behavior",
-    signal: "gap-marker",
-  }, {
-    id: "doc-incomplete",
-    path: "docs/incomplete.md",
-    line: 7,
-    heading: "Incomplete",
-    text: "- Incomplete behavior",
-    signal: "unchecked",
-  }];
+  mkdirSync(join(root, "web", "src"), { recursive: true });
+  writeFileSync(join(root, sourcePath), "# Complete behavior\n- [ ] Incomplete behavior\n");
+  writeFileSync(
+    join(root, implementationPath),
+    "export function completeBehavior() { return true; }\n",
+  );
+  writeFileSync(
+    join(root, testPath),
+    'test("renders complete behavior", () => completeBehavior());\n',
+  );
+  git(root, ["add", sourcePath, implementationPath, testPath]);
+  git(root, ["commit", "--quiet", "-m", "verification fixture"]);
+  const candidates = extractDocumentCandidates(
+    sourcePath,
+    readFileSync(join(root, sourcePath), "utf8"),
+  );
+  const [completeCandidate, incompleteCandidate] = candidates;
   const records = [{
-    id: stableId("requirement", "doc-complete"),
-    candidateId: "doc-complete",
-    source: { path: "docs/complete.md", line: 4 },
+    id: stableId("requirement", completeCandidate.id),
+    candidateId: completeCandidate.id,
+    source: { path: completeCandidate.path, line: completeCandidate.line },
     targetBehavior: "The complete behavior is available.",
     priority: null,
     status: "complete",
     uiEntry: [],
     visibleResult: null,
-    react: ["web/src/Complete.tsx::Complete"],
+    react: [`code:${implementationPath}#completeBehavior`],
     storeApi: [],
     tauri: [],
     rust: [],
     sideEffects: [],
     returnPath: [],
-    automatedTests: ["web/src/Complete.test.tsx::renders complete behavior"],
+    automatedTests: [`test:${testPath}#renders complete behavior`],
     runtimeEvidence: [],
-    provenance: ["docs/complete.md:4"],
+    provenance: [`source:${completeCandidate.path}:${completeCandidate.line}:heading`],
     acceptanceCriteria: [],
     gapGroup: null,
     finalDisposition: "verified-complete",
     commit: null,
   }, {
-    id: stableId("requirement", "doc-incomplete"),
-    candidateId: "doc-incomplete",
-    source: { path: "docs/incomplete.md", line: 7 },
+    id: stableId("requirement", incompleteCandidate.id),
+    candidateId: incompleteCandidate.id,
+    source: { path: incompleteCandidate.path, line: incompleteCandidate.line },
     targetBehavior: "The incomplete behavior becomes available.",
     priority: null,
     status: "incomplete",
@@ -1452,7 +1460,7 @@ function createDocumentVerificationFixture(t) {
     returnPath: [],
     automatedTests: [],
     runtimeEvidence: [],
-    provenance: ["docs/incomplete.md:7"],
+    provenance: [`source:${incompleteCandidate.path}:${incompleteCandidate.line}:unchecked`],
     acceptanceCriteria: ["A focused test proves the incomplete behavior."],
     gapGroup: "documentation",
     finalDisposition: "active-gap:documentation",
@@ -1469,7 +1477,18 @@ function createDocumentVerificationFixture(t) {
     );
   };
   write();
-  return { root, audit, candidates, records, write };
+  return {
+    root,
+    audit,
+    sourcePath,
+    implementationPath,
+    testPath,
+    completeCandidate,
+    incompleteCandidate,
+    candidates,
+    records,
+    write,
+  };
 }
 
 test("verifyAudit documents accepts a complete, planned ledger", (t) => {
@@ -1635,10 +1654,10 @@ test("verifyAudit documents rejects unresolved or unsupported dispositions", asy
   });
 
   await t.test("non-array evidence field", (t) => {
-    const result = mutate(t, (records) => { records[0].react = "web/src/Complete.tsx"; });
+    const result = mutate(t, (records) => { records[0].react = "web/src/Complete.ts"; });
     assert.ok(result.errors.some(({ code, candidateId, message }) => (
       code === "invalid-field-type"
-      && candidateId === "doc-complete"
+      && candidateId != null
       && message === "react must be an array of non-empty strings"
     )));
   });
@@ -1675,7 +1694,7 @@ test("verifyAudit documents rejects unresolved or unsupported dispositions", asy
     fixture.write(candidates, fixture.records);
     const result = verifyAudit(fixture.root, fixture.audit, "documents");
     assert.ok(result.errors.some(({ code, candidateId }) => (
-      code === "invalid-candidate" && candidateId === "doc-complete"
+      code === "invalid-candidate" && candidateId === fixture.completeCandidate.id
     )));
   });
 
@@ -1689,6 +1708,168 @@ test("verifyAudit documents rejects unresolved or unsupported dispositions", asy
     assert.ok(result.errors.some(({ code, message }) => (
       code === "invalid-audit-schema" && message.startsWith("requirements.json")
     )));
+  });
+});
+
+test("verifyAudit documents rejects repositories and candidate sources that drift", async (t) => {
+  await t.test("audit directory outside repository", (t) => {
+    const fixture = createDocumentVerificationFixture(t);
+    const outside = mkdtempSync(join(tmpdir(), "opentake-completion-audit-outside-"));
+    t.after(() => rmSync(outside, { recursive: true, force: true }));
+    writeFileSync(
+      join(outside, "document-candidates.json"),
+      `${JSON.stringify({ schema: 1, candidates: fixture.candidates }, null, 2)}\n`,
+    );
+    writeFileSync(
+      join(outside, "requirements.json"),
+      `${JSON.stringify({ schema: 1, records: fixture.records }, null, 2)}\n`,
+    );
+    const result = verifyAudit(fixture.root, outside, "documents");
+    assert.ok(result.errors.some(({ code }) => code === "audit-directory-outside-root"));
+  });
+
+  await t.test("missing source file", (t) => {
+    const fixture = createDocumentVerificationFixture(t);
+    rmSync(join(fixture.root, fixture.sourcePath));
+    const result = verifyAudit(fixture.root, fixture.audit, "documents");
+    assert.ok(result.errors.some(({ code }) => code === "candidate-source-missing"));
+  });
+
+  await t.test("untracked source file", (t) => {
+    const fixture = createDocumentVerificationFixture(t);
+    git(fixture.root, ["rm", "--cached", fixture.sourcePath]);
+    const result = verifyAudit(fixture.root, fixture.audit, "documents");
+    assert.ok(result.errors.some(({ code }) => code === "candidate-source-untracked"));
+  });
+
+  await t.test("forged candidate ID", (t) => {
+    const fixture = createDocumentVerificationFixture(t);
+    const candidates = structuredClone(fixture.candidates);
+    const records = structuredClone(fixture.records);
+    candidates[0].id = "doc-forged";
+    records[0].candidateId = candidates[0].id;
+    records[0].id = stableId("requirement", candidates[0].id);
+    fixture.write(candidates, records);
+    const result = verifyAudit(fixture.root, fixture.audit, "documents");
+    assert.ok(result.errors.some(({ code }) => code === "candidate-id-mismatch"));
+  });
+
+  await t.test("source text drift", (t) => {
+    const fixture = createDocumentVerificationFixture(t);
+    const candidates = structuredClone(fixture.candidates);
+    candidates[0].text = "# Different behavior";
+    fixture.write(candidates, fixture.records);
+    const result = verifyAudit(fixture.root, fixture.audit, "documents");
+    assert.ok(result.errors.some(({ code }) => code === "candidate-text-drift"));
+  });
+
+  await t.test("source signal drift", (t) => {
+    const fixture = createDocumentVerificationFixture(t);
+    const candidates = structuredClone(fixture.candidates);
+    candidates[0].signal = "unchecked";
+    fixture.write(candidates, fixture.records);
+    const result = verifyAudit(fixture.root, fixture.audit, "documents");
+    assert.ok(result.errors.some(({ code }) => code === "candidate-signal-drift"));
+  });
+});
+
+test("verifyAudit documents rejects invalid implementation, test, and runtime evidence", async (t) => {
+  const mutate = (t, change) => {
+    const fixture = createDocumentVerificationFixture(t);
+    const records = structuredClone(fixture.records);
+    change(records[0], fixture);
+    fixture.write(fixture.candidates, records);
+    return verifyAudit(fixture.root, fixture.audit, "documents");
+  };
+
+  const implementationCases = [
+    ["missing implementation path", "code:web/src/Missing.ts#completeBehavior", "implementation-path-missing"],
+    ["missing implementation symbol", "code:web/src/Complete.ts#missingSymbol", "implementation-symbol-missing"],
+    ["implementation directory", "code:web/src#completeBehavior", "invalid-implementation-evidence"],
+    ["combined implementation symbols", "code:web/src/Complete.ts#completeBehavior/other", "invalid-implementation-evidence"],
+    ["invalid implementation symbol grammar", "code:web/src/Complete.ts#complete-behavior", "invalid-implementation-evidence"],
+    ["natural-language implementation", "web/src/Complete.ts has complete behavior", "invalid-implementation-evidence"],
+  ];
+  for (const [name, evidence, code] of implementationCases) {
+    await t.test(name, (t) => {
+      const result = mutate(t, (record) => { record.react = [evidence]; });
+      assert.ok(result.errors.some((error) => error.code === code));
+    });
+  }
+
+  const testCases = [
+    ["missing test path", "test:web/src/Missing.test.ts#renders complete behavior", "test-path-missing"],
+    ["missing test name", "test:web/src/Complete.test.ts#missing behavior", "test-name-missing"],
+    ["test file only", "web/src/Complete.test.ts", "invalid-test-evidence"],
+    ["natural-language test", "Complete test passes", "invalid-test-evidence"],
+  ];
+  for (const [name, evidence, code] of testCases) {
+    await t.test(name, (t) => {
+      const result = mutate(t, (record) => { record.automatedTests = [evidence]; });
+      assert.ok(result.errors.some((error) => error.code === code));
+    });
+  }
+
+  await t.test("symbol use without declaration", (t) => {
+    const result = mutate(t, (record, fixture) => {
+      writeFileSync(
+        join(fixture.root, fixture.implementationPath),
+        "export function wrapper() { return completeBehavior(); }\n",
+      );
+    });
+    assert.ok(result.errors.some(({ code }) => code === "implementation-symbol-missing"));
+  });
+
+  await t.test("valid runtime commit", (t) => {
+    const result = mutate(t, (record, fixture) => {
+      record.runtimeEvidence = [`commit:${git(fixture.root, ["rev-parse", "HEAD"])}`];
+    });
+    assert.equal(result.errors.length, 0);
+  });
+
+  await t.test("valid runtime hash", (t) => {
+    const result = mutate(t, (record, fixture) => {
+      const digest = createHash("sha256")
+        .update(readFileSync(join(fixture.root, fixture.implementationPath)))
+        .digest("hex");
+      record.runtimeEvidence = [`hash:${fixture.implementationPath}#sha256=${digest}`];
+    });
+    assert.equal(result.errors.length, 0);
+  });
+
+  await t.test("valid zero-exit runtime receipt", (t) => {
+    const result = mutate(t, (record, fixture) => {
+      const receiptPath = "receipts/test.json";
+      mkdirSync(join(fixture.root, "receipts"), { recursive: true });
+      writeFileSync(join(fixture.root, receiptPath), '{"exitCode":0}\n');
+      git(fixture.root, ["add", receiptPath]);
+      const digest = createHash("sha256")
+        .update(readFileSync(join(fixture.root, receiptPath)))
+        .digest("hex");
+      record.runtimeEvidence = [`receipt:${receiptPath}#sha256=${digest}#exit=0`];
+    });
+    assert.equal(result.errors.length, 0);
+  });
+
+  await t.test("forged runtime commit", (t) => {
+    const result = mutate(t, (record) => { record.runtimeEvidence = [`commit:${"0".repeat(40)}`]; });
+    assert.ok(result.errors.some(({ code }) => code === "runtime-commit-invalid"));
+  });
+
+  await t.test("forged runtime hash", (t) => {
+    const result = mutate(t, (record, fixture) => {
+      record.runtimeEvidence = [`hash:${fixture.implementationPath}#sha256=${"0".repeat(64)}`];
+    });
+    assert.ok(result.errors.some(({ code }) => code === "runtime-hash-invalid"));
+  });
+
+  await t.test("forged runtime receipt", (t) => {
+    const result = mutate(t, (record) => {
+      record.runtimeEvidence = [
+        `receipt:web/src/Complete.test.ts#sha256=${"0".repeat(64)}#exit=0`,
+      ];
+    });
+    assert.ok(result.errors.some(({ code }) => code === "runtime-receipt-invalid"));
   });
 });
 

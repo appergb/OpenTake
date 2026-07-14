@@ -136,9 +136,17 @@
 
 | 原始行 | Candidate ID | Gap group |
 |---:|---|---|
+| 7 | `doc-e78f9ac965173a39` | documentation |
+| 11 | `doc-0ac24fddd4013df7` | documentation |
+| 20 | `doc-9da2b92ccd8d8400` | documentation |
+| 27 | `doc-04d35f76871cb772` | documentation |
 | 35 | `doc-0100da1e54423a8a` | media-render-playback-export |
+| 40 | `doc-30a91e62a1dd765d` | documentation |
+| 45 | `doc-c04af382f1643cb0` | documentation |
 | 50 | `doc-d6cea2543d472f23` | preview-timeline |
 | 55 | `doc-b03d7fd0c59f44ab` | agent-settings-generation |
+| 65 | `doc-b2922739480c9864` | documentation |
 | 74 | `doc-2d97f5cb55065d5d` | agent-settings-generation |
 | 80 | `doc-96b289d64d013bf3` | agent-settings-generation |
+| 104 | `doc-a70454cfbc57828b` | agent-settings-generation |
 | 118 | `doc-4c1feb508ee96cc8` | agent-settings-generation |

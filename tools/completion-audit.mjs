@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const DEFAULT_FILE_INVENTORY_PATH = "docs/audit/2026-07-14/repository-files.json";
@@ -3533,7 +3533,6 @@ const DOCUMENT_ARRAY_FIELDS = [
   "acceptanceCriteria",
 ];
 const DOCUMENT_IMPLEMENTATION_FIELDS = [
-  "uiEntry",
   "react",
   "storeApi",
   "tauri",
@@ -3551,11 +3550,6 @@ function nonEmptyString(value) {
 
 function nonEmptyStringArray(value) {
   return Array.isArray(value) && value.some(nonEmptyString);
-}
-
-function implementationProvenance(value) {
-  return Array.isArray(value)
-    && value.some((item) => nonEmptyString(item) && item.startsWith("implementation:"));
 }
 
 function duplicateCount(values) {
@@ -3605,6 +3599,190 @@ function readDocumentAuditFile(auditDirectory, name, collectionName, errors) {
   return parsed[collectionName];
 }
 
+function pathInsideRoot(root, value) {
+  if (typeof value !== "string" || value === "" || isAbsolute(value)) return null;
+  const normalized = normalizePath(value);
+  const absolute = resolve(root, normalized);
+  const inside = relative(root, absolute);
+  if (inside === "" || inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
+    return null;
+  }
+  return { normalized, absolute };
+}
+
+function trackedRegularFile(root, trackedPaths, value) {
+  const resolved = pathInsideRoot(root, value);
+  if (!resolved) return { status: "invalid", ...resolved };
+  if (!existsSync(resolved.absolute)) return { status: "missing", ...resolved };
+  if (!lstatSync(resolved.absolute).isFile()) return { status: "not-file", ...resolved };
+  if (!trackedPaths.has(resolved.normalized)) return { status: "untracked", ...resolved };
+  return { status: "valid", ...resolved };
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function sourceDeclaresSymbol(path, source, symbol) {
+  if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(symbol)) return false;
+  const escaped = escapeRegExp(symbol);
+  if (path.endsWith(".rs")) {
+    return new RegExp(
+      `\\b(?:fn|struct|enum|trait|type|const|static|mod)\\s+${escaped}\\b|\\bmacro_rules!\\s*${escaped}\\b`,
+    ).test(source);
+  }
+  if (/\\.(?:[cm]?[jt]sx?)$/.test(path)) {
+    const declaration = new RegExp(
+      `\\b(?:function|class|interface|type|enum|const|let|var)\\s+${escaped}\\b`,
+    );
+    const method = new RegExp(
+      `(?:^|\\n)\\s*(?:(?:public|private|protected|static|async|get|set|readonly|abstract|override)\\s+)*${escaped}\\s*(?:<[^>\\n]*>)?\\s*\\([^;]{0,2000}?\\)\\s*(?::[^={;\\n]+)?\\s*\\{`,
+    );
+    return declaration.test(source) || method.test(source);
+  }
+  if (path.endsWith(".py")) {
+    return new RegExp(`(?:^|\\n)\\s*(?:async\\s+)?(?:def|class)\\s+${escaped}\\b`).test(source);
+  }
+  return new RegExp(
+    `\\b(?:fn|function|struct|enum|class|interface|type|const|let|var|trait|mod)\\s+${escaped}\\b`,
+  ).test(source);
+}
+
+function sourceDeclaresTest(path, source, name) {
+  if (path.endsWith(".rs")) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return false;
+    return new RegExp(`\\bfn\\s+${escapeRegExp(name)}\\s*\\(`).test(source);
+  }
+  const escaped = escapeRegExp(name);
+  return new RegExp(`\\b(?:test|it)\\s*\\(\\s*["'\`]${escaped}["'\`]`).test(source);
+}
+
+function validateImplementationEvidence(
+  root,
+  trackedPaths,
+  evidence,
+  candidateId,
+  errors,
+) {
+  const match = /^code:([^#\n]+)#([A-Za-z_$][A-Za-z0-9_$]*)$/.exec(evidence);
+  if (!match) {
+    pushVerificationError(
+      errors,
+      "invalid-implementation-evidence",
+      `implementation evidence must match code:<tracked-file>#<exact-symbol>: ${evidence}`,
+      candidateId,
+    );
+    return false;
+  }
+  const [, path, symbol] = match;
+  const file = trackedRegularFile(root, trackedPaths, path);
+  if (file.status === "missing") {
+    pushVerificationError(errors, "implementation-path-missing", `missing implementation path: ${path}`, candidateId);
+    return false;
+  }
+  if (file.status === "untracked") {
+    pushVerificationError(errors, "implementation-path-untracked", `untracked implementation path: ${path}`, candidateId);
+    return false;
+  }
+  if (file.status !== "valid") {
+    pushVerificationError(errors, "invalid-implementation-evidence", `implementation path is not a tracked file: ${path}`, candidateId);
+    return false;
+  }
+  const source = readFileSync(file.absolute, "utf8");
+  if (!sourceDeclaresSymbol(path, source, symbol)) {
+    pushVerificationError(errors, "implementation-symbol-missing", `implementation symbol is absent: ${path}#${symbol}`, candidateId);
+    return false;
+  }
+  return true;
+}
+
+function validateTestEvidence(root, trackedPaths, evidence, candidateId, errors) {
+  const match = /^test:([^#\n]+)#([^#\n]+)$/.exec(evidence);
+  if (!match) {
+    pushVerificationError(
+      errors,
+      "invalid-test-evidence",
+      `test evidence must match test:<tracked-file>#<exact-test-name>: ${evidence}`,
+      candidateId,
+    );
+    return false;
+  }
+  const [, path, name] = match;
+  const file = trackedRegularFile(root, trackedPaths, path);
+  if (file.status === "missing") {
+    pushVerificationError(errors, "test-path-missing", `missing test path: ${path}`, candidateId);
+    return false;
+  }
+  if (file.status === "untracked") {
+    pushVerificationError(errors, "test-path-untracked", `untracked test path: ${path}`, candidateId);
+    return false;
+  }
+  if (file.status !== "valid") {
+    pushVerificationError(errors, "invalid-test-evidence", `test path is not a tracked file: ${path}`, candidateId);
+    return false;
+  }
+  const source = readFileSync(file.absolute, "utf8");
+  if (!sourceDeclaresTest(path, source, name)) {
+    pushVerificationError(errors, "test-name-missing", `test name is absent: ${path}#${name}`, candidateId);
+    return false;
+  }
+  return true;
+}
+
+function validateRuntimeEvidence(root, trackedPaths, evidence, candidateId, errors) {
+  const commit = /^commit:([0-9a-f]{40})$/.exec(evidence);
+  if (commit) {
+    try {
+      execFileSync("git", ["-C", root, "cat-file", "-e", `${commit[1]}^{commit}`], {
+        stdio: "ignore",
+      });
+      execFileSync("git", ["-C", root, "merge-base", "--is-ancestor", commit[1], "HEAD"], {
+        stdio: "ignore",
+      });
+      return true;
+    } catch {
+      pushVerificationError(errors, "runtime-commit-invalid", `runtime commit is absent or not an ancestor: ${commit[1]}`, candidateId);
+      return false;
+    }
+  }
+
+  const hash = /^hash:([^#\n]+)#sha256=([0-9a-f]{64})$/.exec(evidence);
+  if (hash) {
+    const file = trackedRegularFile(root, trackedPaths, hash[1]);
+    const actual = file.status === "valid"
+      ? createHash("sha256").update(readFileSync(file.absolute)).digest("hex")
+      : null;
+    if (actual === hash[2]) return true;
+    pushVerificationError(errors, "runtime-hash-invalid", `runtime hash cannot be verified: ${hash[1]}`, candidateId);
+    return false;
+  }
+
+  const receipt = /^receipt:([^#\n]+)#sha256=([0-9a-f]{64})#exit=0$/.exec(evidence);
+  if (receipt) {
+    const file = trackedRegularFile(root, trackedPaths, receipt[1]);
+    if (file.status === "valid") {
+      const bytes = readFileSync(file.absolute);
+      const digest = createHash("sha256").update(bytes).digest("hex");
+      try {
+        const parsed = JSON.parse(bytes.toString("utf8"));
+        if (digest === receipt[2] && parsed?.exitCode === 0) return true;
+      } catch {
+        // The common error below is deliberately stable for malformed receipts.
+      }
+    }
+    pushVerificationError(errors, "runtime-receipt-invalid", `runtime receipt cannot be verified: ${receipt[1]}`, candidateId);
+    return false;
+  }
+
+  pushVerificationError(
+    errors,
+    "invalid-runtime-evidence",
+    `runtime evidence must be a verifiable commit, hash, or exit receipt: ${evidence}`,
+    candidateId,
+  );
+  return false;
+}
+
 export function verifyAudit(root, auditDir, scope) {
   if (scope !== "documents") {
     throw new Error(`unsupported verification scope: ${scope}`);
@@ -3612,18 +3790,39 @@ export function verifyAudit(root, auditDir, scope) {
   const repositoryRoot = resolve(root);
   const auditDirectory = resolve(repositoryRoot, auditDir);
   const errors = [];
-  const candidates = readDocumentAuditFile(
-    auditDirectory,
-    "document-candidates.json",
-    "candidates",
-    errors,
-  );
-  const records = readDocumentAuditFile(
-    auditDirectory,
-    "requirements.json",
-    "records",
-    errors,
-  );
+  const auditRelative = relative(repositoryRoot, auditDirectory);
+  const auditOutsideRoot = auditRelative === ".."
+    || auditRelative.startsWith(`..${sep}`)
+    || isAbsolute(auditRelative);
+  if (auditOutsideRoot) {
+    pushVerificationError(
+      errors,
+      "audit-directory-outside-root",
+      "audit directory must remain inside the repository root",
+    );
+  }
+  const candidates = auditOutsideRoot
+    ? []
+    : readDocumentAuditFile(
+      auditDirectory,
+      "document-candidates.json",
+      "candidates",
+      errors,
+    );
+  const records = auditOutsideRoot
+    ? []
+    : readDocumentAuditFile(
+      auditDirectory,
+      "requirements.json",
+      "records",
+      errors,
+    );
+  let trackedPaths = new Set();
+  try {
+    trackedPaths = new Set(readTrackedFiles(repositoryRoot));
+  } catch (error) {
+    pushVerificationError(errors, "repository-index-unavailable", error.message);
+  }
 
   const candidateIds = candidates
     .map((candidate) => candidate?.id)
@@ -3672,6 +3871,36 @@ export function verifyAudit(root, auditDir, scope) {
         "candidate source must contain a string path and integer line",
         candidate.id,
       );
+    } else {
+      const sourceFile = trackedRegularFile(repositoryRoot, trackedPaths, candidate.path);
+      if (sourceFile.status === "missing") {
+        pushVerificationError(errors, "candidate-source-missing", `candidate source is missing: ${candidate.path}`, candidate.id);
+      } else if (sourceFile.status === "untracked") {
+        pushVerificationError(errors, "candidate-source-untracked", `candidate source is untracked: ${candidate.path}`, candidate.id);
+      } else if (sourceFile.status !== "valid") {
+        pushVerificationError(errors, "invalid-candidate", `candidate source is not a tracked file: ${candidate.path}`, candidate.id);
+      } else {
+        const derived = extractDocumentCandidates(
+          candidate.path,
+          readFileSync(sourceFile.absolute, "utf8"),
+        ).find((item) => item.line === candidate.line);
+        if (!derived) {
+          pushVerificationError(errors, "candidate-source-signal-missing", `candidate signal is absent at ${candidate.path}:${candidate.line}`, candidate.id);
+        } else {
+          if (candidate.text !== derived.text) {
+            pushVerificationError(errors, "candidate-text-drift", `candidate text drifted at ${candidate.path}:${candidate.line}`, candidate.id);
+          }
+          if (candidate.signal !== derived.signal) {
+            pushVerificationError(errors, "candidate-signal-drift", `candidate signal drifted at ${candidate.path}:${candidate.line}`, candidate.id);
+          }
+          if (candidate.heading !== derived.heading) {
+            pushVerificationError(errors, "candidate-heading-drift", `candidate heading drifted at ${candidate.path}:${candidate.line}`, candidate.id);
+          }
+          if (candidate.id !== derived.id) {
+            pushVerificationError(errors, "candidate-id-mismatch", `candidate ID does not derive from current source: ${candidate.id}`, candidate.id);
+          }
+        }
+      }
     }
     if (!candidatesById.has(candidate.id)) candidatesById.set(candidate.id, candidate);
   }
@@ -3839,27 +4068,42 @@ export function verifyAudit(root, auditDir, scope) {
     }
 
     if (record.status === "complete") {
-      const hasImplementation = DOCUMENT_IMPLEMENTATION_FIELDS
-        .some((field) => nonEmptyStringArray(record[field]))
-        || implementationProvenance(record.provenance);
+      const implementationEvidence = DOCUMENT_IMPLEMENTATION_FIELDS
+        .flatMap((field) => Array.isArray(record[field]) ? record[field] : []);
+      const hasImplementation = implementationEvidence.length > 0;
+      for (const evidence of implementationEvidence) {
+        validateImplementationEvidence(
+          repositoryRoot,
+          trackedPaths,
+          evidence,
+          candidateId,
+          errors,
+        );
+      }
       if (!hasImplementation) {
         pushVerificationError(
           errors,
           "complete-without-implementation",
-          "complete requirement needs implementation evidence or implementation-prefixed provenance",
+          "complete requirement needs exact code:<tracked-file>#<symbol> evidence",
           candidateId,
         );
       }
-      if (
-        !nonEmptyStringArray(record.automatedTests)
-        && !nonEmptyStringArray(record.runtimeEvidence)
-      ) {
+      const automatedTests = Array.isArray(record.automatedTests)
+        ? record.automatedTests
+        : [];
+      for (const evidence of automatedTests) {
+        validateTestEvidence(repositoryRoot, trackedPaths, evidence, candidateId, errors);
+      }
+      if (automatedTests.length === 0) {
         pushVerificationError(
           errors,
           "complete-without-verification",
-          "complete requirement needs automated or runtime verification evidence",
+          "complete requirement needs exact test:<tracked-file>#<test-name> evidence",
           candidateId,
         );
+      }
+      for (const evidence of Array.isArray(record.runtimeEvidence) ? record.runtimeEvidence : []) {
+        validateRuntimeEvidence(repositoryRoot, trackedPaths, evidence, candidateId, errors);
       }
     }
 

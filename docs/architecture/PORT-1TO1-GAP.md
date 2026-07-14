@@ -206,6 +206,7 @@
 
 | 原始行 | Candidate ID | Gap group |
 |---:|---|---|
+| 42 | `doc-f76a4690eac1c241` | media-library |
 | 106 | `doc-4fef1bcb26796c23` | home-shell |
 | 157 | `doc-c99689011d01e778` | home-shell |
 | 176 | `doc-653aa10c9f19799b` | accessibility-polish |
