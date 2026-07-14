@@ -528,7 +528,9 @@ Run:
 
 ```bash
 git -C ../palmier-pro-upstream fetch --prune origin
-git fetch --prune origin H-Chris233 cuic19053-hue
+git fetch --prune origin
+git fetch --prune H-Chris233
+git fetch --prune cuic19053-hue
 ```
 
 Expected: remote-tracking refs update; neither source worktree gains file changes. If Git transport is unavailable, retrieve refs/trees through authenticated GitHub Git Data API, store the transport limitation, and require exact SHA/tree readback before continuing.
@@ -612,9 +614,9 @@ git commit -m "docs(audit): reconcile every OpenTake planning requirement"
 
 Audit Home, editor shell/title bar, Media/Library, Preview, Timeline, Inspector, Agent, Settings, Export/Save As, dialogs, dropdowns, popovers, context menus, and empty/error states. Resolve each handler through stores/actions/API/Tauri commands to Rust symbols and return events/snapshots.
 
-- [ ] **Step 2: Add component tests for candidate controls with missing deterministic coverage**
+- [ ] **Step 2: Reproduce controls with missing deterministic coverage**
 
-For each control lacking a component or interaction test, first write a failing Vitest test that renders the owning component, invokes the exact pointer/keyboard event, and asserts the expected store/API call plus visible state. Then implement only real defects found by that test. Product fixes discovered here receive their own commit and requirement/control IDs.
+For each control lacking a component or interaction test, define the exact Vitest test case that would render the owning component, invoke the pointer/keyboard event, and assert the expected store/API call plus visible state. Run the test in a temporary patch when practical. If it passes, record the command and output as characterization evidence. If it fails, record the exact test, failure, acceptance criterion, and gap group; do not mix the product fix into this audit task.
 
 - [ ] **Step 3: Exercise browser-capable paths**
 
@@ -637,11 +639,11 @@ The reviewer samples source paths and reruns high-risk interactions. Any silent 
 Run: `node tools/completion-audit.mjs verify --root . --audit docs/audit/2026-07-14 --scope controls --out docs/audit/2026-07-14/control-verification.json`  
 Expected: exit 0, every candidate ID covered, no unverified controls, no complete control without a handler trace and runtime or deterministic interaction evidence.
 
-- [ ] **Step 8: Commit interface evidence and any independently reviewed fixes**
+- [ ] **Step 8: Commit interface evidence**
 
 ```bash
-git add web src-tauri crates docs/audit/2026-07-14
-git commit -m "test(ui): verify every OpenTake interface control"
+git add docs/audit/2026-07-14
+git commit -m "docs(audit): trace every OpenTake interface control"
 ```
 
 ### Task 8: Fail-closed coverage verifier and gap grouping
