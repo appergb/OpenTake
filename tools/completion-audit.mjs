@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
@@ -3568,11 +3569,37 @@ function pushVerificationError(errors, code, message, candidateId = null) {
   errors.push({ code, candidateId, message });
 }
 
-function readDocumentAuditFile(auditDirectory, name, collectionName, errors) {
+function realPathWithinRoot(root, absolute) {
+  try {
+    const real = realpathSync(absolute);
+    const inside = relative(root, real);
+    if (inside === "" || inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
+      return null;
+    }
+    return real;
+  } catch {
+    return null;
+  }
+}
+
+function readDocumentAuditFile(root, auditDirectory, name, collectionName, errors) {
   const path = resolve(auditDirectory, name);
+  if (!existsSync(path)) {
+    pushVerificationError(errors, "missing-audit-file", `${name} is missing`);
+    return [];
+  }
+  const real = realPathWithinRoot(root, path);
+  if (!lstatSync(path).isFile() || !real) {
+    pushVerificationError(
+      errors,
+      "audit-file-symlink-escape",
+      `${name} must be a real regular file confined to the repository`,
+    );
+    return [];
+  }
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync(path, "utf8"));
+    parsed = JSON.parse(readFileSync(real, "utf8"));
   } catch (error) {
     pushVerificationError(
       errors,
@@ -3614,47 +3641,230 @@ function trackedRegularFile(root, trackedPaths, value) {
   const resolved = pathInsideRoot(root, value);
   if (!resolved) return { status: "invalid", ...resolved };
   if (!existsSync(resolved.absolute)) return { status: "missing", ...resolved };
-  if (!lstatSync(resolved.absolute).isFile()) return { status: "not-file", ...resolved };
+  const stat = lstatSync(resolved.absolute);
+  if (stat.isSymbolicLink()) return { status: "symlink", ...resolved };
+  if (!stat.isFile()) return { status: "not-file", ...resolved };
+  const real = realPathWithinRoot(root, resolved.absolute);
+  if (!real) return { status: "realpath-escape", ...resolved };
   if (!trackedPaths.has(resolved.normalized)) return { status: "untracked", ...resolved };
-  return { status: "valid", ...resolved };
+  return { status: "valid", real, ...resolved };
 }
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+let cachedTypeScript;
+
+function typeScriptCompiler() {
+  if (!cachedTypeScript) {
+    const require = createRequire(new URL("../web/package.json", import.meta.url));
+    cachedTypeScript = require("typescript");
+  }
+  return cachedTypeScript;
+}
+
+function typeScriptSourceFile(path, source) {
+  const ts = typeScriptCompiler();
+  const kind = path.endsWith(".tsx")
+    ? ts.ScriptKind.TSX
+    : path.endsWith(".jsx")
+      ? ts.ScriptKind.JSX
+      : path.endsWith(".js") || path.endsWith(".mjs") || path.endsWith(".cjs")
+        ? ts.ScriptKind.JS
+        : ts.ScriptKind.TS;
+  return ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, kind);
+}
+
+function typeScriptNameMatches(ts, name, expected) {
+  return Boolean(name) && (
+    (ts.isIdentifier(name) && name.text === expected)
+    || (ts.isStringLiteral(name) && name.text === expected)
+  );
+}
+
+function typeScriptDeclaresSymbol(path, source, symbol) {
+  const ts = typeScriptCompiler();
+  const sourceFile = typeScriptSourceFile(path, source);
+  let found = false;
+  const visit = (node) => {
+    if (found) return;
+    if (
+      (
+        ts.isFunctionDeclaration(node)
+        || ts.isClassDeclaration(node)
+        || ts.isInterfaceDeclaration(node)
+        || ts.isTypeAliasDeclaration(node)
+        || ts.isEnumDeclaration(node)
+        || ts.isMethodDeclaration(node)
+        || ts.isGetAccessorDeclaration(node)
+        || ts.isSetAccessorDeclaration(node)
+        || ts.isPropertyDeclaration(node)
+        || ts.isMethodSignature(node)
+        || ts.isPropertySignature(node)
+      )
+      && typeScriptNameMatches(ts, node.name, symbol)
+    ) {
+      found = true;
+      return;
+    }
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === symbol) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
+}
+
+function stripRustCommentsAndLiterals(source) {
+  const output = [...source];
+  const blank = (start, end) => {
+    for (let cursor = start; cursor < end; cursor += 1) {
+      if (output[cursor] !== "\n" && output[cursor] !== "\r") output[cursor] = " ";
+    }
+  };
+  let index = 0;
+  while (index < source.length) {
+    if (source.startsWith("//", index)) {
+      const lineEnd = source.indexOf("\n", index + 2);
+      const end = lineEnd === -1 ? source.length : lineEnd;
+      blank(index, end);
+      index = end;
+      continue;
+    }
+    if (source.startsWith("/*", index)) {
+      const start = index;
+      index += 2;
+      let depth = 1;
+      while (index < source.length && depth > 0) {
+        if (source.startsWith("/*", index)) {
+          depth += 1;
+          index += 2;
+        } else if (source.startsWith("*/", index)) {
+          depth -= 1;
+          index += 2;
+        } else {
+          index += 1;
+        }
+      }
+      blank(start, index);
+      continue;
+    }
+
+    const raw = /^(?:br|rb|r)(#{0,255})"/.exec(source.slice(index));
+    if (raw) {
+      const start = index;
+      const closing = `"${raw[1]}`;
+      index += raw[0].length;
+      const closingIndex = source.indexOf(closing, index);
+      index = closingIndex === -1 ? source.length : closingIndex + closing.length;
+      blank(start, index);
+      continue;
+    }
+
+    const stringPrefixLength = source.startsWith('b"', index) || source.startsWith('c"', index)
+      ? 2
+      : source[index] === '"'
+        ? 1
+        : 0;
+    if (stringPrefixLength > 0) {
+      const start = index;
+      index += stringPrefixLength;
+      while (index < source.length) {
+        if (source[index] === "\\") index += 2;
+        else if (source[index] === '"') {
+          index += 1;
+          break;
+        } else index += 1;
+      }
+      blank(start, index);
+      continue;
+    }
+
+    const character = /^(?:b)?'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]{1,6}\}|.)|[^\\'\r\n])'/u.exec(source.slice(index));
+    if (character) {
+      blank(index, index + character[0].length);
+      index += character[0].length;
+      continue;
+    }
+    index += 1;
+  }
+  return output.join("");
+}
+
+function stripRustMacroInvocations(source) {
+  const output = [...source];
+  const macro = /(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*[A-Za-z_][A-Za-z0-9_]*\s*!\s*([({[])/g;
+  const closing = { "(": ")", "{": "}", "[": "]" };
+  for (const match of source.matchAll(macro)) {
+    const open = match.index + match[0].lastIndexOf(match[1]);
+    const stack = [closing[match[1]]];
+    let index = open + 1;
+    while (index < source.length && stack.length > 0) {
+      const character = source[index];
+      if (closing[character]) stack.push(closing[character]);
+      else if (character === stack.at(-1)) stack.pop();
+      index += 1;
+    }
+    for (let cursor = match.index; cursor < index; cursor += 1) {
+      if (output[cursor] !== "\n" && output[cursor] !== "\r") output[cursor] = " ";
+    }
+    macro.lastIndex = index;
+  }
+  return output.join("");
+}
+
+function rustCodeTokens(source) {
+  return stripRustMacroInvocations(stripRustCommentsAndLiterals(source));
+}
+
 function sourceDeclaresSymbol(path, source, symbol) {
   if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(symbol)) return false;
-  const escaped = escapeRegExp(symbol);
   if (path.endsWith(".rs")) {
+    const escaped = escapeRegExp(symbol);
+    const tokens = rustCodeTokens(source);
     return new RegExp(
       `\\b(?:fn|struct|enum|trait|type|const|static|mod)\\s+${escaped}\\b|\\bmacro_rules!\\s*${escaped}\\b`,
-    ).test(source);
+    ).test(tokens);
   }
-  if (/\\.(?:[cm]?[jt]sx?)$/.test(path)) {
-    const declaration = new RegExp(
-      `\\b(?:function|class|interface|type|enum|const|let|var)\\s+${escaped}\\b`,
-    );
-    const method = new RegExp(
-      `(?:^|\\n)\\s*(?:(?:public|private|protected|static|async|get|set|readonly|abstract|override)\\s+)*${escaped}\\s*(?:<[^>\\n]*>)?\\s*\\([^;]{0,2000}?\\)\\s*(?::[^={;\\n]+)?\\s*\\{`,
-    );
-    return declaration.test(source) || method.test(source);
+  if (/\.(?:[cm]?[jt]sx?)$/.test(path)) {
+    return typeScriptDeclaresSymbol(path, source, symbol);
   }
-  if (path.endsWith(".py")) {
-    return new RegExp(`(?:^|\\n)\\s*(?:async\\s+)?(?:def|class)\\s+${escaped}\\b`).test(source);
-  }
-  return new RegExp(
-    `\\b(?:fn|function|struct|enum|class|interface|type|const|let|var|trait|mod)\\s+${escaped}\\b`,
-  ).test(source);
+  return false;
 }
 
 function sourceDeclaresTest(path, source, name) {
   if (path.endsWith(".rs")) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return false;
-    return new RegExp(`\\bfn\\s+${escapeRegExp(name)}\\s*\\(`).test(source);
+    const tokens = rustCodeTokens(source);
+    const attribute = String.raw`#\s*\[\s*(?:test|tokio\s*::\s*test|async_std\s*::\s*test)(?:\s*\([^\]]*\))?\s*\]`;
+    const declaration = String.raw`\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+${escapeRegExp(name)}\s*\(`;
+    return new RegExp(`${attribute}${declaration}`).test(tokens);
   }
-  const escaped = escapeRegExp(name);
-  return new RegExp(`\\b(?:test|it)\\s*\\(\\s*["'\`]${escaped}["'\`]`).test(source);
+  if (!/\.(?:[cm]?[jt]sx?)$/.test(path)) return false;
+  const ts = typeScriptCompiler();
+  const sourceFile = typeScriptSourceFile(path, source);
+  let found = false;
+  const visit = (node) => {
+    if (found) return;
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      const [first] = node.arguments;
+      if (
+        (node.expression.text === "test" || node.expression.text === "it")
+        && first
+        && (ts.isStringLiteral(first) || ts.isNoSubstitutionTemplateLiteral(first))
+        && first.text === name
+      ) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
 }
 
 function validateImplementationEvidence(
@@ -3684,11 +3894,19 @@ function validateImplementationEvidence(
     pushVerificationError(errors, "implementation-path-untracked", `untracked implementation path: ${path}`, candidateId);
     return false;
   }
+  if (file.status === "realpath-escape") {
+    pushVerificationError(errors, "implementation-path-escape", `implementation path escapes repository by symlink: ${path}`, candidateId);
+    return false;
+  }
+  if (file.status === "symlink") {
+    pushVerificationError(errors, "implementation-path-symlink", `implementation path is a symlink: ${path}`, candidateId);
+    return false;
+  }
   if (file.status !== "valid") {
     pushVerificationError(errors, "invalid-implementation-evidence", `implementation path is not a tracked file: ${path}`, candidateId);
     return false;
   }
-  const source = readFileSync(file.absolute, "utf8");
+  const source = readFileSync(file.real, "utf8");
   if (!sourceDeclaresSymbol(path, source, symbol)) {
     pushVerificationError(errors, "implementation-symbol-missing", `implementation symbol is absent: ${path}#${symbol}`, candidateId);
     return false;
@@ -3717,11 +3935,19 @@ function validateTestEvidence(root, trackedPaths, evidence, candidateId, errors)
     pushVerificationError(errors, "test-path-untracked", `untracked test path: ${path}`, candidateId);
     return false;
   }
+  if (file.status === "realpath-escape") {
+    pushVerificationError(errors, "test-path-escape", `test path escapes repository by symlink: ${path}`, candidateId);
+    return false;
+  }
+  if (file.status === "symlink") {
+    pushVerificationError(errors, "test-path-symlink", `test path is a symlink: ${path}`, candidateId);
+    return false;
+  }
   if (file.status !== "valid") {
     pushVerificationError(errors, "invalid-test-evidence", `test path is not a tracked file: ${path}`, candidateId);
     return false;
   }
-  const source = readFileSync(file.absolute, "utf8");
+  const source = readFileSync(file.real, "utf8");
   if (!sourceDeclaresTest(path, source, name)) {
     pushVerificationError(errors, "test-name-missing", `test name is absent: ${path}#${name}`, candidateId);
     return false;
@@ -3729,71 +3955,21 @@ function validateTestEvidence(root, trackedPaths, evidence, candidateId, errors)
   return true;
 }
 
-function validateRuntimeEvidence(root, trackedPaths, evidence, candidateId, errors) {
-  const commit = /^commit:([0-9a-f]{40})$/.exec(evidence);
-  if (commit) {
-    try {
-      execFileSync("git", ["-C", root, "cat-file", "-e", `${commit[1]}^{commit}`], {
-        stdio: "ignore",
-      });
-      execFileSync("git", ["-C", root, "merge-base", "--is-ancestor", commit[1], "HEAD"], {
-        stdio: "ignore",
-      });
-      return true;
-    } catch {
-      pushVerificationError(errors, "runtime-commit-invalid", `runtime commit is absent or not an ancestor: ${commit[1]}`, candidateId);
-      return false;
-    }
-  }
-
-  const hash = /^hash:([^#\n]+)#sha256=([0-9a-f]{64})$/.exec(evidence);
-  if (hash) {
-    const file = trackedRegularFile(root, trackedPaths, hash[1]);
-    const actual = file.status === "valid"
-      ? createHash("sha256").update(readFileSync(file.absolute)).digest("hex")
-      : null;
-    if (actual === hash[2]) return true;
-    pushVerificationError(errors, "runtime-hash-invalid", `runtime hash cannot be verified: ${hash[1]}`, candidateId);
-    return false;
-  }
-
-  const receipt = /^receipt:([^#\n]+)#sha256=([0-9a-f]{64})#exit=0$/.exec(evidence);
-  if (receipt) {
-    const file = trackedRegularFile(root, trackedPaths, receipt[1]);
-    if (file.status === "valid") {
-      const bytes = readFileSync(file.absolute);
-      const digest = createHash("sha256").update(bytes).digest("hex");
-      try {
-        const parsed = JSON.parse(bytes.toString("utf8"));
-        if (digest === receipt[2] && parsed?.exitCode === 0) return true;
-      } catch {
-        // The common error below is deliberately stable for malformed receipts.
-      }
-    }
-    pushVerificationError(errors, "runtime-receipt-invalid", `runtime receipt cannot be verified: ${receipt[1]}`, candidateId);
-    return false;
-  }
-
-  pushVerificationError(
-    errors,
-    "invalid-runtime-evidence",
-    `runtime evidence must be a verifiable commit, hash, or exit receipt: ${evidence}`,
-    candidateId,
-  );
-  return false;
-}
-
 export function verifyAudit(root, auditDir, scope) {
   if (scope !== "documents") {
     throw new Error(`unsupported verification scope: ${scope}`);
   }
-  const repositoryRoot = resolve(root);
-  const auditDirectory = resolve(repositoryRoot, auditDir);
+  const requestedRepositoryRoot = resolve(root);
+  const requestedAuditDirectory = resolve(requestedRepositoryRoot, auditDir);
+  const repositoryRoot = realpathSync(requestedRepositoryRoot);
   const errors = [];
-  const auditRelative = relative(repositoryRoot, auditDirectory);
+  const auditRelative = relative(requestedRepositoryRoot, requestedAuditDirectory);
   const auditOutsideRoot = auditRelative === ".."
     || auditRelative.startsWith(`..${sep}`)
     || isAbsolute(auditRelative);
+  const auditDirectory = auditOutsideRoot
+    ? requestedAuditDirectory
+    : resolve(repositoryRoot, auditRelative);
   if (auditOutsideRoot) {
     pushVerificationError(
       errors,
@@ -3801,17 +3977,28 @@ export function verifyAudit(root, auditDir, scope) {
       "audit directory must remain inside the repository root",
     );
   }
-  const candidates = auditOutsideRoot
+  let auditSymlinkEscape = false;
+  if (!auditOutsideRoot && existsSync(auditDirectory) && !realPathWithinRoot(repositoryRoot, auditDirectory)) {
+    auditSymlinkEscape = true;
+    pushVerificationError(
+      errors,
+      "audit-directory-symlink-escape",
+      "audit directory resolves outside the repository root",
+    );
+  }
+  const candidates = auditOutsideRoot || auditSymlinkEscape
     ? []
     : readDocumentAuditFile(
+      repositoryRoot,
       auditDirectory,
       "document-candidates.json",
       "candidates",
       errors,
     );
-  const records = auditOutsideRoot
+  const records = auditOutsideRoot || auditSymlinkEscape
     ? []
     : readDocumentAuditFile(
+      repositoryRoot,
       auditDirectory,
       "requirements.json",
       "records",
@@ -3877,12 +4064,16 @@ export function verifyAudit(root, auditDir, scope) {
         pushVerificationError(errors, "candidate-source-missing", `candidate source is missing: ${candidate.path}`, candidate.id);
       } else if (sourceFile.status === "untracked") {
         pushVerificationError(errors, "candidate-source-untracked", `candidate source is untracked: ${candidate.path}`, candidate.id);
+      } else if (sourceFile.status === "realpath-escape") {
+        pushVerificationError(errors, "candidate-source-symlink-escape", `candidate source escapes repository by symlink: ${candidate.path}`, candidate.id);
+      } else if (sourceFile.status === "symlink") {
+        pushVerificationError(errors, "candidate-source-symlink", `candidate source is a symlink: ${candidate.path}`, candidate.id);
       } else if (sourceFile.status !== "valid") {
         pushVerificationError(errors, "invalid-candidate", `candidate source is not a tracked file: ${candidate.path}`, candidate.id);
       } else {
         const derived = extractDocumentCandidates(
           candidate.path,
-          readFileSync(sourceFile.absolute, "utf8"),
+          readFileSync(sourceFile.real, "utf8"),
         ).find((item) => item.line === candidate.line);
         if (!derived) {
           pushVerificationError(errors, "candidate-source-signal-missing", `candidate signal is absent at ${candidate.path}:${candidate.line}`, candidate.id);
@@ -4103,7 +4294,12 @@ export function verifyAudit(root, auditDir, scope) {
         );
       }
       for (const evidence of Array.isArray(record.runtimeEvidence) ? record.runtimeEvidence : []) {
-        validateRuntimeEvidence(repositoryRoot, trackedPaths, evidence, candidateId, errors);
+        pushVerificationError(
+          errors,
+          "unsupported-runtime-evidence",
+          `documents scope does not accept self-reported runtime evidence: ${evidence}`,
+          candidateId,
+        );
       }
     }
 

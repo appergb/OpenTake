@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -33,6 +40,10 @@ const ts = require("typescript");
 
 function git(root, args) {
   return execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function createGitSourceFixture(t) {
@@ -1728,6 +1739,24 @@ test("verifyAudit documents rejects repositories and candidate sources that drif
     assert.ok(result.errors.some(({ code }) => code === "audit-directory-outside-root"));
   });
 
+  await t.test("internal audit symlink escaping the repository", (t) => {
+    const fixture = createDocumentVerificationFixture(t);
+    const outside = mkdtempSync(join(tmpdir(), "opentake-completion-audit-linked-"));
+    t.after(() => rmSync(outside, { recursive: true, force: true }));
+    writeFileSync(
+      join(outside, "document-candidates.json"),
+      `${JSON.stringify({ schema: 1, candidates: fixture.candidates }, null, 2)}\n`,
+    );
+    writeFileSync(
+      join(outside, "requirements.json"),
+      `${JSON.stringify({ schema: 1, records: fixture.records }, null, 2)}\n`,
+    );
+    const linkedAudit = join(fixture.root, "docs", "audit", "linked");
+    symlinkSync(outside, linkedAudit, "dir");
+    const result = verifyAudit(fixture.root, linkedAudit, "documents");
+    assert.ok(result.errors.some(({ code }) => code === "audit-directory-symlink-escape"));
+  });
+
   await t.test("missing source file", (t) => {
     const fixture = createDocumentVerificationFixture(t);
     rmSync(join(fixture.root, fixture.sourcePath));
@@ -1740,6 +1769,43 @@ test("verifyAudit documents rejects repositories and candidate sources that drif
     git(fixture.root, ["rm", "--cached", fixture.sourcePath]);
     const result = verifyAudit(fixture.root, fixture.audit, "documents");
     assert.ok(result.errors.some(({ code }) => code === "candidate-source-untracked"));
+  });
+
+  await t.test("tracked candidate source leaf symlink", (t) => {
+    const fixture = createDocumentVerificationFixture(t);
+    const outside = mkdtempSync(join(tmpdir(), "opentake-candidate-leaf-link-"));
+    t.after(() => rmSync(outside, { recursive: true, force: true }));
+    const outsideSource = join(outside, "requirements.md");
+    writeFileSync(outsideSource, "# Complete behavior\n- [ ] Incomplete behavior\n");
+    rmSync(join(fixture.root, fixture.sourcePath));
+    symlinkSync(outsideSource, join(fixture.root, fixture.sourcePath));
+    git(fixture.root, ["add", "-f", fixture.sourcePath]);
+    const result = verifyAudit(fixture.root, fixture.audit, "documents");
+    assert.ok(result.errors.some(({ code }) => code === "candidate-source-symlink"));
+  });
+
+  await t.test("candidate source ancestor symlink escape", (t) => {
+    const fixture = createDocumentVerificationFixture(t);
+    const outside = mkdtempSync(join(tmpdir(), "opentake-candidate-ancestor-link-"));
+    t.after(() => rmSync(outside, { recursive: true, force: true }));
+    writeFileSync(join(outside, "requirements.md"), "# Complete behavior\n- [ ] Incomplete behavior\n");
+    const linked = join(fixture.root, "docs", "linked");
+    symlinkSync(outside, linked, "dir");
+    git(fixture.root, ["add", "docs/linked"]);
+    const linkedPath = "docs/linked/requirements.md";
+    const candidates = extractDocumentCandidates(
+      linkedPath,
+      readFileSync(join(outside, "requirements.md"), "utf8"),
+    );
+    const records = structuredClone(fixture.records);
+    for (let index = 0; index < records.length; index += 1) {
+      records[index].candidateId = candidates[index].id;
+      records[index].id = stableId("requirement", candidates[index].id);
+      records[index].source = { path: linkedPath, line: candidates[index].line };
+    }
+    fixture.write(candidates, records);
+    const result = verifyAudit(fixture.root, fixture.audit, "documents");
+    assert.ok(result.errors.some(({ code }) => code === "candidate-source-symlink-escape"));
   });
 
   await t.test("forged candidate ID", (t) => {
@@ -1810,6 +1876,56 @@ test("verifyAudit documents rejects invalid implementation, test, and runtime ev
     });
   }
 
+  await t.test("tracked implementation leaf symlink", (t) => {
+    const result = mutate(t, (record, fixture) => {
+      const outside = mkdtempSync(join(tmpdir(), "opentake-implementation-leaf-link-"));
+      t.after(() => rmSync(outside, { recursive: true, force: true }));
+      const outsideSource = join(outside, "Complete.ts");
+      writeFileSync(outsideSource, "export function completeBehavior() { return true; }\n");
+      rmSync(join(fixture.root, fixture.implementationPath));
+      symlinkSync(outsideSource, join(fixture.root, fixture.implementationPath));
+      git(fixture.root, ["add", "-f", fixture.implementationPath]);
+    });
+    assert.ok(result.errors.some(({ code }) => code === "implementation-path-symlink"));
+  });
+
+  await t.test("implementation ancestor symlink escape", (t) => {
+    const result = mutate(t, (record, fixture) => {
+      const outside = mkdtempSync(join(tmpdir(), "opentake-implementation-ancestor-link-"));
+      t.after(() => rmSync(outside, { recursive: true, force: true }));
+      writeFileSync(join(outside, "Complete.ts"), "export function completeBehavior() { return true; }\n");
+      symlinkSync(outside, join(fixture.root, "web", "linked"), "dir");
+      git(fixture.root, ["add", "web/linked"]);
+      record.react = ["code:web/linked/Complete.ts#completeBehavior"];
+    });
+    assert.ok(result.errors.some(({ code }) => code === "implementation-path-escape"));
+  });
+
+  await t.test("tracked test leaf symlink", (t) => {
+    const result = mutate(t, (record, fixture) => {
+      const outside = mkdtempSync(join(tmpdir(), "opentake-test-leaf-link-"));
+      t.after(() => rmSync(outside, { recursive: true, force: true }));
+      const outsideSource = join(outside, "Complete.test.ts");
+      writeFileSync(outsideSource, 'test("renders complete behavior", () => true);\n');
+      rmSync(join(fixture.root, fixture.testPath));
+      symlinkSync(outsideSource, join(fixture.root, fixture.testPath));
+      git(fixture.root, ["add", "-f", fixture.testPath]);
+    });
+    assert.ok(result.errors.some(({ code }) => code === "test-path-symlink"));
+  });
+
+  await t.test("test ancestor symlink escape", (t) => {
+    const result = mutate(t, (record, fixture) => {
+      const outside = mkdtempSync(join(tmpdir(), "opentake-test-ancestor-link-"));
+      t.after(() => rmSync(outside, { recursive: true, force: true }));
+      writeFileSync(join(outside, "Complete.test.ts"), 'test("renders complete behavior", () => true);\n');
+      symlinkSync(outside, join(fixture.root, "web", "linked-tests"), "dir");
+      git(fixture.root, ["add", "web/linked-tests"]);
+      record.automatedTests = ["test:web/linked-tests/Complete.test.ts#renders complete behavior"];
+    });
+    assert.ok(result.errors.some(({ code }) => code === "test-path-escape"));
+  });
+
   await t.test("symbol use without declaration", (t) => {
     const result = mutate(t, (record, fixture) => {
       writeFileSync(
@@ -1820,24 +1936,136 @@ test("verifyAudit documents rejects invalid implementation, test, and runtime ev
     assert.ok(result.errors.some(({ code }) => code === "implementation-symbol-missing"));
   });
 
-  await t.test("valid runtime commit", (t) => {
+  for (const [name, source] of [
+    ["commented TypeScript declaration", "// export function completeBehavior() { return true; }\n"],
+    ["string-contained TypeScript declaration", 'export const note = "function completeBehavior() {}";\n'],
+  ]) {
+    await t.test(name, (t) => {
+      const result = mutate(t, (record, fixture) => {
+        writeFileSync(join(fixture.root, fixture.implementationPath), source);
+      });
+      assert.ok(result.errors.some(({ code }) => code === "implementation-symbol-missing"));
+    });
+  }
+
+  await t.test("aliased TypeScript test call is unsupported", (t) => {
+    const result = mutate(t, (record, fixture) => {
+      writeFileSync(
+        join(fixture.root, fixture.testPath),
+        'const check = test; check("renders complete behavior", () => true);\n',
+      );
+    });
+    assert.ok(result.errors.some(({ code }) => code === "test-name-missing"));
+  });
+
+  for (const [name, source] of [
+    ["commented Rust declaration", "// pub fn real_implementation() {}\n"],
+    ["string-contained Rust declaration", 'pub const NOTE: &str = r#"pub fn real_implementation() {}"#;\n'],
+    ["macro-token Rust pseudo declaration", "stringify!(fn real_implementation() {});\n"],
+  ]) {
+    await t.test(name, (t) => {
+      const result = mutate(t, (record, fixture) => {
+        const implementationPath = "crates/example/src/lib.rs";
+        mkdirSync(join(fixture.root, "crates", "example", "src"), { recursive: true });
+        writeFileSync(join(fixture.root, implementationPath), source);
+        git(fixture.root, ["add", implementationPath]);
+        record.react = [];
+        record.rust = [`code:${implementationPath}#real_implementation`];
+      });
+      assert.ok(result.errors.some(({ code }) => code === "implementation-symbol-missing"));
+    });
+  }
+
+  for (const [name, source] of [
+    ["commented TypeScript test", '// test("renders complete behavior", () => completeBehavior());\n'],
+    ["string-contained TypeScript test", 'export const note = `test("renders complete behavior", () => true)`;\n'],
+  ]) {
+    await t.test(name, (t) => {
+      const result = mutate(t, (record, fixture) => {
+        writeFileSync(join(fixture.root, fixture.testPath), source);
+      });
+      assert.ok(result.errors.some(({ code }) => code === "test-name-missing"));
+    });
+  }
+
+  await t.test("ordinary Rust function is not an automated test", (t) => {
+    const result = mutate(t, (record, fixture) => {
+      const implementationPath = "crates/example/src/lib.rs";
+      const testPath = "crates/example/tests/helper.rs";
+      mkdirSync(join(fixture.root, "crates", "example", "src"), { recursive: true });
+      mkdirSync(join(fixture.root, "crates", "example", "tests"), { recursive: true });
+      writeFileSync(join(fixture.root, implementationPath), "pub fn real_implementation() {}\n");
+      writeFileSync(join(fixture.root, testPath), "fn ordinary_helper() {}\n");
+      git(fixture.root, ["add", implementationPath, testPath]);
+      record.react = [];
+      record.rust = [`code:${implementationPath}#real_implementation`];
+      record.automatedTests = [`test:${testPath}#ordinary_helper`];
+    });
+    assert.ok(result.errors.some(({ code }) => code === "test-name-missing"));
+  });
+
+  for (const [name, testSource] of [
+    ["Rust ignore attribute is not a test", "#[ignore]\nfn ordinary_helper() {}\n"],
+    ["Rust test attribute cannot attach across another function", "#[test]\nfn different_test() {}\nfn ordinary_helper() {}\n"],
+  ]) {
+    await t.test(name, (t) => {
+      const result = mutate(t, (record, fixture) => {
+        const implementationPath = "crates/example/src/lib.rs";
+        const testPath = "crates/example/tests/helper.rs";
+        mkdirSync(join(fixture.root, "crates", "example", "src"), { recursive: true });
+        mkdirSync(join(fixture.root, "crates", "example", "tests"), { recursive: true });
+        writeFileSync(join(fixture.root, implementationPath), "pub fn real_implementation() {}\n");
+        writeFileSync(join(fixture.root, testPath), testSource);
+        git(fixture.root, ["add", implementationPath, testPath]);
+        record.react = [];
+        record.rust = [`code:${implementationPath}#real_implementation`];
+        record.automatedTests = [`test:${testPath}#ordinary_helper`];
+      });
+      assert.ok(result.errors.some(({ code }) => code === "test-name-missing"));
+    });
+  }
+
+  for (const [name, attribute] of [
+    ["tokio test attribute is supported", "#[tokio::test]\nasync"],
+    ["async-std test attribute is supported", "#[async_std::test]\nasync"],
+  ]) {
+    await t.test(name, (t) => {
+      const result = mutate(t, (record, fixture) => {
+        const implementationPath = "crates/example/src/lib.rs";
+        const testPath = "crates/example/tests/supported.rs";
+        mkdirSync(join(fixture.root, "crates", "example", "src"), { recursive: true });
+        mkdirSync(join(fixture.root, "crates", "example", "tests"), { recursive: true });
+        writeFileSync(join(fixture.root, implementationPath), "pub fn real_implementation() {}\n");
+        writeFileSync(join(fixture.root, testPath), `${attribute} fn supported_test() {}\n`);
+        git(fixture.root, ["add", implementationPath, testPath]);
+        record.react = [];
+        record.rust = [`code:${implementationPath}#real_implementation`];
+        record.automatedTests = [`test:${testPath}#supported_test`];
+      });
+      assert.equal(result.errors.length, 0, JSON.stringify(result.errors));
+    });
+  }
+
+  await t.test("runtime commit is unsupported self-report", (t) => {
     const result = mutate(t, (record, fixture) => {
       record.runtimeEvidence = [`commit:${git(fixture.root, ["rev-parse", "HEAD"])}`];
     });
-    assert.equal(result.errors.length, 0);
+    assert.ok(result.errors.some(({ code }) => code === "unsupported-runtime-evidence"));
   });
 
-  await t.test("valid runtime hash", (t) => {
+  await t.test("matching runtime hash is unsupported self-report", (t) => {
     const result = mutate(t, (record, fixture) => {
       const digest = createHash("sha256")
         .update(readFileSync(join(fixture.root, fixture.implementationPath)))
         .digest("hex");
       record.runtimeEvidence = [`hash:${fixture.implementationPath}#sha256=${digest}`];
+      record.automatedTests = [];
     });
-    assert.equal(result.errors.length, 0);
+    assert.ok(result.errors.some(({ code }) => code === "unsupported-runtime-evidence"));
+    assert.ok(result.errors.some(({ code }) => code === "complete-without-verification"));
   });
 
-  await t.test("valid zero-exit runtime receipt", (t) => {
+  await t.test("matching zero-exit runtime receipt is unsupported self-report", (t) => {
     const result = mutate(t, (record, fixture) => {
       const receiptPath = "receipts/test.json";
       mkdirSync(join(fixture.root, "receipts"), { recursive: true });
@@ -1848,19 +2076,19 @@ test("verifyAudit documents rejects invalid implementation, test, and runtime ev
         .digest("hex");
       record.runtimeEvidence = [`receipt:${receiptPath}#sha256=${digest}#exit=0`];
     });
-    assert.equal(result.errors.length, 0);
+    assert.ok(result.errors.some(({ code }) => code === "unsupported-runtime-evidence"));
   });
 
   await t.test("forged runtime commit", (t) => {
     const result = mutate(t, (record) => { record.runtimeEvidence = [`commit:${"0".repeat(40)}`]; });
-    assert.ok(result.errors.some(({ code }) => code === "runtime-commit-invalid"));
+    assert.ok(result.errors.some(({ code }) => code === "unsupported-runtime-evidence"));
   });
 
   await t.test("forged runtime hash", (t) => {
     const result = mutate(t, (record, fixture) => {
       record.runtimeEvidence = [`hash:${fixture.implementationPath}#sha256=${"0".repeat(64)}`];
     });
-    assert.ok(result.errors.some(({ code }) => code === "runtime-hash-invalid"));
+    assert.ok(result.errors.some(({ code }) => code === "unsupported-runtime-evidence"));
   });
 
   await t.test("forged runtime receipt", (t) => {
@@ -1869,8 +2097,104 @@ test("verifyAudit documents rejects invalid implementation, test, and runtime ev
         `receipt:web/src/Complete.test.ts#sha256=${"0".repeat(64)}#exit=0`,
       ];
     });
-    assert.ok(result.errors.some(({ code }) => code === "runtime-receipt-invalid"));
+    assert.ok(result.errors.some(({ code }) => code === "unsupported-runtime-evidence"));
   });
+});
+
+test("review demotions are unique and semantically bound to frozen candidates", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const audit = join(root, "docs", "audit", "2026-07-14");
+  const candidates = JSON.parse(
+    readFileSync(join(audit, "document-candidates.json"), "utf8"),
+  ).candidates;
+  const records = JSON.parse(
+    readFileSync(join(audit, "requirements.json"), "utf8"),
+  ).records;
+  const candidatesById = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+  const provenance = "review-provenance:demoted-from-complete@6e32952ccf4fa7a2fd3cdd66f327702024f4a463";
+  const demoted = records.filter((record) => record.provenance.includes(provenance));
+  assert.equal(demoted.length, 289);
+  assert.equal(new Set(demoted.map((record) => record.targetBehavior)).size, demoted.length);
+  assert.equal(
+    new Set(demoted.map((record) => JSON.stringify(record.acceptanceCriteria))).size,
+    demoted.length,
+  );
+
+  const labels = [
+    "Source binding:",
+    "Expected behavior:",
+    "Deterministic test:",
+    "Initial state/input/event:",
+    "Code/store/API/Rust effect:",
+    "Visible/returned assertion:",
+    "Evidence required:",
+  ];
+  for (const record of demoted) {
+    const candidate = candidatesById.get(record.candidateId);
+    assert.ok(candidate, record.candidateId);
+    assert.equal(record.acceptanceCriteria.length, labels.length, record.candidateId);
+    labels.forEach((label, index) => {
+      assert.ok(record.acceptanceCriteria[index].startsWith(label), `${record.candidateId} ${label}`);
+    });
+    assert.match(record.targetBehavior, new RegExp(`${escapeRegExp(candidate.path)}:${candidate.line}`));
+    assert.ok(record.acceptanceCriteria[0].includes(candidate.text), record.candidateId);
+    assert.ok(record.acceptanceCriteria[0].includes(`signal=${candidate.signal}`), record.candidateId);
+    assert.ok(
+      record.acceptanceCriteria[2].includes(record.candidateId.replace(/^doc-/, "")),
+      record.candidateId,
+    );
+    assert.match(record.acceptanceCriteria[2], /test:[^#]+#[A-Za-z_][A-Za-z0-9_]*$/);
+    assert.match(record.acceptanceCriteria[6], /code:<tracked-file>#<declared-symbol>/);
+    assert.match(record.acceptanceCriteria[6], /test:<tracked-test-file>#<exact-test-name>/);
+  }
+
+  const agent = demoted.filter(({ source }) => (
+    /^docs\/specs\/agent\/(?:1-mcp-server|4-execution-shell|10-implementation)\.md$/.test(source.path)
+  ));
+  assert.ok(agent.length > 0);
+  assert.equal(new Set(agent.map(({ targetBehavior }) => targetBehavior)).size, agent.length);
+  for (const record of agent) {
+    const candidate = candidatesById.get(record.candidateId);
+    assert.ok(record.targetBehavior.includes(candidate.text), record.candidateId);
+    assert.ok(record.acceptanceCriteria.join(" ").includes(candidate.text), record.candidateId);
+  }
+
+  const exactAgentTerms = new Map([
+    ["docs/specs/agent/1-mcp-server.md:1", ["loopback", "stateless", "origin", "content-type", "protocol version", "route", "capabilities"]],
+    ["docs/specs/agent/1-mcp-server.md:26", ["rmcp", "axum", "tower", "streamablehttpservice", "/mcp", "well-known"]],
+    ["docs/specs/agent/1-mcp-server.md:47", ["127.0.0.1", "default enabled", "idempotent", "disabled", "0.0.0.0"]],
+    ["docs/specs/agent/1-mcp-server.md:73", ["origin", "host", "403", "application/json", "415", "protocol", "400"]],
+    ["docs/specs/agent/1-mcp-server.md:90", ["name", "version", "instructions", "opentake://models/video", "opentake://models/image", "capabilities"]],
+    ["docs/specs/agent/4-execution-shell.md:1", ["execution sequence", "snapshot", "undo", "context signal", "shorten", "no panic"]],
+    ["docs/specs/agent/4-execution-shell.md:5", ["toolname", "snapshot", "expand", "run", "undo", "context signal", "shorten", "serialized"]],
+    ["docs/specs/agent/4-execution-shell.md:31", ["three-layer", "unknown fields", "non-finite", "serde path", "validation order"]],
+    ["docs/specs/agent/4-execution-shell.md:33", ["unknown fields", "nested", "allowed", "entries[3]", "no mutation"]],
+    ["docs/specs/agent/4-execution-shell.md:42", ["first non-finite", "array", "object", "value must be finite"]],
+    ["docs/specs/agent/4-execution-shell.md:55", ["keynotfound", "typemismatch", "valuenotfound", "datacorrupted", "entries[3].startframe"]],
+    ["docs/specs/agent/4-execution-shell.md:84", ["per-tool guards", "exact error messages", "no mutation", "mixed trackindex"]],
+    ["docs/specs/agent/4-execution-shell.md:97", ["assistant-only undo", "session undo stack", "user undo", "conflict", "not undoing"]],
+    ["docs/specs/agent/4-execution-shell.md:113", ["toolresult", "text", "image", "is_error", "rmcp", "calltoolresult"]],
+    ["docs/specs/agent/10-implementation.md:5", ["workspace", "lib.rs exports", "module tree", "desktop shell", "tauri"]],
+    ["docs/specs/agent/10-implementation.md:51", ["serde_path_to_error", "allowedkeys", "non-finite", "entries[3].startframe", "exact wording"]],
+    ["docs/specs/agent/10-implementation.md:85", ["os keychain", "project.json", "logs", "telemetry", "webview", "plaintext"]],
+    ["docs/specs/agent/10-implementation.md:88", ["untrusted", "plugin:{id}", "system prompt", "prompt injection", "source label"]],
+  ]);
+  for (const [key, terms] of exactAgentTerms) {
+    const [path, line] = key.split(/:(?=\d+$)/);
+    const record = agent.find((item) => item.source.path === path && item.source.line === Number(line));
+    assert.ok(record, key);
+    const contract = `${record.targetBehavior} ${record.acceptanceCriteria.slice(1, 6).join(" ")}`.toLowerCase();
+    for (const term of terms) assert.ok(contract.includes(term), `${key} missing ${term}`);
+  }
+  for (const line of [97, 113]) {
+    const record = agent.find((item) => (
+      item.source.path === "docs/specs/agent/4-execution-shell.md" && item.source.line === line
+    ));
+    assert.doesNotMatch(
+      record.acceptanceCriteria.slice(1, 6).join(" ").toLowerCase(),
+      /malformed input|unknown fields|non-finite/,
+    );
+  }
 });
 
 test("verify CLI writes failed document verification before exiting nonzero", (t) => {
