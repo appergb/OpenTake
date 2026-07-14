@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import test from "node:test";
@@ -9,10 +10,108 @@ import { fileURLToPath } from "node:url";
 import {
   buildFileInventory,
   classifyFile,
+  extractControls,
   extractDocumentCandidates,
   normalizePath,
   stableId,
 } from "./completion-audit.mjs";
+
+const require = createRequire(new URL("../web/package.json", import.meta.url));
+const ts = require("typescript");
+
+test("extractControls records labels, handlers, and panel triggers", () => {
+  const source = "export function View(){return <button aria-label=\"Export\" onClick={() => setExportOpen(true)}>Go</button>}";
+  const [control] = extractControls("web/src/View.tsx", source, ts);
+  assert.equal(control.element, "button");
+  assert.equal(control.label, "Export");
+  assert.match(control.handler, /setExportOpen/);
+  assert.equal(control.panelTrigger, true);
+});
+
+test("extractControls covers native, custom-handler, and ARIA controls in source order", () => {
+  const source = [
+    "export function View(){return <section>",
+    "  <a title=\"Documentation\" onKeyDown={openDocs}>Read docs</a>",
+    "  <input aria-label=\"Search\" onChange={(event) => setQuery(event.currentTarget.value)} disabled={busy} />",
+    "  <select title=\"Format\" onValueChange={showFormatMenu} />",
+    "  <textarea onInput={handleNotes}>Notes fallback</textarea>",
+    "  <HoverButton onPress={toggleInspector}>Inspector</HoverButton>",
+    "  <Card onSelect={() => setActivePanel(\"library\")}>Library</Card>",
+    "  <div role=\"combobox\" aria-label=\"Model\" />",
+    "  <div role=\"treeitem\">Assets</div>",
+    "  <div>Not interactive</div>",
+    "</section>}",
+  ].join("\n");
+
+  const controls = extractControls("./web\\src\\View.tsx", source, ts);
+
+  assert.deepEqual(controls.map(({ element }) => element), [
+    "a", "input", "select", "textarea", "HoverButton", "Card", "div", "div",
+  ]);
+  assert.deepEqual(controls.map(({ order }) => order), [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.deepEqual(controls.map(({ line }) => line), [2, 3, 4, 5, 6, 7, 8, 9]);
+  assert.ok(controls.every(({ column }) => Number.isInteger(column) && column > 0));
+  assert.ok(controls.every(({ path }) => path === "web/src/View.tsx"));
+  assert.equal(controls[0].label, "Documentation");
+  assert.equal(controls[3].label, "Notes fallback");
+  assert.equal(controls[4].label, "Inspector");
+  assert.equal(controls[7].label, "Assets");
+  assert.equal(controls[1].disabled, "{busy}");
+  assert.equal(controls[6].role, "combobox");
+  assert.match(controls[1].handler, /^\{\(event\)/);
+  assert.equal(controls[0].panelTrigger, true);
+  assert.equal(controls[2].panelTrigger, true);
+  assert.equal(controls[4].panelTrigger, true);
+  assert.equal(controls[5].panelTrigger, true);
+  assert.equal(controls[1].panelTrigger, false);
+  assert.deepEqual(extractControls("web/src/View.tsx", source, ts), controls);
+});
+
+test("extractControls uses columns to distinguish same-line same-tag controls", () => {
+  const source = "export const Pair = () => <div><button>One</button><button>Two</button></div>;";
+  const controls = extractControls("web/src/Pair.tsx", source, ts);
+
+  assert.equal(controls.length, 2);
+  assert.equal(controls[0].line, controls[1].line);
+  assert.notEqual(controls[0].column, controls[1].column);
+  assert.notEqual(controls[0].id, controls[1].id);
+  assert.equal(
+    controls[0].id,
+    stableId("control", `web/src/Pair.tsx:${controls[0].line}:${controls[0].column}:button`),
+  );
+  assert.deepEqual(controls.map(({ label }) => label), ["One", "Two"]);
+});
+
+test("extractControls includes every required interactive ARIA role", () => {
+  const roles = [
+    "button", "menuitem", "tab", "switch", "slider", "link", "checkbox", "radio",
+    "option", "combobox", "spinbutton", "textbox", "treeitem",
+  ];
+  const source = `export const Roles = () => <>${roles.map((role) => `<div role="${role}" />`).join("")}<div role="status" /></>`;
+
+  assert.deepEqual(
+    extractControls("web/src/Roles.tsx", source, ts).map(({ role }) => role),
+    roles,
+  );
+});
+
+test("extractControls recognizes set, toggle, open, show, and onOpen panel patterns", () => {
+  const source = [
+    "export const Triggers = () => <>",
+    "  <button onClick={setModalVisible} />",
+    "  <button onClick={toggleInspector} />",
+    "  <button onClick={openExportDialog} />",
+    "  <button onClick={showSettings} />",
+    "  <button onClick={onOpenSettings} />",
+    "  <button onClick={setQuery} />",
+    "</>;",
+  ].join("\n");
+
+  assert.deepEqual(
+    extractControls("web/src/Triggers.tsx", source, ts).map(({ panelTrigger }) => panelTrigger),
+    [true, true, true, true, true, false],
+  );
+});
 
 test("normalizePath uses repository-relative POSIX paths", () => {
   assert.equal(normalizePath("./web\\src\\App.tsx"), "web/src/App.tsx");
@@ -212,6 +311,225 @@ test("docs CLI deterministically extracts tracked Markdown only", (t) => {
     new Set(documentCandidates.candidates.map(({ id }) => id)).size,
     documentCandidates.candidates.length,
   );
+});
+
+test("controls CLI scans tracked web/src TSX files through a real subprocess", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "opentake-completion-audit-controls-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const firstOutput = join(root, "control-candidates.json");
+  const secondOutput = join(root, "control-candidates-second.json");
+  mkdirSync(join(root, "web", "src", "nested"), { recursive: true });
+  writeFileSync(
+    join(root, "web", "src", "nested", "B.tsx"),
+    "export const B = () => <div role=\"switch\" title=\"Beta\" />;\n",
+  );
+  writeFileSync(
+    join(root, "web", "src", "A.tsx"),
+    "export const A = () => <><button>Alpha</button><button>Again</button></>;\n",
+  );
+  writeFileSync(join(root, "web", "src", "ignored.ts"), "// onClick is not TSX\n");
+  writeFileSync(join(root, "web", "src", "untracked.tsx"), "export const Nope = () => <button />;\n");
+  execFileSync("git", ["init", "--quiet", root]);
+  execFileSync("git", ["-C", root, "add", "web/src/A.tsx", "web/src/nested/B.tsx", "web/src/ignored.ts"]);
+
+  const invoke = (output) => spawnSync(
+    process.execPath,
+    [
+      "tools/completion-audit.mjs",
+      "controls",
+      "--root",
+      root,
+      "--out",
+      output,
+    ],
+    {
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      encoding: "utf8",
+    },
+  );
+
+  const firstResult = invoke(firstOutput);
+  const secondResult = invoke(secondOutput);
+  assert.equal(firstResult.status, 0, firstResult.stderr);
+  assert.equal(secondResult.status, 0, secondResult.stderr);
+  assert.equal(readFileSync(firstOutput, "utf8"), readFileSync(secondOutput, "utf8"));
+  const ledger = JSON.parse(readFileSync(firstOutput, "utf8"));
+  assert.equal(ledger.schema, 1);
+  assert.deepEqual(ledger.candidates.map(({ path, element, label }) => [path, element, label]), [
+    ["web/src/A.tsx", "button", "Alpha"],
+    ["web/src/A.tsx", "button", "Again"],
+    ["web/src/nested/B.tsx", "div", "Beta"],
+  ]);
+  assert.equal(new Set(ledger.candidates.map(({ id }) => id)).size, 3);
+  assert.equal(
+    new Set(ledger.candidates.map(({ path, line, column }) => `${path}:${line}:${column}`)).size,
+    3,
+  );
+});
+
+test("control-ledger CLI creates shells and preserves reviewed records", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "opentake-completion-audit-control-ledger-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const candidatesPath = join(root, "control-candidates.json");
+  const controlsPath = join(root, "controls.json");
+  const candidates = [
+    {
+      id: stableId("control", "web/src/A.tsx:1:25:button"),
+      path: "web/src/A.tsx",
+      line: 1,
+      column: 25,
+      order: 1,
+      element: "button",
+      label: "Alpha",
+      handler: "{openAlpha}",
+      disabled: null,
+      role: "",
+      panelTrigger: true,
+    },
+    {
+      id: stableId("control", "web/src/B.tsx:2:3:input"),
+      path: "web/src/B.tsx",
+      line: 2,
+      column: 3,
+      order: 1,
+      element: "input",
+      label: "Beta",
+      handler: "{setBeta}",
+      disabled: "{busy}",
+      role: "",
+      panelTrigger: false,
+    },
+  ];
+  const reviewed = {
+    id: stableId("control-record", candidates[0].id),
+    candidateId: candidates[0].id,
+    visibility: "Editor is open",
+    enabledWhen: "A project is active",
+    inputs: ["pointer", "keyboard"],
+    handler: candidates[0].handler,
+    stateTransition: "Alpha opens",
+    backendTrace: ["alpha_command"],
+    outcomes: { success: "Alpha shown", failure: "Inline error" },
+    accessibility: { focus: "visible", label: "Alpha", shortcut: "Cmd+A" },
+    returnPath: ["Close Alpha"],
+    automatedTests: ["alpha test"],
+    runtimeEvidence: ["desktop pass"],
+    status: "complete",
+    acceptanceCriteria: ["Alpha opens"],
+    gapGroup: "alpha",
+    finalDisposition: "verified",
+    commit: "abc123",
+    reviewNotes: ["preserve byte-for-byte by candidate ID"],
+  };
+  writeFileSync(candidatesPath, `${JSON.stringify({ schema: 1, candidates }, null, 2)}\n`);
+  writeFileSync(controlsPath, `${JSON.stringify({
+    schema: 1,
+    records: [reviewed, { id: "stale", candidateId: "control-stale" }],
+  }, null, 2)}\n`);
+
+  const invoke = () => spawnSync(
+    process.execPath,
+    [
+      "tools/completion-audit.mjs",
+      "control-ledger",
+      "--root",
+      root,
+      "--candidates",
+      candidatesPath,
+      "--out",
+      controlsPath,
+    ],
+    {
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      encoding: "utf8",
+    },
+  );
+
+  const firstResult = invoke();
+  assert.equal(firstResult.status, 0, firstResult.stderr);
+  const firstBytes = readFileSync(controlsPath, "utf8");
+  const controls = JSON.parse(firstBytes);
+  assert.equal(controls.schema, 1);
+  assert.equal(controls.records.length, candidates.length);
+  assert.deepEqual(controls.records[0], reviewed);
+  assert.deepEqual(controls.records[1], {
+    id: stableId("control-record", candidates[1].id),
+    candidateId: candidates[1].id,
+    visibility: null,
+    enabledWhen: null,
+    inputs: [],
+    handler: candidates[1].handler,
+    stateTransition: null,
+    backendTrace: [],
+    outcomes: {
+      success: null,
+      pending: null,
+      empty: null,
+      disabled: null,
+      cancel: null,
+      retry: null,
+      failure: null,
+    },
+    accessibility: { focus: null, label: null, shortcut: null },
+    returnPath: [],
+    automatedTests: [],
+    runtimeEvidence: [],
+    status: "unverified",
+    acceptanceCriteria: [],
+    gapGroup: null,
+    finalDisposition: null,
+    commit: null,
+  });
+
+  const secondResult = invoke();
+  assert.equal(secondResult.status, 0, secondResult.stderr);
+  assert.equal(readFileSync(controlsPath, "utf8"), firstBytes);
+});
+
+test("control-ledger CLI rejects duplicate candidate IDs and column locations", async (t) => {
+  const invokeWith = (candidates, suffix) => {
+    const root = mkdtempSync(join(tmpdir(), `opentake-completion-audit-control-${suffix}-`));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const candidatesPath = join(root, "control-candidates.json");
+    const controlsPath = join(root, "controls.json");
+    writeFileSync(candidatesPath, `${JSON.stringify({ schema: 1, candidates }, null, 2)}\n`);
+    return spawnSync(
+      process.execPath,
+      [
+        "tools/completion-audit.mjs",
+        "control-ledger",
+        "--root",
+        root,
+        "--candidates",
+        candidatesPath,
+        "--out",
+        controlsPath,
+      ],
+      {
+        cwd: fileURLToPath(new URL("..", import.meta.url)),
+        encoding: "utf8",
+      },
+    );
+  };
+  const base = {
+    id: "control-one",
+    path: "web/src/A.tsx",
+    line: 4,
+    column: 12,
+    element: "button",
+  };
+
+  await t.test("duplicate ID", () => {
+    const result = invokeWith([base, { ...base, path: "web/src/B.tsx" }], "duplicate-id");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /duplicate candidate id: control-one/);
+  });
+
+  await t.test("duplicate path-line-column", () => {
+    const result = invokeWith([base, { ...base, id: "control-two" }], "duplicate-location");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /duplicate candidate location: web\/src\/A\.tsx:4:12/);
+  });
 });
 
 test("requirements CLI creates complete shells and preserves reviewed records", (t) => {
