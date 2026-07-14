@@ -3794,24 +3794,47 @@ function stripRustCommentsAndLiterals(source) {
   return output.join("");
 }
 
+function rustDelimitedEnd(source, open) {
+  const closing = { "(": ")", "{": "}", "[": "]" };
+  const stack = [closing[source[open]]];
+  let index = open + 1;
+  while (index < source.length && stack.length > 0) {
+    const character = source[index];
+    if (closing[character]) stack.push(closing[character]);
+    else if (character === stack.at(-1)) stack.pop();
+    index += 1;
+  }
+  return index;
+}
+
+function blankRustRange(output, start, end) {
+  for (let cursor = start; cursor < end; cursor += 1) {
+    if (output[cursor] !== "\n" && output[cursor] !== "\r") output[cursor] = " ";
+  }
+}
+
 function stripRustMacroInvocations(source) {
   const output = [...source];
-  const macro = /(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*[A-Za-z_][A-Za-z0-9_]*\s*!\s*([({[])/g;
-  const closing = { "(": ")", "{": "}", "[": "]" };
-  for (const match of source.matchAll(macro)) {
+  const definition = /\bmacro_rules\s*!\s*[A-Za-z_][A-Za-z0-9_]*\s*([({[])/g;
+  let match;
+  while ((match = definition.exec(source)) !== null) {
     const open = match.index + match[0].lastIndexOf(match[1]);
-    const stack = [closing[match[1]]];
-    let index = open + 1;
-    while (index < source.length && stack.length > 0) {
-      const character = source[index];
-      if (closing[character]) stack.push(closing[character]);
-      else if (character === stack.at(-1)) stack.pop();
-      index += 1;
-    }
-    for (let cursor = match.index; cursor < index; cursor += 1) {
+    const end = rustDelimitedEnd(source, open);
+    // Preserve `macro_rules! name` as a declaration, but hide every token the
+    // macro may emit so generated-looking declarations cannot count as code.
+    blankRustRange(output, open, end);
+    definition.lastIndex = end;
+  }
+
+  const withoutDefinitionBodies = output.join("");
+  const macro = /(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*[A-Za-z_][A-Za-z0-9_]*\s*!\s*([({[])/g;
+  while ((match = macro.exec(withoutDefinitionBodies)) !== null) {
+    const open = match.index + match[0].lastIndexOf(match[1]);
+    const end = rustDelimitedEnd(withoutDefinitionBodies, open);
+    for (let cursor = match.index; cursor < end; cursor += 1) {
       if (output[cursor] !== "\n" && output[cursor] !== "\r") output[cursor] = " ";
     }
-    macro.lastIndex = index;
+    macro.lastIndex = end;
   }
   return output.join("");
 }
@@ -3826,7 +3849,7 @@ function sourceDeclaresSymbol(path, source, symbol) {
     const escaped = escapeRegExp(symbol);
     const tokens = rustCodeTokens(source);
     return new RegExp(
-      `\\b(?:fn|struct|enum|trait|type|const|static|mod)\\s+${escaped}\\b|\\bmacro_rules!\\s*${escaped}\\b`,
+      `\\b(?:fn|struct|enum|trait|type|const|static|mod)\\s+${escaped}\\b|\\bmacro_rules\\s*!\\s*${escaped}\\b`,
     ).test(tokens);
   }
   if (/\.(?:[cm]?[jt]sx?)$/.test(path)) {
@@ -3953,6 +3976,26 @@ function validateTestEvidence(root, trackedPaths, evidence, candidateId, errors)
     return false;
   }
   return true;
+}
+
+function validateHistoricalReportProvenance(
+  root,
+  trackedPaths,
+  provenance,
+  candidateId,
+  errors,
+) {
+  const match = /^historical-report:([^#\r\n]+)$/.exec(provenance);
+  const path = match?.[1];
+  const file = path ? trackedRegularFile(root, trackedPaths, path) : null;
+  if (file?.status === "valid") return true;
+  pushVerificationError(
+    errors,
+    "invalid-historical-report-provenance",
+    `historical report provenance must reference one tracked regular file: ${provenance}`,
+    candidateId,
+  );
+  return false;
 }
 
 export function verifyAudit(root, auditDir, scope) {
@@ -4218,6 +4261,26 @@ export function verifyAudit(root, auditDir, scope) {
       }
     }
 
+    for (const evidence of Array.isArray(record.runtimeEvidence) ? record.runtimeEvidence : []) {
+      pushVerificationError(
+        errors,
+        "unsupported-runtime-evidence",
+        `documents scope does not accept self-reported runtime evidence: ${evidence}`,
+        candidateId,
+      );
+    }
+    for (const provenance of Array.isArray(record.provenance) ? record.provenance : []) {
+      if (provenance.startsWith("historical-report:")) {
+        validateHistoricalReportProvenance(
+          repositoryRoot,
+          trackedPaths,
+          provenance,
+          candidateId,
+          errors,
+        );
+      }
+    }
+
     if (record.status === "unverified") {
       statusCounts.unverified += 1;
       pushVerificationError(
@@ -4290,14 +4353,6 @@ export function verifyAudit(root, auditDir, scope) {
           errors,
           "complete-without-verification",
           "complete requirement needs exact test:<tracked-file>#<test-name> evidence",
-          candidateId,
-        );
-      }
-      for (const evidence of Array.isArray(record.runtimeEvidence) ? record.runtimeEvidence : []) {
-        pushVerificationError(
-          errors,
-          "unsupported-runtime-evidence",
-          `documents scope does not accept self-reported runtime evidence: ${evidence}`,
           candidateId,
         );
       }

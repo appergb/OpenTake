@@ -7,7 +7,7 @@ This report is the human-readable index for `requirements.json`. The JSON ledger
 - Candidate records: 2704
 - Unique candidate IDs: 2704
 - Unverified dispositions: 0
-- Requirements ledger SHA-256: `9d90b12e0cc2f19d737c514164b69e8e0927ed7095f65550c42e181c454e8552`
+- Requirements ledger SHA-256: `d358872b3aadd218ce5f32b2c7eec24fd1a07b7e4795e4c2f934e885876cb8e8`
 - Independent-review correction: all 298 earlier complete claims were re-evaluated without candidate-ID exceptions; 9 retain strict evidence and 289 were downgraded to source-bound active gaps with unique deterministic closure scenarios.
 - Complete dispositions require at least one exact tracked implementation symbol and at least one exact tracked automated-test name. Self-reported runtime commit, hash, or receipt entries are rejected in documents scope.
 - Incomplete dispositions require a subsystem gap group and an exact acceptance criterion. Contradicted, obsolete, and duplicate records retain source provenance and an explicit final disposition.

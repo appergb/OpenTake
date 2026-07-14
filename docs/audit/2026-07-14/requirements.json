@@ -67779,11 +67779,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:37:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:37:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -67809,11 +67808,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:105:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:105:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -67839,11 +67837,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:114:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:114:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -67869,11 +67866,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:166:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:166:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -67899,11 +67895,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:180:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:180:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -67957,11 +67952,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:219:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:219:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -67987,11 +67981,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:230:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:230:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68017,11 +68010,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:262:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:262:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68047,11 +68039,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:291:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:291:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68077,11 +68068,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:369:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:369:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68107,11 +68097,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:406:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:406:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68137,11 +68126,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:436:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:436:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68195,11 +68183,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:482:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:482:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68225,11 +68212,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:510:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:510:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68255,11 +68241,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:539:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:539:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68285,11 +68270,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:567:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:567:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68315,11 +68299,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:601:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:601:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68345,11 +68328,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:662:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:662:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68403,11 +68385,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:694:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:694:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68433,11 +68414,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:704:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:704:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68463,11 +68443,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:728:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:728:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68521,11 +68500,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:771:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:771:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68551,11 +68529,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:800:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:800:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68581,11 +68558,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:810:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:810:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68611,11 +68587,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:833:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:833:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68669,11 +68644,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:863:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:863:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68699,11 +68673,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:904:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:904:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68729,11 +68702,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:919:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:919:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68759,11 +68731,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:932:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:932:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68789,11 +68760,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-08-verification-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:948:unchecked"
+        "source:docs/superpowers/plans/2026-07-08-opentake-recovery-integration.md:948:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-08-verification-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -68987,11 +68957,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:293:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:293:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -69017,11 +68986,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:337:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:337:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -69047,11 +69015,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:355:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:355:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -69077,11 +69044,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:371:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:371:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -69107,11 +69073,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:427:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:427:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -69165,11 +69130,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:463:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:463:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -69195,11 +69159,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:486:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:486:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -69225,11 +69188,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:502:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:502:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -69255,11 +69217,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:521:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:521:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -69285,11 +69246,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:539:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:539:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -69343,11 +69303,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:605:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:605:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -69373,11 +69332,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:640:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:640:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -69403,11 +69361,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:682:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:682:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -69433,11 +69390,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:717:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:717:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -69491,11 +69447,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:764:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:764:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -69521,11 +69476,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:798:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:798:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -69551,11 +69505,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:834:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:834:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -69581,11 +69534,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:841:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:841:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -69611,11 +69563,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:855:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:855:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -69977,11 +69928,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:1736:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:1736:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70007,11 +69957,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:1764:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:1764:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70037,11 +69986,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:1786:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:1786:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70067,11 +70015,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:1801:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:1801:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70097,11 +70044,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:1818:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:1818:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70127,11 +70073,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:1856:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:1856:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70157,11 +70102,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:1870:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:1870:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70215,11 +70159,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:1901:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:1901:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70245,11 +70188,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:1914:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:1914:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70275,11 +70217,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:2032:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:2032:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70305,11 +70246,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:2064:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:2064:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70335,11 +70275,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:2105:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:2105:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70365,11 +70304,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:2131:unchecked"
+        "source:docs/superpowers/plans/2026-07-10-opentake-wave-1a-integration-baseline.md:2131:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-10-wave1a-baseline-disposition.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70535,11 +70473,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:75:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:75:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70565,11 +70502,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:95:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:95:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70595,11 +70531,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:116:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:116:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70625,11 +70560,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:178:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:178:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70683,11 +70617,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:247:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:247:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70713,11 +70646,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:263:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:263:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70743,11 +70675,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:276:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:276:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70773,11 +70704,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:329:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:329:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70803,11 +70733,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:342:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:342:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70833,11 +70762,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:355:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:355:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70863,11 +70791,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:365:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:365:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70921,11 +70848,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:384:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:384:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70951,11 +70877,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:424:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:424:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -70981,11 +70906,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:468:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:468:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71011,11 +70935,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:486:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:486:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71041,11 +70964,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:499:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:499:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71071,11 +70993,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:503:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:503:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71101,11 +71022,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:544:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:544:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71131,11 +71051,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:556:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:556:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71189,11 +71108,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:580:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:580:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71219,11 +71137,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:584:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:584:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71249,11 +71166,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:596:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:596:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71279,11 +71195,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:610:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:610:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71309,11 +71224,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:623:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:623:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71339,11 +71253,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:638:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:638:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71397,11 +71310,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:649:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:649:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71427,11 +71339,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:671:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:671:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71457,11 +71368,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:685:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:685:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71487,11 +71397,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:689:unchecked"
+        "source:docs/superpowers/plans/2026-07-11-opentake-wave-1b-schema-compatibility.md:689:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71657,11 +71566,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:48:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:48:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71687,11 +71595,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:69:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:69:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71717,11 +71624,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:81:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:81:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71747,11 +71653,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:98:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:98:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71777,11 +71682,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:106:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:106:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71807,11 +71711,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:164:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:164:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71837,11 +71740,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:180:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:180:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71867,11 +71769,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:197:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:197:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71897,11 +71798,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:204:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:204:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71955,11 +71855,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:215:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:215:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -71985,11 +71884,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:314:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:314:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -72015,11 +71913,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:322:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:322:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -72045,11 +71942,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:333:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:333:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -72075,11 +71971,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:341:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:341:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -72105,11 +72000,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:371:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:371:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -72135,11 +72029,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:390:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:390:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -72165,11 +72058,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:397:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:397:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -72223,11 +72115,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:408:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:408:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -72253,11 +72144,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:471:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:471:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -72283,11 +72173,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:507:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:507:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,
@@ -72313,11 +72202,10 @@
       "sideEffects": [],
       "returnPath": [],
       "automatedTests": [],
-      "runtimeEvidence": [
-        "docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
-      ],
+      "runtimeEvidence": [],
       "provenance": [
-        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:572:unchecked"
+        "source:docs/superpowers/plans/2026-07-12-opentake-wave-1b-c1a-fail-closed-export.md:572:unchecked",
+        "historical-report:docs/superpowers/archive/2026-07-13-cloud-integration-release-report.md"
       ],
       "acceptanceCriteria": [],
       "gapGroup": null,

@@ -1962,6 +1962,10 @@ test("verifyAudit documents rejects invalid implementation, test, and runtime ev
     ["commented Rust declaration", "// pub fn real_implementation() {}\n"],
     ["string-contained Rust declaration", 'pub const NOTE: &str = r#"pub fn real_implementation() {}"#;\n'],
     ["macro-token Rust pseudo declaration", "stringify!(fn real_implementation() {});\n"],
+    [
+      "macro_rules nested body pseudo declaration",
+      "macro_rules! blueprint { (($value:expr)) => {{ let _ = [($value)]; fn real_implementation() {} }} }\n",
+    ],
   ]) {
     await t.test(name, (t) => {
       const result = mutate(t, (record, fixture) => {
@@ -1975,6 +1979,35 @@ test("verifyAudit documents rejects invalid implementation, test, and runtime ev
       assert.ok(result.errors.some(({ code }) => code === "implementation-symbol-missing"));
     });
   }
+
+  await t.test("macro_rules declaration name is supported without exposing its body", (t) => {
+    const result = mutate(t, (record, fixture) => {
+      const implementationPath = "crates/example/src/lib.rs";
+      mkdirSync(join(fixture.root, "crates", "example", "src"), { recursive: true });
+      writeFileSync(
+        join(fixture.root, implementationPath),
+        "macro_rules! blueprint { (($value:expr)) => {{ let _ = [($value)]; fn forged_symbol() {} }} }\n",
+      );
+      git(fixture.root, ["add", implementationPath]);
+      record.react = [];
+      record.rust = [`code:${implementationPath}#blueprint`];
+    });
+    assert.equal(result.errors.length, 0, JSON.stringify(result.errors));
+  });
+
+  await t.test("macro_rules nested body test attribute is not an automated test", (t) => {
+    const result = mutate(t, (record, fixture) => {
+      const testPath = "crates/example/tests/macro_body.rs";
+      mkdirSync(join(fixture.root, "crates", "example", "tests"), { recursive: true });
+      writeFileSync(
+        join(fixture.root, testPath),
+        "macro_rules! blueprint { (($value:expr)) => {{ let _ = [($value)]; #[test] fn forged_test() {} }} }\n",
+      );
+      git(fixture.root, ["add", testPath]);
+      record.automatedTests = [`test:${testPath}#forged_test`];
+    });
+    assert.ok(result.errors.some(({ code }) => code === "test-name-missing"));
+  });
 
   for (const [name, source] of [
     ["commented TypeScript test", '// test("renders complete behavior", () => completeBehavior());\n'],
@@ -2077,6 +2110,48 @@ test("verifyAudit documents rejects invalid implementation, test, and runtime ev
       record.runtimeEvidence = [`receipt:${receiptPath}#sha256=${digest}#exit=0`];
     });
     assert.ok(result.errors.some(({ code }) => code === "unsupported-runtime-evidence"));
+  });
+
+  for (const status of [
+    "incomplete",
+    "obsolete",
+    "duplicate",
+    "contradicted",
+    "unverified",
+  ]) {
+    await t.test(`${status} matching runtime commit is unsupported self-report`, (t) => {
+      const result = mutate(t, (record, fixture) => {
+        record.status = status;
+        record.runtimeEvidence = [`commit:${git(fixture.root, ["rev-parse", "HEAD"])}`];
+        record.gapGroup = status === "incomplete" ? "documentation" : null;
+        record.acceptanceCriteria = status === "incomplete"
+          ? ["A deterministic automated test proves the behavior."]
+          : [];
+      });
+      assert.ok(result.errors.some(({ code }) => code === "unsupported-runtime-evidence"));
+    });
+  }
+
+  await t.test("obsolete tracked historical report provenance is accepted", (t) => {
+    const result = mutate(t, (record, fixture) => {
+      record.status = "obsolete";
+      record.gapGroup = null;
+      record.runtimeEvidence = [];
+      record.provenance.push(`historical-report:${fixture.implementationPath}`);
+    });
+    assert.equal(result.errors.length, 0, JSON.stringify(result.errors));
+  });
+
+  await t.test("historical report provenance rejects a non-tracked regular path", (t) => {
+    const result = mutate(t, (record) => {
+      record.status = "obsolete";
+      record.gapGroup = null;
+      record.runtimeEvidence = [];
+      record.provenance.push("historical-report:reports/missing.md");
+    });
+    assert.ok(result.errors.some(({ code }) => (
+      code === "invalid-historical-report-provenance"
+    )));
   });
 
   await t.test("forged runtime commit", (t) => {
