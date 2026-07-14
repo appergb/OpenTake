@@ -210,3 +210,22 @@ default-off Rust renderer or to perform the then-missing first device check.
 3. IPC 多词字段 camelCase 三边同步;静默失效先加 try/catch 暴露。
 4. 大任务用 `git worktree` 隔离;提交只 `git add` 显式路径,绝不 `-A`;动手前先 `git log`/`gh pr list` 查并发协作者是否已做(#53 曾重复实现)。
 5. 别 bundle 多个有 bug 的 PR;一 PR 一事。
+
+---
+
+**2026-07-14 完成度审计校准：** 本文中的状态声明已逐项归入 `docs/audit/2026-07-14/requirements.json`；当前裁决、证据与验收条件以同目录 `document-reconciliation.md` 为准，本文保留为交接时点记录。
+
+**当前有效条目的 ledger 绑定：**
+
+| 原始行 | Candidate ID | Gap group |
+|---:|---|---|
+| 126 | `doc-72fd9278412a314f` | media-library |
+| 146 | `doc-fda8c3be3dfa4161` | agent-settings-generation |
+| 151 | `doc-e4d48925632767a2` | agent-settings-generation |
+| 161 | `doc-02ff53bbfaf2f4ac` | inspector-text-keyframes |
+| 171 | `doc-74145abee768207c` | media-render-playback-export |
+| 178 | `doc-2655a5de61309700` | media-render-playback-export |
+| 182 | `doc-43c0111d8d467789` | inspector-text-keyframes |
+| 186 | `doc-cf47d7775c7e1947` | media-render-playback-export |
+| 191 | `doc-793e43b6ec894755` | media-render-playback-export |
+| 201 | `doc-b7b124cd7a6d5ef2` | agent-settings-generation |

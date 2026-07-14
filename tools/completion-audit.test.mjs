@@ -24,6 +24,7 @@ import {
   stableId,
   validateSourceEvidenceCatalogs,
   validateSourceEvidenceShape,
+  verifyAudit,
   verifyOpenPullRequests,
 } from "./completion-audit.mjs";
 
@@ -1390,6 +1391,332 @@ test("requirements CLI rejects duplicate candidate identities", (t) => {
 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /duplicate candidate id: doc-duplicate/);
+});
+
+function createDocumentVerificationFixture(t) {
+  const root = mkdtempSync(join(tmpdir(), "opentake-completion-audit-verify-documents-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const audit = join(root, "docs", "audit", "2026-07-14");
+  mkdirSync(audit, { recursive: true });
+  const candidates = [{
+    id: "doc-complete",
+    path: "docs/complete.md",
+    line: 4,
+    heading: "Complete",
+    text: "- Complete behavior",
+    signal: "gap-marker",
+  }, {
+    id: "doc-incomplete",
+    path: "docs/incomplete.md",
+    line: 7,
+    heading: "Incomplete",
+    text: "- Incomplete behavior",
+    signal: "unchecked",
+  }];
+  const records = [{
+    id: stableId("requirement", "doc-complete"),
+    candidateId: "doc-complete",
+    source: { path: "docs/complete.md", line: 4 },
+    targetBehavior: "The complete behavior is available.",
+    priority: null,
+    status: "complete",
+    uiEntry: [],
+    visibleResult: null,
+    react: ["web/src/Complete.tsx::Complete"],
+    storeApi: [],
+    tauri: [],
+    rust: [],
+    sideEffects: [],
+    returnPath: [],
+    automatedTests: ["web/src/Complete.test.tsx::renders complete behavior"],
+    runtimeEvidence: [],
+    provenance: ["docs/complete.md:4"],
+    acceptanceCriteria: [],
+    gapGroup: null,
+    finalDisposition: "verified-complete",
+    commit: null,
+  }, {
+    id: stableId("requirement", "doc-incomplete"),
+    candidateId: "doc-incomplete",
+    source: { path: "docs/incomplete.md", line: 7 },
+    targetBehavior: "The incomplete behavior becomes available.",
+    priority: null,
+    status: "incomplete",
+    uiEntry: [],
+    visibleResult: null,
+    react: [],
+    storeApi: [],
+    tauri: [],
+    rust: [],
+    sideEffects: [],
+    returnPath: [],
+    automatedTests: [],
+    runtimeEvidence: [],
+    provenance: ["docs/incomplete.md:7"],
+    acceptanceCriteria: ["A focused test proves the incomplete behavior."],
+    gapGroup: "documentation",
+    finalDisposition: "active-gap:documentation",
+    commit: null,
+  }];
+  const write = (nextCandidates = candidates, nextRecords = records) => {
+    writeFileSync(
+      join(audit, "document-candidates.json"),
+      `${JSON.stringify({ schema: 1, candidates: nextCandidates }, null, 2)}\n`,
+    );
+    writeFileSync(
+      join(audit, "requirements.json"),
+      `${JSON.stringify({ schema: 1, records: nextRecords }, null, 2)}\n`,
+    );
+  };
+  write();
+  return { root, audit, candidates, records, write };
+}
+
+test("verifyAudit documents accepts a complete, planned ledger", (t) => {
+  const fixture = createDocumentVerificationFixture(t);
+  const result = verifyAudit(fixture.root, fixture.audit, "documents");
+
+  assert.equal(result.passed, true);
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.counts, {
+    candidates: 2,
+    records: 2,
+    uniqueCandidateIds: 2,
+    uniqueRecordIds: 2,
+    missingCandidateIds: 0,
+    orphanCandidateIds: 0,
+    duplicateCandidateIds: 0,
+    duplicateRecordIds: 0,
+    unverified: 0,
+    complete: 1,
+    incomplete: 1,
+    contradicted: 0,
+    obsolete: 0,
+    duplicate: 0,
+  });
+});
+
+test("verifyAudit documents rejects missing and duplicate identities", async (t) => {
+  await t.test("missing candidate ID", (t) => {
+    const fixture = createDocumentVerificationFixture(t);
+    fixture.write(fixture.candidates, fixture.records.slice(0, 1));
+    const result = verifyAudit(fixture.root, fixture.audit, "documents");
+    assert.equal(result.passed, false);
+    assert.ok(result.errors.some(({ code }) => code === "missing-candidate-id"));
+  });
+
+  await t.test("duplicate record ID", (t) => {
+    const fixture = createDocumentVerificationFixture(t);
+    fixture.write(fixture.candidates, [fixture.records[0], {
+      ...fixture.records[1],
+      id: fixture.records[0].id,
+    }]);
+    const result = verifyAudit(fixture.root, fixture.audit, "documents");
+    assert.ok(result.errors.some(({ code }) => code === "duplicate-record-id"));
+  });
+
+  await t.test("duplicate record candidateId", (t) => {
+    const fixture = createDocumentVerificationFixture(t);
+    fixture.write(fixture.candidates, [fixture.records[0], {
+      ...fixture.records[1],
+      candidateId: fixture.records[0].candidateId,
+    }]);
+    const result = verifyAudit(fixture.root, fixture.audit, "documents");
+    assert.ok(result.errors.some(({ code }) => code === "duplicate-candidate-id"));
+  });
+
+  await t.test("orphan requirement candidateId", (t) => {
+    const fixture = createDocumentVerificationFixture(t);
+    fixture.write(fixture.candidates, [...fixture.records, {
+      ...fixture.records[1],
+      id: "requirement-orphan",
+      candidateId: "doc-orphan",
+      source: { path: "docs/orphan.md", line: 1 },
+    }]);
+    const result = verifyAudit(fixture.root, fixture.audit, "documents");
+    assert.ok(result.errors.some(({ code }) => code === "orphan-candidate-id"));
+  });
+});
+
+test("verifyAudit documents rejects unresolved or unsupported dispositions", async (t) => {
+  const mutate = (t, change) => {
+    const fixture = createDocumentVerificationFixture(t);
+    const records = structuredClone(fixture.records);
+    change(records);
+    fixture.write(fixture.candidates, records);
+    return verifyAudit(fixture.root, fixture.audit, "documents");
+  };
+
+  await t.test("unverified", (t) => {
+    const result = mutate(t, (records) => { records[0].status = "unverified"; });
+    assert.ok(result.errors.some(({ code }) => code === "unverified-status"));
+  });
+
+  await t.test("complete without implementation", (t) => {
+    const result = mutate(t, (records) => {
+      records[0].react = [];
+      records[0].provenance = [];
+    });
+    assert.ok(result.errors.some(({ code }) => code === "complete-without-implementation"));
+  });
+
+  await t.test("complete without verification", (t) => {
+    const result = mutate(t, (records) => { records[0].automatedTests = []; });
+    assert.ok(result.errors.some(({ code }) => code === "complete-without-verification"));
+  });
+
+  await t.test("record ID does not derive from candidate ID", (t) => {
+    const result = mutate(t, (records) => { records[0].id = "requirement-wrong"; });
+    assert.ok(result.errors.some(({ code }) => code === "record-id-mismatch"));
+  });
+
+  await t.test("complete without target behavior", (t) => {
+    const result = mutate(t, (records) => { records[0].targetBehavior = null; });
+    assert.ok(result.errors.some(({ code }) => code === "requirement-without-target-behavior"));
+  });
+
+  await t.test("incomplete without final disposition", (t) => {
+    const result = mutate(t, (records) => { records[1].finalDisposition = null; });
+    assert.ok(result.errors.some(({ code }) => code === "requirement-without-final-disposition"));
+  });
+
+  await t.test("incomplete without acceptance criteria", (t) => {
+    const result = mutate(t, (records) => { records[1].acceptanceCriteria = []; });
+    assert.ok(result.errors.some(({ code }) => code === "incomplete-without-acceptance-criteria"));
+  });
+
+  await t.test("invalid status", (t) => {
+    const result = mutate(t, (records) => { records[0].status = "maybe"; });
+    assert.ok(result.errors.some(({ code }) => code === "invalid-status"));
+  });
+
+  await t.test("invalid gap group", (t) => {
+    const result = mutate(t, (records) => { records[1].gapGroup = "miscellaneous"; });
+    assert.ok(result.errors.some(({ code }) => code === "invalid-gap-group"));
+  });
+
+  await t.test("incomplete without gap group", (t) => {
+    const result = mutate(t, (records) => { records[1].gapGroup = null; });
+    assert.ok(result.errors.some(({ code }) => code === "incomplete-without-gap-group"));
+  });
+
+  await t.test("contradicted without target behavior", (t) => {
+    const result = mutate(t, (records) => {
+      records[0].status = "contradicted";
+      records[0].targetBehavior = null;
+    });
+    assert.ok(result.errors.some(({ code }) => code === "disposition-without-target-behavior"));
+  });
+
+  await t.test("obsolete without final disposition", (t) => {
+    const result = mutate(t, (records) => {
+      records[0].status = "obsolete";
+      records[0].finalDisposition = null;
+    });
+    assert.ok(result.errors.some(({ code }) => code === "disposition-without-final-disposition"));
+  });
+
+  await t.test("duplicate without provenance", (t) => {
+    const result = mutate(t, (records) => {
+      records[0].status = "duplicate";
+      records[0].provenance = [];
+    });
+    assert.ok(result.errors.some(({ code }) => code === "disposition-without-provenance"));
+  });
+
+  await t.test("candidate source drift", (t) => {
+    const result = mutate(t, (records) => { records[0].source.line = 5; });
+    assert.ok(result.errors.some(({ code }) => code === "candidate-source-drift"));
+  });
+
+  await t.test("candidate source path drift", (t) => {
+    const result = mutate(t, (records) => { records[0].source.path = "docs/elsewhere.md"; });
+    assert.ok(result.errors.some(({ code }) => code === "candidate-source-drift"));
+  });
+
+  await t.test("non-array evidence field", (t) => {
+    const result = mutate(t, (records) => { records[0].react = "web/src/Complete.tsx"; });
+    assert.ok(result.errors.some(({ code, candidateId, message }) => (
+      code === "invalid-field-type"
+      && candidateId === "doc-complete"
+      && message === "react must be an array of non-empty strings"
+    )));
+  });
+
+  await t.test("non-string evidence item", (t) => {
+    const result = mutate(t, (records) => { records[0].automatedTests = [123]; });
+    assert.ok(result.errors.some(({ code }) => code === "invalid-field-type"));
+  });
+
+  await t.test("non-string scalar field", (t) => {
+    const result = mutate(t, (records) => { records[0].targetBehavior = 42; });
+    assert.ok(result.errors.some(({ code }) => code === "invalid-field-type"));
+  });
+
+  await t.test("non-array return path", (t) => {
+    const result = mutate(t, (records) => { records[0].returnPath = "snapshot"; });
+    assert.ok(result.errors.some(({ code, message }) => (
+      code === "invalid-field-type" && message.startsWith("returnPath must")
+    )));
+  });
+
+  await t.test("non-string nullable metadata", (t) => {
+    const result = mutate(t, (records) => { records[0].priority = 1; });
+    assert.ok(result.errors.some(({ code, message }) => (
+      code === "invalid-field-type" && message === "priority must be a string or null"
+    )));
+  });
+
+  await t.test("malformed candidate source fields fail closed", (t) => {
+    const fixture = createDocumentVerificationFixture(t);
+    const candidates = structuredClone(fixture.candidates);
+    candidates[0].path = 42;
+    candidates[0].line = "4";
+    fixture.write(candidates, fixture.records);
+    const result = verifyAudit(fixture.root, fixture.audit, "documents");
+    assert.ok(result.errors.some(({ code, candidateId }) => (
+      code === "invalid-candidate" && candidateId === "doc-complete"
+    )));
+  });
+
+  await t.test("unsupported audit schema fails closed", (t) => {
+    const fixture = createDocumentVerificationFixture(t);
+    writeFileSync(
+      join(fixture.audit, "requirements.json"),
+      `${JSON.stringify({ schema: 2, records: fixture.records }, null, 2)}\n`,
+    );
+    const result = verifyAudit(fixture.root, fixture.audit, "documents");
+    assert.ok(result.errors.some(({ code, message }) => (
+      code === "invalid-audit-schema" && message.startsWith("requirements.json")
+    )));
+  });
+});
+
+test("verify CLI writes failed document verification before exiting nonzero", (t) => {
+  const fixture = createDocumentVerificationFixture(t);
+  fixture.records[0].status = "unverified";
+  fixture.write();
+  const output = join(fixture.audit, "document-verification.json");
+  const result = spawnSync(process.execPath, [
+    "tools/completion-audit.mjs",
+    "verify",
+    "--root",
+    fixture.root,
+    "--audit",
+    fixture.audit,
+    "--scope",
+    "documents",
+    "--out",
+    output,
+  ], {
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    encoding: "utf8",
+  });
+
+  assert.notEqual(result.status, 0);
+  const verification = JSON.parse(readFileSync(output, "utf8"));
+  assert.equal(verification.passed, false);
+  assert.ok(verification.errors.some(({ code }) => code === "unverified-status"));
 });
 
 test("module imports when process.argv[1] is unavailable", () => {

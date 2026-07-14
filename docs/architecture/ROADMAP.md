@@ -127,3 +127,18 @@
   5. 插件 CLI（`opentake plugin create/validate/package`）。
 - **验证**：创建示例插件 → 激活 → Agent 获得插件指引;rules 校验正确。
 - **设计文档**：[WORKFLOW-PLUGIN-SYSTEM.md](../modules/opentake-agent/WORKFLOW-PLUGIN-SYSTEM.md)
+
+---
+
+**2026-07-14 完成度审计校准：** 路线条目已逐项归入 `docs/audit/2026-07-14/requirements.json`；当前裁决、证据与验收条件以同目录 `document-reconciliation.md` 为准，阶段文字不再单独作为完成证明。
+
+**当前有效条目的 ledger 绑定：**
+
+| 原始行 | Candidate ID | Gap group |
+|---:|---|---|
+| 35 | `doc-0100da1e54423a8a` | media-render-playback-export |
+| 50 | `doc-d6cea2543d472f23` | preview-timeline |
+| 55 | `doc-b03d7fd0c59f44ab` | agent-settings-generation |
+| 74 | `doc-2d97f5cb55065d5d` | agent-settings-generation |
+| 80 | `doc-96b289d64d013bf3` | agent-settings-generation |
+| 118 | `doc-4c1feb508ee96cc8` | agent-settings-generation |

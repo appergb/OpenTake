@@ -3497,6 +3497,455 @@ function mergeControlLedger(candidates, existing) {
   return records;
 }
 
+const DOCUMENT_REQUIREMENT_STATUSES = new Set([
+  "complete",
+  "incomplete",
+  "contradicted",
+  "obsolete",
+  "duplicate",
+]);
+
+export const DOCUMENT_GAP_GROUPS = Object.freeze([
+  "accessibility-polish",
+  "agent-settings-generation",
+  "command-contracts",
+  "data-safety",
+  "documentation",
+  "home-shell",
+  "inspector-text-keyframes",
+  "media-library",
+  "media-render-playback-export",
+  "preview-timeline",
+]);
+
+const DOCUMENT_GAP_GROUP_SET = new Set(DOCUMENT_GAP_GROUPS);
+const DOCUMENT_ARRAY_FIELDS = [
+  "uiEntry",
+  "react",
+  "storeApi",
+  "tauri",
+  "rust",
+  "sideEffects",
+  "returnPath",
+  "automatedTests",
+  "runtimeEvidence",
+  "provenance",
+  "acceptanceCriteria",
+];
+const DOCUMENT_IMPLEMENTATION_FIELDS = [
+  "uiEntry",
+  "react",
+  "storeApi",
+  "tauri",
+  "rust",
+];
+const DOCUMENT_NON_REQUIREMENT_STATUSES = new Set([
+  "contradicted",
+  "obsolete",
+  "duplicate",
+]);
+
+function nonEmptyString(value) {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+function nonEmptyStringArray(value) {
+  return Array.isArray(value) && value.some(nonEmptyString);
+}
+
+function implementationProvenance(value) {
+  return Array.isArray(value)
+    && value.some((item) => nonEmptyString(item) && item.startsWith("implementation:"));
+}
+
+function duplicateCount(values) {
+  const counts = new Map();
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return [...counts.values()].reduce(
+    (total, count) => total + Math.max(0, count - 1),
+    0,
+  );
+}
+
+function pushVerificationError(errors, code, message, candidateId = null) {
+  errors.push({ code, candidateId, message });
+}
+
+function readDocumentAuditFile(auditDirectory, name, collectionName, errors) {
+  const path = resolve(auditDirectory, name);
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    pushVerificationError(
+      errors,
+      "invalid-audit-file",
+      `${name}: ${error.message}`,
+    );
+    return [];
+  }
+  if (parsed?.schema !== 1) {
+    pushVerificationError(
+      errors,
+      "invalid-audit-schema",
+      `${name}: schema must equal 1`,
+    );
+  }
+  if (!Array.isArray(parsed?.[collectionName])) {
+    pushVerificationError(
+      errors,
+      "invalid-audit-file",
+      `${name}: ${collectionName} must be an array`,
+    );
+    return [];
+  }
+  return parsed[collectionName];
+}
+
+export function verifyAudit(root, auditDir, scope) {
+  if (scope !== "documents") {
+    throw new Error(`unsupported verification scope: ${scope}`);
+  }
+  const repositoryRoot = resolve(root);
+  const auditDirectory = resolve(repositoryRoot, auditDir);
+  const errors = [];
+  const candidates = readDocumentAuditFile(
+    auditDirectory,
+    "document-candidates.json",
+    "candidates",
+    errors,
+  );
+  const records = readDocumentAuditFile(
+    auditDirectory,
+    "requirements.json",
+    "records",
+    errors,
+  );
+
+  const candidateIds = candidates
+    .map((candidate) => candidate?.id)
+    .filter((id) => typeof id === "string");
+  const recordIds = records
+    .map((record) => record?.id)
+    .filter((id) => typeof id === "string");
+  const recordCandidateIds = records
+    .map((record) => record?.candidateId)
+    .filter((id) => typeof id === "string");
+  const duplicateCandidateDefinitions = duplicateCount(candidateIds);
+  const duplicateRecordIds = duplicateCount(recordIds);
+  const duplicateCandidateIds = duplicateCount(recordCandidateIds);
+  if (duplicateCandidateDefinitions > 0) {
+    pushVerificationError(
+      errors,
+      "duplicate-candidate-definition-id",
+      `document candidates contain ${duplicateCandidateDefinitions} duplicate ID(s)`,
+    );
+  }
+  if (duplicateRecordIds > 0) {
+    pushVerificationError(
+      errors,
+      "duplicate-record-id",
+      `requirements contain ${duplicateRecordIds} duplicate record ID(s)`,
+    );
+  }
+  if (duplicateCandidateIds > 0) {
+    pushVerificationError(
+      errors,
+      "duplicate-candidate-id",
+      `requirements contain ${duplicateCandidateIds} duplicate candidateId(s)`,
+    );
+  }
+
+  const candidatesById = new Map();
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate.id !== "string") {
+      pushVerificationError(errors, "invalid-candidate", "candidate id must be a string");
+      continue;
+    }
+    if (typeof candidate.path !== "string" || !Number.isInteger(candidate.line)) {
+      pushVerificationError(
+        errors,
+        "invalid-candidate",
+        "candidate source must contain a string path and integer line",
+        candidate.id,
+      );
+    }
+    if (!candidatesById.has(candidate.id)) candidatesById.set(candidate.id, candidate);
+  }
+  const recordCandidateIdSet = new Set(recordCandidateIds);
+  const missingCandidateIds = [...candidatesById.keys()].filter(
+    (candidateId) => !recordCandidateIdSet.has(candidateId),
+  );
+  for (const candidateId of missingCandidateIds) {
+    pushVerificationError(
+      errors,
+      "missing-candidate-id",
+      `candidate has no requirement record: ${candidateId}`,
+      candidateId,
+    );
+  }
+  const orphanCandidateIds = [...new Set(recordCandidateIds)].filter(
+    (candidateId) => !candidatesById.has(candidateId),
+  );
+  for (const candidateId of orphanCandidateIds) {
+    pushVerificationError(
+      errors,
+      "orphan-candidate-id",
+      `requirement record has no document candidate: ${candidateId}`,
+      candidateId,
+    );
+  }
+
+  const statusCounts = {
+    unverified: 0,
+    complete: 0,
+    incomplete: 0,
+    contradicted: 0,
+    obsolete: 0,
+    duplicate: 0,
+  };
+  for (const record of records) {
+    if (!record || typeof record !== "object" || Array.isArray(record)) {
+      pushVerificationError(errors, "invalid-record", "requirement record must be an object");
+      continue;
+    }
+    const candidateId = typeof record.candidateId === "string"
+      ? record.candidateId
+      : null;
+    if (!candidateId) {
+      pushVerificationError(errors, "invalid-record", "requirement candidateId must be a string");
+    }
+    if (typeof record.id !== "string") {
+      pushVerificationError(
+        errors,
+        "invalid-record",
+        "requirement id must be a string",
+        candidateId,
+      );
+    } else if (
+      candidateId
+      && record.id !== stableId("requirement", candidateId)
+    ) {
+      pushVerificationError(
+        errors,
+        "record-id-mismatch",
+        `requirement id must derive from candidateId ${candidateId}`,
+        candidateId,
+      );
+    }
+    for (const field of DOCUMENT_ARRAY_FIELDS) {
+      if (
+        !Array.isArray(record[field])
+        || record[field].some((item) => !nonEmptyString(item))
+      ) {
+        pushVerificationError(
+          errors,
+          "invalid-field-type",
+          `${field} must be an array of non-empty strings`,
+          candidateId,
+        );
+      }
+    }
+    for (const field of [
+      "targetBehavior",
+      "priority",
+      "visibleResult",
+      "gapGroup",
+      "finalDisposition",
+      "commit",
+    ]) {
+      if (record[field] != null && typeof record[field] !== "string") {
+        pushVerificationError(
+          errors,
+          "invalid-field-type",
+          `${field} must be a string or null`,
+          candidateId,
+        );
+      }
+    }
+
+    const candidate = candidateId ? candidatesById.get(candidateId) : null;
+    if (candidate) {
+      const validSource = record.source
+        && typeof record.source === "object"
+        && !Array.isArray(record.source)
+        && typeof record.source.path === "string"
+        && Number.isInteger(record.source.line);
+      if (!validSource) {
+        pushVerificationError(
+          errors,
+          "invalid-field-type",
+          "source must contain a string path and integer line",
+          candidateId,
+        );
+      } else if (
+        typeof candidate.path === "string"
+        && Number.isInteger(candidate.line)
+        && (
+          normalizePath(record.source.path) !== normalizePath(candidate.path)
+          || record.source.line !== candidate.line
+        )
+      ) {
+        pushVerificationError(
+          errors,
+          "candidate-source-drift",
+          `source does not match candidate ${candidateId}`,
+          candidateId,
+        );
+      }
+    }
+
+    if (record.status === "unverified") {
+      statusCounts.unverified += 1;
+      pushVerificationError(
+        errors,
+        "unverified-status",
+        "unverified status is forbidden",
+        candidateId,
+      );
+      continue;
+    }
+    if (!DOCUMENT_REQUIREMENT_STATUSES.has(record.status)) {
+      pushVerificationError(
+        errors,
+        "invalid-status",
+        `unsupported requirement status: ${String(record.status)}`,
+        candidateId,
+      );
+      continue;
+    }
+    statusCounts[record.status] += 1;
+
+    if (["complete", "incomplete"].includes(record.status)) {
+      if (!nonEmptyString(record.targetBehavior)) {
+        pushVerificationError(
+          errors,
+          "requirement-without-target-behavior",
+          `${record.status} requirement needs explicit target behavior`,
+          candidateId,
+        );
+      }
+      if (!nonEmptyString(record.finalDisposition)) {
+        pushVerificationError(
+          errors,
+          "requirement-without-final-disposition",
+          `${record.status} requirement needs an explicit final disposition`,
+          candidateId,
+        );
+      }
+    }
+
+    if (record.status === "complete") {
+      const hasImplementation = DOCUMENT_IMPLEMENTATION_FIELDS
+        .some((field) => nonEmptyStringArray(record[field]))
+        || implementationProvenance(record.provenance);
+      if (!hasImplementation) {
+        pushVerificationError(
+          errors,
+          "complete-without-implementation",
+          "complete requirement needs implementation evidence or implementation-prefixed provenance",
+          candidateId,
+        );
+      }
+      if (
+        !nonEmptyStringArray(record.automatedTests)
+        && !nonEmptyStringArray(record.runtimeEvidence)
+      ) {
+        pushVerificationError(
+          errors,
+          "complete-without-verification",
+          "complete requirement needs automated or runtime verification evidence",
+          candidateId,
+        );
+      }
+    }
+
+    if (record.status === "incomplete") {
+      if (!nonEmptyStringArray(record.acceptanceCriteria)) {
+        pushVerificationError(
+          errors,
+          "incomplete-without-acceptance-criteria",
+          "incomplete requirement needs exact acceptance criteria",
+          candidateId,
+        );
+      }
+      if (record.gapGroup == null || record.gapGroup === "") {
+        pushVerificationError(
+          errors,
+          "incomplete-without-gap-group",
+          "incomplete requirement needs a subsystem gap group",
+          candidateId,
+        );
+      } else if (!DOCUMENT_GAP_GROUP_SET.has(record.gapGroup)) {
+        pushVerificationError(
+          errors,
+          "invalid-gap-group",
+          `unsupported gap group: ${record.gapGroup}`,
+          candidateId,
+        );
+      }
+    } else if (record.gapGroup != null) {
+      pushVerificationError(
+        errors,
+        "invalid-gap-group",
+        `gap group is only valid for incomplete requirements: ${record.gapGroup}`,
+        candidateId,
+      );
+    }
+
+    if (DOCUMENT_NON_REQUIREMENT_STATUSES.has(record.status)) {
+      if (!nonEmptyString(record.targetBehavior)) {
+        pushVerificationError(
+          errors,
+          "disposition-without-target-behavior",
+          `${record.status} disposition needs explicit target behavior`,
+          candidateId,
+        );
+      }
+      if (!nonEmptyString(record.finalDisposition)) {
+        pushVerificationError(
+          errors,
+          "disposition-without-final-disposition",
+          `${record.status} disposition needs an explicit final disposition`,
+          candidateId,
+        );
+      }
+      if (!nonEmptyStringArray(record.provenance)) {
+        pushVerificationError(
+          errors,
+          "disposition-without-provenance",
+          `${record.status} disposition needs provenance`,
+          candidateId,
+        );
+      }
+    }
+  }
+
+  const counts = {
+    candidates: candidates.length,
+    records: records.length,
+    uniqueCandidateIds: new Set(recordCandidateIds).size,
+    uniqueRecordIds: new Set(recordIds).size,
+    missingCandidateIds: missingCandidateIds.length,
+    orphanCandidateIds: orphanCandidateIds.length,
+    duplicateCandidateIds,
+    duplicateRecordIds,
+    ...statusCounts,
+  };
+  return {
+    schema: 1,
+    scope: "documents",
+    auditDirectory: normalizePath(relative(repositoryRoot, auditDirectory)) || ".",
+    passed: errors.length === 0,
+    legalGapGroups: DOCUMENT_GAP_GROUPS,
+    counts,
+    errors,
+  };
+}
+
 function writeJson(path, value) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
@@ -3582,6 +4031,12 @@ async function runCommand(command, root, args) {
       records: mergeControlLedger(candidateLedger.candidates, existing),
     };
   }
+  if (command === "verify") {
+    if (!args.audit || !args.scope) {
+      throw new Error("verify command needs --audit <path> --scope <scope>");
+    }
+    return verifyAudit(root, args.audit, args.scope);
+  }
   throw new Error(`unsupported command: ${command}`);
 }
 
@@ -3599,6 +4054,10 @@ async function main(argv) {
   }
   const output = resolve(args.out);
   writeJson(output, result);
+  if (args.command === "verify" && !result.passed) {
+    console.error(`audit verification failed with ${result.errors.length} error(s)`);
+    process.exitCode = 1;
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
