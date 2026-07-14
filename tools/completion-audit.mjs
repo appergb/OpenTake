@@ -26,9 +26,9 @@ export function readTrackedFiles(root) {
 export function classifyFile(path) {
   const normalizedPath = normalizePath(path);
   const segments = normalizedPath.split("/");
-  const extension = normalizedPath.includes(".")
-    ? normalizedPath.slice(normalizedPath.lastIndexOf(".") + 1)
-    : "";
+  const basename = segments[segments.length - 1];
+  const extensionSeparator = basename.lastIndexOf(".");
+  const extension = extensionSeparator > 0 ? basename.slice(extensionSeparator + 1) : "";
   const domain = normalizedPath.startsWith("crates/")
     ? segments[1]
     : normalizedPath.startsWith("web/")

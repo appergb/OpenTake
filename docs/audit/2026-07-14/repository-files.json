@@ -32,7 +32,7 @@
       "id": "file-3d36a1bf06148bc6",
       "path": ".github/CODEOWNERS",
       "domain": "ci",
-      "kind": "github/CODEOWNERS",
+      "kind": "configuration",
       "material": true,
       "bytes": 322,
       "sha256": "203bbd3f3e5cea15595596e3e5dee8fcf93c244ba14b77d154a533ee997ff9a2"
@@ -50,7 +50,7 @@
       "id": "file-bc37d034bad56458",
       "path": ".gitignore",
       "domain": "repository",
-      "kind": "gitignore",
+      "kind": "configuration",
       "material": true,
       "bytes": 279,
       "sha256": "b93f80050368a0d8158210f81acfc92e892ad27de6d8e4361f6fc378f061bf86"
@@ -4860,8 +4860,8 @@
       "domain": "repository",
       "kind": "mjs",
       "material": true,
-      "bytes": 3714,
-      "sha256": "5f2a86165235b4dfd7726b10000729d2aa8be3c558a7c7fc6f4086988f73b7e3"
+      "bytes": 3787,
+      "sha256": "9c095e09222a68b0fa1bf1737ec202afcd45cc51b4ff9daad5e12a5f6c1a9ee3"
     },
     {
       "id": "file-0a425b6c048018f2",
@@ -4869,8 +4869,8 @@
       "domain": "repository",
       "kind": "mjs",
       "material": true,
-      "bytes": 2682,
-      "sha256": "166237e27847eedf8a8b2562266b5b822ce5c75a1210f771d1be244b5e405649"
+      "bytes": 4584,
+      "sha256": "53cf2a1dbc898abc2086856c69da4a04234b98743d15fab801ec80c296661eb2"
     },
     {
       "id": "file-8734ea50ae6e2cc2",
