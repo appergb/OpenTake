@@ -9,6 +9,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   buildFileInventory,
+  captureDirtyCheckout,
+  captureGitSource,
   classifyFile,
   extractControls,
   extractDocumentCandidates,
@@ -18,6 +20,228 @@ import {
 
 const require = createRequire(new URL("../web/package.json", import.meta.url));
 const ts = require("typescript");
+
+function git(root, args) {
+  return execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
+}
+
+function createGitSourceFixture(t) {
+  const root = mkdtempSync(join(tmpdir(), "opentake-git-source-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  execFileSync("git", ["init", "--quiet", root]);
+  git(root, ["config", "user.name", "Completion Audit"]);
+  git(root, ["config", "user.email", "audit@example.invalid"]);
+  git(root, ["remote", "add", "origin", "https://example.invalid/origin/OpenTake.git"]);
+  git(root, ["remote", "add", "fork", "ssh://git@example.invalid/fork/OpenTake.git"]);
+  writeFileSync(join(root, "source.txt"), "base\n");
+  git(root, ["add", "source.txt"]);
+  git(root, ["commit", "--quiet", "-m", "base"]);
+  const base = git(root, ["rev-parse", "HEAD"]);
+  writeFileSync(join(root, "source.txt"), "head\n");
+  git(root, ["add", "source.txt"]);
+  git(root, ["commit", "--quiet", "-m", "head"]);
+  const head = git(root, ["rev-parse", "HEAD"]);
+  return { root, base, head };
+}
+
+test("captureGitSource records exact immutable Git evidence", (t) => {
+  const { root, base, head } = createGitSourceFixture(t);
+  const before = execFileSync("git", ["-C", root, "status", "--porcelain=v1", "-z"]);
+
+  const source = captureGitSource({
+    name: "fixture",
+    path: root,
+    base,
+    head: "HEAD",
+    requireClean: true,
+    expectChanges: true,
+  });
+
+  assert.equal(source.name, "fixture");
+  assert.equal(source.repository, "https://example.invalid/origin/OpenTake.git");
+  assert.equal(source.remote, "origin");
+  assert.equal(source.status, "changes");
+  assert.equal(source.base, base);
+  assert.equal(source.head, head);
+  assert.equal(source.baseTree, git(root, ["rev-parse", `${base}^{tree}`]));
+  assert.equal(source.headTree, git(root, ["rev-parse", `${head}^{tree}`]));
+  assert.equal(source.mergeBase, base);
+  assert.equal(source.commitCount, 1);
+  assert.equal(source.aheadCount, 1);
+  assert.equal(source.behindCount, 0);
+  assert.deepEqual(source.changedPaths, [
+    { status: "M", path: "source.txt", destination: null, disposition: "unverified" },
+  ]);
+  assert.deepEqual(
+    execFileSync("git", ["-C", root, "status", "--porcelain=v1", "-z"]),
+    before,
+  );
+});
+
+test("captureGitSource parses rename and copy records from NUL-delimited output", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "opentake-git-source-nul-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  execFileSync("git", ["init", "--quiet", root]);
+  git(root, ["config", "user.name", "Completion Audit"]);
+  git(root, ["config", "user.email", "audit@example.invalid"]);
+  git(root, ["remote", "add", "origin", "https://example.invalid/nul.git"]);
+  writeFileSync(join(root, "old\tname.txt"), "rename me\n");
+  writeFileSync(join(root, "copy-source.txt"), "copy me\n");
+  git(root, ["add", "."]);
+  git(root, ["commit", "--quiet", "-m", "base"]);
+  const base = git(root, ["rev-parse", "HEAD"]);
+  git(root, ["mv", "old\tname.txt", "renamed\nname.txt"]);
+  writeFileSync(join(root, "copy\tduplicate.txt"), readFileSync(join(root, "copy-source.txt")));
+  git(root, ["add", "."]);
+  git(root, ["commit", "--quiet", "-m", "rename and copy"]);
+
+  const source = captureGitSource({
+    name: "nul-fixture",
+    path: root,
+    base,
+    head: "HEAD",
+    requireClean: true,
+    expectChanges: true,
+  });
+
+  assert.deepEqual(source.changedPaths, [
+    {
+      status: "C100",
+      path: "copy-source.txt",
+      destination: "copy\tduplicate.txt",
+      disposition: "unverified",
+    },
+    {
+      status: "R100",
+      path: "old\tname.txt",
+      destination: "renamed\nname.txt",
+      disposition: "unverified",
+    },
+  ]);
+});
+
+test("captureGitSource uses the requested remote repository URL", (t) => {
+  const { root, base } = createGitSourceFixture(t);
+  const source = captureGitSource({
+    name: "fork fixture",
+    path: root,
+    base,
+    head: "HEAD",
+    remote: "fork",
+  });
+
+  assert.equal(source.remote, "fork");
+  assert.equal(source.repository, "ssh://git@example.invalid/fork/OpenTake.git");
+});
+
+test("captureGitSource rejects a dirty repository when clean evidence is required", (t) => {
+  const { root, base } = createGitSourceFixture(t);
+  writeFileSync(join(root, "untracked.txt"), "dirty\n");
+
+  assert.throws(
+    () => captureGitSource({
+      name: "dirty fixture",
+      path: root,
+      base,
+      head: "HEAD",
+      requireClean: true,
+    }),
+    /dirty fixture: source repository is dirty/,
+  );
+});
+
+test("captureGitSource output ignores transient worktree dirtiness", (t) => {
+  const { root, base } = createGitSourceFixture(t);
+  const clean = captureGitSource({ name: "stable fixture", path: root, base, head: "HEAD" });
+  writeFileSync(join(root, "untracked.txt"), "dirty\n");
+  const dirty = captureGitSource({ name: "stable fixture", path: root, base, head: "HEAD" });
+
+  assert.deepEqual(dirty, clean);
+  assert.equal(clean.status, "changes");
+});
+
+test("captureGitSource rejects missing refs and abbreviated SHA inputs", (t) => {
+  const { root, base, head } = createGitSourceFixture(t);
+
+  assert.throws(
+    () => captureGitSource({ name: "missing fixture", path: root, base, head: "missing-ref" }),
+    /missing fixture: git rev-parse missing-ref failed/,
+  );
+  assert.throws(
+    () => captureGitSource({ name: "short fixture", path: root, base, head: head.slice(0, 12) }),
+    /short fixture: abbreviated SHA ref is not immutable/,
+  );
+});
+
+test("captureGitSource rejects equal refs when changes are expected", (t) => {
+  const { root, head } = createGitSourceFixture(t);
+
+  assert.throws(
+    () => captureGitSource({
+      name: "equal fixture",
+      path: root,
+      base: head,
+      head: "HEAD",
+      expectChanges: true,
+    }),
+    /equal fixture: expected base and head to differ/,
+  );
+});
+
+test("captureDirtyCheckout hashes every tracked dirty and untracked path", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "opentake-dirty-source-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  execFileSync("git", ["init", "--quiet", root]);
+  git(root, ["config", "user.name", "Completion Audit"]);
+  git(root, ["config", "user.email", "audit@example.invalid"]);
+  git(root, ["remote", "add", "origin", "https://example.invalid/canonical.git"]);
+  writeFileSync(join(root, "modified.txt"), "base\n");
+  writeFileSync(join(root, "deleted.txt"), "delete\n");
+  git(root, ["add", "."]);
+  git(root, ["commit", "--quiet", "-m", "base"]);
+  writeFileSync(join(root, "modified.txt"), "changed\n");
+  rmSync(join(root, "deleted.txt"));
+  writeFileSync(join(root, "untracked.txt"), "new\n");
+  const before = execFileSync("git", ["-C", root, "status", "--porcelain=v1", "-z"]);
+
+  const first = captureDirtyCheckout({ name: "canonical", path: root });
+  const second = captureDirtyCheckout({ name: "canonical", path: root });
+
+  assert.deepEqual(second, first);
+  assert.equal(first.repository, "https://example.invalid/canonical.git");
+  assert.equal(first.status, "dirty");
+  assert.equal(first.head, git(root, ["rev-parse", "HEAD"]));
+  assert.equal(first.tree, git(root, ["rev-parse", "HEAD^{tree}"]));
+  assert.equal(first.statusSha256, createHash("sha256").update(before).digest("hex"));
+  assert.deepEqual(first.paths.map(({ status, path, tracked }) => [status, path, tracked]), [
+    [" D", "deleted.txt", true],
+    [" M", "modified.txt", true],
+    ["??", "untracked.txt", false],
+  ]);
+  assert.deepEqual(
+    first.paths.map(({ path }) => path),
+    first.paths.map(({ path }) => path).toSorted((left, right) => left.localeCompare(right, "en")),
+  );
+  const deleted = first.paths[0];
+  const modified = first.paths[1];
+  const untracked = first.paths[2];
+  assert.match(deleted.patchSha256, /^[0-9a-f]{64}$/);
+  assert.equal(deleted.contentSha256, null);
+  assert.equal(deleted.bytes, null);
+  assert.equal(modified.contentSha256, createHash("sha256").update("changed\n").digest("hex"));
+  assert.equal(modified.bytes, Buffer.byteLength("changed\n"));
+  assert.match(modified.patchSha256, /^[0-9a-f]{64}$/);
+  assert.equal(untracked.patchSha256, null);
+  assert.equal(untracked.contentSha256, createHash("sha256").update("new\n").digest("hex"));
+  assert.equal(
+    first.manifestSha256,
+    createHash("sha256").update(JSON.stringify(first.paths)).digest("hex"),
+  );
+  assert.deepEqual(
+    execFileSync("git", ["-C", root, "status", "--porcelain=v1", "-z"]),
+    before,
+  );
+});
 
 test("extractControls records labels, handlers, and panel triggers", () => {
   const source = "export function View(){return <button aria-label=\"Export\" onClick={() => setExportOpen(true)}>Go</button>}";

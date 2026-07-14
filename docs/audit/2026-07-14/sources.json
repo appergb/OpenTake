@@ -1,0 +1,3453 @@
+{
+  "schema": 1,
+  "auditDate": "2026-07-14",
+  "generation": {
+    "deterministicOrdering": "UTF-8 normalized path/ref ordering",
+    "hashAlgorithm": "SHA-256",
+    "sourceRefs": "full immutable 40-character commit SHAs"
+  },
+  "fetchEvidence": {
+    "serializedOrder": [
+      "git -C ../palmier-pro-upstream fetch --prune origin",
+      "git fetch --prune origin",
+      "git fetch --prune H-Chris233",
+      "git fetch --prune cuic19053-hue"
+    ],
+    "target": {
+      "pre": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "post": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "canonical": {
+      "pre": "1157939da02403643b66eee0618db0ec04f9a42412a538d0a67d547d75e0dd00",
+      "post": "1157939da02403643b66eee0618db0ec04f9a42412a538d0a67d547d75e0dd00"
+    },
+    "palmier": {
+      "pre": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "post": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "workingFilesUnchanged": true
+  },
+  "openPullRequests": {
+    "repository": "appergb/OpenTake",
+    "state": "open",
+    "transport": "gh-live-readback",
+    "command": "gh pr list --repo appergb/OpenTake --state open --json number,title,headRefName,baseRefName,url",
+    "count": 0,
+    "items": []
+  },
+  "sources": [
+    {
+      "name": "target cloud main vs local start",
+      "repository": "https://github.com/appergb/OpenTake.git",
+      "remote": "origin",
+      "status": "equivalent-tree",
+      "base": "f94a171753c7fe5361044eabf1c8f3be8177d238",
+      "head": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "baseTree": "d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+      "headTree": "d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+      "mergeBase": "ac50dc896bea821f66c88c6ed50cf9185e4e31d1",
+      "commitCount": 9,
+      "aheadCount": 9,
+      "behindCount": 159,
+      "changedPaths": []
+    },
+    {
+      "name": "Palmier Pro refreshed main",
+      "repository": "https://github.com/palmier-io/palmier-pro.git",
+      "remote": "origin",
+      "status": "changes",
+      "base": "404e14f4c449bd24576e52fa24f8e50694a5da13",
+      "head": "092bc9e0fd4c9f0e865799299d34b0dcfee63c7e",
+      "baseTree": "b6eb2625b43f1b10884b18c14d0a5f9fe23ec578",
+      "headTree": "e397e177b5673ea23fb55b18e8463146ccee0cf4",
+      "mergeBase": "404e14f4c449bd24576e52fa24f8e50694a5da13",
+      "commitCount": 23,
+      "aheadCount": 23,
+      "behindCount": 0,
+      "changedPaths": [
+        {
+          "status": "M",
+          "path": ".github/workflows/ci.yml",
+          "destination": null,
+          "disposition": "platform-specific",
+          "behavior": "Updates Swift toolchain, dependency, CI, version, or macOS bundle metadata.",
+          "openTakeEquivalent": "Cargo.toml/Cargo.lock; .github/workflows/ci.yml; src-tauri/tauri.conf.json",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "A",
+          "path": ".swift-version",
+          "destination": null,
+          "disposition": "platform-specific",
+          "behavior": "Updates Swift toolchain, dependency, CI, version, or macOS bundle metadata.",
+          "openTakeEquivalent": "Cargo.toml/Cargo.lock; .github/workflows/ci.yml; src-tauri/tauri.conf.json",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Metal/ChromaKey.metal",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Corrects chroma-key compositing and adds preview eyedropper sampling.",
+          "openTakeEquivalent": "crates/opentake-domain/src/grade.rs; crates/opentake-render/src/gpu/shader.wgsl; src-tauri/src/commands.rs; web/src/components/inspector/Inspector.tsx",
+          "linkedRequirementIds": [
+            "requirement-5698f215032c0f0e"
+          ],
+          "linkedControlIds": [
+            "control-record-f8fda6ae2f426fe7",
+            "control-record-46a4a8652371f465",
+            "control-record-1dda462442994c48",
+            "control-record-15ec45b9eaa7d580"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Package.resolved",
+          "destination": null,
+          "disposition": "platform-specific",
+          "behavior": "Updates Swift toolchain, dependency, CI, version, or macOS bundle metadata.",
+          "openTakeEquivalent": "Cargo.toml/Cargo.lock; .github/workflows/ci.yml; src-tauri/tauri.conf.json",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Package.swift",
+          "destination": null,
+          "disposition": "requires-reconciliation",
+          "behavior": "Adds Swift package traits and release-time speech/telemetry/signing feature composition.",
+          "openTakeEquivalent": "Cargo feature tables; src-tauri packaging; OpenTake release workflows",
+          "linkedRequirementIds": [
+            "requirement-681025f8d7d4facf"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "README.md",
+          "destination": null,
+          "disposition": "obsolete",
+          "behavior": "Updates Palmier-only release, appcast, version, or repository analytics metadata.",
+          "openTakeEquivalent": "OpenTake release metadata is independently versioned and signed",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Agent/AgentService.swift",
+          "destination": null,
+          "disposition": "cloud-specific",
+          "behavior": "Changes hosted-chat model selection and in-app activation accounting.",
+          "openTakeEquivalent": "crates/opentake-agent/src/chat (BYOK architecture); no hosted activation sink",
+          "linkedRequirementIds": [
+            "requirement-681025f8d7d4facf"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Agent/MCP/MCPHTTPServer.swift",
+          "destination": null,
+          "disposition": "requirement-needed:agent-session-telemetry",
+          "behavior": "Tracks activated MCP sessions and consolidates project-tool registration.",
+          "openTakeEquivalent": "crates/opentake-agent/src/mcp/server.rs; src-tauri/src/mcp.rs",
+          "linkedRequirementIds": [
+            "requirement-923fa228087ad4f3"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Agent/MCP/MCPService.swift",
+          "destination": null,
+          "disposition": "requirement-needed:agent-session-telemetry",
+          "behavior": "Tracks activated MCP sessions and consolidates project-tool registration.",
+          "openTakeEquivalent": "crates/opentake-agent/src/mcp/server.rs; src-tauri/src/mcp.rs",
+          "linkedRequirementIds": [
+            "requirement-923fa228087ad4f3"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Agent/Tools/AgentInstructions.swift",
+          "destination": null,
+          "disposition": "requirement-needed:agent-project-tool-consolidation",
+          "behavior": "Consolidates project management tools, records tool calls, and updates hosted chat instructions/model selection.",
+          "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs; crates/opentake-agent/src/chat; web/src/store/chatStore.ts",
+          "linkedRequirementIds": [
+            "requirement-34e3026d3b05e9ee"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Agent/Tools/ToolDefinitions.swift",
+          "destination": null,
+          "disposition": "requirement-needed:agent-project-tool-consolidation",
+          "behavior": "Consolidates project management tools, records tool calls, and updates hosted chat instructions/model selection.",
+          "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs; crates/opentake-agent/src/chat; web/src/store/chatStore.ts",
+          "linkedRequirementIds": [
+            "requirement-34e3026d3b05e9ee"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Agent/Tools/ToolExecutor+Clips.swift",
+          "destination": null,
+          "disposition": "requirement-needed:agent-project-tool-consolidation",
+          "behavior": "Consolidates project management tools, records tool calls, and updates hosted chat instructions/model selection.",
+          "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs; crates/opentake-agent/src/chat; web/src/store/chatStore.ts",
+          "linkedRequirementIds": [
+            "requirement-34e3026d3b05e9ee"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Agent/Tools/ToolExecutor+Export.swift",
+          "destination": null,
+          "disposition": "requirement-needed:cancellable-export-queue",
+          "behavior": "Replaces single export coordination with a cancellable queued export lifecycle and UI.",
+          "openTakeEquivalent": "src-tauri/src/export.rs; web/src/components/shell/ExportDialog.tsx (single in-flight export with cancellation)",
+          "linkedRequirementIds": [],
+          "linkedControlIds": [
+            "control-record-8592a780adc50cb8"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Agent/Tools/ToolExecutor+Generate.swift",
+          "destination": null,
+          "disposition": "requires-reconciliation",
+          "behavior": "Adds sourceMediaRef and targetLanguage validation for voice isolation and dubbing tool calls.",
+          "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs; crates/opentake-gen/src/provider/elevenlabs.rs",
+          "linkedRequirementIds": [
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Agent/Tools/ToolExecutor+Import.swift",
+          "destination": null,
+          "disposition": "requirement-needed:manifest-metadata-batching",
+          "behavior": "Routes imported asset metadata through a batched manifest updater.",
+          "openTakeEquivalent": "crates/opentake-core/src/session.rs::import_media_file_checked (direct manifest mutation)",
+          "linkedRequirementIds": [
+            "requirement-6a74e3f1924c4e22"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Agent/Tools/ToolExecutor+ProjectSettings.swift",
+          "destination": null,
+          "disposition": "requirement-needed:agent-project-tool-consolidation",
+          "behavior": "Consolidates project management tools, records tool calls, and updates hosted chat instructions/model selection.",
+          "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs; crates/opentake-agent/src/chat; web/src/store/chatStore.ts",
+          "linkedRequirementIds": [
+            "requirement-34e3026d3b05e9ee"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Agent/Tools/ToolExecutor+Projects.swift",
+          "destination": null,
+          "disposition": "requirement-needed:agent-project-tool-consolidation",
+          "behavior": "Consolidates project management tools, records tool calls, and updates hosted chat instructions/model selection.",
+          "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs; crates/opentake-agent/src/chat; web/src/store/chatStore.ts",
+          "linkedRequirementIds": [
+            "requirement-34e3026d3b05e9ee"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Agent/Tools/ToolExecutor+ShortId.swift",
+          "destination": null,
+          "disposition": "requirement-needed:agent-project-tool-consolidation",
+          "behavior": "Consolidates project management tools, records tool calls, and updates hosted chat instructions/model selection.",
+          "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs; crates/opentake-agent/src/chat; web/src/store/chatStore.ts",
+          "linkedRequirementIds": [
+            "requirement-34e3026d3b05e9ee"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Agent/Tools/ToolExecutor+Timeline.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Tightens Agent edit transaction boundaries so undo groups match tool calls.",
+          "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs; crates/opentake-core/src/session.rs",
+          "linkedRequirementIds": [
+            "requirement-d8779330e21693ad"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Agent/Tools/ToolExecutor.swift",
+          "destination": null,
+          "disposition": "requirement-needed:agent-project-tool-consolidation",
+          "behavior": "Consolidates project management tools, records tool calls, and updates hosted chat instructions/model selection.",
+          "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs; crates/opentake-agent/src/chat; web/src/store/chatStore.ts",
+          "linkedRequirementIds": [
+            "requirement-34e3026d3b05e9ee"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/App/AppDelegate.swift",
+          "destination": null,
+          "disposition": "requires-reconciliation",
+          "behavior": "Consolidates project open/manage/close persistence and application lifecycle handling.",
+          "openTakeEquivalent": "crates/opentake-core/src/session.rs; crates/opentake-project/src/bundle.rs; web/src/store/projectActions.ts",
+          "linkedRequirementIds": [
+            "requirement-9a5fece84fd52934"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/App/AppState.swift",
+          "destination": null,
+          "disposition": "requires-reconciliation",
+          "behavior": "Consolidates project open/manage/close persistence and application lifecycle handling.",
+          "openTakeEquivalent": "crates/opentake-core/src/session.rs; crates/opentake-project/src/bundle.rs; web/src/store/projectActions.ts",
+          "linkedRequirementIds": [
+            "requirement-9a5fece84fd52934"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Audio/Analysis/SpeakerIdentity.swift",
+          "destination": null,
+          "disposition": "platform-specific",
+          "behavior": "Moves model preflight off the main actor and drains Apple MLX work before termination.",
+          "openTakeEquivalent": "crates/opentake-media/src/ort_worker (cross-platform ONNX worker architecture)",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Audio/Analysis/VoiceActivity.swift",
+          "destination": null,
+          "disposition": "platform-specific",
+          "behavior": "Moves model preflight off the main actor and drains Apple MLX work before termination.",
+          "openTakeEquivalent": "crates/opentake-media/src/ort_worker (cross-platform ONNX worker architecture)",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Audio/AudioEnhancer.swift",
+          "destination": null,
+          "disposition": "platform-specific",
+          "behavior": "Moves model preflight off the main actor and drains Apple MLX work before termination.",
+          "openTakeEquivalent": "crates/opentake-media/src/ort_worker (cross-platform ONNX worker architecture)",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "A",
+          "path": "Sources/PalmierPro/Audio/AudioMeter.swift",
+          "destination": null,
+          "disposition": "requirement-needed:audio-scrub-meter",
+          "behavior": "Adds non-blocking timeline audio scrubbing and a low-invalidation stereo meter.",
+          "openTakeEquivalent": "src-tauri/src/playback/audio.rs; web/src/components/preview/Preview.tsx (no confirmed meter/scrub-audio parity)",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "A",
+          "path": "Sources/PalmierPro/Audio/AudioMeterView.swift",
+          "destination": null,
+          "disposition": "requirement-needed:audio-scrub-meter",
+          "behavior": "Adds non-blocking timeline audio scrubbing and a low-invalidation stereo meter.",
+          "openTakeEquivalent": "src-tauri/src/playback/audio.rs; web/src/components/preview/Preview.tsx (no confirmed meter/scrub-audio parity)",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "R100",
+          "path": "Sources/PalmierPro/Account/BackendConfig.swift",
+          "destination": "Sources/PalmierPro/Backend/BackendConfig.swift",
+          "disposition": "equivalent",
+          "behavior": "Moves shared hosted backend configuration without changing its content.",
+          "openTakeEquivalent": "crates/opentake-gen/src/keys.rs and provider configuration",
+          "linkedRequirementIds": [
+            "requirement-9f64c383bdf1c254"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "A",
+          "path": "Sources/PalmierPro/Backend/BackendError.swift",
+          "destination": null,
+          "disposition": "equivalent",
+          "behavior": "Adds provider-neutral backend error decoding for storage and generation requests.",
+          "openTakeEquivalent": "crates/opentake-gen/src/error.rs",
+          "linkedRequirementIds": [
+            "requirement-1f36e817d0ba77ea"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "R084",
+          "path": "Sources/PalmierPro/Generation/BackendStorage.swift",
+          "destination": "Sources/PalmierPro/Backend/BackendStorage.swift",
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Compositing/EffectRegistry.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Corrects chroma-key compositing and adds preview eyedropper sampling.",
+          "openTakeEquivalent": "crates/opentake-domain/src/grade.rs; crates/opentake-render/src/gpu/shader.wgsl; src-tauri/src/commands.rs; web/src/components/inspector/Inspector.tsx",
+          "linkedRequirementIds": [
+            "requirement-5698f215032c0f0e"
+          ],
+          "linkedControlIds": [
+            "control-record-f8fda6ae2f426fe7",
+            "control-record-46a4a8652371f465",
+            "control-record-1dda462442994c48",
+            "control-record-15ec45b9eaa7d580"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Compositing/FrameRenderer.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Corrects chroma-key compositing and adds preview eyedropper sampling.",
+          "openTakeEquivalent": "crates/opentake-domain/src/grade.rs; crates/opentake-render/src/gpu/shader.wgsl; src-tauri/src/commands.rs; web/src/components/inspector/Inspector.tsx",
+          "linkedRequirementIds": [
+            "requirement-5698f215032c0f0e"
+          ],
+          "linkedControlIds": [
+            "control-record-f8fda6ae2f426fe7",
+            "control-record-46a4a8652371f465",
+            "control-record-1dda462442994c48",
+            "control-record-15ec45b9eaa7d580"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Compositing/LUTLoader.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Extends .cube LUT parsing to 65-point tables.",
+          "openTakeEquivalent": "crates/opentake-domain/src/grade.rs; crates/opentake-render/src/gpu/shader.wgsl",
+          "linkedRequirementIds": [
+            "requirement-308f50408571c49c"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Editor/EditorView.swift",
+          "destination": null,
+          "disposition": "requirement-needed:audio-scrub-meter",
+          "behavior": "Adds non-blocking timeline audio scrubbing and a low-invalidation stereo meter.",
+          "openTakeEquivalent": "src-tauri/src/playback/audio.rs; web/src/components/preview/Preview.tsx (no confirmed meter/scrub-audio parity)",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Editor/EditorWindowController.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Corrects chroma-key compositing and adds preview eyedropper sampling.",
+          "openTakeEquivalent": "crates/opentake-domain/src/grade.rs; crates/opentake-render/src/gpu/shader.wgsl; src-tauri/src/commands.rs; web/src/components/inspector/Inspector.tsx",
+          "linkedRequirementIds": [
+            "requirement-5698f215032c0f0e"
+          ],
+          "linkedControlIds": [
+            "control-record-f8fda6ae2f426fe7",
+            "control-record-46a4a8652371f465",
+            "control-record-1dda462442994c48",
+            "control-record-15ec45b9eaa7d580"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Editor/TitleBarView.swift",
+          "destination": null,
+          "disposition": "requirement-needed:cancellable-export-queue",
+          "behavior": "Adds export queue activity/history status to the title bar.",
+          "openTakeEquivalent": "web/src/components/shell/TitleBar.tsx (export entry without queue history)",
+          "linkedRequirementIds": [],
+          "linkedControlIds": [
+            "control-record-51cd2ee5dd1aecc9"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Editor/ViewModel/EditorViewModel+AIEdit.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "A",
+          "path": "Sources/PalmierPro/Editor/ViewModel/EditorViewModel+ChromaKey.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Corrects chroma-key compositing and adds preview eyedropper sampling.",
+          "openTakeEquivalent": "crates/opentake-domain/src/grade.rs; crates/opentake-render/src/gpu/shader.wgsl; src-tauri/src/commands.rs; web/src/components/inspector/Inspector.tsx",
+          "linkedRequirementIds": [
+            "requirement-5698f215032c0f0e"
+          ],
+          "linkedControlIds": [
+            "control-record-f8fda6ae2f426fe7",
+            "control-record-46a4a8652371f465",
+            "control-record-1dda462442994c48",
+            "control-record-15ec45b9eaa7d580"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Editor/ViewModel/EditorViewModel+Folders.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Batches manifest metadata updates and restores persisted star/favorite history.",
+          "openTakeEquivalent": "crates/opentake-domain/src/media.rs; crates/opentake-project/src/bundle.rs; src-tauri/src/library.rs",
+          "linkedRequirementIds": [
+            "requirement-6a74e3f1924c4e22"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Editor/ViewModel/EditorViewModel+MediaLibrary.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Batches manifest metadata updates and restores persisted star/favorite history.",
+          "openTakeEquivalent": "crates/opentake-domain/src/media.rs; crates/opentake-project/src/bundle.rs; src-tauri/src/library.rs",
+          "linkedRequirementIds": [
+            "requirement-6a74e3f1924c4e22"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Editor/ViewModel/EditorViewModel.swift",
+          "destination": null,
+          "disposition": "requires-reconciliation",
+          "behavior": "Carries shared state/UI plumbing for chroma sampling, audio scrub/meter, and manifest updates.",
+          "openTakeEquivalent": "src-tauri/src/playback; web/src/components/preview/Preview.tsx; web/src/components/inspector/Inspector.tsx",
+          "linkedRequirementIds": [
+            "requirement-5698f215032c0f0e"
+          ],
+          "linkedControlIds": [
+            "control-record-f8fda6ae2f426fe7",
+            "control-record-46a4a8652371f465",
+            "control-record-1dda462442994c48",
+            "control-record-15ec45b9eaa7d580"
+          ]
+        },
+        {
+          "status": "D",
+          "path": "Sources/PalmierPro/Export/ExportCoordinator.swift",
+          "destination": null,
+          "disposition": "requirement-needed:cancellable-export-queue",
+          "behavior": "Replaces single export coordination with a cancellable queued export lifecycle and UI.",
+          "openTakeEquivalent": "src-tauri/src/export.rs; web/src/components/shell/ExportDialog.tsx (single in-flight export with cancellation)",
+          "linkedRequirementIds": [],
+          "linkedControlIds": [
+            "control-record-8592a780adc50cb8"
+          ]
+        },
+        {
+          "status": "A",
+          "path": "Sources/PalmierPro/Export/ExportQueue.swift",
+          "destination": null,
+          "disposition": "requirement-needed:cancellable-export-queue",
+          "behavior": "Replaces single export coordination with a cancellable queued export lifecycle and UI.",
+          "openTakeEquivalent": "src-tauri/src/export.rs; web/src/components/shell/ExportDialog.tsx (single in-flight export with cancellation)",
+          "linkedRequirementIds": [],
+          "linkedControlIds": [
+            "control-record-8592a780adc50cb8"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Export/ExportService.swift",
+          "destination": null,
+          "disposition": "requirement-needed:cancellable-export-queue",
+          "behavior": "Replaces single export coordination with a cancellable queued export lifecycle and UI.",
+          "openTakeEquivalent": "src-tauri/src/export.rs; web/src/components/shell/ExportDialog.tsx (single in-flight export with cancellation)",
+          "linkedRequirementIds": [],
+          "linkedControlIds": [
+            "control-record-8592a780adc50cb8"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Export/ExportView.swift",
+          "destination": null,
+          "disposition": "requirement-needed:cancellable-export-queue",
+          "behavior": "Replaces single export coordination with a cancellable queued export lifecycle and UI.",
+          "openTakeEquivalent": "src-tauri/src/export.rs; web/src/components/shell/ExportDialog.tsx (single in-flight export with cancellation)",
+          "linkedRequirementIds": [],
+          "linkedControlIds": [
+            "control-record-8592a780adc50cb8"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Export/HDRVideoExporter.swift",
+          "destination": null,
+          "disposition": "requirement-needed:cancellable-export-queue",
+          "behavior": "Replaces single export coordination with a cancellable queued export lifecycle and UI.",
+          "openTakeEquivalent": "src-tauri/src/export.rs; web/src/components/shell/ExportDialog.tsx (single in-flight export with cancellation)",
+          "linkedRequirementIds": [],
+          "linkedControlIds": [
+            "control-record-8592a780adc50cb8"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Export/PalmierProjectExporter.swift",
+          "destination": null,
+          "disposition": "requirement-needed:cancellable-export-queue",
+          "behavior": "Replaces single export coordination with a cancellable queued export lifecycle and UI.",
+          "openTakeEquivalent": "src-tauri/src/export.rs; web/src/components/shell/ExportDialog.tsx (single in-flight export with cancellation)",
+          "linkedRequirementIds": [],
+          "linkedControlIds": [
+            "control-record-8592a780adc50cb8"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Generation/Catalog/AudioModelConfig.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Generation/Catalog/CostEstimator.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Generation/Catalog/ModelCatalog.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Generation/Edit/AIEditMenu.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "A",
+          "path": "Sources/PalmierPro/Generation/Edit/AudioTransformEditKind.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "A",
+          "path": "Sources/PalmierPro/Generation/Edit/EditSubmitter+AudioTransform.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "C060",
+          "path": "Sources/PalmierPro/Generation/Edit/EditSubmitter.swift",
+          "destination": "Sources/PalmierPro/Generation/Edit/EditSubmitter+Rerun.swift",
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "A",
+          "path": "Sources/PalmierPro/Generation/Edit/EditSubmitter+Seeds.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "A",
+          "path": "Sources/PalmierPro/Generation/Edit/EditSubmitter+Upscale.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Generation/Edit/EditSubmitter.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Generation/GenerationBackend.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Generation/GenerationService.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "A",
+          "path": "Sources/PalmierPro/Generation/Preprocessing/AudioTrackExtractor.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "A",
+          "path": "Sources/PalmierPro/Generation/Preprocessing/TrimmedSource.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "R100",
+          "path": "Sources/PalmierPro/Generation/VideoCompressor.swift",
+          "destination": "Sources/PalmierPro/Generation/Preprocessing/VideoCompressor.swift",
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "R077",
+          "path": "Sources/PalmierPro/Generation/Edit/VideoTrimExtractor.swift",
+          "destination": "Sources/PalmierPro/Generation/Preprocessing/VideoTrimExtractor.swift",
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Generation/Submission/AudioGenerationSubmission.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "A",
+          "path": "Sources/PalmierPro/Generation/Submission/GenerationInput+AudioSource.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Generation/UI/GenerationView+ModelState.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Generation/UI/GenerationView+References.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Generation/UI/GenerationView+Settings.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Generation/UI/GenerationView+Submit.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Generation/UI/GenerationView.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Generation/UI/ReferenceControls.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Inspector/InspectorView.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Corrects chroma-key compositing and adds preview eyedropper sampling.",
+          "openTakeEquivalent": "crates/opentake-domain/src/grade.rs; crates/opentake-render/src/gpu/shader.wgsl; src-tauri/src/commands.rs; web/src/components/inspector/Inspector.tsx",
+          "linkedRequirementIds": [
+            "requirement-5698f215032c0f0e"
+          ],
+          "linkedControlIds": [
+            "control-record-f8fda6ae2f426fe7",
+            "control-record-46a4a8652371f465",
+            "control-record-1dda462442994c48",
+            "control-record-15ec45b9eaa7d580"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Inspector/Tabs/AIEditTab.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Inspector/Tabs/AdjustTab.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Corrects chroma-key compositing and adds preview eyedropper sampling.",
+          "openTakeEquivalent": "crates/opentake-domain/src/grade.rs; crates/opentake-render/src/gpu/shader.wgsl; src-tauri/src/commands.rs; web/src/components/inspector/Inspector.tsx",
+          "linkedRequirementIds": [
+            "requirement-5698f215032c0f0e"
+          ],
+          "linkedControlIds": [
+            "control-record-f8fda6ae2f426fe7",
+            "control-record-46a4a8652371f465",
+            "control-record-1dda462442994c48",
+            "control-record-15ec45b9eaa7d580"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Models/MediaManifest.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Batches manifest metadata updates and restores persisted star/favorite history.",
+          "openTakeEquivalent": "crates/opentake-domain/src/media.rs; crates/opentake-project/src/bundle.rs; src-tauri/src/library.rs",
+          "linkedRequirementIds": [
+            "requirement-6a74e3f1924c4e22"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Models/MediaResolver.swift",
+          "destination": null,
+          "disposition": "equivalent",
+          "behavior": "Makes media resolution reads observe queued-export cancellation.",
+          "openTakeEquivalent": "src-tauri/src/export.rs operation-scoped media cancellation",
+          "linkedRequirementIds": [],
+          "linkedControlIds": [
+            "control-record-8592a780adc50cb8"
+          ]
+        },
+        {
+          "status": "A",
+          "path": "Sources/PalmierPro/Preview/ChromaKeySamplerOverlayView.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Corrects chroma-key compositing and adds preview eyedropper sampling.",
+          "openTakeEquivalent": "crates/opentake-domain/src/grade.rs; crates/opentake-render/src/gpu/shader.wgsl; src-tauri/src/commands.rs; web/src/components/inspector/Inspector.tsx",
+          "linkedRequirementIds": [
+            "requirement-5698f215032c0f0e"
+          ],
+          "linkedControlIds": [
+            "control-record-f8fda6ae2f426fe7",
+            "control-record-46a4a8652371f465",
+            "control-record-1dda462442994c48",
+            "control-record-15ec45b9eaa7d580"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Preview/PreviewContainerView.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Corrects chroma-key compositing and adds preview eyedropper sampling.",
+          "openTakeEquivalent": "crates/opentake-domain/src/grade.rs; crates/opentake-render/src/gpu/shader.wgsl; src-tauri/src/commands.rs; web/src/components/inspector/Inspector.tsx",
+          "linkedRequirementIds": [
+            "requirement-5698f215032c0f0e"
+          ],
+          "linkedControlIds": [
+            "control-record-f8fda6ae2f426fe7",
+            "control-record-46a4a8652371f465",
+            "control-record-1dda462442994c48",
+            "control-record-15ec45b9eaa7d580"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Preview/PreviewHitTester.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Corrects chroma-key compositing and adds preview eyedropper sampling.",
+          "openTakeEquivalent": "crates/opentake-domain/src/grade.rs; crates/opentake-render/src/gpu/shader.wgsl; src-tauri/src/commands.rs; web/src/components/inspector/Inspector.tsx",
+          "linkedRequirementIds": [
+            "requirement-5698f215032c0f0e"
+          ],
+          "linkedControlIds": [
+            "control-record-f8fda6ae2f426fe7",
+            "control-record-46a4a8652371f465",
+            "control-record-1dda462442994c48",
+            "control-record-15ec45b9eaa7d580"
+          ]
+        },
+        {
+          "status": "A",
+          "path": "Sources/PalmierPro/Preview/ScrubAudioEngine.swift",
+          "destination": null,
+          "disposition": "requirement-needed:audio-scrub-meter",
+          "behavior": "Adds non-blocking timeline audio scrubbing and a low-invalidation stereo meter.",
+          "openTakeEquivalent": "src-tauri/src/playback/audio.rs; web/src/components/preview/Preview.tsx (no confirmed meter/scrub-audio parity)",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "A",
+          "path": "Sources/PalmierPro/Preview/ScrubAudioOutput.swift",
+          "destination": null,
+          "disposition": "requirement-needed:audio-scrub-meter",
+          "behavior": "Adds non-blocking timeline audio scrubbing and a low-invalidation stereo meter.",
+          "openTakeEquivalent": "src-tauri/src/playback/audio.rs; web/src/components/preview/Preview.tsx (no confirmed meter/scrub-audio parity)",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Preview/VideoEngine.swift",
+          "destination": null,
+          "disposition": "requires-reconciliation",
+          "behavior": "Carries shared state/UI plumbing for chroma sampling, audio scrub/meter, and manifest updates.",
+          "openTakeEquivalent": "src-tauri/src/playback; web/src/components/preview/Preview.tsx; web/src/components/inspector/Inspector.tsx",
+          "linkedRequirementIds": [
+            "requirement-5698f215032c0f0e"
+          ],
+          "linkedControlIds": [
+            "control-record-f8fda6ae2f426fe7",
+            "control-record-46a4a8652371f465",
+            "control-record-1dda462442994c48",
+            "control-record-15ec45b9eaa7d580"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Project/VideoProject.swift",
+          "destination": null,
+          "disposition": "requires-reconciliation",
+          "behavior": "Consolidates project open/manage/close persistence and application lifecycle handling.",
+          "openTakeEquivalent": "crates/opentake-core/src/session.rs; crates/opentake-project/src/bundle.rs; web/src/store/projectActions.ts",
+          "linkedRequirementIds": [
+            "requirement-9a5fece84fd52934"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Resources/Info.plist",
+          "destination": null,
+          "disposition": "obsolete",
+          "behavior": "Updates Palmier-only release, appcast, version, or repository analytics metadata.",
+          "openTakeEquivalent": "OpenTake release metadata is independently versioned and signed",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Search/Indexing/VisualIndexer.swift",
+          "destination": null,
+          "disposition": "requires-reconciliation",
+          "behavior": "Moves visual-search preflight off the UI actor and makes index work more deterministic.",
+          "openTakeEquivalent": "crates/opentake-media/src/search; src-tauri/src/search.rs; web/src/components/media/MediaSearch.tsx",
+          "linkedRequirementIds": [],
+          "linkedControlIds": [
+            "control-record-64640989bd95e214"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Search/Models/VisualEmbedder.swift",
+          "destination": null,
+          "disposition": "requires-reconciliation",
+          "behavior": "Moves visual-search preflight off the UI actor and makes index work more deterministic.",
+          "openTakeEquivalent": "crates/opentake-media/src/search; src-tauri/src/search.rs; web/src/components/media/MediaSearch.tsx",
+          "linkedRequirementIds": [],
+          "linkedControlIds": [
+            "control-record-64640989bd95e214"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Search/SearchIndexCoordinator.swift",
+          "destination": null,
+          "disposition": "requires-reconciliation",
+          "behavior": "Moves visual-search preflight off the UI actor and makes index work more deterministic.",
+          "openTakeEquivalent": "crates/opentake-media/src/search; src-tauri/src/search.rs; web/src/components/media/MediaSearch.tsx",
+          "linkedRequirementIds": [],
+          "linkedControlIds": [
+            "control-record-64640989bd95e214"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Telemetry/Analytics.swift",
+          "destination": null,
+          "disposition": "platform-specific",
+          "behavior": "Reduces production logging overhead and adds hosted telemetry counters.",
+          "openTakeEquivalent": "Rust tracing/logging and optional platform telemetry; no Swift runtime port",
+          "linkedRequirementIds": [
+            "requirement-923fa228087ad4f3"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Telemetry/Telemetry.swift",
+          "destination": null,
+          "disposition": "platform-specific",
+          "behavior": "Reduces production logging overhead and adds hosted telemetry counters.",
+          "openTakeEquivalent": "Rust tracing/logging and optional platform telemetry; no Swift runtime port",
+          "linkedRequirementIds": [
+            "requirement-923fa228087ad4f3"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Timeline/TimelineView+AIEditMenu.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Transcription/TranscriptionBackend.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/UI/AppTheme.swift",
+          "destination": null,
+          "disposition": "requires-reconciliation",
+          "behavior": "Carries shared state/UI plumbing for chroma sampling, audio scrub/meter, and manifest updates.",
+          "openTakeEquivalent": "src-tauri/src/playback; web/src/components/preview/Preview.tsx; web/src/components/inspector/Inspector.tsx",
+          "linkedRequirementIds": [
+            "requirement-5698f215032c0f0e"
+          ],
+          "linkedControlIds": [
+            "control-record-f8fda6ae2f426fe7",
+            "control-record-46a4a8652371f465",
+            "control-record-1dda462442994c48",
+            "control-record-15ec45b9eaa7d580"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/UI/CapsuleButton.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/UI/HoverHighlight.swift",
+          "destination": null,
+          "disposition": "portable",
+          "behavior": "Adds voice isolation/dubbing inputs and splits rerun, seed, upscale, and audio-transform submission flows.",
+          "openTakeEquivalent": "crates/opentake-gen; crates/opentake-agent/src/mcp/dispatch.rs; web/src/components/media/MediaPanel.tsx",
+          "linkedRequirementIds": [
+            "requirement-f686c7eff856124f",
+            "requirement-9f64c383bdf1c254",
+            "requirement-ae3876aa43f16739",
+            "requirement-dd0fe05957bd7e1e"
+          ],
+          "linkedControlIds": [
+            "control-record-d53ae6c2dec481d0"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Utilities/Log.swift",
+          "destination": null,
+          "disposition": "platform-specific",
+          "behavior": "Reduces production logging overhead and adds hosted telemetry counters.",
+          "openTakeEquivalent": "Rust tracing/logging and optional platform telemetry; no Swift runtime port",
+          "linkedRequirementIds": [
+            "requirement-923fa228087ad4f3"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Sources/PalmierPro/Utilities/MLXRuntime.swift",
+          "destination": null,
+          "disposition": "platform-specific",
+          "behavior": "Moves model preflight off the main actor and drains Apple MLX work before termination.",
+          "openTakeEquivalent": "crates/opentake-media/src/ort_worker (cross-platform ONNX worker architecture)",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "A",
+          "path": "Tests/PalmierProTests/Agent/AnalyticsSessionActivationTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Tracks activated MCP sessions and consolidates project-tool registration.",
+          "openTakeEquivalent": "crates/opentake-agent/src/mcp/server.rs; src-tauri/src/mcp.rs; corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [
+            "requirement-923fa228087ad4f3"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Tests/PalmierProTests/Agent/ExportProjectToolTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Replaces single export coordination with a cancellable queued export lifecycle and UI.",
+          "openTakeEquivalent": "src-tauri/src/export.rs; web/src/components/shell/ExportDialog.tsx (single in-flight export with cancellation); corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [],
+          "linkedControlIds": [
+            "control-record-8592a780adc50cb8"
+          ]
+        },
+        {
+          "status": "A",
+          "path": "Tests/PalmierProTests/Agent/ManageProjectToolTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Consolidates project management tools, records tool calls, and updates hosted chat instructions/model selection.",
+          "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs; crates/opentake-agent/src/chat; web/src/store/chatStore.ts; corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [
+            "requirement-34e3026d3b05e9ee"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Tests/PalmierProTests/Agent/ManageTracksTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Consolidates project management tools, records tool calls, and updates hosted chat instructions/model selection.",
+          "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs; crates/opentake-agent/src/chat; web/src/store/chatStore.ts; corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [
+            "requirement-34e3026d3b05e9ee"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Tests/PalmierProTests/Agent/ToolExecutorTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Consolidates project management tools, records tool calls, and updates hosted chat instructions/model selection.",
+          "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs; crates/opentake-agent/src/chat; web/src/store/chatStore.ts; corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [
+            "requirement-34e3026d3b05e9ee"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Tests/PalmierProTests/Agent/UndoToolTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Tightens Agent edit transaction boundaries so undo groups match tool calls.",
+          "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs; crates/opentake-core/src/session.rs; corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [
+            "requirement-d8779330e21693ad"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "A",
+          "path": "Tests/PalmierProTests/Audio/AudioMeterTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Adds non-blocking timeline audio scrubbing and a low-invalidation stereo meter.",
+          "openTakeEquivalent": "src-tauri/src/playback/audio.rs; web/src/components/preview/Preview.tsx (no confirmed meter/scrub-audio parity); corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "A",
+          "path": "Tests/PalmierProTests/Audio/ScrubAudioOutputStateTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Adds non-blocking timeline audio scrubbing and a low-invalidation stereo meter.",
+          "openTakeEquivalent": "src-tauri/src/playback/audio.rs; web/src/components/preview/Preview.tsx (no confirmed meter/scrub-audio parity); corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "A",
+          "path": "Tests/PalmierProTests/Export/ExportQueueTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Replaces single export coordination with a cancellable queued export lifecycle and UI.",
+          "openTakeEquivalent": "src-tauri/src/export.rs; web/src/components/shell/ExportDialog.tsx (single in-flight export with cancellation); corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [],
+          "linkedControlIds": [
+            "control-record-8592a780adc50cb8"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Tests/PalmierProTests/Export/ExportServiceRoundTripTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Replaces single export coordination with a cancellable queued export lifecycle and UI.",
+          "openTakeEquivalent": "src-tauri/src/export.rs; web/src/components/shell/ExportDialog.tsx (single in-flight export with cancellation); corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [],
+          "linkedControlIds": [
+            "control-record-8592a780adc50cb8"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Tests/PalmierProTests/Export/PalmierProjectExportTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Replaces single export coordination with a cancellable queued export lifecycle and UI.",
+          "openTakeEquivalent": "src-tauri/src/export.rs; web/src/components/shell/ExportDialog.tsx (single in-flight export with cancellation); corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [],
+          "linkedControlIds": [
+            "control-record-8592a780adc50cb8"
+          ]
+        },
+        {
+          "status": "A",
+          "path": "Tests/PalmierProTests/Media/ManifestMetadataTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Batches manifest metadata updates and restores persisted star/favorite history.",
+          "openTakeEquivalent": "crates/opentake-domain/src/media.rs; crates/opentake-project/src/bundle.rs; src-tauri/src/library.rs; corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [
+            "requirement-6a74e3f1924c4e22"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "A",
+          "path": "Tests/PalmierProTests/Project/ProjectClosePersistenceTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Consolidates project open/manage/close persistence and application lifecycle handling.",
+          "openTakeEquivalent": "crates/opentake-core/src/session.rs; crates/opentake-project/src/bundle.rs; web/src/store/projectActions.ts; corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [
+            "requirement-9a5fece84fd52934"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Tests/PalmierProTests/Rendering/ChromaKeyKernelTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Corrects chroma-key compositing and adds preview eyedropper sampling.",
+          "openTakeEquivalent": "crates/opentake-domain/src/grade.rs; crates/opentake-render/src/gpu/shader.wgsl; src-tauri/src/commands.rs; web/src/components/inspector/Inspector.tsx; corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [
+            "requirement-5698f215032c0f0e"
+          ],
+          "linkedControlIds": [
+            "control-record-f8fda6ae2f426fe7",
+            "control-record-46a4a8652371f465",
+            "control-record-1dda462442994c48",
+            "control-record-15ec45b9eaa7d580"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Tests/PalmierProTests/Rendering/CompositorRenderTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Corrects chroma-key compositing and adds preview eyedropper sampling.",
+          "openTakeEquivalent": "crates/opentake-domain/src/grade.rs; crates/opentake-render/src/gpu/shader.wgsl; src-tauri/src/commands.rs; web/src/components/inspector/Inspector.tsx; corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [
+            "requirement-5698f215032c0f0e"
+          ],
+          "linkedControlIds": [
+            "control-record-f8fda6ae2f426fe7",
+            "control-record-46a4a8652371f465",
+            "control-record-1dda462442994c48",
+            "control-record-15ec45b9eaa7d580"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Tests/PalmierProTests/Rendering/HistogramTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Corrects chroma-key compositing and adds preview eyedropper sampling.",
+          "openTakeEquivalent": "crates/opentake-domain/src/grade.rs; crates/opentake-render/src/gpu/shader.wgsl; src-tauri/src/commands.rs; web/src/components/inspector/Inspector.tsx; corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [
+            "requirement-5698f215032c0f0e"
+          ],
+          "linkedControlIds": [
+            "control-record-f8fda6ae2f426fe7",
+            "control-record-46a4a8652371f465",
+            "control-record-1dda462442994c48",
+            "control-record-15ec45b9eaa7d580"
+          ]
+        },
+        {
+          "status": "A",
+          "path": "Tests/PalmierProTests/Rendering/LUTLoaderTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Extends .cube LUT parsing to 65-point tables.",
+          "openTakeEquivalent": "crates/opentake-domain/src/grade.rs; crates/opentake-render/src/gpu/shader.wgsl; corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [
+            "requirement-308f50408571c49c"
+          ],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "Tests/PalmierProTests/Search/SearchIndexCoordinatorTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Moves visual-search preflight off the UI actor and makes index work more deterministic.",
+          "openTakeEquivalent": "crates/opentake-media/src/search; src-tauri/src/search.rs; web/src/components/media/MediaSearch.tsx; corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [],
+          "linkedControlIds": [
+            "control-record-64640989bd95e214"
+          ]
+        },
+        {
+          "status": "M",
+          "path": "Tests/PalmierProTests/Timeline/ClipMutationsTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Corrects chroma-key compositing and adds preview eyedropper sampling.",
+          "openTakeEquivalent": "crates/opentake-domain/src/grade.rs; crates/opentake-render/src/gpu/shader.wgsl; src-tauri/src/commands.rs; web/src/components/inspector/Inspector.tsx; corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [
+            "requirement-5698f215032c0f0e"
+          ],
+          "linkedControlIds": [
+            "control-record-f8fda6ae2f426fe7",
+            "control-record-46a4a8652371f465",
+            "control-record-1dda462442994c48",
+            "control-record-15ec45b9eaa7d580"
+          ]
+        },
+        {
+          "status": "A",
+          "path": "Tests/PalmierProTests/Utilities/MLXOperationGateTests.swift",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Regression coverage: Moves model preflight off the main actor and drains Apple MLX work before termination.",
+          "openTakeEquivalent": "crates/opentake-media/src/ort_worker (cross-platform ONNX worker architecture); corresponding Rust/TypeScript tests",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "appcast.xml",
+          "destination": null,
+          "disposition": "obsolete",
+          "behavior": "Updates Palmier-only release, appcast, version, or repository analytics metadata.",
+          "openTakeEquivalent": "OpenTake release metadata is independently versioned and signed",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "docs/readme/README.ar.md",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Updates localized upstream repository analytics artwork.",
+          "openTakeEquivalent": "No OpenTake runtime equivalent; upstream documentation only",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "docs/readme/README.bn.md",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Updates localized upstream repository analytics artwork.",
+          "openTakeEquivalent": "No OpenTake runtime equivalent; upstream documentation only",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "docs/readme/README.es.md",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Updates localized upstream repository analytics artwork.",
+          "openTakeEquivalent": "No OpenTake runtime equivalent; upstream documentation only",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "docs/readme/README.fr.md",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Updates localized upstream repository analytics artwork.",
+          "openTakeEquivalent": "No OpenTake runtime equivalent; upstream documentation only",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "docs/readme/README.hi.md",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Updates localized upstream repository analytics artwork.",
+          "openTakeEquivalent": "No OpenTake runtime equivalent; upstream documentation only",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "docs/readme/README.it.md",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Updates localized upstream repository analytics artwork.",
+          "openTakeEquivalent": "No OpenTake runtime equivalent; upstream documentation only",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "docs/readme/README.ja.md",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Updates localized upstream repository analytics artwork.",
+          "openTakeEquivalent": "No OpenTake runtime equivalent; upstream documentation only",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "docs/readme/README.ko.md",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Updates localized upstream repository analytics artwork.",
+          "openTakeEquivalent": "No OpenTake runtime equivalent; upstream documentation only",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "docs/readme/README.pt-BR.md",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Updates localized upstream repository analytics artwork.",
+          "openTakeEquivalent": "No OpenTake runtime equivalent; upstream documentation only",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "docs/readme/README.ru.md",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Updates localized upstream repository analytics artwork.",
+          "openTakeEquivalent": "No OpenTake runtime equivalent; upstream documentation only",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "docs/readme/README.tr.md",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Updates localized upstream repository analytics artwork.",
+          "openTakeEquivalent": "No OpenTake runtime equivalent; upstream documentation only",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "docs/readme/README.vi.md",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Updates localized upstream repository analytics artwork.",
+          "openTakeEquivalent": "No OpenTake runtime equivalent; upstream documentation only",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "docs/readme/README.zh-CN.md",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Updates localized upstream repository analytics artwork.",
+          "openTakeEquivalent": "No OpenTake runtime equivalent; upstream documentation only",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "docs/readme/README.zh-TW.md",
+          "destination": null,
+          "disposition": "test-doc-only",
+          "behavior": "Updates localized upstream repository analytics artwork.",
+          "openTakeEquivalent": "No OpenTake runtime equivalent; upstream documentation only",
+          "linkedRequirementIds": [],
+          "linkedControlIds": []
+        },
+        {
+          "status": "M",
+          "path": "scripts/bundle.sh",
+          "destination": null,
+          "disposition": "requires-reconciliation",
+          "behavior": "Adds Swift package traits and release-time speech/telemetry/signing feature composition.",
+          "openTakeEquivalent": "Cargo feature tables; src-tauri packaging; OpenTake release workflows",
+          "linkedRequirementIds": [
+            "requirement-681025f8d7d4facf"
+          ],
+          "linkedControlIds": []
+        }
+      ]
+    },
+    {
+      "name": "cuic19053-hue main ancestry",
+      "repository": "https://github.com/cuic19053-hue/OpenTake.git",
+      "remote": "cuic19053-hue",
+      "status": "integrated-ancestor",
+      "base": "83482cf365f113241182d0504138751d569dd359",
+      "head": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "baseTree": "b761a799d999fcbdac3b80c3478c4694e48d7d35",
+      "headTree": "d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+      "mergeBase": "83482cf365f113241182d0504138751d569dd359",
+      "commitCount": 331,
+      "aheadCount": 331,
+      "behindCount": 0,
+      "changedPaths": [],
+      "comparisonMode": "ancestry-only",
+      "targetRepository": "https://github.com/appergb/OpenTake.git",
+      "targetAheadCount": 331,
+      "forkUniqueCount": 0,
+      "integratedPathDeltaCount": 519
+    },
+    {
+      "name": "H-Chris233 main ancestry",
+      "repository": "https://github.com/H-Chris233/OpenTake.git",
+      "remote": "H-Chris233",
+      "status": "integrated-ancestor",
+      "base": "b89f1fc14fa4f2a4d6f988b8a3680ee6406b8483",
+      "head": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "baseTree": "06c6868c0ac278877aca9427a468c588d1c2067c",
+      "headTree": "d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+      "mergeBase": "b89f1fc14fa4f2a4d6f988b8a3680ee6406b8483",
+      "commitCount": 339,
+      "aheadCount": 339,
+      "behindCount": 0,
+      "changedPaths": [],
+      "comparisonMode": "ancestry-only",
+      "targetRepository": "https://github.com/appergb/OpenTake.git",
+      "targetAheadCount": 339,
+      "forkUniqueCount": 0,
+      "integratedPathDeltaCount": 523
+    }
+  ],
+  "branchIndex": [
+    {
+      "ref": "cuic19053-hue/chore-35-bundle-id-cherrypick",
+      "remote": "cuic19053-hue",
+      "tip": "d507ddd9520975b23b08719261835489cd7a633f",
+      "tree": "b67d8e058de865969a96d73aa77b836cea4b6a8b",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "83482cf365f113241182d0504138751d569dd359",
+      "targetMergeBase": "d507ddd9520975b23b08719261835489cd7a633f",
+      "forkMainMergeBase": "29021f2d398838e9254e55f22a298f65b38c356a",
+      "targetAncestor": true,
+      "forkMainAncestor": false,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 1,
+      "forkMainChangedPathCount": 93,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "cuic19053-hue/chore-35-bundle-identifier-rename",
+      "remote": "cuic19053-hue",
+      "tip": "f388b41aee0379a17a124f861fe3c291d83511d4",
+      "tree": "5f8082adaaa6538979706ed30eee34b03a3b66fd",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "83482cf365f113241182d0504138751d569dd359",
+      "targetMergeBase": "f388b41aee0379a17a124f861fe3c291d83511d4",
+      "forkMainMergeBase": "29021f2d398838e9254e55f22a298f65b38c356a",
+      "targetAncestor": true,
+      "forkMainAncestor": false,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 1,
+      "forkMainChangedPathCount": 94,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "cuic19053-hue/feat-101-swap-media",
+      "remote": "cuic19053-hue",
+      "tip": "02d484e599d94c7e7197dcc9dafb18884662bcdc",
+      "tree": "3588b5121da8274fcb6b4bf1676d30369ad5ca37",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "83482cf365f113241182d0504138751d569dd359",
+      "targetMergeBase": "02d484e599d94c7e7197dcc9dafb18884662bcdc",
+      "forkMainMergeBase": "2c4d49d198683bbf380154d43638f882119cbcff",
+      "targetAncestor": true,
+      "forkMainAncestor": false,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 7,
+      "forkMainChangedPathCount": 22,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "cuic19053-hue/feat-39-extract-audio",
+      "remote": "cuic19053-hue",
+      "tip": "74af48724bc97e3f1872c9d81c5b3c608dd56b10",
+      "tree": "488ab0b6462fed15adb752daabc63f7dad696b3c",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "83482cf365f113241182d0504138751d569dd359",
+      "targetMergeBase": "74af48724bc97e3f1872c9d81c5b3c608dd56b10",
+      "forkMainMergeBase": "b89f1fc14fa4f2a4d6f988b8a3680ee6406b8483",
+      "targetAncestor": true,
+      "forkMainAncestor": false,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 3,
+      "forkMainChangedPathCount": 31,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "cuic19053-hue/feat-40-settings-mcp-home",
+      "remote": "cuic19053-hue",
+      "tip": "4fe5ba7a27b10e8b7b403054a5f74b8f8a167010",
+      "tree": "e4247c3f8b9b211e1388633289a0f293543b0d14",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "83482cf365f113241182d0504138751d569dd359",
+      "targetMergeBase": "4fe5ba7a27b10e8b7b403054a5f74b8f8a167010",
+      "forkMainMergeBase": "b89f1fc14fa4f2a4d6f988b8a3680ee6406b8483",
+      "targetAncestor": true,
+      "forkMainAncestor": false,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 4,
+      "forkMainChangedPathCount": 43,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "cuic19053-hue/feat-58-folder-browse",
+      "remote": "cuic19053-hue",
+      "tip": "df1e3189a5de7c891d1f2416365678cefb15e7bb",
+      "tree": "ba27f52a1817303182eb2e285c81d9221de9df24",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "83482cf365f113241182d0504138751d569dd359",
+      "targetMergeBase": "df1e3189a5de7c891d1f2416365678cefb15e7bb",
+      "forkMainMergeBase": "b89f1fc14fa4f2a4d6f988b8a3680ee6406b8483",
+      "targetAncestor": true,
+      "forkMainAncestor": false,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 3,
+      "forkMainChangedPathCount": 28,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "cuic19053-hue/feat-64-mjpeg-preview-stream",
+      "remote": "cuic19053-hue",
+      "tip": "4db1a32d6c2d00efb1a79c42303cf5865d601433",
+      "tree": "371795161f7e2df4af0989f92827e0b5eb00ed87",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "83482cf365f113241182d0504138751d569dd359",
+      "targetMergeBase": "4db1a32d6c2d00efb1a79c42303cf5865d601433",
+      "forkMainMergeBase": "2c4d49d198683bbf380154d43638f882119cbcff",
+      "targetAncestor": true,
+      "forkMainAncestor": false,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 1,
+      "forkMainChangedPathCount": 32,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "cuic19053-hue/feat-93-clip-context-menu",
+      "remote": "cuic19053-hue",
+      "tip": "f9de899c33b69f3e3a034115d6865b5fcf79ebf2",
+      "tree": "6b445839b39c8737ec03cc2fca159611718d9d65",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "83482cf365f113241182d0504138751d569dd359",
+      "targetMergeBase": "f9de899c33b69f3e3a034115d6865b5fcf79ebf2",
+      "forkMainMergeBase": "ea8b015a195c9007d7da3f9dc32dda0f74d2fa5b",
+      "targetAncestor": true,
+      "forkMainAncestor": false,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 5,
+      "forkMainChangedPathCount": 13,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "cuic19053-hue/feat-94-clipboard-copy-paste",
+      "remote": "cuic19053-hue",
+      "tip": "2acd1616d0a6f5e328463f511244b07aaf394261",
+      "tree": "6eaf345b14e486fd1eab1564269a2dba15dbcc76",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "83482cf365f113241182d0504138751d569dd359",
+      "targetMergeBase": "2acd1616d0a6f5e328463f511244b07aaf394261",
+      "forkMainMergeBase": "b89f1fc14fa4f2a4d6f988b8a3680ee6406b8483",
+      "targetAncestor": true,
+      "forkMainAncestor": false,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 3,
+      "forkMainChangedPathCount": 23,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "cuic19053-hue/feat-95-keyframe-editing",
+      "remote": "cuic19053-hue",
+      "tip": "7adae915bf7ed452ebc8161b3b425145d13622f1",
+      "tree": "0e540a431c2e4e3dc44dd77be877da784900600e",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "83482cf365f113241182d0504138751d569dd359",
+      "targetMergeBase": "7adae915bf7ed452ebc8161b3b425145d13622f1",
+      "forkMainMergeBase": "7adae915bf7ed452ebc8161b3b425145d13622f1",
+      "targetAncestor": true,
+      "forkMainAncestor": true,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 0,
+      "forkMainChangedPathCount": 55,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "cuic19053-hue/feat-96-text-tool-texttab",
+      "remote": "cuic19053-hue",
+      "tip": "cf8a7b7c918569a1523faeba083c1fb399fb27be",
+      "tree": "dfb95f8def629db8b40f97fd2a2e0a33963f0ee8",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "83482cf365f113241182d0504138751d569dd359",
+      "targetMergeBase": "cf8a7b7c918569a1523faeba083c1fb399fb27be",
+      "forkMainMergeBase": "cf8a7b7c918569a1523faeba083c1fb399fb27be",
+      "targetAncestor": true,
+      "forkMainAncestor": true,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 0,
+      "forkMainChangedPathCount": 92,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "cuic19053-hue/feat-97-inspector-live-missing-fields",
+      "remote": "cuic19053-hue",
+      "tip": "2a3339c00c22bb1ce09cce86d99570cce3cd5462",
+      "tree": "6d055ee3972d62af1b198251bb741c25053f3568",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "83482cf365f113241182d0504138751d569dd359",
+      "targetMergeBase": "2a3339c00c22bb1ce09cce86d99570cce3cd5462",
+      "forkMainMergeBase": "2c4d49d198683bbf380154d43638f882119cbcff",
+      "targetAncestor": true,
+      "forkMainAncestor": false,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 4,
+      "forkMainChangedPathCount": 23,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "cuic19053-hue/feat-98-drag-drop-new-track-option-duplicate",
+      "remote": "cuic19053-hue",
+      "tip": "854cc1a1d8e280ba12118156b980776c3c3041c9",
+      "tree": "b761a799d999fcbdac3b80c3478c4694e48d7d35",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "83482cf365f113241182d0504138751d569dd359",
+      "targetMergeBase": "854cc1a1d8e280ba12118156b980776c3c3041c9",
+      "forkMainMergeBase": "28a218c736321a408f967ff9178c2db5b2e1f4f7",
+      "targetAncestor": true,
+      "forkMainAncestor": false,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 9,
+      "forkMainChangedPathCount": 0,
+      "forkMainDelta": "empty",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "cuic19053-hue/feat-99-snap-offset-volume-envelope",
+      "remote": "cuic19053-hue",
+      "tip": "6adf5760cd0c1555068b6f1df189c74adbc1c91a",
+      "tree": "cb9b61c174deaaea1376cb39c7840f546b868b6b",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "83482cf365f113241182d0504138751d569dd359",
+      "targetMergeBase": "6adf5760cd0c1555068b6f1df189c74adbc1c91a",
+      "forkMainMergeBase": "ee0baf5bbee1529382547475dd43dc83a8f21562",
+      "targetAncestor": true,
+      "forkMainAncestor": false,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 2,
+      "forkMainChangedPathCount": 10,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "cuic19053-hue/fix-146-hit-test-hidden-track",
+      "remote": "cuic19053-hue",
+      "tip": "f0298bcb63796a4d37aa671b29f7807cf4378d52",
+      "tree": "3afd332b74c371d9e5938cb27b29560c0af99027",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "83482cf365f113241182d0504138751d569dd359",
+      "targetMergeBase": "f0298bcb63796a4d37aa671b29f7807cf4378d52",
+      "forkMainMergeBase": "2c4d49d198683bbf380154d43638f882119cbcff",
+      "targetAncestor": true,
+      "forkMainAncestor": false,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 1,
+      "forkMainChangedPathCount": 24,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "cuic19053-hue/fix-150-waveform-empty-stdout",
+      "remote": "cuic19053-hue",
+      "tip": "12933d1e521a5e77b5fc722109a0bba5b24f8ea9",
+      "tree": "7e68178b63e05497205c8833cf89218a64a98176",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "83482cf365f113241182d0504138751d569dd359",
+      "targetMergeBase": "12933d1e521a5e77b5fc722109a0bba5b24f8ea9",
+      "forkMainMergeBase": "83482cf365f113241182d0504138751d569dd359",
+      "targetAncestor": true,
+      "forkMainAncestor": false,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 1,
+      "forkMainChangedPathCount": 2,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "cuic19053-hue/fix/hittest-hidden-track-146",
+      "remote": "cuic19053-hue",
+      "tip": "3cf47fdecfdf3683a49e629a9b32254092d351e8",
+      "tree": "7f15cd6bd55110f1384e92bcd6b4660f0653db18",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "83482cf365f113241182d0504138751d569dd359",
+      "targetMergeBase": "3cf47fdecfdf3683a49e629a9b32254092d351e8",
+      "forkMainMergeBase": "2c4d49d198683bbf380154d43638f882119cbcff",
+      "targetAncestor": true,
+      "forkMainAncestor": false,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 1,
+      "forkMainChangedPathCount": 25,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "cuic19053-hue/test/geometry-pure-fns",
+      "remote": "cuic19053-hue",
+      "tip": "31d7c3f85fbfc7de723d6921c290754b23ad0dfc",
+      "tree": "83061cada14a4bfe1cca6800eda7abcb1d511b92",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "83482cf365f113241182d0504138751d569dd359",
+      "targetMergeBase": "31d7c3f85fbfc7de723d6921c290754b23ad0dfc",
+      "forkMainMergeBase": "2c4d49d198683bbf380154d43638f882119cbcff",
+      "targetAncestor": true,
+      "forkMainAncestor": false,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 1,
+      "forkMainChangedPathCount": 25,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "cuic19053-hue/test/ruler-ticks",
+      "remote": "cuic19053-hue",
+      "tip": "e405449961b14120bd5fc9af225914e32444cec5",
+      "tree": "152c54a56a7de889e839d1731436bc7c5fbba069",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "83482cf365f113241182d0504138751d569dd359",
+      "targetMergeBase": "e405449961b14120bd5fc9af225914e32444cec5",
+      "forkMainMergeBase": "2c4d49d198683bbf380154d43638f882119cbcff",
+      "targetAncestor": true,
+      "forkMainAncestor": false,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 1,
+      "forkMainChangedPathCount": 25,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "H-Chris233/feat/link-offset-badge-87",
+      "remote": "H-Chris233",
+      "tip": "a8c09d988df26b8a92ee256aae8ed84bebec1427",
+      "tree": "4aa67facf523da075e2446299e542bbafd2b91b7",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "b89f1fc14fa4f2a4d6f988b8a3680ee6406b8483",
+      "targetMergeBase": "a8c09d988df26b8a92ee256aae8ed84bebec1427",
+      "forkMainMergeBase": "b89f1fc14fa4f2a4d6f988b8a3680ee6406b8483",
+      "targetAncestor": true,
+      "forkMainAncestor": false,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 3,
+      "forkMainChangedPathCount": 3,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    },
+    {
+      "ref": "H-Chris233/fix/snap-include-playhead-86",
+      "remote": "H-Chris233",
+      "tip": "360bba1fe75bffb5166e3c99363b02fdc0ff01a1",
+      "tree": "ceee72001541b89867a89eff74d696ca7c247c06",
+      "targetMain": "925736a1c0871f2de1f668d1587a5607e45ab1f9",
+      "forkMain": "b89f1fc14fa4f2a4d6f988b8a3680ee6406b8483",
+      "targetMergeBase": "360bba1fe75bffb5166e3c99363b02fdc0ff01a1",
+      "forkMainMergeBase": "b89f1fc14fa4f2a4d6f988b8a3680ee6406b8483",
+      "targetAncestor": true,
+      "forkMainAncestor": false,
+      "targetUniqueCommitCount": 0,
+      "forkMainUniqueCommitCount": 2,
+      "forkMainChangedPathCount": 2,
+      "forkMainDelta": "changes",
+      "status": "integrated-target",
+      "separatelyRelevant": false
+    }
+  ],
+  "branchSummary": {
+    "totalNonMainHeads": 21,
+    "integratedTarget": 21,
+    "integratedForkMain": 0,
+    "empty": 0,
+    "emptyForkMainDeltas": 1,
+    "relevantUnmerged": 0
+  },
+  "canonicalDirtyCheckout": {
+    "name": "canonical dirty OpenTake checkout",
+    "repository": "https://github.com/appergb/OpenTake.git",
+    "remote": "origin",
+    "status": "dirty",
+    "head": "c2f807aafd6e46088365eac2de45fe8803a7e1d0",
+    "tree": "6fa0ac1bd83719c8215e887e4edcb52c527623dd",
+    "statusSha256": "1157939da02403643b66eee0618db0ec04f9a42412a538d0a67d547d75e0dd00",
+    "manifestSha256": "74942bfb8337034cc7632b93a3406da511b1984814c002bb3398a64d992253f8",
+    "paths": [
+      {
+        "status": " M",
+        "path": ".github/workflows/ci.yml",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 928,
+        "patchSha256": "fda4099eacd2439a7875f8ebafc781d33f79c524b5e209322ba05315418da8dd",
+        "fileType": "regular",
+        "bytes": 3162,
+        "contentSha256": "7396deb507c1220dadef9b7e17f53e8ea696573f084039c9ca46fa81211966b1",
+        "linkTargetSha256": null,
+        "relationship": "stale",
+        "disposition": "obsolete",
+        "requirementGap": null,
+        "behavior": "Canonical build/dependency delta associated with the earlier playback implementation.",
+        "openTakeEquivalent": "Audited target path .github/workflows/ci.yml at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": ".gitignore",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 361,
+        "patchSha256": "0740016f5036b0321ef4995c5a0dba2e3341eda8345920e5ef08558a8d724249",
+        "fileType": "regular",
+        "bytes": 412,
+        "contentSha256": "2db1d1d64f7d1f1227a055bce41b0afd94cb0142099885b938eb1ef6a2a1f1cc",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requirement-needed:canonical-three-way-reconciliation",
+        "requirementGap": "requirement-needed:canonical-three-way-reconciliation",
+        "behavior": "Canonical build/dependency delta associated with the earlier playback implementation.",
+        "openTakeEquivalent": "Audited target path .gitignore at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "Cargo.lock",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 800,
+        "patchSha256": "bbdaa4e6a0545960541e3936ce07c16bb40257e5aa98bf0270081b313c7faaa3",
+        "fileType": "regular",
+        "bytes": 175828,
+        "contentSha256": "b598e1dd3aa880226bbde50c8b3ede34a0db38bdcbd02c142b8e1853b244059b",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requirement-needed:canonical-three-way-reconciliation",
+        "requirementGap": "requirement-needed:canonical-three-way-reconciliation",
+        "behavior": "Canonical build/dependency delta associated with the earlier playback implementation.",
+        "openTakeEquivalent": "Audited target path Cargo.lock at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "docs/architecture/HANDOFF-2026-07.md",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 2642,
+        "patchSha256": "6c2aa6de0c034e634596582f41c4995204e7414489e09f7cab3ae3549e9218bd",
+        "fileType": "regular",
+        "bytes": 15424,
+        "contentSha256": "1615f2e7a17708ff8f2bb670a88dfcb19943a99e563e882b141596258e08ccb9",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requirement-needed:canonical-three-way-reconciliation",
+        "requirementGap": "requirement-needed:canonical-three-way-reconciliation",
+        "behavior": "Canonical handoff or QA evidence delta relative to the audited documentation set.",
+        "openTakeEquivalent": "Audited target path docs/architecture/HANDOFF-2026-07.md at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "docs/architecture/PLAYBACK-ENGINE.md",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 8447,
+        "patchSha256": "ad2eea4ab242268cf25a17f71c45f0d7dd1571b277b3cdd3d71c97183fe3dc95",
+        "fileType": "regular",
+        "bytes": 6435,
+        "contentSha256": "4b4eb281a639424086fea9deef77e57590abd0cbe19de065fa8ab0e89c91c042",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path docs/architecture/PLAYBACK-ENGINE.md at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "docs/superpowers/archive/2026-07-08-verification-report.md",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 3719,
+        "patchSha256": "f0a50818f1a7186644de2f97a1f8fed86e566930e6ce989bd546e6ccb8648592",
+        "fileType": "regular",
+        "bytes": 8478,
+        "contentSha256": "5eb79bd98d923fe3220c07af0543ad4f03f496e32bc0c8c93bd5074deb65dd7d",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requirement-needed:canonical-three-way-reconciliation",
+        "requirementGap": "requirement-needed:canonical-three-way-reconciliation",
+        "behavior": "Canonical handoff or QA evidence delta relative to the audited documentation set.",
+        "openTakeEquivalent": "Audited target path docs/superpowers/archive/2026-07-08-verification-report.md at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      },
+      {
+        "status": "??",
+        "path": "docs/superpowers/archive/2026-07-10-playback-cache-installed-app-qa.md",
+        "source": null,
+        "tracked": false,
+        "patchBytes": null,
+        "patchSha256": null,
+        "fileType": "regular",
+        "bytes": 11654,
+        "contentSha256": "234ae0129d766079452dfb4405d21f833e846566f1a2a51cec3fae7f5ea0fc22",
+        "linkTargetSha256": null,
+        "relationship": "requires-reconciliation",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path docs/superpowers/archive/2026-07-10-playback-cache-installed-app-qa.md at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "README.md",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 749,
+        "patchSha256": "b96020c3c721bed8610b6232f3778c9ea2824979daf0d00507b8b18075fad90a",
+        "fileType": "regular",
+        "bytes": 16626,
+        "contentSha256": "19198c404cfb97f285a94eef7e7e5e01fac108ede24c9959ace824dc138d91e9",
+        "linkTargetSha256": null,
+        "relationship": "equivalent",
+        "disposition": "equivalent",
+        "requirementGap": null,
+        "behavior": "Canonical handoff or QA evidence delta relative to the audited documentation set.",
+        "openTakeEquivalent": "Audited target path README.md at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "src-tauri/capabilities/default.json",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 379,
+        "patchSha256": "d49b053fac4f28b4db8bcb7bbc1a113c0d7babdc394f6e0daa2dbe7e2af76dc3",
+        "fileType": "regular",
+        "bytes": 382,
+        "contentSha256": "dfb2175923b3755374f6e346b16372e669f67f06dd9c7131ef8eacc8cfca4ef6",
+        "linkTargetSha256": null,
+        "relationship": "integrated",
+        "disposition": "integrated",
+        "requirementGap": null,
+        "behavior": "Canonical UI or state delta associated with the earlier playback convergence work.",
+        "openTakeEquivalent": "Audited target path src-tauri/capabilities/default.json at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "src-tauri/Cargo.toml",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 571,
+        "patchSha256": "24da83dd54b161cec222c563a0b4d5c38b23edf8764ebdcd02cb4a2cbba7f843",
+        "fileType": "regular",
+        "bytes": 4509,
+        "contentSha256": "6404f83912d8b5e48d374a08fcde028b66a0e642c255cba8840c162e0a167db0",
+        "linkTargetSha256": null,
+        "relationship": "stale",
+        "disposition": "obsolete",
+        "requirementGap": null,
+        "behavior": "Canonical build/dependency delta associated with the earlier playback implementation.",
+        "openTakeEquivalent": "Audited target path src-tauri/Cargo.toml at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "src-tauri/src/lib.rs",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 1091,
+        "patchSha256": "7a843103a19cae9009547cf1d004a941b1bc512079d4521bb3c108e81fd553b3",
+        "fileType": "regular",
+        "bytes": 13118,
+        "contentSha256": "3cf4cf9d11ab70d72cda37ac492c91e6b01ea0d9ec0e43bd639ad737d569ee69",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path src-tauri/src/lib.rs at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "src-tauri/src/media.rs",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 18578,
+        "patchSha256": "af76ae680ed43f46a8d4c3806c137a4e249a02ed74e538de0ff2e86b19920e44",
+        "fileType": "regular",
+        "bytes": 81886,
+        "contentSha256": "086060e173389b28c988b71cbdab5a063701e7bd4feb8ff597ce09d515645819",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path src-tauri/src/media.rs at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " D",
+        "path": "src-tauri/src/mpv_bootstrap.rs",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 3638,
+        "patchSha256": "d62ee2c3efcc2d146a3bcdb6b0e46211a45c4beb9e146e5a126278d2bfad9753",
+        "fileType": "missing",
+        "bytes": null,
+        "contentSha256": null,
+        "linkTargetSha256": null,
+        "relationship": "integrated",
+        "disposition": "integrated",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target intentionally deletes or supersedes src-tauri/src/mpv_bootstrap.rs",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "src-tauri/src/playback/audio.rs",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 16714,
+        "patchSha256": "e1f52f17086b29244cce2279537205bb744b1730f51498460fc0a7b55aee3f91",
+        "fileType": "regular",
+        "bytes": 27533,
+        "contentSha256": "d51e963ccc573ef48d47b7f74785d03681fb017d8b3cf15cad694d4d9e5c4587",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path src-tauri/src/playback/audio.rs at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "src-tauri/src/playback/commands.rs",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 16815,
+        "patchSha256": "04c8eedc9fb6e5a554ef8f82efc89916ad75fe0d71aeda459d8f2068b6510deb",
+        "fileType": "regular",
+        "bytes": 15827,
+        "contentSha256": "7c149ad129e5f13e12bd311f52f5546c618207106da3a60b4979586713876039",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path src-tauri/src/playback/commands.rs at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "src-tauri/src/playback/engine.rs",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 20110,
+        "patchSha256": "5bce2f3c2e3353c829bda59c7e337d29c4d4dd20be6e1e48845f93aa5765dd51",
+        "fileType": "regular",
+        "bytes": 27158,
+        "contentSha256": "2025a6bdb517565d2781c304e20296c110dedd0b151a916fcaacd5a13e21861e",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path src-tauri/src/playback/engine.rs at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "src-tauri/src/playback/resolver.rs",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 3451,
+        "patchSha256": "c1e8eb3402a10fad8f777a10852dfae2dd1aa8a75694b766d4e21ccaa4cc248f",
+        "fileType": "regular",
+        "bytes": 18844,
+        "contentSha256": "5d64130d536582f7d00f16347dc833c09a155039ec572097e19a553418ea94ab",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path src-tauri/src/playback/resolver.rs at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "src-tauri/src/playback/transport.rs",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 2942,
+        "patchSha256": "9f1cacaa8108922e833ae525f8b5d1d80b53b80dcd54c88225d1a9fbb2f371f3",
+        "fileType": "regular",
+        "bytes": 16273,
+        "contentSha256": "69affad5e0c24605a9ccbff5458dcf38f64b887c2949a652e9b4b370d5c2786c",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path src-tauri/src/playback/transport.rs at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "src-tauri/tauri.conf.json",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 325,
+        "patchSha256": "7582d01a488792fa47fe215b402bacda0ce1b2a3c08173b2048aac7bbffcacc5",
+        "fileType": "regular",
+        "bytes": 1242,
+        "contentSha256": "89f1428d2ef298adb9666f15915e4bc6dc6e16c682d6e7659bad41b399432088",
+        "linkTargetSha256": null,
+        "relationship": "integrated",
+        "disposition": "integrated",
+        "requirementGap": null,
+        "behavior": "Canonical UI or state delta associated with the earlier playback convergence work.",
+        "openTakeEquivalent": "Audited target path src-tauri/tauri.conf.json at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "src-tauri/tests/playback_integration.rs",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 6667,
+        "patchSha256": "cdfc73a0d37844b18218838b6d71b80490e33c67dda879e617016f7bb16dc3d0",
+        "fileType": "regular",
+        "bytes": 12174,
+        "contentSha256": "380781b975cbcc2ae70505734d9645ea1b45efa9d08995ffef74aa3186a2f3dd",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path src-tauri/tests/playback_integration.rs at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "src-tauri/tests/playback_transport_integration.rs",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 2285,
+        "patchSha256": "3f28c8480518650bba6d45f7271c058e58a6242fd9209550d3d6e28fa54ad544",
+        "fileType": "regular",
+        "bytes": 4096,
+        "contentSha256": "0170f805fe780a9a73fad8df34e5367c7e521e387af4e5503f96d872920aa42b",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path src-tauri/tests/playback_transport_integration.rs at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/package.json",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 328,
+        "patchSha256": "891022739a80c3f7b53f59666ea663c53538a4c88eed7d5882c210749a60dec7",
+        "fileType": "regular",
+        "bytes": 674,
+        "contentSha256": "015d4d9ff0da2fd25631e14816b4f6d7942ed5dbb1f5688d0942b3aa2cf96861",
+        "linkTargetSha256": null,
+        "relationship": "equivalent",
+        "disposition": "equivalent",
+        "requirementGap": null,
+        "behavior": "Canonical build/dependency delta associated with the earlier playback implementation.",
+        "openTakeEquivalent": "Audited target path web/package.json at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/pnpm-lock.yaml",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 5798,
+        "patchSha256": "4743da660812999de5e9fb8bb5d53b307ab1eb07aa9d4e0a6b9fb47694bd724f",
+        "fileType": "regular",
+        "bytes": 32981,
+        "contentSha256": "64b3ac46511df19b18ac1472ec83636184274b960eaa7b4de397412057dd718e",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requirement-needed:canonical-three-way-reconciliation",
+        "requirementGap": "requirement-needed:canonical-three-way-reconciliation",
+        "behavior": "Canonical build/dependency delta associated with the earlier playback implementation.",
+        "openTakeEquivalent": "Audited target path web/pnpm-lock.yaml at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/App.tsx",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 627,
+        "patchSha256": "8cf03e3facd3d4c7ce9d5e5031e759434eb8dcdeee9c8ae7f572833000620105",
+        "fileType": "regular",
+        "bytes": 3848,
+        "contentSha256": "2a082ab204df3e62bea2ed891d5004a7027f6907b440f828271c4209572f6a44",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/App.tsx at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/components/home/HomeView.tsx",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 1910,
+        "patchSha256": "0a4539d083e78fde4c8edc1a72eb99fc6f716ce76cf8716825c954dd9c32345a",
+        "fileType": "regular",
+        "bytes": 15348,
+        "contentSha256": "27fdd26cc39b6811b21d1449ce724e679c19559029ff64e8ed497153bba9a552",
+        "linkTargetSha256": null,
+        "relationship": "integrated",
+        "disposition": "integrated",
+        "requirementGap": null,
+        "behavior": "Canonical UI or state delta associated with the earlier playback convergence work.",
+        "openTakeEquivalent": "Audited target path web/src/components/home/HomeView.tsx at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/components/home/HomeView.visual.test.ts",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 959,
+        "patchSha256": "bf9c5b52763d63e62b974a3e7f0095e409cbd1598ee3635fe51d3433991f0f60",
+        "fileType": "regular",
+        "bytes": 3991,
+        "contentSha256": "b95e53c1984a868729e359623721ab28cb66b1a6d9c39f5d559f184331467796",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requirement-needed:canonical-three-way-reconciliation",
+        "requirementGap": "requirement-needed:canonical-three-way-reconciliation",
+        "behavior": "Canonical UI or state delta associated with the earlier playback convergence work.",
+        "openTakeEquivalent": "Audited target path web/src/components/home/HomeView.visual.test.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/components/media/MediaPanel.tsx",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 552,
+        "patchSha256": "0d18b5cdf70b98aa06e7fd8bd4687b2fd8a56b7b75c8081ee917c3733375cb8e",
+        "fileType": "regular",
+        "bytes": 38336,
+        "contentSha256": "b90548877b6c68fddfb964407df3549a7035428f0f6e4578cebaecf5663d294d",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requirement-needed:canonical-three-way-reconciliation",
+        "requirementGap": "requirement-needed:canonical-three-way-reconciliation",
+        "behavior": "Canonical UI or state delta associated with the earlier playback convergence work.",
+        "openTakeEquivalent": "Audited target path web/src/components/media/MediaPanel.tsx at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/components/media/MediaSearch.tsx",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 2881,
+        "patchSha256": "7ecee6f4cc487658b976c59521103d3b8a61aeb79addcd365721a2918bdcc9af",
+        "fileType": "regular",
+        "bytes": 20516,
+        "contentSha256": "eee013fdeddc9b3df20fbc6dc3a073070ebbb0ddea549dd3943405ec231df1aa",
+        "linkTargetSha256": null,
+        "relationship": "integrated",
+        "disposition": "integrated",
+        "requirementGap": null,
+        "behavior": "Canonical UI or state delta associated with the earlier playback convergence work.",
+        "openTakeEquivalent": "Audited target path web/src/components/media/MediaSearch.tsx at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": [
+          "control-record-64640989bd95e214"
+        ]
+      },
+      {
+        "status": "??",
+        "path": "web/src/components/preview/nativePlaybackSession.test.ts",
+        "source": null,
+        "tracked": false,
+        "patchBytes": null,
+        "patchSha256": null,
+        "fileType": "regular",
+        "bytes": 3222,
+        "contentSha256": "b834cae5cd58216ad6240a6c5fbf2acf17653f98a81e6da9568bada6f1049e49",
+        "linkTargetSha256": null,
+        "relationship": "requires-reconciliation",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/components/preview/nativePlaybackSession.test.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": "??",
+        "path": "web/src/components/preview/nativePlaybackSession.ts",
+        "source": null,
+        "tracked": false,
+        "patchBytes": null,
+        "patchSha256": null,
+        "fileType": "regular",
+        "bytes": 1528,
+        "contentSha256": "708efdf999e40dd0f82eb9ccf1de400f878b60b45ce3603f1d14caac6efe38bc",
+        "linkTargetSha256": null,
+        "relationship": "requires-reconciliation",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/components/preview/nativePlaybackSession.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/components/preview/Preview.test.tsx",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 2426,
+        "patchSha256": "fcb40481833f965454e41f96b37e75b3ef76b2005e76e31a0558099624f00945",
+        "fileType": "regular",
+        "bytes": 9626,
+        "contentSha256": "55120d76ec02a5bf893b98629a60b93bb7fcc173fbd62b625357d034830dc683",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/components/preview/Preview.test.tsx at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/components/preview/Preview.tsx",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 15167,
+        "patchSha256": "7bb0ba8033a76977b762622c445d110d7e0251926412562081b0f1b09c2cbbb3",
+        "fileType": "regular",
+        "bytes": 43767,
+        "contentSha256": "32a6471840a145b9161c8adf618c8ccda8fde391599c6a6ef3ab99620e8805d1",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/components/preview/Preview.tsx at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/components/preview/previewEngine.test.ts",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 4276,
+        "patchSha256": "6512332442c343983b6c57fab66d0c567029bd2458cb3cd9e48c24b86578ae76",
+        "fileType": "regular",
+        "bytes": 10052,
+        "contentSha256": "2cb27e71a66776489cb6fa9e93f3865127b9b74d78fbed2c2914244a93a624de",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/components/preview/previewEngine.test.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/components/preview/previewEngine.ts",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 21627,
+        "patchSha256": "9e7d8beea13e2366df1bd7c21ff53c6ea51f8abfc09c644b2276d6c2e01d2005",
+        "fileType": "regular",
+        "bytes": 25408,
+        "contentSha256": "caa2e29553e32e819547719d23f1a161198cb5ed692acbac260d5b53dc5f839e",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/components/preview/previewEngine.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/components/preview/rustEngine.test.ts",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 3475,
+        "patchSha256": "3d614d1e364e7a9aefaaad57e175294a382eed70ada57ee720c1fe6d39b8bc60",
+        "fileType": "regular",
+        "bytes": 2570,
+        "contentSha256": "77b68fd7de0453c46188ce8a5dc38523c2f8f06d77e72c1a123c9db493abfaba",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/components/preview/rustEngine.test.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/components/preview/rustEngine.ts",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 3778,
+        "patchSha256": "a4888f49dab398417c2df4668a5121217375fb7b97501dbab41956642b9adc56",
+        "fileType": "regular",
+        "bytes": 1659,
+        "contentSha256": "a1959f31575a36b5e6c9aa31f58a92bc2eeb9ce66539fce8c1dc7dcb540592dc",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/components/preview/rustEngine.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/components/preview/timelinePlayback.test.ts",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 12647,
+        "patchSha256": "d6478e0907fa20ae81aefa7b066ede3a510635f76e207d135c45eed20b7b5e8a",
+        "fileType": "regular",
+        "bytes": 25096,
+        "contentSha256": "341c90e7a4dc74e24d92d411680b842e7b29788b1b7547022b2099638e93f843",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/components/preview/timelinePlayback.test.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/components/preview/timelinePlayback.ts",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 8798,
+        "patchSha256": "adfc28934f0923fe38195d09ff4e985e3d8baad23951d6e34730243c55c51890",
+        "fileType": "regular",
+        "bytes": 14529,
+        "contentSha256": "0b4ea395d8c5f3de4522774ffb9acabcabbb790c9596161b8ed6d904f74cda6b",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/components/preview/timelinePlayback.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/components/preview/TimelinePlaybackLayer.tsx",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 1648,
+        "patchSha256": "df2656314cbb3a20425ef87d572a0e61ac7f40d1a7d09c2d225e76c60aab5774",
+        "fileType": "regular",
+        "bytes": 5158,
+        "contentSha256": "c39a282db74eaedff33c0006abcf7b73fe0ac8d460fb764e13081d28ccf32f4c",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/components/preview/TimelinePlaybackLayer.tsx at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/components/shell/TitleBar.visual.test.ts",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 806,
+        "patchSha256": "e08131c3ecbcad1eeda7f7a6cba5a8135bcd6ef27eed7d1a79e35ea75079bb4a",
+        "fileType": "regular",
+        "bytes": 2163,
+        "contentSha256": "c069fe0b45dff6a714c4a96eda42ae15f33303b525a6dd2b3f28c1274c8799da",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requirement-needed:canonical-three-way-reconciliation",
+        "requirementGap": "requirement-needed:canonical-three-way-reconciliation",
+        "behavior": "Canonical UI or state delta associated with the earlier playback convergence work.",
+        "openTakeEquivalent": "Audited target path web/src/components/shell/TitleBar.visual.test.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/components/shell/ViewMenu.tsx",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 1510,
+        "patchSha256": "688168a432333362a5372a017182b88188f2acd8b9d6a7e1e0b4aab2967d4857",
+        "fileType": "regular",
+        "bytes": 6558,
+        "contentSha256": "e36204b148e1e32bec4242a6a667d78183ab92ee0b144de632d07aefec6de756",
+        "linkTargetSha256": null,
+        "relationship": "integrated",
+        "disposition": "integrated",
+        "requirementGap": null,
+        "behavior": "Canonical UI or state delta associated with the earlier playback convergence work.",
+        "openTakeEquivalent": "Audited target path web/src/components/shell/ViewMenu.tsx at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/components/timeline/TimelineContainer.test.ts",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 2117,
+        "patchSha256": "0f482280d96959e6b91496025e762b0ff7940bfa3d2da3ca9c610ed9f35b77df",
+        "fileType": "regular",
+        "bytes": 7850,
+        "contentSha256": "7758cc08675ae8f87e86babca29582d1784117e203ea601692dc78ab0cb69a5b",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requirement-needed:canonical-three-way-reconciliation",
+        "requirementGap": "requirement-needed:canonical-three-way-reconciliation",
+        "behavior": "Canonical UI or state delta associated with the earlier playback convergence work.",
+        "openTakeEquivalent": "Audited target path web/src/components/timeline/TimelineContainer.test.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/components/timeline/TimelineContainer.tsx",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 12386,
+        "patchSha256": "a0633b473575af54c1323abaa0917834b9d884b222ec928d5f30ee5953358f8c",
+        "fileType": "regular",
+        "bytes": 74571,
+        "contentSha256": "41b910083c7ffcf6b0c52feec0ae54802d2efb1ff92e53d380acf8cd8f7f28f7",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requirement-needed:canonical-three-way-reconciliation",
+        "requirementGap": "requirement-needed:canonical-three-way-reconciliation",
+        "behavior": "Canonical UI or state delta associated with the earlier playback convergence work.",
+        "openTakeEquivalent": "Audited target path web/src/components/timeline/TimelineContainer.tsx at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/components/ui/PanelShell.tsx",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 2377,
+        "patchSha256": "6195671dcb06c4a66070fdb5fd452f67315ba5613701e4bb845ce7ed4fbb8c2c",
+        "fileType": "regular",
+        "bytes": 2531,
+        "contentSha256": "d4a28feb7bc9cb1bb6abd96e42efdbbd20e70d7a43e7d3aa3af33c2139ad7f35",
+        "linkTargetSha256": null,
+        "relationship": "integrated",
+        "disposition": "integrated",
+        "requirementGap": null,
+        "behavior": "Canonical UI or state delta associated with the earlier playback convergence work.",
+        "openTakeEquivalent": "Audited target path web/src/components/ui/PanelShell.tsx at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/i18n/dict.ts",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 1458,
+        "patchSha256": "63fa749bf758f6a15935511247be8c8db3dd4d0938fd271c809725e18d189f5f",
+        "fileType": "regular",
+        "bytes": 51897,
+        "contentSha256": "d5b77a760126b3e54d35571bc13e340c705671283b229e757548e3b74f45d427",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/i18n/dict.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/lib/api.ts",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 5998,
+        "patchSha256": "2b52fc67d06367d46b5599fc59843e7f827a98d74a92368b200924c19cc066b7",
+        "fileType": "regular",
+        "bytes": 35940,
+        "contentSha256": "62e2463f12daac576f8532f34e9cdc4df88549642abdff04f799ea169e6d2987",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/lib/api.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " D",
+        "path": "web/src/lib/mpvEdl.test.ts",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 5090,
+        "patchSha256": "8a0acf32d0df15bba20628544dd2a00e5238d2f4fb029311733dc08293108cd0",
+        "fileType": "missing",
+        "bytes": null,
+        "contentSha256": null,
+        "linkTargetSha256": null,
+        "relationship": "integrated",
+        "disposition": "integrated",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target intentionally deletes or supersedes web/src/lib/mpvEdl.test.ts",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " D",
+        "path": "web/src/lib/mpvEdl.ts",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 3710,
+        "patchSha256": "b1acb4c05d43b1c119a9a9026d25f769530d064e03aed025000e6c032868ddb5",
+        "fileType": "missing",
+        "bytes": null,
+        "contentSha256": null,
+        "linkTargetSha256": null,
+        "relationship": "integrated",
+        "disposition": "integrated",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target intentionally deletes or supersedes web/src/lib/mpvEdl.ts",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/store/editActions.test.ts",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 974,
+        "patchSha256": "9e6165ab9243c30c7dcfbcad23c3ab89efdf2eeca11c3a061e871211097b0950",
+        "fileType": "regular",
+        "bytes": 21554,
+        "contentSha256": "1d9c4cbb465a03bfc43611af150e52a1a748f2b7c834909f430318b9d1e431d3",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/store/editActions.test.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/store/editActions.ts",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 2442,
+        "patchSha256": "33d18f55882ecb4e77cdc4ad4152ea8623ee5bdc279763314fbef835f70f42da",
+        "fileType": "regular",
+        "bytes": 45588,
+        "contentSha256": "3cd396a77c411736bdf1b73381ed46ec2e42e8fc32657aeaface75a6b389101d",
+        "linkTargetSha256": null,
+        "relationship": "equivalent",
+        "disposition": "equivalent",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/store/editActions.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": "??",
+        "path": "web/src/store/mediaActions.test.ts",
+        "source": null,
+        "tracked": false,
+        "patchBytes": null,
+        "patchSha256": null,
+        "fileType": "regular",
+        "bytes": 2109,
+        "contentSha256": "86554307b3494832f26237a7cf4af0807d52501d04b7168ce9242bf868a13b5b",
+        "linkTargetSha256": null,
+        "relationship": "requires-reconciliation",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/store/mediaActions.test.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/store/mediaActions.ts",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 2112,
+        "patchSha256": "63182070ad81cb18bbccdf8e5d4966f68e7063f78ff776255be8dc30f43268ed",
+        "fileType": "regular",
+        "bytes": 5254,
+        "contentSha256": "6a092971edf97ba70787f1542aae7adca69d27d526beec2f89e2e56c0b2ecdc1",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/store/mediaActions.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/store/projectActions.test.ts",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 9018,
+        "patchSha256": "692db8d2148a202c8508814f2cf8793708ccef2096e9ed4b9430b7e83f988afb",
+        "fileType": "regular",
+        "bytes": 8635,
+        "contentSha256": "69c2bf2ad099d7988fee1bb9fa85a95eb03dd5f79e3e121daa3f5c07ae123cfd",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/store/projectActions.test.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/store/projectActions.ts",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 3128,
+        "patchSha256": "0f6a4c971c446b2c0ac723bc279e2a639b51123c5e705b13db9c7fe99320b8f3",
+        "fileType": "regular",
+        "bytes": 5249,
+        "contentSha256": "d768cf1631039fd23ac84674bac9a4f6fb532f25603a1d52bc77e4c74af03386",
+        "linkTargetSha256": null,
+        "relationship": "conflict",
+        "disposition": "requires-reconciliation",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/store/projectActions.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/store/uiStore.ts",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 1794,
+        "patchSha256": "5a9215691c9ba266c4ee7b4a58626694ab1b9c24c25828a2b8c298281066afad",
+        "fileType": "regular",
+        "bytes": 18185,
+        "contentSha256": "d7e50d2f51501f7cc0d9fd9e21689c20bff2589af7e8863314ecf5440944182b",
+        "linkTargetSha256": null,
+        "relationship": "equivalent",
+        "disposition": "equivalent",
+        "requirementGap": null,
+        "behavior": "Canonical native-playback/session delta relative to the later audited convergence implementation.",
+        "openTakeEquivalent": "Audited target path web/src/store/uiStore.ts at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [
+          "requirement-10e720a4f5ddd734",
+          "requirement-9bceb67f73cd51d4"
+        ],
+        "linkedControlIds": []
+      },
+      {
+        "status": " M",
+        "path": "web/src/styles/global.css",
+        "source": null,
+        "tracked": true,
+        "patchBytes": 1062,
+        "patchSha256": "6cea8117201e65ac804350a267723a512ac666fcf6e4c2d210ef24990bbbb2e8",
+        "fileType": "regular",
+        "bytes": 2705,
+        "contentSha256": "35105a71a4f9351dc28d2cb63b9308f5966b53a02609643b4cb5f20d35aeda3a",
+        "linkTargetSha256": null,
+        "relationship": "integrated",
+        "disposition": "integrated",
+        "requirementGap": null,
+        "behavior": "Canonical UI or state delta associated with the earlier playback convergence work.",
+        "openTakeEquivalent": "Audited target path web/src/styles/global.css at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a",
+        "linkedRequirementIds": [],
+        "linkedControlIds": []
+      }
+    ],
+    "captureManifestSha256": "5cbd2d6cd1bfefb9ee6aae86945b0525dec9d159f4c90fcbf682732babaab8ff",
+    "relationshipCounts": {
+      "stale": 2,
+      "conflict": 36,
+      "requires-reconciliation": 4,
+      "equivalent": 4,
+      "integrated": 10
+    }
+  }
+}
