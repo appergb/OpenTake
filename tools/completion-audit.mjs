@@ -4128,22 +4128,129 @@ function sourceTestExercisesOwningComponent(testPath, source, name, candidatePat
     }
   }
   if (importedNames.size === 0) return false;
+  const unwrapExpression = (node) => {
+    let current = node;
+    while (
+      ts.isParenthesizedExpression(current)
+      || ts.isAsExpression(current)
+      || ts.isTypeAssertionExpression(current)
+      || ts.isNonNullExpression(current)
+    ) {
+      current = current.expression;
+    }
+    return current;
+  };
+  const jsxContainsOwningComponent = (node) => {
+    let found = false;
+    const visit = (child) => {
+      if (found) return;
+      if (
+        (ts.isJsxOpeningElement(child) || ts.isJsxSelfClosingElement(child))
+        && ts.isIdentifier(child.tagName)
+        && importedNames.has(child.tagName.text)
+      ) {
+        found = true;
+        return;
+      }
+      ts.forEachChild(child, visit);
+    };
+    visit(node);
+    return found;
+  };
+  const isCreateElementCall = (node) => {
+    if (!ts.isCallExpression(node)) return false;
+    if (ts.isIdentifier(node.expression)) return node.expression.text === "createElement";
+    return ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === "createElement";
+  };
+  const renderArgumentContainsOwningComponent = (
+    rawNode,
+    constInitializers,
+    resolving = new Set(),
+  ) => {
+    const node = unwrapExpression(rawNode);
+    if (ts.isIdentifier(node)) {
+      if (importedNames.has(node.text) || resolving.has(node.text)) return false;
+      const initializer = constInitializers.get(node.text);
+      if (!initializer) return false;
+      const nextResolving = new Set(resolving);
+      nextResolving.add(node.text);
+      return renderArgumentContainsOwningComponent(initializer, constInitializers, nextResolving);
+    }
+    if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node) || ts.isJsxFragment(node)) {
+      return jsxContainsOwningComponent(node);
+    }
+    if (ts.isCallExpression(node)) {
+      const callee = unwrapExpression(node.expression);
+      if (ts.isIdentifier(callee) && importedNames.has(callee.text)) return true;
+      if (!isCreateElementCall(node)) return false;
+      const [component, _props, ...children] = node.arguments;
+      const owningComponent = component && unwrapExpression(component);
+      if (
+        owningComponent
+        && ts.isIdentifier(owningComponent)
+        && importedNames.has(owningComponent.text)
+      ) {
+        return true;
+      }
+      return children.some((child) => renderArgumentContainsOwningComponent(
+        child,
+        constInitializers,
+        new Set(resolving),
+      ));
+    }
+    if (ts.isConditionalExpression(node)) {
+      return renderArgumentContainsOwningComponent(node.whenTrue, constInitializers, new Set(resolving))
+        || renderArgumentContainsOwningComponent(node.whenFalse, constInitializers, new Set(resolving));
+    }
+    if (ts.isArrayLiteralExpression(node)) {
+      return node.elements.some((element) => renderArgumentContainsOwningComponent(
+        element,
+        constInitializers,
+        new Set(resolving),
+      ));
+    }
+    return false;
+  };
   let found = false;
   const inspectTestBody = (body) => {
-    let rendered = false;
-    let componentReferenced = false;
-    const visit = (node) => {
-      if (ts.isCallExpression(node)) {
-        const expression = node.expression;
-        if (ts.isIdentifier(expression) && ["render", "mount"].includes(expression.text)) {
-          rendered = true;
+    const executableBody = (
+      ts.isArrowFunction(body) || ts.isFunctionExpression(body)
+    ) ? body.body : body;
+    const constInitializers = new Map();
+    if (ts.isBlock(executableBody)) {
+      for (const statement of executableBody.statements) {
+        if (
+          !ts.isVariableStatement(statement)
+          || !(statement.declarationList.flags & ts.NodeFlags.Const)
+        ) continue;
+        for (const declaration of statement.declarationList.declarations) {
+          if (ts.isIdentifier(declaration.name) && declaration.initializer) {
+            constInitializers.set(declaration.name.text, declaration.initializer);
+          }
         }
       }
-      if (ts.isIdentifier(node) && importedNames.has(node.text)) componentReferenced = true;
+    }
+    let rendered = false;
+    const visit = (node) => {
+      if (rendered) return;
+      if (ts.isCallExpression(node)) {
+        const expression = node.expression;
+        const [argument] = node.arguments;
+        if (
+          ts.isIdentifier(expression)
+          && ["render", "mount"].includes(expression.text)
+          && argument
+          && renderArgumentContainsOwningComponent(argument, constInitializers)
+        ) {
+          rendered = true;
+          return;
+        }
+      }
       ts.forEachChild(node, visit);
     };
-    visit(body);
-    return rendered && componentReferenced;
+    visit(executableBody);
+    return rendered;
   };
   const visit = (node) => {
     if (found) return;

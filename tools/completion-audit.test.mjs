@@ -1570,7 +1570,7 @@ test("verifyAudit controls rejects generic proof and accepts exact tests or dire
     fixture.record.automatedTests = [];
     writeFileSync(
       join(fixture.root, fixture.testPath),
-      `import assert from "node:assert/strict";\nimport test from "node:test";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  let calls = 0;\n  const view = render(Panel({ openAlpha: () => { calls += 1; } }));\n  view.props.onClick();\n  assert.equal(calls, 1);\n});\n`,
+      `import assert from "node:assert/strict";\nimport test from "node:test";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  let calls = 0;\n  const element = Panel({ openAlpha: () => { calls += 1; } });\n  const view = render(element);\n  view.props.onClick();\n  assert.equal(calls, 1);\n});\n`,
     );
     const key = "alpha-direct-test";
     const id = stableId("control-runtime-receipt", key);
@@ -1862,6 +1862,63 @@ test("verifyAudit controls rejects static and unrelated completion proof", async
     fixture.write();
     const result = verifyAudit(fixture.root, fixture.audit, "controls");
     assert.ok(result.errors.some(({ code }) => code === "static-control-test-cannot-complete"));
+  });
+
+  await t.test("an unrelated render plus an independent owner identifier cannot complete", (t) => {
+    const fixture = createControlVerificationFixture(t);
+    makeComplete(fixture);
+    fixture.record.automatedTests = [];
+    writeFileSync(
+      join(fixture.root, fixture.testPath),
+      `import assert from "node:assert/strict";\nimport test from "node:test";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  render("<div />");\n  void Panel;\n  assert.equal(1, 1);\n});\n`,
+    );
+    const key = "alpha-unrelated-render";
+    const id = stableId("control-runtime-receipt", key);
+    fixture.record.runtimeEvidence = [`receipt:${id}`];
+    fixture.runtime.receipts = [{
+      id,
+      key,
+      kind: "automated",
+      status: "passed",
+      evidenceLevel: "direct",
+      command: `node --test ${fixture.testPath}`,
+      sourceRevision: {
+        commit: fixture.runtime.provenance.auditedCommit,
+        tree: fixture.runtime.provenance.auditedTree,
+      },
+      result: { summary: "one purported owning-component interaction test passed", exitCode: 0 },
+      startedAt: "2026-07-14T19:10:33+08:00",
+      endedAt: "2026-07-14T19:10:34+08:00",
+      exitCode: 0,
+      candidateIds: [fixture.candidate.id],
+      assertions: [{
+        candidateId: fixture.candidate.id,
+        event: fixture.record.inputs.join(" + "),
+        handler: fixture.record.handler,
+        backend: fixture.record.backendTrace.join(" -> "),
+        visibleOutcome: fixture.record.outcomes.success,
+        accessibility: `focus=${fixture.record.accessibility.focus}; label=${fixture.record.accessibility.label}; shortcut=${fixture.record.accessibility.shortcut}`,
+        returnPath: fixture.record.returnPath.join(" -> "),
+        artifactPaths: [fixture.testPath],
+        testEvidence: [`test:${fixture.testPath}#${fixture.exactTestName}`],
+      }],
+      artifacts: [{
+        path: fixture.testPath,
+        availability: "tracked",
+        sha256: createHash("sha256").update(readFileSync(join(fixture.root, fixture.testPath))).digest("hex"),
+      }],
+      cleanup: {
+        required: false,
+        status: "not-required",
+        details: ["The bounded test process exited itself."],
+      },
+      limitations: [],
+      testEvidence: [`test:${fixture.testPath}#${fixture.exactTestName}`],
+    }];
+    fixture.write();
+    const result = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(result.errors.some(({ code }) => code === "control-test-does-not-exercise-owner"));
+    assert.ok(result.errors.some(({ code }) => code === "complete-without-direct-verification"));
   });
 
   await t.test("one unrelated screenshot cannot prove multiple controls", (t) => {
