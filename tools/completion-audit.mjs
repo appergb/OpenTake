@@ -3305,8 +3305,13 @@ export function buildSourceEvidence({
 
 function markdown(value) {
   return String(value ?? "—")
-    .replaceAll("|", "\\|")
-    .replaceAll("\n", "\\n");
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("\\", "&#92;")
+    .replaceAll("|", "&#124;")
+    .replaceAll("`", "&#96;")
+    .replace(/\r\n?|\n/g, "&#10;");
 }
 
 const REQUIREMENT_STATUS_MEANINGS = {
@@ -3339,30 +3344,38 @@ export function renderDocumentReconciliation(requirementsBytes) {
   const active = [];
   for (const record of requirements.records) {
     if (!record || typeof record !== "object") throw new Error("document reconciliation record must be an object");
-    if (typeof record.id !== "string" || record.id.length === 0 || recordIds.has(record.id)) {
+    if (!nonEmptyString(record.id) || recordIds.has(record.id)) {
       throw new Error(`document reconciliation record ID is missing or duplicate: ${String(record.id)}`);
     }
-    if (typeof record.candidateId !== "string" || record.candidateId.length === 0 || candidateIds.has(record.candidateId)) {
+    if (!nonEmptyString(record.candidateId) || candidateIds.has(record.candidateId)) {
       throw new Error(`document reconciliation candidate ID is missing or duplicate: ${String(record.candidateId)}`);
     }
     if (!Object.hasOwn(REQUIREMENT_STATUS_MEANINGS, record.status)) {
       throw new Error(`document reconciliation status is unsupported: ${String(record.status)}`);
     }
     if (
-      typeof record.source?.path !== "string" || record.source.path.length === 0
+      !record.source || typeof record.source !== "object" || Array.isArray(record.source)
+      || !nonEmptyString(record.source.path)
       || !Number.isInteger(record.source?.line) || record.source.line < 1
-      || typeof record.targetBehavior !== "string" || record.targetBehavior.length === 0
+      || !nonEmptyString(record.targetBehavior)
     ) {
-      throw new Error(`document reconciliation record shape is invalid: ${record.id}`);
+      throw new Error(`document reconciliation source or targetBehavior shape is invalid: ${record.id}`);
+    }
+    for (const field of ["storeApi", "automatedTests", "runtimeEvidence", "acceptanceCriteria"]) {
+      if (!Array.isArray(record[field]) || record[field].some((value) => !nonEmptyString(value))) {
+        throw new Error(`document reconciliation ${field} must be an array of non-empty strings: ${record.id}`);
+      }
+    }
+    if (record.finalDisposition != null && !nonEmptyString(record.finalDisposition)) {
+      throw new Error(`document reconciliation finalDisposition must be null or a non-empty string: ${record.id}`);
     }
     candidateIds.add(record.candidateId);
     recordIds.add(record.id);
     statusCounts[record.status] += 1;
     if (record.status !== "incomplete") continue;
     if (
-      typeof record.gapGroup !== "string" || record.gapGroup.length === 0
-      || !Array.isArray(record.acceptanceCriteria) || record.acceptanceCriteria.length === 0
-      || record.acceptanceCriteria.some((criterion) => typeof criterion !== "string" || criterion.length === 0)
+      !nonEmptyString(record.gapGroup)
+      || record.acceptanceCriteria.length === 0
     ) {
       throw new Error(`incomplete requirement lacks a gap group or exact acceptance criteria: ${record.id}`);
     }
@@ -3409,11 +3422,11 @@ export function renderDocumentReconciliation(requirementsBytes) {
   ];
   for (const record of active) {
     const evidence = [
-      ...(Array.isArray(record.storeApi) ? record.storeApi : []),
-      ...(Array.isArray(record.automatedTests) ? record.automatedTests : []),
-      ...(Array.isArray(record.runtimeEvidence) ? record.runtimeEvidence : []),
+      ...record.storeApi,
+      ...record.automatedTests,
+      ...record.runtimeEvidence,
     ];
-    lines.push(`| ${markdown(record.gapGroup)} | \`${record.candidateId}\` | ${markdown(`${record.source.path}:${record.source.line}`)} | ${markdown(record.targetBehavior)} | ${markdown(record.acceptanceCriteria.join("; "))} | ${markdown(evidence.join("; ") || record.finalDisposition || "No current completion evidence; closure contract remains active.")} |`);
+    lines.push(`| ${markdown(record.gapGroup)} | \`${markdown(record.candidateId)}\` | ${markdown(`${record.source.path}:${record.source.line}`)} | ${markdown(record.targetBehavior)} | ${markdown(record.acceptanceCriteria.join("; "))} | ${markdown(evidence.join("; ") || record.finalDisposition || "No current completion evidence; closure contract remains active.")} |`);
   }
   return `${lines.join("\n")}\n`;
 }

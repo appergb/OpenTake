@@ -786,6 +786,125 @@ test("current human-readable audit reports are exact deterministic renders of no
   );
 });
 
+test("document reconciliation safely renders exact bytes and Markdown-significant text", () => {
+  const unsafe = "& < > \\ | `\nnext";
+  const requirementsBytes = Buffer.from(`${JSON.stringify({
+    schema: 1,
+    records: [{
+      id: "requirement-safe",
+      candidateId: "doc-safe",
+      source: { path: unsafe, line: 7 },
+      targetBehavior: unsafe,
+      status: "incomplete",
+      gapGroup: unsafe,
+      acceptanceCriteria: [unsafe],
+      storeApi: [],
+      automatedTests: [],
+      runtimeEvidence: [],
+      finalDisposition: unsafe,
+    }],
+  }, null, 2)}\n`);
+  const digest = createHash("sha256").update(requirementsBytes).digest("hex");
+  const escaped = "&amp; &lt; &gt; &#92; &#124; &#96;&#10;next";
+
+  assert.equal(renderDocumentReconciliation(requirementsBytes), [
+    "# OpenTake planning-document reconciliation — 2026-07-14",
+    "",
+    "This report is the deterministic human-readable index for `requirements.json`. The JSON ledger is normative; this file is rebuilt byte-for-byte from that ledger and contains no independently maintained dispositions.",
+    "",
+    "## Coverage and integrity",
+    "",
+    "- Candidate records: 1",
+    "- Unique candidate IDs: 1",
+    "- Unverified dispositions: 0",
+    `- Requirements ledger SHA-256: \`${digest}\``,
+    "- Complete dispositions require exact tracked implementation and automated-test evidence; incomplete dispositions require a subsystem gap group and exact acceptance criteria.",
+    "",
+    "| Status | Records | Meaning |",
+    "|---|---:|---|",
+    "| complete | 0 | Current implementation and exact verification evidence support the statement. |",
+    "| contradicted | 0 | Current evidence disproves the source statement. |",
+    "| duplicate | 0 | The candidate is context or repeats another adjudicated requirement. |",
+    "| incomplete | 1 | A current gap remains with an exact closure contract. |",
+    "| obsolete | 0 | A newer decision or implementation supersedes the statement. |",
+    "",
+    "## Active gap groups",
+    "",
+    "| Gap group | Requirements |",
+    "|---|---:|",
+    `| ${escaped} | 1 |`,
+    "",
+    "## Exact active requirements",
+    "",
+    "Every row below is one current `incomplete` requirement from the normative ledger. The acceptance column is its exact closure contract.",
+    "",
+    "| Gap group | Candidate ID | Source | Target behavior | Acceptance criteria | Current evidence |",
+    "|---|---|---|---|---|---|",
+    `| ${escaped} | \`doc-safe\` | ${escaped}:7 | ${escaped} | ${escaped} | ${escaped} |`,
+    "",
+  ].join("\n"));
+});
+
+test("document reconciliation rejects malformed rendered fields and sorts active rows", () => {
+  const record = {
+    id: "requirement-beta",
+    candidateId: "doc-beta",
+    source: { path: "docs/beta.md", line: 2 },
+    targetBehavior: "Beta behavior",
+    status: "incomplete",
+    gapGroup: "beta",
+    acceptanceCriteria: ["Beta is verified"],
+    storeApi: [],
+    automatedTests: [],
+    runtimeEvidence: [],
+    finalDisposition: null,
+  };
+  const render = (records) => renderDocumentReconciliation(Buffer.from(JSON.stringify({ schema: 1, records })));
+  const malformed = [
+    ["storeApi", null],
+    ["automatedTests", [""]],
+    ["runtimeEvidence", [7]],
+    ["finalDisposition", {}],
+    ["source", { path: "", line: 2 }],
+    ["targetBehavior", " "],
+    ["acceptanceCriteria", [" "]],
+  ];
+  for (const [field, value] of malformed) {
+    assert.throws(
+      () => render([{ ...record, [field]: value }]),
+      new RegExp(`document reconciliation.*${field}`, "i"),
+    );
+  }
+
+  const alpha = {
+    ...record,
+    id: "requirement-alpha",
+    candidateId: "doc-alpha",
+    source: { path: "docs/alpha.md", line: 1 },
+    targetBehavior: "Alpha behavior",
+    gapGroup: "alpha",
+  };
+  const ordered = render([record, alpha]);
+  assert.ok(ordered.indexOf("`doc-alpha`") < ordered.indexOf("`doc-beta`"));
+});
+
+test("current document reconciliation covers all 503 active rows and hashes original bytes", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const requirementsBytes = readFileSync(join(root, "docs/audit/2026-07-14/requirements.json"));
+  const requirements = JSON.parse(requirementsBytes.toString("utf8"));
+  const report = renderDocumentReconciliation(requirementsBytes);
+  const digest = createHash("sha256").update(requirementsBytes).digest("hex");
+  const activeRows = report
+    .slice(report.indexOf("## Exact active requirements"))
+    .split("\n")
+    .filter((line) => line.startsWith("| "))
+    .slice(1);
+
+  assert.equal(requirements.records.filter(({ status }) => status === "incomplete").length, 503);
+  assert.equal(activeRows.length, 503);
+  assert.ok(report.includes(`Requirements ledger SHA-256: \`${digest}\``));
+});
+
 test("buildSourceEvidence assembles fixture snapshots and fails closed on ledger drift", () => {
   const operations = createBuildSourceOperations();
   const evidence = buildSourceEvidence({
