@@ -48,20 +48,29 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function createControlVerificationFixture(t) {
+function createControlVerificationFixture(t, {
+  auditRelative = "docs/audit/2026-07-14",
+  sourcePath = "web/src/Panel.tsx",
+  sourceText = "import React from \"react\";\nexport function Panel({ openAlpha }) {\n  return <button aria-label=\"Alpha\" onClick={openAlpha}>Alpha</button>;\n}\nexport function harmlessHelper() { return { props: {} }; }\n",
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), "opentake-completion-audit-verify-controls-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   execFileSync("git", ["init", "--quiet", root]);
   git(root, ["config", "user.name", "Control Audit"]);
   git(root, ["config", "user.email", "control-audit@example.invalid"]);
-  const audit = join(root, "docs", "audit", "2026-07-14");
-  const sourcePath = "web/src/Panel.tsx";
+  const audit = join(root, auditRelative);
   const testPath = "web/src/Panel.test.tsx";
   mkdirSync(join(root, "web", "src"), { recursive: true });
   mkdirSync(audit, { recursive: true });
+  writeFileSync(join(root, ".gitignore"), "web/node_modules\n");
+  symlinkSync(
+    fileURLToPath(new URL("../web/node_modules", import.meta.url)),
+    join(root, "web", "node_modules"),
+    "dir",
+  );
   writeFileSync(
     join(root, sourcePath),
-    "export function Panel({ openAlpha }) {\n  return <button aria-label=\"Alpha\" onClick={openAlpha}>Alpha</button>;\n}\n",
+    sourceText,
   );
   const [candidate] = extractControls(
     sourcePath,
@@ -106,20 +115,43 @@ function createControlVerificationFixture(t) {
   record.acceptanceCriteria = expectedControlAcceptanceCriteria(record);
   const candidateLedgerText = `${JSON.stringify({ schema: 1, candidates }, null, 2)}\n`;
   writeFileSync(join(audit, "control-candidates.json"), candidateLedgerText);
-  git(root, ["add", sourcePath, testPath, "docs/audit/2026-07-14/control-candidates.json"]);
+  const verifierFiles = [
+    "tools/completion-audit.mjs",
+    "tools/completion-audit-controls.mjs",
+    "tools/completion-audit.test.mjs",
+  ];
+  git(root, [
+    "add",
+    ".gitignore",
+    sourcePath,
+    testPath,
+    `${auditRelative}/control-candidates.json`,
+  ]);
   git(root, ["commit", "--quiet", "-m", "audited controls source"]);
   const auditedCommit = git(root, ["rev-parse", "HEAD"]);
   const auditedTree = git(root, ["rev-parse", "HEAD^{tree}"]);
+  mkdirSync(join(root, "tools"), { recursive: true });
+  for (const path of verifierFiles) {
+    writeFileSync(join(root, path), `fixture verifier file: ${path}\n`);
+  }
+  git(root, ["add", ...verifierFiles]);
+  git(root, ["commit", "--quiet", "-m", "fixture verifier code"]);
+  const verifierCommit = git(root, ["rev-parse", "HEAD"]);
+  const verifierTree = git(root, ["rev-parse", "HEAD^{tree}"]);
   const sourceHash = createHash("sha256")
     .update(readFileSync(join(root, sourcePath)))
     .digest("hex");
   const provenance = {
-    auditedCommit,
-    auditedTree,
+    auditedProductRevision: { commit: auditedCommit, tree: auditedTree },
+    verifierRevision: { commit: verifierCommit, tree: verifierTree },
     candidateLedgerSha256: createHash("sha256").update(candidateLedgerText).digest("hex"),
     candidateSourceAggregateSha256: createHash("sha256")
       .update(`${sourcePath}\0${sourceHash}\n`)
       .digest("hex"),
+    verifierFilesSha256: Object.fromEntries(verifierFiles.map((path) => [
+      path,
+      createHash("sha256").update(readFileSync(join(root, path))).digest("hex"),
+    ])),
   };
   const runtime = {
     schema: 1,
@@ -130,8 +162,8 @@ function createControlVerificationFixture(t) {
       evidencePolicy: "Only direct receipts qualify.",
     },
     provenance: structuredClone(provenance),
-    candidateLedger: "docs/audit/2026-07-14/control-candidates.json",
-    controlsLedger: "docs/audit/2026-07-14/controls.json",
+    candidateLedger: `${auditRelative}/control-candidates.json`,
+    controlsLedger: `${auditRelative}/controls.json`,
     summary: {
       receipts: 0,
       direct: 0,
@@ -150,7 +182,7 @@ function createControlVerificationFixture(t) {
     provenance: structuredClone(provenance),
     scope: {
       included: "fixture",
-      sourceLedger: "docs/audit/2026-07-14/control-candidates.json",
+      sourceLedger: `${auditRelative}/control-candidates.json`,
       candidateCount: 1,
       candidateIdsUnique: true,
       unverifiedCount: 0,
@@ -1229,6 +1261,7 @@ test("controls CLI scans tracked web/src TSX files through a real subprocess", (
     ["web/src/A.tsx", "button", "Again"],
     ["web/src/nested/B.tsx", "div", "Beta"],
   ]);
+  assert.deepEqual(ledger.candidates.map(({ ownerSymbol }) => ownerSymbol), ["A", "A", "B"]);
   assert.equal(new Set(ledger.candidates.map(({ id }) => id)).size, 3);
   assert.equal(
     new Set(ledger.candidates.map(({ path, line, column }) => `${path}:${line}:${column}`)).size,
@@ -1423,12 +1456,20 @@ test("verifyAudit controls accepts an exact incomplete schema-2 ledger", (t) => 
   });
 });
 
+test("verifyAudit controls derives ledger bindings from an arbitrary audit directory", (t) => {
+  const fixture = createControlVerificationFixture(t, {
+    auditRelative: "quality/evidence/custom-control-audit",
+  });
+  const result = verifyAudit(fixture.root, fixture.audit, "controls");
+  assert.equal(result.passed, true, JSON.stringify(result.errors));
+});
+
 test("verifyAudit controls rejects current-source and record identity drift", async (t) => {
   await t.test("current handler drift", (t) => {
     const fixture = createControlVerificationFixture(t);
     writeFileSync(
       join(fixture.root, fixture.sourcePath),
-      "export function Panel({ openBeta }) {\n  return <button aria-label=\"Alpha\" onClick={openBeta}>Alpha</button>;\n}\n",
+      "import React from \"react\";\nexport function Panel({ openBeta }) {\n  return <button aria-label=\"Alpha\" onClick={openBeta}>Alpha</button>;\n}\nexport function harmlessHelper() { return { props: {} }; }\n",
     );
     git(fixture.root, ["add", fixture.sourcePath]);
     const result = verifyAudit(fixture.root, fixture.audit, "controls");
@@ -1570,7 +1611,7 @@ test("verifyAudit controls rejects generic proof and accepts exact tests or dire
     fixture.record.automatedTests = [];
     writeFileSync(
       join(fixture.root, fixture.testPath),
-      `import assert from "node:assert/strict";\nimport test from "node:test";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  let calls = 0;\n  const element = Panel({ openAlpha: () => { calls += 1; } });\n  const view = render(element);\n  view.props.onClick();\n  assert.equal(calls, 1);\n});\n`,
+      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  let calls = 0;\n  const element = Panel({ openAlpha: () => { calls += 1; } });\n  const view = render(element);\n  view.props.onClick();\n  expect(calls).toBe(1);\n});\n`,
     );
     const key = "alpha-direct-test";
     const id = stableId("control-runtime-receipt", key);
@@ -1581,10 +1622,21 @@ test("verifyAudit controls rejects generic proof and accepts exact tests or dire
       kind: "automated",
       status: "passed",
       evidenceLevel: "direct",
-      command: `node --test ${fixture.testPath}`,
-      sourceRevision: {
-        commit: fixture.runtime.provenance.auditedCommit,
-        tree: fixture.runtime.provenance.auditedTree,
+      command: {
+        kind: "vitest",
+        executable: "web/node_modules/.bin/vitest",
+        argv: [
+          "run",
+          "src/Panel.test.tsx",
+          "--testNamePattern",
+          `^${escapeRegExp(fixture.exactTestName)}$`,
+          "--reporter=verbose",
+        ],
+        timeoutMs: 30_000,
+      },
+      executedCheckoutRevision: {
+        commit: fixture.runtime.provenance.verifierRevision.commit,
+        tree: fixture.runtime.provenance.verifierRevision.tree,
       },
       result: { summary: "one owning-component interaction test passed", exitCode: 0 },
       startedAt: "2026-07-14T19:10:33+08:00",
@@ -1618,6 +1670,33 @@ test("verifyAudit controls rejects generic proof and accepts exact tests or dire
     fixture.write();
     const result = verifyAudit(fixture.root, fixture.audit, "controls");
     assert.equal(result.passed, true, JSON.stringify(result.errors));
+
+    fixture.runtime.receipts[0].executedCheckoutRevision = {
+      commit: fixture.runtime.provenance.auditedProductRevision.commit,
+      tree: fixture.runtime.provenance.auditedProductRevision.tree,
+    };
+    fixture.write();
+    const wrongExecutionRevision = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(wrongExecutionRevision.errors.some(
+      ({ code }) => code === "runtime-execution-record-incomplete",
+    ));
+    fixture.runtime.receipts[0].executedCheckoutRevision = {
+      commit: fixture.runtime.provenance.verifierRevision.commit,
+      tree: fixture.runtime.provenance.verifierRevision.tree,
+    };
+
+    writeFileSync(
+      join(fixture.root, fixture.testPath),
+      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  let calls = 0;\n  const view = render(Panel({ openAlpha: () => { calls += 1; } }));\n  view.props.onClick();\n  expect(calls).toBe(2);\n});\n`,
+    );
+    fixture.runtime.receipts[0].artifacts[0].sha256 = createHash("sha256")
+      .update(readFileSync(join(fixture.root, fixture.testPath)))
+      .digest("hex");
+    fixture.write();
+    const selfReportedOnly = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(selfReportedOnly.errors.some(
+      ({ code }) => code === "direct-test-reexecution-failed",
+    ));
   });
   await t.test("typed receipt timestamps, exact keys, and summary fail closed", (t) => {
     const fixture = createControlVerificationFixture(t);
@@ -1804,9 +1883,9 @@ test("verifyAudit controls rejects generic proof and accepts exact tests or dire
       status: "passed",
       evidenceLevel: "supporting",
       command: "pnpm -C web dev --host 127.0.0.1 --port 1437",
-      sourceRevision: {
-        commit: fixture.runtime.provenance.auditedCommit,
-        tree: fixture.runtime.provenance.auditedTree,
+      executedCheckoutRevision: {
+        commit: fixture.runtime.provenance.auditedProductRevision.commit,
+        tree: fixture.runtime.provenance.auditedProductRevision.tree,
       },
       result: { summary: "browser capture completed", exitCode: 0 },
       startedAt: "2026-07-14T19:10:33+08:00",
@@ -1830,6 +1909,59 @@ test("verifyAudit controls rejects generic proof and accepts exact tests or dire
     fixture.write();
     const result = verifyAudit(fixture.root, fixture.audit, "controls");
     assert.equal(result.passed, true, JSON.stringify(result.errors));
+
+    fixture.runtime.receipts[0].limitations = [
+      "All browser artifacts are local ignored files.",
+    ];
+    fixture.write();
+    const contradictoryAvailability = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(contradictoryAvailability.errors.some(
+      ({ code }) => code === "runtime-artifact-limitation-contradiction",
+    ));
+  });
+  await t.test("automated receipt summary and limitation test counts must agree", (t) => {
+    const fixture = createControlVerificationFixture(t);
+    const artifactPath = "docs/audit/2026-07-14/full-suite-process.txt";
+    writeFileSync(join(fixture.root, artifactPath), "163 tests passed\n");
+    const key = "automated-count-mismatch";
+    const id = stableId("control-runtime-receipt", key);
+    fixture.runtime.receipts = [{
+      id,
+      key,
+      kind: "automated",
+      status: "passed",
+      evidenceLevel: "supporting",
+      command: "node --test tools/completion-audit.test.mjs",
+      executedCheckoutRevision: {
+        commit: fixture.runtime.provenance.verifierRevision.commit,
+        tree: fixture.runtime.provenance.verifierRevision.tree,
+      },
+      result: { summary: "163 audit tests passed and 0 failed.", exitCode: 0 },
+      startedAt: "2026-07-14T19:10:33+08:00",
+      endedAt: "2026-07-14T19:10:34+08:00",
+      exitCode: 0,
+      candidateIds: [],
+      assertions: [],
+      artifacts: [{
+        path: artifactPath,
+        availability: "tracked",
+        sha256: createHash("sha256").update("163 tests passed\n").digest("hex"),
+      }],
+      cleanup: {
+        required: false,
+        status: "not-required",
+        details: ["The process exited."],
+      },
+      limitations: [
+        "The 148 passing tests validate fail-closed audit behavior only.",
+      ],
+      testEvidence: [],
+    }];
+    fixture.write();
+    const result = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(result.errors.some(
+      ({ code }) => code === "runtime-limitation-count-mismatch",
+    ));
   });
 });
 
@@ -1870,7 +2002,7 @@ test("verifyAudit controls rejects static and unrelated completion proof", async
     fixture.record.automatedTests = [];
     writeFileSync(
       join(fixture.root, fixture.testPath),
-      `import assert from "node:assert/strict";\nimport test from "node:test";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  render("<div />");\n  void Panel;\n  assert.equal(1, 1);\n});\n`,
+      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  render("<div />");\n  void Panel;\n  expect(1).toBe(1);\n});\n`,
     );
     const key = "alpha-unrelated-render";
     const id = stableId("control-runtime-receipt", key);
@@ -1881,10 +2013,21 @@ test("verifyAudit controls rejects static and unrelated completion proof", async
       kind: "automated",
       status: "passed",
       evidenceLevel: "direct",
-      command: `node --test ${fixture.testPath}`,
-      sourceRevision: {
-        commit: fixture.runtime.provenance.auditedCommit,
-        tree: fixture.runtime.provenance.auditedTree,
+      command: {
+        kind: "vitest",
+        executable: "web/node_modules/.bin/vitest",
+        argv: [
+          "run",
+          "src/Panel.test.tsx",
+          "--testNamePattern",
+          `^${escapeRegExp(fixture.exactTestName)}$`,
+          "--reporter=verbose",
+        ],
+        timeoutMs: 30_000,
+      },
+      executedCheckoutRevision: {
+        commit: fixture.runtime.provenance.verifierRevision.commit,
+        tree: fixture.runtime.provenance.verifierRevision.tree,
       },
       result: { summary: "one purported owning-component interaction test passed", exitCode: 0 },
       startedAt: "2026-07-14T19:10:33+08:00",
@@ -1919,6 +2062,45 @@ test("verifyAudit controls rejects static and unrelated completion proof", async
     const result = verifyAudit(fixture.root, fixture.audit, "controls");
     assert.ok(result.errors.some(({ code }) => code === "control-test-does-not-exercise-owner"));
     assert.ok(result.errors.some(({ code }) => code === "complete-without-direct-verification"));
+
+    writeFileSync(
+      join(fixture.root, fixture.testPath),
+      `import { expect, test } from "vitest";\nimport { Panel, harmlessHelper } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  render(harmlessHelper());\n  void Panel;\n  expect(1).toBe(1);\n});\n`,
+    );
+    fixture.runtime.receipts[0].artifacts[0].sha256 = createHash("sha256")
+      .update(readFileSync(join(fixture.root, fixture.testPath)))
+      .digest("hex");
+    fixture.write();
+    const sameModuleHelper = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(sameModuleHelper.errors.some(
+      ({ code }) => code === "control-test-does-not-exercise-owner",
+    ));
+
+    writeFileSync(
+      join(fixture.root, fixture.testPath),
+      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  render(Panel({ openAlpha: () => {} }));\n  expect(1).toBe(1);\n});\n`,
+    );
+    fixture.runtime.receipts[0].artifacts[0].sha256 = createHash("sha256")
+      .update(readFileSync(join(fixture.root, fixture.testPath)))
+      .digest("hex");
+    fixture.write();
+    const unrelatedAssertion = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(unrelatedAssertion.errors.some(
+      ({ code }) => code === "control-test-assertion-not-bound",
+    ));
+
+    writeFileSync(
+      join(fixture.root, fixture.testPath),
+      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  let calls = 0;\n  const view = render(Panel({ openAlpha: () => { calls += 1; } }));\n  view.props.onClick();\n  return;\n  expect(calls).toBe(1);\n});\n`,
+    );
+    fixture.runtime.receipts[0].artifacts[0].sha256 = createHash("sha256")
+      .update(readFileSync(join(fixture.root, fixture.testPath)))
+      .digest("hex");
+    fixture.write();
+    const unreachableAssertion = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(unreachableAssertion.errors.some(
+      ({ code }) => code === "control-test-assertion-not-bound",
+    ));
   });
 
   await t.test("one unrelated screenshot cannot prove multiple controls", (t) => {
@@ -2104,6 +2286,100 @@ test("verifyAudit controls rejects missing artifacts, future receipts, and weak 
 });
 
 test("verifyAudit controls requires immutable provenance and executable criteria", async (t) => {
+  await t.test("a production candidate cannot omit its lexical owner", (t) => {
+    const fixture = createControlVerificationFixture(t);
+    fixture.candidate.ownerSymbol = null;
+    fixture.write();
+    const candidateLedgerHash = createHash("sha256")
+      .update(readFileSync(join(fixture.audit, "control-candidates.json")))
+      .digest("hex");
+    fixture.controls.provenance.candidateLedgerSha256 = candidateLedgerHash;
+    fixture.runtime.provenance.candidateLedgerSha256 = candidateLedgerHash;
+    fixture.write();
+    const result = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(result.errors.some(({ code }) => code === "invalid-candidate"));
+  });
+
+  await t.test("an explicitly obsolete test fixture candidate may omit a lexical owner", (t) => {
+    const fixture = createControlVerificationFixture(t, {
+      sourcePath: "web/src/FixtureCandidate.test.tsx",
+      sourceText: `import React from "react";\nimport { it } from "vitest";\nit("renders a fixture", () => {\n  const openAlpha = () => {};\n  return <button aria-label="Alpha" onClick={openAlpha}>Alpha</button>;\n});\n`,
+    });
+    assert.equal(fixture.candidate.ownerSymbol, null);
+    fixture.record.semanticName = "test-only fixture control";
+    fixture.record.stateTransition = "N/A — test fixture only.";
+    fixture.record.backendTrace = ["N/A — test fixture only."];
+    fixture.record.outcomes = Object.fromEntries(
+      Object.keys(fixture.record.outcomes).map((key) => [key, "N/A — test fixture only."]),
+    );
+    fixture.record.status = "obsolete";
+    fixture.record.finalDisposition = "Test-fixture JSX is not a production user-visible control.";
+    fixture.record.acceptanceCriteria = [];
+    fixture.record.gapGroup = null;
+    fixture.controls.codeEvidence = {};
+    fixture.controls.counts = {
+      complete: 0,
+      incomplete: 0,
+      obsolete: 1,
+      duplicate: 0,
+      contradicted: 0,
+    };
+    fixture.controls.gapCounts = {};
+    fixture.write();
+    const result = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.equal(result.passed, true, JSON.stringify(result.errors));
+
+    const artifactPath = `docs/audit/2026-07-14/${fixture.candidate.id}-fixture.png`;
+    writeFileSync(join(fixture.root, artifactPath), "test-fixture capture\n");
+    const key = "ownerless-test-fixture-direct";
+    const id = stableId("control-runtime-receipt", key);
+    fixture.runtime.receipts = [{
+      id,
+      key,
+      kind: "browser",
+      status: "passed",
+      evidenceLevel: "direct",
+      command: "fixture browser capture",
+      executedCheckoutRevision: {
+        commit: fixture.runtime.provenance.auditedProductRevision.commit,
+        tree: fixture.runtime.provenance.auditedProductRevision.tree,
+      },
+      result: { summary: "fixture browser capture passed", exitCode: 0 },
+      startedAt: "2026-07-14T19:10:33+08:00",
+      endedAt: "2026-07-14T19:10:34+08:00",
+      exitCode: 0,
+      candidateIds: [fixture.candidate.id],
+      assertions: [{
+        candidateId: fixture.candidate.id,
+        event: fixture.record.inputs.join(" + "),
+        handler: fixture.record.handler,
+        backend: fixture.record.backendTrace.join(" -> "),
+        visibleOutcome: fixture.record.outcomes.success,
+        accessibility: `focus=${fixture.record.accessibility.focus}; label=${fixture.record.accessibility.label}; shortcut=${fixture.record.accessibility.shortcut}`,
+        returnPath: fixture.record.returnPath.join(" -> "),
+        artifactPaths: [artifactPath],
+        testEvidence: [],
+      }],
+      artifacts: [{
+        path: artifactPath,
+        availability: "tracked",
+        sha256: createHash("sha256").update("test-fixture capture\n").digest("hex"),
+      }],
+      cleanup: {
+        required: true,
+        status: "verified",
+        details: ["The browser was stopped."],
+      },
+      limitations: ["Test-fixture observation only."],
+      testEvidence: [],
+    }];
+    fixture.write();
+    const directResult = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(directResult.errors.some(
+      ({ code }) => code === "direct-evidence-for-ownerless-fixture",
+    ));
+  });
+
   await t.test("missing source provenance is rejected", (t) => {
     const fixture = createControlVerificationFixture(t);
     delete fixture.controls.provenance;
@@ -2128,6 +2404,15 @@ test("verifyAudit controls requires immutable provenance and executable criteria
     git(fixture.root, ["add", backendPath]);
     const result = verifyAudit(fixture.root, fixture.audit, "controls");
     assert.ok(result.errors.some(({ code }) => code === "backend-source-hash-mismatch"));
+  });
+
+  await t.test("verifier file drift is rejected independently of product source", (t) => {
+    const fixture = createControlVerificationFixture(t);
+    const verifierPath = "tools/completion-audit-controls.mjs";
+    writeFileSync(join(fixture.root, verifierPath), "fixture verifier file drifted\n");
+    git(fixture.root, ["add", verifierPath]);
+    const result = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(result.errors.some(({ code }) => code === "verifier-file-hash-mismatch"));
   });
 
   await t.test("TODO is not an executable candidate-specific acceptance contract", (t) => {
