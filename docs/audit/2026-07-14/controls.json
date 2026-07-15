@@ -17448,16 +17448,16 @@
       "tree": "918925907d79406b36c950a9ba1e8c18f7c7e4bc"
     },
     "verifierRevision": {
-      "commit": "6497d8d1aeb29c8d10ab0880820d35d99181c62e",
-      "tree": "67a797af776794dfa4365566337e00e70aa7c847"
+      "commit": "eb5d602f603814513aece38f938a6aed0cbf0a65",
+      "tree": "58ef09fcb2d5e81eddf1b9486eca6c7809308434"
     },
     "candidateLedgerSha256": "b3117d6ef9db5b39867989d8cca4c046229b50d927755aeca77b03ef21be1994",
     "candidateSourceAggregateSha256": "98428b8c7a7b66327ef2ace05914ecafb5cd9dc6d87a91407ecd1281a6337342",
     "verifierFilesSha256": {
-      "tools/completion-audit.mjs": "a035daa57deb976035f1fc21aefed3a25ebdcae236c68a75ff62744ffb061567",
+      "tools/completion-audit.mjs": "69fcdadecd13980ab2b5ca233cc6ff170a2e54d483858712163378b71ac68fb8",
       "tools/completion-audit-controls.mjs": "8ec67733ffbef2e3e7fb4ca07b7ce79bfa6a53833b9c7557a2a224ac085bc45a",
       "tools/completion-audit-plan-map.json": "33547181fe2335b486bff3a210210d62c9d850df717aad454ca8a470f1a4e056",
-      "tools/completion-audit.test.mjs": "668db3a3c0a01e4d50bb2030bc5de599316f0c47968eabc90bb59a160684e049"
+      "tools/completion-audit.test.mjs": "5b6d4f463221d8e5cc29ed9ffe81bf97c58616b4b2b98cdbd5c88f1211023ce4"
     }
   },
   "codeEvidence": {
