@@ -1,1 +1,146 @@
-{}
+{
+  "schema": 1,
+  "scope": "all",
+  "auditDirectory": "docs/audit/2026-07-14",
+  "ok": true,
+  "passed": true,
+  "counts": {
+    "tracked": 796,
+    "files": 796,
+    "documents": 2704,
+    "requirements": 2704,
+    "controls": 259,
+    "controlRecords": 259,
+    "sources": 4,
+    "sourceChanges": 132,
+    "incompleteRequirements": 503,
+    "incompleteControls": 212,
+    "plannedRecords": 715,
+    "unverified": 0,
+    "identityMappedDocuments": 2704,
+    "identityMappedControls": 259
+  },
+  "gapCounts": {
+    "data-safety": {
+      "requirements": 32,
+      "controls": 0,
+      "total": 32
+    },
+    "command-contracts": {
+      "requirements": 36,
+      "controls": 9,
+      "total": 45
+    },
+    "media-render-playback-export": {
+      "requirements": 60,
+      "controls": 8,
+      "total": 68
+    },
+    "home-shell": {
+      "requirements": 18,
+      "controls": 25,
+      "total": 43
+    },
+    "media-library": {
+      "requirements": 45,
+      "controls": 33,
+      "total": 78
+    },
+    "preview-timeline": {
+      "requirements": 71,
+      "controls": 25,
+      "total": 96
+    },
+    "inspector-text-keyframes": {
+      "requirements": 27,
+      "controls": 57,
+      "total": 84
+    },
+    "agent-settings-generation": {
+      "requirements": 139,
+      "controls": 37,
+      "total": 176
+    },
+    "accessibility-polish": {
+      "requirements": 29,
+      "controls": 18,
+      "total": 47
+    },
+    "documentation": {
+      "requirements": 46,
+      "controls": 0,
+      "total": 46
+    }
+  },
+  "scopeHashes": {
+    "files": "9cbafc2c808336f39e544d5388ed6a79565440088858641b294685e9475c0ec2",
+    "documents": "0a16bb223006674f1606a1a7ce28ad54982dcbaa3ccdf9da3868ae97ebca4202",
+    "controls": "b3117d6ef9db5b39867989d8cca4c046229b50d927755aeca77b03ef21be1994",
+    "sources": "7ad8d78f87a494b0489599049c0b39968c6a857b28061c6b1b8cdfad8597ed7c",
+    "completionLedger": "ed81c319210a6d4b972fbe96bbabd71fcc1045c9e424e380294461e8e1a21e5c",
+    "planOwnership": "ce9eda415dc951bf801431386d1592708de707b7654f646e1c38deece7e16410"
+  },
+  "scopes": {
+    "files": {
+      "passed": true,
+      "counts": {
+        "tracked": 796,
+        "inventoried": 796,
+        "missing": 0,
+        "orphan": 0,
+        "hashMismatches": 0,
+        "deferred": 4
+      }
+    },
+    "documents": {
+      "passed": true,
+      "counts": {
+        "candidates": 2704,
+        "records": 2704,
+        "uniqueCandidateIds": 2704,
+        "uniqueRecordIds": 2704,
+        "missingCandidateIds": 0,
+        "orphanCandidateIds": 0,
+        "duplicateCandidateIds": 0,
+        "duplicateRecordIds": 0,
+        "unverified": 0,
+        "complete": 63,
+        "incomplete": 503,
+        "contradicted": 53,
+        "obsolete": 130,
+        "duplicate": 1955
+      }
+    },
+    "controls": {
+      "passed": true,
+      "counts": {
+        "candidates": 259,
+        "records": 259,
+        "uniqueCandidateIds": 259,
+        "uniqueRecordIds": 259,
+        "missingCandidateIds": 0,
+        "orphanCandidateIds": 0,
+        "duplicateCandidateIds": 0,
+        "duplicateRecordIds": 0,
+        "unverified": 0,
+        "complete": 0,
+        "incomplete": 212,
+        "obsolete": 34,
+        "duplicate": 13,
+        "contradicted": 0
+      }
+    },
+    "sources": {
+      "passed": true,
+      "counts": {
+        "sources": 4,
+        "changedPaths": 132,
+        "disposedChangedPaths": 132,
+        "linkedRequirementIds": 27,
+        "linkedControlIds": 14,
+        "canonicalDirtyPaths": 56
+      }
+    }
+  },
+  "errors": []
+}

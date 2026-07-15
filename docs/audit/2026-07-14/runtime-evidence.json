@@ -12,10 +12,10 @@
     "receipts": 4,
     "direct": 0,
     "supporting": 4,
-    "passed": 3,
+    "passed": 1,
     "failed": 0,
     "partial": 1,
-    "notRun": 0,
+    "notRun": 2,
     "blocked": 0
   },
   "receipts": [
@@ -23,12 +23,12 @@
       "id": "control-runtime-receipt-0ce7e9e4c9f1e1ba",
       "key": "task7-verifier-full-suite",
       "kind": "automated",
-      "status": "passed",
+      "status": "not-run",
       "evidenceLevel": "supporting",
       "command": "node --test tools/completion-audit.test.mjs",
       "startedAt": "2026-07-15T15:58:03+08:00",
       "endedAt": "2026-07-15T15:58:25+08:00",
-      "exitCode": 0,
+      "exitCode": null,
       "candidateIds": [],
       "assertions": [],
       "artifacts": [
@@ -46,7 +46,8 @@
         ]
       },
       "limitations": [
-        "The 168 passing tests validate extraction and fail-closed audit behavior; they do not directly exercise any individual product control."
+        "The 168 passing tests validate extraction and fail-closed audit behavior; they do not directly exercise any individual product control.",
+        "Historical supporting execution at 6023e29572878681a037ccd2f949f0c97f3fefba was not re-executed by this receipt after verifier rebinding."
       ],
       "testEvidence": [
         "test:tools/completion-audit.test.mjs#verifyAudit controls accepts an exact incomplete schema-2 ledger",
@@ -56,8 +57,8 @@
         "test:tools/completion-audit.test.mjs#verify controls CLI writes failure output and exits nonzero"
       ],
       "result": {
-        "summary": "168 audit tests passed and 0 failed.",
-        "exitCode": 0
+        "summary": "Historical supporting execution was captured at 6023e29572878681a037ccd2f949f0c97f3fefba; this receipt does not claim execution at verifier revision e44fc9231bea8246d09bfc847626e5f1a4f3acc9.",
+        "exitCode": null
       },
       "executedCheckoutRevision": {
         "commit": "6023e29572878681a037ccd2f949f0c97f3fefba",
@@ -75,36 +76,36 @@
       "endedAt": "2026-07-15T13:00:48+08:00",
       "exitCode": null,
       "candidateIds": [
-        "control-40c4daee5cdfca99",
-        "control-bb60cdd345230fd7",
-        "control-d4af3faba32c97a0",
-        "control-9583d8fd791a79df",
-        "control-205c12cffc482d00",
-        "control-cefc5a06d042e30d",
-        "control-fb4088359d6ce746",
-        "control-fa81e5ddeee629ae",
-        "control-cd1fd1b68a7523ce",
-        "control-c9a457c8e8f1d8b3",
-        "control-cf205335655d3803",
-        "control-6b1ae7c91a515867",
-        "control-d126bb271429ab1f",
-        "control-c2cede9efe356824",
-        "control-d17c9479f8a82f14",
-        "control-061b4016b9ed6902",
-        "control-8812a39ec38eb7e7",
-        "control-b7650a4ec9ee0f31",
-        "control-431df6604789a897",
-        "control-14c4c4dedf0c6cbc",
-        "control-d1fb1c8eefaf6a50",
-        "control-e94b83c1ef3620ad",
-        "control-a33354a61f6c32cc",
-        "control-f65537d659ea03f2",
-        "control-dd723d5741855034",
-        "control-a7355314b80ba34b"
+        "control-575978f9bced5959",
+        "control-d826a0ad433703cb",
+        "control-d606f9c3adb8762a",
+        "control-70d50e82dbf11502",
+        "control-9276ea9d0a1578bb",
+        "control-1caee0ff811948b1",
+        "control-575921b92e2f3135",
+        "control-baaf4052cb5bdc8e",
+        "control-37ea2cd22696fd55",
+        "control-c6f5ed51aa2b00c2",
+        "control-d3805a1e5b0f0237",
+        "control-d7ba227c6447e43e",
+        "control-ff132f94a8c87906",
+        "control-6fcdff2d800c882d",
+        "control-323d35d24ceb5ab2",
+        "control-1f8b140411e09e22",
+        "control-a6a47152d4fc53e0",
+        "control-408c771762a48a6a",
+        "control-c51942132f080af2",
+        "control-66d58acb1e9d254b",
+        "control-bc7e07c8d75e1cd2",
+        "control-fc5baa4f457e8778",
+        "control-74cf95e67ddd9208",
+        "control-fbc0598258d77d6a",
+        "control-b2ddee9974c7b88f",
+        "control-5409108a04e7cf1c"
       ],
       "assertions": [
         {
-          "candidateId": "control-40c4daee5cdfca99",
+          "candidateId": "control-575978f9bced5959",
           "event": "Home: clicked the main empty-launcher New Project button",
           "handler": "{() => void newProjectAndEnter()}",
           "backend": "web/src/components/home/HomeView.tsx:234::candidate handler -> {() => void newProjectAndEnter()} -> actual branch/state -> newProjectAndEnter enters a fresh editor project -> exact call/arguments -> newProjectAndEnter(); after saveDialog, either projectNew() in browser/no-dialog mode or getDefaultProjectDir(), native save(), projectNew(), then projectSave(chosen .opentake path) -> web/src/store/projectActions.ts::newProjectAndEnter -> saveDialog; stopNativePlaybackForProjectBoundary; api.projectNew(); optional api.projectSave(path); replace snapshot; reset media/runtime; setView('editor') -> web/src/lib/api.ts::getDefaultProjectDir -> invoke('get_default_project_dir') and src-tauri/src/commands.rs::get_default_project_dir when a native save dialog is available -> web/src/lib/api.ts::projectNew/projectSave -> invoke('project_new') and invoke('project_save',{path}) -> src-tauri/src/commands.rs::project_new/project_save -> crates/opentake-core/src/dto.rs::handle_project_new and crates/opentake-core/src/core.rs project save lifecycle -> code:web/src/components/home/HomeView.tsx#HomeView -> code:web/src/store/projectActions.ts#newProjectAndEnter -> code:web/src/lib/api.ts#getDefaultProjectDir -> code:src-tauri/src/commands.rs#get_default_project_dir -> code:web/src/lib/api.ts#projectNew -> code:src-tauri/src/commands.rs#project_new -> code:crates/opentake-core/src/dto.rs#handle_project_new",
@@ -115,7 +116,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-bb60cdd345230fd7",
+          "candidateId": "control-d826a0ad433703cb",
           "event": "editor title bar: clicked View",
           "handler": "{() => setOpen((v) => !v)}",
           "backend": "web/src/components/shell/ViewMenu.tsx:54::candidate handler -> {() => setOpen((v) => !v)} -> actual branch/state -> setOpen toggles; outside/Escape closes -> exact call -> setOpen toggles; outside/Escape closes -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/shell/ViewMenu.tsx#ViewMenu",
@@ -126,7 +127,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-d4af3faba32c97a0",
+          "candidateId": "control-d606f9c3adb8762a",
           "event": "View menu: clicked Agent panel menuitemcheckbox",
           "handler": "{toggleAgent}",
           "backend": "web/src/components/shell/ViewMenu.tsx:108::candidate handler -> {toggleAgent} -> actual branch/state -> toggleAgentPanel -> exact call -> toggleAgentPanel -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/shell/ViewMenu.tsx#ViewMenu",
@@ -137,7 +138,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-9583d8fd791a79df",
+          "candidateId": "control-70d50e82dbf11502",
           "event": "Agent panel: clicked New conversation in the empty Agent state",
           "handler": "{clearChat}",
           "backend": "web/src/components/agent/AgentPanel.tsx:146::candidate handler -> {clearChat} -> actual branch/state -> reset(mintSessionId()) replaces session/messages when not streaming -> exact call -> reset(mintSessionId()) replaces session/messages when not streaming -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/agent/AgentPanel.tsx#AgentPanel",
@@ -148,7 +149,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-205c12cffc482d00",
+          "candidateId": "control-9276ea9d0a1578bb",
           "event": "Agent panel: inspected prompt textbox",
           "handler": "{(event) => setInput(event.target.value)} {onKeyDown}",
           "backend": "web/src/components/agent/AgentPanel.tsx:211::candidate handler -> {(event) => setInput(event.target.value)} {onKeyDown} -> actual branch/state -> onChange calls setInput(event.target.value); Enter without Shift prevents default and calls send(), while Shift+Enter does not send -> exact call/arguments -> onChange only setInput(event.target.value); Enter without Shift calls send() -> chatSend(sessionId,input.trim(),provider); Shift+Enter issues no chat call -> web/src/components/agent/AgentPanel.tsx::textarea onChange/onKeyDown -> setInput or send -> pushUser/beginStream/chatSend -> web/src/lib/api.ts::chatSend -> invoke('chat_send',{sessionId,text,chatProvider:provider}) -> src-tauri/src/chat.rs::chat_send(session_id,text,chat_provider) -> spawned ChatLoop; chat_delta/chat_tool/chat_done events return to AgentPanel listeners -> code:web/src/components/agent/AgentPanel.tsx#AgentPanel -> code:web/src/lib/api.ts#chatSend -> code:src-tauri/src/chat.rs#chat_send",
@@ -159,7 +160,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-cefc5a06d042e30d",
+          "candidateId": "control-1caee0ff811948b1",
           "event": "Agent panel: inspected Send button",
           "handler": "{() => void send()}",
           "backend": "web/src/components/agent/AgentPanel.tsx:244::candidate handler -> {() => void send()} -> actual branch/state -> click calls send(): guard trimmed input/streaming, clear input, push user, create assistant placeholder, await chatSend, and finalize rejection locally -> exact call/arguments -> send() -> chatSend(sessionId,input.trim(),provider) after the non-empty/not-streaming guard -> web/src/components/agent/AgentPanel.tsx::Send button -> send -> clear input, pushUser(text), beginStream(placeholderId), await chatSend -> web/src/lib/api.ts::chatSend -> invoke('chat_send',{sessionId,text,chatProvider:provider}) -> src-tauri/src/chat.rs::chat_send(session_id,text,chat_provider) -> ChatLoop; rejection finalizes the existing assistant placeholder locally -> code:web/src/components/agent/AgentPanel.tsx#AgentPanel -> code:web/src/lib/api.ts#chatSend -> code:src-tauri/src/chat.rs#chat_send",
@@ -170,7 +171,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-fb4088359d6ce746",
+          "candidateId": "control-575921b92e2f3135",
           "event": "Preview: clicked Jump to start on an empty timeline",
           "handler": "{() => seekTo(0)}",
           "backend": "web/src/components/preview/Preview.tsx:492::handler {() => seekTo(0)} -> seekTo(0): clamp to 0; media preview sets mediaRef.current.currentTime = 0/fps, timeline preview calls setCurrentFrame(snapFrameToEdge(timeline,0,threshold).frame) and maybeSnapFeedback -> web/src/components/preview/Preview.tsx::Preview.seekTo(0) -> media element or uiStore.setCurrentFrame -> N/A — no API/Tauri/Rust backend for this exact candidate branch -> code:web/src/components/preview/Preview.tsx#Preview",
@@ -181,7 +182,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-fa81e5ddeee629ae",
+          "candidateId": "control-baaf4052cb5bdc8e",
           "event": "Preview: clicked Previous frame on an empty timeline",
           "handler": "{() => seekTo(activeShownFrame - 1)}",
           "backend": "web/src/components/preview/Preview.tsx:495::handler {() => seekTo(activeShownFrame - 1)} -> seekTo(activeShownFrame - 1): clamp; media preview sets currentTime = clamped/fps, timeline preview sets snapped current frame and maybeSnapFeedback -> web/src/components/preview/Preview.tsx::Preview.seekTo(activeShownFrame - 1) -> media element or uiStore.setCurrentFrame -> N/A — no API/Tauri/Rust backend for this exact candidate branch -> code:web/src/components/preview/Preview.tsx#Preview",
@@ -192,7 +193,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-cd1fd1b68a7523ce",
+          "candidateId": "control-37ea2cd22696fd55",
           "event": "Preview: clicked Play/Pause on an empty timeline",
           "handler": "{togglePlay}",
           "backend": "web/src/components/preview/Preview.tsx:498::handler {togglePlay} -> togglePlay(): media preview calls mediaRef.current.play() when paused or pause() otherwise; timeline preview returns when unsupported, otherwise togglePlayTimeline() -> web/src/components/preview/Preview.tsx::Preview.togglePlay -> HTMLMediaElement or uiStore.togglePlay -> N/A — no API/Tauri/Rust backend for this exact candidate branch -> code:web/src/components/preview/Preview.tsx#Preview",
@@ -203,7 +204,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-c9a457c8e8f1d8b3",
+          "candidateId": "control-c6f5ed51aa2b00c2",
           "event": "Preview: clicked Next frame on an empty timeline",
           "handler": "{() => seekTo(activeShownFrame + 1)}",
           "backend": "web/src/components/preview/Preview.tsx:505::handler {() => seekTo(activeShownFrame + 1)} -> seekTo(activeShownFrame + 1): clamp; media preview sets currentTime = clamped/fps, timeline preview sets snapped current frame and maybeSnapFeedback -> web/src/components/preview/Preview.tsx::Preview.seekTo(activeShownFrame + 1) -> media element or uiStore.setCurrentFrame -> N/A — no API/Tauri/Rust backend for this exact candidate branch -> code:web/src/components/preview/Preview.tsx#Preview",
@@ -214,7 +215,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-cf205335655d3803",
+          "candidateId": "control-d3805a1e5b0f0237",
           "event": "Preview: inspected Capture current frame",
           "handler": "{() => void captureFrame()}",
           "backend": "web/src/components/preview/Preview.tsx:513::handler {() => void captureFrame()} -> if (!canCapture) no-op; else await captureFrameToMedia(frame, nameBase, mediaPanelCurrentFolderId, sourceMediaId); null result shows unavailable toast; success awaits refreshMedia() then saved toast; catch shows failed toast -> web/src/components/preview/Preview.tsx::captureFrame -> web/src/store/editActions.ts::captureFrameToMedia -> web/src/lib/api.ts::captureFrameToMedia -> invoke('capture_frame_to_media', exact frame/name/folder/sourceMediaId) -> src-tauri/src/render.rs::capture_frame_to_media -> code:web/src/components/preview/Preview.tsx#Preview -> code:web/src/components/preview/Preview.tsx#captureFrame -> code:web/src/lib/api.ts#captureFrameToMedia -> code:src-tauri/src/render.rs#capture_frame_to_media",
@@ -225,7 +226,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-6b1ae7c91a515867",
+          "candidateId": "control-d7ba227c6447e43e",
           "event": "editor title bar: inspected Export Video",
           "handler": "{() => setExportDialogOpen(true)}",
           "backend": "web/src/components/shell/TitleBar.tsx:223::candidate handler -> {() => setExportDialogOpen(true)} -> actual branch/state -> setExportDialogOpen(true) -> exact call -> setExportDialogOpen(true) -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/shell/TitleBar.tsx#TitleBar",
@@ -236,7 +237,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-d126bb271429ab1f",
+          "candidateId": "control-ff132f94a8c87906",
           "event": "editor title bar: clicked Settings",
           "handler": "{() => setSettingsOpen(true)}",
           "backend": "web/src/components/shell/TitleBar.tsx:207::candidate handler -> {() => setSettingsOpen(true)} -> actual branch/state -> setSettingsOpen(true) -> exact call -> setSettingsOpen(true) -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/shell/TitleBar.tsx#TitleBar",
@@ -247,7 +248,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-c2cede9efe356824",
+          "candidateId": "control-6fcdff2d800c882d",
           "event": "Settings: switched among Appearance, Import, AI, and MCP panes",
           "handler": "{() => onSelect(pane.id)}",
           "backend": "web/src/components/settings/SettingsView.tsx:211::candidate handler -> {() => onSelect(pane.id)} -> actual branch/state -> onSelect(pane.id) changes activePane -> exact call -> onSelect(pane.id) changes activePane -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/settings/SettingsView.tsx#SettingsView",
@@ -258,7 +259,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-d17c9479f8a82f14",
+          "candidateId": "control-323d35d24ceb5ab2",
           "event": "Settings Appearance: clicked Light theme",
           "handler": "{setTheme}",
           "backend": "web/src/components/settings/SettingsView.tsx:399::candidate handler -> {setTheme} -> actual branch/state -> setTheme updates/persists theme -> exact call -> setTheme updates/persists theme -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/settings/SettingsView.tsx#SettingsView",
@@ -269,7 +270,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-061b4016b9ed6902",
+          "candidateId": "control-1f8b140411e09e22",
           "event": "Settings Appearance: clicked Compact window size",
           "handler": "{setWindowSize}",
           "backend": "web/src/components/settings/SettingsView.tsx:413::candidate handler -> {setWindowSize} -> actual branch/state -> setWindowSize updates/persists window size -> exact call -> setWindowSize updates/persists window size -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/settings/SettingsView.tsx#SettingsView",
@@ -280,7 +281,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-8812a39ec38eb7e7",
+          "candidateId": "control-a6a47152d4fc53e0",
           "event": "Settings Import: clicked Choose default import folder",
           "handler": "{() => void choose()}",
           "backend": "web/src/components/settings/SettingsView.tsx:446::candidate handler -> {() => void choose()} -> actual branch/state -> native directory dialog -> setDefaultImportFolder -> exact call/arguments -> choose(): openDialog(); open({directory:true,multiple:false}); if selected is string call setDefaultImportFolder(selected) -> web/src/components/settings/SettingsView.tsx::ImportPane.choose -> web/src/lib/dialog.ts::openDialog/open -> web/src/store/settingsStore.ts::setDefaultImportFolder(selected) -> persist localStorage and update Zustand -> API/Tauri/Rust -> N/A after the native dialog returns; the selected path is stored locally -> code:web/src/components/settings/SettingsView.tsx#SettingsView -> code:web/src/components/settings/SettingsView.tsx#ImportPane -> code:web/src/lib/dialog.ts#openDialog",
@@ -291,7 +292,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-b7650a4ec9ee0f31",
+          "candidateId": "control-408c771762a48a6a",
           "event": "Settings AI: clicked OpenAI provider",
           "handler": "{setProvider}",
           "backend": "web/src/components/settings/SettingsView.tsx:569::candidate handler -> {setProvider} -> actual branch/state -> setByokProvider; effect reloads masked key status and clears draft -> exact call/arguments -> setByokProvider(opt.id); provider effect clears draft/error and calls secretLoad(provider) for the newly selected provider -> web/src/store/settingsStore.ts::setByokProvider(provider) -> persist localStorage/update Zustand -> web/src/components/settings/SettingsView.tsx::AiPane provider effect -> secretLoad(provider) -> web/src/lib/api.ts::secretLoad -> invoke('secret_load',{provider}); src-tauri/src/secret.rs::secret_load(provider) -> code:web/src/components/settings/SettingsView.tsx#SettingsView -> code:web/src/components/settings/SettingsView.tsx#AiPane -> code:web/src/lib/api.ts#secretLoad -> code:src-tauri/src/secret.rs#secret_load",
@@ -302,7 +303,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-431df6604789a897",
+          "candidateId": "control-c51942132f080af2",
           "event": "Settings AI: filled the password field with the non-secret probe string runtime-probe-not-a-secret",
           "handler": "{(e) => { setDraft(e.target.value); setError(null); }} {(e) => { if (e.key === \"Enter\") void save(); }}",
           "backend": "web/src/components/settings/SettingsView.tsx:577::candidate handler -> {(e) => { setDraft(e.target.value); setError(null); }} {(e) => { if (e.key === \"Enter\") void save(); }} -> actual branch/state -> onChange updates draft/clears error; Enter calls save() only when trimmed draft is non-empty and not busy -> exact call/arguments -> onChange only updates draft/error; Enter calls save() -> secretSave(provider,draft.trim()) when non-empty/not busy -> web/src/components/settings/SettingsView.tsx::AiPane key input onChange/onKeyDown -> local draft or save exact chain -> web/src/lib/api.ts::secretSave -> invoke('secret_save',{provider,key:trimmed}) -> src-tauri/src/secret.rs::secret_save(provider,key) -> OS keychain -> code:web/src/components/settings/SettingsView.tsx#SettingsView -> code:web/src/components/settings/SettingsView.tsx#AiPane -> code:web/src/lib/api.ts#secretSave -> code:src-tauri/src/secret.rs#secret_save",
@@ -313,7 +314,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-14c4c4dedf0c6cbc",
+          "candidateId": "control-66d58acb1e9d254b",
           "event": "Settings AI: clicked Save Key with the non-secret probe",
           "handler": "{() => void save()}",
           "backend": "web/src/components/settings/SettingsView.tsx:600::candidate handler -> {() => void save()} -> actual branch/state -> click calls save(); busy -> secretSave(provider,trimmed) -> masked status/draft clear or visible error -> exact call/arguments -> save() -> secretSave(provider,draft.trim()) when non-empty/not busy; set returned masked status and clear draft -> web/src/components/settings/SettingsView.tsx::AiPane Save button -> save -> secretSave(provider,trimmed) -> web/src/lib/api.ts::secretSave -> invoke('secret_save',{provider,key:trimmed}) -> src-tauri/src/secret.rs::secret_save(provider,key) -> OS keychain -> code:web/src/components/settings/SettingsView.tsx#SettingsView -> code:web/src/components/settings/SettingsView.tsx#AiPane -> code:web/src/lib/api.ts#secretSave -> code:src-tauri/src/secret.rs#secret_save",
@@ -324,7 +325,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-d1fb1c8eefaf6a50",
+          "candidateId": "control-bc7e07c8d75e1cd2",
           "event": "Settings MCP: clicked the first Copy button",
           "handler": "{() => copy(row.key, row.code)}",
           "backend": "web/src/components/settings/SettingsView.tsx:769::candidate handler -> {() => copy(row.key, row.code)} -> actual branch/state -> clipboard.writeText -> transient copied indicator; rejection is swallowed -> exact call/arguments -> navigator.clipboard.writeText(row.code); on success setCopiedKey(row.key) and clear it after 1500ms; rejection is swallowed -> web/src/components/settings/SettingsView.tsx::McpPane.copy(key,text) -> navigator.clipboard.writeText(text) -> API/Tauri/Rust -> N/A for MCP copy -> code:web/src/components/settings/SettingsView.tsx#SettingsView -> code:web/src/components/settings/SettingsView.tsx#McpPane",
@@ -335,7 +336,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-e94b83c1ef3620ad",
+          "candidateId": "control-fc5baa4f457e8778",
           "event": "Settings: clicked Done",
           "handler": "{() => setSettingsOpen(false)}",
           "backend": "web/src/components/settings/SettingsView.tsx:141::candidate handler -> {() => setSettingsOpen(false)} -> actual branch/state -> setSettingsOpen(false) -> exact call -> setSettingsOpen(false) -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/settings/SettingsView.tsx#SettingsView",
@@ -346,7 +347,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-a33354a61f6c32cc",
+          "candidateId": "control-74cf95e67ddd9208",
           "event": "Media panel: inspected Generate",
           "handler": "No handler declared",
           "backend": "web/src/components/media/MediaPanel.tsx:301::candidate handler -> No handler declared -> actual branch/state -> none; the button is permanently disabled -> exact call -> none; the button is permanently disabled -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/media/MediaPanel.tsx#MediaPanel",
@@ -357,7 +358,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-f65537d659ea03f2",
+          "candidateId": "control-fbc0598258d77d6a",
           "event": "Media panel: filled Search with runtime-none",
           "handler": "{(e) => setSearch(e.target.value)}",
           "backend": "web/src/components/media/MediaPanel.tsx:334::candidate handler -> {(e) => setSearch(e.target.value)} -> actual branch/state -> setSearch updates the local query immediately; non-empty query mounts MediaSearchResults, whose 250ms effect calls searchQueryApi(query) while filename filtering remains local -> exact call/arguments -> setSearch(event.target.value); when trimmed query is non-empty MediaSearchResults waits 250ms and calls searchQueryApi(trimmedQuery) -> web/src/components/media/MediaPanel.tsx::search input -> setSearch(value) -> mounts MediaSearchResults(query) -> web/src/components/media/MediaSearch.tsx::MediaSearchResults effect -> setTimeout(250ms) -> searchQueryApi(q) -> web/src/lib/api.ts::searchQuery -> invoke('search_query',{query:q}) -> src-tauri/src/search.rs::search_query(query) -> moments/spoken/files result -> code:web/src/components/media/MediaPanel.tsx#MediaPanel -> code:web/src/components/media/MediaSearch.tsx#MediaSearchResults -> code:web/src/lib/api.ts#searchQuery -> code:src-tauri/src/search.rs#search_query",
@@ -368,7 +369,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-dd723d5741855034",
+          "candidateId": "control-b2ddee9974c7b88f",
           "event": "Media panel: clicked View mode",
           "handler": "No handler declared",
           "backend": "web/src/components/media/MediaPanel.tsx:349::candidate handler -> No handler declared -> actual branch/state -> none -> exact call -> none -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/media/MediaPanel.tsx#MediaPanel",
@@ -379,7 +380,7 @@
           "testEvidence": []
         },
         {
-          "candidateId": "control-a7355314b80ba34b",
+          "candidateId": "control-5409108a04e7cf1c",
           "event": "Media panel: clicked Sort",
           "handler": "No handler declared",
           "backend": "web/src/components/media/MediaPanel.tsx:352::candidate handler -> No handler declared -> actual branch/state -> none -> exact call -> none -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/media/MediaPanel.tsx#MediaPanel",
@@ -614,12 +615,12 @@
       "id": "control-runtime-receipt-c3d683042c669fa4",
       "key": "task7-controls-ledger-verification",
       "kind": "automated",
-      "status": "passed",
+      "status": "not-run",
       "evidenceLevel": "supporting",
       "command": "node tools/completion-audit.mjs verify --root . --audit docs/audit/2026-07-14 --scope controls --out docs/audit/2026-07-14/control-verification.json",
       "startedAt": "2026-07-15T15:59:44+08:00",
       "endedAt": "2026-07-15T15:59:46+08:00",
-      "exitCode": 0,
+      "exitCode": null,
       "candidateIds": [],
       "assertions": [],
       "artifacts": [
@@ -637,12 +638,13 @@
         ]
       },
       "limitations": [
-        "This receipt validates ledger schema, identity, classifications, evidence contracts, and artifact integrity only; it does not directly exercise any product control."
+        "This receipt validates ledger schema, identity, classifications, evidence contracts, and artifact integrity only; it does not directly exercise any product control.",
+        "Historical supporting execution at 6023e29572878681a037ccd2f949f0c97f3fefba was not re-executed by this receipt after verifier rebinding."
       ],
       "testEvidence": [],
       "result": {
-        "summary": "259 controls verified with 0 errors.",
-        "exitCode": 0
+        "summary": "Historical supporting execution was captured at 6023e29572878681a037ccd2f949f0c97f3fefba; this receipt does not claim execution at verifier revision e44fc9231bea8246d09bfc847626e5f1a4f3acc9.",
+        "exitCode": null
       },
       "executedCheckoutRevision": {
         "commit": "6023e29572878681a037ccd2f949f0c97f3fefba",
@@ -656,15 +658,16 @@
       "tree": "918925907d79406b36c950a9ba1e8c18f7c7e4bc"
     },
     "verifierRevision": {
-      "commit": "6023e29572878681a037ccd2f949f0c97f3fefba",
-      "tree": "a8bccf8ada3243a7d585c3c59eb9af46522d90e7"
+      "commit": "e44fc9231bea8246d09bfc847626e5f1a4f3acc9",
+      "tree": "dc9ec1790cbe1f93aebcbb57e2f3383184e393b5"
     },
-    "candidateLedgerSha256": "262e51921d3f431c4d474f10bc3d2b29f59908758e7c80135c5e60f07cb9483c",
+    "candidateLedgerSha256": "b3117d6ef9db5b39867989d8cca4c046229b50d927755aeca77b03ef21be1994",
     "candidateSourceAggregateSha256": "98428b8c7a7b66327ef2ace05914ecafb5cd9dc6d87a91407ecd1281a6337342",
     "verifierFilesSha256": {
-      "tools/completion-audit.mjs": "bdfadad15f8451f4b6ca3f71c61b942950e51bf8a408e86062cb94ca84887d94",
-      "tools/completion-audit-controls.mjs": "66f3a650d9f321f72b1dfd3411fc99aeb2193b0d5d24a556a6b2ae219e106194",
-      "tools/completion-audit.test.mjs": "619d9c7c3006e3284aa10d5843c8347f59b323c1e9d505633d28c327f0ec063b"
+      "tools/completion-audit.mjs": "4f12fced5dbb3b964da63580024fd5dbd8ea5da0435915e7a2bed9bf01333851",
+      "tools/completion-audit-controls.mjs": "8ec67733ffbef2e3e7fb4ca07b7ce79bfa6a53833b9c7557a2a224ac085bc45a",
+      "tools/completion-audit-plan-map.json": "33547181fe2335b486bff3a210210d62c9d850df717aad454ca8a470f1a4e056",
+      "tools/completion-audit.test.mjs": "6861c93279d5b7f2faffe0857ab04f73b4f8bb6061ef5def1d8458bd78521adb"
     }
   }
 }
