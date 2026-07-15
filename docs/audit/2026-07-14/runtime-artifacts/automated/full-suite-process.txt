@@ -1,0 +1,5 @@
+command: node --test tools/completion-audit.test.mjs
+startedAt: 2026-07-15T14:11:57+08:00
+endedAt: 2026-07-15T14:12:05+08:00
+exitCode: 0
+result: 162 tests passed; 0 failed; bounded Node process exited.

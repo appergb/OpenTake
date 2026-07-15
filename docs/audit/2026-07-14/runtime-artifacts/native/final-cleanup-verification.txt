@@ -1,0 +1,9 @@
+2026-07-15T13:15:22+08:00
+probe: pgrep -fl '/OpenTake\.app/Contents/MacOS/opentake|target/release/opentake'
+result: no matching OpenTake process
+probe: nc -z 127.0.0.1 19789
+result: exit 1 (connection unavailable)
+probe: nc -z 127.0.0.1 1437
+result: exit 1 (connection unavailable)
+probe: ps command scan for task7-runtime, Vite 1437, and OpenTake executable markers
+result: only the probe shell and rg process matched; no task-owned runtime remained

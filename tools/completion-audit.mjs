@@ -3625,6 +3625,8 @@ const CONTROL_RUNTIME_RECEIPT_FIELDS = [
   "status",
   "evidenceLevel",
   "command",
+  "sourceRevision",
+  "result",
   "startedAt",
   "endedAt",
   "exitCode",
@@ -3633,6 +3635,25 @@ const CONTROL_RUNTIME_RECEIPT_FIELDS = [
   "artifacts",
   "cleanup",
   "limitations",
+  "testEvidence",
+];
+const CONTROL_PROVENANCE_FIELDS = [
+  "auditedCommit",
+  "auditedTree",
+  "candidateLedgerSha256",
+  "candidateSourceAggregateSha256",
+];
+const CONTROL_RUNTIME_SOURCE_REVISION_FIELDS = ["commit", "tree"];
+const CONTROL_RUNTIME_RESULT_FIELDS = ["summary", "exitCode"];
+const CONTROL_RUNTIME_ASSERTION_FIELDS = [
+  "candidateId",
+  "event",
+  "handler",
+  "backend",
+  "visibleOutcome",
+  "accessibility",
+  "returnPath",
+  "artifactPaths",
   "testEvidence",
 ];
 const CONTROL_RUNTIME_METADATA_FIELDS = [
@@ -3669,6 +3690,40 @@ function isStrictRuntimeTimestamp(value) {
   return nonEmptyString(value)
     && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
     && !Number.isNaN(Date.parse(value));
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function candidateSourceAggregate(candidates, readSource) {
+  const manifest = [...new Set(candidates.map((candidate) => candidate?.path).filter(nonEmptyString))]
+    .sort(compareAuditText)
+    .map((path) => `${path}\0${sha256(readSource(path))}\n`)
+    .join("");
+  return sha256(manifest);
+}
+
+export function expectedControlAcceptanceCriteria(record) {
+  const sourcePath = typeof record?.source?.path === "string" ? record.source.path : "";
+  const testPath = sourcePath.replace(/(?:\.test)?\.tsx$/, ".interaction.test.tsx");
+  const testName = `${String(record?.candidateId ?? "")} ${String(record?.semanticName ?? "")}`;
+  const inputs = Array.isArray(record?.inputs) ? record.inputs : [];
+  const backendTrace = Array.isArray(record?.backendTrace) ? record.backendTrace : [];
+  const accessibility = record?.accessibility && typeof record.accessibility === "object"
+    ? record.accessibility
+    : {};
+  const returnPath = Array.isArray(record?.returnPath) ? record.returnPath : [];
+  const outcomes = record?.outcomes && typeof record.outcomes === "object" ? record.outcomes : {};
+  return [
+    `Candidate: ${String(record?.candidateId ?? "")}.`,
+    `Test: ${testPath}#${testName}.`,
+    `Initial state: visibility=${String(record?.visibility ?? "")}; enabledWhen=${String(record?.enabledWhen ?? "")}.`,
+    `Event: inputs=${JSON.stringify(inputs)}; handler=${String(record?.handler ?? "")}.`,
+    `Exact call/state/backend: stateTransition=${String(record?.stateTransition ?? "")}; backendTrace=${JSON.stringify(backendTrace)}.`,
+    `Visible/accessibility/return path: success=${String(outcomes.success ?? "")}; accessibility=${JSON.stringify(accessibility)}; returnPath=${JSON.stringify(returnPath)}.`,
+    `Outcome matrix: ${JSON.stringify(outcomes)}.`,
+  ];
 }
 
 function duplicateCount(values) {
@@ -3766,17 +3821,6 @@ function trackedRegularFile(root, trackedPaths, value) {
   if (!real) return { status: "realpath-escape", ...resolved };
   if (!trackedPaths.has(resolved.normalized)) return { status: "untracked", ...resolved };
   return { status: "valid", real, ...resolved };
-}
-
-function gitPathIsIgnored(root, value) {
-  try {
-    execFileSync("git", ["-C", root, "check-ignore", "--quiet", "--", value], {
-      stdio: "ignore",
-    });
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function escapeRegExp(value) {
@@ -4065,6 +4109,64 @@ function sourceTestHasAssertion(path, source, name) {
   return found;
 }
 
+function sourceTestExercisesOwningComponent(testPath, source, name, candidatePath) {
+  if (!/\.(?:[cm]?[jt]sx?)$/.test(testPath)) return false;
+  const ts = typeScriptCompiler();
+  const sourceFile = typeScriptSourceFile(testPath, source);
+  const candidateWithoutExtension = candidatePath.replace(/\.(?:[cm]?[jt]sx?)$/, "");
+  const importedNames = new Set();
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
+    const specifier = statement.moduleSpecifier.text;
+    if (!specifier.startsWith(".")) continue;
+    const resolvedImport = normalizePath(resolve("/", dirname(testPath), specifier).slice(1));
+    if (resolvedImport !== candidateWithoutExtension && resolvedImport !== candidatePath) continue;
+    const clause = statement.importClause;
+    if (clause?.name) importedNames.add(clause.name.text);
+    if (clause?.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+      for (const element of clause.namedBindings.elements) importedNames.add(element.name.text);
+    }
+  }
+  if (importedNames.size === 0) return false;
+  let found = false;
+  const inspectTestBody = (body) => {
+    let rendered = false;
+    let componentReferenced = false;
+    const visit = (node) => {
+      if (ts.isCallExpression(node)) {
+        const expression = node.expression;
+        if (ts.isIdentifier(expression) && ["render", "mount"].includes(expression.text)) {
+          rendered = true;
+        }
+      }
+      if (ts.isIdentifier(node) && importedNames.has(node.text)) componentReferenced = true;
+      ts.forEachChild(node, visit);
+    };
+    visit(body);
+    return rendered && componentReferenced;
+  };
+  const visit = (node) => {
+    if (found) return;
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      const [first, body] = node.arguments;
+      if (
+        ["test", "it"].includes(node.expression.text)
+        && first
+        && (ts.isStringLiteral(first) || ts.isNoSubstitutionTemplateLiteral(first))
+        && first.text === name
+        && body
+        && inspectTestBody(body)
+      ) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
+}
+
 function validateImplementationEvidence(
   root,
   trackedPaths,
@@ -4170,6 +4272,29 @@ function validateControlTestEvidence(root, trackedPaths, evidence, candidateId, 
   return true;
 }
 
+function validateExecutedControlTestEvidence(
+  root,
+  trackedPaths,
+  evidence,
+  candidate,
+  errors,
+) {
+  if (!validateControlTestEvidence(root, trackedPaths, evidence, candidate.id, errors)) return null;
+  const [, path, name] = /^test:([^#\n]+)#([^#\n]+)$/.exec(evidence);
+  const file = trackedRegularFile(root, trackedPaths, path);
+  const source = readFileSync(file.real, "utf8");
+  if (!sourceTestExercisesOwningComponent(path, source, name, candidate.path)) {
+    pushVerificationError(
+      errors,
+      "control-test-does-not-exercise-owner",
+      `executed control test must import and render its owning component ${candidate.path}: ${evidence}`,
+      candidate.id,
+    );
+    return null;
+  }
+  return { path, name };
+}
+
 function validateHistoricalReportProvenance(
   root,
   trackedPaths,
@@ -4220,11 +4345,125 @@ function hasExactKeys(value, expected) {
     && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort());
 }
 
+function validateControlProvenance(
+  repositoryRoot,
+  auditDirectory,
+  trackedPaths,
+  candidates,
+  controlsProvenance,
+  runtimeProvenance,
+  errors,
+) {
+  if (
+    !hasExactKeys(controlsProvenance, CONTROL_PROVENANCE_FIELDS)
+    || !hasExactKeys(runtimeProvenance, CONTROL_PROVENANCE_FIELDS)
+  ) {
+    pushVerificationError(
+      errors,
+      "missing-control-provenance",
+      "controls.json and runtime-evidence.json need the exact immutable source provenance contract",
+    );
+    return null;
+  }
+  if (JSON.stringify(controlsProvenance) !== JSON.stringify(runtimeProvenance)) {
+    pushVerificationError(errors, "control-provenance-drift", "controls and runtime provenance differ");
+    return null;
+  }
+  const provenance = controlsProvenance;
+  if (
+    !/^[0-9a-f]{40}$/.test(provenance.auditedCommit)
+    || !/^[0-9a-f]{40}$/.test(provenance.auditedTree)
+    || !/^[0-9a-f]{64}$/.test(provenance.candidateLedgerSha256)
+    || !/^[0-9a-f]{64}$/.test(provenance.candidateSourceAggregateSha256)
+  ) {
+    pushVerificationError(errors, "invalid-control-provenance", "control provenance contains an invalid digest");
+    return null;
+  }
+  let resolvedCommit;
+  let resolvedTree;
+  try {
+    resolvedCommit = gitText(
+      "control provenance",
+      repositoryRoot,
+      ["rev-parse", "--verify", `${provenance.auditedCommit}^{commit}`],
+    );
+    resolvedTree = gitText(
+      "control provenance",
+      repositoryRoot,
+      ["rev-parse", "--verify", `${provenance.auditedCommit}^{tree}`],
+    );
+    execFileSync(
+      "git",
+      ["-C", repositoryRoot, "merge-base", "--is-ancestor", provenance.auditedCommit, "HEAD"],
+      { stdio: "ignore" },
+    );
+  } catch {
+    pushVerificationError(
+      errors,
+      "invalid-control-provenance-revision",
+      "audited commit must exist and be an ancestor of current HEAD",
+    );
+    return null;
+  }
+  if (resolvedCommit !== provenance.auditedCommit || resolvedTree !== provenance.auditedTree) {
+    pushVerificationError(errors, "control-provenance-tree-mismatch", "audited commit/tree binding is invalid");
+  }
+  const candidateLedgerPath = normalizePath(
+    relative(repositoryRoot, resolve(auditDirectory, "control-candidates.json")),
+  );
+  const ledgerFile = trackedRegularFile(repositoryRoot, trackedPaths, candidateLedgerPath);
+  if (ledgerFile.status !== "valid") return provenance;
+  const currentLedger = readFileSync(ledgerFile.real);
+  if (sha256(currentLedger) !== provenance.candidateLedgerSha256) {
+    pushVerificationError(errors, "candidate-ledger-hash-mismatch", "candidate ledger differs from audited provenance");
+  }
+  try {
+    const auditedLedger = gitRead(
+      "control provenance",
+      repositoryRoot,
+      ["show", `${provenance.auditedCommit}:${candidateLedgerPath}`],
+      null,
+    );
+    if (sha256(auditedLedger) !== provenance.candidateLedgerSha256) {
+      pushVerificationError(errors, "candidate-ledger-revision-mismatch", "candidate ledger was not captured by audited commit");
+    }
+  } catch (error) {
+    pushVerificationError(errors, "candidate-ledger-revision-missing", error.message);
+  }
+  try {
+    const currentAggregate = candidateSourceAggregate(candidates, (path) => {
+      const file = trackedRegularFile(repositoryRoot, trackedPaths, path);
+      if (file.status !== "valid") throw new Error(`candidate source unavailable: ${path}`);
+      return readFileSync(file.real);
+    });
+    if (currentAggregate !== provenance.candidateSourceAggregateSha256) {
+      pushVerificationError(errors, "candidate-source-aggregate-mismatch", "candidate TSX sources differ from audited provenance");
+    }
+    const auditedAggregate = candidateSourceAggregate(
+      candidates,
+      (path) => gitRead(
+        "control provenance",
+        repositoryRoot,
+        ["show", `${provenance.auditedCommit}:${path}`],
+        null,
+      ),
+    );
+    if (auditedAggregate !== provenance.candidateSourceAggregateSha256) {
+      pushVerificationError(errors, "candidate-source-revision-mismatch", "candidate TSX sources were not captured by audited commit");
+    }
+  } catch (error) {
+    pushVerificationError(errors, "candidate-source-provenance-unavailable", error.message);
+  }
+  return provenance;
+}
+
 function validateControlRuntimeLedger(
   repositoryRoot,
   trackedPaths,
   ledger,
   candidateIds,
+  recordsByCandidateId,
+  provenance,
   errors,
 ) {
   const directCandidates = new Map();
@@ -4246,6 +4485,7 @@ function validateControlRuntimeLedger(
     !hasExactKeys(ledger, [
       "schema",
       "metadata",
+      "provenance",
       "candidateLedger",
       "controlsLedger",
       "summary",
@@ -4308,8 +4548,39 @@ function validateControlRuntimeLedger(
     ) {
       pushVerificationError(errors, "runtime-timestamp-order", `${receiptId}: endedAt precedes startedAt`);
     }
+    const futureLimit = Date.now() + (5 * 60 * 1000);
+    if (
+      (isStrictRuntimeTimestamp(receipt.startedAt) && Date.parse(receipt.startedAt) > futureLimit)
+      || (isStrictRuntimeTimestamp(receipt.endedAt) && Date.parse(receipt.endedAt) > futureLimit)
+    ) {
+      pushVerificationError(errors, "runtime-timestamp-in-future", `${receiptId}: receipt timestamp is more than five minutes in the future`);
+    }
     if (receipt.exitCode != null && !Number.isInteger(receipt.exitCode)) {
       pushVerificationError(errors, "invalid-runtime-receipt-field", `${receiptId}: exitCode must be integer|null`);
+    }
+    const sourceRevision = receipt.sourceRevision;
+    const result = receipt.result;
+    const executed = ["automated", "browser", "native"].includes(receipt.kind)
+      && ["passed", "partial"].includes(receipt.status);
+    if (
+      executed
+      && (
+        !nonEmptyString(receipt.command)
+        || !hasExactKeys(sourceRevision, CONTROL_RUNTIME_SOURCE_REVISION_FIELDS)
+        || sourceRevision.commit !== provenance?.auditedCommit
+        || sourceRevision.tree !== provenance?.auditedTree
+        || !hasExactKeys(result, CONTROL_RUNTIME_RESULT_FIELDS)
+        || !nonEmptyString(result.summary)
+        || result.exitCode !== receipt.exitCode
+        || !Array.isArray(receipt.artifacts)
+        || receipt.artifacts.length === 0
+      )
+    ) {
+      pushVerificationError(
+        errors,
+        "runtime-execution-record-incomplete",
+        `${receiptId}: passed/partial execution needs command, audited sourceRevision, result, and at least one process/capture artifact`,
+      );
     }
     const cleanup = receipt.cleanup;
     if (
@@ -4344,27 +4615,32 @@ function validateControlRuntimeLedger(
     const assertions = Array.isArray(receipt.assertions) ? receipt.assertions : [];
     for (const assertion of assertions) {
       if (
-        !hasExactKeys(assertion, ["candidateId", "event", "expected", "observed"])
+        !hasExactKeys(assertion, CONTROL_RUNTIME_ASSERTION_FIELDS)
         || !nonEmptyString(assertion.candidateId)
         || !nonEmptyString(assertion.event)
-        || !nonEmptyString(assertion.expected)
-        || !nonEmptyString(assertion.observed)
+        || !nonEmptyString(assertion.handler)
+        || !nonEmptyString(assertion.backend)
+        || !nonEmptyString(assertion.visibleOutcome)
+        || !nonEmptyString(assertion.accessibility)
+        || !nonEmptyString(assertion.returnPath)
+        || !Array.isArray(assertion.artifactPaths)
+        || assertion.artifactPaths.some((path) => !nonEmptyString(path))
+        || !Array.isArray(assertion.testEvidence)
+        || assertion.testEvidence.some((evidence) => !nonEmptyString(evidence))
       ) {
-        pushVerificationError(errors, "invalid-runtime-assertion", `${receiptId}: assertions need exact candidateId/event/expected/observed strings`);
+        pushVerificationError(errors, "invalid-runtime-assertion", `${receiptId}: assertion contract is incomplete`);
       } else if (!receiptCandidateIds.includes(assertion.candidateId)) {
         pushVerificationError(errors, "runtime-assertion-candidate-mismatch", `${receiptId}: assertion candidate is not listed`, assertion.candidateId);
       }
     }
     const artifacts = Array.isArray(receipt.artifacts) ? receipt.artifacts : [];
-    let reproducibleArtifact = false;
+    const artifactsByPath = new Map();
     for (const artifact of artifacts) {
       if (
         !artifact
         || typeof artifact !== "object"
         || !hasExactKeys(artifact, ["path", "availability", "sha256"])
         || !nonEmptyString(artifact.path)
-        || !["tracked", "local-ignored"].includes(artifact.availability)
-        || (artifact.sha256 != null && !/^[0-9a-f]{64}$/.test(artifact.sha256))
       ) {
         pushVerificationError(errors, "invalid-runtime-artifact", `${receiptId}: artifact needs path, availability, and sha256`);
         continue;
@@ -4378,41 +4654,43 @@ function validateControlRuntimeLedger(
         pushVerificationError(errors, "runtime-artifact-path-escape", `${receiptId}: artifact path escapes repository`);
         continue;
       }
-      if (
-        artifact.availability === "local-ignored"
-        && (
-          trackedPaths.has(inside.normalized)
-          || !gitPathIsIgnored(repositoryRoot, inside.normalized)
-        )
-      ) {
+      if (artifact.availability !== "tracked") {
         pushVerificationError(
           errors,
           "runtime-artifact-availability-mismatch",
-          `${receiptId}: local-ignored artifact is tracked or not covered by Git ignore rules: ${artifact.path}`,
+          `${receiptId}: every declared artifact must be tracked: ${artifact.path}`,
         );
+      }
+      const file = trackedRegularFile(repositoryRoot, trackedPaths, artifact.path);
+      if (file.status === "missing") {
+        pushVerificationError(errors, "runtime-artifact-missing", `${receiptId}: artifact is missing: ${artifact.path}`);
         continue;
       }
-      if (artifact.availability === "tracked") {
-        const file = trackedRegularFile(repositoryRoot, trackedPaths, artifact.path);
-        if (file.status !== "valid") {
-          pushVerificationError(errors, "runtime-artifact-not-tracked", `${receiptId}: tracked artifact is unavailable: ${artifact.path}`);
-          continue;
-        }
-        const digest = createHash("sha256").update(readFileSync(file.real)).digest("hex");
-        if (artifact.sha256 !== digest) {
-          pushVerificationError(errors, "runtime-artifact-hash-mismatch", `${receiptId}: artifact hash drifted: ${artifact.path}`);
-          continue;
-        }
-        reproducibleArtifact = true;
-      } else if (existsSync(inside.absolute) && artifact.sha256) {
-        const stat = lstatSync(inside.absolute);
-        if (stat.isSymbolicLink() || !stat.isFile() || !realPathWithinRoot(repositoryRoot, inside.absolute)) {
-          pushVerificationError(errors, "runtime-artifact-symlink", `${receiptId}: local artifact is not a confined regular file`);
-        } else {
-          const digest = createHash("sha256").update(readFileSync(inside.absolute)).digest("hex");
-          if (digest !== artifact.sha256) {
-            pushVerificationError(errors, "runtime-artifact-hash-mismatch", `${receiptId}: local artifact hash drifted: ${artifact.path}`);
-          }
+      if (file.status !== "valid") {
+        pushVerificationError(errors, "runtime-artifact-not-tracked", `${receiptId}: artifact is not a tracked confined regular file: ${artifact.path}`);
+        continue;
+      }
+      const digest = sha256(readFileSync(file.real));
+      if (artifact.sha256 !== digest) {
+        pushVerificationError(errors, "runtime-artifact-hash-mismatch", `${receiptId}: artifact hash drifted: ${artifact.path}`);
+        continue;
+      }
+      if (artifactsByPath.has(inside.normalized)) {
+        pushVerificationError(errors, "duplicate-runtime-artifact", `${receiptId}: duplicate artifact path: ${artifact.path}`);
+      } else {
+        artifactsByPath.set(inside.normalized, artifact);
+      }
+    }
+    for (const assertion of assertions) {
+      if (!Array.isArray(assertion?.artifactPaths)) continue;
+      for (const path of assertion.artifactPaths) {
+        if (!artifactsByPath.has(normalizePath(path))) {
+          pushVerificationError(
+            errors,
+            "runtime-assertion-artifact-mismatch",
+            `${receiptId}: assertion references an undeclared or invalid artifact: ${path}`,
+            assertion.candidateId,
+          );
         }
       }
     }
@@ -4422,15 +4700,15 @@ function validateControlRuntimeLedger(
         pushVerificationError(errors, "invalid-runtime-receipt-field", `${receiptId}: ${field} entries must be non-empty strings`);
       }
     }
-    let validatedTest = false;
+    const validatedTestEvidence = new Set();
     for (const evidence of testEvidence) {
-      validatedTest = validateTestEvidence(
+      if (validateTestEvidence(
         repositoryRoot,
         trackedPaths,
         evidence,
         receiptCandidateIds[0] ?? null,
         errors,
-      ) || validatedTest;
+      )) validatedTestEvidence.add(evidence);
     }
     if (receipt.kind === "automated" && receipt.status === "passed" && receipt.exitCode !== 0) {
       pushVerificationError(errors, "runtime-command-exit-mismatch", `${receiptId}: passed automated receipt needs exitCode 0`);
@@ -4441,19 +4719,109 @@ function validateControlRuntimeLedger(
     if (receipt.evidenceLevel === "direct") {
       const directKind = ["automated", "browser", "native"].includes(receipt.kind);
       const everyCandidateAsserted = receiptCandidateIds.length > 0 && receiptCandidateIds.every(
-        (candidateId) => assertions.some((assertion) => assertion?.candidateId === candidateId),
+        (candidateId) => assertions.filter((assertion) => assertion?.candidateId === candidateId).length === 1,
       );
-      const reproducible = receipt.kind === "automated" ? validatedTest : reproducibleArtifact;
-      if (receipt.status !== "passed" || !directKind || !everyCandidateAsserted || !reproducible) {
+      let assertionsValid = everyCandidateAsserted && assertions.length === receiptCandidateIds.length;
+      const claimedArtifactPaths = new Set();
+      for (const assertion of assertions) {
+        const record = recordsByCandidateId.get(assertion?.candidateId);
+        if (!record) {
+          assertionsValid = false;
+          continue;
+        }
+        const recordContractValid = Array.isArray(record.inputs)
+          && Array.isArray(record.backendTrace)
+          && record.outcomes
+          && typeof record.outcomes === "object"
+          && record.accessibility
+          && typeof record.accessibility === "object"
+          && Array.isArray(record.returnPath);
+        if (!recordContractValid) {
+          assertionsValid = false;
+          pushVerificationError(
+            errors,
+            "direct-assertion-contract-mismatch",
+            `${receiptId}: direct assertion references a malformed control contract`,
+            assertion.candidateId,
+          );
+          continue;
+        }
+        const expectedAccessibility = `focus=${record.accessibility.focus}; label=${record.accessibility.label}; shortcut=${record.accessibility.shortcut}`;
+        const contractMatches = assertion.event === record.inputs.join(" + ")
+          && normalizedControlExpression(assertion.handler) === normalizedControlExpression(record.handler)
+          && assertion.backend === record.backendTrace.join(" -> ")
+          && assertion.visibleOutcome === record.outcomes.success
+          && assertion.accessibility === expectedAccessibility
+          && assertion.returnPath === record.returnPath.join(" -> ");
+        if (!contractMatches) {
+          assertionsValid = false;
+          pushVerificationError(
+            errors,
+            "direct-assertion-contract-mismatch",
+            `${receiptId}: direct assertion does not bind the record's event, handler/backend, visible outcome, accessibility, and return path`,
+            assertion.candidateId,
+          );
+        }
+        if (receipt.kind === "automated") {
+          const exactTests = Array.isArray(assertion.testEvidence) ? assertion.testEvidence : [];
+          const exactArtifacts = Array.isArray(assertion.artifactPaths) ? assertion.artifactPaths : [];
+          if (receipt.exitCode !== 0 || exactTests.length !== 1) {
+            assertionsValid = false;
+          } else {
+            const test = validateExecutedControlTestEvidence(
+              repositoryRoot,
+              trackedPaths,
+              exactTests[0],
+              { id: record.candidateId, path: record.source.path },
+              errors,
+            );
+            if (
+              !test
+              || !validatedTestEvidence.has(exactTests[0])
+              || !exactArtifacts.includes(test.path)
+              || !artifactsByPath.has(normalizePath(test.path))
+              || !receipt.command.includes(test.path)
+            ) {
+              assertionsValid = false;
+              pushVerificationError(
+                errors,
+                "direct-automated-test-not-bound",
+                `${receiptId}: each automated assertion needs an executed exact owning-component test and its tracked file hash`,
+                assertion.candidateId,
+              );
+            }
+          }
+        } else {
+          const exactArtifacts = Array.isArray(assertion.artifactPaths) ? assertion.artifactPaths : [];
+          const candidateBound = exactArtifacts.length > 0 && exactArtifacts.every((path) => (
+            path.includes(assertion.candidateId)
+            && artifactsByPath.has(normalizePath(path))
+            && !claimedArtifactPaths.has(normalizePath(path))
+          ));
+          if (!candidateBound || (Array.isArray(assertion.testEvidence) && assertion.testEvidence.length !== 0)) {
+            assertionsValid = false;
+            pushVerificationError(
+              errors,
+              "direct-assertion-artifact-not-candidate-bound",
+              `${receiptId}: each browser/native assertion needs its own candidate-named tracked artifact`,
+              assertion.candidateId,
+            );
+          }
+          for (const path of exactArtifacts) claimedArtifactPaths.add(normalizePath(path));
+        }
+      }
+      if (receipt.status !== "passed" || !directKind || !everyCandidateAsserted || !assertionsValid) {
         pushVerificationError(
           errors,
           "invalid-direct-runtime-evidence",
-          `${receiptId}: direct evidence needs passed automated/browser/native execution, per-candidate assertions, and a declared test or tracked artifact`,
+          `${receiptId}: direct evidence needs passed execution and one fully bound, independently reproducible assertion per candidate`,
         );
       } else {
-        for (const candidateId of receiptCandidateIds) {
-          if (!directCandidates.has(candidateId)) directCandidates.set(candidateId, new Set());
-          directCandidates.get(candidateId).add(receiptId);
+        if (receipt.kind === "automated" && receipt.exitCode === 0) {
+          for (const candidateId of receiptCandidateIds) {
+            if (!directCandidates.has(candidateId)) directCandidates.set(candidateId, new Set());
+            directCandidates.get(candidateId).add(receiptId);
+          }
         }
       }
     }
@@ -4526,7 +4894,17 @@ export function verifyControlAudit(root, auditDir) {
   if (
     controlsLedger?.schema !== 2
     || !Array.isArray(controlsLedger?.records)
-    || !hasExactKeys(controlsLedger, ["schema", "metadata", "scope", "counts", "gapCounts", "keyFindings", "records"])
+    || !hasExactKeys(controlsLedger, [
+      "schema",
+      "metadata",
+      "provenance",
+      "scope",
+      "counts",
+      "gapCounts",
+      "keyFindings",
+      "codeEvidence",
+      "records",
+    ])
   ) {
     pushVerificationError(errors, "invalid-control-ledger-schema", "controls.json must use the exact schema-2 envelope");
   }
@@ -4540,6 +4918,44 @@ export function verifyControlAudit(root, auditDir) {
   if (duplicateCount(candidateIds)) pushVerificationError(errors, "duplicate-candidate-definition-id", "control candidates contain duplicate IDs");
   if (duplicateCount(recordIds)) pushVerificationError(errors, "duplicate-record-id", "controls contain duplicate record IDs");
   if (duplicateCount(recordCandidateIds)) pushVerificationError(errors, "duplicate-candidate-id", "controls contain duplicate candidateIds");
+  const provenance = validateControlProvenance(
+    repositoryRoot,
+    auditDirectory,
+    trackedPaths,
+    candidates,
+    controlsLedger?.provenance,
+    runtimeLedger?.provenance,
+    errors,
+  );
+  const codeEvidence = controlsLedger?.codeEvidence;
+  if (!codeEvidence || typeof codeEvidence !== "object" || Array.isArray(codeEvidence)) {
+    pushVerificationError(errors, "invalid-control-code-evidence", "controls.json codeEvidence must be an object");
+  } else {
+    for (const [evidence, expectedHash] of Object.entries(codeEvidence)) {
+      if (!validateImplementationEvidence(repositoryRoot, trackedPaths, evidence, null, errors)) continue;
+      const [, path] = /^code:([^#\n]+)#/.exec(evidence);
+      const file = trackedRegularFile(repositoryRoot, trackedPaths, path);
+      const currentHash = sha256(readFileSync(file.real));
+      if (!/^[0-9a-f]{64}$/.test(expectedHash) || expectedHash !== currentHash) {
+        pushVerificationError(errors, "backend-source-hash-mismatch", `backend source hash drifted: ${evidence}`);
+      }
+      if (provenance) {
+        try {
+          const auditedHash = sha256(gitRead(
+            "control code evidence",
+            repositoryRoot,
+            ["show", `${provenance.auditedCommit}:${path}`],
+            null,
+          ));
+          if (expectedHash !== auditedHash) {
+            pushVerificationError(errors, "backend-source-revision-mismatch", `backend source was not captured by audited commit: ${evidence}`);
+          }
+        } catch (error) {
+          pushVerificationError(errors, "backend-source-revision-missing", error.message);
+        }
+      }
+    }
+  }
 
   const candidatesById = new Map();
   const derivedByPath = new Map();
@@ -4595,14 +5011,16 @@ export function verifyControlAudit(root, auditDir) {
     pushVerificationError(errors, "control-record-order-drift", "controls records must preserve candidate ledger order");
   }
 
+  const recordsByCandidateId = new Map(records.map((record) => [record?.candidateId, record]));
   const { receiptsById, directCandidates } = validateControlRuntimeLedger(
     repositoryRoot,
     trackedPaths,
     runtimeLedger,
     candidateIdSet,
+    recordsByCandidateId,
+    provenance,
     errors,
   );
-  const recordsByCandidateId = new Map(records.map((record) => [record?.candidateId, record]));
   const statusCounts = {
     unverified: 0,
     complete: 0,
@@ -4679,9 +5097,37 @@ export function verifyControlAudit(root, auditDir) {
       continue;
     }
     statusCounts[record.status] += 1;
+    const backendCodeRefs = Array.isArray(record.backendTrace)
+      ? record.backendTrace.filter((entry) => /^code:[^#\n]+#[A-Za-z_$][A-Za-z0-9_$]*$/.test(entry))
+      : [];
+    if (["complete", "incomplete", "contradicted"].includes(record.status)) {
+      if (backendCodeRefs.length === 0) {
+        pushVerificationError(
+          errors,
+          "control-backend-code-evidence-missing",
+          "actionable control needs at least one hashed code:<tracked-path>#<symbol> trace",
+          candidateId,
+        );
+      }
+      for (const evidence of backendCodeRefs) {
+        if (!Object.prototype.hasOwnProperty.call(codeEvidence ?? {}, evidence)) {
+          pushVerificationError(
+            errors,
+            "control-backend-code-evidence-unbound",
+            `control code trace has no source hash binding: ${evidence}`,
+            candidateId,
+          );
+        }
+      }
+    }
     if (record.status === "incomplete") {
-      if (!nonEmptyStringArray(record.acceptanceCriteria)) {
-        pushVerificationError(errors, "incomplete-without-acceptance-criteria", "incomplete control needs executable acceptance criteria", candidateId);
+      if (JSON.stringify(record.acceptanceCriteria) !== JSON.stringify(expectedControlAcceptanceCriteria(record))) {
+        pushVerificationError(
+          errors,
+          "invalid-control-acceptance-criteria",
+          "incomplete control needs the exact candidate/test/initial/event/call/backend/visible/accessibility/return/outcome contract",
+          candidateId,
+        );
       }
       if (!DOCUMENT_GAP_GROUP_SET.has(record.gapGroup)) {
         pushVerificationError(errors, "invalid-gap-group", `unsupported control gap group: ${String(record.gapGroup)}`, candidateId);
@@ -4720,15 +5166,13 @@ export function verifyControlAudit(root, auditDir) {
       if (!nonEmptyString(record.handler) || !nonEmptyStringArray(record.backendTrace)) {
         pushVerificationError(errors, "complete-without-handler-trace", "complete control needs its current handler and exact trace", candidateId);
       }
-      let directTest = false;
-      for (const evidence of record.automatedTests) {
-        directTest = validateControlTestEvidence(
-          repositoryRoot,
-          trackedPaths,
-          evidence,
-          candidateId,
+      if (record.automatedTests.length !== 0) {
+        pushVerificationError(
           errors,
-        ) || directTest;
+          "static-control-test-cannot-complete",
+          "static automatedTests declarations cannot prove a control complete; use a direct executed typed receipt",
+          candidateId,
+        );
       }
       let directRuntime = false;
       for (const evidence of record.runtimeEvidence) {
@@ -4739,8 +5183,8 @@ export function verifyControlAudit(root, auditDir) {
         }
         directRuntime = directCandidates.get(candidateId)?.has(match[1]) || directRuntime;
       }
-      if (!directTest && !directRuntime) {
-        pushVerificationError(errors, "complete-without-direct-verification", "complete control needs either a tracked exact candidate-bound interaction test with a real assertion or a direct typed runtime receipt", candidateId);
+      if (!directRuntime) {
+        pushVerificationError(errors, "complete-without-direct-verification", "complete control needs an exit-zero direct automated typed receipt with candidate-bound structured assertions and tracked test hash", candidateId);
       }
     }
   }

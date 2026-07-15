@@ -1,0 +1,5 @@
+command: node tools/completion-audit.mjs verify --root . --audit docs/audit/2026-07-14 --scope controls --out docs/audit/2026-07-14/control-verification.json
+startedAt: 2026-07-15T14:14:06+08:00
+endedAt: 2026-07-15T14:14:07+08:00
+exitCode: 0
+result: 259 candidates and 259 records verified; 0 errors; bounded Node process exited.

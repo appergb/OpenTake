@@ -26,6 +26,7 @@ import {
   compareAuditText,
   extractControls,
   extractDocumentCandidates,
+  expectedControlAcceptanceCriteria,
   normalizePath,
   renderSourceReport,
   reviewPalmierChangedPaths,
@@ -75,6 +76,8 @@ function createControlVerificationFixture(t) {
   const outcomes = Object.fromEntries([
     "success", "pending", "empty", "disabled", "cancel", "retry", "failure",
   ].map((name) => [name, `${name} state`]));
+  const candidates = [candidate];
+  const owningCodeEvidence = `code:${sourcePath}#Panel`;
   const record = {
     id: stableId("control-record", candidate.id),
     candidateId: candidate.id,
@@ -87,7 +90,7 @@ function createControlVerificationFixture(t) {
     inputs: ["click"],
     handler: candidate.handler,
     stateTransition: "openAlpha runs.",
-    backendTrace: ["web/src/Panel.tsx::openAlpha"],
+    backendTrace: [owningCodeEvidence],
     outcomes,
     accessibility: { focus: "native button", label: "Alpha", shortcut: "none" },
     returnPath: ["remain in Panel"],
@@ -96,9 +99,27 @@ function createControlVerificationFixture(t) {
     status: "incomplete",
     finalDisposition: "Direct interaction evidence is missing.",
     duplicateOf: [],
-    acceptanceCriteria: ["Click Alpha and assert openAlpha runs once."],
+    acceptanceCriteria: [],
     gapGroup: "home-shell",
     commit: null,
+  };
+  record.acceptanceCriteria = expectedControlAcceptanceCriteria(record);
+  const candidateLedgerText = `${JSON.stringify({ schema: 1, candidates }, null, 2)}\n`;
+  writeFileSync(join(audit, "control-candidates.json"), candidateLedgerText);
+  git(root, ["add", sourcePath, testPath, "docs/audit/2026-07-14/control-candidates.json"]);
+  git(root, ["commit", "--quiet", "-m", "audited controls source"]);
+  const auditedCommit = git(root, ["rev-parse", "HEAD"]);
+  const auditedTree = git(root, ["rev-parse", "HEAD^{tree}"]);
+  const sourceHash = createHash("sha256")
+    .update(readFileSync(join(root, sourcePath)))
+    .digest("hex");
+  const provenance = {
+    auditedCommit,
+    auditedTree,
+    candidateLedgerSha256: createHash("sha256").update(candidateLedgerText).digest("hex"),
+    candidateSourceAggregateSha256: createHash("sha256")
+      .update(`${sourcePath}\0${sourceHash}\n`)
+      .digest("hex"),
   };
   const runtime = {
     schema: 1,
@@ -108,6 +129,7 @@ function createControlVerificationFixture(t) {
       receiptIdDerivation: "stableId('control-runtime-receipt', key)",
       evidencePolicy: "Only direct receipts qualify.",
     },
+    provenance: structuredClone(provenance),
     candidateLedger: "docs/audit/2026-07-14/control-candidates.json",
     controlsLedger: "docs/audit/2026-07-14/controls.json",
     summary: {
@@ -125,6 +147,7 @@ function createControlVerificationFixture(t) {
   const controls = {
     schema: 2,
     metadata: CONTROL_REVIEW_METADATA,
+    provenance: structuredClone(provenance),
     scope: {
       included: "fixture",
       sourceLedger: "docs/audit/2026-07-14/control-candidates.json",
@@ -135,6 +158,7 @@ function createControlVerificationFixture(t) {
     counts: { complete: 0, incomplete: 1, obsolete: 0, duplicate: 0, contradicted: 0 },
     gapCounts: { "home-shell": 1 },
     keyFindings: ["fixture"],
+    codeEvidence: { [owningCodeEvidence]: sourceHash },
     records: [record],
   };
   const write = () => {
@@ -150,7 +174,7 @@ function createControlVerificationFixture(t) {
     };
     writeFileSync(
       join(audit, "control-candidates.json"),
-      `${JSON.stringify({ schema: 1, candidates: [candidate] }, null, 2)}\n`,
+      `${JSON.stringify({ schema: 1, candidates }, null, 2)}\n`,
     );
     writeFileSync(join(audit, "controls.json"), `${JSON.stringify(controls, null, 2)}\n`);
     writeFileSync(join(audit, "runtime-evidence.json"), `${JSON.stringify(runtime, null, 2)}\n`);
@@ -167,6 +191,7 @@ function createControlVerificationFixture(t) {
     record,
     controls,
     runtime,
+    candidates,
     write,
   };
 }
@@ -1468,16 +1493,16 @@ test("verifyAudit controls rejects generic proof and accepts exact tests or dire
     fixture.controls.counts = { complete: 1, incomplete: 0, obsolete: 0, duplicate: 0, contradicted: 0 };
     fixture.controls.gapCounts = {};
   };
-  await t.test("generic suite string is not direct test evidence", (t) => {
+  await t.test("generic suite string is not completion evidence", (t) => {
     const fixture = createControlVerificationFixture(t);
     makeComplete(fixture);
     fixture.record.automatedTests = ["pnpm test passed"];
     fixture.write();
     const result = verifyAudit(fixture.root, fixture.audit, "controls");
-    assert.ok(result.errors.some(({ code }) => code === "invalid-test-evidence"));
+    assert.ok(result.errors.some(({ code }) => code === "static-control-test-cannot-complete"));
     assert.ok(result.errors.some(({ code }) => code === "complete-without-direct-verification"));
   });
-  await t.test("declared exact test without a candidate binding is rejected", (t) => {
+  await t.test("declared exact test without a candidate binding cannot complete", (t) => {
     const fixture = createControlVerificationFixture(t);
     makeComplete(fixture);
     writeFileSync(
@@ -1487,10 +1512,10 @@ test("verifyAudit controls rejects generic proof and accepts exact tests or dire
     fixture.record.automatedTests = [`test:${fixture.testPath}#Alpha invokes its exact handler`];
     fixture.write();
     const result = verifyAudit(fixture.root, fixture.audit, "controls");
-    assert.ok(result.errors.some(({ code }) => code === "invalid-control-test-evidence"));
+    assert.ok(result.errors.some(({ code }) => code === "static-control-test-cannot-complete"));
     assert.ok(result.errors.some(({ code }) => code === "complete-without-direct-verification"));
   });
-  await t.test("candidate-bound test without a real assertion is rejected", (t) => {
+  await t.test("candidate-bound static test without a real assertion cannot complete", (t) => {
     const fixture = createControlVerificationFixture(t);
     makeComplete(fixture);
     writeFileSync(
@@ -1500,16 +1525,17 @@ test("verifyAudit controls rejects generic proof and accepts exact tests or dire
     fixture.record.automatedTests = [`test:${fixture.testPath}#${fixture.exactTestName}`];
     fixture.write();
     const result = verifyAudit(fixture.root, fixture.audit, "controls");
-    assert.ok(result.errors.some(({ code }) => code === "invalid-control-test-evidence"));
+    assert.ok(result.errors.some(({ code }) => code === "static-control-test-cannot-complete"));
     assert.ok(result.errors.some(({ code }) => code === "complete-without-direct-verification"));
   });
-  await t.test("tracked exact interaction test with a candidate-specific assertion is accepted", (t) => {
+  await t.test("tracked static test with a candidate-specific assertion still cannot complete", (t) => {
     const fixture = createControlVerificationFixture(t);
     makeComplete(fixture);
     fixture.record.automatedTests = [`test:${fixture.testPath}#${fixture.exactTestName}`];
     fixture.write();
     const result = verifyAudit(fixture.root, fixture.audit, "controls");
-    assert.equal(result.passed, true, JSON.stringify(result.errors));
+    assert.ok(result.errors.some(({ code }) => code === "static-control-test-cannot-complete"));
+    assert.ok(result.errors.some(({ code }) => code === "complete-without-direct-verification"));
   });
   await t.test("supporting generic command receipt cannot prove one control", (t) => {
     const fixture = createControlVerificationFixture(t);
@@ -1542,6 +1568,10 @@ test("verifyAudit controls rejects generic proof and accepts exact tests or dire
     const fixture = createControlVerificationFixture(t);
     makeComplete(fixture);
     fixture.record.automatedTests = [];
+    writeFileSync(
+      join(fixture.root, fixture.testPath),
+      `import assert from "node:assert/strict";\nimport test from "node:test";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  let calls = 0;\n  const view = render(Panel({ openAlpha: () => { calls += 1; } }));\n  view.props.onClick();\n  assert.equal(calls, 1);\n});\n`,
+    );
     const key = "alpha-direct-test";
     const id = stableId("control-runtime-receipt", key);
     fixture.record.runtimeEvidence = [`receipt:${id}`];
@@ -1551,18 +1581,32 @@ test("verifyAudit controls rejects generic proof and accepts exact tests or dire
       kind: "automated",
       status: "passed",
       evidenceLevel: "direct",
-      command: "node --test web/src/Panel.test.tsx",
+      command: `node --test ${fixture.testPath}`,
+      sourceRevision: {
+        commit: fixture.runtime.provenance.auditedCommit,
+        tree: fixture.runtime.provenance.auditedTree,
+      },
+      result: { summary: "one owning-component interaction test passed", exitCode: 0 },
       startedAt: "2026-07-14T19:10:33+08:00",
       endedAt: "2026-07-14T19:10:34+08:00",
       exitCode: 0,
       candidateIds: [fixture.candidate.id],
       assertions: [{
         candidateId: fixture.candidate.id,
-        event: "click Alpha",
-        expected: "openAlpha once",
-        observed: "named test passed",
+        event: fixture.record.inputs.join(" + "),
+        handler: fixture.record.handler,
+        backend: fixture.record.backendTrace.join(" -> "),
+        visibleOutcome: fixture.record.outcomes.success,
+        accessibility: `focus=${fixture.record.accessibility.focus}; label=${fixture.record.accessibility.label}; shortcut=${fixture.record.accessibility.shortcut}`,
+        returnPath: fixture.record.returnPath.join(" -> "),
+        artifactPaths: [fixture.testPath],
+        testEvidence: [`test:${fixture.testPath}#${fixture.exactTestName}`],
       }],
-      artifacts: [],
+      artifacts: [{
+        path: fixture.testPath,
+        availability: "tracked",
+        sha256: createHash("sha256").update(readFileSync(join(fixture.root, fixture.testPath))).digest("hex"),
+      }],
       cleanup: {
         required: false,
         status: "not-required",
@@ -1747,11 +1791,9 @@ test("verifyAudit controls rejects generic proof and accepts exact tests or dire
     const result = verifyAudit(fixture.root, fixture.audit, "controls");
     assert.ok(result.errors.some(({ code }) => code === "runtime-artifact-availability-mismatch"));
   });
-  await t.test("hashed ignored browser artifacts with verified cleanup are accepted as supporting", (t) => {
+  await t.test("hashed tracked browser artifacts with verified cleanup are accepted as supporting", (t) => {
     const fixture = createControlVerificationFixture(t);
-    const artifactPath = ".superpowers/sdd/browser-capture.log";
-    writeFileSync(join(fixture.root, ".gitignore"), ".superpowers/\n");
-    mkdirSync(join(fixture.root, ".superpowers", "sdd"), { recursive: true });
+    const artifactPath = "docs/audit/2026-07-14/browser-capture.log";
     writeFileSync(join(fixture.root, artifactPath), "browser capture\n");
     const key = "browser-valid-ignored-artifact";
     const id = stableId("control-runtime-receipt", key);
@@ -1762,6 +1804,11 @@ test("verifyAudit controls rejects generic proof and accepts exact tests or dire
       status: "passed",
       evidenceLevel: "supporting",
       command: "pnpm -C web dev --host 127.0.0.1 --port 1437",
+      sourceRevision: {
+        commit: fixture.runtime.provenance.auditedCommit,
+        tree: fixture.runtime.provenance.auditedTree,
+      },
+      result: { summary: "browser capture completed", exitCode: 0 },
       startedAt: "2026-07-14T19:10:33+08:00",
       endedAt: "2026-07-14T19:30:33+08:00",
       exitCode: 0,
@@ -1769,7 +1816,7 @@ test("verifyAudit controls rejects generic proof and accepts exact tests or dire
       assertions: [],
       artifacts: [{
         path: artifactPath,
-        availability: "local-ignored",
+        availability: "tracked",
         sha256: createHash("sha256").update("browser capture\n").digest("hex"),
       }],
       cleanup: {
@@ -1783,6 +1830,283 @@ test("verifyAudit controls rejects generic proof and accepts exact tests or dire
     fixture.write();
     const result = verifyAudit(fixture.root, fixture.audit, "controls");
     assert.equal(result.passed, true, JSON.stringify(result.errors));
+  });
+});
+
+test("verifyAudit controls rejects static and unrelated completion proof", async (t) => {
+  const makeComplete = (fixture) => {
+    fixture.record.status = "complete";
+    fixture.record.acceptanceCriteria = [];
+    fixture.record.gapGroup = null;
+    fixture.controls.counts = { complete: 1, incomplete: 0, obsolete: 0, duplicate: 0, contradicted: 0 };
+    fixture.controls.gapCounts = {};
+  };
+
+  await t.test("candidate id plus assert.equal(1, 1) cannot prove complete", (t) => {
+    const fixture = createControlVerificationFixture(t);
+    makeComplete(fixture);
+    writeFileSync(
+      join(fixture.root, fixture.testPath),
+      `import assert from "node:assert/strict";\nimport test from "node:test";\ntest(${JSON.stringify(fixture.exactTestName)}, () => assert.equal(1, 1));\n`,
+    );
+    fixture.record.automatedTests = [`test:${fixture.testPath}#${fixture.exactTestName}`];
+    fixture.write();
+    const result = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(result.errors.some(({ code }) => code === "static-control-test-cannot-complete"));
+  });
+
+  await t.test("an independent EventTarget does not exercise the owning component", (t) => {
+    const fixture = createControlVerificationFixture(t);
+    makeComplete(fixture);
+    fixture.record.automatedTests = [`test:${fixture.testPath}#${fixture.exactTestName}`];
+    fixture.write();
+    const result = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(result.errors.some(({ code }) => code === "static-control-test-cannot-complete"));
+  });
+
+  await t.test("one unrelated screenshot cannot prove multiple controls", (t) => {
+    const fixture = createControlVerificationFixture(t);
+    makeComplete(fixture);
+    const secondPath = "web/src/PanelBeta.tsx";
+    writeFileSync(
+      join(fixture.root, secondPath),
+      "export function PanelBeta({ openBeta }) {\n  return <button aria-label=\"Beta\" onClick={openBeta}>Beta</button>;\n}\n",
+    );
+    const [secondCandidate] = extractControls(
+      secondPath,
+      readFileSync(join(fixture.root, secondPath), "utf8"),
+      ts,
+    );
+    const secondRecord = {
+      ...structuredClone(fixture.record),
+      id: stableId("control-record", secondCandidate.id),
+      candidateId: secondCandidate.id,
+      candidateLabel: secondCandidate.label,
+      semanticName: "Beta",
+      source: {
+        path: secondCandidate.path,
+        line: secondCandidate.line,
+        column: secondCandidate.column,
+      },
+      element: secondCandidate.element,
+      handler: secondCandidate.handler,
+    };
+    fixture.candidates.push(secondCandidate);
+    fixture.controls.records.push(secondRecord);
+    fixture.controls.scope.candidateCount = 2;
+    fixture.controls.counts.complete = 2;
+    const artifactPath = "docs/audit/2026-07-14/unrelated.png";
+    writeFileSync(join(fixture.audit, "unrelated.png"), "not a component capture\n");
+    const key = "two-controls-one-unrelated-screenshot";
+    const id = stableId("control-runtime-receipt", key);
+    const evidence = `receipt:${id}`;
+    fixture.record.automatedTests = [];
+    fixture.record.runtimeEvidence = [evidence];
+    secondRecord.automatedTests = [];
+    secondRecord.runtimeEvidence = [evidence];
+    fixture.runtime.receipts = [{
+      id,
+      key,
+      kind: "browser",
+      status: "passed",
+      evidenceLevel: "direct",
+      command: "browser-control --session two-controls",
+      startedAt: "2026-07-14T19:10:33+08:00",
+      endedAt: "2026-07-14T19:10:34+08:00",
+      exitCode: 0,
+      candidateIds: [fixture.candidate.id, secondCandidate.id],
+      assertions: [
+        {
+          candidateId: fixture.candidate.id,
+          event: "click Alpha",
+          expected: "Alpha handler and visible outcome",
+          observed: "unrelated screenshot exists",
+        },
+        {
+          candidateId: secondCandidate.id,
+          event: "click Beta",
+          expected: "Beta handler and visible outcome",
+          observed: "the same unrelated screenshot exists",
+        },
+      ],
+      artifacts: [{
+        path: artifactPath,
+        availability: "tracked",
+        sha256: createHash("sha256").update("not a component capture\n").digest("hex"),
+      }],
+      cleanup: {
+        required: true,
+        status: "verified",
+        details: ["The browser process exited."],
+      },
+      limitations: [],
+      testEvidence: [],
+    }];
+    fixture.write();
+    const result = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(result.errors.some(({ code }) => code === "direct-assertion-artifact-not-candidate-bound"));
+  });
+});
+
+test("verifyAudit controls rejects missing artifacts, future receipts, and weak execution records", async (t) => {
+  await t.test("a declared artifact must still exist", (t) => {
+    const fixture = createControlVerificationFixture(t);
+    const artifactPath = ".superpowers/sdd/deleted-capture.log";
+    writeFileSync(join(fixture.root, ".gitignore"), ".superpowers/\n");
+    mkdirSync(join(fixture.root, ".superpowers", "sdd"), { recursive: true });
+    writeFileSync(join(fixture.root, artifactPath), "capture\n");
+    const key = "deleted-artifact";
+    fixture.runtime.receipts = [{
+      id: stableId("control-runtime-receipt", key),
+      key,
+      kind: "browser",
+      status: "passed",
+      evidenceLevel: "supporting",
+      command: "browser-control --session deleted-artifact",
+      startedAt: "2026-07-14T19:10:33+08:00",
+      endedAt: "2026-07-14T19:10:34+08:00",
+      exitCode: 0,
+      candidateIds: [],
+      assertions: [],
+      artifacts: [{
+        path: artifactPath,
+        availability: "local-ignored",
+        sha256: createHash("sha256").update("capture\n").digest("hex"),
+      }],
+      cleanup: {
+        required: true,
+        status: "verified",
+        details: ["The browser process exited."],
+      },
+      limitations: [],
+      testEvidence: [],
+    }];
+    fixture.write();
+    rmSync(join(fixture.root, artifactPath));
+    const result = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(result.errors.some(({ code }) => code === "runtime-artifact-missing"));
+  });
+
+  await t.test("a receipt from 2099 is rejected", (t) => {
+    const fixture = createControlVerificationFixture(t);
+    const key = "future-receipt";
+    fixture.runtime.receipts = [{
+      id: stableId("control-runtime-receipt", key),
+      key,
+      kind: "automated",
+      status: "passed",
+      evidenceLevel: "supporting",
+      command: "node --test",
+      startedAt: "2099-01-01T00:00:00+00:00",
+      endedAt: "2099-01-01T00:00:01+00:00",
+      exitCode: 0,
+      candidateIds: [],
+      assertions: [],
+      artifacts: [],
+      cleanup: {
+        required: false,
+        status: "not-required",
+        details: ["The process exited."],
+      },
+      limitations: [],
+      testEvidence: [],
+    }];
+    fixture.write();
+    const result = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(result.errors.some(({ code }) => code === "runtime-timestamp-in-future"));
+  });
+
+  await t.test("passed execution needs source revision, result, and a process artifact", (t) => {
+    const fixture = createControlVerificationFixture(t);
+    const key = "weak-passed-execution";
+    fixture.runtime.receipts = [{
+      id: stableId("control-runtime-receipt", key),
+      key,
+      kind: "automated",
+      status: "passed",
+      evidenceLevel: "supporting",
+      command: "node --test",
+      startedAt: "2026-07-14T19:10:33+08:00",
+      endedAt: "2026-07-14T19:10:34+08:00",
+      exitCode: 0,
+      candidateIds: [],
+      assertions: [],
+      artifacts: [],
+      cleanup: {
+        required: false,
+        status: "not-required",
+        details: ["The process exited."],
+      },
+      limitations: [],
+      testEvidence: [],
+    }];
+    fixture.write();
+    const result = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(result.errors.some(({ code }) => code === "runtime-execution-record-incomplete"));
+  });
+});
+
+test("verifyAudit controls requires immutable provenance and executable criteria", async (t) => {
+  await t.test("missing source provenance is rejected", (t) => {
+    const fixture = createControlVerificationFixture(t);
+    delete fixture.controls.provenance;
+    delete fixture.runtime.provenance;
+    fixture.write();
+    const result = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(result.errors.some(({ code }) => code === "missing-control-provenance"));
+  });
+
+  await t.test("backend source hash drift is rejected even when the JSX handler is unchanged", (t) => {
+    const fixture = createControlVerificationFixture(t);
+    const backendPath = "web/src/backend.ts";
+    writeFileSync(join(fixture.root, backendPath), "export function applyAlpha() { return 'v1'; }\n");
+    fixture.record.backendTrace = [`code:${backendPath}#applyAlpha`];
+    fixture.controls.codeEvidence = {
+      [`code:${backendPath}#applyAlpha`]: createHash("sha256")
+        .update("export function applyAlpha() { return 'v1'; }\n")
+        .digest("hex"),
+    };
+    fixture.write();
+    writeFileSync(join(fixture.root, backendPath), "export function applyAlpha() { return 'v2'; }\n");
+    git(fixture.root, ["add", backendPath]);
+    const result = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(result.errors.some(({ code }) => code === "backend-source-hash-mismatch"));
+  });
+
+  await t.test("TODO is not an executable candidate-specific acceptance contract", (t) => {
+    const fixture = createControlVerificationFixture(t);
+    fixture.record.acceptanceCriteria = ["TODO"];
+    fixture.write();
+    const result = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(result.errors.some(({ code }) => code === "invalid-control-acceptance-criteria"));
+  });
+
+  await t.test("criteria copied from another candidate are rejected", (t) => {
+    const fixture = createControlVerificationFixture(t);
+    fixture.record.acceptanceCriteria = [
+      "Candidate: control-0000000000000000.",
+      "Test: web/src/Other.interaction.test.tsx#control-0000000000000000 other control.",
+      "Initial state: other state.",
+      "Event: click other.",
+      "Exact call/state/backend: other call.",
+      "Visible/accessibility/return path: other result.",
+      "Outcome matrix: success=other; pending=other; empty=other; disabled=other; cancel=other; retry=other; failure=other.",
+    ];
+    fixture.write();
+    const result = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(result.errors.some(({ code }) => code === "invalid-control-acceptance-criteria"));
+  });
+
+  await t.test("malformed criteria source fields fail closed instead of throwing", (t) => {
+    const fixture = createControlVerificationFixture(t);
+    fixture.record.outcomes = null;
+    fixture.write();
+    let result;
+    assert.doesNotThrow(() => {
+      result = verifyAudit(fixture.root, fixture.audit, "controls");
+    });
+    assert.ok(result.errors.some(({ code }) => code === "invalid-field-type"));
+    assert.ok(result.errors.some(({ code }) => code === "invalid-control-acceptance-criteria"));
   });
 });
 

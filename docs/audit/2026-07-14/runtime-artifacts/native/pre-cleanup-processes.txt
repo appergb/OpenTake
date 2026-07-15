@@ -1,0 +1,7 @@
+2026-07-15T13:00:03+08:00
+59264 59253 Wed Jul 15 12:56:15 2026     ./target/release/bundle/macos/OpenTake.app/Contents/MacOS/opentake
+60711     1 Wed Jul 15 12:56:28 2026     /Applications/OpenTake.app/Contents/MacOS/opentake
+/usr/sbin/lsof
+COMMAND    PID      USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+opentake 59264 lvbaiqing   10u  IPv4 0x2a8375b1a70c85b3      0t0  TCP 127.0.0.1:19789 (LISTEN)
+60711     1 /Applications/OpenTake.app/Contents/MacOS/opentake

@@ -13,10 +13,12 @@ product action or that a passing generic smoke test proves an individual control
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | All tracked TSX controls | 259 | 0 | 212 | 34 | 13 | 0 | 0 |
 
-No actionable control is marked complete. A `complete` disposition requires
-candidate-specific direct evidence for the declared handler, state transition,
-outcome paths, accessibility contract, and return path. Static source tracing,
-generic suite success, or application launch evidence is supporting evidence only.
+No actionable control is marked complete. A `complete` disposition requires an
+exit-zero direct automated typed receipt whose candidate assertion binds the exact
+event, handler/backend call, visible outcome, accessibility contract, and return
+path to an executed owning-component test and that tracked test file's SHA-256.
+Static test declarations, generic suite success, browser/native screenshots, or
+application launch evidence are supporting evidence only.
 
 ## Trace contract
 
@@ -29,18 +31,21 @@ Each `controls.json` record binds the stable candidate ID to:
    no backend boundary;
 4. success, pending, empty, disabled, cancel, retry, and failure outcomes;
 5. focus, accessible name, shortcut, and return-path obligations;
-6. exact automated-test or typed runtime-receipt references;
-7. one legal final disposition and, for incomplete actions, executable acceptance
-   criteria plus one legal gap group.
+6. revision-bound typed runtime-receipt references and hashed `code:<path>#<symbol>`
+   source evidence for the owning component and traced downstream symbols;
+7. one legal final disposition and, for incomplete actions, an exact seven-part
+   candidate/test/initial-state/event/call/backend/visible/accessibility/return-path/
+   outcome-matrix contract plus one legal gap group.
 
 `tools/completion-audit.mjs verify --scope controls` re-extracts controls from the
 tracked current worktree source and rejects source drift, missing/extra/reordered IDs,
 invalid stable IDs, illegal dispositions, unsupported complete claims, duplicate
-chains, count drift, gap-count drift, or untyped runtime evidence. A deterministic
-test can support `complete` only when its tracked exact name binds the candidate ID
-and its test body contains a real assertion. A runtime receipt must use the exact
-typed envelope, strict timezone timestamps, known candidate IDs, hashed tracked or
-Git-ignored artifacts, a consistent summary, and verified browser/native cleanup.
+chains, count drift, gap-count drift, or untyped runtime evidence. It also verifies
+the audited commit/tree ancestry, candidate-ledger hash, aggregate candidate-TSX
+hash, and every formal code-evidence source hash against both the audited revision
+and current worktree. Receipts reject timestamps more than five minutes in the
+future. Every declared artifact must be present as a tracked, repository-confined
+regular file with a matching SHA-256; browser/native cleanup must be verified.
 
 ## Surface matrix
 
@@ -137,12 +142,14 @@ Only incomplete controls contribute to these totals.
 
 ## Runtime evidence interpretation
 
-`runtime-evidence.json` is the typed receipt ledger. A receipt records the command
-or interaction, timestamps, exit status, candidate assertions, artifacts,
-limitations, and exact named tests. Browser/native launch or generic suite receipts
-are supporting evidence. A direct automated receipt needs per-candidate assertions
-plus a tracked exact named test; a direct browser/native receipt needs per-candidate
-assertions plus a hashed tracked artifact. Supporting evidence can confirm that a
-surface is reachable without promoting any individual control to `complete`.
+`runtime-evidence.json` is the typed receipt ledger. A receipt records the audited
+source revision, command, structured result, timestamps, exit status, candidate
+assertions, artifacts, limitations, and exact named tests. Passed/partial executed
+receipts require at least one tracked process/capture artifact. Browser/native
+launch and generic suite receipts remain supporting evidence. Only an exit-zero
+direct automated receipt can promote a candidate, and each assertion must own its
+exact executed test plus the tracked test-file hash. The 22 browser captures, eight
+native logs/manifests, and two automated process receipts used here live under
+`runtime-artifacts/`; no generated bundle binary is copied into the audit.
 
 The authoritative machine result is generated in `control-verification.json`.

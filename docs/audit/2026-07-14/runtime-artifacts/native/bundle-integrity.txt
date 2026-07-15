@@ -1,0 +1,35 @@
+2026-07-15T13:01:03+08:00
+com.opentake.desktop
+opentake
+1.0.0
+1.0.0
+target/release/bundle/macos/OpenTake.app/Contents/MacOS/opentake: Mach-O 64-bit executable arm64
+Non-fat file: target/release/bundle/macos/OpenTake.app/Contents/MacOS/opentake is architecture: arm64
+target/release/bundle/macos/OpenTake.app: code has no resources but signature indicates they must be present
+Executable=/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-full-convergence/target/release/bundle/macos/OpenTake.app/Contents/MacOS/opentake
+Identifier=opentake-99cfae4a87f45c67
+Format=app bundle with Mach-O thin (arm64)
+CodeDirectory v=20400 size=437272 flags=0x20002(adhoc,linker-signed) hashes=13661+0 location=embedded
+VersionPlatform=1
+VersionMin=720896
+VersionSDK=1705216
+Hash type=sha256 size=32
+CandidateCDHash sha256=4c34b795b82c873654fde22deb09620054a39e06
+CandidateCDHashFull sha256=4c34b795b82c873654fde22deb09620054a39e06427ce5833e79ad54b1ab9f48
+Hash choices=sha256
+CMSDigest=4c34b795b82c873654fde22deb09620054a39e06427ce5833e79ad54b1ab9f48
+CMSDigestType=2
+Executable Segment base=0
+Executable Segment limit=40386560
+Executable Segment flags=0x1
+Page size=4096
+CDHash=4c34b795b82c873654fde22deb09620054a39e06
+Signature=adhoc
+Info.plist=not bound
+TeamIdentifier=not set
+Sealed Resources=none
+Internal requirements=none
+f22da32a3d30409b31f1290e1ad7ed1a5b10fd3405186c5a3be36557d2251abe  target/release/bundle/macos/OpenTake.app/Contents/Info.plist
+9c1c4a40325e6bb95a0bc1c99e8f2bd61737800aa94ac31c8d907f454777f9a3  target/release/bundle/macos/OpenTake.app/Contents/MacOS/opentake
+ae3c51c03d044977567489e6af9d89b81d782d265ba241221cb292ebc9732e98  target/release/bundle/macos/OpenTake.app/Contents/Resources/icon.icns
+406d1462818485cbe327f032578bee1bddc31379ef582c87eaaaea7c679cbabf  .superpowers/sdd/task-7-native-runtime-logs/bundle-files.sha256
