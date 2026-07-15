@@ -34,10 +34,12 @@ import {
   hasValidProductPlanOwnership,
   normalizePath,
   migrateAuditIdentityReferences,
+  readTrackedFiles,
   reviewProcessGapCorrections,
   reviewedPlanExactSlices,
   reviewedPlanOwnershipMaps,
   retireHistoricalAutomatedReceipts,
+  renderDocumentReconciliation,
   renderSourceReport,
   reviewPalmierChangedPaths,
   stableId,
@@ -768,6 +770,22 @@ test("source report renders reviewed classifications and rejects malformed evide
   );
 });
 
+test("current human-readable audit reports are exact deterministic renders of normative JSON", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const audit = join(root, "docs/audit/2026-07-14");
+  const requirementsBytes = readFileSync(join(audit, "requirements.json"));
+  const sources = JSON.parse(readFileSync(join(audit, "sources.json"), "utf8"));
+
+  assert.equal(
+    readFileSync(join(audit, "document-reconciliation.md"), "utf8"),
+    renderDocumentReconciliation(requirementsBytes),
+  );
+  assert.equal(
+    readFileSync(join(audit, "upstream-downstream.md"), "utf8"),
+    renderSourceReport(sources),
+  );
+});
+
 test("buildSourceEvidence assembles fixture snapshots and fails closed on ledger drift", () => {
   const operations = createBuildSourceOperations();
   const evidence = buildSourceEvidence({
@@ -1372,17 +1390,14 @@ test("migrated identity closure rejects legacy IDs in generator current-referenc
     "tools/completion-audit-plan-map.json",
     "tools/completion-audit.test.mjs",
   ];
-  const artifactNames = [
-    "document-candidates.json",
-    "requirements.json",
-    "control-candidates.json",
-    "controls.json",
-    "runtime-evidence.json",
-    "sources.json",
-  ];
+  const currentArtifactPaths = readTrackedFiles(root).filter((path) => (
+    path.startsWith("docs/audit/2026-07-14/")
+    && path !== "docs/audit/2026-07-14/identity-migration.json"
+    && !path.startsWith("docs/audit/2026-07-14/runtime-artifacts/")
+  ));
   const references = Object.fromEntries([
     ...generatorPaths.map((path) => [path, readFileSync(join(root, path), "utf8")]),
-    ...artifactNames.map((name) => [`docs/audit/2026-07-14/${name}`, readFileSync(join(audit, name), "utf8")]),
+    ...currentArtifactPaths.map((path) => [path, readFileSync(join(root, path), "utf8")]),
   ]);
 
   assert.deepEqual(findMigratedIdentityReferenceLeaks(migration, references), []);
@@ -1398,11 +1413,16 @@ test("migrated identity closure rejects legacy IDs in generator current-referenc
   };
   assert.deepEqual(findMigratedIdentityReferenceLeaks(fixtureMigration, {
     "tools/generator.mjs": "const CURRENT = 'requirement-old-current-reference';\n",
-    "docs/audit/current.json": "{\"id\":\"doc-old-current-reference\"}\n",
+    "docs/audit/document-reconciliation.md": "| `doc-old-current-reference` |\n",
+    "docs/audit/upstream-downstream.md": "| requirement-old-current-reference |\n",
   }), [{
-    path: "docs/audit/current.json",
+    path: "docs/audit/document-reconciliation.md",
     oldId: "doc-old-current-reference",
     newId: "doc-new-current-reference",
+  }, {
+    path: "docs/audit/upstream-downstream.md",
+    oldId: "requirement-old-current-reference",
+    newId: "requirement-new-current-reference",
   }, {
     path: "tools/generator.mjs",
     oldId: "requirement-old-current-reference",
@@ -5221,4 +5241,29 @@ test("verifyAudit all validates the exact published completion program", () => {
     "accessibility-polish",
     "documentation",
   ]);
+});
+
+test("verifyAudit all rejects legacy identity injection in either current human-readable report", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const auditRelative = "docs/audit/2026-07-14";
+  const audit = join(root, auditRelative);
+  const migration = JSON.parse(readFileSync(join(audit, "identity-migration.json"), "utf8"));
+  const oldCandidateId = migration.documentMappings.find(
+    ({ oldCandidateId, newCandidateId }) => oldCandidateId !== newCandidateId,
+  ).oldCandidateId;
+
+  for (const name of ["document-reconciliation.md", "upstream-downstream.md"]) {
+    const path = join(audit, name);
+    const original = readFileSync(path, "utf8");
+    try {
+      writeFileSync(path, `${original}\nInjected legacy reference: ${oldCandidateId}\n`);
+      const result = verifyAudit(root, auditRelative, "all");
+      assert.equal(result.ok, false, `${name} legacy identity injection was accepted`);
+      assert.ok(result.errors.some(({ code }) => (
+        code === "identity-stale-reference" || code === "identity-human-report-drift"
+      )), JSON.stringify(result.errors.slice(0, 10)));
+    } finally {
+      writeFileSync(path, original);
+    }
+  }
 });

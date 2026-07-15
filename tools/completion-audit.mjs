@@ -3309,6 +3309,115 @@ function markdown(value) {
     .replaceAll("\n", "\\n");
 }
 
+const REQUIREMENT_STATUS_MEANINGS = {
+  complete: "Current implementation and exact verification evidence support the statement.",
+  contradicted: "Current evidence disproves the source statement.",
+  duplicate: "The candidate is context or repeats another adjudicated requirement.",
+  incomplete: "A current gap remains with an exact closure contract.",
+  obsolete: "A newer decision or implementation supersedes the statement.",
+  unverified: "The candidate has not received a final disposition.",
+};
+
+export function renderDocumentReconciliation(requirementsBytes) {
+  if (!Buffer.isBuffer(requirementsBytes) && !(requirementsBytes instanceof Uint8Array)) {
+    throw new Error("document reconciliation needs the exact requirements.json bytes");
+  }
+  const bytes = Buffer.from(requirementsBytes);
+  let requirements;
+  try {
+    requirements = JSON.parse(bytes.toString("utf8"));
+  } catch (error) {
+    throw new Error(`document reconciliation requirements JSON is invalid: ${error.message}`);
+  }
+  if (requirements?.schema !== 1 || !Array.isArray(requirements.records)) {
+    throw new Error("document reconciliation needs schema 1 requirements records[]");
+  }
+  const candidateIds = new Set();
+  const recordIds = new Set();
+  const statusCounts = Object.fromEntries(Object.keys(REQUIREMENT_STATUS_MEANINGS).map((status) => [status, 0]));
+  const gapCounts = new Map();
+  const active = [];
+  for (const record of requirements.records) {
+    if (!record || typeof record !== "object") throw new Error("document reconciliation record must be an object");
+    if (typeof record.id !== "string" || record.id.length === 0 || recordIds.has(record.id)) {
+      throw new Error(`document reconciliation record ID is missing or duplicate: ${String(record.id)}`);
+    }
+    if (typeof record.candidateId !== "string" || record.candidateId.length === 0 || candidateIds.has(record.candidateId)) {
+      throw new Error(`document reconciliation candidate ID is missing or duplicate: ${String(record.candidateId)}`);
+    }
+    if (!Object.hasOwn(REQUIREMENT_STATUS_MEANINGS, record.status)) {
+      throw new Error(`document reconciliation status is unsupported: ${String(record.status)}`);
+    }
+    if (
+      typeof record.source?.path !== "string" || record.source.path.length === 0
+      || !Number.isInteger(record.source?.line) || record.source.line < 1
+      || typeof record.targetBehavior !== "string" || record.targetBehavior.length === 0
+    ) {
+      throw new Error(`document reconciliation record shape is invalid: ${record.id}`);
+    }
+    candidateIds.add(record.candidateId);
+    recordIds.add(record.id);
+    statusCounts[record.status] += 1;
+    if (record.status !== "incomplete") continue;
+    if (
+      typeof record.gapGroup !== "string" || record.gapGroup.length === 0
+      || !Array.isArray(record.acceptanceCriteria) || record.acceptanceCriteria.length === 0
+      || record.acceptanceCriteria.some((criterion) => typeof criterion !== "string" || criterion.length === 0)
+    ) {
+      throw new Error(`incomplete requirement lacks a gap group or exact acceptance criteria: ${record.id}`);
+    }
+    gapCounts.set(record.gapGroup, (gapCounts.get(record.gapGroup) ?? 0) + 1);
+    active.push(record);
+  }
+  active.sort((left, right) => (
+    compareAuditText(left.gapGroup, right.gapGroup)
+    || compareAuditText(left.candidateId, right.candidateId)
+  ));
+  const lines = [
+    "# OpenTake planning-document reconciliation — 2026-07-14",
+    "",
+    "This report is the deterministic human-readable index for `requirements.json`. The JSON ledger is normative; this file is rebuilt byte-for-byte from that ledger and contains no independently maintained dispositions.",
+    "",
+    "## Coverage and integrity",
+    "",
+    `- Candidate records: ${requirements.records.length}`,
+    `- Unique candidate IDs: ${candidateIds.size}`,
+    `- Unverified dispositions: ${statusCounts.unverified}`,
+    `- Requirements ledger SHA-256: \`${sha256(bytes)}\``,
+    "- Complete dispositions require exact tracked implementation and automated-test evidence; incomplete dispositions require a subsystem gap group and exact acceptance criteria.",
+    "",
+    "| Status | Records | Meaning |",
+    "|---|---:|---|",
+    ...Object.keys(REQUIREMENT_STATUS_MEANINGS)
+      .filter((status) => statusCounts[status] > 0 || status !== "unverified")
+      .map((status) => `| ${status} | ${statusCounts[status]} | ${REQUIREMENT_STATUS_MEANINGS[status]} |`),
+    "",
+    "## Active gap groups",
+    "",
+    "| Gap group | Requirements |",
+    "|---|---:|",
+    ...[...gapCounts.entries()]
+      .sort(([left], [right]) => compareAuditText(left, right))
+      .map(([group, count]) => `| ${markdown(group)} | ${count} |`),
+    "",
+    "## Exact active requirements",
+    "",
+    "Every row below is one current `incomplete` requirement from the normative ledger. The acceptance column is its exact closure contract.",
+    "",
+    "| Gap group | Candidate ID | Source | Target behavior | Acceptance criteria | Current evidence |",
+    "|---|---|---|---|---|---|",
+  ];
+  for (const record of active) {
+    const evidence = [
+      ...(Array.isArray(record.storeApi) ? record.storeApi : []),
+      ...(Array.isArray(record.automatedTests) ? record.automatedTests : []),
+      ...(Array.isArray(record.runtimeEvidence) ? record.runtimeEvidence : []),
+    ];
+    lines.push(`| ${markdown(record.gapGroup)} | \`${record.candidateId}\` | ${markdown(`${record.source.path}:${record.source.line}`)} | ${markdown(record.targetBehavior)} | ${markdown(record.acceptanceCriteria.join("; "))} | ${markdown(evidence.join("; ") || record.finalDisposition || "No current completion evidence; closure contract remains active.")} |`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 export function renderSourceReport(evidence) {
   validateSourceEvidenceShape(evidence);
   const lines = [
@@ -3611,10 +3720,21 @@ export function findMigratedIdentityReferenceLeaks(migration, referencesByPath) 
     }
   }
   const leaks = [];
+  const pattern = replacements.size > 0
+    ? new RegExp(
+      [...replacements.keys()]
+        .sort((left, right) => right.length - left.length || compareAuditText(left, right))
+        .map(escapeRegExp)
+        .join("|"),
+      "g",
+    )
+    : null;
   for (const [path, text] of Object.entries(referencesByPath)) {
     if (typeof text !== "string") throw new Error(`identity migration reference source is not text: ${path}`);
-    for (const [oldId, newId] of replacements) {
-      if (text.includes(oldId)) leaks.push({ path, oldId, newId });
+    if (!pattern) continue;
+    pattern.lastIndex = 0;
+    for (const oldId of new Set(text.match(pattern) ?? [])) {
+      leaks.push({ path, oldId, newId: replacements.get(oldId) });
     }
   }
   return leaks.sort((left, right) => (
@@ -3734,6 +3854,17 @@ const AUDIT_VERIFIER_FILES = [
   "tools/completion-audit-plan-map.json",
   "tools/completion-audit.test.mjs",
 ];
+
+function currentAuditPublicationPaths(root, auditRelative) {
+  const prefix = `${normalizePath(auditRelative).replace(/\/$/, "")}/`;
+  const migrationPath = `${prefix}identity-migration.json`;
+  const historicalEvidencePrefix = `${prefix}runtime-artifacts/`;
+  return readTrackedFiles(root).filter((path) => (
+    path.startsWith(prefix)
+    && path !== migrationPath
+    && !path.startsWith(historicalEvidencePrefix)
+  ));
+}
 
 function jsonBytes(value) {
   return Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
@@ -4001,6 +4132,10 @@ export function buildIdentityMigrationPublication(root, auditDir, sourceRevision
     "runtime-evidence.json": migrated.runtimeEvidence,
     "sources.json": migrated.sources,
   };
+  const reports = {
+    "document-reconciliation.md": renderDocumentReconciliation(jsonBytes(migrated.requirements)),
+    "upstream-downstream.md": renderSourceReport(migrated.sources),
+  };
   const oldLedgers = {
     "document-candidates.json": oldDocumentLedger,
     "requirements.json": oldRequirements,
@@ -4036,7 +4171,7 @@ export function buildIdentityMigrationPublication(root, auditDir, sourceRevision
     documentMappings: migration.documentMappings,
     controlMappings: migration.controlMappings,
   };
-  return { artifact, outputs };
+  return { artifact, outputs, reports };
 }
 
 export function readTrackedFiles(root) {
@@ -7561,12 +7696,26 @@ function validateIdentityMigrationArtifact(root, auditDirectory, errors) {
     if (JSON.stringify(currentRequirements) !== JSON.stringify(migrated.requirements)) {
       pushVerificationError(errors, "identity-classification-corrections-drift", "requirements ledger differs from identity rewrite plus reviewed gap corrections");
     }
+    const reportExpectations = {
+      "document-reconciliation.md": renderDocumentReconciliation(
+        readFileSync(resolve(auditDirectory, "requirements.json")),
+      ),
+      "upstream-downstream.md": renderSourceReport(loadAuditJson(auditDirectory, "sources.json")),
+    };
+    for (const [name, expectedReport] of Object.entries(reportExpectations)) {
+      const reportPath = resolve(auditDirectory, name);
+      if (!existsSync(reportPath) || readFileSync(reportPath, "utf8") !== expectedReport) {
+        pushVerificationError(
+          errors,
+          "identity-human-report-drift",
+          `${name} differs from its normative JSON renderer`,
+        );
+      }
+    }
+    const currentPublicationPaths = currentAuditPublicationPaths(root, auditRelative);
     const referenceSources = Object.fromEntries([
       ...AUDIT_VERIFIER_FILES.map((path) => [path, readFileSync(resolve(root, path), "utf8")]),
-      ...oldNames.map((name) => [
-        normalizePath(join(auditRelative, name)),
-        readFileSync(resolve(auditDirectory, name), "utf8"),
-      ]),
+      ...currentPublicationPaths.map((path) => [path, readFileSync(resolve(root, path), "utf8")]),
     ]);
     const staleReferences = findMigratedIdentityReferenceLeaks(expected, referenceSources);
     if (staleReferences.length > 0) {
@@ -7781,6 +7930,9 @@ async function runCommand(command, root, args) {
     for (const [name, value] of Object.entries(publication.outputs)) {
       writeJson(resolve(auditDirectory, name), value);
     }
+    for (const [name, value] of Object.entries(publication.reports)) {
+      writeFileSync(resolve(auditDirectory, name), value);
+    }
     return publication.artifact;
   }
   if (command === "publish") {
@@ -7788,6 +7940,15 @@ async function runCommand(command, root, args) {
       throw new Error("publish command needs --audit <path> --report <path> --index <path>");
     }
     const auditDirectory = resolve(root, args.audit);
+    const requirementsPath = resolve(auditDirectory, "requirements.json");
+    writeFileSync(
+      resolve(auditDirectory, "document-reconciliation.md"),
+      renderDocumentReconciliation(readFileSync(requirementsPath)),
+    );
+    writeFileSync(
+      resolve(auditDirectory, "upstream-downstream.md"),
+      renderSourceReport(loadAuditJson(auditDirectory, "sources.json")),
+    );
     const plans = buildImplementationPlans(root, auditDirectory);
     for (const [path, content] of Object.entries(plans.outputs)) {
       const absolute = resolve(root, path);
