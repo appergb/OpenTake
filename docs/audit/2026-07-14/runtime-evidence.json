@@ -1,0 +1,494 @@
+{
+  "schema": 1,
+  "metadata": {
+    "schemaName": "completion-control-runtime-evidence",
+    "schemaVersion": 1,
+    "receiptIdDerivation": "stableId('control-runtime-receipt', key)",
+    "evidencePolicy": "Only candidate-bound tracked exact interaction tests with real assertions, or passed direct receipts with per-candidate assertions plus an exact test or hashed tracked artifact, can support complete status. Generic suite/build/launch/smoke evidence is supporting only. Every receipt requires strict timestamps, exact keys, hashed artifacts, consistent summary counts, and concrete cleanup proof."
+  },
+  "candidateLedger": "docs/audit/2026-07-14/control-candidates.json",
+  "controlsLedger": "docs/audit/2026-07-14/controls.json",
+  "summary": {
+    "receipts": 4,
+    "direct": 0,
+    "supporting": 4,
+    "passed": 3,
+    "failed": 0,
+    "partial": 1,
+    "notRun": 0,
+    "blocked": 0
+  },
+  "receipts": [
+    {
+      "id": "control-runtime-receipt-0ce7e9e4c9f1e1ba",
+      "key": "task7-verifier-full-suite",
+      "kind": "automated",
+      "status": "passed",
+      "evidenceLevel": "supporting",
+      "command": "node --test tools/completion-audit.test.mjs",
+      "startedAt": "2026-07-15T13:21:10+08:00",
+      "endedAt": "2026-07-15T13:21:16+08:00",
+      "exitCode": 0,
+      "candidateIds": [],
+      "assertions": [],
+      "artifacts": [],
+      "cleanup": {
+        "required": false,
+        "status": "not-required",
+        "details": [
+          "The bounded Node test process exited with status 0."
+        ]
+      },
+      "limitations": [
+        "The 148 passing tests validate extraction and fail-closed audit behavior; they do not directly exercise any individual product control."
+      ],
+      "testEvidence": [
+        "test:tools/completion-audit.test.mjs#verifyAudit controls accepts an exact incomplete schema-2 ledger",
+        "test:tools/completion-audit.test.mjs#verifyAudit controls rejects current-source and record identity drift",
+        "test:tools/completion-audit.test.mjs#verifyAudit controls fails closed on status, gap, obsolete, and duplicate claims",
+        "test:tools/completion-audit.test.mjs#verifyAudit controls rejects generic proof and accepts exact tests or direct typed receipts",
+        "test:tools/completion-audit.test.mjs#verify controls CLI writes failure output and exits nonzero"
+      ]
+    },
+    {
+      "id": "control-runtime-receipt-f40b696185658fc1",
+      "key": "task7-browser-fallback-runtime",
+      "kind": "browser",
+      "status": "passed",
+      "evidenceLevel": "supporting",
+      "command": "pnpm -C web dev --host 127.0.0.1 --port 1437",
+      "startedAt": "2026-07-14T19:10:33+08:00",
+      "endedAt": "2026-07-15T13:00:48+08:00",
+      "exitCode": null,
+      "candidateIds": [
+        "control-40c4daee5cdfca99",
+        "control-bb60cdd345230fd7",
+        "control-d4af3faba32c97a0",
+        "control-9583d8fd791a79df",
+        "control-205c12cffc482d00",
+        "control-cefc5a06d042e30d",
+        "control-fb4088359d6ce746",
+        "control-fa81e5ddeee629ae",
+        "control-cd1fd1b68a7523ce",
+        "control-c9a457c8e8f1d8b3",
+        "control-cf205335655d3803",
+        "control-6b1ae7c91a515867",
+        "control-d126bb271429ab1f",
+        "control-c2cede9efe356824",
+        "control-d17c9479f8a82f14",
+        "control-061b4016b9ed6902",
+        "control-8812a39ec38eb7e7",
+        "control-b7650a4ec9ee0f31",
+        "control-431df6604789a897",
+        "control-14c4c4dedf0c6cbc",
+        "control-d1fb1c8eefaf6a50",
+        "control-e94b83c1ef3620ad",
+        "control-a33354a61f6c32cc",
+        "control-f65537d659ea03f2",
+        "control-dd723d5741855034",
+        "control-a7355314b80ba34b"
+      ],
+      "assertions": [
+        {
+          "candidateId": "control-40c4daee5cdfca99",
+          "event": "Home: clicked the main empty-launcher New Project button",
+          "expected": "the New Project launcher enters the editor with a new empty project",
+          "observed": "view changed from Home empty state to editor with an empty timeline"
+        },
+        {
+          "candidateId": "control-bb60cdd345230fd7",
+          "event": "editor title bar: clicked View",
+          "expected": "the View control opens its menu and exposes panel/layout choices",
+          "observed": "expanded menu exposed layout and panel menuitemcheckbox roles with shortcut text"
+        },
+        {
+          "candidateId": "control-d4af3faba32c97a0",
+          "event": "View menu: clicked Agent panel menuitemcheckbox",
+          "expected": "the Agent panel menu item toggles the Agent panel on",
+          "observed": "Agent panel rendered and the menuitem became checked"
+        },
+        {
+          "candidateId": "control-9583d8fd791a79df",
+          "event": "Agent panel: clicked New conversation in the empty Agent state",
+          "expected": "New conversation leaves the unavailable browser-fallback Agent state stable without an error",
+          "observed": "click completed without error and the browser-unavailable empty state remained stable"
+        },
+        {
+          "candidateId": "control-205c12cffc482d00",
+          "event": "Agent panel: inspected prompt textbox",
+          "expected": "the prompt textbox has an accessible name and is disabled when Agent is unavailable",
+          "observed": "textbox had accessible name '描述你想做的编辑…' and was disabled in browser fallback"
+        },
+        {
+          "candidateId": "control-cefc5a06d042e30d",
+          "event": "Agent panel: inspected Send button",
+          "expected": "the Send control has an accessible name and is disabled when Agent is unavailable",
+          "observed": "button had accessible name '发送' and was disabled in browser fallback"
+        },
+        {
+          "candidateId": "control-fb4088359d6ce746",
+          "event": "Preview: clicked Jump to start on an empty timeline",
+          "expected": "Jump to start is safe at the empty-timeline boundary and keeps the playhead at zero",
+          "observed": "time display remained 00:00:00 / 00:00:00 and no error appeared"
+        },
+        {
+          "candidateId": "control-fa81e5ddeee629ae",
+          "event": "Preview: clicked Previous frame on an empty timeline",
+          "expected": "Previous frame is safe at the empty-timeline boundary and keeps the playhead at zero",
+          "observed": "click completed; empty-timeline time stayed at zero"
+        },
+        {
+          "candidateId": "control-cd1fd1b68a7523ce",
+          "event": "Preview: clicked Play/Pause on an empty timeline",
+          "expected": "Play/Pause does not advance or error when the fallback timeline contains no media",
+          "observed": "click completed without media or native playback and time stayed at zero"
+        },
+        {
+          "candidateId": "control-c9a457c8e8f1d8b3",
+          "event": "Preview: clicked Next frame on an empty timeline",
+          "expected": "Next frame is safe at the empty-timeline boundary and keeps the playhead at zero",
+          "observed": "click completed; empty-timeline time stayed at zero"
+        },
+        {
+          "candidateId": "control-cf205335655d3803",
+          "event": "Preview: inspected Capture current frame",
+          "expected": "Capture current frame is disabled when no frame/media exists",
+          "observed": "button was disabled while no frame/media existed"
+        },
+        {
+          "candidateId": "control-6b1ae7c91a515867",
+          "event": "editor title bar: inspected Export Video",
+          "expected": "Export Video is disabled for an empty project",
+          "observed": "button was disabled for the empty project"
+        },
+        {
+          "candidateId": "control-d126bb271429ab1f",
+          "event": "editor title bar: clicked Settings",
+          "expected": "Settings opens the settings surface over the editor",
+          "observed": "Settings overlay opened over the editor"
+        },
+        {
+          "candidateId": "control-c2cede9efe356824",
+          "event": "Settings: switched among Appearance, Import, AI, and MCP panes",
+          "expected": "selecting each settings navigation item renders the matching pane and controls",
+          "observed": "each selected pane heading and controls rendered; sidebar remained a named navigation region"
+        },
+        {
+          "candidateId": "control-d17c9479f8a82f14",
+          "event": "Settings Appearance: clicked Light theme",
+          "expected": "selecting Light theme rerenders the app without a runtime error",
+          "observed": "click completed and the app rerendered without console error; visual theme delta was not separately pixel-diffed"
+        },
+        {
+          "candidateId": "control-061b4016b9ed6902",
+          "event": "Settings Appearance: clicked Compact window size",
+          "expected": "selecting Compact marks the compact window-size option active in browser fallback",
+          "observed": "Compact (1066x666) button became active; native window resize was not exercised"
+        },
+        {
+          "candidateId": "control-8812a39ec38eb7e7",
+          "event": "Settings Import: clicked Choose default import folder",
+          "expected": "cancelling or making no selection leaves the default import folder unset",
+          "observed": "browser fallback returned to the same unset state with no folder mutation; no native dialog was exercised"
+        },
+        {
+          "candidateId": "control-b7650a4ec9ee0f31",
+          "event": "Settings AI: clicked OpenAI provider",
+          "expected": "selecting OpenAI keeps the provider API-key control available",
+          "observed": "provider click completed and the API-key field remained available"
+        },
+        {
+          "candidateId": "control-431df6604789a897",
+          "event": "Settings AI: filled the password field with the non-secret probe string runtime-probe-not-a-secret",
+          "expected": "entering a non-empty probe value enables the Save Key control",
+          "observed": "Save Key button appeared while the field was non-empty; the observation had no retained artifact"
+        },
+        {
+          "candidateId": "control-14c4c4dedf0c6cbc",
+          "event": "Settings AI: clicked Save Key with the non-secret probe",
+          "expected": "the declared non-secret probe is rejected without persistence and clears its draft",
+          "observed": "browser fallback returned NO_SECRET and cleared the draft; no OS-keychain persistence was exercised"
+        },
+        {
+          "candidateId": "control-d1fb1c8eefaf6a50",
+          "event": "Settings MCP: clicked the first Copy button",
+          "expected": "Copy writes the configured MCP text to the browser clipboard and exposes a copied confirmation",
+          "observed": "button label changed from 复制 to 已复制"
+        },
+        {
+          "candidateId": "control-e94b83c1ef3620ad",
+          "event": "Settings: clicked Done",
+          "expected": "Done closes Settings and returns focus to the editor document",
+          "observed": "Settings overlay closed and focus returned to the editor document"
+        },
+        {
+          "candidateId": "control-a33354a61f6c32cc",
+          "event": "Media panel: inspected Generate",
+          "expected": "Generate is disabled when generation is unavailable in the empty browser fallback",
+          "observed": "button was disabled in fallback empty state"
+        },
+        {
+          "candidateId": "control-f65537d659ea03f2",
+          "event": "Media panel: filled Search with runtime-none",
+          "expected": "a query with no matches is retained and renders a deterministic empty-result state",
+          "observed": "textbox retained the query and panel displayed no matches for runtime-none"
+        },
+        {
+          "candidateId": "control-dd723d5741855034",
+          "event": "Media panel: clicked View mode",
+          "expected": "View mode accepts the interaction and exposes its active state",
+          "observed": "button click completed and became active in the interaction snapshot; no view-mode data mutation was proven"
+        },
+        {
+          "candidateId": "control-a7355314b80ba34b",
+          "event": "Media panel: clicked Sort",
+          "expected": "Sort accepts the interaction while preserving the filtered-empty state",
+          "observed": "button click completed and became active while filtered-empty state remained stable; no sort data mutation was proven"
+        }
+      ],
+      "artifacts": [
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-12-33-510Z.png",
+          "availability": "local-ignored",
+          "sha256": "29583cf4f92642125ba523a0ff8466f82dd7b6edbb8dc27f7990548e0623a65f"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-13-45-459Z.png",
+          "availability": "local-ignored",
+          "sha256": "be5543d6db0ddf48b8dddfdf3f8184342ba30f8a15de4fac5de4d3ccc35139d8"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-12-58-446Z.yml",
+          "availability": "local-ignored",
+          "sha256": "9d4e1c8093b953f128979398d59a09467da66c6e781b21893d584e21d240840e"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-18-11-121Z.yml",
+          "availability": "local-ignored",
+          "sha256": "2d03d3a7f1246682cd315e3a599a5702ddddf3223a60602d63701afeeddb9695"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-21-25-082Z.yml",
+          "availability": "local-ignored",
+          "sha256": "fce1a102a7c0df2b0823cfe1bafae7f100485d03f960b8bca5edf2766988919e"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-23-43-551Z.yml",
+          "availability": "local-ignored",
+          "sha256": "0b2e437dff3fd0c76b52d6f543153e41448863e885517f9aaec1c62c2950ace6"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-27-26-962Z.yml",
+          "availability": "local-ignored",
+          "sha256": "ef80eff97edd12570dae13a82cc2fc34d6df890028e089c7fad176ea61c467a1"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-28-34-215Z.yml",
+          "availability": "local-ignored",
+          "sha256": "53ace4f56e190543c45f51ffca03bfcb05e3d0bb5e37535ddf905a8a404f73cf"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-29-59-679Z.yml",
+          "availability": "local-ignored",
+          "sha256": "e97dd6ee99e35109fd8f6860c9cd5e0e1348967fc9d813fcd684c36895822693"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-30-22-654Z.yml",
+          "availability": "local-ignored",
+          "sha256": "1961d43203a820e003f1c0027dea54d489eda6ecf471d3e9daff3fc333c68272"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/console-2026-07-14T11-11-54-004Z.log",
+          "availability": "local-ignored",
+          "sha256": "2b4af9d8c849d80beb47f493f1d922dc733abeeb31ecfa752438f25ee56c3d03"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-16-41-938Z.yml",
+          "availability": "local-ignored",
+          "sha256": "dc544d2db1de57cedcce024649b58a9f2fddd675c938c65f52551fdfbe4762df"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-17-11-063Z.yml",
+          "availability": "local-ignored",
+          "sha256": "e80773cb2b263422fffadccc1c183f0372dc45ce45a8bce595ccca3b4d5569d8"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-18-37-045Z.yml",
+          "availability": "local-ignored",
+          "sha256": "bd7e509f28c85e635ea382f46dde1dd786f9e05d010ac97972d03b6b660f74e6"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-14-10-178Z.yml",
+          "availability": "local-ignored",
+          "sha256": "0825421cc4dd6be8c10c57bd8e2cd2af8c32a6fc278af04135c1c95344f544bd"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-14-52-301Z.yml",
+          "availability": "local-ignored",
+          "sha256": "11b988ea2aa9d53ceac5872c8b4fb5f9ee61be29b8e4daed2c5bdbf7ba982e8d"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-15-12-529Z.yml",
+          "availability": "local-ignored",
+          "sha256": "9dc4770355d8345729c3921838ad4400cd7a0439bd6a8721b99e86928ed2188e"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-15-28-980Z.yml",
+          "availability": "local-ignored",
+          "sha256": "f4811dd1d6d8e66c576721b6dd21783bdc444c5f299a0eaec828443e39ac8a8a"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-18-57-011Z.yml",
+          "availability": "local-ignored",
+          "sha256": "2bad19aae7f7734111e1e5d1f45c3a7391b0e39357f96966f30192ed954b07b9"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-20-47-347Z.yml",
+          "availability": "local-ignored",
+          "sha256": "7e3df88fb63708ffa927b24e3ceab205fb7716bd0105c8f154e7451d30eaabed"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-25-18-459Z.yml",
+          "availability": "local-ignored",
+          "sha256": "32f18f6749ba7a0bed40207c43a5935c4cc461a84e381aaf459db9dc57c75ff9"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-browser-runtime-captures/.playwright-cli/page-2026-07-14T11-29-04-984Z.yml",
+          "availability": "local-ignored",
+          "sha256": "0dc0495855ddf611f983173eb4b1a6fbc491257fa52beb8c116794bc345e0a1c"
+        }
+      ],
+      "cleanup": {
+        "required": true,
+        "status": "verified",
+        "details": [
+          "No process command contained the task7-runtime Playwright session marker.",
+          "TCP connect to 127.0.0.1:1437 returned connection refused.",
+          "No task-specific Vite or Playwright process remained."
+        ]
+      },
+      "limitations": [
+        "Browser fallback executed no native/Tauri/Rust, OS keychain, native dialog, GPU/ffmpeg, filesystem capability, MCP server, or real-media path.",
+        "Preview transport assertions cover the empty-timeline state only.",
+        "One assertion has no retained artifact and is supporting observation only.",
+        "No focused keyboard-navigation sample, automated WCAG scan, mobile breakpoint, or Core Web Vitals run was captured.",
+        "All browser artifacts are local ignored files; this receipt is supporting and cannot promote any candidate to complete."
+      ],
+      "testEvidence": []
+    },
+    {
+      "id": "control-runtime-receipt-853a519c10a046eb",
+      "key": "task7-native-bundle-runtime",
+      "kind": "native",
+      "status": "partial",
+      "evidenceLevel": "supporting",
+      "command": null,
+      "startedAt": "2026-07-14T19:12:33+08:00",
+      "endedAt": "2026-07-15T13:15:22+08:00",
+      "exitCode": null,
+      "candidateIds": [],
+      "assertions": [],
+      "artifacts": [
+        {
+          "path": ".superpowers/sdd/task-7-native-runtime-logs/tauri-build.log",
+          "availability": "local-ignored",
+          "sha256": "d17b38cae2c1bd6c302828762015cff02e5d9970ca461f503c51803bb87189fc"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-native-runtime-logs/tauri-build-attempt-2.log",
+          "availability": "local-ignored",
+          "sha256": "cd8add620e801a3c523454998bea2626efd4802cb027e025a56d96d59920cd3c"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-native-runtime-logs/bundle-files.sha256",
+          "availability": "local-ignored",
+          "sha256": "406d1462818485cbe327f032578bee1bddc31379ef582c87eaaaea7c679cbabf"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-native-runtime-logs/bundle-integrity.txt",
+          "availability": "local-ignored",
+          "sha256": "844571af6a7d5a5cd5cd230752d6ee8be4bf6b0fbb8740aac97e99f62784b4b8"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-native-runtime-logs/pre-cleanup-processes.txt",
+          "availability": "local-ignored",
+          "sha256": "6b70cc0fed065387e9d1e69f9966884faa64793d2696a0b6a0a0342bf96854f9"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-native-runtime-logs/post-cleanup-processes.txt",
+          "availability": "local-ignored",
+          "sha256": "00bb20910961751a2bb16769d1ba37f31352b8a4f67e66baec1024298ab0b810"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-native-runtime-logs/final-cleanup-verification.txt",
+          "availability": "local-ignored",
+          "sha256": "c80e572446b54ab9a1f80f07e22d4c3fe79d84a5f6e18b67cac3d4306058962e"
+        },
+        {
+          "path": ".superpowers/sdd/task-7-native-runtime-logs/exact-app-stdout.log",
+          "availability": "local-ignored",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "target/release/bundle/macos/OpenTake.app/Contents/Info.plist",
+          "availability": "local-ignored",
+          "sha256": "f22da32a3d30409b31f1290e1ad7ed1a5b10fd3405186c5a3be36557d2251abe"
+        },
+        {
+          "path": "target/release/bundle/macos/OpenTake.app/Contents/MacOS/opentake",
+          "availability": "local-ignored",
+          "sha256": "9c1c4a40325e6bb95a0bc1c99e8f2bd61737800aa94ac31c8d907f454777f9a3"
+        },
+        {
+          "path": "target/release/bundle/macos/OpenTake.app/Contents/Resources/icon.icns",
+          "availability": "local-ignored",
+          "sha256": "ae3c51c03d044977567489e6af9d89b81d782d265ba241221cb292ebc9732e98"
+        }
+      ],
+      "cleanup": {
+        "required": true,
+        "status": "verified",
+        "details": [
+          "Final pgrep/ps scan found no target bundle or installed OpenTake executable.",
+          "TCP connect to 127.0.0.1:19789 returned unavailable.",
+          "TCP connect to 127.0.0.1:1437 returned unavailable.",
+          "Final task7/OpenTake/Vite scan matched only the probe shell and rg process."
+        ]
+      },
+      "limitations": [
+        "The first Tauri build failed with ENOSPC; only the second build produced the candidate bundle.",
+        "The bundle was built with --no-sign, and strict codesign verification did not pass because resources were absent while the signature indicated they must be present.",
+        "The separately running /Applications/OpenTake.app process was not hash-bound to the candidate bundle and is excluded from candidate evidence.",
+        "AX/WebView interaction was blocked or unavailable; zero native clicks, dialogs, screenshots, or candidate-level native assertions were captured.",
+        "No native import, relink, playback, seek, pause, export, cancel, reopen, Agent prompt, keychain, or real-media path was exercised.",
+        "The exact build and launch shell argv were not retained; native build, launch, MCP ownership, and cleanup remain supporting evidence only."
+      ],
+      "testEvidence": []
+    },
+    {
+      "id": "control-runtime-receipt-c3d683042c669fa4",
+      "key": "task7-controls-ledger-verification",
+      "kind": "automated",
+      "status": "passed",
+      "evidenceLevel": "supporting",
+      "command": "node tools/completion-audit.mjs verify --root . --audit docs/audit/2026-07-14 --scope controls --out docs/audit/2026-07-14/control-verification.json",
+      "startedAt": "2026-07-15T13:26:54+08:00",
+      "endedAt": "2026-07-15T13:26:54+08:00",
+      "exitCode": 0,
+      "candidateIds": [],
+      "assertions": [],
+      "artifacts": [],
+      "cleanup": {
+        "required": false,
+        "status": "not-required",
+        "details": [
+          "The bounded Node verification process exited with status 0 and wrote the controls verification report."
+        ]
+      },
+      "limitations": [
+        "This receipt validates ledger schema, identity, classifications, evidence contracts, and artifact integrity only; it does not directly exercise any product control."
+      ],
+      "testEvidence": []
+    }
+  ]
+}
