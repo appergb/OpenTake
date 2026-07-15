@@ -26,8 +26,8 @@
       "status": "passed",
       "evidenceLevel": "supporting",
       "command": "node --test tools/completion-audit.test.mjs",
-      "startedAt": "2026-07-15T14:34:01+08:00",
-      "endedAt": "2026-07-15T14:34:23+08:00",
+      "startedAt": "2026-07-15T15:35:26+08:00",
+      "endedAt": "2026-07-15T15:35:42+08:00",
       "exitCode": 0,
       "candidateIds": [],
       "assertions": [],
@@ -35,7 +35,7 @@
         {
           "path": "docs/audit/2026-07-14/runtime-artifacts/automated/full-suite-process.txt",
           "availability": "tracked",
-          "sha256": "3557ebf27868f3434d3eab73bf2e3e47e972eba25726e34abb3f494330170430"
+          "sha256": "108f45a61c9ce45777a356a9c3d1d67e82671721fc0633441c384961e38ed158"
         }
       ],
       "cleanup": {
@@ -46,7 +46,7 @@
         ]
       },
       "limitations": [
-        "The 148 passing tests validate extraction and fail-closed audit behavior; they do not directly exercise any individual product control."
+        "The 168 passing tests validate extraction and fail-closed audit behavior; they do not directly exercise any individual product control."
       ],
       "testEvidence": [
         "test:tools/completion-audit.test.mjs#verifyAudit controls accepts an exact incomplete schema-2 ledger",
@@ -55,13 +55,13 @@
         "test:tools/completion-audit.test.mjs#verifyAudit controls rejects generic proof and accepts exact tests or direct typed receipts",
         "test:tools/completion-audit.test.mjs#verify controls CLI writes failure output and exits nonzero"
       ],
-      "sourceRevision": {
-        "commit": "1f9af77923967cf7f4e92f72c924fd6d5505fa1e",
-        "tree": "918925907d79406b36c950a9ba1e8c18f7c7e4bc"
-      },
       "result": {
-        "summary": "163 audit tests passed and 0 failed.",
+        "summary": "168 audit tests passed and 0 failed.",
         "exitCode": 0
+      },
+      "executedCheckoutRevision": {
+        "commit": "d720ff00e4d5139c4af5e1f70757b8e22c9c8ef0",
+        "tree": "1c26a4fb34b4464ba63804903645842fa10eb7d7"
       }
     },
     {
@@ -516,16 +516,16 @@
         "Preview transport assertions cover the empty-timeline state only.",
         "One assertion has no retained artifact and is supporting observation only.",
         "No focused keyboard-navigation sample, automated WCAG scan, mobile breakpoint, or Core Web Vitals run was captured.",
-        "All browser artifacts are local ignored files; this receipt is supporting and cannot promote any candidate to complete."
+        "All retained browser artifacts are tracked audit evidence; this receipt remains supporting and cannot promote any candidate to complete."
       ],
       "testEvidence": [],
-      "sourceRevision": {
-        "commit": "1f9af77923967cf7f4e92f72c924fd6d5505fa1e",
-        "tree": "918925907d79406b36c950a9ba1e8c18f7c7e4bc"
-      },
       "result": {
         "summary": "Browser fallback completed with 26 supporting candidate observations and verified cleanup.",
         "exitCode": null
+      },
+      "executedCheckoutRevision": {
+        "commit": "1f9af77923967cf7f4e92f72c924fd6d5505fa1e",
+        "tree": "918925907d79406b36c950a9ba1e8c18f7c7e4bc"
       }
     },
     {
@@ -601,13 +601,13 @@
         "The exact build and launch shell argv were not retained; native build, launch, MCP ownership, and cleanup remain supporting evidence only."
       ],
       "testEvidence": [],
-      "sourceRevision": {
-        "commit": "1f9af77923967cf7f4e92f72c924fd6d5505fa1e",
-        "tree": "918925907d79406b36c950a9ba1e8c18f7c7e4bc"
-      },
       "result": {
         "summary": "Native candidate bundle built on the second attempt; interaction coverage remained partial and cleanup was verified.",
         "exitCode": null
+      },
+      "executedCheckoutRevision": {
+        "commit": "1f9af77923967cf7f4e92f72c924fd6d5505fa1e",
+        "tree": "918925907d79406b36c950a9ba1e8c18f7c7e4bc"
       }
     },
     {
@@ -617,8 +617,8 @@
       "status": "passed",
       "evidenceLevel": "supporting",
       "command": "node tools/completion-audit.mjs verify --root . --audit docs/audit/2026-07-14 --scope controls --out docs/audit/2026-07-14/control-verification.json",
-      "startedAt": "2026-07-15T14:35:56+08:00",
-      "endedAt": "2026-07-15T14:36:03+08:00",
+      "startedAt": "2026-07-15T15:36:47+08:00",
+      "endedAt": "2026-07-15T15:36:48+08:00",
       "exitCode": 0,
       "candidateIds": [],
       "assertions": [],
@@ -626,7 +626,7 @@
         {
           "path": "docs/audit/2026-07-14/runtime-artifacts/automated/controls-verifier-process.txt",
           "availability": "tracked",
-          "sha256": "34416a92a87aceceb3774b2fc1889ea5fb80f0fdb9dbc780df1eec066cc9cccd"
+          "sha256": "109244fc4f3f76109f4dab9dd1b06310ef29a02635a29fb0b0993d3dcd17a934"
         }
       ],
       "cleanup": {
@@ -640,20 +640,31 @@
         "This receipt validates ledger schema, identity, classifications, evidence contracts, and artifact integrity only; it does not directly exercise any product control."
       ],
       "testEvidence": [],
-      "sourceRevision": {
-        "commit": "1f9af77923967cf7f4e92f72c924fd6d5505fa1e",
-        "tree": "918925907d79406b36c950a9ba1e8c18f7c7e4bc"
-      },
       "result": {
         "summary": "259 controls verified with 0 errors.",
         "exitCode": 0
+      },
+      "executedCheckoutRevision": {
+        "commit": "d720ff00e4d5139c4af5e1f70757b8e22c9c8ef0",
+        "tree": "1c26a4fb34b4464ba63804903645842fa10eb7d7"
       }
     }
   ],
   "provenance": {
-    "auditedCommit": "1f9af77923967cf7f4e92f72c924fd6d5505fa1e",
-    "auditedTree": "918925907d79406b36c950a9ba1e8c18f7c7e4bc",
-    "candidateLedgerSha256": "ed0faf29761095222d8424c0f088e9e8f095570a409c832687be1c8c329826ae",
-    "candidateSourceAggregateSha256": "98428b8c7a7b66327ef2ace05914ecafb5cd9dc6d87a91407ecd1281a6337342"
+    "auditedProductRevision": {
+      "commit": "1f9af77923967cf7f4e92f72c924fd6d5505fa1e",
+      "tree": "918925907d79406b36c950a9ba1e8c18f7c7e4bc"
+    },
+    "verifierRevision": {
+      "commit": "d720ff00e4d5139c4af5e1f70757b8e22c9c8ef0",
+      "tree": "1c26a4fb34b4464ba63804903645842fa10eb7d7"
+    },
+    "candidateLedgerSha256": "262e51921d3f431c4d474f10bc3d2b29f59908758e7c80135c5e60f07cb9483c",
+    "candidateSourceAggregateSha256": "98428b8c7a7b66327ef2ace05914ecafb5cd9dc6d87a91407ecd1281a6337342",
+    "verifierFilesSha256": {
+      "tools/completion-audit.mjs": "bdfadad15f8451f4b6ca3f71c61b942950e51bf8a408e86062cb94ca84887d94",
+      "tools/completion-audit-controls.mjs": "2880326d93f45889f3f1dc3a282d03007e117c7fcdb529768fc5ec14ea4a9fbb",
+      "tools/completion-audit.test.mjs": "c503f4c6a06bcfdfe2144232839346e0f3b56d635c02f03e92dd5e26d0eff53a"
+    }
   }
 }

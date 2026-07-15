@@ -17,7 +17,8 @@
   ],
   "runtimeReceipts": {
     "total": 4,
-    "directCandidateCount": 0
+    "directCandidateCount": 0,
+    "testExecutions": []
   },
   "counts": {
     "candidates": 259,

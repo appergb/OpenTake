@@ -3,6 +3,7 @@
   "candidates": [
     {
       "id": "control-9583d8fd791a79df",
+      "ownerSymbol": "AgentPanel",
       "path": "web/src/components/agent/AgentPanel.tsx",
       "line": 146,
       "column": 9,
@@ -16,6 +17,7 @@
     },
     {
       "id": "control-1f375bfdae03b2e2",
+      "ownerSymbol": "AgentPanel",
       "path": "web/src/components/agent/AgentPanel.tsx",
       "line": 193,
       "column": 11,
@@ -29,6 +31,7 @@
     },
     {
       "id": "control-205c12cffc482d00",
+      "ownerSymbol": "AgentPanel",
       "path": "web/src/components/agent/AgentPanel.tsx",
       "line": 211,
       "column": 9,
@@ -42,6 +45,7 @@
     },
     {
       "id": "control-f1fb06c91872225d",
+      "ownerSymbol": "AgentPanel",
       "path": "web/src/components/agent/AgentPanel.tsx",
       "line": 235,
       "column": 11,
@@ -55,6 +59,7 @@
     },
     {
       "id": "control-cefc5a06d042e30d",
+      "ownerSymbol": "AgentPanel",
       "path": "web/src/components/agent/AgentPanel.tsx",
       "line": 244,
       "column": 11,
@@ -68,6 +73,7 @@
     },
     {
       "id": "control-d66fe6dd12c7ab59",
+      "ownerSymbol": "MessageRow",
       "path": "web/src/components/agent/AgentPanel.tsx",
       "line": 321,
       "column": 9,
@@ -81,6 +87,7 @@
     },
     {
       "id": "control-8886c48accc51eb0",
+      "ownerSymbol": "ToolCallCard",
       "path": "web/src/components/agent/AgentPanel.tsx",
       "line": 368,
       "column": 7,
@@ -94,6 +101,7 @@
     },
     {
       "id": "control-8c1eb1980071d6b2",
+      "ownerSymbol": "Sidebar",
       "path": "web/src/components/home/HomeView.tsx",
       "line": 102,
       "column": 9,
@@ -107,6 +115,7 @@
     },
     {
       "id": "control-4089296fdf294115",
+      "ownerSymbol": "Sidebar",
       "path": "web/src/components/home/HomeView.tsx",
       "line": 103,
       "column": 9,
@@ -120,6 +129,7 @@
     },
     {
       "id": "control-d9c92365fec180d7",
+      "ownerSymbol": "Sidebar",
       "path": "web/src/components/home/HomeView.tsx",
       "line": 111,
       "column": 7,
@@ -133,6 +143,7 @@
     },
     {
       "id": "control-3433c2ea701c21fa",
+      "ownerSymbol": "Sidebar",
       "path": "web/src/components/home/HomeView.tsx",
       "line": 115,
       "column": 7,
@@ -146,6 +157,7 @@
     },
     {
       "id": "control-084e6aaa848dcb43",
+      "ownerSymbol": "SidebarRow",
       "path": "web/src/components/home/HomeView.tsx",
       "line": 132,
       "column": 5,
@@ -159,6 +171,7 @@
     },
     {
       "id": "control-40c4daee5cdfca99",
+      "ownerSymbol": "EmptyLauncher",
       "path": "web/src/components/home/HomeView.tsx",
       "line": 234,
       "column": 11,
@@ -172,6 +185,7 @@
     },
     {
       "id": "control-adbfc21a1f61880d",
+      "ownerSymbol": "EmptyLauncher",
       "path": "web/src/components/home/HomeView.tsx",
       "line": 235,
       "column": 11,
@@ -185,6 +199,7 @@
     },
     {
       "id": "control-a52c801391fd1c8e",
+      "ownerSymbol": "LauncherButton",
       "path": "web/src/components/home/HomeView.tsx",
       "line": 262,
       "column": 5,
@@ -198,6 +213,7 @@
     },
     {
       "id": "control-59030be6fdd39f52",
+      "ownerSymbol": "ProjectLauncher",
       "path": "web/src/components/home/HomeView.tsx",
       "line": 312,
       "column": 5,
@@ -211,6 +227,7 @@
     },
     {
       "id": "control-f5242891d02b65fa",
+      "ownerSymbol": "ProjectLauncher",
       "path": "web/src/components/home/HomeView.tsx",
       "line": 323,
       "column": 7,
@@ -224,6 +241,7 @@
     },
     {
       "id": "control-8a3b799e08f461e7",
+      "ownerSymbol": "ProjectLauncher",
       "path": "web/src/components/home/HomeView.tsx",
       "line": 351,
       "column": 11,
@@ -237,6 +255,7 @@
     },
     {
       "id": "control-fee470bf0a3f09c8",
+      "ownerSymbol": "ProjectHero",
       "path": "web/src/components/home/HomeView.tsx",
       "line": 421,
       "column": 9,
@@ -250,6 +269,7 @@
     },
     {
       "id": "control-d18fda7a76081a14",
+      "ownerSymbol": "ProjectHero",
       "path": "web/src/components/home/HomeView.tsx",
       "line": 422,
       "column": 9,
@@ -263,6 +283,7 @@
     },
     {
       "id": "control-2539dd091f508532",
+      "ownerSymbol": "ProjectGridCard",
       "path": "web/src/components/home/HomeView.tsx",
       "line": 446,
       "column": 5,
@@ -276,6 +297,7 @@
     },
     {
       "id": "control-9307072add2099e1",
+      "ownerSymbol": "ProjectGridCard",
       "path": "web/src/components/home/HomeView.tsx",
       "line": 521,
       "column": 9,
@@ -289,6 +311,7 @@
     },
     {
       "id": "control-5143db03baf1aba8",
+      "ownerSymbol": "Inspector",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 134,
       "column": 11,
@@ -302,6 +325,7 @@
     },
     {
       "id": "control-9679d397e998b452",
+      "ownerSymbol": "KeyframeRowControls",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 297,
       "column": 7,
@@ -315,6 +339,7 @@
     },
     {
       "id": "control-5f453afac1cc910d",
+      "ownerSymbol": "KeyframeRowControls",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 305,
       "column": 7,
@@ -328,6 +353,7 @@
     },
     {
       "id": "control-9b42925626e7b9f7",
+      "ownerSymbol": "KeyframeRowControls",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 318,
       "column": 7,
@@ -341,6 +367,7 @@
     },
     {
       "id": "control-cb3b47a9b971c9b8",
+      "ownerSymbol": "InterpolationSelect",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 347,
       "column": 5,
@@ -354,6 +381,7 @@
     },
     {
       "id": "control-c03c997996deb13a",
+      "ownerSymbol": "ClipInspector",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 449,
       "column": 13,
@@ -367,6 +395,7 @@
     },
     {
       "id": "control-3092214e4df9a283",
+      "ownerSymbol": "ClipInspector",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 475,
       "column": 15,
@@ -380,6 +409,7 @@
     },
     {
       "id": "control-276e11d02bed2b27",
+      "ownerSymbol": "ClipInspector",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 500,
       "column": 17,
@@ -393,6 +423,7 @@
     },
     {
       "id": "control-de2cf19fff04c1f5",
+      "ownerSymbol": "ClipInspector",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 509,
       "column": 17,
@@ -406,6 +437,7 @@
     },
     {
       "id": "control-08a74185d2a4985e",
+      "ownerSymbol": "ClipInspector",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 534,
       "column": 17,
@@ -419,6 +451,7 @@
     },
     {
       "id": "control-7b15479bf7eeafd7",
+      "ownerSymbol": "ClipInspector",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 552,
       "column": 17,
@@ -432,6 +465,7 @@
     },
     {
       "id": "control-8aaf5212668242f1",
+      "ownerSymbol": "ClipInspector",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 602,
       "column": 17,
@@ -445,6 +479,7 @@
     },
     {
       "id": "control-9ce01379c87a44f8",
+      "ownerSymbol": "ClipInspector",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 629,
       "column": 9,
@@ -458,6 +493,7 @@
     },
     {
       "id": "control-080f0d7bec594e0d",
+      "ownerSymbol": "PositionSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 673,
       "column": 9,
@@ -471,6 +507,7 @@
     },
     {
       "id": "control-55f36fe188591166",
+      "ownerSymbol": "PositionSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 695,
       "column": 9,
@@ -484,6 +521,7 @@
     },
     {
       "id": "control-aeb0635eeaa13159",
+      "ownerSymbol": "renderEdge",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 775,
       "column": 7,
@@ -497,6 +535,7 @@
     },
     {
       "id": "control-680f1adbefc0ac43",
+      "ownerSymbol": "CropSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 800,
       "column": 9,
@@ -510,6 +549,7 @@
     },
     {
       "id": "control-97b8f5c6697d9082",
+      "ownerSymbol": "CropSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 810,
       "column": 9,
@@ -523,6 +563,7 @@
     },
     {
       "id": "control-ed2e9a60df03b5af",
+      "ownerSymbol": "FlipSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 858,
       "column": 9,
@@ -536,6 +577,7 @@
     },
     {
       "id": "control-c1a4ef1855758da5",
+      "ownerSymbol": "FlipSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 866,
       "column": 9,
@@ -549,6 +591,7 @@
     },
     {
       "id": "control-706e41e65e67528c",
+      "ownerSymbol": "FadeSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 892,
       "column": 9,
@@ -562,6 +605,7 @@
     },
     {
       "id": "control-44435065cc69f993",
+      "ownerSymbol": "FadeSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 903,
       "column": 9,
@@ -575,6 +619,7 @@
     },
     {
       "id": "control-38177caa02da1c07",
+      "ownerSymbol": "FadeSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 910,
       "column": 9,
@@ -588,6 +633,7 @@
     },
     {
       "id": "control-b5c5c915d7a3d40a",
+      "ownerSymbol": "FadeSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 921,
       "column": 9,
@@ -601,6 +647,7 @@
     },
     {
       "id": "control-b91a1d13e85b28c3",
+      "ownerSymbol": "ColorGradeSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 984,
       "column": 7,
@@ -614,6 +661,7 @@
     },
     {
       "id": "control-b38f8324c20e4ac7",
+      "ownerSymbol": "ColorGradeSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 994,
       "column": 7,
@@ -627,6 +675,7 @@
     },
     {
       "id": "control-55d6a5295e02bafb",
+      "ownerSymbol": "ColorGradeSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1004,
       "column": 7,
@@ -640,6 +689,7 @@
     },
     {
       "id": "control-088817cd81905848",
+      "ownerSymbol": "ColorGradeSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1016,
       "column": 11,
@@ -653,6 +703,7 @@
     },
     {
       "id": "control-73b6b690329a18fc",
+      "ownerSymbol": "ColorGradeSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1030,
       "column": 7,
@@ -666,6 +717,7 @@
     },
     {
       "id": "control-1d8431adf3b1b833",
+      "ownerSymbol": "ColorGradeSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1040,
       "column": 7,
@@ -679,6 +731,7 @@
     },
     {
       "id": "control-1407d0cc41c3c4c8",
+      "ownerSymbol": "ChromaKeySection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1086,
       "column": 9,
@@ -692,6 +745,7 @@
     },
     {
       "id": "control-151a19f98f5eeb8d",
+      "ownerSymbol": "ChromaKeySection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1096,
       "column": 13,
@@ -705,6 +759,7 @@
     },
     {
       "id": "control-e92b6a35d8fd25d8",
+      "ownerSymbol": "ChromaKeySection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1113,
       "column": 11,
@@ -718,6 +773,7 @@
     },
     {
       "id": "control-c9a776ef93554bfb",
+      "ownerSymbol": "ChromaKeySection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1123,
       "column": 11,
@@ -731,6 +787,7 @@
     },
     {
       "id": "control-0177a2f56612863c",
+      "ownerSymbol": "ChromaKeySection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1133,
       "column": 11,
@@ -744,6 +801,7 @@
     },
     {
       "id": "control-cd8307d80a01bff1",
+      "ownerSymbol": "MaskSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1182,
       "column": 9,
@@ -757,6 +815,7 @@
     },
     {
       "id": "control-9d5027a219767453",
+      "ownerSymbol": "MaskSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1192,
       "column": 13,
@@ -770,6 +829,7 @@
     },
     {
       "id": "control-8a96af74587f539d",
+      "ownerSymbol": "MaskSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1223,
       "column": 11,
@@ -783,6 +843,7 @@
     },
     {
       "id": "control-e2662cd7515ea76f",
+      "ownerSymbol": "MaskSection",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1234,
       "column": 13,
@@ -796,6 +857,7 @@
     },
     {
       "id": "control-bc78aa4ee1fa2217",
+      "ownerSymbol": "CircleMaskFields",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1265,
       "column": 7,
@@ -809,6 +871,7 @@
     },
     {
       "id": "control-b480c212937364be",
+      "ownerSymbol": "CircleMaskFields",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1271,
       "column": 7,
@@ -822,6 +885,7 @@
     },
     {
       "id": "control-e3f0161148683b54",
+      "ownerSymbol": "CircleMaskFields",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1277,
       "column": 7,
@@ -835,6 +899,7 @@
     },
     {
       "id": "control-ba316a37d9049abb",
+      "ownerSymbol": "CircleMaskFields",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1285,
       "column": 7,
@@ -848,6 +913,7 @@
     },
     {
       "id": "control-6dbca38eb52f7e44",
+      "ownerSymbol": "LinearMaskFields",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1315,
       "column": 7,
@@ -861,6 +927,7 @@
     },
     {
       "id": "control-e1d256bd207cc35b",
+      "ownerSymbol": "LinearMaskFields",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1321,
       "column": 7,
@@ -874,6 +941,7 @@
     },
     {
       "id": "control-e9e3ba0298d47f2d",
+      "ownerSymbol": "LinearMaskFields",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1327,
       "column": 7,
@@ -887,6 +955,7 @@
     },
     {
       "id": "control-7c4782e5994f5bd2",
+      "ownerSymbol": "LinearMaskFields",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1335,
       "column": 7,
@@ -900,6 +969,7 @@
     },
     {
       "id": "control-ab72141b8bc17b2a",
+      "ownerSymbol": "EffectNumberRow",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1370,
       "column": 7,
@@ -913,6 +983,7 @@
     },
     {
       "id": "control-0ee74a6ef1f17078",
+      "ownerSymbol": "MaskNumberRow",
       "path": "web/src/components/inspector/Inspector.tsx",
       "line": 1400,
       "column": 5,
@@ -926,6 +997,7 @@
     },
     {
       "id": "control-f01d22118b0a288a",
+      "ownerSymbol": "KeyframesLaneRow",
       "path": "web/src/components/inspector/KeyframesLaneRow.tsx",
       "line": 259,
       "column": 11,
@@ -939,6 +1011,7 @@
     },
     {
       "id": "control-5f433a44cb42df64",
+      "ownerSymbol": "KeyframesLaneRow",
       "path": "web/src/components/inspector/KeyframesLaneRow.tsx",
       "line": 267,
       "column": 13,
@@ -952,6 +1025,7 @@
     },
     {
       "id": "control-3a46f3d91ddd6230",
+      "ownerSymbol": "KeyframesLaneRow",
       "path": "web/src/components/inspector/KeyframesLaneRow.tsx",
       "line": 279,
       "column": 7,
@@ -965,6 +1039,7 @@
     },
     {
       "id": "control-8177357dd88d2a90",
+      "ownerSymbol": "KeyframesLaneRow",
       "path": "web/src/components/inspector/KeyframesLaneRow.tsx",
       "line": 293,
       "column": 11,
@@ -978,6 +1053,7 @@
     },
     {
       "id": "control-414466168176fe12",
+      "ownerSymbol": "KeyframesLaneRow",
       "path": "web/src/components/inspector/KeyframesLaneRow.tsx",
       "line": 332,
       "column": 9,
@@ -991,6 +1067,7 @@
     },
     {
       "id": "control-30c6eb5d629f1bb8",
+      "ownerSymbol": "KeyframeContextMenu",
       "path": "web/src/components/inspector/KeyframesLaneRow.tsx",
       "line": 364,
       "column": 7,
@@ -1004,6 +1081,7 @@
     },
     {
       "id": "control-3799d24d1352f96f",
+      "ownerSymbol": "KeyframeContextMenu",
       "path": "web/src/components/inspector/KeyframesLaneRow.tsx",
       "line": 386,
       "column": 9,
@@ -1017,6 +1095,7 @@
     },
     {
       "id": "control-3f93457a1989b6e7",
+      "ownerSymbol": "KeyframeContextMenu",
       "path": "web/src/components/inspector/KeyframesLaneRow.tsx",
       "line": 398,
       "column": 9,
@@ -1030,6 +1109,7 @@
     },
     {
       "id": "control-5a4ebf38c7bcc847",
+      "ownerSymbol": "KeyframeContextMenu",
       "path": "web/src/components/inspector/KeyframesLaneRow.tsx",
       "line": 402,
       "column": 9,
@@ -1043,6 +1123,7 @@
     },
     {
       "id": "control-a4396f1614c5eefb",
+      "ownerSymbol": "KeyframeContextMenu",
       "path": "web/src/components/inspector/KeyframesLaneRow.tsx",
       "line": 406,
       "column": 9,
@@ -1056,6 +1137,7 @@
     },
     {
       "id": "control-6fd64f20d02c0d1a",
+      "ownerSymbol": "MenuItem",
       "path": "web/src/components/inspector/KeyframesLaneRow.tsx",
       "line": 417,
       "column": 5,
@@ -1069,6 +1151,7 @@
     },
     {
       "id": "control-8a3480a836c44330",
+      "ownerSymbol": "KeyframesPanel",
       "path": "web/src/components/inspector/KeyframesPanel.tsx",
       "line": 72,
       "column": 11,
@@ -1082,6 +1165,7 @@
     },
     {
       "id": "control-5b7d439bd6ecc6a3",
+      "ownerSymbol": "ScrubbableNumberField",
       "path": "web/src/components/inspector/ScrubbableNumberField.tsx",
       "line": 101,
       "column": 7,
@@ -1095,6 +1179,7 @@
     },
     {
       "id": "control-7431d942341c4457",
+      "ownerSymbol": "ScrubbableNumberField",
       "path": "web/src/components/inspector/ScrubbableNumberField.tsx",
       "line": 126,
       "column": 5,
@@ -1108,6 +1193,7 @@
     },
     {
       "id": "control-5130e333effd27ad",
+      "ownerSymbol": "SwapMediaSection",
       "path": "web/src/components/inspector/SwapMediaSection.tsx",
       "line": 75,
       "column": 7,
@@ -1121,6 +1207,7 @@
     },
     {
       "id": "control-8ac2cf6be9f4fb65",
+      "ownerSymbol": "SwapMediaSection",
       "path": "web/src/components/inspector/SwapMediaSection.tsx",
       "line": 129,
       "column": 15,
@@ -1134,6 +1221,7 @@
     },
     {
       "id": "control-c52093eae15a8462",
+      "ownerSymbol": "TextTab",
       "path": "web/src/components/inspector/TextTab.tsx",
       "line": 92,
       "column": 9,
@@ -1147,6 +1235,7 @@
     },
     {
       "id": "control-2c574026ced3cd83",
+      "ownerSymbol": "TextTab",
       "path": "web/src/components/inspector/TextTab.tsx",
       "line": 118,
       "column": 11,
@@ -1160,6 +1249,7 @@
     },
     {
       "id": "control-bc7f66e213f278e3",
+      "ownerSymbol": "TextTab",
       "path": "web/src/components/inspector/TextTab.tsx",
       "line": 144,
       "column": 11,
@@ -1173,6 +1263,7 @@
     },
     {
       "id": "control-5b4ca193285817a5",
+      "ownerSymbol": "TextTab",
       "path": "web/src/components/inspector/TextTab.tsx",
       "line": 156,
       "column": 11,
@@ -1186,6 +1277,7 @@
     },
     {
       "id": "control-1607bfdff000e59e",
+      "ownerSymbol": "TextTab",
       "path": "web/src/components/inspector/TextTab.tsx",
       "line": 166,
       "column": 15,
@@ -1199,6 +1291,7 @@
     },
     {
       "id": "control-1ff8c2ab2ef1d277",
+      "ownerSymbol": "TextTab",
       "path": "web/src/components/inspector/TextTab.tsx",
       "line": 177,
       "column": 9,
@@ -1212,6 +1305,7 @@
     },
     {
       "id": "control-7fec63a246cf8680",
+      "ownerSymbol": "TextTab",
       "path": "web/src/components/inspector/TextTab.tsx",
       "line": 189,
       "column": 9,
@@ -1225,6 +1319,7 @@
     },
     {
       "id": "control-4a833d1e25470e97",
+      "ownerSymbol": "TextTab",
       "path": "web/src/components/inspector/TextTab.tsx",
       "line": 199,
       "column": 9,
@@ -1238,6 +1333,7 @@
     },
     {
       "id": "control-9cb03781a302f865",
+      "ownerSymbol": "ToggleColorRow",
       "path": "web/src/components/inspector/TextTab.tsx",
       "line": 280,
       "column": 7,
@@ -1251,6 +1347,7 @@
     },
     {
       "id": "control-5ae0ef30149c0821",
+      "ownerSymbol": "ToggleColorRow",
       "path": "web/src/components/inspector/TextTab.tsx",
       "line": 287,
       "column": 19,
@@ -1264,6 +1361,7 @@
     },
     {
       "id": "control-a180dfc0158b73eb",
+      "ownerSymbol": "AlignButton",
       "path": "web/src/components/inspector/TextTab.tsx",
       "line": 304,
       "column": 5,
@@ -1277,6 +1375,7 @@
     },
     {
       "id": "control-99086ae9f8d8429f",
+      "ownerSymbol": "ColorSwatch",
       "path": "web/src/components/inspector/TextTab.tsx",
       "line": 339,
       "column": 5,
@@ -1290,6 +1389,7 @@
     },
     {
       "id": "control-41eac2fdde5dfd2b",
+      "ownerSymbol": "CaptionsTab",
       "path": "web/src/components/media/CaptionsTab.tsx",
       "line": 198,
       "column": 13,
@@ -1303,6 +1403,7 @@
     },
     {
       "id": "control-96836f01f18495d8",
+      "ownerSymbol": "CaptionsTab",
       "path": "web/src/components/media/CaptionsTab.tsx",
       "line": 212,
       "column": 13,
@@ -1316,6 +1417,7 @@
     },
     {
       "id": "control-4fc51178e7ff625f",
+      "ownerSymbol": "CaptionsTab",
       "path": "web/src/components/media/CaptionsTab.tsx",
       "line": 224,
       "column": 13,
@@ -1329,6 +1431,7 @@
     },
     {
       "id": "control-0b4f85bd573aadab",
+      "ownerSymbol": "CaptionsTab",
       "path": "web/src/components/media/CaptionsTab.tsx",
       "line": 235,
       "column": 13,
@@ -1342,6 +1445,7 @@
     },
     {
       "id": "control-887bbff64b9d8dce",
+      "ownerSymbol": "CaptionsTab",
       "path": "web/src/components/media/CaptionsTab.tsx",
       "line": 239,
       "column": 15,
@@ -1355,6 +1459,7 @@
     },
     {
       "id": "control-9666738daf2978d7",
+      "ownerSymbol": "CaptionsTab",
       "path": "web/src/components/media/CaptionsTab.tsx",
       "line": 245,
       "column": 15,
@@ -1368,6 +1473,7 @@
     },
     {
       "id": "control-541c329a45708a6c",
+      "ownerSymbol": "CaptionsTab",
       "path": "web/src/components/media/CaptionsTab.tsx",
       "line": 254,
       "column": 13,
@@ -1381,6 +1487,7 @@
     },
     {
       "id": "control-551bbaef17091234",
+      "ownerSymbol": "CaptionsTab",
       "path": "web/src/components/media/CaptionsTab.tsx",
       "line": 268,
       "column": 13,
@@ -1394,6 +1501,7 @@
     },
     {
       "id": "control-bcdceef50722ce97",
+      "ownerSymbol": "CaptionsTab",
       "path": "web/src/components/media/CaptionsTab.tsx",
       "line": 280,
       "column": 13,
@@ -1407,6 +1515,7 @@
     },
     {
       "id": "control-5da98456eb74fa64",
+      "ownerSymbol": "CaptionsTab",
       "path": "web/src/components/media/CaptionsTab.tsx",
       "line": 281,
       "column": 13,
@@ -1420,6 +1529,7 @@
     },
     {
       "id": "control-06c6cd68d9b0756f",
+      "ownerSymbol": "CaptionsTab",
       "path": "web/src/components/media/CaptionsTab.tsx",
       "line": 308,
       "column": 13,
@@ -1433,6 +1543,7 @@
     },
     {
       "id": "control-6308242d44ce78a0",
+      "ownerSymbol": "CaptionsTab",
       "path": "web/src/components/media/CaptionsTab.tsx",
       "line": 313,
       "column": 11,
@@ -1446,6 +1557,7 @@
     },
     {
       "id": "control-7e4677db46e78043",
+      "ownerSymbol": "ColorSwatch",
       "path": "web/src/components/media/CaptionsTab.tsx",
       "line": 404,
       "column": 5,
@@ -1459,6 +1571,7 @@
     },
     {
       "id": "control-ec963d30ccf7e194",
+      "ownerSymbol": "PosField",
       "path": "web/src/components/media/CaptionsTab.tsx",
       "line": 436,
       "column": 7,
@@ -1472,6 +1585,7 @@
     },
     {
       "id": "control-f88b19c653c63e74",
+      "ownerSymbol": "LibraryView",
       "path": "web/src/components/media/LibraryView.tsx",
       "line": 131,
       "column": 11,
@@ -1485,6 +1599,7 @@
     },
     {
       "id": "control-27d6b82328cd3615",
+      "ownerSymbol": "LibraryView",
       "path": "web/src/components/media/LibraryView.tsx",
       "line": 162,
       "column": 11,
@@ -1498,6 +1613,7 @@
     },
     {
       "id": "control-95eb0021f9c385e4",
+      "ownerSymbol": "LibraryView",
       "path": "web/src/components/media/LibraryView.tsx",
       "line": 163,
       "column": 11,
@@ -1511,6 +1627,7 @@
     },
     {
       "id": "control-c673d855dbeff972",
+      "ownerSymbol": "CategoryTree",
       "path": "web/src/components/media/LibraryView.tsx",
       "line": 220,
       "column": 9,
@@ -1524,6 +1641,7 @@
     },
     {
       "id": "control-60e7ff979dc2897c",
+      "ownerSymbol": "CategoryTree",
       "path": "web/src/components/media/LibraryView.tsx",
       "line": 244,
       "column": 9,
@@ -1537,6 +1655,7 @@
     },
     {
       "id": "control-7954e49f8abe65b8",
+      "ownerSymbol": "CategoryRow",
       "path": "web/src/components/media/LibraryView.tsx",
       "line": 268,
       "column": 5,
@@ -1550,6 +1669,7 @@
     },
     {
       "id": "control-716662cefe746055",
+      "ownerSymbol": "SearchBox",
       "path": "web/src/components/media/LibraryView.tsx",
       "line": 321,
       "column": 7,
@@ -1563,6 +1683,7 @@
     },
     {
       "id": "control-9a0a2288abfa66d5",
+      "ownerSymbol": "SortSelect",
       "path": "web/src/components/media/LibraryView.tsx",
       "line": 341,
       "column": 5,
@@ -1576,6 +1697,7 @@
     },
     {
       "id": "control-1974ef40626af90d",
+      "ownerSymbol": "LibraryEntryCard",
       "path": "web/src/components/media/LibraryView.tsx",
       "line": 470,
       "column": 5,
@@ -1589,6 +1711,7 @@
     },
     {
       "id": "control-55076d39bddccb43",
+      "ownerSymbol": "LibraryEntryCard",
       "path": "web/src/components/media/LibraryView.tsx",
       "line": 520,
       "column": 13,
@@ -1602,6 +1725,7 @@
     },
     {
       "id": "control-1bf86ba9000fbc70",
+      "ownerSymbol": "LibraryEntryCard",
       "path": "web/src/components/media/LibraryView.tsx",
       "line": 526,
       "column": 13,
@@ -1615,6 +1739,7 @@
     },
     {
       "id": "control-8312a2f6e2964c97",
+      "ownerSymbol": "LibraryEntryCard",
       "path": "web/src/components/media/LibraryView.tsx",
       "line": 527,
       "column": 13,
@@ -1628,6 +1753,7 @@
     },
     {
       "id": "control-d26d7f88b9a93e67",
+      "ownerSymbol": "CardAction",
       "path": "web/src/components/media/LibraryView.tsx",
       "line": 571,
       "column": 5,
@@ -1641,6 +1767,7 @@
     },
     {
       "id": "control-1fd0a8add7b951b0",
+      "ownerSymbol": "MediaPanel",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 158,
       "column": 7,
@@ -1654,6 +1781,7 @@
     },
     {
       "id": "control-a33354a61f6c32cc",
+      "ownerSymbol": "MediaTab",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 301,
       "column": 11,
@@ -1667,6 +1795,7 @@
     },
     {
       "id": "control-4df565e9b950a1b3",
+      "ownerSymbol": "MediaTab",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 326,
       "column": 11,
@@ -1680,6 +1809,7 @@
     },
     {
       "id": "control-f65537d659ea03f2",
+      "ownerSymbol": "MediaTab",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 334,
       "column": 11,
@@ -1693,6 +1823,7 @@
     },
     {
       "id": "control-dd723d5741855034",
+      "ownerSymbol": "MediaTab",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 349,
       "column": 11,
@@ -1706,6 +1837,7 @@
     },
     {
       "id": "control-a7355314b80ba34b",
+      "ownerSymbol": "MediaTab",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 352,
       "column": 11,
@@ -1719,6 +1851,7 @@
     },
     {
       "id": "control-287f9b21021d9801",
+      "ownerSymbol": "MediaTab",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 355,
       "column": 11,
@@ -1732,6 +1865,7 @@
     },
     {
       "id": "control-601d5732e49ba7a4",
+      "ownerSymbol": "MediaTab",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 362,
       "column": 11,
@@ -1745,6 +1879,7 @@
     },
     {
       "id": "control-291185f9ac2c55a0",
+      "ownerSymbol": "MediaTab",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 422,
       "column": 11,
@@ -1758,6 +1893,7 @@
     },
     {
       "id": "control-531eae21a331d72c",
+      "ownerSymbol": "MediaTab",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 437,
       "column": 9,
@@ -1771,6 +1907,7 @@
     },
     {
       "id": "control-eef635bb0adbcb24",
+      "ownerSymbol": "crumbButton",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 475,
       "column": 7,
@@ -1784,6 +1921,7 @@
     },
     {
       "id": "control-cf4aea062671235e",
+      "ownerSymbol": "FolderBreadcrumb",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 507,
       "column": 9,
@@ -1797,6 +1935,7 @@
     },
     {
       "id": "control-92100aec53204894",
+      "ownerSymbol": "ImportMenu",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 571,
       "column": 7,
@@ -1810,6 +1949,7 @@
     },
     {
       "id": "control-e7ca0d262e0ee1a3",
+      "ownerSymbol": "ImportMenu",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 590,
       "column": 11,
@@ -1823,6 +1963,7 @@
     },
     {
       "id": "control-6d968e7ebc432a4a",
+      "ownerSymbol": "ImportMenu",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 598,
       "column": 11,
@@ -1836,6 +1977,7 @@
     },
     {
       "id": "control-3da4acc78ad15c6e",
+      "ownerSymbol": "ImportMenuItem",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 622,
       "column": 5,
@@ -1849,6 +1991,7 @@
     },
     {
       "id": "control-76175bb6af177680",
+      "ownerSymbol": "MediaGrid",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 703,
       "column": 9,
@@ -1862,6 +2005,7 @@
     },
     {
       "id": "control-85d448064d1c699a",
+      "ownerSymbol": "FolderTile",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 724,
       "column": 5,
@@ -1875,6 +2019,7 @@
     },
     {
       "id": "control-6a40c82d2552d05d",
+      "ownerSymbol": "MediaCard",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 888,
       "column": 5,
@@ -1888,6 +2033,7 @@
     },
     {
       "id": "control-2ac826b57dc924c3",
+      "ownerSymbol": "MediaCard",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 960,
       "column": 11,
@@ -1901,6 +2047,7 @@
     },
     {
       "id": "control-8f099086f28c321d",
+      "ownerSymbol": "MediaCard",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 980,
       "column": 13,
@@ -1914,6 +2061,7 @@
     },
     {
       "id": "control-fbb46baf961046fa",
+      "ownerSymbol": "MediaCard",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 1017,
       "column": 11,
@@ -1927,6 +2075,7 @@
     },
     {
       "id": "control-5587672265c66acc",
+      "ownerSymbol": "MediaFavoriteButton",
       "path": "web/src/components/media/MediaPanel.tsx",
       "line": 1098,
       "column": 5,
@@ -1940,6 +2089,7 @@
     },
     {
       "id": "control-c302c4bc1df3ef8c",
+      "ownerSymbol": "SearchIndexAffordance",
       "path": "web/src/components/media/MediaSearch.tsx",
       "line": 260,
       "column": 7,
@@ -1953,6 +2103,7 @@
     },
     {
       "id": "control-5ba8980369bb0cd8",
+      "ownerSymbol": "SearchIndexAffordance",
       "path": "web/src/components/media/MediaSearch.tsx",
       "line": 273,
       "column": 7,
@@ -1966,6 +2117,7 @@
     },
     {
       "id": "control-747a6c5cc366ce35",
+      "ownerSymbol": "SearchIndexAffordance",
       "path": "web/src/components/media/MediaSearch.tsx",
       "line": 286,
       "column": 7,
@@ -1979,6 +2131,7 @@
     },
     {
       "id": "control-58c24f3327614c86",
+      "ownerSymbol": "MomentCard",
       "path": "web/src/components/media/MediaSearch.tsx",
       "line": 454,
       "column": 5,
@@ -1992,6 +2145,7 @@
     },
     {
       "id": "control-d6fce330ba6d0d00",
+      "ownerSymbol": "SpokenRow",
       "path": "web/src/components/media/MediaSearch.tsx",
       "line": 508,
       "column": 5,
@@ -2005,6 +2159,7 @@
     },
     {
       "id": "control-a91fca04b9174be3",
+      "ownerSymbol": "FileCard",
       "path": "web/src/components/media/MediaSearch.tsx",
       "line": 573,
       "column": 5,
@@ -2018,6 +2173,7 @@
     },
     {
       "id": "control-7ee50e57185f8814",
+      "ownerSymbol": "MediaTabBar",
       "path": "web/src/components/media/MediaTabBar.tsx",
       "line": 67,
       "column": 11,
@@ -2031,6 +2187,7 @@
     },
     {
       "id": "control-12412599268cec40",
+      "ownerSymbol": "MediaSubTabBar",
       "path": "web/src/components/media/MediaTabBar.tsx",
       "line": 158,
       "column": 11,
@@ -2044,6 +2201,7 @@
     },
     {
       "id": "control-1713ffae9f52feff",
+      "ownerSymbol": "SoundLibraryTab",
       "path": "web/src/components/media/SoundLibraryTab.tsx",
       "line": 62,
       "column": 9,
@@ -2057,6 +2215,7 @@
     },
     {
       "id": "control-83dfe8e4baccda2e",
+      "ownerSymbol": "SoundRow",
       "path": "web/src/components/media/SoundLibraryTab.tsx",
       "line": 122,
       "column": 9,
@@ -2070,6 +2229,7 @@
     },
     {
       "id": "control-743267a5679a8fd6",
+      "ownerSymbol": "CropOverlay",
       "path": "web/src/components/preview/CropOverlay.tsx",
       "line": 292,
       "column": 7,
@@ -2083,6 +2243,7 @@
     },
     {
       "id": "control-a60754404e4de531",
+      "ownerSymbol": "CropOverlay",
       "path": "web/src/components/preview/CropOverlay.tsx",
       "line": 308,
       "column": 11,
@@ -2096,6 +2257,7 @@
     },
     {
       "id": "control-cb791cf59a9d434a",
+      "ownerSymbol": "Preview",
       "path": "web/src/components/preview/Preview.tsx",
       "line": 467,
       "column": 7,
@@ -2109,6 +2271,7 @@
     },
     {
       "id": "control-fb4088359d6ce746",
+      "ownerSymbol": "Preview",
       "path": "web/src/components/preview/Preview.tsx",
       "line": 492,
       "column": 11,
@@ -2122,6 +2285,7 @@
     },
     {
       "id": "control-fa81e5ddeee629ae",
+      "ownerSymbol": "Preview",
       "path": "web/src/components/preview/Preview.tsx",
       "line": 495,
       "column": 11,
@@ -2135,6 +2299,7 @@
     },
     {
       "id": "control-cd1fd1b68a7523ce",
+      "ownerSymbol": "Preview",
       "path": "web/src/components/preview/Preview.tsx",
       "line": 498,
       "column": 11,
@@ -2148,6 +2313,7 @@
     },
     {
       "id": "control-c9a457c8e8f1d8b3",
+      "ownerSymbol": "Preview",
       "path": "web/src/components/preview/Preview.tsx",
       "line": 505,
       "column": 11,
@@ -2161,6 +2327,7 @@
     },
     {
       "id": "control-536bd5b71eb3f9c4",
+      "ownerSymbol": "Preview",
       "path": "web/src/components/preview/Preview.tsx",
       "line": 508,
       "column": 11,
@@ -2174,6 +2341,7 @@
     },
     {
       "id": "control-cf205335655d3803",
+      "ownerSymbol": "Preview",
       "path": "web/src/components/preview/Preview.tsx",
       "line": 513,
       "column": 9,
@@ -2187,6 +2355,7 @@
     },
     {
       "id": "control-593eb42b32846dc4",
+      "ownerSymbol": "PreviewTabs",
       "path": "web/src/components/preview/Preview.tsx",
       "line": 664,
       "column": 7,
@@ -2200,6 +2369,7 @@
     },
     {
       "id": "control-28dbf7fc067e1ac9",
+      "ownerSymbol": "ScrubBar",
       "path": "web/src/components/preview/Preview.tsx",
       "line": 724,
       "column": 5,
@@ -2213,6 +2383,7 @@
     },
     {
       "id": "control-9d2e465802fe8b75",
+      "ownerSymbol": "BadgeMenu",
       "path": "web/src/components/preview/Preview.tsx",
       "line": 852,
       "column": 7,
@@ -2226,6 +2397,7 @@
     },
     {
       "id": "control-eb64b15519ec58ec",
+      "ownerSymbol": "BadgeMenu",
       "path": "web/src/components/preview/Preview.tsx",
       "line": 900,
       "column": 13,
@@ -2239,6 +2411,7 @@
     },
     {
       "id": "control-8436b20fe2bb74f9",
+      "ownerSymbol": "TransformOverlay",
       "path": "web/src/components/preview/TransformOverlay.tsx",
       "line": 211,
       "column": 9,
@@ -2252,6 +2425,7 @@
     },
     {
       "id": "control-c2023f4fc71e857a",
+      "ownerSymbol": "TransformOverlay",
       "path": "web/src/components/preview/TransformOverlay.tsx",
       "line": 222,
       "column": 11,
@@ -2265,6 +2439,7 @@
     },
     {
       "id": "control-5b121ca976b4ba88",
+      "ownerSymbol": "AccountPane",
       "path": "web/src/components/settings/AccountPane.tsx",
       "line": 222,
       "column": 11,
@@ -2278,6 +2453,7 @@
     },
     {
       "id": "control-1cde28f7ac1e15ac",
+      "ownerSymbol": "AccountPane",
       "path": "web/src/components/settings/AccountPane.tsx",
       "line": 248,
       "column": 11,
@@ -2291,6 +2467,7 @@
     },
     {
       "id": "control-9dde348a2abcc836",
+      "ownerSymbol": "AccountPane",
       "path": "web/src/components/settings/AccountPane.tsx",
       "line": 267,
       "column": 13,
@@ -2304,6 +2481,7 @@
     },
     {
       "id": "control-1e63171a88e43b30",
+      "ownerSymbol": "AccountPane",
       "path": "web/src/components/settings/AccountPane.tsx",
       "line": 311,
       "column": 11,
@@ -2317,6 +2495,7 @@
     },
     {
       "id": "control-4f189a6ed28c665c",
+      "ownerSymbol": "AccountPane",
       "path": "web/src/components/settings/AccountPane.tsx",
       "line": 335,
       "column": 11,
@@ -2330,6 +2509,7 @@
     },
     {
       "id": "control-d430c8ccfc01894b",
+      "ownerSymbol": "AccountPane",
       "path": "web/src/components/settings/AccountPane.tsx",
       "line": 354,
       "column": 13,
@@ -2343,6 +2523,7 @@
     },
     {
       "id": "control-e94b83c1ef3620ad",
+      "ownerSymbol": "SettingsView",
       "path": "web/src/components/settings/SettingsView.tsx",
       "line": 141,
       "column": 13,
@@ -2356,6 +2537,7 @@
     },
     {
       "id": "control-1834a922165ccbbc",
+      "ownerSymbol": "SettingsView",
       "path": "web/src/components/settings/SettingsView.tsx",
       "line": 157,
       "column": 13,
@@ -2369,6 +2551,7 @@
     },
     {
       "id": "control-bceb2a61738c2311",
+      "ownerSymbol": "SettingsView",
       "path": "web/src/components/settings/SettingsView.tsx",
       "line": 179,
       "column": 11,
@@ -2382,6 +2565,7 @@
     },
     {
       "id": "control-c2cede9efe356824",
+      "ownerSymbol": "SettingsSidebar",
       "path": "web/src/components/settings/SettingsView.tsx",
       "line": 211,
       "column": 13,
@@ -2395,6 +2579,7 @@
     },
     {
       "id": "control-6197d095538f0289",
+      "ownerSymbol": "Segmented",
       "path": "web/src/components/settings/SettingsView.tsx",
       "line": 338,
       "column": 11,
@@ -2408,6 +2593,7 @@
     },
     {
       "id": "control-472f585d24046e8c",
+      "ownerSymbol": "GeneralPane",
       "path": "web/src/components/settings/SettingsView.tsx",
       "line": 374,
       "column": 11,
@@ -2421,6 +2607,7 @@
     },
     {
       "id": "control-d17c9479f8a82f14",
+      "ownerSymbol": "AppearancePane",
       "path": "web/src/components/settings/SettingsView.tsx",
       "line": 399,
       "column": 11,
@@ -2434,6 +2621,7 @@
     },
     {
       "id": "control-061b4016b9ed6902",
+      "ownerSymbol": "AppearancePane",
       "path": "web/src/components/settings/SettingsView.tsx",
       "line": 413,
       "column": 11,
@@ -2447,6 +2635,7 @@
     },
     {
       "id": "control-8812a39ec38eb7e7",
+      "ownerSymbol": "ImportPane",
       "path": "web/src/components/settings/SettingsView.tsx",
       "line": 446,
       "column": 13,
@@ -2460,6 +2649,7 @@
     },
     {
       "id": "control-be5532d634b8ffe3",
+      "ownerSymbol": "ImportPane",
       "path": "web/src/components/settings/SettingsView.tsx",
       "line": 467,
       "column": 15,
@@ -2473,6 +2663,7 @@
     },
     {
       "id": "control-b7650a4ec9ee0f31",
+      "ownerSymbol": "AiPane",
       "path": "web/src/components/settings/SettingsView.tsx",
       "line": 569,
       "column": 11,
@@ -2486,6 +2677,7 @@
     },
     {
       "id": "control-431df6604789a897",
+      "ownerSymbol": "AiPane",
       "path": "web/src/components/settings/SettingsView.tsx",
       "line": 577,
       "column": 11,
@@ -2499,6 +2691,7 @@
     },
     {
       "id": "control-14c4c4dedf0c6cbc",
+      "ownerSymbol": "AiPane",
       "path": "web/src/components/settings/SettingsView.tsx",
       "line": 600,
       "column": 13,
@@ -2512,6 +2705,7 @@
     },
     {
       "id": "control-fbec95a49f39f5cd",
+      "ownerSymbol": "AiPane",
       "path": "web/src/components/settings/SettingsView.tsx",
       "line": 620,
       "column": 15,
@@ -2525,6 +2719,7 @@
     },
     {
       "id": "control-d1fb1c8eefaf6a50",
+      "ownerSymbol": "McpPane",
       "path": "web/src/components/settings/SettingsView.tsx",
       "line": 769,
       "column": 13,
@@ -2538,6 +2733,7 @@
     },
     {
       "id": "control-939ca26ebe3798b7",
+      "ownerSymbol": "ExportDialog",
       "path": "web/src/components/shell/ExportDialog.tsx",
       "line": 359,
       "column": 5,
@@ -2551,6 +2747,7 @@
     },
     {
       "id": "control-8dd63ce620bc51d2",
+      "ownerSymbol": "ExportDialog",
       "path": "web/src/components/shell/ExportDialog.tsx",
       "line": 373,
       "column": 7,
@@ -2564,6 +2761,7 @@
     },
     {
       "id": "control-89ff56f975fb6900",
+      "ownerSymbol": "ExportDialog",
       "path": "web/src/components/shell/ExportDialog.tsx",
       "line": 401,
       "column": 11,
@@ -2577,6 +2775,7 @@
     },
     {
       "id": "control-31c78cd054a64ec6",
+      "ownerSymbol": "ExportDialog",
       "path": "web/src/components/shell/ExportDialog.tsx",
       "line": 434,
       "column": 13,
@@ -2590,6 +2789,7 @@
     },
     {
       "id": "control-be1b6a84657e4733",
+      "ownerSymbol": "ExportDialog",
       "path": "web/src/components/shell/ExportDialog.tsx",
       "line": 446,
       "column": 17,
@@ -2603,6 +2803,7 @@
     },
     {
       "id": "control-a32da1e5ac3eeb01",
+      "ownerSymbol": "ExportDialog",
       "path": "web/src/components/shell/ExportDialog.tsx",
       "line": 462,
       "column": 17,
@@ -2616,6 +2817,7 @@
     },
     {
       "id": "control-b765dad5109c52c4",
+      "ownerSymbol": "ExportDialog",
       "path": "web/src/components/shell/ExportDialog.tsx",
       "line": 569,
       "column": 11,
@@ -2629,6 +2831,7 @@
     },
     {
       "id": "control-5ec0e2c7fdb62776",
+      "ownerSymbol": "ExportDialog",
       "path": "web/src/components/shell/ExportDialog.tsx",
       "line": 587,
       "column": 11,
@@ -2642,6 +2845,7 @@
     },
     {
       "id": "control-5947401adb57a03a",
+      "ownerSymbol": "SaveAsProgressView",
       "path": "web/src/components/shell/SaveAsProgress.tsx",
       "line": 42,
       "column": 7,
@@ -2655,6 +2859,7 @@
     },
     {
       "id": "control-20ad834343bd5048",
+      "ownerSymbol": "SplitPane",
       "path": "web/src/components/shell/SplitPane.tsx",
       "line": 82,
       "column": 7,
@@ -2668,6 +2873,7 @@
     },
     {
       "id": "control-2ec2ad95c0ce0659",
+      "ownerSymbol": "TitleBar",
       "path": "web/src/components/shell/TitleBar.tsx",
       "line": 168,
       "column": 7,
@@ -2681,6 +2887,7 @@
     },
     {
       "id": "control-c688488c01589958",
+      "ownerSymbol": "TitleBar",
       "path": "web/src/components/shell/TitleBar.tsx",
       "line": 191,
       "column": 7,
@@ -2694,6 +2901,7 @@
     },
     {
       "id": "control-d126bb271429ab1f",
+      "ownerSymbol": "TitleBar",
       "path": "web/src/components/shell/TitleBar.tsx",
       "line": 207,
       "column": 7,
@@ -2707,6 +2915,7 @@
     },
     {
       "id": "control-6b1ae7c91a515867",
+      "ownerSymbol": "TitleBar",
       "path": "web/src/components/shell/TitleBar.tsx",
       "line": 223,
       "column": 7,
@@ -2720,6 +2929,7 @@
     },
     {
       "id": "control-117eea7e8e236f5d",
+      "ownerSymbol": "TitleBar",
       "path": "web/src/components/shell/TitleBar.tsx",
       "line": 248,
       "column": 9,
@@ -2733,6 +2943,7 @@
     },
     {
       "id": "control-f7e5dfa2afd4f21b",
+      "ownerSymbol": "TitleBar",
       "path": "web/src/components/shell/TitleBar.tsx",
       "line": 289,
       "column": 15,
@@ -2746,6 +2957,7 @@
     },
     {
       "id": "control-ec1aa2701bc044ca",
+      "ownerSymbol": "TitleBar",
       "path": "web/src/components/shell/TitleBar.tsx",
       "line": 317,
       "column": 9,
@@ -2759,6 +2971,7 @@
     },
     {
       "id": "control-642766cd42901ee9",
+      "ownerSymbol": "TitleBar",
       "path": "web/src/components/shell/TitleBar.tsx",
       "line": 359,
       "column": 13,
@@ -2772,6 +2985,7 @@
     },
     {
       "id": "control-a23567e50d74b23b",
+      "ownerSymbol": "TitleBar",
       "path": "web/src/components/shell/TitleBar.tsx",
       "line": 396,
       "column": 15,
@@ -2785,6 +2999,7 @@
     },
     {
       "id": "control-bb60cdd345230fd7",
+      "ownerSymbol": "ViewMenu",
       "path": "web/src/components/shell/ViewMenu.tsx",
       "line": 54,
       "column": 7,
@@ -2798,6 +3013,7 @@
     },
     {
       "id": "control-82bbafab7d014c49",
+      "ownerSymbol": "ViewMenu",
       "path": "web/src/components/shell/ViewMenu.tsx",
       "line": 92,
       "column": 13,
@@ -2811,6 +3027,7 @@
     },
     {
       "id": "control-d4af3faba32c97a0",
+      "ownerSymbol": "ViewMenu",
       "path": "web/src/components/shell/ViewMenu.tsx",
       "line": 108,
       "column": 11,
@@ -2824,6 +3041,7 @@
     },
     {
       "id": "control-fdf3cafb4dd3d646",
+      "ownerSymbol": "ViewMenu",
       "path": "web/src/components/shell/ViewMenu.tsx",
       "line": 115,
       "column": 11,
@@ -2837,6 +3055,7 @@
     },
     {
       "id": "control-3937a9e3726ce1d6",
+      "ownerSymbol": "ViewMenu",
       "path": "web/src/components/shell/ViewMenu.tsx",
       "line": 122,
       "column": 11,
@@ -2850,6 +3069,7 @@
     },
     {
       "id": "control-19b9f2edbc48180c",
+      "ownerSymbol": "MenuItem",
       "path": "web/src/components/shell/ViewMenu.tsx",
       "line": 178,
       "column": 5,
@@ -2863,6 +3083,7 @@
     },
     {
       "id": "control-e47e067736f30c59",
+      "ownerSymbol": "ClipContextMenu",
       "path": "web/src/components/timeline/ClipContextMenu.tsx",
       "line": 379,
       "column": 9,
@@ -2876,6 +3097,7 @@
     },
     {
       "id": "control-eaad8f1d639adec3",
+      "ownerSymbol": "SwapMediaPicker",
       "path": "web/src/components/timeline/SwapMediaPicker.tsx",
       "line": 75,
       "column": 5,
@@ -2889,6 +3111,7 @@
     },
     {
       "id": "control-ef3d2ebcbcbc4c69",
+      "ownerSymbol": "SwapMediaPicker",
       "path": "web/src/components/timeline/SwapMediaPicker.tsx",
       "line": 87,
       "column": 7,
@@ -2902,6 +3125,7 @@
     },
     {
       "id": "control-0ef64683ea66a175",
+      "ownerSymbol": "SwapMediaPicker",
       "path": "web/src/components/timeline/SwapMediaPicker.tsx",
       "line": 113,
       "column": 11,
@@ -2915,6 +3139,7 @@
     },
     {
       "id": "control-99cfb98675f04bd4",
+      "ownerSymbol": "SwapMediaPicker",
       "path": "web/src/components/timeline/SwapMediaPicker.tsx",
       "line": 156,
       "column": 15,
@@ -2928,6 +3153,7 @@
     },
     {
       "id": "control-6e452cb2f0f5e276",
+      "ownerSymbol": "TimelineContainer",
       "path": "web/src/components/timeline/TimelineContainer.tsx",
       "line": 1969,
       "column": 5,
@@ -2941,6 +3167,7 @@
     },
     {
       "id": "control-c5d420ef84466f84",
+      "ownerSymbol": "TimelineContainer",
       "path": "web/src/components/timeline/TimelineContainer.tsx",
       "line": 1977,
       "column": 7,
@@ -2954,6 +3181,7 @@
     },
     {
       "id": "control-39156558e6ce9cad",
+      "ownerSymbol": "TimelineContainer",
       "path": "web/src/components/timeline/TimelineContainer.tsx",
       "line": 2029,
       "column": 11,
@@ -2967,6 +3195,7 @@
     },
     {
       "id": "control-5403bbcc29361d61",
+      "ownerSymbol": "TimelineContainer",
       "path": "web/src/components/timeline/TimelineContainer.tsx",
       "line": 2091,
       "column": 9,
@@ -2980,6 +3209,7 @@
     },
     {
       "id": "control-8c47cac0fe5dc8f1",
+      "ownerSymbol": "TimelineContainer",
       "path": "web/src/components/timeline/TimelineContainer.tsx",
       "line": 2102,
       "column": 9,
@@ -2993,6 +3223,7 @@
     },
     {
       "id": "control-c9e52a1e5bf25d61",
+      "ownerSymbol": "TimelineContainer",
       "path": "web/src/components/timeline/TimelineContainer.tsx",
       "line": 2111,
       "column": 9,
@@ -3006,6 +3237,7 @@
     },
     {
       "id": "control-b95ae345f41980dc",
+      "ownerSymbol": "AudioVolumeKeyframeContextMenu",
       "path": "web/src/components/timeline/TimelineContainer.tsx",
       "line": 2208,
       "column": 9,
@@ -3019,6 +3251,7 @@
     },
     {
       "id": "control-0923f2689f27c0e8",
+      "ownerSymbol": "TimelineRangeContextMenu",
       "path": "web/src/components/timeline/TimelineRangeContextMenu.tsx",
       "line": 99,
       "column": 9,
@@ -3032,6 +3265,7 @@
     },
     {
       "id": "control-be148ae868e49b50",
+      "ownerSymbol": "TimelineRegion",
       "path": "web/src/components/timeline/TimelineRegion.tsx",
       "line": 60,
       "column": 7,
@@ -3045,6 +3279,7 @@
     },
     {
       "id": "control-3c08395ee30bcac1",
+      "ownerSymbol": "TrackHeaderColumn",
       "path": "web/src/components/timeline/TrackHeaderColumn.tsx",
       "line": 74,
       "column": 13,
@@ -3058,6 +3293,7 @@
     },
     {
       "id": "control-2a2a88973c481153",
+      "ownerSymbol": "TrackHeaderRow",
       "path": "web/src/components/timeline/TrackHeaderColumn.tsx",
       "line": 161,
       "column": 5,
@@ -3071,6 +3307,7 @@
     },
     {
       "id": "control-58479ea744c28862",
+      "ownerSymbol": "TrackHeaderRow",
       "path": "web/src/components/timeline/TrackHeaderColumn.tsx",
       "line": 197,
       "column": 11,
@@ -3084,6 +3321,7 @@
     },
     {
       "id": "control-128664cfd86ce443",
+      "ownerSymbol": "TrackHeaderRow",
       "path": "web/src/components/timeline/TrackHeaderColumn.tsx",
       "line": 207,
       "column": 11,
@@ -3097,6 +3335,7 @@
     },
     {
       "id": "control-64a4ebd2f2193fc7",
+      "ownerSymbol": "TrackHeaderRow",
       "path": "web/src/components/timeline/TrackHeaderColumn.tsx",
       "line": 217,
       "column": 9,
@@ -3110,6 +3349,7 @@
     },
     {
       "id": "control-5a0f6c9a24469d3e",
+      "ownerSymbol": "TrackHeaderRow",
       "path": "web/src/components/timeline/TrackHeaderColumn.tsx",
       "line": 229,
       "column": 11,
@@ -3123,6 +3363,7 @@
     },
     {
       "id": "control-973884c6e45e3dbd",
+      "ownerSymbol": "TrackHeaderRow",
       "path": "web/src/components/timeline/TrackHeaderColumn.tsx",
       "line": 245,
       "column": 7,
@@ -3136,6 +3377,7 @@
     },
     {
       "id": "control-078ed409d1ade487",
+      "ownerSymbol": "TrackHeaderContextMenu",
       "path": "web/src/components/timeline/TrackHeaderColumn.tsx",
       "line": 286,
       "column": 5,
@@ -3149,6 +3391,7 @@
     },
     {
       "id": "control-33819c2747c3748f",
+      "ownerSymbol": "TrackHeaderContextMenu",
       "path": "web/src/components/timeline/TrackHeaderColumn.tsx",
       "line": 294,
       "column": 7,
@@ -3162,6 +3405,7 @@
     },
     {
       "id": "control-f0d7621749bf12c5",
+      "ownerSymbol": "TrackHeaderContextMenu",
       "path": "web/src/components/timeline/TrackHeaderColumn.tsx",
       "line": 311,
       "column": 11,
@@ -3175,6 +3419,7 @@
     },
     {
       "id": "control-b65915fd13b261a1",
+      "ownerSymbol": "GlyphButton",
       "path": "web/src/components/toolbar/Toolbar.tsx",
       "line": 53,
       "column": 5,
@@ -3188,6 +3433,7 @@
     },
     {
       "id": "control-dc36c4221479e915",
+      "ownerSymbol": "Toolbar",
       "path": "web/src/components/toolbar/Toolbar.tsx",
       "line": 104,
       "column": 9,
@@ -3201,6 +3447,7 @@
     },
     {
       "id": "control-79b60639845c6b3d",
+      "ownerSymbol": "Toolbar",
       "path": "web/src/components/toolbar/Toolbar.tsx",
       "line": 107,
       "column": 9,
@@ -3214,6 +3461,7 @@
     },
     {
       "id": "control-fe92ff46e082aff8",
+      "ownerSymbol": "Toolbar",
       "path": "web/src/components/toolbar/Toolbar.tsx",
       "line": 116,
       "column": 9,
@@ -3227,6 +3475,7 @@
     },
     {
       "id": "control-75066d8782581697",
+      "ownerSymbol": "Toolbar",
       "path": "web/src/components/toolbar/Toolbar.tsx",
       "line": 123,
       "column": 9,
@@ -3240,6 +3489,7 @@
     },
     {
       "id": "control-4bccc2c792fccf35",
+      "ownerSymbol": "Toolbar",
       "path": "web/src/components/toolbar/Toolbar.tsx",
       "line": 136,
       "column": 9,
@@ -3253,6 +3503,7 @@
     },
     {
       "id": "control-a2fb7575e4964f55",
+      "ownerSymbol": "Toolbar",
       "path": "web/src/components/toolbar/Toolbar.tsx",
       "line": 139,
       "column": 9,
@@ -3266,6 +3517,7 @@
     },
     {
       "id": "control-ca0622eec08b06f3",
+      "ownerSymbol": "Toolbar",
       "path": "web/src/components/toolbar/Toolbar.tsx",
       "line": 144,
       "column": 9,
@@ -3279,6 +3531,7 @@
     },
     {
       "id": "control-845150400113c230",
+      "ownerSymbol": "Toolbar",
       "path": "web/src/components/toolbar/Toolbar.tsx",
       "line": 150,
       "column": 7,
@@ -3292,6 +3545,7 @@
     },
     {
       "id": "control-d66a6dd112be269f",
+      "ownerSymbol": "Toolbar",
       "path": "web/src/components/toolbar/Toolbar.tsx",
       "line": 159,
       "column": 9,
@@ -3305,6 +3559,7 @@
     },
     {
       "id": "control-34442efd96567475",
+      "ownerSymbol": "Dropdown",
       "path": "web/src/components/ui/Dropdown.tsx",
       "line": 62,
       "column": 7,
@@ -3318,6 +3573,7 @@
     },
     {
       "id": "control-4772ba8c4e83f09a",
+      "ownerSymbol": "Dropdown",
       "path": "web/src/components/ui/Dropdown.tsx",
       "line": 121,
       "column": 15,
@@ -3331,6 +3587,7 @@
     },
     {
       "id": "control-58bc7570df855f1c",
+      "ownerSymbol": null,
       "path": "web/src/components/ui/HoverButton.test.tsx",
       "line": 8,
       "column": 39,
@@ -3344,6 +3601,7 @@
     },
     {
       "id": "control-908e94d6996c648a",
+      "ownerSymbol": "HoverButton",
       "path": "web/src/components/ui/HoverButton.tsx",
       "line": 30,
       "column": 5,
@@ -3357,6 +3615,7 @@
     },
     {
       "id": "control-70f7e6bc39c9ca1b",
+      "ownerSymbol": "PanelShell",
       "path": "web/src/components/ui/PanelShell.tsx",
       "line": 22,
       "column": 5,

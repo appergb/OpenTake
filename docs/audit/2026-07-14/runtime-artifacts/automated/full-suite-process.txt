@@ -1,5 +1,1035 @@
-command: node --test tools/completion-audit.test.mjs
-startedAt: 2026-07-15T14:34:01+08:00
-endedAt: 2026-07-15T14:34:23+08:00
-exitCode: 0
-result: 163 tests passed; 0 failed; bounded Node process exited.
+executedCheckoutCommit=d720ff00e4d5139c4af5e1f70757b8e22c9c8ef0
+executedCheckoutTree=1c26a4fb34b4464ba63804903645842fa10eb7d7
+trackedStatus=0
+startedAt=2026-07-15T15:35:26+0800
+TAP version 13
+# Subtest: captureGitSource records exact immutable Git evidence
+ok 1 - captureGitSource records exact immutable Git evidence
+  ---
+  duration_ms: 258.5515
+  type: 'test'
+  ...
+# Subtest: captureGitSource parses rename and copy records from NUL-delimited output
+ok 2 - captureGitSource parses rename and copy records from NUL-delimited output
+  ---
+  duration_ms: 211.441958
+  type: 'test'
+  ...
+# Subtest: captureGitSource uses the requested remote repository URL
+ok 3 - captureGitSource uses the requested remote repository URL
+  ---
+  duration_ms: 211.496917
+  type: 'test'
+  ...
+# Subtest: captureGitSource rejects a dirty repository when clean evidence is required
+ok 4 - captureGitSource rejects a dirty repository when clean evidence is required
+  ---
+  duration_ms: 150.793667
+  type: 'test'
+  ...
+# Subtest: captureGitSource output ignores transient worktree dirtiness
+ok 5 - captureGitSource output ignores transient worktree dirtiness
+  ---
+  duration_ms: 285.227583
+  type: 'test'
+  ...
+# Subtest: captureGitSource rejects missing refs and abbreviated SHA inputs
+ok 6 - captureGitSource rejects missing refs and abbreviated SHA inputs
+  ---
+  duration_ms: 156.349791
+  type: 'test'
+  ...
+# Subtest: captureGitSource rejects equal refs when changes are expected
+ok 7 - captureGitSource rejects equal refs when changes are expected
+  ---
+  duration_ms: 160.542625
+  type: 'test'
+  ...
+# Subtest: Palmier reviewed ledger is an exact 132-row classification golden
+ok 8 - Palmier reviewed ledger is an exact 132-row classification golden
+  ---
+  duration_ms: 1.257
+  type: 'test'
+  ...
+# Subtest: immutable PR capture is independent of live verification changes
+ok 9 - immutable PR capture is independent of live verification changes
+  ---
+  duration_ms: 0.567167
+  type: 'test'
+  ...
+# Subtest: source evidence catalog validation accepts current links and rejects stale IDs
+ok 10 - source evidence catalog validation accepts current links and rejects stale IDs
+  ---
+  duration_ms: 0.750416
+  type: 'test'
+  ...
+# Subtest: source report renders reviewed classifications and rejects malformed evidence
+ok 11 - source report renders reviewed classifications and rejects malformed evidence
+  ---
+  duration_ms: 0.686834
+  type: 'test'
+  ...
+# Subtest: buildSourceEvidence assembles fixture snapshots and fails closed on ledger drift
+ok 12 - buildSourceEvidence assembles fixture snapshots and fails closed on ledger drift
+  ---
+  duration_ms: 2.464125
+  type: 'test'
+  ...
+# Subtest: captureDirtyCheckout hashes every tracked dirty and untracked path
+ok 13 - captureDirtyCheckout hashes every tracked dirty and untracked path
+  ---
+  duration_ms: 348.398042
+  type: 'test'
+  ...
+# Subtest: captureDirtyCheckout fails closed when the snapshot changes during capture
+ok 14 - captureDirtyCheckout fails closed when the snapshot changes during capture
+  ---
+  duration_ms: 151.337834
+  type: 'test'
+  ...
+# Subtest: audit ordering is UTF-8 byte deterministic without Unicode normalization
+ok 15 - audit ordering is UTF-8 byte deterministic without Unicode normalization
+  ---
+  duration_ms: 0.147625
+  type: 'test'
+  ...
+# Subtest: extractControls records labels, handlers, and panel triggers
+ok 16 - extractControls records labels, handlers, and panel triggers
+  ---
+  duration_ms: 5.417666
+  type: 'test'
+  ...
+# Subtest: extractControls fails closed with normalized parse diagnostic locations
+ok 17 - extractControls fails closed with normalized parse diagnostic locations
+  ---
+  duration_ms: 0.74225
+  type: 'test'
+  ...
+# Subtest: extractControls separates user interaction handlers from passive lifecycle callbacks
+ok 18 - extractControls separates user interaction handlers from passive lifecycle callbacks
+  ---
+  duration_ms: 2.058542
+  type: 'test'
+  ...
+# Subtest: extractControls covers native, custom-handler, and ARIA controls in source order
+ok 19 - extractControls covers native, custom-handler, and ARIA controls in source order
+  ---
+  duration_ms: 1.805584
+  type: 'test'
+  ...
+# Subtest: extractControls uses columns to distinguish same-line same-tag controls
+ok 20 - extractControls uses columns to distinguish same-line same-tag controls
+  ---
+  duration_ms: 0.225
+  type: 'test'
+  ...
+# Subtest: extractControls includes every required interactive ARIA role
+ok 21 - extractControls includes every required interactive ARIA role
+  ---
+  duration_ms: 0.36825
+  type: 'test'
+  ...
+# Subtest: extractControls constrains toggle panel patterns to visible surfaces
+ok 22 - extractControls constrains toggle panel patterns to visible surfaces
+  ---
+  duration_ms: 0.571334
+  type: 'test'
+  ...
+# Subtest: normalizePath uses repository-relative POSIX paths
+ok 23 - normalizePath uses repository-relative POSIX paths
+  ---
+  duration_ms: 0.036
+  type: 'test'
+  ...
+# Subtest: stableId is deterministic and prefix scoped
+ok 24 - stableId is deterministic and prefix scoped
+  ---
+  duration_ms: 0.038708
+  type: 'test'
+  ...
+# Subtest: extractDocumentCandidates captures headings, checkboxes, and gap signals
+ok 25 - extractDocumentCandidates captures headings, checkboxes, and gap signals
+  ---
+  duration_ms: 0.402042
+  type: 'test'
+  ...
+# Subtest: extractDocumentCandidates ignores fenced code and preserves the outer heading
+ok 26 - extractDocumentCandidates ignores fenced code and preserves the outer heading
+  ---
+  duration_ms: 0.181875
+  type: 'test'
+  ...
+# Subtest: classifyFile maps product and evidence files
+ok 27 - classifyFile maps product and evidence files
+  ---
+  duration_ms: 0.086334
+  type: 'test'
+  ...
+# Subtest: classifyFile derives extensions from the basename only
+ok 28 - classifyFile derives extensions from the basename only
+  ---
+  duration_ms: 0.040166
+  type: 'test'
+  ...
+# Subtest: buildFileInventory marks its own output as self-referential
+ok 29 - buildFileInventory marks its own output as self-referential
+  ---
+  duration_ms: 33.604708
+  type: 'test'
+  ...
+# Subtest: files CLI writes tracked paths, hashes, and one self-reference
+ok 30 - files CLI writes tracked paths, hashes, and one self-reference
+  ---
+  duration_ms: 77.453917
+  type: 'test'
+  ...
+# Subtest: docs CLI deterministically extracts tracked Markdown only
+ok 31 - docs CLI deterministically extracts tracked Markdown only
+  ---
+  duration_ms: 130.066917
+  type: 'test'
+  ...
+# Subtest: controls CLI scans tracked web/src TSX files through a real subprocess
+ok 32 - controls CLI scans tracked web/src TSX files through a real subprocess
+  ---
+  duration_ms: 360.269417
+  type: 'test'
+  ...
+# Subtest: control-ledger CLI creates shells and preserves reviewed records
+ok 33 - control-ledger CLI creates shells and preserves reviewed records
+  ---
+  duration_ms: 86.514083
+  type: 'test'
+  ...
+# Subtest: control-ledger CLI rejects duplicate candidate IDs and column locations
+    # Subtest: duplicate ID
+    ok 1 - duplicate ID
+      ---
+      duration_ms: 44.017042
+      type: 'test'
+      ...
+    # Subtest: duplicate path-line-column
+    ok 2 - duplicate path-line-column
+      ---
+      duration_ms: 42.528792
+      type: 'test'
+      ...
+    1..2
+ok 34 - control-ledger CLI rejects duplicate candidate IDs and column locations
+  ---
+  duration_ms: 87.585542
+  type: 'test'
+  ...
+# Subtest: verifyAudit controls accepts an exact incomplete schema-2 ledger
+ok 35 - verifyAudit controls accepts an exact incomplete schema-2 ledger
+  ---
+  duration_ms: 272.112791
+  type: 'test'
+  ...
+# Subtest: verifyAudit controls derives ledger bindings from an arbitrary audit directory
+ok 36 - verifyAudit controls derives ledger bindings from an arbitrary audit directory
+  ---
+  duration_ms: 266.475708
+  type: 'test'
+  ...
+# Subtest: verifyAudit controls rejects current-source and record identity drift
+    # Subtest: current handler drift
+    ok 1 - current handler drift
+      ---
+      duration_ms: 249.939792
+      type: 'test'
+      ...
+    # Subtest: record source and stable id drift
+    ok 2 - record source and stable id drift
+      ---
+      duration_ms: 254.246917
+      type: 'test'
+      ...
+    1..2
+ok 37 - verifyAudit controls rejects current-source and record identity drift
+  ---
+  duration_ms: 504.474167
+  type: 'test'
+  ...
+# Subtest: verifyAudit controls fails closed on status, gap, obsolete, and duplicate claims
+    # Subtest: unverified and incomplete without executable gap contract
+    ok 1 - unverified and incomplete without executable gap contract
+      ---
+      duration_ms: 255.550875
+      type: 'test'
+      ...
+    # Subtest: obsolete record still describes an action
+    ok 2 - obsolete record still describes an action
+      ---
+      duration_ms: 265.851541
+      type: 'test'
+      ...
+    # Subtest: duplicate points to itself
+    ok 3 - duplicate points to itself
+      ---
+      duration_ms: 260.748875
+      type: 'test'
+      ...
+    1..3
+ok 38 - verifyAudit controls fails closed on status, gap, obsolete, and duplicate claims
+  ---
+  duration_ms: 782.489083
+  type: 'test'
+  ...
+# Subtest: verifyAudit controls rejects generic proof and accepts exact tests or direct typed receipts
+    # Subtest: generic suite string is not completion evidence
+    ok 1 - generic suite string is not completion evidence
+      ---
+      duration_ms: 246.2965
+      type: 'test'
+      ...
+    # Subtest: declared exact test without a candidate binding cannot complete
+    ok 2 - declared exact test without a candidate binding cannot complete
+      ---
+      duration_ms: 266.9485
+      type: 'test'
+      ...
+    # Subtest: candidate-bound static test without a real assertion cannot complete
+    ok 3 - candidate-bound static test without a real assertion cannot complete
+      ---
+      duration_ms: 247.743458
+      type: 'test'
+      ...
+    # Subtest: tracked static test with a candidate-specific assertion still cannot complete
+    ok 4 - tracked static test with a candidate-specific assertion still cannot complete
+      ---
+      duration_ms: 253.072208
+      type: 'test'
+      ...
+    # Subtest: supporting generic command receipt cannot prove one control
+    ok 5 - supporting generic command receipt cannot prove one control
+      ---
+      duration_ms: 249.147875
+      type: 'test'
+      ...
+    # Subtest: direct automated receipt needs and validates a named test and assertion
+    ok 6 - direct automated receipt needs and validates a named test and assertion
+      ---
+      duration_ms: 1672.796333
+      type: 'test'
+      ...
+    # Subtest: typed receipt timestamps, exact keys, and summary fail closed
+    ok 7 - typed receipt timestamps, exact keys, and summary fail closed
+      ---
+      duration_ms: 214.235625
+      type: 'test'
+      ...
+    # Subtest: executed receipts require strict timezone timestamps
+    ok 8 - executed receipts require strict timezone timestamps
+      ---
+      duration_ms: 192.655709
+      type: 'test'
+      ...
+    # Subtest: runtime metadata and cleanup use exact fail-closed contracts
+    ok 9 - runtime metadata and cleanup use exact fail-closed contracts
+      ---
+      duration_ms: 197.961958
+      type: 'test'
+      ...
+    # Subtest: verified cleanup requires at least one concrete probe
+    ok 10 - verified cleanup requires at least one concrete probe
+      ---
+      duration_ms: 197.239
+      type: 'test'
+      ...
+    # Subtest: declared runtime artifacts require a sha256 digest
+    ok 11 - declared runtime artifacts require a sha256 digest
+      ---
+      duration_ms: 221.765667
+      type: 'test'
+      ...
+    # Subtest: local-ignored artifact declarations must actually be ignored
+    ok 12 - local-ignored artifact declarations must actually be ignored
+      ---
+      duration_ms: 221.679
+      type: 'test'
+      ...
+    # Subtest: hashed tracked browser artifacts with verified cleanup are accepted as supporting
+    ok 13 - hashed tracked browser artifacts with verified cleanup are accepted as supporting
+      ---
+      duration_ms: 282.997458
+      type: 'test'
+      ...
+    # Subtest: automated receipt summary and limitation test counts must agree
+    ok 14 - automated receipt summary and limitation test counts must agree
+      ---
+      duration_ms: 169.115667
+      type: 'test'
+      ...
+    1..14
+ok 39 - verifyAudit controls rejects generic proof and accepts exact tests or direct typed receipts
+  ---
+  duration_ms: 4634.990417
+  type: 'test'
+  ...
+# Subtest: verifyAudit controls rejects static and unrelated completion proof
+    # Subtest: candidate id plus assert.equal(1, 1) cannot prove complete
+    ok 1 - candidate id plus assert.equal(1, 1) cannot prove complete
+      ---
+      duration_ms: 165.0255
+      type: 'test'
+      ...
+    # Subtest: an independent EventTarget does not exercise the owning component
+    ok 2 - an independent EventTarget does not exercise the owning component
+      ---
+      duration_ms: 226.675333
+      type: 'test'
+      ...
+    # Subtest: an unrelated render plus an independent owner identifier cannot complete
+    ok 3 - an unrelated render plus an independent owner identifier cannot complete
+      ---
+      duration_ms: 331.831583
+      type: 'test'
+      ...
+    # Subtest: one unrelated screenshot cannot prove multiple controls
+    ok 4 - one unrelated screenshot cannot prove multiple controls
+      ---
+      duration_ms: 158.15825
+      type: 'test'
+      ...
+    1..4
+ok 40 - verifyAudit controls rejects static and unrelated completion proof
+  ---
+  duration_ms: 882.082291
+  type: 'test'
+  ...
+# Subtest: verifyAudit controls rejects missing artifacts, future receipts, and weak execution records
+    # Subtest: a declared artifact must still exist
+    ok 1 - a declared artifact must still exist
+      ---
+      duration_ms: 151.2355
+      type: 'test'
+      ...
+    # Subtest: a receipt from 2099 is rejected
+    ok 2 - a receipt from 2099 is rejected
+      ---
+      duration_ms: 181.529042
+      type: 'test'
+      ...
+    # Subtest: passed execution needs source revision, result, and a process artifact
+    ok 3 - passed execution needs source revision, result, and a process artifact
+      ---
+      duration_ms: 191.642375
+      type: 'test'
+      ...
+    1..3
+ok 41 - verifyAudit controls rejects missing artifacts, future receipts, and weak execution records
+  ---
+  duration_ms: 524.694167
+  type: 'test'
+  ...
+# Subtest: verifyAudit controls requires immutable provenance and executable criteria
+    # Subtest: a production candidate cannot omit its lexical owner
+    ok 1 - a production candidate cannot omit its lexical owner
+      ---
+      duration_ms: 243.463875
+      type: 'test'
+      ...
+    # Subtest: an explicitly obsolete test fixture candidate may omit a lexical owner
+    ok 2 - an explicitly obsolete test fixture candidate may omit a lexical owner
+      ---
+      duration_ms: 233.71025
+      type: 'test'
+      ...
+    # Subtest: missing source provenance is rejected
+    ok 3 - missing source provenance is rejected
+      ---
+      duration_ms: 115.143292
+      type: 'test'
+      ...
+    # Subtest: backend source hash drift is rejected even when the JSX handler is unchanged
+    ok 4 - backend source hash drift is rejected even when the JSX handler is unchanged
+      ---
+      duration_ms: 147.768666
+      type: 'test'
+      ...
+    # Subtest: verifier file drift is rejected independently of product source
+    ok 5 - verifier file drift is rejected independently of product source
+      ---
+      duration_ms: 135.17825
+      type: 'test'
+      ...
+    # Subtest: TODO is not an executable candidate-specific acceptance contract
+    ok 6 - TODO is not an executable candidate-specific acceptance contract
+      ---
+      duration_ms: 164.352584
+      type: 'test'
+      ...
+    # Subtest: criteria copied from another candidate are rejected
+    ok 7 - criteria copied from another candidate are rejected
+      ---
+      duration_ms: 142.968834
+      type: 'test'
+      ...
+    # Subtest: malformed criteria source fields fail closed instead of throwing
+    ok 8 - malformed criteria source fields fail closed instead of throwing
+      ---
+      duration_ms: 141.995375
+      type: 'test'
+      ...
+    1..8
+ok 42 - verifyAudit controls requires immutable provenance and executable criteria
+  ---
+  duration_ms: 1325.235333
+  type: 'test'
+  ...
+# Subtest: verify controls CLI writes failure output and exits nonzero
+ok 43 - verify controls CLI writes failure output and exits nonzero
+  ---
+  duration_ms: 256.081292
+  type: 'test'
+  ...
+# Subtest: requirements CLI creates complete shells and preserves reviewed records
+ok 44 - requirements CLI creates complete shells and preserves reviewed records
+  ---
+  duration_ms: 51.326084
+  type: 'test'
+  ...
+# Subtest: requirements CLI rejects duplicate candidate identities
+ok 45 - requirements CLI rejects duplicate candidate identities
+  ---
+  duration_ms: 25.987375
+  type: 'test'
+  ...
+# Subtest: verifyAudit documents accepts a complete, planned ledger
+ok 46 - verifyAudit documents accepts a complete, planned ledger
+  ---
+  duration_ms: 41.692875
+  type: 'test'
+  ...
+# Subtest: verifyAudit documents rejects missing and duplicate identities
+    # Subtest: missing candidate ID
+    ok 1 - missing candidate ID
+      ---
+      duration_ms: 39.060459
+      type: 'test'
+      ...
+    # Subtest: duplicate record ID
+    ok 2 - duplicate record ID
+      ---
+      duration_ms: 39.148958
+      type: 'test'
+      ...
+    # Subtest: duplicate record candidateId
+    ok 3 - duplicate record candidateId
+      ---
+      duration_ms: 41.124375
+      type: 'test'
+      ...
+    # Subtest: orphan requirement candidateId
+    ok 4 - orphan requirement candidateId
+      ---
+      duration_ms: 41.2735
+      type: 'test'
+      ...
+    1..4
+ok 47 - verifyAudit documents rejects missing and duplicate identities
+  ---
+  duration_ms: 160.866375
+  type: 'test'
+  ...
+# Subtest: verifyAudit documents rejects unresolved or unsupported dispositions
+    # Subtest: unverified
+    ok 1 - unverified
+      ---
+      duration_ms: 44.527458
+      type: 'test'
+      ...
+    # Subtest: complete without implementation
+    ok 2 - complete without implementation
+      ---
+      duration_ms: 43.358667
+      type: 'test'
+      ...
+    # Subtest: complete without verification
+    ok 3 - complete without verification
+      ---
+      duration_ms: 44.514125
+      type: 'test'
+      ...
+    # Subtest: record ID does not derive from candidate ID
+    ok 4 - record ID does not derive from candidate ID
+      ---
+      duration_ms: 43.993583
+      type: 'test'
+      ...
+    # Subtest: complete without target behavior
+    ok 5 - complete without target behavior
+      ---
+      duration_ms: 44.549167
+      type: 'test'
+      ...
+    # Subtest: incomplete without final disposition
+    ok 6 - incomplete without final disposition
+      ---
+      duration_ms: 42.323625
+      type: 'test'
+      ...
+    # Subtest: incomplete without acceptance criteria
+    ok 7 - incomplete without acceptance criteria
+      ---
+      duration_ms: 42.804792
+      type: 'test'
+      ...
+    # Subtest: invalid status
+    ok 8 - invalid status
+      ---
+      duration_ms: 41.813292
+      type: 'test'
+      ...
+    # Subtest: invalid gap group
+    ok 9 - invalid gap group
+      ---
+      duration_ms: 43.841333
+      type: 'test'
+      ...
+    # Subtest: incomplete without gap group
+    ok 10 - incomplete without gap group
+      ---
+      duration_ms: 42.341583
+      type: 'test'
+      ...
+    # Subtest: contradicted without target behavior
+    ok 11 - contradicted without target behavior
+      ---
+      duration_ms: 43.0795
+      type: 'test'
+      ...
+    # Subtest: obsolete without final disposition
+    ok 12 - obsolete without final disposition
+      ---
+      duration_ms: 43.196042
+      type: 'test'
+      ...
+    # Subtest: duplicate without provenance
+    ok 13 - duplicate without provenance
+      ---
+      duration_ms: 44.269792
+      type: 'test'
+      ...
+    # Subtest: candidate source drift
+    ok 14 - candidate source drift
+      ---
+      duration_ms: 44.692125
+      type: 'test'
+      ...
+    # Subtest: candidate source path drift
+    ok 15 - candidate source path drift
+      ---
+      duration_ms: 44.55925
+      type: 'test'
+      ...
+    # Subtest: non-array evidence field
+    ok 16 - non-array evidence field
+      ---
+      duration_ms: 44.412084
+      type: 'test'
+      ...
+    # Subtest: non-string evidence item
+    ok 17 - non-string evidence item
+      ---
+      duration_ms: 47.367083
+      type: 'test'
+      ...
+    # Subtest: non-string scalar field
+    ok 18 - non-string scalar field
+      ---
+      duration_ms: 45.85975
+      type: 'test'
+      ...
+    # Subtest: non-array return path
+    ok 19 - non-array return path
+      ---
+      duration_ms: 48.7495
+      type: 'test'
+      ...
+    # Subtest: non-string nullable metadata
+    ok 20 - non-string nullable metadata
+      ---
+      duration_ms: 49.602834
+      type: 'test'
+      ...
+    # Subtest: malformed candidate source fields fail closed
+    ok 21 - malformed candidate source fields fail closed
+      ---
+      duration_ms: 47.254417
+      type: 'test'
+      ...
+    # Subtest: unsupported audit schema fails closed
+    ok 22 - unsupported audit schema fails closed
+      ---
+      duration_ms: 47.371833
+      type: 'test'
+      ...
+    1..22
+ok 48 - verifyAudit documents rejects unresolved or unsupported dispositions
+  ---
+  duration_ms: 985.795333
+  type: 'test'
+  ...
+# Subtest: verifyAudit documents rejects repositories and candidate sources that drift
+    # Subtest: audit directory outside repository
+    ok 1 - audit directory outside repository
+      ---
+      duration_ms: 51.022959
+      type: 'test'
+      ...
+    # Subtest: internal audit symlink escaping the repository
+    ok 2 - internal audit symlink escaping the repository
+      ---
+      duration_ms: 48.900083
+      type: 'test'
+      ...
+    # Subtest: missing source file
+    ok 3 - missing source file
+      ---
+      duration_ms: 48.924917
+      type: 'test'
+      ...
+    # Subtest: untracked source file
+    ok 4 - untracked source file
+      ---
+      duration_ms: 57.301083
+      type: 'test'
+      ...
+    # Subtest: tracked candidate source leaf symlink
+    ok 5 - tracked candidate source leaf symlink
+      ---
+      duration_ms: 65.20375
+      type: 'test'
+      ...
+    # Subtest: candidate source ancestor symlink escape
+    ok 6 - candidate source ancestor symlink escape
+      ---
+      duration_ms: 55.870375
+      type: 'test'
+      ...
+    # Subtest: forged candidate ID
+    ok 7 - forged candidate ID
+      ---
+      duration_ms: 51.430292
+      type: 'test'
+      ...
+    # Subtest: source text drift
+    ok 8 - source text drift
+      ---
+      duration_ms: 50.555166
+      type: 'test'
+      ...
+    # Subtest: source signal drift
+    ok 9 - source signal drift
+      ---
+      duration_ms: 49.137459
+      type: 'test'
+      ...
+    1..9
+ok 49 - verifyAudit documents rejects repositories and candidate sources that drift
+  ---
+  duration_ms: 478.944833
+  type: 'test'
+  ...
+# Subtest: verifyAudit documents rejects invalid implementation, test, and runtime evidence
+    # Subtest: missing implementation path
+    ok 1 - missing implementation path
+      ---
+      duration_ms: 51.276792
+      type: 'test'
+      ...
+    # Subtest: missing implementation symbol
+    ok 2 - missing implementation symbol
+      ---
+      duration_ms: 51.151958
+      type: 'test'
+      ...
+    # Subtest: implementation directory
+    ok 3 - implementation directory
+      ---
+      duration_ms: 48.751209
+      type: 'test'
+      ...
+    # Subtest: combined implementation symbols
+    ok 4 - combined implementation symbols
+      ---
+      duration_ms: 48.938875
+      type: 'test'
+      ...
+    # Subtest: invalid implementation symbol grammar
+    ok 5 - invalid implementation symbol grammar
+      ---
+      duration_ms: 50.124792
+      type: 'test'
+      ...
+    # Subtest: natural-language implementation
+    ok 6 - natural-language implementation
+      ---
+      duration_ms: 49.982042
+      type: 'test'
+      ...
+    # Subtest: missing test path
+    ok 7 - missing test path
+      ---
+      duration_ms: 49.594417
+      type: 'test'
+      ...
+    # Subtest: missing test name
+    ok 8 - missing test name
+      ---
+      duration_ms: 52.2515
+      type: 'test'
+      ...
+    # Subtest: test file only
+    ok 9 - test file only
+      ---
+      duration_ms: 48.444417
+      type: 'test'
+      ...
+    # Subtest: natural-language test
+    ok 10 - natural-language test
+      ---
+      duration_ms: 48.507625
+      type: 'test'
+      ...
+    # Subtest: tracked implementation leaf symlink
+    ok 11 - tracked implementation leaf symlink
+      ---
+      duration_ms: 49.227292
+      type: 'test'
+      ...
+    # Subtest: implementation ancestor symlink escape
+    ok 12 - implementation ancestor symlink escape
+      ---
+      duration_ms: 48.320167
+      type: 'test'
+      ...
+    # Subtest: tracked test leaf symlink
+    ok 13 - tracked test leaf symlink
+      ---
+      duration_ms: 48.834541
+      type: 'test'
+      ...
+    # Subtest: test ancestor symlink escape
+    ok 14 - test ancestor symlink escape
+      ---
+      duration_ms: 47.269917
+      type: 'test'
+      ...
+    # Subtest: symbol use without declaration
+    ok 15 - symbol use without declaration
+      ---
+      duration_ms: 40.550834
+      type: 'test'
+      ...
+    # Subtest: commented TypeScript declaration
+    ok 16 - commented TypeScript declaration
+      ---
+      duration_ms: 40.333917
+      type: 'test'
+      ...
+    # Subtest: string-contained TypeScript declaration
+    ok 17 - string-contained TypeScript declaration
+      ---
+      duration_ms: 39.158417
+      type: 'test'
+      ...
+    # Subtest: aliased TypeScript test call is unsupported
+    ok 18 - aliased TypeScript test call is unsupported
+      ---
+      duration_ms: 40.040125
+      type: 'test'
+      ...
+    # Subtest: commented Rust declaration
+    ok 19 - commented Rust declaration
+      ---
+      duration_ms: 45.695084
+      type: 'test'
+      ...
+    # Subtest: string-contained Rust declaration
+    ok 20 - string-contained Rust declaration
+      ---
+      duration_ms: 47.551208
+      type: 'test'
+      ...
+    # Subtest: macro-token Rust pseudo declaration
+    ok 21 - macro-token Rust pseudo declaration
+      ---
+      duration_ms: 45.494041
+      type: 'test'
+      ...
+    # Subtest: macro_rules nested body pseudo declaration
+    ok 22 - macro_rules nested body pseudo declaration
+      ---
+      duration_ms: 44.386833
+      type: 'test'
+      ...
+    # Subtest: macro_rules declaration name is supported without exposing its body
+    ok 23 - macro_rules declaration name is supported without exposing its body
+      ---
+      duration_ms: 44.61775
+      type: 'test'
+      ...
+    # Subtest: macro_rules nested body test attribute is not an automated test
+    ok 24 - macro_rules nested body test attribute is not an automated test
+      ---
+      duration_ms: 43.296666
+      type: 'test'
+      ...
+    # Subtest: commented TypeScript test
+    ok 25 - commented TypeScript test
+      ---
+      duration_ms: 37.118416
+      type: 'test'
+      ...
+    # Subtest: string-contained TypeScript test
+    ok 26 - string-contained TypeScript test
+      ---
+      duration_ms: 36.846208
+      type: 'test'
+      ...
+    # Subtest: ordinary Rust function is not an automated test
+    ok 27 - ordinary Rust function is not an automated test
+      ---
+      duration_ms: 42.247625
+      type: 'test'
+      ...
+    # Subtest: Rust ignore attribute is not a test
+    ok 28 - Rust ignore attribute is not a test
+      ---
+      duration_ms: 43.174584
+      type: 'test'
+      ...
+    # Subtest: Rust test attribute cannot attach across another function
+    ok 29 - Rust test attribute cannot attach across another function
+      ---
+      duration_ms: 42.069208
+      type: 'test'
+      ...
+    # Subtest: tokio test attribute is supported
+    ok 30 - tokio test attribute is supported
+      ---
+      duration_ms: 43.057834
+      type: 'test'
+      ...
+    # Subtest: async-std test attribute is supported
+    ok 31 - async-std test attribute is supported
+      ---
+      duration_ms: 41.686375
+      type: 'test'
+      ...
+    # Subtest: runtime commit is unsupported self-report
+    ok 32 - runtime commit is unsupported self-report
+      ---
+      duration_ms: 40.39775
+      type: 'test'
+      ...
+    # Subtest: matching runtime hash is unsupported self-report
+    ok 33 - matching runtime hash is unsupported self-report
+      ---
+      duration_ms: 36.2775
+      type: 'test'
+      ...
+    # Subtest: matching zero-exit runtime receipt is unsupported self-report
+    ok 34 - matching zero-exit runtime receipt is unsupported self-report
+      ---
+      duration_ms: 40.596084
+      type: 'test'
+      ...
+    # Subtest: incomplete matching runtime commit is unsupported self-report
+    ok 35 - incomplete matching runtime commit is unsupported self-report
+      ---
+      duration_ms: 40.943
+      type: 'test'
+      ...
+    # Subtest: obsolete matching runtime commit is unsupported self-report
+    ok 36 - obsolete matching runtime commit is unsupported self-report
+      ---
+      duration_ms: 39.240333
+      type: 'test'
+      ...
+    # Subtest: duplicate matching runtime commit is unsupported self-report
+    ok 37 - duplicate matching runtime commit is unsupported self-report
+      ---
+      duration_ms: 39.1415
+      type: 'test'
+      ...
+    # Subtest: contradicted matching runtime commit is unsupported self-report
+    ok 38 - contradicted matching runtime commit is unsupported self-report
+      ---
+      duration_ms: 38.836
+      type: 'test'
+      ...
+    # Subtest: unverified matching runtime commit is unsupported self-report
+    ok 39 - unverified matching runtime commit is unsupported self-report
+      ---
+      duration_ms: 39.00375
+      type: 'test'
+      ...
+    # Subtest: obsolete tracked historical report provenance is accepted
+    ok 40 - obsolete tracked historical report provenance is accepted
+      ---
+      duration_ms: 37.1165
+      type: 'test'
+      ...
+    # Subtest: historical report provenance rejects a non-tracked regular path
+    ok 41 - historical report provenance rejects a non-tracked regular path
+      ---
+      duration_ms: 36.435916
+      type: 'test'
+      ...
+    # Subtest: forged runtime commit
+    ok 42 - forged runtime commit
+      ---
+      duration_ms: 36.849375
+      type: 'test'
+      ...
+    # Subtest: forged runtime hash
+    ok 43 - forged runtime hash
+      ---
+      duration_ms: 36.656375
+      type: 'test'
+      ...
+    # Subtest: forged runtime receipt
+    ok 44 - forged runtime receipt
+      ---
+      duration_ms: 37.240375
+      type: 'test'
+      ...
+    1..44
+ok 50 - verifyAudit documents rejects invalid implementation, test, and runtime evidence
+  ---
+  duration_ms: 1911.187292
+  type: 'test'
+  ...
+# Subtest: review demotions are unique and semantically bound to frozen candidates
+ok 51 - review demotions are unique and semantically bound to frozen candidates
+  ---
+  duration_ms: 13.527167
+  type: 'test'
+  ...
+# Subtest: verify CLI writes failed document verification before exiting nonzero
+ok 52 - verify CLI writes failed document verification before exiting nonzero
+  ---
+  duration_ms: 63.517542
+  type: 'test'
+  ...
+# Subtest: module imports when process.argv[1] is unavailable
+ok 53 - module imports when process.argv[1] is unavailable
+  ---
+  duration_ms: 22.610125
+  type: 'test'
+  ...
+1..53
+# tests 168
+# suites 0
+# pass 168
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 16152.608167
+endedAt=2026-07-15T15:35:42+0800
+exitCode=0

@@ -17443,10 +17443,21 @@
     }
   ],
   "provenance": {
-    "auditedCommit": "1f9af77923967cf7f4e92f72c924fd6d5505fa1e",
-    "auditedTree": "918925907d79406b36c950a9ba1e8c18f7c7e4bc",
-    "candidateLedgerSha256": "ed0faf29761095222d8424c0f088e9e8f095570a409c832687be1c8c329826ae",
-    "candidateSourceAggregateSha256": "98428b8c7a7b66327ef2ace05914ecafb5cd9dc6d87a91407ecd1281a6337342"
+    "auditedProductRevision": {
+      "commit": "1f9af77923967cf7f4e92f72c924fd6d5505fa1e",
+      "tree": "918925907d79406b36c950a9ba1e8c18f7c7e4bc"
+    },
+    "verifierRevision": {
+      "commit": "d720ff00e4d5139c4af5e1f70757b8e22c9c8ef0",
+      "tree": "1c26a4fb34b4464ba63804903645842fa10eb7d7"
+    },
+    "candidateLedgerSha256": "262e51921d3f431c4d474f10bc3d2b29f59908758e7c80135c5e60f07cb9483c",
+    "candidateSourceAggregateSha256": "98428b8c7a7b66327ef2ace05914ecafb5cd9dc6d87a91407ecd1281a6337342",
+    "verifierFilesSha256": {
+      "tools/completion-audit.mjs": "bdfadad15f8451f4b6ca3f71c61b942950e51bf8a408e86062cb94ca84887d94",
+      "tools/completion-audit-controls.mjs": "2880326d93f45889f3f1dc3a282d03007e117c7fcdb529768fc5ec14ea4a9fbb",
+      "tools/completion-audit.test.mjs": "c503f4c6a06bcfdfe2144232839346e0f3b56d635c02f03e92dd5e26d0eff53a"
+    }
   },
   "codeEvidence": {
     "code:crates/opentake-core/src/core.rs#AppCore": "67e8554b1d26b4022593a329475423fc6ec840f5f3285cb0a381c3d0d52d53c5",
