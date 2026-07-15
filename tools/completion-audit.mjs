@@ -807,33 +807,33 @@ export function capturedOpenPullRequests() {
 }
 
 const REQUIREMENT = Object.freeze({
-  chromaKey: "requirement-5698f215032c0f0e",
-  lutImport: "requirement-308f50408571c49c",
-  voiceIsolation: "requirement-f686c7eff856124f",
-  generationTools: "requirement-ae3876aa43f16739",
-  generationContract: "requirement-dd0fe05957bd7e1e",
-  elevenLabs: "requirement-9f64c383bdf1c254",
-  generationError: "requirement-1f36e817d0ba77ea",
-  manifest: "requirement-6a74e3f1924c4e22",
-  projectBundle: "requirement-9a5fece84fd52934",
-  agentUndo: "requirement-d8779330e21693ad",
-  toolCalls: "requirement-34e3026d3b05e9ee",
-  telemetry: "requirement-923fa228087ad4f3",
-  telemetryDecision: "requirement-681025f8d7d4facf",
-  playback: "requirement-10e720a4f5ddd734",
-  playbackLifecycle: "requirement-9bceb67f73cd51d4",
+  chromaKey: "requirement-559211270c1ef341",
+  lutImport: "requirement-2156cc0bdb849391",
+  voiceIsolation: "requirement-a61a89d25c504355",
+  generationTools: "requirement-1c40dd077c50436b",
+  generationContract: "requirement-40bc3f68e4a7ed80",
+  elevenLabs: "requirement-d4cf765d956089f4",
+  generationError: "requirement-43d222897dd2b2dc",
+  manifest: "requirement-6afe067d8c7d1190",
+  projectBundle: "requirement-21603ea32a296b68",
+  agentUndo: "requirement-11f2c5fee86dd78a",
+  toolCalls: "requirement-97c6d65f7a0f7dc5",
+  telemetry: "requirement-cd85f58d3c84be13",
+  telemetryDecision: "requirement-a9bb7231b1ead0d4",
+  playback: "requirement-1f4c2338bf4f5188",
+  playbackLifecycle: "requirement-3aa21ae6148b5fcd",
 });
 
 const CONTROL = Object.freeze({
   chromaKey: Object.freeze([
-    "control-record-f8fda6ae2f426fe7",
-    "control-record-46a4a8652371f465",
-    "control-record-1dda462442994c48",
-    "control-record-15ec45b9eaa7d580",
+    "control-record-7f7a127fc222b6f6",
+    "control-record-a7f4988fdf17e70b",
+    "control-record-679cbe8e200cd71f",
+    "control-record-44ecdc8071f40679",
   ]),
-  exportCancel: Object.freeze(["control-record-8592a780adc50cb8"]),
-  generation: Object.freeze(["control-record-d53ae6c2dec481d0"]),
-  searchIndex: Object.freeze(["control-record-64640989bd95e214"]),
+  exportCancel: Object.freeze(["control-record-c6c9e81870a0cc68"]),
+  generation: Object.freeze(["control-record-8715ffdcc0c6bf4d"]),
+  searchIndex: Object.freeze(["control-record-ab960caf193a5615"]),
 });
 
 export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
@@ -889,7 +889,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "Cargo.toml feature tables; src-tauri/Cargo.toml",
     "rationale": "Product-level feature gating is relevant, but SwiftPM declarations are not.",
     "linkedRequirementIds": [
-      "requirement-681025f8d7d4facf"
+      "requirement-a9bb7231b1ead0d4"
     ],
     "linkedControlIds": [],
     "requirementGapIds": [
@@ -1143,7 +1143,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "src-tauri/tauri.conf.json; OpenTake release workflows",
     "rationale": "Feature composition and signing checks are portable release invariants; the script is macOS/Swift-specific.",
     "linkedRequirementIds": [
-      "requirement-681025f8d7d4facf"
+      "requirement-a9bb7231b1ead0d4"
     ],
     "linkedControlIds": [],
     "requirementGapIds": [
@@ -1159,7 +1159,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "crates/opentake-agent/src; none for hosted model/activation telemetry",
     "rationale": "OpenTake is currently BYOK/local-agent oriented; hosted model choice and activation accounting need an explicit service decision.",
     "linkedRequirementIds": [
-      "requirement-681025f8d7d4facf"
+      "requirement-a9bb7231b1ead0d4"
     ],
     "linkedControlIds": [],
     "requirementGapIds": [
@@ -1175,7 +1175,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "crates/opentake-agent/src/mcp/server.rs; src-tauri/src/mcp.rs",
     "rationale": "OpenTake has MCP transport but no equivalent activation telemetry boundary.",
     "linkedRequirementIds": [
-      "requirement-681025f8d7d4facf"
+      "requirement-a9bb7231b1ead0d4"
     ],
     "linkedControlIds": [],
     "requirementGapIds": [
@@ -1251,7 +1251,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "rationale": "Single-export cancellation exists, but queue state and the agent management surface do not.",
     "linkedRequirementIds": [],
     "linkedControlIds": [
-      "control-record-8592a780adc50cb8"
+      "control-record-c6c9e81870a0cc68"
     ],
     "requirementGapIds": [
       "requirement-needed:agent-manage-exports",
@@ -1267,7 +1267,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs::run_body; crates/opentake-gen/src/provider/elevenlabs.rs::ElevenLabsAdapter",
     "rationale": "Provider plumbing exists, but agent generation is explicitly not implemented and lacks these arguments.",
     "linkedRequirementIds": [
-      "requirement-9f64c383bdf1c254"
+      "requirement-d4cf765d956089f4"
     ],
     "linkedControlIds": [],
     "requirementGapIds": [
@@ -1341,7 +1341,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "crates/opentake-agent/src/tools/encode_timeline.rs::encode_timeline; crates/opentake-agent/src/mcp/dispatch.rs::{apply,undo}",
     "rationale": "Assistant-only undo already exists, but receipts/consolidated track operations and event-group parity do not.",
     "linkedRequirementIds": [
-      "requirement-03ec8ed1077fbfd6"
+      "requirement-4780410070918f21"
     ],
     "linkedControlIds": [],
     "requirementGapIds": [
@@ -1357,8 +1357,8 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs::{dispatch,apply,undo}",
     "rationale": "The uniform dispatcher and undo stack exist; telemetry and new tool registrations do not.",
     "linkedRequirementIds": [
-      "requirement-d8779330e21693ad",
-      "requirement-681025f8d7d4facf"
+      "requirement-11f2c5fee86dd78a",
+      "requirement-a9bb7231b1ead0d4"
     ],
     "linkedControlIds": [],
     "requirementGapIds": [
@@ -1388,7 +1388,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "crates/opentake-core/src/events.rs; none for analytics sink",
     "rationale": "OpenTake describes telemetry as a possible observer but ships no analytics capture implementation.",
     "linkedRequirementIds": [
-      "requirement-681025f8d7d4facf"
+      "requirement-a9bb7231b1ead0d4"
     ],
     "linkedControlIds": [],
     "requirementGapIds": []
@@ -1402,7 +1402,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "none",
     "rationale": "Requires an OpenTake privacy/consent and deployment decision before implementation.",
     "linkedRequirementIds": [
-      "requirement-681025f8d7d4facf"
+      "requirement-a9bb7231b1ead0d4"
     ],
     "linkedControlIds": [],
     "requirementGapIds": [
@@ -1490,8 +1490,8 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs::undo; crates/opentake-ops/src/command.rs tests",
     "rationale": "OpenTake snapshots each changed command and keeps a dispatcher-local agent undo stack, avoiding NSUndoManager event groups.",
     "linkedRequirementIds": [
-      "requirement-03ec8ed1077fbfd6",
-      "requirement-d8779330e21693ad"
+      "requirement-4780410070918f21",
+      "requirement-11f2c5fee86dd78a"
     ],
     "linkedControlIds": [],
     "requirementGapIds": []
@@ -1505,7 +1505,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "crates/opentake-render/src/gpu/shader.wgsl chroma branch",
     "rationale": "OpenTake's RGB similarity/smoothness/spill shader is real but not proven visually equivalent to the new chroma-space floor.",
     "linkedRequirementIds": [
-      "requirement-5698f215032c0f0e"
+      "requirement-559211270c1ef341"
     ],
     "linkedControlIds": [],
     "requirementGapIds": [
@@ -1521,10 +1521,10 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "crates/opentake-domain/src/grade.rs::ChromaKey; web/src/components/inspector/Inspector.tsx::completeChromaKey",
     "rationale": "OpenTake defaults smoothness to 0.35 and includes spill, so a blind default copy would change its visual model.",
     "linkedRequirementIds": [
-      "requirement-5698f215032c0f0e"
+      "requirement-559211270c1ef341"
     ],
     "linkedControlIds": [
-      "control-record-1dda462442994c48"
+      "control-record-679cbe8e200cd71f"
     ],
     "requirementGapIds": []
   },
@@ -1537,7 +1537,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "crates/opentake-render/src/gpu/compositor.rs; crates/opentake-render/src/gpu/shader.wgsl",
     "rationale": "Sampling needs an unkeyed frame; alpha-order parity is render-critical and needs GPU image tests.",
     "linkedRequirementIds": [
-      "requirement-5698f215032c0f0e"
+      "requirement-559211270c1ef341"
     ],
     "linkedControlIds": [],
     "requirementGapIds": [
@@ -1553,7 +1553,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "none",
     "rationale": "OpenTake has no .cube LUT loader or import path.",
     "linkedRequirementIds": [
-      "requirement-308f50408571c49c"
+      "requirement-2156cc0bdb849391"
     ],
     "linkedControlIds": [],
     "requirementGapIds": []
@@ -1582,7 +1582,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "web/src/components/inspector/Inspector.tsx::ChromaKeySection; none for sampling",
     "rationale": "Existing manual color input does not replace click-to-sample behavior.",
     "linkedRequirementIds": [
-      "requirement-5698f215032c0f0e"
+      "requirement-559211270c1ef341"
     ],
     "linkedControlIds": [],
     "requirementGapIds": [
@@ -1599,7 +1599,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "rationale": "Manual swatch is integrated; eyedropper and transform actions are absent.",
     "linkedRequirementIds": [],
     "linkedControlIds": [
-      "control-record-f8fda6ae2f426fe7"
+      "control-record-7f7a127fc222b6f6"
     ],
     "requirementGapIds": [
       "requirement-needed:chroma-key-eyedropper",
@@ -1616,9 +1616,9 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "rationale": "Enable and numeric controls exist; sampling control and semantic parity do not.",
     "linkedRequirementIds": [],
     "linkedControlIds": [
-      "control-record-7b6a6c4db4520595",
-      "control-record-46a4a8652371f465",
-      "control-record-1dda462442994c48"
+      "control-record-e2dc11ccd269093f",
+      "control-record-a7f4988fdf17e70b",
+      "control-record-679cbe8e200cd71f"
     ],
     "requirementGapIds": [
       "requirement-needed:chroma-key-eyedropper"
@@ -1704,7 +1704,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "crates/opentake-render/tests/gpu_effects.rs::{chroma_key_removes_green,chroma_key_keeps_non_key_color}",
     "rationale": "OpenTake has GPU chroma tests, but not the new near-black regression/vector semantics.",
     "linkedRequirementIds": [
-      "requirement-5698f215032c0f0e"
+      "requirement-559211270c1ef341"
     ],
     "linkedControlIds": [],
     "requirementGapIds": [
@@ -1748,7 +1748,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "none",
     "rationale": "Test accompanies missing LUT behavior.",
     "linkedRequirementIds": [
-      "requirement-308f50408571c49c"
+      "requirement-2156cc0bdb849391"
     ],
     "linkedControlIds": [],
     "requirementGapIds": []
@@ -1762,7 +1762,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "crates/opentake-ops/src/command.rs chroma tests",
     "rationale": "Chroma mutation exists, but upstream default/field model changed.",
     "linkedRequirementIds": [
-      "requirement-5698f215032c0f0e"
+      "requirement-559211270c1ef341"
     ],
     "linkedControlIds": [],
     "requirementGapIds": []
@@ -1862,7 +1862,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "rationale": "Timeline/preview controls exist but expose no meter.",
     "linkedRequirementIds": [],
     "linkedControlIds": [
-      "control-record-558afc9b67a29ef9"
+      "control-record-2334c496315c4fb0"
     ],
     "requirementGapIds": [
       "requirement-needed:audio-meter"
@@ -1878,7 +1878,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "rationale": "OpenTake explicitly silences audio during scrub; native playback audio can be reused but not assumed safe.",
     "linkedRequirementIds": [],
     "linkedControlIds": [
-      "control-record-5808716793cc1f0f"
+      "control-record-ddec81c32f6fc580"
     ],
     "requirementGapIds": [
       "requirement-needed:audible-scrub"
@@ -2049,7 +2049,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "rationale": "Export entry exists; queue activity/history feedback does not.",
     "linkedRequirementIds": [],
     "linkedControlIds": [
-      "control-record-51cd2ee5dd1aecc9"
+      "control-record-f628e22a4f21d719"
     ],
     "requirementGapIds": [
       "requirement-needed:export-queue"
@@ -2079,7 +2079,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "rationale": "Safe single-operation primitives are a base, but queue semantics are missing.",
     "linkedRequirementIds": [],
     "linkedControlIds": [
-      "control-record-8592a780adc50cb8"
+      "control-record-c6c9e81870a0cc68"
     ],
     "requirementGapIds": [
       "requirement-needed:export-queue"
@@ -2095,8 +2095,8 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "rationale": "OpenTake already uses generation-scoped cancellation and staged commit to protect prior output.",
     "linkedRequirementIds": [],
     "linkedControlIds": [
-      "control-record-f62dd7b0a91d2321",
-      "control-record-8592a780adc50cb8"
+      "control-record-f350ffbc0ca5cf8f",
+      "control-record-c6c9e81870a0cc68"
     ],
     "requirementGapIds": [
       "requirement-needed:export-cancellation-safety"
@@ -2112,8 +2112,8 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "rationale": "Form and live cancel exist; multi-job log/history controls do not.",
     "linkedRequirementIds": [],
     "linkedControlIds": [
-      "control-record-f62dd7b0a91d2321",
-      "control-record-8592a780adc50cb8"
+      "control-record-f350ffbc0ca5cf8f",
+      "control-record-c6c9e81870a0cc68"
     ],
     "requirementGapIds": [
       "requirement-needed:export-queue"
@@ -2213,7 +2213,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "crates/opentake-gen/src/keys.rs; provider configuration",
     "rationale": "OpenTake already centralizes provider configuration independently of account UI.",
     "linkedRequirementIds": [
-      "requirement-9f64c383bdf1c254"
+      "requirement-d4cf765d956089f4"
     ],
     "linkedControlIds": [],
     "requirementGapIds": []
@@ -2227,7 +2227,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "crates/opentake-gen/src/error.rs",
     "rationale": "OpenTake already has provider-neutral generation errors.",
     "linkedRequirementIds": [
-      "requirement-1f36e817d0ba77ea"
+      "requirement-43d222897dd2b2dc"
     ],
     "linkedControlIds": [],
     "requirementGapIds": []
@@ -2269,7 +2269,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "crates/opentake-gen/src/catalog/entry.rs; crates/opentake-gen/src/params.rs",
     "rationale": "Catalog machinery exists, but these model capabilities/constraints are absent.",
     "linkedRequirementIds": [
-      "requirement-9f64c383bdf1c254"
+      "requirement-d4cf765d956089f4"
     ],
     "linkedControlIds": [],
     "requirementGapIds": [
@@ -2299,7 +2299,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "crates/opentake-gen/src/catalog/entry.rs ElevenLabs entries",
     "rationale": "ElevenLabs TTS/music/SFX exist, but cleanup/dubbing catalog entries do not.",
     "linkedRequirementIds": [
-      "requirement-9f64c383bdf1c254"
+      "requirement-d4cf765d956089f4"
     ],
     "linkedControlIds": [],
     "requirementGapIds": [
@@ -2385,7 +2385,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "crates/opentake-agent/src/mcp/dispatch.rs UpscaleMedia stub; generation provider paths",
     "rationale": "OpenTake advertises upscale but the agent body is explicitly unwired.",
     "linkedRequirementIds": [
-      "requirement-cce7bd16986c8437"
+      "requirement-bffafcccb447be75"
     ],
     "linkedControlIds": [],
     "requirementGapIds": []
@@ -2414,7 +2414,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "crates/opentake-gen/src/provider/elevenlabs.rs::ElevenLabsAdapter",
     "rationale": "Palmier Convex/backend calls cannot be copied; direct ElevenLabs BYOK endpoints need separate implementation.",
     "linkedRequirementIds": [
-      "requirement-9f64c383bdf1c254"
+      "requirement-d4cf765d956089f4"
     ],
     "linkedControlIds": [],
     "requirementGapIds": [
@@ -2501,7 +2501,7 @@ export const PALMIER_REVIEWED_PATH_LEDGER = Object.freeze(
     "openTakeEquivalent": "crates/opentake-gen/src/params.rs; crates/opentake-gen/src/provider/elevenlabs.rs",
     "rationale": "Existing request types do not model these transform inputs.",
     "linkedRequirementIds": [
-      "requirement-9f64c383bdf1c254"
+      "requirement-d4cf765d956089f4"
     ],
     "linkedControlIds": [],
     "requirementGapIds": [
@@ -3582,6 +3582,44 @@ export function buildIdentityMigration({
     documentMappings: documents.mappings,
     controlMappings: controls.mappings,
   };
+}
+
+export function findMigratedIdentityReferenceLeaks(migration, referencesByPath) {
+  if (!Array.isArray(migration?.documentMappings) || !Array.isArray(migration?.controlMappings)) {
+    throw new Error("identity migration reference scan needs documentMappings[] and controlMappings[]");
+  }
+  if (!referencesByPath || typeof referencesByPath !== "object" || Array.isArray(referencesByPath)) {
+    throw new Error("identity migration reference scan needs references keyed by path");
+  }
+  const replacements = new Map();
+  for (const mapping of [...migration.documentMappings, ...migration.controlMappings]) {
+    for (const [oldKey, newKey] of [
+      ["oldCandidateId", "newCandidateId"],
+      ["oldRecordId", "newRecordId"],
+    ]) {
+      const oldId = mapping?.[oldKey];
+      const newId = mapping?.[newKey];
+      if (typeof oldId !== "string" || typeof newId !== "string" || oldId.length === 0 || newId.length === 0) {
+        throw new Error(`identity migration reference scan found an invalid ${oldKey}/${newKey} pair`);
+      }
+      if (oldId === newId) continue;
+      const existing = replacements.get(oldId);
+      if (existing && existing !== newId) {
+        throw new Error(`identity migration reference scan found conflicting replacements for ${oldId}`);
+      }
+      replacements.set(oldId, newId);
+    }
+  }
+  const leaks = [];
+  for (const [path, text] of Object.entries(referencesByPath)) {
+    if (typeof text !== "string") throw new Error(`identity migration reference source is not text: ${path}`);
+    for (const [oldId, newId] of replacements) {
+      if (text.includes(oldId)) leaks.push({ path, oldId, newId });
+    }
+  }
+  return leaks.sort((left, right) => (
+    compareAuditText(left.path, right.path) || compareAuditText(left.oldId, right.oldId)
+  ));
 }
 
 function replaceIdentityStrings(value, replacements) {
@@ -7523,13 +7561,21 @@ function validateIdentityMigrationArtifact(root, auditDirectory, errors) {
     if (JSON.stringify(currentRequirements) !== JSON.stringify(migrated.requirements)) {
       pushVerificationError(errors, "identity-classification-corrections-drift", "requirements ledger differs from identity rewrite plus reviewed gap corrections");
     }
-    const currentText = oldNames.slice(1).map((name) => readFileSync(resolve(auditDirectory, name), "utf8")).join("\n");
-    const staleIds = [...expected.documentMappings, ...expected.controlMappings]
-      .flatMap(({ oldCandidateId, oldRecordId, newCandidateId, newRecordId }) => (
-        oldCandidateId === newCandidateId && oldRecordId === newRecordId ? [] : [oldCandidateId, oldRecordId]
-      ));
-    if (staleIds.some((id) => currentText.includes(id))) {
-      pushVerificationError(errors, "identity-stale-reference", "a legacy candidate/record ID remains after migration");
+    const referenceSources = Object.fromEntries([
+      ...AUDIT_VERIFIER_FILES.map((path) => [path, readFileSync(resolve(root, path), "utf8")]),
+      ...oldNames.map((name) => [
+        normalizePath(join(auditRelative, name)),
+        readFileSync(resolve(auditDirectory, name), "utf8"),
+      ]),
+    ]);
+    const staleReferences = findMigratedIdentityReferenceLeaks(expected, referenceSources);
+    if (staleReferences.length > 0) {
+      const first = staleReferences[0];
+      pushVerificationError(
+        errors,
+        "identity-stale-reference",
+        `legacy candidate/record IDs remain after migration (${staleReferences.length}): ${first.path} contains ${first.oldId}`,
+      );
     }
   } catch (error) {
     pushVerificationError(errors, "identity-migration-replay-failed", error.message);

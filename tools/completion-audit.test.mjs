@@ -30,6 +30,7 @@ import {
   extractControls,
   extractDocumentCandidates,
   expectedControlAcceptanceCriteria,
+  findMigratedIdentityReferenceLeaks,
   hasValidProductPlanOwnership,
   normalizePath,
   migrateAuditIdentityReferences,
@@ -391,12 +392,12 @@ function createBuildSourceOperations({
     linkTargetSha256: null,
   }));
   const requirements = new Set([
-    "requirement-10e720a4f5ddd734",
-    "requirement-9bceb67f73cd51d4",
+    "requirement-1f4c2338bf4f5188",
+    "requirement-3aa21ae6148b5fcd",
     ...PALMIER_REVIEWED_PATH_LEDGER.flatMap(({ linkedRequirementIds }) => linkedRequirementIds),
   ]);
   const controls = new Set([
-    "control-record-64640989bd95e214",
+    "control-record-ab960caf193a5615",
     ...PALMIER_REVIEWED_PATH_LEDGER.flatMap(({ linkedControlIds }) => linkedControlIds),
   ]);
 
@@ -612,7 +613,7 @@ test("Palmier reviewed ledger is an exact 132-row classification golden", () => 
     createHash("sha256")
       .update(JSON.stringify(PALMIER_REVIEWED_PATH_LEDGER))
       .digest("hex"),
-    "eea0c2016f0e64f6025b0de94cfab0a21a4ef67ca0b74dd5f3b11508e82cf9a0",
+    "2649c689dad111f72dc4097eb96817c42fe7bc9553c674a388c005280a1facc5",
   );
   assert.equal(
     new Set(PALMIER_REVIEWED_PATH_LEDGER.map(
@@ -1359,6 +1360,54 @@ test("identity publication retires historical automated receipts without claimin
     notRun: 1,
     blocked: 0,
   });
+});
+
+test("migrated identity closure rejects legacy IDs in generator current-reference tables and generated artifacts", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const audit = join(root, "docs/audit/2026-07-14");
+  const migration = JSON.parse(readFileSync(join(audit, "identity-migration.json"), "utf8"));
+  const generatorPaths = [
+    "tools/completion-audit.mjs",
+    "tools/completion-audit-controls.mjs",
+    "tools/completion-audit-plan-map.json",
+    "tools/completion-audit.test.mjs",
+  ];
+  const artifactNames = [
+    "document-candidates.json",
+    "requirements.json",
+    "control-candidates.json",
+    "controls.json",
+    "runtime-evidence.json",
+    "sources.json",
+  ];
+  const references = Object.fromEntries([
+    ...generatorPaths.map((path) => [path, readFileSync(join(root, path), "utf8")]),
+    ...artifactNames.map((name) => [`docs/audit/2026-07-14/${name}`, readFileSync(join(audit, name), "utf8")]),
+  ]);
+
+  assert.deepEqual(findMigratedIdentityReferenceLeaks(migration, references), []);
+
+  const fixtureMigration = {
+    documentMappings: [{
+      oldCandidateId: "doc-old-current-reference",
+      newCandidateId: "doc-new-current-reference",
+      oldRecordId: "requirement-old-current-reference",
+      newRecordId: "requirement-new-current-reference",
+    }],
+    controlMappings: [],
+  };
+  assert.deepEqual(findMigratedIdentityReferenceLeaks(fixtureMigration, {
+    "tools/generator.mjs": "const CURRENT = 'requirement-old-current-reference';\n",
+    "docs/audit/current.json": "{\"id\":\"doc-old-current-reference\"}\n",
+  }), [{
+    path: "docs/audit/current.json",
+    oldId: "doc-old-current-reference",
+    newId: "doc-new-current-reference",
+  }, {
+    path: "tools/generator.mjs",
+    oldId: "requirement-old-current-reference",
+    newId: "requirement-new-current-reference",
+  }]);
 });
 
 test("reviewProcessGapCorrections reclassifies every completion-audit process record to documentation", () => {
