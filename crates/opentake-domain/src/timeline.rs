@@ -1,11 +1,10 @@
 //! Timeline / Track containers. 1:1 port of `Timeline` and `Track` from
 //! upstream `Timeline.swift`.
 //!
-//! Note on `id` tolerance: upstream synthesizes a fresh UUID when a Track/Clip
-//! `id` is missing on decode. To keep this crate a zero-business-dependency leaf
-//! (no `uuid`), a missing `id` decodes to an empty string here; the project layer
-//! (which owns `uuid`) is responsible for backfilling empty ids after load. All
-//! other missing-key fallbacks match upstream exactly.
+//! Note on `id` tolerance: domain decoding is deterministic and maps a missing
+//! or malformed Track/Clip `id` to an empty placeholder. The project persistence
+//! boundary owns UUID repair because it retains the raw JSON needed to
+//! distinguish that placeholder from an explicitly encoded empty string.
 
 use std::collections::HashSet;
 
@@ -68,6 +67,8 @@ impl Default for Timeline {
 }
 
 impl Timeline {
+    pub const TRACKS_WIRE_FIELD: &'static str = "tracks";
+
     pub fn new() -> Self {
         Timeline::default()
     }
@@ -82,26 +83,74 @@ fn default_sync_locked() -> bool {
     true
 }
 
+/// Match Track's upstream `(try? decode(...)) ?? default` behavior for its
+/// tolerant fields, including present values of the wrong JSON type.
+fn deserialize_default_on_error<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    deserialize_or(deserializer, T::default())
+}
+
+fn deserialize_or<'de, D, T>(deserializer: D, fallback: T) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    #[allow(dead_code)]
+    enum Tolerant<T> {
+        Value(T),
+        Invalid(serde::de::IgnoredAny),
+    }
+
+    Ok(match Tolerant::deserialize(deserializer)? {
+        Tolerant::Value(value) => value,
+        Tolerant::Invalid(_) => fallback,
+    })
+}
+
+fn deserialize_true_on_error<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_or(deserializer, true)
+}
+
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Track {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_error")]
     pub id: String,
     #[serde(rename = "type")]
     pub kind: ClipType,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_error")]
     pub muted: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_error")]
     pub hidden: bool,
-    #[serde(default = "default_sync_locked")]
+    #[serde(
+        default = "default_sync_locked",
+        deserialize_with = "deserialize_true_on_error"
+    )]
     pub sync_locked: bool,
     #[serde(default)]
     pub clips: Vec<Clip>,
 }
 
 impl Track {
-    /// New empty track of `kind`. `id` is caller-supplied (the project layer owns
-    /// UUID generation); use `String::new()` for a placeholder if needed.
+    /// Persisted keys owned by Track's wire schema. Compatibility scanning
+    /// consumes this metadata instead of duplicating field names downstream.
+    pub const WIRE_FIELDS: &'static [&'static str] =
+        &["id", "type", "muted", "hidden", "syncLocked", "clips"];
+    pub const TOLERANT_SCALAR_WIRE_FIELDS: &'static [&'static str] =
+        &["id", "muted", "hidden", "syncLocked"];
+    pub const ID_WIRE_FIELD: &'static str = "id";
+    pub const CLIPS_WIRE_FIELD: &'static str = "clips";
+
+    /// New empty track of `kind`. The caller owns identity for new edits; the
+    /// project persistence boundary repairs missing/malformed legacy IDs.
     pub fn new(id: impl Into<String>, kind: ClipType) -> Self {
         Track {
             id: id.into(),
@@ -219,7 +268,8 @@ mod tests {
 
     #[test]
     fn track_decode_defaults_missing_fields() {
-        // Only `type` present; id->"", muted/hidden->false, sync_locked->true.
+        // Only `type` present; id deterministically defaults to an empty
+        // placeholder, muted/hidden->false, sync_locked->true.
         let json = r#"{"type":"audio"}"#;
         let t: Track = serde_json::from_str(json).unwrap();
         assert_eq!(t.kind, ClipType::Audio);
@@ -228,6 +278,12 @@ mod tests {
         assert!(!t.hidden);
         assert!(t.sync_locked);
         assert!(t.clips.is_empty());
+
+        for id in ["null", "7", "false", "{}", "[]"] {
+            let malformed: Track =
+                serde_json::from_str(&format!(r#"{{"id":{id},"type":"audio"}}"#)).unwrap();
+            assert_eq!(malformed.id, "", "id shape {id}");
+        }
     }
 
     #[test]

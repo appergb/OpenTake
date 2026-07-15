@@ -6,10 +6,10 @@
 //! continuity across the cut is preserved by [`split_keyframe_track`].
 //!
 //! This lives in the domain crate (not the editor layer) because it operates
-//! purely on [`Clip`] fields and `split_keyframe_track` already lives here.
-//! Because the domain crate has no `uuid` dependency, the right half's id is
-//! caller-supplied — mirroring how `Clip`/`Track` ids are backfilled by the
-//! project layer after load.
+//! purely on [`Clip`] fields and `split_keyframe_track` already lives here. The
+//! right half's id remains caller-supplied so command/undo flows can inject a
+//! deterministic identity; persistence-only legacy UUID repair happens at the
+//! project bundle boundary and is unrelated to editing commands.
 
 use crate::clip::Clip;
 use crate::keyframe::{split_keyframe_track, AnimPair};

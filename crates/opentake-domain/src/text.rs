@@ -9,6 +9,12 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::text_wire::{
+    deserialize_background_on_error, deserialize_border_on_error, deserialize_color_on_error,
+    deserialize_default_on_error, deserialize_font_name_on_error, deserialize_font_scale_on_error,
+    deserialize_font_size_on_error, deserialize_shadow_on_error,
+};
+
 /// sRGB color with straight alpha. Defaults to opaque white, matching upstream.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Rgba {
@@ -38,6 +44,10 @@ impl Default for Rgba {
 }
 
 impl Rgba {
+    /// Persisted keys owned by RGBA's wire schema.
+    pub const WIRE_FIELDS: &'static [&'static str] = &["r", "g", "b", "a"];
+    pub const TOLERANT_SCALAR_WIRE_FIELDS: &'static [&'static str] = Self::WIRE_FIELDS;
+
     pub fn new(r: f64, g: f64, b: f64, a: f64) -> Self {
         Rgba { r, g, b, a }
     }
@@ -147,6 +157,15 @@ impl Default for Shadow {
     }
 }
 
+impl Shadow {
+    /// Persisted keys owned by Shadow's wire schema.
+    pub const WIRE_FIELDS: &'static [&'static str] =
+        &["enabled", "color", "offsetX", "offsetY", "blur"];
+    pub const TOLERANT_SCALAR_WIRE_FIELDS: &'static [&'static str] =
+        &["enabled", "offsetX", "offsetY", "blur"];
+    pub const COLOR_WIRE_FIELD: &'static str = "color";
+}
+
 /// Toggleable solid color — used for the text box background and border.
 /// Defaults to disabled with opaque white (matches upstream `Fill()`).
 #[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
@@ -158,46 +177,86 @@ pub struct Fill {
 }
 
 impl Fill {
+    /// Persisted keys owned by Fill's wire schema.
+    pub const WIRE_FIELDS: &'static [&'static str] = &["enabled", "color"];
+    pub const TOLERANT_SCALAR_WIRE_FIELDS: &'static [&'static str] = &["enabled"];
+    pub const COLOR_WIRE_FIELD: &'static str = "color";
+
     pub fn new(enabled: bool, color: Rgba) -> Self {
         Fill { enabled, color }
     }
 }
 
-fn default_font_name() -> String {
+pub(crate) fn default_font_name() -> String {
     "Helvetica-Bold".to_string()
 }
-fn default_font_size() -> f64 {
+pub(crate) fn default_font_size() -> f64 {
     96.0
 }
-fn default_font_scale() -> f64 {
+pub(crate) fn default_font_scale() -> f64 {
     1.0
 }
-fn default_background_fill() -> Fill {
+pub(crate) fn default_background_fill() -> Fill {
     Fill::new(false, Rgba::new(0.0, 0.0, 0.0, 0.6))
 }
-fn default_border_fill() -> Fill {
+pub(crate) fn default_border_fill() -> Fill {
     Fill::new(false, Rgba::new(0.0, 0.0, 0.0, 1.0))
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextStyle {
-    #[serde(default = "default_font_name")]
+    #[serde(
+        default = "default_font_name",
+        deserialize_with = "deserialize_font_name_on_error"
+    )]
     pub font_name: String,
-    #[serde(default = "default_font_size")]
+    #[serde(
+        default = "default_font_size",
+        deserialize_with = "deserialize_font_size_on_error"
+    )]
     pub font_size: f64,
-    #[serde(default = "default_font_scale")]
+    #[serde(
+        default = "default_font_scale",
+        deserialize_with = "deserialize_font_scale_on_error"
+    )]
     pub font_scale: f64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_color_on_error")]
     pub color: Rgba,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_error")]
     pub alignment: TextAlignment,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_shadow_on_error")]
     pub shadow: Shadow,
-    #[serde(default = "default_background_fill")]
+    #[serde(
+        default = "default_background_fill",
+        deserialize_with = "deserialize_background_on_error"
+    )]
     pub background: Fill,
-    #[serde(default = "default_border_fill")]
+    #[serde(
+        default = "default_border_fill",
+        deserialize_with = "deserialize_border_on_error"
+    )]
     pub border: Fill,
+}
+
+impl TextStyle {
+    /// Persisted keys owned by TextStyle's wire schema. Compatibility scanning
+    /// consumes these constants so persistence does not maintain a second copy.
+    pub const WIRE_FIELDS: &'static [&'static str] = &[
+        "fontName",
+        "fontSize",
+        "fontScale",
+        "color",
+        "alignment",
+        "shadow",
+        "background",
+        "border",
+    ];
+    pub const TOLERANT_SCALAR_WIRE_FIELDS: &'static [&'static str] =
+        &["fontName", "fontSize", "fontScale", "alignment"];
+    pub const COLOR_WIRE_FIELD: &'static str = "color";
+    pub const SHADOW_WIRE_FIELD: &'static str = "shadow";
+    pub const FILL_WIRE_FIELDS: &'static [&'static str] = &["background", "border"];
 }
 
 impl Default for TextStyle {
@@ -429,6 +488,44 @@ mod tests {
         // untouched fields still default
         approx(s.font_scale, 1.0);
         assert_eq!(s.font_name, "Helvetica-Bold");
+    }
+
+    #[test]
+    fn text_style_malformed_fields_default_independently() {
+        let s: TextStyle = serde_json::from_str(
+            r#"{
+                "fontName": 7,
+                "fontSize": 48,
+                "fontScale": [],
+                "color": {"r": 0.1, "g": 0.2, "b": 0.3, "a": 0.4},
+                "alignment": "future",
+                "shadow": {
+                    "enabled": false,
+                    "color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 0.5},
+                    "offsetX": 1.0,
+                    "offsetY": 2.0,
+                    "blur": 9.0
+                },
+                "background": {"enabled": true},
+                "border": {
+                    "enabled": true,
+                    "color": {"r": 0.9, "g": 0.8, "b": 0.7, "a": 0.6}
+                }
+            }"#,
+        )
+        .expect("upstream TextStyle defaults each malformed field independently");
+
+        assert_eq!(s.font_name, "Helvetica-Bold");
+        approx(s.font_size, 48.0);
+        approx(s.font_scale, 1.0);
+        approx(s.color.r, 0.1);
+        approx(s.color.a, 0.4);
+        assert_eq!(s.alignment, TextAlignment::Center);
+        assert!(!s.shadow.enabled);
+        approx(s.shadow.blur, 9.0);
+        assert_eq!(s.background, default_background_fill());
+        assert!(s.border.enabled);
+        approx(s.border.color.r, 0.9);
     }
 
     #[test]

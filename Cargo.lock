@@ -3496,6 +3496,7 @@ dependencies = [
  "serde_ignored",
  "serde_json",
  "thiserror 2.0.18",
+ "uuid",
  "windows-sys 0.61.2",
 ]
 

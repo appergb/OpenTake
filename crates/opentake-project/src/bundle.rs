@@ -26,6 +26,7 @@ use opentake_domain::{MediaManifest, Timeline};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 
+use crate::compatibility;
 use crate::error::{ProjectError, Result};
 use crate::gen_log::GenerationLog;
 use crate::layout;
@@ -143,15 +144,16 @@ impl Project {
                 bundle: bundle.to_path_buf(),
             }
         })?;
-        let (timeline, timeline_blockers) =
+        let (mut timeline, timeline_blockers, timeline_document) =
             decode_component::<Timeline>(&timeline_bytes, layout::TIMELINE_FILE)?;
+        compatibility::repair_timeline_ids(&mut timeline, &timeline_document);
         after_component(layout::TIMELINE_FILE);
         let mut compatibility = ProjectCompatibility::default();
         compatibility.extend(timeline_blockers);
 
         // media.json: strict when present, empty default when absent.
         let manifest = if let Some(bytes) = root.read_optional(layout::MANIFEST_FILE)? {
-            let (manifest, blockers) =
+            let (manifest, blockers, _) =
                 decode_component::<MediaManifest>(&bytes, layout::MANIFEST_FILE)?;
             compatibility.extend(blockers);
             manifest
@@ -164,7 +166,7 @@ impl Project {
         let generation_log = match root.read_optional(layout::GENERATION_LOG_FILE) {
             Ok(Some(bytes)) => {
                 match decode_component::<GenerationLog>(&bytes, layout::GENERATION_LOG_FILE) {
-                    Ok((log, blockers)) => {
+                    Ok((log, blockers, _)) => {
                         compatibility.extend(blockers);
                         Some(log)
                     }
@@ -308,95 +310,55 @@ fn encode_component<T: Serialize>(file_name: &str, value: &T) -> Result<Vec<u8>>
     serde_json::to_vec_pretty(value).map_err(|error| ProjectError::json(file_name, error))
 }
 
-fn decode_component<T: DeserializeOwned>(bytes: &[u8], file: &str) -> Result<(T, Vec<String>)> {
+fn decode_component<T: DeserializeOwned>(
+    bytes: &[u8],
+    file: &str,
+) -> Result<(T, Vec<String>, Value)> {
     let document: Value =
         serde_json::from_slice(bytes).map_err(|error| ProjectError::json(file, error))?;
+
+    // The normal path performs one formal decode and no Track.clips probes or
+    // document clone. Only a failed timeline decode enters the narrow upstream
+    // Track.clips fallback.
+    let initial = deserialize_with_ignored(bytes, file, &document);
+    let (value, mut ignored, failed_tracks) = match initial {
+        Ok((value, ignored)) => (value, ignored, Vec::new()),
+        Err(initial_error) if file == layout::TIMELINE_FILE => {
+            let Some(fallback) = compatibility::prepare_timeline_fallback(&document) else {
+                return Err(ProjectError::json(file, initial_error));
+            };
+            let normalized = serde_json::to_vec(&fallback.normalized)
+                .map_err(|error| ProjectError::json(file, error))?;
+            let (value, ignored) = deserialize_with_ignored(&normalized, file, &document)
+                .map_err(|error| ProjectError::json(file, error))?;
+            (value, ignored, fallback.failed_tracks)
+        }
+        Err(error) => return Err(ProjectError::json(file, error)),
+    };
+
+    if file == layout::TIMELINE_FILE {
+        compatibility::scan_timeline(&document, file, &failed_tracks, &mut ignored);
+    }
+    ignored.sort();
+    ignored.dedup();
+    Ok((value, ignored, document))
+}
+
+fn deserialize_with_ignored<T: DeserializeOwned>(
+    bytes: &[u8],
+    file: &str,
+    document: &Value,
+) -> std::result::Result<(T, Vec<String>), serde_json::Error> {
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     let mut ignored = Vec::new();
     let value = serde_ignored::deserialize(&mut decoder, |path| {
         ignored.push(format!(
             "{file}:{}",
-            canonical_ignored_path(&path, &document)
+            compatibility::canonical_ignored_path(&path, document)
         ));
-    })
-    .map_err(|error| ProjectError::json(file, error))?;
-    decoder
-        .end()
-        .map_err(|error| ProjectError::json(file, error))?;
-    ignored.sort();
-    ignored.dedup();
+    })?;
+    decoder.end()?;
     Ok((value, ignored))
-}
-
-enum IgnoredSegment {
-    Map(String),
-    Seq(usize),
-}
-
-fn canonical_ignored_path(path: &serde_ignored::Path<'_>, document: &Value) -> String {
-    fn collect(path: &serde_ignored::Path<'_>, segments: &mut Vec<IgnoredSegment>) {
-        match path {
-            serde_ignored::Path::Root => {}
-            serde_ignored::Path::Seq { parent, index } => {
-                collect(parent, segments);
-                segments.push(IgnoredSegment::Seq(*index));
-            }
-            serde_ignored::Path::Map { parent, key } => {
-                collect(parent, segments);
-                segments.push(IgnoredSegment::Map(key.clone()));
-            }
-            serde_ignored::Path::Some { parent }
-            | serde_ignored::Path::NewtypeStruct { parent }
-            | serde_ignored::Path::NewtypeVariant { parent } => collect(parent, segments),
-        }
-    }
-
-    let mut segments = Vec::new();
-    collect(path, &mut segments);
-
-    let mut current = Some(document);
-    let mut rendered = Vec::new();
-    for segment in segments {
-        match segment {
-            IgnoredSegment::Seq(index) => {
-                rendered.push(index.to_string());
-                current = current
-                    .and_then(Value::as_array)
-                    .and_then(|array| array.get(index));
-            }
-            IgnoredSegment::Map(key) => {
-                let direct = current
-                    .and_then(Value::as_object)
-                    .and_then(|object| object.get(&key));
-                if let Some(value) = direct {
-                    rendered.push(key);
-                    current = Some(value);
-                    continue;
-                }
-
-                let variant = current
-                    .and_then(Value::as_object)
-                    .filter(|object| object.len() == 1)
-                    .and_then(|object| object.iter().next())
-                    .filter(|(_, value)| {
-                        value
-                            .as_object()
-                            .is_some_and(|fields| fields.contains_key(&key))
-                    });
-                if let Some((variant_name, variant_value)) = variant {
-                    rendered.push(variant_name.clone());
-                    rendered.push(key.clone());
-                    current = variant_value
-                        .as_object()
-                        .and_then(|fields| fields.get(&key));
-                } else {
-                    rendered.push(key);
-                    current = None;
-                }
-            }
-        }
-    }
-    rendered.join(".")
 }
 
 /// Copy a source bundle's `media/` directory into `dest_bundle`, recursively,
