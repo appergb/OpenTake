@@ -18,6 +18,9 @@ import {
   CONTROL_REVIEW_METADATA,
   PALMIER_REVIEWED_PATH_LEDGER,
   buildFileInventory,
+  buildImplementationPlanGroup,
+  buildImplementationPlans,
+  buildIdentityMigration,
   buildSourceEvidence,
   capturedOpenPullRequests,
   captureDirtyCheckout,
@@ -27,10 +30,20 @@ import {
   extractControls,
   extractDocumentCandidates,
   expectedControlAcceptanceCriteria,
+  hasValidProductPlanOwnership,
   normalizePath,
+  migrateAuditIdentityReferences,
+  reviewProcessGapCorrections,
+  reviewedPlanExactSlices,
+  reviewedPlanOwnershipMaps,
+  retireHistoricalAutomatedReceipts,
   renderSourceReport,
   reviewPalmierChangedPaths,
   stableId,
+  sourceDeclaresProductAnchor,
+  sourceDeclaresProductSpec,
+  sourceDeclaresTest,
+  validateTrackedPlanProvenance,
   validateSourceEvidenceCatalogs,
   validateSourceEvidenceShape,
   verifyAudit,
@@ -118,6 +131,7 @@ function createControlVerificationFixture(t, {
   const verifierFiles = [
     "tools/completion-audit.mjs",
     "tools/completion-audit-controls.mjs",
+    "tools/completion-audit-plan-map.json",
     "tools/completion-audit.test.mjs",
   ];
   git(root, [
@@ -744,6 +758,13 @@ test("source report renders reviewed classifications and rejects malformed evide
     () => validateSourceEvidenceShape(null),
     /source evidence must be an object/,
   );
+
+  const unverified = structuredClone(evidence);
+  unverified.sources[0].changedPaths[0].disposition = "unverified";
+  assert.throws(
+    () => validateSourceEvidenceShape(unverified),
+    /unverified source change.*reviewed\.swift/i,
+  );
 });
 
 test("buildSourceEvidence assembles fixture snapshots and fails closed on ledger drift", () => {
@@ -955,7 +976,7 @@ test("extractControls covers native, custom-handler, and ARIA controls in source
   assert.deepEqual(extractControls("web/src/View.tsx", source, ts), controls);
 });
 
-test("extractControls uses columns to distinguish same-line same-tag controls", () => {
+test("extractControls uses semantic ordinals to distinguish duplicate controls", () => {
   const source = "export const Pair = () => <div><button>One</button><button>Two</button></div>;";
   const controls = extractControls("web/src/Pair.tsx", source, ts);
 
@@ -963,11 +984,63 @@ test("extractControls uses columns to distinguish same-line same-tag controls", 
   assert.equal(controls[0].line, controls[1].line);
   assert.notEqual(controls[0].column, controls[1].column);
   assert.notEqual(controls[0].id, controls[1].id);
-  assert.equal(
-    controls[0].id,
-    stableId("control", `web/src/Pair.tsx:${controls[0].line}:${controls[0].column}:button`),
-  );
+  assert.deepEqual(controls.map(({ semanticOrdinal }) => semanticOrdinal), [1, 1]);
   assert.deepEqual(controls.map(({ label }) => label), ["One", "Two"]);
+});
+
+test("extractControls keeps semantic IDs stable across relocation and unrelated siblings", () => {
+  const before = extractControls(
+    "web/src/Panel.tsx",
+    "export function Panel(){return <section><button aria-label=\"Save\" onClick={save}>Save</button><button aria-label=\"Close\" onClick={close}>Close</button></section>}",
+    ts,
+  );
+  const after = extractControls(
+    "web/src/Panel.tsx",
+    "\nexport function Panel(){return <section>\n<div>unrelated</div><button aria-label=\"Help\" onClick={help}>Help</button><button aria-label=\"Save\" onClick={save}>Save</button><button aria-label=\"Close\" onClick={close}>Close</button></section>}",
+    ts,
+  );
+
+  assert.equal(after.find(({ label }) => label === "Save").id, before.find(({ label }) => label === "Save").id);
+  assert.equal(after.find(({ label }) => label === "Close").id, before.find(({ label }) => label === "Close").id);
+  assert.notEqual(after.find(({ label }) => label === "Save").line, before.find(({ label }) => label === "Save").line);
+});
+
+test("extractControls changes semantic IDs when control behavior changes", () => {
+  const [before] = extractControls(
+    "web/src/Panel.tsx",
+    "export function Panel(){return <button aria-label=\"Save\" onClick={save}>Save</button>}",
+    ts,
+  );
+  const [renamed] = extractControls(
+    "web/src/Panel.tsx",
+    "export function Panel(){return <button aria-label=\"Save copy\" onClick={save}>Save</button>}",
+    ts,
+  );
+  const [rewired] = extractControls(
+    "web/src/Panel.tsx",
+    "export function Panel(){return <button aria-label=\"Save\" onClick={saveAs}>Save</button>}",
+    ts,
+  );
+
+  assert.notEqual(renamed.id, before.id);
+  assert.notEqual(rewired.id, before.id);
+});
+
+test("extractControls assigns stable same-signature ordinals", () => {
+  const before = extractControls(
+    "web/src/Panel.tsx",
+    "export function Panel(){return <><button aria-label=\"Item\" onClick={select}>Item</button><button aria-label=\"Item\" onClick={select}>Item</button></>}",
+    ts,
+  );
+  const after = extractControls(
+    "web/src/Panel.tsx",
+    "export function Panel(){return <><span>unrelated</span><button aria-label=\"Item\" onClick={select}>Item</button><div/><button aria-label=\"Item\" onClick={select}>Item</button></>}",
+    ts,
+  );
+
+  assert.deepEqual(before.map(({ semanticOrdinal }) => semanticOrdinal), [1, 2]);
+  assert.deepEqual(after.map(({ semanticOrdinal }) => semanticOrdinal), [1, 2]);
+  assert.deepEqual(after.map(({ id }) => id), before.map(({ id }) => id));
 });
 
 test("extractControls includes every required interactive ARIA role", () => {
@@ -1030,6 +1103,439 @@ test("extractDocumentCandidates captures headings, checkboxes, and gap signals",
     [1, "heading"], [2, "heading"], [3, "unchecked"], [4, "gap-marker"],
   ]);
   assert.equal(records[2].heading, "Export");
+});
+
+test("extractDocumentCandidates keeps semantic IDs stable across relocation and unrelated siblings", () => {
+  const before = extractDocumentCandidates(
+    "docs/plan.md",
+    "# Delivery\n\n- [ ] Ship export\n",
+  );
+  const after = extractDocumentCandidates(
+    "docs/plan.md",
+    "\n# Delivery\n\nContext that is not a candidate.\n\n- [x] Already complete\n\n- [ ] Ship export\n",
+  );
+
+  assert.equal(after.find(({ signal }) => signal === "heading").id, before.find(({ signal }) => signal === "heading").id);
+  assert.equal(after.find(({ signal }) => signal === "unchecked").id, before.find(({ signal }) => signal === "unchecked").id);
+  assert.notEqual(after.find(({ signal }) => signal === "unchecked").line, before.find(({ signal }) => signal === "unchecked").line);
+});
+
+test("extractDocumentCandidates changes semantic IDs when requirement text changes", () => {
+  const before = extractDocumentCandidates("docs/plan.md", "# Delivery\n- [ ] Ship export\n");
+  const after = extractDocumentCandidates("docs/plan.md", "# Delivery\n- [ ] Ship HDR export\n");
+
+  assert.equal(after[0].id, before[0].id);
+  assert.notEqual(after[1].id, before[1].id);
+});
+
+test("extractDocumentCandidates assigns stable same-signature ordinals", () => {
+  const before = extractDocumentCandidates(
+    "docs/plan.md",
+    "# Delivery\n- [ ] Ship export\n- [ ] Ship export\n",
+  ).filter(({ signal }) => signal === "unchecked");
+  const after = extractDocumentCandidates(
+    "docs/plan.md",
+    "# Delivery\nContext only.\n- [ ] Ship export\n- [x] unrelated\n- [ ] Ship export\n",
+  ).filter(({ signal }) => signal === "unchecked");
+
+  assert.deepEqual(before.map(({ semanticOrdinal }) => semanticOrdinal), [1, 2]);
+  assert.deepEqual(after.map(({ semanticOrdinal }) => semanticOrdinal), [1, 2]);
+  assert.deepEqual(after.map(({ id }) => id), before.map(({ id }) => id));
+});
+
+test("buildIdentityMigration is a lossless document/control bijection and rewrites every reference class", () => {
+  const newDocuments = extractDocumentCandidates(
+    "docs/plan.md",
+    "# Delivery\n- [ ] Ship export\n- [ ] Ship export\n",
+  );
+  const oldDocuments = newDocuments.map((candidate, index) => ({
+    ...candidate,
+    id: `doc-old-${index + 1}`,
+    semanticFingerprint: undefined,
+    semanticOrdinal: undefined,
+  }));
+  const newControls = extractControls(
+    "web/src/Panel.tsx",
+    "export function Panel(){return <><button aria-label=\"Item\" onClick={select}>Item</button><button aria-label=\"Item\" onClick={select}>Item</button></>}",
+    ts,
+  );
+  const oldControls = newControls.map((candidate, index) => ({
+    ...candidate,
+    id: `control-old-${index + 1}`,
+    semanticFingerprint: undefined,
+    semanticOrdinal: undefined,
+  }));
+
+  const migration = buildIdentityMigration({
+    oldDocuments,
+    newDocuments,
+    oldControls,
+    newControls,
+  });
+  assert.deepEqual(migration.counts, {
+    oldDocuments: 3,
+    newDocuments: 3,
+    mappedDocuments: 3,
+    oldControls: 2,
+    newControls: 2,
+    mappedControls: 2,
+    ambiguousSignatures: 0,
+    unmappedOld: 0,
+    unmappedNew: 0,
+  });
+  assert.deepEqual(migration.duplicateOrdinals, {
+    documentSignatures: 1,
+    documentCandidates: 2,
+    controlSignatures: 1,
+    controlCandidates: 2,
+  });
+
+  const oldRequirementId = stableId("requirement", oldDocuments[1].id);
+  const oldCanonicalControlId = stableId("control-record", oldControls[0].id);
+  const oldDuplicateControlId = stableId("control-record", oldControls[1].id);
+  const migrated = migrateAuditIdentityReferences({
+    migration,
+    requirements: {
+      schema: 1,
+      records: [{
+        id: oldRequirementId,
+        candidateId: oldDocuments[1].id,
+        source: { path: oldDocuments[1].path, line: oldDocuments[1].line },
+        provenance: [`source:${oldDocuments[1].path}:${oldDocuments[1].line}:${oldDocuments[1].signal}`],
+        acceptanceCriteria: [`test:fixtures/completion_${oldDocuments[1].id.replace(/^doc-/, "")}.rs#completion_${oldDocuments[1].id.replace(/^doc-/, "")}`],
+      }],
+    },
+    controls: {
+      schema: 2,
+      records: [{
+        id: oldCanonicalControlId,
+        candidateId: oldControls[0].id,
+        source: { path: oldControls[0].path, line: oldControls[0].line, column: oldControls[0].column },
+        duplicateOf: [],
+        finalDisposition: `Canonical ${oldControls[0].id}.`,
+      }, {
+        id: oldDuplicateControlId,
+        candidateId: oldControls[1].id,
+        source: { path: oldControls[1].path, line: oldControls[1].line, column: oldControls[1].column },
+        duplicateOf: [oldControls[0].id],
+        finalDisposition: `Duplicate of ${oldControls[0].id}.`,
+      }],
+    },
+    runtimeEvidence: {
+      receipts: [{
+        candidateIds: oldControls.map(({ id }) => id),
+        assertions: oldControls.map(({ id }) => ({ candidateId: id })),
+      }],
+    },
+    sources: {
+      sources: [{
+        changedPaths: [{
+          linkedRequirementIds: [oldRequirementId],
+          linkedControlIds: [oldCanonicalControlId, oldDuplicateControlId],
+        }],
+      }],
+    },
+  });
+
+  assert.equal(migrated.requirements.records[0].candidateId, newDocuments[1].id);
+  assert.equal(migrated.requirements.records[0].id, stableId("requirement", newDocuments[1].id));
+  assert.deepEqual(
+    migrated.controls.records[1].duplicateOf,
+    [newControls[0].id],
+  );
+  assert.match(migrated.controls.records[1].finalDisposition, new RegExp(newControls[0].id));
+  assert.deepEqual(
+    migrated.runtimeEvidence.receipts[0].candidateIds,
+    newControls.map(({ id }) => id),
+  );
+  assert.deepEqual(migrated.sources.sources[0].changedPaths[0].linkedRequirementIds, [
+    stableId("requirement", newDocuments[1].id),
+  ]);
+  assert.deepEqual(migrated.sources.sources[0].changedPaths[0].linkedControlIds, newControls.map(
+    ({ id }) => stableId("control-record", id),
+  ));
+  assert.deepEqual(migrated.rewriteCounts, {
+    requirementCandidateIds: 1,
+    requirementRecordIds: 1,
+    controlCandidateIds: 2,
+    controlRecordIds: 2,
+    duplicateTargets: 1,
+    runtimeCandidateRefs: 4,
+    sourceRequirementLinks: 1,
+    sourceControlLinks: 2,
+  });
+  assert.equal(
+    migrated.requirements.records[0].provenance[0],
+    `source:${newDocuments[1].path}:${newDocuments[1].line}:${newDocuments[1].signal}`,
+  );
+  assert.equal(
+    migrated.requirements.records[0].acceptanceCriteria[0],
+    `test:fixtures/completion_${newDocuments[1].id.replace(/^doc-/, "")}.rs#completion_${newDocuments[1].id.replace(/^doc-/, "")}`,
+  );
+});
+
+test("buildIdentityMigration fails closed when an identical duplicate is inserted or deleted", () => {
+  const before = extractDocumentCandidates(
+    "docs/plan.md",
+    "# Delivery\n- [ ] Ship export\n- [ ] Ship export\n",
+  );
+  const inserted = extractDocumentCandidates(
+    "docs/plan.md",
+    "# Delivery\n- [ ] Ship export\n- [ ] Ship export\n- [ ] Ship export\n",
+  );
+  const legacy = before.map((candidate, index) => ({ ...candidate, id: `legacy-${index}` }));
+
+  assert.throws(
+    () => buildIdentityMigration({
+      oldDocuments: legacy,
+      newDocuments: inserted,
+      oldControls: [],
+      newControls: [],
+    }),
+    /ambiguous semantic identity.*docs\/plan\.md.*duplicate count changed/i,
+  );
+  assert.throws(
+    () => buildIdentityMigration({
+      oldDocuments: inserted,
+      newDocuments: before,
+      oldControls: [],
+      newControls: [],
+    }),
+    /ambiguous semantic identity.*docs\/plan\.md.*duplicate count changed/i,
+  );
+});
+
+test("identity publication retires historical automated receipts without claiming a new execution", () => {
+  const previousRevision = { commit: "old-commit", tree: "old-tree" };
+  const nextRevision = { commit: "new-commit", tree: "new-tree" };
+  const runtimeEvidence = {
+    summary: {
+      receipts: 2,
+      direct: 0,
+      supporting: 2,
+      passed: 2,
+      failed: 0,
+      partial: 0,
+      notRun: 0,
+      blocked: 0,
+    },
+    receipts: [{
+      id: "historical-automated",
+      kind: "automated",
+      status: "passed",
+      evidenceLevel: "supporting",
+      executedCheckoutRevision: previousRevision,
+      result: { summary: "168 audit tests passed and 0 failed.", exitCode: 0 },
+      exitCode: 0,
+      limitations: ["Supporting evidence only."],
+    }, {
+      id: "product-browser",
+      kind: "browser",
+      status: "passed",
+      evidenceLevel: "supporting",
+      executedCheckoutRevision: { commit: "product", tree: "product-tree" },
+      result: { summary: "Browser smoke passed.", exitCode: 0 },
+      exitCode: 0,
+      limitations: [],
+    }],
+  };
+
+  retireHistoricalAutomatedReceipts(runtimeEvidence, previousRevision, nextRevision);
+
+  assert.deepEqual(runtimeEvidence.receipts[0].executedCheckoutRevision, previousRevision);
+  assert.equal(runtimeEvidence.receipts[0].status, "not-run");
+  assert.equal(runtimeEvidence.receipts[0].exitCode, null);
+  assert.equal(runtimeEvidence.receipts[0].result.exitCode, null);
+  assert.match(runtimeEvidence.receipts[0].result.summary, /does not claim execution at verifier revision new-commit/);
+  assert.match(runtimeEvidence.receipts[0].limitations.at(-1), /Historical supporting execution/);
+  assert.equal(runtimeEvidence.receipts[1].status, "passed");
+  assert.deepEqual(runtimeEvidence.summary, {
+    receipts: 2,
+    direct: 0,
+    supporting: 2,
+    passed: 1,
+    failed: 0,
+    partial: 0,
+    notRun: 1,
+    blocked: 0,
+  });
+});
+
+test("reviewProcessGapCorrections reclassifies every completion-audit process record to documentation", () => {
+  const requirements = {
+    records: [{
+      id: "process-wrong-group",
+      status: "incomplete",
+      source: { path: "docs/superpowers/plans/2026-07-14-opentake-completion-audit.md", line: 166 },
+      targetBehavior: "Step 2: Run the focused test and confirm failure",
+      acceptanceCriteria: ["Run the focused audit test."],
+      gapGroup: "accessibility-polish",
+      finalDisposition: "active-gap:accessibility-polish: audit step",
+      provenance: ["source:audit-plan"],
+    }, {
+      id: "future-process",
+      status: "incomplete",
+      source: { path: "docs/superpowers/plans/2026-07-14-opentake-completion-audit.md", line: 800 },
+      targetBehavior: "Step 2: Run focused tests before and after every change",
+      acceptanceCriteria: ["Run Task 9 focused tests."],
+      gapGroup: "command-contracts",
+      finalDisposition: "active-gap:command-contracts: future audit step",
+      provenance: ["source:audit-plan-task9"],
+    }, {
+      id: "product-record",
+      status: "incomplete",
+      source: { path: "docs/specs/frontend/8-preview.md", line: 5 },
+      targetBehavior: "Preview renders frames.",
+      acceptanceCriteria: ["Render the production preview."],
+      gapGroup: "preview-timeline",
+      finalDisposition: "active-gap:preview-timeline: product gap",
+      provenance: ["source:preview"],
+    }],
+  };
+
+  const corrections = reviewProcessGapCorrections(requirements);
+
+  assert.deepEqual(corrections, [{
+    recordId: "process-wrong-group",
+    oldGroup: "accessibility-polish",
+    newGroup: null,
+    oldStatus: "incomplete",
+    newStatus: "complete",
+    reason: "completion-audit Task 2 is implemented by the current tracked tool and exact named regression test",
+  }, {
+    recordId: "future-process",
+    oldGroup: "command-contracts",
+    newGroup: "documentation",
+    oldStatus: "incomplete",
+    newStatus: "incomplete",
+    reason: "completion-audit Task 9 is future audit-process work, not product subsystem work",
+  }]);
+  assert.equal(requirements.records[0].status, "complete");
+  assert.equal(requirements.records[0].gapGroup, null);
+  assert.deepEqual(requirements.records[0].storeApi, ["code:tools/completion-audit.mjs#buildFileInventory"]);
+  assert.deepEqual(requirements.records[0].automatedTests, [
+    "test:tools/completion-audit.test.mjs#files CLI writes tracked paths, hashes, and one self-reference",
+  ]);
+  assert.ok(requirements.records[0].provenance.includes(
+    "review-correction:process-status:incomplete->complete:task-2-current-tool-and-test-evidence",
+  ));
+  assert.equal(requirements.records[1].gapGroup, "documentation");
+  assert.ok(requirements.records[1].provenance.includes(
+    "review-correction:gap-group:command-contracts->documentation:completion-audit-process-only",
+  ));
+  assert.equal(requirements.records[2].gapGroup, "preview-timeline");
+});
+
+test("reviewProcessGapCorrections closes the misgrouped CoreDeps requirement with exact product evidence", () => {
+  const requirements = { records: [{
+    id: "requirement-b248c29fb16de9d1",
+    status: "incomplete",
+    source: { path: "docs/modules/opentake-core/deps-di.md", line: 72 },
+    gapGroup: "documentation",
+    rust: [],
+    automatedTests: [],
+    provenance: ["source:deps-di"],
+    finalDisposition: "active-gap:documentation: missing proof",
+  }] };
+
+  const corrections = reviewProcessGapCorrections(requirements);
+
+  assert.equal(corrections[0].newStatus, "complete");
+  assert.equal(corrections[0].newGroup, null);
+  assert.deepEqual(requirements.records[0].rust, ["code:crates/opentake-core/src/deps.rs#CoreDeps"]);
+  assert.deepEqual(requirements.records[0].automatedTests, [
+    "test:crates/opentake-core/src/deps.rs#default_deps_report_unsupported_not_panic",
+  ]);
+});
+
+test("reviewProcessGapCorrections applies the exact reviewed media and frontend-layout group corrections", () => {
+  const searchIds = [
+    "requirement-cbdc477af446a4ea", "requirement-45fa0c2b840442cd", "requirement-83d62f78aa13e484",
+    "requirement-2f2d03d0f0d8b62a", "requirement-bd5095a19a955167", "requirement-43fbc8e32bd126c4",
+    "requirement-ae88b5f4d3f80eb6", "requirement-7b2d77c2b48b0238", "requirement-8d06ffbfdd515f03",
+    "requirement-980f6325823ecf64", "requirement-f917123fb8d790f1",
+  ];
+  const transcriptionIds = [
+    "requirement-5ee9b7ba12472dd2", "requirement-182ee5a96ef748eb", "requirement-033385c9654f4781",
+    "requirement-1cfe5d8575e5cc93", "requirement-291a7211a4ee4b55", "requirement-94aebecde1fc0542",
+  ];
+  const layoutIds = [
+    "requirement-bb4951d728a9bcff", "requirement-c531ff6b55858bc0", "requirement-30c0b150880b10ef",
+    "requirement-7fed82947ea8910f", "requirement-798893a778f1813e", "requirement-eeba721f50c7b42d",
+    "requirement-e36316e0aa8cd79f", "requirement-6bb9a832824dd470", "requirement-2d93bc046644f4d8",
+  ];
+  const makeRecord = (id, gapGroup) => ({
+    id,
+    status: "incomplete",
+    gapGroup,
+    finalDisposition: `active-gap:${gapGroup}: source-derived classification`,
+    provenance: [],
+    source: { path: "docs/specs/media/reviewed.md", line: 1 },
+  });
+  const requirements = {
+    records: [
+      ...searchIds.map((id) => makeRecord(id, "inspector-text-keyframes")),
+      ...transcriptionIds.map((id) => makeRecord(id, "accessibility-polish")),
+      ...layoutIds.map((id) => makeRecord(id, "command-contracts")),
+    ],
+  };
+
+  const corrections = reviewProcessGapCorrections(requirements);
+
+  assert.equal(corrections.length, 26);
+  assert.deepEqual(corrections.map(({ recordId }) => recordId), [...searchIds, ...transcriptionIds, ...layoutIds]);
+  assert.deepEqual(
+    requirements.records.map(({ gapGroup }) => gapGroup),
+    [...searchIds, ...transcriptionIds].map(() => "media-library").concat(layoutIds.map(() => "home-shell")),
+  );
+  assert.ok(requirements.records.every(({ status }) => status === "incomplete"));
+  assert.ok(requirements.records.every(({ gapGroup, finalDisposition }) => finalDisposition.startsWith(`active-gap:${gapGroup}:`)));
+  assert.ok(requirements.records.every(({ provenance }) => provenance.some((item) => (
+    item.startsWith("review-correction:gap-group:") && item.endsWith("-ownership")
+  ))));
+});
+
+test("reviewProcessGapCorrections keeps Task 8 review and Task 9 commit steps incomplete while retaining Task 7 artifact provenance", () => {
+  const processPath = "docs/superpowers/plans/2026-07-14-opentake-completion-audit.md";
+  const requirements = { records: [{
+    id: "task7-browser",
+    status: "incomplete",
+    source: { path: processPath, line: 621 },
+    targetBehavior: "Run browser audit verification",
+    acceptanceCriteria: ["Audit browser evidence."],
+    gapGroup: "preview-timeline",
+    finalDisposition: "active-gap:preview-timeline: pending",
+    provenance: [],
+  }, {
+    id: "task8-independent-review",
+    status: "incomplete",
+    source: { path: processPath, line: 773 },
+    targetBehavior: "Step 8: obtain independent review",
+    acceptanceCriteria: ["Run independent audit review."],
+    gapGroup: "command-contracts",
+    finalDisposition: "active-gap:command-contracts: pending",
+    provenance: [],
+  }, {
+    id: "task9-commit",
+    status: "incomplete",
+    source: { path: processPath, line: 800 },
+    targetBehavior: "Step 9: commit the verified publication",
+    acceptanceCriteria: ["Run final audit tests."],
+    gapGroup: "data-safety",
+    finalDisposition: "active-gap:data-safety: pending",
+    provenance: [],
+  }] };
+
+  reviewProcessGapCorrections(requirements);
+
+  assert.equal(requirements.records[0].status, "complete");
+  assert.ok(requirements.records[0].provenance.includes(
+    "historical-report:docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-30-22-654Z.yml",
+  ));
+  assert.deepEqual(requirements.records.slice(1).map(({ status, gapGroup }) => ({ status, gapGroup })), [
+    { status: "incomplete", gapGroup: "documentation" },
+    { status: "incomplete", gapGroup: "documentation" },
+  ]);
 });
 
 test("extractDocumentCandidates ignores fenced code and preserves the outer heading", () => {
@@ -1158,7 +1664,63 @@ test("files CLI writes tracked paths, hashes, and one self-reference", (t) => {
   assert.equal(selfReferences[0].sha256, null);
 });
 
-test("docs CLI deterministically extracts tracked Markdown only", (t) => {
+test("verifyAudit files re-extracts tracked paths, exact hashes, and the narrow self-reference", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "opentake-completion-audit-verify-files-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const audit = join(root, "docs", "audit", "run");
+  mkdirSync(audit, { recursive: true });
+  writeFileSync(join(root, "source.txt"), "tracked source\n");
+  writeFileSync(join(audit, "repository-files.json"), "{}\n");
+  execFileSync("git", ["init", "--quiet", root]);
+  execFileSync("git", ["-C", root, "add", "."]);
+  const inventoryPath = "docs/audit/run/repository-files.json";
+  writeFileSync(
+    join(root, inventoryPath),
+    `${JSON.stringify({ schema: 1, files: buildFileInventory(root, inventoryPath) }, null, 2)}\n`,
+  );
+
+  const passed = verifyAudit(root, audit, "files");
+  assert.equal(passed.passed, true, JSON.stringify(passed.errors));
+  assert.deepEqual(passed.counts, {
+    tracked: 2,
+    inventoried: 2,
+    missing: 0,
+    orphan: 0,
+    hashMismatches: 0,
+    deferred: 1,
+  });
+
+  const inventory = JSON.parse(readFileSync(join(root, inventoryPath), "utf8"));
+  inventory.files.find(({ path }) => path === "source.txt").sha256 = "0".repeat(64);
+  writeFileSync(join(root, inventoryPath), `${JSON.stringify(inventory, null, 2)}\n`);
+  const failed = verifyAudit(root, audit, "files");
+  assert.equal(failed.passed, false);
+  assert.ok(failed.errors.some(({ code }) => code === "file-hash-mismatch"));
+});
+
+test("verifyAudit files rejects absent tracked paths and unexpected inventory keys", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "opentake-completion-audit-verify-files-schema-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const audit = join(root, "docs", "audit", "run");
+  mkdirSync(audit, { recursive: true });
+  writeFileSync(join(root, "source.txt"), "tracked source\n");
+  writeFileSync(join(audit, "repository-files.json"), "{}\n");
+  execFileSync("git", ["init", "--quiet", root]);
+  execFileSync("git", ["-C", root, "add", "."]);
+  const inventoryPath = "docs/audit/run/repository-files.json";
+  const files = buildFileInventory(root, inventoryPath).filter(({ path }) => path !== "source.txt");
+  writeFileSync(
+    join(root, inventoryPath),
+    `${JSON.stringify({ schema: 1, unexpected: true, files }, null, 2)}\n`,
+  );
+
+  const result = verifyAudit(root, audit, "files");
+  assert.equal(result.passed, false);
+  assert.ok(result.errors.some(({ code }) => code === "invalid-file-ledger-schema"));
+  assert.ok(result.errors.some(({ code }) => code === "missing-file"));
+});
+
+test("docs CLI excludes generated audit Markdown while file inventory retains it", (t) => {
   const root = mkdtempSync(join(tmpdir(), "opentake-completion-audit-docs-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const firstOutput = join(root, "..", `${basename(root)}-first.json`);
@@ -1171,8 +1733,13 @@ test("docs CLI deterministically extracts tracked Markdown only", (t) => {
   writeFileSync(join(root, "a.md"), "# Alpha\n- [ ] alpha gap\n");
   writeFileSync(join(root, "tracked.txt"), "TODO: not Markdown\n");
   writeFileSync(join(root, "untracked.md"), "# Untracked\nTODO: ignore me\n");
+  mkdirSync(join(root, "docs", "audit", "run"), { recursive: true });
+  writeFileSync(
+    join(root, "docs", "audit", "run", "completion-report.md"),
+    "# Generated completion report\n- [ ] recursive synthetic gap\n",
+  );
   execFileSync("git", ["init", "--quiet", root]);
-  execFileSync("git", ["-C", root, "add", "a.md", "b.md", "tracked.txt"]);
+  execFileSync("git", ["-C", root, "add", "a.md", "b.md", "tracked.txt", "docs/audit/run/completion-report.md"]);
 
   const invoke = (output) => spawnSync(
     process.execPath,
@@ -1212,6 +1779,9 @@ test("docs CLI deterministically extracts tracked Markdown only", (t) => {
     new Set(documentCandidates.candidates.map(({ id }) => id)).size,
     documentCandidates.candidates.length,
   );
+  assert.ok(buildFileInventory(root, "inventory.json").some(
+    ({ path }) => path === "docs/audit/run/completion-report.md",
+  ));
 });
 
 test("controls CLI scans tracked web/src TSX files through a real subprocess", (t) => {
@@ -2511,6 +3081,17 @@ test("verifyAudit controls requires immutable provenance and executable criteria
     assert.ok(result.errors.some(({ code }) => code === "verifier-file-hash-mismatch"));
   });
 
+  await t.test("plan-map drift is rejected as verifier provenance", (t) => {
+    const fixture = createControlVerificationFixture(t);
+    const verifierPath = "tools/completion-audit-plan-map.json";
+    writeFileSync(join(fixture.root, verifierPath), "fixture plan map drifted\n");
+    git(fixture.root, ["add", verifierPath]);
+    const result = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(result.errors.some(({ code, message }) => (
+      code === "verifier-file-hash-mismatch" && message.endsWith(verifierPath)
+    )));
+  });
+
   await t.test("TODO is not an executable candidate-specific acceptance contract", (t) => {
     const fixture = createControlVerificationFixture(t);
     fixture.record.acceptanceCriteria = ["TODO"];
@@ -3597,6 +4178,936 @@ test("review demotions are unique and semantically bound to frozen candidates", 
   }
 });
 
+test("sourceDeclaresTest accepts exact Vitest test and suite runners but rejects prose lookalikes", () => {
+  const source = `
+    describe("collectMoveSnapTargets", () => {
+      it("snaps within threshold", () => {});
+    });
+    test.each([[1], [2]])("parameterized case", () => {});
+    describe.skip("temporarily skipped suite", () => {});
+    const prose = "not a declared runner";
+  `;
+  assert.equal(sourceDeclaresTest("web/src/example.test.ts", source, "collectMoveSnapTargets"), true);
+  assert.equal(sourceDeclaresTest("web/src/example.test.ts", source, "snaps within threshold"), true);
+  assert.equal(sourceDeclaresTest("web/src/example.test.ts", source, "parameterized case"), true);
+  assert.equal(sourceDeclaresTest("web/src/example.test.ts", source, "temporarily skipped suite"), true);
+  assert.equal(sourceDeclaresTest("web/src/example.test.ts", source, "not a declared runner"), false);
+  assert.equal(sourceDeclaresTest("web/src/example.test.ts", "// test(\"comment only\")", "comment only"), false);
+});
+
+test("sourceDeclaresProductAnchor keeps manifests file-level and validates CSS declarations exactly", () => {
+  assert.equal(sourceDeclaresProductAnchor("plugin.json", '{"id":"opentake-workflow-audio-first"}', null), true);
+  assert.equal(sourceDeclaresProductAnchor("plugin.json", '{"id":"opentake-workflow-audio-first"}', "audio-first"), false);
+  assert.equal(sourceDeclaresProductAnchor("tokens.css", ":root { --bg-raised: #111; }", "--bg-raised"), true);
+  assert.equal(sourceDeclaresProductAnchor("tokens.css", ":root { content: '--bg-raised'; }", "--bg-raised"), false);
+});
+
+test("sourceDeclaresProductSpec requires Rust qualified members inside their declared owner", () => {
+  const source = `
+    enum EditCommand { SetClipProperties { speed: f64 }, Split }
+    enum ToolName { One }
+    impl ToolName { const ALL: [ToolName; 1] = [ToolName::One]; }
+    struct ChatState { value: i32 }
+    impl ChatState { fn new() -> Self { Self { value: 0 } } }
+    struct Other;
+    impl Other { const MISSING: i32 = 1; }
+    use elsewhere::ImportedTrait;
+    impl ImportedTrait for ChatState {}
+  `;
+  assert.equal(sourceDeclaresProductSpec("command.rs", source, "EditCommand::SetClipProperties"), true);
+  assert.equal(sourceDeclaresProductSpec("command.rs", source, "EditCommand::Missing"), false);
+  assert.equal(sourceDeclaresProductSpec("command.rs", source, "ChatState::new"), true);
+  assert.equal(sourceDeclaresProductSpec("command.rs", source, "ToolName::ALL"), true);
+  assert.equal(sourceDeclaresProductSpec("command.rs", source, "ToolName::MISSING"), false);
+  assert.equal(sourceDeclaresProductSpec("command.rs", source, "ImportedTrait"), false);
+});
+
+test("tracked plan provenance verifies actual bytes and fails closed after tampering", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "opentake-plan-provenance-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const directory = join(root, "docs/audit/2026-07-14");
+  mkdirSync(directory, { recursive: true });
+  const definitions = {
+    coreReport: ["task8-core-slice-map.json", "core map\n"],
+    coreValidation: ["task8-core-slice-validation.md", "core validation\n"],
+    uiReport: ["task8-ui-slice-map.json", "ui map\n"],
+    uiValidation: ["task8-ui-slice-validation.md", "ui validation\n"],
+    ledgerReport: ["task8-ledger-slice-map.json", "ledger map\n"],
+    ledgerValidation: ["task8-ledger-slice-validation.md", "ledger validation\n"],
+    corrections: ["task8-map-corrections.json", "corrections\n"],
+    capabilityDedupe: ["task8-ui-ledger-capability-dedupe.json", "dedupe\n"],
+  };
+  const provenance = {};
+  for (const [key, [name, content]] of Object.entries(definitions)) {
+    const path = `docs/audit/2026-07-14/${name}`;
+    writeFileSync(join(root, path), content);
+    provenance[`${key}Path`] = path;
+    provenance[`${key}Sha256`] = createHash("sha256").update(content).digest("hex");
+  }
+  const planMap = {
+    provenance,
+    exactSlices: {
+      sourceSha256: provenance.coreReportSha256,
+      uiSourceSha256: provenance.uiReportSha256,
+    },
+    ledgerOwnership: {
+      sourcePath: provenance.ledgerReportPath,
+      sourceSha256: provenance.ledgerReportSha256,
+      validationPath: provenance.ledgerValidationPath,
+      validationSha256: provenance.ledgerValidationSha256,
+    },
+    corrections: {
+      sourcePath: provenance.correctionsPath,
+      sourceSha256: provenance.correctionsSha256,
+    },
+    capabilityDedupe: {
+      sourcePath: provenance.capabilityDedupePath,
+      sourceSha256: provenance.capabilityDedupeSha256,
+      sourceInputs: {
+        reportMap: { path: provenance.uiReportPath, sha256: provenance.uiReportSha256 },
+        ledgerMap: { path: provenance.ledgerReportPath, sha256: provenance.ledgerReportSha256 },
+      },
+    },
+  };
+
+  assert.deepEqual(validateTrackedPlanProvenance(planMap, root), provenance);
+  writeFileSync(join(root, provenance.ledgerReportPath), "tampered ledger map\n");
+  assert.throws(
+    () => validateTrackedPlanProvenance(planMap, root),
+    /tracked provenance hash mismatch: docs\/audit\/2026-07-14\/task8-ledger-slice-map\.json/,
+  );
+});
+
+test("product plan ownership accepts exact declarations or explicit composite children but rejects an unbound record", () => {
+  const runner = {
+    path: "crates/opentake-render/tests/composite_acceptance.rs",
+    name: "children_close_composite_acceptance",
+    evidenceClass: "reviewed-planned",
+  };
+  const resolution = {
+    strategy: "reviewed-mapping-report",
+    childCapabilities: [],
+  };
+  assert.equal(hasValidProductPlanOwnership({
+    productTargets: [{
+      path: "web/src/styles/tokens.css",
+      symbol: "--bg-placeholder",
+      planned: false,
+    }],
+    tests: [runner],
+    resolution,
+  }), true);
+  assert.equal(hasValidProductPlanOwnership({
+    productTargets: [],
+    tests: [runner],
+    resolution: { ...resolution, childCapabilities: ["MR-media-facade"] },
+  }), true);
+  assert.equal(hasValidProductPlanOwnership({
+    productTargets: [],
+    tests: [runner],
+    resolution,
+  }), false);
+  assert.equal(hasValidProductPlanOwnership({
+    productTargets: [],
+    tests: [{ ...runner, path: "tools/completion-audit.test.mjs" }],
+    resolution: { ...resolution, childCapabilities: ["MR-media-facade"] },
+  }), false);
+});
+
+test("data-safety plan maps all 32 reviewed requirements to exact classified slices", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const plan = buildImplementationPlanGroup(root, "docs/audit/2026-07-14", "data-safety");
+  const tracked = new Set(git(root, ["ls-files", "-z"]).split("\0").filter(Boolean));
+  const expectedSliceSizes = new Map([
+    ["DS-legacy-default-matrix", 1],
+    ["DS-mcp-transport", 1],
+    ["DS-mcp-tool-import", 1],
+    ["DS-mcp-redaction", 1],
+    ["DS-generation-seed", 2],
+    ["DS-unix-consuming-tests", 1],
+    ["DS-windows-safe-fs", 3],
+    ["DS-native-receipt-validator", 1],
+    ["DS-project-open-composite-headings", 4],
+    ["DS-cross-cutting-security-headings", 4],
+    ["DS-manifest-corruption-conflict", 1],
+    ["DS-cache-identity-complete", 1],
+    ["DS-shared-core-command-complete", 10],
+    ["DS-media-resolver-complete", 1],
+  ]);
+
+  assert.equal(plan.entries.length, 32);
+  assert.equal(plan.slices.length, 14);
+  assert.equal(new Set(plan.entries.map(({ record }) => record.id)).size, 32);
+  assert.ok(plan.entries.every(({ kind, record, resolution }) => (
+    kind === "requirement"
+    && record.status === "incomplete"
+    && record.gapGroup === "data-safety"
+    && resolution.strategy === "reviewed-mapping-report"
+  )));
+  assert.deepEqual(
+    Object.fromEntries(["implementation-gap", "composite-acceptance", "evidence-closure"].map((classification) => [
+      classification,
+      plan.entries.filter(({ resolution }) => resolution.disposition === classification).length,
+    ])),
+    { "implementation-gap": 9, "composite-acceptance": 9, "evidence-closure": 14 },
+  );
+  assert.deepEqual(
+    new Map(plan.slices.map(({ ruleIds, entries }) => [ruleIds[0], entries.length])),
+    expectedSliceSizes,
+  );
+  for (const entry of plan.entries) {
+    assert.ok(entry.files.some((ref) => /^(?:web\/src|src-tauri\/src|crates\/[^/]+\/src)\//.test(ref)));
+    assert.notEqual(entry.test.path, "tools/completion-audit.test.mjs");
+    for (const ref of entry.files.filter((value) => value.includes("#"))) {
+      const [path, symbol] = ref.split("#");
+      assert.ok(tracked.has(path), `${entry.record.id} product path is untracked: ${path}`);
+      assert.ok(readFileSync(join(root, path), "utf8").includes(symbol), `${entry.record.id} symbol is absent: ${ref}`);
+    }
+    for (const reviewedTest of entry.tests) {
+      assert.ok(["existing-owned", "reviewed-planned"].includes(reviewedTest.evidenceClass));
+      assert.doesNotMatch(reviewedTest.name, /^task9_requirement_/);
+      if (reviewedTest.evidenceClass === "existing-owned") {
+        assert.ok(tracked.has(reviewedTest.path), `${entry.record.id} existing test path is untracked: ${reviewedTest.path}`);
+        assert.equal(reviewedTest.fileAction, "Modify");
+        assert.ok(readFileSync(join(root, reviewedTest.path), "utf8").includes(reviewedTest.name));
+      } else {
+        assert.equal(reviewedTest.fileAction, tracked.has(reviewedTest.path) ? "Modify" : "Create");
+        assert.match(
+          reviewedTest.path,
+          /^(?:web\/src\/.+\.(?:test|spec)\.tsx?|(?:src-tauri|crates\/[^/]+)\/tests\/.+\.rs|(?:web\/src|src-tauri\/src|crates\/[^/]+\/src)\/.+\.(?:tsx?|rs)|scripts\/tests\/.+-test\.rb|tools\/.+\.test\.mjs)$/,
+          `${entry.record.id} planned test has no legal owning runner`,
+        );
+      }
+    }
+  }
+  assert.equal((plan.implementation.match(/^### Task /gm) ?? []).length, 14);
+  assert.match(plan.design, /[^\n]\n$/);
+  assert.doesNotMatch(plan.design, /\n\n$/);
+  assert.match(plan.implementation, /[^\n]\n$/);
+  assert.doesNotMatch(plan.implementation, /\n\n$/);
+});
+
+test("command-contracts plan maps all 36 reviewed requirements to exact classified slices", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const exact = reviewedPlanExactSlices();
+  const exactCommand = exact.groups["command-contracts"];
+  const dataPlan = buildImplementationPlanGroup(root, "docs/audit/2026-07-14", "data-safety");
+  const plan = buildImplementationPlanGroup(root, "docs/audit/2026-07-14", "command-contracts");
+  const entries = plan.entries.filter(({ kind }) => kind === "requirement");
+  const controls = plan.entries.filter(({ kind }) => kind === "control");
+  const slices = plan.slices.filter(({ entries: sliceEntries }) => sliceEntries.every(({ kind }) => kind === "requirement"));
+  const tracked = new Set(git(root, ["ls-files", "-z"]).split("\0").filter(Boolean));
+  const expectedSliceSizes = new Map([
+    ["CC-seconds-truncation", 1],
+    ["CC-first-video-settings", 1],
+    ["CC-beat-auto-cut", 5],
+    ["CC-mcp-transport", 3],
+    ["CC-mcp-validation-import", 2],
+    ["CC-mcp-error-redaction", 1],
+    ["CC-readonly-versioned-mirror", 3],
+    ["CC-edit-gesture-parity", 2],
+    ["CC-tauri-command-contract", 7],
+    ["CC-automation-composite-headings", 7],
+    ["CC-authority-persistence-mixed", 3],
+    ["CC-event-forwarding-complete", 1],
+  ]);
+  const movedLayoutIds = new Set([
+    "requirement-bb4951d728a9bcff", "requirement-c531ff6b55858bc0", "requirement-30c0b150880b10ef",
+    "requirement-7fed82947ea8910f", "requirement-798893a778f1813e", "requirement-eeba721f50c7b42d",
+    "requirement-e36316e0aa8cd79f", "requirement-6bb9a832824dd470", "requirement-2d93bc046644f4d8",
+  ]);
+  const historicalAuditIds = new Set([
+    "requirement-bc055bd70685d201", "requirement-a15836d9b9069a45", "requirement-80b42eb9098c1a5e",
+  ]);
+
+  assert.equal(exact.schema, 1);
+  assert.equal(exact.sourceSha256, "e097640b5062a93290f132182f3e577f200dd0e767d49144ddd780a4dc2f6dc3");
+  assert.equal(exact.uiSourceSha256, "4d17a7e72e9a83bd09795c64a1f37959c67ce77aae0662ae0ff89c9c602dad1a");
+  assert.equal(Object.keys(exact.groups).length, 9);
+  assert.equal(exactCommand.sourceRecordCount, 48);
+  assert.equal(exactCommand.currentRecordCount, 45);
+  assert.equal(exactCommand.plannedGroupRecordCount, 36);
+  assert.equal(exactCommand.slices.length, 14);
+  assert.equal(new Set(exactCommand.slices.flatMap(({ recordIds }) => recordIds)).size, 48);
+  const sourceIds = exact.groups ? Object.values(exact.groups).flatMap(({ slices: exactSlices }) => (
+    exactSlices.flatMap(({ recordIds }) => recordIds.map((recordId) => (
+      recordId.startsWith("requirement-") ? recordId : `requirement-${recordId}`
+    )))
+  )) : [];
+  const currentIds = Object.values(exact.groups).flatMap(({ slices: exactSlices }) => (
+    exactSlices.filter(({ targetStatus }) => targetStatus !== "complete").flatMap(({ recordIds }) => (
+      recordIds.map((recordId) => recordId.startsWith("requirement-") ? recordId : `requirement-${recordId}`)
+    ))
+  ));
+  assert.equal(sourceIds.length, 353);
+  assert.equal(new Set(sourceIds).size, 353);
+  assert.equal(currentIds.length, 346);
+  assert.equal(new Set(currentIds).size, 346);
+  assert.equal(entries.length, 36);
+  assert.equal(controls.length, 9);
+  assert.equal(slices.length, 12);
+  assert.equal(new Set(entries.map(({ record }) => record.id)).size, 36);
+  assert.ok(controls.every(({ record }) => record.gapGroup === "command-contracts"));
+  assert.ok(plan.slices.every(({ entries: sliceEntries }) => (
+    sliceEntries.every(({ kind }) => kind === "requirement") || sliceEntries.every(({ kind }) => kind === "control")
+  )));
+  assert.ok(entries.every(({ kind, record, resolution }) => (
+    kind === "requirement"
+    && record.status === "incomplete"
+    && record.gapGroup === "command-contracts"
+    && resolution.strategy === "reviewed-mapping-report"
+    && resolution.ruleId.startsWith("CC-")
+  )));
+  assert.deepEqual(
+    Object.fromEntries(["implementation-gap", "composite-acceptance", "evidence-closure"].map((classification) => [
+      classification,
+      entries.filter(({ resolution }) => resolution.disposition === classification).length,
+    ])),
+    { "implementation-gap": 25, "composite-acceptance": 10, "evidence-closure": 1 },
+  );
+  assert.deepEqual(
+    new Map(slices.map(({ ruleIds, entries: sliceEntries }) => [ruleIds[0], sliceEntries.length])),
+    expectedSliceSizes,
+  );
+  assert.ok(entries.every(({ record }) => !movedLayoutIds.has(record.id) && !historicalAuditIds.has(record.id)));
+
+  const evidenceClosure = entries.find(({ record }) => record.id === "requirement-8c2d9157594b8d92");
+  assert.equal(evidenceClosure?.resolution.disposition, "evidence-closure");
+  const capabilities = new Map(entries.map(({ resolution }) => [resolution.ruleId, resolution.capabilityId]));
+  assert.equal(capabilities.get("CC-beat-auto-cut"), "beat-auto-cut");
+  assert.equal(capabilities.get("CC-mcp-transport"), "mcp-transport");
+  assert.equal(capabilities.get("CC-mcp-validation-import"), "mcp-tool-import");
+  assert.equal(capabilities.get("CC-mcp-error-redaction"), "mcp-error-redaction");
+  const dataCapabilitySlices = new Map(dataPlan.entries.filter(({ kind }) => kind === "requirement").map((entry) => (
+    [entry.resolution.capabilityId, entry.sliceId]
+  )));
+  for (const capabilityId of ["mcp-transport", "mcp-tool-import", "mcp-error-redaction"]) {
+    const commandEntries = entries.filter(({ resolution }) => resolution.capabilityId === capabilityId);
+    assert.ok(commandEntries.length > 0);
+    assert.ok(commandEntries.every(({ sliceId, resolution }) => (
+      sliceId === dataCapabilitySlices.get(capabilityId) && resolution.primaryGroup === "data-safety"
+    )));
+  }
+  assert.equal(slices.filter(({ primaryGroup }) => primaryGroup === "data-safety").length, 3);
+
+  for (const entry of entries) {
+    assert.notEqual(entry.test.path, "tools/completion-audit.test.mjs");
+    for (const ref of entry.files.filter((value) => value.includes("#"))) {
+      const [path, symbol] = ref.split("#");
+      assert.ok(tracked.has(path), `${entry.record.id} product path is untracked: ${path}`);
+      assert.ok(readFileSync(join(root, path), "utf8").includes(symbol), `${entry.record.id} symbol is absent: ${ref}`);
+    }
+    for (const reviewedTest of entry.tests) {
+      assert.ok(["existing-owned", "reviewed-planned"].includes(reviewedTest.evidenceClass));
+      assert.doesNotMatch(reviewedTest.name, /^task9_requirement_/);
+      if (reviewedTest.evidenceClass === "existing-owned") {
+        assert.ok(tracked.has(reviewedTest.path), `${entry.record.id} existing test path is untracked: ${reviewedTest.path}`);
+        assert.equal(reviewedTest.fileAction, "Modify");
+        assert.ok(readFileSync(join(root, reviewedTest.path), "utf8").includes(reviewedTest.name));
+      } else {
+        assert.equal(reviewedTest.fileAction, tracked.has(reviewedTest.path) ? "Modify" : "Create");
+        assert.match(
+          reviewedTest.path,
+          /^(?:web\/src\/.+\.(?:test|spec)\.tsx?|(?:src-tauri|crates\/[^/]+)\/tests\/.+\.rs|(?:web\/src|src-tauri\/src|crates\/[^/]+\/src)\/.+\.(?:tsx?|rs)|scripts\/tests\/.+-test\.rb|tools\/.+\.test\.mjs)$/,
+          `${entry.record.id} planned test has no legal owning runner`,
+        );
+      }
+    }
+  }
+  assert.equal((plan.implementation.match(/^### Task \d+: CC-/gm) ?? []).length, 9);
+  assert.equal((plan.implementation.match(/implemented once in `data-safety`/g) ?? []).length, 3);
+  assert.match(plan.design, /[^\n]\n$/);
+  assert.doesNotMatch(plan.design, /\n\n$/);
+  assert.match(plan.implementation, /[^\n]\n$/);
+  assert.doesNotMatch(plan.implementation, /\n\n$/);
+});
+
+test("home-shell plan maps 9 reviewed records plus 9 moved layout records into 8 exact slices", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const plan = buildImplementationPlanGroup(root, "docs/audit/2026-07-14", "home-shell");
+  const entries = plan.entries.filter(({ kind }) => kind === "requirement");
+  const controls = plan.entries.filter(({ kind }) => kind === "control");
+  const slices = plan.slices.filter(({ entries: sliceEntries }) => sliceEntries.every(({ kind }) => kind === "requirement"));
+  const tracked = new Set(git(root, ["ls-files", "-z"]).split("\0").filter(Boolean));
+  const movedLayoutIds = new Set([
+    "requirement-bb4951d728a9bcff", "requirement-c531ff6b55858bc0", "requirement-30c0b150880b10ef",
+    "requirement-7fed82947ea8910f", "requirement-798893a778f1813e", "requirement-eeba721f50c7b42d",
+    "requirement-e36316e0aa8cd79f", "requirement-6bb9a832824dd470", "requirement-2d93bc046644f4d8",
+  ]);
+
+  assert.equal(entries.length, 18);
+  assert.equal(new Set(entries.map(({ record }) => record.id)).size, 18);
+  assert.equal(slices.length, 8);
+  assert.ok(controls.every(({ record }) => record.gapGroup === "home-shell"));
+  assert.ok(entries.every(({ record, resolution }) => (
+    record.gapGroup === "home-shell"
+    && resolution.strategy === "reviewed-mapping-report"
+    && (resolution.ruleId.startsWith("HS-") || resolution.ruleId === "CC-layout-misgrouped")
+  )));
+  assert.deepEqual(
+    Object.fromEntries(["implementation-gap", "composite-acceptance", "evidence-closure"].map((classification) => [
+      classification,
+      entries.filter(({ resolution }) => resolution.disposition === classification).length,
+    ])),
+    { "implementation-gap": 15, "composite-acceptance": 3, "evidence-closure": 0 },
+  );
+  const layoutEntries = entries.filter(({ resolution }) => resolution.capabilityId === "home-shell-layout");
+  assert.equal(layoutEntries.length, 10);
+  assert.equal(new Set(layoutEntries.map(({ sliceId }) => sliceId)).size, 1);
+  assert.ok(layoutEntries.every(({ resolution }) => resolution.primaryGroup === "home-shell"));
+  assert.deepEqual(
+    new Set(layoutEntries.filter(({ record }) => movedLayoutIds.has(record.id)).map(({ record }) => record.id)),
+    movedLayoutIds,
+  );
+
+  for (const entry of entries) {
+    assert.ok(entry.productTargets.length > 0);
+    for (const target of entry.productTargets) {
+      assert.equal(target.fileAction, tracked.has(target.path) ? "Modify" : "Create");
+      if (!target.planned) {
+        assert.ok(tracked.has(target.path), `${entry.record.id} existing product is untracked: ${target.path}`);
+        if (target.symbol) {
+          assert.ok(
+            readFileSync(join(root, target.path), "utf8").includes(target.symbol.split("::").at(-1)),
+            `${entry.record.id} product symbol is absent: ${target.ref}`,
+          );
+        }
+      }
+    }
+    for (const reviewedTest of entry.tests) {
+      assert.ok(["existing-owned", "reviewed-planned"].includes(reviewedTest.evidenceClass));
+      assert.doesNotMatch(reviewedTest.name, /^task9_requirement_/);
+      assert.equal(reviewedTest.fileAction, tracked.has(reviewedTest.path) ? "Modify" : "Create");
+    }
+  }
+  assert.equal((plan.implementation.match(/^### Task \d+: (?:HS-|CC-layout)/gm) ?? []).length, 8);
+  assert.match(plan.design, /[^\n]\n$/);
+  assert.doesNotMatch(plan.design, /\n\n$/);
+  assert.match(plan.implementation, /[^\n]\n$/);
+  assert.doesNotMatch(plan.implementation, /\n\n$/);
+});
+
+test("media-library plan maps all 45 reviewed and moved requirements to 13 exact slices", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const dataPlan = buildImplementationPlanGroup(root, "docs/audit/2026-07-14", "data-safety");
+  const plan = buildImplementationPlanGroup(root, "docs/audit/2026-07-14", "media-library");
+  const entries = plan.entries.filter(({ kind }) => kind === "requirement");
+  const controls = plan.entries.filter(({ kind }) => kind === "control");
+  const slices = plan.slices.filter(({ entries: sliceEntries }) => sliceEntries.every(({ kind }) => kind === "requirement"));
+  const tracked = new Set(git(root, ["ls-files", "-z"]).split("\0").filter(Boolean));
+  const expectedSliceSizes = new Map([
+    ["ML-card-state-machine", 3],
+    ["ML-import-feedback", 1],
+    ["ML-thumbnail-pipeline", 7],
+    ["ML-waveform-pipeline", 4],
+    ["ML-panel-workflows", 7],
+    ["ML-library-workflow-composite", 1],
+    ["ML-basic-media-composite", 1],
+    ["ML-manifest-compat-complete", 1],
+    ["ML-cache-identity-duplicate", 1],
+    ["ML-best-effort-probe-complete", 1],
+    ["ML-relink-in-place-complete", 1],
+    ["misgrouped-media-search", 11],
+    ["misgrouped-transcription", 6],
+  ]);
+
+  assert.equal(entries.length, 45);
+  assert.equal(new Set(entries.map(({ record }) => record.id)).size, 45);
+  assert.equal(slices.length, 13);
+  assert.ok(controls.every(({ record }) => record.gapGroup === "media-library"));
+  assert.ok(entries.every(({ record, resolution }) => (
+    record.gapGroup === "media-library"
+    && resolution.strategy === "reviewed-mapping-report"
+    && (resolution.ruleId.startsWith("ML-") || resolution.ruleId.startsWith("misgrouped-"))
+  )));
+  assert.deepEqual(
+    Object.fromEntries(["implementation-gap", "composite-acceptance", "evidence-closure"].map((classification) => [
+      classification,
+      entries.filter(({ resolution }) => resolution.disposition === classification).length,
+    ])),
+    { "implementation-gap": 22, "composite-acceptance": 2, "evidence-closure": 21 },
+  );
+  assert.deepEqual(
+    new Map(slices.map(({ ruleIds, entries: sliceEntries }) => [ruleIds[0], sliceEntries.length])),
+    expectedSliceSizes,
+  );
+  const cacheEntry = entries.find(({ resolution }) => resolution.ruleId === "ML-cache-identity-duplicate");
+  const dataCacheEntry = dataPlan.entries.find(({ resolution }) => resolution.ruleId === "DS-cache-identity-complete");
+  assert.equal(cacheEntry?.sliceId, dataCacheEntry?.sliceId);
+  assert.equal(cacheEntry?.resolution.capabilityId, "cache-identity");
+  assert.equal(cacheEntry?.resolution.primaryGroup, "data-safety");
+  const movedEntries = entries.filter(({ resolution }) => resolution.ruleId.startsWith("misgrouped-"));
+  assert.equal(movedEntries.length, 17);
+  assert.ok(movedEntries.every(({ resolution }) => (
+    resolution.strategy === "reviewed-mapping-report" && resolution.primaryGroup === "media-library"
+  )));
+  const whisperTest = movedEntries.flatMap(({ tests }) => tests).find(({ name }) => name === "centiseconds_convert_to_seconds");
+  assert.match(whisperTest?.command ?? "", /--features whisper-backend/);
+  const waveformEntry = entries.find(({ resolution }) => resolution.ruleId === "ML-waveform-pipeline");
+  const waveformAcceptance = waveformEntry?.tests.find(({ name }) => (
+    name === "waveform_sample_count_rms_orientation_and_cache_roundtrip"
+  ));
+  assert.match(waveformEntry?.resolution.rationale ?? "", /valid all-silent cache.*poisoned legacy output/);
+  assert.match(waveformAcceptance?.ownershipReason ?? "", /format\/source provenance/);
+  assert.match(plan.implementation, /all == 1\.0 alone cannot classify the cache/);
+
+  for (const entry of entries) {
+    assert.ok(entry.productTargets.length > 0);
+    for (const target of entry.productTargets) {
+      assert.equal(target.fileAction, tracked.has(target.path) ? "Modify" : "Create");
+      if (!target.planned) {
+        assert.ok(tracked.has(target.path), `${entry.record.id} existing product is untracked: ${target.path}`);
+        if (target.symbol) {
+          assert.ok(readFileSync(join(root, target.path), "utf8").includes(target.symbol.split("::").at(-1)));
+        }
+      }
+    }
+    for (const reviewedTest of entry.tests) {
+      assert.ok(["existing-owned", "reviewed-planned"].includes(reviewedTest.evidenceClass));
+      assert.doesNotMatch(reviewedTest.name, /^task9_requirement_/);
+      assert.equal(reviewedTest.fileAction, tracked.has(reviewedTest.path) ? "Modify" : "Create");
+      if (reviewedTest.evidenceClass === "existing-owned") {
+        assert.ok(readFileSync(join(root, reviewedTest.path), "utf8").includes(reviewedTest.name));
+      }
+    }
+  }
+  assert.equal((plan.implementation.match(/^### Task \d+: (?:ML-|misgrouped-)/gm) ?? []).length, 12);
+  assert.equal((plan.implementation.match(/implemented once in `data-safety`/g) ?? []).length, 1);
+  assert.match(plan.design, /[^\n]\n$/);
+  assert.doesNotMatch(plan.design, /\n\n$/);
+  assert.match(plan.implementation, /[^\n]\n$/);
+  assert.doesNotMatch(plan.implementation, /\n\n$/);
+});
+
+test("media-render-playback-export plan maps all 60 reviewed requirements to 38 corrected exact slices", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const commandPlan = buildImplementationPlanGroup(root, "docs/audit/2026-07-14", "command-contracts");
+  const plan = buildImplementationPlanGroup(root, "docs/audit/2026-07-14", "media-render-playback-export");
+  const entries = plan.entries.filter(({ kind }) => kind === "requirement");
+  const controls = plan.entries.filter(({ kind }) => kind === "control");
+  const slices = plan.slices.filter(({ entries: sliceEntries }) => sliceEntries.every(({ kind }) => kind === "requirement"));
+  const tracked = new Set(git(root, ["ls-files", "-z"]).split("\0").filter(Boolean));
+
+  assert.equal(entries.length, 60);
+  assert.equal(new Set(entries.map(({ record }) => record.id)).size, 60);
+  assert.equal(slices.length, 38);
+  assert.ok(controls.every(({ record }) => record.gapGroup === "media-render-playback-export"));
+  assert.ok(entries.every(({ record, resolution }) => (
+    record.gapGroup === "media-render-playback-export"
+    && resolution.strategy === "reviewed-mapping-report"
+    && resolution.ruleId.startsWith("MR-")
+  )));
+  assert.deepEqual(
+    Object.fromEntries(["implementation-gap", "composite-acceptance", "evidence-closure"].map((classification) => [
+      classification,
+      entries.filter(({ resolution }) => resolution.disposition === classification).length,
+    ])),
+    { "implementation-gap": 24, "composite-acceptance": 8, "evidence-closure": 28 },
+  );
+
+  const eventEntry = entries.find(({ resolution }) => resolution.ruleId === "MR-event-bus-complete");
+  const commandEvent = commandPlan.entries.find(({ resolution }) => resolution.ruleId === "CC-event-forwarding-complete");
+  assert.equal(eventEntry?.sliceId, commandEvent?.sliceId);
+  assert.equal(eventEntry?.resolution.primaryGroup, "command-contracts");
+  const corrected = new Set(entries.flatMap(({ resolution }) => resolution.correctionIds));
+  assert.deepEqual(corrected, new Set(["CORE-I-03", "CORE-I-04", "CORE-M-02"]));
+
+  const optical = entries.find(({ resolution }) => resolution.ruleId === "MR-optical-flow");
+  assert.ok(optical?.productTargets.some(({ ref }) => ref === "crates/opentake-render/src/gpu/compositor.rs#TextureResolver"));
+  const textParity = entries.find(({ resolution }) => resolution.ruleId === "MR-text-parity");
+  assert.ok(textParity?.productTargets.some(({ ref }) => ref === "crates/opentake-render/src/plan/types.rs#TextureSource::Text"));
+  const denoise = entries.find(({ resolution }) => resolution.ruleId === "MR-denoise");
+  assert.deepEqual(denoise?.tests.map(({ name }) => name), [
+    "deterministic_noise_fixture_and_bypass",
+    "denoise_preview_uses_shared_processing_owner",
+    "denoise_export_uses_shared_processing_owner",
+  ]);
+  assert.match(denoise?.tests[1].command ?? "", /--no-default-features --features playback-engine/);
+  assert.match(denoise?.tests[2].command ?? "", /--no-default-features/);
+  const facade = entries.find(({ resolution }) => resolution.ruleId === "MR-media-facade");
+  for (const path of ["decode/mod.rs", "encode/mod.rs", "search/mod.rs", "transcribe/mod.rs"]) {
+    assert.ok(facade?.productTargets.some((target) => target.path.endsWith(path)));
+  }
+
+  for (const entry of entries) {
+    assert.ok(entry.productTargets.length > 0 || entry.resolution.childCapabilities.length > 0);
+    for (const target of entry.productTargets) {
+      assert.equal(target.fileAction, tracked.has(target.path) ? "Modify" : "Create");
+      if (!target.planned) assert.ok(tracked.has(target.path), `${entry.record.id} existing product is untracked: ${target.path}`);
+    }
+    for (const reviewedTest of entry.tests) {
+      assert.ok(["existing-owned", "reviewed-planned"].includes(reviewedTest.evidenceClass));
+      assert.doesNotMatch(reviewedTest.name, /^task9_requirement_/);
+      assert.ok(reviewedTest.name.length > 0);
+      assert.equal(reviewedTest.fileAction, tracked.has(reviewedTest.path) ? "Modify" : "Create");
+      if (reviewedTest.evidenceClass === "existing-owned") {
+        assert.ok(readFileSync(join(root, reviewedTest.path), "utf8").includes(reviewedTest.name));
+      }
+    }
+  }
+  assert.equal((plan.implementation.match(/^### Task \d+: MR-/gm) ?? []).length, 37);
+  assert.equal((plan.implementation.match(/implemented once in `command-contracts`/g) ?? []).length, 1);
+  assert.match(plan.design, /[^\n]\n$/);
+  assert.doesNotMatch(plan.design, /\n\n$/);
+  assert.match(plan.implementation, /[^\n]\n$/);
+  assert.doesNotMatch(plan.implementation, /\n\n$/);
+});
+
+test("preview-timeline plan maps the exact 37 report and 34 ledger records into data-driven slices", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const maps = reviewedPlanOwnershipMaps();
+  const reportGroup = maps.ownershipGroups["preview-timeline"];
+  const ledgerGroup = maps.ledger.groups["preview-timeline"];
+  const ledgerSlices = maps.ledger.slices.filter(({ sliceKey }) => ledgerGroup.sliceKeys.includes(sliceKey));
+  const reportIds = reportGroup.slices.flatMap(({ recordIds }) => recordIds);
+  const ledgerIds = ledgerSlices.flatMap(({ recordIds }) => recordIds);
+
+  assert.equal(maps.provenance.uiReportSha256, "4d17a7e72e9a83bd09795c64a1f37959c67ce77aae0662ae0ff89c9c602dad1a");
+  assert.equal(maps.ledger.sourceSha256, "b6cb19951ff98b889e43cf702ca7f8b417a3be5f422e7e8769fc0a5f51301fd3");
+  assert.equal(maps.ledger.validationSha256, "28637d289d84013c09eac554450bf9c1904e3c8548790c0a910ad76e3b99d69f");
+  assert.equal(reportGroup.recordCount, 37);
+  assert.equal(reportGroup.slices.length, 9);
+  assert.equal(new Set(reportIds).size, 37);
+  assert.equal(ledgerGroup.recordCount, 34);
+  assert.equal(ledgerGroup.sliceKeys.length, 9);
+  assert.equal(ledgerSlices.length, 9);
+  assert.equal(new Set(ledgerIds).size, 34);
+  assert.equal(new Set([...reportIds, ...ledgerIds]).size, 71);
+
+  const plan = buildImplementationPlanGroup(root, "docs/audit/2026-07-14", "preview-timeline");
+  const entries = plan.entries.filter(({ kind }) => kind === "requirement");
+  const requirementSlices = plan.slices.filter(({ entries: sliceEntries }) => (
+    sliceEntries.every(({ kind }) => kind === "requirement")
+  ));
+  assert.equal(entries.length, 71);
+  assert.equal(new Set(entries.map(({ record }) => record.id)).size, 71);
+  assert.equal(requirementSlices.length, 12);
+  assert.equal(entries.filter(({ resolution }) => resolution.strategy === "reviewed-mapping-report").length, 37);
+  assert.equal(entries.filter(({ resolution }) => resolution.strategy === "validated-ledger-evidence").length, 34);
+  assert.deepEqual(
+    new Set(entries.map(({ resolution }) => resolution.ruleId)),
+    new Set([...reportGroup.slices.map(({ sliceKey }) => sliceKey), ...ledgerGroup.sliceKeys]),
+  );
+  const previewClusters = maps.capabilityDedupe.duplicateClusters.filter(({ primaryGroup }) => (
+    primaryGroup === "preview-timeline"
+  ));
+  assert.deepEqual(
+    new Set(previewClusters.map(({ capabilityId }) => capabilityId)),
+    new Set([
+      "ui-versioned-frontend-sync",
+      "ui-timeline-snap-geometry",
+      "ui-timeline-visual-surface",
+      "ui-editor-interaction-matrix",
+    ]),
+  );
+  for (const cluster of previewClusters) {
+    const slice = requirementSlices.find(({ capabilityId }) => capabilityId === cluster.capabilityId);
+    assert.equal(slice?.entries.length, cluster.recordIds.length);
+    assert.deepEqual(new Set(slice?.files.filter((ref) => ref.includes("#"))), new Set(
+      cluster.products.map(({ path, symbol }) => `${path}#${symbol}`),
+    ));
+    assert.deepEqual(new Set(slice?.tests.map(({ path, name }) => `${path}#${name}`)), new Set(
+      cluster.tests.map(({ path, name }) => `${path}#${name}`),
+    ));
+  }
+  assert.ok(entries.every(({ tests, resolution }) => (
+    resolution.ruleId && tests.length > 0 && tests.every(({ name }) => name && !name.startsWith("task9_requirement_"))
+  )));
+});
+
+test("inspector-text-keyframes maps report 18 plus ledger 9 and moves media-search 11 only to media", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const maps = reviewedPlanOwnershipMaps();
+  const reportGroup = maps.ownershipGroups["inspector-text-keyframes"];
+  const ledgerGroup = maps.ledger.groups["inspector-text-keyframes"];
+  const moved = maps.capabilityDedupe.taxonomyMoves.find(({ reportSliceKey }) => (
+    reportSliceKey === "misgrouped-media-search"
+  ));
+  const plan = buildImplementationPlanGroup(root, "docs/audit/2026-07-14", "inspector-text-keyframes");
+  const mediaPlan = buildImplementationPlanGroup(root, "docs/audit/2026-07-14", "media-library");
+  const entries = plan.entries.filter(({ kind }) => kind === "requirement");
+  const slices = plan.slices.filter(({ entries: sliceEntries }) => sliceEntries.every(({ kind }) => kind === "requirement"));
+
+  assert.equal(reportGroup.recordCount, 29);
+  assert.equal(reportGroup.slices.length, 9);
+  assert.equal(new Set(reportGroup.slices.flatMap(({ recordIds }) => recordIds)).size, 29);
+  assert.equal(moved.recordIds.length, 11);
+  assert.equal(ledgerGroup.recordCount, 9);
+  assert.equal(ledgerGroup.sliceKeys.length, 3);
+  assert.equal(entries.length, 27);
+  assert.equal(new Set(entries.map(({ record }) => record.id)).size, 27);
+  assert.equal(slices.length, 10);
+  assert.equal(entries.filter(({ resolution }) => resolution.strategy === "reviewed-mapping-report").length, 18);
+  assert.equal(entries.filter(({ resolution }) => resolution.strategy === "validated-ledger-evidence").length, 9);
+  assert.ok(entries.every(({ record }) => !moved.recordIds.includes(record.id)));
+
+  const mediaMoved = mediaPlan.entries.filter(({ record }) => moved.recordIds.includes(record.id));
+  assert.equal(mediaMoved.length, 11);
+  assert.ok(mediaMoved.every(({ record, resolution }) => (
+    record.gapGroup === "media-library"
+    && resolution.primaryGroup === "media-library"
+    && resolution.ruleId === "misgrouped-media-search"
+  )));
+  assert.doesNotMatch(plan.implementation, /misgrouped-media-search/);
+
+  const caption = entries.find(({ resolution }) => resolution.ruleId === "caption-group-style-atomicity");
+  assert.deepEqual(caption?.resolution.correctionIds, ["UI-I-01"]);
+  assert.ok(caption?.tests.some(({ path, name, evidenceClass }) => (
+    path === "crates/opentake-domain/src/caption_sync.rs"
+    && name === "multi_track_same_group_all_restyled"
+    && evidenceClass === "existing-owned"
+  )));
+  const shared = slices.find(({ capabilityId }) => capabilityId === "ui-inspector-text-ai-keyframe-surface");
+  assert.equal(shared?.entries.length, 15);
+  assert.deepEqual(new Set(shared?.ruleIds), new Set([
+    "inspector-component-surface",
+    "IN-inspector-text-ai-keyframe-surface",
+  ]));
+  assert.ok(entries.every(({ tests, resolution }) => (
+    resolution.ruleId && tests.length > 0 && tests.every(({ name }) => name && !name.startsWith("task9_requirement_"))
+  )));
+});
+
+test("agent-settings-generation maps report 78 plus ledger 61 into deduped exact capabilities", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const maps = reviewedPlanOwnershipMaps();
+  const reportGroup = maps.ownershipGroups["agent-settings-generation"];
+  const ledgerGroup = maps.ledger.groups["agent-settings-generation"];
+  const clusters = maps.capabilityDedupe.duplicateClusters.filter(({ primaryGroup }) => (
+    primaryGroup === "agent-settings-generation"
+  ));
+  const plan = buildImplementationPlanGroup(root, "docs/audit/2026-07-14", "agent-settings-generation");
+  const entries = plan.entries.filter(({ kind }) => kind === "requirement");
+  const slices = plan.slices.filter(({ entries: sliceEntries }) => sliceEntries.every(({ kind }) => kind === "requirement"));
+
+  assert.equal(reportGroup.recordCount, 78);
+  assert.equal(reportGroup.slices.length, 16);
+  assert.equal(new Set(reportGroup.slices.flatMap(({ recordIds }) => recordIds)).size, 78);
+  assert.equal(ledgerGroup.recordCount, 61);
+  assert.equal(ledgerGroup.sliceKeys.length, 17);
+  assert.equal(entries.length, 139);
+  assert.equal(new Set(entries.map(({ record }) => record.id)).size, 139);
+  assert.equal(clusters.length, 8);
+  assert.equal(slices.length, 25);
+  assert.equal(entries.filter(({ resolution }) => resolution.strategy === "reviewed-mapping-report").length, 78);
+  assert.equal(entries.filter(({ resolution }) => resolution.strategy === "validated-ledger-evidence").length, 61);
+  assert.deepEqual(
+    Object.fromEntries(["implementation-gap", "composite-acceptance", "evidence-closure"].map((classification) => [
+      classification,
+      entries.filter(({ resolution }) => resolution.disposition === classification).length,
+    ])),
+    { "implementation-gap": 44, "composite-acceptance": 54, "evidence-closure": 41 },
+  );
+  for (const cluster of clusters) {
+    const slice = slices.find(({ capabilityId }) => capabilityId === cluster.capabilityId);
+    assert.equal(slice?.entries.length, cluster.recordIds.length);
+    assert.deepEqual(new Set(slice?.ruleIds), new Set([...cluster.reportSliceKeys, ...cluster.ledgerSliceKeys]));
+  }
+
+  const assembly = entries.find(({ resolution }) => resolution.ruleId === "agent-crate-tauri-assembly");
+  assert.deepEqual(assembly?.resolution.correctionIds, ["UI-I-02"]);
+  assert.deepEqual(assembly?.tests.map(({ path, name }) => `${path}#${name}`), [
+    "crates/opentake-agent/tests/module_tree.rs#documented_exports_compile",
+    "src-tauri/src/mcp.rs#documented_mcp_entrypoint_compiles",
+    "src-tauri/src/chat.rs#documented_chat_entrypoint_compiles",
+  ]);
+  assert.match(assembly?.tests[0].command ?? "", /-p opentake-agent --test module_tree documented_exports_compile/);
+  assert.match(assembly?.tests[1].command ?? "", /-p opentake-tauri documented_mcp_entrypoint_compiles/);
+  assert.match(assembly?.tests[2].command ?? "", /-p opentake-tauri documented_chat_entrypoint_compiles/);
+  assert.ok(entries.every(({ tests, productTargets, resolution }) => (
+    resolution.ruleId
+    && productTargets.length > 0
+    && tests.length > 0
+    && tests.every(({ name }) => name && !name.startsWith("task9_requirement_"))
+  )));
+});
+
+test("accessibility-polish maps report 22 plus ledger 7 while moving 6 and completing 4", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const maps = reviewedPlanOwnershipMaps();
+  const reportGroup = maps.ownershipGroups["accessibility-polish"];
+  const ledgerGroup = maps.ledger.groups["accessibility-polish"];
+  const moved = maps.capabilityDedupe.taxonomyMoves.find(({ reportSliceKey }) => (
+    reportSliceKey === "misgrouped-transcription"
+  ));
+  const completed = maps.capabilityDedupe.completedNonProduct.find(({ reportSliceKey }) => (
+    reportSliceKey === "non-product-audit-plan-steps"
+  ));
+  const clusters = maps.capabilityDedupe.duplicateClusters.filter(({ primaryGroup }) => (
+    primaryGroup === "accessibility-polish"
+  ));
+  const plan = buildImplementationPlanGroup(root, "docs/audit/2026-07-14", "accessibility-polish");
+  const mediaPlan = buildImplementationPlanGroup(root, "docs/audit/2026-07-14", "media-library");
+  const entries = plan.entries.filter(({ kind }) => kind === "requirement");
+  const slices = plan.slices.filter(({ entries: sliceEntries }) => sliceEntries.every(({ kind }) => kind === "requirement"));
+
+  assert.equal(reportGroup.recordCount, 32);
+  assert.equal(reportGroup.slices.length, 9);
+  assert.equal(new Set(reportGroup.slices.flatMap(({ recordIds }) => recordIds)).size, 32);
+  assert.equal(moved.recordIds.length, 6);
+  assert.equal(completed.recordIds.length, 4);
+  assert.equal(ledgerGroup.recordCount, 7);
+  assert.equal(ledgerGroup.sliceKeys.length, 5);
+  assert.equal(entries.length, 29);
+  assert.equal(new Set(entries.map(({ record }) => record.id)).size, 29);
+  assert.equal(clusters.length, 3);
+  assert.equal(slices.length, 9);
+  assert.equal(entries.filter(({ resolution }) => resolution.strategy === "reviewed-mapping-report").length, 22);
+  assert.equal(entries.filter(({ resolution }) => resolution.strategy === "validated-ledger-evidence").length, 7);
+  assert.deepEqual(
+    Object.fromEntries(["implementation-gap", "composite-acceptance", "evidence-closure"].map((classification) => [
+      classification,
+      entries.filter(({ resolution }) => resolution.disposition === classification).length,
+    ])),
+    { "implementation-gap": 2, "composite-acceptance": 25, "evidence-closure": 2 },
+  );
+  assert.ok(entries.every(({ record }) => !moved.recordIds.includes(record.id) && !completed.recordIds.includes(record.id)));
+  assert.doesNotMatch(plan.implementation, /misgrouped-transcription|non-product-audit-plan-steps/);
+
+  const mediaMoved = mediaPlan.entries.filter(({ record }) => moved.recordIds.includes(record.id));
+  assert.equal(mediaMoved.length, 6);
+  assert.ok(mediaMoved.every(({ resolution }) => (
+    resolution.primaryGroup === "media-library" && resolution.ruleId === "misgrouped-transcription"
+  )));
+  const transcription = mediaMoved[0];
+  assert.deepEqual(transcription?.resolution.correctionIds, ["UI-M-01"]);
+  const whisper = transcription?.tests.find(({ path }) => path.endsWith("/whisper.rs"));
+  assert.equal(whisper?.name, "centiseconds_convert_to_seconds");
+  assert.match(whisper?.command ?? "", /-p opentake-media --features whisper-backend/);
+
+  const tokenEntries = entries.filter(({ resolution }) => (
+    resolution.capabilityId === "ui-design-token-consistency" || resolution.ruleId === "AP-bg-placeholder-token"
+  ));
+  assert.ok(tokenEntries.some(({ productTargets }) => productTargets.some(({ ref }) => (
+    ref === "web/src/styles/tokens.css#--bg-raised"
+  ))));
+  assert.ok(tokenEntries.some(({ productTargets }) => productTargets.some(({ ref }) => (
+    ref === "web/src/styles/tokens.css#--bg-placeholder"
+  ))));
+  assert.ok(entries.every(({ tests, productTargets, resolution }) => (
+    resolution.ruleId && productTargets.length > 0 && tests.length > 0
+  )));
+});
+
+test("all implementation plans cover the exact 715-record ownership partition and implement each cross-group slice once", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const plans = buildImplementationPlans(root, "docs/audit/2026-07-14");
+  const tracked = new Set(git(root, ["ls-files", "-z"]).split("\0").filter(Boolean));
+  const groupCounts = {
+    "data-safety": 32,
+    "command-contracts": 45,
+    "media-render-playback-export": 68,
+    "home-shell": 43,
+    "media-library": 78,
+    "preview-timeline": 96,
+    "inspector-text-keyframes": 84,
+    "agent-settings-generation": 176,
+    "accessibility-polish": 47,
+    documentation: 46,
+  };
+  const strategyCounts = {
+    "reviewed-mapping-report": 346,
+    "validated-ledger-evidence": 111,
+    "control-acceptance": 212,
+    "documentation-process": 46,
+  };
+  const entriesByStrategy = Object.fromEntries(Object.keys(strategyCounts).map((strategy) => [
+    strategy,
+    plans.entries.filter(({ resolution }) => resolution.strategy === strategy).length,
+  ]));
+  const recordIds = plans.entries.map(({ record }) => record.id);
+  const slicedRecordIds = plans.slices.flatMap(({ entries }) => entries.map(({ record }) => record.id));
+
+  assert.equal(plans.entries.length, 715);
+  assert.equal(plans.entries.filter(({ kind }) => kind === "requirement").length, 503);
+  assert.equal(plans.entries.filter(({ kind }) => kind === "control").length, 212);
+  assert.equal(plans.entries.filter(({ kind, record }) => kind === "requirement" && record.gapGroup !== "documentation").length, 457);
+  assert.equal(plans.entries.filter(({ record }) => record.gapGroup === "documentation").length, 46);
+  assert.equal(plans.slices.length, 274);
+  assert.deepEqual(entriesByStrategy, strategyCounts);
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(plans.groups).map(([group, info]) => [group, info.entries.length])),
+    groupCounts,
+  );
+  assert.equal(new Set(recordIds).size, 715);
+  assert.deepEqual(slicedRecordIds.toSorted(), recordIds.toSorted());
+  assert.equal(new Set(plans.entries.filter(({ kind }) => kind === "control").map(({ sliceId }) => sliceId)).size, 106);
+  assert.equal(new Set(plans.entries.filter(({ record }) => record.gapGroup === "documentation").map(({ sliceId }) => sliceId)).size, 32);
+
+  for (const entry of plans.entries.filter(({ kind, record }) => (
+    kind === "requirement" && record.gapGroup !== "documentation"
+  ))) {
+    assert.ok(
+      entry.productTargets.length > 0 || entry.resolution.childCapabilities.length > 0,
+      `${entry.record.id} lacks a product target or reviewed child capability`,
+    );
+    for (const target of entry.productTargets) {
+      assert.equal(target.fileAction, tracked.has(target.path) ? "Modify" : "Create", `${entry.record.id} product file action drifted`);
+      if (target.planned) continue;
+      assert.ok(tracked.has(target.path), `${entry.record.id} existing product target is not tracked: ${target.path}`);
+      assert.ok(
+        sourceDeclaresProductSpec(target.path, readFileSync(join(root, target.path), "utf8"), target.symbol),
+        `${entry.record.id} exact existing product declaration is absent: ${target.ref}`,
+      );
+    }
+    assert.ok(["reviewed-mapping-report", "validated-ledger-evidence"].includes(entry.resolution.strategy));
+    assert.ok(entry.resolution.ruleId);
+  }
+
+  const legalPlannedRunner = /^(?:web\/src\/.+\.(?:test|spec|interaction\.test)\.tsx?|src-tauri\/(?:src|tests)\/.+\.rs|crates\/[^/]+\/(?:tests|src)\/.+\.rs|scripts\/tests\/.+-test\.rb|tools\/.+\.test\.mjs)$/;
+  for (const entry of plans.entries) {
+    assert.ok(entry.tests.length > 0, `${entry.record.id} lacks an owning test`);
+    assert.equal(entry.resolution.runnerOwnership.length, entry.tests.length);
+    for (const reviewedTest of entry.tests) {
+      assert.match(reviewedTest.path, legalPlannedRunner, `${entry.record.id} test has no legal owning runner`);
+      assert.equal(reviewedTest.fileAction, tracked.has(reviewedTest.path) ? "Modify" : "Create", `${entry.record.id} test file action drifted`);
+      if (reviewedTest.evidenceClass === "existing-owned") {
+        assert.ok(tracked.has(reviewedTest.path), `${entry.record.id} existing test is not tracked: ${reviewedTest.path}`);
+        assert.ok(
+          sourceDeclaresTest(reviewedTest.path, readFileSync(join(root, reviewedTest.path), "utf8"), reviewedTest.name),
+          `${entry.record.id} exact existing test declaration is absent: ${reviewedTest.path}#${reviewedTest.name}`,
+        );
+      } else {
+        assert.equal(reviewedTest.evidenceClass, "reviewed-planned");
+      }
+      assert.ok(reviewedTest.command.includes(reviewedTest.name), `${entry.record.id} command omits its exact test name`);
+      if (reviewedTest.path.endsWith(".rs")) {
+        const crate = reviewedTest.path.startsWith("crates/") ? reviewedTest.path.split("/")[1] : "opentake-tauri";
+        assert.ok(reviewedTest.command.includes(`-p ${crate}`), `${entry.record.id} command omits its Rust package`);
+      } else {
+        assert.ok(reviewedTest.command.includes(reviewedTest.path.replace(/^web\//, "")), `${entry.record.id} command omits its runner path`);
+      }
+    }
+  }
+
+  const testReferences = plans.entries.flatMap(({ tests }) => tests);
+  const testIdentity = ({ path, name, evidenceClass }) => `${path}\0${name}\0${evidenceClass}`;
+  for (const evidenceClass of ["existing-owned", "reviewed-planned"]) {
+    const references = testReferences.filter((reviewedTest) => reviewedTest.evidenceClass === evidenceClass);
+    const prefix = evidenceClass === "existing-owned" ? "ExistingOwned" : "ReviewedPlanned";
+    assert.equal(plans.ownership.counts[`${prefix[0].toLowerCase()}${prefix.slice(1)}TestReferences`], references.length);
+    assert.equal(plans.ownership.counts[`unique${prefix}Tests`], new Set(references.map(testIdentity)).size);
+  }
+
+  const implementationDocuments = Object.values(plans.groups).map(({ implementationPath }) => plans.outputs[implementationPath]);
+  for (const slice of plans.slices) {
+    const taskHeader = new RegExp(`^### Task \\d+: .*\\(${escapeRegExp(slice.id)}\\)$`, "gm");
+    const implementationCount = implementationDocuments.reduce((count, content) => count + [...content.matchAll(taskHeader)].length, 0);
+    assert.equal(implementationCount, 1, `${slice.id} must have exactly one primary implementation task`);
+  }
+
+  assert.equal(plans.ownership.counts.records, 715);
+  assert.equal(plans.ownership.counts.slices, 274);
+  for (const content of [...Object.values(plans.outputs), plans.index]) {
+    assert.match(content, /[^\n]\n$/);
+    assert.doesNotMatch(content, /\n\n$/);
+  }
+  assert.deepEqual(
+    new Set(plans.ownership.records.map(({ recordId }) => recordId)),
+    new Set(plans.entries.map(({ record }) => record.id)),
+  );
+});
+
 test("verify CLI writes failed document verification before exiting nonzero", (t) => {
   const fixture = createDocumentVerificationFixture(t);
   fixture.records[0].status = "unverified";
@@ -3635,4 +5146,30 @@ test("module imports when process.argv[1] is unavailable", () => {
   );
 
   assert.equal(result.status, 0, result.stderr);
+});
+
+test("verifyAudit all validates the exact published completion program", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const result = verifyAudit(root, "docs/audit/2026-07-14", "all");
+
+  assert.equal(result.ok, true, JSON.stringify(result.errors.slice(0, 10)));
+  assert.equal(result.passed, true);
+  assert.equal(result.counts.documents, 2704);
+  assert.equal(result.counts.controls, 259);
+  assert.equal(result.counts.incompleteRequirements, 503);
+  assert.equal(result.counts.incompleteControls, 212);
+  assert.equal(result.counts.plannedRecords, 715);
+  assert.equal(result.counts.unverified, 0);
+  assert.deepEqual(Object.keys(result.gapCounts), [
+    "data-safety",
+    "command-contracts",
+    "media-render-playback-export",
+    "home-shell",
+    "media-library",
+    "preview-timeline",
+    "inspector-text-keyframes",
+    "agent-settings-generation",
+    "accessibility-polish",
+    "documentation",
+  ]);
 });

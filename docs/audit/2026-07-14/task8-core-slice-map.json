@@ -1,0 +1,1210 @@
+{
+  "schema": 1,
+  "scopeGroups": [
+    "data-safety",
+    "command-contracts",
+    "home-shell",
+    "media-library",
+    "media-render-playback-export"
+  ],
+  "groups": {
+    "data-safety": {
+      "recordCount": 32,
+      "slices": [
+        {
+          "sliceKey": "DS-legacy-default-matrix",
+          "classification": "implementation",
+          "recordIds": ["365ac4943b157d3e"],
+          "products": [
+            {"path": "crates/opentake-project/src/bundle.rs", "symbol": "Project::open_from_root", "planned": false},
+            {"path": "crates/opentake-domain/src/clip.rs", "symbol": null, "planned": false},
+            {"path": "crates/opentake-domain/src/media.rs", "symbol": "MediaManifest", "planned": false},
+            {"path": "crates/opentake-domain/src/timeline.rs", "symbol": null, "planned": false},
+            {"path": "crates/opentake-project/src/gen_log.rs", "symbol": "GenerationLog", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-project/tests/upstream_compat.rs", "name": "applies_clip_defaults_for_omitted_fields", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-project/tests/upstream_compat.rs", "name": "migrates_legacy_transform_xy_to_center", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-project/tests/upstream_compat.rs", "name": "migrates_generation_log_legacy_cost_and_version", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-project/tests/upstream_compat.rs", "name": "exhaustive_legacy_default_matrix", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Project open owns serde migration through the tracked domain types; the planned matrix is required because current tests do not cover every documented field plus save/reopen."
+        },
+        {
+          "sliceKey": "DS-mcp-transport",
+          "classification": "implementation",
+          "recordIds": ["473d4379da3bd4cc"],
+          "products": [
+            {"path": "crates/opentake-agent/src/mcp/server.rs", "symbol": "serve_with_bridge", "planned": false},
+            {"path": "crates/opentake-agent/src/mcp/server.rs", "symbol": "build_router_with_bridge", "planned": false},
+            {"path": "crates/opentake-agent/src/mcp/server.rs", "symbol": "localhost_guard", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-agent/tests/mcp_http.rs", "name": "non_local_origin_is_rejected", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-agent/tests/mcp_http.rs", "name": "oversized_request_body_is_rejected", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-agent/tests/mcp_http.rs", "name": "serve_rejects_non_loopback_bind", "evidenceClass": "reviewed-planned"},
+            {"path": "crates/opentake-agent/tests/mcp_http.rs", "name": "unsupported_protocol_version_is_400", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "The router already owns Host, Origin and body guards, but the listener accepts a caller supplied address and no protocol-version middleware is present."
+        },
+        {
+          "sliceKey": "DS-mcp-tool-import",
+          "classification": "implementation",
+          "recordIds": ["d317ca3e45fba737"],
+          "products": [
+            {"path": "crates/opentake-agent/src/tools/errors.rs", "symbol": "decode_tool_args", "planned": false},
+            {"path": "crates/opentake-agent/src/mcp/dispatch.rs", "symbol": "Dispatcher::import_media", "planned": false},
+            {"path": "src-tauri/src/mcp.rs", "symbol": "TauriMediaBridge::import_media", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-agent/tests/tool_argument_contract.rs", "name": "all_tool_schemas_reject_unknown_missing_wrong_type", "evidenceClass": "reviewed-planned"},
+            {"path": "src-tauri/src/mcp.rs", "name": "https_url_import_enforces_scheme_mime_and_decoded_limit", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Tracked validators cover several shapes and byte import, but URL import is explicitly unsupported rather than HTTPS-only streamed with typed MIME and a 1 GiB decoded cap."
+        },
+        {
+          "sliceKey": "DS-mcp-redaction",
+          "classification": "implementation",
+          "recordIds": ["2e9e6066655d5846"],
+          "products": [
+            {"path": "src-tauri/src/mcp.rs", "symbol": null, "planned": false},
+            {"path": "crates/opentake-agent/src/mcp/convert.rs", "symbol": "to_call_tool_result", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-agent/tests/mcp_error_redaction.rs", "name": "llm_errors_redact_paths_credentials_headers_provider_bodies", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Bridge errors flow into the LLM-facing result conversion and currently retain raw path and IO detail."
+        },
+        {
+          "sliceKey": "DS-generation-seed",
+          "classification": "implementation",
+          "recordIds": ["b9010e6717b5d5ea", "1f35cc4131f8f0b7"],
+          "products": [
+            {"path": "crates/opentake-project/src/bundle.rs", "symbol": "Project::open_from_root", "planned": false},
+            {"path": "crates/opentake-core/src/session.rs", "symbol": "EditorSession::open_project", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-project/tests/roundtrip.rs", "name": "malformed_generation_log_is_ignored", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-core/tests/project_open.rs", "name": "missing_generation_log_seeds_manifest_provenance_once", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Open currently unwraps an absent generation log to default without seeding manifest generation provenance."
+        },
+        {
+          "sliceKey": "DS-unix-consuming-tests",
+          "classification": "evidence-closure",
+          "recordIds": ["67e50cfe6dd7f49a"],
+          "products": [
+            {"path": "crates/opentake-project/src/safe_fs/ops.rs", "symbol": null, "planned": false},
+            {"path": "crates/opentake-project/src/safe_fs/unix.rs", "symbol": null, "planned": true}
+          ],
+          "tests": [
+            {"path": "crates/opentake-project/src/safe_fs/tests.rs", "name": "source_swap_before_quarantine_restores_without_deletion", "evidenceClass": "reviewed-planned"},
+            {"path": "crates/opentake-project/src/safe_fs/tests.rs", "name": "restore_collision_fail_leaks_original_and_quarantine", "evidenceClass": "reviewed-planned"},
+            {"path": "crates/opentake-project/src/safe_fs/tests.rs", "name": "final_unix_name_window_is_explicit_same_account_boundary", "evidenceClass": "reviewed-planned"},
+            {"path": "crates/opentake-project/src/safe_fs/tests.rs", "name": "cleanup_capability_records_identity_before_consuming_delete", "evidenceClass": "reviewed-planned"},
+            {"path": "crates/opentake-project/src/safe_fs/tests.rs", "name": "nested_recursive_quarantine_cleanup_removes_files_symlink_fifo_and_directories", "evidenceClass": "reviewed-planned"},
+            {"path": "crates/opentake-project/src/safe_fs/tests.rs", "name": "destination_collision_preserves_stage_and_every_destination_kind", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "This record is an exact six-test evidence requirement; the Unix target still includes the unsupported backend and only component-name tests are tracked."
+        },
+        {
+          "sliceKey": "DS-windows-safe-fs",
+          "classification": "implementation",
+          "recordIds": ["db25fa5cad389d60", "03a0d53b4d783fb7", "e448f9531bbdb638"],
+          "products": [
+            {"path": "crates/opentake-project/src/safe_fs/ops.rs", "symbol": null, "planned": false},
+            {"path": "crates/opentake-project/src/safe_fs/windows.rs", "symbol": "complete_nt", "planned": true}
+          ],
+          "tests": [
+            {"path": "crates/opentake-project/src/safe_fs/tests.rs", "name": "windows_contract", "evidenceClass": "reviewed-planned"},
+            {"path": "crates/opentake-project/src/safe_fs/tests.rs", "name": "synchronous_nt_pending_is_invariant_error", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "The Windows target is still an unsupported include; the three records form the ordered scaffold, backend, and STATUS_PENDING invariant slice."
+        },
+        {
+          "sliceKey": "DS-native-receipt-validator",
+          "classification": "evidence-closure",
+          "recordIds": ["eb7ba5012fb1494f"],
+          "products": [
+            {"path": ".github/workflows/ci.yml", "symbol": null, "planned": false},
+            {"path": "scripts/run-c1b-windows-red.ps1", "symbol": null, "planned": true},
+            {"path": "scripts/validate-c1b-evidence.rb", "symbol": null, "planned": true}
+          ],
+          "tests": [
+            {"path": "scripts/tests/validate-c1b-evidence-test.rb", "name": null, "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "This is a process/evidence contract with exact receipt confinement and live API validation, not a product feature."
+        },
+        {
+          "sliceKey": "DS-project-open-composite-headings",
+          "classification": "composite-acceptance",
+          "recordIds": ["6748d221ef0d9a4c", "9335bc98b18f8d8d", "706e744a85684655", "b38818cf815e0f1e"],
+          "products": [
+            {"path": "crates/opentake-project/src/bundle.rs", "symbol": "Project::open_from_root", "planned": false},
+            {"path": "crates/opentake-core/src/session.rs", "symbol": "EditorSession::open_project", "planned": false}
+          ],
+          "tests": [],
+          "rationale": "These headings repeat the broader project-open assembly acceptance; the remaining concrete gaps are represented by legacy-default and generation-seed slices."
+        },
+        {
+          "sliceKey": "DS-cross-cutting-security-headings",
+          "classification": "composite-acceptance",
+          "recordIds": ["37acd430c8e1e82b", "43bc7b61f5b484f7", "47a9f1e3f7c11b4c", "debab57411dd52fb"],
+          "products": [],
+          "tests": [],
+          "rationale": "These records span MCP, safe filesystem, playback, export and Agent clients; they must be acceptance collections over child slices rather than one implementation owner."
+        },
+        {
+          "sliceKey": "DS-manifest-corruption-conflict",
+          "classification": "contradicted",
+          "recordIds": ["7908bd026b5a91f6"],
+          "products": [
+            {"path": "docs/specs/core/5-assembly.md", "symbol": null, "planned": true},
+            {"path": "crates/opentake-project/src/bundle.rs", "symbol": "Project::open_from_root", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-project/tests/roundtrip.rs", "name": "malformed_manifest_is_an_error", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "The assembly document says corrupt media.json is nonfatal, while upstream analysis and tracked code require malformed manifest to fail; acceptance must be corrected before product work."
+        },
+        {
+          "sliceKey": "DS-cache-identity-complete",
+          "classification": "evidence-closure",
+          "recordIds": ["52da354b46176a99"],
+          "products": [
+            {"path": "crates/opentake-media/src/cache_key.rs", "symbol": "file_identity_key", "planned": false},
+            {"path": "crates/opentake-media/src/cache_key.rs", "symbol": "identity_hex", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-media/src/cache_key.rs", "name": "identity_hex_is_stable_and_lowercase", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-media/src/cache_key.rs", "name": "identity_hex_matches_swift_for_whole_second_mtime", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-media/src/cache_key.rs", "name": "file_identity_key_missing_file_is_none", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "The stable lowercase 32-hex identity and missing-file behavior are implemented and directly tested."
+        },
+        {
+          "sliceKey": "DS-shared-core-command-complete",
+          "classification": "evidence-closure",
+          "recordIds": ["44e32f4f5265f1dc", "adb4fb8f4521a41f", "978fe275600796df", "a7fcfeeabb9eca2b", "2d95c75bfdf43afd", "90e95608564f8bc4", "479246e3a4dd5891", "1598d28c23e8cd9b", "26e566086bff8227", "a2923e1fa84e4a81"],
+          "products": [
+            {"path": "crates/opentake-ops/src/editor_state.rs", "symbol": "EditorState", "planned": false},
+            {"path": "crates/opentake-ops/src/command.rs", "symbol": "EditCommand::apply", "planned": false},
+            {"path": "crates/opentake-core/src/core.rs", "symbol": "AppCore::apply", "planned": false},
+            {"path": "crates/opentake-core/src/events.rs", "symbol": "EventBus", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-ops/src/editor_state.rs", "name": "commit_undo_redo_cycle_restores_and_versions", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-core/src/core.rs", "name": "apply_bumps_version_and_emits_once", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-core/src/core.rs", "name": "unchanged_command_does_not_emit_or_bump", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-core/src/core.rs", "name": "undo_redo_through_core_bumps_version_and_emits", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "All ten headings describe the same tracked EditorState to EditCommand to AppCore to EventBus ownership path with undo and version tests."
+        },
+        {
+          "sliceKey": "DS-media-resolver-complete",
+          "classification": "evidence-closure",
+          "recordIds": ["c6caf6aefea9247a"],
+          "products": [
+            {"path": "crates/opentake-domain/src/media.rs", "symbol": "MediaResolver::expected_path", "planned": false},
+            {"path": "src-tauri/src/media.rs", "symbol": "MediaItemDto::from_entry", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-domain/src/media.rs", "name": "resolver_expected_path_external", "evidenceClass": "existing-owned"},
+            {"path": "src-tauri/src/media.rs", "name": "dto_reports_file_size_for_present_source", "evidenceClass": "existing-owned"},
+            {"path": "src-tauri/src/media.rs", "name": "relink_keeps_same_id_and_clears_missing", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "The domain resolver owns expected-path resolution and the Tauri projection distinguishes present and missing state."
+        }
+      ],
+      "uncoveredRecordIds": []
+    },
+    "command-contracts": {
+      "recordCount": 48,
+      "slices": [
+        {
+          "sliceKey": "CC-seconds-truncation",
+          "classification": "implementation",
+          "recordIds": ["0a3a8376bab5c2b6"],
+          "products": [
+            {"path": "web/src/store/editActions.ts", "symbol": "mediaDurationFrames", "planned": false},
+            {"path": "web/src/store/editActions.ts", "symbol": "momentDurationFrames", "planned": false},
+            {"path": "web/src/lib/timelineInsert.ts", "symbol": null, "planned": false}
+          ],
+          "tests": [
+            {"path": "web/src/store/editActions.test.ts", "name": "seconds_to_frame_truncates_fractional_boundaries", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "The tracked conversion helpers use Math.round and violate the truncation contract at fractional boundaries."
+        },
+        {
+          "sliceKey": "CC-first-video-settings",
+          "classification": "implementation",
+          "recordIds": ["76b4b09bfdb405be"],
+          "products": [
+            {"path": "web/src/store/editActions.ts", "symbol": "addMediaToTimelineAt", "planned": false},
+            {"path": "crates/opentake-ops/src/command.rs", "symbol": "EditCommand::SetTimelineSettings", "planned": false},
+            {"path": "crates/opentake-ops/src/ops/settings.rs", "symbol": "apply_timeline_settings", "planned": false},
+            {"path": "web/src/lib/projectSettings.ts", "symbol": null, "planned": true},
+            {"path": "web/src/components/preview/ProjectSettingsMismatchDialog.tsx", "symbol": null, "planned": true}
+          ],
+          "tests": [
+            {"path": "crates/opentake-ops/src/ops/settings.rs", "name": "set_timeline_settings_is_undoable", "evidenceClass": "existing-owned"},
+            {"path": "web/src/lib/projectSettings.test.ts", "name": "first_video_auto_configures_and_only_configured_empty_mismatch_prompts", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "The shared settings command exists, but the import-time decision and mismatch UI contract are not connected."
+        },
+        {
+          "sliceKey": "CC-beat-auto-cut",
+          "classification": "implementation",
+          "recordIds": ["6697c7b7e306b700", "b96e0201a585b70a", "408dfad717402883", "1eaff83716e1d766", "122ba722ed1c9d81"],
+          "products": [
+            {"path": "crates/opentake-media/src/analysis/beat.rs", "symbol": "detect_beats", "planned": false},
+            {"path": "crates/opentake-agent/src/mcp/dispatch.rs", "symbol": "Dispatcher::detect_beats", "planned": false},
+            {"path": "crates/opentake-agent/src/mcp/dispatch.rs", "symbol": "Dispatcher::auto_cut_to_beats", "planned": false},
+            {"path": "web/src/store/editActions.ts", "symbol": "applyAutomationCommands", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-media/src/analysis/beat.rs", "name": "pulse_audio_detects_beat_frame_with_strength", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-agent/src/mcp/dispatch.rs", "name": "auto_cut_to_beats_write_false_is_read_only", "evidenceClass": "reviewed-planned"},
+            {"path": "crates/opentake-agent/src/mcp/dispatch.rs", "name": "auto_cut_to_beats_write_true_is_one_atomic_command_and_preserves_links", "evidenceClass": "reviewed-planned"},
+            {"path": "crates/opentake-media/src/analysis/beat.rs", "name": "low_energy_speech_is_not_overdetected", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Detection exists, but auto-cut always returns a read-only preview and has no atomic write path."
+        },
+        {
+          "sliceKey": "CC-mcp-transport",
+          "classification": "implementation",
+          "recordIds": ["1990a4b0e0df5397", "a4194cf440c740ca", "12ca71ff2bf25b39"],
+          "products": [
+            {"path": "crates/opentake-agent/src/mcp/server.rs", "symbol": "serve_with_bridge", "planned": false},
+            {"path": "crates/opentake-agent/src/mcp/server.rs", "symbol": "localhost_guard", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-agent/tests/mcp_http.rs", "name": "serve_rejects_non_loopback_bind", "evidenceClass": "reviewed-planned"},
+            {"path": "crates/opentake-agent/tests/mcp_http.rs", "name": "unsupported_protocol_version_is_400", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "These three records duplicate one transport implementation slice and should share the data-safety MCP transport owner."
+        },
+        {
+          "sliceKey": "CC-mcp-validation-import",
+          "classification": "implementation",
+          "recordIds": ["729157ed3496b88e", "4440efda84f45010"],
+          "products": [
+            {"path": "crates/opentake-agent/src/tools/errors.rs", "symbol": "decode_tool_args", "planned": false},
+            {"path": "crates/opentake-agent/src/mcp/dispatch.rs", "symbol": "Dispatcher::import_media", "planned": false},
+            {"path": "src-tauri/src/mcp.rs", "symbol": "TauriMediaBridge::import_media", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-agent/tests/tool_argument_contract.rs", "name": "all_tool_schemas_reject_unknown_missing_wrong_type", "evidenceClass": "reviewed-planned"},
+            {"path": "src-tauri/src/mcp.rs", "name": "https_url_import_enforces_scheme_mime_and_decoded_limit", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "The records are duplicate command-contract views of the same validation and safe URL import slice."
+        },
+        {
+          "sliceKey": "CC-mcp-error-redaction",
+          "classification": "implementation",
+          "recordIds": ["72876d064ac1a1c3"],
+          "products": [
+            {"path": "src-tauri/src/mcp.rs", "symbol": null, "planned": false},
+            {"path": "crates/opentake-agent/src/mcp/convert.rs", "symbol": "to_call_tool_result", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-agent/tests/mcp_error_redaction.rs", "name": "llm_errors_redact_paths_credentials_headers_provider_bodies", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "This is the command-contract duplicate of the data-safety redaction slice."
+        },
+        {
+          "sliceKey": "CC-readonly-versioned-mirror",
+          "classification": "implementation",
+          "recordIds": ["cc6851a640c8585d", "521a6bc7a7b845c6", "dbce32105bffaabf"],
+          "products": [
+            {"path": "src-tauri/src/lib.rs", "symbol": "forward_event", "planned": false},
+            {"path": "web/src/store/sync.ts", "symbol": "startSync", "planned": false},
+            {"path": "web/src/store/sync.ts", "symbol": "refreshMirror", "planned": false},
+            {"path": "web/src/store/projectStore.ts", "symbol": "useProjectStore", "planned": false}
+          ],
+          "tests": [
+            {"path": "web/src/store/sync.test.ts", "name": null, "evidenceClass": "existing-owned"},
+            {"path": "web/src/store/commandRouting.test.ts", "name": "project_store_has_no_timeline_mutator_and_refreshes_only_from_native_events", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "The version-ordered event to refresh path exists, but a whole-store architectural proof is still missing."
+        },
+        {
+          "sliceKey": "CC-edit-gesture-parity",
+          "classification": "implementation",
+          "recordIds": ["8134b0c5922567c8", "538b644e2cb07926"],
+          "products": [
+            {"path": "web/src/store/editActions.ts", "symbol": null, "planned": false},
+            {"path": "web/src/lib/api.ts", "symbol": "editApply", "planned": false},
+            {"path": "src-tauri/src/commands.rs", "symbol": "EditRequest::into_command", "planned": false}
+          ],
+          "tests": [
+            {"path": "web/src/store/editActions.test.ts", "name": null, "evidenceClass": "existing-owned"},
+            {"path": "web/src/store/commandRouting.test.ts", "name": "every_edit_action_emits_exact_edit_request", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Focused gesture tests exist, but no closed inventory proves every component emits the exact shared DTO."
+        },
+        {
+          "sliceKey": "CC-tauri-command-contract",
+          "classification": "implementation",
+          "recordIds": ["687bc44b4c9243a2", "5ca0aab886c28dde", "2c03433376733eb5", "5558df9d0b133739", "c924246b4d2b7ff9", "cd691581ab4342b3", "29da2e6af9281076"],
+          "products": [
+            {"path": "web/src/lib/api.ts", "symbol": null, "planned": false},
+            {"path": "src-tauri/src/lib.rs", "symbol": "run", "planned": false},
+            {"path": "src-tauri/src/commands.rs", "symbol": "EditRequest", "planned": false},
+            {"path": "src-tauri/src/commands.rs", "symbol": "edit_apply", "planned": false}
+          ],
+          "tests": [
+            {"path": "src-tauri/src/commands.rs", "name": "every_edit_request_maps_to_exact_edit_command", "evidenceClass": "reviewed-planned"},
+            {"path": "web/src/lib/api.commandContract.test.ts", "name": "frontend_command_names_match_invoke_handler", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Many DTO cases are individually tested, but no exhaustive Rust mapping and frontend invoke-handler parity gate exists."
+        },
+        {
+          "sliceKey": "CC-automation-composite-headings",
+          "classification": "composite-acceptance",
+          "recordIds": ["5c2a4b2f9e5abba6", "a3187560b02b641a", "2cf919a757c83ded", "fca4710352ee2ce7", "45ae268014531007", "ed0b686740d56057", "c8405288bd463439"],
+          "products": [],
+          "tests": [],
+          "rationale": "These headings span beat sync, smart reframe, tighten and shared failure semantics; they must aggregate child capability records and cannot be closed by the beat slice alone."
+        },
+        {
+          "sliceKey": "CC-authority-persistence-mixed",
+          "classification": "duplicate-or-taxonomy",
+          "recordIds": ["224726c57b0ebb49", "d9d443c2efd6fafd", "12a60880e3a58578"],
+          "products": [
+            {"path": "web/src/store/projectStore.ts", "symbol": "useProjectStore", "planned": false},
+            {"path": "web/src/store/uiStore.ts", "symbol": "useEditorUiStore", "planned": false}
+          ],
+          "tests": [],
+          "rationale": "Each record mixes Rust project authority with UI-only persistence; authority belongs to the mirror slice and persistence belongs to home-shell."
+        },
+        {
+          "sliceKey": "CC-layout-misgrouped",
+          "classification": "duplicate-or-taxonomy",
+          "recordIds": ["bb4951d728a9bcff", "c531ff6b55858bc0", "30c0b150880b10ef", "7fed82947ea8910f", "798893a778f1813e", "eeba721f50c7b42d", "e36316e0aa8cd79f", "6bb9a832824dd470", "2d93bc046644f4d8"],
+          "products": [
+            {"path": "web/src/components/shell/EditorSplit.tsx", "symbol": "EditorSplit", "planned": false},
+            {"path": "web/src/components/ui/PanelShell.tsx", "symbol": "PanelShell", "planned": false},
+            {"path": "web/src/components/shell/ViewMenu.tsx", "symbol": "ViewMenu", "planned": false}
+          ],
+          "tests": [],
+          "rationale": "These nine records are shell layout and titlebar behavior and should be owned by home-shell rather than command contracts."
+        },
+        {
+          "sliceKey": "CC-historical-audit-steps",
+          "classification": "duplicate-or-taxonomy",
+          "recordIds": ["bc055bd70685d201", "a15836d9b9069a45", "80b42eb9098c1a5e"],
+          "products": [
+            {"path": "tools/completion-audit.mjs", "symbol": null, "planned": false}
+          ],
+          "tests": [
+            {"path": "tools/completion-audit.test.mjs", "name": null, "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "These unchecked historical implementation steps were superseded by the current audit CLI and should be marked obsolete rather than scheduled as product work."
+        },
+        {
+          "sliceKey": "CC-event-forwarding-complete",
+          "classification": "evidence-closure",
+          "recordIds": ["8c2d9157594b8d92"],
+          "products": [
+            {"path": "crates/opentake-core/src/events.rs", "symbol": "CoreEvent", "planned": false},
+            {"path": "src-tauri/src/lib.rs", "symbol": "forward_event", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-core/src/events.rs", "name": "core_event_serializes_with_kind_tag", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-core/src/events.rs", "name": "media_changed_serializes_with_kind_tag", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "Tagged core events are forwarded and WebView emit errors are intentionally ignored as nonfatal."
+        }
+      ],
+      "uncoveredRecordIds": []
+    },
+    "home-shell": {
+      "recordCount": 9,
+      "slices": [
+        {
+          "sliceKey": "HS-project-card-lifecycle",
+          "classification": "implementation",
+          "recordIds": ["c4af18634c223a8d"],
+          "products": [
+            {"path": "src-tauri/src/home.rs", "symbol": "ProjectRegistry", "planned": true},
+            {"path": "web/src/store/recentStore.ts", "symbol": "useRecentStore", "planned": false},
+            {"path": "web/src/components/home/HomeView.tsx", "symbol": "ProjectGridCard", "planned": false}
+          ],
+          "tests": [
+            {"path": "src-tauri/src/home.rs", "name": "missing_entry_survives_registry_load_and_safe_trash_removes_only_after_success", "evidenceClass": "reviewed-planned"},
+            {"path": "web/src/components/home/HomeView.test.tsx", "name": "missing_card_reveal_remove_and_trash_states", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Home currently filters missing entries during load and the card only removes a recent entry; persistent missing, reveal and safe-trash states need a shared registry."
+        },
+        {
+          "sliceKey": "HS-new-open-sample",
+          "classification": "implementation",
+          "recordIds": ["31a4c6a115076c19"],
+          "products": [
+            {"path": "web/src/components/home/HomeView.tsx", "symbol": "HomeView", "planned": false},
+            {"path": "web/src/store/projectActions.ts", "symbol": "newProjectAndEnter", "planned": false},
+            {"path": "web/src/store/projectActions.ts", "symbol": "openProjectPath", "planned": false},
+            {"path": "web/src/store/projectActions.ts", "symbol": "openProjectViaDialog", "planned": false},
+            {"path": "src-tauri/src/samples.rs", "symbol": "SampleProjectService", "planned": true}
+          ],
+          "tests": [
+            {"path": "src-tauri/src/samples.rs", "name": "failed_materialization_rolls_back_entire_sample_directory", "evidenceClass": "reviewed-planned"},
+            {"path": "web/src/components/home/HomeView.test.tsx", "name": "new_open_sample_register_only_after_success_and_route_tutorial", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "New and open helpers exist, while sample materialization, rollback, recent registration and tutorial routing remain one vertical flow."
+        },
+        {
+          "sliceKey": "HS-layout-geometry",
+          "classification": "implementation",
+          "recordIds": ["2269e95a893ffbfe"],
+          "products": [
+            {"path": "web/src/store/uiStore.ts", "symbol": "useEditorUiStore", "planned": false},
+            {"path": "web/src/components/shell/EditorSplit.tsx", "symbol": "EditorSplit", "planned": false},
+            {"path": "web/src/components/shell/EditorSplit.tsx", "symbol": "DefaultLayout", "planned": false},
+            {"path": "web/src/components/shell/EditorSplit.tsx", "symbol": "MediaLayout", "planned": false},
+            {"path": "web/src/components/shell/EditorSplit.tsx", "symbol": "VerticalLayout", "planned": false},
+            {"path": "web/src/components/ui/PanelShell.tsx", "symbol": "PanelShell", "planned": false}
+          ],
+          "tests": [
+            {"path": "web/src/components/shell/EditorSplit.test.tsx", "name": "all_presets_match_geometry_visibility_maximize_and_focus_shell", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "All three layout components exist, but no tracked test proves pinned geometry, gutters, radii and focus treatment."
+        },
+        {
+          "sliceKey": "HS-schema-safe-persistence",
+          "classification": "implementation",
+          "recordIds": ["1a4a6f9bc9a1ee88", "6cc3ccf2f7420f7f"],
+          "products": [
+            {"path": "web/src/store/uiStore.ts", "symbol": "loadBool", "planned": false},
+            {"path": "web/src/store/uiStore.ts", "symbol": "loadPreset", "planned": false},
+            {"path": "web/src/store/uiStore.ts", "symbol": "persist", "planned": false},
+            {"path": "web/src/store/uiStore.ts", "symbol": "useEditorUiStore", "planned": false}
+          ],
+          "tests": [
+            {"path": "web/src/store/uiStore.persistence.test.ts", "name": "schema_safe_layout_panel_and_keyframe_state_survive_restart", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Persistence helpers exist, while the current uiStore tests cover playback rather than restart-safe layout, panel and keyframe state."
+        },
+        {
+          "sliceKey": "HS-menu-contract",
+          "classification": "implementation",
+          "recordIds": ["28dc2449c81b0010"],
+          "products": [
+            {"path": "web/src/components/shell/ViewMenu.tsx", "symbol": "ViewMenu", "planned": false},
+            {"path": "web/src/store/uiStore.ts", "symbol": "useEditorUiStore", "planned": false}
+          ],
+          "tests": [
+            {"path": "web/src/components/shell/ViewMenu.test.tsx", "name": "commands_shortcuts_checked_state_and_disabled_rules", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "The menu owner is tracked but its complete command, shortcut, state and disabled-rule contract lacks focused evidence."
+        },
+        {
+          "sliceKey": "HS-upstream-home-composite",
+          "classification": "composite-acceptance",
+          "recordIds": ["0ccbf12f850bf335"],
+          "products": [],
+          "tests": [],
+          "rationale": "This record combines registry, cards, samples, welcome and update surfaces and must be decomposed into child acceptance records."
+        },
+        {
+          "sliceKey": "HS-autosave-metadata-mixed",
+          "classification": "duplicate-or-taxonomy",
+          "recordIds": ["034f4a07aa8a3c47"],
+          "products": [
+            {"path": "web/src/store/recentStore.ts", "symbol": "useRecentStore", "planned": false}
+          ],
+          "tests": [],
+          "rationale": "Autosave and close-flush have implementation evidence, while Home project metadata remains a registry gap; the record must split before completion."
+        },
+        {
+          "sliceKey": "HS-component-mapping-composite",
+          "classification": "composite-acceptance",
+          "recordIds": ["047e16af5d02f827"],
+          "products": [],
+          "tests": [],
+          "rationale": "Every-component mapping is an acceptance index across the shell, not a single implementation owner."
+        }
+      ],
+      "uncoveredRecordIds": []
+    },
+    "media-library": {
+      "recordCount": 28,
+      "slices": [
+        {
+          "sliceKey": "ML-card-state-machine",
+          "classification": "implementation",
+          "recordIds": ["af77196f5a214264", "3c7deb61c7ee69cf", "a81e230c3a053c6e"],
+          "products": [
+            {"path": "crates/opentake-domain/src/media.rs", "symbol": "MediaResolver", "planned": false},
+            {"path": "src-tauri/src/media.rs", "symbol": "MediaItemDto::from_entry", "planned": false},
+            {"path": "web/src/components/media/MediaPanel.tsx", "symbol": "MediaCard", "planned": false},
+            {"path": "web/src/store/mediaActions.ts", "symbol": null, "planned": false}
+          ],
+          "tests": [
+            {"path": "src-tauri/src/media.rs", "name": "dto_distinguishes_offline_generating_downloading_failed", "evidenceClass": "reviewed-planned"},
+            {"path": "web/src/components/media/MediaPanel.stateMatrix.test.tsx", "name": "state_precedence_actions_and_scoped_relink", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "The current DTO and card primarily expose missing state; the complete generation, download, failure and border-precedence state machine is absent."
+        },
+        {
+          "sliceKey": "ML-import-feedback",
+          "classification": "implementation",
+          "recordIds": ["cc98eb192fb7a536"],
+          "products": [
+            {"path": "src-tauri/src/media.rs", "symbol": "import_media", "planned": false},
+            {"path": "src-tauri/src/media.rs", "symbol": "import_folder", "planned": false},
+            {"path": "web/src/store/mediaActions.ts", "symbol": null, "planned": false}
+          ],
+          "tests": [
+            {"path": "src-tauri/src/media.rs", "name": "import_media_imports_supported_and_skips_others", "evidenceClass": "existing-owned"},
+            {"path": "web/src/store/mediaActions.test.ts", "name": "unsupported_skips_and_folder_failure_remain_visible", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Backend skipped and recursive-folder contracts exist, but visible unsupported and folder-failure feedback is not proved."
+        },
+        {
+          "sliceKey": "ML-thumbnail-pipeline",
+          "classification": "implementation",
+          "recordIds": ["d553b2fbbc1e1ee4", "99cd2a44bcaaec80", "7bf2edec161473dc", "f4f57526b9da4d45", "9b5bee769d832f02", "fe0e0332f4cb42d7", "9158059d3142515c"],
+          "products": [
+            {"path": "crates/opentake-media/src/thumbnail/mod.rs", "symbol": "video_thumbnail_times", "planned": false},
+            {"path": "crates/opentake-media/src/thumbnail/mod.rs", "symbol": "video_thumbnails", "planned": false},
+            {"path": "crates/opentake-media/src/thumbnail/mod.rs", "symbol": "image_thumbnail", "planned": false},
+            {"path": "crates/opentake-media/src/thumbnail/sprite.rs", "symbol": "load_sprite", "planned": false},
+            {"path": "src-tauri/src/media.rs", "symbol": "generate_thumbnail", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-media/src/thumbnail/sprite.rs", "name": "sprite_roundtrip_preserves_times_and_pixels", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-media/src/thumbnail/sprite.rs", "name": "load_corrupt_sidecar_is_none", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-media/src/thumbnail/sprite.rs", "name": "load_invalid_zero_or_undersized_geometry_is_none", "evidenceClass": "reviewed-planned"},
+            {"path": "crates/opentake-media/tests/thumbnail_pipeline.rs", "name": "video_image_sprite_cache_and_bounded_concurrency_roundtrip", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Core thumbnail and sprite paths exist, while invalid geometry and the full service/cache/concurrency acceptance path remain unproved."
+        },
+        {
+          "sliceKey": "ML-waveform-pipeline",
+          "classification": "implementation",
+          "recordIds": ["35d9eddb71d90a1e", "9a6455e155fbcce4", "3712d4cdd2646865", "978bde045890440e"],
+          "products": [
+            {"path": "crates/opentake-media/src/waveform/mod.rs", "symbol": "waveform_cached_cancellable", "planned": false},
+            {"path": "crates/opentake-media/src/waveform/store.rs", "symbol": null, "planned": false},
+            {"path": "src-tauri/src/media.rs", "symbol": "get_waveform", "planned": false},
+            {"path": "web/src/components/media/MediaPanel.tsx", "symbol": "AudioWaveform", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-media/src/waveform/store.rs", "name": null, "evidenceClass": "existing-owned"},
+            {"path": "web/src/components/media/MediaPanel.test.tsx", "name": null, "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-media/tests/waveform_pipeline.rs", "name": "waveform_sample_count_rms_orientation_and_cache_roundtrip", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Disk format and UI bars are tested, but no deterministic PCM fixture jointly proves sample count, RMS normalization, orientation and cache, including format/source discrimination between valid all-silent cache data and poisoned legacy output; all == 1.0 alone cannot classify the cache."
+        },
+        {
+          "sliceKey": "ML-panel-workflows",
+          "classification": "implementation",
+          "recordIds": ["3509681bdf85be16", "d306c6f423c5a3d0", "90c09b1777afb897", "ab96875cf2e266c3", "b7977faf236f2a6e", "e8142ea555c62a5f", "f2fac315139c9dce"],
+          "products": [
+            {"path": "web/src/components/media/MediaTabBar.tsx", "symbol": "MediaTabBar", "planned": false},
+            {"path": "web/src/components/media/MediaPanel.tsx", "symbol": "MediaPanel", "planned": false},
+            {"path": "web/src/components/media/LibraryView.tsx", "symbol": "LibraryView", "planned": false},
+            {"path": "web/src/components/media/SoundLibraryTab.tsx", "symbol": "SoundLibraryTab", "planned": false},
+            {"path": "web/src/store/libraryStore.ts", "symbol": null, "planned": false},
+            {"path": "src-tauri/src/library.rs", "symbol": null, "planned": false}
+          ],
+          "tests": [
+            {"path": "web/src/components/media/LibraryView.test.tsx", "name": null, "evidenceClass": "existing-owned"},
+            {"path": "web/src/components/media/MediaLibrary.workflow.test.tsx", "name": "tab_folder_breadcrumb_preview_drag_favorite_rename_delete_and_music_flow", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Library primitives exist, but several rail destinations remain disabled or placeholders and no complete workflow acceptance test exists."
+        },
+        {
+          "sliceKey": "ML-library-workflow-composite",
+          "classification": "composite-acceptance",
+          "recordIds": ["bf21a3ef0e947dad"],
+          "products": [],
+          "tests": [],
+          "rationale": "This record spans import, preview, drag, favorite, rename, delete and persistence and must aggregate child slices."
+        },
+        {
+          "sliceKey": "ML-basic-media-composite",
+          "classification": "composite-acceptance",
+          "recordIds": ["96ace0bac4ba142d"],
+          "products": [],
+          "tests": [],
+          "rationale": "This record combines FFmpeg, thumbnail and waveform acceptance and is not one implementation owner."
+        },
+        {
+          "sliceKey": "ML-manifest-compat-complete",
+          "classification": "evidence-closure",
+          "recordIds": ["6afe067d8c7d1190"],
+          "products": [
+            {"path": "crates/opentake-domain/src/media.rs", "symbol": "MediaManifest::deserialize", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-domain/src/media.rs", "name": "manifest_missing_version_falls_back_to_one", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-domain/src/media.rs", "name": "manifest_empty_object_decodes", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-project/tests/roundtrip.rs", "name": "save_then_open_is_lossless", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "Manifest v2 persistence and legacy missing version and array defaults are implemented and directly tested."
+        },
+        {
+          "sliceKey": "ML-cache-identity-duplicate",
+          "classification": "duplicate-or-taxonomy",
+          "recordIds": ["73db19cc5b04bae3"],
+          "products": [
+            {"path": "crates/opentake-media/src/cache_key.rs", "symbol": "file_identity_key", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-media/src/cache_key.rs", "name": "identity_hex_is_stable_and_lowercase", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "This is the media-library duplicate of the completed data-safety cache identity requirement."
+        },
+        {
+          "sliceKey": "ML-best-effort-probe-complete",
+          "classification": "evidence-closure",
+          "recordIds": ["022507a3bb431224"],
+          "products": [
+            {"path": "src-tauri/src/media.rs", "symbol": "import_one", "planned": false},
+            {"path": "src-tauri/src/media.rs", "symbol": "probe_media", "planned": false}
+          ],
+          "tests": [
+            {"path": "src-tauri/src/media.rs", "name": "import_media_imports_supported_and_skips_others", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "Supported files remain importable with default metadata when probing fails."
+        },
+        {
+          "sliceKey": "ML-relink-in-place-complete",
+          "classification": "evidence-closure",
+          "recordIds": ["2ea72933632ab3d7"],
+          "products": [
+            {"path": "crates/opentake-core/src/session.rs", "symbol": "EditorSession::relink_media_file", "planned": false},
+            {"path": "src-tauri/src/media.rs", "symbol": "relink_media", "planned": false}
+          ],
+          "tests": [
+            {"path": "src-tauri/src/media.rs", "name": "relink_keeps_same_id_and_clears_missing", "evidenceClass": "existing-owned"},
+            {"path": "src-tauri/src/media.rs", "name": "relink_rejects_type_mismatch", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "Relink preserves the asset id, validates type before mutation and clears missing state."
+        }
+      ],
+      "uncoveredRecordIds": []
+    },
+    "media-render-playback-export": {
+      "recordCount": 60,
+      "slices": [
+        {
+          "sliceKey": "MR-nested-timeline",
+          "classification": "implementation",
+          "recordIds": ["bedfdc6edfa147b9"],
+          "products": [
+            {"path": "crates/opentake-domain/src/clip.rs", "symbol": null, "planned": true},
+            {"path": "crates/opentake-render/src/plan/build.rs", "symbol": "build_frame_plan", "planned": true}
+          ],
+          "tests": [
+            {"path": "crates/opentake-render/tests/nested_timeline.rs", "name": "nested_edits_preview_and_export_same_frames", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "A nested clip reference and recursive render-plan flattening do not exist; the same plan must feed preview and export."
+        },
+        {
+          "sliceKey": "MR-optical-flow",
+          "classification": "implementation",
+          "recordIds": ["5933e802c9dfe372"],
+          "products": [
+            {"path": "crates/opentake-render/src/source.rs", "symbol": "TextureResolver", "planned": false},
+            {"path": "crates/opentake-media/src/decode/frame.rs", "symbol": null, "planned": true}
+          ],
+          "tests": [
+            {"path": "crates/opentake-render/tests/optical_flow.rs", "name": "two_frame_fixture_is_deterministic_and_matches_preview_export", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "The report identified no current optical-flow backend; source-frame interpolation must enter the shared resolver path."
+        },
+        {
+          "sliceKey": "MR-mask-rendering",
+          "classification": "implementation",
+          "recordIds": ["0609f4de4f001a49"],
+          "products": [
+            {"path": "crates/opentake-domain/src/grade.rs", "symbol": "Mask", "planned": false},
+            {"path": "crates/opentake-render/src/plan/build.rs", "symbol": null, "planned": false},
+            {"path": "crates/opentake-render/src/gpu/compositor.rs", "symbol": "pack_masks", "planned": false},
+            {"path": "crates/opentake-render/src/gpu/shader.wgsl", "symbol": "masks_coverage", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-render/tests/gpu_effects.rs", "name": "circle_mask_clips_to_center", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-render/tests/gpu_effects.rs", "name": "linear_circle_and_polygon_masks_match_cpu_reference_in_preview_and_export", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Linear and circular mask paths exist, while polygon masks are deliberately encoded as a no-op and need shared preview/export proof."
+        },
+        {
+          "sliceKey": "MR-stabilization",
+          "classification": "implementation",
+          "recordIds": ["20198476e9083261"],
+          "products": [
+            {"path": "crates/opentake-media/src/analysis", "symbol": null, "planned": true},
+            {"path": "crates/opentake-ops/src/command.rs", "symbol": null, "planned": true},
+            {"path": "crates/opentake-render/src/plan/build.rs", "symbol": null, "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-render/tests/stabilization.rs", "name": "synthetic_shake_produces_editable_undoable_preview_export_solution", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "No tracked stabilization analyzer or command owner exists; the solution must be represented as editable crop or transform state."
+        },
+        {
+          "sliceKey": "MR-generic-effects",
+          "classification": "implementation",
+          "recordIds": ["0086c30d6dc64f51"],
+          "products": [
+            {"path": "crates/opentake-domain/src/grade.rs", "symbol": "Effect", "planned": false},
+            {"path": "crates/opentake-render/src/plan/types.rs", "symbol": "LayerDraw", "planned": false},
+            {"path": "crates/opentake-render/src/gpu/compositor.rs", "symbol": null, "planned": true}
+          ],
+          "tests": [
+            {"path": "crates/opentake-render/tests/gpu_effects.rs", "name": "advertised_effect_registry_has_preview_export_golden_fixtures", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Effect metadata reaches the render plan but the generic effect chain has no production pass implementation."
+        },
+        {
+          "sliceKey": "MR-transitions",
+          "classification": "implementation",
+          "recordIds": ["f5c136c992515801", "73810a059793a1b8"],
+          "products": [
+            {"path": "crates/opentake-domain/src", "symbol": null, "planned": true},
+            {"path": "crates/opentake-render/src/plan/build.rs", "symbol": null, "planned": true},
+            {"path": "crates/opentake-render/src/gpu/compositor.rs", "symbol": null, "planned": true}
+          ],
+          "tests": [
+            {"path": "crates/opentake-render/tests/transitions.rs", "name": "adjacent_clip_transition_is_editable_undoable_and_matches_preview_export", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Both records describe one missing editable transition model and overlap render pass."
+        },
+        {
+          "sliceKey": "MR-lgg-proof",
+          "classification": "evidence-closure",
+          "recordIds": ["6ee2e382b1d3733c"],
+          "products": [
+            {"path": "crates/opentake-domain/src/grade.rs", "symbol": "ColorGrade", "planned": false},
+            {"path": "crates/opentake-render/src/gpu/compositor.rs", "symbol": "grade_blocks", "planned": false},
+            {"path": "crates/opentake-render/src/gpu/shader.wgsl", "symbol": "apply_channel_lgg", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-domain/src/grade.rs", "name": "lift_gamma_gain_gain_scales", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-render/tests/gpu_effects.rs", "name": "lift_gamma_gain_matches_cpu_reference", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Representation and shader code exist, but the record should remain incomplete until GPU output is checked against the CPU reference."
+        },
+        {
+          "sliceKey": "MR-hsl-secondary",
+          "classification": "implementation",
+          "recordIds": ["30c371e348da001c"],
+          "products": [
+            {"path": "crates/opentake-domain/src/grade.rs", "symbol": null, "planned": true},
+            {"path": "crates/opentake-render/src/gpu/shader.wgsl", "symbol": null, "planned": true}
+          ],
+          "tests": [
+            {"path": "crates/opentake-render/tests/gpu_effects.rs", "name": "hsl_secondary_hue_boundary_feather_and_isolation", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "No tracked HSL-secondary representation or render path was found."
+        },
+        {
+          "sliceKey": "MR-lut",
+          "classification": "implementation",
+          "recordIds": ["2156cc0bdb849391"],
+          "products": [
+            {"path": "crates/opentake-domain/src", "symbol": null, "planned": true},
+            {"path": "crates/opentake-render/src/gpu/compositor.rs", "symbol": null, "planned": true}
+          ],
+          "tests": [
+            {"path": "crates/opentake-render/tests/lut.rs", "name": "malformed_and_oversized_luts_fail_closed_and_valid_lut_matches_preview_export", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "No validated LUT import, persisted reference, GPU 3D texture or preview/export path exists."
+        },
+        {
+          "sliceKey": "MR-loudness",
+          "classification": "implementation",
+          "recordIds": ["25da8163d71af1bf"],
+          "products": [
+            {"path": "crates/opentake-media/src/decode/pcm.rs", "symbol": "extract_pcm", "planned": false},
+            {"path": "crates/opentake-media/src/analysis", "symbol": null, "planned": true},
+            {"path": "src-tauri/src/playback/audio.rs", "symbol": null, "planned": false},
+            {"path": "src-tauri/src/export.rs", "symbol": null, "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-media/tests/loudness.rs", "name": "normalization_reaches_configured_lufs_within_tolerance", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "PCM, playback and export owners exist, but no loudness analysis or normalization target path exists."
+        },
+        {
+          "sliceKey": "MR-denoise",
+          "classification": "implementation",
+          "recordIds": ["58c2159d21084d01"],
+          "products": [
+            {"path": "crates/opentake-media/src/analysis", "symbol": null, "planned": true},
+            {"path": "src-tauri/src/playback/audio.rs", "symbol": null, "planned": false},
+            {"path": "src-tauri/src/export.rs", "symbol": null, "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-media/tests/denoise.rs", "name": "deterministic_noise_fixture_bypass_and_preview_export_parity", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "No tracked denoise node exists; playback and export must consume the same processing owner."
+        },
+        {
+          "sliceKey": "MR-stems",
+          "classification": "implementation",
+          "recordIds": ["7c518a7042e8d780"],
+          "products": [
+            {"path": "crates/opentake-media/src/analysis", "symbol": null, "planned": true},
+            {"path": "crates/opentake-gen/src", "symbol": null, "planned": true},
+            {"path": "crates/opentake-core/src/session.rs", "symbol": null, "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-media/tests/stems.rs", "name": "local_or_explicit_provider_selection_cancellation_provenance_and_cleanup", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "No stem separation implementation was found; results must re-enter the shared media import and provenance path."
+        },
+        {
+          "sliceKey": "MR-bounded-audio-streaming",
+          "classification": "implementation",
+          "recordIds": ["b598e7822e10bf65"],
+          "products": [
+            {"path": "src-tauri/src/playback/audio.rs", "symbol": "mix_timeline_stereo", "planned": false},
+            {"path": "src-tauri/src/export.rs", "symbol": "mix_timeline_audio", "planned": false},
+            {"path": "crates/opentake-media/src/encode/mod.rs", "symbol": "VideoEncoder", "planned": false}
+          ],
+          "tests": [
+            {"path": "src-tauri/src/playback/audio.rs", "name": "large_mix_observes_cancellation_between_chunks", "evidenceClass": "existing-owned"},
+            {"path": "src-tauri/src/playback/audio.rs", "name": "long_timeline_mix_has_constant_peak_allocation_and_matches_short_reference", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Current chunking serves cancellation loops but the whole timeline mix is still allocated in memory."
+        },
+        {
+          "sliceKey": "MR-native-chromium",
+          "classification": "implementation",
+          "recordIds": ["d11b3310d27d0350"],
+          "products": [
+            {"path": "crates/opentake-motion/src/renderer.rs", "symbol": "HeadlessChromiumRenderer::render", "planned": false},
+            {"path": "crates/opentake-motion/src/integration.rs", "symbol": "MotionClipSource", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-motion/src/renderer.rs", "name": "chromium_skeleton_reports_unavailable_not_panic", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-motion/tests/chromium.rs", "name": "virtual_time_network_csp_timeout_cleanup_and_frame_identity", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "The tracked renderer is a fail-closed skeleton and explicitly reports that live Chromium is not implemented."
+        },
+        {
+          "sliceKey": "MR-text-parity",
+          "classification": "implementation",
+          "recordIds": ["c74866cce1e8dd58"],
+          "products": [
+            {"path": "crates/opentake-render/src/gpu/text_engine.rs", "symbol": "CosmicTextRasterizer", "planned": false},
+            {"path": "crates/opentake-render/src/source.rs", "symbol": "TextureSource::Text", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-render/tests/gpu_text.rs", "name": "rasterize_is_deterministic_ssim_one", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-render/tests/gpu_text.rs", "name": "natural_size_shadow_padding_matches_upstream", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-render/tests/gpu_text.rs", "name": "fallback_font_no_font_scaled_stroke_and_structural_golden_matrix", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Substantial text rendering and structural tests exist, while the module document still lists fallback and layout parity work."
+        },
+        {
+          "sliceKey": "MR-bounded-index-runtime",
+          "classification": "implementation",
+          "recordIds": ["821266d8c284a554", "c3118cc0b3ca139f", "37700810e0c01c49", "2305bfdee6a62e76"],
+          "products": [
+            {"path": "src-tauri/src/search.rs", "symbol": "search_index_start", "planned": false},
+            {"path": "src-tauri/src/search.rs", "symbol": "index_assets", "planned": false},
+            {"path": "crates/opentake-media/src/index_coordinator.rs", "symbol": "ExportPause", "planned": false},
+            {"path": "crates/opentake-media/src/ort_worker/mod.rs", "symbol": "OrtModel", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-media/src/index_coordinator.rs", "name": "export_pause_ref_counts", "evidenceClass": "existing-owned"},
+            {"path": "src-tauri/src/search.rs", "name": "bounded_single_worker_cancels_skips_stale_and_yields_to_playback_export", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "The media crate explicitly defers the runtime queue; current Tauri search code does not prove a bounded serialized production coordinator."
+        },
+        {
+          "sliceKey": "MR-packaged-ffmpeg",
+          "classification": "evidence-closure",
+          "recordIds": ["ff2faf0938e25f39"],
+          "products": [
+            {"path": "crates/opentake-media/src/ff.rs", "symbol": "ffmpeg_path", "planned": false},
+            {"path": "crates/opentake-media/src/ff.rs", "symbol": "ffprobe_path", "planned": false},
+            {"path": "src-tauri/tauri.conf.json", "symbol": null, "planned": true}
+          ],
+          "tests": [
+            {"path": ".github/workflows/ci.yml", "name": "packaged_macos_windows_sidecars_resolve_and_execute", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Runtime path helpers exist, but no verified packaged external-binary configuration or macOS and Windows execution receipt was found."
+        },
+        {
+          "sliceKey": "MR-image-lottie-materialization",
+          "classification": "implementation",
+          "recordIds": ["db6267b61deb36fe"],
+          "products": [
+            {"path": "src-tauri/src/render.rs", "symbol": "MediaResolver::resolve", "planned": false},
+            {"path": "src-tauri/src/export.rs", "symbol": "MediaResolver::resolve", "planned": false},
+            {"path": "src-tauri/src/playback/resolver.rs", "symbol": "StreamingResolver::resolve", "planned": false}
+          ],
+          "tests": [
+            {"path": "src-tauri/src/playback/resolver.rs", "name": "lottie_cache_lifecycle_frame_modulo_and_preview_export_parity", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "Image materialization exists, while all three production resolver paths return None for Lottie."
+        },
+        {
+          "sliceKey": "MR-media-facade",
+          "classification": "implementation",
+          "recordIds": ["0fc6018b00cc4a4a", "d24e542069e91a59", "fccb7646732532d1", "47f02756ed829ddc"],
+          "products": [
+            {"path": "crates/opentake-media/src/lib.rs", "symbol": "MediaEngine", "planned": false},
+            {"path": "crates/opentake-media/src/probe.rs", "symbol": null, "planned": false},
+            {"path": "crates/opentake-media/src/decode", "symbol": null, "planned": false},
+            {"path": "crates/opentake-media/src/encode", "symbol": null, "planned": false},
+            {"path": "crates/opentake-media/src/search", "symbol": null, "planned": false},
+            {"path": "crates/opentake-media/src/transcribe", "symbol": null, "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-media/src/lib.rs", "name": "crate_public_types_are_reachable", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-media/tests/facade_contract.rs", "name": "all_services_are_reachable_only_through_facade_and_dependencies_stay_acyclic", "evidenceClass": "reviewed-planned"}
+          ],
+          "rationale": "MediaEngine exposes several services, while decode and encode remain mostly flat exports and dependency direction lacks a closed contract test."
+        },
+        {
+          "sliceKey": "MR-capcut-composite",
+          "classification": "composite-acceptance",
+          "recordIds": ["60af541ae52187eb"],
+          "products": [],
+          "tests": [],
+          "rationale": "This record combines 50-track performance, curve speed, nested sequences, multicam alignment and optical flow; nested and optical have child records and the other three need new child records."
+        },
+        {
+          "sliceKey": "MR-hdr-proxy-account-composite",
+          "classification": "composite-acceptance",
+          "recordIds": ["3333d0cfd4a2fa31"],
+          "products": [],
+          "tests": [],
+          "rationale": "HDR, proxy media and account state belong to three different product owners and must be split."
+        },
+        {
+          "sliceKey": "MR-renderer-debt-composite",
+          "classification": "composite-acceptance",
+          "recordIds": ["4b55f25a5196f7e3"],
+          "products": [],
+          "tests": [],
+          "rationale": "Renderer, packaging, settings, solo and stub debt cannot be owned or accepted as one implementation slice."
+        },
+        {
+          "sliceKey": "MR-release-readiness-composite",
+          "classification": "composite-acceptance",
+          "recordIds": ["36fc46ebba504588"],
+          "products": [],
+          "tests": [],
+          "rationale": "Packaged macOS and Windows release readiness is a cross-slice runtime evidence gate, not one product implementation."
+        },
+        {
+          "sliceKey": "MR-advanced-shader-composite",
+          "classification": "composite-acceptance",
+          "recordIds": ["ec4d078ac55f6037"],
+          "products": [],
+          "tests": [],
+          "rationale": "Transitions, masks, LUT and curves have independent owners and child slices."
+        },
+        {
+          "sliceKey": "MR-mask-effect-mixed-duplicate",
+          "classification": "duplicate-or-taxonomy",
+          "recordIds": ["157653b425a21810"],
+          "products": [
+            {"path": "crates/opentake-render/src/gpu/compositor.rs", "symbol": null, "planned": true}
+          ],
+          "tests": [],
+          "rationale": "This record mixes polygon masks and generic effects, which are already represented by separate mask and effect slices."
+        },
+        {
+          "sliceKey": "MR-media-principles-headings",
+          "classification": "duplicate-or-taxonomy",
+          "recordIds": ["1a638c73abd21e1e", "9c7360588ced0198"],
+          "products": [],
+          "tests": [],
+          "rationale": "These are architecture principle and compliance headings; they should become verifier or acceptance collections rather than feature records."
+        },
+        {
+          "sliceKey": "MR-linked-audio-complete",
+          "classification": "evidence-closure",
+          "recordIds": ["06faee34d4b29a33"],
+          "products": [
+            {"path": "crates/opentake-agent/src/mcp/dispatch.rs", "symbol": null, "planned": false},
+            {"path": "crates/opentake-ops/src/ops/place.rs", "symbol": null, "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-agent/src/mcp/dispatch.rs", "name": "add_clips_does_not_link_audio_when_source_has_no_audio", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-agent/src/mcp/dispatch.rs", "name": "insert_clips_does_not_link_audio_when_source_has_no_audio", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "Both add and insert command paths directly prove that a probed silent video does not create linked audio."
+        },
+        {
+          "sliceKey": "MR-playback-route-lifecycle-complete",
+          "classification": "evidence-closure",
+          "recordIds": ["dd35062c2778f365", "b8176cd58b4673fc", "e6e1400ed457bbb9", "3aa21ae6148b5fcd", "55ea08b7a51b30ed", "34258095f740e104"],
+          "products": [
+            {"path": "web/src/components/preview/playbackRoute.ts", "symbol": "resolveTimelinePlaybackRoute", "planned": false},
+            {"path": "web/src/components/preview/nativePlaybackSession.ts", "symbol": null, "planned": false},
+            {"path": "web/src/components/preview/rustFrameBuffer.ts", "symbol": null, "planned": false},
+            {"path": "src-tauri/src/playback/engine.rs", "symbol": "PlaybackEngine", "planned": false},
+            {"path": "src-tauri/src/playback/resolver.rs", "symbol": "PlaybackResolverState", "planned": false}
+          ],
+          "tests": [
+            {"path": "web/src/components/preview/playbackRoute.test.ts", "name": null, "evidenceClass": "existing-owned"},
+            {"path": "web/src/components/preview/nativePlaybackSession.test.ts", "name": null, "evidenceClass": "existing-owned"},
+            {"path": "web/src/components/preview/rustFrameBuffer.test.ts", "name": null, "evidenceClass": "existing-owned"},
+            {"path": "src-tauri/src/playback/resolver.rs", "name": "drain_propagates_stream_failure_instead_of_freezing_cache", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "Capability routing, WebKit and Rust ownership, session identity, retained-frame handoff and source identity have direct focused tests."
+        },
+        {
+          "sliceKey": "MR-generation-job-serde-complete",
+          "classification": "evidence-closure",
+          "recordIds": ["f28087239427d70e"],
+          "products": [
+            {"path": "crates/opentake-gen/src/job.rs", "symbol": "GenerationJob", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-gen/src/job.rs", "name": "deserializes_proxy_shape_with_id", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-gen/src/job.rs", "name": "deserializes_upstream_shape_with_underscore_id", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "Both id shapes and absent optional fields are handled and directly tested."
+        },
+        {
+          "sliceKey": "MR-cli-sidecar-boundary-complete",
+          "classification": "evidence-closure",
+          "recordIds": ["e71abff7d9b41127", "d7bd977b01924877"],
+          "products": [
+            {"path": "crates/opentake-media/src/ff.rs", "symbol": "ffmpeg_path", "planned": false},
+            {"path": "crates/opentake-media/src/ff.rs", "symbol": "ffprobe_path", "planned": false},
+            {"path": "crates/opentake-media/Cargo.toml", "symbol": null, "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-media/src/ff.rs", "name": "env_override_is_respected_for_ffmpeg", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-media/src/ff.rs", "name": "default_ffprobe_is_ffprobe", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "The media crate deliberately uses ffmpeg-sidecar and does not link a libav ABI binding."
+        },
+        {
+          "sliceKey": "MR-motion-decoder-injection-complete",
+          "classification": "evidence-closure",
+          "recordIds": ["b08d2435a038bd02", "4e59a00921e5e252"],
+          "products": [
+            {"path": "crates/opentake-motion/src/integration.rs", "symbol": "MotionClipSource::new", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-motion/src/integration.rs", "name": "decoded_frame_returns_rgba_of_right_shape", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-motion/tests/pipeline.rs", "name": "full_pipeline_render_cache_and_ingest", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "Frame decoding is injected through a closure and the production crate does not own an image decoder dependency."
+        },
+        {
+          "sliceKey": "MR-motion-missing-frame-complete",
+          "classification": "evidence-closure",
+          "recordIds": ["758f9639111ca4be"],
+          "products": [
+            {"path": "crates/opentake-motion/src/integration.rs", "symbol": "MotionClipSource::frame", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-motion/src/integration.rs", "name": "missing_decoder_result_is_none", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "Missing or corrupt decoder output is represented as an absent source frame."
+        },
+        {
+          "sliceKey": "MR-motion-sandbox-complete",
+          "classification": "evidence-closure",
+          "recordIds": ["d6ca662045d019df", "1f1781dbcd30d20c", "69723d1c0bd77577"],
+          "products": [
+            {"path": "crates/opentake-motion/src/renderer.rs", "symbol": "StubRenderer::render", "planned": false},
+            {"path": "crates/opentake-motion/src/renderer.rs", "symbol": "HeadlessChromiumRenderer::render", "planned": false},
+            {"path": "crates/opentake-motion/src/sandbox.rs", "symbol": "SandboxPolicy::check_document_size", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-motion/src/sandbox.rs", "name": "document_size_ceiling_enforced", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-motion/src/renderer.rs", "name": "chromium_applies_sandbox_size_before_unavailable", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "Both stub and unavailable Chromium paths enforce document size before rendering or returning unavailable."
+        },
+        {
+          "sliceKey": "MR-motion-png-complete",
+          "classification": "evidence-closure",
+          "recordIds": ["4ed41de96871fedf"],
+          "products": [
+            {"path": "crates/opentake-motion/src/renderer.rs", "symbol": "encode_solid_rgba_png", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-motion/src/renderer.rs", "name": "stub_output_is_deterministic", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-motion/src/renderer.rs", "name": "stub_png_decodes_with_correct_dimensions_and_alpha", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "The dependency-free PNG encoder is deterministic and tested for dimensions and alpha."
+        },
+        {
+          "sliceKey": "MR-project-serde-complete",
+          "classification": "evidence-closure",
+          "recordIds": ["3c0728a9184da517"],
+          "products": [
+            {"path": "crates/opentake-project/src/bundle.rs", "symbol": "Project::open_from_root", "planned": false},
+            {"path": "crates/opentake-domain/src/media.rs", "symbol": "MediaManifest::deserialize", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-project/tests/upstream_compat.rs", "name": "applies_clip_defaults_for_omitted_fields", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-project/tests/upstream_compat.rs", "name": "migrates_generation_log_legacy_cost_and_version", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "The narrower optional-field and explicit-version migration contract has direct project and domain tests, though broader exhaustive migration remains in data-safety."
+        },
+        {
+          "sliceKey": "MR-event-bus-complete",
+          "classification": "evidence-closure",
+          "recordIds": ["c3edeb41fee8e2a1", "2c6c54de3cd8a488", "30dda70b4f22a7d2"],
+          "products": [
+            {"path": "crates/opentake-core/src/events.rs", "symbol": "EventBus", "planned": false},
+            {"path": "src-tauri/src/lib.rs", "symbol": "forward_event", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-core/src/events.rs", "name": "core_event_serializes_with_kind_tag", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-core/src/events.rs", "name": "media_changed_serializes_with_kind_tag", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "Typed state events cross the Tauri bridge and raw frame pixels remain on the separate playback transport."
+        },
+        {
+          "sliceKey": "MR-ffmpeg-contract-complete",
+          "classification": "evidence-closure",
+          "recordIds": ["bfc002de0fad03b1", "d35161912b562397", "48b0e0781eeb48c1", "6b7f592b1be2c09b"],
+          "products": [
+            {"path": "crates/opentake-media/src/probe.rs", "symbol": "probe", "planned": false},
+            {"path": "crates/opentake-media/src/decode/frame.rs", "symbol": "decode_frame_at", "planned": false},
+            {"path": "crates/opentake-media/src/decode/pcm.rs", "symbol": "extract_pcm", "planned": false},
+            {"path": "crates/opentake-media/src/encode/mod.rs", "symbol": "VideoEncoder", "planned": false}
+          ],
+          "tests": [
+            {"path": "crates/opentake-media/tests/ffmpeg_integration.rs", "name": "probe_reports_dimensions_fps_and_audio", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-media/tests/ffmpeg_integration.rs", "name": "decode_frame_returns_rgba_of_expected_size", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-media/tests/ffmpeg_integration.rs", "name": "extract_pcm_yields_16k_mono", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-media/tests/ffmpeg_integration.rs", "name": "encode_roundtrip_produces_playable_video", "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "Probe, frame decode, PCM extraction and encoding have tracked end-to-end FFmpeg integration fixtures."
+        },
+        {
+          "sliceKey": "MR-interchange-export-complete",
+          "classification": "evidence-closure",
+          "recordIds": ["0c4a155835f2cd05"],
+          "products": [
+            {"path": "crates/opentake-project/src/fcpxml.rs", "symbol": "export_xmeml", "planned": false},
+            {"path": "crates/opentake-project/src/fcpxml_modern.rs", "symbol": "export_fcpxml", "planned": false},
+            {"path": "crates/opentake-project/src/otio.rs", "symbol": "export_otio", "planned": false},
+            {"path": "crates/opentake-project/src/edl.rs", "symbol": "export_edl", "planned": false},
+            {"path": "src-tauri/src/commands.rs", "symbol": null, "planned": false},
+            {"path": "web/src/components/shell/TitleBar.tsx", "symbol": "TitleBar", "planned": false}
+          ],
+          "tests": [
+            {"path": "web/src/components/shell/TitleBar.visual.test.ts", "name": "offers all four interchange formats with their extensions and commands", "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-project/src/fcpxml_modern_tests.rs", "name": null, "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-project/src/otio.rs", "name": null, "evidenceClass": "existing-owned"},
+            {"path": "crates/opentake-project/src/edl.rs", "name": null, "evidenceClass": "existing-owned"}
+          ],
+          "rationale": "FCPXML and XMEML, OTIO and EDL all have tracked exporters, Tauri and frontend routing, and format tests."
+        }
+      ],
+      "uncoveredRecordIds": []
+    }
+  }
+}

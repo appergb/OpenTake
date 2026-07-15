@@ -20,6 +20,7 @@ export function createControlAuditTools(dependencies) {
     gitRead,
     gitText,
     normalizePath,
+    normalizeSemanticText,
     pathInsideRoot,
     pushVerificationError,
     readTrackedFiles,
@@ -277,7 +278,6 @@ function extractControls(path, source, ts) {
           ?? attributes.get("title")?.readable
           ?? directStaticJsxText(node, ts);
         controls.push({
-          id: stableId("control", `${normalizedPath}:${line}:${column}:${element}`),
           ownerSymbol: lexicalControlOwnerSymbol(opening, ts),
           path: normalizedPath,
           line,
@@ -296,7 +296,25 @@ function extractControls(path, source, ts) {
   }
 
   visit(file);
-  return controls;
+  const ordinals = new Map();
+  return controls.map((control) => {
+    const semanticKey = JSON.stringify([
+      control.path,
+      normalizeSemanticText(control.ownerSymbol),
+      control.element,
+      normalizeSemanticText(control.label),
+      normalizeSemanticText(control.role),
+      normalizeSemanticText(control.handler),
+    ]);
+    const semanticOrdinal = (ordinals.get(semanticKey) ?? 0) + 1;
+    ordinals.set(semanticKey, semanticOrdinal);
+    return {
+      id: stableId("control", JSON.stringify([semanticKey, semanticOrdinal])),
+      semanticFingerprint: createHash("sha256").update(semanticKey).digest("hex"),
+      semanticOrdinal,
+      ...control,
+    };
+  });
 }
 
 
@@ -471,6 +489,7 @@ const CONTROL_RUNTIME_SOURCE_REVISION_FIELDS = ["commit", "tree"];
 const CONTROL_VERIFIER_FILES = [
   "tools/completion-audit.mjs",
   "tools/completion-audit-controls.mjs",
+  "tools/completion-audit-plan-map.json",
   "tools/completion-audit.test.mjs",
 ];
 const CONTROL_RUNTIME_RESULT_FIELDS = ["summary", "exitCode"];
@@ -2058,6 +2077,21 @@ function verifyControlAudit(root, auditDir) {
     pushVerificationError(errors, "invalid-control-ledger-metadata", "controls.json metadata differs from the common control schema");
   }
   const records = Array.isArray(controlsLedger?.records) ? controlsLedger.records : [];
+  const currentCandidates = [...trackedPaths]
+    .filter((path) => path.startsWith("web/src/") && path.endsWith(".tsx"))
+    .sort(compareAuditText)
+    .flatMap((path) => extractControls(
+      path,
+      readFileSync(resolve(repositoryRoot, path), "utf8"),
+      typeScriptCompiler(),
+    ));
+  if (JSON.stringify(candidates) !== JSON.stringify(currentCandidates)) {
+    pushVerificationError(
+      errors,
+      "control-candidate-ledger-drift",
+      "control-candidates.json differs from a full current-source re-extraction",
+    );
+  }
   const candidateIds = candidates.map((candidate) => candidate?.id).filter((id) => typeof id === "string");
   const recordIds = records.map((record) => record?.id).filter((id) => typeof id === "string");
   const recordCandidateIds = records.map((record) => record?.candidateId).filter((id) => typeof id === "string");
@@ -2115,6 +2149,12 @@ function verifyControlAudit(root, auditDir) {
       && [record?.semanticName, record?.finalDisposition].some((value) => (
         nonEmptyString(value) && /\btest(?:-only| fixture)\b/i.test(value)
       ));
+    if (!hasExactKeys(candidate, [
+      "id", "semanticFingerprint", "semanticOrdinal", "ownerSymbol", "path", "line", "column",
+      "order", "element", "label", "handler", "disabled", "role", "panelTrigger",
+    ])) {
+      pushVerificationError(errors, "invalid-candidate", "control candidate keys differ from semantic identity schema", candidateId);
+    }
     if (
       !candidateId
       || !nonEmptyString(candidate.path)
@@ -2144,14 +2184,18 @@ function verifyControlAudit(root, auditDir) {
         extractControls(candidate.path, readFileSync(sourceFile.real, "utf8"), typeScriptCompiler()),
       );
     }
-    const derived = derivedByPath.get(candidate.path).find(
-      (item) => item.line === candidate.line && item.column === candidate.column,
-    );
+    const derived = derivedByPath.get(candidate.path).find((item) => item.id === candidate.id);
     if (!derived) {
       pushVerificationError(errors, "candidate-source-signal-missing", `control is absent at ${candidate.path}:${candidate.line}:${candidate.column}`, candidateId);
+      const semanticDrift = derivedByPath.get(candidate.path).find(
+        (item) => item.line === candidate.line && item.column === candidate.column,
+      );
+      if (semanticDrift) {
+        pushVerificationError(errors, "candidate-field-drift", "control at the cited location has a different semantic identity", candidateId);
+      }
       continue;
     }
-    for (const field of ["path", "line", "column", "element", "ownerSymbol", "handler", "label", "disabled", "role", "panelTrigger", "id"]) {
+    for (const field of ["path", "line", "column", "element", "ownerSymbol", "handler", "label", "disabled", "role", "panelTrigger", "semanticFingerprint", "semanticOrdinal", "id"]) {
       if (candidate[field] !== derived[field]) {
         pushVerificationError(errors, "candidate-field-drift", `current source changed candidate field ${field}`, candidateId);
       }

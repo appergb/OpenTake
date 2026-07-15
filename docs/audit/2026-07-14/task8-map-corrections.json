@@ -1,0 +1,509 @@
+{
+  "schema": 1,
+  "kind": "opentake-task8-map-corrections",
+  "repository": "/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-full-convergence",
+  "sourceInputs": {
+    "uiMap": {
+      "path": "docs/audit/2026-07-14/task8-ui-slice-map.json",
+      "sha256": "4d17a7e72e9a83bd09795c64a1f37959c67ce77aae0662ae0ff89c9c602dad1a"
+    },
+    "uiValidation": {
+      "path": "docs/audit/2026-07-14/task8-ui-slice-validation.md",
+      "sha256": "5183718376d058c62ed0977c20d1152064e59a7cab39617954d67895728e07fc"
+    },
+    "coreMap": {
+      "path": "docs/audit/2026-07-14/task8-core-slice-map.json",
+      "sha256": "e097640b5062a93290f132182f3e577f200dd0e767d49144ddd780a4dc2f6dc3"
+    },
+    "coreValidation": {
+      "path": "docs/audit/2026-07-14/task8-core-slice-validation.md",
+      "sha256": "3011b43de0297f225739837c1542eb0ff7a22fc236b6b9e9466244081c8f57bb"
+    }
+  },
+  "closure": {
+    "validationFindingCounts": {
+      "C": 0,
+      "I": 6,
+      "M": 3,
+      "total": 9
+    },
+    "correctionCounts": {
+      "C": 0,
+      "I": 6,
+      "M": 3,
+      "total": 9
+    },
+    "oneCorrectionPerFinding": true,
+    "C": "Both validations reported zero Critical findings, so no Critical correction is required.",
+    "I": "All six Important findings have exactly one required correction object. Apply all six before either map is treated as an authoritative evidence ledger.",
+    "M": "All three Minor findings have exactly one deterministic-validation correction object. Apply them to remove feature, runner, and tracked-path ambiguity.",
+    "findingToCorrection": {
+      "UI-I-01": "UI-I-01",
+      "UI-I-02": "UI-I-02",
+      "UI-M-01": "UI-M-01",
+      "CORE-I-01": "CORE-I-01",
+      "CORE-I-02": "CORE-I-02",
+      "CORE-I-03": "CORE-I-03",
+      "CORE-I-04": "CORE-I-04",
+      "CORE-M-01": "CORE-M-01",
+      "CORE-M-02": "CORE-M-02"
+    }
+  },
+  "corrections": [
+    {
+      "correctionId": "UI-I-01",
+      "findingId": "UI-I-01",
+      "sourceValidation": "ui",
+      "severity": "I",
+      "action": "replace-stale-existing-test-name",
+      "closureStatus": "required-before-ledger-authoritative",
+      "sliceChanges": [
+        {
+          "sliceKey": "caption-group-style-atomicity",
+          "old": {
+            "products": [],
+            "tests": [
+              {
+                "path": "crates/opentake-domain/src/caption_sync.rs",
+                "name": "syncs_style_across_tracks",
+                "evidenceClass": "existing-owned"
+              }
+            ]
+          },
+          "replacement": {
+            "products": [],
+            "tests": [
+              {
+                "path": "crates/opentake-domain/src/caption_sync.rs",
+                "name": "multi_track_same_group_all_restyled",
+                "evidenceClass": "existing-owned"
+              }
+            ]
+          }
+        }
+      ],
+      "runnerCommands": [
+        "cargo test -p opentake-domain --lib multi_track_same_group_all_restyled"
+      ],
+      "featureConditions": [],
+      "runtimeConditions": [],
+      "resolution": "Point the existing-owned evidence at the tracked caption-group style test that actually exists."
+    },
+    {
+      "correctionId": "UI-I-02",
+      "findingId": "UI-I-02",
+      "sourceValidation": "ui",
+      "severity": "I",
+      "action": "split-cross-crate-planned-test",
+      "closureStatus": "required-before-ledger-authoritative",
+      "sliceChanges": [
+        {
+          "sliceKey": "agent-crate-tauri-assembly",
+          "old": {
+            "products": [],
+            "tests": [
+              {
+                "path": "crates/opentake-agent/tests/module_tree.rs",
+                "name": "documented_exports_and_tauri_entrypoints_compile",
+                "evidenceClass": "reviewed-planned"
+              }
+            ]
+          },
+          "replacement": {
+            "products": [],
+            "tests": [
+              {
+                "path": "crates/opentake-agent/tests/module_tree.rs",
+                "name": "documented_exports_compile",
+                "evidenceClass": "reviewed-planned"
+              },
+              {
+                "path": "src-tauri/src/mcp.rs",
+                "name": "documented_mcp_entrypoint_compiles",
+                "evidenceClass": "reviewed-planned"
+              },
+              {
+                "path": "src-tauri/src/chat.rs",
+                "name": "documented_chat_entrypoint_compiles",
+                "evidenceClass": "reviewed-planned"
+              }
+            ]
+          }
+        }
+      ],
+      "runnerCommands": [
+        "cargo test -p opentake-agent --test module_tree documented_exports_compile",
+        "cargo test -p opentake-tauri --lib documented_mcp_entrypoint_compiles",
+        "cargo test -p opentake-tauri --lib documented_chat_entrypoint_compiles"
+      ],
+      "featureConditions": [],
+      "runtimeConditions": [],
+      "resolution": "Keep agent export coverage in the agent integration test and verify the private Tauri MCP/chat entrypoints with co-located unit tests in their owning modules."
+    },
+    {
+      "correctionId": "UI-M-01",
+      "findingId": "UI-M-01",
+      "sourceValidation": "ui",
+      "severity": "M",
+      "action": "attach-explicit-feature-runner",
+      "closureStatus": "required-for-deterministic-validation",
+      "sliceChanges": [
+        {
+          "sliceKey": "misgrouped-transcription",
+          "old": {
+            "products": [],
+            "tests": [
+              {
+                "path": "crates/opentake-media/src/transcribe/whisper.rs",
+                "name": "centiseconds_convert_to_seconds",
+                "evidenceClass": "existing-owned"
+              }
+            ]
+          },
+          "replacement": {
+            "products": [],
+            "tests": [
+              {
+                "path": "crates/opentake-media/src/transcribe/whisper.rs",
+                "name": "centiseconds_convert_to_seconds",
+                "evidenceClass": "existing-owned"
+              }
+            ]
+          }
+        }
+      ],
+      "runnerCommands": [
+        "cargo test -p opentake-media --features whisper-backend --lib centiseconds_convert_to_seconds"
+      ],
+      "featureConditions": [
+        {
+          "package": "opentake-media",
+          "feature": "whisper-backend",
+          "required": true,
+          "reason": "The whisper module and its unit test are cfg-gated by whisper-backend."
+        }
+      ],
+      "runtimeConditions": [
+        "Native whisper-rs build prerequisites, including CMake and a C++ toolchain, must be available."
+      ],
+      "resolution": "Preserve the valid evidence reference but make its feature-specific collection command explicit."
+    },
+    {
+      "correctionId": "CORE-I-01",
+      "findingId": "CORE-I-01",
+      "sourceValidation": "core",
+      "severity": "I",
+      "action": "replace-invalid-qualified-symbol",
+      "closureStatus": "required-before-ledger-authoritative",
+      "sliceChanges": [
+        {
+          "sliceKey": "DS-shared-core-command-complete",
+          "old": {
+            "products": [
+              {
+                "path": "crates/opentake-ops/src/command.rs",
+                "symbol": "EditCommand::apply",
+                "planned": false
+              }
+            ],
+            "tests": []
+          },
+          "replacement": {
+            "products": [
+              {
+                "path": "crates/opentake-ops/src/command.rs",
+                "symbol": "apply",
+                "planned": false
+              }
+            ],
+            "tests": []
+          }
+        }
+      ],
+      "runnerCommands": [],
+      "featureConditions": [],
+      "runtimeConditions": [],
+      "resolution": "Use the tracked free function apply rather than a nonexistent EditCommand associated method."
+    },
+    {
+      "correctionId": "CORE-I-02",
+      "findingId": "CORE-I-02",
+      "sourceValidation": "core",
+      "severity": "I",
+      "action": "replace-stale-settings-product-and-test-owner",
+      "closureStatus": "required-before-ledger-authoritative",
+      "sliceChanges": [
+        {
+          "sliceKey": "CC-first-video-settings",
+          "old": {
+            "products": [
+              {
+                "path": "crates/opentake-ops/src/ops/settings.rs",
+                "symbol": "apply_timeline_settings",
+                "planned": false
+              }
+            ],
+            "tests": [
+              {
+                "path": "crates/opentake-ops/src/ops/settings.rs",
+                "name": "set_timeline_settings_is_undoable",
+                "evidenceClass": "existing-owned"
+              }
+            ]
+          },
+          "replacement": {
+            "products": [
+              {
+                "path": "crates/opentake-ops/src/ops/settings.rs",
+                "symbol": "set_timeline_settings",
+                "planned": false
+              }
+            ],
+            "tests": [
+              {
+                "path": "crates/opentake-ops/src/command.rs",
+                "name": "set_timeline_settings_is_undoable",
+                "evidenceClass": "existing-owned"
+              }
+            ]
+          }
+        }
+      ],
+      "runnerCommands": [
+        "cargo test -p opentake-ops --lib set_timeline_settings_is_undoable"
+      ],
+      "featureConditions": [],
+      "runtimeConditions": [],
+      "resolution": "Use the tracked settings function name and the command-layer file that owns the undoability test."
+    },
+    {
+      "correctionId": "CORE-I-03",
+      "findingId": "CORE-I-03",
+      "sourceValidation": "core",
+      "severity": "I",
+      "action": "replace-two-wrong-render-symbol-paths",
+      "closureStatus": "required-before-ledger-authoritative",
+      "sliceChanges": [
+        {
+          "sliceKey": "MR-optical-flow",
+          "old": {
+            "products": [
+              {
+                "path": "crates/opentake-render/src/source.rs",
+                "symbol": "TextureResolver",
+                "planned": false
+              }
+            ],
+            "tests": []
+          },
+          "replacement": {
+            "products": [
+              {
+                "path": "crates/opentake-render/src/gpu/compositor.rs",
+                "symbol": "TextureResolver",
+                "planned": false
+              }
+            ],
+            "tests": []
+          }
+        },
+        {
+          "sliceKey": "MR-text-parity",
+          "old": {
+            "products": [
+              {
+                "path": "crates/opentake-render/src/source.rs",
+                "symbol": "TextureSource::Text",
+                "planned": false
+              }
+            ],
+            "tests": []
+          },
+          "replacement": {
+            "products": [
+              {
+                "path": "crates/opentake-render/src/plan/types.rs",
+                "symbol": "TextureSource::Text",
+                "planned": false
+              }
+            ],
+            "tests": []
+          }
+        }
+      ],
+      "runnerCommands": [],
+      "featureConditions": [],
+      "runtimeConditions": [],
+      "resolution": "Anchor each render symbol to the tracked file that defines it; a re-export does not make source.rs its owner."
+    },
+    {
+      "correctionId": "CORE-I-04",
+      "findingId": "CORE-I-04",
+      "sourceValidation": "core",
+      "severity": "I",
+      "action": "split-denoise-algorithm-and-tauri-wiring-tests",
+      "closureStatus": "required-before-ledger-authoritative",
+      "sliceChanges": [
+        {
+          "sliceKey": "MR-denoise",
+          "old": {
+            "products": [],
+            "tests": [
+              {
+                "path": "crates/opentake-media/tests/denoise.rs",
+                "name": "deterministic_noise_fixture_bypass_and_preview_export_parity",
+                "evidenceClass": "reviewed-planned"
+              }
+            ]
+          },
+          "replacement": {
+            "products": [],
+            "tests": [
+              {
+                "path": "crates/opentake-media/tests/denoise.rs",
+                "name": "deterministic_noise_fixture_and_bypass",
+                "evidenceClass": "reviewed-planned"
+              },
+              {
+                "path": "src-tauri/src/playback/audio.rs",
+                "name": "denoise_preview_uses_shared_processing_owner",
+                "evidenceClass": "reviewed-planned"
+              },
+              {
+                "path": "src-tauri/src/export.rs",
+                "name": "denoise_export_uses_shared_processing_owner",
+                "evidenceClass": "reviewed-planned"
+              }
+            ]
+          }
+        }
+      ],
+      "runnerCommands": [
+        "cargo test -p opentake-media --test denoise deterministic_noise_fixture_and_bypass",
+        "cargo test -p opentake-tauri --no-default-features --features playback-engine --lib denoise_preview_uses_shared_processing_owner",
+        "cargo test -p opentake-tauri --no-default-features --lib denoise_export_uses_shared_processing_owner"
+      ],
+      "featureConditions": [
+        {
+          "package": "opentake-tauri",
+          "feature": "playback-engine",
+          "requiredFor": [
+            "src-tauri/src/playback/audio.rs#denoise_preview_uses_shared_processing_owner"
+          ],
+          "reason": "The playback module is cfg-gated by playback-engine."
+        }
+      ],
+      "runtimeConditions": [],
+      "resolution": "Test the reusable denoise algorithm in opentake-media, then prove preview and export wiring with co-located unit tests in the owning Tauri modules."
+    },
+    {
+      "correctionId": "CORE-M-01",
+      "findingId": "CORE-M-01",
+      "sourceValidation": "core",
+      "severity": "M",
+      "action": "register-explicit-ruby-runner",
+      "closureStatus": "required-for-deterministic-validation",
+      "sliceChanges": [
+        {
+          "sliceKey": "DS-native-receipt-validator",
+          "old": {
+            "products": [],
+            "tests": [
+              {
+                "path": "scripts/tests/validate-c1b-evidence-test.rb",
+                "name": null,
+                "evidenceClass": "reviewed-planned"
+              }
+            ]
+          },
+          "replacement": {
+            "products": [],
+            "tests": [
+              {
+                "path": "scripts/tests/validate-c1b-evidence-test.rb",
+                "name": null,
+                "evidenceClass": "reviewed-planned"
+              }
+            ]
+          }
+        }
+      ],
+      "runnerCommands": [
+        "ruby scripts/tests/validate-c1b-evidence-test.rb"
+      ],
+      "featureConditions": [],
+      "runtimeConditions": [
+        "Ruby must be installed on the evidence-validation runner.",
+        "The planned test should use standard-library Minitest unless a Ruby dependency manifest is added deliberately."
+      ],
+      "resolution": "Keep the planned path but register the exact direct command in the CI/evidence plan so the Ruby test is actually invoked."
+    },
+    {
+      "correctionId": "CORE-M-02",
+      "findingId": "CORE-M-02",
+      "sourceValidation": "core",
+      "severity": "M",
+      "action": "replace-directory-anchors-with-tracked-module-files",
+      "closureStatus": "required-for-deterministic-validation",
+      "sliceChanges": [
+        {
+          "sliceKey": "MR-media-facade",
+          "old": {
+            "products": [
+              {
+                "path": "crates/opentake-media/src/decode",
+                "symbol": null,
+                "planned": false
+              },
+              {
+                "path": "crates/opentake-media/src/encode",
+                "symbol": null,
+                "planned": false
+              },
+              {
+                "path": "crates/opentake-media/src/search",
+                "symbol": null,
+                "planned": false
+              },
+              {
+                "path": "crates/opentake-media/src/transcribe",
+                "symbol": null,
+                "planned": false
+              }
+            ],
+            "tests": []
+          },
+          "replacement": {
+            "products": [
+              {
+                "path": "crates/opentake-media/src/decode/mod.rs",
+                "symbol": null,
+                "planned": false
+              },
+              {
+                "path": "crates/opentake-media/src/encode/mod.rs",
+                "symbol": null,
+                "planned": false
+              },
+              {
+                "path": "crates/opentake-media/src/search/mod.rs",
+                "symbol": null,
+                "planned": false
+              },
+              {
+                "path": "crates/opentake-media/src/transcribe/mod.rs",
+                "symbol": null,
+                "planned": false
+              }
+            ],
+            "tests": []
+          }
+        }
+      ],
+      "runnerCommands": [],
+      "featureConditions": [],
+      "runtimeConditions": [],
+      "resolution": "Anchor facade ownership to tracked mod.rs files because Git does not track directories as objects."
+    }
+  ]
+}

@@ -1,0 +1,2860 @@
+{
+  "schema": "opentake-task8-ui-ledger-capability-dedupe/v1",
+  "status": "complete",
+  "generatedAt": "2026-07-15",
+  "sourceInputs": {
+    "reportMap": {
+      "path": "docs/audit/2026-07-14/task8-ui-slice-map.json",
+      "sha256": "4d17a7e72e9a83bd09795c64a1f37959c67ce77aae0662ae0ff89c9c602dad1a",
+      "recordCount": 176,
+      "sliceCount": 43
+    },
+    "ledgerMap": {
+      "path": "docs/audit/2026-07-14/task8-ledger-slice-map.json",
+      "sha256": "b6cb19951ff98b889e43cf702ca7f8b417a3be5f422e7e8769fc0a5f51301fd3",
+      "recordCount": 111,
+      "sliceCount": 34
+    }
+  },
+  "method": "Deduplicate only when report and ledger slices share a tracked product/test path boundary and their stated behavior is the same capability. Broad files such as dispatch.rs, TimelineContainer.tsx or Preview.tsx are not sufficient without semantic agreement. Products/tests are exact-object unions; record IDs retain their source prefix and are never coalesced.",
+  "primaryGroups": [
+    "preview-timeline",
+    "inspector-text-keyframes",
+    "agent-settings-generation",
+    "accessibility-polish"
+  ],
+  "duplicateClusterCount": 16,
+  "duplicateClusters": [
+    {
+      "capabilityId": "ui-versioned-frontend-sync",
+      "primaryGroup": "preview-timeline",
+      "reportSliceKeys": [
+        "ui-rust-state-boundary"
+      ],
+      "ledgerSliceKeys": [
+        "PT-versioned-frontend-sync"
+      ],
+      "sourceRecordIds": {
+        "report": [
+          "requirement-0858e3409610b51b",
+          "requirement-63e2699bd9d27494"
+        ],
+        "ledger": [
+          "requirement-18f2106f33522079",
+          "requirement-4e8c2a4123667b92"
+        ]
+      },
+      "recordIds": [
+        "requirement-0858e3409610b51b",
+        "requirement-18f2106f33522079",
+        "requirement-4e8c2a4123667b92",
+        "requirement-63e2699bd9d27494"
+      ],
+      "products": [
+        {
+          "path": "src-tauri/src/commands.rs",
+          "symbol": "get_timeline",
+          "planned": false
+        },
+        {
+          "path": "web/src/store/projectStore.ts",
+          "symbol": "replaceProjectSnapshot",
+          "planned": false
+        },
+        {
+          "path": "web/src/store/sync.ts",
+          "symbol": "startSync",
+          "planned": false
+        },
+        {
+          "path": "web/src/store/uiStore.ts",
+          "symbol": "useEditorUiStore",
+          "planned": false
+        }
+      ],
+      "tests": [
+        {
+          "path": "web/src/store/sync.test.ts",
+          "name": "does not let a late old snapshot replace a newer project",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/store/sync.test.ts",
+          "name": "does not let pending history cross a same-identity compatibility replacement",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/store/uiStore.boundary.test.ts",
+          "name": "derived_selectors_do_not_mutate_timeline_projection",
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "web/src/store/uiStore.test.ts",
+          "name": "timeline playback state",
+          "evidenceClass": "existing-owned"
+        }
+      ],
+      "sharedBoundary": {
+        "productPaths": [
+          "web/src/store/sync.ts"
+        ],
+        "testPaths": []
+      },
+      "sourceRationales": {
+        "report": [
+          "Two documentation headings describe one shared state-boundary slice. Existing store tests do not prove the complete Rust-projection and pure-selector boundary."
+        ],
+        "ledger": [
+          "Version/epoch ordering and DTO snapshot races are directly covered."
+        ]
+      },
+      "rationale": "Both slices own the Rust-projected, version/epoch ordered frontend mirror boundary through web/src/store/sync.ts; keep one capability and union the pure-selector plus race evidence."
+    },
+    {
+      "capabilityId": "ui-timeline-snap-geometry",
+      "primaryGroup": "preview-timeline",
+      "reportSliceKeys": [
+        "timeline-snap-geometry"
+      ],
+      "ledgerSliceKeys": [
+        "PT-timeline-geometry",
+        "PT-snap-hysteresis-acceptance"
+      ],
+      "sourceRecordIds": {
+        "report": [
+          "requirement-38807e6a1df065a0",
+          "requirement-c8564305ae9fa4bb",
+          "requirement-daa6ec4af3aeb4a9",
+          "requirement-e471db5faf7f4480",
+          "requirement-e8f0a3053bf5ae40"
+        ],
+        "ledger": [
+          "requirement-07854d86720411f5",
+          "requirement-824a12344f992e03",
+          "requirement-d35fe204b3828ff1"
+        ]
+      },
+      "recordIds": [
+        "requirement-07854d86720411f5",
+        "requirement-38807e6a1df065a0",
+        "requirement-824a12344f992e03",
+        "requirement-c8564305ae9fa4bb",
+        "requirement-d35fe204b3828ff1",
+        "requirement-daa6ec4af3aeb4a9",
+        "requirement-e471db5faf7f4480",
+        "requirement-e8f0a3053bf5ae40"
+      ],
+      "products": [
+        {
+          "path": "web/src/components/timeline/TimelineContainer.tsx",
+          "symbol": "TimelineContainer",
+          "planned": false
+        },
+        {
+          "path": "web/src/lib/geometry.ts",
+          "symbol": "clipRect",
+          "planned": false
+        },
+        {
+          "path": "web/src/lib/geometry.ts",
+          "symbol": "dropTargetAt",
+          "planned": false
+        },
+        {
+          "path": "web/src/lib/geometry.ts",
+          "symbol": "frameAt",
+          "planned": false
+        },
+        {
+          "path": "web/src/lib/geometry.ts",
+          "symbol": "trackY",
+          "planned": false
+        },
+        {
+          "path": "web/src/lib/snap.ts",
+          "symbol": "collectTargets",
+          "planned": false
+        },
+        {
+          "path": "web/src/lib/snap.ts",
+          "symbol": "findSnap",
+          "planned": false
+        },
+        {
+          "path": "web/src/lib/snap.ts",
+          "symbol": "findSnapDelta",
+          "planned": false
+        }
+      ],
+      "tests": [
+        {
+          "path": "web/src/components/timeline/TimelineContainer.test.ts",
+          "name": "collectMoveSnapTargets",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/lib/geometry.test.ts",
+          "name": "dropTargetAt boundaries",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/lib/geometry.test.ts",
+          "name": "matches SPEC §5.2: x=frame*ppf, y=trackY+2, width=dur*ppf, height=trackH-4",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/lib/geometry.test.ts",
+          "name": "matches upstream dropTargetAt boundary behavior",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/lib/snap.test.ts",
+          "name": "snapFrameToEdge",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/lib/snap.test.ts",
+          "name": "snaps to the nearest clip edge within threshold",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/lib/snap.test.ts",
+          "name": "sticky_multi_probe_and_playhead_multiplier_matrix",
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "web/src/lib/snap.test.ts",
+          "name": "sticky_multi_target_and_both_1_5x_thresholds",
+          "evidenceClass": "reviewed-planned"
+        }
+      ],
+      "sharedBoundary": {
+        "productPaths": [
+          "web/src/lib/geometry.ts",
+          "web/src/lib/snap.ts"
+        ],
+        "testPaths": [
+          "web/src/lib/geometry.test.ts",
+          "web/src/lib/snap.test.ts"
+        ]
+      },
+      "sourceRationales": {
+        "report": [
+          "TimelineContainer imports and calls the snap and geometry owners, but the full sticky, multi-target, and both 1.5x threshold acceptance matrix is absent."
+        ],
+        "ledger": [
+          "Named geometry helpers and boundary tests are tracked.",
+          "Sticky/playhead logic exists; the exact held-target test matrix is missing."
+        ]
+      },
+      "rationale": "The report slice already combines geometry targets, snap helpers and TimelineContainer integration; the two ledger slices partition that same acceptance boundary, so one unified capability prevents duplicate geometry/snap ownership."
+    },
+    {
+      "capabilityId": "ui-timeline-visual-surface",
+      "primaryGroup": "preview-timeline",
+      "reportSliceKeys": [
+        "timeline-toolbar-ruler-visuals"
+      ],
+      "ledgerSliceKeys": [
+        "PT-timeline-visual-surface"
+      ],
+      "sourceRecordIds": {
+        "report": [
+          "requirement-01ab68dad9bef233",
+          "requirement-1ec5bd08013418ac",
+          "requirement-22535d21627595e1",
+          "requirement-32c4ef714d183571",
+          "requirement-6cdaf1b0bc759131",
+          "requirement-6f3d4e423997080c",
+          "requirement-7f8b415cc15cc3a6",
+          "requirement-923f74b3f2c06d84",
+          "requirement-a68911b741563de7",
+          "requirement-a8a43bc740569dc6",
+          "requirement-c83bfe0b365d0d7f",
+          "requirement-d82235254f1ad987"
+        ],
+        "ledger": [
+          "requirement-1f8eaadf44b47e85",
+          "requirement-65354598d0059701",
+          "requirement-81f8ffc84e4f7032",
+          "requirement-9e5580044b5f8307",
+          "requirement-fa8b90c9589d4792"
+        ]
+      },
+      "recordIds": [
+        "requirement-01ab68dad9bef233",
+        "requirement-1ec5bd08013418ac",
+        "requirement-1f8eaadf44b47e85",
+        "requirement-22535d21627595e1",
+        "requirement-32c4ef714d183571",
+        "requirement-65354598d0059701",
+        "requirement-6cdaf1b0bc759131",
+        "requirement-6f3d4e423997080c",
+        "requirement-7f8b415cc15cc3a6",
+        "requirement-81f8ffc84e4f7032",
+        "requirement-923f74b3f2c06d84",
+        "requirement-9e5580044b5f8307",
+        "requirement-a68911b741563de7",
+        "requirement-a8a43bc740569dc6",
+        "requirement-c83bfe0b365d0d7f",
+        "requirement-d82235254f1ad987",
+        "requirement-fa8b90c9589d4792"
+      ],
+      "products": [
+        {
+          "path": "web/src/components/timeline/Playhead.tsx",
+          "symbol": "Playhead",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/timeline/TrackHeaderColumn.tsx",
+          "symbol": "TrackHeaderColumn",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/timeline/clipRenderer.ts",
+          "symbol": "drawClip",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/timeline/rulerCanvas.ts",
+          "symbol": "paintRuler",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/timeline/timelineCanvas.ts",
+          "symbol": "paintTimeline",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/toolbar/Toolbar.tsx",
+          "symbol": "Toolbar",
+          "planned": false
+        }
+      ],
+      "tests": [
+        {
+          "path": "web/src/components/timeline/TimelineParity.test.tsx",
+          "name": "all_named_canvas_affordances",
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "web/src/components/timeline/TimelineParity.test.tsx",
+          "name": "toolbar_ruler_header_clip_playhead_overlay_visual_matrix",
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "web/src/components/timeline/clipRenderer.test.ts",
+          "name": "drawClip fade knees",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/components/timeline/clipRenderer.test.ts",
+          "name": "paints the systemRed wash + border when missing",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/components/timeline/timelineOverlays.test.ts",
+          "name": "marked-range overlay",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/components/timeline/timelineOverlays.test.ts",
+          "name": "paints a dashed box on the gap's track",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/components/toolbar/Toolbar.test.tsx",
+          "name": "upstream_group_order_and_zoom_mapping",
+          "evidenceClass": "reviewed-planned"
+        }
+      ],
+      "sharedBoundary": {
+        "productPaths": [
+          "web/src/components/timeline/TrackHeaderColumn.tsx",
+          "web/src/components/timeline/timelineCanvas.ts",
+          "web/src/components/toolbar/Toolbar.tsx"
+        ],
+        "testPaths": [
+          "web/src/components/timeline/TimelineParity.test.tsx",
+          "web/src/components/timeline/clipRenderer.test.ts",
+          "web/src/components/timeline/timelineOverlays.test.ts"
+        ]
+      },
+      "sourceRationales": {
+        "report": [
+          "Twelve headings and umbrella records converge on one visual surface. Existing canvas tests are partial and do not prove complete visual order, state, and geometry parity."
+        ],
+        "ledger": [
+          "Local painter tests do not prove exact toolbar order and every header/clip/overlay state together."
+        ]
+      },
+      "rationale": "Both slices cover the same toolbar, ruler, track-header, clip and overlay painter surface and share three product paths plus three test paths."
+    },
+    {
+      "capabilityId": "ui-editor-interaction-matrix",
+      "primaryGroup": "preview-timeline",
+      "reportSliceKeys": [
+        "timeline-selection-drag-trim-context",
+        "timeline-trackpad-gestures"
+      ],
+      "ledgerSliceKeys": [
+        "PT-editor-interaction-matrix"
+      ],
+      "sourceRecordIds": {
+        "report": [
+          "requirement-1779ecc2d9f24651",
+          "requirement-64a0fdf590212573",
+          "requirement-6db3895c5fd3fd75",
+          "requirement-92ec4c8b557a6ee3",
+          "requirement-a35e49bb4f4b3488",
+          "requirement-a5977b149ca8a9ec",
+          "requirement-d93395512a23997b",
+          "requirement-f53dbd6c1c65375f"
+        ],
+        "ledger": [
+          "requirement-238be717bbf8bfdd",
+          "requirement-2a4cb9892d0b01ad",
+          "requirement-390cb44707fd921c",
+          "requirement-489198df8df16deb",
+          "requirement-508312eff31773fb",
+          "requirement-5757937ea0526240",
+          "requirement-67ec865065b862f1",
+          "requirement-8e0afbf35b51e9e9",
+          "requirement-a548b853da826bc3",
+          "requirement-aee5b6064f63d4ed",
+          "requirement-be7ce2bc7e82ad78",
+          "requirement-e6604beaade77879",
+          "requirement-e819a53e21abdd61"
+        ]
+      },
+      "recordIds": [
+        "requirement-1779ecc2d9f24651",
+        "requirement-238be717bbf8bfdd",
+        "requirement-2a4cb9892d0b01ad",
+        "requirement-390cb44707fd921c",
+        "requirement-489198df8df16deb",
+        "requirement-508312eff31773fb",
+        "requirement-5757937ea0526240",
+        "requirement-64a0fdf590212573",
+        "requirement-67ec865065b862f1",
+        "requirement-6db3895c5fd3fd75",
+        "requirement-8e0afbf35b51e9e9",
+        "requirement-92ec4c8b557a6ee3",
+        "requirement-a35e49bb4f4b3488",
+        "requirement-a548b853da826bc3",
+        "requirement-a5977b149ca8a9ec",
+        "requirement-aee5b6064f63d4ed",
+        "requirement-be7ce2bc7e82ad78",
+        "requirement-d93395512a23997b",
+        "requirement-e6604beaade77879",
+        "requirement-e819a53e21abdd61",
+        "requirement-f53dbd6c1c65375f"
+      ],
+      "products": [
+        {
+          "path": "web/src/components/timeline/ClipContextMenu.tsx",
+          "symbol": "clipContextMenuItems",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/timeline/TimelineContainer.tsx",
+          "symbol": "TimelineContainer",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/timeline/TimelineContainer.tsx",
+          "symbol": "onWheel",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/timeline/TimelineContainer.tsx",
+          "symbol": "resolveExistingTrackMove",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/timeline/TimelineContainer.tsx",
+          "symbol": "resolveNewTrackMove",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/timeline/TimelineRangeContextMenu.tsx",
+          "symbol": "rangeContextMenuItems",
+          "planned": false
+        },
+        {
+          "path": "web/src/store/editActions.ts",
+          "symbol": "buildMediaInsertPlan",
+          "planned": false
+        },
+        {
+          "path": "web/src/store/editActions.ts",
+          "symbol": "splitAtPlayhead",
+          "planned": false
+        }
+      ],
+      "tests": [
+        {
+          "path": "web/src/components/timeline/ClipContextMenu.test.tsx",
+          "name": "clipContextMenuItems",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/components/timeline/ClipContextMenu.test.tsx",
+          "name": "wires copy, paste, link, and swap actions",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/components/timeline/TimelineContainer.gestures.test.tsx",
+          "name": "trackpad_pinch_horizontal_vertical_navigation",
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "web/src/components/timeline/TimelineContainer.interactions.test.tsx",
+          "name": "frontend_spec_9_selection_drag_trim_scrub_matrix",
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "web/src/components/timeline/TimelineContainer.interactions.test.tsx",
+          "name": "selection_drag_trim_razor_scrub_zoom_context_full_matrix",
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "web/src/components/timeline/TimelineContainer.test.ts",
+          "name": "moves a pure video multi-selection as one rigid track delta",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/components/timeline/TimelineContainer.test.ts",
+          "name": "resolveExistingTrackMove",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/components/timeline/hitTest.test.ts",
+          "name": "fade knee drag math",
+          "evidenceClass": "existing-owned"
+        }
+      ],
+      "sharedBoundary": {
+        "productPaths": [
+          "web/src/components/timeline/ClipContextMenu.tsx",
+          "web/src/components/timeline/TimelineContainer.tsx",
+          "web/src/components/timeline/TimelineRangeContextMenu.tsx",
+          "web/src/store/editActions.ts"
+        ],
+        "testPaths": [
+          "web/src/components/timeline/ClipContextMenu.test.tsx",
+          "web/src/components/timeline/TimelineContainer.interactions.test.tsx",
+          "web/src/components/timeline/TimelineContainer.test.ts"
+        ]
+      },
+      "sourceRationales": {
+        "report": [
+          "The shared interaction owners and partial tests exist, but the complete documented selection, drag, trim, scrub, drop, and context-menu matrix is not covered.",
+          "A non-passive wheel owner distinguishes pinch, modifier zoom, and pan, but there is no focused automated gesture acceptance."
+        ],
+        "ledger": [
+          "Thirteen exhaustive gesture records share one mouse/trackpad/keyboard acceptance matrix."
+        ]
+      },
+      "rationale": "The ledger interaction matrix is the umbrella owner for the report's mouse/context/trim matrix and its focused trackpad gesture slice; merging keeps one exhaustive interaction gate."
+    },
+    {
+      "capabilityId": "ui-inspector-text-ai-keyframe-surface",
+      "primaryGroup": "inspector-text-keyframes",
+      "reportSliceKeys": [
+        "inspector-component-surface"
+      ],
+      "ledgerSliceKeys": [
+        "IN-inspector-text-ai-keyframe-surface"
+      ],
+      "sourceRecordIds": {
+        "report": [
+          "requirement-1cd16e183b6c6b7e",
+          "requirement-3c7ac4a40d6f21a5",
+          "requirement-5215757bd00518c6",
+          "requirement-6aba9217bbeca297",
+          "requirement-6e37ac641ccf5107",
+          "requirement-8c8c904054874383",
+          "requirement-9bdc97e09465edfc",
+          "requirement-c0129772e5592014",
+          "requirement-c13354b986564337"
+        ],
+        "ledger": [
+          "requirement-33b669f5ab381ec8",
+          "requirement-55e9cb9d202147e9",
+          "requirement-86e3768c2d581515",
+          "requirement-c9c677ffc0cea514",
+          "requirement-e419b88df9110885",
+          "requirement-f7024f37d8c971b6"
+        ]
+      },
+      "recordIds": [
+        "requirement-1cd16e183b6c6b7e",
+        "requirement-33b669f5ab381ec8",
+        "requirement-3c7ac4a40d6f21a5",
+        "requirement-5215757bd00518c6",
+        "requirement-55e9cb9d202147e9",
+        "requirement-6aba9217bbeca297",
+        "requirement-6e37ac641ccf5107",
+        "requirement-86e3768c2d581515",
+        "requirement-8c8c904054874383",
+        "requirement-9bdc97e09465edfc",
+        "requirement-c0129772e5592014",
+        "requirement-c13354b986564337",
+        "requirement-c9c677ffc0cea514",
+        "requirement-e419b88df9110885",
+        "requirement-f7024f37d8c971b6"
+      ],
+      "products": [
+        {
+          "path": "web/src/components/inspector/AiEditTab.tsx",
+          "symbol": "AiEditTab",
+          "planned": true
+        },
+        {
+          "path": "web/src/components/inspector/Inspector.tsx",
+          "symbol": "Inspector",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/inspector/KeyframesLaneRow.tsx",
+          "symbol": "KeyframesLaneRow",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/inspector/KeyframesPanel.tsx",
+          "symbol": "KeyframesPanel",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/inspector/KeyframesRuler.tsx",
+          "symbol": "KeyframesRuler",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/inspector/ScrubbableNumberField.tsx",
+          "symbol": "ScrubbableNumberField",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/inspector/TextTab.tsx",
+          "symbol": "TextTab",
+          "planned": false
+        }
+      ],
+      "tests": [
+        {
+          "path": "web/src/components/inspector/Inspector.test.tsx",
+          "name": "four_states_tabs_fields_and_lanes",
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "web/src/components/inspector/Inspector.test.tsx",
+          "name": "selection_tabs_text_ai_keyframe_and_razor_matrix",
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "web/src/components/inspector/ScrubbableNumberField.test.tsx",
+          "name": "drag_commit_cancel",
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "web/src/lib/keyframeNav.test.ts",
+          "name": "maps clip-relative offsets to ABSOLUTE timeline frames via startFrame",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/lib/keyframeNav.test.ts",
+          "name": "previousKeyframeFrame / nextKeyframeFrame",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/lib/keyframeSnap.test.ts",
+          "name": "snapFrame",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/lib/keyframeValue.test.ts",
+          "name": "scaleKeyframeValue",
+          "evidenceClass": "existing-owned"
+        }
+      ],
+      "sharedBoundary": {
+        "productPaths": [
+          "web/src/components/inspector/Inspector.tsx",
+          "web/src/components/inspector/KeyframesPanel.tsx"
+        ],
+        "testPaths": [
+          "web/src/components/inspector/Inspector.test.tsx",
+          "web/src/lib/keyframeNav.test.ts"
+        ]
+      },
+      "sourceRationales": {
+        "report": [
+          "Nine headings converge on one Inspector UI slice. Pure helper tests do not exercise component states, tabs, fields, scrubbing, and lanes."
+        ],
+        "ledger": [
+          "Text/keyframe owners exist, but aiEdit is never added to the Inspector tab list and no full component matrix exists."
+        ]
+      },
+      "rationale": "Both slices cover the Inspector text/keyframe component surface and share Inspector, KeyframesPanel and their focused component/navigation tests."
+    },
+    {
+      "capabilityId": "ui-advertised-tool-surface",
+      "primaryGroup": "agent-settings-generation",
+      "reportSliceKeys": [
+        "advertised-mcp-tool-reachability"
+      ],
+      "ledgerSliceKeys": [
+        "AG-advertised-tool-surface-acceptance"
+      ],
+      "sourceRecordIds": {
+        "report": [
+          "requirement-1c40dd077c50436b",
+          "requirement-24571c00093119be",
+          "requirement-7bd98db408b23ac3",
+          "requirement-8b14028baf4c282e",
+          "requirement-a18c900d1d5a8535",
+          "requirement-f7b67184d96c0030"
+        ],
+        "ledger": [
+          "requirement-375619e15f331c80",
+          "requirement-49c3765a9022c91d",
+          "requirement-54cacbe8e2208d5b",
+          "requirement-5676fb351f12a534",
+          "requirement-5dff656d1f4e9caa",
+          "requirement-6ca4c5069daff120",
+          "requirement-79bb9e1c1c069d35",
+          "requirement-81dcb0a1f7a4ba8a",
+          "requirement-accb36659007a295",
+          "requirement-c5c62c699b0ef951",
+          "requirement-d2bb52fd70e77335"
+        ]
+      },
+      "recordIds": [
+        "requirement-1c40dd077c50436b",
+        "requirement-24571c00093119be",
+        "requirement-375619e15f331c80",
+        "requirement-49c3765a9022c91d",
+        "requirement-54cacbe8e2208d5b",
+        "requirement-5676fb351f12a534",
+        "requirement-5dff656d1f4e9caa",
+        "requirement-6ca4c5069daff120",
+        "requirement-79bb9e1c1c069d35",
+        "requirement-7bd98db408b23ac3",
+        "requirement-81dcb0a1f7a4ba8a",
+        "requirement-8b14028baf4c282e",
+        "requirement-a18c900d1d5a8535",
+        "requirement-accb36659007a295",
+        "requirement-c5c62c699b0ef951",
+        "requirement-d2bb52fd70e77335",
+        "requirement-f7b67184d96c0030"
+      ],
+      "products": [
+        {
+          "path": "crates/opentake-agent/src/chat/loop.rs",
+          "symbol": "tool_catalog",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-agent/src/mcp/dispatch.rs",
+          "symbol": "Dispatcher::dispatch",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-agent/src/mcp/dispatch.rs",
+          "symbol": "dispatch",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-agent/src/tools/names.rs",
+          "symbol": "ToolName::ALL",
+          "planned": false
+        }
+      ],
+      "tests": [
+        {
+          "path": "crates/opentake-agent/src/mcp/dispatch.rs",
+          "name": "stub_tool_reports_not_implemented",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-agent/tests/advertised_tool_acceptance.rs",
+          "name": "every_advertised_tool_is_live_or_absent",
+          "evidenceClass": "reviewed-planned"
+        }
+      ],
+      "sharedBoundary": {
+        "productPaths": [
+          "crates/opentake-agent/src/mcp/dispatch.rs"
+        ],
+        "testPaths": [
+          "crates/opentake-agent/src/mcp/dispatch.rs"
+        ]
+      },
+      "sourceRationales": {
+        "report": [
+          "Tracked dispatch code routes InspectMedia, generation, upscale, and motion-graphic tools to an explicit not-yet-implemented result, directly contradicting production-reachability requirements."
+        ],
+        "ledger": [
+          "These umbrella/checklist records span tool domains; the tracked stub test proves the advertised surface is not closed."
+        ]
+      },
+      "rationale": "Both slices ask whether every advertised MCP tool reaches production behavior, using the same dispatcher and stub evidence boundary."
+    },
+    {
+      "capabilityId": "ui-generation-dispatch-finalization",
+      "primaryGroup": "agent-settings-generation",
+      "reportSliceKeys": [
+        "generation-upscale-finalization"
+      ],
+      "ledgerSliceKeys": [
+        "AG-generation-dispatch-finalization"
+      ],
+      "sourceRecordIds": {
+        "report": [
+          "requirement-179e8dc7bf8a66b4",
+          "requirement-34903e30761f991d",
+          "requirement-39d847c39c244b06",
+          "requirement-4820f51699469306",
+          "requirement-572b929420b7dc5b",
+          "requirement-60b8a1de4e385ca3",
+          "requirement-637ea1555860bd0d",
+          "requirement-76f42c1c9903e8c8",
+          "requirement-bffafcccb447be75",
+          "requirement-e9a0faff34a2391a"
+        ],
+        "ledger": [
+          "requirement-40bc3f68e4a7ed80",
+          "requirement-609bebfb5bc3d76b",
+          "requirement-d536b4cae75639ca",
+          "requirement-dcf0ce260616f190",
+          "requirement-e8cab087009a2104"
+        ]
+      },
+      "recordIds": [
+        "requirement-179e8dc7bf8a66b4",
+        "requirement-34903e30761f991d",
+        "requirement-39d847c39c244b06",
+        "requirement-40bc3f68e4a7ed80",
+        "requirement-4820f51699469306",
+        "requirement-572b929420b7dc5b",
+        "requirement-609bebfb5bc3d76b",
+        "requirement-60b8a1de4e385ca3",
+        "requirement-637ea1555860bd0d",
+        "requirement-76f42c1c9903e8c8",
+        "requirement-bffafcccb447be75",
+        "requirement-d536b4cae75639ca",
+        "requirement-dcf0ce260616f190",
+        "requirement-e8cab087009a2104",
+        "requirement-e9a0faff34a2391a"
+      ],
+      "products": [
+        {
+          "path": "crates/opentake-agent/src/mcp/dispatch.rs",
+          "symbol": "run_body",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-agent/src/mcp/generation.rs",
+          "symbol": "GenerationDispatcher",
+          "planned": true
+        },
+        {
+          "path": "crates/opentake-gen/src/build_params.rs",
+          "symbol": "build_image_params",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-gen/src/build_params.rs",
+          "symbol": "build_upscale_params",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-gen/src/build_params.rs",
+          "symbol": "build_video_params",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-gen/src/client.rs",
+          "symbol": "GenClient",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-gen/src/client.rs",
+          "symbol": "GenClient::submit",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-gen/src/client.rs",
+          "symbol": "GenClient::submit_byok",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-gen/src/client.rs",
+          "symbol": "GenClient::watch",
+          "planned": false
+        },
+        {
+          "path": "src-tauri/src/generation.rs",
+          "symbol": "GenerationBridge",
+          "planned": true
+        },
+        {
+          "path": "web/src/components/agent/AgentPanel.tsx",
+          "symbol": "AgentPanel",
+          "planned": false
+        }
+      ],
+      "tests": [
+        {
+          "path": "crates/opentake-agent/tests/generation_dispatch.rs",
+          "name": "placeholder_persist_finalize_all_results_and_failures",
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "crates/opentake-agent/tests/generation_dispatch.rs",
+          "name": "placeholder_persists_and_every_terminal_result_finalizes_once",
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "crates/opentake-gen/src/build_params.rs",
+          "name": "upscale_uses_first_upload_as_source",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-gen/src/client.rs",
+          "name": "byok_submit_then_watch_to_succeeded",
+          "evidenceClass": "existing-owned"
+        }
+      ],
+      "sharedBoundary": {
+        "productPaths": [
+          "crates/opentake-gen/src/client.rs"
+        ],
+        "testPaths": [
+          "crates/opentake-agent/tests/generation_dispatch.rs",
+          "crates/opentake-gen/src/build_params.rs",
+          "crates/opentake-gen/src/client.rs"
+        ]
+      },
+      "sourceRationales": {
+        "report": [
+          "Generation SDK building blocks exist, but Dispatcher does not call them and no complete placeholder, persistence, import, and N-result finalization path exists."
+        ],
+        "ledger": [
+          "GenClient exists, but Dispatcher hard-codes canGenerate=false and stubs generate/upscale; durable placeholder/finalize/import wiring is missing."
+        ]
+      },
+      "rationale": "Both slices cover generation/upscale dispatch, placeholder persistence and exactly-once terminal finalization and share the client, build-params and planned dispatch test paths."
+    },
+    {
+      "capabilityId": "ui-motion-canvas-production",
+      "primaryGroup": "agent-settings-generation",
+      "reportSliceKeys": [
+        "motion-canvas-production-runner"
+      ],
+      "ledgerSliceKeys": [
+        "AG-motion-canvas-vertical"
+      ],
+      "sourceRecordIds": {
+        "report": [
+          "requirement-62ed34afe0cbaddc",
+          "requirement-8d1113853d0b21eb",
+          "requirement-a70f2258e8af6c86"
+        ],
+        "ledger": [
+          "requirement-8bde5113959f02c8"
+        ]
+      },
+      "recordIds": [
+        "requirement-62ed34afe0cbaddc",
+        "requirement-8bde5113959f02c8",
+        "requirement-8d1113853d0b21eb",
+        "requirement-a70f2258e8af6c86"
+      ],
+      "products": [
+        {
+          "path": "crates/opentake-agent/src/mcp/dispatch.rs",
+          "symbol": "Dispatcher::dispatch",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-agent/src/mcp/dispatch.rs",
+          "symbol": "run_body",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-motion/src/cache.rs",
+          "symbol": "MotionCache",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-motion/src/integration.rs",
+          "symbol": "MotionClipSource",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-motion/src/renderer.rs",
+          "symbol": "HeadlessChromiumRenderer",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-motion/src/renderer.rs",
+          "symbol": "HeadlessChromiumRenderer::render",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-motion/src/renderer.rs",
+          "symbol": "MotionRenderer",
+          "planned": false
+        },
+        {
+          "path": "src-tauri/src/motion.rs",
+          "symbol": "render_import_place",
+          "planned": true
+        },
+        {
+          "path": "web/src/components/agent/MotionPanel.tsx",
+          "symbol": "MotionPanel",
+          "planned": true
+        }
+      ],
+      "tests": [
+        {
+          "path": "crates/opentake-motion/src/renderer.rs",
+          "name": "chromium_skeleton_reports_unavailable_not_panic",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-motion/tests/pipeline.rs",
+          "name": "full_pipeline_render_cache_and_ingest",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "src-tauri/tests/motion_command.rs",
+          "name": "sandbox_progress_cancel_validated_mp4_result",
+          "evidenceClass": "reviewed-planned"
+        }
+      ],
+      "sharedBoundary": {
+        "productPaths": [
+          "crates/opentake-agent/src/mcp/dispatch.rs",
+          "crates/opentake-motion/src/renderer.rs"
+        ],
+        "testPaths": [
+          "crates/opentake-motion/src/renderer.rs",
+          "crates/opentake-motion/tests/pipeline.rs",
+          "src-tauri/tests/motion_command.rs"
+        ]
+      },
+      "sourceRationales": {
+        "report": [
+          "The tracked Chromium owner is an unavailable skeleton and the MCP Add/EditMotionGraphic route is an explicit stub, contradicting a production runner requirement."
+        ],
+        "ledger": [
+          "The Chromium production renderer reports unavailable and Agent motion tools remain stubs."
+        ]
+      },
+      "rationale": "Both slices cover the unavailable Chromium production renderer plus stubbed Agent motion tools and share renderer, pipeline and Tauri command evidence."
+    },
+    {
+      "capabilityId": "ui-automation-call-chain",
+      "primaryGroup": "agent-settings-generation",
+      "reportSliceKeys": [
+        "editing-automation-contract"
+      ],
+      "ledgerSliceKeys": [
+        "AG-automation-call-chain-contract"
+      ],
+      "sourceRecordIds": {
+        "report": [
+          "requirement-6b7dcf95fc15dae5",
+          "requirement-7b0285439bfae8b9"
+        ],
+        "ledger": [
+          "requirement-7adf016d3bd9c09a",
+          "requirement-fd89d8d87fcc28b3"
+        ]
+      },
+      "recordIds": [
+        "requirement-6b7dcf95fc15dae5",
+        "requirement-7adf016d3bd9c09a",
+        "requirement-7b0285439bfae8b9",
+        "requirement-fd89d8d87fcc28b3"
+      ],
+      "products": [
+        {
+          "path": "crates/opentake-agent/src/mcp/core_handle.rs",
+          "symbol": "CoreHandle::apply",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-agent/src/mcp/dispatch.rs",
+          "symbol": "Dispatcher::dispatch",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-agent/src/mcp/dispatch.rs",
+          "symbol": "dispatch",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-agent/src/signal/engine.rs",
+          "symbol": "attach",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-agent/src/tools/short_id.rs",
+          "symbol": "expand_id_prefixes",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-ops/src/intent.rs",
+          "symbol": "EditPlan",
+          "planned": false
+        }
+      ],
+      "tests": [
+        {
+          "path": "crates/opentake-agent/tests/editing_automation_acceptance.rs",
+          "name": null,
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "crates/opentake-agent/tests/editing_automation_acceptance.rs",
+          "name": "documented_call_chains_and_invariants_match_current_code",
+          "evidenceClass": "reviewed-planned"
+        }
+      ],
+      "sharedBoundary": {
+        "productPaths": [
+          "crates/opentake-agent/src/mcp/dispatch.rs",
+          "crates/opentake-agent/src/signal/engine.rs"
+        ],
+        "testPaths": [
+          "crates/opentake-agent/tests/editing_automation_acceptance.rs"
+        ]
+      },
+      "sourceRationales": {
+        "report": [
+          "These are umbrella acceptance records for atomic writes, read-only proposals, linked synchronization, and the full agent call chain, not independent document-edit tasks."
+        ],
+        "ledger": [
+          "README headings are cross-cutting acceptance records, not distinct implementation features."
+        ]
+      },
+      "rationale": "Both slices are umbrella acceptance for read-only proposals, atomic shared-command writes, linked synchronization and the complete agent call chain."
+    },
+    {
+      "capabilityId": "ui-smart-reframe",
+      "primaryGroup": "agent-settings-generation",
+      "reportSliceKeys": [
+        "smart-reframe-backend"
+      ],
+      "ledgerSliceKeys": [
+        "AG-smart-reframe"
+      ],
+      "sourceRecordIds": {
+        "report": [
+          "requirement-2c1080965d1666dc"
+        ],
+        "ledger": [
+          "requirement-528da39dbf930824",
+          "requirement-5b35d8adf0560779",
+          "requirement-72fc950460ec6ee7",
+          "requirement-b08172f5d2b90ea8",
+          "requirement-eb82e776b03c5ac7"
+        ]
+      },
+      "recordIds": [
+        "requirement-2c1080965d1666dc",
+        "requirement-528da39dbf930824",
+        "requirement-5b35d8adf0560779",
+        "requirement-72fc950460ec6ee7",
+        "requirement-b08172f5d2b90ea8",
+        "requirement-eb82e776b03c5ac7"
+      ],
+      "products": [
+        {
+          "path": "crates/opentake-agent/src/mcp/dispatch.rs",
+          "symbol": "smart_reframe",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-media/src/analysis/autocrop.rs",
+          "symbol": "detect_autocrop",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-ops/src/intent.rs",
+          "symbol": "plan_smart_reframe",
+          "planned": false
+        },
+        {
+          "path": "src-tauri/src/mcp.rs",
+          "symbol": "sampled_frame_bridge",
+          "planned": true
+        }
+      ],
+      "tests": [
+        {
+          "path": "crates/opentake-agent/src/mcp/dispatch.rs",
+          "name": "smart_reframe_reports_needs_vision_backend",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-agent/tests/smart_reframe.rs",
+          "name": "sample_analyze_review_apply_is_one_undoable_command",
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "crates/opentake-agent/tests/smart_reframe_dispatch.rs",
+          "name": "production_dispatch_applies_reviewable_crop_or_transform",
+          "evidenceClass": "reviewed-planned"
+        }
+      ],
+      "sharedBoundary": {
+        "productPaths": [
+          "crates/opentake-agent/src/mcp/dispatch.rs",
+          "crates/opentake-media/src/analysis/autocrop.rs",
+          "crates/opentake-ops/src/intent.rs"
+        ],
+        "testPaths": [
+          "crates/opentake-agent/src/mcp/dispatch.rs"
+        ]
+      },
+      "sourceRationales": {
+        "report": [
+          "Dispatcher explicitly returns a needs-vision-backend error; existing autocrop and planning building blocks are not wired to the production dispatch path."
+        ],
+        "ledger": [
+          "Analysis/intent helpers exist, but production smart_reframe deterministically reports the missing vision backend."
+        ]
+      },
+      "rationale": "Both slices describe the same autocrop/intent/dispatcher path and the same deterministic missing-vision-backend contradiction."
+    },
+    {
+      "capabilityId": "ui-byok-keychain-privacy",
+      "primaryGroup": "agent-settings-generation",
+      "reportSliceKeys": [
+        "byok-key-normalization-privacy"
+      ],
+      "ledgerSliceKeys": [
+        "AG-byok-keychain-boundary"
+      ],
+      "sourceRecordIds": {
+        "report": [
+          "requirement-03f73b8c63a3dac8",
+          "requirement-632963638d577e50",
+          "requirement-b888bbde0d13a19b"
+        ],
+        "ledger": [
+          "requirement-9490ea25dd967bf4"
+        ]
+      },
+      "recordIds": [
+        "requirement-03f73b8c63a3dac8",
+        "requirement-632963638d577e50",
+        "requirement-9490ea25dd967bf4",
+        "requirement-b888bbde0d13a19b"
+      ],
+      "products": [
+        {
+          "path": "crates/opentake-gen/src/keys.rs",
+          "symbol": "KeyStore",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-gen/src/keys.rs",
+          "symbol": "KeyringStore",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-gen/src/keys.rs",
+          "symbol": "normalize",
+          "planned": false
+        },
+        {
+          "path": "src-tauri/src/chat.rs",
+          "symbol": "ChatState::new",
+          "planned": false
+        },
+        {
+          "path": "src-tauri/src/secret.rs",
+          "symbol": "secret_load",
+          "planned": false
+        },
+        {
+          "path": "src-tauri/src/secret.rs",
+          "symbol": "secret_save",
+          "planned": false
+        }
+      ],
+      "tests": [
+        {
+          "path": "crates/opentake-agent/tests/secret_leakage.rs",
+          "name": "keys_never_serialize_to_project_log_telemetry_mcp_webview",
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "crates/opentake-gen/src/keys.rs",
+          "name": "accounts_are_stable_and_distinct",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-gen/src/keys.rs",
+          "name": "empty_and_whitespace_values_are_none",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-gen/src/keys.rs",
+          "name": "load_trims_surrounding_whitespace",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "src-tauri/src/secret.rs",
+          "name": "long_keys_reveal_only_last_four",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "src-tauri/src/secret.rs",
+          "name": "production_anthropic_key_never_enters_project_log_or_telemetry",
+          "evidenceClass": "reviewed-planned"
+        }
+      ],
+      "sharedBoundary": {
+        "productPaths": [
+          "crates/opentake-gen/src/keys.rs"
+        ],
+        "testPaths": [
+          "crates/opentake-gen/src/keys.rs"
+        ]
+      },
+      "sourceRationales": {
+        "report": [
+          "Normalization and stable accounts are implemented and tested, while the broader negative secret-leakage contract lacks complete acceptance coverage."
+        ],
+        "ledger": [
+          "OS keyring storage and masked status exist; one negative project/log/telemetry boundary test remains."
+        ]
+      },
+      "rationale": "Both slices cover normalized OS-keychain storage plus the negative project/log/telemetry leakage boundary and share the keys implementation and tests."
+    },
+    {
+      "capabilityId": "ui-short-id-contract",
+      "primaryGroup": "agent-settings-generation",
+      "reportSliceKeys": [
+        "short-id-contract"
+      ],
+      "ledgerSliceKeys": [
+        "AG-short-id-prompt-contract"
+      ],
+      "sourceRecordIds": {
+        "report": [
+          "requirement-81e1bac10cf0afe3",
+          "requirement-9f42f494f7bd639c",
+          "requirement-bb0bf4e53d19f908",
+          "requirement-c8ece7bee7d231c6",
+          "requirement-e7f57e8e3030cffa"
+        ],
+        "ledger": [
+          "requirement-b3c9690870310f25"
+        ]
+      },
+      "recordIds": [
+        "requirement-81e1bac10cf0afe3",
+        "requirement-9f42f494f7bd639c",
+        "requirement-b3c9690870310f25",
+        "requirement-bb0bf4e53d19f908",
+        "requirement-c8ece7bee7d231c6",
+        "requirement-e7f57e8e3030cffa"
+      ],
+      "products": [
+        {
+          "path": "crates/opentake-agent/src/prompt/base.rs",
+          "symbol": "CORE_MODEL",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-agent/src/tools/short_id.rs",
+          "symbol": "current_id_universe",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-agent/src/tools/short_id.rs",
+          "symbol": "expand_id_prefixes",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-agent/src/tools/short_id.rs",
+          "symbol": "short_id_map",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-agent/src/tools/short_id.rs",
+          "symbol": "shorten_ids",
+          "planned": false
+        }
+      ],
+      "tests": [
+        {
+          "path": "crates/opentake-agent/src/prompt/base.rs",
+          "name": "short_id_contract_sentence_verbatim",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-agent/src/tools/short_id.rs",
+          "name": "expand_unique_prefix_resolves_to_full",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-agent/src/tools/short_id.rs",
+          "name": "shared_prefix_extends_until_unique",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-agent/src/tools/short_id.rs",
+          "name": "unique_id_shortens_to_floor",
+          "evidenceClass": "existing-owned"
+        }
+      ],
+      "sharedBoundary": {
+        "productPaths": [
+          "crates/opentake-agent/src/tools/short_id.rs"
+        ],
+        "testPaths": [
+          "crates/opentake-agent/src/tools/short_id.rs"
+        ]
+      },
+      "sourceRationales": {
+        "report": [
+          "Five heading records duplicate one implemented and tested short-ID contract; they require consolidated evidence closure."
+        ],
+        "ledger": [
+          "The exact no-padding sentence and short-id resolver exist with focused tests."
+        ]
+      },
+      "rationale": "Both slices cover one no-padding/no-guessing short-ID prompt and resolver contract with the same implementation and focused tests."
+    },
+    {
+      "capabilityId": "ui-chat-provider-tool-loop",
+      "primaryGroup": "agent-settings-generation",
+      "reportSliceKeys": [
+        "chat-provider-sse-tool-loop"
+      ],
+      "ledgerSliceKeys": [
+        "AG-chat-complete-contract"
+      ],
+      "sourceRecordIds": {
+        "report": [
+          "requirement-59732d045552bc15",
+          "requirement-72c7d14797feeb3d",
+          "requirement-73340597a252e2d9",
+          "requirement-e4c34875f6507835"
+        ],
+        "ledger": [
+          "requirement-27f77ddcca543305",
+          "requirement-34322dbbdfbe0cc7",
+          "requirement-a1ba9949bb843f4c",
+          "requirement-e2b750e813e5adcb",
+          "requirement-fa7d690795a9cf2b"
+        ]
+      },
+      "recordIds": [
+        "requirement-27f77ddcca543305",
+        "requirement-34322dbbdfbe0cc7",
+        "requirement-59732d045552bc15",
+        "requirement-72c7d14797feeb3d",
+        "requirement-73340597a252e2d9",
+        "requirement-a1ba9949bb843f4c",
+        "requirement-e2b750e813e5adcb",
+        "requirement-e4c34875f6507835",
+        "requirement-fa7d690795a9cf2b"
+      ],
+      "products": [
+        {
+          "path": "crates/opentake-agent/src/chat/content.rs",
+          "symbol": "ImageAndMentionBlocks",
+          "planned": true
+        },
+        {
+          "path": "crates/opentake-agent/src/chat/llm.rs",
+          "symbol": "anthropic_body",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-agent/src/chat/llm.rs",
+          "symbol": "drain_sse_frames",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-agent/src/chat/llm.rs",
+          "symbol": "provider_from_choice",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-agent/src/chat/llm.rs",
+          "symbol": "stream_chat",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-agent/src/chat/loop.rs",
+          "symbol": "ChatLoop::run_turn",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-agent/src/chat/persistence.rs",
+          "symbol": "ChatRepository",
+          "planned": true
+        },
+        {
+          "path": "crates/opentake-agent/src/chat/session.rs",
+          "symbol": "ChatSession",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-agent/src/chat/usage.rs",
+          "symbol": "UsageRecorder",
+          "planned": true
+        },
+        {
+          "path": "src-tauri/src/chat.rs",
+          "symbol": "ChatState",
+          "planned": false
+        },
+        {
+          "path": "src-tauri/src/chat.rs",
+          "symbol": "chat_cancel",
+          "planned": false
+        },
+        {
+          "path": "src-tauri/src/chat.rs",
+          "symbol": "chat_history",
+          "planned": false
+        },
+        {
+          "path": "src-tauri/src/chat.rs",
+          "symbol": "chat_send",
+          "planned": false
+        }
+      ],
+      "tests": [
+        {
+          "path": "crates/opentake-agent/src/chat/llm.rs",
+          "name": "anthropic_system_prompt_hoisted_top_level",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-agent/src/chat/llm.rs",
+          "name": "drain_sse_frames_handles_split_utf8_chunks",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-agent/src/chat/loop.rs",
+          "name": "orphan_tool_use_is_repaired_before_next_provider_round",
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "crates/opentake-agent/src/chat/loop.rs",
+          "name": "tool_round_persists_assistant_before_tool_results",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-agent/src/chat/session.rs",
+          "name": "session_round_trip",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-agent/tests/chat_contract.rs",
+          "name": "cache_usage_mentions_images_and_restart_persistence",
+          "evidenceClass": "reviewed-planned"
+        }
+      ],
+      "sharedBoundary": {
+        "productPaths": [
+          "crates/opentake-agent/src/chat/llm.rs",
+          "src-tauri/src/chat.rs"
+        ],
+        "testPaths": [
+          "crates/opentake-agent/src/chat/llm.rs"
+        ]
+      },
+      "sourceRationales": {
+        "report": [
+          "Provider selection, SSE parsing, and tool-loop owners exist, but no explicit orphan tool-use repair owner or test was found."
+        ],
+        "ledger": [
+          "Text/tool streaming exists; cache boundaries, usage, mentions/images and durable restart persistence are absent."
+        ]
+      },
+      "rationale": "The report's provider/SSE/tool-loop gap is the implemented core of the ledger's complete chat contract; both share chat LLM/Tauri owners and SSE tests, so one capability should aggregate remaining cache, usage and persistence gaps."
+    },
+    {
+      "capabilityId": "ui-design-token-consistency",
+      "primaryGroup": "accessibility-polish",
+      "reportSliceKeys": [
+        "centralized-design-token-table"
+      ],
+      "ledgerSliceKeys": [
+        "AP-design-token-consistency"
+      ],
+      "sourceRecordIds": {
+        "report": [
+          "requirement-0c45c9ee70dc990f",
+          "requirement-1e22f85e7e3b8f8a",
+          "requirement-25d4cfadbec947f6",
+          "requirement-47fce8f3ec8e470a",
+          "requirement-4e81a79521708f05",
+          "requirement-4ed0d164ab8ff383",
+          "requirement-5a1da3c2f30572ab",
+          "requirement-787494db54513c33",
+          "requirement-87e46425b74f6667",
+          "requirement-8dc2ce5cb56b0640",
+          "requirement-9ce0276c82bdcfe6",
+          "requirement-a32e4c4537f326df",
+          "requirement-cfcd1cc3cb758c27",
+          "requirement-d0cfcfa29fbae42c",
+          "requirement-e26133887e66e54a",
+          "requirement-efc9de03c45d49eb"
+        ],
+        "ledger": [
+          "requirement-d4624679e2d13a62"
+        ]
+      },
+      "recordIds": [
+        "requirement-0c45c9ee70dc990f",
+        "requirement-1e22f85e7e3b8f8a",
+        "requirement-25d4cfadbec947f6",
+        "requirement-47fce8f3ec8e470a",
+        "requirement-4e81a79521708f05",
+        "requirement-4ed0d164ab8ff383",
+        "requirement-5a1da3c2f30572ab",
+        "requirement-787494db54513c33",
+        "requirement-87e46425b74f6667",
+        "requirement-8dc2ce5cb56b0640",
+        "requirement-9ce0276c82bdcfe6",
+        "requirement-a32e4c4537f326df",
+        "requirement-cfcd1cc3cb758c27",
+        "requirement-d0cfcfa29fbae42c",
+        "requirement-d4624679e2d13a62",
+        "requirement-e26133887e66e54a",
+        "requirement-efc9de03c45d49eb"
+      ],
+      "products": [
+        {
+          "path": "web/src/components/ui/PanelShell.tsx",
+          "symbol": "PanelShell",
+          "planned": false
+        },
+        {
+          "path": "web/src/lib/theme.ts",
+          "symbol": "ACCENT",
+          "planned": false
+        },
+        {
+          "path": "web/src/lib/theme.ts",
+          "symbol": "BG",
+          "planned": false
+        },
+        {
+          "path": "web/src/lib/theme.ts",
+          "symbol": "BORDER",
+          "planned": false
+        },
+        {
+          "path": "web/src/lib/theme.ts",
+          "symbol": "FS",
+          "planned": false
+        },
+        {
+          "path": "web/src/lib/theme.ts",
+          "symbol": "LAYOUT",
+          "planned": false
+        },
+        {
+          "path": "web/src/lib/theme.ts",
+          "symbol": "RADIUS",
+          "planned": false
+        },
+        {
+          "path": "web/src/lib/theme.ts",
+          "symbol": "SPACE",
+          "planned": false
+        },
+        {
+          "path": "web/src/lib/theme.ts",
+          "symbol": "TEXT",
+          "planned": false
+        },
+        {
+          "path": "web/src/lib/theme.ts",
+          "symbol": "TRACK_COLOR",
+          "planned": false
+        },
+        {
+          "path": "web/src/styles/tokens.css",
+          "symbol": null,
+          "planned": false
+        },
+        {
+          "path": "web/src/styles/tokens.css",
+          "symbol": "--bg-raised",
+          "planned": false
+        }
+      ],
+      "tests": [
+        {
+          "path": "web/src/components/preview/TransformOverlay.test.tsx",
+          "name": "renders 4 corner handles at the OpenTake spacing/opacity tokens matching upstream AppTheme.Spacing.smMd / Opacity.strong",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/components/shell/TitleBar.visual.test.ts",
+          "name": "TitleBar alignment",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/lib/theme.contract.test.ts",
+          "name": "complete_upstream_token_table_and_css_projection",
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "web/src/styles/tokenUsage.test.ts",
+          "name": "representative_panel_spacing_type_radius_and_color_matrix",
+          "evidenceClass": "reviewed-planned"
+        }
+      ],
+      "sharedBoundary": {
+        "productPaths": [
+          "web/src/lib/theme.ts",
+          "web/src/styles/tokens.css"
+        ],
+        "testPaths": []
+      },
+      "sourceRationales": {
+        "report": [
+          "Sixteen heading records converge on one shared token capability. Central owners and consumers exist, but there is no complete upstream-table and all-panel-consumption gate."
+        ],
+        "ledger": [
+          "Tokens exist; representative cross-panel token usage still needs one acceptance matrix."
+        ]
+      },
+      "rationale": "Both slices cover the centralized theme/token table and representative cross-panel token consumption through the same theme.ts and tokens.css boundary."
+    },
+    {
+      "capabilityId": "ui-keyboard-shortcut-matrix",
+      "primaryGroup": "accessibility-polish",
+      "reportSliceKeys": [
+        "complete-shortcut-table"
+      ],
+      "ledgerSliceKeys": [
+        "AP-keyboard-shortcut-matrix"
+      ],
+      "sourceRecordIds": {
+        "report": [
+          "requirement-9187f701d82e5081"
+        ],
+        "ledger": [
+          "requirement-31e4396c279ec423",
+          "requirement-58486b72211ee376"
+        ]
+      },
+      "recordIds": [
+        "requirement-31e4396c279ec423",
+        "requirement-58486b72211ee376",
+        "requirement-9187f701d82e5081"
+      ],
+      "products": [
+        {
+          "path": "web/src/App.tsx",
+          "symbol": "App",
+          "planned": false
+        },
+        {
+          "path": "web/src/hooks/useKeyboardShortcuts.ts",
+          "symbol": "handleProjectSaveKeyDown",
+          "planned": false
+        },
+        {
+          "path": "web/src/hooks/useKeyboardShortcuts.ts",
+          "symbol": "handleTransportSpaceKeyDown",
+          "planned": false
+        },
+        {
+          "path": "web/src/hooks/useKeyboardShortcuts.ts",
+          "symbol": "useKeyboardShortcuts",
+          "planned": false
+        },
+        {
+          "path": "web/src/store/editActions.ts",
+          "symbol": "splitAtPlayhead",
+          "planned": false
+        }
+      ],
+      "tests": [
+        {
+          "path": "web/src/hooks/useKeyboardShortcuts.matrix.test.ts",
+          "name": "all_shortcuts_conflicts_editable_suppression_and_platform_modifiers",
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "web/src/hooks/useKeyboardShortcuts.test.ts",
+          "name": "complete_documented_shortcut_table",
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "web/src/hooks/useKeyboardShortcuts.test.ts",
+          "name": "handles plain Space in the editor",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/hooks/useKeyboardShortcuts.test.ts",
+          "name": "keyboard transport Space shortcut",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/hooks/useKeyboardShortcuts.test.ts",
+          "name": "prevents the native shortcut but ignores repeated KeyS events",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/hooks/useKeyboardShortcuts.test.ts",
+          "name": "project save shortcut",
+          "evidenceClass": "existing-owned"
+        }
+      ],
+      "sharedBoundary": {
+        "productPaths": [
+          "web/src/hooks/useKeyboardShortcuts.ts"
+        ],
+        "testPaths": [
+          "web/src/hooks/useKeyboardShortcuts.test.ts"
+        ]
+      },
+      "sourceRationales": {
+        "report": [
+          "The hook is mounted by App and covers Space and save, but the complete documented shortcut table is not implemented or tested as a matrix."
+        ],
+        "ledger": [
+          "The handler is broad, but current tests cover only part of the exact shortcut table."
+        ]
+      },
+      "rationale": "Both slices require the complete documented shortcut table, conflict/editable-target rules and platform modifiers through the same hook and test file."
+    },
+    {
+      "capabilityId": "ui-hover-focus-cursor-matrix",
+      "primaryGroup": "accessibility-polish",
+      "reportSliceKeys": [
+        "complete-hover-cursor-table"
+      ],
+      "ledgerSliceKeys": [
+        "AP-hover-focus-cursor-matrix"
+      ],
+      "sourceRecordIds": {
+        "report": [
+          "requirement-682854f8d348f2f3"
+        ],
+        "ledger": [
+          "requirement-88ea38135949439a",
+          "requirement-a6156af582cbf335"
+        ]
+      },
+      "recordIds": [
+        "requirement-682854f8d348f2f3",
+        "requirement-88ea38135949439a",
+        "requirement-a6156af582cbf335"
+      ],
+      "products": [
+        {
+          "path": "web/src/components/inspector/ScrubbableNumberField.tsx",
+          "symbol": "ScrubbableNumberField",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/inspector/ScrubbableNumberField.tsx",
+          "symbol": "ew-resize",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/preview/CropOverlay.tsx",
+          "symbol": "CropOverlay",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/preview/TransformOverlay.tsx",
+          "symbol": "CORNER_CURSOR",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/preview/TransformOverlay.tsx",
+          "symbol": "TransformOverlay",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/shell/SplitPane.tsx",
+          "symbol": "SplitPane",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/timeline/TimelineContainer.tsx",
+          "symbol": "TimelineContainer",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/timeline/TimelineContainer.tsx",
+          "symbol": "toolMode",
+          "planned": false
+        },
+        {
+          "path": "web/src/components/ui/HoverButton.tsx",
+          "symbol": "HoverButton",
+          "planned": false
+        },
+        {
+          "path": "web/src/styles/global.css",
+          "symbol": null,
+          "planned": false
+        }
+      ],
+      "tests": [
+        {
+          "path": "web/src/components/preview/TransformOverlay.test.tsx",
+          "name": "TransformOverlay",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/components/preview/TransformOverlay.test.tsx",
+          "name": "renders 4 corner handles at the OpenTake spacing/opacity tokens matching upstream AppTheme.Spacing.smMd / Opacity.strong",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/components/ui/HoverButton.test.tsx",
+          "name": "does not opt icon buttons out of normal keyboard focus",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "web/src/components/ui/interactionStateMatrix.test.tsx",
+          "name": "all_enabled_disabled_hover_focus_and_cursor_modes",
+          "evidenceClass": "reviewed-planned"
+        },
+        {
+          "path": "web/src/interactionParity.test.tsx",
+          "name": "complete_hover_cursor_matrix",
+          "evidenceClass": "reviewed-planned"
+        }
+      ],
+      "sharedBoundary": {
+        "productPaths": [
+          "web/src/components/inspector/ScrubbableNumberField.tsx",
+          "web/src/components/preview/TransformOverlay.tsx",
+          "web/src/components/timeline/TimelineContainer.tsx"
+        ],
+        "testPaths": [
+          "web/src/components/preview/TransformOverlay.test.tsx"
+        ]
+      },
+      "sourceRationales": {
+        "report": [
+          "Cursor and hover behavior is scattered across multiple owners; one overlay test does not prove the complete table."
+        ],
+        "ledger": [
+          "Distributed hover/focus/cursor behavior needs one cross-component state matrix."
+        ]
+      },
+      "rationale": "Both slices require one cross-component hover/focus/cursor state matrix and share the same timeline, transform and scrubbable owners plus overlay test boundary."
+    }
+  ],
+  "taxonomyMoves": [
+    {
+      "reportSliceKey": "misgrouped-media-search",
+      "fromGroup": "inspector-text-keyframes",
+      "destinationCapability": "media-search",
+      "disposition": "moved-out-of-four-ui-groups",
+      "recordIds": [
+        "requirement-2f2d03d0f0d8b62a",
+        "requirement-43fbc8e32bd126c4",
+        "requirement-45fa0c2b840442cd",
+        "requirement-7b2d77c2b48b0238",
+        "requirement-83d62f78aa13e484",
+        "requirement-8d06ffbfdd515f03",
+        "requirement-980f6325823ecf64",
+        "requirement-ae88b5f4d3f80eb6",
+        "requirement-bd5095a19a955167",
+        "requirement-cbdc477af446a4ea",
+        "requirement-f917123fb8d790f1"
+      ],
+      "products": [
+        {
+          "path": "crates/opentake-media/src/search/embedder.rs",
+          "symbol": "Embedder",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-media/src/search/tokenizer.rs",
+          "symbol": "SiglipTokenizer",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-media/src/search/indexer.rs",
+          "symbol": "index_video",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-media/src/search/embed_store.rs",
+          "symbol": "AssetIndex",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-media/src/search/ranker.rs",
+          "symbol": "search",
+          "planned": false
+        },
+        {
+          "path": "src-tauri/src/search.rs",
+          "symbol": "search_query",
+          "planned": false
+        }
+      ],
+      "tests": [
+        {
+          "path": "crates/opentake-media/src/search/embedder.rs",
+          "name": "preprocess_squashes_non_square_to_square",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-media/src/search/tokenizer.rs",
+          "name": "pads_short_sequence_to_context_length",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-media/src/search/embed_store.rs",
+          "name": "encode_decode_roundtrip_f16_quantized",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-media/src/search/ranker.rs",
+          "name": "best_per_shot_dedupes_same_shot",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-media/src/search/mod.rs",
+          "name": "index_then_rank_finds_brightest_match",
+          "evidenceClass": "existing-owned"
+        }
+      ],
+      "rationale": "These eleven heading-derived records belong to media search, not Inspector/text/keyframes, and duplicate one implemented search capability."
+    },
+    {
+      "reportSliceKey": "misgrouped-transcription",
+      "fromGroup": "accessibility-polish",
+      "destinationCapability": "media-transcription",
+      "disposition": "moved-out-of-four-ui-groups",
+      "recordIds": [
+        "requirement-033385c9654f4781",
+        "requirement-182ee5a96ef748eb",
+        "requirement-1cfe5d8575e5cc93",
+        "requirement-291a7211a4ee4b55",
+        "requirement-5ee9b7ba12472dd2",
+        "requirement-94aebecde1fc0542"
+      ],
+      "products": [
+        {
+          "path": "crates/opentake-media/src/transcribe/mod.rs",
+          "symbol": "Transcriber",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-media/src/transcribe/mod.rs",
+          "symbol": "transcribe_file",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-media/src/transcribe/cache.rs",
+          "symbol": "TranscriptCache",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-media/src/transcribe/search.rs",
+          "symbol": "search",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-media/src/transcribe/locale.rs",
+          "symbol": "match_locale",
+          "planned": false
+        },
+        {
+          "path": "crates/opentake-media/src/transcribe/whisper.rs",
+          "symbol": "WhisperTranscriber",
+          "planned": false
+        },
+        {
+          "path": "src-tauri/src/transcribe.rs",
+          "symbol": "transcribe_media",
+          "planned": false
+        }
+      ],
+      "tests": [
+        {
+          "path": "crates/opentake-media/src/transcribe/cache.rs",
+          "name": "memory_lru_clears_wholesale_at_capacity",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-media/src/transcribe/search.rs",
+          "name": "search_collects_and_respects_limit",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-media/src/transcribe/locale.rs",
+          "name": "picks_same_language_same_region",
+          "evidenceClass": "existing-owned"
+        },
+        {
+          "path": "crates/opentake-media/src/transcribe/whisper.rs",
+          "name": "centiseconds_convert_to_seconds",
+          "evidenceClass": "existing-owned"
+        }
+      ],
+      "rationale": "These six heading records belong to media transcription, not accessibility polish, and duplicate one implemented transcription capability."
+    }
+  ],
+  "completedNonProduct": [
+    {
+      "reportSliceKey": "non-product-audit-plan-steps",
+      "fromGroup": "accessibility-polish",
+      "disposition": "complete-filtered-non-product-audit-instructions",
+      "recordIds": [
+        "requirement-344e9ace52d703ab",
+        "requirement-59400f8bea91db6b",
+        "requirement-adb116cf5089a85f",
+        "requirement-b472e9d82b5aaee0"
+      ],
+      "products": [],
+      "tests": [
+        {
+          "path": "tools/completion-audit.test.mjs",
+          "name": "unchecked_plan_steps_are_not_product_requirements",
+          "evidenceClass": "reviewed-planned"
+        }
+      ],
+      "rationale": "All four records are unchecked audit-plan instructions saying to run a focused test and confirm failure; they are not product requirements and should be filtered by requirement extraction."
+    }
+  ],
+  "standalone": {
+    "reportSlices": [
+      {
+        "primaryGroup": "preview-timeline",
+        "reportSliceKey": "timeline-scale-performance",
+        "recordIds": [
+          "requirement-9f4b49115b7e6a5b"
+        ]
+      },
+      {
+        "primaryGroup": "preview-timeline",
+        "reportSliceKey": "compound-clips",
+        "recordIds": [
+          "requirement-b49e0f5ed8c2415c"
+        ]
+      },
+      {
+        "primaryGroup": "preview-timeline",
+        "reportSliceKey": "multicam",
+        "recordIds": [
+          "requirement-d179f69761518eaa"
+        ]
+      },
+      {
+        "primaryGroup": "preview-timeline",
+        "reportSliceKey": "preview-playback-controls-overlays",
+        "recordIds": [
+          "requirement-087ed63292e24e0b",
+          "requirement-64629892b7fae65d",
+          "requirement-685b894531563174",
+          "requirement-6a6a5fd7ad27f724",
+          "requirement-a81cc5996343e86d",
+          "requirement-aa1d38d1befcc428",
+          "requirement-dbd3f79b7e0c2f11"
+        ]
+      },
+      {
+        "primaryGroup": "inspector-text-keyframes",
+        "reportSliceKey": "nonlinear-speed-curves",
+        "recordIds": [
+          "requirement-751e3573915c4311",
+          "requirement-96ebb3ccd95b7798"
+        ]
+      },
+      {
+        "primaryGroup": "inspector-text-keyframes",
+        "reportSliceKey": "advanced-keyframe-easing",
+        "recordIds": [
+          "requirement-c1f53c97751f9a26",
+          "requirement-cfeb61ebe0c11259"
+        ]
+      },
+      {
+        "primaryGroup": "inspector-text-keyframes",
+        "reportSliceKey": "rgb-color-curves",
+        "recordIds": [
+          "requirement-a447463cadbc5867"
+        ]
+      },
+      {
+        "primaryGroup": "inspector-text-keyframes",
+        "reportSliceKey": "desktop-asr-captions",
+        "recordIds": [
+          "requirement-099fd03f333fd8c5"
+        ]
+      },
+      {
+        "primaryGroup": "inspector-text-keyframes",
+        "reportSliceKey": "caption-group-style-atomicity",
+        "recordIds": [
+          "requirement-1e1b83d4d6eab6b3"
+        ]
+      },
+      {
+        "primaryGroup": "inspector-text-keyframes",
+        "reportSliceKey": "safe-preview-font-catalog",
+        "recordIds": [
+          "requirement-f354675301c951ec"
+        ]
+      },
+      {
+        "primaryGroup": "inspector-text-keyframes",
+        "reportSliceKey": "keyframe-track-invariants",
+        "recordIds": [
+          "requirement-a1882b9a12702441"
+        ]
+      },
+      {
+        "primaryGroup": "agent-settings-generation",
+        "reportSliceKey": "advanced-ai-workflows",
+        "recordIds": [
+          "requirement-17dcf22b4c1e4d25",
+          "requirement-22dc8e23d599e136",
+          "requirement-30bcd764cc0c454d",
+          "requirement-70db6b4ad2dbd708",
+          "requirement-7d79665fbcb91584",
+          "requirement-9b922be7c8e92147",
+          "requirement-a61a89d25c504355",
+          "requirement-be73dca02523d3b0",
+          "requirement-dbe026f6228381a6",
+          "requirement-fdd45062091b48f3"
+        ]
+      },
+      {
+        "primaryGroup": "agent-settings-generation",
+        "reportSliceKey": "context-signal-plugin-prompt-core",
+        "recordIds": [
+          "requirement-021c6d90aacccf27",
+          "requirement-0718cc9cfd753697",
+          "requirement-10bd5c928350b83c",
+          "requirement-120469fd39c7cb0b",
+          "requirement-43688b32f31cc193",
+          "requirement-4a9d6dd7d3bc678d",
+          "requirement-59d8e4f0e42bc73c",
+          "requirement-5effd883c5b15ea0",
+          "requirement-66dc4f1590f345d7",
+          "requirement-902c3b772480344d",
+          "requirement-96b1859ce4064adb",
+          "requirement-9b40e5ea0d323e45",
+          "requirement-9e9089a1cb060a9b",
+          "requirement-a2a915a42e5e4639",
+          "requirement-aec87fd55323cbc9",
+          "requirement-b4d6970f2d07e8cf",
+          "requirement-bd3a684f68af9863",
+          "requirement-deb0ffb1c6782609",
+          "requirement-e072456b2d232fbd",
+          "requirement-e3b169fc273743bf",
+          "requirement-f2e7068a2e098318",
+          "requirement-f68bff5e318e660a",
+          "requirement-fc8028641bbe69e8"
+        ]
+      },
+      {
+        "primaryGroup": "agent-settings-generation",
+        "reportSliceKey": "plugin-authoring-lifecycle",
+        "recordIds": [
+          "requirement-3f98ce882cd382ec"
+        ]
+      },
+      {
+        "primaryGroup": "agent-settings-generation",
+        "reportSliceKey": "generation-log-credit-migration",
+        "recordIds": [
+          "requirement-75831345b1183120"
+        ]
+      },
+      {
+        "primaryGroup": "agent-settings-generation",
+        "reportSliceKey": "mcp-http-contract",
+        "recordIds": [
+          "requirement-083a4a1cb0deaffa",
+          "requirement-b7f7ca79bcc38f15",
+          "requirement-bd989e8bc74ad42f",
+          "requirement-bee010fba8fcee16",
+          "requirement-eedd77086273df30",
+          "requirement-f15de2f06b50010c"
+        ]
+      },
+      {
+        "primaryGroup": "agent-settings-generation",
+        "reportSliceKey": "agent-crate-tauri-assembly",
+        "recordIds": [
+          "requirement-c352f8fc7a62f904"
+        ]
+      },
+      {
+        "primaryGroup": "agent-settings-generation",
+        "reportSliceKey": "agent-telemetry",
+        "recordIds": [
+          "requirement-adb52c4cc902f758"
+        ]
+      },
+      {
+        "primaryGroup": "agent-settings-generation",
+        "reportSliceKey": "captions-media-panel",
+        "recordIds": [
+          "requirement-8e59f57762f7737c"
+        ]
+      },
+      {
+        "primaryGroup": "accessibility-polish",
+        "reportSliceKey": "feedback-version-metadata",
+        "recordIds": [
+          "requirement-f81d46b5f91e9e68"
+        ]
+      },
+      {
+        "primaryGroup": "accessibility-polish",
+        "reportSliceKey": "dsn-gated-telemetry-init",
+        "recordIds": [
+          "requirement-c1b2d10efb06a9d7"
+        ]
+      },
+      {
+        "primaryGroup": "accessibility-polish",
+        "reportSliceKey": "release-accessibility-visual-parity",
+        "recordIds": [
+          "requirement-2ac9b3f7dfdb31aa"
+        ]
+      },
+      {
+        "primaryGroup": "accessibility-polish",
+        "reportSliceKey": "five-panel-layout-focus",
+        "recordIds": [
+          "requirement-1b9ada0db4670130"
+        ]
+      }
+    ],
+    "ledgerSlices": [
+      {
+        "primaryGroup": "agent-settings-generation",
+        "ledgerSliceKey": "AG-structured-editing-suggestions",
+        "recordIds": [
+          "requirement-00e262c9f28140a8",
+          "requirement-276e2bfecbd2ad41",
+          "requirement-6fceedb18b105841",
+          "requirement-e80b5c0dc0ec1e1a",
+          "requirement-e8b227e21950c923",
+          "requirement-ee27e0025129d88d"
+        ]
+      },
+      {
+        "primaryGroup": "agent-settings-generation",
+        "ledgerSliceKey": "AG-workflow-recipes",
+        "recordIds": [
+          "requirement-427b5b7adcfa69d9",
+          "requirement-77fa5759c7465280",
+          "requirement-e1a3d692b15adbdd"
+        ]
+      },
+      {
+        "primaryGroup": "agent-settings-generation",
+        "ledgerSliceKey": "AG-plugin-prompt-fencing",
+        "recordIds": [
+          "requirement-069e3265180ccaeb",
+          "requirement-81cd8f7162722063"
+        ]
+      },
+      {
+        "primaryGroup": "agent-settings-generation",
+        "ledgerSliceKey": "AG-project-open-order",
+        "recordIds": [
+          "requirement-58cdfb5cd8505898"
+        ]
+      },
+      {
+        "primaryGroup": "agent-settings-generation",
+        "ledgerSliceKey": "AG-typed-validation-contract",
+        "recordIds": [
+          "requirement-7986c169e48b3f56",
+          "requirement-7bd485ebf0ccb154",
+          "requirement-8bd5296ed16bec1c",
+          "requirement-df3cc673479ddc0b",
+          "requirement-e6ff1d4ee0e4f11f"
+        ]
+      },
+      {
+        "primaryGroup": "agent-settings-generation",
+        "ledgerSliceKey": "AG-timeline-tool-schema-dispatch",
+        "recordIds": [
+          "requirement-5518fcd7072d33e0",
+          "requirement-8ab9851e19f6570e",
+          "requirement-ef7ed3316ed7d320"
+        ]
+      },
+      {
+        "primaryGroup": "agent-settings-generation",
+        "ledgerSliceKey": "AG-execution-shell-and-agent-undo",
+        "recordIds": [
+          "requirement-18b2a6cbebd24929",
+          "requirement-671e976cc6e99d91",
+          "requirement-e98c0a98c018e09e",
+          "requirement-eb1f9e319e4b374d"
+        ]
+      },
+      {
+        "primaryGroup": "agent-settings-generation",
+        "ledgerSliceKey": "AG-business-guard-matrix",
+        "recordIds": [
+          "requirement-0cde3f8b52e25e35"
+        ]
+      },
+      {
+        "primaryGroup": "agent-settings-generation",
+        "ledgerSliceKey": "AG-core-signal-dispatch-contract",
+        "recordIds": [
+          "requirement-06c7024737024833",
+          "requirement-50532f0038d53c5a",
+          "requirement-5a6069a145343925",
+          "requirement-d0e2a09d92774d3c",
+          "requirement-f831fcf031f05b7b"
+        ]
+      },
+      {
+        "primaryGroup": "inspector-text-keyframes",
+        "ledgerSliceKey": "IN-subtitle-srt-export",
+        "recordIds": [
+          "requirement-7043d6a44938bd27"
+        ]
+      },
+      {
+        "primaryGroup": "inspector-text-keyframes",
+        "ledgerSliceKey": "IN-text-rasterizer-contract",
+        "recordIds": [
+          "requirement-875e3773ed19fa15",
+          "requirement-8766c1ebeaab1411"
+        ]
+      },
+      {
+        "primaryGroup": "preview-timeline",
+        "ledgerSliceKey": "PT-clip-speed-end-to-end",
+        "recordIds": [
+          "requirement-fec364601c09f3ce"
+        ]
+      },
+      {
+        "primaryGroup": "preview-timeline",
+        "ledgerSliceKey": "PT-missing-media-red-wash",
+        "recordIds": [
+          "requirement-49881ee62b3013d4",
+          "requirement-6745f22112430b2a",
+          "requirement-ebadb3f6cf1a5de0"
+        ]
+      },
+      {
+        "primaryGroup": "preview-timeline",
+        "ledgerSliceKey": "PT-preview-status-overlays",
+        "recordIds": [
+          "requirement-2a219d0f70cc70b1",
+          "requirement-e1ede16014348bab",
+          "requirement-e413cc13c2bc68a1"
+        ]
+      },
+      {
+        "primaryGroup": "preview-timeline",
+        "ledgerSliceKey": "PT-frontend-vertical-acceptance",
+        "recordIds": [
+          "requirement-0a83743add78e662",
+          "requirement-48dccc643ac6d250",
+          "requirement-76c0b87108cd8353",
+          "requirement-81a0932850a78412"
+        ]
+      },
+      {
+        "primaryGroup": "accessibility-polish",
+        "ledgerSliceKey": "AP-i18n-runtime-contract",
+        "recordIds": [
+          "requirement-c90ae1f0093038d9"
+        ]
+      },
+      {
+        "primaryGroup": "accessibility-polish",
+        "ledgerSliceKey": "AP-bg-placeholder-token",
+        "recordIds": [
+          "requirement-4a3f468f9a960cca"
+        ]
+      }
+    ]
+  },
+  "coverageProof": {
+    "report": {
+      "expectedRecordCount": 176,
+      "observedRecordCount": 176,
+      "uniqueRecordCount": 176,
+      "duplicateRecordIds": [],
+      "clustered": {
+        "sliceCount": 17,
+        "recordCount": 88,
+        "recordIds": [
+          "requirement-01ab68dad9bef233",
+          "requirement-03f73b8c63a3dac8",
+          "requirement-0858e3409610b51b",
+          "requirement-0c45c9ee70dc990f",
+          "requirement-1779ecc2d9f24651",
+          "requirement-179e8dc7bf8a66b4",
+          "requirement-1c40dd077c50436b",
+          "requirement-1cd16e183b6c6b7e",
+          "requirement-1e22f85e7e3b8f8a",
+          "requirement-1ec5bd08013418ac",
+          "requirement-22535d21627595e1",
+          "requirement-24571c00093119be",
+          "requirement-25d4cfadbec947f6",
+          "requirement-2c1080965d1666dc",
+          "requirement-32c4ef714d183571",
+          "requirement-34903e30761f991d",
+          "requirement-38807e6a1df065a0",
+          "requirement-39d847c39c244b06",
+          "requirement-3c7ac4a40d6f21a5",
+          "requirement-47fce8f3ec8e470a",
+          "requirement-4820f51699469306",
+          "requirement-4e81a79521708f05",
+          "requirement-4ed0d164ab8ff383",
+          "requirement-5215757bd00518c6",
+          "requirement-572b929420b7dc5b",
+          "requirement-59732d045552bc15",
+          "requirement-5a1da3c2f30572ab",
+          "requirement-60b8a1de4e385ca3",
+          "requirement-62ed34afe0cbaddc",
+          "requirement-632963638d577e50",
+          "requirement-637ea1555860bd0d",
+          "requirement-63e2699bd9d27494",
+          "requirement-64a0fdf590212573",
+          "requirement-682854f8d348f2f3",
+          "requirement-6aba9217bbeca297",
+          "requirement-6b7dcf95fc15dae5",
+          "requirement-6cdaf1b0bc759131",
+          "requirement-6db3895c5fd3fd75",
+          "requirement-6e37ac641ccf5107",
+          "requirement-6f3d4e423997080c",
+          "requirement-72c7d14797feeb3d",
+          "requirement-73340597a252e2d9",
+          "requirement-76f42c1c9903e8c8",
+          "requirement-787494db54513c33",
+          "requirement-7b0285439bfae8b9",
+          "requirement-7bd98db408b23ac3",
+          "requirement-7f8b415cc15cc3a6",
+          "requirement-81e1bac10cf0afe3",
+          "requirement-87e46425b74f6667",
+          "requirement-8b14028baf4c282e",
+          "requirement-8c8c904054874383",
+          "requirement-8d1113853d0b21eb",
+          "requirement-8dc2ce5cb56b0640",
+          "requirement-9187f701d82e5081",
+          "requirement-923f74b3f2c06d84",
+          "requirement-92ec4c8b557a6ee3",
+          "requirement-9bdc97e09465edfc",
+          "requirement-9ce0276c82bdcfe6",
+          "requirement-9f42f494f7bd639c",
+          "requirement-a18c900d1d5a8535",
+          "requirement-a32e4c4537f326df",
+          "requirement-a35e49bb4f4b3488",
+          "requirement-a5977b149ca8a9ec",
+          "requirement-a68911b741563de7",
+          "requirement-a70f2258e8af6c86",
+          "requirement-a8a43bc740569dc6",
+          "requirement-b888bbde0d13a19b",
+          "requirement-bb0bf4e53d19f908",
+          "requirement-bffafcccb447be75",
+          "requirement-c0129772e5592014",
+          "requirement-c13354b986564337",
+          "requirement-c83bfe0b365d0d7f",
+          "requirement-c8564305ae9fa4bb",
+          "requirement-c8ece7bee7d231c6",
+          "requirement-cfcd1cc3cb758c27",
+          "requirement-d0cfcfa29fbae42c",
+          "requirement-d82235254f1ad987",
+          "requirement-d93395512a23997b",
+          "requirement-daa6ec4af3aeb4a9",
+          "requirement-e26133887e66e54a",
+          "requirement-e471db5faf7f4480",
+          "requirement-e4c34875f6507835",
+          "requirement-e7f57e8e3030cffa",
+          "requirement-e8f0a3053bf5ae40",
+          "requirement-e9a0faff34a2391a",
+          "requirement-efc9de03c45d49eb",
+          "requirement-f53dbd6c1c65375f",
+          "requirement-f7b67184d96c0030"
+        ]
+      },
+      "moved": {
+        "sliceCount": 2,
+        "recordCount": 17,
+        "recordIds": [
+          "requirement-033385c9654f4781",
+          "requirement-182ee5a96ef748eb",
+          "requirement-1cfe5d8575e5cc93",
+          "requirement-291a7211a4ee4b55",
+          "requirement-2f2d03d0f0d8b62a",
+          "requirement-43fbc8e32bd126c4",
+          "requirement-45fa0c2b840442cd",
+          "requirement-5ee9b7ba12472dd2",
+          "requirement-7b2d77c2b48b0238",
+          "requirement-83d62f78aa13e484",
+          "requirement-8d06ffbfdd515f03",
+          "requirement-94aebecde1fc0542",
+          "requirement-980f6325823ecf64",
+          "requirement-ae88b5f4d3f80eb6",
+          "requirement-bd5095a19a955167",
+          "requirement-cbdc477af446a4ea",
+          "requirement-f917123fb8d790f1"
+        ]
+      },
+      "complete": {
+        "sliceCount": 1,
+        "recordCount": 4,
+        "recordIds": [
+          "requirement-344e9ace52d703ab",
+          "requirement-59400f8bea91db6b",
+          "requirement-adb116cf5089a85f",
+          "requirement-b472e9d82b5aaee0"
+        ]
+      },
+      "standalone": {
+        "sliceCount": 23,
+        "recordCount": 67,
+        "recordIds": [
+          "requirement-021c6d90aacccf27",
+          "requirement-0718cc9cfd753697",
+          "requirement-083a4a1cb0deaffa",
+          "requirement-087ed63292e24e0b",
+          "requirement-099fd03f333fd8c5",
+          "requirement-10bd5c928350b83c",
+          "requirement-120469fd39c7cb0b",
+          "requirement-17dcf22b4c1e4d25",
+          "requirement-1b9ada0db4670130",
+          "requirement-1e1b83d4d6eab6b3",
+          "requirement-22dc8e23d599e136",
+          "requirement-2ac9b3f7dfdb31aa",
+          "requirement-30bcd764cc0c454d",
+          "requirement-3f98ce882cd382ec",
+          "requirement-43688b32f31cc193",
+          "requirement-4a9d6dd7d3bc678d",
+          "requirement-59d8e4f0e42bc73c",
+          "requirement-5effd883c5b15ea0",
+          "requirement-64629892b7fae65d",
+          "requirement-66dc4f1590f345d7",
+          "requirement-685b894531563174",
+          "requirement-6a6a5fd7ad27f724",
+          "requirement-70db6b4ad2dbd708",
+          "requirement-751e3573915c4311",
+          "requirement-75831345b1183120",
+          "requirement-7d79665fbcb91584",
+          "requirement-8e59f57762f7737c",
+          "requirement-902c3b772480344d",
+          "requirement-96b1859ce4064adb",
+          "requirement-96ebb3ccd95b7798",
+          "requirement-9b40e5ea0d323e45",
+          "requirement-9b922be7c8e92147",
+          "requirement-9e9089a1cb060a9b",
+          "requirement-9f4b49115b7e6a5b",
+          "requirement-a1882b9a12702441",
+          "requirement-a2a915a42e5e4639",
+          "requirement-a447463cadbc5867",
+          "requirement-a61a89d25c504355",
+          "requirement-a81cc5996343e86d",
+          "requirement-aa1d38d1befcc428",
+          "requirement-adb52c4cc902f758",
+          "requirement-aec87fd55323cbc9",
+          "requirement-b49e0f5ed8c2415c",
+          "requirement-b4d6970f2d07e8cf",
+          "requirement-b7f7ca79bcc38f15",
+          "requirement-bd3a684f68af9863",
+          "requirement-bd989e8bc74ad42f",
+          "requirement-be73dca02523d3b0",
+          "requirement-bee010fba8fcee16",
+          "requirement-c1b2d10efb06a9d7",
+          "requirement-c1f53c97751f9a26",
+          "requirement-c352f8fc7a62f904",
+          "requirement-cfeb61ebe0c11259",
+          "requirement-d179f69761518eaa",
+          "requirement-dbd3f79b7e0c2f11",
+          "requirement-dbe026f6228381a6",
+          "requirement-deb0ffb1c6782609",
+          "requirement-e072456b2d232fbd",
+          "requirement-e3b169fc273743bf",
+          "requirement-eedd77086273df30",
+          "requirement-f15de2f06b50010c",
+          "requirement-f2e7068a2e098318",
+          "requirement-f354675301c951ec",
+          "requirement-f68bff5e318e660a",
+          "requirement-f81d46b5f91e9e68",
+          "requirement-fc8028641bbe69e8",
+          "requirement-fdd45062091b48f3"
+        ]
+      },
+      "partitionRecordCount": 176,
+      "partitionUniqueRecordCount": 176,
+      "missingRecordIds": [],
+      "extraRecordIds": [],
+      "all176AccountedExactlyOnce": true
+    },
+    "ledger": {
+      "expectedRecordCount": 111,
+      "observedRecordCount": 111,
+      "uniqueRecordCount": 111,
+      "duplicateRecordIds": [],
+      "clustered": {
+        "sliceCount": 17,
+        "recordCount": 65,
+        "recordIds": [
+          "requirement-07854d86720411f5",
+          "requirement-18f2106f33522079",
+          "requirement-1f8eaadf44b47e85",
+          "requirement-238be717bbf8bfdd",
+          "requirement-27f77ddcca543305",
+          "requirement-2a4cb9892d0b01ad",
+          "requirement-31e4396c279ec423",
+          "requirement-33b669f5ab381ec8",
+          "requirement-34322dbbdfbe0cc7",
+          "requirement-375619e15f331c80",
+          "requirement-390cb44707fd921c",
+          "requirement-40bc3f68e4a7ed80",
+          "requirement-489198df8df16deb",
+          "requirement-49c3765a9022c91d",
+          "requirement-4e8c2a4123667b92",
+          "requirement-508312eff31773fb",
+          "requirement-528da39dbf930824",
+          "requirement-54cacbe8e2208d5b",
+          "requirement-55e9cb9d202147e9",
+          "requirement-5676fb351f12a534",
+          "requirement-5757937ea0526240",
+          "requirement-58486b72211ee376",
+          "requirement-5b35d8adf0560779",
+          "requirement-5dff656d1f4e9caa",
+          "requirement-609bebfb5bc3d76b",
+          "requirement-65354598d0059701",
+          "requirement-67ec865065b862f1",
+          "requirement-6ca4c5069daff120",
+          "requirement-72fc950460ec6ee7",
+          "requirement-79bb9e1c1c069d35",
+          "requirement-7adf016d3bd9c09a",
+          "requirement-81dcb0a1f7a4ba8a",
+          "requirement-81f8ffc84e4f7032",
+          "requirement-824a12344f992e03",
+          "requirement-86e3768c2d581515",
+          "requirement-88ea38135949439a",
+          "requirement-8bde5113959f02c8",
+          "requirement-8e0afbf35b51e9e9",
+          "requirement-9490ea25dd967bf4",
+          "requirement-9e5580044b5f8307",
+          "requirement-a1ba9949bb843f4c",
+          "requirement-a548b853da826bc3",
+          "requirement-a6156af582cbf335",
+          "requirement-accb36659007a295",
+          "requirement-aee5b6064f63d4ed",
+          "requirement-b08172f5d2b90ea8",
+          "requirement-b3c9690870310f25",
+          "requirement-be7ce2bc7e82ad78",
+          "requirement-c5c62c699b0ef951",
+          "requirement-c9c677ffc0cea514",
+          "requirement-d2bb52fd70e77335",
+          "requirement-d35fe204b3828ff1",
+          "requirement-d4624679e2d13a62",
+          "requirement-d536b4cae75639ca",
+          "requirement-dcf0ce260616f190",
+          "requirement-e2b750e813e5adcb",
+          "requirement-e419b88df9110885",
+          "requirement-e6604beaade77879",
+          "requirement-e819a53e21abdd61",
+          "requirement-e8cab087009a2104",
+          "requirement-eb82e776b03c5ac7",
+          "requirement-f7024f37d8c971b6",
+          "requirement-fa7d690795a9cf2b",
+          "requirement-fa8b90c9589d4792",
+          "requirement-fd89d8d87fcc28b3"
+        ]
+      },
+      "standalone": {
+        "sliceCount": 17,
+        "recordCount": 46,
+        "recordIds": [
+          "requirement-00e262c9f28140a8",
+          "requirement-069e3265180ccaeb",
+          "requirement-06c7024737024833",
+          "requirement-0a83743add78e662",
+          "requirement-0cde3f8b52e25e35",
+          "requirement-18b2a6cbebd24929",
+          "requirement-276e2bfecbd2ad41",
+          "requirement-2a219d0f70cc70b1",
+          "requirement-427b5b7adcfa69d9",
+          "requirement-48dccc643ac6d250",
+          "requirement-49881ee62b3013d4",
+          "requirement-4a3f468f9a960cca",
+          "requirement-50532f0038d53c5a",
+          "requirement-5518fcd7072d33e0",
+          "requirement-58cdfb5cd8505898",
+          "requirement-5a6069a145343925",
+          "requirement-671e976cc6e99d91",
+          "requirement-6745f22112430b2a",
+          "requirement-6fceedb18b105841",
+          "requirement-7043d6a44938bd27",
+          "requirement-76c0b87108cd8353",
+          "requirement-77fa5759c7465280",
+          "requirement-7986c169e48b3f56",
+          "requirement-7bd485ebf0ccb154",
+          "requirement-81a0932850a78412",
+          "requirement-81cd8f7162722063",
+          "requirement-875e3773ed19fa15",
+          "requirement-8766c1ebeaab1411",
+          "requirement-8ab9851e19f6570e",
+          "requirement-8bd5296ed16bec1c",
+          "requirement-c90ae1f0093038d9",
+          "requirement-d0e2a09d92774d3c",
+          "requirement-df3cc673479ddc0b",
+          "requirement-e1a3d692b15adbdd",
+          "requirement-e1ede16014348bab",
+          "requirement-e413cc13c2bc68a1",
+          "requirement-e6ff1d4ee0e4f11f",
+          "requirement-e80b5c0dc0ec1e1a",
+          "requirement-e8b227e21950c923",
+          "requirement-e98c0a98c018e09e",
+          "requirement-eb1f9e319e4b374d",
+          "requirement-ebadb3f6cf1a5de0",
+          "requirement-ee27e0025129d88d",
+          "requirement-ef7ed3316ed7d320",
+          "requirement-f831fcf031f05b7b",
+          "requirement-fec364601c09f3ce"
+        ]
+      },
+      "partitionRecordCount": 111,
+      "partitionUniqueRecordCount": 111,
+      "missingRecordIds": [],
+      "extraRecordIds": [],
+      "all111AccountedExactlyOnce": true
+    },
+    "crossSource": {
+      "reportLedgerRecordIdOverlap": [],
+      "totalSourceRecordCount": 287,
+      "totalUniqueSourceRecordCount": 287,
+      "noCrossSourceLossOrDuplication": true
+    },
+    "moved17Verified": true,
+    "complete4Verified": true
+  }
+}
