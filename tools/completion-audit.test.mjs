@@ -1611,7 +1611,7 @@ test("verifyAudit controls rejects generic proof and accepts exact tests or dire
     fixture.record.automatedTests = [];
     writeFileSync(
       join(fixture.root, fixture.testPath),
-      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  let calls = 0;\n  const element = Panel({ openAlpha: () => { calls += 1; } });\n  const view = render(element);\n  view.props.onClick();\n  expect(calls).toBe(1);\n});\n`,
+      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  expect.hasAssertions();\n  let calls = 0;\n  const element = Panel({ openAlpha: () => { calls += 1; } });\n  const view = render(element);\n  view.props.onClick();\n  expect(calls).toBe(1);\n});\n`,
     );
     const key = "alpha-direct-test";
     const id = stableId("control-runtime-receipt", key);
@@ -1685,9 +1685,105 @@ test("verifyAudit controls rejects generic proof and accepts exact tests or dire
       tree: fixture.runtime.provenance.verifierRevision.tree,
     };
 
+    const verifyDirectSource = (source) => {
+      writeFileSync(join(fixture.root, fixture.testPath), source);
+      fixture.runtime.receipts[0].artifacts[0].sha256 = createHash("sha256")
+        .update(readFileSync(join(fixture.root, fixture.testPath)))
+        .digest("hex");
+      fixture.write();
+      return verifyAudit(fixture.root, fixture.audit, "controls");
+    };
+
+    const noGuardConditionalReturn = verifyDirectSource(
+      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  let calls = 0;\n  const view = render(Panel({ openAlpha: () => { calls += 1; } }));\n  view.props.onClick();\n  if (true) return;\n  expect(calls).toBe(1);\n});\n`,
+    );
+    assert.ok(noGuardConditionalReturn.errors.some(
+      ({ code }) => code === "control-test-missing-assertion-guard",
+    ));
+
+    const fakeExpectGuard = verifyDirectSource(
+      `import { test } from "vitest";\nimport { Panel } from "./Panel";\nconst expect = Object.assign(() => ({ toBe() {} }), { hasAssertions() {} });\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  expect.hasAssertions();\n  let calls = 0;\n  const view = render(Panel({ openAlpha: () => { calls += 1; } }));\n  view.props.onClick();\n  if (true) return;\n  expect(calls).toBe(1);\n});\n`,
+    );
+    assert.ok(fakeExpectGuard.errors.some(
+      ({ code }) => code === "control-test-missing-vitest-expect",
+    ));
+
+    const mutatedVitestGuard = verifyDirectSource(
+      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nexpect.hasAssertions = () => {};\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  expect.hasAssertions();\n  let calls = 0;\n  const view = render(Panel({ openAlpha: () => { calls += 1; } }));\n  view.props.onClick();\n  if (true) return;\n  expect(calls).toBe(1);\n});\n`,
+    );
+    assert.ok(mutatedVitestGuard.errors.some(
+      ({ code }) => code === "control-test-mutates-vitest-expect",
+    ));
+
+    const branchedGuard = verifyDirectSource(
+      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  if (true) expect.hasAssertions();\n  let calls = 0;\n  const view = render(Panel({ openAlpha: () => { calls += 1; } }));\n  view.props.onClick();\n  expect(calls).toBe(1);\n});\n`,
+    );
+    assert.ok(branchedGuard.errors.some(
+      ({ code }) => code === "control-test-missing-assertion-guard",
+    ));
+
+    const zeroAssertionGuard = verifyDirectSource(
+      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  expect.assertions(0);\n  let calls = 0;\n  const view = render(Panel({ openAlpha: () => { calls += 1; } }));\n  view.props.onClick();\n  expect(calls).toBe(1);\n});\n`,
+    );
+    assert.ok(zeroAssertionGuard.errors.some(
+      ({ code }) => code === "control-test-missing-assertion-guard",
+    ));
+
+    const guardAfterEvent = verifyDirectSource(
+      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  let calls = 0;\n  const view = render(Panel({ openAlpha: () => { calls += 1; } }));\n  view.props.onClick();\n  expect.hasAssertions();\n  expect(calls).toBe(1);\n});\n`,
+    );
+    assert.ok(guardAfterEvent.errors.some(
+      ({ code }) => code === "control-test-missing-assertion-guard",
+    ));
+
+    const guardAfterReturn = verifyDirectSource(
+      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  return;\n  expect.hasAssertions();\n  let calls = 0;\n  const view = render(Panel({ openAlpha: () => { calls += 1; } }));\n  view.props.onClick();\n  expect(calls).toBe(1);\n});\n`,
+    );
+    assert.ok(guardAfterReturn.errors.some(
+      ({ code }) => code === "control-test-missing-assertion-guard",
+    ));
+
+    const guardedConditionalReturn = verifyDirectSource(
+      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  expect.hasAssertions();\n  let calls = 0;\n  const view = render(Panel({ openAlpha: () => { calls += 1; } }));\n  view.props.onClick();\n  if (true) return;\n  expect(calls).toBe(1);\n});\n`,
+    );
+    assert.ok(guardedConditionalReturn.errors.some(
+      ({ code }) => code === "direct-test-reexecution-failed",
+    ));
+
+    const guardedConditionalThrow = verifyDirectSource(
+      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  expect.assertions(1);\n  let calls = 0;\n  const view = render(Panel({ openAlpha: () => { calls += 1; } }));\n  view.props.onClick();\n  if (true) throw new Error("stop before assertion");\n  expect(calls).toBe(1);\n});\n`,
+    );
+    assert.ok(guardedConditionalThrow.errors.some(
+      ({ code }) => code === "direct-test-reexecution-failed",
+    ));
+
+    const guardedFalseBranch = verifyDirectSource(
+      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  expect.assertions(1);\n  let calls = 0;\n  const view = render(Panel({ openAlpha: () => { calls += 1; } }));\n  view.props.onClick();\n  if (false) return;\n  expect(calls).toBe(1);\n});\n`,
+    );
+    assert.equal(guardedFalseBranch.passed, true, JSON.stringify(guardedFalseBranch.errors));
+
+    const vitestCommand = fixture.runtime.receipts[0].command;
+    fixture.runtime.receipts[0].command = {
+      kind: "node-test",
+      executable: "node",
+      argv: [
+        "--test",
+        "--test-name-pattern",
+        `^${escapeRegExp(fixture.exactTestName)}$`,
+        fixture.testPath,
+      ],
+      timeoutMs: 30_000,
+    };
+    fixture.write();
+    const nodeDirectRunner = verifyAudit(fixture.root, fixture.audit, "controls");
+    assert.ok(nodeDirectRunner.errors.some(
+      ({ code }) => code === "direct-runner-not-vitest",
+    ));
+    fixture.runtime.receipts[0].command = vitestCommand;
+
     writeFileSync(
       join(fixture.root, fixture.testPath),
-      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  let calls = 0;\n  const view = render(Panel({ openAlpha: () => { calls += 1; } }));\n  view.props.onClick();\n  expect(calls).toBe(2);\n});\n`,
+      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  expect.assertions(1);\n  let calls = 0;\n  const view = render(Panel({ openAlpha: () => { calls += 1; } }));\n  view.props.onClick();\n  expect(calls).toBe(2);\n});\n`,
     );
     fixture.runtime.receipts[0].artifacts[0].sha256 = createHash("sha256")
       .update(readFileSync(join(fixture.root, fixture.testPath)))
@@ -2002,7 +2098,7 @@ test("verifyAudit controls rejects static and unrelated completion proof", async
     fixture.record.automatedTests = [];
     writeFileSync(
       join(fixture.root, fixture.testPath),
-      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  render("<div />");\n  void Panel;\n  expect(1).toBe(1);\n});\n`,
+      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  expect.hasAssertions();\n  render("<div />");\n  void Panel;\n  expect(1).toBe(1);\n});\n`,
     );
     const key = "alpha-unrelated-render";
     const id = stableId("control-runtime-receipt", key);
@@ -2065,7 +2161,7 @@ test("verifyAudit controls rejects static and unrelated completion proof", async
 
     writeFileSync(
       join(fixture.root, fixture.testPath),
-      `import { expect, test } from "vitest";\nimport { Panel, harmlessHelper } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  render(harmlessHelper());\n  void Panel;\n  expect(1).toBe(1);\n});\n`,
+      `import { expect, test } from "vitest";\nimport { Panel, harmlessHelper } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  expect.hasAssertions();\n  render(harmlessHelper());\n  void Panel;\n  expect(1).toBe(1);\n});\n`,
     );
     fixture.runtime.receipts[0].artifacts[0].sha256 = createHash("sha256")
       .update(readFileSync(join(fixture.root, fixture.testPath)))
@@ -2078,7 +2174,7 @@ test("verifyAudit controls rejects static and unrelated completion proof", async
 
     writeFileSync(
       join(fixture.root, fixture.testPath),
-      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  render(Panel({ openAlpha: () => {} }));\n  expect(1).toBe(1);\n});\n`,
+      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  expect.hasAssertions();\n  render(Panel({ openAlpha: () => {} }));\n  expect(1).toBe(1);\n});\n`,
     );
     fixture.runtime.receipts[0].artifacts[0].sha256 = createHash("sha256")
       .update(readFileSync(join(fixture.root, fixture.testPath)))
@@ -2091,7 +2187,7 @@ test("verifyAudit controls rejects static and unrelated completion proof", async
 
     writeFileSync(
       join(fixture.root, fixture.testPath),
-      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  let calls = 0;\n  const view = render(Panel({ openAlpha: () => { calls += 1; } }));\n  view.props.onClick();\n  return;\n  expect(calls).toBe(1);\n});\n`,
+      `import { expect, test } from "vitest";\nimport { Panel } from "./Panel";\nfunction render(value) { return value; }\ntest(${JSON.stringify(fixture.exactTestName)}, () => {\n  expect.hasAssertions();\n  let calls = 0;\n  const view = render(Panel({ openAlpha: () => { calls += 1; } }));\n  view.props.onClick();\n  return;\n  expect(calls).toBe(1);\n});\n`,
     );
     fixture.runtime.receipts[0].artifacts[0].sha256 = createHash("sha256")
       .update(readFileSync(join(fixture.root, fixture.testPath)))

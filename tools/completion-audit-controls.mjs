@@ -641,6 +641,204 @@ function sourceTestHasAssertion(path, source, name) {
   return found;
 }
 
+function sourceTestUsesVitestExpect(path, source, name) {
+  if (!/\.(?:[cm]?[jt]sx?)$/.test(path)) return false;
+  const ts = typeScriptCompiler();
+  const sourceFile = typeScriptSourceFile(path, source);
+  const importsExpect = sourceFile.statements.some((statement) => {
+    if (
+      !ts.isImportDeclaration(statement)
+      || !ts.isStringLiteral(statement.moduleSpecifier)
+      || statement.moduleSpecifier.text !== "vitest"
+    ) return false;
+    const bindings = statement.importClause?.namedBindings;
+    return Boolean(bindings && ts.isNamedImports(bindings) && bindings.elements.some((element) => (
+      (element.propertyName?.text ?? element.name.text) === "expect"
+      && element.name.text === "expect"
+    )));
+  });
+  if (!importsExpect) return false;
+
+  let exactCallback = null;
+  const findExactTest = (node) => {
+    if (exactCallback) return;
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      const [first, callback] = node.arguments;
+      if (
+        ["test", "it"].includes(node.expression.text)
+        && first
+        && (ts.isStringLiteral(first) || ts.isNoSubstitutionTemplateLiteral(first))
+        && first.text === name
+        && callback
+        && (ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))
+      ) {
+        exactCallback = callback;
+        return;
+      }
+    }
+    ts.forEachChild(node, findExactTest);
+  };
+  findExactTest(sourceFile);
+  if (!exactCallback) return false;
+  if (exactCallback.parameters.some((parameter) => (
+    ts.isIdentifier(parameter.name) && parameter.name.text === "expect"
+  ))) return false;
+
+  let shadowed = false;
+  const findShadow = (node) => {
+    if (shadowed) return;
+    if (
+      (ts.isVariableDeclaration(node) || ts.isParameter(node))
+      && ts.isIdentifier(node.name)
+      && node.name.text === "expect"
+    ) {
+      shadowed = true;
+      return;
+    }
+    if (
+      (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node))
+      && node.name?.text === "expect"
+    ) {
+      shadowed = true;
+      return;
+    }
+    if (
+      node !== exactCallback.body
+      && (
+        ts.isArrowFunction(node)
+        || ts.isFunctionExpression(node)
+        || ts.isFunctionDeclaration(node)
+      )
+    ) return;
+    ts.forEachChild(node, findShadow);
+  };
+  findShadow(exactCallback.body);
+  return !shadowed;
+}
+
+function sourceTestHasUnmodifiedVitestExpect(path, source) {
+  if (!/\.(?:[cm]?[jt]sx?)$/.test(path)) return false;
+  const ts = typeScriptCompiler();
+  const sourceFile = typeScriptSourceFile(path, source);
+  let valid = true;
+  const visit = (node) => {
+    if (!valid) return;
+    if (ts.isIdentifier(node) && node.text === "expect") {
+      const parent = node.parent;
+      const imported = ts.isImportSpecifier(parent)
+        && parent.name === node
+        && (parent.propertyName?.text ?? parent.name.text) === "expect";
+      const assertionCall = ts.isCallExpression(parent) && parent.expression === node;
+      const guardCall = ts.isPropertyAccessExpression(parent)
+        && parent.expression === node
+        && ["hasAssertions", "assertions"].includes(parent.name.text)
+        && ts.isCallExpression(parent.parent)
+        && parent.parent.expression === parent;
+      if (!imported && !assertionCall && !guardCall) {
+        valid = false;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return valid;
+}
+
+function sourceTestHasTopLevelAssertionGuard(path, source, name, proof) {
+  if (!/\.(?:[cm]?[jt]sx?)$/.test(path)) return false;
+  const ts = typeScriptCompiler();
+  const sourceFile = typeScriptSourceFile(path, source);
+  let exactBody = null;
+  const findExactTest = (node) => {
+    if (exactBody) return;
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      const [first, callback] = node.arguments;
+      if (
+        ["test", "it"].includes(node.expression.text)
+        && first
+        && (ts.isStringLiteral(first) || ts.isNoSubstitutionTemplateLiteral(first))
+        && first.text === name
+        && callback
+        && (ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))
+        && ts.isBlock(callback.body)
+      ) {
+        exactBody = callback.body;
+        return;
+      }
+    }
+    ts.forEachChild(node, findExactTest);
+  };
+  findExactTest(sourceFile);
+  if (!exactBody) return false;
+
+  const eventTokens = String(proof?.event ?? "")
+    .toLowerCase()
+    .split(/[^a-z0-9_$]+/)
+    .filter((token) => token.length >= 3);
+  const statementContainsCandidateEvent = (statement) => {
+    let found = false;
+    const visit = (node) => {
+      if (found) return;
+      if (
+        node !== statement
+        && (
+          ts.isArrowFunction(node)
+          || ts.isFunctionExpression(node)
+          || ts.isFunctionDeclaration(node)
+        )
+      ) return;
+      if (
+        ts.isCallExpression(node)
+        && eventTokens.some((token) => node.getText(sourceFile).toLowerCase().includes(token))
+      ) {
+        found = true;
+        return;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(statement);
+    return found;
+  };
+  const isAssertionGuard = (statement) => {
+    if (!ts.isExpressionStatement(statement) || !ts.isCallExpression(statement.expression)) {
+      return false;
+    }
+    const call = statement.expression;
+    if (
+      !ts.isPropertyAccessExpression(call.expression)
+      || !ts.isIdentifier(call.expression.expression)
+      || call.expression.expression.text !== "expect"
+    ) return false;
+    if (call.expression.name.text === "hasAssertions") return call.arguments.length === 0;
+    if (call.expression.name.text !== "assertions" || call.arguments.length !== 1) return false;
+    const [count] = call.arguments;
+    if (!ts.isNumericLiteral(count)) return false;
+    const value = Number(count.text);
+    return Number.isInteger(value) && value >= 1;
+  };
+
+  const statements = exactBody.statements;
+  const eventIndex = statements.findIndex(statementContainsCandidateEvent);
+  for (let index = 0; index < statements.length; index += 1) {
+    const statement = statements[index];
+    if (ts.isReturnStatement(statement) || ts.isThrowStatement(statement)) return false;
+    if (
+      ts.isIfStatement(statement)
+      || ts.isSwitchStatement(statement)
+      || ts.isTryStatement(statement)
+      || ts.isForStatement(statement)
+      || ts.isForInStatement(statement)
+      || ts.isForOfStatement(statement)
+      || ts.isWhileStatement(statement)
+      || ts.isDoStatement(statement)
+    ) return false;
+    if (isAssertionGuard(statement)) return eventIndex === -1 || index < eventIndex;
+    if (index === eventIndex) return false;
+  }
+  return false;
+}
+
 function sourceTestHasBoundReachableAssertion(path, source, name, proof) {
   if (!/\.(?:[cm]?[jt]sx?)$/.test(path)) return false;
   const ts = typeScriptCompiler();
@@ -1024,6 +1222,33 @@ function validateExecutedControlTestEvidence(
     );
     return null;
   }
+  if (!sourceTestUsesVitestExpect(path, source, name)) {
+    pushVerificationError(
+      errors,
+      "control-test-missing-vitest-expect",
+      `executed control test must use the unshadowed named expect import from Vitest: ${evidence}`,
+      candidate.id,
+    );
+    return null;
+  }
+  if (!sourceTestHasUnmodifiedVitestExpect(path, source)) {
+    pushVerificationError(
+      errors,
+      "control-test-mutates-vitest-expect",
+      `executed control test may use Vitest expect only for assertions and assertion-count guards: ${evidence}`,
+      candidate.id,
+    );
+    return null;
+  }
+  if (!sourceTestHasTopLevelAssertionGuard(path, source, name, proof)) {
+    pushVerificationError(
+      errors,
+      "control-test-missing-assertion-guard",
+      `executed control test needs a reachable top-level expect.hasAssertions() or expect.assertions(N >= 1) before its candidate event: ${evidence}`,
+      candidate.id,
+    );
+    return null;
+  }
   if (!sourceTestHasBoundReachableAssertion(path, source, name, proof)) {
     pushVerificationError(
       errors,
@@ -1248,11 +1473,7 @@ function executeDirectControlTest(repositoryRoot, runner, test, receiptId, candi
   let executable;
   let cwd = repositoryRoot;
   let expectedArgv;
-  if (runner.kind === "node-test" && runner.executable === "node") {
-    if (!/\.(?:[cm]?js)$/.test(test.path)) return fail("node:test only accepts tracked JavaScript test files");
-    executable = process.execPath;
-    expectedArgv = ["--test", "--test-name-pattern", exactPattern, test.path];
-  } else if (
+  if (
     runner.kind === "vitest"
     && runner.executable === "web/node_modules/.bin/vitest"
     && test.path.startsWith("web/")
@@ -1268,7 +1489,7 @@ function executeDirectControlTest(repositoryRoot, runner, test, receiptId, candi
       "--reporter=verbose",
     ];
   } else {
-    return fail("runner executable or kind is not allowlisted for the exact test path");
+    return fail("direct control proof requires the exact allowlisted Vitest runner and test path");
   }
   if (JSON.stringify(runner.argv) !== JSON.stringify(expectedArgv)) {
     return fail("runner argv must select only the exact tracked test and exact test name");
@@ -1604,10 +1825,22 @@ function validateControlRuntimeLedger(
     }
     if (receipt.evidenceLevel === "direct") {
       const directKind = ["automated", "browser", "native"].includes(receipt.kind);
+      const directVitestRunner = receipt.kind !== "automated" || (
+        receipt.command?.kind === "vitest"
+        && receipt.command?.executable === "web/node_modules/.bin/vitest"
+      );
       const everyCandidateAsserted = receiptCandidateIds.length > 0 && receiptCandidateIds.every(
         (candidateId) => assertions.filter((assertion) => assertion?.candidateId === candidateId).length === 1,
       );
       let assertionsValid = everyCandidateAsserted && assertions.length === receiptCandidateIds.length;
+      if (!directVitestRunner) {
+        assertionsValid = false;
+        pushVerificationError(
+          errors,
+          "direct-runner-not-vitest",
+          `${receiptId}: direct automated control proof requires the exact Vitest runner; node:test remains supporting only`,
+        );
+      }
       for (const candidateId of receiptCandidateIds) {
         if (!nonEmptyString(candidatesById.get(candidateId)?.ownerSymbol)) {
           assertionsValid = false;
@@ -1660,6 +1893,7 @@ function validateControlRuntimeLedger(
           );
         }
         if (receipt.kind === "automated") {
+          if (!directVitestRunner) continue;
           const exactTests = Array.isArray(assertion.testEvidence) ? assertion.testEvidence : [];
           const exactArtifacts = Array.isArray(assertion.artifactPaths) ? assertion.artifactPaths : [];
           if (exactTests.length !== 1) {
