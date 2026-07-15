@@ -3371,6 +3371,7 @@ dependencies = [
  "futures",
  "http",
  "keyring",
+ "mime",
  "opentake-core",
  "opentake-domain",
  "opentake-gen",

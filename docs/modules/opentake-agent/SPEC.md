@@ -85,7 +85,7 @@ regex           = "*"       # 短 ID UUID 扫描（§3）
 - 端口常量：`pub const MCP_PORT: u16 = 19789;`（沿用，见 ARCHITECTURE §7 与 ROADMAP）。
 - 偏好键：`io.opentake.mcp.enabled`，**缺省 true**（对应上游 `io.palmier.pro.mcp.enabled`，`MCPService.swift:11-22`）。落到 Tauri Store / `settings.json`。
 - 启动幂等：「已运行则幂等、偏好关闭不启动」（ARCHITECTURE `:1060`）。
-- 绑定地址**必须** `SocketAddr` = `127.0.0.1:19789`（`Ipv4Addr::LOCALHOST`）。**禁止** `0.0.0.0`。
+- 产品默认绑定地址**必须** `SocketAddr` = `127.0.0.1:19789`（`Ipv4Addr::LOCALHOST`）。`serve`/`serve_with_bridge` 对调用方传入的地址先执行 `IpAddr::is_loopback()` 校验，因此 IPv4/IPv6 回环可用，任何非回环地址（包括 `0.0.0.0`）都在创建 listener 前拒绝。
 
 ```rust
 // 伪代码：server 装配
@@ -95,13 +95,17 @@ pub async fn start(core: Arc<CoreHandle>, /* signal, plugins */) -> anyhow::Resu
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), MCP_PORT); // 锁回环
     let listener = tokio::net::TcpListener::bind(addr).await?;            // 绑死 loopback
     let mcp_service = StreamableHttpService::new(/* stateless 配置 */ move || ToolServer::new(core.clone()));
+    let body_limited_mcp = tower::ServiceBuilder::new()
+        .layer(RequestBodyLimitLayer::new(MCP_REQUEST_BODY_MAX))
+        .service(mcp_service);
     let app = axum::Router::new()
-        .nest_service("/mcp", mcp_service)
+        .route_service("/mcp", body_limited_mcp) // 仅精确端点；/mcp/ 与 /mcp/* 均 404
         .route("/.well-known/oauth-protected-resource", get(well_known)) // {"resource":"http://127.0.0.1:19789"}
-        .layer(tower::ServiceBuilder::new()
-            .layer(OriginGuardLayer::localhost(MCP_PORT))   // ① DNS-rebinding 防护
-            .layer(ContentTypeGuardLayer::json())           // ② application/json
-            .layer(ProtocolVersionGuardLayer::new()));      // ③ MCP-Protocol-Version
+        // axum 后添加的 layer 在外层，因此真实请求顺序为：
+        // Host/Origin → Protocol-Version → Content-Type → body limit → rmcp。
+        .layer(ContentTypeGuardLayer::json())               // ③ application/json
+        .layer(ProtocolVersionGuardLayer::new())            // ② MCP-Protocol-Version
+        .layer(OriginGuardLayer::localhost(MCP_PORT));       // ① DNS-rebinding 防护
     Ok(tokio::spawn(async move { axum::serve(listener, app).await.ok(); }))
 }
 ```
@@ -109,13 +113,13 @@ pub async fn start(core: Arc<CoreHandle>, /* signal, plugins */) -> anyhow::Resu
 #### 1.2.2 三个 tower layer（**必须保留，DNS-rebinding 防护**）
 
 `OriginGuardLayer`（对应 `OriginValidator.localhost`）：
-- 若请求带 `Origin` 头：解析其 host:port，**必须** host ∈ {`localhost`,`127.0.0.1`,`[::1]`,`::1`} 且 port == 19789（或无端口时按 80/443 拒绝——本地服务只接受显式 19789 或同源无 Origin 的 stdio shim）。不匹配 → `403 Forbidden`。
-- 同时校验 `Host` 头同上集合（防 rebinding）。
+- 若请求带 `Origin` 头：严格解析 HTTP(S) origin authority，host 必须为大小写不敏感的 `localhost` 或 `IpAddr::is_loopback()` 为真的 IPv4/IPv6 地址，且端口必须等于实际 listener 的预期端口（产品为 19789）。路径、userinfo、无效 UTF-8、缺失/畸形/错误端口、`[::1].evil` 一类前缀/后缀绕过均返回 `403 Forbidden`。
+- `Host` 头必须存在并通过同一 authority/预期端口校验（防 rebinding）；缺失或非法编码均 fail-closed 为 `403`。
 - 无 `Origin`（典型：stdio→HTTP shim、`claude mcp add` 的本地连接）→ 放行（上游 `OriginValidator.localhost` 同样对无 Origin 宽容；本地回环已是第一道边界）。
 
-`ContentTypeGuardLayer`：仅对 `POST /mcp`，`Content-Type` 必须以 `application/json` 起始，否则 `415`。
+`ContentTypeGuardLayer`：由 OpenTake router 显式前置在 body limit 与 rmcp 之前；仅对 `POST /mcp`，要求恰好一个可解析的 `Content-Type`，其 media type 必须为大小写不敏感的 `application/json`（允许 name/value 均合法且非空的参数）。缺失、非法编码、多值、空参数或其他 media type 均由该 guard 返回 `415`。
 
-`ProtocolVersionGuardLayer`：若带 `MCP-Protocol-Version` 头则校验为受支持版本（rmcp 协商版本集合），不匹配 `400`；缺失则按 rmcp 默认协商。
+`ProtocolVersionGuardLayer`：在读取请求体或进入 rmcp 分派前，若带 `MCP-Protocol-Version` 头则按 `rmcp::model::ProtocolVersion::KNOWN_VERSIONS` 校验，不匹配或编码非法返回 `400`；缺失则按 rmcp 默认协商。
 
 > 验证（ROADMAP Phase 7 `:59`）：`claude mcp add --transport http http://127.0.0.1:19789/mcp` 能连；从 `192.168.x.x` 或带伪造 `Origin: http://evil.com` 的请求被 403/拒绝。
 
