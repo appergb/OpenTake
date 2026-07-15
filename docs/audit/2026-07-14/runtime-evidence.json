@@ -26,8 +26,8 @@
       "status": "passed",
       "evidenceLevel": "supporting",
       "command": "node --test tools/completion-audit.test.mjs",
-      "startedAt": "2026-07-15T15:35:26+08:00",
-      "endedAt": "2026-07-15T15:35:42+08:00",
+      "startedAt": "2026-07-15T15:58:03+08:00",
+      "endedAt": "2026-07-15T15:58:25+08:00",
       "exitCode": 0,
       "candidateIds": [],
       "assertions": [],
@@ -35,7 +35,7 @@
         {
           "path": "docs/audit/2026-07-14/runtime-artifacts/automated/full-suite-process.txt",
           "availability": "tracked",
-          "sha256": "108f45a61c9ce45777a356a9c3d1d67e82671721fc0633441c384961e38ed158"
+          "sha256": "458f74c7bc9f923b92c6175e07ae9d76e190e6cbc0e48a59a250fb0d45338af4"
         }
       ],
       "cleanup": {
@@ -60,8 +60,8 @@
         "exitCode": 0
       },
       "executedCheckoutRevision": {
-        "commit": "d720ff00e4d5139c4af5e1f70757b8e22c9c8ef0",
-        "tree": "1c26a4fb34b4464ba63804903645842fa10eb7d7"
+        "commit": "6023e29572878681a037ccd2f949f0c97f3fefba",
+        "tree": "a8bccf8ada3243a7d585c3c59eb9af46522d90e7"
       }
     },
     {
@@ -617,8 +617,8 @@
       "status": "passed",
       "evidenceLevel": "supporting",
       "command": "node tools/completion-audit.mjs verify --root . --audit docs/audit/2026-07-14 --scope controls --out docs/audit/2026-07-14/control-verification.json",
-      "startedAt": "2026-07-15T15:36:47+08:00",
-      "endedAt": "2026-07-15T15:36:48+08:00",
+      "startedAt": "2026-07-15T15:59:44+08:00",
+      "endedAt": "2026-07-15T15:59:46+08:00",
       "exitCode": 0,
       "candidateIds": [],
       "assertions": [],
@@ -626,7 +626,7 @@
         {
           "path": "docs/audit/2026-07-14/runtime-artifacts/automated/controls-verifier-process.txt",
           "availability": "tracked",
-          "sha256": "109244fc4f3f76109f4dab9dd1b06310ef29a02635a29fb0b0993d3dcd17a934"
+          "sha256": "32a9bfa25bc5381d12a70c0dedd6bbe4daab5188d0d3f32be75620e7a9fe3e21"
         }
       ],
       "cleanup": {
@@ -645,8 +645,8 @@
         "exitCode": 0
       },
       "executedCheckoutRevision": {
-        "commit": "d720ff00e4d5139c4af5e1f70757b8e22c9c8ef0",
-        "tree": "1c26a4fb34b4464ba63804903645842fa10eb7d7"
+        "commit": "6023e29572878681a037ccd2f949f0c97f3fefba",
+        "tree": "a8bccf8ada3243a7d585c3c59eb9af46522d90e7"
       }
     }
   ],
@@ -656,15 +656,15 @@
       "tree": "918925907d79406b36c950a9ba1e8c18f7c7e4bc"
     },
     "verifierRevision": {
-      "commit": "d720ff00e4d5139c4af5e1f70757b8e22c9c8ef0",
-      "tree": "1c26a4fb34b4464ba63804903645842fa10eb7d7"
+      "commit": "6023e29572878681a037ccd2f949f0c97f3fefba",
+      "tree": "a8bccf8ada3243a7d585c3c59eb9af46522d90e7"
     },
     "candidateLedgerSha256": "262e51921d3f431c4d474f10bc3d2b29f59908758e7c80135c5e60f07cb9483c",
     "candidateSourceAggregateSha256": "98428b8c7a7b66327ef2ace05914ecafb5cd9dc6d87a91407ecd1281a6337342",
     "verifierFilesSha256": {
       "tools/completion-audit.mjs": "bdfadad15f8451f4b6ca3f71c61b942950e51bf8a408e86062cb94ca84887d94",
-      "tools/completion-audit-controls.mjs": "2880326d93f45889f3f1dc3a282d03007e117c7fcdb529768fc5ec14ea4a9fbb",
-      "tools/completion-audit.test.mjs": "c503f4c6a06bcfdfe2144232839346e0f3b56d635c02f03e92dd5e26d0eff53a"
+      "tools/completion-audit-controls.mjs": "66f3a650d9f321f72b1dfd3411fc99aeb2193b0d5d24a556a6b2ae219e106194",
+      "tools/completion-audit.test.mjs": "619d9c7c3006e3284aa10d5843c8347f59b323c1e9d505633d28c327f0ec063b"
     }
   }
 }
