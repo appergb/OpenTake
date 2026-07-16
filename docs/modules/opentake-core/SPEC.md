@@ -420,7 +420,7 @@ pub struct CoreDeps {
 1. 读并 decode `timeline`(`:31-42`)→ 设 `state.timeline`,`version = 0`。
 2. 设 `project_dir` / 派生 `project_id`(`:192` + `EditorViewModel.swift:116-125`)。
 3. decode `manifest`(`:43-50`)→ `state.manifest` → **从 manifest 物化 `assets`**(`restoreAssetsFromManifest`,`:304-339`):每个 entry 解析 URL → `MediaAsset` → 文件存在则触发波形/缩略图(异步)→ `loadMetadata`。
-4. decode `generation_log`(`:51-53`);缺失则 `seed_generation_log_from_assets`(`:246`)。
+4. decode `generation_log`(`:51-53`);没有有效日志时调用 `Project::seed_generation_log_from_assets`：以 `generationInput` 的规范 JSON 字节为有序键，相同输入只补一条；稳定行 id 使用完整 SHA-256 溯源摘要，并保留 model/createdAt。旧 manifest 没有可信计费字段，补种行的 `costCredits` 为 `null`，避免用会变化的价格表改写历史；有任何有效日志（包括空日志或部分日志）时均以它为准。非空补种结果在下一次安全保存时写入 `generation-log.json`，重开不再重复补种。
 5. `search_index.project_opened()`(`:248`,Phase 8 才实装)。
 6. 不发 `timeline_changed`(open 是初始化,前端 open 后主动 `get_timeline`)。
 

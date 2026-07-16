@@ -25,8 +25,8 @@
 //! 1. decode `timeline` → `EditorState` at version 0,
 //! 2. record `project_dir`,
 //! 3. decode `manifest` into `EditorState`,
-//! 4. decode `generation_log` (lenient; `opentake-project` already degrades a
-//!    malformed log to `None`).
+//! 4. decode `generation_log` (lenient); when no valid log exists, seed one
+//!    deterministically from manifest generation provenance.
 //!
 //! Asset materialization / thumbnails / waveforms (step 3's tail in the spec)
 //! are a media-layer concern injected via [`crate::deps`] and are not performed
@@ -122,6 +122,11 @@ pub struct EditorSession {
     /// Append-only AI generation audit log (persisted as `generation-log.json`).
     generation_log: GenerationLog,
 
+    /// Whether a valid optional log component existed when the session opened.
+    /// This preserves an intentionally empty log across Save-As without making
+    /// every new empty project create the optional component.
+    generation_log_component_present: bool,
+
     /// Persisted fields this build cannot safely write back.
     compatibility: ProjectCompatibility,
 }
@@ -142,6 +147,7 @@ impl EditorSession {
             project_dir: None,
             project_root: None,
             generation_log: GenerationLog::new(),
+            generation_log_component_present: false,
             compatibility: ProjectCompatibility::default(),
         }
     }
@@ -157,6 +163,11 @@ impl EditorSession {
         let project_root = ProjectRoot::open(path)?;
         let project = Project::open_from_root(&project_root)?;
         let compatibility = project.compatibility().clone();
+        let generation_log_component_present = project.generation_log.is_some();
+        let generation_log = match project.generation_log.clone() {
+            Some(log) => log,
+            None => project.seed_generation_log_from_assets()?,
+        };
         // EditorState::new wraps timeline + manifest with empty history at
         // version 0 — exactly the post-open state we want.
         let state = EditorState::new(project.timeline, project.manifest);
@@ -164,7 +175,8 @@ impl EditorSession {
             state,
             project_dir: Some(project.bundle_path),
             project_root: Some(project_root),
-            generation_log: project.generation_log.unwrap_or_default(),
+            generation_log,
+            generation_log_component_present,
             compatibility,
         })
     }
@@ -251,9 +263,9 @@ impl EditorSession {
         // Cover image (upstream `snapshotThumbnail` → `thumbnail.jpg`): only set
         // when the caller produced bytes; otherwise leave the on-disk cover as-is.
         project.thumbnail = thumbnail;
-        // Only persist a generation log once it has rows (mirrors the upstream
-        // "write the log component when present" tolerance).
-        if !self.generation_log.entries.is_empty() {
+        // Preserve an existing valid-but-empty optional component across
+        // Save-As; otherwise only create the log once there are rows.
+        if self.generation_log_component_present || !self.generation_log.entries.is_empty() {
             project.generation_log = Some(self.generation_log.clone());
         }
         let new_root = if same_target {
@@ -267,6 +279,9 @@ impl EditorSession {
         self.project_dir = Some(target.clone());
         if let Some(root) = new_root {
             self.project_root = Some(root);
+        }
+        if project.generation_log.is_some() {
+            self.generation_log_component_present = true;
         }
         Ok(target)
     }

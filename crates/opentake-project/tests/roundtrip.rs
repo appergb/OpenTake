@@ -193,13 +193,39 @@ fn malformed_generation_log_is_ignored() {
     std::fs::create_dir_all(&bundle).unwrap();
     common::write_file(&bundle.join("project.json"), br#"{"tracks":[]}"#);
     common::write_file(
+        &bundle.join("media.json"),
+        br#"{
+            "entries": [{
+                "id": "legacy-generated",
+                "name": "legacy.mov",
+                "type": "video",
+                "source": {"project": {"relativePath": "media/legacy.mov"}},
+                "duration": 1.0,
+                "generationInput": {
+                    "prompt": "legacy prompt",
+                    "model": "legacy-model",
+                    "duration": 1,
+                    "aspectRatio": "16:9",
+                    "createdAt": 700000000.0
+                }
+            }]
+        }"#,
+    );
+    common::write_file(
         &bundle.join("generation-log.json"),
         b"this is not json at all",
     );
 
-    // Lenient: open succeeds, log degrades to None.
+    // Lenient project decode: open succeeds and preserves the distinction
+    // between a valid log and a damaged optional component. The core assembly
+    // layer may derive an in-memory legacy seed, but this project remains
+    // compatibility read-only so the damaged bytes cannot be overwritten.
     let project = Project::open(&bundle).unwrap();
     assert!(project.generation_log.is_none());
+    assert_eq!(
+        project.compatibility().blockers(),
+        ["generation-log.json:invalid-or-unreadable"]
+    );
 }
 
 #[test]

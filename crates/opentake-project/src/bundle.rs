@@ -20,15 +20,17 @@
 //! thumbnail when held); it never creates or deletes `media/` or
 //! `chat-sessions/`, which the media and agent layers manage out-of-band.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use opentake_domain::{MediaManifest, Timeline};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::compatibility;
 use crate::error::{ProjectError, Result};
-use crate::gen_log::GenerationLog;
+use crate::gen_log::{GenerationLog, GenerationLogEntry};
 use crate::layout;
 use crate::ProjectRoot;
 
@@ -115,6 +117,47 @@ impl Project {
     /// Compatibility state detected while opening the persisted components.
     pub fn compatibility(&self) -> &ProjectCompatibility {
         &self.compatibility
+    }
+
+    /// Reconstruct the legacy generation audit rows carried only by manifest
+    /// entries saved before `generation-log.json` existed.
+    ///
+    /// Canonically identical [`opentake_domain::GenerationInput`] snapshots
+    /// represent one generation even when it produced multiple assets. The full
+    /// SHA-256 provenance digest supplies a fixed-size, deterministic synthetic
+    /// row id. Canonical keys also impose a total row order, so manifest ordering
+    /// cannot perturb saved bytes.
+    /// Legacy manifests contain no trustworthy billed-cost field, so seeded rows
+    /// keep `cost_credits = None` instead of applying a mutable pricing catalog
+    /// retroactively.
+    pub fn seed_generation_log_from_assets(&self) -> Result<GenerationLog> {
+        let mut seeds = BTreeMap::<Vec<u8>, (String, Option<f64>)>::new();
+
+        for entry in &self.manifest.entries {
+            let Some(provenance) = &entry.generation_input else {
+                continue;
+            };
+            let canonical_key = serde_json::to_vec(provenance)
+                .map_err(|error| ProjectError::json(layout::MANIFEST_FILE, error))?;
+            seeds
+                .entry(canonical_key)
+                .or_insert_with(|| (provenance.model.clone(), provenance.created_at));
+        }
+
+        Ok(GenerationLog {
+            version: 1,
+            entries: seeds
+                .into_iter()
+                .map(|(canonical_key, (model, created_at))| {
+                    GenerationLogEntry::new(
+                        format!("legacy-generation:{}", sha256_hex(&canonical_key)),
+                        model,
+                        None,
+                        created_at,
+                    )
+                })
+                .collect(),
+        })
     }
 
     /// Open the `.opentake` bundle at `path`.
@@ -268,6 +311,16 @@ impl Project {
         }
         publisher.publish()
     }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 struct EncodedProject {
