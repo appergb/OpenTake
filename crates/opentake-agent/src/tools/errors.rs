@@ -1,4 +1,4 @@
-//! `ToolError` + LLM-facing precise path errors. 1:1 port of upstream
+//! `ToolError` + precise path diagnostics. 1:1 port of upstream
 //! `ToolExecutor.swift` `validateUnknownKeys` / `firstNonFiniteNumberPath` /
 //! `formatDecodingError` (`agent-SPEC.md` §4.2), re-expressed with
 //! `serde_path_to_error` for the decode-error path.
@@ -11,9 +11,10 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-/// A tool-level error carrying an LLM-facing message. Never panics across the
-/// MCP boundary: the executor turns every `Err(ToolError)` into a
-/// `ToolResult::error` (`agent-SPEC.md` §4.1).
+/// A tool-level error carrying an in-process diagnostic message. The executor
+/// turns every `Err(ToolError)` into a private `ToolResult::error`; only typed
+/// dispatcher preflight failures may be rebuilt for an LLM (`agent-SPEC.md`
+/// §4.1-4.2.5).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
 pub struct ToolError {

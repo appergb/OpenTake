@@ -32,10 +32,21 @@ use crate::plugin::registry::PluginRegistry;
 use crate::prompt::assemble::assemble_system_prompt;
 use crate::tools::descriptions::{description, input_schema};
 use crate::tools::names::ToolName;
+use crate::tools::panic_boundary::with_redacted_dispatch_panic;
 
 /// Default loopback bind address for the MCP server (`agent-SPEC.md` §8.4).
 pub const DEFAULT_ADDR: &str = "127.0.0.1:19789";
 pub const MCP_PORT: u16 = 19789;
+
+fn map_dispatch_join_error(error: tokio::task::JoinError) -> McpError {
+    tracing::error!(
+        target: "opentake::mcp::private",
+        task_cancelled = error.is_cancelled(),
+        task_panic = error.is_panic(),
+        "MCP tool dispatch task failed"
+    );
+    McpError::internal_error("tool dispatch task failed", None)
+}
 
 /// One MCP session: owns a [`Dispatcher`] (its own agent-undo stack) and the
 /// system-prompt instructions snapshotted at construction.
@@ -132,7 +143,9 @@ impl ServerHandler for McpServer {
         // `notifications/cancelled`. This does not claim raw TCP disconnect
         // detection; it is the MCP cancellation semantic exposed by rmcp.
         let mut worker = tokio::task::spawn_blocking(move || {
-            to_call_tool_result(dispatcher.dispatch_cancellable(&name, args, &worker_cancel))
+            with_redacted_dispatch_panic(|| {
+                to_call_tool_result(dispatcher.dispatch_cancellable(&name, args, &worker_cancel))
+            })
         });
         let result = tokio::select! {
             result = &mut worker => result,
@@ -141,7 +154,7 @@ impl ServerHandler for McpServer {
                 worker.await
             }
         }
-        .map_err(|e| McpError::internal_error(format!("tool dispatch task failed: {e}"), None));
+        .map_err(map_dispatch_join_error);
         result
     }
 }
@@ -548,6 +561,61 @@ mod tests {
         let s = server();
         let res = s.call("not_a_tool", None);
         assert_eq!(res.is_error, Some(true));
+        let wire = serde_json::to_string(&res).unwrap();
+        assert!(wire.contains("MCP_UNKNOWN_TOOL"), "{wire}");
+        assert!(wire.contains("Unknown tool name."), "{wire}");
+        assert!(!wire.contains("not_a_tool"), "{wire}");
+    }
+
+    #[test]
+    fn call_invalid_arguments_exposes_typed_safe_preflight_detail() {
+        let s = server();
+        let args = serde_json::json!({
+            "entries": [{
+                "mediaRef": "asset",
+                "startFrame": "wrong",
+                "durationFrames": 30
+            }]
+        })
+        .as_object()
+        .cloned();
+        let res = s.call("add_clips", args);
+        assert_eq!(res.is_error, Some(true));
+        let wire = serde_json::to_string(&res).unwrap();
+        assert!(wire.contains("MCP_INVALID_ARGUMENTS"), "{wire}");
+        assert!(wire.contains("entries[0].startFrame"), "{wire}");
+    }
+
+    #[test]
+    fn call_dynamic_param_error_never_echoes_caller_owned_key() {
+        let s = server();
+        let secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+        let args = serde_json::json!({
+            "clipId": "clip",
+            "params": {(secret): []}
+        })
+        .as_object()
+        .cloned();
+        let res = s.call("edit_motion_graphic", args);
+        let wire = serde_json::to_string(&res).unwrap();
+        assert!(wire.contains("MCP_INVALID_ARGUMENTS"), "{wire}");
+        assert!(wire.contains("params"), "{wire}");
+        assert!(!wire.contains(secret), "{wire}");
+    }
+
+    #[tokio::test]
+    async fn join_error_does_not_expose_panic_payload() {
+        let join = tokio::task::spawn_blocking(|| {
+            with_redacted_dispatch_panic(|| {
+                panic!("provider panic carried oauth-super-secret-token")
+            })
+        })
+        .await
+        .expect_err("worker must panic");
+        let error = map_dispatch_join_error(join);
+        let wire = serde_json::to_string(&error).unwrap();
+        assert!(wire.contains("tool dispatch task failed"));
+        assert!(!wire.contains("oauth-super-secret-token"));
     }
 
     #[test]

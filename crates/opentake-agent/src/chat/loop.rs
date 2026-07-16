@@ -22,12 +22,29 @@ use crate::chat::llm::{
     no_key_guide, provider_from_choice, stream_chat, ChatRequest, LlmError, StreamEvent, ToolSchema,
 };
 use crate::chat::session::{ChatMessage, ChatSession, ToolCall};
+use crate::mcp::convert::safe_tool_result_for_llm;
 use crate::mcp::dispatch::Dispatcher;
 use crate::plugin::registry::PluginRegistry;
 use crate::prompt::assemble::assemble_system_prompt;
 use crate::signal::engine::build_signal;
 use crate::tools::descriptions::{description, input_schema};
 use crate::tools::names::ToolName;
+use crate::tools::panic_boundary::with_redacted_dispatch_panic;
+use crate::tools::result::ToolResult;
+
+fn tool_result_for_model(result: &ToolResult) -> serde_json::Value {
+    safe_tool_result_for_llm(result)
+}
+
+fn map_dispatch_join_error(error: tokio::task::JoinError) -> LlmError {
+    tracing::error!(
+        target: "opentake::chat::private",
+        task_cancelled = error.is_cancelled(),
+        task_panic = error.is_panic(),
+        "chat tool dispatch task failed"
+    );
+    LlmError::Network("tool dispatch task failed".to_string())
+}
 
 fn has_trailing_user_message(session: &ChatSession, text: &str) -> bool {
     matches!(
@@ -258,13 +275,12 @@ impl ChatLoop {
                 let dispatcher = self.dispatcher.clone();
                 let name = tc.name.clone();
                 let args = tc.args.clone();
-                let result = tokio::task::spawn_blocking(move || dispatcher.dispatch(&name, args))
-                    .await
-                    .map_err(|e| LlmError::Network(format!("dispatch task: {e}")))?;
-                let result_json = serde_json::json!({
-                    "summary": result.text_joined(),
-                    "isError": result.is_error,
-                });
+                let result = tokio::task::spawn_blocking(move || {
+                    with_redacted_dispatch_panic(|| dispatcher.dispatch(&name, args))
+                })
+                .await
+                .map_err(map_dispatch_join_error)?;
+                let result_json = tool_result_for_model(&result);
                 let tc_id = tc.id.clone();
                 tc.result = Some(result_json.clone());
                 tc.is_error = Some(result.is_error);
@@ -428,6 +444,30 @@ mod tests {
         );
         assert_eq!(session.messages[2].role, crate::chat::session::Role::Tool);
         assert_eq!(session.messages[2].tool_call_id.as_deref(), Some("call-1"));
+    }
+
+    #[test]
+    fn chat_tool_result_uses_shared_fail_closed_error_boundary() {
+        let private = "quota exhausted for customer alice plan enterprise";
+        let value = tool_result_for_model(&ToolResult::error(private));
+        let wire = value.to_string();
+        assert!(wire.contains("MCP_TOOL_ERROR_REDACTED"));
+        assert!(!wire.contains(private));
+        assert_eq!(value["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn chat_join_error_does_not_expose_panic_payload() {
+        let join = tokio::task::spawn_blocking(|| {
+            with_redacted_dispatch_panic(|| {
+                panic!("provider panic carried oauth-super-secret-token")
+            })
+        })
+        .await
+        .expect_err("worker must panic");
+        let error = map_dispatch_join_error(join).to_string();
+        assert!(error.contains("tool dispatch task failed"));
+        assert!(!error.contains("oauth-super-secret-token"));
     }
 
     #[tokio::test]

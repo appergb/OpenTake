@@ -442,6 +442,12 @@ fn decode_tool_args<T: DeserializeOwned>(dict: &Value, path: &str) -> Result<T, 
 
 这些守卫属 `opentake-core`/`opentake-ops` 的命令校验层；本 crate 透传其错误文本（措辞与上游对齐，便于 LLM 自纠）。
 
+#### 4.2.5 LLM 错误边界与私有诊断
+
+`safe_tool_result_for_llm` 是 MCP 与应用内 chat 共享的最后模型边界。错误统一编码为带 `isError`、`code`、`message`、`details`、`remediation`、`errorId` 的 JSON：`ToolResult::error` **默认私有**，不依据正文 deny-list 猜测是否可公开；只有 crate 内 dispatcher 自己产生的 `PublicErrorKind::{UnknownTool, InvalidArguments(tool)}` 才具有公开资格。即使有该类型标记，最终边界也不复制原始正文：未知工具只返回固定 detail；参数路径按该工具的 JSON Schema 逐段重建，`entries[3].startFrame` 等静态字段可保留，`params.<调用方键>` 等开放 map 在 `params` 处截断，错误原因则映射成固定类别。其余业务错误、bridge/provider 错误以及任何可能包含绝对路径、URL/查询串、凭证/Authorization/Cookie、provider response body、嵌套 source error、stack/backtrace 或多块内部信息的错误都使用 `MCP_TOOL_ERROR_REDACTED`，不携带原始 details。
+
+私有诊断日志只记录稳定公开错误码、白名单内部诊断码、与错误正文无关的进程内关联 ID、是否已脱敏，不记录原始错误正文，也不从秘密派生 hash，因此 BYOK key、Bearer token、签名 URL 和 provider body 不进入 MCP/chat 内容或日志。Tauri media bridge 对常见文件/探测失败先改写为稳定内部码（如 `MCP_SOURCE_PATH_UNREADABLE`、`MCP_MEDIA_PROBE_FAILED`），这些码进入私有结构化日志但不会自动获得模型公开资格。dispatch worker 使用线程局部标记配合一次性全局 panic hook：标记线程不输出 panic payload，随后 MCP/chat 的 JoinError 映射只对外返回固定消息，并仅记录 `task_panic`/`task_cancelled` 标志。`remediation` 始终提供可执行的重试/修正建议和可关联的 `errorId`。
+
 ### 4.3 助手专属 undo（`undo:109-123`）
 
 ```
@@ -462,13 +468,18 @@ undo(core) -> ToolResult:
 
 ```rust
 pub enum Block { Text(String), Image { base64: String, media_type: String } }
-pub struct ToolResult { pub content: Vec<Block>, pub is_error: bool }
+pub struct ToolResult {
+    pub content: Vec<Block>,
+    pub is_error: bool,
+    #[serde(skip)] llm_error: Option<PublicErrorKind>, // 默认 None；跨 serde 后仍为 None
+}
 impl ToolResult {
     pub fn ok(s: impl Into<String>) -> Self { Self { content: vec![Block::Text(s.into())], is_error: false } }
-    pub fn error(s: impl Into<String>) -> Self { Self { content: vec![Block::Text(s.into())], is_error: true } }
+    pub fn error(s: impl Into<String>) -> Self { /* private by default */ }
+    pub(crate) fn public_error(kind: PublicErrorKind, s: impl Into<String>) -> Self { /* dispatcher preflight only */ }
 }
 ```
-转 rmcp 的 `CallToolResult`：`Text → Content::text`、`Image → Content::image{data,mime_type}`，`is_error: Some(true) | None`（上游 `is_error ? true : nil`，`ToolResult.swift:32`）。chat 侧直接用 `content`/`is_error`（§5）。
+成功结果转 rmcp 的 `CallToolResult`：`Text → Content::text`、`Image → Content::image{data,mime_type}`，`is_error: None`；错误结果经 §4.2.5 的共享安全信封成为 `is_error: Some(true)`。chat 使用同一个安全信封，禁止直接把 `text_joined()` 回填给模型（§5）。
 
 > **OpenTake 增强（ARCHITECTURE §7 `:154`）**：写工具统一返回**结构化 JSON**（变更的 clipId/帧位/新建轨），而非上游多数工具的人话字符串。可在 `Block::Text` 里放 JSON（与上游 `ripple_delete_ranges`/`remove_tracks` 已返回 JSON 的风格统一），便于多步链式编辑。**保留**上游已返回 JSON 的工具的字段形态。
 
@@ -1077,7 +1088,7 @@ src/
 - [ ] MCP server **仅绑 `127.0.0.1`**，禁 `0.0.0.0`；三个 tower guard 生效。
 - [ ] Anthropic key 存 OS keychain（`keyring`），绝不入 `project.json`/日志/遥测。
 - [x] 工具入参全部经 §4 校验（未知字段/非有限数/类型）；`import_media` 的 url 强制 HTTPS、每跳重验、扩展名/MIME/生产 probe 白名单、流式 ≤1GB、显式 MCP 取消清理与 retained manifest 原子发布（上游 `+Import.swift` 语义）。
-- [ ] 错误信息不泄露内部路径/密钥（错误措辞对 LLM 友好但不含敏感数据）。
+- [x] MCP/chat 错误共享“默认私有、显式类型才可公开”的安全信封；内部路径、凭证/Authorization、签名 URL 查询、provider body、嵌套 source/stack 与 panic payload 在 LLM 边界 fail-closed 脱敏，私有日志仅保留错误码、无秘密派生的关联 ID 与补救提示。
 - [ ] 插件 `instructions.md` 注入系统提示词前不可信内容隔离（标注来源 `plugin:{id}`，避免提示注入冒充系统指令）。
 
 ---

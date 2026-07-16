@@ -550,6 +550,96 @@ impl MediaBridge for CancellationBridge {
     }
 }
 
+struct PrivateFailureBridge;
+
+impl MediaBridge for PrivateFailureBridge {
+    fn import_media(
+        &self,
+        _source: ImportSource,
+        _name: Option<String>,
+        _folder_id: Option<String>,
+    ) -> Result<ImportOutcome, BridgeError> {
+        Err(BridgeError::new(
+            "quota exhausted for customer alice plan enterprise",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn real_mcp_transport_redacts_private_bridge_error() {
+    let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(AppCore::new()));
+    let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+    let addr = start_router_with_bridge(handle, registry, Arc::new(PrivateFailureBridge)).await;
+    let client = reqwest::Client::new();
+    let session_id = initialize_session(&client, addr).await;
+
+    let response = client
+        .post(format!("http://{addr}/mcp"))
+        .header("host", valid_host(addr))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-session-id", session_id)
+        .header("mcp-protocol-version", "2025-06-18")
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 76,
+            "method": "tools/call",
+            "params": {
+                "name": "import_media",
+                "arguments": {
+                    "source": {"url": "https://example.com/clip.mp4"}
+                }
+            }
+        }))
+        .send()
+        .await
+        .expect("tool request sent");
+    assert!(response.status().is_success(), "MCP request failed");
+    let wire = response.text().await.expect("MCP response body");
+    assert!(wire.contains("MCP_TOOL_ERROR_REDACTED"), "{wire}");
+    assert!(
+        !wire.contains("quota exhausted for customer alice plan enterprise"),
+        "real MCP response leaked bridge error: {wire}"
+    );
+}
+
+#[tokio::test]
+async fn real_mcp_transport_never_echoes_dynamic_param_key() {
+    let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(AppCore::new()));
+    let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+    let addr = start_router(handle, registry).await;
+    let client = reqwest::Client::new();
+    let session_id = initialize_session(&client, addr).await;
+    let secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+
+    let response = client
+        .post(format!("http://{addr}/mcp"))
+        .header("host", valid_host(addr))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-session-id", session_id)
+        .header("mcp-protocol-version", "2025-06-18")
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 75,
+            "method": "tools/call",
+            "params": {
+                "name": "edit_motion_graphic",
+                "arguments": {
+                    "clipId": "clip",
+                    "params": {(secret): []}
+                }
+            }
+        }))
+        .send()
+        .await
+        .expect("tool request sent");
+    assert!(response.status().is_success(), "MCP request failed");
+    let wire = response.text().await.expect("MCP response body");
+    assert!(wire.contains("MCP_INVALID_ARGUMENTS"), "{wire}");
+    assert!(!wire.contains(secret), "dynamic key leaked: {wire}");
+}
+
 #[tokio::test]
 async fn cancelled_notification_reaches_media_cancel_token() {
     let core = AppCore::new();

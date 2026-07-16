@@ -551,8 +551,10 @@ impl TauriMediaBridge {
         expected_extension: &str,
         expected_kind: &str,
     ) -> Result<ProbedMedia, BridgeError> {
-        let probe = self.engine.probe_file(file).map_err(|error| {
-            BridgeError::new(format!("Downloaded media failed validation: {error}"))
+        let probe = self.engine.probe_file(file).map_err(|_| {
+            BridgeError::new(
+                "MCP_MEDIA_PROBE_FAILED: Downloaded media could not be validated; verify the source type and retry",
+            )
         })?;
         let actual_kind = if probe.has_video {
             if probe.duration_secs > 0.0 {
@@ -801,8 +803,11 @@ impl TauriMediaBridge {
             .ensure_project_mutable()
             .map_err(|error| BridgeError::new(error.to_string()))?;
         let file_url = PathBuf::from(path);
-        let meta = std::fs::metadata(&file_url)
-            .map_err(|_| BridgeError::new(format!("File not found: {path}")))?;
+        let meta = std::fs::metadata(&file_url).map_err(|_| {
+            BridgeError::new(
+                "MCP_SOURCE_PATH_UNREADABLE: source.path does not exist or is not readable",
+            )
+        })?;
 
         if meta.is_dir() {
             // Recursive directory import (剪注-style folder mirroring). Reuse the
@@ -845,8 +850,16 @@ impl TauriMediaBridge {
             )));
         }
         let entry = crate::media::import_one(&self.core, &self.engine, &file_url)
-            .map_err(|error| BridgeError::new(error.to_string()))?
-            .ok_or_else(|| BridgeError::new(format!("Failed to import file: {path}")))?;
+            .map_err(|_| {
+                BridgeError::new(
+                    "MCP_SOURCE_IMPORT_FAILED: source.path could not be imported; verify the file type and permissions",
+                )
+            })?
+            .ok_or_else(|| {
+                BridgeError::new(
+                    "MCP_SOURCE_IMPORT_FAILED: source.path could not be imported; verify the file type and permissions",
+                )
+            })?;
         let entry = self.apply_import_metadata(entry, name, folder_id)?;
         Ok(ImportOutcome {
             message: format!(
@@ -2338,7 +2351,11 @@ mod tests {
         let err = bridge
             .import_from_path("/no/such/file.mp4", None, None)
             .unwrap_err();
-        assert!(err.message.contains("File not found"), "{}", err.message);
+        assert!(
+            err.message.contains("MCP_SOURCE_PATH_UNREADABLE"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

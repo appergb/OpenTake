@@ -47,7 +47,7 @@ use crate::tools::args::{self, *};
 use crate::tools::encode_timeline::encode_timeline;
 use crate::tools::errors::{decode_tool_args, ToolArgs, ToolError};
 use crate::tools::names::ToolName;
-use crate::tools::result::{Block, ToolResult};
+use crate::tools::result::{Block, PublicErrorKind, ToolResult};
 use crate::tools::short_id;
 
 /// `inspect_timeline` frame-sampling + downscale constants, 1:1 with upstream
@@ -124,7 +124,10 @@ impl Dispatcher {
     ) -> ToolResult {
         // 1. Resolve the tool name.
         let Ok(tool) = name.parse::<ToolName>() else {
-            return ToolResult::error(format!("Unknown tool: {name}"));
+            return ToolResult::public_error(
+                PublicErrorKind::UnknownTool,
+                format!("Unknown tool: {name}"),
+            );
         };
 
         // Validate the complete wire shape before snapshots, side effects, or a
@@ -132,7 +135,10 @@ impl Dispatcher {
         // value it consumes after short-id expansion; this preflight is the
         // fail-closed contract shared by every one of ToolName::ALL.
         if let Err(error) = validate_tool_args(tool, &args) {
-            return ToolResult::error(error.message);
+            return ToolResult::public_error(
+                PublicErrorKind::InvalidArguments(tool),
+                error.message,
+            );
         }
 
         // 2. Snapshot the pre-run state.
@@ -143,7 +149,12 @@ impl Dispatcher {
         let universe = short_id::current_id_universe(&before, &manifest);
         let args = match short_id::expand_id_prefixes(&args, &universe) {
             Ok(v) => v,
-            Err(e) => return ToolResult::error(e.message),
+            Err(e) => {
+                return ToolResult::public_error(
+                    PublicErrorKind::InvalidArguments(tool),
+                    e.message,
+                );
+            }
         };
 
         // 4 + 5. Decode typed args and run the body. `op` collects what the body

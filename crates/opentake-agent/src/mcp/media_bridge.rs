@@ -98,11 +98,11 @@ pub enum ImportSource {
     },
 }
 
-/// A user-visible import error the bridge raises. Carries an LLM-facing message
-/// the dispatcher surfaces verbatim (upstream `ToolError` messages).
+/// An in-process bridge error. Its message may contain private implementation
+/// context and is therefore redacted by default at every LLM boundary.
 #[derive(Debug, Clone)]
 pub struct BridgeError {
-    /// The message shown to the model.
+    /// Private diagnostic text; never expose it directly to a model.
     pub message: String,
 }
 
