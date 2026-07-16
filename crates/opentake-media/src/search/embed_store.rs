@@ -21,7 +21,7 @@ use byteorder::{ByteOrder, LittleEndian};
 use half::f16;
 use serde::{Deserialize, Serialize};
 
-use crate::cache_key::{file_identity_key, KEY_HEX_LEN};
+use crate::cache_key::file_identity_key;
 use crate::error::{MediaError, Result};
 
 /// Magic bytes prefixing every `.embed` file.
@@ -67,7 +67,7 @@ fn row_bytes(dim: usize) -> usize {
 
 /// Cache key for `path` (`file_identity_key` with 32 hex chars).
 pub fn key(path: &Path) -> Option<String> {
-    file_identity_key(path, KEY_HEX_LEN)
+    file_identity_key(path)
 }
 
 /// Serialize an index to the `PALMEMB1` byte layout. Pure (no IO) so the exact

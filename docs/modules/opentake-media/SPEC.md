@@ -20,7 +20,7 @@
 
 1. **时间单位分层**:本 crate 一律用**秒(`f64`)**与**源采样位置**作 IO 边界量;帧↔秒换算(`Int(s*fps)` 截断)留在 `opentake-domain`/调用层,本 crate**不做** fps 折算。证据:上游 `Transcription`/`MediaVisualCache`/`FrameSampler` 全用 `seconds`,`secondsToFrame` 在 `MediaTab`(上层)。
 2. **零硬编码常量**:所有阈值(promoteDiff=12、coverageFloor=8.0、imageSize=256、dim=768、relativeCutoff=0.85、cosineFloor=0.05、波形 count 公式 150/帧 与 20000 上限、缩略图 maximumSize=120×68、sprite 列数=50 …)以 `pub const` / `Options` 结构体集中声明,值**逐字照搬**上游。
-3. **缓存键与磁盘格式逐字节复刻**:`SHA256("path|mtime_unix_f64|size")` 取前 N hex、`PALMEMB1` 二进制布局、`.waveform`/`.thumbs.jpg`+`.thumbs.json` sidecar、转写 JSON。理由:让 OpenTake 与上游/旧工程的缓存目录**可互读**(同机迁移),并保证幂等判定一致。
+3. **缓存键与磁盘格式逐字节复刻**:嵌入/转写使用 `SHA256("path|mtime_unix_f64|size")`,缩略图/波形使用 `SHA256("path|size|mtime_unix_f64")`,均保留前 16 字节为 32 hex;同时复刻 `PALMEMB1` 二进制布局、`.waveform`/`.thumbs.jpg`+`.thumbs.json` sidecar、转写 JSON。理由:让 OpenTake 与上游/旧工程的缓存目录**可互读**(同机迁移),并保证幂等判定一致。
 4. **错误用 `thiserror` 定义本 crate 错误,内部传播用 `anyhow`,边界返回 `Result<T, MediaError>`**;`opentake-domain` 零依赖,本 crate 是第一层允许 IO 的 crate。
 5. **不可变 / 纯函数优先**:排名(`VisualSearch`)、波形降采样、采样判定、转写过滤等都是无副作用纯函数,可全单测;有状态的只有索引调度器(§7.7)与模型加载器(§5.6)。
 6. **后端推理可插拔**:`Embedder` / `Transcriber` / `OrtWorker` 定义为 trait,默认实现走 ort 或 candle;测试注入 mock(协议化 DI)。
@@ -39,7 +39,7 @@ crates/opentake-media/
 └── src/
     ├── lib.rs              # pub re-export + MediaError + 顶层 facade(MediaEngine)
     ├── error.rs            # MediaError(thiserror)
-    ├── cache_key.rs        # SHA256("path|mtime|size") 通用缓存键(被 §2/§4/§6 共用)
+    ├── cache_key.rs        # 两种上游字段顺序的 SHA256 文件缓存键(被 §2/§4/§6 共用)
     ├── probe.rs            # ffprobe 等价:时长/分辨率(应用旋转)/fps/hasAudio  → MediaProbe
     ├── decode/
     │   ├── mod.rs          # Decoder facade
@@ -149,18 +149,21 @@ pub type Result<T> = std::result::Result<T, MediaError>;
 
 ### 1.4 通用缓存键(三处共用)
 
-上游三个独立实现完全同构(只前缀字符数不同),归一为一个函数:
+上游三个独立实现都保留 SHA-256 的前 16 字节(32 个小写 hex 字符),但种子字段顺序有两个变体,因此分别暴露函数:
 
 ```rust
 // cache_key.rs
-/// SHA256("<path>|<mtime_secs_unix_f64>|<size_bytes>") 的小写 hex,取前 `prefix_chars` 字符。
+/// 嵌入 / 转写:SHA256("<path>|<mtime_secs_unix_f64>|<size_bytes>")。
 /// 注意:mtime 是相对 1970 的浮点秒(Swift timeIntervalSince1970)。文件不存在/无属性 → None。
-pub fn file_identity_key(path: &Path, prefix_chars: usize) -> Option<String>;
-```
-- 嵌入向量 / 转写:`prefix_chars = 32`。证据:`EmbeddingStore.key`(`EmbeddingStore.swift:36-42`,`.prefix(32)`)、`TranscriptCache.key`(`TranscriptCache.swift:82-88`,`.prefix(32)`)。
-- 缩略图 / 波形:`prefix_chars = 16`。证据:`MediaVisualCache.diskCacheKey`(`MediaVisualCache.swift:209-216`,`digest.prefix(16)` 即 16 字节 → 32 hex;**注意上游这里取的是 16 字节= 32 hex**,而 Embeddings 取 32 hex 字符= 16 字节)。
+pub fn file_identity_key(path: &Path) -> Option<String>;
 
-> ⚠️ **逐字节核对点**:`MediaVisualCache` 用 `digest.prefix(16).map{%02x}` → 16 字节 → **32 hex 字符**;`EmbeddingStore`/`TranscriptCache` 用 `.map{%02x}.joined().prefix(32)` → **32 hex 字符 = 16 字节**。两者最终都是 32 个 hex 字符、16 字节熵,但代码路径不同。实施时统一为「取 SHA256 前 16 字节 → 32 hex」即与三处全部一致。`file_identity_key(path, 32)` 返回 32 hex 字符即可。`mtime`/`size` 缺失返回 `None`(对应上游 `guard let … else return nil`)。
+/// 缩略图 / 波形:SHA256("<path>|<size_bytes>|<mtime_secs_unix_f64>")。
+pub fn visual_file_identity_key(path: &Path) -> Option<String>;
+```
+- 嵌入向量 / 转写:固定保留 32 hex 字符。证据:`EmbeddingStore.key`(`EmbeddingStore.swift:36-42`,`.prefix(32)`)、`TranscriptCache.key`(`TranscriptCache.swift:82-88`,`.prefix(32)`)。
+- 缩略图 / 波形:固定保留 16 字节= 32 hex 字符。证据:`MediaVisualCache.diskCacheKey`(`MediaVisualCache.swift:209-216`,`digest.prefix(16)` 即 16 字节 → 32 hex)。
+
+> ✅ **逐字节核对完成**:`MediaVisualCache` 用种子 `path|size|mtime` 后取 `digest.prefix(16).map{%02x}` → **32 hex 字符**;`EmbeddingStore`/`TranscriptCache` 用种子 `path|mtime|size` 后执行 `.map{%02x}.joined().prefix(32)` → **32 hex 字符**。Rust 分别由 `visual_file_identity_key` 和 `file_identity_key` 保留这两个顺序;mtime 先按 Foundation 的 2001 reference date 舍入,再按 Swift `Double.description` 格式化,且 `mtime`/`size` 缺失返回 `None`(对应上游 `guard let … else return nil`)。
 
 ---
 
@@ -381,7 +384,7 @@ DSWaveformImage 默认输出的是「振幅包络」,上游语义是 **0=loud,1=
 pub fn load_waveform(cache_root: &Path, key: &str) -> Option<Vec<f32>>; // 读 <key>.waveform
 pub fn save_waveform(cache_root: &Path, key: &str, samples: &[f32]) -> Result<()>;
 ```
-- 文件名:`<key>.waveform`(key = `file_identity_key(path, 32)`)。
+- 文件名:`<key>.waveform`(key = `visual_file_identity_key(path)`)。
 - 格式:小端 f32 连续;`byteorder` 写、读校验 `len%4==0 && len>0`。
 - ⚠️ 字节序:上游 `Data($0)` 是宿主端序(macOS arm64 = LE);跨平台固定 LE,与 arm64 mac 写出的互读一致。
 
@@ -519,7 +522,7 @@ pub struct AssetIndex { pub header: Header, pub rows: Vec<Row>, pub vectors: Vec
 
 pub const MAGIC: &[u8;8] = b"PALMEMB1";
 
-pub fn key(path: &Path) -> Option<String>;             // file_identity_key(path, 32)
+pub fn key(path: &Path) -> Option<String>;             // file_identity_key(path)
 pub fn header(cache_root: &Path, key: &str) -> Option<Header>;
 pub fn is_current(cache_root: &Path, key: &str, model: &str, mv: i32, sv: i32) -> bool;
 pub fn load(cache_root: &Path, key: &str) -> Result<AssetIndex>;
@@ -721,7 +724,7 @@ impl TranscriptCache {
 - **只缓存全量转写**;窗口请求通过 `filter` 全量缓存得到(`:4-5/12-27`)。命中(内存或磁盘)且有 range → 返回 `filter(full, range)`;否则若有 range 直接转写该 range(不缓存,`:17-21`);否则全量转写并缓存(`:22-26`)。
 - **filter**:段 `end > lower && start < upper`;词需 `start/end` 非空且 `end > lower && start < upper`;`text = segments.map(text).join(" ")`(`:29-39`)。
 - **内存 LRU**:`max=4`,满则 `removeAll()`(粗暴清空,逐字照搬 `:57-60`)。
-- **磁盘**:`<cache_root>/Transcripts/<key>.json`,key=`file_identity_key(path,32)`(`:62-88`)。`cached_on_disk`/`has_cached_on_disk` 同步读(供索引调度器判断,§7.7)。
+- **磁盘**:`<cache_root>/Transcripts/<key>.json`,key=`file_identity_key(path)`(`:62-88`)。`cached_on_disk`/`has_cached_on_disk` 同步读(供索引调度器判断,§7.7)。
 
 ### 6.4 关键词搜索 `TranscriptSearch`(口语搜索,纯函数)
 
@@ -911,7 +914,7 @@ impl MediaEngine {
 
 ### Phase 2 子集(基础媒体,先做)
 
-- **T2.1 cache_key + error**:`file_identity_key`(SHA256 path|mtime|size,前 16 字节 32 hex)+ `MediaError`。验收:同输入稳定、不同 mtime/size 变 key、缺文件 None。
+- **T2.1 cache_key + error**:`file_identity_key`(嵌入/转写:path|mtime|size)与 `visual_file_identity_key`(缩略图/波形:path|size|mtime),均取 SHA256 前 16 字节为 32 hex,加 `MediaError`。验收:同输入稳定、不同 mtime/size 变 key、缺文件 None,并与 Swift 固定向量一致。
 - **T2.2 probe**:ffmpeg-next 读时长/旋转校正宽高/fps/has_audio。验收:对一组样本(横屏/竖屏/旋转 90°/纯音频/无音轨视频)字段正确;旋转视频宽高已交换;与 `ffprobe` 交叉核对。
 - **T2.3 decode_frame_at / decode_frames_at**:seek+tolerance+缩放(保宽高比)+ `t>lastTime` 去重。验收:指定秒取到最近帧、实际时间单调、越界 Err;批量去重生效。
 - **T2.4 extract_pcm**:解音轨 → 16k mono f32,支持 range。验收:输出采样率/声道/长度正确;range `(a,b)` 长度≈`(b-a)*16000`;无音轨 `NoTrack`。

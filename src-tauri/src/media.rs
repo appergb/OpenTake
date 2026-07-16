@@ -40,7 +40,7 @@ use opentake_media::library::{FavoriteRequest, LibraryStore, PreparedFavorite};
 #[cfg(test)]
 use opentake_media::MediaCancelToken;
 use opentake_media::{
-    cache_key::{file_identity_key, KEY_HEX_LEN},
+    cache_key::visual_file_identity_key,
     decode_frame_at, decode_frames_at,
     thumbnail::{
         save_sprite, sprite::grid_geometry, video_thumbnail_times, ThumbnailCacheMeta, VideoThumb,
@@ -337,7 +337,7 @@ fn empty_thumbnail_dto(entry: &MediaManifestEntry) -> ThumbnailDto {
 }
 
 fn cache_key_for(path: &Path) -> Result<String, String> {
-    file_identity_key(path, KEY_HEX_LEN)
+    visual_file_identity_key(path)
         .ok_or_else(|| format!("could not build thumbnail cache key for {}", path.display()))
 }
 

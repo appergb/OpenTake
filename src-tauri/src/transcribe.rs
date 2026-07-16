@@ -277,9 +277,7 @@ pub(crate) fn transcribe_with_cache(
 /// using the same file-identity key the cache reads, so a hinted transcription is
 /// served from cache on the next call. Best-effort: a write failure is non-fatal.
 fn persist_full_transcript(cache_root: &Path, path: &Path, result: &TranscriptionResult) {
-    let Some(key) =
-        opentake_media::cache_key::file_identity_key(path, opentake_media::cache_key::KEY_HEX_LEN)
-    else {
+    let Some(key) = opentake_media::cache_key::file_identity_key(path) else {
         return;
     };
     let dir = cache_root.join(opentake_media::transcribe::cache::CACHE_SUBDIR);
