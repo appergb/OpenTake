@@ -118,7 +118,7 @@ impl ServerHandler for McpServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let dispatcher = self.dispatcher.clone();
         let name = request.name.to_string();
@@ -126,9 +126,23 @@ impl ServerHandler for McpServer {
             .arguments
             .map(Value::Object)
             .unwrap_or(Value::Object(Map::new()));
-        tokio::task::spawn_blocking(move || to_call_tool_result(dispatcher.dispatch(&name, args)))
-            .await
-            .map_err(|e| McpError::internal_error(format!("tool dispatch task failed: {e}"), None))
+        let cancel = opentake_media::MediaCancelToken::new();
+        let worker_cancel = cancel.clone();
+        // rmcp cancels `context.ct` for the protocol's explicit
+        // `notifications/cancelled`. This does not claim raw TCP disconnect
+        // detection; it is the MCP cancellation semantic exposed by rmcp.
+        let mut worker = tokio::task::spawn_blocking(move || {
+            to_call_tool_result(dispatcher.dispatch_cancellable(&name, args, &worker_cancel))
+        });
+        let result = tokio::select! {
+            result = &mut worker => result,
+            () = context.ct.cancelled() => {
+                cancel.cancel();
+                worker.await
+            }
+        }
+        .map_err(|e| McpError::internal_error(format!("tool dispatch task failed: {e}"), None));
+        result
     }
 }
 
@@ -380,7 +394,10 @@ pub fn build_router_with_bridge(
     build_router_with_bridge_for_port(handle, registry, bridge, MCP_PORT)
 }
 
-fn build_router_with_bridge_for_port(
+/// Build a bridge-enabled router whose Host/Origin guards expect the supplied
+/// listener port. This is the dynamic-port counterpart of
+/// [`build_router_with_bridge`].
+pub fn build_router_with_bridge_for_port(
     handle: Arc<dyn CoreHandle>,
     registry: Arc<RwLock<PluginRegistry>>,
     bridge: Option<Arc<dyn MediaBridge>>,

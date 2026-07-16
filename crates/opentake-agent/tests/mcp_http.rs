@@ -4,18 +4,24 @@
 //! its instructions. This exercises the whole network face — router, session
 //! transport, and the `ServerHandler` — without a GUI.
 
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{header::HOST, HeaderValue, Request};
 use opentake_agent::mcp::core_handle::{AppCoreHandle, CoreHandle};
-use opentake_agent::mcp::media_bridge::MCP_REQUEST_BODY_MAX;
-use opentake_agent::mcp::server::{build_router, build_router_for_port, serve};
+use opentake_agent::mcp::media_bridge::{
+    BridgeError, ImportOutcome, ImportSource, MediaBridge, MCP_REQUEST_BODY_MAX,
+};
+use opentake_agent::mcp::server::{
+    build_router, build_router_for_port, build_router_with_bridge_for_port, serve,
+};
 use opentake_agent::plugin::registry::PluginRegistry;
 use opentake_core::AppCore;
-use opentake_domain::ClipType;
-use opentake_ops::command::EditCommand;
+use opentake_domain::{ClipType, MediaManifest, Timeline};
+use opentake_ops::command::{EditCommand, EditResult};
 use tower::ServiceExt;
 
 fn insert_video_track(core: &AppCore) {
@@ -33,6 +39,20 @@ async fn start_router(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let router = build_router_for_port(handle, registry, addr.port());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    addr
+}
+
+async fn start_router_with_bridge(
+    handle: Arc<dyn CoreHandle>,
+    registry: Arc<RwLock<PluginRegistry>>,
+    bridge: Arc<dyn MediaBridge>,
+) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = build_router_with_bridge_for_port(handle, registry, Some(bridge), addr.port());
     tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
@@ -427,4 +447,183 @@ async fn only_exact_mcp_route_is_served() {
         .await
         .expect("DELETE /mcp sent");
     assert_eq!(delete.status(), reqwest::StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn transport_rejects_nonfinite_numbers_before_dispatch() {
+    struct DispatchCountingHandle {
+        calls: Arc<AtomicUsize>,
+    }
+    impl CoreHandle for DispatchCountingHandle {
+        fn timeline(&self) -> Timeline {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Timeline::new()
+        }
+
+        fn media(&self) -> MediaManifest {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            MediaManifest::new()
+        }
+
+        fn apply(&self, _cmd: EditCommand) -> anyhow::Result<EditResult> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            anyhow::bail!("non-finite parser proof must not dispatch")
+        }
+
+        fn project_dir(&self) -> Option<PathBuf> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            None
+        }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handle: Arc<dyn CoreHandle> = Arc::new(DispatchCountingHandle {
+        calls: calls.clone(),
+    });
+    let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+    let addr = start_router(handle, registry).await;
+    let client = reqwest::Client::new();
+    let session_id = initialize_session(&client, addr).await;
+    calls.store(0, Ordering::Release);
+
+    for (id, number) in ["NaN", "Infinity", "-Infinity", "1e400"]
+        .into_iter()
+        .enumerate()
+    {
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{"name":"add_clips","arguments":{{"entries":[{{"mediaRef":"asset","startFrame":0,"durationFrames":1}},{{"mediaRef":"asset","startFrame":0,"durationFrames":1}},{{"mediaRef":"asset","startFrame":0,"durationFrames":1}},{{"mediaRef":"asset","startFrame":{number},"durationFrames":1}}]}}}}}}"#,
+            id + 100
+        );
+        let response = client
+            .post(format!("http://{addr}/mcp"))
+            .header("host", valid_host(addr))
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-session-id", session_id.clone())
+            .header("mcp-protocol-version", "2025-06-18")
+            .body(body)
+            .send()
+            .await
+            .expect("raw non-finite request sent");
+        let status = response.status();
+        let text = response.text().await.expect("parser response body");
+        assert!(
+            status.is_client_error()
+                && (text.contains("deserialize")
+                    || text.contains("expected value")
+                    || text.contains("number out of range")
+                    || text.contains("\"error\"")),
+            "{number} was not rejected by the JSON/MCP parser: {status} {text}"
+        );
+        assert_eq!(
+            calls.load(Ordering::Acquire),
+            0,
+            "{number} reached dispatch"
+        );
+    }
+}
+
+#[derive(Default)]
+struct CancellationBridge {
+    started: AtomicBool,
+    observed: AtomicBool,
+}
+
+impl MediaBridge for CancellationBridge {
+    fn import_media_cancellable(
+        &self,
+        _source: ImportSource,
+        _name: Option<String>,
+        _folder_id: Option<String>,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<ImportOutcome, BridgeError> {
+        self.started.store(true, Ordering::Release);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            if cancel.checkpoint() {
+                self.observed.store(true, Ordering::Release);
+                return Err(BridgeError::new("import cancelled by MCP notification"));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Err(BridgeError::new("timed out waiting for MCP cancellation"))
+    }
+}
+
+#[tokio::test]
+async fn cancelled_notification_reaches_media_cancel_token() {
+    let core = AppCore::new();
+    let before = core.media();
+    let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(core.clone()));
+    let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+    let bridge = Arc::new(CancellationBridge::default());
+    let addr = start_router_with_bridge(handle, registry, bridge.clone()).await;
+    let client = reqwest::Client::new();
+    let session_id = initialize_session(&client, addr).await;
+
+    let tool_client = client.clone();
+    let tool_session = session_id.clone();
+    let tool_call = tokio::spawn(async move {
+        tool_client
+            .post(format!("http://{addr}/mcp"))
+            .header("host", valid_host(addr))
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-session-id", tool_session)
+            .header("mcp-protocol-version", "2025-06-18")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 77,
+                "method": "tools/call",
+                "params": {
+                    "name": "import_media",
+                    "arguments": {
+                        "source": {"url": "https://example.com/clip.mp4"}
+                    }
+                }
+            }))
+            .send()
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !bridge.started.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("import bridge started");
+
+    let notification = client
+        .post(format!("http://{addr}/mcp"))
+        .header("host", valid_host(addr))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-session-id", session_id)
+        .header("mcp-protocol-version", "2025-06-18")
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": 77, "reason": "test cancellation"}
+        }))
+        .send()
+        .await
+        .expect("cancellation notification sent");
+    assert!(
+        notification.status().is_success(),
+        "cancellation notification failed: {}",
+        notification.status()
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !bridge.observed.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("bridge observed cancellation");
+    let _ = tokio::time::timeout(Duration::from_secs(2), tool_call)
+        .await
+        .expect("cancelled tool request completed");
+    assert_eq!(core.media(), before);
 }

@@ -37,7 +37,7 @@ use opentake_project::{GenerationLog, ProjectCompatibility};
 use same_file::Handle;
 
 use crate::deps::CoreDeps;
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::events::{CoreEvent, EventBus, SubscriptionId};
 use crate::session::{EditorSession, ProbedMedia};
 
@@ -759,6 +759,85 @@ impl AppCore {
                     }
                 }
                 Ok((entry, warning))
+            })();
+            match result {
+                Ok((entry, warning)) => (entry, warning, session.editor.media().entries.len()),
+                Err(error) => {
+                    session.editor.restore_media(before);
+                    return Err(error);
+                }
+            }
+        };
+        events.push(CoreEvent::MediaChanged {
+            project_epoch: expected_project_epoch,
+            count,
+        });
+        events.push(CoreEvent::ProjectSaved {
+            path: expected_project_dir.to_string_lossy().into_owned(),
+            project_epoch: expected_project_epoch,
+        });
+        Ok(CapabilityImportCommit { entry, warning })
+    }
+
+    /// Capability-bound retained-media import transaction used by external
+    /// producers such as the MCP URL downloader. The candidate manifest is
+    /// persisted through the caller's retained directory capability while the
+    /// session lock is held. The retained-file/cancellation postcondition runs
+    /// before the first persistent write; the atomic writer is the last fallible
+    /// step. Any returned error therefore restores the exact pre-import live
+    /// manifest without first publishing candidate manifest bytes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn import_retained_media_for_project_deferred_with_manifest_writer<F, V>(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+        folder_id: Option<&str>,
+        events: &mut DeferredCoreEvents,
+        mut write_manifest: F,
+        validate_postcondition: V,
+    ) -> Result<CapabilityImportCommit>
+    where
+        F: FnMut(&MediaManifest) -> Result<()>,
+        V: FnOnce() -> Result<()>,
+    {
+        let id = self.ids.next_id();
+        let (entry, warning, count) = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            let before = session.editor.media();
+            let result = (|| {
+                let mut entry = session.editor.import_media_file(path, id, name, probe)?;
+                if let Some(folder_id) = folder_id {
+                    let mut candidate = session.editor.media();
+                    if !candidate
+                        .folders
+                        .iter()
+                        .any(|folder| folder.id == folder_id)
+                    {
+                        return Err(CoreError::Media(format!("folderId not found: {folder_id}")));
+                    }
+                    let imported = candidate
+                        .entries
+                        .iter_mut()
+                        .find(|candidate| candidate.id == entry.id)
+                        .ok_or_else(|| {
+                            CoreError::Media("imported media entry disappeared".to_string())
+                        })?;
+                    imported.folder_id = Some(folder_id.to_string());
+                    entry.folder_id = imported.folder_id.clone();
+                    session.editor.restore_media(candidate);
+                }
+                // The retained leaf identity and cancellation checkpoint are
+                // validated while the session lock is held, before the first
+                // persistent manifest write. The capability writer is atomic,
+                // so a returned writer error preserves the previous bytes and
+                // there is no validation-failure rollback/warning state.
+                validate_postcondition()?;
+                write_manifest(&session.editor.media())?;
+                Ok((entry, None))
             })();
             match result {
                 Ok((entry, warning)) => (entry, warning, session.editor.media().entries.len()),

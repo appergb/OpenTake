@@ -182,7 +182,7 @@ capabilities: { resources: { subscribe:false, listChanged:false },
 | 15 | `split_clip` | `clipId*`,`atFrame*`（严格在 clip 内） | `clipId,atFrame` | （无专用结构，直接取参） | `EditCommand::SplitClip` | 口播精剪：不在词中间切 warning |
 | 16 | `ripple_delete_ranges` | 二选一 `trackIndex?`/`clipId?`；`ranges*[][start,end]`；`units?:enum{seconds,frames}`默认 frames | `ranges` | `{clipId,trackIndex,ranges,units}` | `EditCommand::RippleDeleteRanges`（重叠合并；linked 同区间删；sync-locked 同步左移，放不下整体拒绝；返回 anchor 轨剪后布局） | `break_analysis` 一致性 |
 | 17 | `undo` | （无） | — | — | `EditCommand::Undo` + agentUndoStack 守卫（§4.3） | — |
-| 18 | `add_texts` | `entries[]`{`startFrame*`,`durationFrames*`,`content*`,`transform?{centerX,centerY,width,height}`,`fontName?`,`fontSize?`,`color?`,`alignment?`} | `entries`；entry:`startFrame,durationFrames,content` | `{entries}` / `{trackIndex,startFrame,durationFrames,content,transform,fontName,fontSize,color,alignment}` | `EditCommand::AddTexts`（overlay；同轨重叠覆写；同时显示需放不同轨；全省略 trackIndex 顶部新建一轨） | `text_placement_hint`（层级 / 安全区） |
+| 18 | `add_texts` | `entries[]`{`startFrame*`,`durationFrames*`,`content*`,`transform?{centerX,centerY,width,height,flipHorizontal,flipVertical}`,`fontName?`,`fontSize?`,`color?`,`alignment?`} | `entries`；entry:`startFrame,durationFrames,content` | `{entries}` / `{trackIndex,startFrame,durationFrames,content,transform,fontName,fontSize,color,alignment}` | `EditCommand::AddTexts`（overlay；同轨重叠覆写；同时显示需放不同轨；全省略 trackIndex 顶部新建一轨） | `text_placement_hint`（层级 / 安全区） |
 | 19 | `add_captions` | `clipIds?[]`,`language?`,`fontName?`,`fontSize?`,`color?`,`centerX?`,`centerY?`,`textCase?:enum{auto,upper,lower}`,`censorProfanity?` | — | `{clipIds,language,fontName,fontSize,color,centerX,centerY,textCase,censorProfanity}` | `EditCommand::AddCaptions`（端侧转写 + 样式化 caption clip 到新轨；省略 clipIds 自动挑语音最多的轨） | `caption_style_hint` |
 
 #### C. 媒体生成 / 导入（写，5 个）——媒体管线接入点（依赖 `opentake-gen`）
@@ -193,7 +193,9 @@ capabilities: { resources: { subscribe:false, listChanged:false },
 | 21 | `generate_image` | `prompt*`,`name?`,`model?`,`aspectRatio?`,`resolution?`,`quality?`,`referenceMediaRefs?[]`,`folderId?` | `prompt` | `opentake-gen`：异步提交 placeholder |
 | 22 | `generate_audio` | `prompt?`,`name?`,`model?`,`voice?`,`lyrics?`,`styleInstructions?`,`instrumental?`,`duration?`,`videoSourceStartFrame?`,`videoSourceEndFrame?`,`videoSourceMediaRef?`,`folderId?` | （无） | `opentake-gen`：TTS / 文生乐 / 视频配乐；时间线区间结果自动落轨 |
 | 23 | `upscale_media` | `mediaRef*`,`model?`,`sourceClipId?` | `mediaRef` | `opentake-gen`：升分辨率 placeholder |
-| 24 | `import_media` | `source*`{三选一 `url?`(HTTPS≤1GB)/`path?`(本地，可目录递归)/`bytes?`(base64≤~15MB)，`mimeType?`},`name?`,`folderId?` | `source` | `opentake-core`/`opentake-project`：url 后台下载、path/bytes 同步；扩展名白名单 |
+| 24 | `import_media` | `source*`{三选一 `url?`(HTTPS≤1GB)/`path?`(本地，可目录递归)/`bytes?`(base64≤~15MB)，`mimeType?`},`name?`,`folderId?` | `source` | `opentake-core`/`opentake-project`：url 在阻塞工作线程中逐块下载、path/bytes 同步；扩展名/MIME/探测类型白名单；验证完成后原子发布 manifest |
+
+URL 导入禁用自动重定向并逐跳重新校验 HTTPS、host 与 userinfo；`Content-Length` 只做提前拒绝，逐块累计的解码后字节数才是 1 GiB 硬上限。下载先写 retained project capability 下的未提交 leaf，探测、容器/流类型、project epoch/目录、folder 与 leaf identity 全部通过后，才把候选 manifest 原子写入并发事件。任何此前错误或显式 MCP `notifications/cancelled` 都由 guard 擦除/删除 staging，并保持 live manifest 与磁盘 `media.json` 原字节不变。取消是 rmcp 的显式 request-id 通知语义；不承诺仅因原始 TCP 断连而取消。生产 HTTPS 请求与每个响应 chunk 都通过 `tokio::select!` 同时监听取消令牌，不等待长网络超时才清理。
 
 #### D. 媒体库组织（写，7 个）——均可撤销，均支持「单条参数 或 `entries[]` 批量」二选一
 
@@ -395,6 +397,8 @@ firstNonFiniteNumberPath(value, path):
   return None
 // 命中 → error "{badPath}: value must be finite"
 ```
+
+JSON/MCP 传输本身不允许 `NaN`、`Infinity`、`-Infinity` 或溢出到非有限值的数字。OpenTake 在 rmcp/`serde_json` 解析正文时先拒绝这些原始 token，因此它们不会进入 `serde_json::Value`、快照或工具 dispatch；`firstNonFiniteNumberPath` 继续保护程序内构造的参数值。传输集成测试必须用原始（不能先经 `serde_json::Value`）的工具请求证明拒绝与零 dispatch，禁止用 `Number::from_f64(NaN) -> None` 的假夹具代替。
 
 #### 4.2.3 路径化解码错误（`formatDecodingError:210-229` + `decodeToolArgs:177`）
 
@@ -1072,7 +1076,7 @@ src/
 
 - [ ] MCP server **仅绑 `127.0.0.1`**，禁 `0.0.0.0`；三个 tower guard 生效。
 - [ ] Anthropic key 存 OS keychain（`keyring`），绝不入 `project.json`/日志/遥测。
-- [ ] 工具入参全部经 §4 校验（未知字段/非有限数/类型）；`import_media` 的 url 必须 HTTPS + 扩展名白名单 + ≤1GB（上游 `+Import.swift` 语义）。
+- [x] 工具入参全部经 §4 校验（未知字段/非有限数/类型）；`import_media` 的 url 强制 HTTPS、每跳重验、扩展名/MIME/生产 probe 白名单、流式 ≤1GB、显式 MCP 取消清理与 retained manifest 原子发布（上游 `+Import.swift` 语义）。
 - [ ] 错误信息不泄露内部路径/密钥（错误措辞对 LLM 友好但不含敏感数据）。
 - [ ] 插件 `instructions.md` 注入系统提示词前不可信内容隔离（标注来源 `plugin:{id}`，避免提示注入冒充系统指令）。
 
