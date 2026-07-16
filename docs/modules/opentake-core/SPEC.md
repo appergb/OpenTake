@@ -1,4 +1,6 @@
-# opentake-core 实现就绪规格(Issue #11)
+# opentake-core 历史合订规格(Issue #11)
+
+> **状态：历史快照，不是当前实现的权威来源。** 本文件保留 Issue #11 时的原始合订设计，部分类型名、字段草案和 Undo/Redo 形态已与代码不同。当前可执行规格以 [`docs/specs/core/`](../../specs/core/) 的拆分文件为准；共享编辑状态与命令路由请直接阅读 [`1-editor-state.md`](../../specs/core/1-editor-state.md) 和 [`2-command-routing.md`](../../specs/core/2-command-routing.md)。审计与验收不得用本历史快照覆盖拆分规格或当前代码证据。
 
 > **范围**:`crates/opentake-core/` —— EditorState 组装、命令路由(= 上游单一能力层)、事件总线、Tauri 边界契约。
 > **本 crate 的一句话职责**:把 `opentake-{domain,ops,project,render,agent}` 装配成**一个权威可观测状态容器 `EditorState`**,对 UI / Agent / MCP 三个对等客户端暴露**唯一一条编辑入口**(`EditorCore::apply`),并把状态变更通过**单调递增版本号 + 事件广播**推给前端。

@@ -402,18 +402,29 @@ impl AppCore {
     /// agent, and MCP (`core-SPEC.md` §2.5). Runs the command under the lock
     /// (the ops layer performs the snapshot/commit/version transaction), then,
     /// **after releasing the lock**, emits [`CoreEvent::TimelineChanged`] iff the
-    /// command actually changed the document. Unchanged commands (and rejected
-    /// ones) emit nothing and do not move the version.
+    /// command actually changed the document. A command that changes the media
+    /// manifest also emits [`CoreEvent::MediaChanged`] so catalog observers
+    /// refresh; this includes undo/redo restoring a manifest snapshot. Unchanged
+    /// commands (and rejected ones) emit nothing and do not move the version.
     pub fn apply(&self, command: EditCommand) -> Result<EditResult> {
-        let (result, project_epoch) = {
+        let (result, project_epoch, media_count) = {
             let mut session = self.lock();
             let result = session.editor.apply(command, self.ids.as_ref())?;
-            (result, session.project_epoch)
+            let media_count = result
+                .manifest_changed
+                .then(|| session.editor.media().entries.len());
+            (result, session.project_epoch, media_count)
         };
         if result.changed {
             self.events.emit(&CoreEvent::TimelineChanged {
                 project_epoch,
                 version: result.timeline_version,
+            });
+        }
+        if let Some(count) = media_count {
+            self.events.emit(&CoreEvent::MediaChanged {
+                project_epoch,
+                count,
             });
         }
         Ok(result)
@@ -1311,6 +1322,8 @@ mod tests {
 
         let res = core.apply(add_one_clip()).unwrap();
         assert!(res.changed);
+        assert!(res.timeline_changed);
+        assert!(!res.manifest_changed);
         assert_eq!(res.timeline_version, 1);
         assert_eq!(core.version(), 1);
 
@@ -1325,6 +1338,53 @@ mod tests {
     }
 
     #[test]
+    fn manifest_edit_and_undo_emit_media_changed() {
+        let core = core_with_track();
+        let seen: Arc<Mutex<Vec<CoreEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        core.subscribe(move |ev| sink.lock().unwrap().push(ev.clone()));
+
+        let created = core
+            .apply(EditCommand::CreateFolder {
+                name: "Review".into(),
+                parent_folder_id: None,
+            })
+            .unwrap();
+        assert!(created.changed);
+        assert!(!created.timeline_changed);
+        assert!(created.manifest_changed);
+        assert_eq!(core.media().folders.len(), 1);
+
+        let undone = core.undo().unwrap();
+        assert!(undone.changed);
+        assert!(!undone.timeline_changed);
+        assert!(undone.manifest_changed);
+        assert!(core.media().folders.is_empty());
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                CoreEvent::TimelineChanged {
+                    project_epoch: 0,
+                    version: 1,
+                },
+                CoreEvent::MediaChanged {
+                    project_epoch: 0,
+                    count: 0,
+                },
+                CoreEvent::TimelineChanged {
+                    project_epoch: 0,
+                    version: 2,
+                },
+                CoreEvent::MediaChanged {
+                    project_epoch: 0,
+                    count: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn unchanged_command_does_not_emit_or_bump() {
         let core = core_with_track();
         let seen: Arc<Mutex<Vec<CoreEvent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1334,6 +1394,8 @@ mod tests {
         // Undo with empty history changes nothing.
         let res = core.undo().unwrap();
         assert!(!res.changed);
+        assert!(!res.timeline_changed);
+        assert!(!res.manifest_changed);
         assert_eq!(core.version(), 0);
         assert!(seen.lock().unwrap().is_empty());
     }

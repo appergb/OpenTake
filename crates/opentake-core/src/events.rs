@@ -68,9 +68,10 @@ pub enum CoreEvent {
         project_epoch: u64,
     },
 
-    /// The media manifest changed (one or more assets were imported). Observers
-    /// re-fetch the catalog via `get_media` to refresh the media panel. Carries
-    /// the manifest entry count after the change for cheap staleness checks.
+    /// The media manifest changed (entries, folders, favorites, or their
+    /// metadata). Observers re-fetch the catalog via `get_media` to refresh the
+    /// media panel. Carries the manifest entry count after the change for cheap
+    /// staleness checks.
     MediaChanged {
         /// The project session whose manifest changed.
         #[serde(rename = "projectEpoch")]

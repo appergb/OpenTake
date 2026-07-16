@@ -347,6 +347,8 @@ mod tests {
         fn apply(&self, _cmd: EditCommand) -> anyhow::Result<EditResult> {
             Ok(EditResult {
                 changed: false,
+                timeline_changed: false,
+                manifest_changed: false,
                 action_name: "noop".into(),
                 affected_clip_ids: Vec::new(),
                 timeline_version: 0,

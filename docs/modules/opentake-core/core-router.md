@@ -10,20 +10,21 @@
 
 ```
 AppCore（#[derive(Clone)]）
-├── session: Arc<Mutex<EditorSession>>      // 单一权威实例（对应上游单进程单 EditorViewModel）
+├── session: Arc<Mutex<CoreSessionSlot>>    // project_epoch + 单一 EditorSession
+├── project_identity_workflow: Arc<RwLock<()>> // 外部 workflow 与工程替换互斥
 ├── events:  EventBus                       // 见 events-bus.md（克隆共享同一订阅列表）
 ├── deps:    Arc<CoreDeps>                  // 见 deps-di.md（注入式能力后端）
 └── ids:     Arc<dyn IdGen + Send + Sync>   // 命令铸新 id 用；默认 CoreIdGen（原子计数）
 ```
 
-`AppCore` 是 `Clone`——**克隆只复制 `Arc`**。Tauri `State`、MCP handler、内置 agent loop 各持一份**指向同一个 `Mutex<EditorSession>`** 的句柄，这正是上游「三客户端共享一个 view model」在跨线程下的等价物。一条编译期断言 `assert_send_sync::<AppCore>()` 守住"句柄必须可跨线程共享"这一跨进程设计前提。
+`AppCore` 是 `Clone`——**克隆只复制 `Arc`**。Tauri `State`、MCP handler、内置 agent loop 各持一份**指向同一个 `Mutex<CoreSessionSlot>`** 的句柄，slot 内只有一个 `EditorSession`。这正是上游「三客户端共享一个 view model」在跨线程下的等价物。一条编译期断言 `assert_send_sync::<AppCore>()` 守住"句柄必须可跨线程共享"这一跨进程设计前提。
 
 ## AppCore 在 EditorSession 之上只多两件事
 
 `EditorSession` 已把编辑 + 撤销/版本事务委派给 `opentake-ops`。`AppCore` 只补会话给不了的两点：
 
 1. **串行化所有变更**：一把 `Mutex`，使 `version` 在并发客户端下**严格单调**、无写竞争（见 [SPEC.md](SPEC.md) §4.3）。
-2. **变更广播**：committing 的 edit / undo / redo 之后发 `CoreEvent::TimelineChanged`，让观察者重新同步镜像。事件在**锁释放之后**才发——订阅回调因此可安全地重入 core 而不死锁。
+2. **变更广播**：committing 的 edit / undo / redo 之后发 `CoreEvent::TimelineChanged`；manifest 变化时额外发 `MediaChanged`。事件在**锁释放之后**才发——订阅回调因此可安全地重入 core 而不死锁。
 
 它**刻意不**重实现任何编辑、事务、持久化逻辑——那些活在 `opentake-ops` / `opentake-project`，经会话触达。
 
@@ -31,12 +32,21 @@ AppCore（#[derive(Clone)]）
 
 ```rust
 pub fn apply(&self, command: EditCommand) -> Result<EditResult> {
-    let result = {
+    let (result, project_epoch, media_count) = {
         let mut session = self.lock();
-        session.apply(command, self.ids.as_ref())?   // 锁内跑 ops 事务
-    };                                                 // ← 锁在此释放
+        let result = session.editor.apply(command, self.ids.as_ref())?;
+        let media_count =
+            result.manifest_changed.then(|| session.editor.media().entries.len());
+        (result, session.project_epoch, media_count)
+    };                                                  // ← 锁在此释放
     if result.changed {
-        self.events.emit(&CoreEvent::TimelineChanged { version: result.timeline_version });
+        self.events.emit(&CoreEvent::TimelineChanged {
+            project_epoch,
+            version: result.timeline_version,
+        });
+    }
+    if let Some(count) = media_count {
+        self.events.emit(&CoreEvent::MediaChanged { project_epoch, count });
     }
     Ok(result)
 }
@@ -46,15 +56,15 @@ pub fn apply(&self, command: EditCommand) -> Result<EditResult> {
 
 1. **取锁** → `EditorSession::apply` → `opentake_ops::command::apply`（事务本体：snapshot → 纯函数变更 → before!=after 才提交 + version++）。
 2. **释放锁**（`{}` 作用域结束）。
-3. `result.changed` 为真 → 发**恰好一次** `TimelineChanged { version }`；为假（无变更）或 `Err`（被拒）→ **不发事件、不动 version**。
+3. `result.changed` 为真 → 发**恰好一次** `TimelineChanged { project_epoch, version }`；`result.manifest_changed` 为真 → 再发一次 `MediaChanged { project_epoch, count }`。无变更或 `Err` 不发事件、不动 version。
 
-> **三处不变量**（均有单测固化）：committing 命令 version 恰好 +1 且发一次事件；无变更命令（如空历史 undo）`changed == false`、version 不变、无事件；被拒命令（如 ops 层校验失败的空 `AddClips`）返回 `Err`、version 不变、无事件。
+> **不变量**（均有单测固化）：committing 命令 version 恰好 +1 且发一次 `TimelineChanged`；manifest 命令及其 undo/redo 额外各发一次 `MediaChanged`；纯 timeline 命令不误发媒体事件；无变更命令 version 不变且无事件；被拒命令恢复文档、version 不变且无事件。
 
 ### 三客户端如何共享
 
 - **UI**：React 手势 → `src-tauri` 的 `edit_apply` → `handle_edit_apply`（[dto.md](dto.md)）→ `AppCore::apply`。UI **不**经 agent 工具层，直接构造 `EditCommand`（对应上游 SwiftUI 直接调 `editor.addClips(...)` 而非伪装成工具）。
 - **内置 Agent / MCP**：工具调用 → `opentake-agent` 把工具 args 翻译成 `EditCommand` → 同一个 `AppCore::apply`。工具层只做"短 id 展开/缩短 + args 校验 + 命令构造 + summary 渲染"，编辑本体全归 core/ops。
-- **三者共享**：同一 `AppCore` 句柄（克隆）= 同一 `Mutex<EditorSession>` = 同一份权威 timeline + 同一 version 序列 + 同一全局撤销栈。这就是「单一能力层、多前端」在跨进程下的精确实现。
+- **三者共享**：同一 `AppCore` 句柄（克隆）= 同一 `Mutex<CoreSessionSlot>` = 同一份权威 timeline + 同一 project epoch/version 序列 + 同一全局撤销栈。这就是「单一能力层、多前端」在跨进程下的精确实现。
 
 ## Undo / Redo（薄包装，复用同一路径）
 
@@ -73,9 +83,9 @@ pub fn redo(&self) -> Result<EditResult> { self.apply(EditCommand::Redo) }
 
 | 方法 | 行为 | 发的事件 |
 |---|---|---|
-| `new_project()` | 会话换成全新未保存工程 | `ProjectOpened { path: "", version: 0 }` |
-| `open_project(path)` | 打开 `.opentake` 包替换会话；返回首个快照 | `ProjectOpened { path, version: 0 }`（**不**发 `TimelineChanged`——前端自取首快照，[SPEC.md](SPEC.md) §5.4 步骤 6） |
-| `save_project(path)` | `None` 存回包（autosave）/ `Some` 另存为；返回写入路径 | `ProjectSaved { path }` |
+| `new_project()` | 会话换成全新未保存工程 | `ProjectOpened { path: "", project_epoch, version: 0 }` |
+| `open_project(path)` | 打开 `.opentake` 包替换会话；返回首个快照 | `ProjectOpened { path, project_epoch, version: 0 }`（**不**发 `TimelineChanged`——前端自取首快照，[SPEC.md](SPEC.md) §5.4 步骤 6） |
+| `save_project(path)` | `None` 存回包（autosave）/ `Some` 另存为；返回写入路径 | `ProjectSaved { path, project_epoch }` |
 
 均**先在锁内**完成会话变更、**释放锁后**才发事件（与 `apply` 同纪律）。
 
@@ -84,7 +94,7 @@ pub fn redo(&self) -> Result<EditResult> { self.apply(EditCommand::Redo) }
 `import_media_file(path, name, probe)` / `relink_media_file(asset_id, path, probe)`：
 
 - 在 `import` 路径上**从 core 的 id 生成器铸 asset id**（`self.ids.next_id()`），再调会话同名方法；
-- **锁释放后**发 `CoreEvent::MediaChanged { count }`（count = 变更后 manifest entry 数，供廉价过期检查）；
+- **锁释放后**发 `CoreEvent::MediaChanged { project_epoch, count }`（count = 变更后 manifest entry 数，供廉价过期检查）；
 - 导入**不动 timeline version**（manifest 在撤销事务之外，见 [session.md](session.md)）。
 
 > 这是**同步**媒体路径（调用方供 `ProbedMedia`）。异步能力后端 `CoreDeps::media: MediaImporter`（含缩略图/波形）是另一条路、仍是接缝，见 [deps-di.md](deps-di.md)。

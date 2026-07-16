@@ -2,66 +2,75 @@
 
 ### 1.1 职责与对应上游
 
-`EditorState` = 上游 `EditorViewModel` 的「持久化状态 + 撤销基础设施 + 版本号」子集(`EditorViewModel.swift:26-32,76,184`),**剥离全部 UI-only 瞬态**(selection/zoom/panel 可见性/scrubbing 等,`EditorViewModel.swift:55-107` 那一大片)。UI-only 态在 OpenTake 归前端 Zustand(§2 架构图、ARCHITECTURE §2),**不进 Rust core**。
+`opentake_ops::EditorState` 是上游 `EditorViewModel` 的可编辑文档与撤销基础设施子集。它只保存 timeline、media manifest、整文档 undo/redo 快照和单调版本号；selection、zoom、面板可见性、scrubbing 等 UI-only 状态仍归前端 Zustand。
 
-> 上游把权威态和 UI 态揉在一个 `EditorViewModel` 里(因为单进程、SwiftUI 直接绑)。OpenTake 必须切分:Rust 只持**可序列化的真相**,前端持**交互态**。这是跨进程架构的硬性边界,不是风格选择。
+OpenTake 将上游单进程 `EditorViewModel` 拆成三层：
 
-### 1.2 字段(草案)
+| 层 | 当前实现 | 所有权 |
+|---|---|---|
+| 可编辑文档与历史 | `crates/opentake-ops/src/editor_state.rs::EditorState` | timeline、manifest、undo/redo、version |
+| 工程会话 | `crates/opentake-core/src/session.rs::EditorSession` | `EditorState`、project root/path、generation log、兼容性 |
+| 并发与事件门面 | `crates/opentake-core/src/core.rs::AppCore` | 单一 session 锁、事件总线、依赖与 ID 生成器 |
+
+这三层没有复制权威 timeline：`EditorSession` 按值持有一个 `EditorState`，`AppCore` 的所有 clone 共享同一个 session。
+
+### 1.2 已落地字段与不变量
 
 ```rust
-// crates/opentake-core/src/state.rs
-use opentake_domain::Timeline;
-use opentake_project::MediaManifest;       // entries + folders
-use opentake_project::GenerationLog;       // append-only AI 审计
-use opentake_ops::UndoStack;               // 整树快照栈(Phase 1 已建)
-use opentake_media::MediaAsset;            // 运行时富对象(非磁盘 entry)
+// crates/opentake-ops/src/editor_state.rs
+pub struct DocSnapshot {
+    pub timeline: Timeline,
+    pub manifest: MediaManifest,
+}
 
-/// 权威编辑状态容器。对应上游 EditorViewModel 的「持久化 + 撤销 + 版本」子集。
-/// 跨线程通过 EditorCore(Arc<Mutex<EditorState>>)访问,自身不需 Send 约束之外的并发设施。
 pub struct EditorState {
-    // ── 持久化真相(对应 EditorViewModel.swift:27,30,31) ──
-    timeline: Timeline,                    // 唯一权威 timeline
-    manifest: MediaManifest,               // 媒体清单(磁盘 entries + folders)
-    generation_log: GenerationLog,         // AI 生成审计(append-only)
-
-    // ── 撤销基础设施(对应 EditorViewModel.undoManager + withTimelineSwap) ──
-    undo: UndoStack,                       // 整树快照撤销/重做栈(在 Rust,见 §2.3)
-
-    // ── 版本号(对应 EditorViewModel.swift:27-28 didSet 里的 timelineRenderRevision &+= 1) ──
-    version: u64,                          // 单调递增;timeline 每次"被替换"即 +1
-
-    // ── 运行时媒体库(内存,工程打开时重建,对应 EditorViewModel.swift:110 mediaAssets) ──
-    assets: Vec<MediaAsset>,               // 由 manifest 在 open 时物化(VideoProject.swift:304-339)
-    offline_media: HashSet<String>,        // 对应 offlineMediaRefs
-    unprocessable_media: HashSet<String>,  // 对应 unprocessableMediaRefs
-
-    // ── 工程引用(对应 EditorViewModel.swift:115-126) ──
-    project_dir: Option<PathBuf>,          // .opentake 目录;None = 未保存
-    project_id: Option<String>,            // 遥测用稳定 id
-    dirty: bool,                           // 对应 isDocumentEdited(VideoProject.swift:130-138)
+    pub timeline: Timeline,
+    pub manifest: MediaManifest,
+    undo_stack: Vec<DocSnapshot>,
+    redo_stack: Vec<DocSnapshot>,
+    version: u64,
 }
 ```
 
-**版本号 = OpenTake 跨进程同步的命脉**。上游 `timelineRenderRevision` 仅用于 SwiftUI diff(`TimelineContainerView.swift:61`);OpenTake 把它**升级为前端镜像一致性的权威信标**:`version` 只在「timeline 真正被替换且 before != after」时递增(§2.3 步骤 4),每个 `get_timeline` 快照都带 `version`,每个 `timeline_changed` 事件都带 `version`,前端用它做幂等重取(§4)。
+普通编辑命令通过 `crates/opentake-ops/src/command.rs::transact` 执行；Undo/Redo 和带 refusal 结果的 ripple 路径在同一文件内执行等价的 snapshot/restore/commit 流程：
 
-> **不变量(必须单测)**:`version` 单调递增;同一个 `version` 下取到的 timeline 快照逐字节一致;任何不改变 timeline 的命令(`before == after`)**不** bump `version`、**不**发 `timeline_changed`(直接复刻 `withTimelineSwap` 的 `guard before != after else { return }`,`ClipMutations.swift:246`)。
+1. 同时快照 timeline 与 manifest。
+2. 执行命令；若命令返回错误，恢复快照并原样返回错误。
+3. `before == after` 时不写历史、不清 redo、不递增 version。
+4. 文档改变时把 `before` 压入 undo、清空 redo，并把 version 递增一次。
+5. undo/redo 成功时交换整文档快照并各递增 version 一次；空历史是 `changed=false` 的 no-op。
 
-### 1.3 访问封装:`EditorCore`
+`project_epoch + version` 标识前端读取的权威 timeline 镜像，不是整个 manifest 的修订号：导入、relink、favorite 等独立媒体工作流可在 timeline version 不变时提交 manifest，并通过 `MediaChanged` 同步。对于 `EditCommand` 管理的 timeline + manifest 历史，失败命令不能留下部分写入。对应证据：
 
-`EditorState` 自身是纯数据 + 同步方法,不持有锁。对外句柄是 `EditorCore`:
+- `commit_undo_redo_cycle_restores_and_versions`
+- `failed_transaction_restores_document_and_history`
+- `unchanged_command_does_not_emit_or_bump`
+
+`generation_log`、工程路径、运行时兼容性和 retained project-root authority 不属于编辑算法，因此由 `EditorSession` 持有；媒体解码、导出和生成后端由 `CoreDeps` 注入，也不进入 `EditorState`。
+
+### 1.3 访问封装：`AppCore`
 
 ```rust
 // crates/opentake-core/src/core.rs
 #[derive(Clone)]
-pub struct EditorCore {
-    state: Arc<Mutex<EditorState>>,        // 单一权威实例(对应单进程单 EditorViewModel)
-    events: EventBus,                      // 见 §3
-    deps: Arc<CoreDeps>,                   // render/media/project/gen 的注入句柄,见 §5
+pub struct AppCore {
+    session: Arc<Mutex<CoreSessionSlot>>,
+    project_identity_workflow: Arc<RwLock<()>>,
+    events: EventBus,
+    deps: Arc<CoreDeps>,
+    ids: Arc<dyn IdGen + Send + Sync>,
 }
 ```
 
-`EditorCore` 是 `Clone`(克隆只复制 `Arc`),因此 Tauri `State`、MCP server handler、in-app agent loop 可各持一份**指向同一 `Mutex<EditorState>`** 的句柄——这正是上游「三客户端共享同一 `EditorViewModel`」在 Rust 跨线程下的等价物(`AppState.swift:23-27` 的 `editorProvider` 闭包在 OpenTake 退化为「克隆 EditorCore」)。
+Tauri `State<AppCore>`、应用内 Agent 和 MCP handler 持有的都是 clone；这些 clone 指向同一个 `CoreSessionSlot`，所以共享同一 timeline、manifest、undo/redo 和 version 序列。
 
-> **锁粒度**:命令执行(§2.3)全程持 `state` 锁;命令本体是纯 CPU 的值类型操作(`opentake-ops`,Phase 1),无 IO,临界区短,`std::sync::Mutex` 足够。**IO(解码/导出/生成)绝不在锁内**——它们在命令完成、锁释放后,由 `deps` 在独立 task 上跑(§5、§6)。
+`AppCore::apply` 在 session 锁内调用 `EditorSession::apply`，后者只委托给 `opentake_ops::command::apply`。命令结束后先释放 session 锁，再在 `changed=true` 时恰好发送一个 `CoreEvent::TimelineChanged { project_epoch, version }`；manifest 也改变时额外发送一个 `MediaChanged`，让媒体镜像重取。订阅者可安全地重入读取 API，编辑临界区不执行媒体解码、导出或网络 IO。
+
+对应证据：
+
+- `apply_bumps_version_and_emits_once`
+- `manifest_edit_and_undo_emit_media_changed`
+- `rejected_command_returns_err_without_emitting`
+- `undo_redo_through_core_bumps_version_and_emits`
 
 ---

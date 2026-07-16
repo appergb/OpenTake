@@ -1,159 +1,119 @@
 ## 2. 命令路由 = 上游 ToolExecutor 单一能力层
 
-### 2.1 核心原则:一处定义,三客户端共享
+### 2.1 核心原则：一处定义，三客户端共享
 
-ARCHITECTURE §5 原话:「UI 手势、应用内 Agent、外部 MCP **全部归一到一个 `EditCommand` 枚举**,撤销/校验/遥测只写一遍。」§0 洞察:「编辑能力只有一处真实定义(ToolExecutor → EditorViewModel),UI / 应用内 Agent / 外部 MCP 是它的三个对等客户端。」
+上游没有显式的 `EditCommand` 枚举。`ToolExecutor.run` 负责工具分发，`EditorViewModel.withTimelineSwap` 负责 before/after、undo 注册与变更通知。OpenTake 将这条隐式链显式分成：
 
-**上游的事实分层**(读代码得出,不是想当然):
-- 上游**没有**一个显式的 `EditCommand` 枚举。它的"单一能力层"是 **`ToolExecutor.run(_:_:_:)` 里那张 `switch tool`**(`ToolExecutor.swift:72-106`),每个 case 调 `EditorViewModel` 的一个 mutator(如 `addClips → editor.…` 经 `ToolExecutor+Clips.swift:129`)。
-- 真正的"撤销/校验/遥测只写一遍"发生在**两层**:
-  1. **统一执行壳** `ToolExecutor.execute(name:args:)`(`ToolExecutor.swift:22-70`):快照 before → 展开短 ID → 跑 → 若变更则压 agentUndoStack → 遥测 → 缩短 ID。
-  2. **事务核心** `EditorViewModel.withTimelineSwap`(`ClipMutations.swift:240-252`):每个 mutator 内部用它包裹,负责 before/after diff + 注册双向 undo swap + `notifyTimelineChanged`。
+1. `opentake_ops::EditCommand`：所有可编辑动作的类型化集合。
+2. `opentake_ops::command::apply`：唯一编辑算法入口。
+3. `command::transact` + `EditorState`：快照、错误回滚、no-op 判定、commit、version 与 undo/redo。
+4. `opentake_core::AppCore::apply`：共享 session 锁和提交后的 domain 事件。
 
-OpenTake 把这两层**显式化、合并**成 `EditorCore::apply`,并在其上引入 ARCHITECTURE §5 草拟的 `EditCommand` 枚举(上游隐式、OpenTake 显式——这是有意的改进,让 UI 手势不必伪装成"工具调用"也能走同一入口)。
+UI、应用内 Agent、外部 MCP 最终都调用同一个 `AppCore`，不会各自实现帧算术、重叠求解或撤销。
 
-### 2.2 `EditCommand` 与 `EditResult`(落地 ARCHITECTURE §5)
+### 2.2 `EditCommand` 与 `EditResult`
+
+`EditCommand` 的权威定义在 `crates/opentake-ops/src/command.rs`。它包含 timeline、clip、keyframe、媒体文件夹和全局 `Undo`/`Redo` 等变体；文档不复制完整枚举，避免新增命令后形成第二份陈旧清单。
 
 ```rust
-// crates/opentake-ops/src/command.rs  —— 枚举与 apply 算法属 ops crate(Phase 1)
-// crates/opentake-core 只负责"路由 + 事务 + 事件",不重新定义编辑算法。
-pub enum EditCommand {
-    AddClips { entries: Vec<AddEntry> },
-    InsertClips { track_index: usize, at_frame: i64, entries: Vec<InsertEntry> }, // ripple
-    MoveClips { moves: Vec<Move> },
-    RemoveClips { clip_ids: Vec<String> },
-    RemoveTracks { track_ids: Vec<String> },
-    SplitClip { clip_id: String, at_frame: i64 },
-    TrimClips { /* … */ },
-    SetClipProperties { clip_ids: Vec<String>, props: ClipPropsPatch },
-    SetKeyframes { clip_id: String, property: KeyframeProperty, keyframes: Vec<Keyframe> },
-    RippleDeleteRanges { clip_id: Option<String>, track_index: Option<usize>,
-                         ranges: Vec<(f64, f64)>, units: RangeUnits },
-    AddTexts { /* … */ },
-    AddCaptions { /* … */ },
-    Link { clip_ids: Vec<String> },
-    Unlink { clip_ids: Vec<String> },
-    CreateFolder { /* … */ },
-    MoveToFolder { /* … */ },
-    // 注意:Undo/Redo 不是 EditCommand —— 见 §2.4。它们是 core 的独立 API。
-}
-
 pub struct EditResult {
-    pub changed: bool,                 // before != after(对应 withTimelineSwap 的短路判定)
-    pub action_name: String,           // 撤销标签(对应 setActionName,如 "Add Clips")
+    pub changed: bool,
+    pub timeline_changed: bool,
+    pub manifest_changed: bool,
+    pub action_name: String,
     pub affected_clip_ids: Vec<String>,
-    pub timeline_version: u64,         // 命令后的权威 version(changed=false 时 = 命令前 version)
-    pub summary: String,              // 面向 LLM 的人类可读摘要(对应工具返回的文本)
+    pub timeline_version: u64,
+    pub summary: String,
 }
 ```
 
-> **边界纪律**:`EditCommand` + 其 `apply`(编辑算法本体)住在 `opentake-ops`(Phase 1 已做,含 OverwriteEngine/RippleEngine 等纯函数,ARCHITECTURE §5)。`opentake-core` **只**做"拿到命令 → 起事务 → 调 `command::apply` → 处理 diff/undo/version/event"。core **不含**任何帧算术或重叠求解逻辑。这与上游一致:`ToolExecutor` 不含编辑算法,只调 `EditorViewModel` 的 mutator。
+边界职责如下：
 
-### 2.3 `EditorCore::apply` —— 事务核心(直译 `withTimelineSwap`)
+- `opentake-ops`：参数语义校验、编辑算法、整文档事务、undo/redo 与 version。
+- `opentake-core`：会话可变性检查、互斥访问、跨客户端共享、事件和项目生命周期。
+- `src-tauri` / `opentake-agent`：把 DTO 或工具参数转换成 `EditCommand`，不得重写编辑算法。
 
-这是本 crate 最关键的 30 行。**逐句对应** `ClipMutations.swift:240-252` + `230-237`:
+### 2.3 `command::transact` 与 `AppCore::apply`
+
+`command::transact` 是 `withTimelineSwap` 的当前等价实现：
 
 ```rust
-impl EditorCore {
-    /// 唯一编辑入口。UI/Agent/MCP 全部经此。对应上游 withTimelineSwap 事务。
-    pub fn apply(&self, cmd: EditCommand) -> Result<EditResult, EditError> {
-        let mut st = self.state.lock().unwrap();
-
-        // (1) 快照 before(对应 `let before = timeline`,ClipMutations.swift:241)
-        let before = st.timeline.clone();
-        let action_name = cmd.action_name();          // 命令自带标签
-
-        // (2) 改:调 ops 层纯函数 apply(可校验失败 → 早返回,timeline 不动)
-        //     校验/精确路径错误在 ops::apply 内产生(serde_path_to_error,见 §7 / ARCHITECTURE §7)
-        let outcome = opentake_ops::apply(&mut st.timeline, &cmd, &st.assets)
-            .map_err(EditError::from)?;               // 失败:锁释放,version 不变,无事件
-
-        // (3) before != after 短路(对应 `guard before != after else { return }`,:246)
-        //     Timeline derive PartialEq(ARCHITECTURE §5 "PartialEq 短路")
-        if st.timeline == before {
-            let v = st.version;
-            return Ok(EditResult { changed: false, action_name, timeline_version: v,
-                                   affected_clip_ids: vec![], summary: outcome.summary });
-        }
-
-        // (4) 压 UndoStack(整树快照)+ version+1(对应 registerTimelineSwap + revision&+=1)
-        let after = st.timeline.clone();
-        st.undo.push_swap(before, after);             // 双向 swap:undo 回 before、redo 回 after
-        st.version += 1;
-        st.dirty = true;                              // 对应 updateChangeCount(.changeDone)
-        let version = st.version;
-        let affected = outcome.affected_clip_ids;
-        let summary = outcome.summary;
-        drop(st);                                     // 先释放锁,再发事件(避免事件订阅者回调时重入锁)
-
-        // (5) 广播 timeline_changed{version}(对应 notifyTimelineChanged → 触发 rebuild)
-        self.events.emit(CoreEvent::TimelineChanged { version });
-
-        Ok(EditResult { changed: true, action_name, timeline_version: version,
-                        affected_clip_ids: affected, summary })
+let before = state.snapshot();
+let affected = match work(state) {
+    Ok(affected) => affected,
+    Err(error) => {
+        state.restore(before);
+        return Err(error);
     }
+};
+let changed = before != state.snapshot();
+if changed {
+    state.commit(before);
 }
 ```
 
-**与上游 `registerTimelineSwap`(`:230-237`)的对应**:上游用 `UndoManager.registerUndo` 闭包递归注册双向 swap;OpenTake 用 `UndoStack`(Phase 1 整树快照栈)把 `(before, after)` 压栈,`undo()` pop 并 `timeline = before`、`redo()` 反之。语义等价、更简单(无闭包递归)。
+这保证成功命令只提交一次，no-op 不提交，错误路径恢复 timeline 与 manifest 且不改变历史/version。批量命令在一个 `EditCommand` 内完成，所以仍只产生一个 undo 项。
 
-**上游"嵌套抑制"(`:247-249`)在 OpenTake 自动消失**:上游因为 `withUndoGroup`(`ToolExecutor.swift:151-158`)能嵌套 `withTimelineSwap`,需要 `isUndoRegistrationEnabled` 守卫防止重复注册。OpenTake 的 `apply` 是**单层、不可重入**(一条 `EditCommand` = 一个事务),批量操作在 `EditCommand` 内部完成(如 `AddClips{entries:[...]}` 一次性加多个 clip,对应上游 `addClips` 用一个 `withUndoGroup` 包整批,`ToolExecutor+Clips.swift:178`),**不存在事务嵌套**,故无需该守卫。这是显式 `EditCommand` 相对隐式工具链的结构性收益。
-
-### 2.4 Undo / Redo —— 双层撤销模型(精确复刻上游)
-
-上游有**两套撤销概念**,OpenTake 必须都复刻:
-
-| 概念 | 上游载体 | OpenTake 载体 | 谁能调 |
-|---|---|---|---|
-| **全局撤销树** | `EditorViewModel.undoManager`(`VideoProject.swift:191` 注入,系统 `UndoManager`) | `EditorState.undo: UndoStack`(在 Rust) | UI(Cmd+Z)经 `undo()/redo()` Tauri 命令 |
-| **助手专属 undo 游标** | `ToolExecutor.agentUndoStack: [String]`(`ToolExecutor.swift:20`) | 每个 agent 会话一份 `AgentUndoCursor`(在 `opentake-agent`,**不在 core**) | 仅 Agent/MCP 的 `undo` 工具 |
-
-**全局 undo/redo**(对应 UI 的 Cmd+Z):是 `EditorCore` 的独立方法,**不是 `EditCommand`**(因为它操作的是撤销栈本身,不是 timeline 内容):
+`AppCore::apply` 不重复事务算法，只在锁内委托给 session，并在锁外处理事件：
 
 ```rust
-impl EditorCore {
-    pub fn undo(&self) -> Result<EditResult, EditError> {
-        let mut st = self.state.lock().unwrap();
-        let Some(before) = st.undo.undo(&mut st.timeline) else {   // 无可撤销
-            return Err(EditError::NothingToUndo);
-        };
-        st.version += 1; st.dirty = true;                          // 撤销也 bump version(前端镜像需刷新)
-        let version = st.version; drop(st);
-        self.events.emit(CoreEvent::TimelineChanged { version });
-        Ok(EditResult { changed: true, action_name: "Undo".into(), timeline_version: version, .. })
+pub fn apply(&self, command: EditCommand) -> Result<EditResult> {
+    let (result, project_epoch, media_count) = {
+        let mut session = self.lock();
+        let result = session.editor.apply(command, self.ids.as_ref())?;
+        let media_count =
+            result.manifest_changed.then(|| session.editor.media().entries.len());
+        (result, session.project_epoch, media_count)
+    };
+    if result.changed {
+        self.events.emit(&CoreEvent::TimelineChanged {
+            project_epoch,
+            version: result.timeline_version,
+        });
     }
-    pub fn redo(&self) -> Result<EditResult, EditError> { /* 对称 */ }
+    if let Some(count) = media_count {
+        self.events.emit(&CoreEvent::MediaChanged { project_epoch, count });
+    }
+    Ok(result)
 }
 ```
 
-> **关键决策:撤销也递增 version**。上游撤销时 `vm.timeline = undoState; vm.notifyTimelineChanged()`(`ClipMutations.swift:232-233`)——timeline 被替换、触发 rebuild,等价于 `revision&+=1`。所以 OpenTake 撤销/重做**必须** bump `version` 并发 `timeline_changed`,否则前端镜像与权威态不一致。
+已验证的结果矩阵：
 
-**助手专属 undo**(对应 `ToolExecutor.undo`,`ToolExecutor.swift:108-123`)的**精妙拒绝语义必须照搬**:
-- 「本会话没有助手编辑可撤销」→ 报错,不动(`:110-112`,原话:"The user's own edits are theirs to undo.")。
-- 「栈顶 action 不是助手做的」→ 拒绝,不撤(`:117-119`)。这防止助手撤掉用户手动的编辑。
-- 成功后从 agent 栈弹出,并提示「re-read with get_timeline before editing again」(`:122`)。
+| 路径 | 文档 | version | undo/redo | `TimelineChanged` | `MediaChanged` |
+|---|---|---:|---|---:|---:|
+| 成功且改变 timeline | 提交 after | +1 | push before / clear redo | 1 | 0 |
+| 成功且改变 manifest | 提交 after | +1 | push before / clear redo | 1 | 1 |
+| 成功但 no-op | 不变 | 不变 | 不变 | 0 | 0 |
+| 校验或执行错误 | 恢复 before | 不变 | 不变 | 0 | 0 |
+| 成功 undo/redo | 恢复目标快照 | +1 | 双栈对称移动 | 1 | manifest 改变时 1 |
+| 空历史 undo/redo | 不变 | 不变 | 不变 | 0 | 0 |
 
-这套逻辑在 OpenTake **属于 `opentake-agent`(Phase 7)**,不属于 core。core 只暴露**通用** `undo()/redo()`;agent 的 `undo` 工具在 agent 层先校验它自己的 `AgentUndoCursor`(记录"哪些 version 是本会话造成的"),通过后再调 `core.undo()`。
+对应测试为 `failed_transaction_restores_document_and_history`、`apply_bumps_version_and_emits_once`、`manifest_edit_and_undo_emit_media_changed`、`unchanged_command_does_not_emit_or_bump` 和 `undo_redo_through_core_bumps_version_and_emits`。
 
-> **为何 cursor 在 agent 层而非 core**:上游每个 `ToolExecutor` 实例(每个 MCP 连接 / 每个 chat 会话)有独立 `agentUndoStack`(`AgentService.swift:215` 与 `MCPService.swift:31` 各造一个 executor)。跨进程下,一个 core 会服务多个并发 MCP 连接,**助手栈天然是 per-session 的**,放 core 里会串话。core 持唯一全局撤销栈;agent 层持 per-session 游标。
+### 2.4 Undo / Redo —— 全局历史与助手会话所有权
 
-### 2.5 三客户端如何共享(装配视角)
+全局 undo/redo 由 `EditorState` 的两个 `Vec<DocSnapshot>` 实现。`EditCommand::Undo` 与 `EditCommand::Redo` 走同一个 ops 入口；`AppCore::undo()` / `redo()` 是面向 UI 的薄封装，因此 commit、version 和事件规则没有第二套实现。空历史返回成功的 `changed=false`，不是错误。
 
+上游还有独立的助手会话所有权规则：每个 `ToolExecutor` 只能撤销本会话 Agent 的最近编辑，并在用户编辑成为全局栈顶时拒绝。这个规则属于 `opentake-agent::Dispatcher`，不属于全局 core 历史。本节的 DS7 证据只关闭共享 core 的全局 undo/version/event 路径；助手冲突安全由独立实施片 `AG-execution-shell-and-agent-undo` 及其“用户编辑位于栈顶”故障测试关闭，不能用 DS7 的全局测试替代。
+
+### 2.5 三客户端如何共享（装配视角）
+
+```text
+                       AppCore (Clone)
+             Arc<Mutex<CoreSessionSlot>> + EventBus
+                  /              |              \
+       Tauri edit_apply     in-app Agent      MCP Dispatcher
+       undo / redo          CoreHandle        CoreHandle
+             \                  |                  /
+                 EditCommand -> AppCore::apply
 ```
-            ┌───────────────────── EditorCore (Clone, 内含 Arc<Mutex<EditorState>>) ─────────────────────┐
-            │                                  唯一 EditCommand 路由 + 唯一 UndoStack + 唯一 version       │
-            └───────▲───────────────────────────────▲───────────────────────────────────▲────────────────┘
-                    │ apply / undo / get_timeline    │ apply (工具→EditCommand)            │ apply (工具→EditCommand)
-        ┌───────────┴──────────┐        ┌────────────┴───────────┐            ┌───────────┴────────────┐
-        │ Tauri command 层      │        │ in-app agent (opentake- │            │ MCP server (opentake-   │
-        │ (src-tauri, §3)       │        │  agent, reqwest→LLM)    │            │  agent, rmcp, §7)       │
-        │ ↑ React UI            │        │  per-session ToolCtx +  │            │  per-conn ToolCtx +     │
-        │   (Cmd+Z, 拖拽, 裁剪) │        │  AgentUndoCursor        │            │  AgentUndoCursor        │
-        └──────────────────────┘        └─────────────────────────┘            └─────────────────────────┘
-```
 
-- **UI**:React 手势 → Tauri `invoke('edit_apply', {command})` → core.apply。UI **不**经 agent 工具层(直接构造 `EditCommand`)。对应上游 SwiftUI 直接调 `editor.addClips(...)` 而非伪装成工具。
-- **in-app agent / MCP**:工具调用 → agent 层把工具 args 翻译成 `EditCommand` → core.apply。**工具层只做"短 ID 展开/缩短 + args 校验 + EditCommand 构造 + summary 渲染"**,编辑本体全归 core(对应 `ToolExecutor.run` 的每个 case 实质只是参数搬运到 mutator)。
-- **三者共享**:同一个 `EditorCore` 句柄(克隆),即同一个 `Mutex<EditorState>`,即同一份权威 timeline + 同一个 version 序列 + 同一个全局撤销栈。这就是「单一能力层、多前端」在跨进程下的精确实现。
+- UI：`web/src/lib/api.ts::editApply` → Tauri `src-tauri/src/commands.rs::edit_apply` → `handle_edit_apply` → `AppCore::apply`。
+- UI 全局撤销：Tauri `undo`/`redo` → core DTO handler → `AppCore::undo`/`redo`。
+- Agent/MCP：`Dispatcher` 将类型化工具参数构造成 `EditCommand`，通过 `CoreHandle::apply` 进入同一个 `AppCore`。
+- 事件：所有 clone 共享 `EventBus`；只有已提交的文档变化才发送携带 `project_epoch` 与 `version` 的事件。
+
+因此三类客户端共享同一权威文档、同一全局历史和同一版本序列，同时保留各自边界层的参数解析与会话级策略。
 
 ---

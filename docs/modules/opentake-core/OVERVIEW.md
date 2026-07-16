@@ -55,7 +55,7 @@ web                   React/TS 前端（只读镜像 + 版本号同步）
 
 - Rust 侧**单一持有**权威 `EditorSession`（内含权威 `Timeline`）；
 - 前端**不能**持权威 timeline，只持**只读镜像 + 版本号**；
-- `AppCore` 是 `Clone` 句柄，克隆只复制 `Arc`，三客户端各持一份**指向同一 `Mutex<EditorSession>`** 的句柄——这是上游「三客户端共享一个 view model」在跨线程下的等价物。
+- `AppCore` 是 `Clone` 句柄，克隆只复制 `Arc`，三客户端各持一份**指向同一 `Mutex<CoreSessionSlot>`** 的句柄；slot 内持唯一 `EditorSession`——这是上游「三客户端共享一个 view model」在跨线程下的等价物。
 
 ```
 UI 手势 / 内置 Agent / MCP 工具
@@ -65,14 +65,16 @@ UI 手势 / 内置 Agent / MCP 工具
             └ opentake_ops::command::apply(&mut state, cmd, ids)   [ops：事务本体]
                  snapshot → 纯函数变更（校验失败则 Err，文档不动）
                  → before != after 才推快照入撤销栈 + version++
-                 → EditResult{ changed, action_name, affected_clip_ids, timeline_version, summary }
-  → result.changed 为真 → events.emit(TimelineChanged{version})
+                 → EditResult{ changed, timeline_changed, manifest_changed,
+                               action_name, affected_clip_ids, timeline_version, summary }
+  → result.changed 为真 → events.emit(TimelineChanged{project_epoch, version})
+  → result.manifest_changed 为真 → events.emit(MediaChanged{project_epoch, count})
   → 前端收到事件，若 version 更高则 get_timeline 重取镜像
 ```
 
 `AppCore` 在 `EditorSession` 之上**只多两件事**（见 [core-router.md](core-router.md)）：
 1. **串行化所有变更**（一把 `Mutex`），使 `version` 在并发客户端下严格单调；
-2. **变更广播**：committing 的 edit / undo / redo 之后、**锁释放后**发 `CoreEvent::TimelineChanged`，订阅者据此重取镜像（锁外发事件，使订阅回调可安全重入 core 而不死锁）。
+2. **变更广播**：committing 的 edit / undo / redo 之后、**锁释放后**发 `CoreEvent::TimelineChanged`；manifest 变化时再发 `MediaChanged`。锁外发事件使订阅回调可安全重入 core 而不死锁。
 
 ### 2. 会话管理（EditorSession）
 
@@ -97,10 +99,10 @@ core 编排但不实现的能力（preview / export / media import / generation�
 
 | 变体 | 触发 | 前端用途 |
 |---|---|---|
-| `TimelineChanged { version }` | committing 的 edit / undo / redo | `version` 更高则 `get_timeline` 重取只读镜像 |
-| `ProjectOpened { path, version }` | `new_project`（path 空）/ `open_project` | 打开后前端自取首个快照（open **不**发 `TimelineChanged`） |
-| `ProjectSaved { path }` | `save_project` 成功 | 提示已保存 / 更新窗口标题 |
-| `MediaChanged { count }` | `import_media_file` / `relink_media_file` 成功 | 经 `get_media` 重取媒体面板目录 |
+| `TimelineChanged { project_epoch, version }` | committing 的 edit / undo / redo | epoch 相同且 `version` 更新时重取，epoch 不同则切换工程镜像 |
+| `ProjectOpened { path, project_epoch, version }` | `new_project`（path 空）/ `open_project` | 打开后前端自取首个快照（open **不**发 `TimelineChanged`） |
+| `ProjectSaved { path, project_epoch }` | `save_project` 成功 | 提示已保存 / 更新窗口标题 |
+| `MediaChanged { project_epoch, count }` | manifest 编辑及其 undo/redo，或 import/relink/favorite 等媒体 workflow 成功 | 经 `get_media` 重取媒体面板目录 |
 
 详见 [events-bus.md](events-bus.md)。
 

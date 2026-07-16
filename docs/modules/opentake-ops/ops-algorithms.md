@@ -57,7 +57,7 @@
 
 ## 与其他子系统关系
 
-- **被 `command.rs` 调用**：所有 ops 在 `transact` 的 `work` 闭包里被组合调用（见 [command-apply.md](command-apply.md)）。
+- **被 `command.rs` 调用**：大多数 ops 在 `transact` 的 `work` 闭包里组合；需要返回 refusal 报告的 ripple 路径使用等价的手写 snapshot/restore/commit 事务（见 [command-apply.md](command-apply.md)）。
 - **消费 `engines/`**：`clear_region` 用 `OverwriteEngine`；`ripple.rs` 用 `RippleEngine`（见 [engines.md](engines.md)）。
 - **依赖 `IdGen`**：place / split / move / duplicate / tracks / folders 铸新 id（见 [intent-id.md](intent-id.md)）。
 - **`intent.rs` 在其上预检**：高层意图归一成命令时复用 `trim_values` 等 ops 函数（见 [intent-id.md](intent-id.md)）。
