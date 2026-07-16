@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
-use opentake_core::AppCore;
+use opentake_core::{AppCore, ProjectRuntimeSnapshot};
 use opentake_domain::{ClipType, MediaResolver};
 use opentake_media::{
     whisper_model, MediaEngine, TranscribeOptions, TranscriptCache, TranscriptionResult,
@@ -195,15 +195,26 @@ pub fn transcript_get(
 /// Resolve an asset id to `(source_path, is_video)` from the live manifest.
 /// `is_video` drives audio extraction (video → extract audio track first).
 pub(crate) fn resolve_asset(core: &AppCore, media_id: &str) -> Result<(PathBuf, bool), String> {
-    let manifest = core.media();
-    let entry = manifest
+    let snapshot = core.runtime_snapshot();
+    resolve_asset_from_snapshot(&snapshot, media_id)
+}
+
+/// Resolve an asset against one caller-owned project snapshot.
+///
+/// Batch workflows must retain the same snapshot for every source so a project
+/// switch cannot combine one manifest with another bundle directory.
+pub(crate) fn resolve_asset_from_snapshot(
+    snapshot: &ProjectRuntimeSnapshot,
+    media_id: &str,
+) -> Result<(PathBuf, bool), String> {
+    let entry = snapshot
+        .media
         .entries
         .iter()
         .find(|e| e.id == media_id)
         .ok_or_else(|| format!("media not found: {media_id}"))?;
     let is_video = entry.kind == ClipType::Video;
-    let project_dir = core.project_dir();
-    let path = MediaResolver::new(&manifest, project_dir.as_deref())
+    let path = MediaResolver::new(&snapshot.media, snapshot.project_dir.as_deref())
         .expected_path(media_id)
         .ok_or_else(|| format!("could not resolve a file path for media: {media_id}"))?;
     if !path.exists() {

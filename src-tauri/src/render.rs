@@ -356,10 +356,15 @@ fn composite_rgba(
     frame: i32,
     max_size: u32,
 ) -> Result<DecodedFrame, String> {
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    let project_dir = core.project_dir();
-    composite_rgba_for_snapshot(&timeline, &manifest, &project_dir, render, frame, max_size)
+    let snapshot = core.runtime_snapshot();
+    composite_rgba_for_snapshot(
+        &snapshot.timeline,
+        &snapshot.media,
+        &snapshot.project_dir,
+        render,
+        frame,
+        max_size,
+    )
 }
 
 /// `composite_frame`: render the timeline at `frame` to a PNG data URL.
@@ -493,8 +498,9 @@ fn capture_frame_to_media_workflow(
 /// upstream's `CMTime(value: frame, timescale: fps)` (fps = timeline fps for both
 /// tabs). Errors when the asset is unknown, not a video, or its source is offline.
 fn decode_source_frame(core: &AppCore, media_id: &str, frame: i32) -> Result<DecodedFrame, String> {
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
+    let snapshot = core.runtime_snapshot();
+    let timeline = snapshot.timeline;
+    let manifest = snapshot.media;
     let entry = manifest
         .entries
         .iter()
@@ -505,8 +511,8 @@ fn decode_source_frame(core: &AppCore, media_id: &str, frame: i32) -> Result<Dec
     }
     let path = match &entry.source {
         MediaSource::External { absolute_path } => PathBuf::from(absolute_path),
-        MediaSource::Project { relative_path } => core
-            .project_dir()
+        MediaSource::Project { relative_path } => snapshot
+            .project_dir
             .map(|base| base.join(relative_path))
             .ok_or_else(|| "project not saved; cannot resolve media path".to_string())?,
     };
@@ -582,9 +588,10 @@ fn capture_freeze_frame_workflow(
     clip_id: &str,
     at_frame: i32,
 ) -> Result<String, String> {
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    let project_dir = core.project_dir();
+    let snapshot = core.runtime_snapshot();
+    let timeline = snapshot.timeline;
+    let manifest = snapshot.media;
+    let project_dir = snapshot.project_dir;
     let (solo_timeline, solo_manifest) =
         build_freeze_capture_snapshot(&timeline, &manifest, clip_id)?;
     let composite = composite_rgba_for_snapshot(

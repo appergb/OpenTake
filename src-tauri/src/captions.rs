@@ -17,8 +17,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use opentake_core::dto::{handle_edit_apply, EditResultDto};
-use opentake_core::AppCore;
+use opentake_core::dto::EditResultDto;
+use opentake_core::{AppCore, ProjectRevision};
 use opentake_domain::{Clip, ClipType, MediaManifest, TextLayout, TextStyle, Transform};
 use opentake_media::{
     caption_specs, dominant_speech_track, CaptionCase, CaptionTarget, TranscriptionResult,
@@ -116,9 +116,13 @@ pub fn generate_captions(
     media: State<'_, MediaState>,
     request: CaptionRequestDto,
 ) -> Result<GenerateCaptionsResult, String> {
-    let snapshot = core.get_timeline();
-    let timeline = snapshot.timeline;
-    let manifest = core.media();
+    let snapshot = core.runtime_snapshot();
+    let revision = ProjectRevision {
+        project_epoch: snapshot.project_epoch,
+        version: snapshot.version,
+    };
+    let timeline = &snapshot.timeline;
+    let manifest = &snapshot.media;
     let fps = timeline.fps;
 
     // Style + placement (defaults: 48-pt caption near the bottom, white).
@@ -143,7 +147,7 @@ pub fn generate_captions(
 
     // Caption-eligible clips for the chosen source (each with its track id).
     let auto_detect = matches!(request.source, CaptionSource::Auto);
-    let eligible = eligible_targets(&timeline, &manifest, &request.source);
+    let eligible = eligible_targets(timeline, manifest, &request.source);
     if eligible.is_empty() {
         return Ok(GenerateCaptionsResult {
             edit: unchanged_edit(&snapshot.version),
@@ -172,13 +176,14 @@ pub fn generate_captions(
         if !seen.insert(t.media_ref.clone()) {
             continue;
         }
-        let (path, is_video) = match crate::transcribe::resolve_asset(&core, &t.media_ref) {
-            Ok(pair) => pair,
-            Err(e) => {
-                first_error = first_error.or(Some(e));
-                continue;
-            }
-        };
+        let (path, is_video) =
+            match crate::transcribe::resolve_asset_from_snapshot(&snapshot, &t.media_ref) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    first_error = first_error.or(Some(e));
+                    continue;
+                }
+            };
         let result = if uses_options {
             crate::transcribe::load_backend(media.engine()).and_then(|backend| {
                 let opts = opentake_media::TranscribeOptions {
@@ -279,13 +284,23 @@ pub fn generate_captions(
         .collect();
 
     let count = entries.len();
-    // Place atomically through the core (snapshot/commit/version + TimelineChanged).
-    let edit =
-        handle_edit_apply(&core, EditCommand::AddCaptions { entries }).map_err(|e| e.message)?;
+    // Place atomically only if the project and version still match the snapshot
+    // used for media resolution and caption layout.
+    let edit = apply_captions_at_revision(&core, revision, entries)?;
     Ok(GenerateCaptionsResult {
         edit,
         caption_count: count,
     })
+}
+
+fn apply_captions_at_revision(
+    core: &AppCore,
+    revision: ProjectRevision,
+    entries: Vec<CaptionEntry>,
+) -> Result<EditResultDto, String> {
+    core.apply_at_revision(revision, EditCommand::AddCaptions { entries })
+        .map(EditResultDto::from)
+        .map_err(|error| error.to_string())
 }
 
 /// One caption-eligible clip located on the timeline: the clip + its track id +
@@ -464,6 +479,39 @@ mod tests {
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"captionCount\":2"));
         assert!(json.contains("\"timelineVersion\":3"));
+    }
+
+    fn sample_caption_entry() -> CaptionEntry {
+        CaptionEntry {
+            start_frame: 0,
+            duration_frames: 24,
+            content: "snapshot caption".into(),
+            text_style: TextStyle::default(),
+            transform: Transform::default(),
+            caption_group_id: "snapshot-group".into(),
+        }
+    }
+
+    #[test]
+    fn caption_commit_rejects_stale_project_revision() {
+        let current = AppCore::new();
+        let revision = current.project_revision();
+        apply_captions_at_revision(&current, revision, vec![sample_caption_entry()])
+            .expect("valid caption edit applies at its source revision");
+        assert_eq!(current.get_timeline().timeline.tracks.len(), 1);
+
+        let stale = AppCore::new();
+        let revision = stale.project_revision();
+        stale.new_project();
+        let before = stale.runtime_snapshot();
+        let error = apply_captions_at_revision(&stale, revision, vec![sample_caption_entry()])
+            .expect_err("caption result from the replaced project must not commit");
+        assert_eq!(error, "project changed while preparing a deferred edit");
+        let after = stale.runtime_snapshot();
+        assert_eq!(after.project_epoch, before.project_epoch);
+        assert_eq!(after.version, before.version);
+        assert_eq!(after.timeline, before.timeline);
+        assert_eq!(after.media, before.media);
     }
 
     fn tl_with_audio() -> Timeline {

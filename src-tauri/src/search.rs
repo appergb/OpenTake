@@ -214,9 +214,15 @@ struct ResolvedAsset {
 /// skip them at read time, matching upstream (a missing file simply yields no
 /// index rather than dropping the asset).
 fn resolve_assets(core: &AppCore) -> Vec<ResolvedAsset> {
-    let manifest = core.media();
-    let project_dir = core.project_dir();
-    let resolver = MediaResolver::new(&manifest, project_dir.as_deref());
+    let snapshot = core.runtime_snapshot();
+    resolve_assets_from_snapshot(&snapshot.media, snapshot.project_dir.as_deref())
+}
+
+fn resolve_assets_from_snapshot(
+    manifest: &opentake_domain::MediaManifest,
+    project_dir: Option<&std::path::Path>,
+) -> Vec<ResolvedAsset> {
+    let resolver = MediaResolver::new(manifest, project_dir);
     manifest
         .entries
         .iter()
@@ -355,8 +361,9 @@ pub fn search_query(
         return SearchResultsDto::default();
     }
     let engine = media.engine();
-    let assets = resolve_assets(&core);
-    let fps = core.get_timeline().timeline.fps;
+    let snapshot = core.runtime_snapshot();
+    let assets = resolve_assets_from_snapshot(&snapshot.media, snapshot.project_dir.as_deref());
+    let fps = snapshot.timeline.fps;
 
     // Files: name-substring over every asset (the zero-setup fallback).
     let name_entries: Vec<(String, String)> = assets

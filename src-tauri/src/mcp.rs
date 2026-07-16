@@ -37,7 +37,10 @@ use opentake_agent::mcp::media_bridge::{
 };
 use opentake_agent::mcp::server;
 use opentake_agent::plugin::registry::PluginRegistry;
-use opentake_core::{importable_clip_type, AppCore, CoreError, DeferredCoreEvents, ProbedMedia};
+use opentake_core::{
+    importable_clip_type, AppCore, CoreError, DeferredCoreEvents, ProbedMedia,
+    ProjectRuntimeSnapshot,
+};
 use opentake_domain::{ClipType, MediaSource, TextStyle};
 use opentake_media::{decode_frame_at, FrameRequest, MediaEngine};
 use opentake_render::gpu::texture::upload_rgba;
@@ -290,6 +293,26 @@ impl TauriMediaBridge {
     }
 }
 
+struct ResolvedTranscriptSource {
+    source: TranscriptSource,
+    resolved: Result<(PathBuf, bool), String>,
+}
+
+fn resolve_transcript_batch(
+    snapshot: &ProjectRuntimeSnapshot,
+    sources: &[TranscriptSource],
+) -> Vec<ResolvedTranscriptSource> {
+    sources
+        .iter()
+        .cloned()
+        .map(|source| {
+            let resolved =
+                crate::transcribe::resolve_asset_from_snapshot(snapshot, &source.media_ref);
+            ResolvedTranscriptSource { source, resolved }
+        })
+        .collect()
+}
+
 impl MediaBridge for TauriMediaBridge {
     fn inspect_timeline(
         &self,
@@ -299,9 +322,10 @@ impl MediaBridge for TauriMediaBridge {
         // Snapshot the live session, then composite off the session lock (the
         // preview path's discipline; a local GPU context per call keeps this off
         // the preview's cached `RenderState` mutex, matching export.rs).
-        let timeline = self.core.get_timeline().timeline;
-        let manifest = self.core.media();
-        let project_dir = self.core.project_dir();
+        let snapshot = self.core.runtime_snapshot();
+        let timeline = snapshot.timeline;
+        let manifest = snapshot.media;
+        let project_dir = snapshot.project_dir;
         composite_frames_jpeg(&timeline, &manifest, &project_dir, frames, max_longest_edge)
     }
 
@@ -326,15 +350,17 @@ impl MediaBridge for TauriMediaBridge {
         }
         let mut backend = Backend::Unloaded;
         let mut out = Vec::with_capacity(sources.len());
-        for src in sources {
+        let snapshot = self.core.runtime_snapshot();
+        for resolved_source in resolve_transcript_batch(&snapshot, sources) {
+            let src = resolved_source.source;
             let skip = |reason: String| TranscriptSourceResult {
                 media_ref: src.media_ref.clone(),
                 transcript: None,
                 error: Some(reason),
             };
             // Resolve the asset path; a missing/offline source is skipped.
-            let path = match crate::transcribe::resolve_asset(&self.core, &src.media_ref) {
-                Ok((path, _is_video)) => path,
+            let (path, is_video) = match resolved_source.resolved {
+                Ok(resolved) => resolved,
                 Err(reason) => {
                     out.push(skip(reason));
                     continue;
@@ -387,7 +413,7 @@ impl MediaBridge for TauriMediaBridge {
                 None => {
                     let cache = opentake_media::TranscriptCache::new(self.engine.cache_root());
                     cache
-                        .transcript(&path, src.is_video, None, b)
+                        .transcript(&path, is_video, None, b)
                         .map_err(|e| e.to_string())
                 }
             };
@@ -463,9 +489,10 @@ impl MediaBridge for TauriMediaBridge {
         // Missing (offline) files are kept — their index/transcript reads simply
         // yield nothing, matching upstream (a missing file has no results, not an
         // error). Unresolvable ids are dropped.
-        let manifest = self.core.media();
-        let project_dir = self.core.project_dir();
-        let resolver = opentake_domain::MediaResolver::new(&manifest, project_dir.as_deref());
+        let snapshot = self.core.runtime_snapshot();
+        let manifest = snapshot.media;
+        let resolver =
+            opentake_domain::MediaResolver::new(&manifest, snapshot.project_dir.as_deref());
         let mut visual_paths: Vec<(String, PathBuf)> = Vec::new();
         let mut spoken_paths: Vec<(String, PathBuf)> = Vec::new();
         for c in candidates {
@@ -480,7 +507,7 @@ impl MediaBridge for TauriMediaBridge {
             }
         }
 
-        let fps = self.core.get_timeline().timeline.fps;
+        let fps = snapshot.timeline.fps;
         let installed = crate::search::model_installed(&self.engine);
 
         // Visual group (skipped for scope == "spoken").
@@ -1484,6 +1511,71 @@ mod tests {
         let mut out = Vec::new();
         walk(root, root, &mut out);
         out
+    }
+
+    #[test]
+    fn transcript_batch_resolution_uses_one_snapshot_and_authoritative_types() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let project_dir = fixture.path().join("Batch.opentake");
+        let video_path = project_dir.join("media/video.mov");
+        let audio_path = project_dir.join("media/audio.wav");
+        std::fs::create_dir_all(video_path.parent().expect("media parent"))
+            .expect("create media directory");
+        std::fs::write(&video_path, b"video").expect("write video fixture");
+        std::fs::write(&audio_path, b"audio").expect("write audio fixture");
+        let mut media = opentake_domain::MediaManifest::new();
+        for (id, kind, relative_path) in [
+            ("video", ClipType::Video, "media/video.mov"),
+            ("audio", ClipType::Audio, "media/audio.wav"),
+        ] {
+            media.entries.push(opentake_domain::MediaManifestEntry {
+                id: id.into(),
+                name: id.into(),
+                kind,
+                source: MediaSource::Project {
+                    relative_path: relative_path.into(),
+                },
+                duration: 1.0,
+                generation_input: None,
+                source_width: None,
+                source_height: None,
+                source_fps: None,
+                has_audio: Some(true),
+                folder_id: None,
+                cached_remote_url: None,
+                cached_remote_url_expires_at: None,
+            });
+        }
+        let snapshot = ProjectRuntimeSnapshot {
+            timeline: opentake_domain::Timeline::new(),
+            media,
+            project_dir: Some(project_dir),
+            project_epoch: 7,
+            version: 3,
+        };
+        let stale_sources = vec![
+            TranscriptSource {
+                media_ref: "video".into(),
+                is_video: false,
+                language: None,
+            },
+            TranscriptSource {
+                media_ref: "audio".into(),
+                is_video: true,
+                language: None,
+            },
+        ];
+
+        let resolved = resolve_transcript_batch(&snapshot, &stale_sources);
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(
+            resolved[0].resolved.as_ref().expect("resolve video"),
+            &(video_path, true)
+        );
+        assert_eq!(
+            resolved[1].resolved.as_ref().expect("resolve audio"),
+            &(audio_path, false)
+        );
     }
 
     #[test]

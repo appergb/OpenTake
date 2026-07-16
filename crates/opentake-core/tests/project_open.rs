@@ -1,9 +1,13 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
-use opentake_core::{EditCommand, EditorSession, SeqIdGen};
-use opentake_domain::{ClipType, GenerationInput, MediaManifestEntry, MediaSource, Timeline};
-use opentake_project::{GenerationLog, GenerationLogEntry, Project};
+use opentake_core::{AppCore, CoreError, CoreEvent, EditCommand, EditorSession, SeqIdGen};
+use opentake_domain::{
+    Clip, ClipType, GenerationInput, MediaManifestEntry, MediaSource, Timeline, Track,
+};
+use opentake_project::{GenerationLog, GenerationLogEntry, Project, ProjectError};
 
 struct TempDir(PathBuf);
 
@@ -72,6 +76,258 @@ fn save_manifest_fixture(
     project.manifest.entries = entries;
     project.generation_log = generation_log;
     project.save().expect("save fixture");
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ReceiptEntry {
+    Directory,
+    File(Vec<u8>),
+    Symlink(PathBuf),
+    Other,
+}
+
+fn bundle_receipt(bundle: &Path) -> BTreeMap<String, ReceiptEntry> {
+    fn collect(bundle: &Path, path: &Path, receipt: &mut BTreeMap<String, ReceiptEntry>) {
+        let mut entries = std::fs::read_dir(path)
+            .expect("read bundle directory")
+            .map(|entry| entry.expect("read bundle entry"))
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+
+        for entry in entries {
+            let path = entry.path();
+            let file_type = entry.file_type().expect("read bundle entry type");
+            let relative = path
+                .strip_prefix(bundle)
+                .expect("bundle entry stays under root")
+                .to_string_lossy()
+                .into_owned();
+            if file_type.is_dir() {
+                receipt.insert(relative, ReceiptEntry::Directory);
+                collect(bundle, &path, receipt);
+            } else if file_type.is_symlink() {
+                receipt.insert(
+                    relative,
+                    ReceiptEntry::Symlink(std::fs::read_link(path).expect("read bundle symlink")),
+                );
+            } else if file_type.is_file() {
+                receipt.insert(
+                    relative,
+                    ReceiptEntry::File(std::fs::read(path).expect("read bundle file")),
+                );
+            } else {
+                receipt.insert(relative, ReceiptEntry::Other);
+            }
+        }
+    }
+
+    let mut receipt = BTreeMap::new();
+    receipt.insert(".".into(), ReceiptEntry::Directory);
+    collect(bundle, bundle, &mut receipt);
+    receipt
+}
+
+fn save_composite_fixture(bundle: &Path, label: &str) -> Project {
+    let media_id = format!("{label}-media");
+    let mut project = Project::new(bundle);
+    let mut track = Track::new(format!("{label}-track"), ClipType::Video);
+    track
+        .clips
+        .push(Clip::new(format!("{label}-clip"), &media_id, 12, 48));
+    project.timeline.fps = 24;
+    project.timeline.tracks.push(track);
+    project.manifest.entries.push(manifest_entry(
+        &media_id,
+        Some(generation(
+            &format!("{label}-model"),
+            &format!("{label} prompt"),
+            700_000_000.0,
+        )),
+    ));
+    project.generation_log = Some(GenerationLog {
+        version: 1,
+        entries: vec![GenerationLogEntry::new(
+            format!("{label}-generation"),
+            format!("{label}-model"),
+            Some(25),
+            Some(700_000_000.0),
+        )],
+    });
+    project.save().expect("save composite fixture");
+    let media_dir = bundle.join("media");
+    std::fs::create_dir_all(&media_dir).expect("create fixture media directory");
+    std::fs::write(
+        media_dir.join(format!("{media_id}.mov")),
+        format!("{label}-media-bytes"),
+    )
+    .expect("write fixture media");
+    project
+}
+
+#[test]
+fn project_open_composite_acceptance() {
+    let tmp = TempDir::new("composite");
+
+    // A prepared project is fully decoded before the live session is replaced.
+    let current_bundle = tmp.child("Current.opentake");
+    let target_bundle = tmp.child("Target.opentake");
+    let bad_media_bundle = tmp.child("BadMedia.opentake");
+    save_composite_fixture(&current_bundle, "current");
+    let target = save_composite_fixture(&target_bundle, "target");
+    save_composite_fixture(&bad_media_bundle, "bad-media");
+    std::fs::write(
+        bad_media_bundle.join("media.json"),
+        b"{ definitely not a media manifest",
+    )
+    .expect("damage media manifest");
+
+    let core = AppCore::new();
+    core.open_project(&current_bundle)
+        .expect("open sentinel project");
+    let events = Arc::new(Mutex::new(Vec::<CoreEvent>::new()));
+    let received = Arc::clone(&events);
+    core.subscribe(move |event| {
+        received.lock().unwrap().push(event.clone());
+    });
+    let before = core.bundle_export_snapshot();
+    let before_revision = core.project_revision();
+    let current_receipt = bundle_receipt(&current_bundle);
+    let bad_receipt = bundle_receipt(&bad_media_bundle);
+
+    let error = core
+        .open_project(&bad_media_bundle)
+        .expect_err("malformed media manifest must fail closed");
+    match error {
+        CoreError::Project(ProjectError::Json { file, .. }) => {
+            assert_eq!(file, "media.json");
+        }
+        other => panic!("unexpected malformed-media error: {other}"),
+    }
+    let after_failure = core.bundle_export_snapshot();
+    assert_eq!(core.project_revision(), before_revision);
+    assert_eq!(after_failure.timeline, before.timeline);
+    assert_eq!(after_failure.manifest, before.manifest);
+    assert_eq!(after_failure.generation_log, before.generation_log);
+    assert_eq!(after_failure.project_path, before.project_path);
+    assert_eq!(after_failure.compatibility, before.compatibility);
+    assert!(events.lock().unwrap().is_empty());
+    assert_eq!(bundle_receipt(&current_bundle), current_receipt);
+    assert_eq!(bundle_receipt(&bad_media_bundle), bad_receipt);
+
+    let target_receipt = bundle_receipt(&target_bundle);
+    let prepared =
+        AppCore::prepare_project_open(target_bundle.clone()).expect("prepare valid target");
+    assert_eq!(
+        core.project_revision(),
+        before_revision,
+        "prepare cannot publish the replacement session"
+    );
+    assert!(events.lock().unwrap().is_empty());
+    assert_eq!(bundle_receipt(&target_bundle), target_receipt);
+
+    let opened = core.commit_project_open(prepared);
+    assert_eq!(opened.version, 0);
+    assert_eq!(opened.project_epoch, before_revision.project_epoch + 1);
+    assert_eq!(
+        opened.project_path.as_deref(),
+        Some(target_bundle.as_path())
+    );
+    assert_eq!(opened.timeline, target.timeline);
+    assert_eq!(core.media(), target.manifest);
+    assert_eq!(
+        core.generation_log(),
+        target.generation_log.clone().expect("fixture log")
+    );
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![CoreEvent::ProjectOpened {
+            path: target_bundle.to_string_lossy().into_owned(),
+            project_epoch: opened.project_epoch,
+            version: 0,
+        }]
+    );
+
+    core.save_project(None).expect("save opened target");
+    assert_eq!(
+        bundle_receipt(&target_bundle),
+        target_receipt,
+        "an unchanged project save is byte-stable, including bundled media"
+    );
+    let reopened = AppCore::new();
+    let reopened_snapshot = reopened
+        .open_project(&target_bundle)
+        .expect("reopen saved target");
+    assert_eq!(reopened_snapshot.timeline, opened.timeline);
+    assert_eq!(reopened.media(), core.media());
+    assert_eq!(reopened.generation_log(), core.generation_log());
+
+    // Missing optional components use explicit empty state and remain stable.
+    let missing_optional_bundle = tmp.child("MissingOptional.opentake");
+    std::fs::create_dir_all(&missing_optional_bundle).expect("create legacy bundle");
+    std::fs::write(
+        missing_optional_bundle.join("project.json"),
+        serde_json::to_vec_pretty(&Timeline::new()).expect("encode legacy timeline"),
+    )
+    .expect("write required timeline");
+    let missing_optional = AppCore::new();
+    missing_optional
+        .open_project(&missing_optional_bundle)
+        .expect("open project without optional components");
+    assert!(missing_optional.media().entries.is_empty());
+    assert!(missing_optional.generation_log().entries.is_empty());
+    missing_optional
+        .save_project(None)
+        .expect("save project with missing optional components");
+    assert!(
+        !missing_optional_bundle.join("generation-log.json").exists(),
+        "empty recovered provenance does not invent an optional component"
+    );
+    let missing_optional_reopened = AppCore::new();
+    missing_optional_reopened
+        .open_project(&missing_optional_bundle)
+        .expect("reopen missing-optional project");
+    assert!(missing_optional_reopened.media().entries.is_empty());
+    assert!(missing_optional_reopened
+        .generation_log()
+        .entries
+        .is_empty());
+
+    // A damaged lenient component opens only as an explicit read-only recovery.
+    let bad_log_bundle = tmp.child("BadLog.opentake");
+    save_manifest_fixture(
+        &bad_log_bundle,
+        vec![manifest_entry(
+            "recovered-media",
+            Some(generation("recovered-model", "recover me", 700_000_100.0)),
+        )],
+        None,
+    );
+    std::fs::write(
+        bad_log_bundle.join("generation-log.json"),
+        b"not valid generation log json",
+    )
+    .expect("damage generation log");
+    let bad_log_receipt = bundle_receipt(&bad_log_bundle);
+    let recovered = AppCore::new();
+    let recovered_snapshot = recovered
+        .open_project(&bad_log_bundle)
+        .expect("open recoverable generation log");
+    assert_eq!(
+        recovered_snapshot.compatibility.blockers(),
+        ["generation-log.json:invalid-or-unreadable"]
+    );
+    assert_eq!(recovered.generation_log().entries.len(), 1);
+    assert!(matches!(
+        recovered.save_project(None),
+        Err(CoreError::Project(
+            ProjectError::CompatibilityReadOnly { .. }
+        ))
+    ));
+    assert_eq!(
+        bundle_receipt(&bad_log_bundle),
+        bad_log_receipt,
+        "read-only recovery cannot overwrite the damaged component"
+    );
 }
 
 #[test]

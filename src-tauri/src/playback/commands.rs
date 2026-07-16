@@ -1681,6 +1681,79 @@ mod tests {
     }
 
     #[test]
+    fn prewarm_rejection_restores_active_playback_without_project_publish() {
+        use crate::media::prewarm::PrewarmScheduler;
+        use opentake_core::CoreEvent;
+
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let bundle = fixture.path().join("prewarm-rejected.opentake");
+        let source = AppCore::new();
+        source
+            .save_project(Some(bundle.clone()))
+            .expect("save project fixture");
+        drop(source);
+        let project_before = std::fs::read(bundle.join("project.json")).expect("read project");
+        let media_before = std::fs::read(bundle.join("media.json")).expect("read manifest");
+
+        let core = AppCore::new();
+        let before = core.project_revision();
+        let current = identity(before.project_epoch, before.version, "prewarm-owner");
+        let (playback, publication) = state_with_running(current.clone());
+        let prewarm = PrewarmScheduler::new(before.project_epoch);
+        prewarm
+            .begin_project_transition()
+            .expect("occupy prewarm transition");
+        let events = Arc::new(Mutex::new(Vec::<CoreEvent>::new()));
+        let received = Arc::clone(&events);
+        core.subscribe(move |event| {
+            received
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(event.clone());
+        });
+
+        let error = crate::commands::project_open_with_playback_and_prewarm(
+            &core,
+            bundle.to_string_lossy().into_owned(),
+            &playback,
+            &prewarm,
+        )
+        .expect_err("occupied prewarm transition must reject open");
+
+        assert_eq!(error.code, super::super::session::PlaybackErrorCode::Busy);
+        assert_eq!(core.project_revision(), before);
+        assert_eq!(playback.active_identity(), Some(current.clone()));
+        assert!(
+            publication.is_open(),
+            "cancelled project transition must restore the incumbent publication"
+        );
+        playback
+            .control(current.clone(), SessionControl::Seek, 4)
+            .expect("incumbent playback remains controllable");
+        assert!(events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty());
+        assert_eq!(
+            prewarm.project_state(),
+            (before.project_epoch, true),
+            "the original prewarm transition retains ownership"
+        );
+        assert_eq!(
+            std::fs::read(bundle.join("project.json")).expect("reread project"),
+            project_before
+        );
+        assert_eq!(
+            std::fs::read(bundle.join("media.json")).expect("reread manifest"),
+            media_before
+        );
+        prewarm.activate_project(before.project_epoch);
+        playback
+            .control(current, SessionControl::Stop, 0)
+            .expect("stop retained playback");
+    }
+
+    #[test]
     fn overlapping_project_open_is_rejected_before_core_or_playback_mutation() {
         let core = AppCore::new();
         let before = core.project_revision();

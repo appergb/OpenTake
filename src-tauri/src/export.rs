@@ -937,9 +937,10 @@ pub fn export_video(
 ) -> Result<ExportSummary, String> {
     let guard = control.try_begin(&operation_id)?;
     // Snapshot the session up front; no session lock is held during GPU/encode.
-    let timeline = core.get_timeline().timeline;
-    let manifest = core.media();
-    let project_dir = core.project_dir();
+    let snapshot = core.runtime_snapshot();
+    let timeline = snapshot.timeline;
+    let manifest = snapshot.media;
+    let project_dir = snapshot.project_dir;
     let progress_operation_id = guard.operation_id().to_string();
     let on_progress: AudioExportProgress = Arc::new(move |done: i32, total: i32| {
         let _ = app.emit(

@@ -600,14 +600,30 @@
 - `requirement-b38818cf815e0f1e` (requirement)
 
 **Files:**
-- Modify: `crates/opentake-project/src/bundle.rs#Project`
-- Modify: `crates/opentake-core/src/session.rs#EditorSession`
-- Modify: `crates/opentake-domain/src/media.rs#MediaManifest`
-- Modify: `crates/opentake-project/src/gen_log.rs#GenerationLogEntry`
+- Modify: `crates/opentake-agent/src/mcp/core_handle.rs#AppCoreHandle::media_path`
+- Modify: `crates/opentake-core/src/core.rs#AppCore::apply_at_revision`
+- Modify: `crates/opentake-core/tests/project_open.rs#project_open_composite_acceptance`
+- Modify: `src-tauri/src/captions.rs#generate_captions`
+- Modify: `src-tauri/src/commands.rs#project_open_with_playback_and_prewarm`
+- Modify: `src-tauri/src/export.rs#export_video`
+- Modify: `src-tauri/src/mcp.rs#TauriMediaBridge`
+- Modify: `src-tauri/src/media.rs#MediaListDto::from_core_with_import_results`
+- Modify: `src-tauri/src/render.rs#composite_rgba`
+- Modify: `src-tauri/src/playback/commands.rs#PlaybackState`
+- Modify: `src-tauri/src/search.rs#resolve_assets`
+- Modify: `src-tauri/src/transcribe.rs#resolve_asset_from_snapshot`
+- Modify: `docs/audit/2026-07-14/implementation-plans/data-safety-design.md`
+- Modify: `docs/audit/2026-07-14/implementation-plans/data-safety-implementation.md`
 - Modify: `docs/specs/core/5-assembly.md`
 - Test (reviewed-planned): `crates/opentake-project/tests/upstream_compat.rs#exhaustive_legacy_default_matrix`
 - Test (reviewed-planned): `crates/opentake-core/tests/project_open.rs#missing_generation_log_seeds_manifest_provenance_once`
 - Test (reviewed-planned): `crates/opentake-core/tests/project_open.rs#project_open_composite_acceptance`
+- Test (reviewed-added): `crates/opentake-core/src/core.rs#deferred_apply_rejects_version_and_project_drift_without_mutation`
+- Test (reviewed-added): `crates/opentake-agent/src/mcp/core_handle.rs#app_core_media_path_stress_never_mixes_project_snapshots`
+- Test (reviewed-added): `src-tauri/src/captions.rs#caption_commit_rejects_stale_project_revision`
+- Test (reviewed-added): `src-tauri/src/commands.rs#project_open_mapped_boundaries_composite_acceptance`
+- Test (reviewed-added): `src-tauri/src/playback/commands.rs#prewarm_rejection_restores_active_playback_without_project_publish`
+- Test (reviewed-added): `src-tauri/src/mcp.rs#transcript_batch_resolution_uses_one_snapshot_and_authoritative_types`
 
 **Candidate-bound contracts:**
 
@@ -617,9 +633,9 @@
 - Expected behavior: Project open assembles validated project/media/generation state without silent loss or placeholder dependencies.
 - Resolution: `reviewed-mapping-report:DS-project-open-composite-headings` — Core mapping report: four project-open umbrellas are composite acceptance over the legacy-default and generation-seed child slices, not independent top-one features.
 - Exact acceptance contract:
-  - Open a project by validating bundle, timeline, media index, generation log, caches, render/playback, and Agent dependencies before publishing editor state.
+  - Validate every persisted component and synchronously fallible playback/prewarm admission before publishing editor state; exercise render, playback projection, cache, and Agent consumers against the committed atomic snapshot.
   - A failed dependency or malformed file must return a typed error/recovery result without silently replacing user data or partially publishing a session.
-  - Test valid, legacy, missing optional, malformed media.json, malformed generation log, dependency failure, save, close, and reopen with byte/semantic equality.
+  - Test valid, legacy, missing optional, malformed media.json, malformed generation log, dependency failure, save, replacement/close, and reopen with byte/semantic equality.
 
 #### requirement-9335bc98b18f8d8d
 
@@ -627,9 +643,9 @@
 - Expected behavior: Project open assembles validated project/media/generation state without silent loss or placeholder dependencies.
 - Resolution: `reviewed-mapping-report:DS-project-open-composite-headings` — Core mapping report: four project-open umbrellas are composite acceptance over the legacy-default and generation-seed child slices, not independent top-one features.
 - Exact acceptance contract:
-  - Replace placeholder CoreDeps paths with explicit project/media/render/playback/Agent interfaces whose production implementations are injected by src-tauri.
-  - Provide deterministic fakes for each dependency and ensure core never imports Tauri/UI/provider concrete types.
-  - Compile dependency-direction checks and test each dependency failure/cancellation without partial state or leaked background work.
+  - Remove stale claims that project/render/playback/Agent are production CoreDeps fields; map the real Project/EditorSession/AppCore, src-tauri coordinator/runtime-snapshot, and Agent CoreHandle interfaces.
+  - Use deterministic owning-boundary fixtures and ensure core never imports Tauri/UI/provider concrete types.
+  - Test prepare failure, overlapping transition, prewarm rejection/cancellation with incumbent playback, and successful epoch activation without partial project publication or leaked transition ownership.
 
 #### requirement-706e744a85684655
 
@@ -638,8 +654,8 @@
 - Resolution: `reviewed-mapping-report:DS-project-open-composite-headings` — Core mapping report: four project-open umbrellas are composite acceptance over the legacy-default and generation-seed child slices, not independent top-one features.
 - Exact acceptance contract:
   - Map each project/media/render/Agent assembly point to its current implementation symbol and remove stale upstream-only or placeholder references.
-  - Exercise each mapped boundary through CoreDeps/CoreHandle rather than direct frontend or Agent state mutation.
-  - Add a contract test that opens one fixture and invokes media lookup, render plan, playback route, Agent read, save, and reopen through the mapped interfaces.
+  - Exercise combined media/path reads through one AppCore runtime snapshot and Agent reads through the production CoreHandle rather than direct frontend or private Agent state mutation.
+  - Add a desktop contract test that opens one fixture and invokes media lookup, render-plan construction, playback media projection, Agent read/path resolution, save, and reopen through the mapped interfaces.
 
 #### requirement-b38818cf815e0f1e
 
@@ -647,15 +663,21 @@
 - Expected behavior: Project open assembles validated project/media/generation state without silent loss or placeholder dependencies.
 - Resolution: `reviewed-mapping-report:DS-project-open-composite-headings` — Core mapping report: four project-open umbrellas are composite acceptance over the legacy-default and generation-seed child slices, not independent top-one features.
 - Exact acceptance contract:
-  - Implement open ordering as validate bundle → load timeline/media/generation log → build deps/session → publish snapshot/events → start optional background work.
-  - On failure at every step, close already-created resources, publish no usable session, and preserve all project files unchanged.
-  - Fault-inject every open step and assert cleanup/event order, then open/save/reopen a valid and migrated fixture with identical IDs, frames, media, and generation history.
+  - Implement open ordering as validate bundle → load timeline/media/generation log → build candidate session → admit playback/prewarm transition → publish snapshot/events → activate epoch → allow optional background work.
+  - On every pre-commit failure, drop prepared capabilities, restore acquired transitions, publish no usable session, and preserve all project files unchanged.
+  - Fault-inject the owned failure boundaries and assert cleanup/event order, then open/save/reopen valid and migrated fixtures with identical IDs, frames, media, and generation history.
 
 - [ ] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-project/tests/upstream_compat.rs#exhaustive_legacy_default_matrix` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
   - `crates/opentake-core/tests/project_open.rs#missing_generation_log_seeds_manifest_provenance_once` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
   - `crates/opentake-core/tests/project_open.rs#project_open_composite_acceptance` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
+  - `crates/opentake-core/src/core.rs#deferred_apply_rejects_version_and_project_drift_without_mutation` (reviewed-added) — A long-running workflow cannot commit against a replaced or edited project.
+  - `crates/opentake-agent/src/mcp/core_handle.rs#app_core_media_path_stress_never_mixes_project_snapshots` (reviewed-added) — Stress concurrent project switching against production CoreHandle path resolution.
+  - `src-tauri/src/captions.rs#caption_commit_rejects_stale_project_revision` (reviewed-added) — Caption generation cannot write a stale result into a new project.
+  - `src-tauri/src/commands.rs#project_open_mapped_boundaries_composite_acceptance` (reviewed-added) — One committed fixture reaches UI media, render plan, playback projection, Agent, save, and reopen boundaries.
+  - `src-tauri/src/playback/commands.rs#prewarm_rejection_restores_active_playback_without_project_publish` (reviewed-added) — A rejected dependency restores incumbent playback without publishing the prepared project.
+  - `src-tauri/src/mcp.rs#transcript_batch_resolution_uses_one_snapshot_and_authoritative_types` (reviewed-added) — The production batch resolver uses one snapshot for every source and ignores stale caller type hints.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
@@ -664,18 +686,30 @@
   - Run: `cargo test -p opentake-project --test upstream_compat exhaustive_legacy_default_matrix -- --exact`
   - Run: `cargo test -p opentake-core --test project_open missing_generation_log_seeds_manifest_provenance_once -- --exact`
   - Run: `cargo test -p opentake-core --test project_open project_open_composite_acceptance -- --exact`
+  - Run: `cargo test -p opentake-core core::tests::deferred_apply_rejects_version_and_project_drift_without_mutation -- --exact`
+  - Run: `cargo test -p opentake-agent mcp::core_handle::tests::app_core_media_path_stress_never_mixes_project_snapshots -- --exact`
+  - Run: `cargo test -p opentake-tauri captions::tests::caption_commit_rejects_stale_project_revision -- --exact`
+  - Run: `cargo test -p opentake-tauri commands::project_prewarm_lifecycle_tests::project_open_mapped_boundaries_composite_acceptance -- --exact`
+  - Run: `cargo test -p opentake-tauri playback::commands::tests::prewarm_rejection_restores_active_playback_without_project_publish -- --exact`
+  - Run: `cargo test -p opentake-tauri mcp::tests::transcript_batch_resolution_uses_one_snapshot_and_authoritative_types -- --exact`
 
   Expected: FAIL because one or more of the 4 candidate-bound contracts are not yet satisfied.
 
 - [ ] **Step 3: Implement the minimal vertical slice**
 
-  Modify only `crates/opentake-project/src/bundle.rs#Project`, `crates/opentake-core/src/session.rs#EditorSession`, `crates/opentake-domain/src/media.rs#MediaManifest`, `crates/opentake-project/src/gen_log.rs#GenerationLogEntry`, `docs/specs/core/5-assembly.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
+  Modify only the files listed for Task 8 as required to satisfy every listed acceptance criterion, including atomic combined reads, visible success, and explicit failure/recovery behavior.
 
 - [ ] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-project --test upstream_compat exhaustive_legacy_default_matrix -- --exact`
   - Run: `cargo test -p opentake-core --test project_open missing_generation_log_seeds_manifest_provenance_once -- --exact`
   - Run: `cargo test -p opentake-core --test project_open project_open_composite_acceptance -- --exact`
+  - Run: `cargo test -p opentake-core core::tests::deferred_apply_rejects_version_and_project_drift_without_mutation -- --exact`
+  - Run: `cargo test -p opentake-agent mcp::core_handle::tests::app_core_media_path_stress_never_mixes_project_snapshots -- --exact`
+  - Run: `cargo test -p opentake-tauri captions::tests::caption_commit_rejects_stale_project_revision -- --exact`
+  - Run: `cargo test -p opentake-tauri commands::project_prewarm_lifecycle_tests::project_open_mapped_boundaries_composite_acceptance -- --exact`
+  - Run: `cargo test -p opentake-tauri playback::commands::tests::prewarm_rejection_restores_active_playback_without_project_publish -- --exact`
+  - Run: `cargo test -p opentake-tauri mcp::tests::transcript_batch_resolution_uses_one_snapshot_and_authoritative_types -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 

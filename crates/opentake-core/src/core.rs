@@ -407,8 +407,39 @@ impl AppCore {
     /// refresh; this includes undo/redo restoring a manifest snapshot. Unchanged
     /// commands (and rejected ones) emit nothing and do not move the version.
     pub fn apply(&self, command: EditCommand) -> Result<EditResult> {
+        self.apply_with_revision(command, None)
+    }
+
+    /// Apply a deferred edit only if the project session and document version
+    /// still match the snapshot from which the edit was derived.
+    ///
+    /// Long-running workflows such as transcription must not commit results
+    /// built from project A after another client has opened or edited project B.
+    /// The revision check and edit run under the same session lock, so there is
+    /// no check-then-apply race.
+    pub fn apply_at_revision(
+        &self,
+        expected: ProjectRevision,
+        command: EditCommand,
+    ) -> Result<EditResult> {
+        self.apply_with_revision(command, Some(expected))
+    }
+
+    fn apply_with_revision(
+        &self,
+        command: EditCommand,
+        expected: Option<ProjectRevision>,
+    ) -> Result<EditResult> {
         let (result, project_epoch, media_count) = {
             let mut session = self.lock();
+            if expected.is_some_and(|expected| {
+                session.project_epoch != expected.project_epoch
+                    || session.editor.version() != expected.version
+            }) {
+                return Err(CoreError::Media(
+                    "project changed while preparing a deferred edit".to_string(),
+                ));
+            }
             let result = session.editor.apply(command, self.ids.as_ref())?;
             let media_count = result
                 .manifest_changed
@@ -1335,6 +1366,43 @@ mod tests {
                 version: 1
             }]
         );
+    }
+
+    #[test]
+    fn deferred_apply_rejects_version_and_project_drift_without_mutation() {
+        let version_drift = core_with_track();
+        let expected = version_drift.project_revision();
+        version_drift.apply(add_one_clip()).unwrap();
+        let before = version_drift.runtime_snapshot();
+        let error = version_drift
+            .apply_at_revision(expected, add_one_clip())
+            .expect_err("stale document version must reject deferred edit");
+        assert_eq!(
+            error.to_string(),
+            "project changed while preparing a deferred edit"
+        );
+        let after = version_drift.runtime_snapshot();
+        assert_eq!(after.project_epoch, before.project_epoch);
+        assert_eq!(after.version, before.version);
+        assert_eq!(after.timeline, before.timeline);
+        assert_eq!(after.media, before.media);
+
+        let project_drift = core_with_track();
+        let expected = project_drift.project_revision();
+        project_drift.new_project();
+        let before = project_drift.runtime_snapshot();
+        let error = project_drift
+            .apply_at_revision(expected, add_one_clip())
+            .expect_err("stale project epoch must reject deferred edit");
+        assert_eq!(
+            error.to_string(),
+            "project changed while preparing a deferred edit"
+        );
+        let after = project_drift.runtime_snapshot();
+        assert_eq!(after.project_epoch, before.project_epoch);
+        assert_eq!(after.version, before.version);
+        assert_eq!(after.timeline, before.timeline);
+        assert_eq!(after.media, before.media);
     }
 
     #[test]

@@ -190,11 +190,13 @@ fn resolve_source_path(entry: &MediaManifestEntry, project_dir: Option<&Path>) -
     }
 }
 
-fn source_path_for_entry(core: &AppCore, entry: &MediaManifestEntry) -> Result<PathBuf, String> {
+fn source_path_for_entry(
+    entry: &MediaManifestEntry,
+    project_dir: Option<&Path>,
+) -> Result<PathBuf, String> {
     match &entry.source {
         MediaSource::External { absolute_path } => Ok(PathBuf::from(absolute_path)),
-        MediaSource::Project { relative_path } => core
-            .project_dir()
+        MediaSource::Project { relative_path } => project_dir
             .map(|base| base.join(relative_path))
             .ok_or_else(|| "project not saved; cannot resolve media path".into()),
     }
@@ -269,8 +271,9 @@ impl MediaListDto {
         skipped: Vec<String>,
         prewarm: Vec<ImportPrewarmDto>,
     ) -> Self {
-        let manifest = core.media();
-        let project_dir = core.project_dir();
+        let snapshot = core.runtime_snapshot();
+        let manifest = snapshot.media;
+        let project_dir = snapshot.project_dir;
         MediaListDto {
             items: manifest
                 .entries
@@ -2057,7 +2060,8 @@ pub fn extract_audio(
     // Path boundary check first (review #4): fail fast on a bad output path
     // before touching the manifest or spawning ffmpeg.
     let output = validate_extract_output(&out_path)?;
-    let manifest = core.media();
+    let snapshot = core.runtime_snapshot();
+    let manifest = snapshot.media;
     let entry = manifest
         .entries
         .iter()
@@ -2065,7 +2069,7 @@ pub fn extract_audio(
         .ok_or_else(|| format!("unknown media id: {media_id}"))?;
     let input = match &entry.source {
         MediaSource::External { absolute_path } => PathBuf::from(absolute_path),
-        MediaSource::Project { relative_path } => match core.project_dir() {
+        MediaSource::Project { relative_path } => match snapshot.project_dir {
             Some(base) => base.join(relative_path),
             None => return Err("project not saved; cannot resolve media path".into()),
         },
@@ -2139,13 +2143,14 @@ pub fn generate_thumbnail(
     max_frames: Option<usize>,
     include_sprite: Option<bool>,
 ) -> Result<ThumbnailDto, String> {
-    let manifest = core.media();
+    let snapshot = core.runtime_snapshot();
+    let manifest = snapshot.media;
     let entry = manifest
         .entries
         .iter()
         .find(|e| e.id == media_ref)
         .ok_or_else(|| format!("media not found: {media_ref}"))?;
-    let path = source_path_for_entry(&core, entry)?;
+    let path = source_path_for_entry(entry, snapshot.project_dir.as_deref())?;
     generate_thumbnail_for_entry(
         media.engine(),
         entry,
@@ -2179,7 +2184,8 @@ pub fn preview_poster(
     media_ref: String,
     time_secs: Option<f64>,
 ) -> Result<Option<String>, String> {
-    let manifest = core.media();
+    let snapshot = core.runtime_snapshot();
+    let manifest = snapshot.media;
     let entry = manifest
         .entries
         .iter()
@@ -2188,7 +2194,7 @@ pub fn preview_poster(
     if entry.kind != ClipType::Video {
         return Ok(None);
     }
-    let path = source_path_for_entry(&core, entry)?;
+    let path = source_path_for_entry(entry, snapshot.project_dir.as_deref())?;
     if !path.is_file() {
         return Err(format!("source file not found: {}", path.display()));
     }
@@ -2215,7 +2221,8 @@ pub fn get_waveform(
     media: State<'_, MediaState>,
     media_ref: String,
 ) -> Result<Vec<f32>, String> {
-    let manifest = core.media();
+    let snapshot = core.runtime_snapshot();
+    let manifest = snapshot.media;
     let entry = manifest
         .entries
         .iter()
@@ -2223,7 +2230,7 @@ pub fn get_waveform(
         .ok_or_else(|| format!("media not found: {media_ref}"))?;
     let path = match &entry.source {
         MediaSource::External { absolute_path } => PathBuf::from(absolute_path),
-        MediaSource::Project { relative_path } => match core.project_dir() {
+        MediaSource::Project { relative_path } => match snapshot.project_dir {
             Some(base) => base.join(relative_path),
             None => return Err("project not saved; cannot resolve media path".into()),
         },
