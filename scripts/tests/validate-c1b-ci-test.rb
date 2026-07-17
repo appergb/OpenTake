@@ -10,13 +10,14 @@ ROOT = File.expand_path("../..", __dir__)
 POLICY = JSON.parse(File.read(File.join(ROOT, "scripts/c1b-evidence-policy.json")))
 WORKFLOW = File.join(ROOT, ".github/workflows/ci.yml")
 VALIDATOR = File.join(ROOT, "scripts/validate-c1b-ci.rb")
+RED_HARNESS = File.join(ROOT, "scripts/run-c1b-windows-red.ps1")
 
 def assert(condition, message)
   raise message unless condition
 end
 
-def run_validator(path)
-  Open3.capture3(RbConfig.ruby, VALIDATOR, path)
+def run_validator(path, red_harness = RED_HARNESS)
+  Open3.capture3(RbConfig.ruby, VALIDATOR, path, red_harness)
 end
 
 assert(POLICY.fetch("schema") == "opentake-c1b-evidence-policy-v1", "policy schema")
@@ -34,6 +35,11 @@ assert(stdout.include?("c1b-ci-validation=ok"), "canonical success marker missin
 
 raw = File.read(WORKFLOW)
 assert(raw.include?(%q{printf ' %q' "$@"}), "native gate logs lack an exact command marker")
+red_harness_raw = File.read(RED_HARNESS)
+assert(
+  red_harness_raw.lines.map(&:strip).reject(&:empty?).last == "exit 0",
+  "Windows expected-RED harness does not clear expected native failures"
+)
 mutations = {
   "pr-uses-merge" => ["github.event.pull_request.head.sha", "github.sha"],
   "checkout-not-bound" => ["ref: ${{ env.TARGET_SHA }}", "ref: main"],
@@ -127,6 +133,31 @@ Dir.mktmpdir("c1b-ci-mutations") do |directory|
     File.write(path, mutated)
     _out, _err, result = run_validator(path)
     assert(!result.success?, "validator accepted mutation #{label}")
+  end
+
+  receipt_block = <<~'POWERSHELL'.chomp
+    } | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM `
+      (Join-Path $Evidence 'red-receipt.json')
+  POWERSHELL
+  harness_mutations = {
+    "missing-success-exit" => red_harness_raw.sub(/\nexit 0\s*\z/, "\n"),
+    "only-success-exit" => "exit 0\n",
+    "early-success-exit" => red_harness_raw.sub(
+      "Set-StrictMode -Version Latest",
+      "exit 0\nSet-StrictMode -Version Latest"
+    ),
+    "receipt-removed" => red_harness_raw.sub(receipt_block, "Write-Output 'receipt omitted'"),
+    "red-success-check-removed" => red_harness_raw.sub(
+      'if ($code -eq 0) { throw "RED unexpectedly passed: $Name" }',
+      'if ($code -eq 0) { return 0 }'
+    ),
+  }
+  harness_mutations.each do |label, mutated|
+    assert(mutated != red_harness_raw, "canonical harness mutation token missing: #{label}")
+    mutated_harness = File.join(directory, "#{label}.ps1")
+    File.write(mutated_harness, mutated)
+    _out, _err, result = run_validator(WORKFLOW, mutated_harness)
+    assert(!result.success?, "validator accepted RED harness mutation #{label}")
   end
 end
 
