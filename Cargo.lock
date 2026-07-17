@@ -3492,7 +3492,9 @@ version = "1.0.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
+ "libc",
  "opentake-domain",
+ "rustix",
  "same-file",
  "serde",
  "serde_ignored",

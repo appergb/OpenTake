@@ -1327,6 +1327,12 @@ All private tests live in `crates/opentake-project/src/safe_fs/tests.rs`. No dup
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
+static UNIX_TEST_SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+
+pub(super) fn serialize_unix_test() -> std::sync::MutexGuard<'static, ()> {
+    UNIX_TEST_SERIAL.get_or_init(|| Mutex::new(())).lock().expect("Unix safe_fs test mutex poisoned")
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::error::SecureFilesystemReason;
 
@@ -1446,7 +1452,7 @@ impl RaceGate {
 }
 ```
 
-The release build has neither race hooks, create/rollback-failure injection, nor probe injection: `test_seam` and every call to it are guarded by `#[cfg(test)]`. Real `fstatfs`/`fstatvfs`/`FS_IOC_GETFLAGS` and `MNT_LOCAL`/`_PC_CASE_SENSITIVE` probes remain the release path; injection feeds the same raw-value classifiers and the same `snapshot_from_root`/`revalidate_namespace` production path. Probe and create/rollback-failure tests use scoped in-process one-shot values, never sleeps, polling, mounts, or network filesystems.
+The release build has neither race hooks, create/rollback-failure injection, probe injection, nor the Unix test-serialization guard: `test_seam` and every call to it are guarded by `#[cfg(test)]`. Real `fstatfs`/`fstatvfs`/`FS_IOC_GETFLAGS` and `MNT_LOCAL`/`_PC_CASE_SENSITIVE` probes remain the release path; injection feeds the same raw-value classifiers and the same `snapshot_from_root`/`revalidate_namespace` production path. Probe and create/rollback-failure tests use scoped in-process one-shot values, never sleeps, polling, mounts, or network filesystems. Each `unix_contract` test holds `serialize_unix_test()` for its complete body, so ordinary parallel project/workspace gates cannot race the one-shot seam. Exact RED/GREEN receipts still pass `--test-threads=1` for deterministic output and retain every one-shot slot assertion.
 
 ### Required complete Unix test bodies
 
@@ -1535,6 +1541,7 @@ mod unix_contract {
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_filesystem_and_case_probe_matrix_is_enforced() {
+        let _serial = test_seam::serialize_unix_test();
         use super::super::capability::LinuxFilesystem;
         const EXT: i64 = 0x0000_ef53;
         const XFS: i64 = 0x5846_5342;
@@ -1566,6 +1573,7 @@ mod unix_contract {
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_revalidation_rejects_fsid_device_and_case_changes() {
+        let _serial = test_seam::serialize_unix_test();
         const EXT: i64 = 0x0000_ef53;
         const CASEFOLD: i64 = 0x4000_0000;
         let temp = TestDir::new("linux-probe-change");
@@ -1595,6 +1603,7 @@ mod unix_contract {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_local_and_case_probe_matrix_is_enforced() {
+        let _serial = test_seam::serialize_unix_test();
         const LOCAL: u32 = 0x0000_1000;
         for (raw_case, expected) in [(1, CaseMode::Sensitive), (0, CaseMode::Insensitive)] {
             let temp = TestDir::new("macos-local");
@@ -1611,6 +1620,7 @@ mod unix_contract {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_revalidation_rejects_fsid_device_and_case_changes() {
+        let _serial = test_seam::serialize_unix_test();
         const LOCAL: u32 = 0x0000_1000;
         let temp = TestDir::new("macos-probe-change");
         let baseline = macos_sample(LOCAL, 7, 11, 1);
@@ -1633,6 +1643,7 @@ mod unix_contract {
 
     #[test]
     fn recursive_authority_revalidates_anchor_and_entire_child_scope() {
+        let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("scope");
         std::fs::create_dir_all(temp.path().join("a/b")).expect("create tree");
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
@@ -1647,6 +1658,7 @@ mod unix_contract {
 
     #[test]
     fn query_symlink_fifo_and_special_entries_is_nonblocking_present_metadata() {
+        let _serial = test_seam::serialize_unix_test();
         use std::os::unix::fs::symlink;
         use std::process::Command;
         let temp = TestDir::new("query-special");
@@ -1662,6 +1674,7 @@ mod unix_contract {
 
     #[test]
     fn platform_dispatched_file_bytes_copy_seek_flush_and_sync() {
+        let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("bytes");
         std::fs::write(temp.path().join("source"), b"0123456789").expect("source");
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
@@ -1678,6 +1691,7 @@ mod unix_contract {
 
     #[test]
     fn post_create_metadata_failure_removes_new_file() {
+        let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("create-metadata-rollback");
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
         let _failure = test_seam::install_create_failure(test_seam::CreateFailurePoint::Metadata);
@@ -1692,6 +1706,7 @@ mod unix_contract {
 
     #[test]
     fn post_create_filesystem_failure_removes_new_file() {
+        let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("create-filesystem-rollback");
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
         let _failure = test_seam::install_create_failure(test_seam::CreateFailurePoint::FilesystemProbe);
@@ -1701,6 +1716,7 @@ mod unix_contract {
 
     #[test]
     fn post_create_case_failure_removes_new_directory() {
+        let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("create-case-rollback");
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
         let _failure = test_seam::install_create_failure(test_seam::CreateFailurePoint::CaseProof);
@@ -1710,6 +1726,7 @@ mod unix_contract {
 
     #[test]
     fn post_create_parent_duplicate_failure_removes_new_stage() {
+        let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("create-parent-dup-rollback");
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
         let _failure = test_seam::install_create_failure(test_seam::CreateFailurePoint::ParentDuplicate);
@@ -1719,6 +1736,7 @@ mod unix_contract {
 
     #[test]
     fn post_create_retained_identity_failure_returns_typed_fail_leak() {
+        let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("create-retained-identity-fail-leak");
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
         let _failure = test_seam::install_create_failure(test_seam::CreateFailurePoint::Metadata);
@@ -1731,6 +1749,7 @@ mod unix_contract {
 
     #[test]
     fn post_create_original_name_rebound_before_identity_check_is_preserved() {
+        let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("create-original-rebound");
         let root = Arc::new(capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture"));
         let _failure = test_seam::install_create_failure(test_seam::CreateFailurePoint::ParentDuplicate);
@@ -1753,6 +1772,7 @@ mod unix_contract {
 
     #[test]
     fn post_create_quarantine_move_failure_returns_typed_fail_leak() {
+        let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("create-quarantine-move-fail-leak");
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
         let _failure = test_seam::install_create_failure(test_seam::CreateFailurePoint::ParentDuplicate);
@@ -1765,6 +1785,7 @@ mod unix_contract {
 
     #[test]
     fn post_create_delete_failure_preserves_verified_quarantine() {
+        let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("create-delete-fail-leak");
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
         let _failure = test_seam::install_create_failure(test_seam::CreateFailurePoint::ParentDuplicate);
@@ -1782,6 +1803,7 @@ mod unix_contract {
 
     #[test]
     fn post_create_rebound_name_returns_typed_fail_leak_without_deletion() {
+        let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("create-rebound-fail-leak");
         let root = Arc::new(capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture"));
         let _failure = test_seam::install_create_failure(test_seam::CreateFailurePoint::ParentDuplicate);
@@ -1805,6 +1827,7 @@ mod unix_contract {
 
     #[test]
     fn post_create_quarantine_rebound_after_verification_is_not_deleted() {
+        let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("create-quarantine-rebound");
         let root = Arc::new(capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture"));
         let _failure = test_seam::install_create_failure(test_seam::CreateFailurePoint::ParentDuplicate);
@@ -1829,6 +1852,7 @@ mod unix_contract {
 
     #[test]
     fn nested_recursive_quarantine_cleanup_removes_files_symlink_fifo_and_directories() {
+        let _serial = test_seam::serialize_unix_test();
         use std::os::unix::fs::symlink;
         use std::process::Command;
         let temp = TestDir::new("nested-cleanup");
@@ -1846,6 +1870,7 @@ mod unix_contract {
 
     #[test]
     fn destination_collision_preserves_stage_and_every_destination_kind() {
+        let _serial = test_seam::serialize_unix_test();
         for kind in ["file", "empty-dir", "non-empty-dir", "symlink"] {
             let temp = TestDir::new(kind);
             let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
@@ -1864,6 +1889,7 @@ mod unix_contract {
 
     #[test]
     fn source_swap_before_quarantine_restores_without_deletion() {
+        let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("source-swap");
         let root = Arc::new(capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture"));
         let stage = create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly).expect("stage");
@@ -1885,6 +1911,7 @@ mod unix_contract {
 
     #[test]
     fn restore_collision_fail_leaks_original_and_quarantine() {
+        let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("restore-collision");
         let root = Arc::new(capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture"));
         let stage = create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly).expect("stage");
@@ -1908,6 +1935,7 @@ mod unix_contract {
 
     #[test]
     fn final_unix_name_window_is_explicit_same_account_boundary() {
+        let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("final-name-window");
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
         let stage = create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly).expect("stage");
@@ -1929,6 +1957,7 @@ mod unix_contract {
 
     #[test]
     fn cleanup_capability_records_identity_before_consuming_delete() {
+        let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("cleanup-identity");
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
         let stage = create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly).expect("stage");
@@ -2235,6 +2264,15 @@ GREEN_SHA=$(git rev-parse HEAD)
 ```
 
 Task 5 reports are `$SAFETY_ROOT/logs/c1b-task-5-$GREEN_SHA-attempt-$REVIEW_ATTEMPT/{spec-security-review.md,implementation-review.md}` and its RED receipt is `$SAFETY_ROOT/red/c1b-task-5-$TEST_SHA/receipt.txt`. Native intake is `$SAFETY_ROOT/branch-gates/c1b-task-5-$GREEN_SHA-<NONCE>/` with the same three-receipt validator protocol as Task 4. Both reviews bind the same 40-character SHA and state `APPROVE — Critical 0 / Important 0 / Minor 0`. Missing publication authority is `BLOCKED`; it is not permission to push or dispatch.
+
+Implementation reconciliation (2026-07-17): completion-audit Task 11 began at
+`32f90c89555b4515fdf904bebef22b2088af70c4`, where the Unix adapter still
+included `unsupported.rs` and none of the Task 4/5 Unix tests were collected.
+That convergence slice therefore restores the complete seven authority/I/O/probe,
+ten post-create rollback, and six consuming tests before replacing the adapter
+with sections 4–5. Native execution evidence from that implementation turn is
+macOS-only (21 collected Unix tests); the two Linux-only probe tests were
+cross-compiled, not executed natively, so a native Linux receipt remains required.
 
 ## 8. Residual platform limits
 

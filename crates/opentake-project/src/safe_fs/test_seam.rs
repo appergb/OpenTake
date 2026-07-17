@@ -1,6 +1,15 @@
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
+static UNIX_TEST_SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+
+pub(super) fn serialize_unix_test() -> std::sync::MutexGuard<'static, ()> {
+    UNIX_TEST_SERIAL
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("Unix safe_fs test mutex poisoned")
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::error::SecureFilesystemReason;
 
