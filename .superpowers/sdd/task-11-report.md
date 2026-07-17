@@ -44,7 +44,17 @@ Base revision: `32f90c89555b4515fdf904bebef22b2088af70c4`
 
 The common capability/ops facade and the Windows adapter were not modified.
 
-## RED evidence
+## RED evidence — post-hoc isolated replay only
+
+The original Task 11 turn did not create the normative separate test-only commit
+or durable receipt. Its interactive RED observations therefore do **not** satisfy
+the section-7 test-only-commit protocol. The later isolated, hash-bound replay is
+recorded in [`task-11-red-replay.md`](task-11-red-replay.md). It makes the failure
+boundaries reproducible without rewriting history, but does not cure the missing
+original protocol evidence; Task 11 remains `REJECTED/BLOCKED`.
+
+The following are the non-durable original interactive observations, retained
+only as context and not treated as protocol evidence.
 
 Before adding tests, `cargo test -p opentake-project --lib safe_fs::tests --
 --list` collected only the existing component test.
@@ -62,10 +72,11 @@ After adding the original tests but before changing production code:
   `nested_recursive_quarantine_cleanup_removes_files_symlink_fifo_and_directories`
   ran one test and exited 101 at capture with `UnsupportedTarget`.
 
-Each RED showed `running 1 test`, `0 passed; 1 failed`; no zero-test success was
-used as evidence.
+Each observation showed `running 1 test`, `0 passed; 1 failed`; the hash-bound
+post-hoc replay independently reproduced those markers, but no original receipt
+or test-only commit exists.
 
-Independent-review RED/GREEN:
+The replay also covers the independent-review RED/GREEN boundary:
 
 - Exact `read_parent_cannot_escalate_child_directory_access` and
   `read_parent_cannot_escalate_file_access` each ran once and exited 101 against
@@ -153,7 +164,9 @@ privileged/private namespace broker.
   records identity in a move-only capability and performs a final no-follow
   identity read before consuming deletion.
 - The final Unix read-to-name-syscall window remains explicit and is covered by
-  the same-account-boundary regression; no stronger handle-bound claim is made.
+  the same-account-boundary regression. It is name-linearized, outside the
+  approved threat boundary, and provides no no-data-loss guarantee against a
+  same-account namespace actor; no stronger handle-bound claim is made.
 - `Cargo.lock` contains only the two expected dependency-list additions.
 - `git diff --check` passed and all follow-up paths remain within the authorized
   Task 11 implementation, test, normative, ledger, and report scope.

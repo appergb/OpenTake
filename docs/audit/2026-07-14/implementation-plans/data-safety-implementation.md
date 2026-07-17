@@ -917,7 +917,7 @@ before namespace mutation; downstream algorithm tests use test-only trusted fixt
 - Exact acceptance contract:
   - crates/opentake-project/src/safe_fs/unix.rs no longer includes unsupported.rs and implements capability-relative no-follow acquisition, regular-file I/O/create, quarantine, no-replace publish, and recursive cleanup; production directory/stage create must typed-refuse before mutation.
   - The six named consuming mutation/cleanup regressions and directory-specific rollback regressions pass only through `#[cfg(test)]` trusted fixture creation; regular-file rollback and production directory/stage typed refusal pass against production Unix entry points.
-  - Symlink, FIFO, source-swap, identity-change, restore-collision, destination-collision, and cross-account/name-window cases fail closed without data loss.
+  - Symlink, FIFO, source-swap, identity-change, restore-collision, and destination-collision cases fail closed without data loss. The final Unix read-to-name-syscall window is name-linearized and outside the approved threat boundary; it does not provide a no-data-loss guarantee against a same-account namespace actor.
   - Rust workspace tests, warnings-denied clippy, and native macOS receipt gates
     pass on the exact reviewed tree. Linux cross-compilation is additive and
     does not replace the still-required native Linux receipt.
@@ -952,12 +952,14 @@ before namespace mutation; downstream algorithm tests use test-only trusted fixt
   - Run: `cargo test -p opentake-project nested_recursive_quarantine_cleanup_removes_files_symlink_fifo_and_directories`
   - Run: `cargo test -p opentake-project destination_collision_preserves_stage_and_every_destination_kind`
 
-  Observed before implementation: each exact macOS probe, post-create rollback,
-  and recursive-cleanup witness ran one test and failed against
-  `UnsupportedTarget`; collection was proven first with `-- --list`.
-  Independent review additionally observed exact one-test REDs for both access
-  escalations. Architecture reconciliation observed exact one-test REDs for both
-  production create refusals: the previous code created the names successfully.
+  The original interactive turn observed one-test failures but did not create
+  the required separate test-only commit or persistent receipt, so those
+  observations do not satisfy the normative RED protocol. A later hash-bound
+  isolated replay reproduced three original `UnsupportedTarget` failures, both
+  access-escalation failures, and both production create-refusal failures with
+  exact `exit=101`, `running 1 test`, and `0 passed; 1 failed` markers. See
+  `.superpowers/sdd/task-11-red-replay.md`. Post-hoc replay does not cure the
+  missing original protocol evidence, and the task remains blocked.
 
 - [ ] **Step 3: Implement the safe partial vertical slice — production contract rejected**
 
