@@ -76,6 +76,7 @@ def build_fixture(root, label)
   run_id = "424242"
   dispatcher_sha = "f" * 40
   dispatcher_ref = POLICY.fetch("dispatcher_ref")
+  dispatcher_branch = dispatcher_ref.delete_prefix("refs/heads/")
   File.write(File.join(gate, "run-id.txt"), "#{run_id}\n")
   File.write(File.join(gate, "pre-status.txt"), "")
   File.write(File.join(gate, "post-status.txt"), "")
@@ -103,7 +104,7 @@ def build_fixture(root, label)
     "id" => run_id.to_i, "run_attempt" => 1, "head_sha" => dispatcher_sha,
     "head_branch" => "main", "event" => "workflow_dispatch",
     "status" => "completed", "conclusion" => "success", "name" => "CI",
-    "path" => ".github/workflows/ci.yml@#{dispatcher_ref}",
+    "path" => ".github/workflows/ci.yml@#{dispatcher_branch}",
     "pull_requests" => [],
     "repository" => { "full_name" => POLICY.fetch("repository") },
   }
