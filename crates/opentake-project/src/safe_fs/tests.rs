@@ -114,6 +114,9 @@ mod unix_contract {
     use super::super::capability::CleanupCapability;
     use super::super::ops::{delete_quarantined_entry, open_cleanup_child_nofollow};
     use super::super::test_seam::{self, HookPoint, RaceGate};
+    use super::super::unix::{
+        create_dir_new_trusted_fixture, create_stage_dir_new_trusted_fixture,
+    };
     use super::super::*;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -397,6 +400,79 @@ mod unix_contract {
     }
 
     #[test]
+    fn read_parent_cannot_escalate_child_directory_access() {
+        let _serial = test_seam::serialize_unix_test();
+        let temp = TestDir::new("read-child-access");
+        std::fs::create_dir(temp.path().join("child")).expect("create child");
+        let root = capture_absolute_directory(temp.path(), DirectoryAccess::Read)
+            .expect("capture read authority");
+        open_dir_nofollow(&root, &name("child"), DirectoryAccess::Read)
+            .expect("read parent may open read child");
+        assert!(matches!(
+            open_dir_nofollow(&root, &name("child"), DirectoryAccess::MutateChildren),
+            Err(SafeFsError::AccessMismatch {
+                operation: SafeFsOperation::OpenDirectory
+            })
+        ));
+    }
+
+    #[test]
+    fn read_parent_cannot_escalate_file_access() {
+        let _serial = test_seam::serialize_unix_test();
+        let temp = TestDir::new("read-file-access");
+        std::fs::write(temp.path().join("leaf"), b"payload").expect("create file");
+        let root = capture_absolute_directory(temp.path(), DirectoryAccess::Read)
+            .expect("capture read authority");
+        open_file_nofollow(&root, &name("leaf"), FileAccess::Read)
+            .expect("read parent may open read file");
+        assert!(matches!(
+            open_file_nofollow(&root, &name("leaf"), FileAccess::ReadWrite),
+            Err(SafeFsError::AccessMismatch {
+                operation: SafeFsOperation::OpenFile
+            })
+        ));
+    }
+
+    #[test]
+    fn create_directory_typed_refuses_before_namespace_mutation() {
+        let _serial = test_seam::serialize_unix_test();
+        let temp = TestDir::new("create-directory-refusal");
+        let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren)
+            .expect("capture mutable authority");
+        assert!(matches!(
+            create_dir_new(
+                &root,
+                &name("created"),
+                CreatePermissions::OwnerOnly,
+                DirectoryAccess::Read
+            ),
+            Err(SafeFsError::UnsupportedAtomicPublish {
+                operation: SafeFsOperation::CreateDirectory,
+                reason: AtomicPublishReason::PrimitiveUnavailable
+            })
+        ));
+        assert_absent(&root, "created");
+        assert!(!temp.path().join("created").exists());
+    }
+
+    #[test]
+    fn create_stage_directory_typed_refuses_before_namespace_mutation() {
+        let _serial = test_seam::serialize_unix_test();
+        let temp = TestDir::new("create-stage-directory-refusal");
+        let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren)
+            .expect("capture mutable authority");
+        assert!(matches!(
+            create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly),
+            Err(SafeFsError::UnsupportedAtomicPublish {
+                operation: SafeFsOperation::CreateStageDirectory,
+                reason: AtomicPublishReason::PrimitiveUnavailable
+            })
+        ));
+        assert_absent(&root, "stage");
+        assert!(!temp.path().join("stage").exists());
+    }
+
+    #[test]
     fn query_symlink_fifo_and_special_entries_is_nonblocking_present_metadata() {
         let _serial = test_seam::serialize_unix_test();
         use std::os::unix::fs::symlink;
@@ -500,7 +576,7 @@ mod unix_contract {
             .expect("capture");
         let _failure = test_seam::install_create_failure(test_seam::CreateFailurePoint::CaseProof);
         assert!(matches!(
-            create_dir_new(
+            create_dir_new_trusted_fixture(
                 &root,
                 &name("created"),
                 CreatePermissions::OwnerOnly,
@@ -523,7 +599,11 @@ mod unix_contract {
         let _failure =
             test_seam::install_create_failure(test_seam::CreateFailurePoint::ParentDuplicate);
         assert!(matches!(
-            create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly),
+            create_stage_dir_new_trusted_fixture(
+                &root,
+                &name("stage"),
+                CreatePermissions::OwnerOnly,
+            ),
             Err(SafeFsError::Io {
                 operation: SafeFsOperation::OpenDirectory,
                 ..
@@ -568,7 +648,11 @@ mod unix_contract {
         let _hook = test_seam::install(gate.hook(HookPoint::BeforeCreatedRollbackInitialNameCheck));
         let worker_root = Arc::clone(&root);
         let worker = std::thread::spawn(move || {
-            create_stage_dir_new(&worker_root, &name("stage"), CreatePermissions::OwnerOnly)
+            create_stage_dir_new_trusted_fixture(
+                &worker_root,
+                &name("stage"),
+                CreatePermissions::OwnerOnly,
+            )
         });
         gate.wait_reached();
         let retained = temp.path().join("created-retained");
@@ -603,7 +687,11 @@ mod unix_contract {
         let _rollback =
             test_seam::install_rollback_failure(test_seam::RollbackFailurePoint::QuarantineMove);
         assert!(matches!(
-            create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly),
+            create_stage_dir_new_trusted_fixture(
+                &root,
+                &name("stage"),
+                CreatePermissions::OwnerOnly,
+            ),
             Err(SafeFsError::StageIdentityLost {
                 operation: SafeFsOperation::RollbackCreatedEntry,
                 reason: StageIdentityLostReason::CreatedRollbackQuarantineFailed
@@ -626,7 +714,11 @@ mod unix_contract {
         let _rollback =
             test_seam::install_rollback_failure(test_seam::RollbackFailurePoint::Delete);
         assert!(matches!(
-            create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly),
+            create_stage_dir_new_trusted_fixture(
+                &root,
+                &name("stage"),
+                CreatePermissions::OwnerOnly,
+            ),
             Err(SafeFsError::StageIdentityLost {
                 operation: SafeFsOperation::RollbackCreatedEntry,
                 reason: StageIdentityLostReason::CreatedRollbackDeleteFailed
@@ -663,7 +755,11 @@ mod unix_contract {
         let _hook = test_seam::install(gate.hook(HookPoint::BeforeCreatedRollbackQuarantine));
         let worker_root = Arc::clone(&root);
         let worker = std::thread::spawn(move || {
-            create_stage_dir_new(&worker_root, &name("stage"), CreatePermissions::OwnerOnly)
+            create_stage_dir_new_trusted_fixture(
+                &worker_root,
+                &name("stage"),
+                CreatePermissions::OwnerOnly,
+            )
         });
         gate.wait_reached();
         std::fs::rename(
@@ -717,7 +813,11 @@ mod unix_contract {
             test_seam::install(gate.hook(HookPoint::AfterCreatedRollbackVerifyBeforeDelete));
         let worker_root = Arc::clone(&root);
         let worker = std::thread::spawn(move || {
-            create_stage_dir_new(&worker_root, &name("stage"), CreatePermissions::OwnerOnly)
+            create_stage_dir_new_trusted_fixture(
+                &worker_root,
+                &name("stage"),
+                CreatePermissions::OwnerOnly,
+            )
         });
         gate.wait_reached();
         let quarantine = std::fs::read_dir(temp.path())
@@ -761,11 +861,17 @@ mod unix_contract {
         let temp = TestDir::new("nested-cleanup");
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren)
             .expect("capture");
-        let stage = create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly)
-            .expect("create stage");
+        let stage = create_stage_dir_new_trusted_fixture(
+            &root,
+            &name("stage"),
+            CreatePermissions::OwnerOnly,
+        )
+        .expect("create trusted stage fixture");
         std::fs::create_dir_all(temp.path().join("stage/a/b")).expect("nested dirs");
         std::fs::write(temp.path().join("stage/a/file"), b"payload").expect("file");
-        symlink("file", temp.path().join("stage/a/link")).expect("symlink");
+        let canary = temp.path().join("outside-canary");
+        std::fs::write(&canary, b"outside-payload").expect("outside canary");
+        symlink(&canary, temp.path().join("stage/a/link")).expect("external symlink");
         assert!(Command::new("mkfifo")
             .arg(temp.path().join("stage/a/b/pipe"))
             .status()
@@ -780,6 +886,10 @@ mod unix_contract {
             .path()
             .join(".opentake-quarantine-0123456789abcdef")
             .exists());
+        assert_eq!(
+            std::fs::read(canary).expect("outside canary preserved"),
+            b"outside-payload"
+        );
     }
 
     #[test]
@@ -789,8 +899,12 @@ mod unix_contract {
             let temp = TestDir::new(kind);
             let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren)
                 .expect("capture");
-            let stage = create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly)
-                .expect("stage");
+            let stage = create_stage_dir_new_trusted_fixture(
+                &root,
+                &name("stage"),
+                CreatePermissions::OwnerOnly,
+            )
+            .expect("trusted stage fixture");
             match kind {
                 "file" => {
                     std::fs::write(temp.path().join("destination"), b"existing").expect("file")
@@ -812,6 +926,30 @@ mod unix_contract {
                 })
             ));
             assert!(temp.path().join("stage").is_dir());
+            let destination = temp.path().join("destination");
+            match kind {
+                "file" => assert_eq!(
+                    std::fs::read(destination).expect("destination file preserved"),
+                    b"existing"
+                ),
+                "empty-dir" => assert!(
+                    destination.is_dir()
+                        && std::fs::read_dir(destination)
+                            .expect("read empty destination")
+                            .next()
+                            .is_none(),
+                    "empty destination directory must remain empty"
+                ),
+                "non-empty-dir" => assert_eq!(
+                    std::fs::read(destination.join("child")).expect("destination child preserved"),
+                    b"existing"
+                ),
+                "symlink" => assert_eq!(
+                    std::fs::read_link(destination).expect("destination symlink preserved"),
+                    std::path::PathBuf::from("target")
+                ),
+                _ => unreachable!(),
+            }
         }
     }
 
@@ -823,8 +961,12 @@ mod unix_contract {
             capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren)
                 .expect("capture"),
         );
-        let stage = create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly)
-            .expect("stage");
+        let stage = create_stage_dir_new_trusted_fixture(
+            &root,
+            &name("stage"),
+            CreatePermissions::OwnerOnly,
+        )
+        .expect("trusted stage fixture");
         std::fs::write(temp.path().join("stage/expected"), b"expected").expect("expected file");
         let gate = RaceGate::new();
         let _guard = test_seam::install(gate.hook(HookPoint::BeforeQuarantineRename));
@@ -875,8 +1017,12 @@ mod unix_contract {
             capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren)
                 .expect("capture"),
         );
-        let stage = create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly)
-            .expect("stage");
+        let stage = create_stage_dir_new_trusted_fixture(
+            &root,
+            &name("stage"),
+            CreatePermissions::OwnerOnly,
+        )
+        .expect("trusted stage fixture");
         std::fs::write(temp.path().join("stage/expected"), b"expected").expect("expected file");
         std::fs::rename(
             temp.path().join("stage"),
@@ -932,8 +1078,12 @@ mod unix_contract {
         let temp = TestDir::new("final-name-window");
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren)
             .expect("capture");
-        let stage = create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly)
-            .expect("stage");
+        let stage = create_stage_dir_new_trusted_fixture(
+            &root,
+            &name("stage"),
+            CreatePermissions::OwnerOnly,
+        )
+        .expect("trusted stage fixture");
         std::fs::write(temp.path().join("stage/leaf"), b"expected").expect("expected leaf");
         let quarantined = quarantine_stage(stage, &root, name(".opentake-quarantine-final-window"))
             .expect("quarantine");
@@ -970,8 +1120,12 @@ mod unix_contract {
         let temp = TestDir::new("cleanup-identity");
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren)
             .expect("capture");
-        let stage = create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly)
-            .expect("stage");
+        let stage = create_stage_dir_new_trusted_fixture(
+            &root,
+            &name("stage"),
+            CreatePermissions::OwnerOnly,
+        )
+        .expect("trusted stage fixture");
         std::fs::write(temp.path().join("stage/leaf"), b"leaf").expect("leaf");
         let quarantined = quarantine_stage(stage, &root, name(".opentake-quarantine-identity"))
             .expect("quarantine");

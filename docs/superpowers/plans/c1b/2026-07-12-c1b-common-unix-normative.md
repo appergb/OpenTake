@@ -1,19 +1,19 @@
 # C1B Common and Unix Normative Implementation Appendix
 
-Status: normative, repository-versioned, attempt-6 implementation contract. It is bound to approved design `31bfd57e40e3a2bd0ca42b331e5aa877db2d6ace` and C1A baseline `e67917260ace36e4db1ede4e36eecbc401825bb1`. This appendix contains the complete common facade, unsupported adapter, Unix ownership model, deterministic tests, and executable RED/GREEN evidence protocol. There is no second Windows-only facade.
+Status: normative, repository-versioned, attempt-6 implementation contract, with the 2026-07-17 portable-Unix directory-create reconciliation. It is bound to approved design `31bfd57e40e3a2bd0ca42b331e5aa877db2d6ace` and C1A baseline `e67917260ace36e4db1ede4e36eecbc401825bb1`. Linux and macOS have no portable primitive that atomically creates a directory and returns the identity-bearing descriptor for that exact object; consequently the production Unix directory/stage-create contract is `REJECTED/BLOCKED` and typed-refuses before namespace mutation. This appendix contains the complete common facade, unsupported adapter, reconciled Unix ownership model, deterministic tests, and executable RED/GREEN evidence protocol. There is no second Windows-only facade.
 
 ## 1. Invariants and threat-boundary contract
 
 1. The only opaque platform seams are `NativeNamespaceAnchor`, `NativeDirectory`, and `NativeFile`. No raw descriptor or HANDLE crosses `safe_fs`.
-2. `DirectoryAuthority` is recursive. Capture, child open, and child create return the same type. Its `NamespaceSnapshot` contains the global-root row, every absolute anchor component, and every subsequently opened child component. Each row records raw name, stable identity, filesystem snapshot, and case mode. Revalidation rewalks the entire chain from a fresh global root and compares every row.
-3. `DirectoryAccess::{Read, MutateChildren, Stage}`, `FileAccess::{Read, ReadWrite}`, and `CleanupAccess::Delete` are explicit common-contract values. Platform adapters reject an operation if the retained native authority lacks its access.
+2. `DirectoryAuthority` is recursive for capture and child open. The common child-create facade retains the same return type, but production Unix directory/stage create typed-refuses because `mkdirat` does not return an identity-bearing descriptor and a later name open cannot prove it acquired the object that was created. Its `NamespaceSnapshot` contains the global-root row, every absolute anchor component, and every subsequently opened child component. Each row records raw name, stable identity, filesystem snapshot, and case mode. Revalidation rewalks the entire chain from a fresh global root and compares every row.
+3. `DirectoryAccess::{Read, MutateChildren, Stage}`, `FileAccess::{Read, ReadWrite}`, and `CleanupAccess::Delete` are explicit common-contract values. Authority is monotonic: a `Read` parent may open only a `Read` child directory or `Read` file and can never derive `MutateChildren` or `ReadWrite`; exact escalation attempts return `AccessMismatch` for `OpenDirectory` or `OpenFile`. Platform adapters reject every other operation if the retained native authority lacks its access.
 4. `FileCapability` owns `platform::NativeFile`. Read, write, seek, flush, sync, and metadata all dispatch through `platform`; common code never assumes `std::fs::File`. On Windows these calls use the retained synchronous HANDLE and a fresh IOSB for every NT call.
 5. `StageCapability`, `QuarantinedCapability`, and `CleanupCapability` are move-only. They retain parent authority, raw component name, opened identity, filesystem/case provenance, and access. Windows keeps the same DELETE-capable HANDLE from create/open through rename/delete. Unix keeps retained parent descriptors and the source name, performs quarantine no-replace, reopens the quarantine component nofollow, verifies identity, and otherwise restores no-replace or fail-leaks.
 6. `query_child_nofollow` returns `Ok(ChildState::Present(metadata))` for symlinks, reparse points, FIFOs, sockets, and devices. Unix performs `statat(..., SYMLINK_NOFOLLOW)` only; it never opens a FIFO/device merely to answer a query.
 7. Root quarantine and final publish are atomic no-replace name operations. Unix `renameat2(RENAME_NOREPLACE)` or `renameatx_np(RENAME_EXCL)` is the linearization point. There is no check-then-rename substitute.
 8. Unix cannot bind `unlinkat` or the source side of rename atomically to an earlier inode handle. After verified root quarantine, recursive cleanup performs a fresh nofollow identity read immediately before each name syscall. That final same-account race is outside the approved threat boundary and is never described as handle-bound. Mismatch, ambiguity, or restore collision fails closed and retains the quarantine.
 9. Recursive cleanup never joins an ambient path. Enumeration validates and returns every child component name, including symlink/reparse and special-entry names, without following it or granting authority. Validation callers query/reject nofollow metadata; cleanup opens/records each returned child relative to the retained quarantined authority, recursively consumes child cleanup capabilities, then consumes the empty root capability.
-10. A successful `mkdirat` or `openat(CREATE|EXCL)` never returns an ordinary validation error while silently leaving a new name. Once a retained fd exists, rollback derives the created identity from that fd, moves only the still-matching name to a fresh same-parent random quarantine with no-replace semantics, verifies the quarantine name against the retained identity, then removes the empty directory or new file. If retained identity cannot be established, the original name was rebound, quarantine verification loses identity, or removal cannot be proved, rollback does not delete an unproven name and returns `StageIdentityLost` with a post-create reason. This is the only approved post-create fail-leak contract.
+10. Production Unix regular-file `openat(CREATE|EXCL)` retains the created fd and never returns an ordinary validation error while silently leaving a new name. Its rollback derives identity from that fd, moves only the still-matching name to a fresh same-parent random quarantine with no-replace semantics, verifies the quarantine name, then removes the file; ambiguity returns typed `StageIdentityLost` and fail-leaks. Directory/stage `mkdirat` followed by `openat` cannot establish the same identity chain, so production typed-refuses before `mkdirat`. The legacy directory rollback body exists only as `#[cfg(test)]` `*_trusted_fixture`; it tests downstream rollback/quarantine/publish/cleanup algorithms and is not production directory-create evidence.
 
 ## 2. Complete common source
 
@@ -664,7 +664,7 @@ use rustix::fd::{AsFd, OwnedFd};
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, RenameFlags};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path};
 use std::sync::Arc;
@@ -672,8 +672,10 @@ use std::sync::Arc;
 const DIR_FLAGS: OFlags = OFlags::RDONLY.union(OFlags::DIRECTORY).union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
 const FILE_READ_FLAGS: OFlags = OFlags::RDONLY.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
 const FILE_RW_FLAGS: OFlags = OFlags::RDWR.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
+#[cfg(test)]
 const OWNER_DIR_MODE: Mode = Mode::RUSR.union(Mode::WUSR).union(Mode::XUSR);
 const OWNER_FILE_MODE: Mode = Mode::RUSR.union(Mode::WUSR);
+#[cfg(test)]
 const INHERIT_DIR_MODE: Mode = Mode::RUSR.union(Mode::WUSR).union(Mode::XUSR).union(Mode::RGRP).union(Mode::WGRP).union(Mode::XGRP).union(Mode::ROTH).union(Mode::WOTH).union(Mode::XOTH);
 const INHERIT_FILE_MODE: Mode = Mode::RUSR.union(Mode::WUSR).union(Mode::RGRP).union(Mode::WGRP).union(Mode::ROTH).union(Mode::WOTH);
 #[cfg(target_os = "linux")]
@@ -819,6 +821,8 @@ fn probe_case_mode(fd: impl AsFd, metadata: &EntryMetadata, operation: SafeFsOpe
     }
     let ext_flags = if family == LinuxFilesystem::Ext {
         let mut flags: libc::c_long = 0;
+        // SAFETY: `flags` points to writable storage of the exact kernel ABI type, and the
+        // retained descriptor refers to the directory whose ext flags are being queried.
         let result = unsafe { libc::ioctl(fd.as_fd().as_raw_fd(), FS_IOC_GETFLAGS, &mut flags) };
         if result < 0 { Err(SecureFilesystemReason::CaseSemanticsUnavailable) } else { Ok(flags) }
     } else {
@@ -837,7 +841,10 @@ fn probe_case_mode(fd: impl AsFd, _: &EntryMetadata, operation: SafeFsOperation)
             super::test_seam::UnixProbeSample::Linux { .. } => Err(SafeFsError::UnsupportedSecureFilesystem { operation, reason: SecureFilesystemReason::CaseSemanticsUnavailable }),
         };
     }
-    macos_case_from_raw(unsafe { libc::fpathconf(fd.as_fd().as_raw_fd(), libc::_PC_CASE_SENSITIVE) }, operation)
+    // SAFETY: the retained descriptor is valid for this call and `_PC_CASE_SENSITIVE` does
+    // not require an output buffer; `fpathconf` reports the value directly.
+    let case_sensitive = unsafe { libc::fpathconf(fd.as_fd().as_raw_fd(), libc::_PC_CASE_SENSITIVE) };
+    macos_case_from_raw(case_sensitive, operation)
 }
 
 fn name_metadata(parent: &DirectoryAuthority, name: &ComponentName, operation: SafeFsOperation) -> Result<ChildState> {
@@ -941,7 +948,7 @@ fn opened_child_directory(parent: &DirectoryAuthority, name: &ComponentName, acc
 }
 
 pub(super) fn open_dir_nofollow(parent: &DirectoryAuthority, name: &ComponentName, access: DirectoryAccess) -> Result<DirectoryAuthority> {
-    if access == DirectoryAccess::Stage { return Err(SafeFsError::AccessMismatch { operation: SafeFsOperation::OpenDirectory }); }
+    if access == DirectoryAccess::Stage || (parent.access == DirectoryAccess::Read && access != DirectoryAccess::Read) { return Err(SafeFsError::AccessMismatch { operation: SafeFsOperation::OpenDirectory }); }
     opened_child_directory(parent, name, access, SafeFsOperation::OpenDirectory)
 }
 
@@ -954,12 +961,14 @@ fn open_regular(parent: &DirectoryAuthority, name: &ComponentName, access: FileA
     })?;
     let opened = opened_metadata(&fd, operation)?;
     if opened.kind != EntryKind::RegularFile { return Err(SafeFsError::UnsupportedEntryType { operation, kind: opened.kind }); }
-    let raw = fd.into_raw_fd();
-    let file = unsafe { File::from_raw_fd(raw) };
+    let file = File::from(fd);
     Ok(FileCapability { native: NativeFile::Open(file), access, opened })
 }
 
-pub(super) fn open_file_nofollow(parent: &DirectoryAuthority, name: &ComponentName, access: FileAccess) -> Result<FileCapability> { open_regular(parent, name, access, SafeFsOperation::OpenFile) }
+pub(super) fn open_file_nofollow(parent: &DirectoryAuthority, name: &ComponentName, access: FileAccess) -> Result<FileCapability> {
+    if parent.access == DirectoryAccess::Read && access != FileAccess::Read { return Err(SafeFsError::AccessMismatch { operation: SafeFsOperation::OpenFile }); }
+    open_regular(parent, name, access, SafeFsOperation::OpenFile)
+}
 
 #[cfg(test)]
 fn injected_create_failure(operation: SafeFsOperation, point: super::test_seam::CreateFailurePoint) -> Result<()> {
@@ -986,6 +995,7 @@ fn created_metadata(fd: &OwnedFd, stat: &rustix::fs::Stat, operation: SafeFsOper
     opened_metadata_from_stat(fd, stat, operation)
 }
 
+#[cfg(test)]
 fn created_case_mode(fd: &OwnedFd, metadata: &EntryMetadata, operation: SafeFsOperation) -> Result<CaseMode> {
     #[cfg(test)]
     injected_create_failure(operation, super::test_seam::CreateFailurePoint::CaseProof)?;
@@ -1120,11 +1130,13 @@ fn rollback_created(
     original_error
 }
 
+#[cfg(test)]
 fn open_created_directory(parent: &DirectoryAuthority, name: &ComponentName) -> Result<OwnedFd> {
     rustix::fs::openat(&parent.native.fd, name.as_os_str(), DIR_FLAGS, Mode::empty())
         .map_err(|_| created_fail_leak(StageIdentityLostReason::CreatedObjectIdentityUnavailable))
 }
 
+#[cfg(test)]
 fn validate_created_directory(
     parent: &DirectoryAuthority,
     name: &ComponentName,
@@ -1144,7 +1156,12 @@ fn validate_created_directory(
     Ok((opened, case_mode, snapshot))
 }
 
-pub(super) fn create_dir_new(parent: &DirectoryAuthority, name: &ComponentName, permissions: CreatePermissions, access: DirectoryAccess) -> Result<DirectoryAuthority> {
+pub(super) fn create_dir_new(_parent: &DirectoryAuthority, _name: &ComponentName, _permissions: CreatePermissions, _access: DirectoryAccess) -> Result<DirectoryAuthority> {
+    Err(SafeFsError::UnsupportedAtomicPublish { operation: SafeFsOperation::CreateDirectory, reason: AtomicPublishReason::PrimitiveUnavailable })
+}
+
+#[cfg(test)]
+pub(super) fn create_dir_new_trusted_fixture(parent: &DirectoryAuthority, name: &ComponentName, permissions: CreatePermissions, access: DirectoryAccess) -> Result<DirectoryAuthority> {
     require_parent(parent, SafeFsOperation::CreateDirectory)?;
     if access == DirectoryAccess::Stage { return Err(SafeFsError::AccessMismatch { operation: SafeFsOperation::CreateDirectory }); }
     let mode = if permissions == CreatePermissions::OwnerOnly { OWNER_DIR_MODE } else { INHERIT_DIR_MODE };
@@ -1154,7 +1171,12 @@ pub(super) fn create_dir_new(parent: &DirectoryAuthority, name: &ComponentName, 
     Ok(DirectoryAuthority { anchor: Arc::clone(&parent.anchor), native: NativeDirectory { fd }, access, opened, case_mode, snapshot })
 }
 
-pub(super) fn create_stage_dir_new(parent: &DirectoryAuthority, name: &ComponentName, permissions: CreatePermissions) -> Result<StageCapability> {
+pub(super) fn create_stage_dir_new(_parent: &DirectoryAuthority, _name: &ComponentName, _permissions: CreatePermissions) -> Result<StageCapability> {
+    Err(SafeFsError::UnsupportedAtomicPublish { operation: SafeFsOperation::CreateStageDirectory, reason: AtomicPublishReason::PrimitiveUnavailable })
+}
+
+#[cfg(test)]
+pub(super) fn create_stage_dir_new_trusted_fixture(parent: &DirectoryAuthority, name: &ComponentName, permissions: CreatePermissions) -> Result<StageCapability> {
     require_parent(parent, SafeFsOperation::CreateStageDirectory)?;
     let mode = if permissions == CreatePermissions::OwnerOnly { OWNER_DIR_MODE } else { INHERIT_DIR_MODE };
     rustix::fs::mkdirat(&parent.native.fd, name.as_os_str(), mode).map_err(|error| match error { rustix::io::Errno::EXIST => SafeFsError::AlreadyExists { operation: SafeFsOperation::CreateStageDirectory }, other => io(SafeFsOperation::CreateStageDirectory, other) })?;
@@ -1184,7 +1206,7 @@ pub(super) fn create_file_new(parent: &DirectoryAuthority, name: &ComponentName,
     }
     let opened = created_metadata(&fd, &stat, SafeFsOperation::CreateFile)
         .map_err(|error| rollback_created(parent, name, &fd, Some(expected), EntryKind::RegularFile, error))?;
-    let file = unsafe { File::from_raw_fd(fd.into_raw_fd()) };
+    let file = File::from(fd);
     Ok(FileCapability { native: NativeFile::Open(file), access: FileAccess::ReadWrite, opened })
 }
 
@@ -1317,7 +1339,7 @@ pub(super) fn delete_quarantined_empty_directory(directory: QuarantinedCapabilit
 }
 ```
 
-The Unix implementation has no path fallback. `NativeFile::NameOnly` is intentionally not byte-readable; it exists so special-node cleanup remains nonblocking while retaining parent/name/identity provenance. `StageCapability.directory.native` and Windows `CleanupEntry.native` remain the originally acquired handles; boxing the two cleanup enum payloads changes only layout, and the common wrapper never replaces the move-only handles.
+The Unix implementation has no path fallback. Production `create_dir_new` and `create_stage_dir_new` typed-refuse before mutation because portable Linux/macOS offers no atomic mkdir-and-return-fd primitive; randomizing the created name only moves the race and still cannot prove identity. Their `#[cfg(test)]` `*_trusted_fixture` counterparts are reachable only from this private test module and seed downstream algorithm tests; those tests do not establish production directory-create support. `NativeFile::NameOnly` is intentionally not byte-readable; it exists so special-node cleanup remains nonblocking while retaining parent/name/identity provenance. `StageCapability.directory.native` and Windows `CleanupEntry.native` remain the originally acquired handles; boxing the two cleanup enum payloads changes only layout, and the common wrapper never replaces the move-only handles.
 
 ## 5. Deterministic seam and single test location
 
@@ -1506,6 +1528,7 @@ mod unix_contract {
     use super::super::capability::CleanupCapability;
     use super::super::ops::{delete_quarantined_entry, open_cleanup_child_nofollow};
     use super::super::test_seam::{self, HookPoint, RaceGate};
+    use super::super::unix::{create_dir_new_trusted_fixture, create_stage_dir_new_trusted_fixture};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
@@ -1657,6 +1680,46 @@ mod unix_contract {
     }
 
     #[test]
+    fn read_parent_cannot_escalate_child_directory_access() {
+        let _serial = test_seam::serialize_unix_test();
+        let temp = TestDir::new("read-child-access");
+        std::fs::create_dir(temp.path().join("child")).expect("create child");
+        let root = capture_absolute_directory(temp.path(), DirectoryAccess::Read).expect("capture read authority");
+        open_dir_nofollow(&root, &name("child"), DirectoryAccess::Read).expect("read parent may open read child");
+        assert!(matches!(open_dir_nofollow(&root, &name("child"), DirectoryAccess::MutateChildren), Err(SafeFsError::AccessMismatch { operation: SafeFsOperation::OpenDirectory })));
+    }
+
+    #[test]
+    fn read_parent_cannot_escalate_file_access() {
+        let _serial = test_seam::serialize_unix_test();
+        let temp = TestDir::new("read-file-access");
+        std::fs::write(temp.path().join("leaf"), b"payload").expect("create file");
+        let root = capture_absolute_directory(temp.path(), DirectoryAccess::Read).expect("capture read authority");
+        open_file_nofollow(&root, &name("leaf"), FileAccess::Read).expect("read parent may open read file");
+        assert!(matches!(open_file_nofollow(&root, &name("leaf"), FileAccess::ReadWrite), Err(SafeFsError::AccessMismatch { operation: SafeFsOperation::OpenFile })));
+    }
+
+    #[test]
+    fn create_directory_typed_refuses_before_namespace_mutation() {
+        let _serial = test_seam::serialize_unix_test();
+        let temp = TestDir::new("create-directory-refusal");
+        let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture mutable authority");
+        assert!(matches!(create_dir_new(&root, &name("created"), CreatePermissions::OwnerOnly, DirectoryAccess::Read), Err(SafeFsError::UnsupportedAtomicPublish { operation: SafeFsOperation::CreateDirectory, reason: AtomicPublishReason::PrimitiveUnavailable })));
+        assert_absent(&root, "created");
+        assert!(!temp.path().join("created").exists());
+    }
+
+    #[test]
+    fn create_stage_directory_typed_refuses_before_namespace_mutation() {
+        let _serial = test_seam::serialize_unix_test();
+        let temp = TestDir::new("create-stage-directory-refusal");
+        let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture mutable authority");
+        assert!(matches!(create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly), Err(SafeFsError::UnsupportedAtomicPublish { operation: SafeFsOperation::CreateStageDirectory, reason: AtomicPublishReason::PrimitiveUnavailable })));
+        assert_absent(&root, "stage");
+        assert!(!temp.path().join("stage").exists());
+    }
+
+    #[test]
     fn query_symlink_fifo_and_special_entries_is_nonblocking_present_metadata() {
         let _serial = test_seam::serialize_unix_test();
         use std::os::unix::fs::symlink;
@@ -1720,7 +1783,7 @@ mod unix_contract {
         let temp = TestDir::new("create-case-rollback");
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
         let _failure = test_seam::install_create_failure(test_seam::CreateFailurePoint::CaseProof);
-        assert!(matches!(create_dir_new(&root, &name("created"), CreatePermissions::OwnerOnly, DirectoryAccess::Read), Err(SafeFsError::Io { operation: SafeFsOperation::CreateDirectory, .. })));
+        assert!(matches!(create_dir_new_trusted_fixture(&root, &name("created"), CreatePermissions::OwnerOnly, DirectoryAccess::Read), Err(SafeFsError::Io { operation: SafeFsOperation::CreateDirectory, .. })));
         assert_absent(&root, "created");
     }
 
@@ -1730,7 +1793,11 @@ mod unix_contract {
         let temp = TestDir::new("create-parent-dup-rollback");
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
         let _failure = test_seam::install_create_failure(test_seam::CreateFailurePoint::ParentDuplicate);
-        assert!(matches!(create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly), Err(SafeFsError::Io { operation: SafeFsOperation::OpenDirectory, .. })));
+        assert!(matches!(create_stage_dir_new_trusted_fixture(
+            &root,
+            &name("stage"),
+            CreatePermissions::OwnerOnly,
+        ), Err(SafeFsError::Io { operation: SafeFsOperation::OpenDirectory, .. })));
         assert_absent(&root, "stage");
     }
 
@@ -1756,7 +1823,7 @@ mod unix_contract {
         let gate = RaceGate::new();
         let _hook = test_seam::install(gate.hook(HookPoint::BeforeCreatedRollbackInitialNameCheck));
         let worker_root = Arc::clone(&root);
-        let worker = std::thread::spawn(move || create_stage_dir_new(&worker_root, &name("stage"), CreatePermissions::OwnerOnly));
+        let worker = std::thread::spawn(move || create_stage_dir_new_trusted_fixture(&worker_root, &name("stage"), CreatePermissions::OwnerOnly));
         gate.wait_reached();
         let retained = temp.path().join("created-retained");
         std::fs::rename(temp.path().join("stage"), &retained).expect("retain created directory");
@@ -1777,7 +1844,11 @@ mod unix_contract {
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
         let _failure = test_seam::install_create_failure(test_seam::CreateFailurePoint::ParentDuplicate);
         let _rollback = test_seam::install_rollback_failure(test_seam::RollbackFailurePoint::QuarantineMove);
-        assert!(matches!(create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly),
+        assert!(matches!(create_stage_dir_new_trusted_fixture(
+            &root,
+            &name("stage"),
+            CreatePermissions::OwnerOnly,
+        ),
             Err(SafeFsError::StageIdentityLost { operation: SafeFsOperation::RollbackCreatedEntry,
                 reason: StageIdentityLostReason::CreatedRollbackQuarantineFailed })));
         assert!(temp.path().join("stage").is_dir(), "failed quarantine must preserve original name");
@@ -1790,7 +1861,11 @@ mod unix_contract {
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
         let _failure = test_seam::install_create_failure(test_seam::CreateFailurePoint::ParentDuplicate);
         let _rollback = test_seam::install_rollback_failure(test_seam::RollbackFailurePoint::Delete);
-        assert!(matches!(create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly),
+        assert!(matches!(create_stage_dir_new_trusted_fixture(
+            &root,
+            &name("stage"),
+            CreatePermissions::OwnerOnly,
+        ),
             Err(SafeFsError::StageIdentityLost { operation: SafeFsOperation::RollbackCreatedEntry,
                 reason: StageIdentityLostReason::CreatedRollbackDeleteFailed })));
         assert!(!temp.path().join("stage").exists(), "original name was already quarantined");
@@ -1810,7 +1885,7 @@ mod unix_contract {
         let gate = RaceGate::new();
         let _hook = test_seam::install(gate.hook(HookPoint::BeforeCreatedRollbackQuarantine));
         let worker_root = Arc::clone(&root);
-        let worker = std::thread::spawn(move || create_stage_dir_new(&worker_root, &name("stage"), CreatePermissions::OwnerOnly));
+        let worker = std::thread::spawn(move || create_stage_dir_new_trusted_fixture(&worker_root, &name("stage"), CreatePermissions::OwnerOnly));
         gate.wait_reached();
         std::fs::rename(temp.path().join("stage"), temp.path().join("created-retained")).expect("retain created directory");
         std::fs::create_dir(temp.path().join("stage")).expect("rebind original name");
@@ -1834,7 +1909,7 @@ mod unix_contract {
         let gate = RaceGate::new();
         let _hook = test_seam::install(gate.hook(HookPoint::AfterCreatedRollbackVerifyBeforeDelete));
         let worker_root = Arc::clone(&root);
-        let worker = std::thread::spawn(move || create_stage_dir_new(&worker_root, &name("stage"), CreatePermissions::OwnerOnly));
+        let worker = std::thread::spawn(move || create_stage_dir_new_trusted_fixture(&worker_root, &name("stage"), CreatePermissions::OwnerOnly));
         gate.wait_reached();
         let quarantine = std::fs::read_dir(temp.path()).expect("enumerate fixture")
             .map(|entry| entry.expect("directory entry").path())
@@ -1857,15 +1932,18 @@ mod unix_contract {
         use std::process::Command;
         let temp = TestDir::new("nested-cleanup");
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
-        let stage = create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly).expect("create stage");
+        let stage = create_stage_dir_new_trusted_fixture(&root, &name("stage"), CreatePermissions::OwnerOnly).expect("create trusted stage fixture");
         std::fs::create_dir_all(temp.path().join("stage/a/b")).expect("nested dirs");
         std::fs::write(temp.path().join("stage/a/file"), b"payload").expect("file");
-        symlink("file", temp.path().join("stage/a/link")).expect("symlink");
+        let canary = temp.path().join("outside-canary");
+        std::fs::write(&canary, b"outside-payload").expect("outside canary");
+        symlink(&canary, temp.path().join("stage/a/link")).expect("external symlink");
         assert!(Command::new("mkfifo").arg(temp.path().join("stage/a/b/pipe")).status().expect("mkfifo").success());
         let quarantined = quarantine_stage(stage, &root, name(".opentake-quarantine-0123456789abcdef")).expect("quarantine");
         cleanup_quarantined_tree(quarantined).expect("recursive cleanup");
         assert!(!temp.path().join("stage").exists());
         assert!(!temp.path().join(".opentake-quarantine-0123456789abcdef").exists());
+        assert_eq!(std::fs::read(canary).expect("outside canary preserved"), b"outside-payload");
     }
 
     #[test]
@@ -1874,7 +1952,7 @@ mod unix_contract {
         for kind in ["file", "empty-dir", "non-empty-dir", "symlink"] {
             let temp = TestDir::new(kind);
             let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
-            let stage = create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly).expect("stage");
+            let stage = create_stage_dir_new_trusted_fixture(&root, &name("stage"), CreatePermissions::OwnerOnly).expect("trusted stage fixture");
             match kind {
                 "file" => std::fs::write(temp.path().join("destination"), b"existing").expect("file"),
                 "empty-dir" => std::fs::create_dir(temp.path().join("destination")).expect("dir"),
@@ -1884,6 +1962,14 @@ mod unix_contract {
             }
             assert!(matches!(publish_stage_noreplace(stage, &root, name("destination")), Err(SafeFsError::AlreadyExists { operation: SafeFsOperation::PublishNoReplace })));
             assert!(temp.path().join("stage").is_dir());
+            let destination = temp.path().join("destination");
+            match kind {
+                "file" => assert_eq!(std::fs::read(destination).expect("destination file preserved"), b"existing"),
+                "empty-dir" => assert!(destination.is_dir() && std::fs::read_dir(destination).expect("read empty destination").next().is_none(), "empty destination directory must remain empty"),
+                "non-empty-dir" => assert_eq!(std::fs::read(destination.join("child")).expect("destination child preserved"), b"existing"),
+                "symlink" => assert_eq!(std::fs::read_link(destination).expect("destination symlink preserved"), std::path::PathBuf::from("target")),
+                _ => unreachable!(),
+            }
         }
     }
 
@@ -1892,7 +1978,7 @@ mod unix_contract {
         let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("source-swap");
         let root = Arc::new(capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture"));
-        let stage = create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly).expect("stage");
+        let stage = create_stage_dir_new_trusted_fixture(&root, &name("stage"), CreatePermissions::OwnerOnly).expect("trusted stage fixture");
         std::fs::write(temp.path().join("stage/expected"), b"expected").expect("expected file");
         let gate = RaceGate::new();
         let _guard = test_seam::install(gate.hook(HookPoint::BeforeQuarantineRename));
@@ -1914,7 +2000,7 @@ mod unix_contract {
         let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("restore-collision");
         let root = Arc::new(capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture"));
-        let stage = create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly).expect("stage");
+        let stage = create_stage_dir_new_trusted_fixture(&root, &name("stage"), CreatePermissions::OwnerOnly).expect("trusted stage fixture");
         std::fs::write(temp.path().join("stage/expected"), b"expected").expect("expected file");
         std::fs::rename(temp.path().join("stage"), temp.path().join("expected-moved")).expect("move expected stage");
         std::fs::create_dir(temp.path().join("stage")).expect("replacement stage");
@@ -1938,7 +2024,7 @@ mod unix_contract {
         let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("final-name-window");
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
-        let stage = create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly).expect("stage");
+        let stage = create_stage_dir_new_trusted_fixture(&root, &name("stage"), CreatePermissions::OwnerOnly).expect("trusted stage fixture");
         std::fs::write(temp.path().join("stage/leaf"), b"expected").expect("expected leaf");
         let quarantined = quarantine_stage(stage, &root, name(".opentake-quarantine-final-window")).expect("quarantine");
         let entry = open_cleanup_child_nofollow(&quarantined, &name("leaf")).expect("open cleanup entry");
@@ -1960,7 +2046,7 @@ mod unix_contract {
         let _serial = test_seam::serialize_unix_test();
         let temp = TestDir::new("cleanup-identity");
         let root = capture_absolute_directory(temp.path(), DirectoryAccess::MutateChildren).expect("capture");
-        let stage = create_stage_dir_new(&root, &name("stage"), CreatePermissions::OwnerOnly).expect("stage");
+        let stage = create_stage_dir_new_trusted_fixture(&root, &name("stage"), CreatePermissions::OwnerOnly).expect("trusted stage fixture");
         std::fs::write(temp.path().join("stage/leaf"), b"leaf").expect("leaf");
         let quarantined = quarantine_stage(stage, &root, name(".opentake-quarantine-identity" )).expect("quarantine");
         let expected = present_identity(quarantined.directory(), "leaf");
@@ -2125,7 +2211,7 @@ Task 2B does not claim file, directory, quarantine, or platform behavior. Its re
 
 ### Task 4 — Unix recursive namespace, filesystem/case proof, and platform-dispatched file I/O
 
-The test-only commit adds exactly seventeen platform-gated named tests to the single `safe_fs/tests.rs`: the seven authority/I/O names `recursive_authority_revalidates_anchor_and_entire_child_scope`, `query_symlink_fifo_and_special_entries_is_nonblocking_present_metadata`, `platform_dispatched_file_bytes_copy_seek_flush_and_sync`, Linux-only `linux_filesystem_and_case_probe_matrix_is_enforced` and `linux_revalidation_rejects_fsid_device_and_case_changes`, and macOS-only `macos_local_and_case_probe_matrix_is_enforced` and `macos_revalidation_rejects_fsid_device_and_case_changes`; plus the ten post-create rollback names `post_create_metadata_failure_removes_new_file`, `post_create_filesystem_failure_removes_new_file`, `post_create_case_failure_removes_new_directory`, `post_create_parent_duplicate_failure_removes_new_stage`, `post_create_retained_identity_failure_returns_typed_fail_leak`, `post_create_original_name_rebound_before_identity_check_is_preserved`, `post_create_quarantine_move_failure_returns_typed_fail_leak`, `post_create_delete_failure_preserves_verified_quarantine`, `post_create_rebound_name_returns_typed_fail_leak_without_deletion`, and `post_create_quarantine_rebound_after_verification_is_not_deleted`. The complete section-5 test seam already exists in the Task 2A scaffold, so every name compiles at this test-only SHA without adding production behavior. Two exact behavioral REDs are mandatory: the current-host probe matrix and `post_create_metadata_failure_removes_new_file`; both run once and fail only because the approved Unix adapter still returns its typed refusal. The raw Linux matrix accepts Ext/XFS/Btrfs, exercises the Ext directory casefold ioctl result, and rejects tmpfs as `UnknownFilesystem` until a separately reviewed native case-semantics proof exists.
+The reconciled test group contains exactly twenty-one platform-gated named Task-4 tests in the single `safe_fs/tests.rs`: the original seven authority/I/O/probe names; four exact access/refusal names `read_parent_cannot_escalate_child_directory_access`, `read_parent_cannot_escalate_file_access`, `create_directory_typed_refuses_before_namespace_mutation`, and `create_stage_directory_typed_refuses_before_namespace_mutation`; plus the ten post-create rollback names `post_create_metadata_failure_removes_new_file`, `post_create_filesystem_failure_removes_new_file`, `post_create_case_failure_removes_new_directory`, `post_create_parent_duplicate_failure_removes_new_stage`, `post_create_retained_identity_failure_returns_typed_fail_leak`, `post_create_original_name_rebound_before_identity_check_is_preserved`, `post_create_quarantine_move_failure_returns_typed_fail_leak`, `post_create_delete_failure_preserves_verified_quarantine`, `post_create_rebound_name_returns_typed_fail_leak_without_deletion`, and `post_create_quarantine_rebound_after_verification_is_not_deleted`. The two access tests prove authority monotonicity. The two production create-refusal tests prove exact `UnsupportedAtomicPublish(PrimitiveUnavailable)` and name absence. Directory rollback and every consuming test use only the explicitly test-only trusted fixture; they prove downstream algorithms, not production directory creation. The raw Linux matrix accepts Ext/XFS/Btrfs, exercises the Ext directory casefold ioctl result, and rejects tmpfs as `UnknownFilesystem` until a separately reviewed native case-semantics proof exists.
 
 ```bash
 git add crates/opentake-project/src/safe_fs/tests.rs
@@ -2268,15 +2354,23 @@ Task 5 reports are `$SAFETY_ROOT/logs/c1b-task-5-$GREEN_SHA-attempt-$REVIEW_ATTE
 Implementation reconciliation (2026-07-17): completion-audit Task 11 began at
 `32f90c89555b4515fdf904bebef22b2088af70c4`, where the Unix adapter still
 included `unsupported.rs` and none of the Task 4/5 Unix tests were collected.
-That convergence slice therefore restores the complete seven authority/I/O/probe,
-ten post-create rollback, and six consuming tests before replacing the adapter
-with sections 4–5. Native execution evidence from that implementation turn is
-macOS-only (21 collected Unix tests); the two Linux-only probe tests were
-cross-compiled, not executed natively, so a native Linux receipt remains required.
+That convergence slice first restored the original seven authority/I/O/probe,
+ten post-create rollback, and six consuming tests. Independent review then added
+two authority-escalation and two production directory-create refusal regressions,
+for eleven authority/access/I/O/probe/refusal, ten rollback, and six consuming
+source tests. Native macOS now collects 25 Unix tests; the two Linux-only probe
+tests are source-checked and cross-compiled, not executed natively. The portable
+Unix directory/stage-create identity contract is `REJECTED/BLOCKED`: production
+typed-refuses before namespace mutation, while the rollback/quarantine/publish/
+cleanup tests use `#[cfg(test)]` trusted fixtures and make no production-create
+claim. Future resolution requires a different architecture, such as a single-file
+fd-backed container or a privileged/private namespace broker. A native Linux
+receipt remains required for the Unix behavior that is implemented.
 
 ## 8. Residual platform limits
 
 1. Linux's allowlist is only Ext/XFS/Btrfs and intentionally rejects every other magic. In particular, tmpfs maps to `UnknownFilesystem` until a separate design review and native proof establish its per-directory case semantics; a family is removed if native evidence cannot prove stable `f_fsid + st_dev + ordered dev/inode chain` behavior.
-2. Unix final unlink/remove and rename source identity are name-linearized, not handle-bound. If a same-account namespace attacker enters the threat model, C1D requires a new journal/quarantine design.
-3. Native Linux and macOS behavior receipts and native Windows receipts are required at the exact implementation SHA. Cross-compilation does not replace them.
-4. No local instruction in this appendix grants push, PR, or workflow-dispatch authority. The implementation stops at the native receipt gate when those receipts cannot be obtained without new external authority.
+2. Portable Linux/macOS directory creation cannot bind `mkdirat` to a returned fd. Production directory/stage create remains typed-refused until the storage architecture changes to an identity-preserving design such as a single-file fd-backed container or a privileged/private namespace broker.
+3. Unix final unlink/remove and rename source identity are name-linearized, not handle-bound. If a same-account namespace attacker enters the threat model, C1D requires a new journal/quarantine design.
+4. Native Linux and macOS behavior receipts and native Windows receipts are required at the exact implementation SHA. Cross-compilation does not replace them.
+5. No local instruction in this appendix grants push, PR, or workflow-dispatch authority. The implementation stops at the native receipt gate when those receipts cannot be obtained without new external authority.

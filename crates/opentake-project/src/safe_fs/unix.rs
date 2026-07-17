@@ -5,7 +5,7 @@ use rustix::fd::{AsFd, OwnedFd};
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, RenameFlags};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path};
 use std::sync::Arc;
@@ -18,8 +18,10 @@ const FILE_READ_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
 const FILE_RW_FLAGS: OFlags = OFlags::RDWR.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
+#[cfg(test)]
 const OWNER_DIR_MODE: Mode = Mode::RUSR.union(Mode::WUSR).union(Mode::XUSR);
 const OWNER_FILE_MODE: Mode = Mode::RUSR.union(Mode::WUSR);
+#[cfg(test)]
 const INHERIT_DIR_MODE: Mode = Mode::RUSR
     .union(Mode::WUSR)
     .union(Mode::XUSR)
@@ -317,6 +319,8 @@ fn probe_case_mode(
     }
     let ext_flags = if family == LinuxFilesystem::Ext {
         let mut flags: libc::c_long = 0;
+        // SAFETY: `flags` points to writable storage of the exact kernel ABI type, and the
+        // retained descriptor refers to the directory whose ext flags are being queried.
         let result = unsafe { libc::ioctl(fd.as_fd().as_raw_fd(), FS_IOC_GETFLAGS, &mut flags) };
         if result < 0 {
             Err(SecureFilesystemReason::CaseSemanticsUnavailable)
@@ -352,10 +356,11 @@ fn probe_case_mode(
             }
         };
     }
-    macos_case_from_raw(
-        unsafe { libc::fpathconf(fd.as_fd().as_raw_fd(), libc::_PC_CASE_SENSITIVE) },
-        operation,
-    )
+    // SAFETY: the retained descriptor is valid for this call and `_PC_CASE_SENSITIVE` does
+    // not require an output buffer; `fpathconf` reports the value directly.
+    let case_sensitive =
+        unsafe { libc::fpathconf(fd.as_fd().as_raw_fd(), libc::_PC_CASE_SENSITIVE) };
+    macos_case_from_raw(case_sensitive, operation)
 }
 
 fn name_metadata(
@@ -601,7 +606,9 @@ pub(super) fn open_dir_nofollow(
     name: &ComponentName,
     access: DirectoryAccess,
 ) -> Result<DirectoryAuthority> {
-    if access == DirectoryAccess::Stage {
+    if access == DirectoryAccess::Stage
+        || (parent.access == DirectoryAccess::Read && access != DirectoryAccess::Read)
+    {
         return Err(SafeFsError::AccessMismatch {
             operation: SafeFsOperation::OpenDirectory,
         });
@@ -633,8 +640,7 @@ fn open_regular(
             kind: opened.kind,
         });
     }
-    let raw = fd.into_raw_fd();
-    let file = unsafe { File::from_raw_fd(raw) };
+    let file = File::from(fd);
     Ok(FileCapability {
         native: NativeFile::Open(file),
         access,
@@ -647,6 +653,11 @@ pub(super) fn open_file_nofollow(
     name: &ComponentName,
     access: FileAccess,
 ) -> Result<FileCapability> {
+    if parent.access == DirectoryAccess::Read && access != FileAccess::Read {
+        return Err(SafeFsError::AccessMismatch {
+            operation: SafeFsOperation::OpenFile,
+        });
+    }
     open_regular(parent, name, access, SafeFsOperation::OpenFile)
 }
 
@@ -688,6 +699,7 @@ fn created_metadata(
     opened_metadata_from_stat(fd, stat, operation)
 }
 
+#[cfg(test)]
 fn created_case_mode(
     fd: &OwnedFd,
     metadata: &EntryMetadata,
@@ -894,6 +906,7 @@ fn rollback_created(
     original_error
 }
 
+#[cfg(test)]
 fn open_created_directory(parent: &DirectoryAuthority, name: &ComponentName) -> Result<OwnedFd> {
     rustix::fs::openat(
         &parent.native.fd,
@@ -904,6 +917,7 @@ fn open_created_directory(parent: &DirectoryAuthority, name: &ComponentName) -> 
     .map_err(|_| created_fail_leak(StageIdentityLostReason::CreatedObjectIdentityUnavailable))
 }
 
+#[cfg(test)]
 fn validate_created_directory(
     parent: &DirectoryAuthority,
     name: &ComponentName,
@@ -961,6 +975,19 @@ fn validate_created_directory(
 }
 
 pub(super) fn create_dir_new(
+    _parent: &DirectoryAuthority,
+    _name: &ComponentName,
+    _permissions: CreatePermissions,
+    _access: DirectoryAccess,
+) -> Result<DirectoryAuthority> {
+    Err(SafeFsError::UnsupportedAtomicPublish {
+        operation: SafeFsOperation::CreateDirectory,
+        reason: AtomicPublishReason::PrimitiveUnavailable,
+    })
+}
+
+#[cfg(test)]
+pub(super) fn create_dir_new_trusted_fixture(
     parent: &DirectoryAuthority,
     name: &ComponentName,
     permissions: CreatePermissions,
@@ -999,6 +1026,18 @@ pub(super) fn create_dir_new(
 }
 
 pub(super) fn create_stage_dir_new(
+    _parent: &DirectoryAuthority,
+    _name: &ComponentName,
+    _permissions: CreatePermissions,
+) -> Result<StageCapability> {
+    Err(SafeFsError::UnsupportedAtomicPublish {
+        operation: SafeFsOperation::CreateStageDirectory,
+        reason: AtomicPublishReason::PrimitiveUnavailable,
+    })
+}
+
+#[cfg(test)]
+pub(super) fn create_stage_dir_new_trusted_fixture(
     parent: &DirectoryAuthority,
     name: &ComponentName,
     permissions: CreatePermissions,
@@ -1111,7 +1150,7 @@ pub(super) fn create_file_new(
             error,
         )
     })?;
-    let file = unsafe { File::from_raw_fd(fd.into_raw_fd()) };
+    let file = File::from(fd);
     Ok(FileCapability {
         native: NativeFile::Open(file),
         access: FileAccess::ReadWrite,

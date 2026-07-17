@@ -883,6 +883,10 @@
 
 ### Task 11: DS-unix-consuming-tests (implementation-slice-e5c7ae10bcfd7edf)
 
+**Status:** `REJECTED/BLOCKED` — the portable Unix directory/stage-create identity
+contract is unsatisfiable with Linux/macOS public primitives. Production typed-refuses
+before namespace mutation; downstream algorithm tests use test-only trusted fixtures.
+
 **Covered records:**
 - `requirement-67e50cfe6dd7f49a` (requirement)
 
@@ -890,7 +894,12 @@
 - Modify: `Cargo.lock#opentake-project`
 - Modify: `crates/opentake-project/Cargo.toml`
 - Modify: `crates/opentake-project/src/safe_fs/unix.rs`
+- Modify: `crates/opentake-project/src/safe_fs/test_seam.rs#serialize_unix_test`
 - Modify: `docs/superpowers/plans/c1b/2026-07-12-c1b-common-unix-normative.md`
+- Test (independent-review): `crates/opentake-project/src/safe_fs/tests.rs#read_parent_cannot_escalate_child_directory_access`
+- Test (independent-review): `crates/opentake-project/src/safe_fs/tests.rs#read_parent_cannot_escalate_file_access`
+- Test (architecture-reconciliation): `crates/opentake-project/src/safe_fs/tests.rs#create_directory_typed_refuses_before_namespace_mutation`
+- Test (architecture-reconciliation): `crates/opentake-project/src/safe_fs/tests.rs#create_stage_directory_typed_refuses_before_namespace_mutation`
 - Test (reviewed-planned): `crates/opentake-project/src/safe_fs/tests.rs#source_swap_before_quarantine_restores_without_deletion`
 - Test (reviewed-planned): `crates/opentake-project/src/safe_fs/tests.rs#restore_collision_fail_leaks_original_and_quarantine`
 - Test (reviewed-planned): `crates/opentake-project/src/safe_fs/tests.rs#final_unix_name_window_is_explicit_same_account_boundary`
@@ -904,22 +913,26 @@
 
 - Candidate/source: `doc-72e29816dc2090ed` at `docs/superpowers/plans/c1b/2026-07-12-c1b-common-unix-normative.md:2187` (requirement)
 - Expected behavior: The test-only commit adds exactly these six public consuming mutation/cleanup tests and no others: `source_swap_before_quarantine_restores_without_deletion`, `restore_collision_fail_leaks_original_and_quarantine`, `final_unix_name_window_is_explicit_same_account_boundary`, `cleanup_capability_records_identity_before_consuming_delete`, `nested_recursive_quarantine_cleanup_removes_files_symlink_fifo_and_directories`, and `destination_collision_preserves_stage_and_every_destination_kind`. All ten post-create rollback regressions were already committed before their Task 4 implementation and passed at the reviewed Task 4 GREEN SHA; Task 5 neither moves nor re-adds them. The focused RED is the single named recursive-cleanup test below and fails only because Task 4's approved public mutation stub refuses.
-- Resolution: `reviewed-mapping-report:DS-unix-consuming-tests` — Core mapping report DS-unix-consuming-tests: the six named mutation/cleanup contracts are absent and unix.rs still includes the unsupported backend.
+- Resolution: `REJECTED/BLOCKED:portable-unix-directory-create-identity` — Linux/macOS expose no portable atomic mkdir-and-return-fd primitive. `mkdirat` followed by `openat` admits a same-account name replacement window, and a randomized temporary name only moves that race. Production directory/stage create therefore returns exact `UnsupportedAtomicPublish(PrimitiveUnavailable)` before mutation. Test-only trusted fixtures exercise rollback/quarantine/publish/cleanup algorithms without claiming production directory-create support. Future options are a single-file fd-backed container or a privileged/private namespace broker.
 - Exact acceptance contract:
-  - crates/opentake-project/src/safe_fs/unix.rs no longer includes unsupported.rs and implements capability-relative no-follow acquisition, I/O, quarantine, no-replace publish, and recursive cleanup.
-  - The six named public consuming mutation/cleanup regressions and all ten post-create rollback regressions pass against production Unix code.
+  - crates/opentake-project/src/safe_fs/unix.rs no longer includes unsupported.rs and implements capability-relative no-follow acquisition, regular-file I/O/create, quarantine, no-replace publish, and recursive cleanup; production directory/stage create must typed-refuse before mutation.
+  - The six named consuming mutation/cleanup regressions and directory-specific rollback regressions pass only through `#[cfg(test)]` trusted fixture creation; regular-file rollback and production directory/stage typed refusal pass against production Unix entry points.
   - Symlink, FIFO, source-swap, identity-change, restore-collision, destination-collision, and cross-account/name-window cases fail closed without data loss.
   - Rust workspace tests, warnings-denied clippy, and native macOS receipt gates
     pass on the exact reviewed tree. Linux cross-compilation is additive and
     does not replace the still-required native Linux receipt.
 
-- [x] **Step 1: Write or extend every reviewed owning test**
+- [ ] **Step 1: Write or extend every reviewed owning test — executed, task remains blocked**
 
   Controller reconciliation restores the complete normative Unix test group in
-  the sole owning runner: seven authority/I/O/probe names, ten post-create
-  rollback names, and the six consuming names below. On macOS, 21 tests are
-  collected; the two Linux-only probe names remain source-checked and
+  the sole owning runner: eleven authority/access/I/O/probe/refusal names, ten
+  post-create rollback names, and the six consuming names below. On macOS, 25
+  tests are collected; the two Linux-only probe names remain source-checked and
   cross-compiled rather than misreported as native executions.
+
+  The directory rollback and six consuming names use only
+  `create_*_trusted_fixture`, which is `#[cfg(test)]`; they prove downstream
+  algorithms, not production directory/stage creation.
 
   - `crates/opentake-project/src/safe_fs/tests.rs#source_swap_before_quarantine_restores_without_deletion` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
   - `crates/opentake-project/src/safe_fs/tests.rs#restore_collision_fail_leaks_original_and_quarantine` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
@@ -930,7 +943,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [x] **Step 2: Run all focused tests and verify RED**
+- [ ] **Step 2: Run all focused tests and verify RED — executed, task remains blocked**
 
   - Run: `cargo test -p opentake-project source_swap_before_quarantine_restores_without_deletion`
   - Run: `cargo test -p opentake-project restore_collision_fail_leaks_original_and_quarantine`
@@ -942,15 +955,19 @@
   Observed before implementation: each exact macOS probe, post-create rollback,
   and recursive-cleanup witness ran one test and failed against
   `UnsupportedTarget`; collection was proven first with `-- --list`.
+  Independent review additionally observed exact one-test REDs for both access
+  escalations. Architecture reconciliation observed exact one-test REDs for both
+  production create refusals: the previous code created the names successfully.
 
-- [x] **Step 3: Implement the minimal vertical slice**
+- [ ] **Step 3: Implement the safe partial vertical slice — production contract rejected**
 
-  Replace the Unix unsupported adapter with the complete normative retained-fd,
-  capability-relative, no-follow implementation. Add only the pinned Unix
-  dependencies and their mechanical lockfile edges. Do not modify the common
-  capability/ops facade or Windows adapter.
+  Replace the Unix unsupported adapter with retained-fd, capability-relative,
+  no-follow acquisition, regular-file create/I/O, quarantine, publish, and cleanup.
+  Production directory/stage create typed-refuses before mutation. The former
+  mkdirat/openat body is available only as explicitly named `#[cfg(test)]` trusted
+  fixtures. Do not modify the common capability/ops facade or Windows adapter.
 
-- [x] **Step 4: Run all focused tests and verify GREEN**
+- [ ] **Step 4: Run all focused tests and verify GREEN — partial implementation only**
 
   - Run: `cargo test -p opentake-project source_swap_before_quarantine_restores_without_deletion`
   - Run: `cargo test -p opentake-project restore_collision_fail_leaks_original_and_quarantine`
@@ -959,15 +976,18 @@
   - Run: `cargo test -p opentake-project nested_recursive_quarantine_cleanup_removes_files_symlink_fifo_and_directories`
   - Run: `cargo test -p opentake-project destination_collision_preserves_stage_and_every_destination_kind`
 
-  Expected: PASS with every candidate-bound assertion executed.
+  Observed: all candidate-bound downstream assertions and exact refusal/access
+  regressions pass, but they cannot satisfy the rejected production directory-create
+  requirement because consuming tests are seeded through trusted fixtures.
 
-- [x] **Step 5: Run the subsystem regression gate**
+- [ ] **Step 5: Run the subsystem regression gate — validation does not unblock contract**
 
   Run the one-shot Unix seam tests serialized, then run formatting, warnings-denied
   clippy, native macOS project tests, Linux/Windows cross-checks, and the workspace
   gate. Native Linux behavior still requires a Linux receipt.
 
-  Expected: PASS with no new warnings or unrelated changes.
+  Expected: PASS with no new warnings or unrelated changes. A passing gate is
+  verification of the safe partial implementation, not completion of Task 11.
 
 ### Task 12: DS-windows-safe-fs (implementation-slice-c7f1cd8463f97ad5)
 
