@@ -4,6 +4,7 @@
   "repository": "appergb/OpenTake",
   "workflow": "CI",
   "workflow_file": ".github/workflows/ci.yml",
+  "dispatcher_ref": "refs/heads/main",
   "job_id": "safe-filesystem",
   "receipts": [
     {
