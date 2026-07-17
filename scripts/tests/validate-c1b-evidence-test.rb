@@ -158,8 +158,13 @@ def build_fixture(root, label)
   end
   write_json(File.join(fixture, "run.json"), run)
   write_json(File.join(fixture, "jobs.json"), { "total_count" => jobs.length, "jobs" => jobs })
-  write_json(File.join(fixture, "artifacts.json"),
-    { "total_count" => artifacts.length, "artifacts" => artifacts })
+  artifact_page = { "total_count" => artifacts.length, "artifacts" => artifacts }
+  write_json(File.join(fixture, "artifacts.json"), artifact_page)
+  Dir.glob(File.join(gate, "native-receipts", run_id, "*"), File::FNM_DOTMATCH).each do |directory|
+    next unless File.directory?(directory) && !%w[. ..].include?(File.basename(directory))
+
+    write_json(File.join(directory, "artifacts.json"), artifact_page)
+  end
   write_json(File.join(fixture, "workflow-content.json"),
     { "encoding" => "base64", "content" => Base64.strict_encode64(
       File.binread(File.join(ROOT, POLICY.fetch("workflow_file")))) })
@@ -266,7 +271,7 @@ Dir.mktmpdir("c1b-evidence-test") do |temporary|
       rewrite_json(saved) { |value| value["id"] = duplicate }
     },
     "forged-saved-artifact-bytes" => lambda { |copy, _live|
-      path = Dir.glob(File.join(copy, "native-receipts/*/*/artifact.json")).first
+      path = Dir.glob(File.join(copy, "native-receipts/*/*/artifacts.json")).first
       File.open(path, "a") { |file| file.write("\n") }
     },
     "bad-live-digest" => lambda { |copy, live|
