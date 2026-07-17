@@ -350,7 +350,7 @@ api_version = policy.fetch("api_version")
 run_raw, live_run = gh_json!("/repos/#{repository}/actions/runs/#{run_id}", api_version, "workflow run")
 jobs_raw, live_jobs = gh_json!(
   "/repos/#{repository}/actions/runs/#{run_id}/jobs?per_page=100", api_version, "workflow jobs")
-_artifacts_raw, live_artifacts = gh_json!(
+artifacts_raw, live_artifacts = gh_json!(
   "/repos/#{repository}/actions/runs/#{run_id}/artifacts?per_page=100", api_version, "workflow artifacts")
 _workflow_raw, live_workflow = gh_json!(
   "/repos/#{repository}/contents/#{policy.fetch('workflow_file')}?ref=#{dispatcher_sha}", api_version,
@@ -362,7 +362,7 @@ fail!("live run attempt mismatch") unless live_run.fetch("run_attempt").to_s == 
 fail!("live run repository mismatch") unless live_run.dig("repository", "full_name") == repository
 fail!("live workflow name mismatch") unless live_run.fetch("name") == policy.fetch("workflow")
 fail!("live workflow path mismatch") unless
-  live_run.fetch("path") == "#{policy.fetch('workflow_file')}@#{policy.fetch('dispatcher_ref')}"
+  live_run.fetch("path") == "#{policy.fetch('workflow_file')}@main"
 fail!("live dispatcher branch mismatch") unless live_run.fetch("head_branch") == "main"
 fail!("live run did not complete successfully") unless
   live_run.fetch("status") == "completed" && live_run.fetch("conclusion") == "success"
@@ -390,10 +390,14 @@ receipts.each do |receipt_path, receipt|
   receipt_root_relative = File.join("native-receipts", run_id, receipt_id)
   saved_run_path = confined_file!(gate, File.join(receipt_root_relative, "run.json"), "#{receipt_id} saved run")
   saved_jobs_path = confined_file!(gate, File.join(receipt_root_relative, "jobs.json"), "#{receipt_id} saved jobs")
+  saved_artifacts_path = confined_file!(gate,
+    File.join(receipt_root_relative, "artifacts.json"), "#{receipt_id} saved artifacts")
   saved_artifact_path, saved_artifact = json_file!(gate,
     File.join(receipt_root_relative, "artifact.json"), "#{receipt_id} saved artifact")
   fail!("saved run JSON differs from live API: #{receipt_id}") unless File.binread(saved_run_path) == run_raw
   fail!("saved jobs JSON differs from live API: #{receipt_id}") unless File.binread(saved_jobs_path) == jobs_raw
+  fail!("saved artifacts JSON differs byte-for-byte from live API: #{receipt_id}") unless
+    File.binread(saved_artifacts_path) == artifacts_raw
 
   expected_job_name = "Safe filesystem (#{receipt_id})"
   matched_jobs = jobs.select { |job| job["name"] == expected_job_name }
@@ -412,18 +416,7 @@ receipts.each do |receipt_path, receipt|
   fail!("missing or duplicate live artifact: #{receipt_id}") unless matched_artifacts.length == 1
   artifact = matched_artifacts.first
   artifact_id = positive_integer_string!(artifact.fetch("id"), "live artifact id")
-  artifact_raw, live_artifact_detail = gh_json!(
-    "/repos/#{repository}/actions/artifacts/#{artifact_id}", api_version, "artifact #{receipt_id}")
-  fail!("saved artifact JSON differs byte-for-byte from live API: #{receipt_id}") unless
-    File.binread(saved_artifact_path) == artifact_raw
-  fail!("saved artifact JSON parsing changed identity: #{receipt_id}") unless
-    saved_artifact == live_artifact_detail
-  %w[id name expired digest].each do |field|
-    fail!("artifact detail differs from run artifact list: #{receipt_id}/#{field}") unless
-      live_artifact_detail.fetch(field) == artifact.fetch(field)
-  end
-  fail!("artifact detail run differs from run artifact list: #{receipt_id}") unless
-    live_artifact_detail.fetch("workflow_run") == artifact.fetch("workflow_run")
+  fail!("saved artifact row differs from live artifact list: #{receipt_id}") unless saved_artifact == artifact
   fail!("live artifact expired: #{receipt_id}") unless artifact.fetch("expired") == false
   fail!("live artifact run mismatch: #{receipt_id}") unless artifact.dig("workflow_run", "id").to_s == run_id
   fail!("live artifact head mismatch: #{receipt_id}") unless
