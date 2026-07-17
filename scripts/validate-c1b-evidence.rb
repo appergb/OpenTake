@@ -362,7 +362,7 @@ fail!("live run attempt mismatch") unless live_run.fetch("run_attempt").to_s == 
 fail!("live run repository mismatch") unless live_run.dig("repository", "full_name") == repository
 fail!("live workflow name mismatch") unless live_run.fetch("name") == policy.fetch("workflow")
 fail!("live workflow path mismatch") unless
-  live_run.fetch("path") == "#{policy.fetch('workflow_file')}@main"
+  live_run.fetch("path") == policy.fetch("workflow_file")
 fail!("live dispatcher branch mismatch") unless live_run.fetch("head_branch") == "main"
 fail!("live run did not complete successfully") unless
   live_run.fetch("status") == "completed" && live_run.fetch("conclusion") == "success"
