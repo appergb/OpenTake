@@ -103,6 +103,7 @@ def build_fixture(root, label)
     "head_branch" => "main", "event" => "workflow_dispatch",
     "status" => "completed", "conclusion" => "success", "name" => "CI",
     "path" => POLICY.fetch("workflow_file"),
+    "display_title" => "证据验证",
     "pull_requests" => [],
     "repository" => { "full_name" => POLICY.fetch("repository") },
   }
@@ -120,7 +121,7 @@ def build_fixture(root, label)
     FileUtils.mkdir_p(directory)
     commands = POLICY.fetch("native_commands").map do |row|
       command_id = row.fetch("id")
-      File.write(File.join(directory, "#{command_id}.log"), "synthetic #{command_id}\n")
+      File.write(File.join(directory, "#{command_id}.log"), "synthetic #{command_id} 验证\n")
       File.write(File.join(directory, "#{command_id}.raw-exit"), "0\n")
       row.merge("exit_code" => 0, "log" => "#{command_id}.log",
         "raw_exit" => "#{command_id}.raw-exit")
