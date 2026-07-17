@@ -137,3 +137,7 @@ switch ($Task) {
   finished_at_utc = (Get-Date).ToUniversalTime().ToString('o')
 } | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM `
   (Join-Path $Evidence 'red-receipt.json')
+
+# The selected cargo tests fail by contract. Clear their native exit status only after the
+# immutable receipt has recorded every expected failure and all structural checks have passed.
+exit 0

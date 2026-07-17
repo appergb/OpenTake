@@ -46,6 +46,15 @@ module C1bCiValidator
 
   module_function
 
+  def validate_red_harness(path)
+    raw = File.read(path)
+    final_line = raw.lines.map(&:strip).reject(&:empty?).last
+    raise "Windows expected-RED harness must exit successfully after recording expected failures" unless
+      final_line == "exit 0"
+
+    true
+  end
+
   def select_target(event_name:, github_sha:, pull_request_head_sha: nil, dispatch_sha: nil)
     value = case event_name
             when "workflow_dispatch" then dispatch_sha
@@ -410,7 +419,12 @@ module C1bCiValidator
 end
 
 if $PROGRAM_NAME == __FILE__
-  path = ARGV.fetch(0) { abort "usage: validate-c1b-ci.rb WORKFLOW" }
+  path = ARGV.fetch(0) { abort "usage: validate-c1b-ci.rb WORKFLOW [RED_HARNESS]" }
+  red_harness = ARGV.fetch(
+    1,
+    File.expand_path("../../scripts/run-c1b-windows-red.ps1", File.dirname(path))
+  )
   C1bCiValidator.validate(path)
+  C1bCiValidator.validate_red_harness(red_harness)
   puts "c1b-ci-validation=ok"
 end
