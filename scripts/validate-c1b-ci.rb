@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require "digest"
 require "yaml"
 
 module C1bCiValidator
@@ -18,6 +19,20 @@ module C1bCiValidator
     "archive-security" => "cargo test -p opentake-project --test archive_security -- --test-threads=1",
   }.freeze
   NORMAL_JOBS = %w[rust windows-security web windows-library-security safe-filesystem].freeze
+  ALL_JOBS = (NORMAL_JOBS + ["windows-red-evidence"]).freeze
+  RUN_DIGESTS = {
+    "Validate immutable SHA input" => "9047dcb191ffbcc36e39e563fed9d1f52d0ba4e4dd67052b5303405343f947ac",
+    "Assert exact checked-out SHA" => "956656d8a9f0f6e8931d089ba78fb3626470819672243af21f9cc33ed89110e0",
+    "Install Rust components" => "6a9466ea5252ead01f047aec0f5cc1105b496c48df6fed06c754abbdc3c42299",
+    "Parse Windows expected-RED harness" => "ce782516548a5fc4e2a5aa9434ed4d8d5840d5371b11d672de8ff8c27039c6ac",
+    "Re-assert immutable target before native gates" => "f6a5747011e6bdf7295690c9eb8ef73980d3e85cfe12e10f4a5bcdeba5779adf",
+    "Run all native gates and retain every exit" => "a50598683c2d241183ce2986acf3b7915d492ecbb971abb3c59fd4a874c9c4c4",
+    "Build exclusive JSON receipt" => "21922e9ce85e91bc80ec9163c889666ddc44f68297c03273a898e208d65b7684",
+    "Enforce native aggregate" => "2e108004e97ad29c453f8d2e9ee84d93c11e8ef899b22b6855e03c5fbd4f2430",
+    "Validate immutable RED inputs" => "d52e1b5c9dc160e2af0c2853da884834bc524a84806818c7fdd7cd849a2e62e9",
+    "Assert exact RED commit and parent" => "92fcdb12cbdf5bf9b0c80e1ee4e5e416d3ca3fc8b0c0d1040ab748734bcfab62",
+    "Run focused expected-RED contract" => "1cb7a86e206af187bdd4f796d785ad15ec09fb73f9228acdef73e5241bc778a4",
+  }.freeze
   NORMAL_CONDITION = "github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'"
   TARGET_EXPRESSION = "${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
 
@@ -46,10 +61,32 @@ module C1bCiValidator
     step
   end
 
+  def exact_keys!(value, expected, label)
+    raise "#{label} fields mismatch" unless value.is_a?(Hash) && value.keys.sort == expected.sort
+  end
+
+  def require_step_sequence!(steps, expected, label)
+    actual = steps.map do |step|
+      step.key?("uses") ? ["uses", step.fetch("uses")] : ["name", step.fetch("name", nil)]
+    end
+    raise "#{label} step sequence mismatch" unless actual == expected
+  end
+
+  def require_run_digests!(steps, names)
+    names.each do |name|
+      step = steps.find { |candidate| candidate["name"] == name }
+      raise "missing digest-bound step #{name}" unless step
+      actual = Digest::SHA256.hexdigest(step.fetch("run"))
+      raise "#{name} body differs from reviewed workflow" unless actual == RUN_DIGESTS.fetch(name)
+    end
+  end
+
   def validate(path)
     raw = File.read(path)
     document = YAML.safe_load(raw, aliases: true)
     raise "workflow root must be a mapping" unless document.is_a?(Hash)
+    raise "workflow root contains unknown or missing fields" unless
+      document.keys.sort_by(&:to_s) == ["name", true, "permissions", "concurrency", "jobs"].sort_by(&:to_s)
 
     events = document["on"] || document[true]
     raise "missing on mapping" unless events.is_a?(Hash)
@@ -79,6 +116,7 @@ module C1bCiValidator
 
     jobs = document["jobs"]
     raise "jobs mapping missing" unless jobs.is_a?(Hash)
+    raise "workflow contains unknown or missing jobs" unless jobs.keys.sort == ALL_JOBS.sort
     NORMAL_JOBS.each do |job_name|
       raise "#{job_name} must be disabled only during expected-RED dispatch" unless
         jobs.dig(job_name, "if") == NORMAL_CONDITION
@@ -86,6 +124,7 @@ module C1bCiValidator
 
     job = jobs["safe-filesystem"]
     raise "missing safe-filesystem job and immutable SHA binding" unless job.is_a?(Hash)
+    exact_keys!(job, %w[name if strategy runs-on timeout-minutes env steps], "safe-filesystem job")
     raise "safe-filesystem job identity mismatch" unless
       job["name"] == "Safe filesystem (${{ matrix.receipt_id }})" &&
       job["runs-on"] == "${{ matrix.runner }}" && job["timeout-minutes"] == 35
@@ -105,27 +144,72 @@ module C1bCiValidator
     raise "TARGET_SHA must bind push, PR head, and dispatch independently" unless
       job.dig("env", "TARGET_SHA") == TARGET_EXPRESSION
     raise "receipt directory must be job-local and fixed" unless job.dig("env", "RECEIPT_DIR") == "c1b-native-receipt"
+    raise "safe-filesystem environment contains unreviewed values" unless
+      job["env"] == { "TARGET_SHA" => TARGET_EXPRESSION, "RECEIPT_DIR" => "c1b-native-receipt" }
     steps = job.fetch("steps")
     raise "safe-filesystem steps must be a sequence" unless steps.is_a?(Array)
+    require_step_sequence!(steps, [
+      ["name", "Validate immutable SHA input"],
+      ["uses", "actions/checkout@v4"],
+      ["name", "Assert exact checked-out SHA"],
+      ["name", "Install Rust components"],
+      ["uses", "actions/cache@v4"],
+      ["name", "Parse Windows expected-RED harness"],
+      ["name", "Re-assert immutable target before native gates"],
+      ["name", "Run all native gates and retain every exit"],
+      ["name", "Build exclusive JSON receipt"],
+      ["uses", "actions/upload-artifact@v4"],
+      ["name", "Enforce native aggregate"],
+    ], "safe-filesystem")
+    require_run_digests!(steps, RUN_DIGESTS.keys.first(8))
 
     immutable_input = require_exact_step!(steps, "Validate immutable SHA input", shell: "bash")
+    exact_keys!(immutable_input, %w[name shell run], "immutable SHA input step")
     raise "normal target immutable SHA guard missing" unless
       immutable_input["run"].to_s.include?("[[ \"$TARGET_SHA\" =~ ^[0-9a-fA-F]{40}$ ]]")
     checkouts = steps.select { |step| step["uses"] == "actions/checkout@v4" }
     raise "safe-filesystem must contain one checkout@v4 step" unless checkouts.length == 1
     checkout = checkouts.first
+    exact_keys!(checkout, %w[uses with], "safe-filesystem checkout step")
+    raise "safe-filesystem checkout fields mismatch" unless checkout["with"] == {
+      "ref" => "${{ env.TARGET_SHA }}", "fetch-depth" => 0, "persist-credentials" => false,
+    }
     raise "checkout ref is not TARGET_SHA" unless checkout.dig("with", "ref") == "${{ env.TARGET_SHA }}"
     raise "checkout must fetch immutable object history" unless checkout.dig("with", "fetch-depth") == 0
     raise "checkout credentials must not persist" unless checkout.dig("with", "persist-credentials") == false
 
     bind = require_exact_step!(steps, "Assert exact checked-out SHA", shell: "bash")
+    exact_keys!(bind, %w[name id shell run], "exact checkout binding step")
     bind_text = bind["run"].to_s
     raise "exact checkout binding output id missing" unless bind["id"] == "bind"
     raise "missing exact git rev-parse assertion" unless
       bind_text.include?("git rev-parse HEAD") && bind_text.include?('test "$actual" = "$expected"') &&
       bind_text.include?('git cat-file -e "${expected}^{commit}"') && bind_text.include?("GITHUB_OUTPUT")
 
+    install = require_exact_step!(steps, "Install Rust components", shell: "bash")
+    exact_keys!(install, %w[name shell run], "Rust component install step")
+    raise "Rust component install command mismatch" unless install["run"] == "rustup component add rustfmt clippy"
+    caches = steps.select { |step| step["uses"] == "actions/cache@v4" }
+    raise "safe-filesystem must contain one cache step" unless caches.length == 1
+    exact_keys!(caches.first, %w[name uses with], "safe-filesystem cache step")
+    raise "safe-filesystem cache contract mismatch" unless caches.first["with"] == {
+      "path" => "~/.cargo/registry\n~/.cargo/git\ntarget\n",
+      "key" => "safe-fs-${{ matrix.receipt_id }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}",
+      "restore-keys" => "safe-fs-${{ matrix.receipt_id }}-",
+    }
+
+    parser = require_exact_step!(steps, "Parse Windows expected-RED harness", shell: "pwsh")
+    exact_keys!(parser, %w[name if shell run], "Windows RED parser step")
+    reassert = require_exact_step!(steps, "Re-assert immutable target before native gates", shell: "bash")
+    exact_keys!(reassert, %w[name shell run], "immutable target reassertion step")
+    reassert_text = reassert["run"].to_s
+    ["git rev-parse HEAD", "HEAD^{tree}", '${expected}^{tree}',
+     "git status --porcelain=v1 --untracked-files=all", 'test "$actual" = "$expected"'].each do |token|
+      raise "immutable target reassertion missing #{token}" unless reassert_text.include?(token)
+    end
+
     gates = require_exact_step!(steps, "Run all native gates and retain every exit", shell: "bash")
+    exact_keys!(gates, %w[name shell run], "native gate step")
     gate_text = gates["run"].to_s
     gate_rows = gate_text.lines.each_with_object([]) do |line, rows_accumulator|
       match = line.match(/^\s*run_gate\s+(\S+)\s+(.+?)\s*$/)
@@ -137,6 +221,7 @@ module C1bCiValidator
     end
 
     receipt = require_exact_step!(steps, "Build exclusive JSON receipt", shell: "pwsh", condition: "always()")
+    exact_keys!(receipt, %w[name if shell env run], "native receipt step")
     expected_env = {
       "RECEIPT_SHA" => "${{ steps.bind.outputs.sha }}",
       "RECEIPT_ID" => "${{ matrix.receipt_id }}",
@@ -145,7 +230,7 @@ module C1bCiValidator
       "EXPECTED_RUNNER_ARCH" => "${{ matrix.expected_arch }}",
     }
     raise "receipt environment is not checkout/matrix-bound" unless
-      expected_env.all? { |key, value| receipt.dig("env", key) == value }
+      receipt["env"] == expected_env
     receipt_text = receipt["run"].to_s
     receipt_commands = receipt_text.scan(/@\{ id = '([^']+)'; command = '([^']+)' \}/)
     raise "receipt command ledger differs from native gates" unless receipt_commands == NATIVE_COMMANDS.to_a
@@ -164,6 +249,8 @@ module C1bCiValidator
       "event_name" => "event_name = '${{ github.event_name }}'",
       "requested_sha" => "requested_sha = $env:TARGET_SHA.ToLowerInvariant()",
       "checked_out_sha" => "checked_out_sha = $env:RECEIPT_SHA.ToLowerInvariant()",
+      "dispatcher_sha" => "dispatcher_sha = '${{ github.workflow_sha }}'",
+      "dispatcher_ref" => "dispatcher_ref = '${{ github.workflow_ref }}'",
       "commands" => "commands = @(\$commands)",
       "aggregate_exit" => "aggregate_exit = [int](Get-Content (Join-Path $env:RECEIPT_DIR 'final-aggregate.raw-exit'))",
     }.each do |field, binding|
@@ -184,17 +271,20 @@ module C1bCiValidator
     uploads = steps.select { |step| step["uses"] == "actions/upload-artifact@v4" }
     raise "safe-filesystem must contain one artifact upload" unless uploads.length == 1
     upload = uploads.first
+    exact_keys!(upload, %w[name if uses with], "native receipt upload step")
     expected_name = "c1b-native-${{ matrix.receipt_id }}-${{ steps.bind.outputs.sha }}"
+    expected_upload = {
+      "name" => expected_name, "path" => "c1b-native-receipt/",
+      "if-no-files-found" => "error", "retention-days" => 30,
+    }
     raise "receipt artifact upload is not always and SHA-bound" unless
-      upload["if"] == "always()" && upload.dig("with", "name") == expected_name &&
-      upload.dig("with", "path") == "c1b-native-receipt/" &&
-      upload.dig("with", "if-no-files-found") == "error" && upload.dig("with", "retention-days") == 30
+      upload["if"] == "always()" && upload["with"] == expected_upload
     enforce = require_exact_step!(steps, "Enforce native aggregate", shell: "bash", condition: "always()")
+    exact_keys!(enforce, %w[name if shell run], "native aggregate enforcement step")
     raise "aggregate enforce step does not consume raw aggregate" unless
       enforce["run"].to_s.include?("final-aggregate.raw-exit") &&
       enforce["run"].to_s.include?('test "$(cat "$RECEIPT_DIR/final-aggregate.raw-exit")" = 0')
 
-    parser = require_exact_step!(steps, "Parse Windows expected-RED harness", shell: "pwsh")
     parser_text = parser["run"].to_s
     raise "Windows RED harness parser missing" unless parser["if"] == "runner.os == 'Windows'" &&
       parser_text.include?("scripts/run-c1b-windows-red.ps1") && parser_text.include?("ParseFile") &&
@@ -205,6 +295,7 @@ module C1bCiValidator
       red_job["name"] == "Windows expected RED (${{ inputs.red_task }})" &&
       red_job["if"] == "github.event_name == 'workflow_dispatch' && inputs.red_task != 'none'" &&
       red_job["runs-on"] == "windows-2022" && red_job["timeout-minutes"] == 35
+    exact_keys!(red_job, %w[name if runs-on timeout-minutes env steps], "Windows RED job")
     expected_red_env = {
       "TARGET_SHA" => "${{ inputs.commit_sha }}",
       "PARENT_SHA" => "${{ inputs.red_parent_sha }}",
@@ -212,9 +303,19 @@ module C1bCiValidator
       "RED_NONCE" => "${{ inputs.red_nonce }}",
     }
     raise "Windows RED job environment is not context-bound" unless
-      expected_red_env.all? { |key, value| red_job.dig("env", key) == value }
+      red_job["env"] == expected_red_env
     red_steps = red_job.fetch("steps")
+    raise "Windows RED steps must be a sequence" unless red_steps.is_a?(Array)
+    require_step_sequence!(red_steps, [
+      ["name", "Validate immutable RED inputs"],
+      ["uses", "actions/checkout@v4"],
+      ["name", "Assert exact RED commit and parent"],
+      ["name", "Run focused expected-RED contract"],
+      ["uses", "actions/upload-artifact@v4"],
+    ], "Windows RED")
+    require_run_digests!(red_steps, RUN_DIGESTS.keys.last(3))
     red_input = require_exact_step!(red_steps, "Validate immutable RED inputs", shell: "pwsh")
+    exact_keys!(red_input, %w[name shell run], "Windows RED input step")
     red_input_text = red_input["run"].to_s
     raise "Windows RED immutable input guards missing" unless
       %w[TARGET_SHA PARENT_SHA RED_NONCE].all? { |token| red_input_text.include?(token) } &&
@@ -224,11 +325,16 @@ module C1bCiValidator
     red_checkouts = red_steps.select { |step| step["uses"] == "actions/checkout@v4" }
     raise "Windows RED job must contain one checkout" unless red_checkouts.length == 1
     red_checkout = red_checkouts.first
+    exact_keys!(red_checkout, %w[uses with], "Windows RED checkout step")
+    raise "Windows RED checkout fields mismatch" unless red_checkout["with"] == {
+      "ref" => "${{ env.TARGET_SHA }}", "fetch-depth" => 2, "persist-credentials" => false,
+    }
     raise "Windows RED checkout is not immutable" unless
       red_checkout.dig("with", "ref") == "${{ env.TARGET_SHA }}" &&
       red_checkout.dig("with", "fetch-depth") == 2 &&
       red_checkout.dig("with", "persist-credentials") == false
     red_bind = require_exact_step!(red_steps, "Assert exact RED commit and parent", shell: "pwsh")
+    exact_keys!(red_bind, %w[name id shell run], "Windows RED binding step")
     raise "Windows RED binding output id missing" unless red_bind["id"] == "bind-red"
     red_bind_text = red_bind["run"].to_s
     [
@@ -241,6 +347,7 @@ module C1bCiValidator
     end
 
     red_run = require_exact_step!(red_steps, "Run focused expected-RED contract", shell: "pwsh")
+    exact_keys!(red_run, %w[name shell run], "Windows RED harness step")
     red_run_text = red_run["run"].to_s
     raise "repository Windows RED harness is not invoked with fixed inputs" unless
       red_run_text.include?("./scripts/run-c1b-windows-red.ps1") &&
@@ -251,12 +358,15 @@ module C1bCiValidator
     red_uploads = red_steps.select { |step| step["uses"] == "actions/upload-artifact@v4" }
     raise "Windows RED job must contain one artifact upload" unless red_uploads.length == 1
     red_upload = red_uploads.first
+    exact_keys!(red_upload, %w[name if uses with], "Windows RED artifact step")
     expected_red_name = "c1b-red-${{ inputs.red_task }}-${{ steps.bind-red.outputs.sha }}-${{ inputs.red_nonce }}"
     expected_red_path = "${{ runner.temp }}/c1b-red/c1b-task-${{ inputs.red_task }}-${{ steps.bind-red.outputs.sha }}-${{ inputs.red_nonce }}/"
+    expected_red_upload = {
+      "name" => expected_red_name, "path" => expected_red_path,
+      "if-no-files-found" => "error", "retention-days" => 30,
+    }
     raise "Windows RED artifact is not immutable and nonce-bound" unless
-      red_upload["if"] == "always()" && red_upload.dig("with", "name") == expected_red_name &&
-      red_upload.dig("with", "path") == expected_red_path &&
-      red_upload.dig("with", "if-no-files-found") == "error" && red_upload.dig("with", "retention-days") == 30
+      red_upload["if"] == "always()" && red_upload["with"] == expected_red_upload
 
     merge = "a" * 40
     head = "b" * 40
