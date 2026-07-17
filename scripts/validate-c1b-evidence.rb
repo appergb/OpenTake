@@ -123,7 +123,7 @@ def gh_json!(endpoint, api_version, label)
   stdout, stderr, status = Open3.capture3("gh", "api", "--hostname", "github.com",
     "-H", "X-GitHub-Api-Version: #{api_version}", endpoint)
   fail!("#{label} GitHub API failed: #{stderr.strip}") unless status.success?
-  [stdout, JSON.parse(stdout)]
+  [stdout.b, JSON.parse(stdout)]
 rescue Errno::ENOENT
   fail!("authenticated gh CLI is required")
 rescue JSON::ParserError
@@ -161,7 +161,7 @@ end
 def unzip_entry!(archive, entry, label)
   stdout, stderr, status = Open3.capture3("unzip", "-p", archive, entry)
   fail!("#{label} cannot be read from archive: #{stderr.strip}") unless status.success?
-  stdout
+  stdout.b
 rescue Errno::ENOENT
   fail!("unzip is required to validate artifact archives")
 end
