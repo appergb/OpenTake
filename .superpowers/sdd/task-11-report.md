@@ -40,6 +40,7 @@ Base revision: `32f90c89555b4515fdf904bebef22b2088af70c4`
 - `crates/opentake-project/src/safe_fs/tests.rs`
 - `docs/audit/2026-07-14/implementation-plans/data-safety-implementation.md`
 - `docs/superpowers/plans/c1b/2026-07-12-c1b-common-unix-normative.md`
+- `.superpowers/sdd/task-11-red-replay.md`
 - `.superpowers/sdd/task-11-report.md`
 
 The common capability/ops facade and the Windows adapter were not modified.
