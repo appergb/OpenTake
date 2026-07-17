@@ -30,9 +30,17 @@ module C1bCiValidator
     "Build exclusive JSON receipt" => "21922e9ce85e91bc80ec9163c889666ddc44f68297c03273a898e208d65b7684",
     "Enforce native aggregate" => "2e108004e97ad29c453f8d2e9ee84d93c11e8ef899b22b6855e03c5fbd4f2430",
     "Validate immutable RED inputs" => "d52e1b5c9dc160e2af0c2853da884834bc524a84806818c7fdd7cd849a2e62e9",
-    "Assert exact RED commit and parent" => "92fcdb12cbdf5bf9b0c80e1ee4e5e416d3ca3fc8b0c0d1040ab748734bcfab62",
-    "Run focused expected-RED contract" => "1cb7a86e206af187bdd4f796d785ad15ec09fb73f9228acdef73e5241bc778a4",
+    "Assert trusted RED dispatcher" => "89c29db6dbd47a621e44748ac3f3f55c6a90fc6aae3387530e7f8af33370919f",
+    "Assert exact RED commit and parent" => "a21065725f8dd93a4336999d4118aeb542d72926afb7684e4ff84ae4ede633d8",
+    "Run focused expected-RED contract" => "6b9172b0c06722861d8d0aba5f059a406a7a667c1fbdb4a9a069856924ef9447",
   }.freeze
+  SAFE_RUN_NAMES = RUN_DIGESTS.keys.first(8).freeze
+  RED_RUN_NAMES = [
+    "Validate immutable RED inputs",
+    "Assert trusted RED dispatcher",
+    "Assert exact RED commit and parent",
+    "Run focused expected-RED contract",
+  ].freeze
   NORMAL_CONDITION = "github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'"
   TARGET_EXPRESSION = "${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
 
@@ -161,7 +169,7 @@ module C1bCiValidator
       ["uses", "actions/upload-artifact@v4"],
       ["name", "Enforce native aggregate"],
     ], "safe-filesystem")
-    require_run_digests!(steps, RUN_DIGESTS.keys.first(8))
+    require_run_digests!(steps, SAFE_RUN_NAMES)
 
     immutable_input = require_exact_step!(steps, "Validate immutable SHA input", shell: "bash")
     exact_keys!(immutable_input, %w[name shell run], "immutable SHA input step")
@@ -301,6 +309,8 @@ module C1bCiValidator
       "PARENT_SHA" => "${{ inputs.red_parent_sha }}",
       "RED_TASK" => "${{ inputs.red_task }}",
       "RED_NONCE" => "${{ inputs.red_nonce }}",
+      "DISPATCHER_SHA" => "${{ github.workflow_sha }}",
+      "DISPATCHER_REF" => "${{ github.workflow_ref }}",
     }
     raise "Windows RED job environment is not context-bound" unless
       red_job["env"] == expected_red_env
@@ -309,11 +319,13 @@ module C1bCiValidator
     require_step_sequence!(red_steps, [
       ["name", "Validate immutable RED inputs"],
       ["uses", "actions/checkout@v4"],
+      ["name", "Assert trusted RED dispatcher"],
+      ["uses", "actions/checkout@v4"],
       ["name", "Assert exact RED commit and parent"],
       ["name", "Run focused expected-RED contract"],
       ["uses", "actions/upload-artifact@v4"],
     ], "Windows RED")
-    require_run_digests!(red_steps, RUN_DIGESTS.keys.last(3))
+    require_run_digests!(red_steps, RED_RUN_NAMES)
     red_input = require_exact_step!(red_steps, "Validate immutable RED inputs", shell: "pwsh")
     exact_keys!(red_input, %w[name shell run], "Windows RED input step")
     red_input_text = red_input["run"].to_s
@@ -323,16 +335,26 @@ module C1bCiValidator
       red_input_text.scan("-cnotmatch").length == 3
 
     red_checkouts = red_steps.select { |step| step["uses"] == "actions/checkout@v4" }
-    raise "Windows RED job must contain one checkout" unless red_checkouts.length == 1
-    red_checkout = red_checkouts.first
-    exact_keys!(red_checkout, %w[uses with], "Windows RED checkout step")
-    raise "Windows RED checkout fields mismatch" unless red_checkout["with"] == {
-      "ref" => "${{ env.TARGET_SHA }}", "fetch-depth" => 2, "persist-credentials" => false,
+    raise "Windows RED job must contain trusted dispatcher and target checkouts" unless red_checkouts.length == 2
+    dispatcher_checkout, red_checkout = red_checkouts
+    exact_keys!(dispatcher_checkout, %w[name uses with], "Windows RED dispatcher checkout step")
+    raise "Windows RED dispatcher checkout fields mismatch" unless dispatcher_checkout["with"] == {
+      "ref" => "${{ env.DISPATCHER_SHA }}", "fetch-depth" => 1,
+      "persist-credentials" => false, "path" => "c1b-dispatcher",
     }
-    raise "Windows RED checkout is not immutable" unless
-      red_checkout.dig("with", "ref") == "${{ env.TARGET_SHA }}" &&
-      red_checkout.dig("with", "fetch-depth") == 2 &&
-      red_checkout.dig("with", "persist-credentials") == false
+    dispatcher_bind = require_exact_step!(red_steps, "Assert trusted RED dispatcher", shell: "pwsh")
+    exact_keys!(dispatcher_bind, %w[name id shell run], "Windows RED dispatcher binding step")
+    raise "Windows RED dispatcher output id missing" unless dispatcher_bind["id"] == "bind-dispatcher"
+    dispatcher_bind_text = dispatcher_bind["run"].to_s
+    ["github.repository", ".github/workflows/ci.yml@refs/heads/main", "DISPATCHER_REF",
+     "git -C c1b-dispatcher rev-parse HEAD", "DISPATCHER_SHA", "GITHUB_OUTPUT"].each do |token|
+      raise "Windows RED dispatcher assertion missing #{token}" unless dispatcher_bind_text.include?(token)
+    end
+    exact_keys!(red_checkout, %w[name uses with], "Windows RED target checkout step")
+    raise "Windows RED target checkout fields mismatch" unless red_checkout["with"] == {
+      "ref" => "${{ env.TARGET_SHA }}", "fetch-depth" => 2,
+      "persist-credentials" => false, "path" => "c1b-target",
+    }
     red_bind = require_exact_step!(red_steps, "Assert exact RED commit and parent", shell: "pwsh")
     exact_keys!(red_bind, %w[name id shell run], "Windows RED binding step")
     raise "Windows RED binding output id missing" unless red_bind["id"] == "bind-red"
@@ -341,7 +363,7 @@ module C1bCiValidator
       "git rev-parse HEAD", "git rev-parse 'HEAD^'", "git rev-list --parents -n 1 HEAD",
       "git diff-tree --no-commit-id --name-only -r HEAD", "$commitRow.Count -ne 2",
       "$changedPaths.Count -ne 1", "crates/opentake-project/src/safe_fs/windows.rs",
-      "checked-out RED SHA mismatch", "RED parent SHA mismatch", "GITHUB_OUTPUT",
+      "Set-Location c1b-target", "checked-out RED SHA mismatch", "RED parent SHA mismatch", "GITHUB_OUTPUT",
     ].each do |token|
       raise "Windows RED identity assertion missing #{token}" unless red_bind_text.include?(token)
     end
@@ -350,7 +372,8 @@ module C1bCiValidator
     exact_keys!(red_run, %w[name shell run], "Windows RED harness step")
     red_run_text = red_run["run"].to_s
     raise "repository Windows RED harness is not invoked with fixed inputs" unless
-      red_run_text.include?("./scripts/run-c1b-windows-red.ps1") &&
+      red_run_text.include?("Set-Location c1b-target") &&
+      red_run_text.include?("../c1b-dispatcher/scripts/run-c1b-windows-red.ps1") &&
       %w[-Task\ $env:RED_TASK -TestSha\ $env:TARGET_SHA -ParentSha\ $env:PARENT_SHA
          -Nonce\ $env:RED_NONCE RUNNER_TEMP].all? { |token| red_run_text.include?(token.tr("\\", "")) }
     raise "Windows RED job permits arbitrary command input" if red_run_text.match?(/Invoke-Expression|iex\b|Start-Process/)

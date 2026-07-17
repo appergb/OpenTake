@@ -368,6 +368,8 @@ jobs:
       PARENT_SHA: ${{ inputs.red_parent_sha }}
       RED_TASK: ${{ inputs.red_task }}
       RED_NONCE: ${{ inputs.red_nonce }}
+      DISPATCHER_SHA: ${{ github.workflow_sha }}
+      DISPATCHER_REF: ${{ github.workflow_ref }}
     steps:
       - name: Validate immutable RED inputs
         shell: pwsh
@@ -375,15 +377,34 @@ jobs:
           if ($env:TARGET_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'commit_sha must be lower 40-hex' }
           if ($env:PARENT_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'red_parent_sha must be lower 40-hex' }
           if ($env:RED_NONCE -cnotmatch '^[0-9a-f]{16}$') { throw 'red_nonce must be unique lower 16-hex' }
-      - uses: actions/checkout@v4
+      - name: Checkout trusted RED dispatcher
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DISPATCHER_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: c1b-dispatcher
+      - name: Assert trusted RED dispatcher
+        id: bind-dispatcher
+        shell: pwsh
+        run: |
+          $expectedRef = '${{ github.repository }}/.github/workflows/ci.yml@refs/heads/main'
+          if ($env:DISPATCHER_REF -cne $expectedRef) { throw 'RED dispatcher is not the trusted main workflow' }
+          $actual = (git -C c1b-dispatcher rev-parse HEAD).Trim().ToLowerInvariant()
+          if ($actual -cne $env:DISPATCHER_SHA) { throw 'RED dispatcher SHA mismatch' }
+          "sha=$actual" >> $env:GITHUB_OUTPUT
+      - name: Checkout RED target
+        uses: actions/checkout@v4
         with:
           ref: ${{ env.TARGET_SHA }}
           fetch-depth: 2
           persist-credentials: false
+          path: c1b-target
       - name: Assert exact RED commit and parent
         id: bind-red
         shell: pwsh
         run: |
+          Set-Location c1b-target
           $actual = (git rev-parse HEAD).Trim().ToLowerInvariant()
           $parent = (git rev-parse 'HEAD^').Trim().ToLowerInvariant()
           $commitRow = @((git rev-list --parents -n 1 HEAD).Trim().Split(' '))
@@ -398,7 +419,8 @@ jobs:
       - name: Run focused expected-RED contract
         shell: pwsh
         run: |
-          ./scripts/run-c1b-windows-red.ps1 `
+          Set-Location c1b-target
+          ../c1b-dispatcher/scripts/run-c1b-windows-red.ps1 `
             -Task $env:RED_TASK -TestSha $env:TARGET_SHA -ParentSha $env:PARENT_SHA `
             -Nonce $env:RED_NONCE -EvidenceRoot (Join-Path $env:RUNNER_TEMP 'c1b-red')
       - name: Upload immutable Windows RED receipt
