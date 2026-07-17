@@ -36,9 +36,26 @@ raw = File.read(WORKFLOW)
 mutations = {
   "pr-uses-merge" => ["github.event.pull_request.head.sha", "github.sha"],
   "checkout-not-bound" => ["ref: ${{ env.TARGET_SHA }}", "ref: main"],
+  "checkout-shallow" => ["fetch-depth: 0", "fetch-depth: 1"],
   "checkout-persists-credentials" => ["persist-credentials: false", "persist-credentials: true"],
   "wrong-linux-runner" => ["runner: ubuntu-24.04", "runner: windows-2022"],
   "wrong-macos-arch" => ["expected_arch: ARM64", "expected_arch: X64"],
+  "native-command-substitution" => [
+    "run_gate cargo-clippy cargo clippy -p opentake-project --lib --tests -- -D warnings",
+    "run_gate cargo-clippy cargo check -p opentake-project",
+  ],
+  "receipt-target-not-bound" => [
+    "checked_out_sha = $env:RECEIPT_SHA.ToLowerInvariant()",
+    "checked_out_sha = ('0' * 40)",
+  ],
+  "receipt-dispatcher-sha-not-bound" => [
+    "dispatcher_sha = '${{ github.workflow_sha }}'",
+    "dispatcher_sha = $env:TARGET_SHA.ToLowerInvariant()",
+  ],
+  "receipt-dispatcher-ref-not-bound" => [
+    "dispatcher_ref = '${{ github.workflow_ref }}'",
+    "dispatcher_ref = 'refs/heads/arbitrary'",
+  ],
   "receipt-not-always" => ["name: Build exclusive JSON receipt\n        if: always()",
     "name: Build exclusive JSON receipt\n        if: success()"],
   "artifact-not-sha-bound" => ["c1b-native-${{ matrix.receipt_id }}-${{ steps.bind.outputs.sha }}",
@@ -46,9 +63,17 @@ mutations = {
   "aggregate-not-enforced" => ["name: Enforce native aggregate", "name: Ignore native aggregate"],
   "red-wrong-runner" => ["name: Windows expected RED (${{ inputs.red_task }})\n    if: github.event_name == 'workflow_dispatch' && inputs.red_task != 'none'\n    runs-on: windows-2022",
     "name: Windows expected RED (${{ inputs.red_task }})\n    if: github.event_name == 'workflow_dispatch' && inputs.red_task != 'none'\n    runs-on: ubuntu-24.04"],
+  "red-input-not-lowercase" => [
+    "if ($env:TARGET_SHA -cnotmatch '^[0-9a-f]{40}$')",
+    "if ($env:TARGET_SHA -cnotmatch '^[0-9A-Fa-f]{40}$')",
+  ],
   "red-arbitrary-harness" => ["./scripts/run-c1b-windows-red.ps1", "./scripts/arbitrary.ps1"],
   "red-path-guard-removed" => ["git diff-tree --no-commit-id --name-only -r HEAD", "Write-Output windows.rs"],
   "red-artifact-not-nonce-bound" => ["-${{ inputs.red_nonce }}", "-fixed"],
+  "concurrency-not-nonce-bound" => [
+    "-${{ inputs.red_nonce || 'none' }}",
+    "-fixed-nonce",
+  ],
   "normal-jobs-run-during-red" => ["github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'", "always()"],
 }
 
@@ -57,6 +82,41 @@ Dir.mktmpdir("c1b-ci-mutations") do |directory|
     assert(raw.include?(before), "canonical mutation token missing: #{label}")
     path = File.join(directory, "#{label}.yml")
     File.write(path, raw.sub(before, after))
+    _out, _err, result = run_validator(path)
+    assert(!result.success?, "validator accepted mutation #{label}")
+  end
+
+  structural_mutations = {
+    "extra-normal-job" => raw + <<~YAML,
+
+        rogue-normal:
+          runs-on: ubuntu-24.04
+          steps:
+            - run: cargo test --workspace
+    YAML
+    "extra-step-after-checkout-binding" => raw.sub(
+      "      - name: Run all native gates and retain every exit\n",
+      <<~YAML.gsub(/^/, "      ")
+        - name: Shadow native tools
+          shell: bash
+          run: printf '%s\\n' /tmp/shadow >> "$GITHUB_PATH"
+        - name: Run all native gates and retain every exit
+      YAML
+    ),
+    "extra-red-step" => raw.sub(
+      "      - name: Run focused expected-RED contract\n",
+      <<~YAML.gsub(/^/, "      ")
+        - name: Mutate RED checkout
+          shell: pwsh
+          run: Set-Content crates/opentake-project/src/safe_fs/windows.rs 'mutated'
+        - name: Run focused expected-RED contract
+      YAML
+    ),
+  }
+  structural_mutations.each do |label, mutated|
+    assert(mutated != raw, "canonical structural mutation token missing: #{label}")
+    path = File.join(directory, "#{label}.yml")
+    File.write(path, mutated)
     _out, _err, result = run_validator(path)
     assert(!result.success?, "validator accepted mutation #{label}")
   end
