@@ -116,6 +116,8 @@ caption/transcribe/search、preview/export、MCP media bridge、Agent media path
 
 缺失的 optional 组件与损坏的组件不是同一种状态。`#[serde(default)]` 只负责
 有契约的旧字段默认值，不能把严格组件的 parse error 吞成空值。
+缺失 `media.json` 得到 version 2 的空 manifest；下一次安全保存会创建该文件。
+存在但没有 `version` 的 legacy `{}` manifest 则按上游 decoder 保持 version 1。
 
 ### 5.6 可执行验收证据
 
@@ -126,6 +128,11 @@ caption/transcribe/search、preview/export、MCP media bridge、Agent media path
 - `opentake-core/tests/project_open.rs::project_open_composite_acceptance`
   覆盖 AppCore prepare/commit、typed malformed-media failure、旧 session/epoch/event
   与 bundle byte receipt 保持、optional 组件、只读 recovery、save/reopen。
+- `opentake-project/tests/schema_compat.rs::malformed_manifest_contract_matches_authoritative_source`
+  覆盖 current v2 的 open/edit/save/reopen、strict project/media 错误优先级、
+  manifest 语法/结构损坏、missing/legacy manifest 保存重开，以及 malformed
+  generation log 的只读保护；拒绝路径通过完整 nofollow tree receipt 证明
+  bundle 和 Save As 同级目录没有文件、目录、符号链接或 staging/journal 漏写。
 - `opentake-agent::mcp::core_handle::tests::app_core_media_path_stress_never_mixes_project_snapshots`
   在并发切换项目的压力场景下持续检查 production CoreHandle 只返回成对路径；
   原子性本身由 `AppCoreHandle::media_path` 的单次 `runtime_snapshot` 实现保证。

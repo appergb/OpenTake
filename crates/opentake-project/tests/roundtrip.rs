@@ -235,12 +235,14 @@ fn malformed_manifest_is_an_error() {
     std::fs::create_dir_all(&bundle).unwrap();
     common::write_file(&bundle.join("project.json"), br#"{"tracks":[]}"#);
     common::write_file(&bundle.join("media.json"), b"{ not valid json ");
+    let before = common::tree_receipt(&bundle);
 
     let err = Project::open(&bundle).unwrap_err();
     assert!(
         matches!(err, opentake_project::ProjectError::Json { ref file, .. } if file == "media.json"),
         "expected Json error for media.json, got {err:?}"
     );
+    assert_eq!(common::tree_receipt(&bundle), before);
 }
 
 #[test]

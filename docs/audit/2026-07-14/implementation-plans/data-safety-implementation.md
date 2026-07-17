@@ -726,7 +726,11 @@
 
 **Files:**
 - Modify: `crates/opentake-project/src/bundle.rs#Project`
-- Modify: `crates/opentake-domain/src/media.rs#MediaManifest`
+- Modify: `crates/opentake-project/tests/common/mod.rs#tree_receipt`
+- Modify: `crates/opentake-project/tests/roundtrip.rs#malformed_manifest_is_an_error`
+- Modify: `crates/opentake-project/tests/schema_compat.rs#malformed_manifest_contract_matches_authoritative_source`
+- Modify: `docs/audit/2026-07-14/implementation-plans/data-safety-design.md`
+- Modify: `docs/audit/2026-07-14/implementation-plans/data-safety-implementation.md`
 - Modify: `docs/specs/core/5-assembly.md`
 - Test (existing-owned): `crates/opentake-project/tests/roundtrip.rs#malformed_manifest_is_an_error`
 - Test (reviewed-planned): `crates/opentake-project/tests/schema_compat.rs#malformed_manifest_contract_matches_authoritative_source`
@@ -737,11 +741,12 @@
 
 - Candidate/source: `doc-c5eeda123dd2c6ca` at `docs/specs/core/5-assembly.md:58` (requirement)
 - Expected behavior: Open legacy projects with defaulted optional manifest/generation data while keeping project.json strict.
-- Resolution: `reviewed-mapping-report:DS-manifest-corruption-conflict` — Core mapping report: the source contradicts the fail-closed malformed-manifest contract; acceptance text must be reconciled before product work.
+- Resolution: `reviewed-mapping-report:DS-manifest-corruption-conflict` — Reconciliation confirmed that the authoritative upstream and current product both require malformed `media.json` to fail closed. The conflict was in this plan text, not in product behavior.
 - Exact acceptance contract:
-  - Implementation: Keep project.json strict; default missing media.json/generation-log.json; decide and implement recovery for malformed media.json consistent with the spec (including compatibility blocker/read-only safety); test every missing/malformed combination and safe-save behavior.
+  - Keep `project.json` strict; default a missing `media.json` to an empty current manifest; fail closed with typed `Json(media.json)` when a present manifest is syntactically or structurally malformed.
+  - Keep malformed `generation-log.json` as the sole lenient read recovery: open with a compatibility blocker, reject same-path save and Save As before any write, and preserve the damaged bytes.
   - Add deterministic fixtures for every named current, legacy, missing, malformed, and fail-closed branch; the focused round-trip and compatibility suites must pass.
-  - Exercise open, edit, save, and reopen on representative bundles and attach the exact implementation symbols plus test or runtime evidence before reclassification.
+  - Exercise open, edit, save, and reopen on a complete current version-2 bundle. Prove every rejected open/save leaves the full nofollow bundle tree unchanged, and prove rejected Save As creates no destination, journal, staging, symlink, or other sibling artifact.
 
 - [ ] **Step 1: Write or extend every reviewed owning test**
 
@@ -755,11 +760,14 @@
   - Run: `cargo test -p opentake-project --test roundtrip malformed_manifest_is_an_error -- --exact`
   - Run: `cargo test -p opentake-project --test schema_compat malformed_manifest_contract_matches_authoritative_source -- --exact`
 
-  Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
+  Expected: the existing round-trip smoke passes, while the reviewed-planned
+  schema contract is absent (`running 0 tests`), so the gate is not satisfied.
 
 - [ ] **Step 3: Implement the minimal vertical slice**
 
-  Modify only `crates/opentake-project/src/bundle.rs#Project`, `crates/opentake-domain/src/media.rs#MediaManifest`, `docs/specs/core/5-assembly.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
+  Add the missing owning test and reconcile the comments/spec/plan in the files
+  listed for Task 9. Do not change the already-correct `Project` or
+  `MediaManifest` runtime behavior.
 
 - [ ] **Step 4: Run all focused tests and verify GREEN**
 

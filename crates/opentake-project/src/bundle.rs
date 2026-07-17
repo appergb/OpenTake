@@ -10,8 +10,9 @@
 //!   (upstream throws `fileReadCorruptFile`).
 //! - `media.json`, if present, is parsed strictly; a parse failure is an error
 //!   (upstream throws `fileReadCorruptFile`).
-//! - `generation-log.json`, if present, is parsed leniently; a parse failure is
-//!   swallowed and the log becomes `None` (upstream `try?`).
+//! - `generation-log.json`, if present, is parsed leniently; a parse failure
+//!   yields an in-memory `None` recovery (upstream `try?`) plus a compatibility
+//!   blocker, so the damaged bytes remain readable but cannot be overwritten.
 //!
 //! Write semantics follow the architecture note "assemble an in-memory
 //! snapshot, then write atomically": each JSON component is written to a
@@ -85,7 +86,7 @@ pub struct Project {
     /// absent.
     pub manifest: MediaManifest,
     /// The generation log (`generation-log.json`). `None` when the file was
-    /// absent or failed to parse.
+    /// absent or failed to parse; the latter also makes compatibility read-only.
     pub generation_log: Option<GenerationLog>,
     /// JPEG thumbnail bytes to write on the next `save`. `None` leaves any
     /// existing `thumbnail.jpg` on disk untouched.
@@ -165,7 +166,8 @@ impl Project {
     /// Returns [`ProjectError::NotABundle`] if `path` is not a directory,
     /// [`ProjectError::MissingTimeline`] if `project.json` is absent, and
     /// [`ProjectError::Json`] if `project.json` or `media.json` fails to parse.
-    /// A malformed `generation-log.json` is ignored.
+    /// A malformed `generation-log.json` opens as a compatibility read-only
+    /// recovery with no decoded log.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let root = ProjectRoot::open(path)?;
         Self::open_from_root(&root)
@@ -205,7 +207,8 @@ impl Project {
         };
         after_component(layout::MANIFEST_FILE);
 
-        // generation-log.json: lenient — a parse error degrades to None.
+        // generation-log.json: lenient read recovery — a parse error degrades
+        // to None but records a blocker so no save can overwrite the bytes.
         let generation_log = match root.read_optional(layout::GENERATION_LOG_FILE) {
             Ok(Some(bytes)) => {
                 match decode_component::<GenerationLog>(&bytes, layout::GENERATION_LOG_FILE) {

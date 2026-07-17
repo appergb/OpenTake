@@ -390,12 +390,12 @@ Close each record as the smallest end-to-end vertical slice while preserving Rus
 - Source citation: `docs/specs/core/5-assembly.md:58`
 - Exact files/symbols: `crates/opentake-project/src/bundle.rs#Project`, `crates/opentake-domain/src/media.rs#MediaManifest`, `docs/specs/core/5-assembly.md`
 - Target resolution: `reviewed-mapping-report:DS-manifest-corruption-conflict`; matched `Project`, `MediaManifest`.
-- Resolution rationale: Core mapping report: the source contradicts the fail-closed malformed-manifest contract; acceptance text must be reconciled before product work.
+- Resolution rationale: Reconciliation confirmed the authoritative upstream and current product both require malformed `media.json` to fail closed. The conflict was in the earlier plan text, not in runtime behavior.
 - Test ownership:
   - `crates/opentake-project/tests/roundtrip.rs#malformed_manifest_is_an_error` (existing-owned): Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-project/tests/schema_compat.rs#malformed_manifest_contract_matches_authoritative_source` (reviewed-planned): Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 - Expected behavior: Open legacy projects with defaulted optional manifest/generation data while keeping project.json strict.
-- Acceptance criteria: Implementation: Keep project.json strict; default missing media.json/generation-log.json; decide and implement recovery for malformed media.json consistent with the spec (including compatibility blocker/read-only safety); test every missing/malformed combination and safe-save behavior. Add deterministic fixtures for every named current, legacy, missing, malformed, and fail-closed branch; the focused round-trip and compatibility suites must pass. Exercise open, edit, save, and reopen on representative bundles and attach the exact implementation symbols plus test or runtime evidence before reclassification.
+- Acceptance criteria: Keep `project.json` strict. A missing `media.json` becomes an empty current manifest and is created on the next safe save; a present syntactically or structurally malformed `media.json` returns typed `Json(media.json)` with no recovery session or file write. A malformed `generation-log.json` remains the only lenient read recovery and must block same-path save and Save As without creating missing components or a destination. Cover a complete current version-2 open/edit/save/reopen path plus legacy `{}`, missing, malformed, error-priority, and safe-save branches. Compare full nofollow tree receipts so rejected operations cannot create or alter unknown files, directories, symlinks, journals, or staging artifacts.
 
 ### requirement-37acd430c8e1e82b
 
