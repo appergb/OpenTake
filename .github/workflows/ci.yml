@@ -287,8 +287,13 @@ jobs:
           run_gate() {
             id="$1"
             shift
+            {
+              printf '$'
+              printf ' %q' "$@"
+              printf '\n'
+            } >"$RECEIPT_DIR/$id.log"
             set +e
-            "$@" >"$RECEIPT_DIR/$id.log" 2>&1
+            "$@" >>"$RECEIPT_DIR/$id.log" 2>&1
             code=$?
             set -e
             printf '%s\n' "$code" >"$RECEIPT_DIR/$id.raw-exit"
