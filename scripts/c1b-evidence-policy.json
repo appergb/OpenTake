@@ -1,0 +1,69 @@
+{
+  "schema": "opentake-c1b-evidence-policy-v1",
+  "api_version": "2026-03-10",
+  "repository": "appergb/OpenTake",
+  "workflow": "CI",
+  "workflow_file": ".github/workflows/ci.yml",
+  "dispatcher_ref": "refs/heads/main",
+  "job_id": "safe-filesystem",
+  "receipts": [
+    {
+      "id": "linux-x86_64",
+      "runner": "ubuntu-24.04",
+      "os": "Linux",
+      "arch": "X64"
+    },
+    {
+      "id": "macos-native",
+      "runner": "macos-14",
+      "os": "macOS",
+      "arch": "ARM64"
+    },
+    {
+      "id": "windows-x86_64",
+      "runner": "windows-2022",
+      "os": "Windows",
+      "arch": "X64"
+    }
+  ],
+  "native_commands": [
+    {
+      "id": "cargo-fmt",
+      "command": "cargo fmt --all --check"
+    },
+    {
+      "id": "cargo-clippy",
+      "command": "cargo clippy -p opentake-project --lib --tests -- -D warnings"
+    },
+    {
+      "id": "safe-fs-unit",
+      "command": "cargo test -p opentake-project --lib safe_fs -- --test-threads=1"
+    },
+    {
+      "id": "archive-security",
+      "command": "cargo test -p opentake-project --test archive_security -- --test-threads=1"
+    }
+  ],
+  "local_commands": [
+    {
+      "id": "ci-validator-tests",
+      "command": "ruby scripts/tests/validate-c1b-ci-test.rb"
+    },
+    {
+      "id": "evidence-validator-tests",
+      "command": "ruby scripts/tests/validate-c1b-evidence-test.rb"
+    },
+    {
+      "id": "ci-validator",
+      "command": "ruby scripts/validate-c1b-ci.rb .github/workflows/ci.yml"
+    },
+    {
+      "id": "git-diff-check",
+      "command": "git diff --check"
+    }
+  ],
+  "bootstrap_paths": [
+    ".github/workflows/ci.yml",
+    "scripts/"
+  ]
+}

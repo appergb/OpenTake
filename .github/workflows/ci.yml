@@ -4,14 +4,40 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Immutable 40-hex commit SHA already present in this repository
+        required: true
+        type: string
+      red_task:
+        description: Focused Windows expected-RED slice; none runs normal native gates
+        required: true
+        default: none
+        type: choice
+        options: [none, 6b, 7a, 7b, 7c]
+      red_parent_sha:
+        description: Exact parent SHA for a focused Windows expected-RED slice
+        required: false
+        default: ''
+        type: string
+      red_nonce:
+        description: Unique 16-lower-hex correlation nonce for expected-RED evidence
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ inputs.commit_sha || github.sha }}-${{ inputs.red_task || 'normal' }}-${{ inputs.red_nonce || 'none' }}
   cancel-in-progress: true
 
 jobs:
   rust:
     name: Rust (fmt / clippy / test)
+    if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -85,6 +111,7 @@ jobs:
 
   windows-security:
     name: Windows (cancel / reparse safety)
+    if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -120,6 +147,7 @@ jobs:
 
   web:
     name: Web (install / build)
+    if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -145,6 +173,7 @@ jobs:
 
   windows-library-security:
     name: Windows (library capability security)
+    if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -173,3 +202,232 @@ jobs:
 
       - name: Clippy capability-backed library
         run: cargo clippy -p opentake-media --all-targets -- -D warnings
+
+  safe-filesystem:
+    name: Safe filesystem (${{ matrix.receipt_id }})
+    if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - receipt_id: linux-x86_64
+            runner: ubuntu-24.04
+            expected_os: Linux
+            expected_arch: X64
+          - receipt_id: macos-native
+            runner: macos-14
+            expected_os: macOS
+            expected_arch: ARM64
+          - receipt_id: windows-x86_64
+            runner: windows-2022
+            expected_os: Windows
+            expected_arch: X64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    env:
+      TARGET_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      RECEIPT_DIR: c1b-native-receipt
+    steps:
+      - name: Validate immutable SHA input
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Assert exact checked-out SHA
+        id: bind
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$TARGET_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          printf 'sha=%s\n' "$actual" >> "$GITHUB_OUTPUT"
+      - name: Install Rust components
+        shell: bash
+        run: rustup component add rustfmt clippy
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: safe-fs-${{ matrix.receipt_id }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: safe-fs-${{ matrix.receipt_id }}-
+      - name: Parse Windows expected-RED harness
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'scripts/run-c1b-windows-red.ps1'), [ref]$tokens, [ref]$errors)
+          if ($errors.Count -ne 0) { throw ($errors | Out-String) }
+      - name: Re-assert immutable target before native gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$TARGET_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "${expected}^{tree}")"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - name: Run all native gates and retain every exit
+        shell: bash
+        run: |
+          set -u
+          mkdir "$RECEIPT_DIR"
+          aggregate=0
+          run_gate() {
+            id="$1"
+            shift
+            set +e
+            "$@" >"$RECEIPT_DIR/$id.log" 2>&1
+            code=$?
+            set -e
+            printf '%s\n' "$code" >"$RECEIPT_DIR/$id.raw-exit"
+            if [ "$code" -ne 0 ]; then aggregate=1; fi
+          }
+          set -e
+          run_gate cargo-fmt cargo fmt --all --check
+          run_gate cargo-clippy cargo clippy -p opentake-project --lib --tests -- -D warnings
+          run_gate safe-fs-unit cargo test -p opentake-project --lib safe_fs -- --test-threads=1
+          run_gate archive-security cargo test -p opentake-project --test archive_security -- --test-threads=1
+          printf '%s\n' "$aggregate" >"$RECEIPT_DIR/final-aggregate.raw-exit"
+      - name: Build exclusive JSON receipt
+        if: always()
+        shell: pwsh
+        env:
+          RECEIPT_SHA: ${{ steps.bind.outputs.sha }}
+          RECEIPT_ID: ${{ matrix.receipt_id }}
+          RUNNER_LABEL: ${{ matrix.runner }}
+          EXPECTED_RUNNER_OS: ${{ matrix.expected_os }}
+          EXPECTED_RUNNER_ARCH: ${{ matrix.expected_arch }}
+        run: |
+          if ('${{ runner.os }}' -ne $env:EXPECTED_RUNNER_OS) { throw 'runner OS does not match receipt id' }
+          if ('${{ runner.arch }}' -ne $env:EXPECTED_RUNNER_ARCH) { throw 'runner architecture does not match receipt id' }
+          $commands = @(
+            @{ id = 'cargo-fmt'; command = 'cargo fmt --all --check' },
+            @{ id = 'cargo-clippy'; command = 'cargo clippy -p opentake-project --lib --tests -- -D warnings' },
+            @{ id = 'safe-fs-unit'; command = 'cargo test -p opentake-project --lib safe_fs -- --test-threads=1' },
+            @{ id = 'archive-security'; command = 'cargo test -p opentake-project --test archive_security -- --test-threads=1' }
+          ) | ForEach-Object {
+            $exitPath = Join-Path $env:RECEIPT_DIR ($_.id + '.raw-exit')
+            $_ + @{ exit_code = [int](Get-Content $exitPath); log = ($_.id + '.log'); raw_exit = ($_.id + '.raw-exit') }
+          }
+          $receipt = [ordered]@{
+            schema = 'opentake-c1b-native-receipt-v1'
+            repository = '${{ github.repository }}'
+            workflow = '${{ github.workflow }}'
+            workflow_file = '.github/workflows/ci.yml'
+            run_id = '${{ github.run_id }}'
+            run_attempt = '${{ github.run_attempt }}'
+            job_id = '${{ github.job }}'
+            receipt_id = $env:RECEIPT_ID
+            runner_label = $env:RUNNER_LABEL
+            runner_os = '${{ runner.os }}'
+            runner_arch = '${{ runner.arch }}'
+            event_name = '${{ github.event_name }}'
+            requested_sha = $env:TARGET_SHA.ToLowerInvariant()
+            checked_out_sha = $env:RECEIPT_SHA.ToLowerInvariant()
+            dispatcher_sha = '${{ github.workflow_sha }}'
+            dispatcher_ref = '${{ github.workflow_ref }}'.Split('@')[-1]
+            commands = @($commands)
+            aggregate_exit = [int](Get-Content (Join-Path $env:RECEIPT_DIR 'final-aggregate.raw-exit'))
+          }
+          $receipt | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM (Join-Path $env:RECEIPT_DIR 'receipt.json')
+      - name: Upload immutable native receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c1b-native-${{ matrix.receipt_id }}-${{ steps.bind.outputs.sha }}
+          path: c1b-native-receipt/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Enforce native aggregate
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$RECEIPT_DIR/final-aggregate.raw-exit"
+          test "$(cat "$RECEIPT_DIR/final-aggregate.raw-exit")" = 0
+
+  windows-red-evidence:
+    name: Windows expected RED (${{ inputs.red_task }})
+    if: github.event_name == 'workflow_dispatch' && inputs.red_task != 'none'
+    runs-on: windows-2022
+    timeout-minutes: 35
+    env:
+      TARGET_SHA: ${{ inputs.commit_sha }}
+      PARENT_SHA: ${{ inputs.red_parent_sha }}
+      RED_TASK: ${{ inputs.red_task }}
+      RED_NONCE: ${{ inputs.red_nonce }}
+      DISPATCHER_SHA: ${{ github.workflow_sha }}
+      DISPATCHER_REF: ${{ github.workflow_ref }}
+    steps:
+      - name: Validate immutable RED inputs
+        shell: pwsh
+        run: |
+          if ($env:TARGET_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'commit_sha must be lower 40-hex' }
+          if ($env:PARENT_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'red_parent_sha must be lower 40-hex' }
+          if ($env:RED_NONCE -cnotmatch '^[0-9a-f]{16}$') { throw 'red_nonce must be unique lower 16-hex' }
+      - name: Checkout trusted RED dispatcher
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DISPATCHER_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: c1b-dispatcher
+      - name: Assert trusted RED dispatcher
+        id: bind-dispatcher
+        shell: pwsh
+        run: |
+          $expectedRef = '${{ github.repository }}/.github/workflows/ci.yml@refs/heads/main'
+          if ($env:DISPATCHER_REF -cne $expectedRef) { throw 'RED dispatcher is not the trusted main workflow' }
+          $actual = (git -C c1b-dispatcher rev-parse HEAD).Trim().ToLowerInvariant()
+          if ($actual -cne $env:DISPATCHER_SHA) { throw 'RED dispatcher SHA mismatch' }
+          "sha=$actual" >> $env:GITHUB_OUTPUT
+      - name: Checkout RED target
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 2
+          persist-credentials: false
+          path: c1b-target
+      - name: Assert exact RED commit and parent
+        id: bind-red
+        shell: pwsh
+        run: |
+          Set-Location c1b-target
+          $actual = (git rev-parse HEAD).Trim().ToLowerInvariant()
+          $parent = (git rev-parse 'HEAD^').Trim().ToLowerInvariant()
+          $commitRow = @((git rev-list --parents -n 1 HEAD).Trim().Split(' '))
+          $changedPaths = @(git diff-tree --no-commit-id --name-only -r HEAD)
+          if ($actual -cne $env:TARGET_SHA) { throw 'checked-out RED SHA mismatch' }
+          if ($parent -cne $env:PARENT_SHA) { throw 'RED parent SHA mismatch' }
+          if ($commitRow.Count -ne 2) { throw 'RED commit must have exactly one parent' }
+          if ($changedPaths.Count -ne 1 -or $changedPaths[0] -cne 'crates/opentake-project/src/safe_fs/windows.rs') {
+            throw 'RED commit changed paths outside windows.rs'
+          }
+          "sha=$actual" >> $env:GITHUB_OUTPUT
+      - name: Run focused expected-RED contract
+        shell: pwsh
+        run: |
+          Set-Location c1b-target
+          ../c1b-dispatcher/scripts/run-c1b-windows-red.ps1 `
+            -Task $env:RED_TASK -TestSha $env:TARGET_SHA -ParentSha $env:PARENT_SHA `
+            -Nonce $env:RED_NONCE -EvidenceRoot (Join-Path $env:RUNNER_TEMP 'c1b-red')
+      - name: Upload immutable Windows RED receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c1b-red-${{ inputs.red_task }}-${{ steps.bind-red.outputs.sha }}-${{ inputs.red_nonce }}
+          path: ${{ runner.temp }}/c1b-red/c1b-task-${{ inputs.red_task }}-${{ steps.bind-red.outputs.sha }}-${{ inputs.red_nonce }}/
+          if-no-files-found: error
+          retention-days: 30
