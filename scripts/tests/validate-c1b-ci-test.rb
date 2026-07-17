@@ -135,10 +135,30 @@ Dir.mktmpdir("c1b-ci-mutations") do |directory|
     assert(!result.success?, "validator accepted mutation #{label}")
   end
 
-  mutated_harness = File.join(directory, "red-harness-missing-success-exit.ps1")
-  File.write(mutated_harness, red_harness_raw.sub(/\nexit 0\s*\z/, "\n"))
-  _out, _err, result = run_validator(WORKFLOW, mutated_harness)
-  assert(!result.success?, "validator accepted RED harness without explicit success exit")
+  receipt_block = <<~'POWERSHELL'.chomp
+    } | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM `
+      (Join-Path $Evidence 'red-receipt.json')
+  POWERSHELL
+  harness_mutations = {
+    "missing-success-exit" => red_harness_raw.sub(/\nexit 0\s*\z/, "\n"),
+    "only-success-exit" => "exit 0\n",
+    "early-success-exit" => red_harness_raw.sub(
+      "Set-StrictMode -Version Latest",
+      "exit 0\nSet-StrictMode -Version Latest"
+    ),
+    "receipt-removed" => red_harness_raw.sub(receipt_block, "Write-Output 'receipt omitted'"),
+    "red-success-check-removed" => red_harness_raw.sub(
+      'if ($code -eq 0) { throw "RED unexpectedly passed: $Name" }',
+      'if ($code -eq 0) { return 0 }'
+    ),
+  }
+  harness_mutations.each do |label, mutated|
+    assert(mutated != red_harness_raw, "canonical harness mutation token missing: #{label}")
+    mutated_harness = File.join(directory, "#{label}.ps1")
+    File.write(mutated_harness, mutated)
+    _out, _err, result = run_validator(WORKFLOW, mutated_harness)
+    assert(!result.success?, "validator accepted RED harness mutation #{label}")
+  end
 end
 
 puts "c1b-ci-validator-tests=ok"
