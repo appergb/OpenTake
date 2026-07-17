@@ -260,11 +260,12 @@ Dir.mktmpdir("c1b-evidence-test") do |temporary|
       end
     },
     "duplicate-live-artifact-id" => lambda { |copy, live|
-      live_path = File.join(live, "artifacts.json")
-      values = JSON.parse(File.read(live_path))
-      duplicate = values.fetch("artifacts")[0].fetch("id")
-      values.fetch("artifacts")[1]["id"] = duplicate
-      write_json(live_path, values)
+      page_paths = [File.join(live, "artifacts.json")] +
+        Dir.glob(File.join(copy, "native-receipts/*/*/artifacts.json"))
+      duplicate = JSON.parse(File.read(page_paths.first)).fetch("artifacts")[0].fetch("id")
+      page_paths.each do |path|
+        rewrite_json(path) { |value| value.fetch("artifacts")[1]["id"] = duplicate }
+      end
       saved = Dir.glob(File.join(copy, "native-receipts/*/*/artifact.json")).sort[1]
       rewrite_json(saved) { |value| value["id"] = duplicate }
     },
@@ -273,8 +274,12 @@ Dir.mktmpdir("c1b-evidence-test") do |temporary|
       File.open(path, "a") { |file| file.write("\n") }
     },
     "bad-live-digest" => lambda { |copy, live|
-      rewrite_json(File.join(live, "artifacts.json")) do |value|
-        value.fetch("artifacts")[0]["digest"] = "sha256:#{'0' * 64}"
+      page_paths = [File.join(live, "artifacts.json")] +
+        Dir.glob(File.join(copy, "native-receipts/*/*/artifacts.json"))
+      page_paths.each do |path|
+        rewrite_json(path) do |value|
+          value.fetch("artifacts")[0]["digest"] = "sha256:#{'0' * 64}"
+        end
       end
       path = Dir.glob(File.join(copy, "native-receipts/*/*/artifact.json")).first
       rewrite_json(path) { |value| value["digest"] = "sha256:#{'0' * 64}" }
@@ -288,13 +293,20 @@ Dir.mktmpdir("c1b-evidence-test") do |temporary|
       File.write(path, File.read(path).sub(/Final SHA: [0-9a-f]{40}/, "Final SHA: #{'0' * 40}"))
     },
   }
+  expected_errors = {
+    "duplicate-live-artifact-id" => "duplicate artifact IDs",
+    "bad-live-digest" => "artifact archive digest mismatch",
+  }
   mutations.each do |label, mutate|
     copy, copy_expected, copy_anchor, copy_spec, copy_implementation, copy_fixture =
       build_fixture(temporary, label)
     mutate.call(copy, copy_fixture)
-    _out, _err, result = run_validator(copy, copy_expected, copy_anchor, copy_spec,
+    out, err, result = run_validator(copy, copy_expected, copy_anchor, copy_spec,
       copy_implementation, copy_fixture, fake_bin)
     assert(!result.success?, "validator accepted mutation #{label}")
+    expected_error = expected_errors[label]
+    assert("#{out}#{err}".include?(expected_error),
+      "validator rejected #{label} for the wrong reason") if expected_error
   end
 
   missing_env = { "PATH" => File.join(temporary, "missing-gh") }
