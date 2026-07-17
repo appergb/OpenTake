@@ -33,6 +33,7 @@ assert(status.success?, "canonical workflow rejected: #{stdout}#{stderr}")
 assert(stdout.include?("c1b-ci-validation=ok"), "canonical success marker missing")
 
 raw = File.read(WORKFLOW)
+assert(raw.include?(%q{printf ' %q' "$@"}), "native gate logs lack an exact command marker")
 mutations = {
   "pr-uses-merge" => ["github.event.pull_request.head.sha", "github.sha"],
   "checkout-not-bound" => ["ref: ${{ env.TARGET_SHA }}", "ref: main"],
@@ -44,6 +45,7 @@ mutations = {
     "run_gate cargo-clippy cargo clippy -p opentake-project --lib --tests -- -D warnings",
     "run_gate cargo-clippy cargo check -p opentake-project",
   ],
+  "native-log-marker-removed" => [%q{printf ' %q' "$@"}, %q{printf '' "$@"}],
   "receipt-target-not-bound" => [
     "checked_out_sha = $env:RECEIPT_SHA.ToLowerInvariant()",
     "checked_out_sha = ('0' * 40)",
