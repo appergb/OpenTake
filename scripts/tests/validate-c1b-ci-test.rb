@@ -93,8 +93,8 @@ Dir.mktmpdir("c1b-ci-mutations") do |directory|
   end
 
   structural_mutations = {
-    "extra-normal-job" => raw + <<~YAML,
-
+    "extra-normal-job" => raw.sub("jobs:\n", <<~YAML),
+      jobs:
         rogue-normal:
           runs-on: ubuntu-24.04
           steps:
