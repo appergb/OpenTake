@@ -34,6 +34,7 @@ module C1bCiValidator
     "Assert exact RED commit and parent" => "a21065725f8dd93a4336999d4118aeb542d72926afb7684e4ff84ae4ede633d8",
     "Run focused expected-RED contract" => "6b9172b0c06722861d8d0aba5f059a406a7a667c1fbdb4a9a069856924ef9447",
   }.freeze
+  RED_HARNESS_SHA256 = "f3579b3b17312daa16f0c1a07a2179263576fab064c188204e4a474023a39f81"
   SAFE_RUN_NAMES = RUN_DIGESTS.keys.first(8).freeze
   RED_RUN_NAMES = [
     "Validate immutable RED inputs",
@@ -47,12 +48,15 @@ module C1bCiValidator
   module_function
 
   def validate_red_harness(path)
-    raw = File.read(path)
-    final_line = raw.lines.map(&:strip).reject(&:empty?).last
-    raise "Windows expected-RED harness must exit successfully after recording expected failures" unless
-      final_line == "exit 0"
+    actual = Digest::SHA256.file(path).hexdigest
+    raise "Windows expected-RED harness differs from the reviewed implementation" unless
+      actual == RED_HARNESS_SHA256
 
     true
+  end
+
+  def canonical_red_harness(workflow_path)
+    File.expand_path("../../scripts/run-c1b-windows-red.ps1", File.dirname(workflow_path))
   end
 
   def select_target(event_name:, github_sha:, pull_request_head_sha: nil, dispatch_sha: nil)
@@ -98,7 +102,7 @@ module C1bCiValidator
     end
   end
 
-  def validate(path)
+  def validate(path, red_harness_path: nil)
     raw = File.read(path)
     document = YAML.safe_load(raw, aliases: true)
     raise "workflow root must be a mapping" unless document.is_a?(Hash)
@@ -414,6 +418,8 @@ module C1bCiValidator
       event_name: "workflow_dispatch", github_sha: push, dispatch_sha: dispatch_sha
     ) == dispatch_sha
 
+    validate_red_harness(red_harness_path || canonical_red_harness(path))
+
     true
   end
 end
@@ -422,9 +428,8 @@ if $PROGRAM_NAME == __FILE__
   path = ARGV.fetch(0) { abort "usage: validate-c1b-ci.rb WORKFLOW [RED_HARNESS]" }
   red_harness = ARGV.fetch(
     1,
-    File.expand_path("../../scripts/run-c1b-windows-red.ps1", File.dirname(path))
+    C1bCiValidator.canonical_red_harness(path)
   )
-  C1bCiValidator.validate(path)
-  C1bCiValidator.validate_red_harness(red_harness)
+  C1bCiValidator.validate(path, red_harness_path: red_harness)
   puts "c1b-ci-validation=ok"
 end
