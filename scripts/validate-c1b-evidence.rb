@@ -7,6 +7,7 @@ require "json"
 require "open3"
 require "pathname"
 require "time"
+require_relative "validate-c1b-ci"
 
 SHA = /\A[0-9a-f]{40}\z/
 POSITIVE_INTEGER = /\A[1-9][0-9]*\z/
@@ -188,12 +189,16 @@ fail!("validator policy does not belong to repository") unless
 
 policy = JSON.parse(File.binread(POLICY_PATH))
 exact_hash_keys!(policy,
-  %w[schema api_version repository workflow workflow_file job_id receipts native_commands local_commands bootstrap_paths],
+  %w[schema api_version repository workflow workflow_file dispatcher_ref job_id receipts native_commands local_commands bootstrap_paths],
   "evidence policy")
 fail!("evidence policy schema mismatch") unless policy.fetch("schema") == "opentake-c1b-evidence-policy-v1"
 fail!("GitHub API version mismatch") unless policy.fetch("api_version") == "2026-03-10"
+fail!("trusted dispatcher ref mismatch") unless policy.fetch("dispatcher_ref") == "refs/heads/main"
 fail!("bootstrap allowlist is empty") unless
   policy.fetch("bootstrap_paths").is_a?(Array) && !policy.fetch("bootstrap_paths").empty?
+repository = policy.fetch("repository")
+workflow_path = confined_file!(repo, policy.fetch("workflow_file"), "repository workflow")
+C1bCiValidator.validate(workflow_path)
 
 head = git!(repo, "rev-parse", "HEAD").strip
 fail!("repository HEAD mismatch") unless head == expected_sha
@@ -276,9 +281,11 @@ fail!("duplicate or missing native receipt IDs") unless ids.sort == expected_rec
 run_ids = []
 run_attempts = []
 receipt_events = []
+dispatcher_shas = []
+dispatcher_refs = []
 receipts.each do |path, receipt|
   exact_hash_keys!(receipt,
-    %w[schema receipt_id repository workflow workflow_file job_id event_name run_id run_attempt runner_label runner_os runner_arch requested_sha checked_out_sha commands aggregate_exit],
+    %w[schema receipt_id repository workflow workflow_file job_id event_name run_id run_attempt runner_label runner_os runner_arch requested_sha checked_out_sha dispatcher_sha dispatcher_ref commands aggregate_exit],
     "native receipt")
   receipt_id = receipt.fetch("receipt_id")
   receipt_policy = receipt_policies.find { |row| row.fetch("id") == receipt_id }
@@ -287,7 +294,7 @@ receipts.each do |path, receipt|
   fail!("receipt workflow mismatch: #{receipt_id}") unless receipt.fetch("workflow") == policy.fetch("workflow")
   fail!("receipt workflow file mismatch: #{receipt_id}") unless receipt.fetch("workflow_file") == policy.fetch("workflow_file")
   fail!("receipt job id mismatch: #{receipt_id}") unless receipt.fetch("job_id") == policy.fetch("job_id")
-  fail!("receipt event mismatch: #{receipt_id}") unless %w[push pull_request workflow_dispatch].include?(receipt.fetch("event_name"))
+  fail!("receipt event mismatch: #{receipt_id}") unless receipt.fetch("event_name") == "workflow_dispatch"
   receipt_events << receipt.fetch("event_name")
   {
     "runner_label" => receipt_policy.fetch("runner"),
@@ -298,6 +305,14 @@ receipts.each do |path, receipt|
   end
   fail!("receipt requested SHA mismatch: #{receipt_id}") unless receipt.fetch("requested_sha") == expected_sha
   fail!("receipt checked-out SHA mismatch: #{receipt_id}") unless receipt.fetch("checked_out_sha") == expected_sha
+  current_dispatcher_sha = receipt.fetch("dispatcher_sha")
+  fail!("receipt dispatcher SHA malformed: #{receipt_id}") unless
+    current_dispatcher_sha.is_a?(String) && SHA.match?(current_dispatcher_sha)
+  expected_dispatcher_ref = policy.fetch("dispatcher_ref")
+  fail!("receipt dispatcher ref mismatch: #{receipt_id}") unless
+    receipt.fetch("dispatcher_ref") == expected_dispatcher_ref
+  dispatcher_shas << current_dispatcher_sha
+  dispatcher_refs << receipt.fetch("dispatcher_ref")
   current_run_id = positive_integer_string!(receipt.fetch("run_id"), "receipt run id")
   current_attempt = positive_integer_string!(receipt.fetch("run_attempt"), "receipt run attempt")
   run_ids << current_run_id
@@ -325,10 +340,12 @@ end
 fail!("native receipts do not belong to one run") unless run_ids.uniq == [run_id]
 fail!("native receipts do not belong to one run attempt") unless run_attempts.uniq.length == 1
 fail!("native receipts do not belong to one event") unless receipt_events.uniq.length == 1
+fail!("native receipts do not bind one dispatcher SHA") unless dispatcher_shas.uniq.length == 1
+fail!("native receipts do not bind one dispatcher ref") unless dispatcher_refs.uniq.length == 1
 run_attempt = run_attempts.first
+dispatcher_sha = dispatcher_shas.first
 
 gh_authenticated!
-repository = policy.fetch("repository")
 api_version = policy.fetch("api_version")
 run_raw, live_run = gh_json!("/repos/#{repository}/actions/runs/#{run_id}", api_version, "workflow run")
 jobs_raw, live_jobs = gh_json!(
@@ -336,7 +353,7 @@ jobs_raw, live_jobs = gh_json!(
 _artifacts_raw, live_artifacts = gh_json!(
   "/repos/#{repository}/actions/runs/#{run_id}/artifacts?per_page=100", api_version, "workflow artifacts")
 _workflow_raw, live_workflow = gh_json!(
-  "/repos/#{repository}/contents/#{policy.fetch('workflow_file')}?ref=#{expected_sha}", api_version,
+  "/repos/#{repository}/contents/#{policy.fetch('workflow_file')}?ref=#{dispatcher_sha}", api_version,
   "workflow content")
 
 fail!("live run is not an object") unless live_run.is_a?(Hash)
@@ -345,22 +362,16 @@ fail!("live run attempt mismatch") unless live_run.fetch("run_attempt").to_s == 
 fail!("live run repository mismatch") unless live_run.dig("repository", "full_name") == repository
 fail!("live workflow name mismatch") unless live_run.fetch("name") == policy.fetch("workflow")
 fail!("live workflow path mismatch") unless
-  live_run.fetch("path").match?(/\A#{Regexp.escape(policy.fetch('workflow_file'))}@/)
+  live_run.fetch("path") == "#{policy.fetch('workflow_file')}@#{policy.fetch('dispatcher_ref')}"
+fail!("live dispatcher branch mismatch") unless live_run.fetch("head_branch") == "main"
 fail!("live run did not complete successfully") unless
   live_run.fetch("status") == "completed" && live_run.fetch("conclusion") == "success"
 event = live_run.fetch("event")
-fail!("live run event is unsupported") unless %w[push pull_request workflow_dispatch].include?(event)
+fail!("live run is not a trusted default-branch dispatch") unless event == "workflow_dispatch"
 fail!("receipt event does not match live run") unless receipt_events == [event, event, event]
 run_head = live_run.fetch("head_sha")
 fail!("live run head SHA malformed") unless run_head.is_a?(String) && SHA.match?(run_head)
-if event == "pull_request"
-  pull_requests = live_run.fetch("pull_requests")
-  fail!("live pull request binding is missing") unless pull_requests.is_a?(Array) && !pull_requests.empty?
-  pr_heads = pull_requests.map { |pull| pull.dig("head", "sha") }
-  fail!("live pull request head mismatch") unless pr_heads.all? { |sha| sha == expected_sha }
-else
-  fail!("live run head mismatch") unless run_head == expected_sha
-end
+fail!("live dispatcher SHA mismatch") unless run_head == dispatcher_sha
 
 jobs = page!(live_jobs, "jobs", "workflow jobs")
 artifacts = page!(live_artifacts, "artifacts", "workflow artifacts")
@@ -370,7 +381,6 @@ fail!("workflow content encoding mismatch") unless live_workflow.fetch("encoding
 encoded_workflow = live_workflow.fetch("content")
 fail!("workflow content is not base64") unless encoded_workflow.is_a?(String)
 decoded_workflow = Base64.strict_decode64(encoded_workflow.gsub(/[\r\n]/, ""))
-workflow_path = confined_file!(repo, policy.fetch("workflow_file"), "repository workflow")
 fail!("live workflow content mismatch") unless decoded_workflow == File.binread(workflow_path)
 
 seen_job_ids = []
@@ -402,7 +412,18 @@ receipts.each do |receipt_path, receipt|
   fail!("missing or duplicate live artifact: #{receipt_id}") unless matched_artifacts.length == 1
   artifact = matched_artifacts.first
   artifact_id = positive_integer_string!(artifact.fetch("id"), "live artifact id")
-  fail!("saved artifact JSON differs from live API: #{receipt_id}") unless saved_artifact == artifact
+  artifact_raw, live_artifact_detail = gh_json!(
+    "/repos/#{repository}/actions/artifacts/#{artifact_id}", api_version, "artifact #{receipt_id}")
+  fail!("saved artifact JSON differs byte-for-byte from live API: #{receipt_id}") unless
+    File.binread(saved_artifact_path) == artifact_raw
+  fail!("saved artifact JSON parsing changed identity: #{receipt_id}") unless
+    saved_artifact == live_artifact_detail
+  %w[id name expired digest].each do |field|
+    fail!("artifact detail differs from run artifact list: #{receipt_id}/#{field}") unless
+      live_artifact_detail.fetch(field) == artifact.fetch(field)
+  end
+  fail!("artifact detail run differs from run artifact list: #{receipt_id}") unless
+    live_artifact_detail.fetch("workflow_run") == artifact.fetch("workflow_run")
   fail!("live artifact expired: #{receipt_id}") unless artifact.fetch("expired") == false
   fail!("live artifact run mismatch: #{receipt_id}") unless artifact.dig("workflow_run", "id").to_s == run_id
   fail!("live artifact head mismatch: #{receipt_id}") unless

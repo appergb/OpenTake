@@ -269,6 +269,15 @@ jobs:
           [void][System.Management.Automation.Language.Parser]::ParseFile(
             (Resolve-Path 'scripts/run-c1b-windows-red.ps1'), [ref]$tokens, [ref]$errors)
           if ($errors.Count -ne 0) { throw ($errors | Out-String) }
+      - name: Re-assert immutable target before native gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$TARGET_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "${expected}^{tree}")"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
       - name: Run all native gates and retain every exit
         shell: bash
         run: |
@@ -327,6 +336,8 @@ jobs:
             event_name = '${{ github.event_name }}'
             requested_sha = $env:TARGET_SHA.ToLowerInvariant()
             checked_out_sha = $env:RECEIPT_SHA.ToLowerInvariant()
+            dispatcher_sha = '${{ github.workflow_sha }}'
+            dispatcher_ref = '${{ github.workflow_ref }}'.Split('@')[-1]
             commands = @($commands)
             aggregate_exit = [int](Get-Content (Join-Path $env:RECEIPT_DIR 'final-aggregate.raw-exit'))
           }
