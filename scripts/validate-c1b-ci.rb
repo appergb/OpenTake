@@ -26,7 +26,7 @@ module C1bCiValidator
     "Install Rust components" => "6a9466ea5252ead01f047aec0f5cc1105b496c48df6fed06c754abbdc3c42299",
     "Parse Windows expected-RED harness" => "ce782516548a5fc4e2a5aa9434ed4d8d5840d5371b11d672de8ff8c27039c6ac",
     "Re-assert immutable target before native gates" => "f6a5747011e6bdf7295690c9eb8ef73980d3e85cfe12e10f4a5bcdeba5779adf",
-    "Run all native gates and retain every exit" => "a50598683c2d241183ce2986acf3b7915d492ecbb971abb3c59fd4a874c9c4c4",
+    "Run all native gates and retain every exit" => "3c879ba220178567594d02a9a44c17e2243e89906c76db838a74e8e00a1576f3",
     "Build exclusive JSON receipt" => "21922e9ce85e91bc80ec9163c889666ddc44f68297c03273a898e208d65b7684",
     "Enforce native aggregate" => "2e108004e97ad29c453f8d2e9ee84d93c11e8ef899b22b6855e03c5fbd4f2430",
     "Validate immutable RED inputs" => "d52e1b5c9dc160e2af0c2853da884834bc524a84806818c7fdd7cd849a2e62e9",
@@ -226,6 +226,9 @@ module C1bCiValidator
     raise "native gate commands differ from policy" unless gate_rows == NATIVE_COMMANDS.to_a
     %w[set\ -u set\ +e code=\$? final-aggregate.raw-exit].each do |token|
       raise "native raw-exit aggregation missing #{token.tr('\\', '')}" unless gate_text.include?(token.tr("\\", ""))
+    end
+    [%q{printf ' %q' "$@"}, %q{>>"$RECEIPT_DIR/$id.log" 2>&1}].each do |token|
+      raise "native gate log capture missing #{token}" unless gate_text.include?(token)
     end
 
     receipt = require_exact_step!(steps, "Build exclusive JSON receipt", shell: "pwsh", condition: "always()")

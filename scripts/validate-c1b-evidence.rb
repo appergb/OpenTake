@@ -123,7 +123,7 @@ def gh_json!(endpoint, api_version, label)
   stdout, stderr, status = Open3.capture3("gh", "api", "--hostname", "github.com",
     "-H", "X-GitHub-Api-Version: #{api_version}", endpoint)
   fail!("#{label} GitHub API failed: #{stderr.strip}") unless status.success?
-  [stdout, JSON.parse(stdout)]
+  [stdout.b, JSON.parse(stdout)]
 rescue Errno::ENOENT
   fail!("authenticated gh CLI is required")
 rescue JSON::ParserError
@@ -161,7 +161,7 @@ end
 def unzip_entry!(archive, entry, label)
   stdout, stderr, status = Open3.capture3("unzip", "-p", archive, entry)
   fail!("#{label} cannot be read from archive: #{stderr.strip}") unless status.success?
-  stdout
+  stdout.b
 rescue Errno::ENOENT
   fail!("unzip is required to validate artifact archives")
 end
@@ -362,7 +362,7 @@ fail!("live run attempt mismatch") unless live_run.fetch("run_attempt").to_s == 
 fail!("live run repository mismatch") unless live_run.dig("repository", "full_name") == repository
 fail!("live workflow name mismatch") unless live_run.fetch("name") == policy.fetch("workflow")
 fail!("live workflow path mismatch") unless
-  live_run.fetch("path") == "#{policy.fetch('workflow_file')}@main"
+  live_run.fetch("path") == policy.fetch("workflow_file")
 fail!("live dispatcher branch mismatch") unless live_run.fetch("head_branch") == "main"
 fail!("live run did not complete successfully") unless
   live_run.fetch("status") == "completed" && live_run.fetch("conclusion") == "success"
