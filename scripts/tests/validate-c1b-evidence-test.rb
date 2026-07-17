@@ -57,7 +57,6 @@ def install_fake_gh(root)
       */actions/runs/*/jobs?per_page=100) cat "$fixture/jobs.json" ;;
       */actions/runs/*/artifacts?per_page=100) cat "$fixture/artifacts.json" ;;
       */actions/runs/*) cat "$fixture/run.json" ;;
-      */actions/artifacts/*) cat "$fixture/artifact-${endpoint##*/}.json" ;;
       */contents/.github/workflows/ci.yml?ref=*) cat "$fixture/workflow-content.json" ;;
       *) echo "unsupported fake gh endpoint: $endpoint" >&2; exit 64 ;;
     esac
@@ -154,7 +153,6 @@ def build_fixture(root, label)
     write_json(File.join(directory, "run.json"), run)
     write_json(File.join(directory, "jobs.json"), { "total_count" => jobs.length, "jobs" => jobs })
     write_json(File.join(directory, "artifact.json"), artifact)
-    write_json(File.join(fixture, "artifact-#{artifact.fetch('id')}.json"), artifact)
   end
   write_json(File.join(fixture, "run.json"), run)
   write_json(File.join(fixture, "jobs.json"), { "total_count" => jobs.length, "jobs" => jobs })
