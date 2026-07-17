@@ -75,7 +75,6 @@ def build_fixture(root, label)
   run_id = "424242"
   dispatcher_sha = "f" * 40
   dispatcher_ref = POLICY.fetch("dispatcher_ref")
-  dispatcher_branch = dispatcher_ref.delete_prefix("refs/heads/")
   File.write(File.join(gate, "run-id.txt"), "#{run_id}\n")
   File.write(File.join(gate, "pre-status.txt"), "")
   File.write(File.join(gate, "post-status.txt"), "")
@@ -103,7 +102,7 @@ def build_fixture(root, label)
     "id" => run_id.to_i, "run_attempt" => 1, "head_sha" => dispatcher_sha,
     "head_branch" => "main", "event" => "workflow_dispatch",
     "status" => "completed", "conclusion" => "success", "name" => "CI",
-    "path" => ".github/workflows/ci.yml@#{dispatcher_branch}",
+    "path" => POLICY.fetch("workflow_file"),
     "pull_requests" => [],
     "repository" => { "full_name" => POLICY.fetch("repository") },
   }
@@ -249,9 +248,9 @@ Dir.mktmpdir("c1b-evidence-test") do |temporary|
       path = Dir.glob(File.join(copy, "native-receipts/*/*/run.json")).first
       rewrite_json(path) { |value| value["head_sha"] = "0" * 40 }
     },
-    "wrong-live-dispatcher-ref" => lambda { |copy, live|
+    "wrong-live-workflow-path" => lambda { |copy, live|
       paths = [File.join(live, "run.json")] + Dir.glob(File.join(copy, "native-receipts/*/*/run.json"))
-      paths.each { |path| rewrite_json(path) { |value| value["path"] = ".github/workflows/ci.yml@refs/heads/not-main" } }
+      paths.each { |path| rewrite_json(path) { |value| value["path"] = ".github/workflows/not-ci.yml" } }
     },
     "duplicate-live-job-id" => lambda { |copy, live|
       paths = [File.join(live, "jobs.json")] + Dir.glob(File.join(copy, "native-receipts/*/*/jobs.json"))
