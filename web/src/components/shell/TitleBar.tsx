@@ -1,5 +1,5 @@
 /**
- * Title bar (SPEC §2.8). Leading: Home (return to launcher). Trailing:
+ * Title bar (SPEC §2.8). Leading: Home, Agent panel, and View controls. Trailing:
  * Library + Settings + Export Video + Export Subtitles + Export (interchange).
  * (UpdateBadge/Avatar belong to a separate issue.)
  *
@@ -8,10 +8,9 @@
  * OTIO (DaVinci・industry standard), and EDL (CMX3600) — each opening the native
  * save dialog with the right extension and calling its backend command.
  *
- * The Agent panel is toggled from the §2.9 View menu (ViewMenu) and the
- * keyboard shortcut — the dedicated title-bar toggle button was removed by
- * request. Layout presets and panel-visibility toggles also live in the View
- * menu, the in-app menu entry point for an environment without a native menu bar.
+ * The Agent panel keeps all three upstream access paths: the visible gradient
+ * title-bar toggle, the §2.9 View menu, and the keyboard shortcut. Layout
+ * presets and the other panel-visibility toggles live in the View menu.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -57,6 +56,8 @@ export function TitleBar() {
   const setSettingsOpen = useEditorUiStore((s) => s.setSettingsOpen);
   const setExportDialogOpen = useEditorUiStore((s) => s.setExportDialogOpen);
   const pushToast = useEditorUiStore((s) => s.pushToast);
+  const agentPanelVisible = useEditorUiStore((s) => s.agentPanelVisible);
+  const toggleAgentPanel = useEditorUiStore((s) => s.toggleAgentPanel);
   const projectPath = useProjectStore((s) => s.projectPath);
   const tracks = useProjectStore((s) => s.timeline.tracks);
   const t = useT();
@@ -180,6 +181,26 @@ export function TitleBar() {
         }}
       >
         <Icon icon={Home} size={13} />
+      </button>
+
+      {/* §2.8 upstream Agent entry: always discoverable, with visible state. */}
+      <button
+        title={t("title.toggleAgent")}
+        aria-label={t("title.toggleAgent")}
+        aria-pressed={agentPanelVisible}
+        onClick={toggleAgentPanel}
+        className="hover-area"
+        style={{
+          width: 26,
+          height: 26,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          opacity: agentPanelVisible ? 1 : 0.55,
+          transition: "opacity var(--anim-transition) ease-out",
+        }}
+      >
+        <AgentGradientIcon />
       </button>
 
       {/* §2.9 menu entry point (hosts Layout presets + Agent panel + visibility). */}
@@ -420,6 +441,36 @@ export function TitleBar() {
         )}
       </div>
     </div>
+  );
+}
+
+/** Filled chat bubble matching the upstream AI-gradient Agent affordance. */
+function AgentGradientIcon() {
+  return (
+    <svg
+      data-agent-gradient-icon
+      aria-hidden="true"
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+    >
+      <defs>
+        <linearGradient id="titlebar-agent-gradient" x1="2" y1="2" x2="22" y2="22">
+          <stop offset="0" stopColor="#fff" />
+          <stop offset="0.45" stopColor="#c7c7c7" />
+          <stop offset="0.55" stopColor="#999" />
+          <stop offset="1" stopColor="#fff" />
+        </linearGradient>
+      </defs>
+      <path
+        d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4v8Z"
+        fill="url(#titlebar-agent-gradient)"
+        stroke="url(#titlebar-agent-gradient)"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 

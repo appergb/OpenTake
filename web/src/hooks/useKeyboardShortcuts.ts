@@ -75,6 +75,26 @@ export function handleProjectSaveKeyDown(
   return true;
 }
 
+/** Handle the upstream Agent-panel accelerator on macOS and Windows/Linux. */
+export function handleAgentPanelKeyDown(
+  e: KeyboardEvent,
+  view: AppView,
+  toggle: () => void,
+): boolean {
+  if (
+    view !== "editor" ||
+    e.code !== "KeyA" ||
+    !e.altKey ||
+    (!e.metaKey && !e.ctrlKey) ||
+    isTextEntry(e.target)
+  ) {
+    return false;
+  }
+  e.preventDefault();
+  if (!e.repeat) toggle();
+  return true;
+}
+
 export function useKeyboardShortcuts() {
   useEffect(() => {
     const handleSpaceKeyDown = (e: KeyboardEvent) => {
@@ -116,6 +136,7 @@ export function useKeyboardShortcuts() {
       };
 
       if (handleProjectSaveKeyDown(e)) return;
+      if (handleAgentPanelKeyDown(e, ui.view, ui.toggleAgentPanel)) return;
 
       // Cmd-modified actions.
       if (mod) {
@@ -158,13 +179,6 @@ export function useKeyboardShortcuts() {
             e.preventDefault();
             if (e.altKey) ui.toggleInspectorPanel();
             else ui.toggleMediaPanel();
-            return;
-          case "KeyA":
-            if (e.altKey) {
-              e.preventDefault();
-              ui.toggleAgentPanel();
-              return;
-            }
             return;
           case "KeyC":
             e.preventDefault();

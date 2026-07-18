@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  handleAgentPanelKeyDown,
   handleProjectSaveKeyDown,
   handleTransportSpaceKeyDown,
   shouldHandleTransportSpaceKey,
@@ -122,5 +123,58 @@ describe("project save shortcut", () => {
     expect(handled).toBe(true);
     expect(prevented).toBe(1);
     expect(saves).toBe(0);
+  });
+});
+
+describe("Agent panel shortcut", () => {
+  it("supports both macOS and Windows modifiers without repeating", () => {
+    for (const modifiers of [{ metaKey: true }, { ctrlKey: true }]) {
+      let toggles = 0;
+      let prevented = 0;
+      const handled = handleAgentPanelKeyDown(
+        event({
+          code: "KeyA",
+          altKey: true,
+          ...modifiers,
+          preventDefault: () => {
+            prevented += 1;
+          },
+        }),
+        "editor",
+        () => {
+          toggles += 1;
+        },
+      );
+      const repeatHandled = handleAgentPanelKeyDown(
+        event({
+          code: "KeyA",
+          altKey: true,
+          repeat: true,
+          ...modifiers,
+          preventDefault: () => {},
+        }),
+        "editor",
+        () => {
+          toggles += 1;
+        },
+      );
+
+      expect(handled).toBe(true);
+      expect(repeatHandled).toBe(true);
+      expect(prevented).toBe(1);
+      expect(toggles).toBe(1);
+    }
+  });
+
+  it("does not consume the shortcut outside the editor", () => {
+    expect(
+      handleAgentPanelKeyDown(
+        event({ code: "KeyA", metaKey: true, altKey: true }),
+        "home",
+        () => {
+          throw new Error("must not toggle");
+        },
+      ),
+    ).toBe(false);
   });
 });
