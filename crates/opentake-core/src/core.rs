@@ -37,7 +37,7 @@ use opentake_project::{GenerationLog, ProjectCompatibility};
 use same_file::Handle;
 
 use crate::deps::CoreDeps;
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::events::{CoreEvent, EventBus, SubscriptionId};
 use crate::session::{EditorSession, ProbedMedia};
 
@@ -402,18 +402,60 @@ impl AppCore {
     /// agent, and MCP (`core-SPEC.md` §2.5). Runs the command under the lock
     /// (the ops layer performs the snapshot/commit/version transaction), then,
     /// **after releasing the lock**, emits [`CoreEvent::TimelineChanged`] iff the
-    /// command actually changed the document. Unchanged commands (and rejected
-    /// ones) emit nothing and do not move the version.
+    /// command actually changed the document. A command that changes the media
+    /// manifest also emits [`CoreEvent::MediaChanged`] so catalog observers
+    /// refresh; this includes undo/redo restoring a manifest snapshot. Unchanged
+    /// commands (and rejected ones) emit nothing and do not move the version.
     pub fn apply(&self, command: EditCommand) -> Result<EditResult> {
-        let (result, project_epoch) = {
+        self.apply_with_revision(command, None)
+    }
+
+    /// Apply a deferred edit only if the project session and document version
+    /// still match the snapshot from which the edit was derived.
+    ///
+    /// Long-running workflows such as transcription must not commit results
+    /// built from project A after another client has opened or edited project B.
+    /// The revision check and edit run under the same session lock, so there is
+    /// no check-then-apply race.
+    pub fn apply_at_revision(
+        &self,
+        expected: ProjectRevision,
+        command: EditCommand,
+    ) -> Result<EditResult> {
+        self.apply_with_revision(command, Some(expected))
+    }
+
+    fn apply_with_revision(
+        &self,
+        command: EditCommand,
+        expected: Option<ProjectRevision>,
+    ) -> Result<EditResult> {
+        let (result, project_epoch, media_count) = {
             let mut session = self.lock();
+            if expected.is_some_and(|expected| {
+                session.project_epoch != expected.project_epoch
+                    || session.editor.version() != expected.version
+            }) {
+                return Err(CoreError::Media(
+                    "project changed while preparing a deferred edit".to_string(),
+                ));
+            }
             let result = session.editor.apply(command, self.ids.as_ref())?;
-            (result, session.project_epoch)
+            let media_count = result
+                .manifest_changed
+                .then(|| session.editor.media().entries.len());
+            (result, session.project_epoch, media_count)
         };
         if result.changed {
             self.events.emit(&CoreEvent::TimelineChanged {
                 project_epoch,
                 version: result.timeline_version,
+            });
+        }
+        if let Some(count) = media_count {
+            self.events.emit(&CoreEvent::MediaChanged {
+                project_epoch,
+                count,
             });
         }
         Ok(result)
@@ -759,6 +801,85 @@ impl AppCore {
                     }
                 }
                 Ok((entry, warning))
+            })();
+            match result {
+                Ok((entry, warning)) => (entry, warning, session.editor.media().entries.len()),
+                Err(error) => {
+                    session.editor.restore_media(before);
+                    return Err(error);
+                }
+            }
+        };
+        events.push(CoreEvent::MediaChanged {
+            project_epoch: expected_project_epoch,
+            count,
+        });
+        events.push(CoreEvent::ProjectSaved {
+            path: expected_project_dir.to_string_lossy().into_owned(),
+            project_epoch: expected_project_epoch,
+        });
+        Ok(CapabilityImportCommit { entry, warning })
+    }
+
+    /// Capability-bound retained-media import transaction used by external
+    /// producers such as the MCP URL downloader. The candidate manifest is
+    /// persisted through the caller's retained directory capability while the
+    /// session lock is held. The retained-file/cancellation postcondition runs
+    /// before the first persistent write; the atomic writer is the last fallible
+    /// step. Any returned error therefore restores the exact pre-import live
+    /// manifest without first publishing candidate manifest bytes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn import_retained_media_for_project_deferred_with_manifest_writer<F, V>(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+        folder_id: Option<&str>,
+        events: &mut DeferredCoreEvents,
+        mut write_manifest: F,
+        validate_postcondition: V,
+    ) -> Result<CapabilityImportCommit>
+    where
+        F: FnMut(&MediaManifest) -> Result<()>,
+        V: FnOnce() -> Result<()>,
+    {
+        let id = self.ids.next_id();
+        let (entry, warning, count) = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            let before = session.editor.media();
+            let result = (|| {
+                let mut entry = session.editor.import_media_file(path, id, name, probe)?;
+                if let Some(folder_id) = folder_id {
+                    let mut candidate = session.editor.media();
+                    if !candidate
+                        .folders
+                        .iter()
+                        .any(|folder| folder.id == folder_id)
+                    {
+                        return Err(CoreError::Media(format!("folderId not found: {folder_id}")));
+                    }
+                    let imported = candidate
+                        .entries
+                        .iter_mut()
+                        .find(|candidate| candidate.id == entry.id)
+                        .ok_or_else(|| {
+                            CoreError::Media("imported media entry disappeared".to_string())
+                        })?;
+                    imported.folder_id = Some(folder_id.to_string());
+                    entry.folder_id = imported.folder_id.clone();
+                    session.editor.restore_media(candidate);
+                }
+                // The retained leaf identity and cancellation checkpoint are
+                // validated while the session lock is held, before the first
+                // persistent manifest write. The capability writer is atomic,
+                // so a returned writer error preserves the previous bytes and
+                // there is no validation-failure rollback/warning state.
+                validate_postcondition()?;
+                write_manifest(&session.editor.media())?;
+                Ok((entry, None))
             })();
             match result {
                 Ok((entry, warning)) => (entry, warning, session.editor.media().entries.len()),
@@ -1232,6 +1353,8 @@ mod tests {
 
         let res = core.apply(add_one_clip()).unwrap();
         assert!(res.changed);
+        assert!(res.timeline_changed);
+        assert!(!res.manifest_changed);
         assert_eq!(res.timeline_version, 1);
         assert_eq!(core.version(), 1);
 
@@ -1246,6 +1369,90 @@ mod tests {
     }
 
     #[test]
+    fn deferred_apply_rejects_version_and_project_drift_without_mutation() {
+        let version_drift = core_with_track();
+        let expected = version_drift.project_revision();
+        version_drift.apply(add_one_clip()).unwrap();
+        let before = version_drift.runtime_snapshot();
+        let error = version_drift
+            .apply_at_revision(expected, add_one_clip())
+            .expect_err("stale document version must reject deferred edit");
+        assert_eq!(
+            error.to_string(),
+            "project changed while preparing a deferred edit"
+        );
+        let after = version_drift.runtime_snapshot();
+        assert_eq!(after.project_epoch, before.project_epoch);
+        assert_eq!(after.version, before.version);
+        assert_eq!(after.timeline, before.timeline);
+        assert_eq!(after.media, before.media);
+
+        let project_drift = core_with_track();
+        let expected = project_drift.project_revision();
+        project_drift.new_project();
+        let before = project_drift.runtime_snapshot();
+        let error = project_drift
+            .apply_at_revision(expected, add_one_clip())
+            .expect_err("stale project epoch must reject deferred edit");
+        assert_eq!(
+            error.to_string(),
+            "project changed while preparing a deferred edit"
+        );
+        let after = project_drift.runtime_snapshot();
+        assert_eq!(after.project_epoch, before.project_epoch);
+        assert_eq!(after.version, before.version);
+        assert_eq!(after.timeline, before.timeline);
+        assert_eq!(after.media, before.media);
+    }
+
+    #[test]
+    fn manifest_edit_and_undo_emit_media_changed() {
+        let core = core_with_track();
+        let seen: Arc<Mutex<Vec<CoreEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        core.subscribe(move |ev| sink.lock().unwrap().push(ev.clone()));
+
+        let created = core
+            .apply(EditCommand::CreateFolder {
+                name: "Review".into(),
+                parent_folder_id: None,
+            })
+            .unwrap();
+        assert!(created.changed);
+        assert!(!created.timeline_changed);
+        assert!(created.manifest_changed);
+        assert_eq!(core.media().folders.len(), 1);
+
+        let undone = core.undo().unwrap();
+        assert!(undone.changed);
+        assert!(!undone.timeline_changed);
+        assert!(undone.manifest_changed);
+        assert!(core.media().folders.is_empty());
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                CoreEvent::TimelineChanged {
+                    project_epoch: 0,
+                    version: 1,
+                },
+                CoreEvent::MediaChanged {
+                    project_epoch: 0,
+                    count: 0,
+                },
+                CoreEvent::TimelineChanged {
+                    project_epoch: 0,
+                    version: 2,
+                },
+                CoreEvent::MediaChanged {
+                    project_epoch: 0,
+                    count: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn unchanged_command_does_not_emit_or_bump() {
         let core = core_with_track();
         let seen: Arc<Mutex<Vec<CoreEvent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1255,6 +1462,8 @@ mod tests {
         // Undo with empty history changes nothing.
         let res = core.undo().unwrap();
         assert!(!res.changed);
+        assert!(!res.timeline_changed);
+        assert!(!res.manifest_changed);
         assert_eq!(core.version(), 0);
         assert!(seen.lock().unwrap().is_empty());
     }

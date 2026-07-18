@@ -15,7 +15,7 @@ pub use sprite::{load_sprite, save_sprite, ThumbnailCacheMeta, VideoThumb};
 
 use std::path::Path;
 
-use crate::cache_key::{file_identity_key, KEY_HEX_LEN};
+use crate::cache_key::visual_file_identity_key;
 use crate::decode::frame::{decode_frames_at, fit_within, FrameRequest};
 use crate::error::{MediaError, Result};
 use crate::frame::RgbaFrame;
@@ -70,7 +70,7 @@ pub fn video_thumbnails(
     duration_secs: f64,
     on_partial: Option<PartialThumbCallback<'_>>,
 ) -> Result<Vec<VideoThumb>> {
-    let key = file_identity_key(path, KEY_HEX_LEN);
+    let key = visual_file_identity_key(path);
     if let Some(ref key) = key {
         if let Some(cached) = sprite::load_sprite(cache_root, key) {
             return Ok(cached);

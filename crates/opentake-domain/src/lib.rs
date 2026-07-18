@@ -17,11 +17,13 @@
 //!   the legacy `Transform` `x`/`y` -> center migration and the `MediaManifest`
 //!   `version` fallback to 1.
 //!
-//! Zero IO, pure logic, fully unit-testable. The only dependency is `serde`.
+//! Zero IO, pure logic, fully unit-testable. The only runtime dependency is
+//! `serde`; persistence-side UUID repair belongs to `opentake-project`.
 
 pub mod caption_sync;
 pub mod clip;
 pub mod clip_type;
+mod clip_wire;
 pub mod grade;
 pub mod keyframe;
 pub mod media;
@@ -29,12 +31,13 @@ pub mod signal;
 pub mod split;
 pub mod subtitle_export;
 pub mod text;
+mod text_wire;
 pub mod timeline;
 pub mod transform;
 
 // Flat re-export of the public domain API for ergonomic downstream use.
 pub use caption_sync::{caption_group_ids, clips_in_group, sync_caption_group_style};
-pub use clip::{Clip, FadeEdge, VolumeScale};
+pub use clip::{Clip, FadeEdge, KeyframeTrackWireField, KeyframeValueWireShape, VolumeScale};
 pub use clip_type::ClipType;
 pub use grade::{
     chroma_cb_cr, luma709, smoothstep01, ChromaKey, ColorGrade, Effect, LiftGammaGain, Mask,

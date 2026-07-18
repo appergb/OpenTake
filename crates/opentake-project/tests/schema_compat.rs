@@ -1,13 +1,11 @@
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use opentake_project::{Project, ProjectError};
 use serde_json::{json, Value};
 
 use common::TempDir;
-
-const COMPONENTS: [&str; 3] = ["project.json", "media.json", "generation-log.json"];
 
 fn write_json(path: &Path, value: &Value) {
     common::write_file(
@@ -89,17 +87,6 @@ fn mutate_json(bundle: &Path, component: &str, mutate: impl FnOnce(&mut Value)) 
     write_json(&path, &value);
 }
 
-fn component_receipts(bundle: &Path) -> Vec<(PathBuf, Vec<u8>)> {
-    COMPONENTS
-        .into_iter()
-        .map(|file| {
-            let path = bundle.join(file);
-            let bytes = std::fs::read(&path).expect("record source component bytes");
-            (path, bytes)
-        })
-        .collect()
-}
-
 fn assert_compatibility_error(error: ProjectError, expected_blockers: &[&str]) {
     match error {
         ProjectError::CompatibilityReadOnly { blockers } => {
@@ -116,7 +103,7 @@ fn assert_compatibility_error(error: ProjectError, expected_blockers: &[&str]) {
 }
 
 fn assert_read_only_without_file_changes(bundle: &Path, expected_blockers: &[&str]) -> Project {
-    let before = component_receipts(bundle);
+    let before = common::tree_receipt(bundle);
     let project = Project::open(bundle).expect("unknown fields remain readable");
     assert!(project.compatibility().is_read_only());
     assert_eq!(
@@ -131,15 +118,14 @@ fn assert_read_only_without_file_changes(bundle: &Path, expected_blockers: &[&st
         project.save().expect_err("same-path save must fail"),
         expected_blockers,
     );
-    for (path, bytes) in &before {
-        assert_eq!(std::fs::read(path).expect("read unchanged source"), *bytes);
-    }
+    assert_eq!(common::tree_receipt(bundle), before);
 
     let destination = bundle
         .parent()
         .expect("fixture has parent")
         .join("Rejected-Save-As.opentake");
     assert!(!destination.exists());
+    let parent_before = common::tree_receipt(destination.parent().expect("destination has parent"));
     assert_compatibility_error(
         project
             .save_to(&destination)
@@ -147,9 +133,11 @@ fn assert_read_only_without_file_changes(bundle: &Path, expected_blockers: &[&st
         expected_blockers,
     );
     assert!(!destination.exists());
-    for (path, bytes) in &before {
-        assert_eq!(std::fs::read(path).expect("read unchanged source"), *bytes);
-    }
+    assert_eq!(
+        common::tree_receipt(destination.parent().expect("destination has parent")),
+        parent_before
+    );
+    assert_eq!(common::tree_receipt(bundle), before);
 
     project
 }
@@ -277,6 +265,158 @@ fn malformed_optional_generation_log_opens_but_blocks_writes() {
         &["generation-log.json:invalid-or-unreadable"],
     );
     assert!(project.generation_log.is_none());
+}
+
+#[test]
+fn malformed_manifest_contract_matches_authoritative_source() {
+    let tmp = TempDir::new("schema-manifest-contract");
+
+    // A complete current bundle remains writable and semantically stable
+    // across the full open -> edit -> save -> reopen path.
+    let current_manifest = tmp.child("CurrentManifest.opentake");
+    write_known_bundle(&current_manifest);
+    let mut current = Project::open(&current_manifest).expect("current manifest opens");
+    assert_eq!(current.manifest.version, 2);
+    assert!(!current.compatibility().is_read_only());
+    current.timeline.fps = 48;
+    let expected_timeline = current.timeline.clone();
+    let expected_manifest = current.manifest.clone();
+    let expected_generation_log = current.generation_log.clone();
+    current.save().expect("current manifest saves");
+    let reopened_current =
+        Project::open(&current_manifest).expect("current manifest reopens after edit");
+    assert_eq!(reopened_current.timeline, expected_timeline);
+    assert_eq!(reopened_current.manifest, expected_manifest);
+    assert_eq!(reopened_current.generation_log, expected_generation_log);
+    assert!(!reopened_current.compatibility().is_read_only());
+
+    // Decode order is project -> media -> generation log. An earlier strict
+    // component wins even when every later component is also malformed.
+    let missing_timeline = tmp.child("MissingTimeline.opentake");
+    write_known_bundle(&missing_timeline);
+    std::fs::remove_file(missing_timeline.join("project.json")).expect("remove timeline");
+    common::write_file(&missing_timeline.join("media.json"), b"not-json");
+    common::write_file(&missing_timeline.join("generation-log.json"), b"not-json");
+    let before = common::tree_receipt(&missing_timeline);
+    assert!(matches!(
+        Project::open(&missing_timeline),
+        Err(ProjectError::MissingTimeline { .. })
+    ));
+    assert_eq!(common::tree_receipt(&missing_timeline), before);
+
+    let malformed_timeline = tmp.child("MalformedTimeline.opentake");
+    write_known_bundle(&malformed_timeline);
+    common::write_file(&malformed_timeline.join("project.json"), b"not-json");
+    common::write_file(&malformed_timeline.join("media.json"), b"not-json");
+    let before = common::tree_receipt(&malformed_timeline);
+    assert!(matches!(
+        Project::open(&malformed_timeline),
+        Err(ProjectError::Json { ref file, .. }) if file == "project.json"
+    ));
+    assert_eq!(common::tree_receipt(&malformed_timeline), before);
+
+    // A present media.json is strict for both invalid JSON and a valid JSON
+    // shape that cannot decode as MediaManifest. Neither branch may recover an
+    // empty manifest or alter any component.
+    for (label, malformed) in [
+        ("syntax", serde_json::Value::String("not-json".into())),
+        ("structure", json!({"entries": "not-an-array"})),
+    ] {
+        let name = format!("MalformedManifest-{label}.opentake");
+        let bundle = tmp.child(&name);
+        write_known_bundle(&bundle);
+        if label == "syntax" {
+            common::write_file(&bundle.join("media.json"), b"{ not valid json");
+        } else {
+            write_json(&bundle.join("media.json"), &malformed);
+        }
+        common::write_file(&bundle.join("generation-log.json"), b"not-json");
+        let before = common::tree_receipt(&bundle);
+        assert!(
+            matches!(
+                Project::open(&bundle),
+                Err(ProjectError::Json { ref file, .. }) if file == "media.json"
+            ),
+            "case {label}"
+        );
+        assert_eq!(common::tree_receipt(&bundle), before, "case {label}");
+    }
+
+    // A missing manifest is an explicit empty current manifest. A safe save
+    // creates media.json, keeps the absent optional generation log absent, and
+    // reopens with stable semantics.
+    let missing_manifest = tmp.child("MissingManifest.opentake");
+    write_known_bundle(&missing_manifest);
+    std::fs::remove_file(missing_manifest.join("media.json")).expect("remove manifest");
+    std::fs::remove_file(missing_manifest.join("generation-log.json"))
+        .expect("remove generation log");
+    let mut recovered = Project::open(&missing_manifest).expect("missing manifest defaults");
+    assert_eq!(recovered.manifest.version, 2);
+    assert!(recovered.manifest.entries.is_empty());
+    assert!(recovered.manifest.folders.is_empty());
+    assert!(recovered.generation_log.is_none());
+    assert!(!recovered.compatibility().is_read_only());
+    recovered.timeline.fps = 60;
+    recovered.save().expect("safe save creates empty manifest");
+    assert!(missing_manifest.join("media.json").is_file());
+    assert!(!missing_manifest.join("generation-log.json").exists());
+    let reopened = Project::open(&missing_manifest).expect("reopen saved missing-manifest project");
+    assert_eq!(reopened.timeline.fps, 60);
+    assert_eq!(reopened.manifest.version, 2);
+    assert!(reopened.manifest.entries.is_empty());
+    assert!(reopened.generation_log.is_none());
+
+    // A present legacy `{}` manifest is distinct from a missing file: its
+    // custom decoder preserves upstream schema version 1 across save/reopen.
+    let legacy_manifest = tmp.child("LegacyManifest.opentake");
+    write_known_bundle(&legacy_manifest);
+    write_json(&legacy_manifest.join("media.json"), &json!({}));
+    let legacy = Project::open(&legacy_manifest).expect("legacy manifest opens");
+    assert_eq!(legacy.manifest.version, 1);
+    legacy.save().expect("legacy manifest remains writable");
+    assert_eq!(
+        Project::open(&legacy_manifest)
+            .expect("reopen legacy manifest")
+            .manifest
+            .version,
+        1
+    );
+
+    // A malformed generation log remains the sole read-only recovery branch.
+    // Even with media.json missing, no save may create the default manifest or
+    // create a Save As destination over the damaged provenance.
+    let missing_manifest_bad_log = tmp.child("MissingManifestBadLog.opentake");
+    write_known_bundle(&missing_manifest_bad_log);
+    std::fs::remove_file(missing_manifest_bad_log.join("media.json")).expect("remove manifest");
+    common::write_file(
+        &missing_manifest_bad_log.join("generation-log.json"),
+        b"not-json",
+    );
+    let before = common::tree_receipt(&missing_manifest_bad_log);
+    let mut read_only =
+        Project::open(&missing_manifest_bad_log).expect("damaged optional log recovers");
+    assert_eq!(read_only.manifest.version, 2);
+    assert_eq!(
+        read_only.compatibility().blockers(),
+        ["generation-log.json:invalid-or-unreadable"]
+    );
+    read_only.timeline.fps = 48;
+    assert_compatibility_error(
+        read_only.save().expect_err("same-path save must fail"),
+        &["generation-log.json:invalid-or-unreadable"],
+    );
+    assert_eq!(common::tree_receipt(&missing_manifest_bad_log), before);
+    let destination = tmp.child("RejectedManifestRecovery.opentake");
+    let parent_before = common::tree_receipt(tmp.path());
+    assert_compatibility_error(
+        read_only
+            .save_to(&destination)
+            .expect_err("save-as must fail before destination creation"),
+        &["generation-log.json:invalid-or-unreadable"],
+    );
+    assert!(!destination.exists());
+    assert_eq!(common::tree_receipt(tmp.path()), parent_before);
+    assert_eq!(common::tree_receipt(&missing_manifest_bad_log), before);
 }
 
 #[test]

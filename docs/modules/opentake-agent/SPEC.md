@@ -85,7 +85,7 @@ regex           = "*"       # 短 ID UUID 扫描（§3）
 - 端口常量：`pub const MCP_PORT: u16 = 19789;`（沿用，见 ARCHITECTURE §7 与 ROADMAP）。
 - 偏好键：`io.opentake.mcp.enabled`，**缺省 true**（对应上游 `io.palmier.pro.mcp.enabled`，`MCPService.swift:11-22`）。落到 Tauri Store / `settings.json`。
 - 启动幂等：「已运行则幂等、偏好关闭不启动」（ARCHITECTURE `:1060`）。
-- 绑定地址**必须** `SocketAddr` = `127.0.0.1:19789`（`Ipv4Addr::LOCALHOST`）。**禁止** `0.0.0.0`。
+- 产品默认绑定地址**必须** `SocketAddr` = `127.0.0.1:19789`（`Ipv4Addr::LOCALHOST`）。`serve`/`serve_with_bridge` 对调用方传入的地址先执行 `IpAddr::is_loopback()` 校验，因此 IPv4/IPv6 回环可用，任何非回环地址（包括 `0.0.0.0`）都在创建 listener 前拒绝。
 
 ```rust
 // 伪代码：server 装配
@@ -95,13 +95,17 @@ pub async fn start(core: Arc<CoreHandle>, /* signal, plugins */) -> anyhow::Resu
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), MCP_PORT); // 锁回环
     let listener = tokio::net::TcpListener::bind(addr).await?;            // 绑死 loopback
     let mcp_service = StreamableHttpService::new(/* stateless 配置 */ move || ToolServer::new(core.clone()));
+    let body_limited_mcp = tower::ServiceBuilder::new()
+        .layer(RequestBodyLimitLayer::new(MCP_REQUEST_BODY_MAX))
+        .service(mcp_service);
     let app = axum::Router::new()
-        .nest_service("/mcp", mcp_service)
+        .route_service("/mcp", body_limited_mcp) // 仅精确端点；/mcp/ 与 /mcp/* 均 404
         .route("/.well-known/oauth-protected-resource", get(well_known)) // {"resource":"http://127.0.0.1:19789"}
-        .layer(tower::ServiceBuilder::new()
-            .layer(OriginGuardLayer::localhost(MCP_PORT))   // ① DNS-rebinding 防护
-            .layer(ContentTypeGuardLayer::json())           // ② application/json
-            .layer(ProtocolVersionGuardLayer::new()));      // ③ MCP-Protocol-Version
+        // axum 后添加的 layer 在外层，因此真实请求顺序为：
+        // Host/Origin → Protocol-Version → Content-Type → body limit → rmcp。
+        .layer(ContentTypeGuardLayer::json())               // ③ application/json
+        .layer(ProtocolVersionGuardLayer::new())            // ② MCP-Protocol-Version
+        .layer(OriginGuardLayer::localhost(MCP_PORT));       // ① DNS-rebinding 防护
     Ok(tokio::spawn(async move { axum::serve(listener, app).await.ok(); }))
 }
 ```
@@ -109,13 +113,13 @@ pub async fn start(core: Arc<CoreHandle>, /* signal, plugins */) -> anyhow::Resu
 #### 1.2.2 三个 tower layer（**必须保留，DNS-rebinding 防护**）
 
 `OriginGuardLayer`（对应 `OriginValidator.localhost`）：
-- 若请求带 `Origin` 头：解析其 host:port，**必须** host ∈ {`localhost`,`127.0.0.1`,`[::1]`,`::1`} 且 port == 19789（或无端口时按 80/443 拒绝——本地服务只接受显式 19789 或同源无 Origin 的 stdio shim）。不匹配 → `403 Forbidden`。
-- 同时校验 `Host` 头同上集合（防 rebinding）。
+- 若请求带 `Origin` 头：严格解析 HTTP(S) origin authority，host 必须为大小写不敏感的 `localhost` 或 `IpAddr::is_loopback()` 为真的 IPv4/IPv6 地址，且端口必须等于实际 listener 的预期端口（产品为 19789）。路径、userinfo、无效 UTF-8、缺失/畸形/错误端口、`[::1].evil` 一类前缀/后缀绕过均返回 `403 Forbidden`。
+- `Host` 头必须存在并通过同一 authority/预期端口校验（防 rebinding）；缺失或非法编码均 fail-closed 为 `403`。
 - 无 `Origin`（典型：stdio→HTTP shim、`claude mcp add` 的本地连接）→ 放行（上游 `OriginValidator.localhost` 同样对无 Origin 宽容；本地回环已是第一道边界）。
 
-`ContentTypeGuardLayer`：仅对 `POST /mcp`，`Content-Type` 必须以 `application/json` 起始，否则 `415`。
+`ContentTypeGuardLayer`：由 OpenTake router 显式前置在 body limit 与 rmcp 之前；仅对 `POST /mcp`，要求恰好一个可解析的 `Content-Type`，其 media type 必须为大小写不敏感的 `application/json`（允许 name/value 均合法且非空的参数）。缺失、非法编码、多值、空参数或其他 media type 均由该 guard 返回 `415`。
 
-`ProtocolVersionGuardLayer`：若带 `MCP-Protocol-Version` 头则校验为受支持版本（rmcp 协商版本集合），不匹配 `400`；缺失则按 rmcp 默认协商。
+`ProtocolVersionGuardLayer`：在读取请求体或进入 rmcp 分派前，若带 `MCP-Protocol-Version` 头则按 `rmcp::model::ProtocolVersion::KNOWN_VERSIONS` 校验，不匹配或编码非法返回 `400`；缺失则按 rmcp 默认协商。
 
 > 验证（ROADMAP Phase 7 `:59`）：`claude mcp add --transport http http://127.0.0.1:19789/mcp` 能连；从 `192.168.x.x` 或带伪造 `Origin: http://evil.com` 的请求被 403/拒绝。
 
@@ -178,7 +182,7 @@ capabilities: { resources: { subscribe:false, listChanged:false },
 | 15 | `split_clip` | `clipId*`,`atFrame*`（严格在 clip 内） | `clipId,atFrame` | （无专用结构，直接取参） | `EditCommand::SplitClip` | 口播精剪：不在词中间切 warning |
 | 16 | `ripple_delete_ranges` | 二选一 `trackIndex?`/`clipId?`；`ranges*[][start,end]`；`units?:enum{seconds,frames}`默认 frames | `ranges` | `{clipId,trackIndex,ranges,units}` | `EditCommand::RippleDeleteRanges`（重叠合并；linked 同区间删；sync-locked 同步左移，放不下整体拒绝；返回 anchor 轨剪后布局） | `break_analysis` 一致性 |
 | 17 | `undo` | （无） | — | — | `EditCommand::Undo` + agentUndoStack 守卫（§4.3） | — |
-| 18 | `add_texts` | `entries[]`{`startFrame*`,`durationFrames*`,`content*`,`transform?{centerX,centerY,width,height}`,`fontName?`,`fontSize?`,`color?`,`alignment?`} | `entries`；entry:`startFrame,durationFrames,content` | `{entries}` / `{trackIndex,startFrame,durationFrames,content,transform,fontName,fontSize,color,alignment}` | `EditCommand::AddTexts`（overlay；同轨重叠覆写；同时显示需放不同轨；全省略 trackIndex 顶部新建一轨） | `text_placement_hint`（层级 / 安全区） |
+| 18 | `add_texts` | `entries[]`{`startFrame*`,`durationFrames*`,`content*`,`transform?{centerX,centerY,width,height,flipHorizontal,flipVertical}`,`fontName?`,`fontSize?`,`color?`,`alignment?`} | `entries`；entry:`startFrame,durationFrames,content` | `{entries}` / `{trackIndex,startFrame,durationFrames,content,transform,fontName,fontSize,color,alignment}` | `EditCommand::AddTexts`（overlay；同轨重叠覆写；同时显示需放不同轨；全省略 trackIndex 顶部新建一轨） | `text_placement_hint`（层级 / 安全区） |
 | 19 | `add_captions` | `clipIds?[]`,`language?`,`fontName?`,`fontSize?`,`color?`,`centerX?`,`centerY?`,`textCase?:enum{auto,upper,lower}`,`censorProfanity?` | — | `{clipIds,language,fontName,fontSize,color,centerX,centerY,textCase,censorProfanity}` | `EditCommand::AddCaptions`（端侧转写 + 样式化 caption clip 到新轨；省略 clipIds 自动挑语音最多的轨） | `caption_style_hint` |
 
 #### C. 媒体生成 / 导入（写，5 个）——媒体管线接入点（依赖 `opentake-gen`）
@@ -189,7 +193,9 @@ capabilities: { resources: { subscribe:false, listChanged:false },
 | 21 | `generate_image` | `prompt*`,`name?`,`model?`,`aspectRatio?`,`resolution?`,`quality?`,`referenceMediaRefs?[]`,`folderId?` | `prompt` | `opentake-gen`：异步提交 placeholder |
 | 22 | `generate_audio` | `prompt?`,`name?`,`model?`,`voice?`,`lyrics?`,`styleInstructions?`,`instrumental?`,`duration?`,`videoSourceStartFrame?`,`videoSourceEndFrame?`,`videoSourceMediaRef?`,`folderId?` | （无） | `opentake-gen`：TTS / 文生乐 / 视频配乐；时间线区间结果自动落轨 |
 | 23 | `upscale_media` | `mediaRef*`,`model?`,`sourceClipId?` | `mediaRef` | `opentake-gen`：升分辨率 placeholder |
-| 24 | `import_media` | `source*`{三选一 `url?`(HTTPS≤1GB)/`path?`(本地，可目录递归)/`bytes?`(base64≤~15MB)，`mimeType?`},`name?`,`folderId?` | `source` | `opentake-core`/`opentake-project`：url 后台下载、path/bytes 同步；扩展名白名单 |
+| 24 | `import_media` | `source*`{三选一 `url?`(HTTPS≤1GB)/`path?`(本地，可目录递归)/`bytes?`(base64≤~15MB)，`mimeType?`},`name?`,`folderId?` | `source` | `opentake-core`/`opentake-project`：url 在阻塞工作线程中逐块下载、path/bytes 同步；扩展名/MIME/探测类型白名单；验证完成后原子发布 manifest |
+
+URL 导入禁用自动重定向并逐跳重新校验 HTTPS、host 与 userinfo；`Content-Length` 只做提前拒绝，逐块累计的解码后字节数才是 1 GiB 硬上限。下载先写 retained project capability 下的未提交 leaf，探测、容器/流类型、project epoch/目录、folder 与 leaf identity 全部通过后，才把候选 manifest 原子写入并发事件。任何此前错误或显式 MCP `notifications/cancelled` 都由 guard 擦除/删除 staging，并保持 live manifest 与磁盘 `media.json` 原字节不变。取消是 rmcp 的显式 request-id 通知语义；不承诺仅因原始 TCP 断连而取消。生产 HTTPS 请求与每个响应 chunk 都通过 `tokio::select!` 同时监听取消令牌，不等待长网络超时才清理。
 
 #### D. 媒体库组织（写，7 个）——均可撤销，均支持「单条参数 或 `entries[]` 批量」二选一
 
@@ -392,6 +398,8 @@ firstNonFiniteNumberPath(value, path):
 // 命中 → error "{badPath}: value must be finite"
 ```
 
+JSON/MCP 传输本身不允许 `NaN`、`Infinity`、`-Infinity` 或溢出到非有限值的数字。OpenTake 在 rmcp/`serde_json` 解析正文时先拒绝这些原始 token，因此它们不会进入 `serde_json::Value`、快照或工具 dispatch；`firstNonFiniteNumberPath` 继续保护程序内构造的参数值。传输集成测试必须用原始（不能先经 `serde_json::Value`）的工具请求证明拒绝与零 dispatch，禁止用 `Number::from_f64(NaN) -> None` 的假夹具代替。
+
 #### 4.2.3 路径化解码错误（`formatDecodingError:210-229` + `decodeToolArgs:177`）
 
 上游把 `DecodingError` 翻成精确路径：
@@ -434,6 +442,12 @@ fn decode_tool_args<T: DeserializeOwned>(dict: &Value, path: &str) -> Result<T, 
 
 这些守卫属 `opentake-core`/`opentake-ops` 的命令校验层；本 crate 透传其错误文本（措辞与上游对齐，便于 LLM 自纠）。
 
+#### 4.2.5 LLM 错误边界与私有诊断
+
+`safe_tool_result_for_llm` 是 MCP 与应用内 chat 共享的最后模型边界。错误统一编码为带 `isError`、`code`、`message`、`details`、`remediation`、`errorId` 的 JSON：`ToolResult::error` **默认私有**，不依据正文 deny-list 猜测是否可公开；只有 crate 内 dispatcher 自己产生的 `PublicErrorKind::{UnknownTool, InvalidArguments(tool)}` 才具有公开资格。即使有该类型标记，最终边界也不复制原始正文：未知工具只返回固定 detail；参数路径按该工具的 JSON Schema 逐段重建，`entries[3].startFrame` 等静态字段可保留，`params.<调用方键>` 等开放 map 在 `params` 处截断，错误原因则映射成固定类别。其余业务错误、bridge/provider 错误以及任何可能包含绝对路径、URL/查询串、凭证/Authorization/Cookie、provider response body、嵌套 source error、stack/backtrace 或多块内部信息的错误都使用 `MCP_TOOL_ERROR_REDACTED`，不携带原始 details。
+
+私有诊断日志只记录稳定公开错误码、白名单内部诊断码、与错误正文无关的进程内关联 ID、是否已脱敏，不记录原始错误正文，也不从秘密派生 hash，因此 BYOK key、Bearer token、签名 URL 和 provider body 不进入 MCP/chat 内容或日志。Tauri media bridge 对常见文件/探测失败先改写为稳定内部码（如 `MCP_SOURCE_PATH_UNREADABLE`、`MCP_MEDIA_PROBE_FAILED`），这些码进入私有结构化日志但不会自动获得模型公开资格。dispatch worker 使用线程局部标记配合一次性全局 panic hook：标记线程不输出 panic payload，随后 MCP/chat 的 JoinError 映射只对外返回固定消息，并仅记录 `task_panic`/`task_cancelled` 标志。`remediation` 始终提供可执行的重试/修正建议和可关联的 `errorId`。
+
 ### 4.3 助手专属 undo（`undo:109-123`）
 
 ```
@@ -454,13 +468,18 @@ undo(core) -> ToolResult:
 
 ```rust
 pub enum Block { Text(String), Image { base64: String, media_type: String } }
-pub struct ToolResult { pub content: Vec<Block>, pub is_error: bool }
+pub struct ToolResult {
+    pub content: Vec<Block>,
+    pub is_error: bool,
+    #[serde(skip)] llm_error: Option<PublicErrorKind>, // 默认 None；跨 serde 后仍为 None
+}
 impl ToolResult {
     pub fn ok(s: impl Into<String>) -> Self { Self { content: vec![Block::Text(s.into())], is_error: false } }
-    pub fn error(s: impl Into<String>) -> Self { Self { content: vec![Block::Text(s.into())], is_error: true } }
+    pub fn error(s: impl Into<String>) -> Self { /* private by default */ }
+    pub(crate) fn public_error(kind: PublicErrorKind, s: impl Into<String>) -> Self { /* dispatcher preflight only */ }
 }
 ```
-转 rmcp 的 `CallToolResult`：`Text → Content::text`、`Image → Content::image{data,mime_type}`，`is_error: Some(true) | None`（上游 `is_error ? true : nil`，`ToolResult.swift:32`）。chat 侧直接用 `content`/`is_error`（§5）。
+成功结果转 rmcp 的 `CallToolResult`：`Text → Content::text`、`Image → Content::image{data,mime_type}`，`is_error: None`；错误结果经 §4.2.5 的共享安全信封成为 `is_error: Some(true)`。chat 使用同一个安全信封，禁止直接把 `text_joined()` 回填给模型（§5）。
 
 > **OpenTake 增强（ARCHITECTURE §7 `:154`）**：写工具统一返回**结构化 JSON**（变更的 clipId/帧位/新建轨），而非上游多数工具的人话字符串。可在 `Block::Text` 里放 JSON（与上游 `ripple_delete_ranges`/`remove_tracks` 已返回 JSON 的风格统一），便于多步链式编辑。**保留**上游已返回 JSON 的工具的字段形态。
 
@@ -1068,8 +1087,8 @@ src/
 
 - [ ] MCP server **仅绑 `127.0.0.1`**，禁 `0.0.0.0`；三个 tower guard 生效。
 - [ ] Anthropic key 存 OS keychain（`keyring`），绝不入 `project.json`/日志/遥测。
-- [ ] 工具入参全部经 §4 校验（未知字段/非有限数/类型）；`import_media` 的 url 必须 HTTPS + 扩展名白名单 + ≤1GB（上游 `+Import.swift` 语义）。
-- [ ] 错误信息不泄露内部路径/密钥（错误措辞对 LLM 友好但不含敏感数据）。
+- [x] 工具入参全部经 §4 校验（未知字段/非有限数/类型）；`import_media` 的 url 强制 HTTPS、每跳重验、扩展名/MIME/生产 probe 白名单、流式 ≤1GB、显式 MCP 取消清理与 retained manifest 原子发布（上游 `+Import.swift` 语义）。
+- [x] MCP/chat 错误共享“默认私有、显式类型才可公开”的安全信封；内部路径、凭证/Authorization、签名 URL 查询、provider body、嵌套 source/stack 与 panic payload 在 LLM 边界 fail-closed 脱敏，私有日志仅保留错误码、无秘密派生的关联 ID 与补救提示。
 - [ ] 插件 `instructions.md` 注入系统提示词前不可信内容隔离（标注来源 `plugin:{id}`，避免提示注入冒充系统指令）。
 
 ---

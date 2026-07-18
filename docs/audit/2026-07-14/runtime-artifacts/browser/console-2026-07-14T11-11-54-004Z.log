@@ -1,0 +1,3 @@
+[    2693ms] [INFO] %cDownload the React DevTools for a better development experience: https://reactjs.org/link/react-devtools font-weight:bold @ http://127.0.0.1:1437/node_modules/.vite/deps/react-dom-BKuxjnqG.js?v=96999ff3:17230
+[    2869ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:1437/favicon.ico:0
+[  737776ms] [VERBOSE] [DOM] Password field is not contained in a form: (More info: https://goo.gl/9p2vKq) %o @ http://127.0.0.1:1437/:0

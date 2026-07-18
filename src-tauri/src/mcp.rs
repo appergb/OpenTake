@@ -18,9 +18,14 @@
 //! same posters / manifest entries / `MediaChanged` events as the media panel.
 
 use std::collections::HashMap;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
+#[cfg(test)]
+use std::io::Read;
 
 use base64::Engine as _;
 
@@ -32,7 +37,10 @@ use opentake_agent::mcp::media_bridge::{
 };
 use opentake_agent::mcp::server;
 use opentake_agent::plugin::registry::PluginRegistry;
-use opentake_core::{importable_clip_type, AppCore};
+use opentake_core::{
+    importable_clip_type, AppCore, CoreError, DeferredCoreEvents, ProbedMedia,
+    ProjectRuntimeSnapshot,
+};
 use opentake_domain::{ClipType, MediaSource, TextStyle};
 use opentake_media::{decode_frame_at, FrameRequest, MediaEngine};
 use opentake_render::gpu::texture::upload_rgba;
@@ -42,12 +50,180 @@ use opentake_render::{
     TextureResolver, TextureSource,
 };
 
+use crate::library::ProjectMediaCapability;
+
 /// JPEG quality `inspect_timeline` encodes composited frames at (upstream
 /// `inspectTimelineJPEGQuality = 0.7`). `image` takes a 0–100 byte.
 const INSPECT_JPEG_QUALITY: u8 = 70;
 
 /// Per-frame texture cache size — bounds VRAM during a multi-frame inspect.
 const TEXTURE_CACHE_CAP: usize = 64;
+
+/// Hard decoded-byte ceiling for a URL response. `Content-Length` is only an
+/// early rejection hint; the streaming counter below is authoritative.
+const URL_IMPORT_DECODED_MAX: u64 = 1024 * 1024 * 1024;
+const URL_IMPORT_REDIRECT_MAX: usize = 5;
+#[cfg(test)]
+const URL_IMPORT_READ_CHUNK: usize = 64 * 1024;
+
+struct UrlFetchResponse {
+    status: reqwest::StatusCode,
+    location: Option<String>,
+    content_type: Option<String>,
+    content_length: Option<u64>,
+    body: Box<dyn UrlResponseBody>,
+}
+
+trait UrlFetcher {
+    fn fetch(
+        &self,
+        url: &reqwest::Url,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<UrlFetchResponse, BridgeError>;
+}
+
+struct ReqwestUrlFetcher {
+    client: reqwest::Client,
+    runtime: Arc<tokio::runtime::Runtime>,
+}
+
+impl ReqwestUrlFetcher {
+    fn new() -> Result<Self, BridgeError> {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(5 * 60))
+            .build()
+            .map_err(|error| {
+                BridgeError::new(format!("Failed to initialize HTTPS client: {error}"))
+            })?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map(Arc::new)
+            .map_err(|_| BridgeError::new("Failed to initialize HTTPS runtime"))?;
+        Ok(Self { client, runtime })
+    }
+}
+
+impl UrlFetcher for ReqwestUrlFetcher {
+    fn fetch(
+        &self,
+        url: &reqwest::Url,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<UrlFetchResponse, BridgeError> {
+        let client = self.client.clone();
+        let url = url.clone();
+        let response = self.runtime.block_on(async {
+            tokio::select! {
+                result = client.get(url).send() => result.map_err(safe_reqwest_error),
+                () = wait_for_media_cancel(cancel) => {
+                    Err(BridgeError::new("source.url import was cancelled"))
+                }
+            }
+        })?;
+        let status = response.status();
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let content_length = response.content_length();
+        Ok(UrlFetchResponse {
+            status,
+            location,
+            content_type,
+            content_length,
+            body: Box::new(ReqwestUrlBody {
+                runtime: self.runtime.clone(),
+                response,
+            }),
+        })
+    }
+}
+
+trait UrlResponseBody: Send {
+    fn next_chunk(
+        &mut self,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<Option<Vec<u8>>, BridgeError>;
+}
+
+#[cfg(test)]
+struct ReaderUrlBody {
+    reader: Box<dyn Read + Send>,
+}
+
+#[cfg(test)]
+impl UrlResponseBody for ReaderUrlBody {
+    fn next_chunk(
+        &mut self,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<Option<Vec<u8>>, BridgeError> {
+        cancelled_checkpoint(cancel)?;
+        let mut buffer = vec![0_u8; URL_IMPORT_READ_CHUNK];
+        match self.reader.read(&mut buffer) {
+            Ok(0) => Ok(None),
+            Ok(count) => {
+                buffer.truncate(count);
+                Ok(Some(buffer))
+            }
+            Err(error) => {
+                cancelled_checkpoint(cancel)?;
+                Err(BridgeError::new(format!(
+                    "Failed while streaming source.url: {error}"
+                )))
+            }
+        }
+    }
+}
+
+struct ReqwestUrlBody {
+    runtime: Arc<tokio::runtime::Runtime>,
+    response: reqwest::Response,
+}
+
+impl UrlResponseBody for ReqwestUrlBody {
+    fn next_chunk(
+        &mut self,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<Option<Vec<u8>>, BridgeError> {
+        let runtime = self.runtime.clone();
+        let response = &mut self.response;
+        runtime.block_on(async {
+            tokio::select! {
+                result = response.chunk() => result
+                    .map(|chunk| chunk.map(|bytes| bytes.to_vec()))
+                    .map_err(safe_reqwest_error),
+                () = wait_for_media_cancel(cancel) => {
+                    Err(BridgeError::new("source.url import was cancelled"))
+                }
+            }
+        })
+    }
+}
+
+async fn wait_for_media_cancel(cancel: &opentake_media::MediaCancelToken) {
+    while !cancel.is_cancelled() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn safe_reqwest_error(error: reqwest::Error) -> BridgeError {
+    if error.is_timeout() {
+        BridgeError::new("source.url download timed out")
+    } else if error.is_connect() {
+        BridgeError::new("source.url connection failed")
+    } else {
+        // reqwest::Error Display can contain the complete signed URL.
+        BridgeError::new("source.url download failed")
+    }
+}
 
 /// Built-in workflows + any user-authored plugins under `workflows_dir`
 /// (user plugins override a built-in with the same id, since `register` replaces
@@ -117,6 +293,26 @@ impl TauriMediaBridge {
     }
 }
 
+struct ResolvedTranscriptSource {
+    source: TranscriptSource,
+    resolved: Result<(PathBuf, bool), String>,
+}
+
+fn resolve_transcript_batch(
+    snapshot: &ProjectRuntimeSnapshot,
+    sources: &[TranscriptSource],
+) -> Vec<ResolvedTranscriptSource> {
+    sources
+        .iter()
+        .cloned()
+        .map(|source| {
+            let resolved =
+                crate::transcribe::resolve_asset_from_snapshot(snapshot, &source.media_ref);
+            ResolvedTranscriptSource { source, resolved }
+        })
+        .collect()
+}
+
 impl MediaBridge for TauriMediaBridge {
     fn inspect_timeline(
         &self,
@@ -126,9 +322,10 @@ impl MediaBridge for TauriMediaBridge {
         // Snapshot the live session, then composite off the session lock (the
         // preview path's discipline; a local GPU context per call keeps this off
         // the preview's cached `RenderState` mutex, matching export.rs).
-        let timeline = self.core.get_timeline().timeline;
-        let manifest = self.core.media();
-        let project_dir = self.core.project_dir();
+        let snapshot = self.core.runtime_snapshot();
+        let timeline = snapshot.timeline;
+        let manifest = snapshot.media;
+        let project_dir = snapshot.project_dir;
         composite_frames_jpeg(&timeline, &manifest, &project_dir, frames, max_longest_edge)
     }
 
@@ -153,15 +350,17 @@ impl MediaBridge for TauriMediaBridge {
         }
         let mut backend = Backend::Unloaded;
         let mut out = Vec::with_capacity(sources.len());
-        for src in sources {
+        let snapshot = self.core.runtime_snapshot();
+        for resolved_source in resolve_transcript_batch(&snapshot, sources) {
+            let src = resolved_source.source;
             let skip = |reason: String| TranscriptSourceResult {
                 media_ref: src.media_ref.clone(),
                 transcript: None,
                 error: Some(reason),
             };
             // Resolve the asset path; a missing/offline source is skipped.
-            let path = match crate::transcribe::resolve_asset(&self.core, &src.media_ref) {
-                Ok((path, _is_video)) => path,
+            let (path, is_video) = match resolved_source.resolved {
+                Ok(resolved) => resolved,
                 Err(reason) => {
                     out.push(skip(reason));
                     continue;
@@ -214,7 +413,7 @@ impl MediaBridge for TauriMediaBridge {
                 None => {
                     let cache = opentake_media::TranscriptCache::new(self.engine.cache_root());
                     cache
-                        .transcript(&path, src.is_video, None, b)
+                        .transcript(&path, is_video, None, b)
                         .map_err(|e| e.to_string())
                 }
             };
@@ -236,6 +435,21 @@ impl MediaBridge for TauriMediaBridge {
         name: Option<String>,
         folder_id: Option<String>,
     ) -> Result<ImportOutcome, BridgeError> {
+        self.import_media_cancellable(
+            source,
+            name,
+            folder_id,
+            &opentake_media::MediaCancelToken::new(),
+        )
+    }
+
+    fn import_media_cancellable(
+        &self,
+        source: ImportSource,
+        name: Option<String>,
+        folder_id: Option<String>,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<ImportOutcome, BridgeError> {
         match source {
             ImportSource::Path(path) => {
                 self.import_from_path(&path, name.as_deref(), folder_id.as_deref())
@@ -243,16 +457,24 @@ impl MediaBridge for TauriMediaBridge {
             ImportSource::Bytes { base64, mime_type } => {
                 self.import_from_bytes(&base64, &mime_type, name.as_deref(), folder_id.as_deref())
             }
-            // HTTPS download is not wired in this build: doing a byte-capped 1 GB
-            // streaming download from this synchronous bridge would require adding a
-            // full async HTTP stack (reqwest + a tokio runtime) to `src-tauri` — the
-            // one client in the workspace (`opentake-gen`) is a typed provider client,
-            // not a general file downloader, and is async. Path + bytes are fully
-            // functional; url returns a clear, structured error (mirrors upstream's
-            // validation-error shape) so the agent knows to fall back to path/bytes.
-            ImportSource::Url { .. } => Err(BridgeError::new(
-                "source.url import is not yet supported in this build — download the file and pass source.path (a local path), or inline it as source.bytes with source.mimeType.",
-            )),
+            ImportSource::Url { url, mime_type } => {
+                let fetcher = ReqwestUrlFetcher::new()?;
+                self.import_from_url_with(
+                    &fetcher,
+                    &url,
+                    mime_type.as_deref(),
+                    name.as_deref(),
+                    folder_id.as_deref(),
+                    URL_IMPORT_DECODED_MAX,
+                    cancel,
+                    |file, extension, kind| self.probe_required(file, extension, kind),
+                    |project_media, manifest| {
+                        project_media
+                            .write_manifest(manifest)
+                            .map_err(CoreError::Media)
+                    },
+                )
+            }
         }
     }
 
@@ -267,9 +489,10 @@ impl MediaBridge for TauriMediaBridge {
         // Missing (offline) files are kept — their index/transcript reads simply
         // yield nothing, matching upstream (a missing file has no results, not an
         // error). Unresolvable ids are dropped.
-        let manifest = self.core.media();
-        let project_dir = self.core.project_dir();
-        let resolver = opentake_domain::MediaResolver::new(&manifest, project_dir.as_deref());
+        let snapshot = self.core.runtime_snapshot();
+        let manifest = snapshot.media;
+        let resolver =
+            opentake_domain::MediaResolver::new(&manifest, snapshot.project_dir.as_deref());
         let mut visual_paths: Vec<(String, PathBuf)> = Vec::new();
         let mut spoken_paths: Vec<(String, PathBuf)> = Vec::new();
         for c in candidates {
@@ -284,7 +507,7 @@ impl MediaBridge for TauriMediaBridge {
             }
         }
 
-        let fps = self.core.get_timeline().timeline.fps;
+        let fps = snapshot.timeline.fps;
         let installed = crate::search::model_installed(&self.engine);
 
         // Visual group (skipped for scope == "spoken").
@@ -349,6 +572,250 @@ impl MediaBridge for TauriMediaBridge {
 }
 
 impl TauriMediaBridge {
+    fn probe_required(
+        &self,
+        file: &std::fs::File,
+        expected_extension: &str,
+        expected_kind: &str,
+    ) -> Result<ProbedMedia, BridgeError> {
+        let probe = self.engine.probe_file(file).map_err(|_| {
+            BridgeError::new(
+                "MCP_MEDIA_PROBE_FAILED: Downloaded media could not be validated; verify the source type and retry",
+            )
+        })?;
+        let actual_kind = if probe.has_video {
+            if probe.duration_secs > 0.0 {
+                "video"
+            } else {
+                "image"
+            }
+        } else if probe.has_audio {
+            "audio"
+        } else {
+            return Err(BridgeError::new(
+                "Downloaded bytes contain no supported audio, video, or image stream",
+            ));
+        };
+        if actual_kind != expected_kind {
+            return Err(BridgeError::new(format!(
+                "Downloaded media type '{actual_kind}' conflicts with declared '{expected_kind}'"
+            )));
+        }
+        let format_name = probe.format_name.as_deref().ok_or_else(|| {
+            BridgeError::new("Downloaded media probe did not identify a container format")
+        })?;
+        if !container_matches_extension(format_name, expected_extension) {
+            return Err(BridgeError::new(format!(
+                "Downloaded container '{format_name}' conflicts with '.{expected_extension}'"
+            )));
+        }
+        Ok(ProbedMedia {
+            duration_secs: probe.duration_secs,
+            width: probe.width.map(|value| value as i32),
+            height: probe.height.map(|value| value as i32),
+            fps: probe.fps,
+            has_audio: probe.has_audio,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn import_from_url_with<F, P, W>(
+        &self,
+        fetcher: &F,
+        raw_url: &str,
+        requested_mime: Option<&str>,
+        requested_name: Option<&str>,
+        folder_id: Option<&str>,
+        decoded_limit: u64,
+        cancel: &opentake_media::MediaCancelToken,
+        probe: P,
+        mut write_manifest: W,
+    ) -> Result<ImportOutcome, BridgeError>
+    where
+        F: UrlFetcher,
+        P: FnOnce(&std::fs::File, &str, &str) -> Result<ProbedMedia, BridgeError>,
+        W: FnMut(&ProjectMediaCapability, &opentake_domain::MediaManifest) -> Result<(), CoreError>,
+    {
+        let mut current = validate_https_url(raw_url)?;
+        let mut redirects = 0_usize;
+        let (final_url, mut response) = loop {
+            cancelled_checkpoint(cancel)?;
+            let response = match fetcher.fetch(&current, cancel) {
+                Ok(response) => response,
+                Err(error) => {
+                    cancelled_checkpoint(cancel)?;
+                    return Err(error);
+                }
+            };
+            if is_followed_redirect(response.status) {
+                let location = response.location.as_deref().ok_or_else(|| {
+                    BridgeError::new(format!(
+                        "source.url redirect {} is missing Location",
+                        response.status
+                    ))
+                })?;
+                let next = current.join(location).map_err(|error| {
+                    BridgeError::new(format!("source.url redirect is invalid: {error}"))
+                })?;
+                validate_parsed_https_url(&next)?;
+                if redirects >= URL_IMPORT_REDIRECT_MAX {
+                    return Err(BridgeError::new(format!(
+                        "source.url exceeded {URL_IMPORT_REDIRECT_MAX} redirects"
+                    )));
+                }
+                redirects += 1;
+                current = next;
+                continue;
+            }
+            if response.status.is_redirection() {
+                return Err(BridgeError::new(format!(
+                    "source.url returned unsupported redirect status {}",
+                    response.status
+                )));
+            }
+            if !response.status.is_success() {
+                return Err(BridgeError::new(format!(
+                    "source.url returned HTTP {}",
+                    response.status
+                )));
+            }
+            break (current, response);
+        };
+
+        let (extension, response_mime, expected_kind) =
+            resolve_url_media_type(&final_url, requested_mime, response.content_type.as_deref())?;
+        if let Some(length) = response.content_length {
+            if length > decoded_limit {
+                return Err(BridgeError::new(format!(
+                    "source.url Content-Length is too large: {length} bytes, max {decoded_limit}"
+                )));
+            }
+        }
+
+        self.core
+            .ensure_project_mutable()
+            .map_err(|error| BridgeError::new(error.to_string()))?;
+        let project = self.core.runtime_snapshot();
+        let project_dir = project
+            .project_dir
+            .clone()
+            .ok_or_else(|| BridgeError::new("No project is open; cannot import source.url"))?;
+        let project_media = ProjectMediaCapability::open_verified(
+            &self.core,
+            project.project_epoch,
+            &project_dir,
+            true,
+        )
+        .map_err(BridgeError::new)?;
+        let leaf_name = format!("imported-url-{}.{extension}", uuid::Uuid::new_v4());
+        let mut staged = project_media
+            .create_import(Path::new(&leaf_name))
+            .map_err(BridgeError::new)?;
+
+        let mut total = 0_u64;
+        loop {
+            cancelled_checkpoint(cancel)?;
+            let Some(chunk) = response.body.next_chunk(cancel)? else {
+                break;
+            };
+            total = total
+                .checked_add(chunk.len() as u64)
+                .ok_or_else(|| BridgeError::new("source.url decoded byte count overflowed"))?;
+            if total > decoded_limit {
+                return Err(BridgeError::new(format!(
+                    "source.url decoded payload is too large: {total} bytes, max {decoded_limit}"
+                )));
+            }
+            staged.file_mut().write_all(&chunk).map_err(|error| {
+                BridgeError::new(format!("Failed to stage source.url: {error}"))
+            })?;
+        }
+        if total == 0 {
+            return Err(BridgeError::new("source.url returned an empty body"));
+        }
+        staged
+            .file_mut()
+            .flush()
+            .map_err(|error| BridgeError::new(format!("Failed to flush source.url: {error}")))?;
+        staged
+            .file()
+            .sync_all()
+            .map_err(|error| BridgeError::new(format!("Failed to sync source.url: {error}")))?;
+        staged
+            .file_mut()
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| BridgeError::new(format!("Failed to rewind source.url: {error}")))?;
+        cancelled_checkpoint(cancel)?;
+        if !project_media
+            .matches_leaf(&staged)
+            .map_err(BridgeError::new)?
+        {
+            return Err(BridgeError::new(
+                "source.url staging identity changed before probe",
+            ));
+        }
+        let probed = probe(staged.file(), &extension, expected_kind)?;
+        cancelled_checkpoint(cancel)?;
+        if !project_media
+            .matches_leaf(&staged)
+            .map_err(BridgeError::new)?
+        {
+            return Err(BridgeError::new(
+                "source.url staging identity changed during probe",
+            ));
+        }
+
+        let display_name = requested_name
+            .map(str::to_owned)
+            .or_else(|| url_display_name(&final_url))
+            .unwrap_or_else(|| "Imported Media".to_string());
+        let mut events = DeferredCoreEvents::default();
+        let commit = self
+            .core
+            .import_retained_media_for_project_deferred_with_manifest_writer(
+                project.project_epoch,
+                &project_dir,
+                staged.path(),
+                display_name,
+                &probed,
+                folder_id,
+                &mut events,
+                |manifest| write_manifest(&project_media, manifest),
+                || {
+                    if cancel.checkpoint() {
+                        return Err(CoreError::Media(
+                            "source.url import was cancelled before publication".to_string(),
+                        ));
+                    }
+                    match project_media.matches_leaf(&staged) {
+                        Ok(true) => Ok(()),
+                        Ok(false) => Err(CoreError::Media(
+                            "source.url staging identity changed during publication".to_string(),
+                        )),
+                        Err(error) => Err(CoreError::Media(format!(
+                            "source.url staging identity check failed during publication: {error}"
+                        ))),
+                    }
+                },
+            )
+            .map_err(|error| BridgeError::new(error.to_string()))?;
+        staged.commit();
+        self.core.emit_deferred(events);
+        let warning = commit.warning.map_or(String::new(), |warning| {
+            format!(" Warning: retained commit required recovery: {warning:?}.")
+        });
+        Ok(ImportOutcome {
+            message: format!(
+                "Imported '{}' (id: {}, type: {}, {} bytes, {}). Available now in get_media.{warning}",
+                commit.entry.name,
+                commit.entry.id,
+                clip_type_name(commit.entry.kind),
+                total,
+                response_mime.unwrap_or_else(|| format!(".{extension}"))
+            ),
+        })
+    }
+
     /// `path` import: in place, mirroring directories recursively — the exact
     /// `crate::media` path the media panel uses (`import_one` / `mirror_dir`), so
     /// posters/manifest/events stay consistent. 1:1 with upstream
@@ -363,8 +830,11 @@ impl TauriMediaBridge {
             .ensure_project_mutable()
             .map_err(|error| BridgeError::new(error.to_string()))?;
         let file_url = PathBuf::from(path);
-        let meta = std::fs::metadata(&file_url)
-            .map_err(|_| BridgeError::new(format!("File not found: {path}")))?;
+        let meta = std::fs::metadata(&file_url).map_err(|_| {
+            BridgeError::new(
+                "MCP_SOURCE_PATH_UNREADABLE: source.path does not exist or is not readable",
+            )
+        })?;
 
         if meta.is_dir() {
             // Recursive directory import (剪注-style folder mirroring). Reuse the
@@ -407,8 +877,16 @@ impl TauriMediaBridge {
             )));
         }
         let entry = crate::media::import_one(&self.core, &self.engine, &file_url)
-            .map_err(|error| BridgeError::new(error.to_string()))?
-            .ok_or_else(|| BridgeError::new(format!("Failed to import file: {path}")))?;
+            .map_err(|_| {
+                BridgeError::new(
+                    "MCP_SOURCE_IMPORT_FAILED: source.path could not be imported; verify the file type and permissions",
+                )
+            })?
+            .ok_or_else(|| {
+                BridgeError::new(
+                    "MCP_SOURCE_IMPORT_FAILED: source.path could not be imported; verify the file type and permissions",
+                )
+            })?;
         let entry = self.apply_import_metadata(entry, name, folder_id)?;
         Ok(ImportOutcome {
             message: format!(
@@ -518,6 +996,163 @@ impl TauriMediaBridge {
         }
         Ok(entry)
     }
+}
+
+fn cancelled_checkpoint(cancel: &opentake_media::MediaCancelToken) -> Result<(), BridgeError> {
+    if cancel.checkpoint() {
+        Err(BridgeError::new("source.url import was cancelled"))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_https_url(raw: &str) -> Result<reqwest::Url, BridgeError> {
+    let url = reqwest::Url::parse(raw)
+        .map_err(|error| BridgeError::new(format!("source.url is invalid: {error}")))?;
+    validate_parsed_https_url(&url)?;
+    Ok(url)
+}
+
+fn validate_parsed_https_url(url: &reqwest::Url) -> Result<(), BridgeError> {
+    if url.scheme() != "https" {
+        return Err(BridgeError::new("source.url must use HTTPS"));
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err(BridgeError::new("source.url must include a host"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(BridgeError::new("source.url must not include userinfo"));
+    }
+    Ok(())
+}
+
+fn is_followed_redirect(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::MOVED_PERMANENTLY
+            | reqwest::StatusCode::FOUND
+            | reqwest::StatusCode::SEE_OTHER
+            | reqwest::StatusCode::TEMPORARY_REDIRECT
+            | reqwest::StatusCode::PERMANENT_REDIRECT
+    )
+}
+
+fn allowed_url_extension(extension: &str) -> Option<(&'static str, &'static str)> {
+    match extension.to_ascii_lowercase().as_str() {
+        "mov" => Some(("mov", "video")),
+        "mp4" => Some(("mp4", "video")),
+        "m4v" => Some(("m4v", "video")),
+        "mp3" => Some(("mp3", "audio")),
+        "wav" => Some(("wav", "audio")),
+        "aac" => Some(("aac", "audio")),
+        "m4a" => Some(("m4a", "audio")),
+        "png" => Some(("png", "image")),
+        "jpg" | "jpeg" => Some(("jpg", "image")),
+        "tiff" => Some(("tiff", "image")),
+        "heic" => Some(("heic", "image")),
+        _ => None,
+    }
+}
+
+fn container_matches_extension(format_name: &str, extension: &str) -> bool {
+    let formats = format_name.split(',').collect::<Vec<_>>();
+    let any = |accepted: &[&str]| formats.iter().any(|format| accepted.contains(format));
+    match extension {
+        "mov" | "mp4" | "m4v" | "m4a" => any(&["mov", "mp4", "m4a", "3gp", "3g2", "mj2"]),
+        "mp3" => any(&["mp3"]),
+        "wav" => any(&["wav"]),
+        "aac" => any(&["aac"]),
+        "png" => any(&["png_pipe", "image2"]),
+        "jpg" => any(&["jpeg_pipe", "image2"]),
+        "tiff" => any(&["tiff_pipe", "image2"]),
+        "heic" => any(&["heic", "heif", "image2"]),
+        _ => false,
+    }
+}
+
+fn normalized_mime(raw: &str) -> String {
+    raw.split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn mime_extension_and_kind(raw: &str) -> Result<(&'static str, &'static str), BridgeError> {
+    let mime = normalized_mime(raw);
+    let extension = crate::media::file_extension_for_mime(&mime).ok_or_else(|| {
+        BridgeError::new(format!(
+            "Unsupported source.url MIME type '{mime}'. {}",
+            crate::media::IMPORT_ACCEPTED_MIMES
+        ))
+    })?;
+    let (_, kind) =
+        allowed_url_extension(extension).expect("MIME table only returns allowed URL extensions");
+    Ok((extension, kind))
+}
+
+fn resolve_url_media_type(
+    url: &reqwest::Url,
+    requested_mime: Option<&str>,
+    response_content_type: Option<&str>,
+) -> Result<(String, Option<String>, &'static str), BridgeError> {
+    let requested = requested_mime.map(mime_extension_and_kind).transpose()?;
+    // An explicit source.mimeType is the caller's type-inference override for
+    // signed or opaque URL paths, so an absent/unsupported path extension must
+    // not reject the request first. The response MIME and production probe
+    // still independently validate the downloaded bytes.
+    let url_extension = if requested.is_some() {
+        None
+    } else {
+        Path::new(url.path())
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| {
+                allowed_url_extension(value).ok_or_else(|| {
+                    BridgeError::new(format!(
+                        "Unsupported source.url extension '.{value}'. Supported: mov/mp4/m4v, mp3/wav/aac/m4a, png/jpg/jpeg/tiff/heic."
+                    ))
+                })
+            })
+            .transpose()?
+    };
+    let response = response_content_type
+        .map(mime_extension_and_kind)
+        .transpose()?;
+
+    if let (Some((_, requested_kind)), Some((_, response_kind))) = (requested, response) {
+        if requested_kind != response_kind {
+            return Err(BridgeError::new(
+                "source.mimeType conflicts with the HTTPS response Content-Type",
+            ));
+        }
+    }
+    let mime_choice = requested.or(response);
+    if let (Some((_, url_kind)), Some((_, mime_kind))) = (url_extension, mime_choice) {
+        if url_kind != mime_kind {
+            return Err(BridgeError::new(
+                "source.url extension conflicts with its declared MIME type",
+            ));
+        }
+    }
+    let (extension, expected_kind) = mime_choice
+        .or(url_extension)
+        .map(|(extension, kind)| (extension.to_string(), kind))
+        .ok_or_else(|| {
+            BridgeError::new("source.url needs an allowed extension or an allowed MIME type")
+        })?;
+    let selected_mime = requested_mime
+        .map(normalized_mime)
+        .or_else(|| response_content_type.map(normalized_mime));
+    Ok((extension, selected_mime, expected_kind))
+}
+
+fn url_display_name(url: &reqwest::Url) -> Option<String> {
+    Path::new(url.path())
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 /// Lowercase `ClipType` name for the import confirmation (`video`/`audio`/…),
@@ -879,6 +1514,71 @@ mod tests {
     }
 
     #[test]
+    fn transcript_batch_resolution_uses_one_snapshot_and_authoritative_types() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let project_dir = fixture.path().join("Batch.opentake");
+        let video_path = project_dir.join("media/video.mov");
+        let audio_path = project_dir.join("media/audio.wav");
+        std::fs::create_dir_all(video_path.parent().expect("media parent"))
+            .expect("create media directory");
+        std::fs::write(&video_path, b"video").expect("write video fixture");
+        std::fs::write(&audio_path, b"audio").expect("write audio fixture");
+        let mut media = opentake_domain::MediaManifest::new();
+        for (id, kind, relative_path) in [
+            ("video", ClipType::Video, "media/video.mov"),
+            ("audio", ClipType::Audio, "media/audio.wav"),
+        ] {
+            media.entries.push(opentake_domain::MediaManifestEntry {
+                id: id.into(),
+                name: id.into(),
+                kind,
+                source: MediaSource::Project {
+                    relative_path: relative_path.into(),
+                },
+                duration: 1.0,
+                generation_input: None,
+                source_width: None,
+                source_height: None,
+                source_fps: None,
+                has_audio: Some(true),
+                folder_id: None,
+                cached_remote_url: None,
+                cached_remote_url_expires_at: None,
+            });
+        }
+        let snapshot = ProjectRuntimeSnapshot {
+            timeline: opentake_domain::Timeline::new(),
+            media,
+            project_dir: Some(project_dir),
+            project_epoch: 7,
+            version: 3,
+        };
+        let stale_sources = vec![
+            TranscriptSource {
+                media_ref: "video".into(),
+                is_video: false,
+                language: None,
+            },
+            TranscriptSource {
+                media_ref: "audio".into(),
+                is_video: true,
+                language: None,
+            },
+        ];
+
+        let resolved = resolve_transcript_batch(&snapshot, &stale_sources);
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(
+            resolved[0].resolved.as_ref().expect("resolve video"),
+            &(video_path, true)
+        );
+        assert_eq!(
+            resolved[1].resolved.as_ref().expect("resolve audio"),
+            &(audio_path, false)
+        );
+    }
+
+    #[test]
     fn mcp_path_import_refuses_unknown_project_without_manifest_or_folder_change() {
         let tmp = tempfile::tempdir().expect("create temp root");
         let core = unknown_core(tmp.path());
@@ -972,27 +1672,493 @@ mod tests {
     }
 
     #[test]
-    fn url_import_returns_structured_not_supported_error() {
-        // The bridge fully wires path + bytes; url reports a clear fallback message
-        // (path/bytes) rather than silently failing. Constructed without a GPU/core
-        // so this stays a pure unit assertion on the url arm.
-        let bridge = TauriMediaBridge::new(
-            AppCore::new(),
-            std::env::temp_dir().join("inspect-cache"),
-            std::env::temp_dir().join("inspect-models"),
-        );
-        let err = bridge
-            .import_media(
-                ImportSource::Url {
-                    url: "https://example.com/a.mp4".into(),
-                    mime_type: None,
-                },
+    fn https_url_import_enforces_scheme_mime_and_decoded_limit() {
+        use std::collections::VecDeque;
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        use std::sync::Mutex;
+
+        struct FakeFetcher {
+            responses: Mutex<VecDeque<UrlFetchResponse>>,
+            seen: Mutex<Vec<String>>,
+        }
+        impl FakeFetcher {
+            fn new(responses: Vec<UrlFetchResponse>) -> Self {
+                Self {
+                    responses: Mutex::new(responses.into()),
+                    seen: Mutex::new(Vec::new()),
+                }
+            }
+        }
+        impl UrlFetcher for FakeFetcher {
+            fn fetch(
+                &self,
+                url: &reqwest::Url,
+                _cancel: &opentake_media::MediaCancelToken,
+            ) -> Result<UrlFetchResponse, BridgeError> {
+                self.seen.lock().unwrap().push(url.as_str().to_string());
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .ok_or_else(|| BridgeError::new("unexpected fetch"))
+            }
+        }
+        fn response(
+            status: reqwest::StatusCode,
+            location: Option<&str>,
+            mime: Option<&str>,
+            length: Option<u64>,
+            body: impl Read + Send + 'static,
+        ) -> UrlFetchResponse {
+            UrlFetchResponse {
+                status,
+                location: location.map(str::to_owned),
+                content_type: mime.map(str::to_owned),
+                content_length: length,
+                body: Box::new(ReaderUrlBody {
+                    reader: Box::new(body),
+                }),
+            }
+        }
+        struct CancelAfterFirstRead {
+            cursor: std::io::Cursor<Vec<u8>>,
+            cancel: opentake_media::MediaCancelToken,
+            fired: bool,
+        }
+        impl Read for CancelAfterFirstRead {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let count = self.cursor.read(buffer)?;
+                if count > 0 && !self.fired {
+                    self.fired = true;
+                    self.cancel.cancel();
+                }
+                Ok(count)
+            }
+        }
+        fn saved_bridge(root: &Path) -> (TauriMediaBridge, AppCore, PathBuf) {
+            let bundle = root.join("UrlImport.opentake");
+            let core = AppCore::new();
+            core.save_project(Some(bundle.clone()))
+                .expect("save URL import fixture");
+            let bridge =
+                TauriMediaBridge::new(core.clone(), root.join("cache"), root.join("models"));
+            (bridge, core, bundle)
+        }
+        fn assert_unchanged(
+            core: &AppCore,
+            bundle: &Path,
+            before: &opentake_domain::MediaManifest,
+            disk: &[u8],
+        ) {
+            assert_eq!(&core.media(), before, "live manifest changed after failure");
+            assert_eq!(
+                std::fs::read(bundle.join("media.json")).expect("read manifest after failure"),
+                disk,
+                "persistent manifest bytes changed after failure"
+            );
+            let media_dir = bundle.join("media");
+            if media_dir.exists() {
+                assert_eq!(
+                    std::fs::read_dir(media_dir).unwrap().count(),
+                    0,
+                    "uncommitted URL staging leaf survived"
+                );
+            }
+        }
+        fn persist_manifest(
+            capability: &ProjectMediaCapability,
+            manifest: &opentake_domain::MediaManifest,
+        ) -> Result<(), CoreError> {
+            capability
+                .write_manifest(manifest)
+                .map_err(CoreError::Media)
+        }
+
+        // Initial URL validation is strictly pre-fetch.
+        let tmp = tempfile::tempdir().unwrap();
+        let (bridge, core, bundle) = saved_bridge(tmp.path());
+        let manifest_before = core.media();
+        let disk_before = std::fs::read(bundle.join("media.json")).unwrap();
+        for url in [
+            "http://example.com/a.mp4",
+            "https://",
+            "https://user@example.com/a.mp4",
+        ] {
+            let fetcher = FakeFetcher::new(Vec::new());
+            let err = bridge
+                .import_from_url_with(
+                    &fetcher,
+                    url,
+                    None,
+                    None,
+                    None,
+                    8,
+                    &opentake_media::MediaCancelToken::new(),
+                    |_, _, _| Ok(ProbedMedia::default()),
+                    persist_manifest,
+                )
+                .unwrap_err();
+            assert!(
+                err.message.contains("HTTPS")
+                    || err.message.contains("host")
+                    || err.message.contains("userinfo")
+                    || err.message.contains("invalid"),
+                "{url}: {}",
+                err.message
+            );
+            assert!(fetcher.seen.lock().unwrap().is_empty());
+            assert_unchanged(&core, &bundle, &manifest_before, &disk_before);
+        }
+
+        // Every redirect target is validated before the next request.
+        for target in [
+            "http://example.com/final.mp4",
+            "https://user@example.com/final.mp4",
+        ] {
+            let fetcher = FakeFetcher::new(vec![response(
+                reqwest::StatusCode::FOUND,
+                Some(target),
                 None,
                 None,
+                std::io::Cursor::new(Vec::new()),
+            )]);
+            bridge
+                .import_from_url_with(
+                    &fetcher,
+                    "https://example.com/start.mp4",
+                    None,
+                    None,
+                    None,
+                    8,
+                    &opentake_media::MediaCancelToken::new(),
+                    |_, _, _| Ok(ProbedMedia::default()),
+                    persist_manifest,
+                )
+                .expect_err("unsafe redirect target must fail");
+            assert_eq!(fetcher.seen.lock().unwrap().len(), 1);
+            assert_unchanged(&core, &bundle, &manifest_before, &disk_before);
+        }
+
+        // Declared and authoritative streamed sizes are independently capped;
+        // unsupported MIME/extension combinations never publish either.
+        for (url, mime, length, body) in [
+            (
+                "https://example.com/a.mp4",
+                Some("video/mp4"),
+                Some(9),
+                vec![1],
+            ),
+            (
+                "https://example.com/a.mp4",
+                Some("video/mp4"),
+                None,
+                vec![1; 9],
+            ),
+            (
+                "https://example.com/a.mp4",
+                Some("video/mp4"),
+                Some(1),
+                vec![1; 9],
+            ),
+            (
+                "https://example.com/a.exe",
+                Some("video/mp4"),
+                Some(1),
+                vec![1],
+            ),
+            (
+                "https://example.com/a.mp4",
+                Some("application/zip"),
+                Some(1),
+                vec![1],
+            ),
+        ] {
+            let fetcher = FakeFetcher::new(vec![response(
+                reqwest::StatusCode::OK,
+                None,
+                mime,
+                length,
+                std::io::Cursor::new(body),
+            )]);
+            bridge
+                .import_from_url_with(
+                    &fetcher,
+                    url,
+                    None,
+                    None,
+                    None,
+                    8,
+                    &opentake_media::MediaCancelToken::new(),
+                    |_, _, _| Ok(ProbedMedia::default()),
+                    persist_manifest,
+                )
+                .expect_err("invalid MIME/extension/size must fail");
+            assert_unchanged(&core, &bundle, &manifest_before, &disk_before);
+        }
+
+        // Explicit source.mimeType overrides an absent or unusable URL path
+        // extension. The response MIME and injected probe still validate the
+        // selected type before either candidate is published.
+        let override_tmp = tempfile::tempdir().unwrap();
+        let (override_bridge, override_core, override_bundle) = saved_bridge(override_tmp.path());
+        for url in [
+            "https://example.com/download",
+            "https://example.com/opaque.exe?signature=secret",
+        ] {
+            let fetcher = FakeFetcher::new(vec![response(
+                reqwest::StatusCode::OK,
+                None,
+                Some("video/mp4"),
+                Some(4),
+                std::io::Cursor::new(vec![1, 2, 3, 4]),
+            )]);
+            override_bridge
+                .import_from_url_with(
+                    &fetcher,
+                    url,
+                    Some("video/mp4"),
+                    None,
+                    None,
+                    8,
+                    &opentake_media::MediaCancelToken::new(),
+                    |_, extension, kind| {
+                        assert_eq!(extension, "mp4");
+                        assert_eq!(kind, "video");
+                        Ok(ProbedMedia::default())
+                    },
+                    persist_manifest,
+                )
+                .expect("explicit source.mimeType overrides the URL path extension");
+        }
+        assert_eq!(override_core.media().entries.len(), 2);
+        let override_persisted = opentake_project::Project::open(&override_bundle)
+            .expect("reopen MIME override fixture");
+        assert_eq!(override_persisted.manifest.entries.len(), 2);
+        assert!(override_persisted.manifest.entries.iter().all(|entry| {
+            matches!(
+                &entry.source,
+                MediaSource::Project { relative_path } if relative_path.ends_with(".mp4")
             )
-            .unwrap_err();
-        assert!(err.message.contains("not yet supported"), "{}", err.message);
-        assert!(err.message.contains("source.path"), "{}", err.message);
+        }));
+
+        // The limit itself is accepted (strictly greater is rejected), even
+        // when Content-Length understates the streamed body. The injected probe
+        // stops before publication so the shared fixture remains unchanged.
+        let fetcher = FakeFetcher::new(vec![response(
+            reqwest::StatusCode::OK,
+            None,
+            Some("video/mp4"),
+            Some(1),
+            std::io::Cursor::new(vec![1; 8]),
+        )]);
+        let exact_limit = bridge
+            .import_from_url_with(
+                &fetcher,
+                "https://example.com/exact.mp4",
+                None,
+                None,
+                None,
+                8,
+                &opentake_media::MediaCancelToken::new(),
+                |_, _, _| Err(BridgeError::new("exact limit reached probe")),
+                persist_manifest,
+            )
+            .expect_err("probe deliberately stops exact-limit fixture");
+        assert!(
+            exact_limit.message.contains("exact limit reached probe"),
+            "{}",
+            exact_limit.message
+        );
+        assert_unchanged(&core, &bundle, &manifest_before, &disk_before);
+
+        // Cancellation after a partial read drops the retained candidate and
+        // leaves both the live and byte-for-byte persistent manifest untouched.
+        let cancel = opentake_media::MediaCancelToken::new();
+        let body = CancelAfterFirstRead {
+            cursor: std::io::Cursor::new(vec![1; 8]),
+            cancel: cancel.clone(),
+            fired: false,
+        };
+        let fetcher = FakeFetcher::new(vec![response(
+            reqwest::StatusCode::OK,
+            None,
+            Some("video/mp4"),
+            None,
+            body,
+        )]);
+        bridge
+            .import_from_url_with(
+                &fetcher,
+                "https://example.com/cancel.mp4",
+                None,
+                None,
+                None,
+                8,
+                &cancel,
+                |_, _, _| Ok(ProbedMedia::default()),
+                persist_manifest,
+            )
+            .expect_err("cancelled stream must fail");
+        assert_unchanged(&core, &bundle, &manifest_before, &disk_before);
+
+        for fail_probe in [true, false] {
+            let fetcher = FakeFetcher::new(vec![response(
+                reqwest::StatusCode::OK,
+                None,
+                Some("video/mp4"),
+                Some(4),
+                std::io::Cursor::new(vec![1, 2, 3, 4]),
+            )]);
+            let result = bridge.import_from_url_with(
+                &fetcher,
+                "https://example.com/failure.mp4",
+                None,
+                None,
+                None,
+                8,
+                &opentake_media::MediaCancelToken::new(),
+                move |_, _, _| {
+                    if fail_probe {
+                        Err(BridgeError::new("injected probe failure"))
+                    } else {
+                        Ok(ProbedMedia::default())
+                    }
+                },
+                move |capability, manifest| {
+                    if fail_probe {
+                        persist_manifest(capability, manifest)
+                    } else {
+                        Err(CoreError::Media("injected writer failure".to_string()))
+                    }
+                },
+            );
+            let error = result.expect_err("probe/writer fault must fail closed");
+            assert!(
+                error.message.contains("probe") || error.message.contains("writer"),
+                "{}",
+                error.message
+            );
+            assert_unchanged(&core, &bundle, &manifest_before, &disk_before);
+        }
+
+        // A successful HTTPS redirect chain probes the retained bytes before
+        // publication, persists the manifest, and survives a project reopen.
+        let probed = Arc::new(AtomicBool::new(false));
+        let probed_in_closure = probed.clone();
+        let fetcher = FakeFetcher::new(vec![
+            response(
+                reqwest::StatusCode::TEMPORARY_REDIRECT,
+                Some("/final.mp4"),
+                None,
+                None,
+                std::io::Cursor::new(Vec::new()),
+            ),
+            response(
+                reqwest::StatusCode::OK,
+                None,
+                Some("video/mp4; charset=binary"),
+                Some(4),
+                std::io::Cursor::new(vec![1, 2, 3, 4]),
+            ),
+        ]);
+        bridge
+            .import_from_url_with(
+                &fetcher,
+                "https://example.com/start.mp4",
+                None,
+                Some("Remote clip"),
+                None,
+                8,
+                &opentake_media::MediaCancelToken::new(),
+                move |file, _, _| {
+                    let mut bytes = Vec::new();
+                    file.try_clone().unwrap().read_to_end(&mut bytes).unwrap();
+                    assert_eq!(bytes, vec![1, 2, 3, 4]);
+                    probed_in_closure.store(true, AtomicOrdering::Release);
+                    Ok(ProbedMedia::default())
+                },
+                persist_manifest,
+            )
+            .expect("valid HTTPS import succeeds");
+        assert!(probed.load(AtomicOrdering::Acquire));
+        assert_eq!(core.media().entries.len(), 1);
+        let persisted = opentake_project::Project::open(&bundle).expect("reopen persisted project");
+        assert_eq!(persisted.manifest.entries.len(), 1);
+        let entry = &persisted.manifest.entries[0];
+        assert_eq!(entry.name, "Remote clip");
+        let relative = match &entry.source {
+            MediaSource::Project { relative_path } => relative_path,
+            other => panic!("URL import must be project-retained, got {other:?}"),
+        };
+        assert_eq!(
+            std::fs::read(bundle.join(relative)).unwrap(),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(fetcher.seen.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn reqwest_fetch_is_cancellable_and_redacts_signed_url_errors() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            let _ = release_rx.recv_timeout(Duration::from_secs(2));
+        });
+        let cancel = opentake_media::MediaCancelToken::new();
+        let trigger = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            trigger.cancel();
+        });
+        let fetcher = ReqwestUrlFetcher::new().unwrap();
+        let signed =
+            reqwest::Url::parse(&format!("http://{addr}/media.mp4?token=super-secret-query"))
+                .unwrap();
+        let started = std::time::Instant::now();
+        let cancelled = fetcher
+            .fetch(&signed, &cancel)
+            .err()
+            .expect("in-flight request must observe cancellation");
+        assert!(
+            cancelled.message.contains("cancelled"),
+            "{}",
+            cancelled.message
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "cancellation waited for the network timeout"
+        );
+        assert!(!cancelled.message.contains("super-secret-query"));
+        let _ = release_tx.send(());
+        server.join().unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            drop(stream);
+        });
+        let signed =
+            reqwest::Url::parse(&format!("http://{addr}/media.mp4?token=another-secret")).unwrap();
+        let error = fetcher
+            .fetch(&signed, &opentake_media::MediaCancelToken::new())
+            .err()
+            .expect("closed connection fails");
+        assert!(
+            !error.message.contains("another-secret"),
+            "{}",
+            error.message
+        );
+        assert!(
+            !error.message.contains(signed.as_str()),
+            "{}",
+            error.message
+        );
+        server.join().unwrap();
     }
 
     #[test]
@@ -1087,6 +2253,77 @@ mod tests {
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
+    }
+
+    fn make_audio_with_cover(path: &Path) -> bool {
+        Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=32x32:d=1",
+                "-map",
+                "0:a",
+                "-map",
+                "1:v",
+                "-c:a",
+                "libmp3lame",
+                "-c:v",
+                "mjpeg",
+                "-disposition:v",
+                "attached_pic",
+                "-y",
+            ])
+            .arg(path)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn url_probe_validates_real_container_and_audio_cover_art() {
+        if !ffmpeg_ready() {
+            eprintln!("skip: ffmpeg not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = TauriMediaBridge::new(
+            AppCore::new(),
+            tmp.path().join("cache"),
+            tmp.path().join("models"),
+        );
+
+        let video = tmp.path().join("fixture.mp4");
+        if !make_video(&video, 32, 18, 1, 1) {
+            eprintln!("skip: could not generate video probe fixture");
+            return;
+        }
+        let video_file = std::fs::File::open(&video).unwrap();
+        bridge
+            .probe_required(&video_file, "mp4", "video")
+            .expect("real MP4 passes production URL probe");
+        bridge
+            .probe_required(&video_file, "mp3", "audio")
+            .expect_err("real MP4 cannot masquerade as MP3 audio");
+
+        let audio = tmp.path().join("cover.mp3");
+        if !make_audio_with_cover(&audio) {
+            eprintln!("skip: could not generate covered MP3 probe fixture");
+            return;
+        }
+        let audio_file = std::fs::File::open(&audio).unwrap();
+        let probed = bridge
+            .probe_required(&audio_file, "mp3", "audio")
+            .expect("MP3 with attached cover remains audio");
+        assert!(probed.has_audio);
+        assert_eq!(probed.width, None);
+        assert_eq!(probed.height, None);
     }
 
     fn external_entry(
@@ -1206,7 +2443,11 @@ mod tests {
         let err = bridge
             .import_from_path("/no/such/file.mp4", None, None)
             .unwrap_err();
-        assert!(err.message.contains("File not found"), "{}", err.message);
+        assert!(
+            err.message.contains("MCP_SOURCE_PATH_UNREADABLE"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

@@ -1,0 +1,117 @@
+- generic [ref=e3]:
+  - generic [ref=e39]:
+    - button "返回主页" [ref=e40]
+    - generic [ref=e44]:
+      - button "视图" [expanded] [active] [ref=e45]
+      - menu [ref=e261]:
+        - generic [ref=e262]: 布局
+        - menuitemcheckbox "默认布局 ⌘1" [checked] [ref=e263]:
+          - generic [ref=e267]: 默认布局
+          - generic [ref=e271]: ⌘1
+        - menuitemcheckbox "媒体布局 ⌘2" [ref=e272]:
+          - generic [ref=e276]: 媒体布局
+          - generic [ref=e280]: ⌘2
+        - menuitemcheckbox "竖屏布局 ⌘3" [ref=e281]:
+          - generic [ref=e285]: 竖屏布局
+          - generic [ref=e289]: ⌘3
+        - generic [ref=e291]: 面板
+        - menuitemcheckbox "Agent 面板 ⌘⌥A" [ref=e292]:
+          - generic [ref=e297]: Agent 面板
+          - generic [ref=e301]: ⌘⌥A
+        - menuitemcheckbox "媒体面板 ⌘0" [checked] [ref=e302]:
+          - generic [ref=e306]: 媒体面板
+          - generic [ref=e310]: ⌘0
+        - menuitemcheckbox "检查器 ⌘⌥0" [checked] [ref=e311]:
+          - generic [ref=e315]: 检查器
+          - generic [ref=e319]: ⌘⌥0
+    - button "素材库" [ref=e47]
+    - button "设置" [ref=e50]
+    - button "导出视频" [disabled] [ref=e54]
+    - button "导出字幕" [ref=e58]
+    - button "导出" [ref=e63]
+  - generic [ref=e70]:
+    - generic [ref=e72]:
+      - generic [ref=e76]:
+        - tablist [ref=e77]:
+          - tab "素材" [selected] [ref=e78] [cursor=pointer]
+          - tab "音频" [ref=e80] [cursor=pointer]
+          - tab "文本" [disabled] [ref=e81]
+          - tab "贴纸" [disabled] [ref=e82]
+          - tab "特效" [disabled] [ref=e83]
+          - tab "转场" [disabled] [ref=e84]
+          - tab "字幕" [ref=e85] [cursor=pointer]
+          - tab "智能包裹" [disabled] [ref=e86]
+        - generic [ref=e87]:
+          - generic [ref=e88]:
+            - generic [ref=e89]:
+              - button "导入媒体 (⌘I)" [ref=e91] [cursor=pointer]
+              - button "生成" [disabled] [ref=e93]
+              - tablist [ref=e96]:
+                - tab "导入" [selected] [ref=e97] [cursor=pointer]
+                - tab "我的" [ref=e98] [cursor=pointer]
+            - generic [ref=e99]:
+              - textbox "搜索" [ref=e100]
+              - button "视图模式" [ref=e101] [cursor=pointer]
+              - button "排序" [ref=e107] [cursor=pointer]
+              - button "筛选" [ref=e111] [cursor=pointer]
+            - generic [ref=e114]: 全部
+            - generic [ref=e116]:
+              - generic [ref=e117]: 媒体库
+              - generic [ref=e118]: 0 个项目
+          - generic [ref=e119]: 拖放媒体文件到此处,或使用导入 / 生成。
+      - generic [ref=e123]:
+        - generic [ref=e126]:
+          - button "时间线" [ref=e129]
+          - generic [ref=e130]: 暂无媒体
+          - generic [ref=e136]:
+            - generic [ref=e137]: 00:00:00 / 00:00:00
+            - generic [ref=e138]:
+              - button "跳到开头" [ref=e139] [cursor=pointer]
+              - button "上一帧" [ref=e142] [cursor=pointer]
+              - button "播放/暂停 (空格)" [ref=e145] [cursor=pointer]
+              - button "下一帧" [ref=e148] [cursor=pointer]
+              - button "跳到结尾" [ref=e151] [cursor=pointer]
+            - button "截取当前帧到素材库" [disabled] [ref=e154]
+            - generic [ref=e158]:
+              - button "画幅比例" [ref=e160] [cursor=pointer]:
+                - generic [ref=e161]: 16:9
+              - generic [ref=e165]: "30"
+              - button "预览画质" [ref=e167] [cursor=pointer]:
+                - generic [ref=e168]: FHD
+              - button "画布缩放" [ref=e173] [cursor=pointer]:
+                - generic [ref=e174]: Fit
+        - generic [ref=e181]:
+          - generic [ref=e182]: 时间线
+          - generic [ref=e189]:
+            - generic [ref=e190]: 格式
+            - generic [ref=e192]:
+              - generic [ref=e193]: 分辨率
+              - generic [ref=e194]: 1920 × 1080
+            - generic [ref=e195]:
+              - generic [ref=e196]: 帧率
+              - generic [ref=e197]: 30 fps
+            - generic [ref=e198]:
+              - generic [ref=e199]: 宽高比
+              - generic [ref=e200]: 16:9
+            - generic [ref=e201]:
+              - generic [ref=e202]: 时长
+              - generic [ref=e203]: 00:00:00
+    - generic [ref=e207]:
+      - generic [ref=e208]:
+        - generic [ref=e209]:
+          - button "撤销 (⌘Z)" [disabled] [ref=e210]
+          - button "重做 (⇧⌘Z)" [disabled] [ref=e214]
+        - generic [ref=e219]:
+          - button "选择工具 (V)" [ref=e220] [cursor=pointer]
+          - button "切割工具 (C)" [ref=e223] [cursor=pointer]
+        - generic [ref=e231]:
+          - button "在播放头处分割 (⌘K)" [ref=e232] [cursor=pointer]
+          - button "将入点修剪到播放头 (Q)" [ref=e236] [cursor=pointer]:
+            - generic [ref=e237]: "["
+          - button "将出点修剪到播放头 (W)" [ref=e238] [cursor=pointer]:
+            - generic [ref=e239]: "]"
+        - button "添加文本" [ref=e241] [cursor=pointer]:
+          - generic [ref=e242]: T
+        - slider "时间线缩放" [ref=e248]: "0.656"
+      - generic [ref=e254]:
+        - group "Timeline clips"

@@ -26,6 +26,9 @@ const store = vi.hoisted(() => ({
     requestMediaPreviewToggle: vi.fn(),
     mediaPreviewToggleRequest: 0,
     rustEngineFailed: false,
+    setRustEngineFailed: vi.fn(),
+    webkitPlaybackFailedRevision: null as string | null,
+    setWebkitPlaybackFailedRevision: vi.fn(),
   },
   media: {
     items: [] as Array<{
@@ -61,6 +64,11 @@ vi.mock("../../store/mediaStore", () => ({
 
 vi.mock("../../lib/asset", () => ({
   assetUrl: (path: string | null | undefined) => (path ? `asset://${path}` : null),
+}));
+
+vi.mock("../../lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/api")>()),
+  isTauri: true,
 }));
 
 vi.mock("./nativePlaybackSession", () => ({
@@ -127,6 +135,8 @@ describe("Preview timeline rendering", () => {
       isScrubbing: false,
       previewMediaId: null,
       selectedClipIds: new Set<string>(),
+      rustEngineFailed: false,
+      webkitPlaybackFailedRevision: null,
     };
     store.media.items = [
       { id: "base", name: "base", type: "video", duration: 10, hasAudio: true, path: "/base.mov" },
@@ -167,6 +177,62 @@ describe("Preview timeline rendering", () => {
     expect(playingHtml).toContain('data-playback-surface="webkit"');
   });
 
+  it("uses the native surface for a multi-video-track timeline", () => {
+    store.timeline = timeline([
+      track({
+        id: "v2",
+        type: "video",
+        clips: [clip({ id: "upper", mediaRef: "pip", mediaType: "video" })],
+      }),
+      track({
+        id: "v1",
+        type: "video",
+        clips: [clip({ id: "lower-main10", mediaRef: "base", mediaType: "video" })],
+      }),
+    ]);
+
+    const html = renderToStaticMarkup(<Preview />);
+
+    expect(html).not.toContain('data-playback-surface="webkit"');
+    expect(html).not.toContain("<video");
+    expect(html.match(/data-rust-frame-slot=/g)).toHaveLength(2);
+  });
+
+  it("mounts WebKit again when native startup fails after a WebKit decode failure", () => {
+    store.timeline = timeline([
+      track({
+        id: "v1",
+        type: "video",
+        clips: [clip({ id: "main10", mediaRef: "base", mediaType: "video" })],
+      }),
+    ]);
+    store.ui.webkitPlaybackFailedRevision = "3:7";
+    store.ui.rustEngineFailed = true;
+
+    const html = renderToStaticMarkup(<Preview />);
+
+    expect(html).toContain('data-playback-surface="webkit"');
+    expect(html).toContain("<video");
+  });
+
+  it("switches the failed WebKit revision to native before native startup fails", () => {
+    store.timeline = timeline([
+      track({
+        id: "v1",
+        type: "video",
+        clips: [clip({ id: "main10", mediaRef: "base", mediaType: "video" })],
+      }),
+    ]);
+    store.ui.webkitPlaybackFailedRevision = "3:7";
+    store.ui.rustEngineFailed = false;
+
+    const html = renderToStaticMarkup(<Preview />);
+
+    expect(html).not.toContain('data-playback-surface="webkit"');
+    expect(html).not.toContain("<video");
+    expect(html.match(/data-rust-frame-slot=/g)).toHaveLength(2);
+  });
+
   it("renders a user visible unsupported surface instead of incomplete DOM media", () => {
     store.timeline = timeline([
       track({
@@ -196,6 +262,22 @@ describe("Preview timeline rendering", () => {
 
     expect(html).toMatch(/aria-label="播放\/暂停 \(空格\)"[^>]*disabled/);
     expect(html).toMatch(/aria-label="截取当前帧到素材库"[^>]*disabled/);
+  });
+
+  it("keeps play available so a compositor-only timeline can retry native startup", () => {
+    store.timeline = timeline([
+      track({
+        id: "v1",
+        type: "text",
+        clips: [clip({ id: "text-clip", mediaRef: "base", mediaType: "text" })],
+      }),
+    ]);
+    store.ui.rustEngineFailed = true;
+
+    const html = renderToStaticMarkup(<Preview />);
+
+    expect(html).toContain('data-testid="unsupported-playback-surface"');
+    expect(html).not.toMatch(/aria-label="播放\/暂停 \(空格\)"[^>]*disabled/);
   });
 
   it("ignores native publications on a WebKit playback route", () => {

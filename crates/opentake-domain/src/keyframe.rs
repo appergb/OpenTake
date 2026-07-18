@@ -52,6 +52,10 @@ pub struct AnimPair {
 }
 
 impl AnimPair {
+    /// Persisted keys owned by the pair-valued keyframe wire schema.
+    pub const WIRE_FIELDS: &'static [&'static str] = &["a", "b"];
+    pub const SCALAR_WIRE_FIELDS: &'static [&'static str] = Self::WIRE_FIELDS;
+
     pub fn new(a: f64, b: f64) -> Self {
         AnimPair { a, b }
     }
@@ -93,6 +97,11 @@ pub struct Keyframe<V> {
 }
 
 impl<V> Keyframe<V> {
+    /// Persisted keys owned by a keyframe entry.
+    pub const WIRE_FIELDS: &'static [&'static str] = &["frame", "value", "interpolationOut"];
+    pub const SCALAR_WIRE_FIELDS: &'static [&'static str] = &["frame", "interpolationOut"];
+    pub const VALUE_WIRE_FIELD: &'static str = "value";
+
     /// New keyframe with the upstream default `interpolation_out = .smooth`.
     pub fn new(frame: i32, value: V) -> Self {
         Keyframe {
@@ -126,6 +135,10 @@ impl<V> Default for KeyframeTrack<V> {
 }
 
 impl<V> KeyframeTrack<V> {
+    /// Persisted keys owned by a keyframe track container.
+    pub const WIRE_FIELDS: &'static [&'static str] = &["keyframes"];
+    pub const KEYFRAMES_WIRE_FIELD: &'static str = "keyframes";
+
     pub fn new() -> Self {
         KeyframeTrack::default()
     }

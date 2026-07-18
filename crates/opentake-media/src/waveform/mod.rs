@@ -25,7 +25,7 @@ pub use dsp::{
 
 use std::path::Path;
 
-use crate::cache_key::{file_identity_key, KEY_HEX_LEN};
+use crate::cache_key::visual_file_identity_key;
 use crate::error::Result;
 use crate::{extract_pcm_cancellable, MediaCancelToken, PcmFormat, PcmSpec};
 
@@ -91,7 +91,7 @@ pub fn waveform_cached_cancellable(
     duration_secs: f64,
     cancel: &MediaCancelToken,
 ) -> Result<Vec<f32>> {
-    if let Some(key) = file_identity_key(path, KEY_HEX_LEN) {
+    if let Some(key) = visual_file_identity_key(path) {
         if let Some(cached) = store::load_waveform(cache_root, &key) {
             return Ok(cached);
         }

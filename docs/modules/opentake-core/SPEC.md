@@ -1,4 +1,6 @@
-# opentake-core 实现就绪规格(Issue #11)
+# opentake-core 历史合订规格(Issue #11)
+
+> **状态：历史快照，不是当前实现的权威来源。** 本文件保留 Issue #11 时的原始合订设计，部分类型名、字段草案和 Undo/Redo 形态已与代码不同。当前可执行规格以 [`docs/specs/core/`](../../specs/core/) 的拆分文件为准；共享编辑状态与命令路由请直接阅读 [`1-editor-state.md`](../../specs/core/1-editor-state.md) 和 [`2-command-routing.md`](../../specs/core/2-command-routing.md)。审计与验收不得用本历史快照覆盖拆分规格或当前代码证据。
 
 > **范围**:`crates/opentake-core/` —— EditorState 组装、命令路由(= 上游单一能力层)、事件总线、Tauri 边界契约。
 > **本 crate 的一句话职责**:把 `opentake-{domain,ops,project,render,agent}` 装配成**一个权威可观测状态容器 `EditorState`**,对 UI / Agent / MCP 三个对等客户端暴露**唯一一条编辑入口**(`EditorCore::apply`),并把状态变更通过**单调递增版本号 + 事件广播**推给前端。
@@ -420,7 +422,7 @@ pub struct CoreDeps {
 1. 读并 decode `timeline`(`:31-42`)→ 设 `state.timeline`,`version = 0`。
 2. 设 `project_dir` / 派生 `project_id`(`:192` + `EditorViewModel.swift:116-125`)。
 3. decode `manifest`(`:43-50`)→ `state.manifest` → **从 manifest 物化 `assets`**(`restoreAssetsFromManifest`,`:304-339`):每个 entry 解析 URL → `MediaAsset` → 文件存在则触发波形/缩略图(异步)→ `loadMetadata`。
-4. decode `generation_log`(`:51-53`);缺失则 `seed_generation_log_from_assets`(`:246`)。
+4. decode `generation_log`(`:51-53`);没有有效日志时调用 `Project::seed_generation_log_from_assets`：以 `generationInput` 的规范 JSON 字节为有序键，相同输入只补一条；稳定行 id 使用完整 SHA-256 溯源摘要，并保留 model/createdAt。旧 manifest 没有可信计费字段，补种行的 `costCredits` 为 `null`，避免用会变化的价格表改写历史；有任何有效日志（包括空日志或部分日志）时均以它为准。非空补种结果在下一次安全保存时写入 `generation-log.json`，重开不再重复补种。
 5. `search_index.project_opened()`(`:248`,Phase 8 才实装)。
 6. 不发 `timeline_changed`(open 是初始化,前端 open 后主动 `get_timeline`)。
 

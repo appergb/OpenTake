@@ -46,6 +46,33 @@ impl Default for Transform {
 }
 
 impl Transform {
+    /// Persisted keys emitted by the current transform encoder.
+    pub const WIRE_FIELDS: &'static [&'static str] = &[
+        "centerX",
+        "centerY",
+        "width",
+        "height",
+        "rotation",
+        "flipHorizontal",
+        "flipVertical",
+    ];
+    /// Legacy position keys accepted only during decode.
+    pub const LEGACY_WIRE_FIELDS: &'static [&'static str] = &["x", "y"];
+    /// Complete current + legacy key set accepted by compatibility scanning.
+    pub const COMPATIBLE_WIRE_FIELDS: &'static [&'static str] = &[
+        "centerX",
+        "centerY",
+        "width",
+        "height",
+        "rotation",
+        "flipHorizontal",
+        "flipVertical",
+        "x",
+        "y",
+    ];
+    /// All accepted Transform fields are scalar-valued when understood.
+    pub const SCALAR_WIRE_FIELDS: &'static [&'static str] = Self::COMPATIBLE_WIRE_FIELDS;
+
     /// Construct from a top-left origin and size (centers are derived).
     pub fn from_top_left(top_left: Point, width: f64, height: f64) -> Self {
         Transform {
@@ -259,6 +286,10 @@ impl Default for Crop {
 }
 
 impl Crop {
+    /// Persisted keys owned by Crop's wire schema.
+    pub const WIRE_FIELDS: &'static [&'static str] = &["left", "top", "right", "bottom"];
+    pub const SCALAR_WIRE_FIELDS: &'static [&'static str] = Self::WIRE_FIELDS;
+
     pub fn is_identity(&self) -> bool {
         self.left == 0.0 && self.top == 0.0 && self.right == 0.0 && self.bottom == 0.0
     }

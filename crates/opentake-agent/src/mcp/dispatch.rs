@@ -45,9 +45,9 @@ use crate::signal::engine;
 use crate::signal::rules::OpContext;
 use crate::tools::args::{self, *};
 use crate::tools::encode_timeline::encode_timeline;
-use crate::tools::errors::{decode_tool_args, ToolError};
+use crate::tools::errors::{decode_tool_args, ToolArgs, ToolError};
 use crate::tools::names::ToolName;
-use crate::tools::result::{Block, ToolResult};
+use crate::tools::result::{Block, PublicErrorKind, ToolResult};
 use crate::tools::short_id;
 
 /// `inspect_timeline` frame-sampling + downscale constants, 1:1 with upstream
@@ -110,10 +110,36 @@ impl Dispatcher {
 
     /// Run one tool through the full pipeline and return its neutral result.
     pub fn dispatch(&self, name: &str, args: Value) -> ToolResult {
+        self.dispatch_cancellable(name, args, &opentake_media::MediaCancelToken::new())
+    }
+
+    /// Run one tool with cooperative media cancellation. The MCP transport uses
+    /// this to propagate `notifications/cancelled`; direct callers use
+    /// [`Self::dispatch`], whose fresh token is never cancelled.
+    pub fn dispatch_cancellable(
+        &self,
+        name: &str,
+        args: Value,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> ToolResult {
         // 1. Resolve the tool name.
         let Ok(tool) = name.parse::<ToolName>() else {
-            return ToolResult::error(format!("Unknown tool: {name}"));
+            return ToolResult::public_error(
+                PublicErrorKind::UnknownTool,
+                format!("Unknown tool: {name}"),
+            );
         };
+
+        // Validate the complete wire shape before snapshots, side effects, or a
+        // not-yet-implemented stub can run. `run_body` still decodes the typed
+        // value it consumes after short-id expansion; this preflight is the
+        // fail-closed contract shared by every one of ToolName::ALL.
+        if let Err(error) = validate_tool_args(tool, &args) {
+            return ToolResult::public_error(
+                PublicErrorKind::InvalidArguments(tool),
+                error.message,
+            );
+        }
 
         // 2. Snapshot the pre-run state.
         let before = self.handle.timeline();
@@ -123,13 +149,18 @@ impl Dispatcher {
         let universe = short_id::current_id_universe(&before, &manifest);
         let args = match short_id::expand_id_prefixes(&args, &universe) {
             Ok(v) => v,
-            Err(e) => return ToolResult::error(e.message),
+            Err(e) => {
+                return ToolResult::public_error(
+                    PublicErrorKind::InvalidArguments(tool),
+                    e.message,
+                );
+            }
         };
 
         // 4 + 5. Decode typed args and run the body. `op` collects what the body
         // did for the rule layer; `result` is the body's neutral output.
         let mut op = OpContext::default();
-        let result = match self.run_body(tool, &args, &before, &manifest, &mut op) {
+        let result = match self.run_body(tool, &args, &before, &manifest, &mut op, cancel) {
             Ok(r) => r,
             Err(e) => return ToolResult::error(e.message),
         };
@@ -159,6 +190,7 @@ impl Dispatcher {
         before: &Timeline,
         manifest: &MediaManifest,
         op: &mut OpContext,
+        cancel: &opentake_media::MediaCancelToken,
     ) -> Result<ToolResult, ToolError> {
         match tool {
             // --- Reads ---
@@ -222,7 +254,7 @@ impl Dispatcher {
 
             // --- Render + import + transcript + search (wired to the injected MediaBridge) ---
             ToolName::InspectTimeline => self.inspect_timeline(args, before),
-            ToolName::ImportMedia => self.import_media(args, manifest),
+            ToolName::ImportMedia => self.import_media(args, manifest, cancel),
             ToolName::GetTranscript => self.get_transcript(args, before, manifest),
             ToolName::AddCaptions => self.add_captions(args, before, manifest),
             ToolName::SearchMedia => self.search_media(args, manifest),
@@ -352,6 +384,7 @@ impl Dispatcher {
         &self,
         args: &Value,
         manifest: &MediaManifest,
+        cancel: &opentake_media::MediaCancelToken,
     ) -> Result<ToolResult, ToolError> {
         let a: ImportMediaArgs = decode_tool_args(args, "")?;
         // Validate the nested `source` object's own keys (upstream
@@ -418,7 +451,7 @@ impl Dispatcher {
         };
 
         let outcome = bridge
-            .import_media(import_source, a.name.clone(), a.folder_id.clone())
+            .import_media_cancellable(import_source, a.name.clone(), a.folder_id.clone(), cancel)
             .map_err(|e| ToolError::new(e.message))?;
         Ok(ToolResult::ok(outcome.message))
     }
@@ -1758,6 +1791,222 @@ impl Dispatcher {
             .apply(cmd)
             .map_err(|e| ToolError::new(e.to_string()))
     }
+}
+
+#[derive(serde::Deserialize)]
+struct EmptyArgs {}
+
+impl ToolArgs for EmptyArgs {
+    const ALLOWED_KEYS: &'static [&'static str] = &[];
+}
+
+/// Exhaustive wire-shape validation for every registered tool. Raw nested
+/// arrays/objects are decoded again with their own path so serde cannot silently
+/// discard unknown keys. Caller-defined `params` maps remain deliberately open;
+/// their surrounding object and declared value types are still decoded.
+fn validate_tool_args(tool: ToolName, args: &Value) -> Result<(), ToolError> {
+    macro_rules! decode {
+        ($ty:ty) => {{
+            let _: $ty = decode_tool_args(args, "")?;
+        }};
+    }
+
+    match tool {
+        ToolName::GetTimeline => decode!(GetTimelineArgs),
+        ToolName::GetMedia
+        | ToolName::ListFolders
+        | ToolName::Undo
+        | ToolName::ListWorkflows
+        | ToolName::DeactivateWorkflow => decode!(EmptyArgs),
+        ToolName::InspectMedia => decode!(InspectMediaArgs),
+        ToolName::GetTranscript => decode!(GetTranscriptArgs),
+        ToolName::InspectTimeline => decode!(InspectTimelineArgs),
+        ToolName::SearchMedia => decode!(SearchMediaArgs),
+        ToolName::ListModels => decode!(ListModelsArgs),
+        ToolName::AddClips => {
+            decode!(AddClipsArgs);
+            validate_array::<AddClipEntry>(args, "entries")?;
+        }
+        ToolName::InsertClips => {
+            decode!(InsertClipsArgs);
+            validate_array::<InsertClipEntry>(args, "entries")?;
+        }
+        ToolName::RemoveClips => decode!(RemoveClipsArgs),
+        ToolName::RemoveTracks => decode!(RemoveTracksArgs),
+        ToolName::MoveClips => {
+            decode!(MoveClipsArgs);
+            validate_array::<MoveEntry>(args, "moves")?;
+        }
+        ToolName::SetClipProperties => {
+            decode!(SetClipPropertiesArgs);
+            validate_optional_object::<TransformArg>(args, "transform", "transform")?;
+        }
+        ToolName::SetKeyframes => decode!(SetKeyframesArgs),
+        ToolName::SplitClip => decode!(SplitClipArgs),
+        ToolName::RippleDeleteRanges => decode!(RippleDeleteRangesArgs),
+        ToolName::AddTexts => {
+            decode!(AddTextsArgs);
+            validate_array::<AddTextEntry>(args, "entries")?;
+            if let Some(entries) = args.get("entries").and_then(Value::as_array) {
+                for (index, entry) in entries.iter().enumerate() {
+                    validate_optional_object::<TransformArg>(
+                        entry,
+                        "transform",
+                        &format!("entries[{index}].transform"),
+                    )?;
+                }
+            }
+        }
+        ToolName::AddCaptions => decode!(AddCaptionsArgs),
+        ToolName::DetectBeats => decode!(DetectBeatsArgs),
+        ToolName::AutoCutToBeats => decode!(AutoCutToBeatsArgs),
+        ToolName::SmartReframe => decode!(SmartReframeArgs),
+        ToolName::TightenSilences => decode!(TightenSilencesArgs),
+        ToolName::GenerateVideo => decode!(GenerateVideoArgs),
+        ToolName::GenerateImage => decode!(GenerateImageArgs),
+        ToolName::GenerateAudio => decode!(GenerateAudioArgs),
+        ToolName::UpscaleMedia => decode!(UpscaleMediaArgs),
+        ToolName::ImportMedia => {
+            decode!(ImportMediaArgs);
+            validate_required_object::<ImportSourceArg>(args, "source", "source")?;
+        }
+        ToolName::CreateFolder => {
+            decode!(CreateFolderArgs);
+            validate_optional_array::<CreateFolderEntry>(args, "entries")?;
+        }
+        ToolName::MoveToFolder => {
+            decode!(MoveToFolderArgs);
+            validate_optional_array::<MoveToFolderEntry>(args, "entries")?;
+        }
+        ToolName::RenameMedia => {
+            decode!(RenameMediaArgs);
+            validate_optional_array::<RenameMediaEntry>(args, "entries")?;
+        }
+        ToolName::RenameFolder => {
+            decode!(RenameFolderArgs);
+            validate_optional_array::<RenameFolderEntry>(args, "entries")?;
+        }
+        ToolName::DeleteMedia => decode!(DeleteMediaArgs),
+        ToolName::DeleteFolder => decode!(DeleteFolderArgs),
+        ToolName::ActivateWorkflow => decode!(ActivateWorkflowArgs),
+        ToolName::SetColorGrade => {
+            decode!(SetColorGradeArgs);
+            for field in ["lift", "gamma", "gain"] {
+                validate_optional_object::<RgbArg>(args, field, field)?;
+            }
+        }
+        ToolName::ChromaKey => decode!(ChromaKeyArgs),
+        ToolName::SetMask => {
+            decode!(SetMaskArgs);
+            validate_array::<MaskArg>(args, "masks")?;
+            if let Some(masks) = args.get("masks").and_then(Value::as_array) {
+                for (mask_index, mask) in masks.iter().enumerate() {
+                    for field in ["point", "normal", "center", "radius"] {
+                        validate_optional_object::<Point2Arg>(
+                            mask,
+                            field,
+                            &format!("masks[{mask_index}].{field}"),
+                        )?;
+                    }
+                    if let Some(points) = mask.get("points").and_then(Value::as_array) {
+                        for (point_index, point) in points.iter().enumerate() {
+                            let _: Point2Arg = decode_tool_args(
+                                point,
+                                &format!("masks[{mask_index}].points[{point_index}]"),
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+        ToolName::ApplyEffect => {
+            decode!(ApplyEffectArgs);
+            validate_array::<EffectArg>(args, "effects")?;
+        }
+        ToolName::AddMotionGraphic => {
+            decode!(AddMotionGraphicArgs);
+            if let Some(source) = args.get("source") {
+                let source: MotionSourceArg = decode_tool_args(source, "source")?;
+                match (source.code.is_some(), source.template_id.is_some()) {
+                    (true, false) => {
+                        if source.params.is_some() {
+                            return Err(ToolError::new(
+                                "source.params: only valid with 'templateId'",
+                            ));
+                        }
+                    }
+                    (false, true) => {}
+                    _ => {
+                        return Err(ToolError::new(
+                            "source: exactly one of 'code' or 'templateId' is required",
+                        ));
+                    }
+                }
+                if let Some(params) = source.params.as_ref() {
+                    validate_motion_params(params, "source.params")?;
+                }
+            }
+        }
+        ToolName::EditMotionGraphic => {
+            let decoded: EditMotionGraphicArgs = decode_tool_args(args, "")?;
+            if decoded.code.is_none() && decoded.params.is_none() {
+                return Err(ToolError::new(
+                    "arguments: at least one of 'code' or 'params' is required",
+                ));
+            }
+            if let Some(params) = decoded.params.as_ref() {
+                validate_motion_params(params, "params")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_motion_params(
+    params: &serde_json::Map<String, Value>,
+    path: &str,
+) -> Result<(), ToolError> {
+    for (name, value) in params {
+        if !matches!(value, Value::String(_) | Value::Number(_) | Value::Bool(_)) {
+            return Err(ToolError::new(format!(
+                "{path}.{name}: expected string, number, or bool, got something else"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_array<T: ToolArgs>(args: &Value, field: &str) -> Result<(), ToolError> {
+    let Some(values) = args.get(field).and_then(Value::as_array) else {
+        return Ok(()); // the owning top-level decode reports missing/wrong type
+    };
+    for (index, value) in values.iter().enumerate() {
+        let _: T = decode_tool_args(value, &format!("{field}[{index}]"))?;
+    }
+    Ok(())
+}
+
+fn validate_optional_array<T: ToolArgs>(args: &Value, field: &str) -> Result<(), ToolError> {
+    validate_array::<T>(args, field)
+}
+
+fn validate_required_object<T: ToolArgs>(
+    args: &Value,
+    field: &str,
+    path: &str,
+) -> Result<(), ToolError> {
+    if let Some(value) = args.get(field) {
+        let _: T = decode_tool_args(value, path)?;
+    }
+    Ok(()) // the owning top-level decode reports a missing field
+}
+
+fn validate_optional_object<T: ToolArgs>(
+    args: &Value,
+    field: &str,
+    path: &str,
+) -> Result<(), ToolError> {
+    validate_required_object::<T>(args, field, path)
 }
 
 // MARK: - Free conversion helpers

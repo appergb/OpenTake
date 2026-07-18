@@ -67,6 +67,8 @@ const MEDIA_THUMBNAIL_CONCURRENCY = 4;
  *  bottom would otherwise grow this Map without limit; cap it (LRU) so memory
  *  stays bounded — evicted keys just re-request a (disk-cached) path later. */
 const MEDIA_THUMBNAIL_CACHE_MAX = 256;
+const MEDIA_DRAG_PREVIEW_WIDTH = 80;
+const MEDIA_DRAG_PREVIEW_HEIGHT = 60;
 
 let activeThumbnailRequests = 0;
 const pendingThumbnailRequests: Array<() => void> = [];
@@ -75,6 +77,36 @@ const mediaThumbnailInFlight = new Map<string, Promise<string | null>>();
 /** Bounded LRU over the resolved thumbnail paths, so a long library scrolled top
  *  to bottom can't grow memory without limit (see {@link BoundedCache}). */
 const mediaThumbnailCache = new BoundedCache<string | null>(MEDIA_THUMBNAIL_CACHE_MAX);
+
+/** Replace the browser's default whole-card drag ghost (which includes the
+ * filename) with a compact visual-only preview, matching the native app. */
+export function setMediaThumbnailDragImage(
+  dataTransfer: Pick<DataTransfer, "setDragImage">,
+  thumbnail: HTMLElement,
+): void {
+  const preview = thumbnail.cloneNode(true) as HTMLElement;
+  preview.querySelectorAll("span, button").forEach((node) => node.remove());
+  preview.querySelectorAll("img").forEach((image) => image.setAttribute("alt", ""));
+  preview.setAttribute("aria-hidden", "true");
+  Object.assign(preview.style, {
+    position: "fixed",
+    left: "-1000px",
+    top: "-1000px",
+    width: `${MEDIA_DRAG_PREVIEW_WIDTH}px`,
+    height: `${MEDIA_DRAG_PREVIEW_HEIGHT}px`,
+    aspectRatio: "auto",
+    pointerEvents: "none",
+  });
+  document.body.append(preview);
+  dataTransfer.setDragImage(
+    preview,
+    MEDIA_DRAG_PREVIEW_WIDTH / 2,
+    MEDIA_DRAG_PREVIEW_HEIGHT / 2,
+  );
+  const remove = () => preview.remove();
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(remove);
+  else setTimeout(remove, 0);
+}
 
 function runNextThumbnailRequest(): void {
   if (activeThumbnailRequests >= MEDIA_THUMBNAIL_CONCURRENCY) return;
@@ -768,6 +800,7 @@ function FolderTile({
 function MediaCard({ item }: { item: MediaItem }) {
   const t = useT();
   const cardRef = useRef<HTMLDivElement | null>(null);
+  const thumbnailRef = useRef<HTMLDivElement | null>(null);
   const fps = useProjectStore((s) => s.timeline.fps);
   const setPreviewMedia = useEditorUiStore((s) => s.setPreviewMedia);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
@@ -842,6 +875,9 @@ function MediaCard({ item }: { item: MediaItem }) {
   const onDragStart = (e: React.DragEvent) => {
     e.dataTransfer.setData(MEDIA_DND_TYPE, item.id);
     e.dataTransfer.effectAllowed = "copy";
+    if (thumbnailRef.current) {
+      setMediaThumbnailDragImage(e.dataTransfer, thumbnailRef.current);
+    }
     // Stash the item so the timeline can size its drop ghost during dragover
     // (dataTransfer payloads are unreadable until drop). Cleared on dragEnd.
     setDraggingMedia(item);
@@ -905,6 +941,7 @@ function MediaCard({ item }: { item: MediaItem }) {
       {/* Thumbnail: generated cache image only. Missing thumbnails are requested
           lazily as cards enter view, so import/list commands stay cheap. */}
       <div
+        ref={thumbnailRef}
         style={{
           position: "relative",
           aspectRatio: "5 / 4",

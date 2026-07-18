@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use super::{TranscribeOptions, Transcriber, TranscriptionResult};
-use crate::cache_key::{file_identity_key, KEY_HEX_LEN};
+use crate::cache_key::file_identity_key;
 
 /// Cache subdirectory name (kept identical to upstream).
 pub const CACHE_SUBDIR: &str = "Transcripts";
@@ -58,7 +58,7 @@ pub fn filter(r: &TranscriptionResult, range: (f64, f64)) -> TranscriptionResult
 
 /// Disk-only existence check (`hasCachedOnDisk`).
 pub fn has_cached_on_disk(cache_root: &Path, path: &Path) -> bool {
-    match file_identity_key(path, KEY_HEX_LEN) {
+    match file_identity_key(path) {
         Some(key) => disk_path(cache_root, &key).exists(),
         None => false,
     }
@@ -66,7 +66,7 @@ pub fn has_cached_on_disk(cache_root: &Path, path: &Path) -> bool {
 
 /// Disk-only read (`cachedOnDisk`). Returns `None` on missing/unparsable file.
 pub fn cached_on_disk(cache_root: &Path, path: &Path) -> Option<TranscriptionResult> {
-    let key = file_identity_key(path, KEY_HEX_LEN)?;
+    let key = file_identity_key(path)?;
     let data = std::fs::read(disk_path(cache_root, &key)).ok()?;
     let r: TranscriptionResult = serde_json::from_slice(&data).ok()?;
     // Read-side #198 defense: scrub non-speech markers out of transcripts
@@ -100,7 +100,7 @@ impl TranscriptCache {
         t: &dyn Transcriber,
     ) -> crate::error::Result<TranscriptionResult> {
         let _ = is_video; // backend reads the track type from the file itself.
-        let key = file_identity_key(path, KEY_HEX_LEN);
+        let key = file_identity_key(path);
 
         if let Some(ref key) = key {
             if let Some(full) = self.cached(key) {
@@ -173,7 +173,7 @@ pub(crate) fn write_disk_for_test(
     media_path: &Path,
     result: &TranscriptionResult,
 ) {
-    let key = file_identity_key(media_path, KEY_HEX_LEN).expect("media file must exist");
+    let key = file_identity_key(media_path).expect("media file must exist");
     let dir = cache_root.join(CACHE_SUBDIR);
     std::fs::create_dir_all(&dir).unwrap();
     let json = serde_json::to_vec(result).unwrap();
@@ -365,7 +365,7 @@ mod tests {
                 },
             ],
         };
-        let key = file_identity_key(media.path(), KEY_HEX_LEN).unwrap();
+        let key = file_identity_key(media.path()).unwrap();
         let sub = dir.path().join(CACHE_SUBDIR);
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(

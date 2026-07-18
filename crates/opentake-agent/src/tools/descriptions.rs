@@ -113,7 +113,7 @@ pub fn description(tool: ToolName) -> &'static str {
 /// The JSON Schema (`inputSchema`) for a tool. Verbatim from upstream
 /// `ToolDefinitions.swift`, transcribed to `serde_json`.
 pub fn input_schema(tool: ToolName) -> Value {
-    match tool {
+    let mut schema = match tool {
         ToolName::GetTimeline => object(
             json!({
                 "startFrame": {"type": "integer", "description": "Optional. Window start (inclusive); only clips intersecting [startFrame, endFrame) are returned. Tracks report totalClips when the window hides some."},
@@ -141,7 +141,8 @@ pub fn input_schema(tool: ToolName) -> Value {
             json!({
                 "startFrame": {"type": "integer", "description": "Optional. Only return words ending after this project frame. Use with the returned nextStartFrame to page a long timeline."},
                 "endFrame": {"type": "integer", "description": "Optional. Only return words starting before this project frame."},
-                "clipId": {"type": "string", "description": "Scope the transcript to a single clip — returns only what that clip says, in project frames. Answers \"what's in clip X?\" without scanning the whole timeline."}
+                "clipId": {"type": "string", "description": "Scope the transcript to a single clip — returns only what that clip says, in project frames. Answers \"what's in clip X?\" without scanning the whole timeline."},
+                "wordTimestamps": {"type": "boolean", "description": "Accepted for upstream validator parity. get_transcript always returns compact word rows."}
             }),
             &[],
         ),
@@ -321,7 +322,9 @@ pub fn input_schema(tool: ToolName) -> Value {
                                     "centerX": {"type": "number", "description": "Horizontal center 0–1 (0=left edge, 1=right edge)"},
                                     "centerY": {"type": "number", "description": "Vertical center 0–1 (0=top, 1=bottom)"},
                                     "width": {"type": "number", "description": "Width 0–1 (optional; omit for auto-fit)"},
-                                    "height": {"type": "number", "description": "Height 0–1 (optional; omit for auto-fit)"}
+                                    "height": {"type": "number", "description": "Height 0–1 (optional; omit for auto-fit)"},
+                                    "flipHorizontal": {"type": "boolean", "description": "Mirror across the vertical axis."},
+                                    "flipVertical": {"type": "boolean", "description": "Mirror across the horizontal axis."}
                                 }
                             },
                             "fontName": {"type": "string", "description": "Font PostScript or family name, e.g. 'Helvetica-Bold', 'Georgia-Bold'. Default 'Helvetica-Bold'. Falls back to bold system font if not found."},
@@ -673,7 +676,7 @@ pub fn input_schema(tool: ToolName) -> Value {
                     "properties": {
                         "code": {"type": "string", "description": "Motion Canvas TypeScript/TSX scene or project source. Prefer deterministic frame-driven animation, not wall-clock timers."},
                         "templateId": {"type": "string", "description": "Registered Motion Canvas template id (e.g. 'lower-third.glass'). Mutually exclusive with code."},
-                        "params": {"type": "object", "description": "Template params: name -> value. Values are string, number, bool, or a hex color string '#RRGGBB'/'#RRGGBBAA'. Only valid with templateId."}
+                        "params": {"type": "object", "description": "Template params: name -> value. Values are string, number, bool, or a hex color string '#RRGGBB'/'#RRGGBBAA'. Only valid with templateId.", "additionalProperties": {"oneOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]}}
                     }
                 },
                 "startFrame": {"type": "integer", "description": "Timeline frame position to place the graphic (project frames)."},
@@ -688,10 +691,36 @@ pub fn input_schema(tool: ToolName) -> Value {
             json!({
                 "clipId": {"type": "string", "description": "The Motion Canvas-generated clip id to edit (from add_motion_graphic or get_timeline)."},
                 "code": {"type": "string", "description": "Replacement Motion Canvas TypeScript/TSX source for a code-authored graphic. Only valid when the clip was authored with code."},
-                "params": {"type": "object", "description": "Template param overrides (merged over current bindings) for a template-authored Motion Canvas graphic. Values are string, number, bool, or a hex color string. Only valid when the clip was authored from a template."}
+                "params": {"type": "object", "description": "Template param overrides (merged over current bindings) for a template-authored Motion Canvas graphic. Values are string, number, bool, or a hex color string. Only valid when the clip was authored from a template.", "additionalProperties": {"oneOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]}}
             }),
             &["clipId"],
         ),
+    };
+    close_declared_objects(&mut schema);
+    schema
+}
+
+/// Keep the published MCP schema aligned with the runtime's fail-closed object
+/// validation. Explicit dynamic maps (`additionalProperties: true` or a value
+/// schema) retain their declared exception.
+fn close_declared_objects(value: &mut Value) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                close_declared_objects(value);
+            }
+        }
+        Value::Object(object) => {
+            if object.get("type").and_then(Value::as_str) == Some("object")
+                && !object.contains_key("additionalProperties")
+            {
+                object.insert("additionalProperties".into(), Value::Bool(false));
+            }
+            for value in object.values_mut() {
+                close_declared_objects(value);
+            }
+        }
+        _ => {}
     }
 }
 

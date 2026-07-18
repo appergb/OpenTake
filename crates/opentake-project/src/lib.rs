@@ -44,6 +44,7 @@
 
 pub mod archive;
 pub mod bundle;
+mod compatibility;
 pub mod edl;
 pub mod error;
 pub mod fcpxml;

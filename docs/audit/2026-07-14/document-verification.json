@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "scope": "documents",
+  "auditDirectory": "docs/audit/2026-07-14",
+  "passed": true,
+  "legalGapGroups": [
+    "accessibility-polish",
+    "agent-settings-generation",
+    "command-contracts",
+    "data-safety",
+    "documentation",
+    "home-shell",
+    "inspector-text-keyframes",
+    "media-library",
+    "media-render-playback-export",
+    "preview-timeline"
+  ],
+  "counts": {
+    "candidates": 2704,
+    "records": 2704,
+    "uniqueCandidateIds": 2704,
+    "uniqueRecordIds": 2704,
+    "missingCandidateIds": 0,
+    "orphanCandidateIds": 0,
+    "duplicateCandidateIds": 0,
+    "duplicateRecordIds": 0,
+    "unverified": 0,
+    "complete": 9,
+    "incomplete": 557,
+    "contradicted": 53,
+    "obsolete": 130,
+    "duplicate": 1955
+  },
+  "errors": []
+}

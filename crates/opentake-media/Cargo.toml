@@ -13,6 +13,7 @@ serde_json = { workspace = true }
 thiserror = "2"
 anyhow = "1"
 sha2 = "0.10"
+ryu-js = "1.0.3"
 dirs = "6"
 cap-std = "4.0.2"
 cap-fs-ext = "4.0.2"

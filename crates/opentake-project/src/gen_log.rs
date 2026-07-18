@@ -15,6 +15,7 @@
 //! project/render layer converts to/from wall-clock time.
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 fn default_version() -> i64 {
     1
@@ -60,14 +61,14 @@ impl GenerationLog {
 /// One row in the project activity log. 1:1 with upstream `GenerationLogEntry`.
 ///
 /// `id` is required on the wire when written by OpenTake, but tolerated as
-/// missing on read (upstream synthesizes a UUID; here it decodes to an empty
-/// string and the bundle layer leaves it untouched — rows are append-only and
-/// not referenced by id elsewhere). `model` is required; `cost_credits` and
-/// `created_at` are optional.
+/// missing on read (upstream synthesizes a UUID). An explicitly stored empty
+/// string remains empty. `model` is required; `cost_credits` and `created_at`
+/// are optional.
 #[derive(Clone, PartialEq, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerationLogEntry {
-    /// Stable row id. Empty string when an old file omitted it.
+    /// Stable row id. Missing/null values synthesize a UUID; explicit empty
+    /// strings remain empty.
     pub id: String,
     /// Model identifier used for the generation.
     pub model: String,
@@ -123,7 +124,7 @@ impl<'de> Deserialize<'de> for GenerationLogEntry {
                 .map(|dollars| (dollars * 100.0).ceil() as i64),
         };
         Ok(GenerationLogEntry {
-            id: raw.id.unwrap_or_default(),
+            id: raw.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
             model: raw.model,
             cost_credits,
             created_at: raw.created_at,
@@ -197,11 +198,18 @@ mod tests {
     }
 
     #[test]
-    fn missing_id_decodes_to_empty_string() {
+    fn missing_or_null_id_gets_uuid_but_explicit_empty_is_preserved() {
         let e: GenerationLogEntry = serde_json::from_str(r#"{"model":"m"}"#).unwrap();
-        assert_eq!(e.id, "");
+        let id = Uuid::parse_str(&e.id).expect("missing generation id gets UUID");
+        assert_eq!(id.get_version_num(), 4);
         assert_eq!(e.cost_credits, None);
         assert_eq!(e.created_at, None);
+
+        let null: GenerationLogEntry = serde_json::from_str(r#"{"id":null,"model":"m"}"#).unwrap();
+        assert_eq!(Uuid::parse_str(&null.id).unwrap().get_version_num(), 4);
+
+        let empty: GenerationLogEntry = serde_json::from_str(r#"{"id":"","model":"m"}"#).unwrap();
+        assert_eq!(empty.id, "");
     }
 
     #[test]

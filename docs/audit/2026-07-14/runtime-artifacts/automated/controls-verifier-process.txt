@@ -1,0 +1,11 @@
+command=node tools/completion-audit.mjs verify --root . --audit docs/audit/2026-07-14 --scope controls --out docs/audit/2026-07-14/control-verification.json
+verifierRevision=6023e29572878681a037ccd2f949f0c97f3fefba
+verifierTree=a8bccf8ada3243a7d585c3c59eb9af46522d90e7
+verifierCodeDiffStatus=0
+startedAt=2026-07-15T15:59:44+0800
+endedAt=2026-07-15T15:59:46+0800
+exitCode=0
+passed=true
+candidates=259
+records=259
+errors=0

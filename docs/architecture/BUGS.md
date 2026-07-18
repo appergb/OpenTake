@@ -119,3 +119,17 @@
 | **D4** | Export 仅 H.264 | 🟡 中 | 输出格式受限 | 低 |
 | **D5** | TextTab/AIEdit scaffold | 🟡 中 | 功能不完整 | 中 |
 | **D6** | Captions UI 缺失 | 🟡 中 | 字幕功能不可用 | 高 |
+
+---
+
+**2026-07-14 完成度审计校准：** 表内问题声明已逐项归入 `docs/audit/2026-07-14/requirements.json`；当前裁决、代码证据与验收条件以同目录 `document-reconciliation.md` 为准，原表继续保留其历史快照语义。
+
+**当前有效条目的 ledger 绑定：**
+
+| 原始行 | Candidate ID | Gap group |
+|---:|---|---|
+| 20 | `doc-6f1a93d45661bbfd` | command-contracts |
+| 42 | `doc-a1186db8f6c14b8d` | agent-settings-generation |
+| 62 | `doc-9d12174d77c6d78f` | agent-settings-generation |
+| 67 | `doc-54bee1f172b75396` | agent-settings-generation |
+| 83 | `doc-73db2179c0394868` | inspector-text-keyframes |

@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::names::ToolName;
+
 /// One content block in a tool result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -36,6 +38,42 @@ impl Block {
 pub struct ToolResult {
     pub content: Vec<Block>,
     pub is_error: bool,
+    /// Error details are private by default. Only dispatcher-owned, typed
+    /// preflight failures opt in to LLM disclosure; serde deliberately drops
+    /// this capability so crossing an unrecognised boundary fails closed.
+    #[serde(skip)]
+    pub(crate) llm_error: Option<PublicErrorKind>,
+}
+
+/// Fixed, reviewable classes of errors that may expose a compact detail to an
+/// LLM after the final boundary rebuilds it from the matching tool schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublicErrorKind {
+    UnknownTool,
+    InvalidArguments(ToolName),
+}
+
+impl PublicErrorKind {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::UnknownTool => "MCP_UNKNOWN_TOOL",
+            Self::InvalidArguments(_) => "MCP_INVALID_ARGUMENTS",
+        }
+    }
+
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::UnknownTool => "The requested tool is not available.",
+            Self::InvalidArguments(_) => "The tool request has invalid arguments.",
+        }
+    }
+
+    pub(crate) fn remediation(self) -> &'static str {
+        match self {
+            Self::UnknownTool => "Choose a tool returned by the current tool catalog, then retry.",
+            Self::InvalidArguments(_) => "Correct the reported arguments, then retry.",
+        }
+    }
 }
 
 impl ToolResult {
@@ -44,14 +82,27 @@ impl ToolResult {
         ToolResult {
             content: vec![Block::text(text)],
             is_error: false,
+            llm_error: None,
         }
     }
 
-    /// An error text result (LLM-facing message).
+    /// A private error. The text remains available to trusted in-process
+    /// diagnostics, but final MCP/chat boundaries must redact it.
     pub fn error(message: impl Into<String>) -> Self {
         ToolResult {
             content: vec![Block::text(message)],
             is_error: true,
+            llm_error: None,
+        }
+    }
+
+    /// A dispatcher-owned preflight error whose detail may be shown to an LLM
+    /// only if the final boundary independently accepts the text as safe.
+    pub(crate) fn public_error(kind: PublicErrorKind, message: impl Into<String>) -> Self {
+        ToolResult {
+            content: vec![Block::text(message)],
+            is_error: true,
+            llm_error: Some(kind),
         }
     }
 
@@ -60,7 +111,12 @@ impl ToolResult {
         ToolResult {
             content,
             is_error: false,
+            llm_error: None,
         }
+    }
+
+    pub(crate) fn public_error_kind(&self) -> Option<PublicErrorKind> {
+        self.llm_error
     }
 
     /// Append a block (used by the context-signal engine to attach a signal
@@ -96,6 +152,28 @@ mod tests {
         let err = ToolResult::error("bad");
         assert!(err.is_error);
         assert_eq!(err.text_joined(), "bad");
+        assert_eq!(err.public_error_kind(), None);
+
+        let public = ToolResult::public_error(
+            PublicErrorKind::InvalidArguments(ToolName::AddClips),
+            "entries[0] is invalid",
+        );
+        assert_eq!(
+            public.public_error_kind(),
+            Some(PublicErrorKind::InvalidArguments(ToolName::AddClips))
+        );
+    }
+
+    #[test]
+    fn serde_drops_public_error_capability() {
+        let result = ToolResult::public_error(
+            PublicErrorKind::InvalidArguments(ToolName::AddClips),
+            "entries[0] is invalid",
+        );
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(!json.contains("MCP_INVALID_ARGUMENTS"));
+        let decoded: ToolResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.public_error_kind(), None);
     }
 
     #[test]

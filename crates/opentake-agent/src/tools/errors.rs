@@ -1,4 +1,4 @@
-//! `ToolError` + LLM-facing precise path errors. 1:1 port of upstream
+//! `ToolError` + precise path diagnostics. 1:1 port of upstream
 //! `ToolExecutor.swift` `validateUnknownKeys` / `firstNonFiniteNumberPath` /
 //! `formatDecodingError` (`agent-SPEC.md` §4.2), re-expressed with
 //! `serde_path_to_error` for the decode-error path.
@@ -11,9 +11,10 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-/// A tool-level error carrying an LLM-facing message. Never panics across the
-/// MCP boundary: the executor turns every `Err(ToolError)` into a
-/// `ToolResult::error` (`agent-SPEC.md` §4.1).
+/// A tool-level error carrying an in-process diagnostic message. The executor
+/// turns every `Err(ToolError)` into a private `ToolResult::error`; only typed
+/// dispatcher preflight failures may be rebuilt for an LLM (`agent-SPEC.md`
+/// §4.1-4.2.5).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
 pub struct ToolError {
@@ -93,9 +94,13 @@ pub fn first_non_finite_number_path(value: &Value, path: &str) -> Option<String>
 /// `dict` is the top-level args object; `path` is the prefix (usually the empty
 /// string for top-level, or `"entries[3]"` when decoding a single nested entry).
 pub fn decode_tool_args<T: ToolArgs>(dict: &Value, path: &str) -> Result<T, ToolError> {
-    if let Value::Object(map) = dict {
-        validate_unknown_keys(map, T::ALLOWED_KEYS, top_label(path))?;
-    }
+    let Value::Object(map) = dict else {
+        return Err(ToolError::new(format!(
+            "{}: expected object, got something else",
+            top_label(path)
+        )));
+    };
+    validate_unknown_keys(map, T::ALLOWED_KEYS, top_label(path))?;
     if let Some(bad) = first_non_finite_number_path(dict, path) {
         return Err(ToolError::new(format!("{bad}: value must be finite")));
     }
@@ -297,34 +302,6 @@ mod tests {
             err.message,
             "entries[1].startFrame: missing required field 'startFrame'"
         );
-    }
-
-    #[test]
-    fn non_finite_number_rejected_with_path() {
-        // Build a Value carrying a non-finite f64 directly.
-        let mut map = serde_json::Map::new();
-        map.insert("mediaRef".into(), Value::String("m".into()));
-        map.insert(
-            "startFrame".into(),
-            serde_json::Number::from_f64(f64::NAN)
-                .map(Value::Number)
-                .unwrap_or(Value::Null),
-        );
-        // NaN can't be a JSON number, so simulate via array path instead.
-        let arr = Value::Array(vec![Value::Number(
-            serde_json::Number::from_f64(1.0).unwrap(),
-        )]);
-        // Direct finite path is None.
-        assert_eq!(first_non_finite_number_path(&arr, "x"), None);
-    }
-
-    #[test]
-    fn first_non_finite_finds_nested_path() {
-        // serde_json::Number cannot hold NaN, so we exercise the traversal with
-        // a hand-built tree where one leaf is a Number that as_f64 reports
-        // non-finite is impossible; instead verify object/array descent labels.
-        let v = serde_json::json!({"a":[{"b":1.0},{"b":2.0}]});
-        assert_eq!(first_non_finite_number_path(&v, ""), None);
     }
 
     #[test]

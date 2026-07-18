@@ -1,0 +1,133 @@
+- generic [ref=e3]:
+  - generic [ref=e39]:
+    - button "返回主页" [ref=e40]
+    - button "视图" [ref=e45]
+    - button "素材库" [ref=e47]
+    - button "设置" [ref=e50]
+    - button "导出视频" [disabled] [ref=e54]
+    - button "导出字幕" [ref=e58]
+    - button "导出" [ref=e63]
+  - generic [ref=e320]:
+    - generic [ref=e324]:
+      - generic [ref=e325]:
+        - generic [ref=e326]: Agent
+        - button "新对话" [ref=e327]
+      - generic [ref=e331]: Agent 仅在桌面版中可用。
+      - generic [ref=e333]:
+        - textbox "描述你想做的编辑…" [disabled] [ref=e334]
+        - button "发送" [disabled] [ref=e335]
+    - generic [ref=e342]:
+      - generic [ref=e344]:
+        - generic [ref=e348]:
+          - tablist [ref=e349]:
+            - tab "素材" [selected] [ref=e350] [cursor=pointer]
+            - tab "音频" [ref=e352] [cursor=pointer]
+            - tab "文本" [disabled] [ref=e353]
+            - tab "贴纸" [disabled] [ref=e354]
+            - tab "特效" [disabled] [ref=e355]
+            - tab "转场" [disabled] [ref=e356]
+            - tab "字幕" [ref=e357] [cursor=pointer]
+            - tab "智能包裹" [disabled] [ref=e358]
+          - generic [ref=e359]:
+            - generic [ref=e360]:
+              - generic [ref=e361]:
+                - button "导入媒体 (⌘I)" [ref=e363] [cursor=pointer]
+                - button "生成" [disabled] [ref=e365]
+                - tablist [ref=e368]:
+                  - tab "导入" [selected] [ref=e369] [cursor=pointer]
+                  - tab "我的" [ref=e370] [cursor=pointer]
+              - generic [ref=e371]:
+                - textbox "搜索" [ref=e372]
+                - button "视图模式" [ref=e373] [cursor=pointer]
+                - button "排序" [ref=e379] [cursor=pointer]
+                - button "筛选" [ref=e383] [cursor=pointer]
+              - generic [ref=e386]: 全部
+              - generic [ref=e388]:
+                - generic [ref=e389]: 媒体库
+                - generic [ref=e390]: 0 个项目
+            - generic [ref=e391]: 拖放媒体文件到此处,或使用导入 / 生成。
+        - generic [ref=e395]:
+          - generic [ref=e398]:
+            - button "时间线" [ref=e401]
+            - generic [ref=e402]: 暂无媒体
+            - generic [ref=e408]:
+              - generic [ref=e409]: 00:00:00 / 00:00:00
+              - generic [ref=e410]:
+                - button "跳到开头" [ref=e411] [cursor=pointer]
+                - button "上一帧" [ref=e414] [cursor=pointer]
+                - button "播放/暂停 (空格)" [ref=e417] [cursor=pointer]
+                - button "下一帧" [ref=e420] [cursor=pointer]
+                - button "跳到结尾" [ref=e423] [cursor=pointer]
+              - button "截取当前帧到素材库" [disabled] [ref=e426]
+              - generic [ref=e430]:
+                - button "画幅比例" [ref=e432] [cursor=pointer]:
+                  - generic [ref=e433]: 16:9
+                - generic [ref=e437]: "30"
+                - button "预览画质" [ref=e439] [cursor=pointer]:
+                  - generic [ref=e440]: FHD
+                - button "画布缩放" [ref=e445] [cursor=pointer]:
+                  - generic [ref=e446]: Fit
+          - generic [ref=e453]:
+            - generic [ref=e454]: 时间线
+            - generic [ref=e461]:
+              - generic [ref=e462]: 格式
+              - generic [ref=e464]:
+                - generic [ref=e465]: 分辨率
+                - generic [ref=e466]: 1920 × 1080
+              - generic [ref=e467]:
+                - generic [ref=e468]: 帧率
+                - generic [ref=e469]: 30 fps
+              - generic [ref=e470]:
+                - generic [ref=e471]: 宽高比
+                - generic [ref=e472]: 16:9
+              - generic [ref=e473]:
+                - generic [ref=e474]: 时长
+                - generic [ref=e475]: 00:00:00
+      - generic [ref=e479]:
+        - generic [ref=e480]:
+          - generic [ref=e481]:
+            - button "撤销 (⌘Z)" [disabled] [ref=e482]
+            - button "重做 (⇧⌘Z)" [disabled] [ref=e486]
+          - generic [ref=e491]:
+            - button "选择工具 (V)" [ref=e492] [cursor=pointer]
+            - button "切割工具 (C)" [ref=e495] [cursor=pointer]
+          - generic [ref=e503]:
+            - button "在播放头处分割 (⌘K)" [ref=e504] [cursor=pointer]
+            - button "将入点修剪到播放头 (Q)" [ref=e508] [cursor=pointer]:
+              - generic [ref=e509]: "["
+            - button "将出点修剪到播放头 (W)" [ref=e510] [cursor=pointer]:
+              - generic [ref=e511]: "]"
+          - button "添加文本" [ref=e513] [cursor=pointer]:
+            - generic [ref=e514]: T
+          - slider "时间线缩放" [ref=e520]: "0.656"
+        - generic [ref=e526]:
+          - group "Timeline clips"
+  - generic [ref=e532]:
+    - banner [ref=e533]:
+      - generic [ref=e534]: 设置
+      - generic [ref=e535]:
+        - button "完成" [ref=e536]
+        - button "Close" [ref=e537]
+    - generic [ref=e541]:
+      - navigation "设置" [ref=e542]:
+        - generic [ref=e543]:
+          - button "通用" [ref=e544]
+          - button "外观" [ref=e549]
+          - button "导入" [ref=e557]
+          - button "AI" [ref=e562]
+          - button "MCP 说明" [ref=e567]
+          - button "账户" [ref=e571]
+          - button "关于" [ref=e576]
+      - generic [ref=e634]:
+        - heading "AI" [level=2] [ref=e635]
+        - generic [ref=e636]:
+          - generic [ref=e637]: 填入你自己的模型 API 密钥以启用 AI 生成与 Agent。密钥安全存储在系统钥匙串中（macOS 钥匙串 / Windows 凭据管理器 / Linux Secret Service），绝不以明文写入应用配置。
+          - generic [ref=e638]:
+            - generic [ref=e639]: 服务商
+            - generic [ref=e642]:
+              - button "Anthropic" [ref=e643]
+              - button "OpenAI" [ref=e646]
+              - button "Google" [ref=e647]
+          - generic [ref=e648]:
+            - generic [ref=e649]: API 密钥
+            - textbox "粘贴你的 API 密钥" [ref=e651]

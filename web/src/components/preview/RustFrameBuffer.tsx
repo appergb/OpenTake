@@ -20,6 +20,8 @@ export interface RustFrameBufferProps {
   projectEpoch: number;
   timelineVersion: number;
   engineDriving: boolean;
+  /** Frame to composite while native streaming is idle (paused/scrubbing). */
+  stillFrame?: number | null;
   requestCompositeStill: (frame: number) => Promise<CompositeFrame | null>;
   onTerminalFailure: () => void;
 }
@@ -34,6 +36,40 @@ export function afterPaint(callback: () => void): void {
 
 export function rustFrameEventSource(target: Pick<HTMLImageElement, "currentSrc">): string {
   return target.currentSrc;
+}
+
+function paintLiveFrame(
+  canvas: HTMLCanvasElement,
+  image: HTMLImageElement,
+  preserveCurrentFrame: boolean,
+): boolean {
+  if (image.naturalWidth <= 0 || image.naturalHeight <= 0) return false;
+  try {
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context) return false;
+    const sizeChanged =
+      canvas.width !== image.naturalWidth || canvas.height !== image.naturalHeight;
+    if (sizeChanged && preserveCurrentFrame) {
+      const staging = document.createElement("canvas");
+      staging.width = image.naturalWidth;
+      staging.height = image.naturalHeight;
+      const stagingContext = staging.getContext("2d", { alpha: false });
+      if (!stagingContext) return false;
+      stagingContext.drawImage(image, 0, 0);
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      context.drawImage(staging, 0, 0);
+      return true;
+    }
+    if (sizeChanged) {
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+    }
+    context.drawImage(image, 0, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function identityFor(frame: PlaybackFrameEvent): PlaybackIdentity {
@@ -81,17 +117,84 @@ export function RustFrameBuffer({
   projectEpoch,
   timelineVersion,
   engineDriving,
+  stillFrame = null,
   requestCompositeStill,
   onTerminalFailure,
 }: RustFrameBufferProps) {
   const [state, setState] = useState<RustFrameBufferState>(createRustFrameBufferState);
   const stateRef = useRef(state);
+  const liveCanvasRef = useRef<HTMLCanvasElement>(null);
   const [composite, setComposite] = useState<{
     image: CompositeFrame;
     frame: PlaybackFrameEvent;
     loaded: boolean;
   } | null>(null);
+  const [idleComposite, setIdleComposite] = useState<CompositeFrame | null>(null);
+  const idleQueueRef = useRef<{
+    inFlight: boolean;
+    pending: {
+      frame: number;
+      revision: string;
+      generation: number;
+      key: string;
+      requester: RustFrameBufferProps["requestCompositeStill"];
+    } | null;
+    latestKey: string | null;
+    revision: string;
+    generation: number;
+  }>({
+    inFlight: false,
+    pending: null,
+    latestKey: null,
+    revision: `${projectEpoch}:${timelineVersion}`,
+    generation: 0,
+  });
+  const requestCompositeStillRef = useRef(requestCompositeStill);
+  requestCompositeStillRef.current = requestCompositeStill;
+  const idleRevisionRef = useRef(`${projectEpoch}:${timelineVersion}`);
+  idleRevisionRef.current = `${projectEpoch}:${timelineVersion}`;
+  const mountedRef = useRef(true);
+  const pumpIdleCompositeRef = useRef<() => void>(() => undefined);
   const failedTerminalKeys = useRef(new Set<string>());
+
+  pumpIdleCompositeRef.current = () => {
+    const queue = idleQueueRef.current;
+    if (queue.inFlight || !queue.pending) return;
+    const job = queue.pending;
+    queue.pending = null;
+    queue.inFlight = true;
+    void job.requester(job.frame)
+      .then((image) => {
+        const current = idleQueueRef.current;
+        if (
+          image &&
+          mountedRef.current &&
+          current.generation === job.generation &&
+          current.latestKey === job.key &&
+          idleRevisionRef.current === job.revision &&
+          requestCompositeStillRef.current === job.requester
+        ) {
+          setIdleComposite(image);
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        const current = idleQueueRef.current;
+        current.inFlight = false;
+        pumpIdleCompositeRef.current();
+      });
+  };
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const queue = idleQueueRef.current;
+      queue.generation += 1;
+      queue.pending = null;
+      queue.latestKey = null;
+    };
+  }, []);
 
   const commit = (next: RustFrameBufferState) => {
     stateRef.current = next;
@@ -133,6 +236,38 @@ export function RustFrameBuffer({
   }, [projectEpoch, timelineVersion]);
 
   useEffect(() => {
+    const queue = idleQueueRef.current;
+    const revision = `${projectEpoch}:${timelineVersion}`;
+    if (queue.revision !== revision) {
+      queue.revision = revision;
+      queue.generation += 1;
+      queue.pending = null;
+      queue.latestKey = null;
+      setIdleComposite(null);
+    }
+    if (engineDriving || stillFrame === null) {
+      queue.generation += 1;
+      queue.pending = null;
+      queue.latestKey = null;
+      // Keep the paused composite during native-engine startup. It is removed
+      // only after the first live frame has actually loaded, preventing a
+      // visible black flash at the route handoff.
+      if (!engineDriving) setIdleComposite(null);
+      return;
+    }
+    const key = `${revision}:${stillFrame}:${queue.generation}`;
+    queue.latestKey = key;
+    queue.pending = {
+      frame: stillFrame,
+      revision,
+      generation: queue.generation,
+      key,
+      requester: requestCompositeStill,
+    };
+    pumpIdleCompositeRef.current();
+  }, [engineDriving, projectEpoch, requestCompositeStill, stillFrame, timelineVersion]);
+
+  useEffect(() => {
     if (!event) return;
     const previousIdentity = stateRef.current.identity;
     const result = requestRustFrame(stateRef.current, event, endpoint);
@@ -163,20 +298,29 @@ export function RustFrameBuffer({
     };
   }, [activeFrame, composite?.frame.sequence, engineDriving, requestCompositeStill]);
 
-  const onLoad = (slot: 0 | 1, src: string) => {
-    const pendingFrame = stateRef.current.slots[slot].frame;
-    const result = loadRustFrame(stateRef.current, slot, src);
-    if (result.state !== stateRef.current) commit(result.state);
-    if (pendingFrame?.terminal && result.effect === "terminal-promoted") {
-      finishTransport(pendingFrame, result.effect);
-    }
-  };
-
-  const onError = (slot: 0 | 1, src: string) => {
+  const rejectFrame = (slot: 0 | 1, src: string) => {
     const pendingFrame = stateRef.current.slots[slot].frame;
     const result = failRustFrame(stateRef.current, slot, src);
     if (result.state !== stateRef.current) commit(result.state);
     if (pendingFrame?.terminal && result.effect === "terminal-exhausted") {
+      finishTransport(pendingFrame, result.effect);
+    }
+  };
+
+  const onLoad = (slot: 0 | 1, target: HTMLImageElement) => {
+    const src = rustFrameEventSource(target);
+    const current = stateRef.current;
+    if (current.pendingSlot !== slot || current.slots[slot].src !== src) return;
+    const pendingFrame = current.slots[slot].frame;
+    const canvas = liveCanvasRef.current;
+    if (!canvas || !paintLiveFrame(canvas, target, current.activeSlot !== null)) {
+      rejectFrame(slot, src);
+      return;
+    }
+    const result = loadRustFrame(current, slot, src);
+    if (result.state !== current) commit(result.state);
+    setIdleComposite(null);
+    if (pendingFrame?.terminal && result.effect === "terminal-promoted") {
       finishTransport(pendingFrame, result.effect);
     }
   };
@@ -219,6 +363,19 @@ export function RustFrameBuffer({
           style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain" }}
         />
       )}
+      <canvas
+        ref={liveCanvasRef}
+        data-testid="rust-live-canvas"
+        aria-hidden="true"
+        style={{
+          position: "absolute",
+          inset: 0,
+          width: "100%",
+          height: "100%",
+          visibility:
+            state.activeSlot !== null && displayedIdentityIsCurrent ? "visible" : "hidden",
+        }}
+      />
       {state.slots.map((slot, index) => (
         <img
           key={index}
@@ -226,22 +383,34 @@ export function RustFrameBuffer({
           src={slot.src ?? undefined}
           alt=""
           draggable={false}
-          onLoad={(event) =>
-            onLoad(index as 0 | 1, rustFrameEventSource(event.currentTarget))
-          }
+          onLoad={(event) => onLoad(index as 0 | 1, event.currentTarget)}
           onError={(event) =>
-            onError(index as 0 | 1, rustFrameEventSource(event.currentTarget))
+            rejectFrame(index as 0 | 1, rustFrameEventSource(event.currentTarget))
           }
+          style={{
+            position: "absolute",
+            width: 1,
+            height: 1,
+            visibility: "hidden",
+          }}
+        />
+      ))}
+      {idleComposite && (
+        <img
+          data-testid="rust-idle-composite-still"
+          src={idleComposite.dataUrl}
+          alt=""
+          draggable={false}
           style={{
             position: "absolute",
             inset: 0,
             width: "100%",
             height: "100%",
             objectFit: "contain",
-            visibility: slot.visible && displayedIdentityIsCurrent ? "visible" : "hidden",
+            zIndex: 2,
           }}
         />
-      ))}
+      )}
     </div>
   );
 }

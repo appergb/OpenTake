@@ -510,7 +510,7 @@ fn library_import_to_project_with_hook(
     })
 }
 
-struct ProjectMediaCapability {
+pub(crate) struct ProjectMediaCapability {
     parent: Dir,
     root: Dir,
     media: Dir,
@@ -523,7 +523,7 @@ struct ProjectMediaCapability {
 }
 
 impl ProjectMediaCapability {
-    fn open_verified(
+    pub(crate) fn open_verified(
         core: &AppCore,
         project_epoch: u64,
         project_dir: &Path,
@@ -634,6 +634,24 @@ impl ProjectMediaCapability {
         Handle::from_file(file.into_std()).map_err(|error| error.to_string())
     }
 
+    /// Create one uncommitted retained media leaf. Dropping the returned guard
+    /// scrubs and unlinks only the exact handle created here.
+    pub(crate) fn create_import(&self, name: &Path) -> Result<ProjectImportGuard, String> {
+        let leaf_name = name
+            .file_name()
+            .ok_or_else(|| "project import target has no leaf name".to_string())?
+            .to_owned();
+        let media = self.media.try_clone().map_err(|error| error.to_string())?;
+        let handle = self.create_leaf(name)?;
+        Ok(ProjectImportGuard {
+            path: self.absolute_path(name),
+            name: leaf_name,
+            media,
+            handle,
+            committed: false,
+        })
+    }
+
     fn open_leaf(&self, name: &std::ffi::OsStr) -> Result<Handle, String> {
         let mut options = OpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
@@ -690,7 +708,7 @@ impl ProjectMediaCapability {
         Ok(&current == expected)
     }
 
-    fn matches_leaf(&self, leaf: &ProjectImportGuard) -> Result<bool, String> {
+    pub(crate) fn matches_leaf(&self, leaf: &ProjectImportGuard) -> Result<bool, String> {
         self.matches_handle(&leaf.name, &leaf.handle)
     }
 
@@ -698,7 +716,10 @@ impl ProjectMediaCapability {
         self.project_dir.join("media").join(name)
     }
 
-    fn write_manifest(&self, manifest: &opentake_domain::MediaManifest) -> Result<(), String> {
+    pub(crate) fn write_manifest(
+        &self,
+        manifest: &opentake_domain::MediaManifest,
+    ) -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(manifest).map_err(|error| error.to_string())?;
         opentake_media::library::write_atomic_capability_file(
             &self.root,
@@ -805,7 +826,7 @@ fn existing_project_import(
     }))
 }
 
-struct ProjectImportGuard {
+pub(crate) struct ProjectImportGuard {
     path: PathBuf,
     name: std::ffi::OsString,
     media: Dir,
@@ -814,6 +835,22 @@ struct ProjectImportGuard {
 }
 
 impl ProjectImportGuard {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn file(&self) -> &std::fs::File {
+        self.handle.as_file()
+    }
+
+    pub(crate) fn file_mut(&mut self) -> &mut std::fs::File {
+        self.handle.as_file_mut()
+    }
+
+    pub(crate) fn commit(&mut self) {
+        self.committed = true;
+    }
+
     fn owns_name(&self) -> bool {
         let mut options = OpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);

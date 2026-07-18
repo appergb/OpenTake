@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { Clip, ClipType, Timeline, Track } from "../../lib/types";
-import { resolveTimelinePlaybackRoute } from "./playbackRoute";
+import {
+  isRetryableRustPlaybackFailure,
+  resolveTimelinePlaybackRoute,
+} from "./playbackRoute";
 
 const runtime = { rustAvailable: true, rustEnabled: true };
 
@@ -71,6 +74,49 @@ describe("resolveTimelinePlaybackRoute", () => {
       runtime,
     );
     expect(result).toEqual({ kind: "webkit", reasons: [] });
+  });
+
+  it("routes two ordinary video tracks through the native compositor", () => {
+    const result = resolveTimelinePlaybackRoute(
+      timeline(
+        clip({ id: "upper-video", mediaType: "video" }),
+        clip({ id: "lower-video", mediaType: "video" }),
+      ),
+      runtime,
+    );
+
+    expect(result).toEqual({ kind: "rust", reasons: [] });
+  });
+
+  it("keeps temporally remapped video stacks on WebKit", () => {
+    const result = resolveTimelinePlaybackRoute(
+      timeline(
+        clip({ id: "upper-video", mediaType: "video", speed: 1.5 }),
+        clip({ id: "lower-video", mediaType: "video" }),
+      ),
+      runtime,
+    );
+
+    expect(result).toEqual({ kind: "webkit", reasons: [] });
+  });
+
+  it("retries a failed WebKit video revision through the native decoder", () => {
+    expect(
+      resolveTimelinePlaybackRoute(timeline(clip()), {
+        ...runtime,
+        forceRust: true,
+      }),
+    ).toEqual({ kind: "rust", reasons: [] });
+  });
+
+  it("keeps failed WebKit video on WebKit when native playback is unavailable", () => {
+    expect(
+      resolveTimelinePlaybackRoute(timeline(clip()), {
+        rustAvailable: false,
+        rustEnabled: true,
+        forceRust: true,
+      }),
+    ).toEqual({ kind: "webkit", reasons: [] });
   });
 
   it("routes reverse only and speed only timelines to WebKit", () => {
@@ -147,6 +193,23 @@ describe("resolveTimelinePlaybackRoute", () => {
     );
     expect(result.kind).toBe("unsupported");
     expect(reasonCodes(result)).toContain("composited-reverse");
+  });
+
+  it("only treats a previous native startup failure as retryable", () => {
+    const nativeStartupFailure = resolveTimelinePlaybackRoute(
+      timeline(clip({ mediaType: "text", sourceClipType: "text" })),
+      { rustAvailable: true, rustEnabled: false },
+    );
+    const authoredUnsupportedFeature = resolveTimelinePlaybackRoute(
+      timeline(
+        clip({ mediaType: "text", sourceClipType: "text", reversed: true }),
+      ),
+      { rustAvailable: true, rustEnabled: false },
+    );
+
+    expect(isRetryableRustPlaybackFailure(nativeStartupFailure, true)).toBe(true);
+    expect(isRetryableRustPlaybackFailure(nativeStartupFailure, false)).toBe(false);
+    expect(isRetryableRustPlaybackFailure(authoredUnsupportedFeature, true)).toBe(false);
   });
 
   it("returns Unsupported for composited content plus speed", () => {

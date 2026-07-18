@@ -368,6 +368,9 @@ export function useTimelinePlaybackEngine(): void {
   >>(null);
   const nativeFrameListenerLeaseRef = useRef<NativeFrameListenerLease | null>(null);
   const engineFailed = useEditorUiStore((s) => s.rustEngineFailed);
+  const webkitPlaybackFailedRevision = useEditorUiStore(
+    (s) => s.webkitPlaybackFailedRevision,
+  );
   const setEngineFailed = useEditorUiStore((s) => s.setRustEngineFailed);
 
   useEffect(() => {
@@ -425,6 +428,8 @@ export function useTimelinePlaybackEngine(): void {
     const route = resolveTimelinePlaybackRoute(timeline, {
       rustAvailable: isTauri,
       rustEnabled: rustEngineEnabled() && !engineFailed,
+      forceRust:
+        webkitPlaybackFailedRevision === `${projectEpoch}:${timelineVersion}`,
     });
     if (route.kind === "unsupported") {
       cancelPendingInteractiveSeek();
@@ -630,12 +635,22 @@ export function useTimelinePlaybackEngine(): void {
       cancelPendingInteractiveSeek();
       pauseAll();
     };
-  }, [isPlaying, isScrubbing, engineFailed, projectEpoch, timelineVersion, setEngineFailed]);
+  }, [
+    isPlaying,
+    isScrubbing,
+    engineFailed,
+    projectEpoch,
+    timelineVersion,
+    setEngineFailed,
+    webkitPlaybackFailedRevision,
+  ]);
 
   useEffect(() => {
     const route = resolveTimelinePlaybackRoute(useProjectStore.getState().timeline, {
       rustAvailable: isTauri,
       rustEnabled: rustEngineEnabled() && !engineFailed,
+      forceRust:
+        webkitPlaybackFailedRevision === `${projectEpoch}:${timelineVersion}`,
     });
     if (route.kind !== "rust" || !isPlaying || isScrubbing) {
       return;
@@ -651,5 +666,13 @@ export function useTimelinePlaybackEngine(): void {
       lastEngineFrameRef.current = Math.max(0, Math.floor(activeFrame));
       void nativePlaybackController.seek(identity, activeFrame);
     }
-  }, [activeFrame, engineFailed, isPlaying, isScrubbing]);
+  }, [
+    activeFrame,
+    engineFailed,
+    isPlaying,
+    isScrubbing,
+    projectEpoch,
+    timelineVersion,
+    webkitPlaybackFailedRevision,
+  ]);
 }

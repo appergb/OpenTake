@@ -23,7 +23,7 @@
 //! Both methods default to `Err("unsupported")` so a hand-rolled bridge (or the
 //! absence of one) never breaks the build.
 
-use opentake_media::TranscriptionResult;
+use opentake_media::{MediaCancelToken, TranscriptionResult};
 
 use crate::tools::result::Block;
 
@@ -98,11 +98,11 @@ pub enum ImportSource {
     },
 }
 
-/// A user-visible import error the bridge raises. Carries an LLM-facing message
-/// the dispatcher surfaces verbatim (upstream `ToolError` messages).
+/// An in-process bridge error. Its message may contain private implementation
+/// context and is therefore redacted by default at every LLM boundary.
 #[derive(Debug, Clone)]
 pub struct BridgeError {
-    /// The message shown to the model.
+    /// Private diagnostic text; never expose it directly to a model.
     pub message: String,
 }
 
@@ -297,6 +297,19 @@ pub trait MediaBridge: Send + Sync {
         Err(BridgeError::new(
             "import_media: importing is not available in this build",
         ))
+    }
+
+    /// Cancellation-aware import entry point. Existing embedders retain source
+    /// compatibility through the default implementation; the desktop bridge
+    /// overrides this for URL streaming and retained-file publication.
+    fn import_media_cancellable(
+        &self,
+        source: ImportSource,
+        name: Option<String>,
+        folder_id: Option<String>,
+        _cancel: &MediaCancelToken,
+    ) -> Result<ImportOutcome, BridgeError> {
+        self.import_media(source, name, folder_id)
     }
 
     /// Search the media library by content: visual (SigLIP2 semantic) and spoken

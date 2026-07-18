@@ -1,0 +1,3 @@
+f22da32a3d30409b31f1290e1ad7ed1a5b10fd3405186c5a3be36557d2251abe  target/release/bundle/macos/OpenTake.app/Contents/Info.plist
+9c1c4a40325e6bb95a0bc1c99e8f2bd61737800aa94ac31c8d907f454777f9a3  target/release/bundle/macos/OpenTake.app/Contents/MacOS/opentake
+ae3c51c03d044977567489e6af9d89b81d782d265ba241221cb292ebc9732e98  target/release/bundle/macos/OpenTake.app/Contents/Resources/icon.icns

@@ -24,6 +24,16 @@ pub struct TransformArg {
     pub flip_horizontal: Option<bool>,
     pub flip_vertical: Option<bool>,
 }
+impl ToolArgs for TransformArg {
+    const ALLOWED_KEYS: &'static [&'static str] = &[
+        "centerX",
+        "centerY",
+        "width",
+        "height",
+        "flipHorizontal",
+        "flipVertical",
+    ];
+}
 
 // --- get_timeline ---
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -513,6 +523,9 @@ pub struct GetTranscriptArgs {
     pub start_frame: Option<i32>,
     pub end_frame: Option<i32>,
     pub clip_id: Option<String>,
+    /// Accepted for upstream validator parity. The compact transcript response
+    /// always includes word rows, so the value does not change execution.
+    pub word_timestamps: Option<bool>,
 }
 impl ToolArgs for GetTranscriptArgs {
     // `wordTimestamps` is accepted for parity with upstream's validator

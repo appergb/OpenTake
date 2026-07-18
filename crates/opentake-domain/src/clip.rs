@@ -12,6 +12,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::clip_type::ClipType;
+use crate::clip_wire::{
+    deserialize_crop_on_error, deserialize_default_on_error, deserialize_linear_on_error,
+    deserialize_one_on_error, deserialize_optional_crop_track_on_error,
+    deserialize_optional_f64_track_on_error, deserialize_optional_pair_track_on_error,
+};
 use crate::grade::{ChromaKey, ColorGrade, Effect, Mask};
 use crate::keyframe::{AnimPair, AnimatableProperty, Interpolation, KeyframeTrack};
 use crate::text::TextStyle;
@@ -65,63 +70,134 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Shape of the value stored inside one of Clip's keyframe-track fields.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KeyframeValueWireShape {
+    Scalar,
+    Pair,
+    Crop,
+}
+
+/// One keyframe-track field in Clip's persisted wire schema.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct KeyframeTrackWireField {
+    pub name: &'static str,
+    pub value_shape: KeyframeValueWireShape,
+}
+
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Clip {
+    #[serde(default, deserialize_with = "deserialize_default_on_error")]
     pub id: String,
     pub media_ref: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_error")]
     pub media_type: ClipType,
     /// Original media type for derived clips; used for color-coding.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_error")]
     pub source_clip_type: ClipType,
     pub start_frame: i32,
     pub duration_frames: i32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_error")]
     pub trim_start_frame: i32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_error")]
     pub trim_end_frame: i32,
-    #[serde(default = "default_speed")]
+    #[serde(
+        default = "default_speed",
+        deserialize_with = "deserialize_one_on_error"
+    )]
     pub speed: f64,
-    #[serde(default = "default_volume")]
+    #[serde(
+        default = "default_volume",
+        deserialize_with = "deserialize_one_on_error"
+    )]
     pub volume: f64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_error")]
     pub fade_in_frames: i32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_error")]
     pub fade_out_frames: i32,
-    #[serde(default = "default_linear")]
+    #[serde(
+        default = "default_linear",
+        deserialize_with = "deserialize_linear_on_error"
+    )]
     pub fade_in_interpolation: Interpolation,
-    #[serde(default = "default_linear")]
+    #[serde(
+        default = "default_linear",
+        deserialize_with = "deserialize_linear_on_error"
+    )]
     pub fade_out_interpolation: Interpolation,
-    #[serde(default = "default_opacity")]
+    #[serde(
+        default = "default_opacity",
+        deserialize_with = "deserialize_one_on_error"
+    )]
     pub opacity: f64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_error")]
     pub transform: Transform,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_crop_on_error")]
     pub crop: Crop,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_default_on_error",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub link_group_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_default_on_error",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub caption_group_id: Option<String>,
 
     // Text clips only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_default_on_error",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub text_content: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_default_on_error",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub text_style: Option<TextStyle>,
 
     // Keyframe tracks for each animatable property. None when no animation exists.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_f64_track_on_error",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub opacity_track: Option<KeyframeTrack<f64>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_pair_track_on_error",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub position_track: Option<KeyframeTrack<AnimPair>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_pair_track_on_error",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub scale_track: Option<KeyframeTrack<AnimPair>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_f64_track_on_error",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub rotation_track: Option<KeyframeTrack<f64>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_crop_track_on_error",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub crop_track: Option<KeyframeTrack<Crop>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_f64_track_on_error",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub volume_track: Option<KeyframeTrack<f64>>,
 
     // Advanced pixel-effect fields (A-tier; `docs/ADVANCED-FEATURES.md`). All
@@ -146,6 +222,91 @@ pub struct Clip {
 }
 
 impl Clip {
+    /// Persisted keys owned by Clip's wire schema. The project compatibility
+    /// visitor consumes this metadata instead of maintaining a hand-copied
+    /// schema beside bundle IO.
+    pub const WIRE_FIELDS: &'static [&'static str] = &[
+        "id",
+        "mediaRef",
+        "mediaType",
+        "sourceClipType",
+        "startFrame",
+        "durationFrames",
+        "trimStartFrame",
+        "trimEndFrame",
+        "speed",
+        "volume",
+        "fadeInFrames",
+        "fadeOutFrames",
+        "fadeInInterpolation",
+        "fadeOutInterpolation",
+        "opacity",
+        "transform",
+        "crop",
+        "linkGroupId",
+        "captionGroupId",
+        "textContent",
+        "textStyle",
+        "opacityTrack",
+        "positionTrack",
+        "scaleTrack",
+        "rotationTrack",
+        "cropTrack",
+        "volumeTrack",
+        "colorGrade",
+        "chromaKey",
+        "masks",
+        "effects",
+        "reversed",
+    ];
+    pub const TOLERANT_SCALAR_WIRE_FIELDS: &'static [&'static str] = &[
+        "id",
+        "mediaType",
+        "sourceClipType",
+        "trimStartFrame",
+        "trimEndFrame",
+        "speed",
+        "volume",
+        "fadeInFrames",
+        "fadeOutFrames",
+        "fadeInInterpolation",
+        "fadeOutInterpolation",
+        "opacity",
+        "linkGroupId",
+        "captionGroupId",
+        "textContent",
+    ];
+    pub const ID_WIRE_FIELD: &'static str = "id";
+    pub const TRANSFORM_WIRE_FIELD: &'static str = "transform";
+    pub const CROP_WIRE_FIELD: &'static str = "crop";
+    pub const TEXT_STYLE_WIRE_FIELD: &'static str = "textStyle";
+    pub const KEYFRAME_TRACK_WIRE_FIELDS: &'static [KeyframeTrackWireField] = &[
+        KeyframeTrackWireField {
+            name: "opacityTrack",
+            value_shape: KeyframeValueWireShape::Scalar,
+        },
+        KeyframeTrackWireField {
+            name: "positionTrack",
+            value_shape: KeyframeValueWireShape::Pair,
+        },
+        KeyframeTrackWireField {
+            name: "scaleTrack",
+            value_shape: KeyframeValueWireShape::Pair,
+        },
+        KeyframeTrackWireField {
+            name: "rotationTrack",
+            value_shape: KeyframeValueWireShape::Scalar,
+        },
+        KeyframeTrackWireField {
+            name: "cropTrack",
+            value_shape: KeyframeValueWireShape::Crop,
+        },
+        KeyframeTrackWireField {
+            name: "volumeTrack",
+            value_shape: KeyframeValueWireShape::Scalar,
+        },
+    ];
+
     /// Minimal constructor mirroring the upstream defaulted memberwise init.
     pub fn new(
         id: impl Into<String>,
@@ -991,8 +1152,9 @@ mod tests {
     #[test]
     fn clip_decodes_with_missing_optional_fields() {
         // Only the required keys present; everything else falls back to defaults.
-        let json = r#"{"id":"x","mediaRef":"m","startFrame":0,"durationFrames":12}"#;
+        let json = r#"{"mediaRef":"m","startFrame":0,"durationFrames":12}"#;
         let c: Clip = serde_json::from_str(json).unwrap();
+        assert_eq!(c.id, "");
         assert_eq!(c.media_type, ClipType::Video);
         approx(c.speed, 1.0);
         approx(c.volume, 1.0);
@@ -1000,6 +1162,16 @@ mod tests {
         assert_eq!(c.fade_in_interpolation, Interpolation::Linear);
         assert_eq!(c.transform, Transform::default());
         assert!(c.opacity_track.is_none());
+    }
+
+    #[test]
+    fn clip_direct_decode_uses_deterministic_empty_id_placeholder() {
+        for id in ["null", "7", "false", "{}", "[]"] {
+            let json =
+                format!(r#"{{"id":{id},"mediaRef":"m","startFrame":0,"durationFrames":12}}"#);
+            let clip: Clip = serde_json::from_str(&json).unwrap();
+            assert_eq!(clip.id, "", "id shape {id}");
+        }
     }
 
     #[test]

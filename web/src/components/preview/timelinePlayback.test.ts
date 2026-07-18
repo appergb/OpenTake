@@ -138,6 +138,43 @@ describe("activeVisualClip", () => {
     expect(activeVisualClips(tl, 10).map((v) => v.clip.id)).toEqual(["bottom", "top"]);
   });
 
+  it("reveals the lower long clip after the short upper clip ends", () => {
+    const tl = timeline([
+      track({
+        id: "v2",
+        type: "video",
+        clips: [
+          clip({
+            id: "upper-short",
+            mediaType: "video",
+            startFrame: 44,
+            durationFrames: 405,
+          }),
+        ],
+      }),
+      track({
+        id: "v1",
+        type: "video",
+        clips: [
+          clip({
+            id: "lower-main10",
+            mediaType: "video",
+            startFrame: 204,
+            durationFrames: 6_321,
+          }),
+        ],
+      }),
+    ]);
+
+    expect(activeVisualClips(tl, 448).map((visual) => visual.clip.id)).toEqual([
+      "lower-main10",
+      "upper-short",
+    ]);
+    expect(activeVisualClips(tl, 480).map((visual) => visual.clip.id)).toEqual([
+      "lower-main10",
+    ]);
+  });
+
   it("skips hidden tracks and audio/text", () => {
     const tl = timeline([
       track({ id: "v1", type: "video", hidden: true, clips: [clip({ id: "hid", mediaType: "video" })] }),

@@ -16,10 +16,10 @@
 
 | 变体 | 何时发 | payload | 前端用途 |
 |---|---|---|---|
-| `TimelineChanged { version }` | committing 的 edit / undo / redo（由 [`AppCore::apply`](core-router.md) 发） | `version: u64`（严格递增） | `version` 比镜像高则 `get_timeline` 重取 |
-| `ProjectOpened { path, version }` | `new_project`（path 空串）/ `open_project` | `path: String`、`version: u64`（恒 0） | 打开后前端自取首快照；open **不**另发 `TimelineChanged`（[SPEC.md](SPEC.md) §5.4 步骤 6） |
-| `ProjectSaved { path }` | `save_project` 成功 | `path: String`（写入的包路径） | 提示已保存 / 更新窗口标题 |
-| `MediaChanged { count }` | `import_media_file` / `relink_media_file` 成功 | `count: usize`（变更后 manifest entry 数） | 经 `get_media` 重取媒体面板目录；count 供廉价过期检查 |
+| `TimelineChanged { project_epoch, version }` | committing 的 edit / undo / redo（由 [`AppCore::apply`](core-router.md) 发） | `project_epoch: u64`、`version: u64`（同一 epoch 内严格递增） | epoch/version 判定镜像身份并 `get_timeline` 重取 |
+| `ProjectOpened { path, project_epoch, version }` | `new_project`（path 空串）/ `open_project` | `path: String`、`project_epoch: u64`、`version: u64`（恒 0） | 打开后前端自取首快照；open **不**另发 `TimelineChanged`（[SPEC.md](SPEC.md) §5.4 步骤 6） |
+| `ProjectSaved { path, project_epoch }` | `save_project` 成功 | `path: String`、`project_epoch: u64` | 提示已保存 / 更新窗口标题 |
+| `MediaChanged { project_epoch, count }` | manifest 编辑及其 undo/redo，或 import/relink/favorite 等媒体 workflow 成功 | `project_epoch: u64`、`count: usize`（变更后 manifest entry 数） | 经 `get_media` 重取媒体面板目录；count 供廉价过期检查 |
 
 > **只建模了 timeline / 工程生命周期 / 媒体变更**。preview / export / generation 事件（`PreviewFrame` / `ExportProgress` / `ExportDone` / `ExportFailed` / `GenerationProgress`，见 [SPEC.md](SPEC.md) §3.1）属后续阶段，随其后端落地时再加——**当前代码没有这些变体**。
 
@@ -60,10 +60,10 @@ EventBus（#[derive(Clone)]，Arc-backed，克隆共享同一订阅列表）
 
 ## 序列化形状（前端契约）
 
-- `TimelineChanged { version: 7 }` → `{"kind":"timeline_changed","version":7}`
-- `MediaChanged { count: 3 }` → `{"kind":"media_changed","count":3}`
+- `TimelineChanged { project_epoch: 3, version: 7 }` → `{"kind":"timeline_changed","projectEpoch":3,"version":7}`
+- `MediaChanged { project_epoch: 3, count: 3 }` → `{"kind":"media_changed","projectEpoch":3,"count":3}`
 
-> 单词字段（`version` / `count` / `path`）本就无大小写歧义；`kind` 标签是稳定的 snake_case 判别字段。（多词 DTO 字段的 camelCase 约定见 [dto.md](dto.md)。）
+> `kind` 标签是稳定的 snake_case 判别字段；多词 payload 字段 `project_epoch` 序列化为 camelCase `projectEpoch`（DTO 约定见 [dto.md](dto.md)）。
 
 ## 测试覆盖（本文件 `#[cfg(test)]`）
 

@@ -49,6 +49,9 @@ interface DrawOpts {
    *  "+" badge in the top-right corner so the user sees the gesture will copy
    *  rather than move. Only meaningful when `ghost` is true. */
   isDuplicate?: boolean;
+  /** Visible document-space X range. Long clips can span hours, but canvas work
+   *  must stay proportional to the viewport rather than the full clip width. */
+  visibleX?: { min: number; max: number };
 }
 
 /** Radius of the draggable volume-keyframe dots drawn by `drawVolumeEnvelope`.
@@ -152,7 +155,17 @@ export function drawClip(
   if (contentW > 2 && contentH > 2) {
     if (clip.mediaType === "audio") {
       if (opts.waveform && opts.waveform.length > 0) {
-        drawWaveform(ctx, clip, contentX, contentY, contentW, contentH, color, opts.waveform);
+        drawWaveform(
+          ctx,
+          clip,
+          contentX,
+          contentY,
+          contentW,
+          contentH,
+          color,
+          opts.waveform,
+          opts.visibleX,
+        );
       } else {
         // No samples yet (cache still resolving): a faint band, not a fake wave.
         ctx.fillStyle = withAlpha(color, 0.12);
@@ -160,7 +173,17 @@ export function drawClip(
       }
     } else {
       if (opts.thumbnailStrip) {
-        drawFilmstrip(ctx, clip, contentX, contentY, contentW, contentH, opts.thumbnailStrip, opts.fps);
+        drawFilmstrip(
+          ctx,
+          clip,
+          contentX,
+          contentY,
+          contentW,
+          contentH,
+          opts.thumbnailStrip,
+          opts.fps,
+          opts.visibleX,
+        );
       } else {
         ctx.fillStyle = withAlpha(color, 0.12);
         ctx.fillRect(contentX, contentY, contentW, contentH);
@@ -317,6 +340,7 @@ function drawWaveform(
   h: number,
   color: string,
   samples: number[],
+  visibleX?: { min: number; max: number },
 ) {
   if (w <= 2 || h <= 2 || samples.length === 0) return;
 
@@ -326,6 +350,9 @@ function drawWaveform(
 
   const barCount = Math.floor(w);
   if (barCount <= 0) return;
+  const firstBar = Math.max(0, Math.floor((visibleX?.min ?? x) - x));
+  const lastBar = Math.min(barCount, Math.ceil((visibleX?.max ?? x + w) - x));
+  if (lastBar <= firstBar) return;
   const visCount = sampleEnd - sampleStart;
 
   // Samples are dB-normalized, so volume shifts the dB axis (not multiplies).
@@ -333,7 +360,7 @@ function drawWaveform(
   const staticShift = dbFromLinear(clip.volume) / dbRange;
 
   ctx.fillStyle = withAlpha(blendWhite(color, 0.3), 0.85);
-  for (let i = 0; i < barCount; i++) {
+  for (let i = firstBar; i < lastBar; i++) {
     const sStart = sampleStart + Math.floor((i * visCount) / barCount);
     const sEnd = Math.max(sStart + 1, sampleStart + Math.floor(((i + 1) * visCount) / barCount));
     const end = Math.min(sEnd, sampleEnd);
@@ -358,6 +385,7 @@ function drawFilmstrip(
   h: number,
   strip: ClipThumbnailStrip,
   fps: number,
+  visibleX?: { min: number; max: number },
 ) {
   if (w <= 2 || h <= 2 || !strip.image.complete) return;
   const tileW = strip.tileWidth || strip.image.naturalWidth || 1;
@@ -368,6 +396,9 @@ function drawFilmstrip(
   const aspect = tileW / tileH;
   const displayW = Math.max(24, Math.min(96, h * aspect));
   const step = Math.min(displayW, w);
+  const visibleMin = Math.max(x, visibleX?.min ?? x);
+  const visibleMax = Math.min(x + w, visibleX?.max ?? x + w);
+  if (visibleMax <= visibleMin) return;
 
   const fpsSafe = fps > 0 ? fps : 30;
   const speed = clip.speed > 0 ? clip.speed : 1;
@@ -376,7 +407,15 @@ function drawFilmstrip(
 
   ctx.save();
   ctx.globalAlpha *= 0.82;
-  for (let dx = x; dx < x + w - 0.5; dx += step) {
+  // Preserve the document-aligned tile grid while starting at the first tile
+  // that intersects the viewport. The hard cap mirrors upstream's safety net.
+  const firstTile = Math.max(0, Math.floor((visibleMin - x) / step));
+  let drawn = 0;
+  for (
+    let dx = x + firstTile * step;
+    dx < visibleMax - 0.5 && drawn < 200;
+    dx += step, drawn += 1
+  ) {
     const dw = Math.min(step, x + w - dx);
     const center = Math.max(0, Math.min(1, (dx - x + dw / 2) / w));
     const sourceTime = sourceStart + sourceDuration * center;

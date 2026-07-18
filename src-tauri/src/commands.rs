@@ -123,7 +123,7 @@ pub(crate) fn project_open_with_playback(
 }
 
 #[cfg(feature = "playback-engine")]
-fn project_open_with_playback_and_prewarm(
+pub(crate) fn project_open_with_playback_and_prewarm(
     core: &AppCore,
     path: String,
     playback: &crate::playback::PlaybackState,
@@ -1194,7 +1194,11 @@ mod project_prewarm_lifecycle_tests {
     use super::project_open_with_playback_and_prewarm;
     use crate::media::prewarm::PrewarmScheduler;
     use crate::playback::PlaybackState;
+    use opentake_agent::mcp::core_handle::{AppCoreHandle, CoreHandle};
     use opentake_core::AppCore;
+    use opentake_domain::{Clip, ClipType, MediaManifestEntry, MediaSource, Track};
+    use opentake_project::{GenerationLog, GenerationLogEntry, Project};
+    use opentake_render::{build_render_plan, RenderSize};
 
     #[test]
     fn failed_project_prepare_changes_no_playback_or_prewarm_state() {
@@ -1219,6 +1223,108 @@ mod project_prewarm_lifecycle_tests {
         assert_eq!(core.project_revision(), before);
         assert_eq!(prewarm.project_state(), (before.project_epoch, false));
         assert!(playback.active_identity().is_none());
+    }
+
+    #[test]
+    fn project_open_mapped_boundaries_composite_acceptance() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let bundle = fixture.path().join("mapped-boundaries.opentake");
+        let media_path = bundle.join("media/source.mov");
+        let mut project = Project::new(&bundle);
+        let mut track = Track::new("mapped-track", ClipType::Video);
+        track
+            .clips
+            .push(Clip::new("mapped-clip", "mapped-media", 12, 48));
+        project.timeline.tracks.push(track);
+        project.manifest.entries.push(MediaManifestEntry {
+            id: "mapped-media".into(),
+            name: "source.mov".into(),
+            kind: ClipType::Video,
+            source: MediaSource::Project {
+                relative_path: "media/source.mov".into(),
+            },
+            duration: 2.0,
+            generation_input: None,
+            source_width: Some(1280),
+            source_height: Some(720),
+            source_fps: Some(24.0),
+            has_audio: Some(false),
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+        project.generation_log = Some(GenerationLog {
+            version: 1,
+            entries: vec![GenerationLogEntry::new(
+                "mapped-generation",
+                "mapped-model",
+                Some(10),
+                Some(700_000_000.0),
+            )],
+        });
+        project.save().expect("save mapped project fixture");
+        std::fs::create_dir_all(media_path.parent().expect("media parent"))
+            .expect("create media directory");
+        std::fs::write(&media_path, b"mapped-media-bytes").expect("write mapped media");
+
+        let core = AppCore::new();
+        let before = core.project_revision();
+        let playback = PlaybackState::new();
+        let prewarm = PrewarmScheduler::new(before.project_epoch);
+        let opened = project_open_with_playback_and_prewarm(
+            &core,
+            bundle.to_string_lossy().into_owned(),
+            &playback,
+            &prewarm,
+        )
+        .expect("open through desktop coordinator");
+        assert_eq!(opened.version, 0);
+        assert_eq!(prewarm.project_state(), (opened.project_epoch, false));
+
+        let catalog = crate::media::MediaListDto::from_core(&core, None);
+        assert_eq!(catalog.items.len(), 1);
+        assert_eq!(catalog.items[0].id, "mapped-media");
+        assert!(!catalog.items[0].missing);
+        assert_eq!(catalog.items[0].file_size, Some(18));
+
+        let snapshot = core.runtime_snapshot();
+        let (sizes, playback_media) =
+            crate::playback::project_media(&snapshot.media, &snapshot.project_dir);
+        assert_eq!(
+            playback_media
+                .get("mapped-media")
+                .expect("playback media route")
+                .path,
+            media_path
+        );
+        let metrics = crate::playback::ManifestMetrics { sizes };
+        let plan = build_render_plan(
+            &snapshot.timeline,
+            RenderSize::new(
+                snapshot.timeline.width as u32,
+                snapshot.timeline.height as u32,
+            ),
+            &metrics,
+        );
+        assert_eq!(plan.clip_plans.len(), 1);
+        assert_eq!(plan.clip_plans[0].clip_id, "mapped-clip");
+        assert_eq!(plan.frame(&snapshot.timeline, 12).draws.len(), 1);
+
+        let agent = AppCoreHandle::new(core.clone());
+        assert_eq!(agent.timeline(), snapshot.timeline);
+        assert_eq!(agent.media(), snapshot.media);
+        assert_eq!(agent.media_path("mapped-media"), Some(media_path.clone()));
+
+        core.save_project(None).expect("save mapped project");
+        let reopened = AppCore::new();
+        reopened
+            .open_project(&bundle)
+            .expect("reopen mapped project");
+        let reopened_agent = AppCoreHandle::new(reopened.clone());
+        assert_eq!(reopened_agent.timeline(), agent.timeline());
+        assert_eq!(reopened_agent.media(), agent.media());
+        assert_eq!(reopened_agent.media_path("mapped-media"), Some(media_path));
+        assert_eq!(reopened.generation_log(), core.generation_log());
     }
 
     #[test]

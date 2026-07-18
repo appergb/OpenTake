@@ -29,23 +29,28 @@
 
 ### apply() —— 事务执行壳
 
-`apply(state: &mut EditorState, command: EditCommand, ids: &dyn IdGen) -> Result<EditResult, EditError>`：把命令分派到各实现函数。除 `Undo`/`Redo` 外，每个实现都走 `transact()`：
+`apply(state: &mut EditorState, command: EditCommand, ids: &dyn IdGen) -> Result<EditResult, EditError>`：把命令分派到各实现函数。普通编辑实现走 `transact()`；`Undo`/`Redo` 与带 refusal 结果的 ripple 路径执行等价的 snapshot/restore/commit 流程：
 
 ```
 fn transact(state, action_name, summarize, work):
     before  = state.snapshot()        // 整文档 Clone
-    affected = work(state)?            // 跑纯函数变更；Err 直接传播，不提交
+    affected = match work(state):
+        Ok(value) → value
+        Err(error) → state.restore(before); return Err(error)
     after   = state.snapshot()
-    changed = before != after          // PartialEq 短路
+    timeline_changed = before.timeline != after.timeline
+    manifest_changed = before.manifest != after.manifest
+    changed = timeline_changed || manifest_changed
     if changed: state.commit(before)   // 推 before 入撤销栈、清 redo、version++
-    return EditResult{ changed, action_name, affected_clip_ids, timeline_version, summary }
+    return EditResult{ changed, timeline_changed, manifest_changed,
+                       action_name, affected_clip_ids, timeline_version, summary }
 ```
 
 即上游 `withTimelineSwap` 的泛化：从「整 timeline 交换」扩到「整文档（timeline + manifest）交换」。
 
 ### EditResult / EditError
 
-- `EditResult { changed, action_name, affected_clip_ids, timeline_version, summary }`：1:1 形态来自 ARCHITECTURE §5。`changed` 驱动前端是否需重取镜像；未变更的命令报告**先前**的 version。
+- `EditResult { changed, timeline_changed, manifest_changed, action_name, affected_clip_ids, timeline_version, summary }`：`changed` 驱动 commit/version/通用同步；两个 domain flag 让 core 在 manifest 变化时额外发送 `MediaChanged`。Tauri `EditResultDto` 仍只投影面向前端的原 5 个业务字段。未变更命令报告**先前**的 version。
 - `EditError::Invalid(String)`：输入校验失败（坏索引 / 缺片段 / 空载荷）。
 - `EditError::Refused(String)`：波纹拒绝（sync-lock 跟随轨无法吸收位移）。
 
@@ -59,7 +64,7 @@ fn transact(state, action_name, summarize, work):
 
 ## 不变量与上游对齐
 
-- **原子性**：`work` 返回 `Err` 时 `transact` 不调 `commit`，文档保持原样；波纹拒绝（`Err(Refused)`）等价于校验失败的「整次不改」。
+- **原子性**：`work` 返回 `Err` 时 `transact` 显式恢复 `before` 后返回，timeline、manifest、history、version 均不留下部分变化；波纹拒绝（`Err(Refused)`）执行同样的「整次不改」。
 - **commit-if-changed**：只有 `before != after` 才入栈 + `version++`。无实质变化的命令（如 `SwapMedia` 换到相同 `media_ref`）返回 `changed = false`、不污染撤销栈。
 - **撤销 = 整树快照交换**：`commit(before)` 推 before 入 `undo_stack` 并**清空 `redo_stack`**（新编辑使 redo 失效）；`undo` 把当前推入 redo、还原栈顶；`redo` 反之。`version` 在提交、撤销、重做时都 +1（前端据此判失效）。对齐 ARCHITECTURE「撤销栈在 Rust、整树快照」。
 - **pin-by-id**：放置类命令在 `clear_region`（可能 prune / 移位索引）后用 `track_index(track_id)` 重新定位轨道，避免索引失效。
@@ -71,11 +76,11 @@ fn transact(state, action_name, summarize, work):
 - `EditCommand` 是**纯枚举，无 serde derive**。
 - IPC 层另有 serde DTO `EditRequest`（在 `../../../src-tauri/src/commands.rs`），用 `#[serde(tag = "type", rename_all = "camelCase")]`，由 Tauri 命令 `edit_apply` 映射成 `EditCommand`。
 - 因此**多词字段在前端线上必须是 camelCase**（如 `atFrame` / `trackIndex`）。历史上「删除 / 分割 / Inspector 全静默失效」就是 DTO 的 camelCase 没对齐导致反序列化失败。改 IPC 字段时，Rust DTO、前端 `web/src/lib/types.ts` 的 `EditRequest`、调用处三边必须同步；IPC 内若静默吞错，先加 `try/catch` 把错误暴露出来。
-- 编辑命令 / IPC 的完整规格见 [opentake-core 规格 SPEC](../opentake-core/SPEC.md)。
+- 编辑命令 / IPC 的当前规格见 [core 命令路由](../../specs/core/2-command-routing.md)。
 
 ## 与其他子系统关系
 
-- **调用 `ops/*`**：各命令实现（`add_clips` / `move_clips` / `split` / `trim` / `ripple_delete*` 等）在 `transact` 的 `work` 闭包里调用 `ops/` 的算法函数与 `intent`（见 [ops-algorithms.md](ops-algorithms.md)）。
+- **调用 `ops/*`**：大多数命令在 `transact` 的 `work` 闭包里组合 `ops/` 算法；带 refusal 报告的 ripple 路径在等价的手写事务中调用（见 [ops-algorithms.md](ops-algorithms.md)）。
 - **re-export `engines`**：`RippleDeleteRanges` 直接收 `FrameRange`（来自 [engines.md](engines.md)）。
 - **依赖 `IdGen`**：新实体 id 由注入的生成器铸造（见 [intent-id.md](intent-id.md)）。
 - **被 `opentake-core` 装配**：core 把 `EditorState` 包进 `Arc<Mutex<…>>` 权威容器，对 UI/Agent/MCP 暴露唯一 `apply` 入口，并经版本号 + 事件广播推前端。

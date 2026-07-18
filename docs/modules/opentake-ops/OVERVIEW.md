@@ -50,7 +50,8 @@ UI 手势 / Agent / MCP 工具
        1. snapshot   ：克隆整个文档（timeline + manifest）
        2. mutate     ：跑命令的纯函数变更（校验失败 → Err，文档不动）
        3. commit-if-changed：before != after（PartialEq 短路）才推快照入撤销栈 + version++
-       4. → EditResult{ changed, action_name, affected_clip_ids, timeline_version, summary }
+       4. → EditResult{ changed, timeline_changed, manifest_changed,
+                        action_name, affected_clip_ids, timeline_version, summary }
   → 前端据 version 失效并重取只读镜像
 ```
 

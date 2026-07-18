@@ -10,8 +10,9 @@
 //!   (upstream throws `fileReadCorruptFile`).
 //! - `media.json`, if present, is parsed strictly; a parse failure is an error
 //!   (upstream throws `fileReadCorruptFile`).
-//! - `generation-log.json`, if present, is parsed leniently; a parse failure is
-//!   swallowed and the log becomes `None` (upstream `try?`).
+//! - `generation-log.json`, if present, is parsed leniently; a parse failure
+//!   yields an in-memory `None` recovery (upstream `try?`) plus a compatibility
+//!   blocker, so the damaged bytes remain readable but cannot be overwritten.
 //!
 //! Write semantics follow the architecture note "assemble an in-memory
 //! snapshot, then write atomically": each JSON component is written to a
@@ -20,14 +21,17 @@
 //! thumbnail when held); it never creates or deletes `media/` or
 //! `chat-sessions/`, which the media and agent layers manage out-of-band.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use opentake_domain::{MediaManifest, Timeline};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
+use crate::compatibility;
 use crate::error::{ProjectError, Result};
-use crate::gen_log::GenerationLog;
+use crate::gen_log::{GenerationLog, GenerationLogEntry};
 use crate::layout;
 use crate::ProjectRoot;
 
@@ -82,7 +86,7 @@ pub struct Project {
     /// absent.
     pub manifest: MediaManifest,
     /// The generation log (`generation-log.json`). `None` when the file was
-    /// absent or failed to parse.
+    /// absent or failed to parse; the latter also makes compatibility read-only.
     pub generation_log: Option<GenerationLog>,
     /// JPEG thumbnail bytes to write on the next `save`. `None` leaves any
     /// existing `thumbnail.jpg` on disk untouched.
@@ -116,12 +120,54 @@ impl Project {
         &self.compatibility
     }
 
+    /// Reconstruct the legacy generation audit rows carried only by manifest
+    /// entries saved before `generation-log.json` existed.
+    ///
+    /// Canonically identical [`opentake_domain::GenerationInput`] snapshots
+    /// represent one generation even when it produced multiple assets. The full
+    /// SHA-256 provenance digest supplies a fixed-size, deterministic synthetic
+    /// row id. Canonical keys also impose a total row order, so manifest ordering
+    /// cannot perturb saved bytes.
+    /// Legacy manifests contain no trustworthy billed-cost field, so seeded rows
+    /// keep `cost_credits = None` instead of applying a mutable pricing catalog
+    /// retroactively.
+    pub fn seed_generation_log_from_assets(&self) -> Result<GenerationLog> {
+        let mut seeds = BTreeMap::<Vec<u8>, (String, Option<f64>)>::new();
+
+        for entry in &self.manifest.entries {
+            let Some(provenance) = &entry.generation_input else {
+                continue;
+            };
+            let canonical_key = serde_json::to_vec(provenance)
+                .map_err(|error| ProjectError::json(layout::MANIFEST_FILE, error))?;
+            seeds
+                .entry(canonical_key)
+                .or_insert_with(|| (provenance.model.clone(), provenance.created_at));
+        }
+
+        Ok(GenerationLog {
+            version: 1,
+            entries: seeds
+                .into_iter()
+                .map(|(canonical_key, (model, created_at))| {
+                    GenerationLogEntry::new(
+                        format!("legacy-generation:{}", sha256_hex(&canonical_key)),
+                        model,
+                        None,
+                        created_at,
+                    )
+                })
+                .collect(),
+        })
+    }
+
     /// Open the `.opentake` bundle at `path`.
     ///
     /// Returns [`ProjectError::NotABundle`] if `path` is not a directory,
     /// [`ProjectError::MissingTimeline`] if `project.json` is absent, and
     /// [`ProjectError::Json`] if `project.json` or `media.json` fails to parse.
-    /// A malformed `generation-log.json` is ignored.
+    /// A malformed `generation-log.json` opens as a compatibility read-only
+    /// recovery with no decoded log.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let root = ProjectRoot::open(path)?;
         Self::open_from_root(&root)
@@ -143,15 +189,16 @@ impl Project {
                 bundle: bundle.to_path_buf(),
             }
         })?;
-        let (timeline, timeline_blockers) =
+        let (mut timeline, timeline_blockers, timeline_document) =
             decode_component::<Timeline>(&timeline_bytes, layout::TIMELINE_FILE)?;
+        compatibility::repair_timeline_ids(&mut timeline, &timeline_document);
         after_component(layout::TIMELINE_FILE);
         let mut compatibility = ProjectCompatibility::default();
         compatibility.extend(timeline_blockers);
 
         // media.json: strict when present, empty default when absent.
         let manifest = if let Some(bytes) = root.read_optional(layout::MANIFEST_FILE)? {
-            let (manifest, blockers) =
+            let (manifest, blockers, _) =
                 decode_component::<MediaManifest>(&bytes, layout::MANIFEST_FILE)?;
             compatibility.extend(blockers);
             manifest
@@ -160,11 +207,12 @@ impl Project {
         };
         after_component(layout::MANIFEST_FILE);
 
-        // generation-log.json: lenient — a parse error degrades to None.
+        // generation-log.json: lenient read recovery — a parse error degrades
+        // to None but records a blocker so no save can overwrite the bytes.
         let generation_log = match root.read_optional(layout::GENERATION_LOG_FILE) {
             Ok(Some(bytes)) => {
                 match decode_component::<GenerationLog>(&bytes, layout::GENERATION_LOG_FILE) {
-                    Ok((log, blockers)) => {
+                    Ok((log, blockers, _)) => {
                         compatibility.extend(blockers);
                         Some(log)
                     }
@@ -268,6 +316,16 @@ impl Project {
     }
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
 struct EncodedProject {
     timeline: Vec<u8>,
     manifest: Vec<u8>,
@@ -308,95 +366,55 @@ fn encode_component<T: Serialize>(file_name: &str, value: &T) -> Result<Vec<u8>>
     serde_json::to_vec_pretty(value).map_err(|error| ProjectError::json(file_name, error))
 }
 
-fn decode_component<T: DeserializeOwned>(bytes: &[u8], file: &str) -> Result<(T, Vec<String>)> {
+fn decode_component<T: DeserializeOwned>(
+    bytes: &[u8],
+    file: &str,
+) -> Result<(T, Vec<String>, Value)> {
     let document: Value =
         serde_json::from_slice(bytes).map_err(|error| ProjectError::json(file, error))?;
+
+    // The normal path performs one formal decode and no Track.clips probes or
+    // document clone. Only a failed timeline decode enters the narrow upstream
+    // Track.clips fallback.
+    let initial = deserialize_with_ignored(bytes, file, &document);
+    let (value, mut ignored, failed_tracks) = match initial {
+        Ok((value, ignored)) => (value, ignored, Vec::new()),
+        Err(initial_error) if file == layout::TIMELINE_FILE => {
+            let Some(fallback) = compatibility::prepare_timeline_fallback(&document) else {
+                return Err(ProjectError::json(file, initial_error));
+            };
+            let normalized = serde_json::to_vec(&fallback.normalized)
+                .map_err(|error| ProjectError::json(file, error))?;
+            let (value, ignored) = deserialize_with_ignored(&normalized, file, &document)
+                .map_err(|error| ProjectError::json(file, error))?;
+            (value, ignored, fallback.failed_tracks)
+        }
+        Err(error) => return Err(ProjectError::json(file, error)),
+    };
+
+    if file == layout::TIMELINE_FILE {
+        compatibility::scan_timeline(&document, file, &failed_tracks, &mut ignored);
+    }
+    ignored.sort();
+    ignored.dedup();
+    Ok((value, ignored, document))
+}
+
+fn deserialize_with_ignored<T: DeserializeOwned>(
+    bytes: &[u8],
+    file: &str,
+    document: &Value,
+) -> std::result::Result<(T, Vec<String>), serde_json::Error> {
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     let mut ignored = Vec::new();
     let value = serde_ignored::deserialize(&mut decoder, |path| {
         ignored.push(format!(
             "{file}:{}",
-            canonical_ignored_path(&path, &document)
+            compatibility::canonical_ignored_path(&path, document)
         ));
-    })
-    .map_err(|error| ProjectError::json(file, error))?;
-    decoder
-        .end()
-        .map_err(|error| ProjectError::json(file, error))?;
-    ignored.sort();
-    ignored.dedup();
+    })?;
+    decoder.end()?;
     Ok((value, ignored))
-}
-
-enum IgnoredSegment {
-    Map(String),
-    Seq(usize),
-}
-
-fn canonical_ignored_path(path: &serde_ignored::Path<'_>, document: &Value) -> String {
-    fn collect(path: &serde_ignored::Path<'_>, segments: &mut Vec<IgnoredSegment>) {
-        match path {
-            serde_ignored::Path::Root => {}
-            serde_ignored::Path::Seq { parent, index } => {
-                collect(parent, segments);
-                segments.push(IgnoredSegment::Seq(*index));
-            }
-            serde_ignored::Path::Map { parent, key } => {
-                collect(parent, segments);
-                segments.push(IgnoredSegment::Map(key.clone()));
-            }
-            serde_ignored::Path::Some { parent }
-            | serde_ignored::Path::NewtypeStruct { parent }
-            | serde_ignored::Path::NewtypeVariant { parent } => collect(parent, segments),
-        }
-    }
-
-    let mut segments = Vec::new();
-    collect(path, &mut segments);
-
-    let mut current = Some(document);
-    let mut rendered = Vec::new();
-    for segment in segments {
-        match segment {
-            IgnoredSegment::Seq(index) => {
-                rendered.push(index.to_string());
-                current = current
-                    .and_then(Value::as_array)
-                    .and_then(|array| array.get(index));
-            }
-            IgnoredSegment::Map(key) => {
-                let direct = current
-                    .and_then(Value::as_object)
-                    .and_then(|object| object.get(&key));
-                if let Some(value) = direct {
-                    rendered.push(key);
-                    current = Some(value);
-                    continue;
-                }
-
-                let variant = current
-                    .and_then(Value::as_object)
-                    .filter(|object| object.len() == 1)
-                    .and_then(|object| object.iter().next())
-                    .filter(|(_, value)| {
-                        value
-                            .as_object()
-                            .is_some_and(|fields| fields.contains_key(&key))
-                    });
-                if let Some((variant_name, variant_value)) = variant {
-                    rendered.push(variant_name.clone());
-                    rendered.push(key.clone());
-                    current = variant_value
-                        .as_object()
-                        .and_then(|fields| fields.get(&key));
-                } else {
-                    rendered.push(key);
-                    current = None;
-                }
-            }
-        }
-    }
-    rendered.join(".")
 }
 
 /// Copy a source bundle's `media/` directory into `dest_bundle`, recursively,

@@ -313,6 +313,14 @@ describe("accessibleClipRects", () => {
 });
 
 describe("structured media prewarm coordination", () => {
+  it("bounds automatic timeline sprite generation for long sources", () => {
+    expect(timelineContainer.TIMELINE_SPRITE_FRAME_LIMIT).toBeGreaterThan(1);
+    expect(timelineContainer.TIMELINE_SPRITE_FRAME_LIMIT).toBeLessThanOrEqual(24);
+    expect(timelineContainerSource).toContain(
+      "maxFrames: TIMELINE_SPRITE_FRAME_LIMIT",
+    );
+  });
+
   it("does not let an old project admission block or satisfy the current project", () => {
     const oldKey = timelineContainer.timelinePrewarmKey?.(3, "shared", "/same.mov|online") ?? "";
     const currentKey = timelineContainer.timelinePrewarmKey?.(4, "shared", "/same.mov|online") ?? "";

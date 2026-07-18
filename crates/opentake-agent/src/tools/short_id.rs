@@ -146,6 +146,7 @@ pub fn shorten_ids(result: ToolResult, ids: &HashSet<String>) -> ToolResult {
     ToolResult {
         content,
         is_error: result.is_error,
+        llm_error: result.llm_error,
     }
 }
 

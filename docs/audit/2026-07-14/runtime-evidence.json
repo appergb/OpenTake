@@ -1,0 +1,673 @@
+{
+  "schema": 1,
+  "metadata": {
+    "schemaName": "completion-control-runtime-evidence",
+    "schemaVersion": 1,
+    "receiptIdDerivation": "stableId('control-runtime-receipt', key)",
+    "evidencePolicy": "Only an exit-zero direct automated typed receipt with one candidate-bound structured assertion per control, an exact executed owning-component test, and that tracked test file's hash can support complete. Every receipt is revision-bound; every artifact is tracked, present, regular, and hash-matched; generic suite/browser/native evidence remains supporting only."
+  },
+  "candidateLedger": "docs/audit/2026-07-14/control-candidates.json",
+  "controlsLedger": "docs/audit/2026-07-14/controls.json",
+  "summary": {
+    "receipts": 4,
+    "direct": 0,
+    "supporting": 4,
+    "passed": 1,
+    "failed": 0,
+    "partial": 1,
+    "notRun": 2,
+    "blocked": 0
+  },
+  "receipts": [
+    {
+      "id": "control-runtime-receipt-0ce7e9e4c9f1e1ba",
+      "key": "task7-verifier-full-suite",
+      "kind": "automated",
+      "status": "not-run",
+      "evidenceLevel": "supporting",
+      "command": "node --test tools/completion-audit.test.mjs",
+      "startedAt": "2026-07-15T15:58:03+08:00",
+      "endedAt": "2026-07-15T15:58:25+08:00",
+      "exitCode": null,
+      "candidateIds": [],
+      "assertions": [],
+      "artifacts": [
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/automated/full-suite-process.txt",
+          "availability": "tracked",
+          "sha256": "458f74c7bc9f923b92c6175e07ae9d76e190e6cbc0e48a59a250fb0d45338af4"
+        }
+      ],
+      "cleanup": {
+        "required": false,
+        "status": "not-required",
+        "details": [
+          "The bounded Node test process exited with status 0."
+        ]
+      },
+      "limitations": [
+        "The 168 passing tests validate extraction and fail-closed audit behavior; they do not directly exercise any individual product control.",
+        "Historical supporting execution at 6023e29572878681a037ccd2f949f0c97f3fefba was not re-executed by this receipt after verifier rebinding."
+      ],
+      "testEvidence": [
+        "test:tools/completion-audit.test.mjs#verifyAudit controls accepts an exact incomplete schema-2 ledger",
+        "test:tools/completion-audit.test.mjs#verifyAudit controls rejects current-source and record identity drift",
+        "test:tools/completion-audit.test.mjs#verifyAudit controls fails closed on status, gap, obsolete, and duplicate claims",
+        "test:tools/completion-audit.test.mjs#verifyAudit controls rejects generic proof and accepts exact tests or direct typed receipts",
+        "test:tools/completion-audit.test.mjs#verify controls CLI writes failure output and exits nonzero"
+      ],
+      "result": {
+        "summary": "Historical supporting execution was captured at 6023e29572878681a037ccd2f949f0c97f3fefba; this receipt does not claim execution at verifier revision eb5d602f603814513aece38f938a6aed0cbf0a65.",
+        "exitCode": null
+      },
+      "executedCheckoutRevision": {
+        "commit": "6023e29572878681a037ccd2f949f0c97f3fefba",
+        "tree": "a8bccf8ada3243a7d585c3c59eb9af46522d90e7"
+      }
+    },
+    {
+      "id": "control-runtime-receipt-f40b696185658fc1",
+      "key": "task7-browser-fallback-runtime",
+      "kind": "browser",
+      "status": "passed",
+      "evidenceLevel": "supporting",
+      "command": "pnpm -C web dev --host 127.0.0.1 --port 1437",
+      "startedAt": "2026-07-14T19:10:33+08:00",
+      "endedAt": "2026-07-15T13:00:48+08:00",
+      "exitCode": null,
+      "candidateIds": [
+        "control-575978f9bced5959",
+        "control-d826a0ad433703cb",
+        "control-d606f9c3adb8762a",
+        "control-70d50e82dbf11502",
+        "control-9276ea9d0a1578bb",
+        "control-1caee0ff811948b1",
+        "control-575921b92e2f3135",
+        "control-baaf4052cb5bdc8e",
+        "control-37ea2cd22696fd55",
+        "control-c6f5ed51aa2b00c2",
+        "control-d3805a1e5b0f0237",
+        "control-d7ba227c6447e43e",
+        "control-ff132f94a8c87906",
+        "control-6fcdff2d800c882d",
+        "control-323d35d24ceb5ab2",
+        "control-1f8b140411e09e22",
+        "control-a6a47152d4fc53e0",
+        "control-408c771762a48a6a",
+        "control-c51942132f080af2",
+        "control-66d58acb1e9d254b",
+        "control-bc7e07c8d75e1cd2",
+        "control-fc5baa4f457e8778",
+        "control-74cf95e67ddd9208",
+        "control-fbc0598258d77d6a",
+        "control-b2ddee9974c7b88f",
+        "control-5409108a04e7cf1c"
+      ],
+      "assertions": [
+        {
+          "candidateId": "control-575978f9bced5959",
+          "event": "Home: clicked the main empty-launcher New Project button",
+          "handler": "{() => void newProjectAndEnter()}",
+          "backend": "web/src/components/home/HomeView.tsx:234::candidate handler -> {() => void newProjectAndEnter()} -> actual branch/state -> newProjectAndEnter enters a fresh editor project -> exact call/arguments -> newProjectAndEnter(); after saveDialog, either projectNew() in browser/no-dialog mode or getDefaultProjectDir(), native save(), projectNew(), then projectSave(chosen .opentake path) -> web/src/store/projectActions.ts::newProjectAndEnter -> saveDialog; stopNativePlaybackForProjectBoundary; api.projectNew(); optional api.projectSave(path); replace snapshot; reset media/runtime; setView('editor') -> web/src/lib/api.ts::getDefaultProjectDir -> invoke('get_default_project_dir') and src-tauri/src/commands.rs::get_default_project_dir when a native save dialog is available -> web/src/lib/api.ts::projectNew/projectSave -> invoke('project_new') and invoke('project_save',{path}) -> src-tauri/src/commands.rs::project_new/project_save -> crates/opentake-core/src/dto.rs::handle_project_new and crates/opentake-core/src/core.rs project save lifecycle -> code:web/src/components/home/HomeView.tsx#HomeView -> code:web/src/store/projectActions.ts#newProjectAndEnter -> code:web/src/lib/api.ts#getDefaultProjectDir -> code:src-tauri/src/commands.rs#get_default_project_dir -> code:web/src/lib/api.ts#projectNew -> code:src-tauri/src/commands.rs#project_new -> code:crates/opentake-core/src/dto.rs#handle_project_new",
+          "visibleOutcome": "view changed from Home empty state to editor with an empty timeline",
+          "accessibility": "focus=Custom LauncherButton focus behavior depends on its implementation; label=Visible child text/title or caller-provided label; verify at runtime; shortcut=None declared on this control",
+          "returnPath": "Project actions enter the editor; Library/Settings provide explicit Home/close actions.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-d826a0ad433703cb",
+          "event": "editor title bar: clicked View",
+          "handler": "{() => setOpen((v) => !v)}",
+          "backend": "web/src/components/shell/ViewMenu.tsx:54::candidate handler -> {() => setOpen((v) => !v)} -> actual branch/state -> setOpen toggles; outside/Escape closes -> exact call -> setOpen toggles; outside/Escape closes -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/shell/ViewMenu.tsx#ViewMenu",
+          "visibleOutcome": "expanded menu exposed layout and panel menuitemcheckbox roles with shortcut text",
+          "accessibility": "focus=Native keyboard-focusable control; label=t(\"view.menu\"); shortcut=None declared on this control",
+          "returnPath": "Preset selection closes the menu; panel toggles leave it open; focus return is not managed.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-d606f9c3adb8762a",
+          "event": "View menu: clicked Agent panel menuitemcheckbox",
+          "handler": "{toggleAgent}",
+          "backend": "web/src/components/shell/ViewMenu.tsx:108::candidate handler -> {toggleAgent} -> actual branch/state -> toggleAgentPanel -> exact call -> toggleAgentPanel -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/shell/ViewMenu.tsx#ViewMenu",
+          "visibleOutcome": "Agent panel rendered and the menuitem became checked",
+          "accessibility": "focus=Custom MenuItem focus behavior depends on its implementation; label=Visible child text/title or caller-provided label; verify at runtime; shortcut=None declared on this control",
+          "returnPath": "Preset selection closes the menu; panel toggles leave it open; focus return is not managed.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-70d50e82dbf11502",
+          "event": "Agent panel: clicked New conversation in the empty Agent state",
+          "handler": "{clearChat}",
+          "backend": "web/src/components/agent/AgentPanel.tsx:146::candidate handler -> {clearChat} -> actual branch/state -> reset(mintSessionId()) replaces session/messages when not streaming -> exact call -> reset(mintSessionId()) replaces session/messages when not streaming -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/agent/AgentPanel.tsx#AgentPanel",
+          "visibleOutcome": "click completed without error and the browser-unavailable empty state remained stable",
+          "accessibility": "focus=Native keyboard-focusable control; label=t(\"agent.clear\"); shortcut=None declared on this control",
+          "returnPath": "Focus remains in the Agent panel; settings actions return through closing Settings.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-9276ea9d0a1578bb",
+          "event": "Agent panel: inspected prompt textbox",
+          "handler": "{(event) => setInput(event.target.value)} {onKeyDown}",
+          "backend": "web/src/components/agent/AgentPanel.tsx:211::candidate handler -> {(event) => setInput(event.target.value)} {onKeyDown} -> actual branch/state -> onChange calls setInput(event.target.value); Enter without Shift prevents default and calls send(), while Shift+Enter does not send -> exact call/arguments -> onChange only setInput(event.target.value); Enter without Shift calls send() -> chatSend(sessionId,input.trim(),provider); Shift+Enter issues no chat call -> web/src/components/agent/AgentPanel.tsx::textarea onChange/onKeyDown -> setInput or send -> pushUser/beginStream/chatSend -> web/src/lib/api.ts::chatSend -> invoke('chat_send',{sessionId,text,chatProvider:provider}) -> src-tauri/src/chat.rs::chat_send(session_id,text,chat_provider) -> spawned ChatLoop; chat_delta/chat_tool/chat_done events return to AgentPanel listeners -> code:web/src/components/agent/AgentPanel.tsx#AgentPanel -> code:web/src/lib/api.ts#chatSend -> code:src-tauri/src/chat.rs#chat_send",
+          "visibleOutcome": "textbox had accessible name '描述你想做的编辑…' and was disabled in browser fallback",
+          "accessibility": "focus=Native keyboard-focusable control; label=Visible child text/title or caller-provided label; verify at runtime; shortcut=None declared on this control",
+          "returnPath": "Focus remains in the Agent panel; settings actions return through closing Settings.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-1caee0ff811948b1",
+          "event": "Agent panel: inspected Send button",
+          "handler": "{() => void send()}",
+          "backend": "web/src/components/agent/AgentPanel.tsx:244::candidate handler -> {() => void send()} -> actual branch/state -> click calls send(): guard trimmed input/streaming, clear input, push user, create assistant placeholder, await chatSend, and finalize rejection locally -> exact call/arguments -> send() -> chatSend(sessionId,input.trim(),provider) after the non-empty/not-streaming guard -> web/src/components/agent/AgentPanel.tsx::Send button -> send -> clear input, pushUser(text), beginStream(placeholderId), await chatSend -> web/src/lib/api.ts::chatSend -> invoke('chat_send',{sessionId,text,chatProvider:provider}) -> src-tauri/src/chat.rs::chat_send(session_id,text,chat_provider) -> ChatLoop; rejection finalizes the existing assistant placeholder locally -> code:web/src/components/agent/AgentPanel.tsx#AgentPanel -> code:web/src/lib/api.ts#chatSend -> code:src-tauri/src/chat.rs#chat_send",
+          "visibleOutcome": "button had accessible name '发送' and was disabled in browser fallback",
+          "accessibility": "focus=Native keyboard-focusable control; label=t(\"agent.send\"); shortcut=None declared on this control",
+          "returnPath": "Focus remains in the Agent panel; settings actions return through closing Settings.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-575921b92e2f3135",
+          "event": "Preview: clicked Jump to start on an empty timeline",
+          "handler": "{() => seekTo(0)}",
+          "backend": "web/src/components/preview/Preview.tsx:492::handler {() => seekTo(0)} -> seekTo(0): clamp to 0; media preview sets mediaRef.current.currentTime = 0/fps, timeline preview calls setCurrentFrame(snapFrameToEdge(timeline,0,threshold).frame) and maybeSnapFeedback -> web/src/components/preview/Preview.tsx::Preview.seekTo(0) -> media element or uiStore.setCurrentFrame -> N/A — no API/Tauri/Rust backend for this exact candidate branch -> code:web/src/components/preview/Preview.tsx#Preview",
+          "visibleOutcome": "time display remained 00:00:00 / 00:00:00 and no error appeared",
+          "accessibility": "focus=Native rendered control is keyboard-focusable.; label=Accessible-name source recorded by discovery: t(\"preview.jumpStart\").; shortcut=No dedicated shortcut is declared.",
+          "returnPath": "Remain on the owning editor surface after local state or authoritative mirror refresh. -> Retain focus on the native control or explicitly restore it when conditional UI closes; this must be asserted.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-baaf4052cb5bdc8e",
+          "event": "Preview: clicked Previous frame on an empty timeline",
+          "handler": "{() => seekTo(activeShownFrame - 1)}",
+          "backend": "web/src/components/preview/Preview.tsx:495::handler {() => seekTo(activeShownFrame - 1)} -> seekTo(activeShownFrame - 1): clamp; media preview sets currentTime = clamped/fps, timeline preview sets snapped current frame and maybeSnapFeedback -> web/src/components/preview/Preview.tsx::Preview.seekTo(activeShownFrame - 1) -> media element or uiStore.setCurrentFrame -> N/A — no API/Tauri/Rust backend for this exact candidate branch -> code:web/src/components/preview/Preview.tsx#Preview",
+          "visibleOutcome": "click completed; empty-timeline time stayed at zero",
+          "accessibility": "focus=Native rendered control is keyboard-focusable.; label=Accessible-name source recorded by discovery: t(\"preview.stepBack\").; shortcut=No dedicated shortcut is declared.",
+          "returnPath": "Remain on the owning editor surface after local state or authoritative mirror refresh. -> Retain focus on the native control or explicitly restore it when conditional UI closes; this must be asserted.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-37ea2cd22696fd55",
+          "event": "Preview: clicked Play/Pause on an empty timeline",
+          "handler": "{togglePlay}",
+          "backend": "web/src/components/preview/Preview.tsx:498::handler {togglePlay} -> togglePlay(): media preview calls mediaRef.current.play() when paused or pause() otherwise; timeline preview returns when unsupported, otherwise togglePlayTimeline() -> web/src/components/preview/Preview.tsx::Preview.togglePlay -> HTMLMediaElement or uiStore.togglePlay -> N/A — no API/Tauri/Rust backend for this exact candidate branch -> code:web/src/components/preview/Preview.tsx#Preview",
+          "visibleOutcome": "click completed without media or native playback and time stayed at zero",
+          "accessibility": "focus=Native rendered control is keyboard-focusable.; label=Accessible-name source recorded by discovery: t(\"preview.playPause\").; shortcut=No dedicated shortcut is declared.",
+          "returnPath": "Remain on the owning editor surface after local state or authoritative mirror refresh. -> Retain focus on the native control or explicitly restore it when conditional UI closes; this must be asserted.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-c6f5ed51aa2b00c2",
+          "event": "Preview: clicked Next frame on an empty timeline",
+          "handler": "{() => seekTo(activeShownFrame + 1)}",
+          "backend": "web/src/components/preview/Preview.tsx:505::handler {() => seekTo(activeShownFrame + 1)} -> seekTo(activeShownFrame + 1): clamp; media preview sets currentTime = clamped/fps, timeline preview sets snapped current frame and maybeSnapFeedback -> web/src/components/preview/Preview.tsx::Preview.seekTo(activeShownFrame + 1) -> media element or uiStore.setCurrentFrame -> N/A — no API/Tauri/Rust backend for this exact candidate branch -> code:web/src/components/preview/Preview.tsx#Preview",
+          "visibleOutcome": "click completed; empty-timeline time stayed at zero",
+          "accessibility": "focus=Native rendered control is keyboard-focusable.; label=Accessible-name source recorded by discovery: t(\"preview.stepForward\").; shortcut=No dedicated shortcut is declared.",
+          "returnPath": "Remain on the owning editor surface after local state or authoritative mirror refresh. -> Retain focus on the native control or explicitly restore it when conditional UI closes; this must be asserted.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-d3805a1e5b0f0237",
+          "event": "Preview: inspected Capture current frame",
+          "handler": "{() => void captureFrame()}",
+          "backend": "web/src/components/preview/Preview.tsx:513::handler {() => void captureFrame()} -> if (!canCapture) no-op; else await captureFrameToMedia(frame, nameBase, mediaPanelCurrentFolderId, sourceMediaId); null result shows unavailable toast; success awaits refreshMedia() then saved toast; catch shows failed toast -> web/src/components/preview/Preview.tsx::captureFrame -> web/src/store/editActions.ts::captureFrameToMedia -> web/src/lib/api.ts::captureFrameToMedia -> invoke('capture_frame_to_media', exact frame/name/folder/sourceMediaId) -> src-tauri/src/render.rs::capture_frame_to_media -> code:web/src/components/preview/Preview.tsx#Preview -> code:web/src/components/preview/Preview.tsx#captureFrame -> code:web/src/lib/api.ts#captureFrameToMedia -> code:src-tauri/src/render.rs#capture_frame_to_media",
+          "visibleOutcome": "button was disabled while no frame/media existed",
+          "accessibility": "focus=Native rendered control is keyboard-focusable.; label=Accessible-name source recorded by discovery: t(\"preview.captureFrame\").; shortcut=No dedicated shortcut is declared.",
+          "returnPath": "Remain on the owning editor surface after local state or authoritative mirror refresh. -> Retain focus on the native control or explicitly restore it when conditional UI closes; this must be asserted.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-d7ba227c6447e43e",
+          "event": "editor title bar: inspected Export Video",
+          "handler": "{() => setExportDialogOpen(true)}",
+          "backend": "web/src/components/shell/TitleBar.tsx:223::candidate handler -> {() => setExportDialogOpen(true)} -> actual branch/state -> setExportDialogOpen(true) -> exact call -> setExportDialogOpen(true) -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/shell/TitleBar.tsx#TitleBar",
+          "visibleOutcome": "button was disabled for the empty project",
+          "accessibility": "focus=Native keyboard-focusable control; label=t(\"title.exportVideo\"); shortcut=None declared on this control",
+          "returnPath": "Navigation changes the full-screen view; popup actions should close and return focus to the title-bar trigger.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-ff132f94a8c87906",
+          "event": "editor title bar: clicked Settings",
+          "handler": "{() => setSettingsOpen(true)}",
+          "backend": "web/src/components/shell/TitleBar.tsx:207::candidate handler -> {() => setSettingsOpen(true)} -> actual branch/state -> setSettingsOpen(true) -> exact call -> setSettingsOpen(true) -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/shell/TitleBar.tsx#TitleBar",
+          "visibleOutcome": "Settings overlay opened over the editor",
+          "accessibility": "focus=Native keyboard-focusable control; label=t(\"title.settings\"); shortcut=None declared on this control",
+          "returnPath": "Navigation changes the full-screen view; popup actions should close and return focus to the title-bar trigger.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-6fcdff2d800c882d",
+          "event": "Settings: switched among Appearance, Import, AI, and MCP panes",
+          "handler": "{() => onSelect(pane.id)}",
+          "backend": "web/src/components/settings/SettingsView.tsx:211::candidate handler -> {() => onSelect(pane.id)} -> actual branch/state -> onSelect(pane.id) changes activePane -> exact call -> onSelect(pane.id) changes activePane -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/settings/SettingsView.tsx#SettingsView",
+          "visibleOutcome": "each selected pane heading and controls rendered; sidebar remained a named navigation region",
+          "accessibility": "focus=Native keyboard-focusable control; label=Visible child text/title or caller-provided label; verify at runtime; shortcut=None declared on this control",
+          "returnPath": "Done/Close returns to the invoking Home/editor surface; menus should return focus to their trigger.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-323d35d24ceb5ab2",
+          "event": "Settings Appearance: clicked Light theme",
+          "handler": "{setTheme}",
+          "backend": "web/src/components/settings/SettingsView.tsx:399::candidate handler -> {setTheme} -> actual branch/state -> setTheme updates/persists theme -> exact call -> setTheme updates/persists theme -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/settings/SettingsView.tsx#SettingsView",
+          "visibleOutcome": "click completed and the app rerendered without console error; visual theme delta was not separately pixel-diffed",
+          "accessibility": "focus=Custom Segmented focus behavior depends on its implementation; label=Visible child text/title or caller-provided label; verify at runtime; shortcut=None declared on this control",
+          "returnPath": "Done/Close returns to the invoking Home/editor surface; menus should return focus to their trigger.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-1f8b140411e09e22",
+          "event": "Settings Appearance: clicked Compact window size",
+          "handler": "{setWindowSize}",
+          "backend": "web/src/components/settings/SettingsView.tsx:413::candidate handler -> {setWindowSize} -> actual branch/state -> setWindowSize updates/persists window size -> exact call -> setWindowSize updates/persists window size -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/settings/SettingsView.tsx#SettingsView",
+          "visibleOutcome": "Compact (1066x666) button became active; native window resize was not exercised",
+          "accessibility": "focus=Custom Segmented focus behavior depends on its implementation; label=Visible child text/title or caller-provided label; verify at runtime; shortcut=None declared on this control",
+          "returnPath": "Done/Close returns to the invoking Home/editor surface; menus should return focus to their trigger.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-a6a47152d4fc53e0",
+          "event": "Settings Import: clicked Choose default import folder",
+          "handler": "{() => void choose()}",
+          "backend": "web/src/components/settings/SettingsView.tsx:446::candidate handler -> {() => void choose()} -> actual branch/state -> native directory dialog -> setDefaultImportFolder -> exact call/arguments -> choose(): openDialog(); open({directory:true,multiple:false}); if selected is string call setDefaultImportFolder(selected) -> web/src/components/settings/SettingsView.tsx::ImportPane.choose -> web/src/lib/dialog.ts::openDialog/open -> web/src/store/settingsStore.ts::setDefaultImportFolder(selected) -> persist localStorage and update Zustand -> API/Tauri/Rust -> N/A after the native dialog returns; the selected path is stored locally -> code:web/src/components/settings/SettingsView.tsx#SettingsView -> code:web/src/components/settings/SettingsView.tsx#ImportPane -> code:web/src/lib/dialog.ts#openDialog",
+          "visibleOutcome": "browser fallback returned to the same unset state with no folder mutation; no native dialog was exercised",
+          "accessibility": "focus=Native keyboard-focusable control; label=Visible child text/title or caller-provided label; verify at runtime; shortcut=None declared on this control",
+          "returnPath": "Done/Close returns to the invoking Home/editor surface; menus should return focus to their trigger.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-408c771762a48a6a",
+          "event": "Settings AI: clicked OpenAI provider",
+          "handler": "{setProvider}",
+          "backend": "web/src/components/settings/SettingsView.tsx:569::candidate handler -> {setProvider} -> actual branch/state -> setByokProvider; effect reloads masked key status and clears draft -> exact call/arguments -> setByokProvider(opt.id); provider effect clears draft/error and calls secretLoad(provider) for the newly selected provider -> web/src/store/settingsStore.ts::setByokProvider(provider) -> persist localStorage/update Zustand -> web/src/components/settings/SettingsView.tsx::AiPane provider effect -> secretLoad(provider) -> web/src/lib/api.ts::secretLoad -> invoke('secret_load',{provider}); src-tauri/src/secret.rs::secret_load(provider) -> code:web/src/components/settings/SettingsView.tsx#SettingsView -> code:web/src/components/settings/SettingsView.tsx#AiPane -> code:web/src/lib/api.ts#secretLoad -> code:src-tauri/src/secret.rs#secret_load",
+          "visibleOutcome": "provider click completed and the API-key field remained available",
+          "accessibility": "focus=Custom Segmented focus behavior depends on its implementation; label=Visible child text/title or caller-provided label; verify at runtime; shortcut=None declared on this control",
+          "returnPath": "Done/Close returns to the invoking Home/editor surface; menus should return focus to their trigger.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-c51942132f080af2",
+          "event": "Settings AI: filled the password field with the non-secret probe string runtime-probe-not-a-secret",
+          "handler": "{(e) => { setDraft(e.target.value); setError(null); }} {(e) => { if (e.key === \"Enter\") void save(); }}",
+          "backend": "web/src/components/settings/SettingsView.tsx:577::candidate handler -> {(e) => { setDraft(e.target.value); setError(null); }} {(e) => { if (e.key === \"Enter\") void save(); }} -> actual branch/state -> onChange updates draft/clears error; Enter calls save() only when trimmed draft is non-empty and not busy -> exact call/arguments -> onChange only updates draft/error; Enter calls save() -> secretSave(provider,draft.trim()) when non-empty/not busy -> web/src/components/settings/SettingsView.tsx::AiPane key input onChange/onKeyDown -> local draft or save exact chain -> web/src/lib/api.ts::secretSave -> invoke('secret_save',{provider,key:trimmed}) -> src-tauri/src/secret.rs::secret_save(provider,key) -> OS keychain -> code:web/src/components/settings/SettingsView.tsx#SettingsView -> code:web/src/components/settings/SettingsView.tsx#AiPane -> code:web/src/lib/api.ts#secretSave -> code:src-tauri/src/secret.rs#secret_save",
+          "visibleOutcome": "Save Key button appeared while the field was non-empty; the observation had no retained artifact",
+          "accessibility": "focus=Native keyboard-focusable control; label=Visible child text/title or caller-provided label; verify at runtime; shortcut=None declared on this control",
+          "returnPath": "Done/Close returns to the invoking Home/editor surface; menus should return focus to their trigger.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-66d58acb1e9d254b",
+          "event": "Settings AI: clicked Save Key with the non-secret probe",
+          "handler": "{() => void save()}",
+          "backend": "web/src/components/settings/SettingsView.tsx:600::candidate handler -> {() => void save()} -> actual branch/state -> click calls save(); busy -> secretSave(provider,trimmed) -> masked status/draft clear or visible error -> exact call/arguments -> save() -> secretSave(provider,draft.trim()) when non-empty/not busy; set returned masked status and clear draft -> web/src/components/settings/SettingsView.tsx::AiPane Save button -> save -> secretSave(provider,trimmed) -> web/src/lib/api.ts::secretSave -> invoke('secret_save',{provider,key:trimmed}) -> src-tauri/src/secret.rs::secret_save(provider,key) -> OS keychain -> code:web/src/components/settings/SettingsView.tsx#SettingsView -> code:web/src/components/settings/SettingsView.tsx#AiPane -> code:web/src/lib/api.ts#secretSave -> code:src-tauri/src/secret.rs#secret_save",
+          "visibleOutcome": "browser fallback returned NO_SECRET and cleared the draft; no OS-keychain persistence was exercised",
+          "accessibility": "focus=Native keyboard-focusable control; label=Visible child text/title or caller-provided label; verify at runtime; shortcut=None declared on this control",
+          "returnPath": "Done/Close returns to the invoking Home/editor surface; menus should return focus to their trigger.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-bc7e07c8d75e1cd2",
+          "event": "Settings MCP: clicked the first Copy button",
+          "handler": "{() => copy(row.key, row.code)}",
+          "backend": "web/src/components/settings/SettingsView.tsx:769::candidate handler -> {() => copy(row.key, row.code)} -> actual branch/state -> clipboard.writeText -> transient copied indicator; rejection is swallowed -> exact call/arguments -> navigator.clipboard.writeText(row.code); on success setCopiedKey(row.key) and clear it after 1500ms; rejection is swallowed -> web/src/components/settings/SettingsView.tsx::McpPane.copy(key,text) -> navigator.clipboard.writeText(text) -> API/Tauri/Rust -> N/A for MCP copy -> code:web/src/components/settings/SettingsView.tsx#SettingsView -> code:web/src/components/settings/SettingsView.tsx#McpPane",
+          "visibleOutcome": "button label changed from 复制 to 已复制",
+          "accessibility": "focus=Native keyboard-focusable control; label=Visible child text/title or caller-provided label; verify at runtime; shortcut=None declared on this control",
+          "returnPath": "Done/Close returns to the invoking Home/editor surface; menus should return focus to their trigger.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-fc5baa4f457e8778",
+          "event": "Settings: clicked Done",
+          "handler": "{() => setSettingsOpen(false)}",
+          "backend": "web/src/components/settings/SettingsView.tsx:141::candidate handler -> {() => setSettingsOpen(false)} -> actual branch/state -> setSettingsOpen(false) -> exact call -> setSettingsOpen(false) -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/settings/SettingsView.tsx#SettingsView",
+          "visibleOutcome": "Settings overlay closed and focus returned to the editor document",
+          "accessibility": "focus=Native keyboard-focusable control; label=Visible child text/title or caller-provided label; verify at runtime; shortcut=None declared on this control",
+          "returnPath": "Done/Close returns to the invoking Home/editor surface; menus should return focus to their trigger.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-74cf95e67ddd9208",
+          "event": "Media panel: inspected Generate",
+          "handler": "No handler declared",
+          "backend": "web/src/components/media/MediaPanel.tsx:301::candidate handler -> No handler declared -> actual branch/state -> none; the button is permanently disabled -> exact call -> none; the button is permanently disabled -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/media/MediaPanel.tsx#MediaPanel",
+          "visibleOutcome": "button was disabled in fallback empty state",
+          "accessibility": "focus=Native keyboard-focusable control; label=t(\"media.generateSoon\"); shortcut=None declared on this control",
+          "returnPath": "Media actions remain in the panel; native dialogs return focus to the invoking panel in platform behavior but this is not asserted.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-fbc0598258d77d6a",
+          "event": "Media panel: filled Search with runtime-none",
+          "handler": "{(e) => setSearch(e.target.value)}",
+          "backend": "web/src/components/media/MediaPanel.tsx:334::candidate handler -> {(e) => setSearch(e.target.value)} -> actual branch/state -> setSearch updates the local query immediately; non-empty query mounts MediaSearchResults, whose 250ms effect calls searchQueryApi(query) while filename filtering remains local -> exact call/arguments -> setSearch(event.target.value); when trimmed query is non-empty MediaSearchResults waits 250ms and calls searchQueryApi(trimmedQuery) -> web/src/components/media/MediaPanel.tsx::search input -> setSearch(value) -> mounts MediaSearchResults(query) -> web/src/components/media/MediaSearch.tsx::MediaSearchResults effect -> setTimeout(250ms) -> searchQueryApi(q) -> web/src/lib/api.ts::searchQuery -> invoke('search_query',{query:q}) -> src-tauri/src/search.rs::search_query(query) -> moments/spoken/files result -> code:web/src/components/media/MediaPanel.tsx#MediaPanel -> code:web/src/components/media/MediaSearch.tsx#MediaSearchResults -> code:web/src/lib/api.ts#searchQuery -> code:src-tauri/src/search.rs#search_query",
+          "visibleOutcome": "textbox retained the query and panel displayed no matches for runtime-none",
+          "accessibility": "focus=Native keyboard-focusable control; label=Visible child text/title or caller-provided label; verify at runtime; shortcut=None declared on this control",
+          "returnPath": "Media actions remain in the panel; native dialogs return focus to the invoking panel in platform behavior but this is not asserted.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-b2ddee9974c7b88f",
+          "event": "Media panel: clicked View mode",
+          "handler": "No handler declared",
+          "backend": "web/src/components/media/MediaPanel.tsx:349::candidate handler -> No handler declared -> actual branch/state -> none -> exact call -> none -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/media/MediaPanel.tsx#MediaPanel",
+          "visibleOutcome": "button click completed and became active in the interaction snapshot; no view-mode data mutation was proven",
+          "accessibility": "focus=Custom HoverButton focus behavior depends on its implementation; label=t(\"media.viewMode\"); shortcut=None declared on this control",
+          "returnPath": "Media actions remain in the panel; native dialogs return focus to the invoking panel in platform behavior but this is not asserted.",
+          "artifactPaths": [],
+          "testEvidence": []
+        },
+        {
+          "candidateId": "control-5409108a04e7cf1c",
+          "event": "Media panel: clicked Sort",
+          "handler": "No handler declared",
+          "backend": "web/src/components/media/MediaPanel.tsx:352::candidate handler -> No handler declared -> actual branch/state -> none -> exact call -> none -> API/Tauri/Rust -> N/A for this immediate activation; later submit/export/generate actions are separate candidates. -> code:web/src/components/media/MediaPanel.tsx#MediaPanel",
+          "visibleOutcome": "button click completed and became active while filtered-empty state remained stable; no sort data mutation was proven",
+          "accessibility": "focus=Custom HoverButton focus behavior depends on its implementation; label=t(\"media.sort\"); shortcut=None declared on this control",
+          "returnPath": "Media actions remain in the panel; native dialogs return focus to the invoking panel in platform behavior but this is not asserted.",
+          "artifactPaths": [],
+          "testEvidence": []
+        }
+      ],
+      "artifacts": [
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-12-33-510Z.png",
+          "availability": "tracked",
+          "sha256": "29583cf4f92642125ba523a0ff8466f82dd7b6edbb8dc27f7990548e0623a65f"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-13-45-459Z.png",
+          "availability": "tracked",
+          "sha256": "be5543d6db0ddf48b8dddfdf3f8184342ba30f8a15de4fac5de4d3ccc35139d8"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-12-58-446Z.yml",
+          "availability": "tracked",
+          "sha256": "9d4e1c8093b953f128979398d59a09467da66c6e781b21893d584e21d240840e"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-18-11-121Z.yml",
+          "availability": "tracked",
+          "sha256": "2d03d3a7f1246682cd315e3a599a5702ddddf3223a60602d63701afeeddb9695"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-21-25-082Z.yml",
+          "availability": "tracked",
+          "sha256": "fce1a102a7c0df2b0823cfe1bafae7f100485d03f960b8bca5edf2766988919e"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-23-43-551Z.yml",
+          "availability": "tracked",
+          "sha256": "0b2e437dff3fd0c76b52d6f543153e41448863e885517f9aaec1c62c2950ace6"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-27-26-962Z.yml",
+          "availability": "tracked",
+          "sha256": "ef80eff97edd12570dae13a82cc2fc34d6df890028e089c7fad176ea61c467a1"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-28-34-215Z.yml",
+          "availability": "tracked",
+          "sha256": "53ace4f56e190543c45f51ffca03bfcb05e3d0bb5e37535ddf905a8a404f73cf"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-29-59-679Z.yml",
+          "availability": "tracked",
+          "sha256": "e97dd6ee99e35109fd8f6860c9cd5e0e1348967fc9d813fcd684c36895822693"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-30-22-654Z.yml",
+          "availability": "tracked",
+          "sha256": "1961d43203a820e003f1c0027dea54d489eda6ecf471d3e9daff3fc333c68272"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/console-2026-07-14T11-11-54-004Z.log",
+          "availability": "tracked",
+          "sha256": "2b4af9d8c849d80beb47f493f1d922dc733abeeb31ecfa752438f25ee56c3d03"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-16-41-938Z.yml",
+          "availability": "tracked",
+          "sha256": "dc544d2db1de57cedcce024649b58a9f2fddd675c938c65f52551fdfbe4762df"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-17-11-063Z.yml",
+          "availability": "tracked",
+          "sha256": "e80773cb2b263422fffadccc1c183f0372dc45ce45a8bce595ccca3b4d5569d8"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-18-37-045Z.yml",
+          "availability": "tracked",
+          "sha256": "bd7e509f28c85e635ea382f46dde1dd786f9e05d010ac97972d03b6b660f74e6"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-14-10-178Z.yml",
+          "availability": "tracked",
+          "sha256": "0825421cc4dd6be8c10c57bd8e2cd2af8c32a6fc278af04135c1c95344f544bd"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-14-52-301Z.yml",
+          "availability": "tracked",
+          "sha256": "11b988ea2aa9d53ceac5872c8b4fb5f9ee61be29b8e4daed2c5bdbf7ba982e8d"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-15-12-529Z.yml",
+          "availability": "tracked",
+          "sha256": "9dc4770355d8345729c3921838ad4400cd7a0439bd6a8721b99e86928ed2188e"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-15-28-980Z.yml",
+          "availability": "tracked",
+          "sha256": "f4811dd1d6d8e66c576721b6dd21783bdc444c5f299a0eaec828443e39ac8a8a"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-18-57-011Z.yml",
+          "availability": "tracked",
+          "sha256": "2bad19aae7f7734111e1e5d1f45c3a7391b0e39357f96966f30192ed954b07b9"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-20-47-347Z.yml",
+          "availability": "tracked",
+          "sha256": "7e3df88fb63708ffa927b24e3ceab205fb7716bd0105c8f154e7451d30eaabed"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-25-18-459Z.yml",
+          "availability": "tracked",
+          "sha256": "32f18f6749ba7a0bed40207c43a5935c4cc461a84e381aaf459db9dc57c75ff9"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/browser/page-2026-07-14T11-29-04-984Z.yml",
+          "availability": "tracked",
+          "sha256": "0dc0495855ddf611f983173eb4b1a6fbc491257fa52beb8c116794bc345e0a1c"
+        }
+      ],
+      "cleanup": {
+        "required": true,
+        "status": "verified",
+        "details": [
+          "No process command contained the task7-runtime Playwright session marker.",
+          "TCP connect to 127.0.0.1:1437 returned connection refused.",
+          "No task-specific Vite or Playwright process remained."
+        ]
+      },
+      "limitations": [
+        "Browser fallback executed no native/Tauri/Rust, OS keychain, native dialog, GPU/ffmpeg, filesystem capability, MCP server, or real-media path.",
+        "Preview transport assertions cover the empty-timeline state only.",
+        "One assertion has no retained artifact and is supporting observation only.",
+        "No focused keyboard-navigation sample, automated WCAG scan, mobile breakpoint, or Core Web Vitals run was captured.",
+        "All retained browser artifacts are tracked audit evidence; this receipt remains supporting and cannot promote any candidate to complete."
+      ],
+      "testEvidence": [],
+      "result": {
+        "summary": "Browser fallback completed with 26 supporting candidate observations and verified cleanup.",
+        "exitCode": null
+      },
+      "executedCheckoutRevision": {
+        "commit": "1f9af77923967cf7f4e92f72c924fd6d5505fa1e",
+        "tree": "918925907d79406b36c950a9ba1e8c18f7c7e4bc"
+      }
+    },
+    {
+      "id": "control-runtime-receipt-853a519c10a046eb",
+      "key": "task7-native-bundle-runtime",
+      "kind": "native",
+      "status": "partial",
+      "evidenceLevel": "supporting",
+      "command": "unretained exact argv; observed build invocation: tauri build --no-sign (beforeBuildCommand: pnpm -C web build)",
+      "startedAt": "2026-07-14T19:12:33+08:00",
+      "endedAt": "2026-07-15T13:15:22+08:00",
+      "exitCode": null,
+      "candidateIds": [],
+      "assertions": [],
+      "artifacts": [
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/native/tauri-build.log",
+          "availability": "tracked",
+          "sha256": "6a5de40c6db29ffa7e84c3311698c191272b5b440a36686f57f923b5f9c41732"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/native/tauri-build-attempt-2.log",
+          "availability": "tracked",
+          "sha256": "cddddd5f077851b1f4b7edf6bf558aa87f9c734201259931a12750dcd7541f66"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/native/bundle-files.sha256",
+          "availability": "tracked",
+          "sha256": "406d1462818485cbe327f032578bee1bddc31379ef582c87eaaaea7c679cbabf"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/native/bundle-integrity.txt",
+          "availability": "tracked",
+          "sha256": "844571af6a7d5a5cd5cd230752d6ee8be4bf6b0fbb8740aac97e99f62784b4b8"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/native/pre-cleanup-processes.txt",
+          "availability": "tracked",
+          "sha256": "6b70cc0fed065387e9d1e69f9966884faa64793d2696a0b6a0a0342bf96854f9"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/native/post-cleanup-processes.txt",
+          "availability": "tracked",
+          "sha256": "00bb20910961751a2bb16769d1ba37f31352b8a4f67e66baec1024298ab0b810"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/native/final-cleanup-verification.txt",
+          "availability": "tracked",
+          "sha256": "c80e572446b54ab9a1f80f07e22d4c3fe79d84a5f6e18b67cac3d4306058962e"
+        },
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/native/exact-app-stdout.log",
+          "availability": "tracked",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "cleanup": {
+        "required": true,
+        "status": "verified",
+        "details": [
+          "Final pgrep/ps scan found no target bundle or installed OpenTake executable.",
+          "TCP connect to 127.0.0.1:19789 returned unavailable.",
+          "TCP connect to 127.0.0.1:1437 returned unavailable.",
+          "Final task7/OpenTake/Vite scan matched only the probe shell and rg process."
+        ]
+      },
+      "limitations": [
+        "The first Tauri build failed with ENOSPC; only the second build produced the candidate bundle.",
+        "The bundle was built with --no-sign, and strict codesign verification did not pass because resources were absent while the signature indicated they must be present.",
+        "The separately running /Applications/OpenTake.app process was not hash-bound to the candidate bundle and is excluded from candidate evidence.",
+        "AX/WebView interaction was blocked or unavailable; zero native clicks, dialogs, screenshots, or candidate-level native assertions were captured.",
+        "No native import, relink, playback, seek, pause, export, cancel, reopen, Agent prompt, keychain, or real-media path was exercised.",
+        "The exact build and launch shell argv were not retained; native build, launch, MCP ownership, and cleanup remain supporting evidence only."
+      ],
+      "testEvidence": [],
+      "result": {
+        "summary": "Native candidate bundle built on the second attempt; interaction coverage remained partial and cleanup was verified.",
+        "exitCode": null
+      },
+      "executedCheckoutRevision": {
+        "commit": "1f9af77923967cf7f4e92f72c924fd6d5505fa1e",
+        "tree": "918925907d79406b36c950a9ba1e8c18f7c7e4bc"
+      }
+    },
+    {
+      "id": "control-runtime-receipt-c3d683042c669fa4",
+      "key": "task7-controls-ledger-verification",
+      "kind": "automated",
+      "status": "not-run",
+      "evidenceLevel": "supporting",
+      "command": "node tools/completion-audit.mjs verify --root . --audit docs/audit/2026-07-14 --scope controls --out docs/audit/2026-07-14/control-verification.json",
+      "startedAt": "2026-07-15T15:59:44+08:00",
+      "endedAt": "2026-07-15T15:59:46+08:00",
+      "exitCode": null,
+      "candidateIds": [],
+      "assertions": [],
+      "artifacts": [
+        {
+          "path": "docs/audit/2026-07-14/runtime-artifacts/automated/controls-verifier-process.txt",
+          "availability": "tracked",
+          "sha256": "32a9bfa25bc5381d12a70c0dedd6bbe4daab5188d0d3f32be75620e7a9fe3e21"
+        }
+      ],
+      "cleanup": {
+        "required": false,
+        "status": "not-required",
+        "details": [
+          "The bounded Node verification process exited with status 0 and wrote the controls verification report."
+        ]
+      },
+      "limitations": [
+        "This receipt validates ledger schema, identity, classifications, evidence contracts, and artifact integrity only; it does not directly exercise any product control.",
+        "Historical supporting execution at 6023e29572878681a037ccd2f949f0c97f3fefba was not re-executed by this receipt after verifier rebinding."
+      ],
+      "testEvidence": [],
+      "result": {
+        "summary": "Historical supporting execution was captured at 6023e29572878681a037ccd2f949f0c97f3fefba; this receipt does not claim execution at verifier revision eb5d602f603814513aece38f938a6aed0cbf0a65.",
+        "exitCode": null
+      },
+      "executedCheckoutRevision": {
+        "commit": "6023e29572878681a037ccd2f949f0c97f3fefba",
+        "tree": "a8bccf8ada3243a7d585c3c59eb9af46522d90e7"
+      }
+    }
+  ],
+  "provenance": {
+    "auditedProductRevision": {
+      "commit": "1f9af77923967cf7f4e92f72c924fd6d5505fa1e",
+      "tree": "918925907d79406b36c950a9ba1e8c18f7c7e4bc"
+    },
+    "verifierRevision": {
+      "commit": "eb5d602f603814513aece38f938a6aed0cbf0a65",
+      "tree": "58ef09fcb2d5e81eddf1b9486eca6c7809308434"
+    },
+    "candidateLedgerSha256": "b3117d6ef9db5b39867989d8cca4c046229b50d927755aeca77b03ef21be1994",
+    "candidateSourceAggregateSha256": "98428b8c7a7b66327ef2ace05914ecafb5cd9dc6d87a91407ecd1281a6337342",
+    "verifierFilesSha256": {
+      "tools/completion-audit.mjs": "69fcdadecd13980ab2b5ca233cc6ff170a2e54d483858712163378b71ac68fb8",
+      "tools/completion-audit-controls.mjs": "8ec67733ffbef2e3e7fb4ca07b7ce79bfa6a53833b9c7557a2a224ac085bc45a",
+      "tools/completion-audit-plan-map.json": "33547181fe2335b486bff3a210210d62c9d850df717aad454ca8a470f1a4e056",
+      "tools/completion-audit.test.mjs": "5b6d4f463221d8e5cc29ed9ffe81bf97c58616b4b2b98cdbd5c88f1211023ce4"
+    }
+  }
+}

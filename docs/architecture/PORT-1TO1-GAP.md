@@ -197,3 +197,16 @@
 8. **新建落盘与自动保存必须配套设计。** `project_dir=None` 时 `save_project(None)` 报 NoProjectOpen,所以 P0-1(新建即落盘)是 P1-1(自动保存)的硬前置,二者同期落地。
 
 9. **全局可复用素材库(#37)是 OpenTake 新增子系统,不在本 1:1 差距清单约束内。** 上游 palmier-pro 无对应模块(grep 确认无全局收藏库)。采用 copy-on-favorite + SHA-256 内容寻址去重 + JSON manifest 原子写;后端存储层(#37-A / #104)+ Tauri 命令层(#37-B / #106)**已并入 main**,前端(#37-C / #56)待做。注意区分范畴:**#37 = 跨项目全局库;#49/#91 = 每项目媒体与文件夹浏览**,两者不同。
+
+---
+
+**2026-07-14 完成度审计校准：** 本清单中的移植声明已逐项归入 `docs/audit/2026-07-14/requirements.json`；当前裁决、实现证据与验收条件以同目录 `document-reconciliation.md` 为准，旧阶段描述继续作为移植决策记录。
+
+**当前有效条目的 ledger 绑定：**
+
+| 原始行 | Candidate ID | Gap group |
+|---:|---|---|
+| 42 | `doc-f76a4690eac1c241` | media-library |
+| 106 | `doc-4fef1bcb26796c23` | home-shell |
+| 157 | `doc-c99689011d01e778` | home-shell |
+| 176 | `doc-653aa10c9f19799b` | accessibility-polish |

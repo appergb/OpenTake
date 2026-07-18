@@ -10,10 +10,12 @@
 use std::path::Path;
 use std::process::Command;
 
+use opentake_media::decode::spawn_video_stream;
 use opentake_media::ffmpeg_status::{ffmpeg_available, ffprobe_available};
 use opentake_media::{
     decode_frame_at, encode, extract_pcm, probe, video_thumbnails, waveform, ExportPreset,
     ExportResolution, FrameRequest, PcmFormat, PcmSpec, VideoCodec, VideoEncoder,
+    VideoStreamRequest,
 };
 
 /// Generate a 2 s 320x240@10fps test video with a 440 Hz sine audio track.
@@ -422,4 +424,39 @@ fn encode_h265_roundtrip_produces_hevc_mp4() {
 #[test]
 fn encode_prores_roundtrip_produces_prores_mov() {
     encode_codec_roundtrip(VideoCodec::ProRes422, "mov", "prores");
+}
+
+#[test]
+#[ignore = "requires OPENTAKE_MAIN10_FIXTURE pointing at a real HEVC Main10 clip"]
+fn continuous_decode_scales_real_main10_frames_without_corruption() {
+    let path = std::env::var_os("OPENTAKE_MAIN10_FIXTURE")
+        .map(std::path::PathBuf::from)
+        .expect("set OPENTAKE_MAIN10_FIXTURE");
+    let mut request = VideoStreamRequest::new(path, 30);
+    request.start_frame = 1_572;
+    request.end_frame = Some(request.start_frame + 90);
+    request.max_size = (1_920, 1_080);
+
+    let stream = spawn_video_stream(request).unwrap();
+    for _ in 0..90 {
+        let decoded = stream
+            .receiver()
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("continuous decoder frame")
+            .expect("continuous decoder success");
+
+        assert_eq!((decoded.frame.width, decoded.frame.height), (1_920, 1_080));
+        assert_eq!(decoded.frame.rgba.len(), 1_920 * 1_080 * 4);
+        let neon_green = decoded
+            .frame
+            .rgba
+            .chunks_exact(4)
+            .filter(|pixel| pixel[0] < 32 && pixel[1] > 224 && pixel[2] < 32)
+            .count();
+        assert!(
+            neon_green < decoded.frame.pixel_count() / 100,
+            "frame {} contains {neon_green} neon-green pixels",
+            decoded.source_frame
+        );
+    }
 }

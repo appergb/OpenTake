@@ -24,6 +24,10 @@ pub struct MediaProbe {
     pub fps: Option<f64>,
     pub has_audio: bool,
     pub has_video: bool,
+    /// ffprobe's comma-separated demuxer names (for example
+    /// `mov,mp4,m4a,3gp,3g2,mj2`). Security-sensitive import boundaries use
+    /// this to verify that downloaded bytes match their declared container.
+    pub format_name: Option<String>,
 }
 
 /// Open the container and read the first video stream + audio presence.
@@ -93,9 +97,17 @@ pub fn parse_probe(json: &serde_json::Value) -> MediaProbe {
         .cloned()
         .unwrap_or_default();
 
-    let video = streams
-        .iter()
-        .find(|s| s.get("codec_type").and_then(|v| v.as_str()) == Some("video"));
+    // Cover art in an audio container is reported as a video stream with
+    // `disposition.attached_pic = 1`. It is metadata, not playable video:
+    // treating it as the primary video stream makes valid MP3/M4A imports look
+    // like videos and gives them the cover's dimensions and frame rate.
+    let video = streams.iter().find(|stream| {
+        stream.get("codec_type").and_then(|value| value.as_str()) == Some("video")
+            && stream
+                .pointer("/disposition/attached_pic")
+                .and_then(|value| value.as_i64())
+                != Some(1)
+    });
     let has_video = video.is_some();
     // An audio stream that reports zero channels carries no real sound (an
     // empty/placeholder track some exporters add). Treating it as "has audio"
@@ -147,6 +159,11 @@ pub fn parse_probe(json: &serde_json::Value) -> MediaProbe {
         .and_then(|f| f.get("duration"))
         .and_then(|x| x.as_str())
         .and_then(|s| s.parse::<f64>().ok());
+    let format_name = json
+        .get("format")
+        .and_then(|format| format.get("format_name"))
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
 
     let duration_secs = video_duration.or(container_duration).unwrap_or(0.0);
 
@@ -157,6 +174,7 @@ pub fn parse_probe(json: &serde_json::Value) -> MediaProbe {
         fps,
         has_audio,
         has_video,
+        format_name,
     }
 }
 
@@ -225,6 +243,32 @@ mod tests {
         assert!(p.has_video && !p.has_audio);
         // video stream duration wins over container.
         assert_eq!(p.duration_secs, 12.5);
+    }
+
+    #[test]
+    fn attached_picture_is_not_a_playable_video_stream() {
+        let probe = parse_probe(&json!({
+            "streams": [
+                {
+                    "codec_type": "audio",
+                    "channels": 2
+                },
+                {
+                    "codec_type": "video",
+                    "width": 600,
+                    "height": 600,
+                    "disposition": {"attached_pic": 1}
+                }
+            ],
+            "format": {
+                "duration": "3.0",
+                "format_name": "mp3"
+            }
+        }));
+        assert!(probe.has_audio);
+        assert!(!probe.has_video);
+        assert_eq!(probe.width, None);
+        assert_eq!(probe.height, None);
     }
 
     #[test]

@@ -51,11 +51,16 @@ impl std::fmt::Display for EditError {
 
 impl std::error::Error for EditError {}
 
-/// Outcome of a successfully-attempted command. 1:1 shape from `ARCHITECTURE.md 搂5`.
+/// Outcome of a successfully-attempted command. The core result from
+/// `ARCHITECTURE.md §5` plus document-domain flags used for precise events.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct EditResult {
     /// Whether the document actually changed (drives undo-stack push + version bump).
     pub changed: bool,
+    /// Whether the timeline portion of the document changed.
+    pub timeline_changed: bool,
+    /// Whether the media-manifest portion of the document changed.
+    pub manifest_changed: bool,
     /// Undo label, e.g. "Add Clips" / "Ripple Delete".
     pub action_name: String,
     /// Clip ids created or directly affected (for selection / response).
@@ -458,10 +463,13 @@ pub fn apply(
 ) -> Result<EditResult, EditError> {
     match command {
         EditCommand::Undo => {
+            let before = state.snapshot();
             let changed = state.undo();
+            let after = state.snapshot();
             Ok(result(
                 state,
-                changed,
+                changed && before.timeline != after.timeline,
+                changed && before.manifest != after.manifest,
                 "Undo",
                 Vec::new(),
                 if changed {
@@ -472,10 +480,13 @@ pub fn apply(
             ))
         }
         EditCommand::Redo => {
+            let before = state.snapshot();
             let changed = state.redo();
+            let after = state.snapshot();
             Ok(result(
                 state,
-                changed,
+                changed && before.timeline != after.timeline,
+                changed && before.manifest != after.manifest,
                 "Redo",
                 Vec::new(),
                 if changed {
@@ -604,29 +615,80 @@ fn transact(
     work: impl FnOnce(&mut EditorState) -> Result<Vec<String>, EditError>,
 ) -> Result<EditResult, EditError> {
     let before = state.snapshot();
-    let affected = work(state)?;
+    let affected = match work(state) {
+        Ok(affected) => affected,
+        Err(error) => {
+            state.restore(before);
+            return Err(error);
+        }
+    };
     let after = state.snapshot();
-    let changed = before != after;
+    let timeline_changed = before.timeline != after.timeline;
+    let manifest_changed = before.manifest != after.manifest;
+    let changed = timeline_changed || manifest_changed;
     if changed {
         state.commit(before);
     }
     let summary = summarize(&affected);
-    Ok(result(state, changed, action_name, affected, &summary))
+    Ok(result(
+        state,
+        timeline_changed,
+        manifest_changed,
+        action_name,
+        affected,
+        &summary,
+    ))
 }
 
 fn result(
     state: &EditorState,
-    changed: bool,
+    timeline_changed: bool,
+    manifest_changed: bool,
     action_name: &str,
     affected: Vec<String>,
     summary: &str,
 ) -> EditResult {
     EditResult {
-        changed,
+        changed: timeline_changed || manifest_changed,
+        timeline_changed,
+        manifest_changed,
         action_name: action_name.to_string(),
         affected_clip_ids: affected,
         timeline_version: state.version(),
         summary: summary.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+
+    #[test]
+    fn failed_transaction_restores_document_and_history() {
+        let mut state = EditorState::default();
+        let before = state.snapshot();
+
+        let error = transact(
+            &mut state,
+            "Injected Failure",
+            |_| String::new(),
+            |state| {
+                state.timeline.fps = 60;
+                state.manifest.folders.push(opentake_domain::MediaFolder {
+                    id: "partial-folder".into(),
+                    name: "Partial".into(),
+                    parent_folder_id: None,
+                });
+                Err(EditError::Invalid("injected after mutation".into()))
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error, EditError::Invalid("injected after mutation".into()));
+        assert_eq!(state.snapshot(), before);
+        assert_eq!(state.version(), 0);
+        assert!(!state.can_undo());
+        assert!(!state.can_redo());
     }
 }
 
@@ -1848,7 +1910,14 @@ fn ripple_delete_ranges(
                 .iter()
                 .map(|f| f.0.clone())
                 .collect();
-            Ok(result(state, changed, "Ripple Delete", affected, &summary))
+            Ok(result(
+                state,
+                changed,
+                false,
+                "Ripple Delete",
+                affected,
+                &summary,
+            ))
         }
     }
 }
@@ -1889,6 +1958,7 @@ fn ripple_delete_clips(
             Ok(result(
                 state,
                 changed,
+                false,
                 "Ripple Delete",
                 affected,
                 &format!("Ripple-deleted {n} clip(s)"),
@@ -2070,7 +2140,14 @@ fn add_captions(
     if entries.is_empty() {
         // No captions built (e.g. no speech detected): no track, no change.
         // Matches upstream returning `[]` and restoring `timeline` before commit.
-        return Ok(result(state, false, "Generate Captions", Vec::new(), ""));
+        return Ok(result(
+            state,
+            false,
+            false,
+            "Generate Captions",
+            Vec::new(),
+            "",
+        ));
     }
     for (i, e) in entries.iter().enumerate() {
         if e.duration_frames < 1 {
@@ -2453,6 +2530,8 @@ fn swap_media(
         let version = state.version();
         return Ok(EditResult {
             changed: false,
+            timeline_changed: false,
+            manifest_changed: false,
             action_name: "Swap Media".to_string(),
             affected_clip_ids: vec![clip_id.clone()],
             timeline_version: version,
