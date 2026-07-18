@@ -11,6 +11,7 @@ function makeCtx() {
   const fillRects: Array<{ fillStyle: string; x: number; y: number; width: number; height: number }> = [];
   const arcs: Array<{ x: number; y: number; radius: number }> = [];
   const drawnImages: unknown[][] = [];
+  const texts: string[] = [];
   let firstMoveTo: [number, number] | null = null;
   const ctx = {
     fillStyle: "",
@@ -34,7 +35,9 @@ function makeCtx() {
     closePath() {},
     clip() {},
     rect() {},
-    fillText() {},
+    fillText(value: string) {
+      texts.push(value);
+    },
     measureText() {
       return { width: 10 };
     },
@@ -65,6 +68,7 @@ function makeCtx() {
     fillRects,
     arcs,
     drawnImages,
+    texts,
   };
 }
 
@@ -87,6 +91,20 @@ const testClip = {
   transform: {},
   crop: {},
 } as unknown as Clip;
+
+describe("drawClip drag preview", () => {
+  const rect = { x: 0, y: 0, width: 200, height: 60 };
+
+  it("keeps the normal clip label but omits text from the drag ghost", () => {
+    const normal = makeCtx();
+    drawClip(normal.ctx, testClip, rect, { isSelected: false, fps: 30 });
+    expect(normal.texts).toContain("m1  00:03:10");
+
+    const ghost = makeCtx();
+    drawClip(ghost.ctx, testClip, rect, { isSelected: false, fps: 30, ghost: true });
+    expect(ghost.texts).toEqual([]);
+  });
+});
 
 describe("drawClip missing wash", () => {
   const rect = { x: 0, y: 0, width: 200, height: 60 };

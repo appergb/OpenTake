@@ -385,6 +385,18 @@ export function useTimelinePlaybackEngine(): void {
   }, []);
 
   useEffect(() => {
+    if (!isScrubbing) return;
+    // Scrub owns the playhead. Retire the previous native identity immediately
+    // so a frame already crossing the IPC boundary cannot republish its old
+    // playhead after pointer-up and replace the user's final exact seek.
+    const stopping = nativePlaybackController.stopCurrent();
+    activeNativeIdentityRef.current = null;
+    lastEngineFrameRef.current = null;
+    clearNativePlaybackPublication();
+    void stopping.catch(() => undefined);
+  }, [isScrubbing]);
+
+  useEffect(() => {
     const prev = previousTransportState.current;
     if (!isPlaying && !isScrubbing) {
       cancelPendingInteractiveSeek();

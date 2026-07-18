@@ -13,6 +13,93 @@ afterEach(() => {
 });
 
 describe("paused native composite", () => {
+  it("cancels an in-flight settled composite when scrubbing starts", async () => {
+    const requestCompositeStill = vi.fn(() => new Promise(() => undefined));
+    const cancelCompositeStill = vi.fn().mockResolvedValue(undefined);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <RustFrameBuffer
+          event={null}
+          endpoint={null}
+          projectEpoch={3}
+          timelineVersion={7}
+          engineDriving={false}
+          stillFrame={100}
+          requestCompositeStill={requestCompositeStill}
+          cancelCompositeStill={cancelCompositeStill}
+          onTerminalFailure={vi.fn()}
+        />,
+      );
+    });
+    await act(async () => {
+      root.render(
+        <RustFrameBuffer
+          event={null}
+          endpoint={null}
+          projectEpoch={3}
+          timelineVersion={7}
+          engineDriving={false}
+          stillFrame={null}
+          requestCompositeStill={requestCompositeStill}
+          cancelCompositeStill={cancelCompositeStill}
+          onTerminalFailure={vi.fn()}
+        />,
+      );
+    });
+
+    expect(cancelCompositeStill).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectEpoch: 3,
+        timelineVersion: 7,
+        minimumSeekGeneration: 1,
+      }),
+    );
+    await act(async () => root.unmount());
+  });
+
+  it("retains the last settled composite while scrub cancels exact-frame work", async () => {
+    const requestCompositeStill = vi.fn().mockResolvedValue({
+      width: 640,
+      height: 360,
+      dataUrl: "data:image/png;base64,last-good",
+    });
+    const cancelCompositeStill = vi.fn().mockResolvedValue(undefined);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const render = (stillFrame: number | null) => (
+      <RustFrameBuffer
+        event={null}
+        endpoint={null}
+        projectEpoch={3}
+        timelineVersion={7}
+        engineDriving={false}
+        stillFrame={stillFrame}
+        requestCompositeStill={requestCompositeStill}
+        cancelCompositeStill={cancelCompositeStill}
+        onTerminalFailure={vi.fn()}
+      />
+    );
+
+    await act(async () => {
+      root.render(render(100));
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[src="data:image/png;base64,last-good"]')).not.toBeNull();
+
+    await act(async () => root.render(render(null)));
+
+    expect(cancelCompositeStill).toHaveBeenCalledWith(
+      expect.objectContaining({ minimumSeekGeneration: 1 }),
+    );
+    expect(container.querySelector('[src="data:image/png;base64,last-good"]')).not.toBeNull();
+    await act(async () => root.unmount());
+  });
+
   it("requests and retains the current frame without a playback publication", async () => {
     const requestCompositeStill = vi.fn().mockResolvedValue({
       width: 640,
@@ -39,7 +126,14 @@ describe("paused native composite", () => {
       await Promise.resolve();
     });
 
-    expect(requestCompositeStill).toHaveBeenCalledWith(480);
+    expect(requestCompositeStill).toHaveBeenCalledWith(
+      expect.objectContaining({
+        frame: 480,
+        projectEpoch: 3,
+        timelineVersion: 7,
+        seekGeneration: 0,
+      }),
+    );
     expect(container.querySelector('[data-testid="rust-idle-composite-still"]')).not.toBeNull();
     await act(async () => root.unmount());
   });
@@ -50,9 +144,9 @@ describe("paused native composite", () => {
       { resolve: (value: { width: number; height: number; dataUrl: string }) => void }
     >();
     const requestCompositeStill = vi.fn(
-      (frame: number) =>
+      (request: { frame: number }) =>
         new Promise<{ width: number; height: number; dataUrl: string }>((resolve) => {
-          pending.set(frame, { resolve });
+          pending.set(request.frame, { resolve });
         }),
     );
     const container = document.createElement("div");
@@ -73,13 +167,13 @@ describe("paused native composite", () => {
     await act(async () => root.render(renderFrame(100)));
     await act(async () => root.render(renderFrame(101)));
     await act(async () => root.render(renderFrame(102)));
-    expect(requestCompositeStill.mock.calls.map(([frame]) => frame)).toEqual([100]);
+    expect(requestCompositeStill.mock.calls.map(([request]) => request.frame)).toEqual([100]);
 
     await act(async () => {
       pending.get(100)!.resolve({ width: 640, height: 360, dataUrl: "data:old" });
       await Promise.resolve();
     });
-    expect(requestCompositeStill.mock.calls.map(([frame]) => frame)).toEqual([100, 102]);
+    expect(requestCompositeStill.mock.calls.map(([request]) => request.frame)).toEqual([100, 102]);
     expect(container.querySelector('[src="data:old"]')).toBeNull();
 
     await act(async () => {

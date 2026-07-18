@@ -153,10 +153,72 @@ pub enum PlaybackCmd {
     Pause(i32, mpsc::Sender<()>),
     /// Resume a retained session from `frame`.
     Resume(i32, mpsc::Sender<()>),
-    /// Jump the clock + restart streams at this frame.
-    Seek(i32),
+    /// Wake the render thread to consume the newest coalesced seek.
+    Seek,
     /// Stop the loop and tear down (streams stop cooperatively).
     Stop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SeekRequest {
+    frame: i32,
+    generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SeekSubmission {
+    should_wake: bool,
+}
+
+#[derive(Default)]
+struct SeekMailboxState {
+    generation: u64,
+    pending: Option<SeekRequest>,
+    wake_queued: bool,
+}
+
+/// One-slot newest-wins mailbox. Twenty rapid seeks overwrite one pending
+/// request and enqueue at most one control wake; the generation also lets the
+/// render thread discard pixels completed after a newer seek arrived.
+#[derive(Default)]
+struct SeekMailbox(Mutex<SeekMailboxState>);
+
+impl SeekMailbox {
+    fn submit(&self, frame: i32) -> SeekSubmission {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.generation = state.generation.wrapping_add(1);
+        state.pending = Some(SeekRequest {
+            frame,
+            generation: state.generation,
+        });
+        let should_wake = !state.wake_queued;
+        state.wake_queued = true;
+        SeekSubmission { should_wake }
+    }
+
+    fn take(&self) -> Option<SeekRequest> {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let request = state.pending.take();
+        state.wake_queued = false;
+        request
+    }
+
+    fn generation(&self) -> u64 {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .generation
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.generation() == generation
+    }
 }
 
 /// Integer target frame from a base frame plus elapsed time. Truncates (matching
@@ -307,6 +369,7 @@ impl RenderLoop {
 /// `stop`) requests a cooperative shutdown.
 pub struct PlaybackEngine {
     control_tx: mpsc::Sender<PlaybackCmd>,
+    seek_mailbox: Arc<SeekMailbox>,
     handle: Option<JoinHandle<()>>,
     cancel: MediaCancelToken,
 }
@@ -431,6 +494,8 @@ impl PlaybackEngine {
         cancel: MediaCancelToken,
     ) -> Result<Self, String> {
         let (tx, rx) = mpsc::channel();
+        let seek_mailbox = Arc::new(SeekMailbox::default());
+        let render_seek_mailbox = Arc::clone(&seek_mailbox);
         let render_cancel = cancel.clone();
         let handle = thread::Builder::new()
             .name("opentake-playback-render".to_string())
@@ -445,6 +510,7 @@ impl PlaybackEngine {
                     sink,
                     emitter,
                     rx,
+                    render_seek_mailbox,
                     initial_frame,
                     startup,
                     render_cancel,
@@ -453,6 +519,7 @@ impl PlaybackEngine {
             .map_err(|e| format!("spawn playback thread: {e}"))?;
         Ok(PlaybackEngine {
             control_tx: tx,
+            seek_mailbox,
             handle: Some(handle),
             cancel,
         })
@@ -460,7 +527,9 @@ impl PlaybackEngine {
 
     /// Seek the running engine to `frame`.
     pub fn seek(&self, frame: i32) {
-        let _ = self.control_tx.send(PlaybackCmd::Seek(frame));
+        if self.seek_mailbox.submit(frame).should_wake {
+            let _ = self.control_tx.send(PlaybackCmd::Seek);
+        }
     }
 
     pub fn pause(&self, frame: i32) -> Result<(), String> {
@@ -510,13 +579,14 @@ impl PlaybackEngine {
                     PlaybackCmd::Pause(_, reply) | PlaybackCmd::Resume(_, reply) => {
                         let _ = reply.send(());
                     }
-                    PlaybackCmd::Seek(_) => {}
+                    PlaybackCmd::Seek => {}
                 }
             }
         });
         (
             Self {
                 control_tx,
+                seek_mailbox: Arc::new(SeekMailbox::default()),
                 handle: Some(handle),
                 cancel: MediaCancelToken::new(),
             },
@@ -546,13 +616,14 @@ impl PlaybackEngine {
                         let _ = resume_tx.send(paused);
                         let _ = reply.send(());
                     }
-                    PlaybackCmd::Seek(_) => {}
+                    PlaybackCmd::Seek => {}
                 }
             }
         });
         (
             Self {
                 control_tx,
+                seek_mailbox: Arc::new(SeekMailbox::default()),
                 handle: Some(handle),
                 cancel: MediaCancelToken::new(),
             },
@@ -586,6 +657,7 @@ fn run_render_thread(
     sink: Arc<dyn FrameSink>,
     emitter: Arc<dyn PlayheadEmitter>,
     rx: mpsc::Receiver<PlaybackCmd>,
+    seek_mailbox: Arc<SeekMailbox>,
     initial_frame: Option<i32>,
     mut startup: Option<mpsc::Sender<Result<(), String>>>,
     cancel: MediaCancelToken,
@@ -633,10 +705,12 @@ fn run_render_thread(
                     paused = false;
                     let _ = reply.send(());
                 }
-                Ok(PlaybackCmd::Seek(frame)) => {
-                    clock.seek(frame);
-                    render_loop.seek();
-                    buffered_first = None;
+                Ok(PlaybackCmd::Seek) => {
+                    if let Some(request) = seek_mailbox.take() {
+                        clock.seek(request.frame);
+                        render_loop.seek();
+                        buffered_first = None;
+                    }
                 }
                 Ok(PlaybackCmd::Stop) | Err(_) => return,
             }
@@ -658,9 +732,11 @@ fn run_render_thread(
                     render_loop.seek();
                     let _ = reply.send(());
                 }
-                Ok(PlaybackCmd::Seek(f)) => {
-                    clock.seek(f);
-                    render_loop.seek();
+                Ok(PlaybackCmd::Seek) => {
+                    if let Some(request) = seek_mailbox.take() {
+                        clock.seek(request.frame);
+                        render_loop.seek();
+                    }
                 }
                 Ok(PlaybackCmd::Stop) => return,
                 Err(TryRecvError::Empty) => break,
@@ -673,7 +749,12 @@ fn run_render_thread(
         }
 
         let (clamped, done) = loop_step(clock.frame(fps), total);
-        match render_loop.render_frame(clamped) {
+        let render_generation = seek_mailbox.generation();
+        let rendered = render_loop.render_frame(clamped);
+        if !seek_mailbox.is_current(render_generation) {
+            continue;
+        }
+        match rendered {
             Ok(frame) => {
                 if let Some(tx) = startup.take() {
                     if tx.send(Ok(())).is_err() {
@@ -790,6 +871,41 @@ mod tests {
         assert!(
             (500..=501).contains(&f),
             "expected ~500 right after seek, got {f}"
+        );
+    }
+
+    #[test]
+    fn rapid_seek_mailbox_keeps_only_the_latest_frame_and_one_wake() {
+        let mailbox = SeekMailbox::default();
+        let wake_count = (0..20)
+            .filter(|frame| mailbox.submit(*frame).should_wake)
+            .count();
+
+        assert_eq!(wake_count, 1);
+        assert_eq!(
+            mailbox.take(),
+            Some(SeekRequest {
+                frame: 19,
+                generation: 20
+            })
+        );
+        assert_eq!(mailbox.take(), None);
+    }
+
+    #[test]
+    fn a_new_seek_generation_supersedes_an_inflight_render() {
+        let mailbox = SeekMailbox::default();
+        mailbox.submit(10);
+        let rendering = mailbox.take().expect("first seek");
+        mailbox.submit(99);
+
+        assert!(!mailbox.is_current(rendering.generation));
+        assert_eq!(
+            mailbox.take(),
+            Some(SeekRequest {
+                frame: 99,
+                generation: 2
+            })
         );
     }
 }

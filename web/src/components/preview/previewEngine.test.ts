@@ -241,6 +241,30 @@ describe("shouldSyncPausedMediaToFrame", () => {
     expect(nativeApiHarness.unlistenCalls).toBe(1);
   });
 
+  it("retires the native playback identity as soon as scrubbing begins", async () => {
+    useProjectStore.setState({ projectEpoch: 4, timelineVersion: 7, timeline: rustTimeline() });
+    useEditorUiStore.setState({
+      activeFrame: 12,
+      currentFrame: 12,
+      isPlaying: true,
+      isScrubbing: false,
+      rustEngineFailed: false,
+    });
+    const root = await mountPlaybackHook();
+    const started = nativePlaybackController.currentIdentity();
+    expect(started).not.toBeNull();
+
+    await act(async () => {
+      useEditorUiStore.getState().setScrubbing(true);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(nativeApiHarness.playbackStop).toHaveBeenCalledWith(started);
+    expect(nativePlaybackController.currentIdentity()).toBeNull();
+    await unmountPlaybackHook(root);
+  });
+
   it("re-registers the native frame listener when PLAY retries after registration rejection", async () => {
     nativeApiHarness.deferred = true;
     useProjectStore.setState({ projectEpoch: 4, timelineVersion: 7, timeline: rustTimeline() });

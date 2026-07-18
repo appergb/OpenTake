@@ -231,8 +231,10 @@ export function drawClip(
     ctx.stroke();
   }
 
-  // 7. Label bar (ClipRenderer:594-621): clip wider than 20px.
-  if (width > CLIP.minWidthForLabel) {
+  // 7. Label bar (ClipRenderer:594-621): clip wider than 20px. Active move and
+  //    trim previews deliberately carry no media/name/timecode text; the
+  //    translucent content is enough to identify the clip while dragging.
+  if (!opts.ghost && width > CLIP.minWidthForLabel) {
     ctx.save();
     ctx.beginPath();
     ctx.rect(x + CLIP.stripWidth + 3, y, width - CLIP.stripWidth - 3, CLIP.labelBarHeight);

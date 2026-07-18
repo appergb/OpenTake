@@ -41,6 +41,14 @@ pub struct ThumbnailCacheMeta {
     pub times: Vec<f64>,
 }
 
+/// Encoded cache payload kept in memory until an epoch-safe scheduler commits
+/// the JPEG first and its JSON completeness marker last.
+pub struct EncodedSpriteArtifact {
+    pub jpeg: Vec<u8>,
+    pub json: Vec<u8>,
+    pub meta: ThumbnailCacheMeta,
+}
+
 fn jpg_path(cache_root: &Path, key: &str) -> PathBuf {
     cache_root
         .join(CACHE_SUBDIR)
@@ -112,21 +120,15 @@ fn compose_sprite(thumbs: &[VideoThumb]) -> Option<(RgbaImage, ThumbnailCacheMet
     Some((sprite, meta))
 }
 
-/// Save the sprite + sidecar under `<cache_root>/MediaVisualCache/`. The JSON
-/// sidecar is written last (completeness marker).
-pub fn save_sprite(cache_root: &Path, key: &str, thumbs: &[VideoThumb]) -> Result<()> {
+pub fn encode_sprite(thumbs: &[VideoThumb]) -> Result<Option<EncodedSpriteArtifact>> {
     let Some((sprite, meta)) = compose_sprite(thumbs) else {
-        return Ok(());
+        return Ok(None);
     };
-    let dir = cache_root.join(CACHE_SUBDIR);
-    std::fs::create_dir_all(&dir)?;
-
-    // Encode JPEG (drop alpha → RGB) at the configured quality.
     let rgb = image::DynamicImage::ImageRgba8(sprite).to_rgb8();
-    let mut jpg_bytes = Vec::new();
+    let mut jpeg = Vec::new();
     {
         let mut encoder =
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg_bytes, JPEG_QUALITY);
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, JPEG_QUALITY);
         encoder
             .encode(
                 rgb.as_raw(),
@@ -136,12 +138,21 @@ pub fn save_sprite(cache_root: &Path, key: &str, thumbs: &[VideoThumb]) -> Resul
             )
             .map_err(|e| crate::error::MediaError::Encode(format!("jpeg: {e}")))?;
     }
-    std::fs::write(jpg_path(cache_root, key), &jpg_bytes)?;
-
-    // Sidecar last.
     let json =
         serde_json::to_vec(&meta).map_err(|e| crate::error::MediaError::Encode(e.to_string()))?;
-    std::fs::write(json_path(cache_root, key), json)?;
+    Ok(Some(EncodedSpriteArtifact { jpeg, json, meta }))
+}
+
+/// Save the sprite + sidecar under `<cache_root>/MediaVisualCache/`. The JSON
+/// sidecar is written last (completeness marker).
+pub fn save_sprite(cache_root: &Path, key: &str, thumbs: &[VideoThumb]) -> Result<()> {
+    let Some(artifact) = encode_sprite(thumbs)? else {
+        return Ok(());
+    };
+    let dir = cache_root.join(CACHE_SUBDIR);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(jpg_path(cache_root, key), artifact.jpeg)?;
+    std::fs::write(json_path(cache_root, key), artifact.json)?;
     Ok(())
 }
 
@@ -314,6 +325,22 @@ mod tests {
         let back = load_sprite(dir.path(), "multi").unwrap();
         assert_eq!(back.len(), 60);
         assert_eq!(back[59].time_secs, 59.0);
+    }
+
+    #[test]
+    fn encoded_sprite_artifact_preserves_distinct_sample_times_without_writing() {
+        let artifact = encode_sprite(&[
+            thumb(0.0, 2, 2, 10),
+            thumb(12.5, 2, 2, 120),
+            thumb(25.0, 2, 2, 240),
+        ])
+        .unwrap()
+        .expect("non-empty artifact");
+
+        assert!(!artifact.jpeg.is_empty());
+        assert_eq!(artifact.meta.times, vec![0.0, 12.5, 25.0]);
+        let sidecar: ThumbnailCacheMeta = serde_json::from_slice(&artifact.json).unwrap();
+        assert_eq!(sidecar, artifact.meta);
     }
 
     fn avg(f: &RgbaFrame) -> f64 {

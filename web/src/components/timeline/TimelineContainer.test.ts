@@ -220,6 +220,41 @@ describe("marked range context routing", () => {
   });
 });
 
+describe("timeline sprite request lifecycle", () => {
+  it("backs off and retries transient null transport results before releasing the poster fallback", () => {
+    expect(timelineContainer.timelineSpriteTransportRetryDelay?.(0)).toBe(250);
+    expect(timelineContainer.timelineSpriteTransportRetryDelay?.(1)).toBe(500);
+    expect(timelineContainer.timelineSpriteTransportRetryDelay?.(4)).toBe(2_000);
+    expect(timelineContainer.timelineSpriteTransportRetryDelay?.(8)).toBeNull();
+  });
+
+  it("does not leave an in-flight lock when a retired poster effect finishes late", () => {
+    const inFlight = new Set<string>();
+
+    expect(
+      timelineContainer.acquireTimelineSpriteRequest?.("media-key", inFlight, true),
+    ).toBe(false);
+    expect(inFlight).toEqual(new Set());
+
+    expect(
+      timelineContainer.acquireTimelineSpriteRequest?.("media-key", inFlight, false),
+    ).toBe(true);
+    expect(inFlight).toEqual(new Set(["media-key"]));
+  });
+
+  it("wakes the current visual effect when a retired poster request settles", () => {
+    expect(
+      timelineContainer.shouldRetryTimelineVisualAfterPosterSettlement?.(true, true),
+    ).toBe(true);
+    expect(
+      timelineContainer.shouldRetryTimelineVisualAfterPosterSettlement?.(false, true),
+    ).toBe(false);
+    expect(
+      timelineContainer.shouldRetryTimelineVisualAfterPosterSettlement?.(true, false),
+    ).toBe(false);
+  });
+});
+
 describe("accessibleClipRects", () => {
   it("maps canvas clips to stable accessible button rectangles", () => {
     const tl = timeline([
@@ -319,6 +354,8 @@ describe("structured media prewarm coordination", () => {
     expect(timelineContainerSource).toContain(
       "maxFrames: TIMELINE_SPRITE_FRAME_LIMIT",
     );
+    expect(timelineContainerSource).toContain("requestTimelineSprite");
+    expect(timelineContainerSource).not.toContain("includeSprite: true");
   });
 
   it("does not let an old project admission block or satisfy the current project", () => {
@@ -371,5 +408,25 @@ describe("structured media prewarm coordination", () => {
     for (const result of ["queued", "duplicate", "busy", "staleProject", null] as const) {
       expect(timelineContainer.prewarmResultAllowsCacheRead?.(result)).toBe(false);
     }
+  });
+});
+
+describe("timeline ruler scrub lifecycle", () => {
+  it("does not settle the compositor during pointer move", () => {
+    const scrubMove = timelineContainerSource
+      .split('if (d.kind === "scrub") {')[1]
+      ?.split('if (d.kind === "move") {')[0];
+
+    expect(scrubMove).toBeDefined();
+    expect(scrubMove).not.toContain("setScrubbing(false)");
+  });
+
+  it("keeps paused Rust composites disabled until the scrub ends", () => {
+    const previewSource = readFileSync(
+      new URL("../preview/Preview.tsx", import.meta.url),
+      "utf8",
+    );
+
+    expect(previewSource).toContain("!isPlaying && !isScrubbing");
   });
 });

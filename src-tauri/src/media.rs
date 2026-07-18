@@ -41,13 +41,14 @@ use opentake_media::library::{FavoriteRequest, LibraryStore, PreparedFavorite};
 use opentake_media::MediaCancelToken;
 use opentake_media::{
     cache_key::visual_file_identity_key,
-    decode_frame_at, decode_frames_at,
+    decode_frame_at, decode_frame_at_cancellable, decode_frames_at,
     thumbnail::{
-        save_sprite, sprite::grid_geometry, video_thumbnail_times, ThumbnailCacheMeta, VideoThumb,
+        encode_sprite, representative_thumbnail_times, save_sprite, sprite::grid_geometry,
+        video_thumbnail_times, EncodedSpriteArtifact, ThumbnailCacheMeta, VideoThumb,
         MAX_VIDEO_THUMBNAILS, THUMB_MAX_SIZE, THUMB_TOLERANCE_SECS,
     },
     waveform::store::CACHE_SUBDIR,
-    FrameRequest, MediaEngine, RgbaFrame,
+    FrameRequest, MediaEngine, MediaError, RgbaFrame,
 };
 
 use crate::library::LibraryState;
@@ -326,6 +327,13 @@ pub struct ThumbnailDto {
     pub times: Vec<f64>,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineSpriteDto {
+    pub status: prewarm::TimelineSpriteStatus,
+    pub thumbnail: Option<ThumbnailDto>,
+}
+
 fn empty_thumbnail_dto(entry: &MediaManifestEntry) -> ThumbnailDto {
     ThumbnailDto {
         media_ref: entry.id.clone(),
@@ -350,6 +358,10 @@ fn visual_cache_dir(cache_root: &Path) -> PathBuf {
 
 fn sprite_path_for(cache_root: &Path, key: &str) -> PathBuf {
     visual_cache_dir(cache_root).join(format!("{key}.thumbs.jpg"))
+}
+
+fn partial_sprite_path_for(cache_root: &Path, key: &str) -> PathBuf {
+    visual_cache_dir(cache_root).join(format!("{key}.thumbs.partial.jpg"))
 }
 
 fn poster_path_for(cache_root: &Path, key: &str) -> PathBuf {
@@ -482,9 +494,11 @@ fn sprite_meta_path_for(cache_root: &Path, key: &str) -> PathBuf {
     visual_cache_dir(cache_root).join(format!("{key}.thumbs.json"))
 }
 
-fn read_cached_sprite_meta(cache_root: &Path, key: &str) -> Option<ThumbnailCacheMeta> {
-    let sprite_path = sprite_path_for(cache_root, key);
-    let meta_path = sprite_meta_path_for(cache_root, key);
+fn partial_sprite_meta_path_for(cache_root: &Path, key: &str) -> PathBuf {
+    visual_cache_dir(cache_root).join(format!("{key}.thumbs.partial.json"))
+}
+
+fn read_sprite_meta_at(sprite_path: &Path, meta_path: &Path) -> Option<ThumbnailCacheMeta> {
     if !sprite_path.is_file() || !meta_path.is_file() {
         return None;
     }
@@ -499,6 +513,46 @@ fn read_cached_sprite_meta(cache_root: &Path, key: &str) -> Option<ThumbnailCach
         return None;
     }
     Some(meta)
+}
+
+fn read_cached_sprite_meta(cache_root: &Path, key: &str) -> Option<ThumbnailCacheMeta> {
+    let sprite_path = sprite_path_for(cache_root, key);
+    let meta_path = sprite_meta_path_for(cache_root, key);
+    read_sprite_meta_at(&sprite_path, &meta_path)
+}
+
+fn thumbnail_dto_for_sprite(
+    entry: &MediaManifestEntry,
+    cache_root: &Path,
+    poster_key: &str,
+    sprite_path: &Path,
+    meta: ThumbnailCacheMeta,
+) -> ThumbnailDto {
+    let poster = poster_path_for(cache_root, poster_key);
+    ThumbnailDto {
+        media_ref: entry.id.clone(),
+        kind: entry.kind,
+        thumbnail_path: poster
+            .is_file()
+            .then(|| poster.to_string_lossy().into_owned()),
+        sprite_path: Some(sprite_path.to_string_lossy().into_owned()),
+        tile_width: Some(meta.tile_width),
+        tile_height: Some(meta.tile_height),
+        columns: Some(meta.columns),
+        times: meta.times,
+    }
+}
+
+fn commit_sprite_artifact(
+    context: &prewarm::JobContext,
+    sprite_path: &Path,
+    meta_path: &Path,
+    artifact: &EncodedSpriteArtifact,
+) -> Result<bool, String> {
+    if !context.commit_staged_bytes(sprite_path, &artifact.jpeg)? {
+        return Ok(false);
+    }
+    context.commit_staged_bytes(meta_path, &artifact.json)
 }
 
 fn sprite_frame_limit(max_frames: Option<usize>) -> usize {
@@ -2166,6 +2220,177 @@ pub fn generate_thumbnail(
         );
         e
     })
+}
+
+/// Cache-first timeline sprite request. A miss only admits work to the single
+/// low-priority worker; the command never performs multi-point FFmpeg seeks on
+/// the Tauri command thread. Partial sprites are published every six decoded
+/// samples and the final JSON sidecar remains the completeness marker.
+#[tauri::command]
+pub fn request_timeline_sprite(
+    core: State<'_, AppCore>,
+    media: State<'_, MediaState>,
+    prewarm: State<'_, prewarm::PrewarmScheduler>,
+    media_ref: String,
+    max_frames: Option<usize>,
+) -> Result<TimelineSpriteDto, String> {
+    const PARTIAL_STRIDE: usize = 6;
+
+    let snapshot = core.runtime_snapshot();
+    let entry = snapshot
+        .media
+        .entries
+        .iter()
+        .find(|entry| entry.id == media_ref)
+        .ok_or_else(|| format!("media not found: {media_ref}"))?;
+    if entry.kind != ClipType::Video {
+        return Ok(TimelineSpriteDto {
+            status: prewarm::TimelineSpriteStatus::Cached,
+            thumbnail: None,
+        });
+    }
+    let path = source_path_for_entry(entry, snapshot.project_dir.as_deref())?;
+    if !path.is_file() {
+        return Ok(TimelineSpriteDto {
+            status: prewarm::TimelineSpriteStatus::Failed,
+            thumbnail: None,
+        });
+    }
+    let cache_root = media.engine().cache_root().to_path_buf();
+    let key = cache_key_for(&path)?;
+    let limit = sprite_frame_limit(max_frames);
+    let sprite_cache_key = format!("{key}.timeline-v2-{limit}");
+    let final_sprite = sprite_path_for(&cache_root, &sprite_cache_key);
+    if let Some(meta) = read_cached_sprite_meta(&cache_root, &sprite_cache_key) {
+        return Ok(TimelineSpriteDto {
+            status: prewarm::TimelineSpriteStatus::Cached,
+            thumbnail: Some(thumbnail_dto_for_sprite(
+                entry,
+                &cache_root,
+                &key,
+                &final_sprite,
+                meta,
+            )),
+        });
+    }
+
+    let partial_sprite = partial_sprite_path_for(&cache_root, &sprite_cache_key);
+    let partial_meta_path = partial_sprite_meta_path_for(&cache_root, &sprite_cache_key);
+    let partial_meta = read_sprite_meta_at(&partial_sprite, &partial_meta_path);
+    let partial_thumbnail = partial_meta
+        .map(|meta| thumbnail_dto_for_sprite(entry, &cache_root, &key, &partial_sprite, meta));
+    let epoch = snapshot.project_epoch;
+    let duration = entry.duration;
+    let job_key = sprite_cache_key.clone();
+    let status_key = sprite_cache_key.clone();
+    let job_final_sprite = final_sprite.clone();
+    let job_final_meta = sprite_meta_path_for(&cache_root, &sprite_cache_key);
+    let job_partial_sprite = partial_sprite.clone();
+    let job_partial_meta = partial_meta_path.clone();
+    let admission = prewarm.schedule(
+        epoch,
+        prewarm::PrewarmKind::TimelineSprite,
+        job_key,
+        false,
+        move |context| {
+            let times = representative_thumbnail_times(duration, limit);
+            let request = FrameRequest {
+                time_secs: 0.0,
+                max_size: THUMB_MAX_SIZE,
+                tolerance_secs: THUMB_TOLERANCE_SECS,
+                apply_rotation: true,
+            };
+            let cancel = context.cancel_token();
+            let mut thumbs = Vec::with_capacity(times.len());
+            let mut last_time = f64::NEG_INFINITY;
+            for (index, time_secs) in times.iter().copied().enumerate() {
+                if context.is_cancelled() {
+                    context.set_timeline_sprite_status(prewarm::TimelineSpriteStatus::Cancelled);
+                    return;
+                }
+                let frame_request = FrameRequest {
+                    time_secs,
+                    ..request.clone()
+                };
+                match decode_frame_at_cancellable(&path, &frame_request, &cancel) {
+                    Ok((actual, frame)) if actual > last_time => {
+                        last_time = actual;
+                        thumbs.push(VideoThumb {
+                            time_secs: actual,
+                            image: frame,
+                        });
+                    }
+                    Ok(_) | Err(MediaError::Decode(_)) => continue,
+                    Err(MediaError::Cancelled) => {
+                        context
+                            .set_timeline_sprite_status(prewarm::TimelineSpriteStatus::Cancelled);
+                        return;
+                    }
+                    Err(_) => {
+                        context.set_timeline_sprite_status(prewarm::TimelineSpriteStatus::Failed);
+                        return;
+                    }
+                }
+                if !thumbs.is_empty()
+                    && thumbs.len() % PARTIAL_STRIDE == 0
+                    && index + 1 < times.len()
+                {
+                    let Ok(Some(artifact)) = encode_sprite(&thumbs) else {
+                        context.set_timeline_sprite_status(prewarm::TimelineSpriteStatus::Failed);
+                        return;
+                    };
+                    match commit_sprite_artifact(
+                        &context,
+                        &job_partial_sprite,
+                        &job_partial_meta,
+                        &artifact,
+                    ) {
+                        Ok(true) => context
+                            .set_timeline_sprite_status(prewarm::TimelineSpriteStatus::Partial),
+                        Ok(false) => return,
+                        Err(_) => {
+                            context
+                                .set_timeline_sprite_status(prewarm::TimelineSpriteStatus::Failed);
+                            return;
+                        }
+                    }
+                }
+            }
+            let Ok(Some(artifact)) = encode_sprite(&thumbs) else {
+                context.set_timeline_sprite_status(prewarm::TimelineSpriteStatus::Failed);
+                return;
+            };
+            match commit_sprite_artifact(&context, &job_final_sprite, &job_final_meta, &artifact) {
+                Ok(true) => {
+                    context.set_timeline_sprite_status(prewarm::TimelineSpriteStatus::Cached)
+                }
+                Ok(false) => {}
+                Err(_) => context.set_timeline_sprite_status(prewarm::TimelineSpriteStatus::Failed),
+            }
+        },
+    );
+
+    let status = match admission {
+        prewarm::PrewarmResult::Cached => prewarm::TimelineSpriteStatus::Cached,
+        prewarm::PrewarmResult::Busy => prewarm::TimelineSpriteStatus::Busy,
+        prewarm::PrewarmResult::StaleProject => prewarm::TimelineSpriteStatus::StaleProject,
+        prewarm::PrewarmResult::Cancelled => prewarm::TimelineSpriteStatus::Cancelled,
+        prewarm::PrewarmResult::Queued | prewarm::PrewarmResult::Duplicate => prewarm
+            .timeline_sprite_status(&status_key)
+            .unwrap_or(prewarm::TimelineSpriteStatus::Queued),
+    };
+    Ok(TimelineSpriteDto {
+        status,
+        thumbnail: partial_thumbnail,
+    })
+}
+
+#[tauri::command]
+pub fn set_timeline_sprite_interactive(
+    prewarm: State<'_, prewarm::PrewarmScheduler>,
+    active: bool,
+) {
+    prewarm.set_interactive(active);
 }
 
 /// `preview_poster`: decode (and disk-cache) a HI-RES first-frame still for the

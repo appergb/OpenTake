@@ -36,6 +36,7 @@ import {
 import { useT } from "../../i18n";
 import {
   captureFrameToMedia,
+  cancelCompositeFrame,
   compositeFrame,
   getPreviewEndpoint,
   isTauri,
@@ -67,6 +68,7 @@ import {
 } from "./playbackRoute";
 import { rustEngineEnabled } from "./rustEngine";
 import { RustFrameBuffer } from "./RustFrameBuffer.tsx";
+import { createScrubGesture, transitionScrubGesture } from "./scrubGesture";
 
 export function Preview() {
   const t = useT();
@@ -76,6 +78,7 @@ export function Preview() {
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
   const setCurrentFrame = useEditorUiStore((s) => s.setCurrentFrame);
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
+  const isScrubbing = useEditorUiStore((s) => s.isScrubbing);
   const rustEngineFailed = useEditorUiStore((s) => s.rustEngineFailed);
   const setRustEngineFailed = useEditorUiStore((s) => s.setRustEngineFailed);
   const webkitPlaybackFailedRevision = useEditorUiStore(
@@ -224,9 +227,9 @@ export function Preview() {
   const timelinePlaybackAllowed =
     playbackRoute.kind !== "unsupported" || retryableRustFailure;
   const requestCompositeStill = useCallback(
-    (frame: number) =>
+    (request: Parameters<typeof compositeFrame>[0]) =>
       compositeFrame(
-        frame,
+        request,
         previewQualityMaxSize(previewQualityShortEdge, timeline.width, timeline.height),
       ),
     [previewQualityShortEdge, timeline.height, timeline.width],
@@ -425,11 +428,12 @@ export function Preview() {
                   timelineVersion={timelineVersion}
                   engineDriving={playbackRoute.kind === "rust" && isPlaying}
                   stillFrame={
-                    playbackRoute.kind !== "unsupported" && !isPlaying
+                    playbackRoute.kind !== "unsupported" && !isPlaying && !isScrubbing
                       ? Math.max(0, Math.floor(activeFrame))
                       : null
                   }
                   requestCompositeStill={requestCompositeStill}
+                  cancelCompositeStill={cancelCompositeFrame}
                   onTerminalFailure={() => pushToast(t("preview.terminalFrameFailed"))}
                 />
                 {/* Below-fit canvas outline (upstream PreviewContainerView.swift:
@@ -740,6 +744,7 @@ function ScrubBar({
   onScrubbingChange?: (scrubbing: boolean) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const gestureRef = useRef(createScrubGesture());
   const [hover, setHover] = useState(false);
   const progress = total > 0 ? frame / total : 0;
 
@@ -758,14 +763,29 @@ function ScrubBar({
       onMouseLeave={() => setHover(false)}
       onPointerDown={(e) => {
         (e.target as HTMLElement).setPointerCapture(e.pointerId);
-        onScrubbingChange?.(true);
-        seekFromEvent(e.clientX);
+        const transition = transitionScrubGesture(gestureRef.current, "down");
+        gestureRef.current = transition.state;
+        onScrubbingChange?.(transition.scrubbing);
+        if (transition.effect === "interactive-seek") seekFromEvent(e.clientX);
       }}
       onPointerMove={(e) => {
-        if (e.buttons === 1) seekFromEvent(e.clientX);
+        if (e.buttons !== 1) return;
+        const transition = transitionScrubGesture(gestureRef.current, "move");
+        gestureRef.current = transition.state;
+        onScrubbingChange?.(transition.scrubbing);
+        if (transition.effect === "interactive-seek") seekFromEvent(e.clientX);
       }}
-      onPointerUp={() => onScrubbingChange?.(false)}
-      onLostPointerCapture={() => onScrubbingChange?.(false)}
+      onPointerUp={(e) => {
+        const transition = transitionScrubGesture(gestureRef.current, "up");
+        gestureRef.current = transition.state;
+        if (transition.effect === "exact-seek") seekFromEvent(e.clientX);
+        onScrubbingChange?.(transition.scrubbing);
+      }}
+      onLostPointerCapture={() => {
+        const transition = transitionScrubGesture(gestureRef.current, "cancel");
+        gestureRef.current = transition.state;
+        if (transition.effect !== "none") onScrubbingChange?.(transition.scrubbing);
+      }}
       style={{
         height: 18,
         flex: "0 0 auto",

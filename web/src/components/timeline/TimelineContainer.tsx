@@ -54,6 +54,8 @@ import {
   getWaveform,
   isTauri,
   preloadMedia,
+  requestTimelineSprite,
+  setTimelineSpriteInteractive,
   type PrewarmResult,
 } from "../../lib/api";
 import { assetUrl } from "../../lib/asset";
@@ -202,7 +204,7 @@ export function collectMoveSnapTargets(
 }
 
 export function prewarmResultNeedsRetry(result: PrewarmResult | null): boolean {
-  return result === "queued" || result === "duplicate" || result === "busy";
+  return result === "queued" || result === "duplicate" || result === "busy" || result === "cancelled";
 }
 
 export function prewarmResultAllowsCacheRead(result: PrewarmResult | null): boolean {
@@ -241,6 +243,36 @@ export function timelineVisualRequestShouldStart(
   inFlight: Set<string>,
 ): boolean {
   return !timelineVisualCacheIsCurrent(currentKey, cachedKey) && !inFlight.has(currentKey);
+}
+
+/** Acquire the component-wide sprite request lease only for a live effect.
+ * Poster decoding may finish after its owning effect was retired; admitting a
+ * sprite poll from that callback would leave an in-flight key with no live
+ * poller to release it. */
+export function acquireTimelineSpriteRequest(
+  key: string,
+  inFlight: Set<string>,
+  disposed: boolean,
+): boolean {
+  if (disposed || inFlight.has(key)) return false;
+  inFlight.add(key);
+  return true;
+}
+
+const TIMELINE_SPRITE_TRANSPORT_RETRY_LIMIT = 8;
+
+/** Back off transient IPC failures without pinning the poster-only fallback.
+ * The lease is released before each retry so a newer effect can take over. */
+export function timelineSpriteTransportRetryDelay(failureCount: number): number | null {
+  if (failureCount >= TIMELINE_SPRITE_TRANSPORT_RETRY_LIMIT) return null;
+  return Math.min(2_000, 250 * 2 ** failureCount);
+}
+
+export function shouldRetryTimelineVisualAfterPosterSettlement(
+  disposed: boolean,
+  mounted: boolean,
+): boolean {
+  return disposed && mounted;
 }
 
 export function clipAccessTargetSize(width: number, height: number): { width: number; height: number } {
@@ -567,6 +599,7 @@ export function TimelineContainer() {
   const toolMode = useEditorUiStore((s) => s.toolMode);
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
+  const isScrubbing = useEditorUiStore((s) => s.isScrubbing);
   const setCurrentFrame = useEditorUiStore((s) => s.setCurrentFrame);
   const setScrubbing = useEditorUiStore((s) => s.setScrubbing);
   const selectedClipIds = useEditorUiStore((s) => s.selectedClipIds);
@@ -652,6 +685,7 @@ export function TimelineContainer() {
   }, []);
   const [waveformVersion, setWaveformVersion] = useState(0);
   const [thumbnailVersion, setThumbnailVersion] = useState(0);
+  const [thumbnailRequestVersion, setThumbnailRequestVersion] = useState(0);
   latestVisualCacheKeysRef.current = visualCacheKeys;
   const currentWaveforms = useMemo(() => {
     const current = new Map<string, number[]>();
@@ -1007,6 +1041,9 @@ export function TimelineContainer() {
   // Load visual thumbnails in two phases: a poster first so dropped clips paint
   // immediately, then a video sprite that upgrades the same cache entry.
   useEffect(() => {
+    let disposed = false;
+    const retryTimers = new Set<ReturnType<typeof setTimeout>>();
+    const startedSpriteKeys = new Set<string>();
     const wanted = new Map<string, ClipType>();
     for (const track of timeline.tracks) {
       for (const clip of track.clips) {
@@ -1049,20 +1086,66 @@ export function TimelineContainer() {
       return true;
     };
 
-    const startSpriteLoad = (ref: string, key: string) => {
-      if (thumbnailSpriteInFlightRef.current.has(key)) return;
-      thumbnailSpriteInFlightRef.current.add(key);
-      void generateThumbnail(ref, {
-        includeSprite: true,
-        maxFrames: TIMELINE_SPRITE_FRAME_LIMIT,
-      })
-        .then((result) => storeThumbnail(ref, key, result, true))
-        .catch((err) => {
-          console.warn(`thumbnail sprite load failed for ${ref}:`, err);
+    const releaseSpriteLease = (key: string) => {
+      thumbnailSpriteInFlightRef.current.delete(key);
+      startedSpriteKeys.delete(key);
+    };
+
+    const startSpriteLoad = (ref: string, key: string, transportFailureCount = 0) => {
+      if (!acquireTimelineSpriteRequest(key, thumbnailSpriteInFlightRef.current, disposed)) return;
+      startedSpriteKeys.add(key);
+      const poll = () => {
+        if (disposed) {
+          releaseSpriteLease(key);
+          return;
+        }
+        void requestTimelineSprite(ref, {
+          maxFrames: TIMELINE_SPRITE_FRAME_LIMIT,
         })
-        .finally(() => {
+          .then(async (result) => {
+            if (disposed) {
+              releaseSpriteLease(key);
+              return;
+            }
+            if (!result) {
+              releaseSpriteLease(key);
+              const delay = timelineSpriteTransportRetryDelay(transportFailureCount);
+              if (delay == null) return;
+              const timer = setTimeout(() => {
+                retryTimers.delete(timer);
+                startSpriteLoad(ref, key, transportFailureCount + 1);
+              }, delay);
+              retryTimers.add(timer);
+              return;
+            }
+            if (result.thumbnail) {
+              await storeThumbnail(ref, key, result.thumbnail, true);
+            }
+            if (result.status === "cached" || result.status === "failed" || result.status === "staleProject") {
+              releaseSpriteLease(key);
+              return;
+            }
+            const delay = result.status === "running" || result.status === "partial" ? 150 : 250;
+            const timer = setTimeout(() => {
+              retryTimers.delete(timer);
+              poll();
+            }, delay);
+            retryTimers.add(timer);
+          })
+          .catch((err) => {
+            console.warn(`thumbnail sprite load failed for ${ref}:`, err);
+            releaseSpriteLease(key);
+          });
+      };
+      poll();
+    };
+
+    const cleanup = () => {
+      disposed = true;
+      for (const timer of retryTimers) clearTimeout(timer);
+      for (const key of startedSpriteKeys) {
           thumbnailSpriteInFlightRef.current.delete(key);
-        });
+      }
     };
 
     for (const [ref, mediaType] of wanted) {
@@ -1088,12 +1171,29 @@ export function TimelineContainer() {
           })
           .finally(() => {
             thumbnailPosterInFlightRef.current.delete(key);
+            if (
+              shouldRetryTimelineVisualAfterPosterSettlement(disposed, mountedRef.current)
+            ) {
+              setThumbnailRequestVersion((version) => version + 1);
+            }
           });
       } else if (mediaType === "video" && existing && existing.kind !== "sprite") {
         startSpriteLoad(ref, key);
       }
     }
-  }, [timeline, missingMediaRefs, visualCacheKeys]);
+    return cleanup;
+  }, [
+    timeline,
+    missingMediaRefs,
+    visualCacheKeys,
+    isPlaying,
+    isScrubbing,
+    thumbnailRequestVersion,
+  ]);
+
+  useEffect(() => {
+    void setTimelineSpriteInteractive(isPlaying || isScrubbing).catch(() => undefined);
+  }, [isPlaying, isScrubbing]);
 
   // Paint ruler canvas (sticky top).
   useEffect(() => {
@@ -1193,6 +1293,20 @@ export function TimelineContainer() {
     return () => el.removeEventListener("wheel", handler);
   }, []);
 
+  const updateRulerScrubFrame = useCallback(
+    (docX: number) => {
+      const raw = frameAt(docX, zoomScale);
+      const targets = collectTargets(timeline, EMPTY_EXCLUDE, null, false);
+      const snap = findSnapDelta([raw], targets, zoomScale, scrubSnapRef.current, [0]);
+      scrubSnapRef.current = snap
+        ? { frame: snap.snappedFrame, probeOffset: snap.probeOffset }
+        : null;
+      setCurrentFrame(Math.max(0, Math.round(snap ? raw + snap.delta : raw)));
+      maybeSnapFeedback(snap ? snap.snappedFrame : null);
+    },
+    [setCurrentFrame, timeline, zoomScale],
+  );
+
   // --- Pointer down: the decision tree (SPEC §5.8) ---
   const onPointerDown = useCallback(
     (e: React.PointerEvent) => {
@@ -1205,12 +1319,7 @@ export function TimelineContainer() {
         dragRef.current = { kind: "scrub" };
         scrubSnapRef.current = null;
         setScrubbing(true);
-        // Snap the playhead to the nearest clip start/end (clip edges only — not
-        // the playhead itself), so scrubbing magnetizes to cut points.
-        const raw = frameAt(docX, zoomScale);
-        const snap = findSnap(raw, collectTargets(timeline, EMPTY_EXCLUDE, null, false), zoomScale, null);
-        setCurrentFrame(Math.max(0, Math.round(snap ? snap.frame : raw)));
-        maybeSnapFeedback(snap ? snap.frame : null);
+        updateRulerScrubFrame(docX);
         return;
       }
 
@@ -1351,6 +1460,7 @@ export function TimelineContainer() {
       selectGap,
       setCurrentFrame,
       setScrubbing,
+      updateRulerScrubFrame,
       docWidth,
       docHeight,
     ],
@@ -1363,17 +1473,9 @@ export function TimelineContainer() {
       const { docX, docY } = toDoc(e);
 
       if (d.kind === "scrub") {
-        // Sticky-snap the dragged playhead to the nearest clip edge so it
-        // magnetizes to cut points without jittering; fire a tick on engage.
-        const raw = frameAt(docX, zoomScale);
-        const targets = collectTargets(timeline, EMPTY_EXCLUDE, null, false);
-        const snap = findSnapDelta([raw], targets, zoomScale, scrubSnapRef.current, [0]);
-        scrubSnapRef.current = snap
-          ? { frame: snap.snappedFrame, probeOffset: snap.probeOffset }
-          : null;
-        setCurrentFrame(Math.max(0, Math.round(snap ? raw + snap.delta : raw)));
-        maybeSnapFeedback(snap ? snap.snappedFrame : null);
-        setScrubbing(false);
+        // Interactive moves update only the playhead. The settled Rust
+        // composite remains disabled until pointer-up publishes one exact seek.
+        updateRulerScrubFrame(docX);
         return;
       }
 
@@ -1514,7 +1616,7 @@ export function TimelineContainer() {
         forceTick((n) => n + 1);
       }
     },
-    [toDoc, zoomScale, timeline, trackHeights, activeFrame, setCurrentFrame, selectClips],
+    [toDoc, zoomScale, timeline, trackHeights, activeFrame, setCurrentFrame, selectClips, updateRulerScrubFrame],
   );
 
   // Abandon an in-progress drag WITHOUT committing — fires on pointercancel (a
@@ -1541,6 +1643,12 @@ export function TimelineContainer() {
       setScrubbing(false);
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
       if (!d) return;
+
+      if (d.kind === "scrub") {
+        const { docX } = toDoc(e);
+        updateRulerScrubFrame(docX);
+        return;
+      }
 
       if (d.kind === "move") {
         // No-op: no movement, no track change, and not dropping on a new track.
@@ -1712,7 +1820,7 @@ export function TimelineContainer() {
         void edit.trimClips(edits);
       }
     },
-    [timeline, setScrubbing],
+    [timeline, setScrubbing, toDoc, updateRulerScrubFrame],
   );
 
   // Ghost preview offsets for the active drag (read from dragRef during render).

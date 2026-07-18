@@ -114,17 +114,18 @@ export function createNativePlaybackController(
 
   const stopIdentity = async (identity: PlaybackIdentity) => {
     if (!samePlaybackIdentity(current, identity)) return;
+    // Retire locally before awaiting IPC. A final backend frame can race the
+    // stop command across the WebView bridge; keeping `current` alive until the
+    // promise resolves lets that stale frame overwrite a newer scrub result.
+    current = null;
+    paused = false;
+    lastSequence = -1;
+    clearNativePlaybackPublication();
     try {
       await playbackApi.playbackStop(identity);
     } catch (error) {
       const decoded = api.decodePlaybackCommandError(error);
       if (!decoded || decoded.code === "engine") throw error;
-    }
-    if (samePlaybackIdentity(current, identity)) {
-      current = null;
-      paused = false;
-      lastSequence = -1;
-      clearNativePlaybackPublication();
     }
   };
 

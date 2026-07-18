@@ -716,7 +716,13 @@ export async function previewPoster(
   }
 }
 
-export type PrewarmResult = "queued" | "duplicate" | "cached" | "busy" | "staleProject";
+export type PrewarmResult =
+  | "queued"
+  | "duplicate"
+  | "cached"
+  | "busy"
+  | "staleProject"
+  | "cancelled";
 
 const PREWARM_RESULTS = new Set<PrewarmResult>([
   "queued",
@@ -724,6 +730,7 @@ const PREWARM_RESULTS = new Set<PrewarmResult>([
   "cached",
   "busy",
   "staleProject",
+  "cancelled",
 ]);
 
 export function decodePrewarmResult(value: unknown): PrewarmResult | null {
@@ -747,6 +754,42 @@ export async function preloadMedia(mediaRef: string): Promise<PrewarmResult | nu
   }
 }
 
+export type TimelineSpriteStatus =
+  | "queued"
+  | "running"
+  | "partial"
+  | "cached"
+  | "cancelled"
+  | "failed"
+  | "busy"
+  | "staleProject";
+
+export interface TimelineSpriteResult {
+  status: TimelineSpriteStatus;
+  thumbnail: ThumbnailResult | null;
+}
+
+export async function requestTimelineSprite(
+  mediaRef: string,
+  opts?: { maxFrames?: number },
+): Promise<TimelineSpriteResult | null> {
+  await ensureTauri();
+  if (!invokeImpl) return null;
+  try {
+    const args: Record<string, unknown> = { mediaRef };
+    if (opts?.maxFrames != null) args.maxFrames = opts.maxFrames;
+    return await invokeImpl<TimelineSpriteResult>("request_timeline_sprite", args);
+  } catch (error) {
+    console.warn(`request_timeline_sprite failed for ${mediaRef}:`, error);
+    return null;
+  }
+}
+
+export async function setTimelineSpriteInteractive(active: boolean): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) await invokeImpl<void>("set_timeline_sprite_interactive", { active });
+}
+
 // MARK: - Timeline composite preview (#47)
 //
 // `composite_frame` renders the timeline at a frame on the GPU (wgpu compositor)
@@ -768,8 +811,25 @@ export interface CompositeFrame {
   dataUrl: string;
 }
 
+export interface CompositeStillRequest {
+  frame: number;
+  projectEpoch: number;
+  timelineVersion: number;
+  sessionId: string;
+  sessionGeneration: number;
+  seekGeneration: number;
+}
+
+export interface CancelCompositeStillRequest {
+  projectEpoch: number;
+  timelineVersion: number;
+  sessionId: string;
+  sessionGeneration: number;
+  minimumSeekGeneration: number;
+}
+
 export async function compositeFrame(
-  frame: number,
+  request: CompositeStillRequest,
   maxSize?: number,
 ): Promise<CompositeFrame | null> {
   await ensureTauri();
@@ -778,10 +838,20 @@ export async function compositeFrame(
   // non-integer is rejected/coerced inconsistently by Tauri's deserializer).
   if (invokeImpl)
     return invokeImpl<CompositeFrame>("composite_frame", {
-      frame: Math.floor(frame),
+      request: {
+        ...request,
+        frame: Math.floor(request.frame),
+      },
       maxSize,
     });
   return null;
+}
+
+export async function cancelCompositeFrame(
+  request: CancelCompositeStillRequest,
+): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) await invokeImpl<void>("cancel_composite_frame", { ...request });
 }
 
 /**

@@ -41,6 +41,7 @@ function timeline(): Timeline {
  *  at each fillRect/stroke so the test can assert what colors were painted. */
 function recordingCtx() {
   const calls: { op: string; style: string; args: number[] }[] = [];
+  const texts: string[] = [];
   let fillStyle = "";
   let strokeStyle = "";
   const stub = {
@@ -56,7 +57,7 @@ function recordingCtx() {
     clearRect() {},
     fillRect(...a: number[]) { calls.push({ op: "fillRect", style: fillStyle, args: a }); },
     strokeRect(...a: number[]) { calls.push({ op: "strokeRect", style: strokeStyle, args: a }); },
-    fillText() {},
+    fillText(value: string) { texts.push(value); },
     beginPath() {},
     moveTo() {},
     lineTo() {},
@@ -80,7 +81,7 @@ function recordingCtx() {
     drawImage() {},
     roundRect() {},
   };
-  return { ctx: stub as unknown as CanvasRenderingContext2D, calls };
+  return { ctx: stub as unknown as CanvasRenderingContext2D, calls, texts };
 }
 
 function baseState(over: Partial<PaintState>): PaintState {
@@ -159,6 +160,24 @@ describe("ripple-insert indicator (content canvas)", () => {
     const { ctx, calls } = recordingCtx();
     paintTimeline(ctx, baseState({ mediaGhost: ghost }));
     expect(calls.some((c) => c.op === "stroke" && c.style === "rgb(255,204,0)")).toBe(false);
+  });
+});
+
+describe("active clip drag preview (content canvas)", () => {
+  it("keeps stationary labels but omits the dragged clip name and timecode", () => {
+    const { ctx, texts } = recordingCtx();
+    paintTimeline(ctx, baseState({
+      drag: {
+        kind: "move",
+        ids: new Set(["a"]),
+        deltaFrames: 10,
+        trackDelta: 0,
+        leadTrackIndex: 0,
+      },
+    }));
+
+    expect(texts).toContain("b-m  00:03:10");
+    expect(texts.some((value) => value.startsWith("a-m  "))).toBe(false);
   });
 });
 

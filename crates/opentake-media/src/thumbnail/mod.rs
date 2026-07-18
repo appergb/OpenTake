@@ -11,7 +11,9 @@ pub mod sprite;
 pub use project::{
     capture_project_thumbnail, pick_thumbnail_source, ThumbnailKind, ThumbnailSource,
 };
-pub use sprite::{load_sprite, save_sprite, ThumbnailCacheMeta, VideoThumb};
+pub use sprite::{
+    encode_sprite, load_sprite, save_sprite, EncodedSpriteArtifact, ThumbnailCacheMeta, VideoThumb,
+};
 
 use std::path::Path;
 
@@ -52,6 +54,28 @@ pub fn video_thumbnail_times(duration: f64) -> Vec<f64> {
         t += interval;
     }
     times
+}
+
+/// Evenly sample the upstream thumbnail cadence across the whole source while
+/// respecting a caller-owned hard limit. This keeps a 24-tile long-media strip
+/// representative instead of showing only the first 48 seconds.
+pub fn representative_thumbnail_times(duration: f64, limit: usize) -> Vec<f64> {
+    let all = video_thumbnail_times(duration);
+    if all.len() <= limit {
+        return all;
+    }
+    if limit == 0 {
+        return Vec::new();
+    }
+    if limit == 1 {
+        return vec![all[0]];
+    }
+    (0..limit)
+        .map(|index| {
+            let source_index = index * (all.len() - 1) / (limit - 1);
+            all[source_index]
+        })
+        .collect()
 }
 
 fn sprite_thumbnail_times(duration: f64) -> Vec<f64> {
@@ -180,6 +204,16 @@ mod tests {
         assert_eq!(times.len(), MAX_VIDEO_THUMBNAILS);
         assert_eq!(times[0], 0.0);
         assert_eq!(times[1], 2.0);
+    }
+
+    #[test]
+    fn representative_times_cover_the_whole_long_source() {
+        let times = representative_thumbnail_times(210.0, 6);
+
+        assert_eq!(times.len(), 6);
+        assert_eq!(times[0], 0.0);
+        assert!(*times.last().unwrap() >= 208.0);
+        assert!(times.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]

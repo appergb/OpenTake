@@ -6,7 +6,7 @@
 //! and make admission fail closed; cache publication is checked under the same
 //! state lock immediately before the same-filesystem rename.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
@@ -24,6 +24,7 @@ use serde::Serialize;
 
 const PREWARM_QUEUE_CAPACITY: usize = 24;
 const PREWARM_WORKERS: usize = 3;
+const LOW_PRIORITY_QUEUE_CAPACITY: usize = 8;
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -31,6 +32,7 @@ pub enum PrewarmKind {
     GridPoster,
     PreviewPoster,
     TimelineVisuals,
+    TimelineSprite,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -39,6 +41,20 @@ pub enum PrewarmResult {
     Queued,
     Duplicate,
     Cached,
+    Busy,
+    StaleProject,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TimelineSpriteStatus {
+    Queued,
+    Running,
+    Partial,
+    Cached,
+    Cancelled,
+    Failed,
     Busy,
     StaleProject,
 }
@@ -53,11 +69,15 @@ struct SchedulerState {
     active_epoch: u64,
     transitioning: bool,
     cancel: MediaCancelToken,
+    low_cancel: MediaCancelToken,
+    interactive: bool,
     in_flight: HashSet<ReservationKey>,
+    timeline_sprite_statuses: HashMap<String, TimelineSpriteStatus>,
 }
 
 struct SchedulerInner {
     sender: SyncSender<PrewarmJob>,
+    low_sender: SyncSender<PrewarmJob>,
     state: Mutex<SchedulerState>,
 }
 
@@ -67,6 +87,7 @@ struct PrewarmJob {
     epoch: u64,
     token: MediaCancelToken,
     reservation: ReservationKey,
+    low_priority: bool,
     work: PrewarmWork,
 }
 
@@ -78,23 +99,31 @@ pub struct JobContext {
     inner: Weak<SchedulerInner>,
     epoch: u64,
     token: MediaCancelToken,
+    reservation: ReservationKey,
+    low_priority: bool,
 }
 
 struct ReservationGuard {
     inner: Weak<SchedulerInner>,
     reservation: Option<ReservationKey>,
+    token: MediaCancelToken,
 }
 
 impl PrewarmScheduler {
     pub fn new(active_epoch: u64) -> Self {
         let (sender, receiver) = mpsc::sync_channel(PREWARM_QUEUE_CAPACITY);
+        let (low_sender, low_receiver) = mpsc::sync_channel(LOW_PRIORITY_QUEUE_CAPACITY);
         let inner = Arc::new(SchedulerInner {
             sender,
+            low_sender,
             state: Mutex::new(SchedulerState {
                 active_epoch,
                 transitioning: false,
                 cancel: MediaCancelToken::new(),
+                low_cancel: MediaCancelToken::new(),
+                interactive: false,
                 in_flight: HashSet::new(),
+                timeline_sprite_statuses: HashMap::new(),
             }),
         });
         let receiver = Arc::new(Mutex::new(receiver));
@@ -106,6 +135,12 @@ impl PrewarmScheduler {
                 .spawn(move || prewarm_worker(worker_inner, worker_receiver))
                 .expect("spawn persistent media prewarm worker");
         }
+        let low_receiver = Arc::new(Mutex::new(low_receiver));
+        let low_inner = Arc::downgrade(&inner);
+        thread::Builder::new()
+            .name("opentake-media-sprite-low".to_string())
+            .spawn(move || prewarm_worker(low_inner, low_receiver))
+            .expect("spawn low-priority media sprite worker");
         Self { inner }
     }
 
@@ -116,6 +151,15 @@ impl PrewarmScheduler {
         }
         state.transitioning = true;
         state.cancel.cancel();
+        state.low_cancel.cancel();
+        for status in state.timeline_sprite_statuses.values_mut() {
+            if !matches!(
+                status,
+                TimelineSpriteStatus::Cached | TimelineSpriteStatus::Failed
+            ) {
+                *status = TimelineSpriteStatus::Cancelled;
+            }
+        }
         Ok(())
     }
 
@@ -125,9 +169,44 @@ impl PrewarmScheduler {
             return;
         }
         state.cancel.cancel();
+        state.low_cancel.cancel();
         state.active_epoch = epoch;
         state.transitioning = false;
         state.cancel = MediaCancelToken::new();
+        state.low_cancel = MediaCancelToken::new();
+        state.interactive = false;
+        state.timeline_sprite_statuses.clear();
+    }
+
+    pub fn set_interactive(&self, active: bool) {
+        let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.interactive == active {
+            return;
+        }
+        state.interactive = active;
+        if active {
+            state.low_cancel.cancel();
+            for status in state.timeline_sprite_statuses.values_mut() {
+                if !matches!(
+                    status,
+                    TimelineSpriteStatus::Cached | TimelineSpriteStatus::Failed
+                ) {
+                    *status = TimelineSpriteStatus::Cancelled;
+                }
+            }
+        } else {
+            state.low_cancel = MediaCancelToken::new();
+        }
+    }
+
+    pub fn timeline_sprite_status(&self, cache_key: &str) -> Option<TimelineSpriteStatus> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .timeline_sprite_statuses
+            .get(cache_key)
+            .copied()
     }
 
     pub fn schedule<F, K>(
@@ -146,29 +225,66 @@ impl PrewarmScheduler {
             kind,
             cache_key: cache_key.into(),
         };
+        let low_priority = kind == PrewarmKind::TimelineSprite;
         let token = {
             let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.transitioning || state.active_epoch != epoch {
                 return PrewarmResult::StaleProject;
             }
             if cached {
+                if low_priority {
+                    state
+                        .timeline_sprite_statuses
+                        .insert(reservation.cache_key.clone(), TimelineSpriteStatus::Cached);
+                }
                 return PrewarmResult::Cached;
+            }
+            if low_priority && state.interactive {
+                state.timeline_sprite_statuses.insert(
+                    reservation.cache_key.clone(),
+                    TimelineSpriteStatus::Cancelled,
+                );
+                return PrewarmResult::Cancelled;
             }
             if !state.in_flight.insert(reservation.clone()) {
                 return PrewarmResult::Duplicate;
             }
-            state.cancel.clone()
+            if low_priority {
+                state
+                    .timeline_sprite_statuses
+                    .insert(reservation.cache_key.clone(), TimelineSpriteStatus::Queued);
+                state.low_cancel.clone()
+            } else {
+                state.cancel.clone()
+            }
         };
         let job = PrewarmJob {
             epoch,
             token,
             reservation: reservation.clone(),
+            low_priority,
             work: Box::new(work),
         };
-        match self.inner.sender.try_send(job) {
+        let send = if low_priority {
+            self.inner.low_sender.try_send(job)
+        } else {
+            self.inner.sender.try_send(job)
+        };
+        match send {
             Ok(()) => PrewarmResult::Queued,
             Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
                 self.remove_reservation(&reservation);
+                if low_priority {
+                    self.inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .timeline_sprite_statuses
+                        .insert(
+                            reservation.cache_key.clone(),
+                            TimelineSpriteStatus::Cancelled,
+                        );
+                }
                 PrewarmResult::Busy
             }
         }
@@ -278,14 +394,33 @@ impl JobContext {
         !self.is_current()
     }
 
+    pub fn set_timeline_sprite_status(&self, status: TimelineSpriteStatus) {
+        if !self.low_priority {
+            return;
+        }
+        if let Some(inner) = self.inner.upgrade() {
+            inner
+                .state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .timeline_sprite_statuses
+                .insert(self.reservation.cache_key.clone(), status);
+        }
+    }
+
     fn is_current(&self) -> bool {
         let Some(inner) = self.inner.upgrade() else {
             return false;
         };
         let state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
+        let active_token = if self.low_priority {
+            &state.low_cancel
+        } else {
+            &state.cancel
+        };
         !state.transitioning
             && state.active_epoch == self.epoch
-            && state.cancel.same_instance(&self.token)
+            && active_token.same_instance(&self.token)
             && !self.token.is_cancelled()
     }
 
@@ -318,9 +453,14 @@ impl JobContext {
             return Ok(false);
         };
         let state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
+        let active_token = if self.low_priority {
+            &state.low_cancel
+        } else {
+            &state.cancel
+        };
         let current = !state.transitioning
             && state.active_epoch == self.epoch
-            && state.cancel.same_instance(&self.token)
+            && active_token.same_instance(&self.token)
             && !self.token.is_cancelled();
         if !current {
             drop(state);
@@ -345,12 +485,17 @@ impl Drop for ReservationGuard {
             return;
         };
         if let Some(inner) = self.inner.upgrade() {
-            inner
-                .state
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .in_flight
-                .remove(&reservation);
+            let mut state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
+            if reservation.kind == PrewarmKind::TimelineSprite {
+                let active_token = &state.low_cancel;
+                if !active_token.same_instance(&self.token) || self.token.is_cancelled() {
+                    state.timeline_sprite_statuses.insert(
+                        reservation.cache_key.clone(),
+                        TimelineSpriteStatus::Cancelled,
+                    );
+                }
+            }
+            state.in_flight.remove(&reservation);
         }
     }
 }
@@ -366,14 +511,20 @@ fn prewarm_worker(inner: Weak<SchedulerInner>, receiver: Arc<Mutex<Receiver<Prew
         };
         let guard = ReservationGuard {
             inner: inner.clone(),
-            reservation: Some(job.reservation),
+            reservation: Some(job.reservation.clone()),
+            token: job.token.clone(),
         };
         let context = JobContext {
             inner: inner.clone(),
             epoch: job.epoch,
             token: job.token,
+            reservation: job.reservation,
+            low_priority: job.low_priority,
         };
         if !context.is_cancelled() {
+            if context.low_priority {
+                context.set_timeline_sprite_status(TimelineSpriteStatus::Running);
+            }
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 (job.work)(context);
             }));
@@ -688,5 +839,72 @@ mod tests {
             scheduler.schedule(2, PrewarmKind::PreviewPoster, "shared", false, |_| {}),
             PrewarmResult::Queued
         );
+    }
+
+    #[test]
+    fn interactive_work_cancels_the_single_low_priority_sprite_worker() {
+        let scheduler = PrewarmScheduler::new(1);
+        let (token_tx, token_rx) = mpsc::channel();
+        let (cancelled_tx, cancelled_rx) = mpsc::channel();
+        assert_eq!(
+            scheduler.schedule(
+                1,
+                PrewarmKind::TimelineSprite,
+                "sprite",
+                false,
+                move |context| {
+                    let token = context.cancel_token();
+                    token_tx.send(token.clone()).expect("publish low token");
+                    while !token.is_cancelled() {
+                        thread::yield_now();
+                    }
+                    cancelled_tx.send(()).expect("publish cancellation");
+                }
+            ),
+            PrewarmResult::Queued
+        );
+        let token = token_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("low worker starts");
+
+        scheduler.set_interactive(true);
+
+        cancelled_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("interactive work cancels sprite worker");
+        assert!(token.is_cancelled());
+        assert_eq!(
+            scheduler.timeline_sprite_status("sprite"),
+            Some(TimelineSpriteStatus::Cancelled)
+        );
+    }
+
+    #[test]
+    fn low_priority_sprite_has_one_worker_independent_of_poster_workers() {
+        let scheduler = PrewarmScheduler::new(1);
+        let (low_entered_tx, low_entered_rx) = mpsc::channel();
+        let (low_release_tx, low_release_rx) = mpsc::channel();
+        assert_eq!(
+            scheduler.schedule(1, PrewarmKind::TimelineSprite, "low", false, move |_| {
+                low_entered_tx.send(()).expect("low starts");
+                low_release_rx.recv().expect("release low");
+            }),
+            PrewarmResult::Queued
+        );
+        low_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("low worker starts");
+
+        let (poster_tx, poster_rx) = mpsc::channel();
+        assert_eq!(
+            scheduler.schedule(1, PrewarmKind::PreviewPoster, "poster", false, move |_| {
+                poster_tx.send(()).expect("poster starts independently");
+            }),
+            PrewarmResult::Queued
+        );
+        poster_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("poster is not blocked behind sprite");
+        low_release_tx.send(()).expect("release low");
     }
 }

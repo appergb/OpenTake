@@ -26,12 +26,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use base64::Engine as _;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use opentake_core::{AppCore, EditCommand};
+use opentake_core::{AppCore, EditCommand, ProjectRevision};
 use opentake_domain::{ClipType, MediaSource, TextStyle, Timeline};
-use opentake_media::{decode_frame_at, FrameRequest};
+use opentake_media::{
+    decode_frame_at, decode_frame_at_cancellable, FrameRequest, MediaCancelToken,
+};
 use opentake_ops::command::RenameEntry;
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::wgpu;
@@ -63,6 +65,17 @@ pub struct CompositeFrameDto {
     pub data_url: String,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompositeFrameRequest {
+    pub frame: i32,
+    pub project_epoch: u64,
+    pub timeline_version: u64,
+    pub session_id: String,
+    pub session_generation: u64,
+    pub seek_generation: u64,
+}
+
 /// Lazily-acquired GPU device + compositor, cached across composite calls.
 struct GpuContext {
     device: wgpu::Device,
@@ -75,15 +88,155 @@ struct GpuContext {
 /// Tauri managed state holding the (lazily created) GPU context. `None` until the
 /// first composite; an acquisition failure (no adapter / headless) surfaces to
 /// the caller as a command error rather than panicking.
-#[derive(Default)]
 pub struct RenderState {
     ctx: Mutex<Option<GpuContext>>,
+    preview: PreviewCompositeCoordinator,
 }
 
 impl RenderState {
     /// An empty render state (GPU acquired on first `composite_frame`).
     pub fn new() -> Self {
-        RenderState::default()
+        Self {
+            ctx: Mutex::new(None),
+            preview: PreviewCompositeCoordinator::default(),
+        }
+    }
+}
+
+impl Default for RenderState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone)]
+struct ActivePreviewComposite {
+    seek_generation: u64,
+    cancel: MediaCancelToken,
+}
+
+#[derive(Default)]
+struct PreviewCompositeState {
+    revision: Option<ProjectRevision>,
+    session_id: String,
+    session_generation: u64,
+    minimum_seek_generation: u64,
+    active: Option<ActivePreviewComposite>,
+}
+
+#[derive(Default)]
+struct PreviewCompositeCoordinator(Mutex<PreviewCompositeState>);
+
+impl PreviewCompositeCoordinator {
+    fn select_session(
+        state: &mut PreviewCompositeState,
+        revision: ProjectRevision,
+        session_id: &str,
+        session_generation: u64,
+    ) -> Result<(), String> {
+        let same_revision = state.revision == Some(revision);
+        if same_revision && session_generation < state.session_generation {
+            return Err("preview composite session was superseded".to_string());
+        }
+        if same_revision
+            && session_generation == state.session_generation
+            && !state.session_id.is_empty()
+            && state.session_id != session_id
+        {
+            return Err("preview composite session identity mismatch".to_string());
+        }
+        if !same_revision || session_generation > state.session_generation {
+            if let Some(active) = state.active.take() {
+                active.cancel.cancel();
+            }
+            state.revision = Some(revision);
+            state.session_id = session_id.to_string();
+            state.session_generation = session_generation;
+            state.minimum_seek_generation = 0;
+        }
+        Ok(())
+    }
+
+    fn begin(
+        &self,
+        revision: ProjectRevision,
+        session_id: &str,
+        session_generation: u64,
+        seek_generation: u64,
+    ) -> Result<MediaCancelToken, String> {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self::select_session(&mut state, revision, session_id, session_generation)?;
+        if seek_generation < state.minimum_seek_generation {
+            return Err("preview composite seek was superseded".to_string());
+        }
+        if let Some(active) = state.active.take() {
+            active.cancel.cancel();
+        }
+        let cancel = MediaCancelToken::new();
+        state.active = Some(ActivePreviewComposite {
+            seek_generation,
+            cancel: cancel.clone(),
+        });
+        Ok(cancel)
+    }
+
+    fn cancel_before(
+        &self,
+        revision: ProjectRevision,
+        session_id: &str,
+        session_generation: u64,
+        minimum_seek_generation: u64,
+    ) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.revision.is_none() {
+            state.revision = Some(revision);
+            state.session_id = session_id.to_string();
+            state.session_generation = session_generation;
+        } else if state.revision != Some(revision)
+            || state.session_id != session_id
+            || state.session_generation != session_generation
+        {
+            // A late cancellation from an old project/session must never cancel
+            // the active successor. Its exact matching work, if any, was
+            // already cancelled when the successor session began.
+            return;
+        }
+        state.minimum_seek_generation = state.minimum_seek_generation.max(minimum_seek_generation);
+        if state
+            .active
+            .as_ref()
+            .is_some_and(|active| active.seek_generation < state.minimum_seek_generation)
+        {
+            if let Some(active) = state.active.take() {
+                active.cancel.cancel();
+            }
+        }
+    }
+
+    fn is_current(
+        &self,
+        revision: ProjectRevision,
+        session_id: &str,
+        session_generation: u64,
+        seek_generation: u64,
+    ) -> bool {
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.revision == Some(revision)
+            && state.session_id == session_id
+            && state.session_generation == session_generation
+            && state.minimum_seek_generation <= seek_generation
+            && state.active.as_ref().is_some_and(|active| {
+                active.seek_generation == seek_generation && !active.cancel.is_cancelled()
+            })
     }
 }
 
@@ -129,6 +282,7 @@ struct MediaResolver<'d> {
     text_rasterizer: &'d CosmicTextRasterizer,
     /// Downscale box for decoded source frames (matches the preview render size).
     preview_box: (u32, u32),
+    cancel: &'d MediaCancelToken,
 }
 
 impl MediaResolver<'_> {
@@ -190,7 +344,7 @@ impl TextureResolver for MediaResolver<'_> {
             tolerance_secs: 0.1,
             apply_rotation: true,
         };
-        let (_actual, frame) = decode_frame_at(&info.path, &req).ok()?;
+        let (_actual, frame) = decode_frame_at_cancellable(&info.path, &req, self.cancel).ok()?;
         // ffmpeg emits straight RGBA; the plan's `needs_premultiply` flag (false
         // for image/video here) drives the shader, so the `premultiplied` marker
         // on the upload is informational only.
@@ -258,6 +412,7 @@ fn composite_rgba_for_snapshot(
     render: &RenderState,
     frame: i32,
     max_size: u32,
+    cancel: &MediaCancelToken,
 ) -> Result<DecodedFrame, String> {
     // Project text clips (content + style + box) so the resolver can rasterize
     // them on demand. Keyed by clip id, matching `TextureSource::Text { clip_id }`.
@@ -338,6 +493,7 @@ fn composite_rgba_for_snapshot(
         text: &text,
         text_rasterizer: &ctx.text_rasterizer,
         preview_box: (render_size.width, render_size.height),
+        cancel,
     };
     ctx.compositor
         .render_to_rgba(
@@ -355,6 +511,7 @@ fn composite_rgba(
     render: &RenderState,
     frame: i32,
     max_size: u32,
+    cancel: &MediaCancelToken,
 ) -> Result<DecodedFrame, String> {
     let snapshot = core.runtime_snapshot();
     composite_rgba_for_snapshot(
@@ -364,6 +521,7 @@ fn composite_rgba(
         render,
         frame,
         max_size,
+        cancel,
     )
 }
 
@@ -374,21 +532,78 @@ fn composite_rgba(
 pub fn composite_frame(
     core: State<'_, AppCore>,
     render: State<'_, RenderState>,
-    frame: i32,
+    request: CompositeFrameRequest,
     max_size: Option<u32>,
 ) -> Result<CompositeFrameDto, String> {
+    let revision = ProjectRevision {
+        project_epoch: request.project_epoch,
+        version: request.timeline_version,
+    };
+    if core.project_revision() != revision {
+        return Err("preview composite revision was superseded".to_string());
+    }
+    let cancel = render.preview.begin(
+        revision,
+        &request.session_id,
+        request.session_generation,
+        request.seek_generation,
+    )?;
     let composite = composite_rgba(
         &core,
         &render,
-        frame,
+        request.frame,
         max_size.unwrap_or(DEFAULT_PREVIEW_CAP),
+        &cancel,
     )?;
+    if cancel.is_cancelled()
+        || core.project_revision() != revision
+        || !render.preview.is_current(
+            revision,
+            &request.session_id,
+            request.session_generation,
+            request.seek_generation,
+        )
+    {
+        return Err("preview composite was superseded".to_string());
+    }
     let data_url = encode_png_data_url(&composite)?;
+    if cancel.is_cancelled()
+        || core.project_revision() != revision
+        || !render.preview.is_current(
+            revision,
+            &request.session_id,
+            request.session_generation,
+            request.seek_generation,
+        )
+    {
+        return Err("preview composite was superseded".to_string());
+    }
     Ok(CompositeFrameDto {
         width: composite.width,
         height: composite.height,
         data_url,
     })
+}
+
+#[tauri::command]
+pub fn cancel_composite_frame(
+    render: State<'_, RenderState>,
+    project_epoch: u64,
+    timeline_version: u64,
+    session_id: String,
+    session_generation: u64,
+    minimum_seek_generation: u64,
+) {
+    let revision = ProjectRevision {
+        project_epoch,
+        version: timeline_version,
+    };
+    render.preview.cancel_before(
+        revision,
+        &session_id,
+        session_generation,
+        minimum_seek_generation,
+    );
 }
 
 /// `capture_frame_to_media`: composite the timeline at `frame` and import the
@@ -451,7 +666,7 @@ fn capture_frame_to_media_workflow(
 ) -> Result<crate::media::MediaListDto, String> {
     // Frame → RGBA. Timeline tab composites; video tab decodes the source frame.
     let composite = match source_media_id {
-        None => composite_rgba(core, render, frame, 0)?,
+        None => composite_rgba(core, render, frame, 0, &MediaCancelToken::new())?,
         Some(id) => decode_source_frame(core, id, frame)?,
     };
 
@@ -601,6 +816,7 @@ fn capture_freeze_frame_workflow(
         render,
         at_frame,
         0,
+        &MediaCancelToken::new(),
     )?;
     let captures_dir = engine.cache_root().join("captures");
     std::fs::create_dir_all(&captures_dir).map_err(|e| format!("create captures dir: {e}"))?;
@@ -660,6 +876,40 @@ fn project_frame_time_secs(source_frame: i64, timeline_fps: i32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_composite_cancel_floor_kills_old_work_but_not_its_successor() {
+        let coordinator = PreviewCompositeCoordinator::default();
+        let revision = opentake_core::ProjectRevision {
+            project_epoch: 3,
+            version: 7,
+        };
+        let old = coordinator
+            .begin(revision, "idle-session", 1, 0)
+            .expect("initial request accepted");
+
+        coordinator.cancel_before(revision, "idle-session", 1, 1);
+        assert!(old.is_cancelled());
+
+        let current = coordinator
+            .begin(revision, "idle-session", 1, 1)
+            .expect("request at the cancel floor accepted");
+        coordinator.cancel_before(revision, "idle-session", 1, 1);
+        assert!(!current.is_cancelled());
+        assert!(coordinator.is_current(revision, "idle-session", 1, 1));
+    }
+
+    #[test]
+    fn preview_composite_rejects_a_generation_below_the_cancel_floor() {
+        let coordinator = PreviewCompositeCoordinator::default();
+        let revision = opentake_core::ProjectRevision {
+            project_epoch: 8,
+            version: 2,
+        };
+        coordinator.cancel_before(revision, "idle-session", 1, 4);
+
+        assert!(coordinator.begin(revision, "idle-session", 1, 3).is_err());
+    }
     use opentake_domain::{Clip, MediaManifest, MediaManifestEntry, Track};
     use std::fs;
 

@@ -109,6 +109,31 @@ describe("native playback identity", () => {
     expect(h.api.playbackStop).toHaveBeenCalledWith(current);
   });
 
+  it("retires a stopped identity before the stop IPC resolves", async () => {
+    let finishStop: (() => void) | undefined;
+    const api = {
+      playbackStart: vi.fn(async () => {}),
+      playbackPause: vi.fn(async () => {}),
+      playbackSeek: vi.fn(async () => {}),
+      playbackStop: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finishStop = resolve;
+          }),
+      ),
+    };
+    const controller = createNativePlaybackController(api, () => "retired-session");
+    const current = await controller.start(revision(4, 6), 0);
+
+    const stopping = controller.stop(current);
+    controller.acceptFrame(frame(current, 1));
+
+    expect(controller.currentIdentity()).toBeNull();
+    expect(getNativePlaybackPublication()).toBeNull();
+    finishStop?.();
+    await stopping;
+  });
+
   it("publishes only increasing matching frame sequences", async () => {
     const h = harness();
     const current = await h.controller.start(revision(3, 1), 0);
