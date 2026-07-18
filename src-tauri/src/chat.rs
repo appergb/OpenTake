@@ -35,7 +35,7 @@ pub struct ChatState {
     core: AppCore,
     loop_: ChatLoop,
     sessions: Arc<Mutex<HashMap<SessionKey, ChatSession>>>,
-    cancels: Arc<Mutex<HashMap<SessionKey, Arc<AtomicBool>>>>,
+    turns: Arc<Mutex<TurnRegistry>>,
     persistence: Arc<Mutex<()>>,
 }
 
@@ -44,6 +44,31 @@ struct SessionKey {
     project_epoch: u64,
     project_dir: PathBuf,
     session_id: String,
+}
+
+struct TurnCancel {
+    requested: Arc<AtomicBool>,
+    media: opentake_media::MediaCancelToken,
+}
+
+impl TurnCancel {
+    fn new() -> Self {
+        Self {
+            requested: Arc::new(AtomicBool::new(false)),
+            media: opentake_media::MediaCancelToken::new(),
+        }
+    }
+
+    fn request(&self) {
+        self.requested.store(true, Ordering::Relaxed);
+        self.media.cancel();
+    }
+}
+
+#[derive(Default)]
+struct TurnRegistry {
+    running: HashMap<SessionKey, Arc<TurnCancel>>,
+    transition_depth: usize,
 }
 
 #[derive(Clone)]
@@ -82,14 +107,29 @@ impl ChatState {
         ));
         let store: Arc<dyn KeyStore> = Arc::new(KeyringStore::new());
         let sessions = Arc::new(Mutex::new(HashMap::new()));
-        let cancels = Arc::new(Mutex::new(HashMap::new()));
+        let turns = Arc::new(Mutex::new(TurnRegistry::default()));
         let state = ChatState {
             core,
             loop_: ChatLoop::new(dispatcher, registry, store),
             sessions: sessions.clone(),
-            cancels: cancels.clone(),
+            turns: turns.clone(),
             persistence: Arc::new(Mutex::new(())),
         };
+        let transition_turns = turns.clone();
+        state
+            .core
+            .subscribe_project_identity_transition(move |pending| {
+                if let Ok(mut turns) = transition_turns.lock() {
+                    if pending {
+                        turns.transition_depth = turns.transition_depth.saturating_add(1);
+                        for cancel in turns.running.values() {
+                            cancel.request();
+                        }
+                    } else {
+                        turns.transition_depth = turns.transition_depth.saturating_sub(1);
+                    }
+                }
+            });
         state.core.subscribe(move |event| {
             let (project_epoch, project_dir) = match event {
                 opentake_core::CoreEvent::ProjectOpened {
@@ -106,12 +146,12 @@ impl ChatState {
                 ),
                 _ => return,
             };
-            if let Ok(mut running) = cancels.lock() {
-                running.retain(|key, cancel| {
+            if let Ok(mut turns) = turns.lock() {
+                turns.running.retain(|key, cancel| {
                     let current = key.project_epoch == project_epoch
                         && project_dir.as_ref() == Some(&key.project_dir);
                     if !current {
-                        cancel.store(true, Ordering::Relaxed);
+                        cancel.request();
                     }
                     current
                 });
@@ -227,14 +267,24 @@ impl ChatState {
         project.store.list().map_err(|e| e.to_string())
     }
 
-    fn reserve_turn(&self, key: SessionKey, cancel: Arc<AtomicBool>) -> Result<(), String> {
-        let mut cancels = self.cancels.lock().map_err(|e| e.to_string())?;
-        match cancels.entry(key) {
+    fn reserve_turn(&self, key: SessionKey, cancel: Arc<TurnCancel>) -> Result<(), String> {
+        let mut turns = self.turns.lock().map_err(|e| e.to_string())?;
+        if turns.transition_depth > 0 {
+            cancel.request();
+            return Err("project transition is in progress".into());
+        }
+        match turns.running.entry(key) {
             Entry::Vacant(entry) => {
                 entry.insert(cancel);
                 Ok(())
             }
             Entry::Occupied(_) => Err("a turn is already running on this session".into()),
+        }
+    }
+
+    fn release_turn(&self, key: &SessionKey) {
+        if let Ok(mut turns) = self.turns.lock() {
+            turns.running.remove(key);
         }
     }
 }
@@ -333,14 +383,16 @@ impl EmitLoop for AppEmitter {
 struct ProjectTurnGate {
     state: ChatState,
     project: ChatProjectContext,
-    cancel: Arc<AtomicBool>,
+    cancel: Arc<TurnCancel>,
 }
 
 impl ProjectTurnGate {
     fn with_current_project<T>(&self, operation: impl FnOnce() -> T) -> Option<T> {
         let _identity = self.state.core.lock_project_identity_workflow();
-        if self.state.ensure_project_context(&self.project).is_err() {
-            self.cancel.store(true, Ordering::Relaxed);
+        if self.cancel.requested.load(Ordering::Relaxed)
+            || self.state.ensure_project_context(&self.project).is_err()
+        {
+            self.cancel.request();
             return None;
         }
         Some(operation())
@@ -358,7 +410,9 @@ impl ChatTurnGate for ProjectTurnGate {
         name: &str,
         args: serde_json::Value,
     ) -> Option<ToolResult> {
-        self.with_current_project(|| dispatcher.dispatch(name, args))
+        self.with_current_project(|| {
+            dispatcher.dispatch_cancellable(name, args, &self.cancel.media)
+        })
     }
 }
 
@@ -378,28 +432,21 @@ pub async fn chat_send(
 ) -> Result<(), String> {
     let project = state.project_context_for(expected_project_epoch, &expected_project_path)?;
     let session_key = project.key(&session_id);
-    let cancel = Arc::new(AtomicBool::new(false));
-    state.reserve_turn(session_key.clone(), cancel.clone())?;
+    let turn_cancel = Arc::new(TurnCancel::new());
+    state.reserve_turn(session_key.clone(), turn_cancel.clone())?;
+    let cancel = turn_cancel.requested.clone();
 
     let mut session = match state.take_project_session(&project, &session_id) {
         Ok(session) => session,
         Err(error) => {
-            state
-                .cancels
-                .lock()
-                .ok()
-                .and_then(|mut cancels| cancels.remove(&session_key));
+            state.release_turn(&session_key);
             return Err(error);
         }
     };
     session.provider = Some(chat_provider.clone());
     session.messages.push(ChatMessage::user(text.clone()));
     if let Err(error) = state.put_project_session(&project, session.clone()) {
-        state
-            .cancels
-            .lock()
-            .ok()
-            .and_then(|mut cancels| cancels.remove(&session_key));
+        state.release_turn(&session_key);
         return Err(error);
     }
     let state_clone = state.inner().clone();
@@ -414,7 +461,7 @@ pub async fn chat_send(
         let gate: Arc<dyn ChatTurnGate> = Arc::new(ProjectTurnGate {
             state: state_clone.clone(),
             project: project.clone(),
-            cancel: cancel.clone(),
+            cancel: turn_cancel,
         });
         let result = state_clone
             .loop_
@@ -448,11 +495,7 @@ pub async fn chat_send(
                 ),
             });
         }
-        state_clone
-            .cancels
-            .lock()
-            .ok()
-            .and_then(|mut c| c.remove(&session_key));
+        state_clone.release_turn(&session_key);
     });
 
     Ok(())
@@ -491,11 +534,14 @@ pub fn chat_cancel(
     expected_project_epoch: u64,
     expected_project_path: String,
 ) -> Result<(), String> {
-    let project = state.project_context_for(expected_project_epoch, &expected_project_path)?;
-    let key = project.key(&session_id);
-    let cancels = state.cancels.lock().map_err(|e| e.to_string())?;
-    if let Some(flag) = cancels.get(&key) {
-        flag.store(true, Ordering::Relaxed);
+    let key = SessionKey {
+        project_epoch: expected_project_epoch,
+        project_dir: PathBuf::from(expected_project_path),
+        session_id,
+    };
+    let turns = state.turns.lock().map_err(|e| e.to_string())?;
+    if let Some(flag) = turns.running.get(&key) {
+        flag.request();
     }
     Ok(())
 }
@@ -669,7 +715,7 @@ mod tests {
             temp.path().join("chat-models"),
         );
         let project_a = state.project_context().unwrap();
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::new(TurnCancel::new());
         let gate = ProjectTurnGate {
             state,
             project: project_a,
@@ -700,7 +746,8 @@ mod tests {
                 serde_json::json!({"name": "stale folder"}),
             )
             .is_none());
-        assert!(cancel.load(Ordering::Relaxed));
+        assert!(cancel.requested.load(Ordering::Relaxed));
+        assert!(cancel.media.is_cancelled());
         assert!(core.media().folders.is_empty());
     }
 
@@ -721,14 +768,14 @@ mod tests {
         };
 
         state
-            .reserve_turn(key.clone(), Arc::new(AtomicBool::new(false)))
+            .reserve_turn(key.clone(), Arc::new(TurnCancel::new()))
             .unwrap();
         let error = state
-            .reserve_turn(key, Arc::new(AtomicBool::new(false)))
+            .reserve_turn(key, Arc::new(TurnCancel::new()))
             .expect_err("a second turn must not replace the first cancel token");
 
         assert!(error.contains("already running"));
-        assert_eq!(state.cancels.lock().unwrap().len(), 1);
+        assert_eq!(state.turns.lock().unwrap().running.len(), 1);
     }
 
     #[test]
@@ -748,19 +795,221 @@ mod tests {
         state
             .put_project_session(&project_a, ChatSession::new("chat-same"))
             .unwrap();
-        let old_cancel = Arc::new(AtomicBool::new(false));
+        let old_cancel = Arc::new(TurnCancel::new());
         state
             .reserve_turn(project_a.key("chat-same"), old_cancel.clone())
             .unwrap();
 
         core.save_project(Some(target)).unwrap();
 
-        assert!(old_cancel.load(Ordering::Relaxed));
-        assert!(state.cancels.lock().unwrap().is_empty());
+        assert!(old_cancel.requested.load(Ordering::Relaxed));
+        assert!(old_cancel.media.is_cancelled());
+        assert!(state.turns.lock().unwrap().running.is_empty());
         assert!(state.sessions.lock().unwrap().is_empty());
         let project_b = state.project_context().unwrap();
         state
-            .reserve_turn(project_b.key("chat-same"), Arc::new(AtomicBool::new(false)))
+            .reserve_turn(project_b.key("chat-same"), Arc::new(TurnCancel::new()))
             .expect("same session id in the Save As target is independent");
+    }
+
+    #[test]
+    fn save_as_cancels_an_active_tool_before_waiting_for_its_identity_lease() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source.opentake");
+        let target = temp.path().join("Target.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(source)).unwrap();
+        let state = ChatState::new(
+            core.clone(),
+            temp.path().join("no-workflows"),
+            temp.path().join("chat-cache"),
+            temp.path().join("chat-models"),
+        );
+        let project = state.project_context().unwrap();
+        let cancel = Arc::new(TurnCancel::new());
+        state
+            .reserve_turn(project.key("chat-active"), cancel.clone())
+            .unwrap();
+        let gate = ProjectTurnGate {
+            state,
+            project,
+            cancel: cancel.clone(),
+        };
+        let (tool_started_tx, tool_started_rx) = std::sync::mpsc::channel();
+        let (tool_finished_tx, tool_finished_rx) = std::sync::mpsc::channel();
+
+        let tool = std::thread::spawn(move || {
+            gate.with_current_project(|| {
+                tool_started_tx.send(()).unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                while !cancel.media.is_cancelled() && std::time::Instant::now() < deadline {
+                    std::thread::yield_now();
+                }
+                if cancel.media.is_cancelled() {
+                    tool_finished_tx.send(()).unwrap();
+                }
+            })
+        });
+        tool_started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("the simulated media tool must hold the project identity lease");
+
+        let saver = std::thread::spawn(move || core.save_project(Some(target)));
+
+        tool_finished_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("Save As must cancel the active tool before waiting for the write lease");
+        assert!(tool.join().unwrap().is_some());
+        saver.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn save_as_rejects_a_turn_registered_after_the_cancel_sweep() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source.opentake");
+        let target = temp.path().join("Target.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(source)).unwrap();
+        let state = ChatState::new(
+            core.clone(),
+            temp.path().join("no-workflows"),
+            temp.path().join("chat-cache"),
+            temp.path().join("chat-models"),
+        );
+        let project = state.project_context().unwrap();
+        let (hook_entered_tx, hook_entered_rx) = std::sync::mpsc::channel();
+        let hook_release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let hook_release_for_listener = hook_release.clone();
+        core.subscribe_project_identity_transition(move |pending| {
+            if !pending {
+                return;
+            }
+            hook_entered_tx.send(()).unwrap();
+            let (released, wake) = &*hook_release_for_listener;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = wake.wait(released).unwrap();
+            }
+        });
+
+        let saver = std::thread::spawn(move || core.save_project(Some(target)));
+        hook_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("Save As must reach the pre-transition hook");
+
+        let late_cancel = Arc::new(TurnCancel::new());
+        let reserve = state.reserve_turn(project.key("chat-too-late"), late_cancel.clone());
+        let (released, wake) = &*hook_release;
+        *released.lock().unwrap() = true;
+        wake.notify_all();
+        saver.join().unwrap().unwrap();
+
+        assert!(
+            reserve.is_err(),
+            "a pending transition must reject new turns"
+        );
+        assert!(late_cancel.requested.load(Ordering::Relaxed));
+        assert!(late_cancel.media.is_cancelled());
+        let current = state.project_context().unwrap();
+        state
+            .reserve_turn(current.key("chat-after-save"), Arc::new(TurnCancel::new()))
+            .expect("the transition flag must clear after Save As completes");
+    }
+
+    #[test]
+    fn overlapping_save_as_transitions_keep_new_turns_blocked_until_both_finish() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source.opentake");
+        let target_a = temp.path().join("Target-A.opentake");
+        let target_b = temp.path().join("Target-B.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(source)).unwrap();
+        let state = ChatState::new(
+            core.clone(),
+            temp.path().join("no-workflows"),
+            temp.path().join("chat-cache"),
+            temp.path().join("chat-models"),
+        );
+        let true_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (first_entered_tx, first_entered_rx) = std::sync::mpsc::channel();
+        let (second_entered_tx, second_entered_rx) = std::sync::mpsc::channel();
+        let first_release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let true_count_for_listener = true_count.clone();
+        let first_release_for_listener = first_release.clone();
+        core.subscribe_project_identity_transition(move |pending| {
+            if !pending {
+                return;
+            }
+            let index = true_count_for_listener.fetch_add(1, Ordering::Relaxed);
+            if index == 0 {
+                first_entered_tx.send(()).unwrap();
+                let (released, wake) = &*first_release_for_listener;
+                let mut released = released.lock().unwrap();
+                while !*released {
+                    released = wake.wait(released).unwrap();
+                }
+            } else {
+                second_entered_tx.send(()).unwrap();
+            }
+        });
+
+        let core_a = core.clone();
+        let saver_a = std::thread::spawn(move || core_a.save_project(Some(target_a)));
+        first_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("the first transition must pause before its writer");
+        let core_b = core.clone();
+        let saver_b = std::thread::spawn(move || core_b.save_project(Some(target_b)));
+        second_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("the second transition must overlap the first");
+        saver_b.join().unwrap().unwrap();
+
+        let current = state.project_context().unwrap();
+        let late_cancel = Arc::new(TurnCancel::new());
+        let reserve = state.reserve_turn(current.key("chat-between-saves"), late_cancel.clone());
+        let (released, wake) = &*first_release;
+        *released.lock().unwrap() = true;
+        wake.notify_all();
+        saver_a.join().unwrap().unwrap();
+
+        assert!(
+            reserve.is_err(),
+            "one completed transition must not clear another transition's pending state"
+        );
+        assert!(late_cancel.requested.load(Ordering::Relaxed));
+        assert!(late_cancel.media.is_cancelled());
+        let current = state.project_context().unwrap();
+        state
+            .reserve_turn(current.key("chat-after-both"), Arc::new(TurnCancel::new()))
+            .expect("new turns may resume after both transitions finish");
+    }
+
+    #[test]
+    fn failed_save_as_clears_the_transition_flag() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source.opentake");
+        let invalid_target = temp.path().join("not-a-bundle");
+        let core = AppCore::new();
+        core.save_project(Some(source)).unwrap();
+        let state = ChatState::new(
+            core.clone(),
+            temp.path().join("no-workflows"),
+            temp.path().join("chat-cache"),
+            temp.path().join("chat-models"),
+        );
+        let project = state.project_context().unwrap();
+        std::fs::write(&invalid_target, b"regular file").unwrap();
+
+        core.save_project(Some(invalid_target))
+            .expect_err("Save As to a regular file must fail");
+
+        assert_eq!(state.turns.lock().unwrap().transition_depth, 0);
+        state
+            .reserve_turn(
+                project.key("chat-after-failure"),
+                Arc::new(TurnCancel::new()),
+            )
+            .expect("a failed transition must not block later Agent turns");
     }
 }

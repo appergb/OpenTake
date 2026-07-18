@@ -42,6 +42,8 @@ use crate::error::{CoreError, Result};
 use crate::events::{CoreEvent, EventBus, SubscriptionId};
 use crate::session::{EditorSession, ProbedMedia};
 
+type ProjectIdentityTransitionListener = Arc<dyn Fn(bool) + Send + Sync + 'static>;
+
 /// Thread-safe id generator used as the core's default.
 ///
 /// [`opentake_ops::SeqIdGen`] is deliberately `!Sync` (it threads a `Cell`
@@ -271,6 +273,7 @@ impl DeferredCoreEvents {
 pub struct AppCore {
     session: Arc<Mutex<CoreSessionSlot>>,
     project_identity_workflow: Arc<RwLock<()>>,
+    project_identity_transition: Arc<Mutex<Vec<ProjectIdentityTransitionListener>>>,
     events: EventBus,
     deps: Arc<CoreDeps>,
     // `Send + Sync` so `AppCore` stays shareable across threads (Tauri State,
@@ -299,6 +302,7 @@ impl AppCore {
                 editor: EditorSession::new_project(),
             })),
             project_identity_workflow: Arc::new(RwLock::new(())),
+            project_identity_transition: Arc::new(Mutex::new(Vec::new())),
             events: EventBus::new(),
             deps: Arc::new(deps),
             ids: Arc::new(CoreIdGen::new("id-")),
@@ -410,6 +414,34 @@ impl AppCore {
         self.project_identity_workflow
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Register a synchronous project-identity transition hook. `true` runs
+    /// immediately before replacement or Save As waits for the exclusive
+    /// identity lease; `false` runs after the lease is released, on success or
+    /// failure. Long external workflows use the pending interval to reject new
+    /// work and request cooperative cancellation while old readers still hold
+    /// the shared lease. A post-commit [`CoreEvent`] alone is too late because
+    /// the writer cannot acquire the lease until those workflows return.
+    pub fn subscribe_project_identity_transition(
+        &self,
+        listener: impl Fn(bool) + Send + Sync + 'static,
+    ) {
+        self.project_identity_transition
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(Arc::new(listener));
+    }
+
+    fn announce_project_identity_transition(&self, pending: bool) {
+        let listeners = self
+            .project_identity_transition
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        for listener in listeners {
+            listener(pending);
+        }
     }
 
     /// Snapshot all self-contained bundle inputs under one session lock.
@@ -529,6 +561,7 @@ impl AppCore {
     /// [`CoreEvent::ProjectOpened`] (path empty, version 0), and return its first
     /// snapshot.
     pub fn new_project(&self) -> TimelineSnapshot {
+        self.announce_project_identity_transition(true);
         let _identity = self
             .project_identity_workflow
             .write()
@@ -538,6 +571,7 @@ impl AppCore {
             session.replace_editor(EditorSession::new_project())
         };
         drop(_identity);
+        self.announce_project_identity_transition(false);
         self.events.emit(&CoreEvent::ProjectOpened {
             path: String::new(),
             project_epoch: snapshot.project_epoch,
@@ -561,6 +595,7 @@ impl AppCore {
     }
 
     pub fn commit_project_open(&self, prepared: PreparedProjectOpen) -> TimelineSnapshot {
+        self.announce_project_identity_transition(true);
         let _identity = self
             .project_identity_workflow
             .write()
@@ -570,6 +605,7 @@ impl AppCore {
             session.replace_editor(prepared.editor)
         };
         drop(_identity);
+        self.announce_project_identity_transition(false);
         self.events.emit(&CoreEvent::ProjectOpened {
             path: prepared.path.to_string_lossy().into_owned(),
             project_epoch: snapshot.project_epoch,
@@ -596,18 +632,26 @@ impl AppCore {
         path: Option<PathBuf>,
         thumbnail: Option<Vec<u8>>,
     ) -> Result<PathBuf> {
+        let changes_identity = path.is_some();
+        if changes_identity {
+            self.announce_project_identity_transition(true);
+        }
         let _identity = self
             .project_identity_workflow
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (written, project_epoch) = {
+        let result = {
             let mut session = self.lock();
-            let written = session
+            session
                 .editor
-                .save_project_with_thumbnail(path, thumbnail)?;
-            (written, session.project_epoch)
+                .save_project_with_thumbnail(path, thumbnail)
+                .map(|written| (written, session.project_epoch))
         };
         drop(_identity);
+        if changes_identity {
+            self.announce_project_identity_transition(false);
+        }
+        let (written, project_epoch) = result?;
         self.events.emit(&CoreEvent::ProjectSaved {
             path: written.to_string_lossy().into_owned(),
             project_epoch,
