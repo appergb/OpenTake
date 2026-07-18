@@ -63,6 +63,7 @@ std::thread_local! {
 std::thread_local! {
     static FAIL_REMOVED_STORED_CLEANUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAIL_ATOMIC_CAPABILITY_REPLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_REPAIR_STORED_COPY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Test-only fault injection for the post-commit remove cleanup boundary.
@@ -80,6 +81,15 @@ pub fn fail_next_removed_stored_cleanup_for_test() {
 #[cfg(any(test, feature = "test-faults"))]
 pub fn fail_next_atomic_capability_replace_for_test() {
     FAIL_ATOMIC_CAPABILITY_REPLACE.with(|fail| fail.set(true));
+}
+
+/// Test-only fault injection for one stored-copy repair. This lets integration
+/// tests exercise per-asset failure isolation without replacing a retained
+/// directory, which Windows intentionally prevents while handles are open.
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-faults"))]
+pub fn fail_next_repair_stored_copy_for_test() {
+    FAIL_REPAIR_STORED_COPY.with(|fail| fail.set(true));
 }
 
 #[cfg(test)]
@@ -1491,6 +1501,12 @@ impl LibraryStore {
     /// entry, so a source that changed in place cannot create an orphan under a
     /// new id while leaving the project's original mapping unresolved.
     pub fn repair_stored_copy(&self, expected_id: &str, source: impl AsRef<Path>) -> Result<()> {
+        #[cfg(any(test, feature = "test-faults"))]
+        if FAIL_REPAIR_STORED_COPY.with(|fail| fail.replace(false)) {
+            return Err(MediaError::Io(std::io::Error::other(
+                "injected stored copy repair failure",
+            )));
+        }
         let source = source.as_ref();
         let existing = self
             .load_manifest()?

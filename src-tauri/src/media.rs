@@ -3112,13 +3112,14 @@ mod tests {
         core.set_media_global_favorite(&asset_b, Some(global_b.id.clone()))
             .expect("seed valid mapping B");
         core.save_project(None).expect("persist both mappings");
-        fs::remove_dir_all(store.root().join(opentake_media::library::FILES_SUBDIR))
-            .expect("remove files directory");
-        fs::write(
-            store.root().join(opentake_media::library::FILES_SUBDIR),
-            b"not a directory",
+        fs::remove_file(
+            store
+                .stored_path(&global_b.id)
+                .expect("lookup second stored copy")
+                .expect("second stored copy exists"),
         )
-        .expect("replace files directory with a regular file");
+        .expect("remove second stored copy");
+        opentake_media::library::fail_next_repair_stored_copy_for_test();
 
         let synced = sync_project_favorites_impl(&core, tmp.path(), &store, vec![])
             .expect("copy lookup errors are per-asset failures");
@@ -4674,7 +4675,8 @@ mod tests {
         // All five extensions accepted by the codec table + the native save
         // dialog filters should parse to an absolute PathBuf.
         for ext in ["m4a", "m4r", "aac", "mp3", "wav"] {
-            let p = validate_extract_output(&format!("/tmp/out.{ext}"))
+            let output = std::env::temp_dir().join(format!("out.{ext}"));
+            let p = validate_extract_output(&output.to_string_lossy())
                 .unwrap_or_else(|e| panic!(".{ext}: {e}"));
             assert_eq!(p.extension().unwrap().to_str().unwrap(), ext);
             assert!(p.is_absolute());
@@ -4703,7 +4705,8 @@ mod tests {
 
     #[test]
     fn validate_extract_output_rejects_unknown_extension() {
-        let err = validate_extract_output("/tmp/out.mp4").unwrap_err();
+        let output = std::env::temp_dir().join("out.mp4");
+        let err = validate_extract_output(&output.to_string_lossy()).unwrap_err();
         assert!(
             err.contains("unsupported audio extension"),
             "video extension must be rejected: got {err}"
@@ -4712,7 +4715,8 @@ mod tests {
 
     #[test]
     fn validate_extract_output_rejects_missing_extension() {
-        let err = validate_extract_output("/tmp/out").unwrap_err();
+        let output = std::env::temp_dir().join("out");
+        let err = validate_extract_output(&output.to_string_lossy()).unwrap_err();
         assert!(
             err.contains("no extension"),
             "extensionless path must be rejected: got {err}"
