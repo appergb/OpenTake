@@ -36,6 +36,18 @@ fn tool_result_for_model(result: &ToolResult) -> serde_json::Value {
     safe_tool_result_for_llm(result)
 }
 
+fn tool_result_message(
+    tool_call_id: impl Into<String>,
+    result: serde_json::Value,
+    is_error: bool,
+) -> ChatMessage {
+    if is_error {
+        ChatMessage::tool_error_result(tool_call_id, result)
+    } else {
+        ChatMessage::tool_result(tool_call_id, result)
+    }
+}
+
 fn map_dispatch_join_error(error: tokio::task::JoinError) -> LlmError {
     tracing::error!(
         target: "opentake::chat::private",
@@ -82,6 +94,65 @@ fn update_assistant_tool_call(
             *existing = resolved_tool_call.clone();
         }
     }
+}
+
+/// Restore the provider protocol after cancellation or a failed dispatch left
+/// an assistant `tool_use` without its immediately-following `tool_result`.
+/// Repairs are inserted before the next conversational turn and mirrored onto
+/// the UI-facing [`ToolCall`] so a resumed session is both wire-valid and
+/// visibly marked as cancelled.
+fn resolve_orphan_tool_uses(messages: &mut Vec<ChatMessage>) -> usize {
+    let mut repaired = 0;
+    let mut index = 0;
+
+    while index < messages.len() {
+        if messages[index].role != crate::chat::session::Role::Assistant
+            || messages[index].tool_calls.is_empty()
+        {
+            index += 1;
+            continue;
+        }
+
+        let mut insert_at = index + 1;
+        let mut answered = std::collections::HashSet::new();
+        while let Some(message) = messages.get(insert_at) {
+            if message.role != crate::chat::session::Role::Tool {
+                break;
+            }
+            if let Some(tool_call_id) = &message.tool_call_id {
+                answered.insert(tool_call_id.clone());
+            }
+            insert_at += 1;
+        }
+
+        let missing: Vec<String> = messages[index]
+            .tool_calls
+            .iter()
+            .filter(|tool_call| !answered.contains(&tool_call.id))
+            .map(|tool_call| tool_call.id.clone())
+            .collect();
+        for tool_call_id in missing {
+            let cancelled = serde_json::json!({"error": "Cancelled"});
+            if let Some(tool_call) = messages[index]
+                .tool_calls
+                .iter_mut()
+                .find(|tool_call| tool_call.id == tool_call_id)
+            {
+                tool_call.result = Some(cancelled.clone());
+                tool_call.is_error = Some(true);
+            }
+            messages.insert(
+                insert_at,
+                ChatMessage::tool_error_result(tool_call_id, cancelled),
+            );
+            insert_at += 1;
+            repaired += 1;
+        }
+
+        index = insert_at;
+    }
+
+    repaired
 }
 
 /// Events the loop emits during a turn. The Tauri shell forwards each to a
@@ -227,6 +298,15 @@ impl ChatLoop {
                 return Err(LoopError::Cancelled);
             }
 
+            let repaired = resolve_orphan_tool_uses(&mut session.messages);
+            if repaired > 0 {
+                tracing::debug!(
+                    session_id = %session.id,
+                    repaired,
+                    "repaired orphaned chat tool uses before provider request"
+                );
+            }
+
             let system = self.system_prompt();
             let mut messages = Vec::with_capacity(session.messages.len() + 1);
             messages.push(ChatMessage::system(system));
@@ -291,7 +371,7 @@ impl ChatLoop {
                 });
                 session
                     .messages
-                    .push(ChatMessage::tool_result(tc_id, result_json));
+                    .push(tool_result_message(tc_id, result_json, result.is_error));
                 resolved.push(tc);
             }
 
@@ -331,6 +411,48 @@ mod tests {
     use opentake_ops::{EditCommand, EditResult};
     use std::path::PathBuf;
     use std::sync::Mutex;
+
+    #[test]
+    fn orphan_tool_uses_are_repaired_before_the_next_user_turn() {
+        let mut orphan =
+            ToolCall::request("missing", "split_clip", serde_json::json!({"clipId": "c1"}));
+        let resolved = ToolCall::request("resolved", "get_timeline", serde_json::json!({}));
+        let mut messages = vec![
+            ChatMessage::assistant("working", vec![resolved, orphan.clone()]),
+            ChatMessage::tool_result("resolved", serde_json::json!({"ok": true})),
+            ChatMessage::user("continue"),
+        ];
+
+        assert_eq!(resolve_orphan_tool_uses(&mut messages), 1);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[2].role, crate::chat::Role::Tool);
+        assert_eq!(messages[2].tool_call_id.as_deref(), Some("missing"));
+        assert_eq!(messages[2].tool_is_error, Some(true));
+        assert!(messages[2].content.contains("Cancelled"));
+        assert_eq!(messages[3].role, crate::chat::Role::User);
+        orphan.result = Some(serde_json::json!({"error": "Cancelled"}));
+        orphan.is_error = Some(true);
+        assert_eq!(messages[0].tool_calls[1].result, orphan.result);
+        assert_eq!(messages[0].tool_calls[1].is_error, Some(true));
+
+        assert_eq!(resolve_orphan_tool_uses(&mut messages), 0);
+        assert_eq!(messages.len(), 4);
+    }
+
+    #[test]
+    fn dispatcher_failures_become_provider_error_results() {
+        let failed = tool_result_message(
+            "call-failed",
+            serde_json::json!({"error": "invalid clip"}),
+            true,
+        );
+        assert_eq!(failed.tool_call_id.as_deref(), Some("call-failed"));
+        assert_eq!(failed.tool_is_error, Some(true));
+
+        let succeeded =
+            tool_result_message("call-ok", serde_json::json!({"summary": "done"}), false);
+        assert_eq!(succeeded.tool_is_error, None);
+    }
 
     /// A minimal CoreHandle over an in-memory timeline + manifest, so the loop
     /// can dispatch read tools without a full AppCore.

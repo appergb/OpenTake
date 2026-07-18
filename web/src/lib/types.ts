@@ -688,4 +688,5 @@ export interface ChatMessage {
   toolCalls: ChatToolCall[];
   createdAt: number;
   toolCallId?: string;
+  toolIsError?: boolean;
 }

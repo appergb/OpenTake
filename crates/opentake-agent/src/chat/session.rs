@@ -65,6 +65,11 @@ pub struct ChatMessage {
     /// tool-result messages require it; absent for other roles.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// When role == Tool: true when the provider must treat this result as an
+    /// error. Anthropic carries this as `tool_result.is_error`; OpenAI has no
+    /// equivalent field and receives the structured error content instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_is_error: Option<bool>,
 }
 
 impl ChatMessage {
@@ -76,6 +81,7 @@ impl ChatMessage {
             tool_calls: Vec::new(),
             created_at: now_millis(),
             tool_call_id: None,
+            tool_is_error: None,
         }
     }
 
@@ -87,6 +93,7 @@ impl ChatMessage {
             tool_calls,
             created_at: now_millis(),
             tool_call_id: None,
+            tool_is_error: None,
         }
     }
 
@@ -98,6 +105,7 @@ impl ChatMessage {
             tool_calls: Vec::new(),
             created_at: now_millis(),
             tool_call_id: None,
+            tool_is_error: None,
         }
     }
 
@@ -111,7 +119,16 @@ impl ChatMessage {
             tool_calls: Vec::new(),
             created_at: now_millis(),
             tool_call_id: Some(tool_call_id.into()),
+            tool_is_error: None,
         }
+    }
+
+    /// A failed tool result. The explicit marker is required by Anthropic's
+    /// wire protocol so cancellation repair is not mistaken for success.
+    pub fn tool_error_result(tool_call_id: impl Into<String>, result: serde_json::Value) -> Self {
+        let mut message = Self::tool_result(tool_call_id, result);
+        message.tool_is_error = Some(true);
+        message
     }
 }
 
@@ -210,7 +227,17 @@ mod tests {
         let v = serde_json::to_value(&m).unwrap();
         assert_eq!(v["role"], "tool");
         assert_eq!(v["toolCallId"], "call-1");
+        assert!(v.get("toolIsError").is_none());
         assert!(v["content"].as_str().unwrap().contains("summary"));
+    }
+
+    #[test]
+    fn tool_error_result_round_trips_an_explicit_error_marker() {
+        let m = ChatMessage::tool_error_result("call-1", serde_json::json!({"error": "Cancelled"}));
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["toolIsError"], true);
+        let back: ChatMessage = serde_json::from_value(v).unwrap();
+        assert_eq!(back.tool_is_error, Some(true));
     }
 
     #[test]

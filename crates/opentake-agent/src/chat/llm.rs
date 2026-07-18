@@ -400,7 +400,10 @@ fn anthropic_body(
                 }
                 system.push_str(&m.content);
             }
-            Role::User => turns.push(serde_json::json!({"role": "user", "content": m.content})),
+            Role::User => turns.push(serde_json::json!({
+                "role": "user",
+                "content": [{"type": "text", "text": m.content}],
+            })),
             Role::Assistant => {
                 let mut blocks = Vec::new();
                 if !m.content.is_empty() {
@@ -417,11 +420,14 @@ fn anthropic_body(
                 turns.push(serde_json::json!({"role": "assistant", "content": blocks}));
             }
             Role::Tool => {
-                let block = serde_json::json!({
+                let mut block = serde_json::json!({
                     "type": "tool_result",
                     "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
                     "content": m.content,
                 });
+                if let Some(is_error) = m.tool_is_error {
+                    block["is_error"] = serde_json::Value::Bool(is_error);
+                }
                 if let Some(last) = turns.last_mut() {
                     if last.get("role").and_then(|r| r.as_str()) == Some("user") {
                         if let Some(arr) = last.get_mut("content").and_then(|c| c.as_array_mut()) {
@@ -437,26 +443,41 @@ fn anthropic_body(
 
     let mut body = serde_json::json!({
         "model": model,
-        "max_tokens": 4096,
+        "max_tokens": 8192,
         "stream": true,
         "messages": turns,
     });
     if !system.is_empty() {
-        body["system"] = serde_json::Value::String(system);
+        body["system"] = serde_json::json!([{
+            "type": "text",
+            "text": system,
+            "cache_control": {"type": "ephemeral"},
+        }]);
     }
     if !tools.is_empty() {
-        body["tools"] = serde_json::Value::Array(
-            tools
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "name": t.name,
-                        "description": t.description,
-                        "input_schema": t.parameters,
-                    })
+        let mut wire_tools: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.parameters,
                 })
-                .collect(),
-        );
+            })
+            .collect();
+        if let Some(last) = wire_tools.last_mut() {
+            last["cache_control"] = serde_json::json!({"type": "ephemeral"});
+        }
+        body["tools"] = serde_json::Value::Array(wire_tools);
+    }
+    if let Some(last_block) = body["messages"]
+        .as_array_mut()
+        .and_then(|messages| messages.last_mut())
+        .and_then(|message| message.get_mut("content"))
+        .and_then(serde_json::Value::as_array_mut)
+        .and_then(|content| content.last_mut())
+    {
+        last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
     }
     body
 }
@@ -703,9 +724,46 @@ mod tests {
             ChatMessage::user("hi"),
         ];
         let body = anthropic_body("claude", &msgs, &[]);
-        assert_eq!(body["system"], "you are an editor");
+        assert_eq!(body["system"][0]["type"], "text");
+        assert_eq!(body["system"][0]["text"], "you are an editor");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
         assert_eq!(body["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn anthropic_request_sets_all_prompt_cache_boundaries_and_upstream_token_limit() {
+        let tools = vec![
+            ToolSchema {
+                name: "get_timeline".into(),
+                description: "read".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            ToolSchema {
+                name: "split_clip".into(),
+                description: "edit".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        ];
+        let messages = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("first"),
+            ChatMessage::assistant("ack", vec![]),
+            ChatMessage::user("latest"),
+        ];
+
+        let body = anthropic_body("claude", &messages, &tools);
+
+        assert_eq!(body["max_tokens"], 8192);
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert_eq!(body["tools"][1]["cache_control"]["type"], "ephemeral");
+        assert_eq!(
+            body["messages"][2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert!(body["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none());
     }
 
     #[test]
@@ -720,7 +778,7 @@ mod tests {
                     serde_json::json!({}),
                 )],
             ),
-            ChatMessage::tool_result("c1", serde_json::json!({"fps": 30})),
+            ChatMessage::tool_error_result("c1", serde_json::json!({"error": "Cancelled"})),
         ];
         let body = anthropic_body("claude", &msgs, &[]);
         let turns = body["messages"].as_array().unwrap();
@@ -729,6 +787,7 @@ mod tests {
         assert_eq!(last["role"], "user");
         assert_eq!(last["content"][0]["type"], "tool_result");
         assert_eq!(last["content"][0]["tool_use_id"], "c1");
+        assert_eq!(last["content"][0]["is_error"], true);
     }
 
     #[test]
