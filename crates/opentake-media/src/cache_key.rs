@@ -70,6 +70,10 @@ fn foundation_unix_seconds(time: SystemTime) -> f64 {
             }
         }
     };
+    foundation_unix_seconds_from_parts(whole_seconds, nanos)
+}
+
+fn foundation_unix_seconds_from_parts(whole_seconds: f64, nanos: u32) -> f64 {
     let reference_seconds =
         (whole_seconds - FOUNDATION_REFERENCE_OFFSET_SECS) + f64::from(nanos) / 1_000_000_000.0;
     reference_seconds + FOUNDATION_REFERENCE_OFFSET_SECS
@@ -262,7 +266,7 @@ mod tests {
     fn foundation_file_times_match_swift_cache_vectors() {
         let cases = [
             (
-                UNIX_EPOCH + std::time::Duration::new(1_718_900_000, 123_456_789),
+                (1_718_900_000.0, 123_456_789),
                 "/a/b.mp4",
                 42,
                 "1718900000.123457",
@@ -270,7 +274,7 @@ mod tests {
                 "171d2ad89d6dcba2eee30b72903bb18c",
             ),
             (
-                UNIX_EPOCH + std::time::Duration::from_micros(1),
+                (0.0, 1_000),
                 "/tiny",
                 1,
                 "9.5367431640625e-07",
@@ -278,7 +282,7 @@ mod tests {
                 "6090717edb604ac2af1714435b7cece1",
             ),
             (
-                UNIX_EPOCH - std::time::Duration::from_micros(1),
+                (-1.0, 999_999_000),
                 "/before",
                 1,
                 "-9.5367431640625e-07",
@@ -286,12 +290,29 @@ mod tests {
                 "5cc3a36a9381ac6a6ea34d80d86bf5e5",
             ),
         ];
-        for (time, path, size, expected_time, expected_regular, expected_visual) in cases {
-            let seconds = foundation_unix_seconds(time);
+        for (
+            (whole_seconds, nanos),
+            path,
+            size,
+            expected_time,
+            expected_regular,
+            expected_visual,
+        ) in cases
+        {
+            let seconds = foundation_unix_seconds_from_parts(whole_seconds, nanos);
             assert_eq!(swift_double(seconds), expected_time);
             assert_eq!(identity_hex(path, seconds, size), expected_regular);
             assert_eq!(visual_identity_hex(path, seconds, size), expected_visual);
         }
+    }
+
+    #[test]
+    fn foundation_system_time_supports_100ns_precision() {
+        let time = UNIX_EPOCH + std::time::Duration::new(1_718_900_000, 123_456_700);
+        assert_eq!(
+            swift_double(foundation_unix_seconds(time)),
+            "1718900000.1234567"
+        );
     }
 
     #[test]
