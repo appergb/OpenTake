@@ -238,6 +238,19 @@ impl ChatState {
             .unwrap_or_else(|| ChatSession::new(session_id.to_string())))
     }
 
+    fn take_open_project_session_for_turn(
+        &self,
+        project: &ChatProjectContext,
+        session_id: &str,
+    ) -> Result<ChatSession, String> {
+        let session = self.take_project_session(project, session_id)?;
+        if session.is_open {
+            Ok(session)
+        } else {
+            Err("the Agent chat tab is closed".into())
+        }
+    }
+
     /// Atomically persist a session only while its original project identity
     /// still owns the core. Stale turn completion cannot publish into A or B.
     fn put_project_session(
@@ -265,6 +278,24 @@ impl ChatState {
         self.ensure_project_context(project)?;
         let _persistence = self.persistence.lock().map_err(|e| e.to_string())?;
         project.store.list().map_err(|e| e.to_string())
+    }
+
+    fn set_project_session_open(
+        &self,
+        project: &ChatProjectContext,
+        session_id: &str,
+        is_open: bool,
+    ) -> Result<ChatSession, String> {
+        let key = project.key(session_id);
+        let turns = self.turns.lock().map_err(|e| e.to_string())?;
+        if turns.running.contains_key(&key) {
+            return Err("finish or cancel the running turn before changing its tab state".into());
+        }
+        let mut session = self.take_project_session(project, session_id)?;
+        session.is_open = is_open;
+        self.put_project_session(project, session.clone())?;
+        drop(turns);
+        Ok(session)
     }
 
     fn reserve_turn(&self, key: SessionKey, cancel: Arc<TurnCancel>) -> Result<(), String> {
@@ -436,7 +467,7 @@ pub async fn chat_send(
     state.reserve_turn(session_key.clone(), turn_cancel.clone())?;
     let cancel = turn_cancel.requested.clone();
 
-    let mut session = match state.take_project_session(&project, &session_id) {
+    let mut session = match state.take_open_project_session_for_turn(&project, &session_id) {
         Ok(session) => session,
         Err(error) => {
             state.release_turn(&session_key);
@@ -523,6 +554,21 @@ pub fn chat_sessions(
 ) -> Result<Vec<ChatSession>, String> {
     let project = state.project_context_for(expected_project_epoch, &expected_project_path)?;
     state.list_project_sessions(&project)
+}
+
+/// Persist whether a conversation is represented by an open Agent tab. Opening
+/// a new id creates an empty project-local session immediately, so tabs survive
+/// restart even before their first message.
+#[tauri::command]
+pub fn chat_session_set_open(
+    state: State<'_, ChatState>,
+    session_id: String,
+    is_open: bool,
+    expected_project_epoch: u64,
+    expected_project_path: String,
+) -> Result<ChatSession, String> {
+    let project = state.project_context_for(expected_project_epoch, &expected_project_path)?;
+    state.set_project_session_open(&project, &session_id, is_open)
 }
 
 /// `chat_cancel`: request a running turn stop at the next boundary. No-op when
@@ -664,6 +710,45 @@ mod tests {
         assert_eq!(loaded.messages.len(), 1);
         assert_eq!(loaded.messages[0].content, "remember me");
         assert_eq!(reopened.list_project_sessions(&project).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn session_open_state_persists_across_state_recreation() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().join("Tabs.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle)).unwrap();
+        let state = ChatState::new(
+            core.clone(),
+            temp.path().join("no-workflows"),
+            temp.path().join("chat-cache"),
+            temp.path().join("chat-models"),
+        );
+        let project = state.project_context().unwrap();
+
+        let opened = state
+            .set_project_session_open(&project, "chat-tab", true)
+            .unwrap();
+        assert!(opened.is_open);
+        let closed = state
+            .set_project_session_open(&project, "chat-tab", false)
+            .unwrap();
+        assert!(!closed.is_open);
+        assert!(state
+            .take_open_project_session_for_turn(&project, "chat-tab")
+            .is_err());
+
+        let recreated = ChatState::new(
+            core,
+            temp.path().join("no-workflows-2"),
+            temp.path().join("chat-cache-2"),
+            temp.path().join("chat-models-2"),
+        );
+        let recreated_project = recreated.project_context().unwrap();
+        let sessions = recreated.list_project_sessions(&recreated_project).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "chat-tab");
+        assert!(!sessions[0].is_open);
     }
 
     #[test]

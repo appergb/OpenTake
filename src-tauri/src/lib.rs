@@ -218,6 +218,7 @@ pub fn run() {
             chat::chat_send,
             chat::chat_history,
             chat::chat_sessions,
+            chat::chat_session_set_open,
             chat::chat_cancel,
             transcribe::transcribe_model_status,
             transcribe::download_transcribe_model,

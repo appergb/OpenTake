@@ -681,11 +681,33 @@ export interface ChatToolCall {
   isError?: boolean;
 }
 
+export type AgentToolResultContentBlock =
+  | { kind: "text"; text: string }
+  | { kind: "image"; base64: string; mediaType: string };
+
+export type AgentContentBlock =
+  | { type: "text"; text: string }
+  | {
+      type: "toolUse";
+      id: string;
+      name: string;
+      input: unknown;
+      result?: unknown;
+      isError?: boolean;
+    }
+  | {
+      type: "toolResult";
+      toolUseId: string;
+      content: AgentToolResultContentBlock[];
+      isError?: boolean;
+    };
+
 export interface ChatMessage {
   id: string;
   role: ChatRole;
   content: string;
   toolCalls: ChatToolCall[];
+  blocks?: AgentContentBlock[];
   createdAt: number;
   toolCallId?: string;
   toolIsError?: boolean;
@@ -695,6 +717,7 @@ export interface ChatSession {
   id: string;
   messages: ChatMessage[];
   createdAt: number;
+  isOpen: boolean;
   provider?: string;
   model?: string;
 }

@@ -1039,6 +1039,23 @@ export async function chatSessions(
   return [];
 }
 
+export async function chatSessionSetOpen(
+  sessionId: string,
+  isOpen: boolean,
+  expectedProjectEpoch: number,
+  expectedProjectPath: string,
+): Promise<ChatSession> {
+  await ensureTauri();
+  if (invokeImpl)
+    return invokeImpl<ChatSession>("chat_session_set_open", {
+      sessionId,
+      isOpen,
+      expectedProjectEpoch,
+      expectedProjectPath,
+    });
+  throw new Error("chat tabs require the desktop app");
+}
+
 export async function chatCancel(
   sessionId: string,
   expectedProjectEpoch: number,

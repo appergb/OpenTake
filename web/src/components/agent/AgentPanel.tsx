@@ -2,23 +2,25 @@ import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } f
 import {
   ChevronDown,
   ChevronRight,
+  Plus,
   Send,
   Settings as SettingsIcon,
   Square,
-  Trash2,
   Wrench,
+  X,
 } from "lucide-react";
 import { useT } from "../../i18n";
 import {
   chatCancel,
   chatSend,
+  chatSessionSetOpen,
   chatSessions,
   isTauri,
   onChatDelta,
   onChatDone,
   onChatToolCall,
 } from "../../lib/api";
-import type { ChatMessage, ChatToolCall } from "../../lib/types";
+import type { ChatMessage, ChatSession, ChatToolCall } from "../../lib/types";
 import { useSettingsStore } from "../../store/settingsStore";
 import { mintSessionId, useChatStore } from "../../store/chatStore";
 import { useEditorUiStore } from "../../store/uiStore";
@@ -45,7 +47,27 @@ export function AgentPanel() {
   const reset = useChatStore((state) => state.reset);
 
   const [input, setInput] = useState("");
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const sessionsRef = useRef<ChatSession[]>([]);
+  const tabMutationRef = useRef<Promise<void>>(Promise.resolve());
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  function commitSessions(next: ChatSession[]) {
+    sessionsRef.current = next;
+    setSessions(next);
+  }
+
+  function updateSessions(update: (current: ChatSession[]) => ChatSession[]) {
+    commitSessions(update(sessionsRef.current));
+  }
+
+  function enqueueTabMutation(operation: () => Promise<void>) {
+    const pending = tabMutationRef.current.then(operation, operation);
+    tabMutationRef.current = pending.then(
+      () => undefined,
+      () => undefined,
+    );
+  }
 
   useEffect(() => {
     let unDelta: () => void = () => {};
@@ -90,12 +112,13 @@ export function AgentPanel() {
   useEffect(() => {
     const freshSessionId = mintSessionId();
     reset(freshSessionId);
+    commitSessions([]);
     if (!isTauri || !projectPath) return;
     let disposed = false;
     const loadingEpoch = projectEpoch;
     const loadingPath = projectPath;
     void chatSessions(loadingEpoch, loadingPath)
-      .then((sessions) => {
+      .then((projectSessions) => {
         if (disposed) return;
         const project = useProjectStore.getState();
         const chat = useChatStore.getState();
@@ -108,10 +131,47 @@ export function AgentPanel() {
         ) {
           return;
         }
-        const latest = sessions[0];
+        const openSessions = projectSessions.filter((session) => session.isOpen !== false);
+        commitSessions(openSessions);
+        const latest = openSessions[0];
         if (latest) {
           reset(latest.id);
           setMessages(latest.messages);
+        } else {
+          const optimistic: ChatSession = {
+            id: freshSessionId,
+            messages: [],
+            createdAt: Date.now(),
+            isOpen: true,
+          };
+          commitSessions([optimistic]);
+          enqueueTabMutation(async () => {
+            if (disposed) return;
+            try {
+              const created = await chatSessionSetOpen(
+                freshSessionId,
+                true,
+                loadingEpoch,
+                loadingPath,
+              );
+              if (disposed) return;
+              const currentProject = useProjectStore.getState();
+              if (
+                currentProject.projectEpoch === loadingEpoch &&
+                currentProject.projectPath === loadingPath &&
+                useChatStore.getState().sessionId === freshSessionId
+              ) {
+                updateSessions((current) =>
+                  current.map((session) =>
+                    session.id === freshSessionId ? created : session,
+                  ),
+                );
+              }
+            } catch {
+              // Keep the local empty tab; sending a message will surface a
+              // project persistence error through the normal chat path.
+            }
+          });
         }
       })
       .catch(() => {});
@@ -119,6 +179,14 @@ export function AgentPanel() {
       disposed = true;
     };
   }, [projectEpoch, projectPath, reset, setMessages]);
+
+  useEffect(() => {
+    updateSessions((current) =>
+      current.map((session) =>
+        session.id === sessionId ? { ...session, messages } : session,
+      ),
+    );
+  }, [messages, sessionId]);
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -164,9 +232,86 @@ export function AgentPanel() {
     void chatCancel(sessionId, projectEpoch, projectPath).catch(() => {});
   }
 
-  function clearChat() {
-    if (streaming) return;
-    reset(mintSessionId());
+  function openSession(session: ChatSession) {
+    if (streaming || session.id === sessionId || !projectPath) return;
+    reset(session.id);
+    setMessages(session.messages);
+  }
+
+  function newChat() {
+    if (streaming || !projectPath) return;
+    const openingEpoch = projectEpoch;
+    const openingPath = projectPath;
+    enqueueTabMutation(() => createNewChatNow(openingEpoch, openingPath));
+  }
+
+  async function createNewChatNow(openingEpoch: number, openingPath: string) {
+    const project = useProjectStore.getState();
+    if (project.projectEpoch !== openingEpoch || project.projectPath !== openingPath) return;
+    const createdId = mintSessionId();
+    const optimistic: ChatSession = {
+      id: createdId,
+      messages: [],
+      createdAt: Date.now(),
+      isOpen: true,
+    };
+    reset(createdId);
+    updateSessions((current) => [optimistic, ...current]);
+    try {
+      const persisted = await chatSessionSetOpen(
+        createdId,
+        true,
+        openingEpoch,
+        openingPath,
+      );
+      const currentProject = useProjectStore.getState();
+      if (
+        currentProject.projectEpoch === openingEpoch &&
+        currentProject.projectPath === openingPath
+      ) {
+        updateSessions((current) =>
+          current.map((session) => (session.id === createdId ? persisted : session)),
+        );
+      }
+    } catch {
+      // Keep the reversible local tab available; the next message surfaces any
+      // project persistence failure through the existing chat error path.
+    }
+  }
+
+  function closeChat(session: ChatSession) {
+    if (streaming || !projectPath) return;
+    const closingEpoch = projectEpoch;
+    const closingPath = projectPath;
+    enqueueTabMutation(() => closeChatNow(session.id, closingEpoch, closingPath));
+  }
+
+  async function closeChatNow(
+    closingSessionId: string,
+    closingEpoch: number,
+    closingPath: string,
+  ) {
+    const before = useProjectStore.getState();
+    if (before.projectEpoch !== closingEpoch || before.projectPath !== closingPath) return;
+    try {
+      await chatSessionSetOpen(closingSessionId, false, closingEpoch, closingPath);
+    } catch {
+      return;
+    }
+    const project = useProjectStore.getState();
+    if (project.projectEpoch !== closingEpoch || project.projectPath !== closingPath) return;
+    const remaining = sessionsRef.current.filter(
+      (candidate) => candidate.id !== closingSessionId,
+    );
+    commitSessions(remaining);
+    if (closingSessionId !== useChatStore.getState().sessionId) return;
+    const next = remaining[0];
+    if (next) {
+      reset(next.id);
+      setMessages(next.messages);
+    } else {
+      await createNewChatNow(closingEpoch, closingPath);
+    }
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -201,9 +346,10 @@ export function AgentPanel() {
         </span>
         <button
           type="button"
-          onClick={clearChat}
-          disabled={streaming}
-          title={t("agent.clear")}
+          onClick={() => void newChat()}
+          disabled={streaming || !projectPath}
+          title={t("agent.newTab")}
+          aria-label={t("agent.newTab")}
           className="hover-area"
           style={{
             width: 26,
@@ -213,11 +359,79 @@ export function AgentPanel() {
             justifyContent: "center",
             borderRadius: "var(--radius-sm)",
             color: "var(--text-secondary)",
-            opacity: streaming ? 0.4 : 1,
+            opacity: streaming || !projectPath ? 0.4 : 1,
           }}
         >
-          <Trash2 size={14} />
+          <Plus size={14} />
         </button>
+      </div>
+
+      <div
+        role="tablist"
+        aria-label={t("agent.tabs")}
+        style={{
+          display: "flex",
+          gap: 2,
+          overflowX: "auto",
+          padding: "var(--space-xs) var(--space-sm)",
+          borderBottom: "var(--bw-hairline) solid var(--border-subtle)",
+          flexShrink: 0,
+        }}
+      >
+        {sessions.map((session, index) => {
+          const title = sessionTitle(session, `${t("agent.newChat")} ${index + 1}`);
+          const active = session.id === sessionId;
+          return (
+            <div
+              key={session.id}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                minWidth: 0,
+                borderRadius: "var(--radius-sm)",
+                background: active ? "var(--bg-elevated)" : "transparent",
+              }}
+            >
+              <button
+                type="button"
+                role="tab"
+                aria-selected={active}
+                aria-label={title}
+                disabled={streaming}
+                onClick={() => openSession(session)}
+                style={{
+                  maxWidth: 120,
+                  height: 24,
+                  padding: "0 4px 0 var(--space-sm)",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  color: active ? "var(--text-primary)" : "var(--text-muted)",
+                  fontSize: "var(--fs-xs)",
+                }}
+              >
+                {title}
+              </button>
+              <button
+                type="button"
+                aria-label={`${t("agent.closeTab")} ${title}`}
+                disabled={streaming}
+                onClick={() => void closeChat(session)}
+                style={{
+                  width: 20,
+                  height: 24,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: "var(--text-muted)",
+                  opacity: streaming ? 0.4 : 1,
+                }}
+              >
+                <X size={11} />
+              </button>
+            </div>
+          );
+        })}
       </div>
 
       <div
@@ -314,6 +528,15 @@ export function AgentPanel() {
       </div>
     </div>
   );
+}
+
+function sessionTitle(session: ChatSession, fallback: string): string {
+  const firstUserMessage = session.messages.find(
+    (message) => message.role === "user" && message.content.trim().length > 0,
+  );
+  if (!firstUserMessage) return fallback;
+  const compact = firstUserMessage.content.trim().replace(/\s+/g, " ");
+  return compact.length > 20 ? `${compact.slice(0, 20)}…` : compact;
 }
 
 function MessageRow({

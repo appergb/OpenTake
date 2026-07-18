@@ -39,14 +39,15 @@ fn tool_result_for_model(result: &ToolResult) -> serde_json::Value {
 
 fn tool_result_message(
     tool_call_id: impl Into<String>,
-    result: serde_json::Value,
-    is_error: bool,
+    result: &ToolResult,
+    safe_result: serde_json::Value,
 ) -> ChatMessage {
-    if is_error {
-        ChatMessage::tool_error_result(tool_call_id, result)
+    let blocks = if result.is_error {
+        vec![crate::tools::result::Block::text(safe_result.to_string())]
     } else {
-        ChatMessage::tool_result(tool_call_id, result)
-    }
+        result.content.clone()
+    };
+    ChatMessage::tool_result_blocks(tool_call_id, blocks, safe_result, result.is_error)
 }
 
 fn map_dispatch_join_error(error: tokio::task::JoinError) -> LlmError {
@@ -93,6 +94,7 @@ fn update_assistant_tool_call(
             .find(|tool_call| tool_call.id == resolved_tool_call.id)
         {
             *existing = resolved_tool_call.clone();
+            message.refresh_blocks();
         }
     }
 }
@@ -149,6 +151,7 @@ fn resolve_orphan_tool_uses(messages: &mut Vec<ChatMessage>) -> usize {
             insert_at += 1;
             repaired += 1;
         }
+        messages[index].refresh_blocks();
 
         index = insert_at;
     }
@@ -442,7 +445,7 @@ impl ChatLoop {
                 });
                 session
                     .messages
-                    .push(tool_result_message(tc_id, result_json, result.is_error));
+                    .push(tool_result_message(tc_id, &result, result_json));
                 resolved.push(tc);
             }
 
@@ -512,16 +515,22 @@ mod tests {
 
     #[test]
     fn dispatcher_failures_become_provider_error_results() {
-        let failed = tool_result_message(
-            "call-failed",
-            serde_json::json!({"error": "invalid clip"}),
-            true,
-        );
+        let failed_result = ToolResult::error("invalid clip");
+        let failed_safe = tool_result_for_model(&failed_result);
+        let failed = tool_result_message("call-failed", &failed_result, failed_safe.clone());
         assert_eq!(failed.tool_call_id.as_deref(), Some("call-failed"));
         assert_eq!(failed.tool_is_error, Some(true));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&failed.content).unwrap(),
+            failed_safe
+        );
 
-        let succeeded =
-            tool_result_message("call-ok", serde_json::json!({"summary": "done"}), false);
+        let succeeded_result = ToolResult::ok("done");
+        let succeeded = tool_result_message(
+            "call-ok",
+            &succeeded_result,
+            tool_result_for_model(&succeeded_result),
+        );
         assert_eq!(succeeded.tool_is_error, None);
     }
 

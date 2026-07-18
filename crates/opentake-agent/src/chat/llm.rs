@@ -21,7 +21,8 @@ use serde::{Deserialize, Serialize};
 
 use opentake_gen::{KeyStore, ProviderKey};
 
-use crate::chat::session::{ChatMessage, Role, ToolCall};
+use crate::chat::session::{AgentContentBlock, ChatMessage, Role, ToolCall};
+use crate::tools::result::Block;
 
 /// Which BYOK provider a chat session talks to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -383,6 +384,35 @@ where
 
 // MARK: - Anthropic streaming
 
+fn anthropic_tool_result_content(message: &ChatMessage) -> serde_json::Value {
+    let Some(AgentContentBlock::ToolResult { content, .. }) = message
+        .blocks
+        .iter()
+        .find(|block| matches!(block, AgentContentBlock::ToolResult { .. }))
+    else {
+        return serde_json::Value::String(message.content.clone());
+    };
+    serde_json::Value::Array(
+        content
+            .iter()
+            .map(|block| match block {
+                Block::Text { text } => serde_json::json!({
+                    "type": "text",
+                    "text": text,
+                }),
+                Block::Image { base64, media_type } => serde_json::json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": base64,
+                    },
+                }),
+            })
+            .collect(),
+    )
+}
+
 /// Build the Anthropic request body. System prompt is a top-level field (not a
 /// message); tool results are `role:user` `tool_result` content blocks.
 fn anthropic_body(
@@ -423,7 +453,7 @@ fn anthropic_body(
                 let mut block = serde_json::json!({
                     "type": "tool_result",
                     "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
-                    "content": m.content,
+                    "content": anthropic_tool_result_content(m),
                 });
                 if let Some(is_error) = m.tool_is_error {
                     block["is_error"] = serde_json::Value::Bool(is_error);
@@ -788,6 +818,36 @@ mod tests {
         assert_eq!(last["content"][0]["type"], "tool_result");
         assert_eq!(last["content"][0]["tool_use_id"], "c1");
         assert_eq!(last["content"][0]["is_error"], true);
+    }
+
+    #[test]
+    fn anthropic_tool_results_preserve_native_image_blocks() {
+        let message = ChatMessage::tool_result_blocks(
+            "c-image",
+            vec![
+                Block::text("before"),
+                Block::image("aW1hZ2U=", "image/png"),
+                Block::text("after"),
+            ],
+            serde_json::json!({"summary": "beforeafter", "isError": false}),
+            false,
+        );
+
+        let body = anthropic_body("claude", &[message], &[]);
+        let content = &body["messages"][0]["content"][0]["content"];
+
+        assert_eq!(
+            content[0],
+            serde_json::json!({"type": "text", "text": "before"})
+        );
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "aW1hZ2U=");
+        assert_eq!(
+            content[2],
+            serde_json::json!({"type": "text", "text": "after"})
+        );
     }
 
     #[test]
