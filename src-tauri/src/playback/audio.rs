@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -50,6 +50,20 @@ const MIX_CANCEL_CHUNK_FRAMES: usize = 4 * 1024;
 const CALLBACK_START_TIMEOUT: Duration = Duration::from_secs(1);
 const CALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const CALLBACKS_REQUIRED_FOR_LIVENESS: u64 = 2;
+
+type AudioRateReply = SyncSender<Option<u32>>;
+
+/// Serializes CPAL device discovery on one process-lifetime thread.
+///
+/// CPAL 0.15's WASAPI backend caches its `IMMDeviceEnumerator` process-wide,
+/// while COM initialization is thread-local. Rust's test harness (and Tokio in
+/// production) may invoke playback setup from successive short-lived threads;
+/// allowing the thread which first created the enumerator to exit can leave the
+/// cached COM object with no live originating apartment and the next query can
+/// terminate the process with `STATUS_ACCESS_VIOLATION`. Keeping discovery on a
+/// dedicated thread both preserves that COM lifetime and prevents concurrent
+/// default-device queries from racing.
+static AUDIO_RATE_PROBE: OnceLock<Option<SyncSender<AudioRateReply>>> = OnceLock::new();
 
 struct AudioPrepareJob<T> {
     build: Box<dyn FnOnce() -> T + Send + 'static>,
@@ -670,6 +684,32 @@ where
 
 /// Query the default output device's sample rate (Hz), or `None` if unavailable.
 fn default_output_rate() -> Option<u32> {
+    let probe = AUDIO_RATE_PROBE
+        .get_or_init(|| {
+            let (request_tx, request_rx) = mpsc::sync_channel::<AudioRateReply>(1);
+            thread::Builder::new()
+                .name("opentake-audio-device".to_string())
+                .spawn(move || run_audio_rate_probe(request_rx, query_default_output_rate))
+                .ok()
+                .map(|_| request_tx)
+        })
+        .as_ref()?;
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    probe.send(reply_tx).ok()?;
+    reply_rx.recv().ok().flatten()
+}
+
+fn run_audio_rate_probe(
+    request_rx: Receiver<AudioRateReply>,
+    mut query: impl FnMut() -> Option<u32>,
+) {
+    while let Ok(reply) = request_rx.recv() {
+        let rate = catch_unwind(AssertUnwindSafe(&mut query)).unwrap_or(None);
+        let _ = reply.send(rate);
+    }
+}
+
+fn query_default_output_rate() -> Option<u32> {
     let host = cpal::default_host();
     let device = host.default_output_device()?;
     let config = device.default_output_config().ok()?;
@@ -1162,6 +1202,42 @@ mod tests {
         };
 
         assert!(error.to_string().contains("audio_buffer_too_large"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn default_output_rate_survives_sequential_short_lived_callers() {
+        for _ in 0..8 {
+            std::thread::spawn(default_output_rate)
+                .join()
+                .expect("WASAPI rate probing must survive caller thread teardown");
+        }
+    }
+
+    #[test]
+    fn audio_rate_probe_survives_a_query_panic() {
+        let (request_tx, request_rx) = mpsc::sync_channel::<AudioRateReply>(1);
+        let mut attempts = 0;
+        let worker = std::thread::spawn(move || {
+            run_audio_rate_probe(request_rx, move || {
+                attempts += 1;
+                if attempts == 1 {
+                    panic!("simulated CPAL query panic");
+                }
+                Some(44_100)
+            });
+        });
+
+        let request = |sender: &SyncSender<AudioRateReply>| {
+            let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+            sender.send(reply_tx).expect("submit rate query");
+            reply_rx.recv().expect("receive rate query result")
+        };
+        assert_eq!(request(&request_tx), None);
+        assert_eq!(request(&request_tx), Some(44_100));
+
+        drop(request_tx);
+        worker.join().expect("join audio rate probe");
     }
 
     #[test]
