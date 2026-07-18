@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const homeSource = readFileSync(new URL("./HomeView.tsx", import.meta.url), "utf8");
+const homeSource = readFileSync(new URL("./HomeView.tsx", import.meta.url), "utf8").replace(/\r\n?/g, "\n");
 const projectLauncherSource = homeSource.slice(
   homeSource.indexOf("function ProjectLauncher"),
   homeSource.indexOf("function ProjectHero"),
