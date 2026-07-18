@@ -471,6 +471,20 @@ impl EditorSession {
         self.state.manifest = manifest;
     }
 
+    /// Capture the complete undoable document state before an application-layer
+    /// batch transaction. The matching restore is intentionally crate-private:
+    /// only [`crate::AppCore`] may use it while holding the authoritative
+    /// session lock.
+    pub(crate) fn checkpoint_editor_state(&self) -> EditorState {
+        self.state.clone()
+    }
+
+    /// Restore a failed application-layer batch exactly, including manifest,
+    /// undo/redo history, and version.
+    pub(crate) fn restore_editor_state(&mut self, state: EditorState) {
+        self.state = state;
+    }
+
     /// The manifest entry for `asset_id`, if present (lookup without cloning the
     /// whole manifest).
     pub fn media_entry(&self, asset_id: &str) -> Option<&MediaManifestEntry> {

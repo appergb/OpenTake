@@ -26,6 +26,7 @@
 //! persistence logic — those live in `opentake-ops` / `opentake-project` and are
 //! reached through the session.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
@@ -120,6 +121,39 @@ pub struct ProjectRuntimeSnapshot {
     pub version: u64,
 }
 
+/// A folder target in a prepared media-import plan. Planned folders are keyed
+/// by the scanner without consuming application ids; existing folders retain
+/// their authoritative project id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PreparedMediaFolderRef {
+    Planned(u64),
+    Existing(String),
+}
+
+/// One filesystem-free operation in a prepared media-import plan. Directory
+/// walking and probing happen before these values reach the session commit.
+#[derive(Clone, Debug)]
+pub enum PreparedMediaImportOp {
+    CreateFolder {
+        key: u64,
+        name: String,
+        parent: Option<PreparedMediaFolderRef>,
+    },
+    ImportFile {
+        path: PathBuf,
+        name: String,
+        probe: ProbedMedia,
+        folder: Option<PreparedMediaFolderRef>,
+    },
+}
+
+/// One file admitted by a successful durable batch import.
+#[derive(Clone, Debug)]
+pub struct CommittedMediaImport {
+    pub path: PathBuf,
+    pub entry: MediaManifestEntry,
+}
+
 /// Result of a capability-bound library import whose first manifest commit is
 /// durable. `warning` is populated only when a failed postcondition could not
 /// be rolled back; the entry remains authoritative and must be preserved.
@@ -196,6 +230,21 @@ fn ensure_project_identity(
         Err(crate::CoreError::Media(
             "project changed during global library workflow".to_string(),
         ))
+    }
+}
+
+fn resolve_prepared_folder(
+    planned: &BTreeMap<u64, String>,
+    folder: Option<PreparedMediaFolderRef>,
+) -> Result<Option<String>> {
+    match folder {
+        None => Ok(None),
+        Some(PreparedMediaFolderRef::Existing(id)) => Ok(Some(id)),
+        Some(PreparedMediaFolderRef::Planned(key)) => planned
+            .get(&key)
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| CoreError::Media(format!("prepared folder key not found: {key}"))),
     }
 }
 
@@ -678,6 +727,131 @@ impl AppCore {
             count,
         });
         Ok(entry)
+    }
+
+    /// Commit a fully probed media-import plan as one project-bound durable
+    /// transaction. The session lock covers identity validation, all manifest
+    /// edits, and the atomic `media.json` write. Any failure restores the exact
+    /// pre-call editor state (manifest, undo/redo, and version); events are
+    /// published only after the lock is released and the write succeeds.
+    pub fn import_media_batch_for_project_persisted(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        plan: Vec<PreparedMediaImportOp>,
+    ) -> Result<Vec<CommittedMediaImport>> {
+        self.import_media_batch_for_project_with_writer(
+            expected_project_epoch,
+            expected_project_dir,
+            plan,
+            |editor| editor.save_media_manifest(),
+        )
+    }
+
+    fn import_media_batch_for_project_with_writer<F>(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        plan: Vec<PreparedMediaImportOp>,
+        persist: F,
+    ) -> Result<Vec<CommittedMediaImport>>
+    where
+        F: FnOnce(&mut EditorSession) -> Result<PathBuf>,
+    {
+        let (imports, count, initial_version, final_version, written) = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            session.editor.ensure_mutable()?;
+            let before = session.editor.checkpoint_editor_state();
+            let initial_version = session.editor.version();
+            let result = (|| {
+                let mut folder_ids = BTreeMap::<u64, String>::new();
+                let mut imports = Vec::new();
+
+                for operation in plan {
+                    match operation {
+                        PreparedMediaImportOp::CreateFolder { key, name, parent } => {
+                            if folder_ids.contains_key(&key) {
+                                return Err(CoreError::Media(format!(
+                                    "duplicate prepared folder key: {key}"
+                                )));
+                            }
+                            let parent_folder_id = resolve_prepared_folder(&folder_ids, parent)?;
+                            let result = session.editor.apply(
+                                EditCommand::CreateFolder {
+                                    name,
+                                    parent_folder_id,
+                                },
+                                self.ids.as_ref(),
+                            )?;
+                            let folder_id =
+                                result.affected_clip_ids.into_iter().next().ok_or_else(|| {
+                                    CoreError::Media(
+                                        "folder creation returned no id during batch import"
+                                            .to_string(),
+                                    )
+                                })?;
+                            folder_ids.insert(key, folder_id);
+                        }
+                        PreparedMediaImportOp::ImportFile {
+                            path,
+                            name,
+                            probe,
+                            folder,
+                        } => {
+                            let folder_id = resolve_prepared_folder(&folder_ids, folder)?;
+                            let id = self.ids.next_id();
+                            let mut entry =
+                                session.editor.import_media_file(&path, id, name, &probe)?;
+                            if let Some(folder_id) = folder_id {
+                                session.editor.apply(
+                                    EditCommand::MoveToFolder {
+                                        asset_ids: vec![entry.id.clone()],
+                                        folder_id: Some(folder_id.clone()),
+                                    },
+                                    self.ids.as_ref(),
+                                )?;
+                                entry.folder_id = Some(folder_id);
+                            }
+                            imports.push(CommittedMediaImport { path, entry });
+                        }
+                    }
+                }
+
+                let written = persist(&mut session.editor)?;
+                Ok((imports, written))
+            })();
+
+            match result {
+                Ok((imports, written)) => (
+                    imports,
+                    session.editor.media().entries.len(),
+                    initial_version,
+                    session.editor.version(),
+                    written,
+                ),
+                Err(error) => {
+                    session.editor.restore_editor_state(before);
+                    return Err(error);
+                }
+            }
+        };
+
+        if final_version != initial_version {
+            self.events.emit(&CoreEvent::TimelineChanged {
+                project_epoch: expected_project_epoch,
+                version: final_version,
+            });
+        }
+        self.events.emit(&CoreEvent::MediaChanged {
+            project_epoch: expected_project_epoch,
+            count,
+        });
+        self.events.emit(&CoreEvent::ProjectSaved {
+            path: written.to_string_lossy().into_owned(),
+            project_epoch: expected_project_epoch,
+        });
+        Ok(imports)
     }
 
     /// Import one global-library file, bind its content id, and persist the
@@ -1775,6 +1949,120 @@ mod tests {
             .save_media_manifest_for_project(expected_epoch, &project_a)
             .is_err());
         assert_eq!(core.media(), before);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepared_media_batch_rejects_project_replacement_without_pollution() {
+        let sequence = CoreIdGen::default().next_id();
+        let root = std::env::temp_dir().join(format!(
+            "opentake-core-stale-media-batch-{}-{sequence}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let project_a = root.join("A.opentake");
+        let project_b = root.join("B.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(project_a.clone())).unwrap();
+        let expected_epoch = core.runtime_snapshot().project_epoch;
+        opentake_project::Project::new(&project_b).save().unwrap();
+        core.open_project(project_b.clone()).unwrap();
+        let before_b = core.media();
+
+        let error = core
+            .import_media_batch_for_project_persisted(
+                expected_epoch,
+                &project_a,
+                vec![
+                    PreparedMediaImportOp::CreateFolder {
+                        key: 0,
+                        name: "stale".to_string(),
+                        parent: None,
+                    },
+                    PreparedMediaImportOp::ImportFile {
+                        path: PathBuf::from("/abs/stale.mp4"),
+                        name: "stale".to_string(),
+                        probe: ProbedMedia::default(),
+                        folder: Some(PreparedMediaFolderRef::Planned(0)),
+                    },
+                ],
+            )
+            .expect_err("stale batch must be rejected");
+
+        assert!(error.to_string().contains("project changed"));
+        assert_eq!(core.media(), before_b);
+        let reopened_a = AppCore::new();
+        reopened_a.open_project(project_a).unwrap();
+        assert!(reopened_a.media().entries.is_empty());
+        assert!(reopened_a.media().folders.is_empty());
+        let reopened_b = AppCore::new();
+        reopened_b.open_project(project_b).unwrap();
+        assert_eq!(reopened_b.media(), before_b);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepared_media_batch_writer_failure_restores_full_editor_state() {
+        let sequence = CoreIdGen::default().next_id();
+        let root = std::env::temp_dir().join(format!(
+            "opentake-core-media-batch-rollback-{}-{sequence}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let project = root.join("Rollback.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(project.clone())).unwrap();
+        core.apply(EditCommand::CreateFolder {
+            name: "existing".to_string(),
+            parent_folder_id: None,
+        })
+        .unwrap();
+        core.undo().unwrap();
+        core.save_media_manifest_for_project(core.runtime_snapshot().project_epoch, &project)
+            .unwrap();
+        let before_media = core.media();
+        let before_version = core.version();
+        let before_can_undo = core.can_undo();
+        let before_can_redo = core.can_redo();
+        let expected_epoch = core.runtime_snapshot().project_epoch;
+        let seen: Arc<Mutex<Vec<CoreEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        core.subscribe(move |event| sink.lock().unwrap().push(event.clone()));
+
+        let error = core
+            .import_media_batch_for_project_with_writer(
+                expected_epoch,
+                &project,
+                vec![
+                    PreparedMediaImportOp::CreateFolder {
+                        key: 0,
+                        name: "candidate".to_string(),
+                        parent: None,
+                    },
+                    PreparedMediaImportOp::ImportFile {
+                        path: PathBuf::from("/abs/candidate.mp4"),
+                        name: "candidate".to_string(),
+                        probe: ProbedMedia::default(),
+                        folder: Some(PreparedMediaFolderRef::Planned(0)),
+                    },
+                ],
+                |_| {
+                    Err(CoreError::Media(
+                        "injected manifest write failure".to_string(),
+                    ))
+                },
+            )
+            .expect_err("writer failure must abort the batch");
+
+        assert_eq!(error.to_string(), "injected manifest write failure");
+        assert_eq!(core.media(), before_media);
+        assert_eq!(core.version(), before_version);
+        assert_eq!(core.can_undo(), before_can_undo);
+        assert_eq!(core.can_redo(), before_can_redo);
+        assert!(seen.lock().unwrap().is_empty());
+        let reopened = AppCore::new();
+        reopened.open_project(project).unwrap();
+        assert_eq!(reopened.media(), before_media);
         let _ = std::fs::remove_dir_all(root);
     }
 

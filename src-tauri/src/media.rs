@@ -31,7 +31,8 @@ use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use opentake_core::{
-    importable_clip_type, AppCore, CoreError, DeferredCoreEvents, EditCommand, ProbedMedia,
+    importable_clip_type, AppCore, CommittedMediaImport, CoreError, DeferredCoreEvents,
+    PreparedMediaFolderRef, PreparedMediaImportOp, ProbedMedia,
 };
 use opentake_domain::{
     ClipType, GenerationInput, MediaManifest, MediaManifestEntry, MediaSource, Timeline,
@@ -811,6 +812,21 @@ pub(crate) fn import_one(
     Ok(Some(entry))
 }
 
+fn prepare_import_file(
+    engine: &MediaEngine,
+    path: &Path,
+    folder: Option<PreparedMediaFolderRef>,
+) -> Option<PreparedMediaImportOp> {
+    importable_clip_type(path)?;
+    let probe = probe_media(engine, path);
+    Some(PreparedMediaImportOp::ImportFile {
+        path: path.to_path_buf(),
+        name: display_name(path),
+        probe,
+        folder,
+    })
+}
+
 /// Admit an imported asset's small grid poster to the project-scoped scheduler.
 /// The post-import snapshot proves the entry still belongs to the epoch being
 /// scheduled; if a project replacement won the race, old content is rejected.
@@ -1041,32 +1057,44 @@ fn import_folder_impl(
     recursive: Option<bool>,
 ) -> Result<MediaListDto, String> {
     core.ensure_project_mutable().map_err(|e| e.to_string())?;
+    let project = core.runtime_snapshot();
+    let project_dir = project
+        .project_dir
+        .as_ref()
+        .ok_or_else(|| "no project open".to_string())?;
     let root = PathBuf::from(&path);
     if !root.is_dir() {
         return Err(format!("not a directory: {path}"));
     }
     let mut skipped = Vec::new();
-    let mut prewarm_results = Vec::new();
+    let mut plan = Vec::new();
     if recursive.unwrap_or(false) {
-        mirror_dir_scheduled(
-            core,
+        let mut next_folder_key = 0;
+        prepare_mirror_dir(
             engine,
-            prewarm,
             &root,
             None,
+            &mut next_folder_key,
             &mut skipped,
-            &mut prewarm_results,
+            &mut plan,
         )
         .map_err(|e| e.to_string())?;
     } else {
         let (files, skipped_files) = list_top_level(&root);
         for file in &files {
-            if let Some(entry) = import_one(core, engine, file).map_err(|e| e.to_string())? {
-                prewarm_results.push(schedule_import_poster(core, engine, prewarm, &entry, file));
+            if let Some(operation) = prepare_import_file(engine, file, None) {
+                plan.push(operation);
             }
         }
         skipped = skipped_files;
     }
+    let committed = if plan.is_empty() {
+        Vec::new()
+    } else {
+        core.import_media_batch_for_project_persisted(project.project_epoch, project_dir, plan)
+            .map_err(|e| e.to_string())?
+    };
+    let prewarm_results = schedule_committed_posters(core, engine, prewarm, &committed);
     Ok(MediaListDto::from_core_with_import_results(
         core,
         Some(engine.cache_root()),
@@ -1087,98 +1115,76 @@ pub(crate) fn mirror_dir(
     parent_folder_id: Option<String>,
     skipped: &mut Vec<String>,
 ) -> Result<(), CoreError> {
-    let mut unused_results = Vec::new();
-    mirror_dir_impl(
-        core,
+    core.ensure_project_mutable()?;
+    let project = core.runtime_snapshot();
+    let project_dir = project.project_dir.ok_or(CoreError::NoProjectOpen)?;
+    let mut next_folder_key = 0;
+    let mut plan = Vec::new();
+    prepare_mirror_dir(
         engine,
-        None,
         dir,
-        parent_folder_id,
+        parent_folder_id.map(PreparedMediaFolderRef::Existing),
+        &mut next_folder_key,
         skipped,
-        &mut unused_results,
-    )
+        &mut plan,
+    )?;
+    core.import_media_batch_for_project_persisted(project.project_epoch, &project_dir, plan)?;
+    Ok(())
 }
 
-fn mirror_dir_scheduled(
-    core: &AppCore,
+fn prepare_mirror_dir(
     engine: &MediaEngine,
-    prewarm: &prewarm::PrewarmScheduler,
     dir: &Path,
-    parent_folder_id: Option<String>,
+    parent: Option<PreparedMediaFolderRef>,
+    next_folder_key: &mut u64,
     skipped: &mut Vec<String>,
-    prewarm_results: &mut Vec<ImportPrewarmDto>,
+    plan: &mut Vec<PreparedMediaImportOp>,
 ) -> Result<(), CoreError> {
-    mirror_dir_impl(
-        core,
-        engine,
-        Some(prewarm),
-        dir,
-        parent_folder_id,
-        skipped,
-        prewarm_results,
-    )
-}
-
-fn mirror_dir_impl(
-    core: &AppCore,
-    engine: &MediaEngine,
-    prewarm: Option<&prewarm::PrewarmScheduler>,
-    dir: &Path,
-    parent_folder_id: Option<String>,
-    skipped: &mut Vec<String>,
-    prewarm_results: &mut Vec<ImportPrewarmDto>,
-) -> Result<(), CoreError> {
-    let folder_id = create_folder(core, &dir_name(dir), parent_folder_id)?;
+    let folder_key = *next_folder_key;
+    *next_folder_key = next_folder_key.saturating_add(1);
+    plan.push(PreparedMediaImportOp::CreateFolder {
+        key: folder_key,
+        name: dir_name(dir),
+        parent,
+    });
+    let folder = PreparedMediaFolderRef::Planned(folder_key);
 
     // Partition this directory's visible entries into media files + subdirs
     // (both case-insensitive name order) plus the names of unsupported files.
     let (files, subdirs, mut dir_skipped) = list_dir(dir);
     skipped.append(&mut dir_skipped);
 
-    let mut imported_ids = Vec::new();
     for file in &files {
-        if let Some(entry) = import_one(core, engine, file)? {
-            if let Some(prewarm) = prewarm {
-                prewarm_results.push(schedule_import_poster(core, engine, prewarm, &entry, file));
-            }
-            imported_ids.push(entry.id);
+        if let Some(operation) = prepare_import_file(engine, file, Some(folder.clone())) {
+            plan.push(operation);
         }
-    }
-    if !imported_ids.is_empty() {
-        core.apply(EditCommand::MoveToFolder {
-            asset_ids: imported_ids,
-            folder_id: Some(folder_id.clone()),
-        })?;
     }
 
     for sub in subdirs {
-        mirror_dir_impl(
-            core,
+        prepare_mirror_dir(
             engine,
-            prewarm,
             &sub,
-            Some(folder_id.clone()),
+            Some(folder.clone()),
+            next_folder_key,
             skipped,
-            prewarm_results,
+            plan,
         )?;
     }
     Ok(())
 }
 
-/// Create a library folder, returning its new id or propagating the rejection.
-fn create_folder(
+fn schedule_committed_posters(
     core: &AppCore,
-    name: &str,
-    parent_folder_id: Option<String>,
-) -> Result<String, CoreError> {
-    core.apply(EditCommand::CreateFolder {
-        name: name.to_string(),
-        parent_folder_id,
-    })?
-    .affected_clip_ids
-    .into_iter()
-    .next()
-    .ok_or_else(|| CoreError::Media("folder creation returned no id".into()))
+    engine: &MediaEngine,
+    prewarm: &prewarm::PrewarmScheduler,
+    committed: &[CommittedMediaImport],
+) -> Vec<ImportPrewarmDto> {
+    committed
+        .iter()
+        .map(|imported| {
+            schedule_import_poster(core, engine, prewarm, &imported.entry, &imported.path)
+        })
+        .collect()
 }
 
 /// Directory display name (its last path component), falling back to "folder".
@@ -1259,8 +1265,13 @@ fn import_media_impl(
     paths: Vec<String>,
 ) -> Result<MediaListDto, String> {
     core.ensure_project_mutable().map_err(|e| e.to_string())?;
+    let project = core.runtime_snapshot();
+    let project_dir = project
+        .project_dir
+        .as_ref()
+        .ok_or_else(|| "no project open".to_string())?;
     let mut skipped = Vec::new();
-    let mut prewarm_results = Vec::new();
+    let mut plan = Vec::new();
     for p in &paths {
         let path = PathBuf::from(p);
         if !path.is_file() {
@@ -1274,10 +1285,17 @@ fn import_media_impl(
             skipped.push(display_file_name(&path));
             continue;
         }
-        if let Some(entry) = import_one(core, engine, &path).map_err(|e| e.to_string())? {
-            prewarm_results.push(schedule_import_poster(core, engine, prewarm, &entry, &path));
+        if let Some(operation) = prepare_import_file(engine, &path, None) {
+            plan.push(operation);
         }
     }
+    let committed = if plan.is_empty() {
+        Vec::new()
+    } else {
+        core.import_media_batch_for_project_persisted(project.project_epoch, project_dir, plan)
+            .map_err(|e| e.to_string())?
+    };
+    let prewarm_results = schedule_committed_posters(core, engine, prewarm, &committed);
     Ok(MediaListDto::from_core_with_import_results(
         core,
         Some(engine.cache_root()),
@@ -3263,6 +3281,105 @@ mod tests {
     }
 
     #[test]
+    fn explicit_import_persists_manifest_before_command_returns() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let bundle = tmp.path().join("ImportPersisted.opentake");
+        let source = tmp.path().join("still.png");
+        image::RgbaImage::from_pixel(32, 24, image::Rgba([10, 20, 30, 255]))
+            .save(&source)
+            .expect("write import fixture");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save empty project");
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(core.runtime_snapshot().project_epoch);
+
+        let imported = import_media_impl(
+            &core,
+            &engine,
+            &scheduler,
+            vec![source.to_string_lossy().into_owned()],
+        )
+        .expect("import media");
+
+        assert_eq!(imported.items.len(), 1);
+        let reopened = AppCore::new();
+        reopened
+            .open_project(bundle)
+            .expect("reopen imported project");
+        assert_eq!(reopened.media().entries.len(), 1);
+        assert_eq!(reopened.media().entries[0].name, "still");
+    }
+
+    #[test]
+    fn flat_folder_import_persists_manifest_before_command_returns() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let bundle = tmp.path().join("FolderImportPersisted.opentake");
+        let source_dir = tmp.path().join("source");
+        fs::create_dir(&source_dir).expect("create source folder");
+        image::RgbaImage::from_pixel(32, 24, image::Rgba([40, 50, 60, 255]))
+            .save(source_dir.join("still.png"))
+            .expect("write import fixture");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save empty project");
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(core.runtime_snapshot().project_epoch);
+
+        let imported = import_folder_impl(
+            &core,
+            &engine,
+            &scheduler,
+            source_dir.to_string_lossy().into_owned(),
+            Some(false),
+        )
+        .expect("import folder");
+
+        assert_eq!(imported.items.len(), 1);
+        let reopened = AppCore::new();
+        reopened
+            .open_project(bundle)
+            .expect("reopen imported project");
+        assert_eq!(reopened.media().entries.len(), 1);
+    }
+
+    #[test]
+    fn recursive_folder_import_persists_folders_and_media_before_command_returns() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let bundle = tmp.path().join("RecursiveImportPersisted.opentake");
+        let source_dir = tmp.path().join("source");
+        let nested_dir = source_dir.join("nested");
+        fs::create_dir_all(&nested_dir).expect("create nested source folder");
+        image::RgbaImage::from_pixel(32, 24, image::Rgba([70, 80, 90, 255]))
+            .save(nested_dir.join("still.png"))
+            .expect("write import fixture");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save empty project");
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(core.runtime_snapshot().project_epoch);
+
+        let imported = import_folder_impl(
+            &core,
+            &engine,
+            &scheduler,
+            source_dir.to_string_lossy().into_owned(),
+            Some(true),
+        )
+        .expect("import recursive folder");
+
+        assert_eq!(imported.items.len(), 1);
+        assert_eq!(imported.folders.len(), 2);
+        let reopened = AppCore::new();
+        reopened
+            .open_project(bundle)
+            .expect("reopen imported project");
+        assert_eq!(reopened.media().entries.len(), 1);
+        assert_eq!(reopened.media().folders.len(), 2);
+        assert!(reopened.media().entries[0].folder_id.is_some());
+    }
+
+    #[test]
     fn save_clip_as_media_refuses_before_media_output_creation() {
         let tmp = tempfile::tempdir().expect("create temp root");
         let core = unknown_core(tmp.path());
@@ -4203,20 +4320,11 @@ mod tests {
         fs::create_dir(root.join("Empty")).unwrap(); // empty subfolder still mirrors
 
         let core = AppCore::new();
+        core.save_project(Some(tmp.path().join("MirrorTree.opentake")))
+            .expect("save project");
         let engine = engine_for(tmp.path());
-        let scheduler = prewarm::PrewarmScheduler::new(core.project_revision().project_epoch);
         let mut skipped = Vec::new();
-        let mut prewarm_results = Vec::new();
-        mirror_dir_scheduled(
-            &core,
-            &engine,
-            &scheduler,
-            &root,
-            None,
-            &mut skipped,
-            &mut prewarm_results,
-        )
-        .unwrap();
+        mirror_dir(&core, &engine, &root, None, &mut skipped).unwrap();
 
         let m = core.media();
         // Folders: Trip (root) + Day1 + Empty, nested under Trip.
@@ -4245,20 +4353,11 @@ mod tests {
         fs::create_dir(&root).unwrap();
         touch(&root.join("x.png"));
         let core = AppCore::new();
+        core.save_project(Some(tmp.path().join("MirrorDto.opentake")))
+            .expect("save project");
         let engine = engine_for(tmp.path());
-        let scheduler = prewarm::PrewarmScheduler::new(core.project_revision().project_epoch);
         let mut skipped = Vec::new();
-        let mut prewarm_results = Vec::new();
-        mirror_dir_scheduled(
-            &core,
-            &engine,
-            &scheduler,
-            &root,
-            None,
-            &mut skipped,
-            &mut prewarm_results,
-        )
-        .unwrap();
+        mirror_dir(&core, &engine, &root, None, &mut skipped).unwrap();
 
         let dto = MediaListDto::from_core(&core, None);
         assert_eq!(dto.folders.len(), 1);

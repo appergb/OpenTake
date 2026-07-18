@@ -44,7 +44,8 @@ pub mod session;
 
 // --- Assembly façade ---
 pub use crate::core::{
-    AppCore, BundleExportSnapshot, CapabilityImportCommit, DeferredCoreEvents, ImportCommitWarning,
+    AppCore, BundleExportSnapshot, CapabilityImportCommit, CommittedMediaImport,
+    DeferredCoreEvents, ImportCommitWarning, PreparedMediaFolderRef, PreparedMediaImportOp,
     ProjectRevision, ProjectRuntimeSnapshot, TimelineSnapshot,
 };
 pub use session::{
