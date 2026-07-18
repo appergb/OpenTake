@@ -535,7 +535,7 @@ impl ProjectMediaCapability {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn open(project_dir: &Path, create_media: bool) -> Result<Self, String> {
         Self::open_with_root_gate(project_dir, create_media, |_| Ok(()))
     }
@@ -999,6 +999,7 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(unix)]
     fn generate_video(path: &Path, size: &str) -> bool {
         if !opentake_media::ffmpeg_status::ffmpeg_available() {
             return false;
