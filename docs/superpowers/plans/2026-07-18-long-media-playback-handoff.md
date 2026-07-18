@@ -6,11 +6,11 @@
 
 - 工作仓库：`/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-full-convergence`
 - 交接前分支：`audit/opentake-completion-20260714`
-- 交接前提交：`bde1c70bee336e818329a7927dc5ea635de30514`
+- 交接补丁提交：`a745172`（稳定 canvas/真实 Main10 探针）与 `e416588`（本交接文档）
 - 云端 `origin/main` 基线：`acf07e5`
 - 真实复现工程：`~/Documents/OpenTake/未命名.opentake/Untitled.opentake`
 - 真实重素材：`Aroll-气口剪辑完成素材.mov`，3840×2160、HEVC Main10、约 2.5 GB、210.71 秒。
-- 已确认没有打开的 GitHub PR。
+- 交接补丁 PR：GitHub `#229`。本次预览相关检查通过，但仓库既有的 minimal-feature Clippy 门禁失败，详见 P1。
 
 ## 2. 用户报告的问题总表
 
@@ -92,12 +92,21 @@
 
 这些改动位于提交 `db3527b`，不能只凭单测判定完成，必须在最终安装包中复验。
 
+### P1-CI：`opentake-tauri --no-default-features` 无法编译
+
+PR #229 的 GitHub Actions 中，Web、三平台 safe-filesystem、常规 Rust fmt/clippy/test 和播放 transport integration 均通过；失败只出现在：
+
+`cargo clippy -p opentake-tauri --no-default-features --all-targets -- -D warnings`
+
+错误来自 `src-tauri/src/mcp.rs` 对 `tokio::runtime`、`tokio::select!`、`tokio::time::sleep` 的引用：minimal feature 组合没有链接 `tokio`。该文件和 Cargo feature 配置不在本次预览补丁 diff 内，本地可独立复现相同错误。下一位 Agent 应决定是让 MCP 代码受正确 feature gate 约束，还是把实际必需的 Tokio 能力纳入 minimal feature；不要通过删除 CI 门禁或降低告警级别规避。
+
 ## 3. 当前测试与证据
 
 - Web：67 个测试文件、679 项测试通过。
 - Rust：`cargo test --workspace` 通过。
 - Web production build 通过；仅保留既有 dynamic-import/chunk-size 警告。
 - `cargo fmt --all -- --check` 与 `git diff --check` 通过。
+- GitHub Actions 常规 Rust fmt/clippy/test 与 playback transport integration 通过；minimal `--no-default-features` Clippy 因上述既有 Tokio feature 问题失败。
 - 真实 Main10 FFmpeg 连续解码 90 帧通过，无绿色像素区域。
 - 真实 Main10 GPU playback probe 通过：约 62–63 帧发布，playhead=90，整段 `min_nonblack` 约 0.946–0.970，`max_neon_green=0.000`。
 - 独立 review agent 最终结论：当前 canvas/Main10 测试补丁 APPROVE，无 HIGH/MEDIUM/LOW 发现。
@@ -132,6 +141,8 @@ docs/superpowers/plans/2026-07-18-long-media-playback-handoff.md
 以及仓库 AGENTS.md、CLAUDE.md、docs/specs/media/3-thumbnails.md、docs/architecture/PLAYBACK-ENGINE.md。
 
 必须先检查 git status、当前 main SHA 和现有 diff，不要覆盖任何未提交内容。使用 systematic debugging + TDD + Karpathy Guidelines。先复现再修改，最终代码必须交给一个独立 review agent 审查。
+
+先检查 GitHub PR #229 与 main 状态。若 #229 尚未合并，确认它的预览补丁 diff；当前已知 CI 阻塞是 `cargo clippy -p opentake-tauri --no-default-features --all-targets -- -D warnings` 下 MCP 使用 Tokio 但依赖未启用。用 feature gate 或正确依赖关系修复该门禁，不得删除检查。
 
 目标只有两个 P0，但必须同时回归交接文档中的已知问题：
 1. 连续快速拖动播放头后，应用后续播放/编辑持续变卡。找出并修复请求堆积、seek/composite 取消、解码 worker 或播放会话生命周期问题。要求 newest-wins，旧 project/timeline/session/seek generation 永不发布；松开后 250 ms 内恢复，连续 20 次 scrub 后资源数量回到基线，无黑屏。
