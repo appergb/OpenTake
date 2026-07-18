@@ -11,8 +11,8 @@ import {
 import { useT } from "../../i18n";
 import {
   chatCancel,
-  chatHistory,
   chatSend,
+  chatSessions,
   isTauri,
   onChatDelta,
   onChatDone,
@@ -22,6 +22,7 @@ import type { ChatMessage, ChatToolCall } from "../../lib/types";
 import { useSettingsStore } from "../../store/settingsStore";
 import { mintSessionId, useChatStore } from "../../store/chatStore";
 import { useEditorUiStore } from "../../store/uiStore";
+import { useProjectStore } from "../../store/projectStore";
 
 const NO_KEY_HINT = /Settings|设置|API key/i;
 
@@ -29,6 +30,8 @@ export function AgentPanel() {
   const t = useT();
   const provider = useSettingsStore((state) => state.byokProvider);
   const setSettingsOpen = useEditorUiStore((state) => state.setSettingsOpen);
+  const projectEpoch = useProjectStore((state) => state.projectEpoch);
+  const projectPath = useProjectStore((state) => state.projectPath);
 
   const sessionId = useChatStore((state) => state.sessionId);
   const messages = useChatStore((state) => state.messages);
@@ -50,17 +53,29 @@ export function AgentPanel() {
     let unDone: () => void = () => {};
     void (async () => {
       unDelta = await onChatDelta((event) => {
-        if (event.sessionId === useChatStore.getState().sessionId) {
+        if (
+          event.projectEpoch === useProjectStore.getState().projectEpoch &&
+          event.projectPath === useProjectStore.getState().projectPath &&
+          event.sessionId === useChatStore.getState().sessionId
+        ) {
           appendDelta(event.delta);
         }
       });
       unTool = await onChatToolCall((event) => {
-        if (event.sessionId === useChatStore.getState().sessionId) {
+        if (
+          event.projectEpoch === useProjectStore.getState().projectEpoch &&
+          event.projectPath === useProjectStore.getState().projectPath &&
+          event.sessionId === useChatStore.getState().sessionId
+        ) {
           upsertToolCall(event.toolCall);
         }
       });
       unDone = await onChatDone((event) => {
-        if (event.sessionId === useChatStore.getState().sessionId) {
+        if (
+          event.projectEpoch === useProjectStore.getState().projectEpoch &&
+          event.projectPath === useProjectStore.getState().projectPath &&
+          event.sessionId === useChatStore.getState().sessionId
+        ) {
           finalize(event.message);
         }
       });
@@ -73,9 +88,37 @@ export function AgentPanel() {
   }, [appendDelta, finalize, upsertToolCall]);
 
   useEffect(() => {
-    if (!isTauri) return;
-    void chatHistory(sessionId).then(setMessages).catch(() => {});
-  }, [sessionId, setMessages]);
+    const freshSessionId = mintSessionId();
+    reset(freshSessionId);
+    if (!isTauri || !projectPath) return;
+    let disposed = false;
+    const loadingEpoch = projectEpoch;
+    const loadingPath = projectPath;
+    void chatSessions(loadingEpoch, loadingPath)
+      .then((sessions) => {
+        if (disposed) return;
+        const project = useProjectStore.getState();
+        const chat = useChatStore.getState();
+        if (
+          project.projectEpoch !== loadingEpoch ||
+          project.projectPath !== loadingPath ||
+          chat.sessionId !== freshSessionId ||
+          chat.messages.length !== 0 ||
+          chat.streaming
+        ) {
+          return;
+        }
+        const latest = sessions[0];
+        if (latest) {
+          reset(latest.id);
+          setMessages(latest.messages);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+    };
+  }, [projectEpoch, projectPath, reset, setMessages]);
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -86,14 +129,26 @@ export function AgentPanel() {
 
   async function send() {
     const text = input.trim();
-    if (!text || streaming) return;
+    if (!text || streaming || !projectPath) return;
+    const sendingEpoch = projectEpoch;
+    const sendingPath = projectPath;
+    const sendingSessionId = sessionId;
     setInput("");
     pushUser(text);
     const placeholderId = `assistant-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     beginStream(placeholderId);
     try {
-      await chatSend(sessionId, text, provider);
+      await chatSend(sendingSessionId, text, provider, sendingEpoch, sendingPath);
     } catch (error) {
+      const project = useProjectStore.getState();
+      const chat = useChatStore.getState();
+      if (
+        project.projectEpoch !== sendingEpoch ||
+        project.projectPath !== sendingPath ||
+        chat.sessionId !== sendingSessionId
+      ) {
+        return;
+      }
       finalize({
         id: placeholderId,
         role: "assistant",
@@ -105,7 +160,8 @@ export function AgentPanel() {
   }
 
   function cancel() {
-    void chatCancel(sessionId).catch(() => {});
+    if (!projectPath) return;
+    void chatCancel(sessionId, projectEpoch, projectPath).catch(() => {});
   }
 
   function clearChat() {

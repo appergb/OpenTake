@@ -16,6 +16,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
+use opentake_domain::Timeline;
 use opentake_gen::KeyStore;
 
 use crate::chat::llm::{
@@ -191,6 +192,37 @@ pub trait EmitLoop: Send + Sync {
     fn emit(&self, event: LoopEvent);
 }
 
+/// Per-turn project authority around every live timeline snapshot and tool
+/// dispatch. Desktop chat supplies an epoch/path/root gate; standalone callers
+/// use the direct gate below. `None` means the turn's authority is stale and
+/// the loop must stop without publishing that result.
+pub trait ChatTurnGate: Send + Sync {
+    fn timeline(&self, dispatcher: &Dispatcher) -> Option<Timeline>;
+    fn dispatch(
+        &self,
+        dispatcher: &Dispatcher,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Option<ToolResult>;
+}
+
+struct DirectChatTurnGate;
+
+impl ChatTurnGate for DirectChatTurnGate {
+    fn timeline(&self, dispatcher: &Dispatcher) -> Option<Timeline> {
+        Some(dispatcher.timeline())
+    }
+
+    fn dispatch(
+        &self,
+        dispatcher: &Dispatcher,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Option<ToolResult> {
+        Some(dispatcher.dispatch(name, args))
+    }
+}
+
 /// The chat loop. Clonable so the Tauri shell can hold one per session cheaply.
 /// Holds a shared [`Dispatcher`] (same pipeline as MCP), a plugin registry
 /// (read-locked for the active workflow), and the BYOK key store.
@@ -238,8 +270,7 @@ impl ChatLoop {
 
     /// Assemble the system prompt: base + active plugin + a live Context Signal
     /// block describing the current timeline.
-    fn system_prompt(&self) -> String {
-        let timeline = self.dispatcher.timeline();
+    fn system_prompt_for_timeline(&self, timeline: Timeline) -> String {
         let registry = self.registry.read().unwrap_or_else(|e| e.into_inner());
         let plugin = registry.active();
         let mut s = assemble_system_prompt(&registry, "default");
@@ -252,6 +283,11 @@ impl ChatLoop {
         s
     }
 
+    #[cfg(test)]
+    fn system_prompt(&self) -> String {
+        self.system_prompt_for_timeline(self.dispatcher.timeline())
+    }
+
     /// Run one user turn. Appends the user message, then drives LLM round-trips
     /// until the model produces a final text turn with no further tool calls.
     pub async fn run_turn(
@@ -261,6 +297,29 @@ impl ChatLoop {
         user_text: String,
         emitter: &dyn EmitLoop,
         cancel: Arc<AtomicBool>,
+    ) -> Result<(), LoopError> {
+        self.run_turn_gated(
+            session,
+            provider_choice,
+            user_text,
+            emitter,
+            cancel,
+            Arc::new(DirectChatTurnGate),
+        )
+        .await
+    }
+
+    /// Run one user turn with an authority gate around every dispatcher read
+    /// and side effect. The desktop uses this to bind the whole turn to the
+    /// project identity captured when `chat_send` was accepted.
+    pub async fn run_turn_gated(
+        &self,
+        session: &mut ChatSession,
+        provider_choice: String,
+        user_text: String,
+        emitter: &dyn EmitLoop,
+        cancel: Arc<AtomicBool>,
+        gate: Arc<dyn ChatTurnGate>,
     ) -> Result<(), LoopError> {
         let provider = provider_from_choice(&provider_choice)?;
         session.provider = Some(provider_choice);
@@ -307,7 +366,11 @@ impl ChatLoop {
                 );
             }
 
-            let system = self.system_prompt();
+            let Some(timeline) = gate.timeline(&self.dispatcher) else {
+                cancel.store(true, Ordering::Relaxed);
+                return Err(LoopError::Cancelled);
+            };
+            let system = self.system_prompt_for_timeline(timeline);
             let mut messages = Vec::with_capacity(session.messages.len() + 1);
             messages.push(ChatMessage::system(system));
             messages.extend(session.messages.iter().cloned());
@@ -353,13 +416,21 @@ impl ChatLoop {
                     return Err(LoopError::Cancelled);
                 }
                 let dispatcher = self.dispatcher.clone();
+                let gate = gate.clone();
                 let name = tc.name.clone();
                 let args = tc.args.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    with_redacted_dispatch_panic(|| dispatcher.dispatch(&name, args))
+                    with_redacted_dispatch_panic(|| gate.dispatch(&dispatcher, &name, args))
                 })
                 .await
                 .map_err(map_dispatch_join_error)?;
+                let Some(result) = result else {
+                    cancel.store(true, Ordering::Relaxed);
+                    return Err(LoopError::Cancelled);
+                };
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(LoopError::Cancelled);
+                }
                 let result_json = tool_result_for_model(&result);
                 let tc_id = tc.id.clone();
                 tc.result = Some(result_json.clone());

@@ -4,6 +4,8 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use cap_fs_ext::{ambient_authority, DirExt, FollowSymlinks, OpenOptionsFollowExt};
+#[cfg(unix)]
+use cap_std::fs::OpenOptionsExt;
 use cap_std::fs::{Dir, OpenOptions};
 use same_file::Handle;
 
@@ -121,6 +123,12 @@ impl ProjectRoot {
         &self.identity == other
     }
 
+    /// Stable no-follow identity retained for this concrete bundle. Callers
+    /// may pass it back to the core before out-of-band project writes.
+    pub fn identity(&self) -> &Handle {
+        &self.identity
+    }
+
     /// Diagnostic comparison for a caller-supplied path alias. Same-project
     /// saves continue through this root even when the logical spelling differs.
     pub fn matches_path(&self, path: impl AsRef<Path>) -> Result<bool> {
@@ -146,17 +154,31 @@ impl ProjectRoot {
     /// destination bundle. Both traversal and publication are capability
     /// relative, so ambient source or destination rebinding cannot redirect it.
     pub fn copy_media_to(&self, destination: &ProjectRoot) -> Result<()> {
-        let source = match self.dir.open_dir_nofollow(crate::layout::MEDIA_DIR) {
+        self.copy_directory_component_to(destination, crate::layout::MEDIA_DIR, "media-copy")
+    }
+
+    /// Copy project-local Agent conversations during complete-bundle
+    /// publication (Save As / archive) through retained no-follow roots.
+    pub fn copy_chat_sessions_to(&self, destination: &ProjectRoot) -> Result<()> {
+        self.copy_directory_component_to(
+            destination,
+            crate::layout::CHAT_SESSIONS_DIR,
+            "chat-sessions-copy",
+        )
+    }
+
+    fn copy_directory_component_to(
+        &self,
+        destination: &ProjectRoot,
+        component: &str,
+        staging_prefix: &str,
+    ) -> Result<()> {
+        let source = match self.dir.open_dir_nofollow(component) {
             Ok(source) => source,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => {
-                return Err(ProjectError::io(
-                    self.path.join(crate::layout::MEDIA_DIR),
-                    error,
-                ))
-            }
+            Err(error) => return Err(ProjectError::io(self.path.join(component), error)),
         };
-        let staging_name = unique_directory_name("media-copy");
+        let staging_name = unique_directory_name(staging_prefix);
         destination
             .dir
             .create_dir(&staging_name)
@@ -174,20 +196,17 @@ impl ProjectRoot {
         drop(staging);
         if let Err(error) = copy_result {
             let _ = remove_directory_artifact(&destination.dir, &destination.path, &staging_name);
-            return Err(ProjectError::io(
-                destination.path.join(crate::layout::MEDIA_DIR),
-                error,
-            ));
+            return Err(ProjectError::io(destination.path.join(component), error));
         }
-        match destination.dir.symlink_metadata(crate::layout::MEDIA_DIR) {
+        match destination.dir.symlink_metadata(component) {
             Ok(_) => {
                 let _ =
                     remove_directory_artifact(&destination.dir, &destination.path, &staging_name);
                 return Err(ProjectError::io(
-                    destination.path.join(crate::layout::MEDIA_DIR),
+                    destination.path.join(component),
                     std::io::Error::new(
                         std::io::ErrorKind::AlreadyExists,
-                        "destination media already exists; complete bundle publication requires a fresh staging root",
+                        format!("destination {component} already exists; complete bundle publication requires a fresh staging root"),
                     ),
                 ));
             }
@@ -195,18 +214,13 @@ impl ProjectRoot {
             Err(error) => {
                 let _ =
                     remove_directory_artifact(&destination.dir, &destination.path, &staging_name);
-                return Err(ProjectError::io(
-                    destination.path.join(crate::layout::MEDIA_DIR),
-                    error,
-                ));
+                return Err(ProjectError::io(destination.path.join(component), error));
             }
         }
         destination
             .dir
-            .rename(&staging_name, &destination.dir, crate::layout::MEDIA_DIR)
-            .map_err(|error| {
-                ProjectError::io(destination.path.join(crate::layout::MEDIA_DIR), error)
-            })?;
+            .rename(&staging_name, &destination.dir, component)
+            .map_err(|error| ProjectError::io(destination.path.join(component), error))?;
         Ok(())
     }
 
@@ -227,6 +241,8 @@ impl ProjectRoot {
     pub(crate) fn read_optional(&self, name: &str) -> Result<Option<Vec<u8>>> {
         let mut options = OpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NONBLOCK);
         let mut file = match self.dir.open_with(name, &options) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -270,6 +286,168 @@ impl ProjectRoot {
         // after it before cleanup is disarmed.
         tmp.cleanup_on_drop = false;
         Ok(())
+    }
+
+    /// Read one no-follow regular file from `chat-sessions/`, bounded before
+    /// allocation and while streaming in case the retained file grows.
+    pub fn read_chat_session(&self, name: &str, max_bytes: usize) -> Result<Option<Vec<u8>>> {
+        validate_leaf(name).map_err(|error| {
+            ProjectError::io(
+                self.path.join(crate::layout::CHAT_SESSIONS_DIR).join(name),
+                error,
+            )
+        })?;
+        let Some(directory) = self.chat_sessions_directory(false)? else {
+            return Ok(None);
+        };
+        let path = self.path.join(crate::layout::CHAT_SESSIONS_DIR).join(name);
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NONBLOCK);
+        let mut file = match directory.open_with(name, &options) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(ProjectError::io(path, error)),
+        };
+        let metadata = file
+            .metadata()
+            .map_err(|error| ProjectError::io(&path, error))?;
+        if !metadata.is_file() {
+            return Err(ProjectError::io(
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "chat session is not a nofollow regular file",
+                ),
+            ));
+        }
+        if metadata.len() > max_bytes as u64 {
+            return Err(ProjectError::io(
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "chat session exceeds the configured byte limit",
+                ),
+            ));
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        Read::by_ref(&mut file)
+            .take(max_bytes as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| ProjectError::io(&path, error))?;
+        if bytes.len() > max_bytes {
+            return Err(ProjectError::io(
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "chat session grew beyond the configured byte limit",
+                ),
+            ));
+        }
+        Ok(Some(bytes))
+    }
+
+    /// Atomically replace one no-follow regular file in `chat-sessions/`.
+    pub fn write_chat_session_atomic(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        validate_leaf(name).map_err(|error| {
+            ProjectError::io(
+                self.path.join(crate::layout::CHAT_SESSIONS_DIR).join(name),
+                error,
+            )
+        })?;
+        let directory = self
+            .chat_sessions_directory(true)?
+            .expect("create=true returns a directory");
+        let directory_path = self.path.join(crate::layout::CHAT_SESSIONS_DIR);
+        let tmp_name = unique_temp_name(name);
+        let mut tmp = TransactionLeaf::create(&directory, &tmp_name)
+            .map_err(|error| ProjectError::io(directory_path.join(&tmp_name), error))?;
+        tmp.handle
+            .as_file_mut()
+            .write_all(bytes)
+            .map_err(|error| ProjectError::io(directory_path.join(&tmp_name), error))?;
+        tmp.handle
+            .as_file()
+            .sync_all()
+            .map_err(|error| ProjectError::io(directory_path.join(&tmp_name), error))?;
+        tmp.replace(&directory, Path::new(name))
+            .map_err(|error| ProjectError::io(directory_path.join(name), error))?;
+        tmp.cleanup_on_drop = false;
+        Ok(())
+    }
+
+    /// List no-follow regular leaves in `chat-sessions/`. Callers own the
+    /// filename policy (for example selecting only `<session>.json`).
+    pub fn list_chat_session_files(&self, max_entries: usize) -> Result<Vec<OsString>> {
+        let Some(directory) = self.chat_sessions_directory(false)? else {
+            return Ok(Vec::new());
+        };
+        let directory_path = self.path.join(crate::layout::CHAT_SESSIONS_DIR);
+        let entries = directory
+            .entries()
+            .map_err(|error| ProjectError::io(&directory_path, error))?;
+        let mut files = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| ProjectError::io(&directory_path, error))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| ProjectError::io(&directory_path, error))?;
+            if !file_type.is_file() {
+                return Err(ProjectError::io(
+                    directory_path.join(entry.file_name()),
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "chat session directory contains a non-regular entry",
+                    ),
+                ));
+            }
+            if file_type.is_file() {
+                if files.len() == max_entries {
+                    return Err(ProjectError::io(
+                        &directory_path,
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "chat session directory exceeds the configured entry limit",
+                        ),
+                    ));
+                }
+                files.push(entry.file_name());
+            }
+        }
+        files.sort();
+        Ok(files)
+    }
+
+    fn chat_sessions_directory(&self, create: bool) -> Result<Option<Dir>> {
+        let name = crate::layout::CHAT_SESSIONS_DIR;
+        let path = self.path.join(name);
+        match self.dir.symlink_metadata(name) {
+            Ok(metadata) => {
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    return Err(ProjectError::io(
+                        path,
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "chat-sessions must be a nofollow directory",
+                        ),
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+                match self.dir.create_dir(name) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(ProjectError::io(&path, error)),
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(ProjectError::io(&path, error)),
+        }
+        self.dir
+            .open_dir_nofollow(name)
+            .map(Some)
+            .map_err(|error| ProjectError::io(path, error))
     }
 }
 
@@ -1644,6 +1822,64 @@ mod tests {
             .filter_map(std::result::Result::ok)
             .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix));
         assert!(!leaked, "failed transaction leaked its temporary leaf");
+    }
+
+    #[test]
+    fn chat_session_reads_are_bounded_and_listing_rejects_directories() {
+        let tmp = TmpDir::new("chat-session-bounds");
+        let bundle = tmp.path().join("Chat.opentake");
+        let root = ProjectRoot::create(&bundle).unwrap();
+        root.write_chat_session_atomic("bounded.json", b"12345")
+            .unwrap();
+
+        let error = root
+            .read_chat_session("bounded.json", 4)
+            .expect_err("metadata larger than the caller's limit must be rejected");
+        assert!(error.to_string().contains("byte limit"), "{error}");
+
+        fs::create_dir(bundle.join("chat-sessions/not-a-session")).unwrap();
+        let error = root
+            .list_chat_session_files(16)
+            .expect_err("non-regular directory entries must fail closed");
+        assert!(error.to_string().contains("non-regular"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_chat_session_read_rejects_a_fifo_without_blocking() {
+        use std::process::Command;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let tmp = TmpDir::new("chat-session-fifo");
+        let bundle = tmp.path().join("Chat.opentake");
+        let root = ProjectRoot::create(&bundle).unwrap();
+        fs::create_dir(bundle.join("chat-sessions")).unwrap();
+        let fifo = bundle.join("chat-sessions/blocked.json");
+        assert!(Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+
+        let (sent, received) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            sent.send(root.read_chat_session("blocked.json", 1024))
+                .unwrap();
+        });
+        let result = match received.recv_timeout(Duration::from_millis(250)) {
+            Ok(result) => result,
+            Err(_) => {
+                // Unblock the buggy blocking-open path before failing so this
+                // regression never strands a test worker.
+                let _writer = fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+                let _ = received.recv_timeout(Duration::from_secs(1));
+                reader.join().unwrap();
+                panic!("direct FIFO read blocked before it could fail closed");
+            }
+        };
+        reader.join().unwrap();
+        assert!(result.is_err(), "a FIFO must never be parsed as chat JSON");
     }
 
     #[cfg(unix)]

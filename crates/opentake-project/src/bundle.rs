@@ -311,6 +311,7 @@ impl Project {
         encoded.write_to(publisher.stage())?;
         if let Some(source) = media_source {
             source.copy_media_to(publisher.stage())?;
+            source.copy_chat_sessions_to(publisher.stage())?;
         }
         publisher.publish()
     }
@@ -609,6 +610,31 @@ mod tests {
         );
         assert!(!target.join("media/stale.bin").exists());
         assert!(!target.join("stale.txt").exists());
+    }
+
+    #[test]
+    fn complete_publish_carries_project_chat_sessions_across_save_as() {
+        let tmp = TmpDir::new("complete-chat-sessions");
+        let source = tmp.path().join("Source.opentake");
+        let target = tmp.path().join("Target.opentake");
+        let project = Project::new(&source);
+        project.save().unwrap();
+        fs::create_dir_all(source.join("chat-sessions")).unwrap();
+        fs::write(
+            source.join("chat-sessions/chat-1.json"),
+            br#"{"id":"chat-1","messages":[]}"#,
+        )
+        .unwrap();
+        let source_root = ProjectRoot::open(&source).unwrap();
+
+        project
+            .publish_complete_to(&target, Some(&source_root))
+            .expect("Save As must carry project-local conversations");
+
+        assert_eq!(
+            fs::read(target.join("chat-sessions/chat-1.json")).unwrap(),
+            br#"{"id":"chat-1","messages":[]}"#
+        );
     }
 
     #[cfg(unix)]

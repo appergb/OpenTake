@@ -690,3 +690,11 @@ export interface ChatMessage {
   toolCallId?: string;
   toolIsError?: boolean;
 }
+
+export interface ChatSession {
+  id: string;
+  messages: ChatMessage[];
+  createdAt: number;
+  provider?: string;
+  model?: string;
+}

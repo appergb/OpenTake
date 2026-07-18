@@ -13,6 +13,7 @@ import type {
   AccountStatus,
   CaptionRequest,
   ChatMessage,
+  ChatSession,
   ChatToolCall,
   ClipType,
   EditRequest,
@@ -971,16 +972,22 @@ export async function accountGetStatus(): Promise<AccountStatus> {
 // MARK: - In-app chat (#HANDOFF-3.3)
 
 export interface ChatDelta {
+  projectEpoch: number;
+  projectPath: string;
   sessionId: string;
   delta: string;
 }
 
 export interface ChatToolCallEvent {
+  projectEpoch: number;
+  projectPath: string;
   sessionId: string;
   toolCall: ChatToolCall;
 }
 
 export interface ChatDoneEvent {
+  projectEpoch: number;
+  projectPath: string;
   sessionId: string;
   message: ChatMessage;
 }
@@ -989,21 +996,61 @@ export async function chatSend(
   sessionId: string,
   text: string,
   chatProvider: string,
+  expectedProjectEpoch: number,
+  expectedProjectPath: string,
 ): Promise<void> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<void>("chat_send", { sessionId, text, chatProvider });
+  if (invokeImpl)
+    return invokeImpl<void>("chat_send", {
+      sessionId,
+      text,
+      chatProvider,
+      expectedProjectEpoch,
+      expectedProjectPath,
+    });
   throw new Error("chat requires the desktop app (LLM + tool dispatch)");
 }
 
-export async function chatHistory(sessionId: string): Promise<ChatMessage[]> {
+export async function chatHistory(
+  sessionId: string,
+  expectedProjectEpoch: number,
+  expectedProjectPath: string,
+): Promise<ChatMessage[]> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<ChatMessage[]>("chat_history", { sessionId });
+  if (invokeImpl)
+    return invokeImpl<ChatMessage[]>("chat_history", {
+      sessionId,
+      expectedProjectEpoch,
+      expectedProjectPath,
+    });
   return [];
 }
 
-export async function chatCancel(sessionId: string): Promise<void> {
+export async function chatSessions(
+  expectedProjectEpoch: number,
+  expectedProjectPath: string,
+): Promise<ChatSession[]> {
   await ensureTauri();
-  if (invokeImpl) await invokeImpl<void>("chat_cancel", { sessionId });
+  if (invokeImpl)
+    return invokeImpl<ChatSession[]>("chat_sessions", {
+      expectedProjectEpoch,
+      expectedProjectPath,
+    });
+  return [];
+}
+
+export async function chatCancel(
+  sessionId: string,
+  expectedProjectEpoch: number,
+  expectedProjectPath: string,
+): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl)
+    await invokeImpl<void>("chat_cancel", {
+      sessionId,
+      expectedProjectEpoch,
+      expectedProjectPath,
+    });
 }
 
 // MARK: - Events
@@ -1072,9 +1119,22 @@ export async function onChatDelta(
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("chat_delta", (e) => {
-    const payload = e.payload as { sessionId?: string; delta?: string } | undefined;
-    if (payload && typeof payload.sessionId === "string" && typeof payload.delta === "string") {
-      handler({ sessionId: payload.sessionId, delta: payload.delta });
+    const payload = e.payload as
+      | { projectEpoch?: number; projectPath?: string; sessionId?: string; delta?: string }
+      | undefined;
+    if (
+      payload &&
+      typeof payload.projectEpoch === "number" &&
+      typeof payload.projectPath === "string" &&
+      typeof payload.sessionId === "string" &&
+      typeof payload.delta === "string"
+    ) {
+      handler({
+        projectEpoch: payload.projectEpoch,
+        projectPath: payload.projectPath,
+        sessionId: payload.sessionId,
+        delta: payload.delta,
+      });
     }
   });
 }
@@ -1085,9 +1145,27 @@ export async function onChatToolCall(
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("chat_tool_call", (e) => {
-    const payload = e.payload as { sessionId?: string; toolCall?: ChatToolCall } | undefined;
-    if (payload && typeof payload.sessionId === "string" && payload.toolCall) {
-      handler({ sessionId: payload.sessionId, toolCall: payload.toolCall });
+    const payload = e.payload as
+      | {
+          projectEpoch?: number;
+          projectPath?: string;
+          sessionId?: string;
+          toolCall?: ChatToolCall;
+        }
+      | undefined;
+    if (
+      payload &&
+      typeof payload.projectEpoch === "number" &&
+      typeof payload.projectPath === "string" &&
+      typeof payload.sessionId === "string" &&
+      payload.toolCall
+    ) {
+      handler({
+        projectEpoch: payload.projectEpoch,
+        projectPath: payload.projectPath,
+        sessionId: payload.sessionId,
+        toolCall: payload.toolCall,
+      });
     }
   });
 }
@@ -1098,9 +1176,27 @@ export async function onChatDone(
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("chat_done", (e) => {
-    const payload = e.payload as { sessionId?: string; message?: ChatMessage } | undefined;
-    if (payload && typeof payload.sessionId === "string" && payload.message) {
-      handler({ sessionId: payload.sessionId, message: payload.message });
+    const payload = e.payload as
+      | {
+          projectEpoch?: number;
+          projectPath?: string;
+          sessionId?: string;
+          message?: ChatMessage;
+        }
+      | undefined;
+    if (
+      payload &&
+      typeof payload.projectEpoch === "number" &&
+      typeof payload.projectPath === "string" &&
+      typeof payload.sessionId === "string" &&
+      payload.message
+    ) {
+      handler({
+        projectEpoch: payload.projectEpoch,
+        projectPath: payload.projectPath,
+        sessionId: payload.sessionId,
+        message: payload.message,
+      });
     }
   });
 }

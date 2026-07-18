@@ -17,9 +17,11 @@
 pub mod llm;
 pub mod r#loop;
 pub mod session;
+pub mod store;
 
 pub use llm::{
     no_key_guide, provider_from_choice, stream_chat, ChatRequest, LlmError, LlmProvider, ToolSchema,
 };
-pub use r#loop::{ChatLoop, EmitLoop, LoopError, LoopEvent};
+pub use r#loop::{ChatLoop, ChatTurnGate, EmitLoop, LoopError, LoopEvent};
 pub use session::{ChatMessage, ChatSession, Role, ToolCall};
+pub use store::{ChatSessionStore, ChatSessionStoreError};
