@@ -37,15 +37,41 @@ use opentake_tauri_lib::playback::{
     audio::build_clock_paused, FrameSink, MediaInfo, PlaybackEngine, PlayheadEmitter,
 };
 
-/// Collects frames: counts + keeps the last one.
+#[derive(Clone, Debug)]
+struct FrameQuality {
+    min_nonblack_ratio: f64,
+    max_neon_green_ratio: f64,
+    first_green_frame: Option<i32>,
+}
+
+impl Default for FrameQuality {
+    fn default() -> Self {
+        Self {
+            min_nonblack_ratio: 1.0,
+            max_neon_green_ratio: 0.0,
+            first_green_frame: None,
+        }
+    }
+}
+
+/// Collects frames and quality facts across the complete playback run.
 struct ProbeSink {
     frames: AtomicI32,
     last: Mutex<Option<DecodedFrame>>,
+    quality: Mutex<FrameQuality>,
 }
 
 impl FrameSink for ProbeSink {
     fn push_frame(&self, frame: &DecodedFrame) {
-        self.frames.fetch_add(1, Ordering::SeqCst);
+        let frame_index = self.frames.fetch_add(1, Ordering::SeqCst);
+        let nonblack = nonblack_ratio(frame);
+        let neon_green = neon_green_ratio(frame);
+        let mut quality = self.quality.lock().unwrap();
+        quality.min_nonblack_ratio = quality.min_nonblack_ratio.min(nonblack);
+        quality.max_neon_green_ratio = quality.max_neon_green_ratio.max(neon_green);
+        if neon_green >= 0.01 && quality.first_green_frame.is_none() {
+            quality.first_green_frame = Some(frame_index);
+        }
         *self.last.lock().unwrap() = Some(frame.clone());
     }
 }
@@ -67,14 +93,14 @@ fn video_clip(id: &str, media: &str, start: i32, dur: i32) -> Clip {
     c
 }
 
-/// Run a timeline for `secs` seconds, returning (frames received, last
-/// playhead, last frame, whether a live audio clock was installed).
+/// Run a timeline for `secs` seconds, returning frames received, last playhead,
+/// last frame, whether a live audio clock was installed, and whole-run quality.
 fn run_engine(
     timeline: Timeline,
     media: HashMap<String, MediaInfo>,
     sizes: HashMap<String, (u32, u32)>,
     secs: f64,
-) -> (i32, i32, Option<DecodedFrame>, bool) {
+) -> (i32, i32, Option<DecodedFrame>, bool, FrameQuality) {
     let fps = timeline.fps;
     let (clock, audio) =
         build_clock_paused(&timeline, &media, fps, 0).expect("probe prepared audio clock");
@@ -82,6 +108,7 @@ fn run_engine(
     let sink = Arc::new(ProbeSink {
         frames: AtomicI32::new(0),
         last: Mutex::new(None),
+        quality: Mutex::new(FrameQuality::default()),
     });
     let emitter = Arc::new(ProbeEmitter {
         last_frame: AtomicI32::new(-1),
@@ -115,7 +142,8 @@ fn run_engine(
     let n = sink.frames.load(Ordering::SeqCst);
     let head = emitter.last_frame.load(Ordering::SeqCst);
     let last = sink.last.lock().unwrap().clone();
-    (n, head, last, audio_active)
+    let quality = sink.quality.lock().unwrap().clone();
+    (n, head, last, audio_active, quality)
 }
 
 fn nonblack_ratio(f: &DecodedFrame) -> f64 {
@@ -127,6 +155,16 @@ fn nonblack_ratio(f: &DecodedFrame) -> f64 {
         }
     }
     nonblack as f64 / total
+}
+
+fn neon_green_ratio(f: &DecodedFrame) -> f64 {
+    let total = (f.width * f.height) as f64;
+    let neon_green = f
+        .rgba
+        .chunks_exact(4)
+        .filter(|pixel| pixel[0] < 32 && pixel[1] > 224 && pixel[2] < 32)
+        .count();
+    neon_green as f64 / total
 }
 
 fn ffmpeg_ready() -> bool {
@@ -165,7 +203,7 @@ fn probe_realtime_playback_with_audio_or_safe_fallback() {
     let mut sizes = HashMap::new();
     sizes.insert("m-1".to_string(), (1584u32, 1080u32));
 
-    let (frames, playhead, last, audio_active) = run_engine(tl, media, sizes, 3.0);
+    let (frames, playhead, last, audio_active, _quality) = run_engine(tl, media, sizes, 3.0);
     let clock_mode = if audio_active {
         "audio"
     } else {
@@ -178,6 +216,15 @@ fn probe_realtime_playback_with_audio_or_safe_fallback() {
             "strict audio qualification requires a live device callback"
         );
     }
+    let last = last.expect("no frame captured");
+    let ratio = nonblack_ratio(&last);
+    let green_ratio = neon_green_ratio(&last);
+    eprintln!("[probe] nonblack_ratio={ratio:.3} neon_green_ratio={green_ratio:.3}");
+    assert!(ratio > 0.01, "frames are black (ratio {ratio:.4})");
+    assert!(
+        green_ratio < 0.01,
+        "frames contain a neon-green corruption region (ratio {green_ratio:.4})"
+    );
     // 3s @30fps targets 90 frames. Pre-#192-fix, the render thread stacked a
     // full frame period on top of render time and measured ~67 frames/3s
     // (~22fps) on this asset+machine; post-fix it consistently measures
@@ -187,10 +234,77 @@ fn probe_realtime_playback_with_audio_or_safe_fallback() {
     // number passes") while leaving margin below the observed floor.
     assert!(frames >= 73, "frame rate too low: {frames} frames in 3s");
     assert!(playhead >= 73, "playhead did not advance: {playhead}");
-    let last = last.expect("no frame captured");
-    let ratio = nonblack_ratio(&last);
-    eprintln!("[probe] nonblack_ratio={ratio:.3}");
-    assert!(ratio > 0.01, "frames are black (ratio {ratio:.4})");
+}
+
+/// Real 4K HEVC Main10 playback probe. This validates every published frame's
+/// pixels and transport progress without reusing the calibrated throughput
+/// threshold from the smaller acceptance asset above.
+#[test]
+#[ignore = "real-device probe: needs GPU + a real HEVC Main10 video asset"]
+fn probe_main10_playback_has_no_black_or_green_frames() {
+    let Some(src) = std::env::var_os("OPENTAKE_MAIN10_FIXTURE") else {
+        eprintln!("skip: set OPENTAKE_MAIN10_FIXTURE to a real HEVC Main10 video file");
+        return;
+    };
+    let src = std::path::PathBuf::from(src);
+    if !src.exists() {
+        eprintln!(
+            "skip: OPENTAKE_MAIN10_FIXTURE does not exist: {}",
+            src.display()
+        );
+        return;
+    }
+    let probe = opentake_media::probe(&src).expect("probe Main10 fixture");
+    let source_size = (
+        probe.width.expect("Main10 fixture width"),
+        probe.height.expect("Main10 fixture height"),
+    );
+    let source_fps = probe.fps.expect("Main10 fixture fps");
+    let trim_start_frame = std::env::var("OPENTAKE_PROBE_START_FRAME")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1_572);
+    assert!(
+        trim_start_frame + 300 < (probe.duration_secs * source_fps) as i32,
+        "Main10 probe window exceeds source duration"
+    );
+
+    let mut timeline = Timeline::new();
+    timeline.fps = 30;
+    timeline.width = 1920;
+    timeline.height = 1080;
+    let mut track = Track::new("t-v1", ClipType::Video);
+    let mut clip = video_clip("c-1", "m-1", 0, 300);
+    clip.trim_start_frame = trim_start_frame;
+    track.clips.push(clip);
+    timeline.tracks.push(track);
+
+    let mut media = HashMap::new();
+    media.insert("m-1".to_string(), MediaInfo { path: src });
+    let mut sizes = HashMap::new();
+    sizes.insert("m-1".to_string(), source_size);
+
+    let (frames, playhead, _last, _audio_active, quality) = run_engine(timeline, media, sizes, 3.0);
+    eprintln!(
+        "[probe] Main10 frames={frames} playhead={playhead} min_nonblack={:.3} max_neon_green={:.3}",
+        quality.min_nonblack_ratio, quality.max_neon_green_ratio
+    );
+    assert!(
+        frames > 1,
+        "Main10 playback did not publish consecutive frames"
+    );
+    assert!(playhead > 0, "Main10 playback playhead did not advance");
+    assert!(
+        quality.min_nonblack_ratio > 0.01,
+        "Main10 playback published a black frame (minimum nonblack ratio {:.4})",
+        quality.min_nonblack_ratio
+    );
+    assert!(
+        quality.max_neon_green_ratio < 0.01,
+        "Main10 playback published a green-corrupted frame at {:?} (maximum ratio {:.4})",
+        quality.first_green_frame,
+        quality.max_neon_green_ratio
+    );
 }
 
 /// Generate an N-second ProRes (422, profile 2) + PCM audio fixture at `path`
@@ -248,7 +362,7 @@ fn probe_prores_playback() {
     let mut sizes = HashMap::new();
     sizes.insert("m-1".to_string(), (1280u32, 720u32));
 
-    let (frames, _playhead, last, _audio_active) = run_engine(tl, media, sizes, 2.0);
+    let (frames, _playhead, last, _audio_active, _quality) = run_engine(tl, media, sizes, 2.0);
     eprintln!("[probe] prores frames={frames}");
     // 2s @30fps targets 60 frames. Post-#192-fix this consistently measures
     // ~50-51 frames/2s on this machine (bounded by the same compositor GPU
@@ -324,7 +438,7 @@ fn probe_color_grade_visible_in_playback() {
     let mut sizes = HashMap::new();
     sizes.insert("m-1".to_string(), (640u32, 360u32));
 
-    let (frames, _playhead, last, _audio_active) = run_engine(tl, media, sizes, 1.5);
+    let (frames, _playhead, last, _audio_active, _quality) = run_engine(tl, media, sizes, 1.5);
     // 1.5s @30fps targets 45 frames. Post-#192-fix this measures ~32-39
     // frames/1.5s on this machine across repeated runs (short 1.5s window,
     // so warm-up cost is a larger share and variance is higher than the

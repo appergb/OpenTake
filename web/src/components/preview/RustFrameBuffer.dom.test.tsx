@@ -7,7 +7,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PlaybackFrameEvent } from "../../lib/types";
 import { RustFrameBuffer } from "./RustFrameBuffer.tsx";
 
-afterEach(() => document.body.replaceChildren());
+afterEach(() => {
+  vi.restoreAllMocks();
+  document.body.replaceChildren();
+});
 
 describe("paused native composite", () => {
   it("requests and retains the current frame without a playback publication", async () => {
@@ -142,13 +145,185 @@ describe("paused native composite", () => {
       'img[data-rust-frame-slot][src]',
     );
     expect(liveFrame).not.toBeNull();
-    Object.defineProperty(liveFrame!, "currentSrc", {
-      configurable: true,
-      value: liveFrame!.src,
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
+      drawImage: vi.fn(),
+    } as never);
+    Object.defineProperties(liveFrame!, {
+      currentSrc: { configurable: true, value: liveFrame!.src },
+      naturalWidth: { configurable: true, value: 640 },
+      naturalHeight: { configurable: true, value: 360 },
     });
     await act(async () => liveFrame!.dispatchEvent(new Event("load", { bubbles: true })));
 
     expect(container.querySelector('[data-testid="rust-idle-composite-still"]')).toBeNull();
+    await act(async () => root.unmount());
+  });
+
+  it("paints live frames onto one stable canvas instead of exposing decoder images", async () => {
+    const drawImage = vi.fn();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ drawImage } as never);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const event: PlaybackFrameEvent = {
+      projectEpoch: 3,
+      timelineVersion: 7,
+      sessionId: "session-canvas",
+      frame: 481,
+      sequence: 1,
+      terminal: false,
+    };
+
+    await act(async () => {
+      root.render(
+        <RustFrameBuffer
+          event={event}
+          endpoint="http://127.0.0.1/frame"
+          projectEpoch={3}
+          timelineVersion={7}
+          engineDriving
+          requestCompositeStill={vi.fn().mockResolvedValue(null)}
+          onTerminalFailure={vi.fn()}
+        />,
+      );
+    });
+
+    const decoder = container.querySelector<HTMLImageElement>('img[data-rust-frame-slot][src]');
+    const canvas = container.querySelector<HTMLCanvasElement>('[data-testid="rust-live-canvas"]');
+    expect(decoder).not.toBeNull();
+    expect(canvas).not.toBeNull();
+    expect(decoder!.style.visibility).toBe("hidden");
+    Object.defineProperties(decoder!, {
+      currentSrc: { configurable: true, value: decoder!.src },
+      naturalWidth: { configurable: true, value: 640 },
+      naturalHeight: { configurable: true, value: 360 },
+    });
+
+    await act(async () => decoder!.dispatchEvent(new Event("load", { bubbles: true })));
+
+    expect(drawImage).toHaveBeenCalledWith(decoder, 0, 0);
+    expect(canvas!.width).toBe(640);
+    expect(canvas!.height).toBe(360);
+    expect(canvas!.style.visibility).toBe("visible");
+    await act(async () => root.unmount());
+  });
+
+  it("retains the paused still when a live frame cannot get a canvas context", async () => {
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    const requestCompositeStill = vi.fn().mockResolvedValue({
+      width: 640,
+      height: 360,
+      dataUrl: "data:image/png;base64,paused",
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const event: PlaybackFrameEvent = {
+      projectEpoch: 3,
+      timelineVersion: 7,
+      sessionId: "session-no-context",
+      frame: 481,
+      sequence: 1,
+      terminal: false,
+    };
+
+    await act(async () => {
+      root.render(
+        <RustFrameBuffer
+          event={null}
+          endpoint="http://127.0.0.1/frame"
+          projectEpoch={3}
+          timelineVersion={7}
+          engineDriving={false}
+          stillFrame={480}
+          requestCompositeStill={requestCompositeStill}
+          onTerminalFailure={vi.fn()}
+        />,
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      root.render(
+        <RustFrameBuffer
+          event={event}
+          endpoint="http://127.0.0.1/frame"
+          projectEpoch={3}
+          timelineVersion={7}
+          engineDriving
+          requestCompositeStill={requestCompositeStill}
+          onTerminalFailure={vi.fn()}
+        />,
+      );
+    });
+
+    const decoder = container.querySelector<HTMLImageElement>('img[data-rust-frame-slot][src]');
+    const canvas = container.querySelector<HTMLCanvasElement>('[data-testid="rust-live-canvas"]');
+    Object.defineProperties(decoder!, {
+      currentSrc: { configurable: true, value: decoder!.src },
+      naturalWidth: { configurable: true, value: 640 },
+      naturalHeight: { configurable: true, value: 360 },
+    });
+    await act(async () => decoder!.dispatchEvent(new Event("load", { bubbles: true })));
+
+    expect(container.querySelector('[data-testid="rust-idle-composite-still"]')).not.toBeNull();
+    expect(canvas!.style.visibility).toBe("hidden");
+    await act(async () => root.unmount());
+  });
+
+  it("keeps the last good frame active when the next canvas draw throws", async () => {
+    const drawImage = vi
+      .fn()
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => {
+        throw new Error("draw failed");
+      });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ drawImage } as never);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const renderFrame = (sequence: number) => (
+      <RustFrameBuffer
+        event={{
+          projectEpoch: 3,
+          timelineVersion: 7,
+          sessionId: "session-draw-failure",
+          frame: 480 + sequence,
+          sequence,
+          terminal: false,
+        }}
+        endpoint="http://127.0.0.1/frame"
+        projectEpoch={3}
+        timelineVersion={7}
+        engineDriving
+        requestCompositeStill={vi.fn().mockResolvedValue(null)}
+        onTerminalFailure={vi.fn()}
+      />
+    );
+
+    await act(async () => root.render(renderFrame(1)));
+    let decoder = container.querySelector<HTMLImageElement>('img[data-rust-frame-slot][src]')!;
+    Object.defineProperties(decoder, {
+      currentSrc: { configurable: true, value: decoder.src },
+      naturalWidth: { configurable: true, value: 640 },
+      naturalHeight: { configurable: true, value: 360 },
+    });
+    await act(async () => decoder.dispatchEvent(new Event("load", { bubbles: true })));
+
+    await act(async () => root.render(renderFrame(2)));
+    const decoders = Array.from(
+      container.querySelectorAll<HTMLImageElement>('img[data-rust-frame-slot][src]'),
+    );
+    decoder = decoders.find((candidate) => candidate.src.includes("sequence=2"))!;
+    Object.defineProperties(decoder, {
+      currentSrc: { configurable: true, value: decoder.src },
+      naturalWidth: { configurable: true, value: 640 },
+      naturalHeight: { configurable: true, value: 360 },
+    });
+    await act(async () => decoder.dispatchEvent(new Event("load", { bubbles: true })));
+
+    expect(drawImage).toHaveBeenCalledTimes(2);
+    expect(container.querySelector<HTMLCanvasElement>('[data-testid="rust-live-canvas"]')!.style.visibility)
+      .toBe("visible");
     await act(async () => root.unmount());
   });
 });
