@@ -65,6 +65,10 @@ import {
 } from "../../lib/timelineRange";
 import type { ClipThumbnailStrip } from "./clipRenderer";
 
+/** Keep cold long-video drops bounded: 24 representative frames preserve a
+ * useful filmstrip while avoiding the former 240 random-access decodes. */
+export const TIMELINE_SPRITE_FRAME_LIMIT = 24;
+
 /** Where a move/duplicate drag will land. `newTrack` inserts before `index`
  *  (upstream `newTrackAt(index)`), clamped into visual/audio zones by the core. */
 type DropTarget =
@@ -1048,7 +1052,10 @@ export function TimelineContainer() {
     const startSpriteLoad = (ref: string, key: string) => {
       if (thumbnailSpriteInFlightRef.current.has(key)) return;
       thumbnailSpriteInFlightRef.current.add(key);
-      void generateThumbnail(ref, { includeSprite: true })
+      void generateThumbnail(ref, {
+        includeSprite: true,
+        maxFrames: TIMELINE_SPRITE_FRAME_LIMIT,
+      })
         .then((result) => storeThumbnail(ref, key, result, true))
         .catch((err) => {
           console.warn(`thumbnail sprite load failed for ${ref}:`, err);

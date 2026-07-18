@@ -28,7 +28,7 @@ import { formatTimecode } from "../../lib/geometry";
 import { assetUrl } from "../../lib/asset";
 import { setDraggingMedia } from "../../lib/mediaDragState";
 import { setDraggingMomentRange } from "../../lib/momentDragState";
-import { MEDIA_DND_TYPE } from "./MediaPanel";
+import { MEDIA_DND_TYPE, setMediaThumbnailDragImage } from "./MediaPanel";
 import { useMediaStore } from "../../store/mediaStore";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
@@ -385,7 +385,17 @@ function ResultsGrid({ children }: { children: React.ReactNode }) {
 }
 
 /** Async frame thumbnail for a search hit at a specific source-second time. */
-function HitThumbnail({ mediaId, timeSec, alt }: { mediaId: string; timeSec: number; alt: string }) {
+function HitThumbnail({
+  mediaId,
+  timeSec,
+  alt,
+  thumbnailRef,
+}: {
+  mediaId: string;
+  timeSec: number;
+  alt: string;
+  thumbnailRef?: React.Ref<HTMLDivElement>;
+}) {
   const [path, setPath] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -399,6 +409,7 @@ function HitThumbnail({ mediaId, timeSec, alt }: { mediaId: string; timeSec: num
   const src = assetUrl(path);
   return (
     <div
+      ref={thumbnailRef}
       style={{
         position: "relative",
         aspectRatio: "16 / 9",
@@ -431,11 +442,15 @@ function MomentCard({ hit }: { hit: MomentHit }) {
   const item = useMediaItem(hit.mediaId);
   const fps = useProjectStore((s) => s.timeline.fps);
   const setPreviewMedia = useEditorUiStore((s) => s.setPreviewMedia);
+  const thumbnailRef = useRef<HTMLDivElement | null>(null);
   if (!item) return null;
 
   const onDragStart = (e: React.DragEvent) => {
     e.dataTransfer.setData(MEDIA_DND_TYPE, item.id);
     e.dataTransfer.effectAllowed = "copy";
+    if (thumbnailRef.current) {
+      setMediaThumbnailDragImage(e.dataTransfer, thumbnailRef.current);
+    }
     setDraggingMedia(item);
     void preloadMedia(item.id);
     // Stills drag as the whole asset (no meaningful range).
@@ -462,7 +477,12 @@ function MomentCard({ hit }: { hit: MomentHit }) {
       title={t("search.dragToTimeline")}
       style={{ display: "flex", flexDirection: "column", gap: 3, cursor: "grab" }}
     >
-      <HitThumbnail mediaId={hit.mediaId} timeSec={hit.startSec} alt={item.name} />
+      <HitThumbnail
+        mediaId={hit.mediaId}
+        timeSec={hit.startSec}
+        alt={item.name}
+        thumbnailRef={thumbnailRef}
+      />
       <span
         style={{
           fontSize: "var(--fs-xs)",
@@ -490,11 +510,15 @@ function SpokenRow({ hit }: { hit: SpokenHit }) {
   const item = useMediaItem(hit.mediaId);
   const fps = useProjectStore((s) => s.timeline.fps);
   const setPreviewMedia = useEditorUiStore((s) => s.setPreviewMedia);
+  const thumbnailRef = useRef<HTMLDivElement | null>(null);
   if (!item) return null;
 
   const onDragStart = (e: React.DragEvent) => {
     e.dataTransfer.setData(MEDIA_DND_TYPE, item.id);
     e.dataTransfer.effectAllowed = "copy";
+    if (thumbnailRef.current) {
+      setMediaThumbnailDragImage(e.dataTransfer, thumbnailRef.current);
+    }
     setDraggingMedia(item);
     void preloadMedia(item.id);
     setDraggingMomentRange({ startSec: hit.startSec, endSec: hit.endSec });
@@ -522,7 +546,12 @@ function SpokenRow({ hit }: { hit: SpokenHit }) {
       }}
     >
       <div style={{ width: 96, flex: "0 0 auto" }}>
-        <HitThumbnail mediaId={hit.mediaId} timeSec={hit.startSec} alt={item.name} />
+        <HitThumbnail
+          mediaId={hit.mediaId}
+          timeSec={hit.startSec}
+          alt={item.name}
+          thumbnailRef={thumbnailRef}
+        />
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
         <span
@@ -559,10 +588,14 @@ function SpokenRow({ hit }: { hit: SpokenHit }) {
 function FileCard({ item }: { item: MediaItem }) {
   const setPreviewMedia = useEditorUiStore((s) => s.setPreviewMedia);
   const thumb = item.missing ? null : assetUrl(item.thumbnail);
+  const thumbnailRef = useRef<HTMLDivElement | null>(null);
 
   const onDragStart = (e: React.DragEvent) => {
     e.dataTransfer.setData(MEDIA_DND_TYPE, item.id);
     e.dataTransfer.effectAllowed = "copy";
+    if (thumbnailRef.current) {
+      setMediaThumbnailDragImage(e.dataTransfer, thumbnailRef.current);
+    }
     setDraggingMedia(item);
     void preloadMedia(item.id);
     setDraggingMomentRange(null); // whole asset
@@ -583,6 +616,7 @@ function FileCard({ item }: { item: MediaItem }) {
       style={{ display: "flex", flexDirection: "column", gap: 3, cursor: "grab" }}
     >
       <div
+        ref={thumbnailRef}
         style={{
           aspectRatio: "16 / 9",
           background: "var(--bg-placeholder)",

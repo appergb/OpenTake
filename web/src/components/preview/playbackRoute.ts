@@ -3,6 +3,8 @@ import type { Clip, Timeline } from "../../lib/types";
 export interface PlaybackRouteRuntime {
   rustAvailable: boolean;
   rustEnabled: boolean;
+  /** WebKit failed to decode a visual clip in this exact project revision. */
+  forceRust?: boolean;
 }
 
 export type UnsupportedPlaybackReason =
@@ -19,6 +21,18 @@ export type TimelinePlaybackRoute =
   | { kind: "webkit"; reasons: [] }
   | { kind: "rust"; reasons: [] }
   | { kind: "unsupported"; reasons: UnsupportedPlaybackReason[] };
+
+export function isRetryableRustPlaybackFailure(
+  route: TimelinePlaybackRoute,
+  rustEngineFailed: boolean,
+): boolean {
+  return (
+    rustEngineFailed &&
+    route.kind === "unsupported" &&
+    route.reasons.length === 1 &&
+    route.reasons[0]?.code === "rust-disabled"
+  );
+}
 
 interface ClipCapabilities {
   clip: Clip;
@@ -74,6 +88,15 @@ export function resolveTimelinePlaybackRoute(
     .filter((track) => !track.hidden)
     .flatMap((track) => track.clips.map((clip) => inspectClip(clip, reasons)));
   const needsRust = capabilities.some((item) => item.needsRust);
+  const hasVideo = capabilities.some((item) => item.clip.mediaType === "video");
+  const requiresNativeVideoStack =
+    timeline.tracks.filter(
+      (track) =>
+        !track.hidden && track.clips.some((clip) => clip.mediaType === "video"),
+    ).length > 1;
+  const hasTemporalRemapping = capabilities.some(
+    (item) => item.reversed || item.speedChanged,
+  );
 
   if (needsRust) {
     for (const item of capabilities) {
@@ -91,7 +114,23 @@ export function resolveTimelinePlaybackRoute(
   }
 
   if (reasons.length > 0) return { kind: "unsupported", reasons };
-  if (!needsRust) return { kind: "webkit", reasons: [] };
+  if (!needsRust) {
+    // A single ordinary video track stays on the low-overhead WebKit route.
+    // Multiple video tracks need the native compositor for deterministic
+    // decode/layer parity; an explicit WebKit decode error also retries the
+    // exact revision through FFmpeg. Temporal remapping stays on WebKit until
+    // native reverse/speed parity exists.
+    if (
+      (requiresNativeVideoStack || runtime.forceRust === true) &&
+      hasVideo &&
+      !hasTemporalRemapping &&
+      runtime.rustAvailable &&
+      runtime.rustEnabled
+    ) {
+      return { kind: "rust", reasons: [] };
+    }
+    return { kind: "webkit", reasons: [] };
+  }
   if (!runtime.rustAvailable) {
     return { kind: "unsupported", reasons: [{ code: "rust-unavailable" }] };
   }

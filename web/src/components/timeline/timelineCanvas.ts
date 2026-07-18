@@ -255,6 +255,7 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
         linkOffset: linkOffsetForClip(timeline, clip.id),
         volumeKfGhost,
         isDuplicate,
+        visibleX: { min: scrollLeft, max: visRight },
       });
     }
   }

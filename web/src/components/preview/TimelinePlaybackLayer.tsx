@@ -31,7 +31,15 @@ import {
 import type { Clip, Timeline } from "../../lib/types";
 import { useRef } from "react";
 
-export function TimelinePlayback({ timeline, fps }: { timeline: Timeline; fps: number }) {
+export function TimelinePlayback({
+  timeline,
+  fps,
+  onPlaybackFailure,
+}: {
+  timeline: Timeline;
+  fps: number;
+  onPlaybackFailure?: (clipId: string) => void;
+}) {
   // Subscribe to activeFrame so the right clips stay mounted as the playhead moves.
   const frame = useEditorUiStore((s) => playbackFrameFromActiveFrame(s.activeFrame));
   const items = useMediaStore((s) => s.items);
@@ -98,6 +106,7 @@ export function TimelinePlayback({ timeline, fps }: { timeline: Timeline; fps: n
                   playsInline
                   preload="auto"
                   onLoadedData={seekOnLoad(visual.clip)}
+                  onError={() => onPlaybackFailure?.(visual.clip.id)}
                   style={mediaStyle}
                 />
               ) : (

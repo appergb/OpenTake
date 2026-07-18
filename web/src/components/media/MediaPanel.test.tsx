@@ -14,10 +14,20 @@ import {
 import { useProjectStore } from "../../store/projectStore";
 
 vi.mock("../../lib/api", () => ({
+  isTauri: false,
   getWaveform: vi.fn(),
+  preloadMedia: vi.fn().mockResolvedValue("cached"),
+  generateThumbnail: vi.fn().mockResolvedValue(null),
+  toggleFavorite: vi.fn(),
+  extractAudio: vi.fn(),
 }));
 
-import { AudioWaveform, MediaFavoriteButton } from "./MediaPanel";
+vi.mock("../../lib/asset", () => ({
+  assetUrl: (path: string | null | undefined) => (path ? `asset://${path}` : null),
+}));
+
+import { useEditorUiStore } from "../../store/uiStore";
+import { AudioWaveform, MediaFavoriteButton, MediaPanel } from "./MediaPanel";
 
 afterEach(() => {
   document.body.replaceChildren();
@@ -207,6 +217,59 @@ describe("MediaFavoriteButton", () => {
     expect(useMediaStore.getState().items).toEqual(projectBItems);
     expect(useMediaStore.getState().folders).toEqual(projectBFolders);
     expect(useMediaStore.getState().error).toBeNull();
+    await act(async () => root.unmount());
+  });
+});
+
+describe("MediaCard drag image", () => {
+  it("uses a thumbnail-only drag image without filename characters", async () => {
+    useEditorUiStore.setState({
+      mediaTab: "material",
+      mediaSubTab: "import",
+      mediaPanelCurrentFolderId: null,
+      previewMediaId: null,
+    });
+    useMediaStore.setState({
+      items: [
+        {
+          id: "long-video",
+          name: "第二节课超长素材.mov",
+          type: "video",
+          duration: 3_600,
+          hasAudio: true,
+          path: "/long.mov",
+          thumbnail: "/long-thumb.jpg",
+          favorite: false,
+        },
+      ],
+      folders: [],
+      importing: false,
+      error: null,
+    });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<MediaPanel />));
+    const card = container.querySelector<HTMLElement>('[draggable="true"]');
+    expect(card).not.toBeNull();
+
+    const setDragImage = vi.fn();
+    const drag = new Event("dragstart", { bubbles: true, cancelable: true });
+    Object.defineProperty(drag, "dataTransfer", {
+      value: {
+        effectAllowed: "none",
+        setData: vi.fn(),
+        setDragImage,
+      },
+    });
+    await act(async () => card!.dispatchEvent(drag));
+
+    expect(setDragImage).toHaveBeenCalledTimes(1);
+    const preview = setDragImage.mock.calls[0][0] as HTMLElement;
+    expect(preview.textContent?.trim()).toBe("");
+    expect(preview.style.width).toBe("80px");
+    expect(preview.style.height).toBe("60px");
     await act(async () => root.unmount());
   });
 });

@@ -60,7 +60,11 @@ import {
 } from "../../lib/previewPresets";
 import type { MediaItem } from "../../lib/types";
 import { useNativePlaybackPublication } from "./nativePlaybackSession";
-import { resolveTimelinePlaybackRoute, type UnsupportedPlaybackReason } from "./playbackRoute";
+import {
+  isRetryableRustPlaybackFailure,
+  resolveTimelinePlaybackRoute,
+  type UnsupportedPlaybackReason,
+} from "./playbackRoute";
 import { rustEngineEnabled } from "./rustEngine";
 import { RustFrameBuffer } from "./RustFrameBuffer.tsx";
 
@@ -72,6 +76,14 @@ export function Preview() {
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
   const setCurrentFrame = useEditorUiStore((s) => s.setCurrentFrame);
   const isPlaying = useEditorUiStore((s) => s.isPlaying);
+  const rustEngineFailed = useEditorUiStore((s) => s.rustEngineFailed);
+  const setRustEngineFailed = useEditorUiStore((s) => s.setRustEngineFailed);
+  const webkitPlaybackFailedRevision = useEditorUiStore(
+    (s) => s.webkitPlaybackFailedRevision,
+  );
+  const setWebkitPlaybackFailedRevision = useEditorUiStore(
+    (s) => s.setWebkitPlaybackFailedRevision,
+  );
   const setScrubbing = useEditorUiStore((s) => s.setScrubbing);
   const togglePlayTimeline = useEditorUiStore((s) => s.togglePlay);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
@@ -201,9 +213,16 @@ export function Preview() {
   const playing = previewing ? mediaPlaying : isPlaying;
   const playbackRoute = resolveTimelinePlaybackRoute(timeline, {
     rustAvailable: isTauri,
-    rustEnabled: rustEngineEnabled(),
+    rustEnabled: rustEngineEnabled() && !rustEngineFailed,
+    forceRust:
+      webkitPlaybackFailedRevision === `${projectEpoch}:${timelineVersion}`,
   });
-  const timelinePlaybackAllowed = playbackRoute.kind !== "unsupported";
+  const retryableRustFailure = isRetryableRustPlaybackFailure(
+    playbackRoute,
+    rustEngineFailed,
+  );
+  const timelinePlaybackAllowed =
+    playbackRoute.kind !== "unsupported" || retryableRustFailure;
   const requestCompositeStill = useCallback(
     (frame: number) =>
       compositeFrame(
@@ -235,6 +254,7 @@ export function Preview() {
       else el.pause();
     } else {
       if (!timelinePlaybackAllowed) return;
+      if (retryableRustFailure) setRustEngineFailed(false);
       // Rewinds from the parked end frame on replay (see store togglePlay).
       togglePlayTimeline();
     }
@@ -390,7 +410,13 @@ export function Preview() {
             ) : timelineHasContent ? (
               <>
                 {playbackRoute.kind === "webkit" && (
-                  <TimelinePlayback timeline={timeline} fps={fps} />
+                  <TimelinePlayback
+                    timeline={timeline}
+                    fps={fps}
+                    onPlaybackFailure={() =>
+                      setWebkitPlaybackFailedRevision(`${projectEpoch}:${timelineVersion}`)
+                    }
+                  />
                 )}
                 <RustFrameBuffer
                   event={nativeFrameEvent}
@@ -398,6 +424,11 @@ export function Preview() {
                   projectEpoch={projectEpoch}
                   timelineVersion={timelineVersion}
                   engineDriving={playbackRoute.kind === "rust" && isPlaying}
+                  stillFrame={
+                    playbackRoute.kind !== "unsupported" && !isPlaying
+                      ? Math.max(0, Math.floor(activeFrame))
+                      : null
+                  }
                   requestCompositeStill={requestCompositeStill}
                   onTerminalFailure={() => pushToast(t("preview.terminalFrameFailed"))}
                 />

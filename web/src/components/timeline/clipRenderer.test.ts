@@ -10,6 +10,7 @@ function makeCtx() {
   const filledPaths: Array<{ fillStyle: string; firstMoveTo: [number, number] | null }> = [];
   const fillRects: Array<{ fillStyle: string; x: number; y: number; width: number; height: number }> = [];
   const arcs: Array<{ x: number; y: number; radius: number }> = [];
+  const drawnImages: unknown[][] = [];
   let firstMoveTo: [number, number] | null = null;
   const ctx = {
     fillStyle: "",
@@ -52,8 +53,19 @@ function makeCtx() {
     strokeRect() {
       strokes.push(String(this.strokeStyle));
     },
+    drawImage(...args: unknown[]) {
+      drawnImages.push(args);
+    },
   };
-  return { ctx: ctx as unknown as CanvasRenderingContext2D, fills, strokes, filledPaths, fillRects, arcs };
+  return {
+    ctx: ctx as unknown as CanvasRenderingContext2D,
+    fills,
+    strokes,
+    filledPaths,
+    fillRects,
+    arcs,
+    drawnImages,
+  };
 }
 
 const testClip = {
@@ -253,5 +265,61 @@ describe("waveformSampleRange", () => {
   it("returns an empty range for degenerate input", () => {
     expect(waveformSampleRange({ ...base, durationFrames: 0 }, 1000)).toEqual({ start: 0, end: 0 });
     expect(waveformSampleRange(base, 0)).toEqual({ start: 0, end: 0 });
+  });
+});
+
+describe("long clip viewport work", () => {
+  const longRect = { x: 0, y: 0, width: 10_000, height: 60 };
+  const visibleX = { min: 4_000, max: 4_500 };
+
+  it("draws only the visible filmstrip tiles", () => {
+    const { ctx, drawnImages } = makeCtx();
+    const image = {
+      complete: true,
+      naturalWidth: 960,
+      naturalHeight: 540,
+    } as HTMLImageElement;
+    drawClip(
+      ctx,
+      { ...testClip, mediaType: "video", sourceClipType: "video", durationFrames: 108_000 },
+      longRect,
+      {
+        isSelected: false,
+        fps: 30,
+        visibleX,
+        thumbnailStrip: {
+          image,
+          kind: "sprite",
+          tileWidth: 160,
+          tileHeight: 90,
+          columns: 12,
+          times: Array.from({ length: 240 }, (_, index) => index * 15),
+        },
+      } as never,
+    );
+
+    expect(drawnImages.length).toBeGreaterThan(0);
+    expect(drawnImages.length).toBeLessThan(12);
+  });
+
+  it("samples only waveform bars that intersect the viewport", () => {
+    const { ctx, fillRects } = makeCtx();
+    drawClip(
+      ctx,
+      { ...testClip, durationFrames: 108_000 },
+      longRect,
+      {
+        isSelected: false,
+        fps: 30,
+        visibleX,
+        waveform: Array.from({ length: 2_000 }, (_, index) => (index % 10) / 10),
+      } as never,
+    );
+
+    const waveformBars = fillRects.filter(
+      (rect) => rect.width === 1 && rect.x >= 4_000 && rect.x <= 4_500,
+    );
+    expect(waveformBars.length).toBeGreaterThan(0);
+    expect(fillRects.filter((rect) => rect.width === 1).length).toBeLessThan(600);
   });
 });

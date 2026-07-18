@@ -92,6 +92,9 @@ interface UiState {
    *  deadline), so the current session falls back to the legacy <video> stack and
    *  the MJPEG overlay unmounts. Reset to false at the start of every play. */
   rustEngineFailed: boolean;
+  /** Project/timeline revision whose WebKit video decoder failed. That exact
+   *  revision is retried through the native decoder; other revisions ignore it. */
+  webkitPlaybackFailedRevision: string | null;
 
   // Selection
   selectedClipIds: Set<string>;
@@ -177,6 +180,7 @@ interface UiState {
   setPlaying: (playing: boolean) => void;
   /** Trip the Rust-engine runtime fallback for the current play session. */
   setRustEngineFailed: (failed: boolean) => void;
+  setWebkitPlaybackFailedRevision: (revision: string | null) => void;
   /** Toggle play/pause. When STARTING from the parked end-of-timeline frame,
    *  rewinds to 0 first (both tickers stop at the last drawable frame, so without
    *  this the stop check fires immediately and play does nothing). Mirrors
@@ -248,6 +252,7 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   isPlaying: false,
   isScrubbing: false,
   rustEngineFailed: false,
+  webkitPlaybackFailedRevision: null,
 
   selectedClipIds: new Set(),
   selectedMediaAssetIds: new Set(),
@@ -307,6 +312,8 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
     set({ currentFrame: frame, activeFrame: frame, isPlaying: false, isScrubbing: false });
   },
   setRustEngineFailed: (rustEngineFailed) => set({ rustEngineFailed }),
+  setWebkitPlaybackFailedRevision: (webkitPlaybackFailedRevision) =>
+    set({ webkitPlaybackFailedRevision }),
   togglePlay: () => {
     const { isPlaying, activeFrame } = get();
     if (isPlaying) {
@@ -433,6 +440,7 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
       isPlaying: false,
       isScrubbing: false,
       rustEngineFailed: false,
+      webkitPlaybackFailedRevision: null,
       selectedClipIds: new Set(),
       selectedMediaAssetIds: new Set(),
       selectedFolderIds: new Set(),

@@ -1,6 +1,6 @@
 # Playback engine architecture
 
-> Current reviewed state: 2026-07-11. The original 2026-07-04 default-off
+> Current reviewed state: 2026-07-18. The original 2026-07-04 default-off
 > MJPEG design is historical; this document records the Wave 1A implementation.
 
 ## Capability route is the sole authority
@@ -8,22 +8,25 @@
 `resolveTimelinePlaybackRoute` selects exactly one route before runtime
 preference or fallback is considered:
 
-- `webkit`: ordinary visible video/image/audio, including temporal-only reverse
-  or speed changes that do not require compositing.
+- `webkit`: one ordinary visible video track plus image/audio, including
+  temporal-only reverse or speed changes that do not require compositing.
 - `rust`: content requiring the implemented compositor path: text, color grade,
-  chroma key, and up to four linear/circle masks.
+  chroma key, up to four linear/circle masks, or multiple visible video tracks.
+  A WebKit video decode failure may also retry the exact project revision here.
 - `unsupported`: Lottie, enabled generic effects, polygon masks, more than four
   masks, or any timeline that combines compositing with reverse or a non-unit
   speed. Rust unavailable/disabled is also unsupported for Rust-only content.
 
 Unsupported capability is fail closed. It receives a localized explanation and
 disabled Play/Capture/Space controls; it is not silently rendered by an engine
-that would omit authored content. Only a typed Rust `engine` failure may use the
-WebKit runtime fallback; `busy`, `cancelled`, and `superseded` are control states.
+that would omit authored content. A compositor-only timeline whose previous
+native startup failed keeps Play enabled for an explicit retry. Only a typed
+Rust `engine` failure may use the WebKit runtime fallback; `busy`, `cancelled`,
+and `superseded` are control states.
 
 ## WebKit route
 
-WebKit is the normal route for ordinary media. One frontend clock drives the
+WebKit is the normal route for a single ordinary video stack. One frontend clock drives the
 mounted `<video>`/`<audio>` elements; pause/resume keeps the same decoded DOM
 surface. Reverse and positive-speed media can remain on this route when no
 compositor-only content is present. This route has no libmpv dependency or
@@ -83,7 +86,10 @@ The previous visible slot remains painted during loading. Terminal publication
 is stopped only after the terminal image crosses the browser paint boundary;
 bounded retries retain the last good frame on failure. A matching paused
 composite releases the terminal Rust frame only after the replacement is loaded.
-Stale identity, sequence, load, cleanup, and paint callbacks are ignored.
+Paused/scrub composite requests are latest-only: one request may be in flight
+and only the newest pending frame is retained. That paused composite stays
+painted during native startup and is removed only after the first live slot
+loads. Stale identity, sequence, load, cleanup, and paint callbacks are ignored.
 
 ## Project/source identity and prewarm/cache
 
