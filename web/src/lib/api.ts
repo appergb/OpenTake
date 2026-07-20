@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tauri bridge. All editing goes through `edit_apply`; the mirror is fetched via
  * `get_timeline` and refreshed on the `timeline_changed` event (SPEC §11).
  *
@@ -17,9 +17,14 @@ import type {
   ClipType,
   EditRequest,
   EditResult,
+  FolderEntry,
   GenerateCaptionsResult,
   MediaList,
   ModelStatus,
+  MotionRenderParams,
+  MotionRenderResult,
+  MotionSource,
+  PcmChunkData,
   PlaybackCommandError,
   PlaybackFrameEvent,
   PlaybackIdentity,
@@ -647,6 +652,18 @@ export async function searchQuery(query: string): Promise<SearchResults> {
 }
 
 /**
+ * `list_folder`: list a directory's visible subdirectories + importable media
+ * files for the 剪映-style nested folder browser (#49). `path = null` lists the
+ * user's home directory as a browsing root. Returns an empty array outside
+ * Tauri (no file system) so the browser shell degrades gracefully.
+ */
+export async function listFolder(path: string | null): Promise<FolderEntry[]> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<FolderEntry[]>("list_folder", { path });
+  return [];
+}
+
+/**
  * Relink an offline asset to a newly chosen file, KEEPING its id so every clip
  * that references it recovers in place (the fix for "lost media stays red after
  * re-selecting the path" — re-importing would mint a new id and strand the old
@@ -830,6 +847,87 @@ export async function getWaveform(mediaRef: string): Promise<number[] | null> {
     }
   }
   return null;
+}
+
+/**
+ * Decode a short chunk of a media asset's first audio track to interleaved f32
+ * (stereo-preserving) for streaming playback (#160). `mediaRef` is the asset id
+ * (resolved to a source path by the backend, same as `get_waveform`).
+ * `startTime` is the seek position (seconds); `duration` is the chunk length
+ * (seconds, defaults to 5.0 on the backend). The backend also defaults to
+ * 48 kHz stereo when `sampleRate`/`channels` are omitted.
+ *
+ * Outside Tauri (browser dev mode) there is no media engine, so this returns an
+ * empty chunk — the playback layer keeps using `<audio>` elements natively.
+ */
+export async function decodePcmChunk(
+  mediaRef: string,
+  startTime: number,
+  duration: number,
+): Promise<PcmChunkData> {
+  await ensureTauri();
+  if (invokeImpl) {
+    try {
+      return await invokeImpl<PcmChunkData>("decode_pcm_chunk", {
+        mediaRef,
+        startTimeSec: startTime,
+        durationSec: duration,
+      });
+    } catch (e) {
+      // No audio track / decode failure: surface the reason (same rationale as
+      // `get_waveform` — a silent swallow masked whole categories of failures).
+      console.warn(`decode_pcm_chunk failed for ${mediaRef}:`, e);
+      return { samples: [], sampleRate: 48000, channels: 2, frameCount: 0 };
+    }
+  }
+  // Browser fallback: no Rust core to decode with — empty chunk.
+  return { samples: [], sampleRate: 48000, channels: 2, frameCount: 0 };
+}
+
+// MARK: - Motion graphics (#34)
+//
+// `render_motion_clip` renders an HTML/CSS/JS motion graphic (or a template
+// instance) to a sequence of RGBA frames via the `opentake-motion` crate. The
+// return value is a `motion://<hash>` media_ref that can be assigned to a
+// clip's `mediaRef` — the compositor recognizes the prefix and routes the clip
+// to a `MotionClipSource` instead of the file decoder. Results are content-hash
+// cached, so an identical request reuses already-rendered frames.
+
+/**
+ * Render a motion-graphic source to frames and return a `motion://<hash>`
+ * media_ref usable as a clip's `mediaRef`.
+ *
+ * @param source What to render — inline code (`{ code: { html_css_js } }`) or a
+ *   template instance (`{ template: { id, params } }`).
+ * @param params Render parameters (fps, durationFrames, width, height,
+ *   transparent).
+ * @returns The `motion://<contentHash>` media_ref string, or an empty string
+ *   outside Tauri (no Rust core to render with).
+ *
+ * Outside Tauri (browser dev mode) there is no motion engine, so this returns
+ * an empty string — the caller should treat an empty result as "rendering
+ * unavailable" and skip adding the motion clip.
+ */
+export async function renderMotion(
+  source: MotionSource,
+  params: MotionRenderParams,
+): Promise<string> {
+  await ensureTauri();
+  if (invokeImpl) {
+    try {
+      const result = await invokeImpl<MotionRenderResult>(
+        "render_motion_clip",
+        { source, params },
+      );
+      return result.mediaRef;
+    } catch (e) {
+      console.warn("render_motion_clip failed:", e);
+      return "";
+    }
+  }
+  // Browser fallback: no Rust core to render with — empty string signals
+  // "unavailable" so the caller can skip adding the motion clip.
+  return "";
 }
 
 // MARK: - BYOK secret store

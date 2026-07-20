@@ -81,6 +81,15 @@ pub fn prune_empty_tracks(timeline: &mut Timeline) {
     timeline.tracks.retain(|t| !t.clips.is_empty());
 }
 
+/// Toggle the `soloed` flag on the track at `track_index`. Returns the new
+/// value. The caller (command layer) validates the index and wraps the mutation
+/// in a transaction (snapshot / commit / version bump).
+pub fn toggle_solo(timeline: &mut Timeline, track_index: usize) -> bool {
+    let track = &mut timeline.tracks[track_index];
+    track.soloed = !track.soloed;
+    track.soloed
+}
+
 /// First audio track free over `[start_frame, start_frame + duration)`, else
 /// `None`. 1:1 port of `availableAudioTrackIndex(startFrame:duration:)`.
 pub fn available_audio_track_index(
@@ -193,5 +202,21 @@ mod tests {
         let n = remove_tracks(&mut tl, &["a1".to_string()]);
         assert_eq!(n, 1);
         assert_eq!(tl.tracks.len(), 1);
+    }
+
+    #[test]
+    fn toggle_solo_flips_track_soloed() {
+        let mut tl = tl_v_a();
+        assert!(!tl.tracks[0].soloed);
+        // Toggle on.
+        let new_val = toggle_solo(&mut tl, 0);
+        assert!(new_val);
+        assert!(tl.tracks[0].soloed);
+        // Toggle back off.
+        let new_val = toggle_solo(&mut tl, 0);
+        assert!(!new_val);
+        assert!(!tl.tracks[0].soloed);
+        // Other tracks are unaffected.
+        assert!(!tl.tracks[1].soloed);
     }
 }

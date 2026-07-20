@@ -50,6 +50,63 @@ pub fn ffprobe_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Ensure ffmpeg/ffprobe are available, auto-downloading them when the
+/// `ffmpeg-download` feature is enabled and the binaries aren't on PATH.
+///
+/// After a successful download the binaries land adjacent to the current
+/// executable (ffmpeg-sidecar's `sidecar_dir`), so we set the
+/// `OPENTAKE_FFMPEG` / `OPENTAKE_FFPROBE` env overrides to point at them —
+/// [`ffmpeg_path`] / [`ffprobe_path`] read those overrides, so the rest of the
+/// media layer finds the binaries without each call site changing.
+///
+/// When the feature is disabled (the default for offline library builds), this
+/// returns an error if the binaries are missing, so callers can log a clear
+/// message rather than failing silently on the first decode.
+pub fn ensure_ffmpeg() -> crate::error::Result<()> {
+    if ffmpeg_available() && ffprobe_available() {
+        return Ok(());
+    }
+
+    #[cfg(feature = "ffmpeg-download")]
+    {
+        // `auto_download` internally checks `ffmpeg_is_installed` (adjacent to
+        // the exe, then PATH) and short-circuits, so calling it when ffmpeg IS
+        // available is a no-op. On a fresh install it fetches + unpacks the
+        // platform release into `sidecar_dir` (next to the app binary).
+        ffmpeg_sidecar::download::auto_download()
+            .map_err(|e| crate::error::MediaError::Ffmpeg(format!("auto-download: {e}")))?;
+
+        // Point our env overrides at the freshly downloaded binaries so
+        // `ffmpeg_path()` / `ffprobe_path()` resolve to them on every call.
+        let ff = ffmpeg_sidecar::paths::ffmpeg_path();
+        if ff.is_file() {
+            std::env::set_var("OPENTAKE_FFMPEG", &ff);
+        }
+        // ffprobe sits in the same directory as ffmpeg.
+        if let Some(parent) = ff.parent() {
+            let probe = parent.join(if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" });
+            if probe.is_file() {
+                std::env::set_var("OPENTAKE_FFPROBE", &probe);
+            }
+        }
+
+        if ffmpeg_available() {
+            return Ok(());
+        }
+        return Err(crate::error::MediaError::Ffmpeg(
+            "ffmpeg still unavailable after auto-download".into(),
+        ));
+    }
+
+    #[cfg(not(feature = "ffmpeg-download"))]
+    {
+        Err(crate::error::MediaError::Ffmpeg(
+            "ffmpeg not found on PATH; enable the `ffmpeg-download` feature for auto-download"
+                .into(),
+        ))
+    }
+}
+
 /// Run `ffprobe -of json -show_streams -show_format <path>` and return parsed
 /// JSON. Zero decoding — header/stream parameters only.
 pub fn ffprobe_json(path: &std::path::Path) -> crate::error::Result<serde_json::Value> {

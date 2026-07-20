@@ -68,6 +68,11 @@ default = []
 # Test-only cross-crate fault boundaries. Shipped builds do not expose these
 # hooks; integration tests opt in through a dev-dependency feature union.
 test-faults = []
+# Enable ffmpeg-sidecar's `download_ffmpeg` feature so `ensure_ffmpeg` can
+# auto-download the binaries at first run when they aren't on PATH. Pulls in
+# ureq + rustls + zip/tar/xz2 (the crate's only HTTP/TLS stack). Enabled by the
+# Tauri desktop shell so end users get a working ffmpeg without manual install.
+ffmpeg-download = ["ffmpeg-sidecar/download_ffmpeg"]
 # Real SigLIP2 inference via ONNX Runtime. `download-binaries` lets ort fetch a
 # prebuilt onnxruntime *when this feature is explicitly enabled* — it is off by
 # default, so plain `cargo build`/`cargo test` never touch the network.

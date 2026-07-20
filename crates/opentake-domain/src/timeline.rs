@@ -92,6 +92,8 @@ pub struct Track {
     #[serde(default)]
     pub muted: bool,
     #[serde(default)]
+    pub soloed: bool,
+    #[serde(default)]
     pub hidden: bool,
     #[serde(default = "default_sync_locked")]
     pub sync_locked: bool,
@@ -107,6 +109,7 @@ impl Track {
             id: id.into(),
             kind,
             muted: false,
+            soloed: false,
             hidden: false,
             sync_locked: true,
             clips: Vec::new(),
@@ -219,12 +222,13 @@ mod tests {
 
     #[test]
     fn track_decode_defaults_missing_fields() {
-        // Only `type` present; id->"", muted/hidden->false, sync_locked->true.
+        // Only `type` present; id->"", muted/soloed/hidden->false, sync_locked->true.
         let json = r#"{"type":"audio"}"#;
         let t: Track = serde_json::from_str(json).unwrap();
         assert_eq!(t.kind, ClipType::Audio);
         assert_eq!(t.id, "");
         assert!(!t.muted);
+        assert!(!t.soloed);
         assert!(!t.hidden);
         assert!(t.sync_locked);
         assert!(t.clips.is_empty());

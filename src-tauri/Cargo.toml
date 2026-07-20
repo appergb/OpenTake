@@ -41,8 +41,11 @@ opentake-domain = { workspace = true }
 # opentake-media level (its own default tests run offline, without them);
 # ort-inference tests are feature-gated + runtime-skipped like the GPU/ffmpeg
 # integration tests.
-opentake-media = { workspace = true, features = ["whisper-backend", "ort-backend", "model-download"] }
+# `ffmpeg-download` enables ffmpeg-sidecar's download_ffmpeg so ensure_ffmpeg
+# can auto-download ffmpeg binaries at first run (see resolve_media_tools).
+opentake-media = { workspace = true, features = ["whisper-backend", "ort-backend", "model-download", "ffmpeg-download"] }
 opentake-render = { workspace = true }
+opentake-motion = { workspace = true }
 opentake-gen = { workspace = true }
 opentake-agent = { workspace = true }
 # Preview composite frames are returned to the WebView as a base64 PNG data URL;
@@ -102,3 +105,8 @@ custom-protocol = ["tauri/custom-protocol"]
 # image-jpeg are already in the workspace lockfile (via opentake-agent), so
 # enabling it pulls just cpal + its small platform audio bindings.
 playback-engine = ["dep:axum", "dep:tokio", "dep:bytes", "dep:futures", "dep:cpal", "image/jpeg"]
+# Enables the real headless-Chromium CDP backend for motion rendering (requires
+# a Chrome/Chromium binary on the system). When disabled (default), motion
+# rendering uses the deterministic StubRenderer. When enabled but Chrome is
+# absent, render_motion_clip falls back to StubRenderer with a logged warning.
+chromium = ["opentake-motion/chromium"]

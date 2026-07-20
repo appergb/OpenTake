@@ -45,8 +45,9 @@ pub use keyframe::{
     KeyframeInterpolatable, KeyframeTrack,
 };
 pub use media::{
-    GenerationInput, GenerationStatus, MediaAsset, MediaFolder, MediaManifest, MediaManifestEntry,
-    MediaResolver, MediaSource,
+    is_motion_ref, motion_hash_from_ref, motion_ref_for_hash, GenerationInput, GenerationStatus,
+    MediaAsset, MediaFolder, MediaManifest, MediaManifestEntry, MediaResolver, MediaSource,
+    MOTION_REF_PREFIX,
 };
 pub use signal::{
     ContextSignal, EditingSkeleton, EditingStage, StageGuidance, TrackHint, TrackRole,

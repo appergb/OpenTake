@@ -341,6 +341,93 @@ impl HeadlessChromiumRenderer {
             .map(|i| i as f64 / req.fps as f64)
             .collect()
     }
+
+    /// Best-effort check for a Chrome/Chromium binary on the system PATH and a
+    /// handful of well-known install locations. Returns `true` when a candidate
+    /// binary is found, `false` otherwise.
+    ///
+    /// The dispatch layer (e.g. the Tauri `render_motion_clip` command) calls
+    /// this to decide whether to attempt the CDP backend or fall back to
+    /// [`StubRenderer`]. Because the live CDP wiring is not yet implemented
+    /// (Issue #14 TODO), this returning `true` does NOT mean a render will
+    /// succeed — [`render`] still returns [`MotionError::RendererUnavailable`]
+    /// until the `chromium` feature lands its CDP client. The check exists so
+    /// the dispatch can produce a precise "Chrome not found" error message
+    /// instead of the generic "backend not implemented" one.
+    ///
+    /// Pure-ish (reads env + stats files); does not spawn a process.
+    pub fn chrome_available() -> bool {
+        chrome_binary_path().is_some()
+    }
+}
+
+/// Locate a Chrome/Chromium binary by scanning the `PATH` environment variable
+/// and a small set of well-known per-OS install locations. Returns the first
+/// candidate path that exists as a file, or `None`.
+///
+/// This is intentionally lightweight (no version probe, no launch). The real
+/// CDP integration (#14) will replace it with a proper binary locator +
+/// version check (likely via `chromiumoxide`'s own discovery).
+fn chrome_binary_path() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+
+    // Candidate binary names per OS.
+    let names: &[&str] = if cfg!(target_os = "windows") {
+        &["chrome.exe", "chromium.exe"]
+    } else if cfg!(target_os = "macos") {
+        &["chrome", "chromium", "Google Chrome", "Chromium"]
+    } else {
+        &[
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium",
+            "chromium-browser",
+            "chrome",
+        ]
+    };
+
+    // 1. PATH lookup.
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            for name in names {
+                let candidate = dir.join(name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    // 2. Well-known install locations (outside PATH).
+    let known: &[&str] = if cfg!(target_os = "macos") {
+        &[
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ]
+    } else if cfg!(target_os = "windows") {
+        &[
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ]
+    } else {
+        &[
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/usr/local/bin/chromium",
+            "/opt/google/chrome/chrome",
+            "/snap/bin/chromium",
+        ]
+    };
+    for p in known {
+        let candidate = PathBuf::from(p);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
 
 impl MotionRenderer for HeadlessChromiumRenderer {

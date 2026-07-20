@@ -271,12 +271,16 @@ impl Compositor {
         }
     }
 
-    /// Render one frame to an offscreen RGBA8 target and read it back.
+    /// Render one frame to an offscreen RGBA8 target and read it back
+    /// synchronously. Convenience wrapper around [`Self::begin_render`] +
+    /// [`PendingReadback::finish_blocking`] for the single-frame preview path
+    /// (paused / scrubbing) where the caller must get the frame immediately.
     ///
-    /// Clears to `frame_plan.clear_rgba` (opaque black), then composites each
-    /// draw in order (later = on top). Draws whose texture can't be resolved are
-    /// skipped (offline/unprocessable sources contribute nothing, mirroring
-    /// upstream's offline handling).
+    /// Streaming/playback callers should use [`Self::begin_render`] directly
+    /// with [`PendingReadback::try_finish`] for non-blocking double-buffered
+    /// readback (Issue #202): while frame N renders on the GPU, frame N-1's
+    /// readback completes asynchronously, avoiding the per-frame
+    /// `device.poll(Maintain::Wait)` stall that capped playback at ~25.5fps.
     pub fn render_to_rgba(
         &self,
         device: &wgpu::Device,
@@ -285,6 +289,27 @@ impl Compositor {
         frame_plan: &FramePlan<'_>,
         resolver: &mut dyn TextureResolver,
     ) -> Result<DecodedFrame, RenderError> {
+        let pending = self.begin_render(device, queue, size, frame_plan, resolver)?;
+        pending.finish_blocking(device)
+    }
+
+    /// Encode + submit one frame's render pass and return a [`PendingReadback`]
+    /// holding the staging buffer. The readback is NOT finished — the caller
+    /// finishes it via [`PendingReadback::finish_blocking`] (sync, preview) or
+    /// [`PendingReadback::try_finish`] (non-blocking, streaming).
+    ///
+    /// Clears to `frame_plan.clear_rgba` (opaque black), then composites each
+    /// draw in order (later = on top). Draws whose texture can't be resolved are
+    /// skipped (offline/unprocessable sources contribute nothing, mirroring
+    /// upstream's offline handling).
+    pub fn begin_render(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        size: RenderSize,
+        frame_plan: &FramePlan<'_>,
+        resolver: &mut dyn TextureResolver,
+    ) -> Result<PendingReadback, RenderError> {
         let rt = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("opentake-render target"),
             size: wgpu::Extent3d {
@@ -440,41 +465,130 @@ impl Compositor {
             }
         }
 
-        let frame = read_back(device, queue, &mut encoder, &rt, size)?;
+        let pending = read_back(device, queue, &mut encoder, &rt, size)?;
         queue.submit(Some(encoder.finish()));
-        // `read_back` mapped the staging buffer after submit via poll; finalize.
-        frame.finish(device)
+        Ok(pending)
     }
 }
 
-/// Holds the staging buffer until its contents are mapped and copied out.
-struct PendingReadback {
+/// Holds the staging buffer for one frame's GPU readback. Created by
+/// [`Compositor::begin_render`] after the render pass is encoded and submitted;
+/// finished by one of two paths:
+///
+/// - [`PendingReadback::finish_blocking`] — synchronous, polls the device with
+///   `Maintain::Wait` until the readback completes. Use for the single-frame
+///   preview path (paused / scrubbing) where the caller must get the frame.
+/// - [`PendingReadback::try_finish`] — non-blocking, polls with `Maintain::Check`
+///   and returns `Ok(None)` when the GPU hasn't finished yet. Use for the
+///   streaming / playback path.
+///
+/// # Double-buffered readback (Issue #202)
+///
+/// The previous `finish` did a per-frame `device.poll(Maintain::Wait)`, blocking
+/// the CPU on the GPU every frame and capping playback at ~25.5fps. The async
+/// split below lets the caller overlap frame N's render with frame N-1's
+/// readback: while frame N renders on the GPU, frame N-1's `map_async` callback
+/// fires and `try_finish` harvests it without a blocking wait.
+///
+/// Caller-side ring (one slot is enough — the GPU serializes work anyway):
+///
+/// ```text
+/// let mut prev = compositor.begin_render(frame_0, ...)?;      // submit frame 0
+/// for f in 1..n {
+///     let cur = compositor.begin_render(frame_f, ...)?;        // submit frame N
+///     match prev.try_finish(device)? {                         // finish N-1 (non-blocking)
+///         Some(frame) => display(frame),
+///         None => redisplay_previous(),                        // GPU not ready: reuse last
+///     }
+///     prev = cur;
+/// }
+/// let last = prev.finish_blocking(device)?;                    // drain final frame
+/// ```
+pub struct PendingReadback {
     buffer: wgpu::Buffer,
     size: RenderSize,
     padded_bytes_per_row: u32,
+    /// Sender captured by the `map_async` callback; `None` once the map request
+    /// has been issued (`map_async` may only be called once per mapping, so the
+    /// first finish call — blocking or non-blocking — owns it).
+    tx: Option<std::sync::mpsc::Sender<Result<(), wgpu::BufferAsyncError>>>,
+    /// Receiver signaled by the `map_async` callback when the buffer is mapped.
+    rx: std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
 }
 
 impl PendingReadback {
-    fn finish(self, device: &wgpu::Device) -> Result<DecodedFrame, RenderError> {
-        let slice = self.buffer.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |res| {
-            let _ = tx.send(res);
-        });
+    /// Issue the async map request if it hasn't been issued yet. Idempotent:
+    /// safe to call from both finish paths. `map_async` registers a callback
+    /// that fires once the GPU completes the `copy_texture_to_buffer` and the
+    /// buffer becomes mappable; the device must be polled to make progress.
+    fn issue_map(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            let slice = self.buffer.slice(..);
+            slice.map_async(wgpu::MapMode::Read, move |res| {
+                let _ = tx.send(res);
+            });
+        }
+    }
+
+    /// Blocking finish: issue `map_async` then poll the device with
+    /// `Maintain::Wait` until the GPU completes the readback, and extract the
+    /// RGBA pixels. Use for the single-frame preview path where the caller must
+    /// get the frame immediately. This is the synchronous fallback for the
+    /// paused/scrub path (and for draining the last frame of a stream).
+    pub fn finish_blocking(mut self, device: &wgpu::Device) -> Result<DecodedFrame, RenderError> {
+        self.issue_map();
+        // `Maintain::Wait` is the efficient single-frame wait on native backends
+        // (Metal/DX/Vulkan): it blocks the thread without busy-spinning. The
+        // streaming path uses `try_finish` (`Maintain::Check`) instead.
         device.poll(wgpu::Maintain::Wait);
-        rx.recv()
+        self.rx
+            .recv()
             .map_err(|_| RenderError::Readback("map channel closed".into()))?
             .map_err(|e| RenderError::Readback(e.to_string()))?;
+        self.extract_and_unmap()
+    }
 
-        let data = slice.get_mapped_range();
-        let row_bytes = self.size.width as usize * 4;
-        let mut rgba = vec![0u8; row_bytes * self.size.height as usize];
-        for y in 0..self.size.height as usize {
-            let src = y * self.padded_bytes_per_row as usize;
-            let dst = y * row_bytes;
-            rgba[dst..dst + row_bytes].copy_from_slice(&data[src..src + row_bytes]);
+    /// Non-blocking finish: issue `map_async` (once) and poll the device with
+    /// `Maintain::Check` (no wait). Returns `Ok(None)` when the GPU hasn't
+    /// finished the readback yet — the caller should reuse the previous frame.
+    /// The map request is issued on the first call; subsequent calls re-poll
+    /// without re-issuing. Once the readback is ready the buffer is unmapped and
+    /// the frame returned; the `PendingReadback` should then be dropped.
+    pub fn try_finish(&mut self, device: &wgpu::Device) -> Result<Option<DecodedFrame>, RenderError> {
+        self.issue_map();
+        // `Maintain::Poll` makes one non-blocking poll pass: it processes
+        // completed GPU work (firing the map_async callback if the copy is done)
+        // without stalling the CPU. This is the key to the double-buffered
+        // overlap — the host stays free to prepare the next frame. (wgpu 23
+        // names the non-blocking variant `Poll`, not `Check`.)
+        device.poll(wgpu::Maintain::Poll);
+        match self.rx.try_recv() {
+            Ok(Ok(())) => {
+                // Take the frame out without consuming `self` so the caller can
+                // keep the slot alive across retries. The buffer is unmapped
+                // here; a subsequent `try_finish` would find the channel empty.
+                let frame = self.extract_and_unmap()?;
+                Ok(Some(frame))
+            }
+            Ok(Err(e)) => Err(RenderError::Readback(e.to_string())),
+            Err(std::sync::mpsc::TryRecvError::Empty) => Ok(None),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err(RenderError::Readback("map channel closed".into()))
+            }
         }
-        drop(data);
+    }
+
+    /// Copy the mapped staging rows into a tight RGBA buffer and unmap. The
+    /// caller must have already waited for `map_async` to complete (the channel
+    /// has yielded `Ok(())`).
+    fn extract_and_unmap(&self) -> Result<DecodedFrame, RenderError> {
+        // Scope the slice + mapped view so their borrows release before `unmap`
+        // (wgpu requires the buffer not be borrowed when `unmap` is called).
+        let rgba = {
+            let slice = self.buffer.slice(..);
+            let data = slice.get_mapped_range();
+            extract_rgba(&data, self.size, self.padded_bytes_per_row)
+        };
         self.buffer.unmap();
         Ok(DecodedFrame::new(
             self.size.width,
@@ -486,8 +600,21 @@ impl PendingReadback {
     }
 }
 
+/// Copy 256-byte-aligned staging rows into a tight `width * 4` RGBA buffer.
+fn extract_rgba(data: &[u8], size: RenderSize, padded_bytes_per_row: u32) -> Vec<u8> {
+    let row_bytes = size.width as usize * 4;
+    let mut rgba = vec![0u8; row_bytes * size.height as usize];
+    for y in 0..size.height as usize {
+        let src = y * padded_bytes_per_row as usize;
+        let dst = y * row_bytes;
+        rgba[dst..dst + row_bytes].copy_from_slice(&data[src..src + row_bytes]);
+    }
+    rgba
+}
+
 /// Encode the RT -> buffer copy (256-aligned rows) and return a pending readback
-/// to be finalized after `queue.submit`.
+/// to be finalized after `queue.submit`. The staging buffer is created unmapped;
+/// the `map_async` request is issued lazily by the first finish call.
 fn read_back(
     device: &wgpu::Device,
     _queue: &wgpu::Queue,
@@ -525,9 +652,12 @@ fn read_back(
             depth_or_array_layers: 1,
         },
     );
+    let (tx, rx) = std::sync::mpsc::channel();
     Ok(PendingReadback {
         buffer,
         size,
         padded_bytes_per_row: padded,
+        tx: Some(tx),
+        rx,
     })
 }

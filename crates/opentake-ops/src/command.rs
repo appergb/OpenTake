@@ -392,6 +392,10 @@ pub enum EditCommand {
         hidden: Option<bool>,
         sync_locked: Option<bool>,
     },
+    /// Toggle the `soloed` flag on one track. When any track is soloed, non-soloed
+    /// tracks are silenced in the render layer (the data model only stores the
+    /// flag). 1:1 with the upstream track-header solo toggle.
+    ToggleSolo { track_index: usize },
     /// Create a media-library folder.
     CreateFolder {
         name: String,
@@ -572,6 +576,7 @@ pub fn apply(
             hidden,
             sync_locked,
         } => set_track_props(state, track_index, muted, hidden, sync_locked),
+        EditCommand::ToggleSolo { track_index } => toggle_solo_cmd(state, track_index),
         EditCommand::CreateFolder {
             name,
             parent_folder_id,
@@ -821,6 +826,28 @@ fn swap_tracks(state: &mut EditorState, a: usize, b: usize) -> Result<EditResult
     )
 }
 
+fn toggle_solo_cmd(
+    state: &mut EditorState,
+    track_index: usize,
+) -> Result<EditResult, EditError> {
+    if track_index >= state.timeline.tracks.len() {
+        return Err(EditError::Invalid(format!(
+            "trackIndex {track_index} out of range"
+        )));
+    }
+    transact(
+        state,
+        "Toggle Solo",
+        |_| "Toggled track solo".to_string(),
+        |st| {
+            let new_val = ops::toggle_solo(&mut st.timeline, track_index);
+            // Summary reflects the resulting state so the caller can echo it.
+            let _ = new_val;
+            Ok(Vec::new())
+        },
+    )
+}
+
 /// Swap the positions of two clips. The op refuses (leaves the timeline
 /// untouched) when the swap would overlap a third clip; `transact` then reports
 /// `changed = false`, so a refused swap is a clean no-op with no undo entry.
@@ -841,7 +868,6 @@ fn swap_clips(state: &mut EditorState, a: String, b: String) -> Result<EditResul
         },
     )
 }
-
 fn insert_clips(
     state: &mut EditorState,
     track_index: usize,

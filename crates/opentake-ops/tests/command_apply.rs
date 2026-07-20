@@ -972,6 +972,61 @@ fn swap_tracks_cross_type_is_noop_without_undo_entry() {
     );
 }
 
+// ---- toggle_solo ----------------------------------------------------------
+
+#[test]
+fn toggle_solo_toggles_track_soloed() {
+    let mut st = state(vec![
+        video_track("v0", true, vec![clip("a", 0, 30)]),
+        audio_track("a0", true, vec![clip("b", 0, 30)]),
+    ]);
+    let g = SeqIdGen::default();
+    assert!(!st.timeline.tracks[0].soloed);
+
+    // Toggle on -> track 0 soloed, track 1 untouched.
+    let res = apply(
+        &mut st,
+        EditCommand::ToggleSolo { track_index: 0 },
+        &g,
+    )
+    .unwrap();
+    assert!(res.changed);
+    assert_eq!(res.action_name, "Toggle Solo");
+    assert_eq!(res.timeline_version, 1);
+    assert!(st.timeline.tracks[0].soloed);
+    assert!(!st.timeline.tracks[1].soloed);
+
+    // Toggle back off -> soloed cleared, version bumped again.
+    let res = apply(
+        &mut st,
+        EditCommand::ToggleSolo { track_index: 0 },
+        &g,
+    )
+    .unwrap();
+    assert!(res.changed);
+    assert_eq!(res.timeline_version, 2);
+    assert!(!st.timeline.tracks[0].soloed);
+
+    // Undo restores the soloed state.
+    apply(&mut st, EditCommand::Undo, &g).unwrap();
+    assert!(st.timeline.tracks[0].soloed);
+}
+
+#[test]
+fn toggle_solo_rejects_unknown_track() {
+    let mut st = state(vec![video_track("v0", true, vec![clip("a", 0, 30)])]);
+    let g = SeqIdGen::default();
+    let err = apply(
+        &mut st,
+        EditCommand::ToggleSolo { track_index: 5 },
+        &g,
+    )
+    .unwrap_err();
+    assert!(matches!(err, EditError::Invalid(_)));
+    assert_eq!(st.version(), 0); // unchanged
+    assert!(!st.timeline.tracks[0].soloed);
+}
+
 // ---- no-change command ----------------------------------------------------
 
 #[test]

@@ -93,13 +93,34 @@ export const FONT_UI =
 export const FONT_MONO = 'ui-monospace, "SF Mono", Menlo, Consolas, monospace';
 
 /**
- * §5.2 Timeline layout constants (Constants.swift). Each value is the exact
- * upstream literal — do not approximate.
+ * §5.2 Timeline layout constants — 1:1 port of upstream `Constants.swift`
+ * (enum `Layout`). Verified against
+ * `palmier-pro-upstream/Sources/PalmierPro/Utilities/Constants.swift`.
+ *
+ * DEVIATION NOTE (Issue #148): contrary to the issue's premise, these web
+ * values are NOT a web-platform adaptation — they are the exact upstream
+ * literals, kept identical on purpose (SPEC §0.1 "逐字照搬"). The issue cited
+ * upstream figures of `rulerHeight=42, dropZoneHeight=4, trackHeight=32`, but
+ * those numbers do not exist in the upstream source. The actual upstream
+ * values are:
+ *   - rulerHeight       = 24  (Constants.swift:49)  — matches web ✓
+ *   - dropZoneHeight    = 60  (Constants.swift:51)  — matches web ✓
+ *   - trackHeaderWidth  = 100 (Constants.swift:50)  — matches web ✓
+ *   - trackHeight       = 50  (Constants.swift:48)  → TRACK_SIZE.defaultHeight
+ *   - TrackSize.minHeight = 32 (Constants.swift:76) → TRACK_SIZE.minHeight
+ *
+ * So `32` is `TrackSize.minHeight` (a resize lower bound), NOT `trackHeight`;
+ * and `4` / `42` do not appear in the timeline layout enum at all. Do not
+ * "reconcile" these values toward 42 / 4 / 32 — that would actually introduce
+ * a deviation from upstream. SPEC §5.2 (frontend-UI-1to1-SPEC.md:504) is the
+ * authoritative reference and confirms 24 / 60 / 100.
+ *
+ * Each value is the exact upstream literal — do not approximate.
  */
 export const LAYOUT = {
-  rulerHeight: 24, // Constants.swift:46
-  dropZoneHeight: 60, // :47
-  trackHeaderWidth: 100, // :48
+  rulerHeight: 24, // Constants.swift:49
+  dropZoneHeight: 60, // :51
+  trackHeaderWidth: 100, // :50
   insertThreshold: 10, // :52
   dragThreshold: 3, // :53
   previewMinHeight: 320, // :57

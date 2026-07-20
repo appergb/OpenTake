@@ -7,11 +7,13 @@
 //! base64 PNG data URL the WebView paints onto a `<canvas>` (replacing the black
 //! placeholder shown on the Timeline tab).
 //!
-//! Scope: **video + image + text** layers. Text clips rasterize through
+//! Scope: **video + image + text + lottie** layers. Text clips rasterize through
 //! `CosmicTextRasterizer` (cosmic-text glyph layout + swash raster) to a
 //! premultiplied-RGBA box texture composited last, like upstream's `CATextLayer`
-//! (#65). **Lottie** layers are still skipped (the resolver returns `None`, so
-//! the compositor omits them) until the bake path is wired (#65 follow-up).
+//! (#65). **Lottie** clips route through a `LottieRasterizer` (pluggable); the
+//! null backend returns `None` so the compositor omits them gracefully until a
+//! real bake backend (rlottie / vello / the `opentake-motion` crate's
+//! `MotionClipSource`) is injected (#65 follow-up).
 //!
 //! The GPU device + compositor are acquired once and cached in Tauri managed
 //! state ([`RenderState`]); only the per-frame texture cache is short-lived. A
@@ -37,8 +39,8 @@ use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::wgpu;
 use opentake_render::{
     build_render_plan, even, Compositor, CosmicTextRasterizer, DecodedFrame, GpuTexture,
-    RenderDevice, RenderSize, SourceMetrics, TextRasterRequest, TextRasterizer, TextureCache,
-    TextureResolver, TextureSource,
+    LottieRasterRequest, LottieRasterizer, NullLottieRasterizer, RenderDevice, RenderSize,
+    SourceMetrics, TextRasterRequest, TextRasterizer, TextureCache, TextureResolver, TextureSource,
 };
 
 /// Cap (longest canvas side, px) for a composite when the caller passes no
@@ -70,6 +72,10 @@ struct GpuContext {
     compositor: Compositor,
     /// Text rasterizer (system fonts discovered once on first composite).
     text_rasterizer: CosmicTextRasterizer,
+    /// Lottie rasterizer. The null backend is the default (returns `None`, so
+    /// the compositor omits Lottie layers); swap for a real backend (rlottie /
+    /// vello / `MotionClipSource`) when Issue #65's bake path lands.
+    lottie_rasterizer: NullLottieRasterizer,
 }
 
 /// Tauri managed state holding the (lazily created) GPU context. `None` until the
@@ -115,8 +121,9 @@ impl SourceMetrics for ManifestMetrics {
 }
 
 /// `TextureResolver` that decodes a layer's pixels on demand via ffmpeg and
-/// uploads them to the GPU (with a small LRU cache). Video/image only; text and
-/// Lottie return `None` (skipped by the compositor) in this cut.
+/// uploads them to the GPU (with a small LRU cache). Video/image decoded by
+/// ffmpeg; text rasterized by `CosmicTextRasterizer`; Lottie rasterized by the
+/// injected `LottieRasterizer` (null backend returns `None` → compositor omits).
 struct MediaResolver<'d> {
     device: &'d wgpu::Device,
     queue: &'d wgpu::Queue,
@@ -127,6 +134,9 @@ struct MediaResolver<'d> {
     text: &'d HashMap<String, TextInfo>,
     /// cosmic-text rasterizer (system fonts) for text layers.
     text_rasterizer: &'d CosmicTextRasterizer,
+    /// Lottie rasterizer (null backend by default; real backend injected when
+    /// the bake path is wired).
+    lottie_rasterizer: &'d dyn LottieRasterizer,
     /// Downscale box for decoded source frames (matches the preview render size).
     preview_box: (u32, u32),
 }
@@ -154,19 +164,43 @@ impl MediaResolver<'_> {
         let tex = upload_rgba(self.device, self.queue, &frame, false, Some("preview-text"));
         Some(self.cache.insert(key, tex))
     }
+
+    /// Rasterize one Lottie frame to a premultiplied-RGBA texture (same upload
+    /// path as text/image). Cached per `(media_ref, frame)` so scrubbing the
+    /// same frame reuses the texture. The null backend returns `None` → the
+    /// compositor omits the layer (graceful, no panic), matching a failed
+    /// video decode. Swap `NullLottieRasterizer` for a real backend (rlottie /
+    /// vello / `MotionClipSource`) to enable Lottie rendering.
+    fn resolve_lottie(&mut self, media_ref: &str, source_frame: i64) -> Option<Rc<GpuTexture>> {
+        let key = format!("l:{media_ref}:{source_frame}");
+        if let Some(tex) = self.cache.get(&key) {
+            return Some(tex);
+        }
+        let req = LottieRasterRequest {
+            media_ref,
+            frame: source_frame,
+            canvas: self.preview_box,
+        };
+        let frame = self.lottie_rasterizer.rasterize(&req)?;
+        let tex = upload_rgba(self.device, self.queue, &frame, false, Some("preview-lottie"));
+        Some(self.cache.insert(key, tex))
+    }
 }
 
 impl TextureResolver for MediaResolver<'_> {
     fn resolve(&mut self, source: &TextureSource, source_frame: i64) -> Option<Rc<GpuTexture>> {
         // Map the source to (asset id, cache key). Video keys per frame; images
-        // key once. Text rasterizes its box; Lottie is not supported yet.
+        // key once. Text rasterizes its box; Lottie rasterizes per internal
+        // frame (the null backend returns `None` until a real baker is wired).
         let (media_ref, key, is_image) = match source {
             TextureSource::Decoded { media_ref } => {
                 (media_ref, format!("v:{media_ref}:{source_frame}"), false)
             }
             TextureSource::Image { media_ref } => (media_ref, format!("i:{media_ref}"), true),
             TextureSource::Text { clip_id } => return self.resolve_text(clip_id),
-            TextureSource::Lottie { .. } => return None,
+            TextureSource::Lottie { media_ref } => {
+                return self.resolve_lottie(media_ref, source_frame);
+            }
         };
 
         if let Some(tex) = self.cache.get(&key) {
@@ -325,6 +359,7 @@ fn composite_rgba_for_snapshot(
             queue: dev.queue,
             compositor,
             text_rasterizer,
+            lottie_rasterizer: NullLottieRasterizer,
         });
     }
     let ctx = guard.as_ref().expect("ctx set above");
@@ -337,6 +372,7 @@ fn composite_rgba_for_snapshot(
         timeline_fps: plan.fps,
         text: &text,
         text_rasterizer: &ctx.text_rasterizer,
+        lottie_rasterizer: &ctx.lottie_rasterizer as &dyn LottieRasterizer,
         preview_box: (render_size.width, render_size.height),
     };
     ctx.compositor

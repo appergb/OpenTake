@@ -56,9 +56,10 @@ pub use probe::{probe, MediaProbe};
 pub use decode::{
     decode_frame_at, decode_frame_at_cancellable, decode_frames_at, decode_frames_at_cancellable,
     decode_pcm_interleaved, decode_pcm_interleaved_cancellable, extract_pcm,
-    extract_pcm_cancellable, extract_pcm_cancellable_with_progress, FrameRequest, PcmBuffer,
-    PcmFormat, PcmProgressCallback, PcmSpec, StreamDecodeControl, StreamVideoFrame, VideoStream,
-    VideoStreamRequest, DEFAULT_VIDEO_STREAM_QUEUE_CAPACITY,
+    extract_pcm_cancellable, extract_pcm_cancellable_with_progress, extract_pcm_chunk,
+    FrameRequest, PcmBuffer, PcmChunk, PcmFormat, PcmProgressCallback, PcmSpec,
+    StreamDecodeControl, StreamVideoFrame, VideoStream, VideoStreamRequest,
+    DEFAULT_VIDEO_STREAM_QUEUE_CAPACITY,
 };
 
 pub use encode::{ExportPreset, ExportResolution, VideoCodec, VideoEncoder};
@@ -107,7 +108,7 @@ pub use ort_worker::ExecutionProvider;
 /// ffmpeg/ffprobe availability probes (re-exported for integration tests and
 /// host-capability checks).
 pub mod ffmpeg_status {
-    pub use crate::ff::{ffmpeg_available, ffprobe_available};
+    pub use crate::ff::{ensure_ffmpeg, ffmpeg_available, ffprobe_available};
 }
 
 /// Facade bundling the media engine's roots for `opentake-core` (SPEC §8.4).

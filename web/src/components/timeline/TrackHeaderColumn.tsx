@@ -7,15 +7,15 @@
 
 import { useCallback, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Eye, EyeOff, Volume2, VolumeX, Link, Unlink } from "lucide-react";
+import { Eye, EyeOff, Volume2, VolumeX, Link, Unlink, Headphones } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { useT } from "../../i18n";
-import { LAYOUT, TRACK_SIZE } from "../../lib/theme";
+import { ACCENT, LAYOUT, TRACK_SIZE } from "../../lib/theme";
 import { trackColor } from "../../lib/clip";
 import { trackDisplayLabel, firstAudioIndex } from "../../lib/zones";
 import { trackDisplayHeight } from "../../lib/geometry";
 import { useEditorUiStore } from "../../store/uiStore";
-import { setTrackProps, swapTracks } from "../../store/editActions";
+import { setTrackProps, swapTracks, toggleSolo } from "../../store/editActions";
 import type { Timeline } from "../../lib/types";
 
 interface Props {
@@ -80,6 +80,7 @@ export function TrackHeaderColumn({ timeline, scrollTop, totalHeight }: Props) {
               height={h}
               isAudio={track.type === "audio"}
               muted={track.muted}
+              soloed={track.soloed}
               hidden={track.hidden}
               syncLocked={track.syncLocked}
               regionDivider={firstAudio > 0 && i === firstAudio}
@@ -118,6 +119,7 @@ interface RowProps {
   height: number;
   isAudio: boolean;
   muted: boolean;
+  soloed: boolean;
   hidden: boolean;
   syncLocked: boolean;
   regionDivider: boolean;
@@ -191,7 +193,8 @@ function TrackHeaderRow(p: RowProps) {
       >
         {p.label}
       </span>
-      {/* Toggles. Clicking dispatches SetTrackProps (toggles the field). */}
+      {/* Toggles. Clicking dispatches SetTrackProps (toggles the field) or
+          ToggleSolo (toggles the soloed flag). */}
       <div style={{ display: "flex", alignItems: "center", gap: 2, paddingRight: 4 }}>
         {p.isAudio ? (
           <span
@@ -214,6 +217,19 @@ function TrackHeaderRow(p: RowProps) {
             <Icon icon={p.hidden ? EyeOff : Eye} size={11} />
           </span>
         )}
+        <span
+          title={t("timeline.solo")}
+          role="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={() => void toggleSolo(p.index)}
+          style={{
+            color: p.soloed ? ACCENT.systemYellow : iconColor(false),
+            display: "inline-flex",
+            cursor: "pointer",
+          }}
+        >
+          <Icon icon={Headphones} size={11} />
+        </span>
         <span
           title={t("timeline.syncLock")}
           role="button"

@@ -600,6 +600,10 @@ pub enum EditRequest {
         sync_locked: Option<bool>,
     },
     #[serde(rename_all = "camelCase")]
+    ToggleSolo {
+        track_index: usize,
+    },
+    #[serde(rename_all = "camelCase")]
     CreateFolder {
         name: String,
         parent_folder_id: Option<String>,
@@ -790,6 +794,9 @@ impl EditRequest {
                 hidden,
                 sync_locked,
             },
+            EditRequest::ToggleSolo { track_index } => {
+                EditCommand::ToggleSolo { track_index }
+            }
             EditRequest::CreateFolder {
                 name,
                 parent_folder_id,

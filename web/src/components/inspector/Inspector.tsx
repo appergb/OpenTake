@@ -20,6 +20,7 @@ import {
   Pipette,
   RotateCcw,
   SlidersHorizontal,
+  Sparkles,
   type LucideIcon,
 } from "lucide-react";
 import { PanelHeaderBar } from "../ui/PanelShell";
@@ -167,6 +168,29 @@ function MarqueeSummary({ count, t }: { count: number; t: TFunction }) {
       }}
     >
       {t("inspector.selectedCount", { count })}
+    </div>
+  );
+}
+
+/** Placeholder content for the AI tab — a centered "coming soon" message
+ *  with a Sparkles glyph (issue #25: AI tab is scaffolded, not implemented). */
+function AiComingSoon({ t }: { t: TFunction }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: "var(--space-md)",
+        padding: "var(--space-xl)",
+        textAlign: "center",
+        color: "var(--text-tertiary)",
+        fontSize: "var(--fs-sm-md)",
+      }}
+    >
+      <Icon icon={Sparkles} size={20} strokeWidth={1.5} />
+      {t("inspector.ai.comingSoon")}
     </div>
   );
 }
@@ -394,6 +418,8 @@ function ClipInspector({
   if (clip.mediaType === "text") tabs.push("text");
   else tabs.push("video");
   if (hasAudio) tabs.push("audio");
+  // AI tab is always available as a "coming soon" placeholder (issue #25).
+  tabs.push("aiEdit");
 
   const activeTab = tabs.includes(tab as never) ? tab : tabs[0];
 
@@ -450,6 +476,9 @@ function ClipInspector({
               key={tabId}
               onClick={() => setTab(tabId)}
               style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "var(--space-xs)",
                 paddingBottom: 4,
                 fontSize: "var(--fs-sm-md)",
                 fontWeight: activeTab === tabId ? "var(--fw-medium)" : "var(--fw-regular)",
@@ -458,6 +487,7 @@ function ClipInspector({
                   activeTab === tabId ? "var(--bw-medium) solid var(--text-primary)" : "none",
               }}
             >
+              {tabId === "aiEdit" && <Icon icon={Sparkles} size={12} />}
               {t(TAB_LABEL_KEY[tabId])}
             </button>
           ))}
@@ -465,10 +495,14 @@ function ClipInspector({
       )}
 
       <div style={{ padding: "var(--space-lg)", display: "flex", flexDirection: "column", gap: "var(--space-lg)" }}>
-        {clip.mediaType !== "text" && <SwapMediaSection clip={clip} t={t} />}
-        {activeTab === "text" ? (
-          <TextTab clip={clip} t={t} />
-        ) : activeTab === "audio" ? (
+        {activeTab === "aiEdit" ? (
+          <AiComingSoon t={t} />
+        ) : (
+          <>
+            {clip.mediaType !== "text" && <SwapMediaSection clip={clip} t={t} />}
+            {activeTab === "text" ? (
+              <TextTab clip={clip} t={t} />
+            ) : activeTab === "audio" ? (
           <section>
             <SectionHeader label={t("inspector.section.levels")} />
             <Row label={t("inspector.field.volume")}>
@@ -613,6 +647,8 @@ function ClipInspector({
             </section>
 
             {isVisualEffectClip(clip) && <ShaderEffectsSection clip={clip} t={t} />}
+          </>
+        )}
           </>
         )}
       </div>

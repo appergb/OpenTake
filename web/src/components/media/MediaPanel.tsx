@@ -59,6 +59,7 @@ import { CaptionsTab } from "./CaptionsTab";
 import { MediaSearchResults } from "./MediaSearch";
 import { applyFavoriteMigrationOutcome, migrateLocalFavorites } from "./favorites";
 import { LibraryEntryGrid } from "./LibraryView";
+import { FolderBrowser } from "./FolderBrowser";
 
 /** MIME-ish type used on dataTransfer when dragging a media item to the timeline. */
 export const MEDIA_DND_TYPE = "application/x-opentake-media";
@@ -186,6 +187,10 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   const currentFolderId = useEditorUiStore((s) => s.mediaPanelCurrentFolderId);
   const setCurrentFolderId = useEditorUiStore((s) => s.setMediaPanelCurrentFolderId);
   const [search, setSearch] = useState("");
+  // View toggle (#49): "grid" = the media-library grid; "folder" = the 剪映-style
+  // nested folder browser that navigates the file system without a dialog.
+  const [view, setView] = useState<"grid" | "folder">("grid");
+  const isFolderView = view === "folder";
 
   // Folder navigation only applies to the "import" view (the full library tree).
   // "我的/favorites" is a flat cross-folder collection, so it ignores folders.
@@ -298,6 +303,15 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
           <ImportMenu />
           {/* AI 生成尚未接线（generate_* 仍是 stub）。封边：明确「即将推出」并禁用，
               不给测试者一个点了没反应的死按钮。 */}
+          {/* Folder view toggle (#49): switches between the media-library grid and
+              the 剪映-style nested folder browser. */}
+          <HoverButton
+            title={t("media.folder.browse")}
+            active={isFolderView}
+            onClick={() => setView((v) => (v === "grid" ? "folder" : "grid"))}
+          >
+            <Icon icon={FolderIcon} size={13} />
+          </HoverButton>
           <button
             type="button"
             disabled
@@ -329,66 +343,73 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
             tabs={isAudio ? AUDIO_SUB_TABS : MATERIAL_SUB_TABS}
           />
         </div>
-        {/* searchControlsRow */}
-        <div style={{ height: 28, display: "flex", alignItems: "center", gap: "var(--space-xs)" }}>
-          <input
-            placeholder={t("media.search")}
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            style={{
-              flex: 1,
-              height: 22,
-              background: "var(--bg-raised)",
-              border: "var(--bw-thin) solid var(--border-primary)",
-              borderRadius: "var(--radius-sm)",
-              color: "var(--text-primary)",
-              fontSize: "var(--fs-sm)",
-              padding: "0 8px",
-            }}
-          />
-          <HoverButton title={t("media.viewMode")}>
-            <Icon icon={LayoutGrid} size={13} />
-          </HoverButton>
-          <HoverButton title={t("media.sort")}>
-            <Icon icon={ArrowUpDown} size={13} />
-          </HoverButton>
-          <HoverButton title={t("media.filter")}>
-            <Icon icon={Filter} size={13} />
-          </HoverButton>
-        </div>
+        {/* searchControlsRow — hidden in folder view (doesn't apply to the FS listing) */}
+        {!isFolderView && (
+          <div style={{ height: 28, display: "flex", alignItems: "center", gap: "var(--space-xs)" }}>
+            <input
+              placeholder={t("media.search")}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              style={{
+                flex: 1,
+                height: 22,
+                background: "var(--bg-raised)",
+                border: "var(--bw-thin) solid var(--border-primary)",
+                borderRadius: "var(--radius-sm)",
+                color: "var(--text-primary)",
+                fontSize: "var(--fs-sm)",
+                padding: "0 8px",
+              }}
+            />
+            <HoverButton title={t("media.viewMode")}>
+              <Icon icon={LayoutGrid} size={13} />
+            </HoverButton>
+            <HoverButton title={t("media.sort")}>
+              <Icon icon={ArrowUpDown} size={13} />
+            </HoverButton>
+            <HoverButton title={t("media.filter")}>
+              <Icon icon={Filter} size={13} />
+            </HoverButton>
+          </div>
+        )}
         {/* Breadcrumb / 返回上级 — only while browsing the library tree and not
-            searching. Root is always clickable; the current folder is plain text. */}
-        {browsing && query === "" && (
+            searching. Root is always clickable; the current folder is plain text.
+            Hidden in folder view (FolderBrowser shows its own navigation). */}
+        {!isFolderView && browsing && query === "" && (
           <FolderBreadcrumb trail={trail} onNavigate={setCurrentFolderId} />
         )}
-        {/* contextBar */}
-        <div
-          style={{
-            height: "var(--context-row-height)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            color: "var(--text-tertiary)",
-            fontSize: "var(--fs-xs)",
-          }}
-        >
-          <span>{t("media.library")}</span>
-          <span>
-            {importing
-              ? t("media.importing")
-              : audioSoundView
-                ? ""
-                : t("media.itemCount", { count: displayCount })}
-          </span>
-        </div>
-        {(error || (subTab === "mine" && libraryError)) && (
+        {/* contextBar — hidden in folder view (FolderBrowser shows its own state) */}
+        {!isFolderView && (
+          <div
+            style={{
+              height: "var(--context-row-height)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              color: "var(--text-tertiary)",
+              fontSize: "var(--fs-xs)",
+            }}
+          >
+            <span>{t("media.library")}</span>
+            <span>
+              {importing
+                ? t("media.importing")
+                : audioSoundView
+                  ? ""
+                  : t("media.itemCount", { count: displayCount })}
+            </span>
+          </div>
+        )}
+        {!isFolderView && (error || (subTab === "mine" && libraryError)) && (
           <div style={{ color: "var(--status-error)", fontSize: "var(--fs-xs)" }}>
             {t("media.importFailed", { error: error ?? libraryError ?? "" })}
           </div>
         )}
       </div>
 
-      {subTab === "mine" ? (
+      {isFolderView ? (
+        <FolderBrowser />
+      ) : subTab === "mine" ? (
         <LibraryEntryGrid
           entries={filteredLibraryEntries}
           loading={libraryLoading}

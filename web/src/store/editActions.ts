@@ -232,6 +232,13 @@ export async function swapTracks(a: number, b: number) {
   await applyAndRefresh({ type: "swapTracks", a, b });
 }
 
+/** Toggle the `soloed` flag on one track. When any track is soloed, non-soloed
+ *  tracks are silenced in the playback layer (the data model only stores the
+ *  flag). Mirrors the upstream track-header solo toggle. */
+export async function toggleSolo(trackIndex: number) {
+  await applyAndRefresh({ type: "toggleSolo", trackIndex });
+}
+
 /** Replace (or clear) a clip's keyframe track for one property. */
 export async function setKeyframes(
   clipId: string,

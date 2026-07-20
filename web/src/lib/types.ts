@@ -20,6 +20,7 @@ export interface Track {
   id: string;
   type: ClipType; // serde rename = "type"
   muted: boolean;
+  soloed: boolean;
   hidden: boolean;
   syncLocked: boolean; // default true
   clips: Clip[];
@@ -349,6 +350,7 @@ export type EditRequest =
       hidden?: boolean;
       syncLocked?: boolean;
      }
+  | { type: "toggleSolo"; trackIndex: number }
   | { type: "createFolder"; name: string; parentFolderId?: string }
   | { type: "moveToFolder"; assetIds: string[]; folderId?: string }
   | { type: "renameMedia"; entries: RenameEntryReq[] }
@@ -641,6 +643,19 @@ export interface FavoriteSyncResult {
   failures: FavoriteSyncFailure[];
 }
 
+// MARK: - Folder browser (剪映-style nested folder browser, #49)
+
+/** One visible entry in a browsed directory, returned by `list_folder`. `isDir`
+ *  is `true` for directories; `mediaType` is `"video" | "audio" | "image"` for
+ *  importable media files and `undefined` for directories (non-media files are
+ *  filtered out by the backend). */
+export interface FolderEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+  mediaType?: string;
+}
+
 // MARK: - BYOK secret store (mirror of src-tauri SecretStatus)
 
 /** Masked status of a provider's stored API key. The plaintext key never
@@ -688,4 +703,83 @@ export interface ChatMessage {
   toolCalls: ChatToolCall[];
   createdAt: number;
   toolCallId?: string;
+}
+
+// MARK: - Streaming PCM chunk (mirror of src-tauri PcmChunkDto, #160)
+
+/** One chunk of decoded PCM audio for streaming playback (#160). Mirrors the
+ *  Rust `PcmChunkDto` (camelCase serde). `samples` is interleaved f32 —
+ *  `samples[f * channels + c]` — so stereo stays stereo (no mono averaging,
+ *  unlike the waveform pipeline). Outside Tauri `decodePcmChunk` returns an
+ *  empty chunk (no Rust core to decode with). */
+export interface PcmChunkData {
+  /** Interleaved f32 samples (length = `frameCount * channels`). */
+  samples: number[];
+  sampleRate: number;
+  channels: number;
+  /** Per-channel sample count (independent of channel count). */
+  frameCount: number;
+}
+
+// MARK: - Motion graphics (mirror of opentake-motion types, Issue #34)
+//
+// These mirror the Rust `opentake-motion` serde output. `MotionSource` and
+// `MotionParamValue` use snake_case (matching the motion crate's serde attrs);
+// `MotionRenderParams` / `MotionRenderResult` use camelCase (matching the
+// src-tauri DTO's `rename_all = "camelCase"`).
+
+/** A typed parameter value for a motion template (mirror of Rust `ParamValue`).
+ *  Internally tagged: `tag = "type"`, `content = "value"`. */
+export type MotionParamValue =
+  | { type: "string"; value: string }
+  | { type: "number"; value: number }
+  | { type: "bool"; value: boolean }
+  | { type: "color"; value: string };
+
+/** Where a motion graphic's animation comes from (mirror of Rust
+ *  `MotionSource`). Externally-tagged enum: `{"code": {...}}` or
+ *  `{"template": {...}}`.
+ *
+ *  - `code` — inline, self-contained HTML/CSS/JS document. The renderer injects
+ *    a deterministic clock; authors animate against `OpenTake.seek(seconds)`.
+ *  - `template` — instantiate a registered template by id with bound params. */
+export type MotionSource =
+  | { code: { html_css_js: string } }
+  | { template: { id: string; params?: Record<string, MotionParamValue> } };
+
+/** Render parameters for a motion clip (mirror of `MotionRenderParamsDto`).
+ *  All fields map 1:1 to the Rust DTO (camelCase serde). */
+export interface MotionRenderParams {
+  /** Timeline frames per second. */
+  fps: number;
+  /** Number of frames to produce. */
+  durationFrames: number;
+  /** Canvas width in pixels. */
+  width: number;
+  /** Canvas height in pixels. */
+  height: number;
+  /** Whether to capture a straight-alpha overlay (transparent body). Defaults
+ *  to `false` when omitted (the backend treats absent as `false`). */
+  transparent?: boolean;
+}
+
+/** The full result of `render_motion_clip` (mirror of `MotionRenderResultDto`).
+ *  `renderMotion` returns just the `mediaRef` string; this type is exported for
+ *  callers that need the metadata (e.g. to check which renderer was used). */
+export interface MotionRenderResult {
+  /** The `motion://<contentHash>` media_ref to assign to a clip's `mediaRef`. */
+  mediaRef: string;
+  /** The content hash (SHA-256 hex) naming the cache directory. */
+  contentHash: string;
+  /** Number of frames rendered (== `durationFrames`). */
+  frameCount: number;
+  /** Canvas width in pixels. */
+  width: number;
+  /** Canvas height in pixels. */
+  height: number;
+  /** Whether the frames carry straight alpha. */
+  transparent: boolean;
+  /** Which renderer produced the frames: `"cache"` (hit), `"stub"`, or
+   *  `"chromium"`. */
+  renderer: string;
 }

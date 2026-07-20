@@ -3,7 +3,7 @@ import { trackDisplayLabel } from "./zones";
 import type { ClipType, Timeline, Track } from "./types";
 
 function track(type: ClipType, id: string): Track {
-  return { id, type, muted: false, hidden: false, syncLocked: true, clips: [] };
+  return { id, type, muted: false, soloed: false, hidden: false, syncLocked: true, clips: [] };
 }
 function tl(types: ClipType[]): Timeline {
   return {

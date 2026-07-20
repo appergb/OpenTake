@@ -26,6 +26,28 @@ use crate::clip_type::ClipType;
 /// Where a media file lives. Encoded externally-tagged to match Swift's
 /// synthesized `Codable` for an enum with associated values:
 /// `{"external":{"absolutePath":"..."}}` / `{"project":{"relativePath":"..."}}`.
+///
+/// # Why there is no `Motion` variant
+///
+/// `MediaSource` models *where a file lives on disk* — an absolute path
+/// (`External`) or a project-bundle-relative path (`Project`). A motion-graphic
+/// clip is not a single file: it is a content-addressed sequence of RGBA frames
+/// produced by `opentake-motion` and cached under a SHA-256 hash. Forcing it
+/// into this enum would:
+///
+/// - Break the 1:1 Swift `Codable` round-trip (upstream has no motion variant).
+/// - Force every `match` on `MediaSource` (`MediaResolver::expected_path`,
+///   `resolve_source_path`, `MediaItemDto::from_entry`, `to_manifest_entry`) to
+///   handle an arm that has no on-disk file path.
+/// - Conflate "file location" with "media kind" — the kind is already carried
+///   by `ClipType` / `Clip.media_ref`.
+///
+/// Instead, motion clips reuse the existing `Clip.media_ref: String` field with
+/// a dedicated URI scheme: `motion://<content_hash>`. The compositor's media
+/// resolver recognizes the prefix and maps the hash to a `MotionClipSource`
+/// (see `opentake-motion::integration`). This keeps the domain crate
+/// dependency-free and the `MediaSource` enum focused on file location, while
+/// motion clips flow through the same `media_ref` channel as every other clip.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MediaSource {
@@ -33,6 +55,48 @@ pub enum MediaSource {
     External { absolute_path: String },
     #[serde(rename_all = "camelCase")]
     Project { relative_path: String },
+}
+
+/// The URI scheme prefix marking a `media_ref` as a rendered motion-graphic
+/// clip (e.g. `motion://a1b2c3…`). The rest of the string is the
+/// `opentake-motion` content hash (SHA-256 hex) that names the frame cache dir.
+pub const MOTION_REF_PREFIX: &str = "motion://";
+
+/// `true` when `media_ref` refers to a rendered motion-graphic clip
+/// (`motion://<hash>`), as opposed to a manifest asset id or file path.
+///
+/// Pure; safe to call on any `media_ref` string. Used by the render/compositor
+/// layer to route the ref to a `MotionClipSource` instead of the file decoder.
+pub fn is_motion_ref(media_ref: &str) -> bool {
+    media_ref.starts_with(MOTION_REF_PREFIX)
+}
+
+/// Extract the content hash from a `motion://<hash>` ref, or `None` when the
+/// ref is not a motion ref or carries an empty hash. The returned slice borrows
+/// from `media_ref` (no allocation).
+///
+/// ```
+/// use opentake_domain::motion_hash_from_ref;
+/// assert_eq!(
+///     motion_hash_from_ref("motion://abc123"),
+///     Some("abc123")
+/// );
+/// assert_eq!(motion_hash_from_ref("asset-id-1"), None);
+/// assert_eq!(motion_hash_from_ref("motion://"), None); // empty hash
+/// ```
+pub fn motion_hash_from_ref(media_ref: &str) -> Option<&str> {
+    let hash = media_ref.strip_prefix(MOTION_REF_PREFIX)?;
+    if hash.is_empty() {
+        None
+    } else {
+        Some(hash)
+    }
+}
+
+/// Build a `motion://<hash>` media_ref from a content hash. The inverse of
+/// [`motion_hash_from_ref`]. Pure; does not validate the hash format.
+pub fn motion_ref_for_hash(hash: &str) -> String {
+    format!("{MOTION_REF_PREFIX}{hash}")
 }
 
 /// Full serializable input snapshot for a generated asset. 1:1 port of
@@ -564,6 +628,49 @@ mod tests {
         assert_eq!(json, r#"{"project":{"relativePath":"media/clip.mov"}}"#);
         let back: MediaSource = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
+    }
+
+    // --- Motion media_ref helpers (motion://<hash>) ---
+
+    #[test]
+    fn is_motion_ref_recognizes_prefix() {
+        assert!(is_motion_ref("motion://abc123"));
+        assert!(is_motion_ref("motion://deadbeef"));
+        // Not a motion ref: manifest asset ids, file paths, plain strings.
+        assert!(!is_motion_ref("asset-id-1"));
+        assert!(!is_motion_ref("/abs/clip.mp4"));
+        assert!(!is_motion_ref("media/clip.mov"));
+        assert!(!is_motion_ref(""));
+        // Prefix must be exact — "motion:" without "//" is not a motion ref.
+        assert!(!is_motion_ref("motion:abc"));
+    }
+
+    #[test]
+    fn motion_hash_from_ref_extracts_hash() {
+        assert_eq!(
+            motion_hash_from_ref("motion://a1b2c3d4e5"),
+            Some("a1b2c3d4e5")
+        );
+        // A realistic 64-char SHA-256 hex hash.
+        let hash = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+        let r = motion_ref_for_hash(hash);
+        assert!(is_motion_ref(&r));
+        assert_eq!(motion_hash_from_ref(&r), Some(hash));
+    }
+
+    #[test]
+    fn motion_hash_from_ref_rejects_non_motion_and_empty() {
+        assert_eq!(motion_hash_from_ref("asset-id-1"), None);
+        assert_eq!(motion_hash_from_ref("/path/x.mp4"), None);
+        // Prefix present but empty hash -> None (no valid motion clip).
+        assert_eq!(motion_hash_from_ref("motion://"), None);
+    }
+
+    #[test]
+    fn motion_ref_for_hash_roundtrips() {
+        let r = motion_ref_for_hash("abc");
+        assert_eq!(r, "motion://abc");
+        assert_eq!(motion_hash_from_ref(&r), Some("abc"));
     }
 
     // --- MediaManifest version fallback ---

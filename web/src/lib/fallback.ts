@@ -155,6 +155,7 @@ function demoTimeline(): Timeline {
     id: "t-v1",
     type: "video",
     muted: false,
+    soloed: false,
     hidden: false,
     syncLocked: true,
     clips: [
@@ -166,6 +167,7 @@ function demoTimeline(): Timeline {
     id: "t-a1",
     type: "audio",
     muted: false,
+    soloed: false,
     hidden: false,
     syncLocked: true,
     clips: [newClip("c3", "demo-audio", "audio", 0, 150)],
@@ -265,6 +267,7 @@ export function createFallbackStore() {
       id: nextTrackId(),
       type: "audio",
       muted: false,
+      soloed: false,
       hidden: false,
       syncLocked: true,
       clips: [],
@@ -299,6 +302,7 @@ export function createFallbackStore() {
             id: trackId,
             type: cmd.kind === "audio" ? "audio" : "video",
             muted: false,
+            soloed: false,
             hidden: false,
             syncLocked: true,
             clips: [],
@@ -598,6 +602,14 @@ export function createFallbackStore() {
         case "deleteMedia":
         case "deleteFolder":
           return result(false, cmd.type, []);
+        case "toggleSolo": {
+          if (cmd.trackIndex >= 0 && cmd.trackIndex < timeline.tracks.length) {
+            const tr = timeline.tracks[cmd.trackIndex];
+            tr.soloed = !tr.soloed;
+            return result(true, "Toggle Solo", []);
+          }
+          return result(false, "Toggle Solo", []);
+        }
         default:
           return result(false, cmd.type, []);
       }

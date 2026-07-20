@@ -60,10 +60,20 @@ function clipAt(track: Track, frame: number): Clip | null {
   return null;
 }
 
+/** Whether any track in the timeline is soloed. When true, only soloed tracks
+ *  contribute to playback (visual + audio); non-soloed tracks are silenced and
+ *  skipped. Mirrors the upstream render-layer solo semantics. */
+export function anyTrackSoloed(timeline: Timeline): boolean {
+  return timeline.tracks.some((t) => t.soloed);
+}
+
 /**
  * Top-most VISUAL clip (video or image) at `frame`. Upstream keeps visual track
  * 0 topmost; `activeVisualClips` returns bottom -> top, so the last matching
  * track wins. Kept for master-clock selection.
+ *
+ * Solo: when any track is soloed, non-soloed tracks are skipped entirely (they
+ * are neither seen nor heard).
  */
 export function activeVisualClip(timeline: Timeline, frame: number): ActiveMedia | null {
   const clips = activeVisualClips(timeline, frame);
@@ -76,10 +86,12 @@ export function activeVisualClip(timeline: Timeline, frame: number): ActiveMedia
  * first and lets lower indexes render last.
  */
 export function activeVisualClips(timeline: Timeline, frame: number): ActiveMedia[] {
+  const soloed = anyTrackSoloed(timeline);
   const out: ActiveMedia[] = [];
   for (let trackIndex = timeline.tracks.length - 1; trackIndex >= 0; trackIndex--) {
     const track = timeline.tracks[trackIndex];
     if (track.hidden || track.type === "audio") continue;
+    if (soloed && !track.soloed) continue;
     const clip = clipAt(track, frame);
     if (!clip) continue;
     if (clip.mediaType !== "video" && clip.mediaType !== "image") continue;
@@ -92,11 +104,15 @@ export function activeVisualClips(timeline: Timeline, frame: number): ActiveMedi
  * Audio sources at `frame`: every clip on a non-muted AUDIO track. A video
  * clip's own sound is played by its visual `<video>` element (see
  * `activeVisualClip`), so it is not duplicated here.
+ *
+ * Solo: when any track is soloed, non-soloed audio tracks are skipped entirely.
  */
 export function activeAudioClips(timeline: Timeline, frame: number): ActiveMedia[] {
+  const soloed = anyTrackSoloed(timeline);
   const out: ActiveMedia[] = [];
   timeline.tracks.forEach((track, trackIndex) => {
     if (track.type !== "audio" || track.muted) return;
+    if (soloed && !track.soloed) return;
     const clip = clipAt(track, frame);
     if (clip) out.push({ clip, track, trackIndex });
   });
@@ -209,4 +225,21 @@ export function isExternalSeekWhilePlaying(args: {
   if (args.lastEngineFrame === null) return false;
   const eps = args.epsilonFrames ?? 2;
   return Math.abs(Math.floor(args.activeFrame) - args.lastEngineFrame) > eps;
+}
+
+/**
+ * The audio channel count a clip's source carries (for the streaming PCM
+ * pipeline, #160). Stereo (2) is the default for imported media — the
+ * `<audio>`/`<video>` elements handle multi-channel playback natively, and the
+ * Rust `extract_pcm_chunk` backend defaults to stereo f32 interleaved. This
+ * helper is a typing/documentation seam: it makes the stereo assumption
+ * explicit at the call site and leaves room for a future per-clip channel
+ * override (e.g. mono assets) without touching every caller.
+ */
+export function clipAudioChannels(_clip: Clip): number {
+  // Stereo default — the streaming PCM pipeline (#160) decodes 2-channel f32.
+  // The leading underscore marks `_clip` as intentionally unused for now: the
+  // signature is stable so future per-clip metadata (e.g. a `channels` field
+  // on `Clip`) can be wired in without changing call sites.
+  return 2;
 }

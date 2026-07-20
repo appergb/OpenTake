@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use image::ImageEncoder;
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use opentake_core::{
     importable_clip_type, AppCore, CoreError, DeferredCoreEvents, EditCommand, ProbedMedia,
@@ -47,7 +47,7 @@ use opentake_media::{
         MAX_VIDEO_THUMBNAILS, THUMB_MAX_SIZE, THUMB_TOLERANCE_SECS,
     },
     waveform::store::CACHE_SUBDIR,
-    FrameRequest, MediaEngine, RgbaFrame,
+    extract_pcm_chunk, FrameRequest, MediaEngine, RgbaFrame,
 };
 
 use crate::library::LibraryState;
@@ -954,6 +954,90 @@ fn finalize_saved_media_with_hooks(
         crate::export::AUDIO_PROGRESS_TOTAL,
     );
     Ok(result)
+}
+
+/// One visible entry in a browsed directory, for the folder browser (剪映-style,
+/// #49). `media_type` is `"video" | "audio" | "image"` for importable media
+/// files and `None` for directories (non-media files are filtered out entirely
+/// by [`list_folder_entries`]).
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderEntryDto {
+    /// Display name (file/directory's last path component).
+    pub name: String,
+    /// Absolute path to the entry.
+    pub path: String,
+    /// `true` for directories, `false` for media files.
+    pub is_dir: bool,
+    /// Media kind for files (`"video" | "audio" | "image"`), `None` for dirs.
+    pub media_type: Option<ClipType>,
+}
+
+/// `list_folder`: list a directory's visible entries for the folder browser
+/// (剪映-style, #49). Returns subdirectories and importable media files, each
+/// with its detected media type. `path = None` (or empty) lists the user's home
+/// directory as a sensible browsing root. Hidden (dot-prefixed) entries are
+/// skipped, matching the importer. Directories are listed before files, each
+/// group sorted by case-insensitive name. Returns an error when `path` is not a
+/// directory or is unreadable.
+#[tauri::command]
+pub fn list_folder(app: AppHandle, path: Option<String>) -> Result<Vec<FolderEntryDto>, String> {
+    let dir = match path {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => app.path().home_dir().map_err(|e| e.to_string())?,
+    };
+    if !dir.is_dir() {
+        return Err(format!("not a directory: {}", dir.display()));
+    }
+    Ok(list_folder_entries(&dir))
+}
+
+/// Collect a directory's visible subdirectories + importable media files as
+/// [`FolderEntryDto`]s. Directories first, then files, each group sorted by
+/// case-insensitive name. Hidden (dot-prefixed) and non-media files are skipped.
+fn list_folder_entries(dir: &Path) -> Vec<FolderEntryDto> {
+    let mut entries = Vec::new();
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return entries;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        let hidden = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.starts_with('.'))
+            .unwrap_or(false);
+        if hidden {
+            continue;
+        }
+        let is_dir = path.is_dir();
+        let media_type = if is_dir {
+            None
+        } else {
+            importable_clip_type(&path)
+        };
+        // Skip non-media files — only dirs + importable media are browseable.
+        if !is_dir && media_type.is_none() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        entries.push(FolderEntryDto {
+            name,
+            path: path.to_string_lossy().into_owned(),
+            is_dir,
+            media_type,
+        });
+    }
+    // Directories first, then files; each group by case-insensitive name.
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    entries
 }
 
 /// `import_folder`: bring a local directory into the library.
@@ -2236,6 +2320,72 @@ pub fn get_waveform(
             path.display()
         );
         e.to_string()
+    })
+}
+
+/// One chunk of decoded PCM audio for streaming playback (#160). Mirrors
+/// `opentake_media::PcmChunk` with a serde-friendly camelCase shape for the
+/// WebView. `samples` is interleaved f32 (length = `frameCount * channels`);
+/// `channels` is preserved (stereo stays stereo - no mono averaging, unlike the
+/// waveform pipeline).
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PcmChunkDto {
+    /// Interleaved f32 samples (length = `frame_count * channels`).
+    pub samples: Vec<f32>,
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// Per-channel sample count (independent of channel count).
+    pub frame_count: usize,
+}
+
+/// `decode_pcm_chunk`: decode a short chunk of a media asset's first audio
+/// track to interleaved f32 (stereo-preserving) for streaming playback (#160).
+/// `media_ref` is resolved to a source path via the manifest (same path as
+/// `get_waveform`). `start_time_sec` is the seek position; `duration_sec`
+/// defaults to 5.0 s, `target_sample_rate` to 48 000, `channels` to 2 (stereo).
+/// Errors when the asset is unknown, has no resolvable path, or carries no
+/// audio track.
+#[tauri::command]
+pub fn decode_pcm_chunk(
+    core: State<'_, AppCore>,
+    media_ref: String,
+    start_time_sec: f64,
+    duration_sec: Option<f64>,
+    target_sample_rate: Option<u32>,
+    channels: Option<u16>,
+) -> Result<PcmChunkDto, String> {
+    let manifest = core.media();
+    let entry = manifest
+        .entries
+        .iter()
+        .find(|e| e.id == media_ref)
+        .ok_or_else(|| format!("media not found: {media_ref}"))?;
+    let path = match &entry.source {
+        MediaSource::External { absolute_path } => PathBuf::from(absolute_path),
+        MediaSource::Project { relative_path } => match core.project_dir() {
+            Some(base) => base.join(relative_path),
+            None => return Err("project not saved; cannot resolve media path".into()),
+        },
+    };
+    // Defaults match the streaming pipeline (#160): 5 s chunks, 48 kHz, stereo.
+    let duration = duration_sec.unwrap_or(5.0);
+    let sample_rate = target_sample_rate.unwrap_or(48_000);
+    let ch = channels.unwrap_or(2);
+
+    let chunk = extract_pcm_chunk(&path.to_string_lossy(), start_time_sec, duration, sample_rate, ch)
+        .map_err(|e| {
+            eprintln!(
+                "decode_pcm_chunk failed: media_ref={media_ref} path={} error={e}",
+                path.display()
+            );
+            e.to_string()
+        })?;
+    Ok(PcmChunkDto {
+        samples: chunk.samples,
+        sample_rate: chunk.sample_rate,
+        channels: chunk.channels,
+        frame_count: chunk.frame_count,
     })
 }
 
@@ -4386,5 +4536,44 @@ mod tests {
             err.contains("no extension"),
             "extensionless path must be rejected: got {err}"
         );
+    #[test]
+    fn list_folder_entries_dirs_first_then_files_skips_hidden_and_nonmedia() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir(root.join("ZDir")).unwrap();
+        fs::create_dir(root.join("ADir")).unwrap();
+        touch(&root.join("b.png"));
+        touch(&root.join("a.mp4"));
+        touch(&root.join("c.txt")); // unsupported -> skipped
+        touch(&root.join(".hidden.mp4")); // hidden -> skipped
+
+        let entries = list_folder_entries(root);
+        // Directories first (case-insensitive), then media files.
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["ADir", "ZDir", "a.mp4", "b.png"]);
+
+        // Directories carry no media type; files do.
+        let adir = &entries[0];
+        assert!(adir.is_dir);
+        assert_eq!(adir.media_type, None);
+        let mp4 = entries.iter().find(|e| e.name == "a.mp4").unwrap();
+        assert!(!mp4.is_dir);
+        assert_eq!(mp4.media_type, Some(ClipType::Video));
+        let png = entries.iter().find(|e| e.name == "b.png").unwrap();
+        assert_eq!(png.media_type, Some(ClipType::Image));
+    }
+
+    #[test]
+    fn folder_entry_dto_serializes_camel_case() {
+        let dto = FolderEntryDto {
+            name: "clip".into(),
+            path: "/a/clip.mp4".into(),
+            is_dir: false,
+            media_type: Some(ClipType::Video),
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"isDir\""));
+        assert!(json.contains("\"mediaType\":\"video\""));
+    }
     }
 }

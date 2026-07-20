@@ -12,8 +12,8 @@ pub use frame::{
     fit_within, FrameRequest,
 };
 pub use pcm::{
-    extract_pcm, extract_pcm_cancellable, extract_pcm_cancellable_with_progress, PcmBuffer,
-    PcmFormat, PcmProgressCallback, PcmSpec,
+    extract_pcm, extract_pcm_cancellable, extract_pcm_cancellable_with_progress,
+    extract_pcm_chunk, PcmBuffer, PcmChunk, PcmFormat, PcmProgressCallback, PcmSpec,
 };
 pub use stream::{
     spawn_video_stream, StreamDecodeControl, StreamVideoFrame, VideoStream, VideoStreamRequest,

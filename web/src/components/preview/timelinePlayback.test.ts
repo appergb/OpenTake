@@ -6,7 +6,8 @@ import {
   activeVisualClip,
   activeVisualClips,
   advancePlayhead,
-  clipCoversFrame,
+  anyTrackSoloed,
+  clipAudioChannels,  clipCoversFrame,
   clipOpacity,
   clipVolume,
   clipVolumeAt,
@@ -84,6 +85,7 @@ function track(over: Partial<Track> & { id: string; type: ClipType; clips: Clip[
     id: over.id,
     type: over.type,
     muted: over.muted ?? false,
+    soloed: over.soloed ?? false,
     hidden: over.hidden ?? false,
     syncLocked: over.syncLocked ?? true,
     clips: over.clips,
@@ -332,5 +334,78 @@ describe("advancePlayhead", () => {
 
   it("falls back to 30fps when fps is non-positive", () => {
     expect(advancePlayhead({ currentFrame: 0, dtSec: 1, fps: 0 })).toBeCloseTo(30);
+  });
+});
+
+describe("anyTrackSoloed", () => {
+  it("is false when no track is soloed", () => {
+    const tl = timeline([
+      track({ id: "v1", type: "video", clips: [] }),
+      track({ id: "a1", type: "audio", clips: [] }),
+    ]);
+    expect(anyTrackSoloed(tl)).toBe(false);
+  });
+
+  it("is true when at least one track is soloed", () => {
+    const tl = timeline([
+      track({ id: "v1", type: "video", clips: [] }),
+      track({ id: "a1", type: "audio", soloed: true, clips: [] }),
+    ]);
+    expect(anyTrackSoloed(tl)).toBe(true);
+  });
+});
+
+describe("solo playback semantics", () => {
+  it("activeVisualClip skips non-soloed tracks when any track is soloed", () => {
+    const tl = timeline([
+      track({ id: "v1", type: "video", clips: [clip({ id: "low", mediaType: "video" })] }),
+      track({ id: "v2", type: "video", soloed: true, clips: [clip({ id: "solo", mediaType: "video" })] }),
+    ]);
+    // Without solo, the higher track (v2) wins; with v2 soloed, v1 is skipped
+    // and v2 is still the winner.
+    expect(activeVisualClip(tl, 10)?.clip.id).toBe("solo");
+  });
+
+  it("activeVisualClip returns null when only non-soloed visual tracks exist", () => {
+    const tl = timeline([
+      track({ id: "v1", type: "video", clips: [clip({ id: "low", mediaType: "video" })] }),
+      track({ id: "a1", type: "audio", soloed: true, clips: [clip({ id: "music", mediaType: "audio" })] }),
+    ]);
+    // Audio is soloed → the non-soloed video track is silenced/hidden.
+    expect(activeVisualClip(tl, 10)).toBeNull();
+  });
+
+  it("activeAudioClips skips non-soloed audio tracks when any track is soloed", () => {
+    const tl = timeline([
+      track({ id: "v1", type: "video", soloed: true, clips: [clip({ id: "vid", mediaType: "video" })] }),
+      track({ id: "a1", type: "audio", clips: [clip({ id: "music", mediaType: "audio" })] }),
+      track({ id: "a2", type: "audio", soloed: true, clips: [clip({ id: "vox", mediaType: "audio" })] }),
+    ]);
+    const ids = activeAudioClips(tl, 10).map((a) => a.clip.id);
+    expect(ids).toEqual(["vox"]);
+  });
+
+  it("soloed track still plays when other soloed tracks exist", () => {
+    const tl = timeline([
+      track({ id: "a1", type: "audio", soloed: true, clips: [clip({ id: "music", mediaType: "audio" })] }),
+      track({ id: "a2", type: "audio", soloed: true, clips: [clip({ id: "vox", mediaType: "audio" })] }),
+    ]);
+    const ids = activeAudioClips(tl, 10).map((a) => a.clip.id).sort();
+    expect(ids).toEqual(["music", "vox"]);
+  });
+
+  it("clipVolume still respects mute on a soloed track", () => {
+    const t = track({ id: "a", type: "audio", soloed: true, muted: true, clips: [] });
+    const c = clip({ id: "c", mediaType: "audio", volume: 1 });
+    expect(clipVolume(t, c)).toBe(0);
+  });
+});
+
+describe("clipAudioChannels", () => {
+  it("defaults to stereo (2) for any clip", () => {
+    // The streaming PCM pipeline (#160) decodes 2-channel f32; the <audio>
+    // elements handle stereo natively. The helper makes the assumption explicit.
+    expect(clipAudioChannels(clip({ id: "v", mediaType: "video" }))).toBe(2);
+    expect(clipAudioChannels(clip({ id: "a", mediaType: "audio" }))).toBe(2);
   });
 });

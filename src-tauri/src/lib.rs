@@ -18,6 +18,7 @@ mod haptic;
 mod library;
 mod mcp;
 mod media;
+mod motion;
 mod render;
 mod search;
 mod secret;
@@ -166,6 +167,14 @@ pub fn run() {
                 app.manage(preview_server);
                 app.manage(playback::commands::PlaybackState::new());
             }
+            // Motion-graphics frame cache (#34): rooted at the app cache dir
+            // alongside the media cache, falling back to the OS temp dir.
+            let motion_cache_root = app
+                .path()
+                .app_cache_dir()
+                .unwrap_or_else(|_| std::env::temp_dir())
+                .join("motion-cache");
+            app.manage(motion::MotionState::new(motion_cache_root));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -201,6 +210,9 @@ pub fn run() {
             haptic::snap_haptic,
             render::composite_frame,
             render::capture_frame_to_media,
+            media::decode_pcm_chunk,
+            media::list_folder,
+            motion::render_motion_clip,
             export::export_video,
             export::save_range_as_media,
             export::cancel_export,
@@ -274,9 +286,15 @@ pub fn run() {
 /// (`/opt/homebrew/bin`) and `/usr/local/bin`. A PATH-only `ffmpeg` lookup then
 /// fails and every frame decode returns nothing — the timeline preview stays
 /// black even though the code is correct. Pin an absolute path from the common
-/// install locations instead. (Bundling the binaries via Tauri `externalBin` is
-/// the cross-machine follow-up; this unblocks any host that has ffmpeg on disk.)
+/// install locations instead.
+///
+/// If the binaries still aren't found, `ensure_ffmpeg` (behind the
+/// `ffmpeg-download` feature, enabled for the desktop shell) auto-downloads
+/// them adjacent to the app binary and sets the env overrides. We log failures
+/// but never crash — the media layer degrades gracefully to empty
+/// probes/waveforms, and the user can install ffmpeg manually later.
 fn resolve_media_tools() {
+    // First: try the common on-disk locations (fast, no network).
     for (key, bin) in [
         ("OPENTAKE_FFMPEG", "ffmpeg"),
         ("OPENTAKE_FFPROBE", "ffprobe"),
@@ -299,6 +317,13 @@ fn resolve_media_tools() {
         if let Some(found) = dirs.into_iter().map(|d| d.join(bin)).find(|c| c.is_file()) {
             std::env::set_var(key, found);
         }
+    }
+
+    // Second: if still unavailable, auto-download (ffmpeg-sidecar). Best-effort
+    // — a download failure (no network, unsupported arch) must not crash the
+    // app; the user gets a clear log line and can install ffmpeg manually.
+    if let Err(e) = opentake_media::ffmpeg_status::ensure_ffmpeg() {
+        eprintln!("ensure_ffmpeg: {e}");
     }
 }
 

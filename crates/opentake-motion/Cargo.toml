@@ -32,4 +32,18 @@ default = []
 # Gates the real headless-Chromium (CDP) backend behind a feature so neither the
 # default build nor CI tests require a Chromium binary. The skeleton compiles
 # unconditionally; only the live CDP wiring is feature-gated (see renderer.rs).
+#
+# When the CDP integration (Issue #14) lands, this feature will pull in a CDP
+# client crate, e.g.:
+#   chromium = ["dep:chromiumoxide"]
+# [dependencies.chromiumoxide]
+# version = "0.7"
+# default-features = false
+# features = ["tokio-runtime"]   # or "async-std-runtime"
+# optional = true
+#
+# Until then the feature is empty and `HeadlessChromiumRenderer::render` returns
+# `MotionError::RendererUnavailable`. `HeadlessChromiumRenderer::chrome_available`
+# provides a best-effort runtime binary check so the dispatch layer can produce a
+# precise "Chrome not found" message and fall back to `StubRenderer`.
 chromium = []

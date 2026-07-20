@@ -109,6 +109,27 @@ export async function importFolderViaDialog(): Promise<void> {
 }
 
 /**
+ * Import every supported file inside `path` WITHOUT opening a dialog — used by
+ * the folder browser's "Import This Folder" action (#49), which already knows
+ * the directory to import. `recursive = true` mirrors the on-disk tree into the
+ * library (剪映-style), matching `importFolderViaDialog`. Surfaces progress /
+ * errors through the media store exactly like the dialog flow.
+ */
+export async function importFolderByPath(path: string): Promise<void> {
+  const store = useMediaStore.getState();
+  store.setError(null);
+  try {
+    store.setImporting(true);
+    await api.importFolder(path, true);
+    await refreshMedia();
+  } catch (error: unknown) {
+    store.setError(getErrorMessage(error));
+  } finally {
+    store.setImporting(false);
+  }
+}
+
+/**
  * Relink an offline asset: pick the file it should now point at and hand it to
  * the Rust `relink_media` command, which keeps the SAME asset id so every clip
  * referencing it recovers (re-importing would mint a new id and strand them).

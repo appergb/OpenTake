@@ -489,6 +489,145 @@ pub(super) fn decode_raw_pcm_cancellable(
     validate_pcm_output(path, status, stdout, stderr, reader_cap)
 }
 
+/// Decoded PCM chunk for streaming playback (#160). Unlike [`PcmBuffer`] (which
+/// averages channels to mono for transcription/waveform), `PcmChunk` PRESERVES
+/// the multi-channel layout as interleaved f32 — stereo stays stereo — so the
+/// Web Audio API can re-wrap it as an `AudioBuffer` without re-decoding.
+///
+/// `samples` is interleaved: `frame f, channel c` lives at
+/// `samples[f * channels + c]`. `frame_count` is the per-channel sample count
+/// (so `samples.len() == frame_count * channels as usize`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PcmChunk {
+    /// Interleaved f32 samples (length = `frame_count * channels`).
+    pub samples: Vec<f32>,
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// Per-channel sample count (independent of channel count).
+    pub frame_count: usize,
+}
+
+impl PcmChunk {
+    /// Duration in seconds implied by `frame_count` and `sample_rate`.
+    pub fn duration_secs(&self) -> f64 {
+        if self.sample_rate == 0 {
+            return 0.0;
+        }
+        self.frame_count as f64 / self.sample_rate as f64
+    }
+}
+
+/// Build the ffmpeg arg list for a chunked seek+duration decode (`-ss`/`-t`)
+/// to raw f32le on stdout. Mirrors [`pcm_args`] but uses `-t` (duration) instead
+/// of `-to` (end), matching the streaming-chunk pattern: seek to `start_time_sec`
+/// and read exactly `duration_sec` more.
+fn pcm_chunk_args(
+    path: &Path,
+    sample_rate: u32,
+    channels: u16,
+    start_time_sec: f64,
+    duration_sec: f64,
+) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    // Seek BEFORE `-i` for fast keyframe-accurate seek (ffmpeg's input-seeking
+    // path), which is what chunked streaming wants: it skips the decode cost
+    // for the discarded prefix. Same placement as `pcm_args`'s `-ss`.
+    args.push("-ss".into());
+    args.push(format!("{:.6}", start_time_sec.max(0.0)));
+    args.push("-t".into());
+    args.push(format!("{:.6}", duration_sec.max(0.0)));
+    args.push("-i".into());
+    args.push(path.to_string_lossy().into_owned());
+    args.push("-vn".into()); // drop video
+    args.push("-ac".into());
+    args.push(channels.to_string());
+    args.push("-ar".into());
+    args.push(sample_rate.to_string());
+    args.push("-f".into());
+    args.push("f32le".into()); // chunk pipeline is f32-only (no s16 path)
+    args.push("-".into());
+    args
+}
+
+/// Convert interleaved raw f32le bytes to interleaved f32 samples. Channels
+/// are preserved (no mono averaging) — the chunk pipeline keeps stereo.
+fn raw_f32_to_interleaved(bytes: &[u8], channels: u16) -> (Vec<f32>, usize) {
+    let ch = channels.max(1) as usize;
+    let total_samples = bytes.len() / 4;
+    let frame_count = total_samples / ch;
+    let mut out = Vec::with_capacity(total_samples);
+    for i in 0..total_samples {
+        let off = i * 4;
+        out.push(f32::from_le_bytes([
+            bytes[off],
+            bytes[off + 1],
+            bytes[off + 2],
+            bytes[off + 3],
+        ]));
+    }
+    (out, frame_count)
+}
+
+/// Decode a chunk of `media_path`'s first audio track to interleaved f32,
+/// preserving the multi-channel layout (stereo stays stereo). `start_time_sec`
+/// is the seek position; `duration_sec` is the chunk length. Defaults match the
+/// streaming pipeline: 48 kHz, stereo, 5 s chunks (#160).
+///
+/// Uses ffmpeg with `-ss` (input seek) and `-t` (duration) for efficient
+/// chunked extraction — same spawn/read/wait/error pattern as [`extract_pcm`].
+/// Errors with `NoTrack("audio", …)` when the file has no audio stream.
+pub fn extract_pcm_chunk(
+    media_path: &str,
+    start_time_sec: f64,
+    duration_sec: f64,
+    target_sample_rate: u32,
+    channels: u16,
+) -> Result<PcmChunk> {
+    let path = Path::new(media_path);
+    // Cheap guard: confirm an audio track exists before spawning the decoder.
+    if let Ok(p) = probe::probe(path) {
+        if !p.has_audio {
+            return Err(MediaError::no_track("audio", path));
+        }
+    }
+
+    let mut child = ff::ffmpeg()
+        .args(pcm_chunk_args(
+            path,
+            target_sample_rate,
+            channels,
+            start_time_sec,
+            duration_sec,
+        ))
+        .spawn()
+        .map_err(|e| MediaError::Ffmpeg(format!("spawn: {e}")))?;
+
+    // Read raw f32le straight off stdout.
+    let mut raw = Vec::new();
+    if let Some(mut stdout) = child.take_stdout() {
+        stdout
+            .read_to_end(&mut raw)
+            .map_err(|e| MediaError::Ffmpeg(format!("read stdout: {e}")))?;
+    }
+    let status = child.wait().map_err(MediaError::Io)?;
+    if !status.success() && raw.is_empty() {
+        return Err(MediaError::no_track("audio", path));
+    }
+    // ffmpeg can exit 0 with empty stdout when metadata says audio exists but
+    // no decodable samples: treat as no audio track (same guard as `extract_pcm`).
+    if raw.is_empty() {
+        return Err(MediaError::no_track("audio", path));
+    }
+
+    let (samples, frame_count) = raw_f32_to_interleaved(&raw, channels);
+    Ok(PcmChunk {
+        samples,
+        sample_rate: target_sample_rate,
+        channels,
+        frame_count,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -795,6 +934,83 @@ mod tests {
 
         assert!(matches!(error, MediaError::Ffmpeg(_)));
         assert!(error.to_string().contains("decoder failed"));
+    }
+
+    #[test]
+    fn pcm_chunk_duration_from_interleaved_stereo() {
+        // 2ch, 48k, 2s → frame_count = 96_000, samples.len = 192_000.
+        let c = PcmChunk {
+            samples: vec![0.0; 192_000],
+            sample_rate: 48_000,
+            channels: 2,
+            frame_count: 96_000,
+        };
+        assert!((c.duration_secs() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pcm_chunk_duration_handles_zero_rate() {
+        let c = PcmChunk {
+            samples: vec![0.0; 100],
+            sample_rate: 0,
+            channels: 2,
+            frame_count: 50,
+        };
+        assert_eq!(c.duration_secs(), 0.0);
+    }
+
+    #[test]
+    fn pcm_chunk_args_emits_ss_and_t() {
+        let args = pcm_chunk_args(Path::new("/a.mp4"), 48_000, 2, 1.5, 5.0);
+        let ss = args.iter().position(|a| a == "-ss").unwrap();
+        assert_eq!(args[ss + 1], "1.500000");
+        let t = args.iter().position(|a| a == "-t").unwrap();
+        assert_eq!(args[t + 1], "5.000000");
+        assert!(args.windows(2).any(|w| w == ["-ar", "48000"]));
+        assert!(args.windows(2).any(|w| w == ["-ac", "2"]));
+        assert!(args.windows(2).any(|w| w == ["-f", "f32le"]));
+        assert!(args.iter().any(|a| a == "-vn"));
+        assert!(!args.iter().any(|a| a == "-to"));
+    }
+
+    #[test]
+    fn pcm_chunk_args_clamps_negative_seek() {
+        let args = pcm_chunk_args(Path::new("/a.mp4"), 48_000, 2, -1.0, 5.0);
+        let ss = args.iter().position(|a| a == "-ss").unwrap();
+        assert_eq!(args[ss + 1], "0.000000");
+    }
+
+    #[test]
+    fn raw_f32_interleaved_preserves_stereo_channels() {
+        // frame0: L=1.0 R=0.0 ; frame1: L=-0.5 R=0.5 → no averaging.
+        let mut bytes = Vec::new();
+        for v in [1.0f32, 0.0, -0.5, 0.5] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        let (samples, frames) = raw_f32_to_interleaved(&bytes, 2);
+        assert_eq!(samples.len(), 4);
+        assert_eq!(frames, 2);
+        assert_eq!(samples, vec![1.0, 0.0, -0.5, 0.5]);
+    }
+
+    #[test]
+    fn raw_f32_interleaved_mono_passthrough() {
+        let mut bytes = Vec::new();
+        for v in [0.25f32, -0.75, 0.5] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        let (samples, frames) = raw_f32_to_interleaved(&bytes, 1);
+        assert_eq!(samples, vec![0.25, -0.75, 0.5]);
+        assert_eq!(frames, 3);
+    }
+
+    #[test]
+    fn raw_f32_interleaved_partial_trailing_frame_ignored() {
+        // 9 bytes = 2 full f32 samples + 1 stray byte → 2 samples.
+        let bytes = [0u8, 0, 0, 0, 0, 0, 0x80, 0x3f, 7];
+        let (samples, frames) = raw_f32_to_interleaved(&bytes, 1);
+        assert_eq!(samples.len(), 2);
+        assert_eq!(frames, 2);
     }
 
     #[test]

@@ -58,7 +58,7 @@ import {
   type QualityPreset,
   type ZoomPreset,
 } from "../../lib/previewPresets";
-import type { MediaItem } from "../../lib/types";
+import { bestCodec } from "../../lib/codecSupport";import type { MediaItem } from "../../lib/types";
 import { useNativePlaybackPublication } from "./nativePlaybackSession";
 import { resolveTimelinePlaybackRoute, type UnsupportedPlaybackReason } from "./playbackRoute";
 import { rustEngineEnabled } from "./rustEngine";
@@ -596,7 +596,7 @@ function MediaPreview({
     };
   }, [item.id, item.type, item.missing]);
 
-  const box: React.CSSProperties = {
+  const [codecUnsupported, setCodecUnsupported] = useState(false);  const box: React.CSSProperties = {
     maxWidth: "100%",
     maxHeight: "100%",
     objectFit: "contain",
@@ -630,6 +630,28 @@ function MediaPreview({
       </div>
     );
   }
+  // Codec fallback (#131): when the WebView can't decode the source (VP9/AV1/
+  // HEVC without system codec), `<video>` fires `onError` and shows black.
+  // Detect via `bestCodec` and surface a clear message instead of a silent
+  // black frame.
+  if (codecUnsupported) {
+    return (
+      <div
+        style={{
+          ...box,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "var(--text-muted)",
+          fontSize: "var(--fs-sm)",
+          padding: "var(--space-xl)",
+          textAlign: "center",
+        }}
+      >
+        {t("preview.unsupportedCodec")}
+      </div>
+    );
+  }
   // video (and any other visual): app transport drives it (no native controls).
   // `preload="metadata"` (not the default "auto") + an instant hi-res `poster`
   // make a cold click near-instant: the first frame shows immediately and the
@@ -650,6 +672,9 @@ function MediaPreview({
       onPlay={() => onPlayingChange(true)}
       onPause={() => onPlayingChange(false)}
       onEnded={() => onPlayingChange(false)}
+      onError={() => {
+        if (bestCodec(item.name) === "unknown") setCodecUnsupported(true);
+      }}
       style={box}
     />
   );

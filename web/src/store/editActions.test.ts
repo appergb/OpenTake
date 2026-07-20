@@ -197,6 +197,7 @@ vi.mock("../lib/api", () => ({
         id: t.id,
         type: t.type,
         muted: false,
+        soloed: false,
         hidden: false,
         syncLocked: true,
         clips: t.clips.map((c) => ({
