@@ -22,8 +22,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use opentake_domain::{AnimPair, Crop, Interpolation, Keyframe, KeyframeTrack};
 use opentake_domain::{
-    ChromaKey, ColorGrade, Effect, LiftGammaGain, Mask, MaskShape, MediaManifest, Point2, Rgb,
-    Rgba, TextStyle, Timeline, Transform, VideoType,
+    ChromaKey, ColorGrade, Effect, GenerationJobStatus, LiftGammaGain, Mask, MaskShape,
+    MediaManifest, Point2, Rgb, Rgba, TextStyle, Timeline, Transform, VideoType,
 };
 use opentake_media::analysis::{
     detect_beats, detect_silences, BeatDetectionConfig, SilenceDetectionConfig,
@@ -37,6 +37,7 @@ use serde_json::Value;
 
 use crate::mcp::core_handle::CoreHandle;
 use crate::mcp::gen_catalog;
+use crate::mcp::generation::{GenerationBridge, GenerationRequest};
 use crate::mcp::media_bridge::{
     frame_to_block, media_frame_to_block, BridgeErrorKind, ImportSource, InspectMediaRequest,
     InspectMediaResult, InspectResult, MediaBridge, SearchCandidate, TranscriptSource,
@@ -63,6 +64,16 @@ const INSPECT_MEDIA_MAX_FRAMES: usize = 12;
 const INSPECT_MEDIA_MAX_SEGMENTS: usize = 400;
 const INSPECT_MEDIA_MAX_WORDS: usize = 10_000;
 
+fn is_generation_tool(tool: ToolName) -> bool {
+    matches!(
+        tool,
+        ToolName::GenerateVideo
+            | ToolName::GenerateImage
+            | ToolName::GenerateAudio
+            | ToolName::UpscaleMedia
+    )
+}
+
 /// The in-process tool dispatcher. Holds the [`CoreHandle`] boundary, the plugin
 /// registry (read-locked for the active plugin), and a per-dispatcher agent-undo
 /// stack so `undo` only reverts edits this session made.
@@ -74,6 +85,9 @@ pub struct Dispatcher {
     /// [`CoreHandle`] because those two capabilities reach into crates the agent
     /// layer does not link (`opentake-render`, the src-tauri import path).
     bridge: Option<Arc<dyn MediaBridge>>,
+    /// Paid generation/upscale side-door. The desktop host injects this only
+    /// when it can persist jobs and run configured providers.
+    generation_bridge: Option<Arc<dyn GenerationBridge>>,
     /// Action names of agent edits applied through this dispatcher, newest last.
     /// Guards `undo`: we only revert when this session has pushed an edit.
     agent_undo: Mutex<Vec<String>>,
@@ -95,10 +109,21 @@ impl Dispatcher {
         registry: Arc<RwLock<PluginRegistry>>,
         bridge: Option<Arc<dyn MediaBridge>>,
     ) -> Self {
+        Self::with_bridges(handle, registry, bridge, None)
+    }
+
+    /// New dispatcher with independent media and generation host capabilities.
+    pub fn with_bridges(
+        handle: Arc<dyn CoreHandle>,
+        registry: Arc<RwLock<PluginRegistry>>,
+        bridge: Option<Arc<dyn MediaBridge>>,
+        generation_bridge: Option<Arc<dyn GenerationBridge>>,
+    ) -> Self {
         Dispatcher {
             handle,
             registry,
             bridge,
+            generation_bridge,
             agent_undo: Mutex::new(Vec::new()),
         }
     }
@@ -107,6 +132,20 @@ impl Dispatcher {
     /// injected [`MediaBridge`].
     pub fn has_media_bridge(&self) -> bool {
         self.bridge.is_some()
+    }
+
+    pub fn can_generate(&self) -> bool {
+        self.generation_bridge
+            .as_ref()
+            .is_some_and(|bridge| bridge.can_generate())
+    }
+
+    pub fn advertised_tools(&self) -> Vec<ToolName> {
+        let mut tools = ToolName::ALL.to_vec();
+        if self.can_generate() {
+            tools.extend(ToolName::GENERATION);
+        }
+        tools
     }
 
     /// Snapshot the current timeline from the bound core handle.
@@ -145,7 +184,9 @@ impl Dispatcher {
                 error.message,
             );
         }
-        if !ToolName::ALL.contains(&tool) {
+        if !(ToolName::ALL.contains(&tool)
+            || is_generation_tool(tool) && self.generation_bridge.is_some())
+        {
             return ToolResult::public_error(
                 PublicErrorKind::UnknownTool,
                 format!("Tool is not advertised: {}", tool.as_str()),
@@ -208,16 +249,15 @@ impl Dispatcher {
             ToolName::GetTimeline => {
                 let a: GetTimelineArgs = decode_tool_args(args, "")?;
                 let tl = self.handle.timeline();
-                // canGenerate is gated by the (not-yet-wired) generation backend;
-                // false until that lands so the model never proposes generation.
-                let json = encode_timeline(&tl, a.start_frame, a.end_frame, false);
+                let json = encode_timeline(&tl, a.start_frame, a.end_frame, self.can_generate());
                 Ok(ToolResult::ok(json.to_string()))
             }
             ToolName::GetMedia => {
                 let manifest = self.handle.media();
-                let json = serde_json::to_value(&manifest)
+                let mut json = serde_json::to_value(&manifest)
                     .map(round_floats_3dp)
                     .map_err(|e| ToolError::new(format!("get_media: {e}")))?;
+                inject_generation_statuses(&mut json, &manifest);
                 Ok(ToolResult::ok(json.to_string()))
             }
             ToolName::ListFolders => {
@@ -278,16 +318,53 @@ impl Dispatcher {
             ToolName::GenerateVideo
             | ToolName::GenerateImage
             | ToolName::GenerateAudio
-            | ToolName::UpscaleMedia
-            | ToolName::AddMotionGraphic
-            | ToolName::EditMotionGraphic => Ok(ToolResult::error(format!(
-                "{}: capability is not advertised",
-                tool.as_str()
-            ))),
+            | ToolName::UpscaleMedia => self.submit_generation(tool, args, cancel),
+            ToolName::AddMotionGraphic | ToolName::EditMotionGraphic => Ok(ToolResult::error(
+                format!("{}: capability is not advertised", tool.as_str()),
+            )),
         }
     }
 
     // MARK: - Generative read bodies
+
+    fn submit_generation(
+        &self,
+        tool: ToolName,
+        args: &Value,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<ToolResult, ToolError> {
+        let request = match tool {
+            ToolName::GenerateVideo => GenerationRequest::Video(decode_tool_args(args, "")?),
+            ToolName::GenerateImage => GenerationRequest::Image(decode_tool_args(args, "")?),
+            ToolName::GenerateAudio => GenerationRequest::Audio(decode_tool_args(args, "")?),
+            ToolName::UpscaleMedia => GenerationRequest::Upscale(decode_tool_args(args, "")?),
+            _ => return Err(ToolError::new("not a generation tool")),
+        };
+        if !request.cost_authorized() {
+            return Ok(ToolResult::public_error(
+                PublicErrorKind::InvalidArguments(tool),
+                "costAuthorized must be true after explicit user approval",
+            ));
+        }
+        let Some(bridge) = self.generation_bridge.as_ref() else {
+            return Ok(ToolResult::public_error(
+                PublicErrorKind::CapabilityUnavailable(tool),
+                "Generation is not available in this build.",
+            ));
+        };
+        if !bridge.can_generate() {
+            return Ok(ToolResult::public_error(
+                PublicErrorKind::CapabilityUnavailable(tool),
+                "Configure a compatible generation provider before submitting.",
+            ));
+        }
+        let submission = bridge
+            .submit(request, cancel)
+            .map_err(|_| ToolError::new("generation submission failed"))?;
+        let payload = serde_json::to_string(&submission)
+            .map_err(|_| ToolError::new("generation submission response failed"))?;
+        Ok(ToolResult::ok(payload))
+    }
 
     /// `list_models`: project the built-in static catalog from `opentake-gen`
     /// into the `{ models, loaded }` payload, optionally filtered by `?type=`.
@@ -323,6 +400,7 @@ impl Dispatcher {
                 format!("Media not found: {}", a.media_ref),
             ));
         };
+        ensure_generation_output_ready(entry, "inspect_media")?;
         if entry.kind == opentake_domain::ClipType::Text {
             return Ok(ToolResult::public_error(
                 PublicErrorKind::CapabilityUnavailable(ToolName::InspectMedia),
@@ -1029,6 +1107,13 @@ impl Dispatcher {
         let mut explicit_count = 0usize;
         for (i, raw) in a.entries.iter().enumerate() {
             let e: AddClipEntry = decode_tool_args(raw, &format!("entries[{i}]"))?;
+            if let Some(entry) = manifest
+                .entries
+                .iter()
+                .find(|entry| entry.id == e.media_ref)
+            {
+                ensure_generation_output_ready(entry, &format!("entries[{i}]"))?;
+            }
             let (media_type, has_audio) = resolve_media_kind(manifest, &e.media_ref);
             if e.track_index.is_some() {
                 explicit_count += 1;
@@ -1082,6 +1167,13 @@ impl Dispatcher {
         let mut entries = Vec::with_capacity(a.entries.len());
         for (i, raw) in a.entries.iter().enumerate() {
             let e: InsertClipEntry = decode_tool_args(raw, &format!("entries[{i}]"))?;
+            if let Some(entry) = manifest
+                .entries
+                .iter()
+                .find(|entry| entry.id == e.media_ref)
+            {
+                ensure_generation_output_ready(entry, &format!("entries[{i}]"))?;
+            }
             let (media_type, has_audio) = resolve_media_kind(manifest, &e.media_ref);
             let duration_frames = match e.duration_frames {
                 Some(d) => d,
@@ -2274,6 +2366,63 @@ fn resolve_media_kind(
         .unwrap_or((opentake_domain::ClipType::Video, false))
 }
 
+fn generation_status_label(status: Option<GenerationJobStatus>) -> &'static str {
+    match status {
+        Some(GenerationJobStatus::Queued | GenerationJobStatus::Generating) => "generating",
+        Some(GenerationJobStatus::Downloading | GenerationJobStatus::Finalizing) => "downloading",
+        Some(GenerationJobStatus::Failed) => "failed",
+        Some(GenerationJobStatus::Cancelled) => "cancelled",
+        Some(GenerationJobStatus::Ready) | None => "none",
+    }
+}
+
+fn ensure_generation_output_ready(
+    entry: &opentake_domain::MediaManifestEntry,
+    path: &str,
+) -> Result<(), ToolError> {
+    let status = entry
+        .generation_input
+        .as_ref()
+        .and_then(|input| input.status);
+    if matches!(status, Some(GenerationJobStatus::Ready) | None) {
+        return Ok(());
+    }
+    Err(ToolError::new(format!(
+        "{path}: generated media '{}' is not ready (status {})",
+        entry.id,
+        generation_status_label(status)
+    )))
+}
+
+fn inject_generation_statuses(payload: &mut Value, manifest: &MediaManifest) {
+    let Some(entries) = payload
+        .as_object_mut()
+        .and_then(|object| object.get_mut("entries"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for (payload_entry, manifest_entry) in entries.iter_mut().zip(&manifest.entries) {
+        let Some(object) = payload_entry.as_object_mut() else {
+            continue;
+        };
+        let input = manifest_entry.generation_input.as_ref();
+        object.insert(
+            "generationStatus".into(),
+            Value::String(generation_status_label(input.and_then(|value| value.status)).into()),
+        );
+        if let Some(progress) = input.and_then(|value| value.progress) {
+            object.insert("generationProgress".into(), json_number(progress, 3));
+        }
+        if let Some(error_code) = input.and_then(|value| value.error_code.as_ref()) {
+            object.insert(
+                "generationErrorCode".into(),
+                Value::String(error_code.clone()),
+            );
+        }
+    }
+}
+
 /// Current `(track_index, start_frame)` of a clip on the timeline, or `(None,
 /// None)` if absent. Used to fill optional `move_clips` fields.
 fn clip_location(timeline: &Timeline, clip_id: &str) -> (Option<usize>, Option<i32>) {
@@ -3026,7 +3175,18 @@ fn inspect_media_result(
         "duration".into(),
         json_number(inspected.duration_seconds, 3),
     );
-    meta.insert("generationStatus".into(), Value::String("none".into()));
+    meta.insert(
+        "generationStatus".into(),
+        Value::String(
+            generation_status_label(
+                entry
+                    .generation_input
+                    .as_ref()
+                    .and_then(|input| input.status),
+            )
+            .into(),
+        ),
+    );
     meta.insert("byteSize".into(), Value::from(inspected.byte_size));
     if let Some(file_name) = manifest_file_name(entry) {
         meta.insert("fileName".into(), Value::String(file_name));

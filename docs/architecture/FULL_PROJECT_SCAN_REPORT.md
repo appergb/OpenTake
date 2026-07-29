@@ -95,9 +95,9 @@
 
 **问题/风险**:
 - 38 个发现面工具均已脱离 `not yet implemented` 分支；`inspect_media` 已通过 Tauri `MediaBridge` 接入图片/视频抽帧及本地转写。
-- 生成/超分/Motion 六个兼容线名在生产后端完成前从 MCP、Chat 与系统提示隐藏；Lottie 源检查仍明确不支持。
-- 细节:生成作业/授权/恢复仍未实现，`canGenerate` 仍为 false；这些是未完成能力，不是可发现工具。
-- 严重性: **高** (AI 协作核心缺失 → transcript-driven 编辑等 workflow 不可用)。
+- 生成/超分四个工具已接共享生产 GenerationBridge：仅在托管或兼容 BYOK 凭据可用时动态发布；Motion 两个兼容线名仍隐藏，Lottie 源检查仍明确不支持。
+- 生成作业已具备成本授权、耐久占位/日志、进度、取消、部分成功、失败码、重试与重启恢复；结果下载受协议/地址/大小/重定向约束并在探测后原子导入。
+- 严重性: **中**（生成主竖切已闭合；高级 AI workflow、Motion 与付费真实账号冒烟仍属发布验证项）。
 
 **测试**: mcp_http.rs (传输) 存在；全工具执行弱。
 
@@ -122,7 +122,7 @@
 **问题/风险**:
 - Import: thumbnails 永远 None (media.rs:79，“placeholder”)、无进度/反馈、扩展静默丢弃、folder 浏览不全。
 - Export: H.264 spine 好，但 H265/ProRes 未接、无进度/取消。
-- Gen: 占位部分，但 agent 路径 stub。
+- Gen: image/video/audio/upscale 已从 MCP/Chat 走生产桥并有无付费网络的 provider 合约与应用集成测试；时间线视频源音频生成已预留渲染路径，但当前内置目录没有 `inputs:["video"]` 的音频模型，因此按能力拒绝。
 - Bundle 细微差异 (chat 目录名)。
 - 严重性: **中高** (工作流断裂)。
 

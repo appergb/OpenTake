@@ -257,9 +257,9 @@ impl ChatLoop {
     /// When the dispatcher lacks a media bridge, hide the bridge-dependent
     /// tools instead of advertising tools that would only fail at runtime.
     fn tool_catalog(&self) -> Vec<ToolSchema> {
-        ToolName::ALL
-            .iter()
-            .copied()
+        self.dispatcher
+            .advertised_tools()
+            .into_iter()
             .filter(|tool| {
                 self.dispatcher.has_media_bridge()
                     || !matches!(

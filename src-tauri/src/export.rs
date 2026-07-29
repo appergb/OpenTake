@@ -995,6 +995,7 @@ pub fn run_export(
 #[derive(Default)]
 pub(crate) struct ExportRunOptions<'a> {
     pub(crate) control: Option<&'a ExportControl>,
+    pub(crate) external_cancel: Option<MediaCancelToken>,
     pub(crate) on_progress: Option<AudioExportProgress>,
     pub(crate) frame_range: Option<(i32, i32)>,
     pub(crate) output_file: Option<File>,
@@ -1009,6 +1010,7 @@ pub(crate) fn run_export_with_control(
     mut options: ExportRunOptions<'_>,
 ) -> Result<ExportSummary, String> {
     let control = options.control;
+    let external_cancel = options.external_cancel.clone();
     let on_progress = options.on_progress;
     let defer_completion = options.defer_completion;
     let reserved_output = options.output_file.is_some();
@@ -1068,7 +1070,11 @@ pub(crate) fn run_export_with_control(
 
     let mut last_progress_emit = Instant::now();
     for f in start_frame..end_frame {
-        if control.is_some_and(|c| c.is_cancelled()) {
+        if control.is_some_and(|c| c.is_cancelled())
+            || external_cancel
+                .as_ref()
+                .is_some_and(MediaCancelToken::is_cancelled)
+        {
             // `abort` kills + waits on the ffmpeg child (unlike a plain `drop`,
             // which would orphan the process and race the file removal below).
             encoder.abort();
@@ -1927,6 +1933,7 @@ fn save_range_as_media_workflow(
         &req,
         ExportRunOptions {
             control: Some(control),
+            external_cancel: None,
             on_progress: Some(Arc::clone(&on_progress)),
             frame_range: Some((in_frame, out_frame)),
             output_file: Some(output_file),

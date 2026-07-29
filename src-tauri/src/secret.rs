@@ -22,14 +22,15 @@ pub struct SecretStatus {
     masked: String,
 }
 
-/// Allowed BYOK chat providers → stable keychain account strings, following the
-/// `<prefix>-api-key` convention from [`opentake_gen::keys`]. Validating the
-/// provider here means an unknown value can never address an arbitrary keychain
-/// entry — the only writable accounts are the three the UI offers.
+/// Allowed chat + generation providers → fixed keychain accounts. Validating
+/// here prevents arbitrary keychain account access from the WebView.
 fn account_for(provider: &str) -> Result<&'static str, String> {
     match provider {
         "anthropic" => Ok("anthropic-api-key"),
+        "fal" => Ok("fal-api-key"),
+        "replicate" => Ok("replicate-api-key"),
         "openai" => Ok("openai-api-key"),
+        "elevenlabs" => Ok("elevenlabs-api-key"),
         "google" => Ok("google-api-key"),
         other => Err(format!("unknown provider: {other}")),
     }
@@ -106,7 +107,10 @@ mod tests {
     #[test]
     fn account_mapping_is_stable_for_known_providers() {
         assert_eq!(account_for("anthropic").unwrap(), "anthropic-api-key");
+        assert_eq!(account_for("fal").unwrap(), "fal-api-key");
+        assert_eq!(account_for("replicate").unwrap(), "replicate-api-key");
         assert_eq!(account_for("openai").unwrap(), "openai-api-key");
+        assert_eq!(account_for("elevenlabs").unwrap(), "elevenlabs-api-key");
         assert_eq!(account_for("google").unwrap(), "google-api-key");
     }
 

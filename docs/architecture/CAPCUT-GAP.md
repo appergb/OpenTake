@@ -89,6 +89,7 @@
 - **前置依赖**:FFmpeg vidstab 路线仅依赖 ffmpeg-next(已有);自研路线依赖光流(与追踪共用);补偿应用依赖关键帧引擎/wgpu
 
 ### 画质超清修复(super-resolution / enhance) — `partial` · 难度 medium · 优先级 p1
+- **OpenTake 当前状态(2026-07-29)**:BYOK 云端 2x 超分竖切已完成。`upscale_media` 经共享 GenerationBridge 创建耐久占位、上传源素材、轮询 Replicate、校验结果尺寸严格为源宽高 2 倍并作为新资产导入；原资产字节与元数据保持不变。UI 已提供进度/取消/失败/重试，重试要求重新确认成本。确定性生产路径测试覆盖成功、取消不导入、恢复、鉴权/限流、源不变与精确 2x。本地 Real-ESRGAN/SeedVR 修复轨仍未实现，因此总体仍标 `partial`。
 - **判定依据**:上游有『Upscale』入口但纯云端、且仅放大不修复:AIEditTab『AI Enhance / Upscale / Enhance resolution with AI』(Inspector/AIEditTab.swift:31-36)、UpscaleModelConfig 从 Convex ModelCatalog 拉取(Generation/Catalog/UpscaleModelConfig.swift)、EditSubmitter.submitUpscale 把 sourceURL+durationSeconds 发后端(UpscaleModelConfig.swift:3-15)、需登录订阅否则禁用(ToolExecutor+Generate.swift:320)、video 仅 <2160 可放大(MODULE-PORT-MAP.md:528)。本地零推理。OpenTake 设计稿 Generation 章把它归为 cloud-rebuild,未规划本地超分实现(MODULE-PORT-MAP.md:231、ARCHITECTURE §8 只讲生成代理双模,未列本地 SR)。
 - **落点(crate/层)**:opentake-gen(BYOK 云超分,复刻 UpscaleGenerationParams + job 状态机,设计稿已含)+ 新增 opentake-media 本地超分 worker(ort/candle 跑 SR 模型)作为 OpenTake 增强项
 - **实现方案**:双轨。① 云端 BYOK(低成本起步、对齐上游):opentake-gen 已规划复刻 GenerationParams 联合类型与 job 抽象(ARCHITECTURE §8、ROADMAP Phase 9),upscale 作为其中一类,用户自带 fal/Replicate key 直连厂商超分模型(Topaz/SeedVR/Real-ESRGAN 端点),零运营成本,这是把上游云能力『去 Convex 化』的自然落点。② 本地推理(OpenTake 反超点,p2):经 ort 跑 Real-ESRGAN / SwinIR(图像)或 SeedVR2(视频,时序一致),复用 SigLIP2/RVM 同套 ONNX 通道与 ModelDownloader;『修复』(去噪/去压缩伪影/人脸增强 GFPGAN/CodeFormer)与『放大』分开提供,补上上游只放大不修复的短板。③ 处理结果作为新媒体资产回填时间线(沿用上游 upscale 回填语义)。
@@ -233,4 +234,3 @@
 - **落点(crate/层)**:opentake-gen(扩展 AudioGenerationParams 增加 referenceAudioURL/voiceId 字段 + provider adapter)+ services/opentake-gen-proxy(对接 ElevenLabs voice-clone / fal / MiniMax 等)+ 音色库管理(可存于 .opentake 工程或账户级)+ keyring 存厂商 key。
 - **实现方案**:本地无法稳定实现高质量克隆(需说话人编码+声码器大模型),走外部 API 最务实。两步:① 创建音色:用户提供参考音频样本→预签名上传→调 ElevenLabs Instant Voice Cloning / MiniMax voice clone 等→拿回一个 voiceId,存入音色库。② 使用:把该 voiceId 当作 TTS 的 voice 传入现有 generate_audio 流水线即可复用全部落轨逻辑。需扩展 OpenTake 既有的 AudioGenerationParams 联合类型(report03 已设计该 enum)加 referenceAudioURL/clonedVoiceId 字段,catalog 用 caps 标注"该模型支持克隆"。合规上需加"声音授权确认"。若坚持本地路线,可评估 OpenVoice/XTTS(candle/ort 跑)做轻量零样本音色迁移,但质量与多语稳定性远逊云端,定位为可选实验功能。
 - **前置依赖**:依赖 opentake-gen 生成后端 + 上传预签名 + keyring 密钥存储先就绪;依赖支持克隆的外部 provider;与 TTS(图文成片配音)、数字人驱动音频可串联复用。
-

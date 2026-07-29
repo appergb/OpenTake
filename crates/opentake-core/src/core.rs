@@ -40,7 +40,10 @@ use same_file::Handle;
 use crate::deps::CoreDeps;
 use crate::error::{CoreError, Result};
 use crate::events::{CoreEvent, EventBus, SubscriptionId};
-use crate::session::{EditorSession, ProbedMedia};
+use crate::session::{
+    EditorSession, GenerationJobCommit, GenerationStateUpdate, PreparedGenerationJob,
+    PreparedGenerationOutput, ProbedMedia,
+};
 
 type ProjectIdentityTransitionListener = Arc<dyn Fn(bool) + Send + Sync + 'static>;
 
@@ -674,6 +677,112 @@ impl AppCore {
     /// (`Export/ExportService.swift:186-197`). Reads are infallible.
     pub fn generation_log(&self) -> GenerationLog {
         self.lock().editor.generation_log().clone()
+    }
+
+    /// Persist placeholder assets and the queued audit event before a paid
+    /// provider request is submitted. No ids are returned unless the project
+    /// snapshot is durable.
+    pub fn begin_generation_job_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        plan: PreparedGenerationJob,
+    ) -> Result<GenerationJobCommit> {
+        self.persist_generation_mutation(
+            expected_project_epoch,
+            expected_project_dir,
+            |editor, ids| editor.begin_generation_job(plan, ids),
+        )
+    }
+
+    pub fn update_generation_job_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        job_id: &str,
+        update: GenerationStateUpdate,
+    ) -> Result<usize> {
+        self.persist_generation_mutation(
+            expected_project_epoch,
+            expected_project_dir,
+            |editor, ids| editor.update_generation_job(job_id, update, ids),
+        )
+    }
+
+    pub fn finalize_generation_output_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        output: PreparedGenerationOutput,
+    ) -> Result<()> {
+        self.persist_generation_mutation(
+            expected_project_epoch,
+            expected_project_dir,
+            |editor, ids| editor.finalize_generation_output(output, ids),
+        )
+    }
+
+    pub fn fail_generation_output_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        asset_id: &str,
+        error_code: &str,
+        created_at: Option<f64>,
+    ) -> Result<()> {
+        self.persist_generation_mutation(
+            expected_project_epoch,
+            expected_project_dir,
+            |editor, ids| editor.fail_generation_output(asset_id, error_code, created_at, ids),
+        )
+    }
+
+    pub fn cancel_generation_output_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        asset_id: &str,
+        created_at: Option<f64>,
+    ) -> Result<()> {
+        self.persist_generation_mutation(
+            expected_project_epoch,
+            expected_project_dir,
+            |editor, ids| editor.cancel_generation_output(asset_id, created_at, ids),
+        )
+    }
+
+    fn persist_generation_mutation<T>(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        mutate: impl FnOnce(&mut EditorSession, &dyn IdGen) -> Result<T>,
+    ) -> Result<T> {
+        let (value, count, written) = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            let checkpoint = session.editor.checkpoint_generation_state();
+            let result = (|| {
+                let value = mutate(&mut session.editor, self.ids.as_ref())?;
+                let written = session.editor.save_generation_state()?;
+                Ok((value, written))
+            })();
+            match result {
+                Ok((value, written)) => (value, session.editor.media().entries.len(), written),
+                Err(error) => {
+                    session.editor.restore_generation_state(checkpoint);
+                    return Err(error);
+                }
+            }
+        };
+        self.events.emit(&CoreEvent::MediaChanged {
+            project_epoch: expected_project_epoch,
+            count,
+        });
+        self.events.emit(&CoreEvent::ProjectSaved {
+            path: written.to_string_lossy().into_owned(),
+            project_epoch: expected_project_epoch,
+        });
+        Ok(value)
     }
 
     /// The open project's `.opentake` bundle directory, or `None` for an unsaved

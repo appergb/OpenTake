@@ -402,6 +402,7 @@ pub fn input_schema(tool: ToolName) -> Value {
 
         ToolName::GenerateVideo => object(
             json!({
+                "costAuthorized": {"type": "boolean", "description": "Required true. Set only after the user explicitly approves the paid generation request in this conversation."},
                 "prompt": {"type": "string", "description": "Text description of the video to generate"},
                 "name": {"type": "string", "description": "Display name for the asset in the media library. Defaults to first 30 chars of prompt."},
                 "model": {"type": "string", "description": "Model ID (e.g. 'veo3.1-fast'). Use list_models to see options. Defaults to first available model."},
@@ -417,25 +418,28 @@ pub fn input_schema(tool: ToolName) -> Value {
                 "referenceAudioMediaRefs": {"type": "array", "items": {"type": "string"}, "description": "Media asset IDs of audio references (Seedance only). Refer to them as @Audio1, @Audio2. See maxReferenceAudios and maxCombinedAudioRefSeconds."},
                 "folderId": {"type": "string", "description": "Optional. Folder id (from list_folders or create_folder) to place the result in. Omit for the project root."}
             }),
-            &["prompt"],
+            &["costAuthorized", "prompt"],
         ),
 
         ToolName::GenerateImage => object(
             json!({
+                "costAuthorized": {"type": "boolean", "description": "Required true. Set only after the user explicitly approves the paid generation request in this conversation."},
                 "prompt": {"type": "string", "description": "Text description of the image to generate"},
                 "name": {"type": "string", "description": "Display name for the asset in the media library. Defaults to first 30 chars of prompt."},
                 "model": {"type": "string", "description": "Model ID (e.g. 'nano-banana-pro'). Use list_models to see options. Defaults to first available model."},
                 "aspectRatio": {"type": "string", "description": "Aspect ratio (e.g. '16:9', '9:16')"},
                 "resolution": {"type": "string", "description": "Resolution (e.g. '2K', '4K')"},
                 "quality": {"type": "string", "description": "Image quality (e.g. 'low', 'medium', 'high'). Only supported by some models — see list_models."},
+                "numImages": {"type": "integer", "minimum": 1, "maximum": 4, "description": "Number of ordered image results to generate. Defaults to 1 and is capped at 4."},
                 "referenceMediaRefs": {"type": "array", "items": {"type": "string"}, "description": "Media asset IDs to use as reference images"},
                 "folderId": {"type": "string", "description": "Optional. Folder id (from list_folders or create_folder) to place the result in. Omit for the project root."}
             }),
-            &["prompt"],
+            &["costAuthorized", "prompt"],
         ),
 
         ToolName::GenerateAudio => object(
             json!({
+                "costAuthorized": {"type": "boolean", "description": "Required true. Set only after the user explicitly approves the paid generation request in this conversation."},
                 "prompt": {"type": "string", "description": "Required for TTS (the text to speak) and text-to-music (style/mood/genre; MiniMax needs ≥10 chars). For Lyria 3 Pro, include lyrics, tempo, language, and vocal style directly in the prompt. Optional style guide for video-to-music models."},
                 "name": {"type": "string", "description": "Display name for the asset in the media library. Defaults to first 30 chars of prompt."},
                 "model": {"type": "string", "description": "Model ID. Use list_models with type='audio' to see options and their 'inputs'. Defaults to the first model."},
@@ -449,16 +453,17 @@ pub fn input_schema(tool: ToolName) -> Value {
                 "videoSourceMediaRef": {"type": "string", "description": "Video-to-audio models only. Score this existing video asset instead of a timeline span. Mutually exclusive with the videoSource frames."},
                 "folderId": {"type": "string", "description": "Optional. Folder id (from list_folders or create_folder) to place the result in. Omit for the project root."}
             }),
-            &[],
+            &["costAuthorized"],
         ),
 
         ToolName::UpscaleMedia => object(
             json!({
+                "costAuthorized": {"type": "boolean", "description": "Required true. Set only after the user explicitly approves the paid upscale request in this conversation."},
                 "mediaRef": {"type": "string", "description": "ID of the video or image asset to upscale"},
                 "model": {"type": "string", "description": "Upscaler model ID (e.g. 'bytedance-upscaler', 'seedvr-image-upscaler'). Defaults to the first model that supports the asset's type."},
                 "sourceClipId": {"type": "string", "description": "Optional. Video clip id (from get_timeline) referencing mediaRef. When set and the clip is trimmed, only the clip's visible range is upscaled, not the full source."}
             }),
-            &["mediaRef"],
+            &["costAuthorized", "mediaRef"],
         ),
 
         ToolName::ImportMedia => object(

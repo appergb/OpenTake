@@ -30,6 +30,7 @@ use std::io::Read;
 use base64::Engine as _;
 
 use opentake_agent::mcp::core_handle::{AppCoreHandle, CoreHandle};
+use opentake_agent::mcp::generation::GenerationBridge;
 use opentake_agent::mcp::media_bridge::{
     BridgeError, ImportOutcome, ImportSource, InspectMediaRequest, InspectMediaResult,
     InspectResult, InspectedFrame, InspectedMediaFrame, MediaBridge, SearchCandidate,
@@ -252,7 +253,13 @@ pub(crate) fn build_registry(workflows_dir: &Path) -> PluginRegistry {
 /// the same paths the UI's [`MediaEngine`] uses, so the bridge's imports land in
 /// the same caches. A bind failure (port in use) is logged, not fatal — the app
 /// keeps running without the agent network face.
-pub fn spawn(core: AppCore, workflows_dir: PathBuf, cache_root: PathBuf, models_dir: PathBuf) {
+pub fn spawn(
+    core: AppCore,
+    workflows_dir: PathBuf,
+    cache_root: PathBuf,
+    models_dir: PathBuf,
+    generation_bridge: Arc<dyn GenerationBridge>,
+) {
     let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(core.clone()));
     let bridge = build_media_bridge(core, cache_root, models_dir);
     let registry = Arc::new(RwLock::new(build_registry(&workflows_dir)));
@@ -264,7 +271,15 @@ pub fn spawn(core: AppCore, workflows_dir: PathBuf, cache_root: PathBuf, models_
                 return;
             }
         };
-        if let Err(e) = server::serve_with_bridge(addr, handle, registry, Some(bridge)).await {
+        if let Err(e) = server::serve_with_bridges(
+            addr,
+            handle,
+            registry,
+            Some(bridge),
+            Some(generation_bridge),
+        )
+        .await
+        {
             eprintln!("[mcp] server stopped: {e}");
         }
     });

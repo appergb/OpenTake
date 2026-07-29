@@ -3402,6 +3402,7 @@ dependencies = [
  "same-file",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 
@@ -3531,6 +3532,7 @@ dependencies = [
  "cap-std",
  "cpal",
  "futures",
+ "futures-util",
  "image",
  "libc",
  "objc2-app-kit",
@@ -4180,6 +4182,7 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",

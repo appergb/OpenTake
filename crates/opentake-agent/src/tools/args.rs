@@ -682,6 +682,7 @@ impl ToolArgs for TightenSilencesArgs {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateVideoArgs {
+    pub cost_authorized: Option<bool>,
     pub prompt: String,
     pub name: Option<String>,
     pub model: Option<String>,
@@ -700,6 +701,7 @@ pub struct GenerateVideoArgs {
 impl ToolArgs for GenerateVideoArgs {
     const ALLOWED_KEYS: &'static [&'static str] = &[
         "prompt",
+        "costAuthorized",
         "name",
         "model",
         "duration",
@@ -720,23 +722,27 @@ impl ToolArgs for GenerateVideoArgs {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateImageArgs {
+    pub cost_authorized: Option<bool>,
     pub prompt: String,
     pub name: Option<String>,
     pub model: Option<String>,
     pub aspect_ratio: Option<String>,
     pub resolution: Option<String>,
     pub quality: Option<String>,
+    pub num_images: Option<i32>,
     pub reference_media_refs: Option<Vec<String>>,
     pub folder_id: Option<String>,
 }
 impl ToolArgs for GenerateImageArgs {
     const ALLOWED_KEYS: &'static [&'static str] = &[
         "prompt",
+        "costAuthorized",
         "name",
         "model",
         "aspectRatio",
         "resolution",
         "quality",
+        "numImages",
         "referenceMediaRefs",
         "folderId",
     ];
@@ -746,6 +752,7 @@ impl ToolArgs for GenerateImageArgs {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateAudioArgs {
+    pub cost_authorized: Option<bool>,
     pub prompt: Option<String>,
     pub name: Option<String>,
     pub model: Option<String>,
@@ -762,6 +769,7 @@ pub struct GenerateAudioArgs {
 impl ToolArgs for GenerateAudioArgs {
     const ALLOWED_KEYS: &'static [&'static str] = &[
         "prompt",
+        "costAuthorized",
         "name",
         "model",
         "voice",
@@ -780,12 +788,14 @@ impl ToolArgs for GenerateAudioArgs {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct UpscaleMediaArgs {
+    pub cost_authorized: Option<bool>,
     pub media_ref: String,
     pub model: Option<String>,
     pub source_clip_id: Option<String>,
 }
 impl ToolArgs for UpscaleMediaArgs {
-    const ALLOWED_KEYS: &'static [&'static str] = &["mediaRef", "model", "sourceClipId"];
+    const ALLOWED_KEYS: &'static [&'static str] =
+        &["costAuthorized", "mediaRef", "model", "sourceClipId"];
 }
 
 // --- import_media ---

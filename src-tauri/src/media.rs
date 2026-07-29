@@ -35,7 +35,8 @@ use opentake_core::{
     PreparedMediaFolderRef, PreparedMediaImportOp, ProbedMedia,
 };
 use opentake_domain::{
-    ClipType, GenerationInput, MediaManifest, MediaManifestEntry, MediaSource, Timeline,
+    ClipType, GenerationInput, GenerationJobStatus, MediaManifest, MediaManifestEntry, MediaSource,
+    Timeline,
 };
 use opentake_media::library::{FavoriteRequest, LibraryStore, PreparedFavorite};
 #[cfg(test)]
@@ -116,6 +117,10 @@ pub struct MediaItemDto {
     /// always `None` in practice — the Inspector renders those sections only
     /// when it is present, matching upstream's `if let gen = asset.generationInput`.
     pub generation_input: Option<GenerationInput>,
+    /// Durable async lifecycle projected from `generation_input`.
+    pub generation_status: String,
+    pub generation_progress: Option<f64>,
+    pub generation_error_code: Option<String>,
     /// `true` when the asset's source file is not on disk (moved / deleted /
     /// offline). Derived from file existence on every read (mirrors upstream
     /// `MediaResolver.isMissing`), so it clears automatically once a `relink_media`
@@ -144,9 +149,31 @@ impl MediaItemDto {
             // produced by importing (always external) but handled for safety.
             MediaSource::Project { .. } => None,
         };
-        // Missing = we can resolve a local source path and it doesn't exist.
+        let generation_input = entry.generation_input.as_ref();
+        let generation_status = match generation_input.and_then(|input| input.status) {
+            Some(GenerationJobStatus::Queued | GenerationJobStatus::Generating) => "generating",
+            Some(GenerationJobStatus::Downloading | GenerationJobStatus::Finalizing) => {
+                "downloading"
+            }
+            Some(GenerationJobStatus::Failed) => "failed",
+            Some(GenerationJobStatus::Cancelled) => "cancelled",
+            Some(GenerationJobStatus::Ready) | None => "none",
+        }
+        .to_string();
+        let generation_pending = matches!(
+            generation_input.and_then(|input| input.status),
+            Some(
+                GenerationJobStatus::Queued
+                    | GenerationJobStatus::Generating
+                    | GenerationJobStatus::Downloading
+                    | GenerationJobStatus::Finalizing
+            )
+        );
+        // Missing = a finalized source can resolve and is absent. Pending
+        // placeholders intentionally have no file yet and are not "offline".
         // An unresolvable (e.g. remote-only) source is not flagged missing.
-        let missing = resolved.as_ref().map(|p| !p.exists()).unwrap_or(false);
+        let missing =
+            !generation_pending && resolved.as_ref().map(|p| !p.exists()).unwrap_or(false);
         let thumbnail = if missing {
             None
         } else {
@@ -177,6 +204,9 @@ impl MediaItemDto {
             folder_id: entry.folder_id.clone(),
             file_size,
             generation_input: entry.generation_input.clone(),
+            generation_status,
+            generation_progress: generation_input.and_then(|input| input.progress),
+            generation_error_code: generation_input.and_then(|input| input.error_code.clone()),
             missing,
             favorite,
         }
@@ -4102,6 +4132,9 @@ mod tests {
             folder_id: None,
             file_size: Some(2048),
             generation_input: None,
+            generation_status: "none".into(),
+            generation_progress: None,
+            generation_error_code: None,
             missing: false,
             favorite: true,
         };

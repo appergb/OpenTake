@@ -100,6 +100,15 @@ struct BoundCredential {
     backend_url: String,
 }
 
+/// Stored, backend-bound credential for managed generation. The tuple remains
+/// inside the Rust process and is never returned by a Tauri command.
+pub(crate) fn generation_credential() -> Result<Option<(String, String)>, String> {
+    let store = keyring_store();
+    let backend = load_backend_url(&store)?;
+    Ok(load_bound_credential(&store, backend.as_deref())?
+        .map(|credential| (credential.backend_url, credential.token)))
+}
+
 fn advance_generation(runtime: &mut AccountRuntime) -> u64 {
     runtime.generation = runtime.generation.wrapping_add(1);
     runtime.generation

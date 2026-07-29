@@ -157,6 +157,15 @@ impl ToolName {
         ToolName::ApplyEffect,
     ];
 
+    /// Provider-backed tools appended to a host catalog only while its live
+    /// generation bridge reports usable authorization.
+    pub const GENERATION: [ToolName; 4] = [
+        ToolName::GenerateVideo,
+        ToolName::GenerateImage,
+        ToolName::GenerateAudio,
+        ToolName::UpscaleMedia,
+    ];
+
     /// Every recognized schema/wire name, including capabilities deliberately
     /// hidden from discovery until a real backend exists. Keeping this set lets
     /// strict argument validation and compatibility tests cover future tools

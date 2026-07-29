@@ -167,6 +167,14 @@ impl ProjectRoot {
         )
     }
 
+    /// Preserve the optional project cover across complete-bundle publication.
+    pub(crate) fn copy_thumbnail_to(&self, destination: &ProjectRoot) -> Result<()> {
+        if let Some(bytes) = self.read_optional(crate::layout::THUMBNAIL_FILE)? {
+            destination.write_atomic(crate::layout::THUMBNAIL_FILE, &bytes)?;
+        }
+        Ok(())
+    }
+
     fn copy_directory_component_to(
         &self,
         destination: &ProjectRoot,

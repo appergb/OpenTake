@@ -23,6 +23,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::clip_type::ClipType;
 
+/// Durable provider-neutral lifecycle for an asynchronous generated output.
+/// Stored with `GenerationInput` so the manifest is the recovery source of
+/// truth and never needs provider credentials or signed result URLs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GenerationJobStatus {
+    Queued,
+    Generating,
+    Downloading,
+    Finalizing,
+    Ready,
+    Failed,
+    Cancelled,
+}
+
 /// Where a media file lives. Encoded externally-tagged to match Swift's
 /// synthesized `Codable` for an enum with associated values:
 /// `{"external":{"absolutePath":"..."}}` / `{"project":{"relativePath":"..."}}`.
@@ -100,6 +115,41 @@ pub struct GenerationInput {
     /// Apple-reference-date seconds (see module note on dates).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<f64>,
+    /// Local durable job identity. Provider job ids remain private to the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    /// Non-secret provider routing prefix (`fal`, `replicate`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Provider job identity required for restart recovery. This is not a
+    /// credential and must never contain a result URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<GenerationJobStatus>,
+    /// Normalized 0..1 progress. Providers without progress report phase-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<f64>,
+    /// Fixed application-owned failure code; provider messages are never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// Stable ordered output index for N-result generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_index: Option<usize>,
+    /// Source asset provenance for upscale/edit flows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_asset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_clip_id: Option<String>,
+    /// Timeline span provenance for video-to-audio generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_start_frame: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_end_frame: Option<i32>,
+    /// Client-side estimate shown before submission; actual settled cost is
+    /// recorded once in the generation log when a provider supplies it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_cost_credits: Option<i64>,
 }
 
 /// Serializable manifest entry. 1:1 port of `MediaManifestEntry`.
@@ -460,7 +510,28 @@ impl MediaAsset {
             source_fps: entry.source_fps,
             has_audio: entry.has_audio.unwrap_or(false),
             generation_input: entry.generation_input.clone(),
-            generation_status: GenerationStatus::None,
+            generation_status: match entry
+                .generation_input
+                .as_ref()
+                .and_then(|input| input.status)
+            {
+                Some(GenerationJobStatus::Queued | GenerationJobStatus::Generating) => {
+                    GenerationStatus::Generating
+                }
+                Some(GenerationJobStatus::Downloading) => GenerationStatus::Downloading,
+                Some(GenerationJobStatus::Finalizing) => GenerationStatus::Rendering,
+                Some(GenerationJobStatus::Failed) => GenerationStatus::Failed(
+                    entry
+                        .generation_input
+                        .as_ref()
+                        .and_then(|input| input.error_code.clone())
+                        .unwrap_or_else(|| "GENERATION_FAILED".to_string()),
+                ),
+                Some(GenerationJobStatus::Cancelled) => {
+                    GenerationStatus::Failed("GENERATION_CANCELLED".to_string())
+                }
+                Some(GenerationJobStatus::Ready) | None => GenerationStatus::None,
+            },
             folder_id: entry.folder_id.clone(),
             pending_download_url: None,
             cached_remote_url: entry.cached_remote_url.clone(),

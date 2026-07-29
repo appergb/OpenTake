@@ -312,6 +312,9 @@ impl Project {
         if let Some(source) = media_source {
             source.copy_media_to(publisher.stage())?;
             source.copy_chat_sessions_to(publisher.stage())?;
+            if self.thumbnail.is_none() {
+                source.copy_thumbnail_to(publisher.stage())?;
+            }
         }
         publisher.publish()
     }

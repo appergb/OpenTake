@@ -168,21 +168,44 @@ pub fn build_params(
                 GenerationParams::Video(build_video_edit_params(input, uploaded))
             } else {
                 // Frame count: derive from start/end presence via image_urls slot.
-                let frame_count = input.image_urls.as_ref().map(|v| v.len()).unwrap_or(0);
-                let image_ref_count = input
-                    .reference_image_urls
+                let frame_count = input
+                    .image_url_asset_ids
                     .as_ref()
-                    .map(|v| v.len())
+                    .map(|values| values.len())
+                    .or_else(|| input.image_urls.as_ref().map(|values| values.len()))
+                    .unwrap_or(0);
+                let image_ref_count = input
+                    .reference_image_asset_ids
+                    .as_ref()
+                    .map(|values| values.len())
+                    .or_else(|| {
+                        input
+                            .reference_image_urls
+                            .as_ref()
+                            .map(|values| values.len())
+                    })
                     .unwrap_or(0);
                 let video_ref_count = input
-                    .reference_video_urls
+                    .reference_video_asset_ids
                     .as_ref()
-                    .map(|v| v.len())
+                    .map(|values| values.len())
+                    .or_else(|| {
+                        input
+                            .reference_video_urls
+                            .as_ref()
+                            .map(|values| values.len())
+                    })
                     .unwrap_or(0);
                 let audio_ref_count = input
-                    .reference_audio_urls
+                    .reference_audio_asset_ids
                     .as_ref()
-                    .map(|v| v.len())
+                    .map(|values| values.len())
+                    .or_else(|| {
+                        input
+                            .reference_audio_urls
+                            .as_ref()
+                            .map(|values| values.len())
+                    })
                     .unwrap_or(0);
                 GenerationParams::Video(build_video_params(
                     input,

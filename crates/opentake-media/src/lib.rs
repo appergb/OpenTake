@@ -45,6 +45,78 @@ pub mod waveform;
 
 use std::path::{Path, PathBuf};
 
+/// Materialize an exact visible source range as an uploadable MP4. This is used
+/// by generation/upscale when `sourceClipId` is supplied, so provider uploads
+/// receive the clip's trimmed source window instead of the complete asset.
+pub fn trim_video_range(
+    source: &Path,
+    destination: &Path,
+    start_seconds: f64,
+    end_seconds: f64,
+    cancel: &MediaCancelToken,
+) -> Result<()> {
+    if !start_seconds.is_finite()
+        || !end_seconds.is_finite()
+        || start_seconds < 0.0
+        || end_seconds <= start_seconds
+    {
+        return Err(MediaError::Ffmpeg(
+            "invalid trimmed generation source range".to_string(),
+        ));
+    }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let duration = end_seconds - start_seconds;
+    let mut child = std::process::Command::new(ff::ffmpeg_path())
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y"])
+        .arg("-ss")
+        .arg(format!("{start_seconds:.6}"))
+        .arg("-i")
+        .arg(source)
+        .arg("-t")
+        .arg(format!("{duration:.6}"))
+        .args([
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "18",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+        ])
+        .arg(destination)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| MediaError::Ffmpeg(format!("trim source spawn: {error}")))?;
+    loop {
+        if cancel.is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(destination);
+            return Err(MediaError::Cancelled);
+        }
+        if let Some(status) = child.try_wait()? {
+            if !status.success() || !destination.is_file() {
+                let _ = std::fs::remove_file(destination);
+                return Err(MediaError::Ffmpeg(
+                    "trimmed generation source could not be materialized".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 // --- flat re-exports of the public API ---
 
 pub use cancel::MediaCancelToken;
@@ -456,5 +528,40 @@ mod tests {
             "output has video stream(s): {}",
             v_streams.trim()
         );
+    }
+
+    #[test]
+    fn trim_video_range_materializes_only_visible_window_and_honors_cancel() {
+        use std::process::Command;
+        if !ff::ffmpeg_available() || !ff::ffprobe_available() {
+            eprintln!("skipping: ffmpeg/ffprobe unavailable");
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.mp4");
+        let trimmed = temp.path().join("trimmed.mp4");
+        let generated = Command::new(ff::ffmpeg_path())
+            .args(["-hide_banner", "-loglevel", "error", "-y"])
+            .args(["-f", "lavfi", "-i", "color=size=64x48:rate=24:duration=3"])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(generated.status.success());
+        let source_before = std::fs::read(&source).unwrap();
+
+        trim_video_range(&source, &trimmed, 0.75, 1.75, &MediaCancelToken::new()).unwrap();
+        let trimmed_probe = probe(&trimmed).unwrap();
+        assert!((trimmed_probe.duration_secs - 1.0).abs() < 0.2);
+        assert_eq!(std::fs::read(&source).unwrap(), source_before);
+
+        let cancelled_path = temp.path().join("cancelled.mp4");
+        let cancel = MediaCancelToken::new();
+        cancel.cancel();
+        assert!(matches!(
+            trim_video_range(&source, &cancelled_path, 0.0, 2.0, &cancel),
+            Err(MediaError::Cancelled)
+        ));
+        assert!(!cancelled_path.exists());
     }
 }

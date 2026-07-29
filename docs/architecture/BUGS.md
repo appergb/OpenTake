@@ -39,13 +39,13 @@
 
 ---
 
-### B4. `canGenerate` 硬编码为 `false`（中）
+### B4. `canGenerate` 硬编码为 `false`（已修复）
 
 | 属性 | 值 |
 |---|---|
-| **位置** | `crates/opentake-agent/src/tools/...` — 具体待定位 |
-| **描述** | Agent 工具的 `canGenerate` 返回值硬编码为 `false`，即使 BYOK key 已配置 |
-| **影响** | Agent 无法进行任何 AI 生成操作 |
+| **位置** | `crates/opentake-agent/src/mcp/{dispatch,generation}.rs`、`src-tauri/src/generation.rs` |
+| **修复** | `canGenerate` 由托管凭据或 fal/Replicate/OpenAI/ElevenLabs 兼容 BYOK 凭据动态派生；无可用凭据时四个付费工具不发布，有凭据时 MCP 与 Chat 共用同一异步生产桥 |
+| **验证** | `configured_capability_and_cost_authorization_gate_dispatch` 覆盖有/无能力与显式成本授权；生产 mock provider 路径覆盖 image/video/audio/upscale |
 
 ---
 
@@ -112,7 +112,7 @@
 | **B1** | swapMedia IPC 缺失 | 🔴 关键 | 单功能完全不可用 | 低（~10 行代码） |
 | **B2** | 前端帧数学截断不一致 | 🟠 高 | 所有媒体导入时长偏差 | 低（3 处 Math.round→floor） |
 | **B3** | rippleDeleteRanges 忽略 clipId | 🟠 高 | Agent 工具精度下降 | 中 |
-| **B4** | canGenerate 硬编码 false | 🟡 中 | AI 生成功能不可用 | 低 |
+| **B4** | canGenerate 硬编码 false（已修复） | ✅ 已关闭 | 动态生成能力已恢复 | — |
 | **D1** | 预览未接入 GPU 合成 | 🟠 高 | 所有编辑效果不可见 | 中 |
 | **D2** | Agent 工具 30% stub | 🟠 高 | AI 协作核心缺失 | 高 |
 | **D3** | 缩略图始终 None | 🟡 中 | 媒体库 UX 差 | 中 |
