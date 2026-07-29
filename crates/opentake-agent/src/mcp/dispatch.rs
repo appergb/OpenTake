@@ -5614,4 +5614,18 @@ mod tests {
         );
         assert!(r.is_error);
     }
+
+    /// Composite acceptance entry tracked by the data-safety implementation plan.
+    /// Keep this as an executable roll-up of the owning MCP boundary tests so the
+    /// audit command proves validation, mutation, undo, and bridge fail-closed
+    /// behavior together rather than merely matching a test name.
+    #[test]
+    fn cross_cutting_mcp_acceptance() {
+        precise_path_arg_error_mentions_field();
+        add_clips_then_get_timeline_reflects_clip();
+        add_captions_is_one_undo_step();
+        undo_with_empty_stack_errors();
+        import_media_bytes_rejects_oversized_base64_before_bridge();
+        import_media_rejects_unknown_nested_source_key();
+    }
 }

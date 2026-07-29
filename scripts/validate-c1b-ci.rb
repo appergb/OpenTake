@@ -18,7 +18,14 @@ module C1bCiValidator
     "safe-fs-unit" => "cargo test -p opentake-project --lib safe_fs -- --test-threads=1",
     "archive-security" => "cargo test -p opentake-project --test archive_security -- --test-threads=1",
   }.freeze
-  NORMAL_JOBS = %w[rust windows-security web windows-library-security safe-filesystem].freeze
+  NORMAL_JOBS = %w[
+    rust
+    windows-product
+    windows-security
+    web
+    windows-library-security
+    safe-filesystem
+  ].freeze
   ALL_JOBS = (NORMAL_JOBS + ["windows-red-evidence"]).freeze
   RUN_DIGESTS = {
     "Validate immutable SHA input" => "9047dcb191ffbcc36e39e563fed9d1f52d0ba4e4dd67052b5303405343f947ac",
@@ -142,6 +149,19 @@ module C1bCiValidator
       raise "#{job_name} must be disabled only during expected-RED dispatch" unless
         jobs.dig(job_name, "if") == NORMAL_CONDITION
     end
+
+    windows_product = jobs["windows-product"]
+    raise "missing Windows product job" unless windows_product.is_a?(Hash)
+    raise "Windows product TARGET_SHA must bind push, PR head, and dispatch independently" unless
+      windows_product.dig("env", "TARGET_SHA") == TARGET_EXPRESSION
+    product_checkouts = windows_product.fetch("steps", []).select do |step|
+      step["uses"] == "actions/checkout@v4"
+    end
+    raise "Windows product must contain one checkout@v4 step" unless product_checkouts.length == 1
+    raise "Windows product checkout must bind the immutable target without credentials" unless
+      product_checkouts.first["with"] == {
+        "ref" => "${{ env.TARGET_SHA }}", "fetch-depth" => 0, "persist-credentials" => false,
+      }
 
     job = jobs["safe-filesystem"]
     raise "missing safe-filesystem job and immutable SHA binding" unless job.is_a?(Hash)

@@ -1702,3 +1702,15 @@ fn swap_media_does_not_cascade_to_link_group_with_different_ref() {
     assert_eq!(v_clip.media_ref, "new_v");
     assert_eq!(a_clip.media_ref, "other"); // untouched
 }
+
+/// Composite acceptance entry tracked by the data-safety implementation plan.
+/// It rolls up command validation, linked edits, collision refusal, no-op
+/// semantics, and undo/redo through the public `apply` boundary.
+#[test]
+fn cross_cutting_command_acceptance() {
+    add_clips_rejects_incompatible_type();
+    split_linked_pair_splits_partner_and_regroups();
+    ripple_delete_ranges_refuses_when_sync_follower_collides();
+    undo_redo_restores_and_versions();
+    unchanged_command_does_not_push_undo_or_bump_version();
+}
