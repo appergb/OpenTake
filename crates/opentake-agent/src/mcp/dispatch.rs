@@ -12,9 +12,10 @@
 //! 7. shorten outbound ids in the result,
 //! 8. return the [`ToolResult`].
 //!
-//! Sync throughout: every wired (EXISTS-mapped) tool is synchronous. The async
-//! generation / media tools are stubs in this phase and return an honest
-//! "not yet implemented" so the tool table is complete.
+//! Sync throughout: every advertised (EXISTS-mapped) tool has a synchronous
+//! dispatch path. Future async generation and Motion tools retain known wire
+//! names for compatibility but stay out of discovery until their backends are
+//! production-ready.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -37,7 +38,8 @@ use serde_json::Value;
 use crate::mcp::core_handle::CoreHandle;
 use crate::mcp::gen_catalog;
 use crate::mcp::media_bridge::{
-    frame_to_block, ImportSource, InspectResult, MediaBridge, SearchCandidate, TranscriptSource,
+    frame_to_block, media_frame_to_block, BridgeErrorKind, ImportSource, InspectMediaRequest,
+    InspectMediaResult, InspectResult, MediaBridge, SearchCandidate, TranscriptSource,
     IMPORT_BYTES_BASE64_MAX,
 };
 use crate::plugin::registry::PluginRegistry;
@@ -56,6 +58,10 @@ use crate::tools::short_id;
 const INSPECT_TIMELINE_DEFAULT_FRAMES: i32 = 6;
 const INSPECT_TIMELINE_MAX_FRAMES: i32 = 12;
 const INSPECT_TIMELINE_MAX_DIMENSION: u32 = 512;
+const INSPECT_MEDIA_DEFAULT_FRAMES: usize = 6;
+const INSPECT_MEDIA_MAX_FRAMES: usize = 12;
+const INSPECT_MEDIA_MAX_SEGMENTS: usize = 400;
+const INSPECT_MEDIA_MAX_WORDS: usize = 10_000;
 
 /// The in-process tool dispatcher. Holds the [`CoreHandle`] boundary, the plugin
 /// registry (read-locked for the active plugin), and a per-dispatcher agent-undo
@@ -130,14 +136,19 @@ impl Dispatcher {
             );
         };
 
-        // Validate the complete wire shape before snapshots, side effects, or a
-        // not-yet-implemented stub can run. `run_body` still decodes the typed
-        // value it consumes after short-id expansion; this preflight is the
-        // fail-closed contract shared by every one of ToolName::ALL.
+        // Validate the complete wire shape before snapshots or side effects.
+        // Known-but-hidden compatibility names keep their strict schema
+        // contract, but a valid invocation is rejected below as unavailable.
         if let Err(error) = validate_tool_args(tool, &args) {
             return ToolResult::public_error(
                 PublicErrorKind::InvalidArguments(tool),
                 error.message,
+            );
+        }
+        if !ToolName::ALL.contains(&tool) {
+            return ToolResult::public_error(
+                PublicErrorKind::UnknownTool,
+                format!("Tool is not advertised: {}", tool.as_str()),
             );
         }
 
@@ -216,6 +227,7 @@ impl Dispatcher {
                 Ok(ToolResult::ok(json.to_string()))
             }
             ToolName::ListModels => self.list_models_catalog(args),
+            ToolName::InspectMedia => self.inspect_media(args, before, manifest),
 
             // --- Editing (wired to EditCommand) ---
             ToolName::AddClips => self.add_clips(args, manifest, op),
@@ -259,19 +271,17 @@ impl Dispatcher {
             ToolName::AddCaptions => self.add_captions(args, before, manifest),
             ToolName::SearchMedia => self.search_media(args, manifest),
 
-            // --- Not yet implementable in this phase (honest stubs) ---
-            // inspect_media still needs the analysis backend; generation/upscale
-            // need the async GenClient + BYOK auth. Motion graphics (#34) now
-            // routes through the planned Motion Canvas plugin: render mp4 ->
-            // import media -> place clip.
-            ToolName::InspectMedia
-            | ToolName::GenerateVideo
+            // --- Known but deliberately absent from discovery ---
+            // Generation/upscale need the async GenClient + BYOK auth. Motion
+            // graphics (#34) need the planned deterministic Motion Canvas path:
+            // render mp4 -> import media -> place clip.
+            ToolName::GenerateVideo
             | ToolName::GenerateImage
             | ToolName::GenerateAudio
             | ToolName::UpscaleMedia
             | ToolName::AddMotionGraphic
             | ToolName::EditMotionGraphic => Ok(ToolResult::error(format!(
-                "{}: not yet implemented",
+                "{}: capability is not advertised",
                 tool.as_str()
             ))),
         }
@@ -292,6 +302,92 @@ impl Dispatcher {
     }
 
     // MARK: - Render + import tool bodies (backed by the MediaBridge)
+
+    /// Inspect one raw source asset with real decoded frames and optional local
+    /// transcription. Manifest/clip/range validation stays in the dispatcher;
+    /// retained source resolution and IO stay behind [`MediaBridge`].
+    fn inspect_media(
+        &self,
+        args: &Value,
+        timeline: &Timeline,
+        manifest: &MediaManifest,
+    ) -> Result<ToolResult, ToolError> {
+        let a: InspectMediaArgs = decode_tool_args(args, "")?;
+        let Some(entry) = manifest
+            .entries
+            .iter()
+            .find(|entry| entry.id == a.media_ref)
+        else {
+            return Ok(ToolResult::public_error(
+                PublicErrorKind::ResourceNotFound(ToolName::InspectMedia),
+                format!("Media not found: {}", a.media_ref),
+            ));
+        };
+        if entry.kind == opentake_domain::ClipType::Text {
+            return Ok(ToolResult::public_error(
+                PublicErrorKind::CapabilityUnavailable(ToolName::InspectMedia),
+                "Text clips are not stored as media assets.",
+            ));
+        }
+
+        let mapping = if let Some(clip_id) = a.clip_id.as_deref() {
+            let clip = find_clip(timeline, clip_id)
+                .ok_or_else(|| ToolError::new(format!("Clip not found: {clip_id}")))?;
+            if clip.media_ref != entry.id {
+                return Err(ToolError::new(format!(
+                    "Clip {clip_id} does not reference mediaRef {} (it references {})",
+                    entry.id, clip.media_ref
+                )));
+            }
+            Some(clip)
+        } else {
+            None
+        };
+
+        let duration = entry.duration.max(0.0);
+        let range = inspect_media_range(a.start_seconds, a.end_seconds, duration)?;
+        let max_frames = a
+            .max_frames
+            .unwrap_or(INSPECT_MEDIA_DEFAULT_FRAMES as i32)
+            .clamp(1, INSPECT_MEDIA_MAX_FRAMES as i32) as usize;
+        let Some(bridge) = self.bridge.as_ref() else {
+            return Ok(ToolResult::public_error(
+                PublicErrorKind::CapabilityUnavailable(ToolName::InspectMedia),
+                "inspect_media: source inspection is not available in this build",
+            ));
+        };
+        let request = InspectMediaRequest {
+            media_ref: entry.id.clone(),
+            kind: entry.kind,
+            start_seconds: range.map(|value| value.0),
+            end_seconds: range.map(|value| value.1),
+            max_frames,
+            overview: a.overview.unwrap_or(false),
+        };
+        let inspected = match bridge.inspect_media(&request) {
+            Ok(inspected) => inspected,
+            Err(error) => {
+                let kind = match error.kind {
+                    BridgeErrorKind::Private => return Err(ToolError::new(error.message)),
+                    BridgeErrorKind::NotFound => {
+                        PublicErrorKind::ResourceNotFound(ToolName::InspectMedia)
+                    }
+                    BridgeErrorKind::Unavailable => {
+                        PublicErrorKind::CapabilityUnavailable(ToolName::InspectMedia)
+                    }
+                };
+                return Ok(ToolResult::public_error(kind, error.message));
+            }
+        };
+        inspect_media_result(
+            entry,
+            timeline.fps,
+            mapping,
+            &request,
+            inspected,
+            a.word_timestamps,
+        )
+    }
 
     /// `inspect_timeline`: composite one project frame, or `maxFrames` frames
     /// evenly sampled across `[startFrame, endFrame)`, downscaled for tokens.
@@ -2885,6 +2981,283 @@ fn parse_interpolation(s: &str) -> Option<Interpolation> {
     }
 }
 
+fn inspect_media_range(
+    start: Option<f64>,
+    end: Option<f64>,
+    duration: f64,
+) -> Result<Option<(f64, f64)>, ToolError> {
+    if start.is_none() && end.is_none() {
+        return Ok(None);
+    }
+    let start = start.unwrap_or(0.0).max(0.0);
+    let end = end.unwrap_or(duration).min(duration);
+    if start >= end {
+        return Err(ToolError::new(format!(
+            "Invalid time range [{start}, {end}] for media of duration {duration}s"
+        )));
+    }
+    Ok(Some((start, end)))
+}
+
+fn inspect_media_result(
+    entry: &opentake_domain::MediaManifestEntry,
+    timeline_fps: i32,
+    mapping: Option<&opentake_domain::Clip>,
+    request: &InspectMediaRequest,
+    inspected: InspectMediaResult,
+    include_words: Option<bool>,
+) -> Result<ToolResult, ToolError> {
+    if entry.kind.is_visual() && inspected.frames.is_empty() {
+        return Err(ToolError::new(format!(
+            "Failed to extract frames from {}",
+            entry.name
+        )));
+    }
+
+    let mut blocks: Vec<Block> = inspected.frames.iter().map(media_frame_to_block).collect();
+    let mut meta = serde_json::Map::new();
+    meta.insert("id".into(), Value::String(entry.id.clone()));
+    meta.insert("name".into(), Value::String(entry.name.clone()));
+    meta.insert(
+        "type".into(),
+        serde_json::to_value(entry.kind).unwrap_or(Value::Null),
+    );
+    meta.insert(
+        "duration".into(),
+        json_number(inspected.duration_seconds, 3),
+    );
+    meta.insert("generationStatus".into(), Value::String("none".into()));
+    meta.insert("byteSize".into(), Value::from(inspected.byte_size));
+    if let Some(file_name) = manifest_file_name(entry) {
+        meta.insert("fileName".into(), Value::String(file_name));
+    }
+    if let Some(width) = inspected.width {
+        meta.insert("sourceWidth".into(), Value::from(width));
+    }
+    if let Some(height) = inspected.height {
+        meta.insert("sourceHeight".into(), Value::from(height));
+    }
+    if let Some(fps) = inspected.fps {
+        meta.insert("sourceFPS".into(), json_number(fps, 3));
+    }
+    if let Some(input) = &entry.generation_input {
+        if let Ok(input) = serde_json::to_value(input) {
+            meta.insert("generationInput".into(), input);
+        }
+    }
+    if let (Some(start), Some(end)) = (request.start_seconds, request.end_seconds) {
+        meta.insert(
+            "timeRange".into(),
+            Value::Array(vec![json_number(start, 3), json_number(end, 3)]),
+        );
+    }
+
+    let frame_timestamps: Vec<Value> = inspected
+        .frames
+        .iter()
+        .map(|frame| json_number(frame.timestamp_seconds, 3))
+        .collect();
+    if request.overview {
+        let timestamps = inspected
+            .overview_timestamps
+            .iter()
+            .map(|timestamp| json_number(*timestamp, 3))
+            .collect::<Vec<_>>();
+        meta.insert(
+            "overview".into(),
+            serde_json::json!({"tileTimestamps": timestamps}),
+        );
+    } else if !frame_timestamps.is_empty() {
+        meta.insert("frameTimestamps".into(), Value::Array(frame_timestamps));
+    }
+
+    if entry.kind == opentake_domain::ClipType::Image {
+        if let Some(frame) = inspected.frames.first() {
+            meta.insert("mimeType".into(), Value::String(frame.media_type.clone()));
+            meta.insert("encodedByteSize".into(), Value::from(frame.bytes.len()));
+        }
+        if let (Some(width), Some(height)) = (inspected.width, inspected.height) {
+            meta.insert(
+                "imageProperties".into(),
+                serde_json::json!({"pixelWidth": width, "pixelHeight": height}),
+            );
+        }
+    }
+    if entry.kind == opentake_domain::ClipType::Video {
+        meta.insert("hasAudio".into(), Value::Bool(inspected.has_audio));
+    }
+
+    if let Some(transcript) = inspected.transcript.as_ref() {
+        let transcript = transcription_meta(
+            transcript,
+            mapping,
+            timeline_fps,
+            include_words.unwrap_or(false),
+        );
+        if entry.kind == opentake_domain::ClipType::Audio {
+            meta.extend(transcript);
+        } else {
+            meta.insert("transcription".into(), Value::Object(transcript));
+        }
+    } else if inspected.transcription_unavailable {
+        meta.insert(
+            "transcriptionError".into(),
+            Value::String("On-device transcription is unavailable.".into()),
+        );
+    }
+    if let Some(clip) = mapping {
+        meta.insert(
+            "timelineMapping".into(),
+            serde_json::json!({
+                "clipId": clip.id,
+                "clipStartFrame": clip.start_frame,
+                "clipEndFrame": clip.end_frame(),
+                "fps": timeline_fps,
+                "note": "transcription segments/words are project frames for this clip; out-of-range entries are dropped."
+            }),
+        );
+    }
+
+    blocks.push(Block::text(
+        round_floats_3dp(Value::Object(meta)).to_string(),
+    ));
+    Ok(ToolResult::blocks(blocks))
+}
+
+fn transcription_meta(
+    transcript: &opentake_media::TranscriptionResult,
+    mapping: Option<&opentake_domain::Clip>,
+    timeline_fps: i32,
+    include_words: bool,
+) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    out.insert(
+        "timing".into(),
+        Value::String(if mapping.is_some() {
+            "projectFrames".into()
+        } else {
+            "sourceSeconds".into()
+        }),
+    );
+    if let Some(language) = &transcript.language {
+        out.insert("language".into(), Value::String(language.clone()));
+    }
+
+    let segment_rows: Vec<(Value, f64)> = transcript
+        .segments
+        .iter()
+        .filter_map(|segment| {
+            let row = if let Some(clip) = mapping {
+                let (start, end) = opentake_media::transcribe::timeline::span_frames(
+                    segment.start,
+                    segment.end,
+                    clip,
+                    timeline_fps,
+                )?;
+                serde_json::json!([segment.text, start, end])
+            } else {
+                serde_json::json!([
+                    segment.text,
+                    json_number(segment.start, 2),
+                    json_number(segment.end, 2)
+                ])
+            };
+            Some((row, segment.end))
+        })
+        .collect();
+    out.insert(
+        "segments".into(),
+        Value::Array(
+            segment_rows
+                .iter()
+                .take(INSPECT_MEDIA_MAX_SEGMENTS)
+                .map(|(row, _)| row.clone())
+                .collect(),
+        ),
+    );
+    if segment_rows.len() > INSPECT_MEDIA_MAX_SEGMENTS {
+        out.insert("totalSegments".into(), Value::from(segment_rows.len()));
+        if let Some((_, end)) = segment_rows.get(INSPECT_MEDIA_MAX_SEGMENTS - 1) {
+            out.insert("nextStartSeconds".into(), json_number(*end, 2));
+        }
+        out.insert(
+            "segmentsNote".into(),
+            Value::String(format!(
+                "First {} of {} segments. Continue with startSeconds = nextStartSeconds.",
+                INSPECT_MEDIA_MAX_SEGMENTS,
+                segment_rows.len()
+            )),
+        );
+    }
+
+    if include_words {
+        let words: Vec<Value> = transcript
+            .words
+            .iter()
+            .filter_map(|word| {
+                let (Some(start), Some(end)) = (word.start, word.end) else {
+                    return None;
+                };
+                if let Some(clip) = mapping {
+                    let (start, end) = opentake_media::transcribe::timeline::span_frames(
+                        start,
+                        end,
+                        clip,
+                        timeline_fps,
+                    )?;
+                    Some(serde_json::json!([word.text, start, end]))
+                } else {
+                    Some(serde_json::json!([
+                        word.text,
+                        json_number(start, 2),
+                        json_number(end, 2)
+                    ]))
+                }
+            })
+            .collect();
+        out.insert(
+            "words".into(),
+            Value::Array(
+                words
+                    .iter()
+                    .take(INSPECT_MEDIA_MAX_WORDS)
+                    .cloned()
+                    .collect(),
+            ),
+        );
+        if words.len() > INSPECT_MEDIA_MAX_WORDS {
+            out.insert("totalWords".into(), Value::from(words.len()));
+            out.insert(
+                "wordsNote".into(),
+                Value::String(format!(
+                    "First {} of {} words. Narrow with startSeconds/endSeconds.",
+                    INSPECT_MEDIA_MAX_WORDS,
+                    words.len()
+                )),
+            );
+        }
+    }
+    out
+}
+
+fn manifest_file_name(entry: &opentake_domain::MediaManifestEntry) -> Option<String> {
+    let path = match &entry.source {
+        opentake_domain::MediaSource::External { absolute_path } => absolute_path,
+        opentake_domain::MediaSource::Project { relative_path } => relative_path,
+    };
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+}
+
+fn json_number(value: f64, places: i32) -> Value {
+    let factor = 10_f64.powi(places);
+    serde_json::Number::from_f64((value * factor).round() / factor)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
+}
+
 /// Round every float in a JSON tree to 3 decimal places (mirrors the encoder's
 /// `round3`), so `get_media` floats match the rest of the agent surface.
 fn round_floats_3dp(value: Value) -> Value {
@@ -3084,16 +3457,12 @@ mod tests {
     }
 
     #[test]
-    fn stub_tool_reports_not_implemented() {
+    fn hidden_tool_is_rejected_as_unadvertised() {
         let d = dispatcher_with(Arc::new(TestHandle::new()));
         let r = d.dispatch("generate_video", serde_json::json!({"prompt": "x"}));
         assert!(r.is_error);
-        assert!(
-            r.text_joined()
-                .contains("generate_video: not yet implemented"),
-            "{}",
-            r.text_joined()
-        );
+        assert_eq!(r.public_error_kind(), Some(PublicErrorKind::UnknownTool));
+        assert!(r.text_joined().contains("not advertised"));
     }
 
     #[test]
@@ -4270,8 +4639,9 @@ mod tests {
     // MARK: - MediaBridge tools (inspect_timeline / import_media)
 
     use crate::mcp::media_bridge::{
-        BridgeError, ImportOutcome, ImportSource, InspectResult, InspectedFrame, MediaBridge,
-        TranscriptSource, TranscriptSourceResult,
+        BridgeError, ImportOutcome, ImportSource, InspectMediaRequest, InspectMediaResult,
+        InspectResult, InspectedFrame, InspectedMediaFrame, MediaBridge, TranscriptSource,
+        TranscriptSourceResult,
     };
     use crate::tools::result::Block;
     use opentake_media::{TranscriptionResult, TranscriptionSegment, TranscriptionWord};
@@ -4289,6 +4659,7 @@ mod tests {
     #[derive(Default)]
     struct FakeBridge {
         inspect_calls: Mutex<Vec<(Vec<i32>, u32)>>,
+        media_inspect_calls: Mutex<Vec<InspectMediaRequest>>,
         import_calls: Mutex<Vec<ImportCall>>,
         /// Canned transcripts keyed by media_ref (source-seconds timings).
         transcripts: Mutex<std::collections::HashMap<String, TranscriptionResult>>,
@@ -4320,6 +4691,43 @@ mod tests {
     }
 
     impl MediaBridge for FakeBridge {
+        fn inspect_media(
+            &self,
+            request: &InspectMediaRequest,
+        ) -> Result<InspectMediaResult, BridgeError> {
+            self.media_inspect_calls
+                .lock()
+                .unwrap()
+                .push(request.clone());
+            let transcript = self
+                .transcripts
+                .lock()
+                .unwrap()
+                .get(&request.media_ref)
+                .cloned();
+            let frames = if request.kind.is_visual() {
+                vec![InspectedMediaFrame {
+                    timestamp_seconds: request.start_seconds.unwrap_or(0.25),
+                    bytes: vec![0xff, 0xd8, 0xff, 0xe0],
+                    media_type: "image/jpeg".into(),
+                }]
+            } else {
+                Vec::new()
+            };
+            Ok(InspectMediaResult {
+                frames,
+                overview_timestamps: Vec::new(),
+                duration_seconds: 1.0,
+                width: request.kind.is_visual().then_some(640),
+                height: request.kind.is_visual().then_some(360),
+                fps: (request.kind == ClipType::Video).then_some(30.0),
+                has_audio: request.kind == ClipType::Video,
+                byte_size: 4096,
+                transcript,
+                transcription_unavailable: false,
+            })
+        }
+
         fn transcribe_sources(
             &self,
             sources: &[TranscriptSource],
@@ -4441,6 +4849,134 @@ mod tests {
             Some(bridge.clone() as Arc<dyn MediaBridge>),
         );
         (d, bridge)
+    }
+
+    fn inspected_transcript() -> TranscriptionResult {
+        TranscriptionResult {
+            text: "hello world".into(),
+            language: Some("en".into()),
+            segments: vec![TranscriptionSegment {
+                text: "hello world".into(),
+                start: 0.0,
+                end: 1.0,
+            }],
+            words: vec![TranscriptionWord {
+                text: "hello".into(),
+                start: Some(0.0),
+                end: Some(0.5),
+            }],
+        }
+    }
+
+    #[test]
+    fn inspect_media_returns_real_blocks_metadata_and_transcript() {
+        let (d, bridge) = dispatcher_with_fake_bridge();
+        bridge
+            .transcripts
+            .lock()
+            .unwrap()
+            .insert("asset-1".into(), inspected_transcript());
+
+        let result = d.dispatch(
+            "inspect_media",
+            serde_json::json!({
+                "mediaRef": "asset-1",
+                "startSeconds": 0.1,
+                "endSeconds": 0.9,
+                "maxFrames": 99,
+                "wordTimestamps": true
+            }),
+        );
+        assert!(!result.is_error, "{}", result.text_joined());
+        assert!(matches!(result.content.first(), Some(Block::Image { .. })));
+        let text = result
+            .content
+            .iter()
+            .find_map(|block| match block {
+                Block::Text { text } if text.starts_with('{') => Some(text),
+                _ => None,
+            })
+            .expect("inspection metadata block");
+        let metadata: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(metadata["id"], "asset-1");
+        assert_eq!(metadata["type"], "video");
+        assert_eq!(metadata["timeRange"], serde_json::json!([0.1, 0.9]));
+        assert_eq!(metadata["transcription"]["timing"], "sourceSeconds");
+        assert_eq!(
+            metadata["transcription"]["segments"][0],
+            serde_json::json!(["hello world", 0.0, 1.0])
+        );
+        assert_eq!(
+            metadata["transcription"]["words"][0],
+            serde_json::json!(["hello", 0.0, 0.5])
+        );
+
+        let calls = bridge.media_inspect_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].max_frames, INSPECT_MEDIA_MAX_FRAMES);
+        assert_eq!(calls[0].start_seconds, Some(0.1));
+        assert_eq!(calls[0].end_seconds, Some(0.9));
+    }
+
+    #[test]
+    fn inspect_media_clip_mapping_uses_project_frames() {
+        let (d, bridge) = dispatcher_with_fake_bridge();
+        bridge
+            .transcripts
+            .lock()
+            .unwrap()
+            .insert("asset-1".into(), inspected_transcript());
+
+        let result = d.dispatch(
+            "inspect_media",
+            serde_json::json!({
+                "mediaRef": "asset-1",
+                "clipId": "clip-1",
+                "wordTimestamps": true
+            }),
+        );
+        assert!(!result.is_error, "{}", result.text_joined());
+        let metadata: Value = serde_json::from_str(
+            result
+                .content
+                .iter()
+                .find_map(|block| match block {
+                    Block::Text { text } if text.starts_with('{') => Some(text.as_str()),
+                    _ => None,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(metadata["transcription"]["timing"], "projectFrames");
+        assert_eq!(
+            metadata["transcription"]["segments"][0],
+            serde_json::json!(["hello world", 0, 30])
+        );
+        assert_eq!(metadata["timelineMapping"]["clipId"], "clip-1");
+    }
+
+    #[test]
+    fn inspect_media_rejects_missing_asset_and_invalid_range_before_io() {
+        let (d, bridge) = dispatcher_with_fake_bridge();
+        let missing = d.dispatch("inspect_media", serde_json::json!({"mediaRef": "ghost"}));
+        assert!(missing.is_error);
+        assert!(missing.text_joined().contains("Media not found: ghost"));
+        assert_eq!(
+            missing.public_error_kind(),
+            Some(PublicErrorKind::ResourceNotFound(ToolName::InspectMedia))
+        );
+
+        let invalid = d.dispatch(
+            "inspect_media",
+            serde_json::json!({
+                "mediaRef": "asset-1",
+                "startSeconds": 0.9,
+                "endSeconds": 0.1
+            }),
+        );
+        assert!(invalid.is_error);
+        assert!(invalid.text_joined().contains("Invalid time range"));
+        assert!(bridge.media_inspect_calls.lock().unwrap().is_empty());
     }
 
     #[test]

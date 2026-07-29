@@ -119,17 +119,18 @@ MCP 客户端 → /mcp (loopback 守卫) → McpServer::call_tool
 - **系统提示**：分段 base + 插件围栏注入。
 - **agent-undo 栈**：会话级，仅回退本会话 Agent 编辑。
 
-### 计划中 / stub（如实标注）
+### 计划中 / 隐藏能力（如实标注）
 
-- **honest stub**（解码参数后直接返回 "not yet implemented"）：`inspect_media` / `get_transcript` / `inspect_timeline` / `search_media`（需更宽的媒体后端 CoreHandle）、`generate_video` / `generate_image` / `generate_audio` / `upscale_media`（需异步 GenClient + BYOK 鉴权）、`import_media`、`add_captions`、`add_motion_graphic` / `edit_motion_graphic`（Motion Canvas，Issue #34）。
-- `smart_reframe`：返回错误（需视觉/显著性分析后端，`CoreHandle` 尚未暴露采样帧）。
+- `inspect_media` / `get_transcript` / `inspect_timeline` / `search_media` / `import_media` / `add_captions` 已接真实桌面媒体桥；`inspect_media` 的 Lottie 分支仍返回明确不支持。
+- `generate_video` / `generate_image` / `generate_audio` / `upscale_media`（异步 GenClient + BYOK）及 `add_motion_graphic` / `edit_motion_graphic`（Motion Canvas）仅保留于 `ToolName::KNOWN`，不进入 MCP/Chat 发现面或系统提示。
+- `smart_reframe`：返回结构化不可用原因（需视觉/显著性分析后端）。
 - `get_timeline` 的 `canGenerate` 恒为 `false`（生成后端未接线，让模型不会提议生成）。
 - `create_folder` / `move_to_folder` 的批量 `entries` 形式未接线（仅单条形式）。
 - **应用内聊天客户端**（`AgentService` 等价的 SSE 工具循环、BYOK Anthropic 直连）尚未落地。
 
-## 工具总数：**44 个**
+## 工具总数：**38 个发现面工具 / 44 个兼容线名**
 
-= **31 个上游对齐**（`tools::names::UPSTREAM`）+ **13 个 OpenTake 扩展**（`ALL` 减 `UPSTREAM`）。源：`crates/opentake-agent/src/tools/names.rs` 的 `ALL`（44）/ `UPSTREAM`（31）常量。
+源：`crates/opentake-agent/src/tools/names.rs` 的 `ALL`（38）/ `KNOWN`（44）/ `UPSTREAM`（31）常量。
 
 13 个扩展 = 分析驱动 4（`detect_beats` / `auto_cut_to_beats` / `smart_reframe` / `tighten_silences`）+ 工作流插件 3（`activate_workflow` / `list_workflows` / `deactivate_workflow`）+ A-tier 着色效果 4（`set_color_grade` / `chroma_key` / `set_mask` / `apply_effect`）+ Motion Canvas 2（`add_motion_graphic` / `edit_motion_graphic`）。
 

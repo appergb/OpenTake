@@ -60,7 +60,7 @@
   3. 应用内 chat(reqwest→Anthropic SSE,BYOK;prompt caching)。
   4. **OpenTake 增强**:分层可组合系统提示词 + 模型策略配置化;高阶工具 `remove_filler_words`/`tighten_silences`;写工具返回结构化 JSON;新增 `get_capabilities`。
 - **验证**:`claude mcp add` 能连;每个工具走通;应用内 chat 能完成多步链式编辑;助手专属 undo 正确。
-- **进度**:`list_models` 工具已从存根接到 `opentake-gen` 内置静态 catalog(#111,`?type=` 过滤 + `{ models, loaded }`,纯本地无网络/BYOK);`generate_*`/`upscale_media` 仍待 async + ProviderRegistry + BYOK。
+- **进度**:`list_models` 已接 `opentake-gen` 本地 catalog；`inspect_media` 已接桌面媒体桥并有图片端到端、视频故事板和转写契约测试。当前发现面发布 38 个真实路径工具；`generate_*`/`upscale_media`/Motion 六个兼容线名在 async ProviderRegistry + BYOK/确定性渲染完成前保持隐藏，仍是 Phase 7 未完成项。
 
 ## Phase 8 — 文字/字幕渲染 + 转写 + 语义搜索
 - **做**:cosmic-text + tiny-skia/Vello 文字渲染(阴影/描边/背景/对齐/换行,逐帧 opacity)接入合成器;whisper-rs 转写(word/segment 时间戳,`TranscriptionResult` 模型复用);candle/ort 跑 SigLIP2 + tokenizers 做视觉/口语搜索。

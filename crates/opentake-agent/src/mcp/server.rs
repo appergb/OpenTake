@@ -566,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_all_44_tools() {
+    fn lists_every_advertised_tool() {
         assert_eq!(McpServer::tools().len(), ToolName::ALL.len());
         // Names round-trip to the wire names.
         let names: Vec<String> = McpServer::tools()

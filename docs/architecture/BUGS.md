@@ -59,12 +59,12 @@
 | **描述** | GPU 合成的 infrastructure 已就绪（`composite_frame` Tauri 命令、`useTimelineFrame` hook 均存在），但 `Preview.tsx` 仍然使用 DOM `<video>`/`<img>` 路径渲染，未接入 `useTimelineFrame`。后果：看不到关键帧动画、transform/crop/text/effects，preview ≠ export |
 | **当前状态** | 已有完整的 wgpu 合成管线，只需在 Preview.tsx 中接入 `useTimelineFrame` hook |
 
-### D2. Agent/MCP 工具 12/40 为 stub（高）
+### D2. Agent/MCP 隐藏能力仍待生产后端（高）
 
 | 属性 | 值 |
 |---|---|
-| **位置** | `crates/opentake-agent/src/mcp/dispatch.rs:177-191` |
-| **描述** | 40 个工具中 12 个（30%）返回 `"not yet implemented"` stub 错误：InspectMedia、GetTranscript、InspectTimeline、SearchMedia、GenerateVideo/Image/Audio、UpscaleMedia、ImportMedia、AddCaptions、AddMotionGraphic、EditMotionGraphic。另有 `create_folder` 和 `move_to_folder` 的 batch 形式 stub |
+| **位置** | `crates/opentake-agent/src/tools/names.rs`、`crates/opentake-agent/src/mcp/dispatch.rs` |
+| **描述** | 发现面当前只发布 38 个有真实执行路径的工具。`inspect_media` 已连接桌面媒体桥，可检查图片、视频和音频（Lottie 仍明确不支持）；GenerateVideo/Image/Audio、UpscaleMedia、AddMotionGraphic、EditMotionGraphic 保留兼容线名但不进入 `ToolName::ALL`、MCP/Chat 目录或系统提示。它们的生产后端仍是 Beta 功能缺口，不能按已交付计算。 |
 
 ### D3. Media 缩略图始终返回 `None`（中）
 
