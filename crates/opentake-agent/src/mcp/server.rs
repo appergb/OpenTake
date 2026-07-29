@@ -31,6 +31,7 @@ use crate::mcp::media_bridge::{MediaBridge, MCP_REQUEST_BODY_MAX};
 use crate::plugin::registry::PluginRegistry;
 use crate::prompt::assemble::assemble_system_prompt;
 use crate::tools::descriptions::{description, input_schema};
+use crate::tools::errors::first_non_finite_json_number_path;
 use crate::tools::names::ToolName;
 use crate::tools::panic_boundary::with_redacted_dispatch_panic;
 
@@ -368,6 +369,43 @@ async fn content_type_guard(
     next.run(request).await
 }
 
+/// Buffer the already bounded MCP request once so non-standard JSON numeric
+/// tokens and exponent overflow can be rejected with the tool-relative path
+/// before rmcp's JSON decoder loses that context.
+async fn finite_number_guard(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    if request.method() != axum::http::Method::POST || request.uri().path() != "/mcp" {
+        return next.run(request).await;
+    }
+    let (parts, body) = request.into_parts();
+    let bytes = match axum::body::to_bytes(body, MCP_REQUEST_BODY_MAX).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                "OpenTake MCP request body is too large",
+            )
+                .into_response();
+        }
+    };
+    if let Some(path) = first_non_finite_json_number_path(&bytes) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("{path}: value must be finite"),
+        )
+            .into_response();
+    }
+    next.run(axum::http::Request::from_parts(
+        parts,
+        axum::body::Body::from(bytes),
+    ))
+    .await
+}
+
 /// Minimal OAuth protected-resource metadata: the server requires no auth (it is
 /// loopback-only), so it advertises no authorization servers.
 async fn oauth_protected_resource() -> axum::Json<Value> {
@@ -444,6 +482,7 @@ pub fn build_router_with_bridge_for_port(
             axum::routing::get(oauth_protected_resource),
         )
         .route_service("/mcp", service)
+        .layer(axum::middleware::from_fn(finite_number_guard))
         .layer(axum::middleware::from_fn(content_type_guard))
         .layer(axum::middleware::from_fn(protocol_version_guard))
         .layer(axum::middleware::from_fn_with_state(

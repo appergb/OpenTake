@@ -2381,7 +2381,7 @@
   - Visible/returned assertion: assert exact category-specific wording and entries[3].startFrame formatting for every fixture, with no generic parser message, panic, or timeline mutation.
   - Evidence required: record the owning code:<tracked-file>#<declared-symbol> and the passing test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-agent/tests/spec_agent_4_line_55_5d932c51ced061d6.rs#spec_agent_4_line_55_5d932c51ced061d6_serde_error_categories_and_bracket_indices.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-agent/src/tools/errors.rs#unknown_field_lists_sorted_allowed` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-agent/src/tools/errors.rs#nested_array_index_uses_brackets` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -2399,11 +2399,15 @@
 
   Expected: FAIL because one or more of the 5 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Historical note (2026-07-29): the missing exact-owned test was discovered by the completion audit, but a complete pre-fix RED transcript for all four focused commands was not retained. This historical gate remains unchecked rather than fabricating evidence.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-agent/src/tools/errors.rs#decode_tool_args`, `crates/opentake-agent/src/tools/errors.rs#validate_unknown_keys`, `crates/opentake-agent/src/tools/errors.rs#ToolArgs`, `docs/specs/agent/10-implementation.md`, `docs/specs/agent/4-execution-shell.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Rust boundary note (2026-07-29): standard `serde_json` rejects or loses the precise path for raw `NaN`/`Infinity` and exponent overflow before `decode_tool_args`. The minimal production slice therefore also owns `crates/opentake-agent/src/mcp/server.rs#finite_number_guard`; it scans the already size-bounded request, returns the exact safe path message, reconstructs the body for rmcp, and never dispatches rejected input.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-agent unknown_field_lists_sorted_allowed`
   - Run: `cargo test -p opentake-agent nested_array_index_uses_brackets`
@@ -2412,11 +2416,13 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-07-29: all focused tests passed, `cargo clippy --workspace --all-targets -- -D warnings` passed, and `cargo test --workspace --no-fail-fast` passed. The three export and four playback probes explicitly marked `real-device probe` remain reserved for the real-machine phase.
 
 ### Task 19: AG-timeline-tool-schema-dispatch (implementation-slice-cb53b36cf984d605)
 

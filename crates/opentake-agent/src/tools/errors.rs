@@ -79,11 +79,262 @@ pub fn first_non_finite_number_path(value: &Value, path: &str) -> Option<String>
             .iter()
             .enumerate()
             .find_map(|(i, v)| first_non_finite_number_path(v, &format!("{path}[{i}]"))),
-        Value::Object(map) => map
-            .iter()
-            .find_map(|(k, v)| first_non_finite_number_path(v, &format!("{path}.{k}"))),
+        Value::Object(map) => map.iter().find_map(|(k, v)| {
+            let child = if path.is_empty() {
+                k.clone()
+            } else {
+                format!("{path}.{k}")
+            };
+            first_non_finite_number_path(v, &child)
+        }),
         _ => None,
     }
+}
+
+/// Inspect bounded raw JSON before `serde_json`/rmcp decoding so JSON's
+/// non-standard `NaN`/`Infinity` tokens and finite-syntax overflow numbers can
+/// still receive the same path-precise tool error as in-process values.
+pub fn first_non_finite_json_number_path(input: &[u8]) -> Option<String> {
+    RawNumberPathScanner::new(input)
+        .scan_value("", 0)
+        .map(argument_relative_path)
+}
+
+const RAW_NUMBER_MAX_DEPTH: usize = 128;
+const RAW_NUMBER_MAX_PATH: usize = 256;
+
+struct RawNumberPathScanner<'a> {
+    input: &'a [u8],
+    cursor: usize,
+}
+
+impl<'a> RawNumberPathScanner<'a> {
+    fn new(input: &'a [u8]) -> Self {
+        Self { input, cursor: 0 }
+    }
+
+    fn scan_value(&mut self, path: &str, depth: usize) -> Option<String> {
+        if depth > RAW_NUMBER_MAX_DEPTH {
+            return None;
+        }
+        self.skip_whitespace();
+        match self.input.get(self.cursor).copied()? {
+            b'{' => self.scan_object(path, depth),
+            b'[' => self.scan_array(path, depth),
+            b'"' => {
+                self.scan_string()?;
+                None
+            }
+            b'-' if self.consume_word(b"-Infinity") => Some(path.to_string()),
+            b'N' if self.consume_word(b"NaN") => Some(path.to_string()),
+            b'I' if self.consume_word(b"Infinity") => Some(path.to_string()),
+            b'-' | b'0'..=b'9' => self.scan_number(path),
+            b't' => {
+                self.consume_word(b"true");
+                None
+            }
+            b'f' => {
+                self.consume_word(b"false");
+                None
+            }
+            b'n' => {
+                self.consume_word(b"null");
+                None
+            }
+            _ => {
+                self.cursor += 1;
+                None
+            }
+        }
+    }
+
+    fn scan_object(&mut self, path: &str, depth: usize) -> Option<String> {
+        self.cursor += 1;
+        loop {
+            self.skip_whitespace();
+            if self.input.get(self.cursor) == Some(&b'}') {
+                self.cursor += 1;
+                return None;
+            }
+            let key = self.scan_string()?;
+            self.skip_whitespace();
+            if self.input.get(self.cursor) != Some(&b':') {
+                return None;
+            }
+            self.cursor += 1;
+            let child_path = bounded_object_path(path, &key);
+            if let Some(found) = self.scan_value(&child_path, depth + 1) {
+                return Some(found);
+            }
+            self.skip_whitespace();
+            match self.input.get(self.cursor) {
+                Some(b',') => self.cursor += 1,
+                Some(b'}') => {
+                    self.cursor += 1;
+                    return None;
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    fn scan_array(&mut self, path: &str, depth: usize) -> Option<String> {
+        self.cursor += 1;
+        let mut index = 0;
+        loop {
+            self.skip_whitespace();
+            if self.input.get(self.cursor) == Some(&b']') {
+                self.cursor += 1;
+                return None;
+            }
+            let child_path = bounded_array_path(path, index);
+            if let Some(found) = self.scan_value(&child_path, depth + 1) {
+                return Some(found);
+            }
+            index += 1;
+            self.skip_whitespace();
+            match self.input.get(self.cursor) {
+                Some(b',') => self.cursor += 1,
+                Some(b']') => {
+                    self.cursor += 1;
+                    return None;
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    fn scan_string(&mut self) -> Option<String> {
+        let start = self.cursor;
+        if self.input.get(self.cursor) != Some(&b'"') {
+            return None;
+        }
+        self.cursor += 1;
+        while let Some(byte) = self.input.get(self.cursor).copied() {
+            match byte {
+                b'\\' => {
+                    self.cursor += 2;
+                }
+                b'"' => {
+                    self.cursor += 1;
+                    return serde_json::from_slice(&self.input[start..self.cursor]).ok();
+                }
+                _ => self.cursor += 1,
+            }
+        }
+        None
+    }
+
+    fn scan_number(&mut self, path: &str) -> Option<String> {
+        let start = self.cursor;
+        if self.input.get(self.cursor) == Some(&b'-') {
+            self.cursor += 1;
+        }
+        self.consume_digits();
+        if self.input.get(self.cursor) == Some(&b'.') {
+            self.cursor += 1;
+            self.consume_digits();
+        }
+        if self
+            .input
+            .get(self.cursor)
+            .is_some_and(|byte| matches!(byte, b'e' | b'E'))
+        {
+            self.cursor += 1;
+            if self
+                .input
+                .get(self.cursor)
+                .is_some_and(|byte| matches!(byte, b'+' | b'-'))
+            {
+                self.cursor += 1;
+            }
+            self.consume_digits();
+        }
+        let token = std::str::from_utf8(&self.input[start..self.cursor]).ok()?;
+        token
+            .parse::<f64>()
+            .ok()
+            .filter(|number| !number.is_finite())
+            .map(|_| path.to_string())
+    }
+
+    fn consume_digits(&mut self) {
+        while self.input.get(self.cursor).is_some_and(u8::is_ascii_digit) {
+            self.cursor += 1;
+        }
+    }
+
+    fn consume_word(&mut self, word: &[u8]) -> bool {
+        if !self.input[self.cursor..].starts_with(word) {
+            return false;
+        }
+        let end = self.cursor + word.len();
+        if self
+            .input
+            .get(end)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'))
+        {
+            return false;
+        }
+        self.cursor = end;
+        true
+    }
+
+    fn skip_whitespace(&mut self) {
+        while self
+            .input
+            .get(self.cursor)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            self.cursor += 1;
+        }
+    }
+}
+
+fn bounded_object_path(path: &str, key: &str) -> String {
+    if path == "$" || path.len() + key.len() + usize::from(!path.is_empty()) > RAW_NUMBER_MAX_PATH {
+        "$".to_string()
+    } else if path.is_empty() {
+        key.to_string()
+    } else {
+        format!("{path}.{key}")
+    }
+}
+
+fn bounded_array_path(path: &str, index: usize) -> String {
+    if path == "$" {
+        return "$".to_string();
+    }
+    let child = format!("{path}[{index}]");
+    if child.len() > RAW_NUMBER_MAX_PATH {
+        "$".to_string()
+    } else {
+        child
+    }
+}
+
+fn argument_relative_path(path: String) -> String {
+    for marker in ["params.arguments.", ".params.arguments."] {
+        if let Some(index) = path.find(marker) {
+            let relative = &path[index + marker.len()..];
+            return if safe_planned_non_finite_path(relative) {
+                relative.to_string()
+            } else {
+                "arguments".to_string()
+            };
+        }
+    }
+    "arguments".to_string()
+}
+
+fn safe_planned_non_finite_path(path: &str) -> bool {
+    let Some(index) = path
+        .strip_prefix("entries[")
+        .and_then(|tail| tail.strip_suffix("].startFrame"))
+    else {
+        return false;
+    };
+    !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// Decode `dict` into `T` with the full three-layer guard:
@@ -301,6 +552,33 @@ mod tests {
         assert_eq!(
             err.message,
             "entries[1].startFrame: missing required field 'startFrame'"
+        );
+    }
+
+    #[test]
+    fn non_finite_number_rejected_with_path() {
+        for number in ["NaN", "Infinity", "-Infinity", "1e400"] {
+            let body = format!(
+                r#"{{"jsonrpc":"2.0","params":{{"arguments":{{"entries":[0,1,2,{{"startFrame":{number}}}]}}}}}}"#
+            );
+            assert_eq!(
+                first_non_finite_json_number_path(body.as_bytes()).as_deref(),
+                Some("entries[3].startFrame"),
+                "{number}"
+            );
+        }
+        assert_eq!(
+            first_non_finite_json_number_path(
+                br#"{"params":{"arguments":{"entries":[{"startFrame":120.5}]}}}"#
+            ),
+            None
+        );
+        assert_eq!(
+            first_non_finite_json_number_path(
+                br#"{"params":{"arguments":{"callerOwnedSecret":Infinity}}}"#
+            )
+            .as_deref(),
+            Some("arguments")
         );
     }
 
