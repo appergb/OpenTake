@@ -113,8 +113,55 @@ impl ToolName {
         }
     }
 
-    /// All tools in registration order.
-    pub const ALL: [ToolName; 44] = [
+    /// Tools advertised to MCP and in-app Chat in registration order. Provider-
+    /// backed generation and Motion Canvas tools remain known wire names, but
+    /// stay out of discovery until their production backends are connected.
+    pub const ALL: [ToolName; 38] = [
+        ToolName::GetTimeline,
+        ToolName::GetMedia,
+        ToolName::InspectMedia,
+        ToolName::GetTranscript,
+        ToolName::InspectTimeline,
+        ToolName::SearchMedia,
+        ToolName::ListModels,
+        ToolName::AddClips,
+        ToolName::InsertClips,
+        ToolName::RemoveClips,
+        ToolName::RemoveTracks,
+        ToolName::MoveClips,
+        ToolName::SetClipProperties,
+        ToolName::SetKeyframes,
+        ToolName::SplitClip,
+        ToolName::RippleDeleteRanges,
+        ToolName::Undo,
+        ToolName::AddTexts,
+        ToolName::AddCaptions,
+        ToolName::DetectBeats,
+        ToolName::AutoCutToBeats,
+        ToolName::SmartReframe,
+        ToolName::TightenSilences,
+        ToolName::ImportMedia,
+        ToolName::ListFolders,
+        ToolName::CreateFolder,
+        ToolName::MoveToFolder,
+        ToolName::RenameMedia,
+        ToolName::RenameFolder,
+        ToolName::DeleteMedia,
+        ToolName::DeleteFolder,
+        ToolName::ActivateWorkflow,
+        ToolName::ListWorkflows,
+        ToolName::DeactivateWorkflow,
+        ToolName::SetColorGrade,
+        ToolName::ChromaKey,
+        ToolName::SetMask,
+        ToolName::ApplyEffect,
+    ];
+
+    /// Every recognized schema/wire name, including capabilities deliberately
+    /// hidden from discovery until a real backend exists. Keeping this set lets
+    /// strict argument validation and compatibility tests cover future tools
+    /// without advertising placeholder behavior to models.
+    pub const KNOWN: [ToolName; 44] = [
         ToolName::GetTimeline,
         ToolName::GetMedia,
         ToolName::InspectMedia,
@@ -200,7 +247,7 @@ impl ToolName {
 impl FromStr for ToolName {
     type Err = ();
     fn from_str(s: &str) -> Result<Self, ()> {
-        ToolName::ALL
+        ToolName::KNOWN
             .iter()
             .copied()
             .find(|t| t.as_str() == s)
@@ -218,8 +265,12 @@ mod tests {
     }
 
     #[test]
-    fn all_set_is_44() {
-        assert_eq!(ToolName::ALL.len(), 44);
+    fn advertised_set_is_38_and_known_set_is_44() {
+        assert_eq!(ToolName::ALL.len(), 38);
+        assert_eq!(ToolName::KNOWN.len(), 44);
+        assert!(ToolName::ALL
+            .iter()
+            .all(|tool| ToolName::KNOWN.contains(tool)));
     }
 
     #[test]
@@ -247,14 +298,17 @@ mod tests {
         for t in [ToolName::AddMotionGraphic, ToolName::EditMotionGraphic] {
             assert_eq!(ToolName::from_str(t.as_str()), Ok(t));
         }
-        // They are present in ALL exactly once each.
+        // They remain known for schema compatibility, but are not advertised
+        // until the production Motion Canvas renderer is wired.
         assert_eq!(
-            ToolName::ALL
+            ToolName::KNOWN
                 .iter()
                 .filter(|t| matches!(t, ToolName::AddMotionGraphic | ToolName::EditMotionGraphic))
                 .count(),
             2
         );
+        assert!(!ToolName::ALL.contains(&ToolName::AddMotionGraphic));
+        assert!(!ToolName::ALL.contains(&ToolName::EditMotionGraphic));
         // ...and are NOT part of the 31 upstream tools.
         assert!(!ToolName::UPSTREAM.contains(&ToolName::AddMotionGraphic));
         assert!(!ToolName::UPSTREAM.contains(&ToolName::EditMotionGraphic));

@@ -251,7 +251,8 @@ impl ChatLoop {
     }
 
     /// The tool catalog in the OpenAI function-calling shape. Built fresh per
-    /// turn (cheap; ~44 tools) so the model always sees the current schema.
+    /// turn (cheap; currently 38 live tools) so the model always sees the
+    /// current fail-closed catalog.
     ///
     /// When the dispatcher lacks a media bridge, hide the bridge-dependent
     /// tools instead of advertising tools that would only fail at runtime.
@@ -261,7 +262,10 @@ impl ChatLoop {
             .copied()
             .filter(|tool| {
                 self.dispatcher.has_media_bridge()
-                    || !matches!(tool, ToolName::InspectTimeline | ToolName::ImportMedia)
+                    || !matches!(
+                        tool,
+                        ToolName::InspectMedia | ToolName::InspectTimeline | ToolName::ImportMedia
+                    )
             })
             .map(|tool| ToolSchema {
                 name: tool.as_str().to_string(),
@@ -603,6 +607,7 @@ mod tests {
         let loop_ = build_loop(talking_head_timeline(), Arc::new(MemoryKeyStore::new()));
         let tools = loop_.tool_catalog();
         assert!(tools.iter().any(|t| t.name == "tighten_silences"));
+        assert!(!tools.iter().any(|t| t.name == "inspect_media"));
         assert!(!tools.iter().any(|t| t.name == "inspect_timeline"));
         assert!(!tools.iter().any(|t| t.name == "import_media"));
     }

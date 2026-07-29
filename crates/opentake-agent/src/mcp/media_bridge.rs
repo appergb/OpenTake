@@ -23,6 +23,7 @@
 //! Both methods default to `Err("unsupported")` so a hand-rolled bridge (or the
 //! absence of one) never breaks the build.
 
+use opentake_domain::ClipType;
 use opentake_media::{MediaCancelToken, TranscriptionResult};
 
 use crate::tools::result::Block;
@@ -66,6 +67,50 @@ pub struct InspectResult {
     pub height: u32,
 }
 
+/// One raw-source frame produced for `inspect_media`.
+#[derive(Debug, Clone)]
+pub struct InspectedMediaFrame {
+    /// Actual source timestamp decoded for this image.
+    pub timestamp_seconds: f64,
+    /// Encoded image bytes (JPEG in the desktop bridge).
+    pub bytes: Vec<u8>,
+    /// MIME type of `bytes`.
+    pub media_type: String,
+}
+
+/// Validated source-inspection request. The dispatcher owns tool arguments and
+/// manifest/clip validation; the desktop bridge owns retained source resolution,
+/// probing, decoding, and transcription.
+#[derive(Debug, Clone)]
+pub struct InspectMediaRequest {
+    pub media_ref: String,
+    pub kind: ClipType,
+    pub start_seconds: Option<f64>,
+    pub end_seconds: Option<f64>,
+    pub max_frames: usize,
+    pub overview: bool,
+}
+
+/// Backend facts and content returned for `inspect_media`. The dispatcher turns
+/// this neutral result into image blocks plus the compact upstream JSON shape.
+#[derive(Debug, Clone)]
+pub struct InspectMediaResult {
+    pub frames: Vec<InspectedMediaFrame>,
+    /// Source timestamps represented by a single overview storyboard image.
+    /// Empty for ordinary per-frame inspection.
+    pub overview_timestamps: Vec<f64>,
+    pub duration_seconds: f64,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub fps: Option<f64>,
+    pub has_audio: bool,
+    pub byte_size: u64,
+    pub transcript: Option<TranscriptionResult>,
+    /// True when visual inspection succeeded but local ASR was unavailable or
+    /// failed. Private backend diagnostics never cross this trait boundary.
+    pub transcription_unavailable: bool,
+}
+
 /// The outcome of an `import_media` call, mirroring upstream's `.ok("…")` string
 /// results. The dispatcher wraps `message` in a [`crate::tools::result::ToolResult`].
 #[derive(Debug, Clone)]
@@ -104,6 +149,16 @@ pub enum ImportSource {
 pub struct BridgeError {
     /// Private diagnostic text; never expose it directly to a model.
     pub message: String,
+    /// Fixed classification used to expose a safe recovery contract without
+    /// forwarding the private diagnostic.
+    pub kind: BridgeErrorKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeErrorKind {
+    Private,
+    NotFound,
+    Unavailable,
 }
 
 impl BridgeError {
@@ -111,6 +166,21 @@ impl BridgeError {
     pub fn new(message: impl Into<String>) -> Self {
         BridgeError {
             message: message.into(),
+            kind: BridgeErrorKind::Private,
+        }
+    }
+
+    pub fn not_found(message: impl Into<String>) -> Self {
+        BridgeError {
+            message: message.into(),
+            kind: BridgeErrorKind::NotFound,
+        }
+    }
+
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        BridgeError {
+            message: message.into(),
+            kind: BridgeErrorKind::Unavailable,
         }
     }
 }
@@ -255,6 +325,18 @@ pub struct SearchMediaResult {
 /// so the [`Dispatcher`](super::dispatch::Dispatcher) can hold `Arc<dyn
 /// MediaBridge>` across threads (matching [`CoreHandle`](super::core_handle)).
 pub trait MediaBridge: Send + Sync {
+    /// Inspect one source asset with real decoded frames and optional on-device
+    /// transcription. The default is explicitly unavailable so non-desktop
+    /// embedders do not advertise a fake success.
+    fn inspect_media(
+        &self,
+        _request: &InspectMediaRequest,
+    ) -> Result<InspectMediaResult, BridgeError> {
+        Err(BridgeError::new(
+            "inspect_media: source inspection is not available in this build",
+        ))
+    }
+
     /// Transcribe each unique source for `get_transcript`, caching so a
     /// re-transcribe is instant. Per-source errors are returned inline (never
     /// fatal), matching upstream's skip-don't-fail loop. The default reports
@@ -340,9 +422,18 @@ pub trait MediaBridge: Send + Sync {
 /// bytes (rmcp image content is base64). Kept here so the dispatcher stays free of
 /// encoding concerns.
 pub fn frame_to_block(frame: &InspectedFrame) -> Block {
+    encoded_image_to_block(&frame.bytes, &frame.media_type)
+}
+
+/// Convert a raw-source inspection frame into an MCP image block.
+pub fn media_frame_to_block(frame: &InspectedMediaFrame) -> Block {
+    encoded_image_to_block(&frame.bytes, &frame.media_type)
+}
+
+fn encoded_image_to_block(bytes: &[u8], media_type: &str) -> Block {
     use base64::Engine as _;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&frame.bytes);
-    Block::image(b64, frame.media_type.clone())
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Block::image(b64, media_type)
 }
 
 #[cfg(test)]
@@ -358,6 +449,22 @@ mod tests {
     fn default_inspect_timeline_is_unsupported() {
         let b = NoopBridge;
         let err = b.inspect_timeline(&[0], 512).unwrap_err();
+        assert!(err.message.contains("not available"), "{}", err.message);
+    }
+
+    #[test]
+    fn default_inspect_media_is_unsupported() {
+        let b = NoopBridge;
+        let err = b
+            .inspect_media(&InspectMediaRequest {
+                media_ref: "asset".into(),
+                kind: ClipType::Video,
+                start_seconds: None,
+                end_seconds: None,
+                max_frames: 6,
+                overview: false,
+            })
+            .unwrap_err();
         assert!(err.message.contains("not available"), "{}", err.message);
     }
 

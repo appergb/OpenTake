@@ -8,6 +8,8 @@
 
 枚举顺序严格按 `ToolName`（`ToolDefinitions.swift:4-36`）：`get_timeline, get_media, add_clips, insert_clips, remove_clips, remove_tracks, move_clips, set_clip_properties, set_keyframes, split_clip, ripple_delete_ranges, undo, add_texts, add_captions, generate_video, generate_image, generate_audio, upscale_media, import_media, list_models, inspect_media, get_transcript, inspect_timeline, search_media, list_folders, create_folder, move_to_folder, rename_media, rename_folder, delete_media, delete_folder`。
 
+> 这是上游 31 工具契约清单，不等于当前发现面。OpenTake 目前在 `ToolName::KNOWN` 保留 44 个兼容线名，仅将 38 个真实路径工具放入 `ToolName::ALL`；`generate_video`、`generate_image`、`generate_audio`、`upscale_media`、`add_motion_graphic`、`edit_motion_graphic` 在生产后端完成前不会出现在 MCP/Chat 目录或系统提示中。
+
 ### A. 读 / 内省（只读，7 个）
 
 | # | 工具 | 关键参数（schema 字段；`*`=required） | required 字段 | 背后命令（opentake-core） | Context Signal 附加（§6） |

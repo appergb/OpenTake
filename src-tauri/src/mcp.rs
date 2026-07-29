@@ -31,9 +31,10 @@ use base64::Engine as _;
 
 use opentake_agent::mcp::core_handle::{AppCoreHandle, CoreHandle};
 use opentake_agent::mcp::media_bridge::{
-    BridgeError, ImportOutcome, ImportSource, InspectResult, InspectedFrame, MediaBridge,
-    SearchCandidate, SearchIndexState, SearchMediaResult, SearchSpokenHit, SearchVisualHit,
-    TranscriptSource, TranscriptSourceResult, IMPORT_BYTES_DECODED_MAX,
+    BridgeError, ImportOutcome, ImportSource, InspectMediaRequest, InspectMediaResult,
+    InspectResult, InspectedFrame, InspectedMediaFrame, MediaBridge, SearchCandidate,
+    SearchIndexState, SearchMediaResult, SearchSpokenHit, SearchVisualHit, TranscriptSource,
+    TranscriptSourceResult, IMPORT_BYTES_DECODED_MAX,
 };
 use opentake_agent::mcp::server;
 use opentake_agent::plugin::registry::PluginRegistry;
@@ -42,7 +43,7 @@ use opentake_core::{
     ProjectRuntimeSnapshot,
 };
 use opentake_domain::{ClipType, MediaSource, TextStyle};
-use opentake_media::{decode_frame_at, FrameRequest, MediaEngine};
+use opentake_media::{decode_frame_at, decode_frames_at, FrameRequest, MediaEngine, RgbaFrame};
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::{
     build_render_plan, even, Compositor, CosmicTextRasterizer, DecodedFrame, GpuTexture,
@@ -55,6 +56,10 @@ use crate::library::ProjectMediaCapability;
 /// JPEG quality `inspect_timeline` encodes composited frames at (upstream
 /// `inspectTimelineJPEGQuality = 0.7`). `image` takes a 0–100 byte.
 const INSPECT_JPEG_QUALITY: u8 = 70;
+const INSPECT_MEDIA_FRAME_MAX_DIMENSION: u32 = 512;
+const INSPECT_MEDIA_OVERVIEW_TILES: usize = 36;
+const INSPECT_MEDIA_OVERVIEW_COLUMNS: u32 = 6;
+const INSPECT_MEDIA_OVERVIEW_TILE: (u32, u32) = (192, 108);
 
 /// Per-frame texture cache size — bounds VRAM during a multi-frame inspect.
 const TEXTURE_CACHE_CAP: usize = 64;
@@ -314,6 +319,13 @@ fn resolve_transcript_batch(
 }
 
 impl MediaBridge for TauriMediaBridge {
+    fn inspect_media(
+        &self,
+        request: &InspectMediaRequest,
+    ) -> Result<InspectMediaResult, BridgeError> {
+        inspect_source_media(&self.core, &self.engine, request)
+    }
+
     fn inspect_timeline(
         &self,
         frames: &[i32],
@@ -1178,6 +1190,242 @@ fn short_uuid() -> String {
     format!("{:08x}", (nanos as u64) & 0xffff_ffff)
 }
 
+// MARK: - Raw-source inspection for inspect_media
+
+fn inspect_source_media(
+    core: &AppCore,
+    engine: &MediaEngine,
+    request: &InspectMediaRequest,
+) -> Result<InspectMediaResult, BridgeError> {
+    let snapshot = core.runtime_snapshot();
+    let entry = snapshot
+        .media
+        .entries
+        .iter()
+        .find(|entry| entry.id == request.media_ref)
+        .ok_or_else(|| {
+            BridgeError::not_found("inspect_media: media is not in the active project")
+        })?;
+    if entry.kind != request.kind {
+        return Err(BridgeError::unavailable(
+            "inspect_media: media type changed before inspection",
+        ));
+    }
+    if entry.kind == ClipType::Text {
+        return Err(BridgeError::unavailable(
+            "inspect_media: text clips are not source media",
+        ));
+    }
+    if entry.kind == ClipType::Lottie {
+        return Err(BridgeError::unavailable(
+            "inspect_media: Lottie rendering is not available in this build",
+        ));
+    }
+
+    let (path, _) =
+        crate::transcribe::resolve_asset_from_snapshot(&snapshot, &request.media_ref)
+            .map_err(|_| BridgeError::unavailable("inspect_media: source media is offline"))?;
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|_| BridgeError::unavailable("inspect_media: source media is unavailable"))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err(BridgeError::unavailable(
+            "inspect_media: source media is not a regular file",
+        ));
+    }
+    let byte_size = metadata.len();
+
+    if entry.kind == ClipType::Image {
+        let frame =
+            opentake_media::thumbnail::image_thumbnail(&path, INSPECT_MEDIA_FRAME_MAX_DIMENSION)
+                .map_err(|_| BridgeError::new("inspect_media: failed to decode image"))?;
+        let width = frame.width;
+        let height = frame.height;
+        let bytes = encode_rgba_jpeg(&frame)
+            .ok_or_else(|| BridgeError::new("inspect_media: failed to encode image"))?;
+        return Ok(InspectMediaResult {
+            frames: vec![InspectedMediaFrame {
+                timestamp_seconds: 0.0,
+                bytes,
+                media_type: "image/jpeg".into(),
+            }],
+            overview_timestamps: Vec::new(),
+            duration_seconds: entry.duration.max(0.0),
+            width: Some(width),
+            height: Some(height),
+            fps: None,
+            has_audio: false,
+            byte_size,
+            transcript: None,
+            transcription_unavailable: false,
+        });
+    }
+
+    let probe = engine
+        .probe(&path)
+        .map_err(|_| BridgeError::new("inspect_media: failed to probe source media"))?;
+    let duration = if probe.duration_secs.is_finite() && probe.duration_secs > 0.0 {
+        probe.duration_secs
+    } else {
+        entry.duration.max(0.0)
+    };
+    let start = request.start_seconds.unwrap_or(0.0).clamp(0.0, duration);
+    let end = request.end_seconds.unwrap_or(duration).clamp(0.0, duration);
+    if start >= end {
+        return Err(BridgeError::new(
+            "inspect_media: requested time range is outside the source",
+        ));
+    }
+
+    let (frames, overview_timestamps) = if entry.kind == ClipType::Video {
+        inspect_video_frames(&path, start, end, request.max_frames, request.overview)?
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    let (transcript, transcription_unavailable) = if probe.has_audio {
+        match inspect_media_transcript(engine, &path, entry.kind == ClipType::Video, (start, end)) {
+            Ok(transcript) => (Some(transcript), false),
+            Err(error) => {
+                eprintln!("[mcp] inspect_media transcription unavailable: {error}");
+                (None, true)
+            }
+        }
+    } else {
+        (None, false)
+    };
+
+    Ok(InspectMediaResult {
+        frames,
+        overview_timestamps,
+        duration_seconds: duration,
+        width: probe.width,
+        height: probe.height,
+        fps: probe.fps,
+        has_audio: probe.has_audio,
+        byte_size,
+        transcript,
+        transcription_unavailable,
+    })
+}
+
+fn inspect_video_frames(
+    path: &Path,
+    start: f64,
+    end: f64,
+    requested_frames: usize,
+    overview: bool,
+) -> Result<(Vec<InspectedMediaFrame>, Vec<f64>), BridgeError> {
+    let count = if overview {
+        INSPECT_MEDIA_OVERVIEW_TILES
+    } else {
+        requested_frames.max(1)
+    };
+    let times = (0..count)
+        .map(|index| start + (end - start) * (index as f64 + 0.5) / count as f64)
+        .collect::<Vec<_>>();
+    let decode = FrameRequest {
+        time_secs: 0.0,
+        max_size: (
+            INSPECT_MEDIA_FRAME_MAX_DIMENSION,
+            INSPECT_MEDIA_FRAME_MAX_DIMENSION,
+        ),
+        tolerance_secs: 0.25,
+        apply_rotation: true,
+    };
+    let decoded = decode_frames_at(path, &times, &decode)
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    if decoded.is_empty() {
+        return Err(BridgeError::new(
+            "inspect_media: failed to decode video frames",
+        ));
+    }
+
+    if overview {
+        let timestamps = decoded.iter().map(|(time, _)| *time).collect::<Vec<_>>();
+        let (bytes, _width, _height) = encode_storyboard_jpeg(&decoded)
+            .ok_or_else(|| BridgeError::new("inspect_media: failed to encode overview"))?;
+        return Ok((
+            vec![InspectedMediaFrame {
+                timestamp_seconds: start,
+                bytes,
+                media_type: "image/jpeg".into(),
+            }],
+            timestamps,
+        ));
+    }
+
+    let frames = decoded
+        .into_iter()
+        .filter_map(|(timestamp_seconds, frame)| {
+            encode_rgba_jpeg(&frame).map(|bytes| InspectedMediaFrame {
+                timestamp_seconds,
+                bytes,
+                media_type: "image/jpeg".into(),
+            })
+        })
+        .collect::<Vec<_>>();
+    if frames.is_empty() {
+        return Err(BridgeError::new(
+            "inspect_media: failed to encode video frames",
+        ));
+    }
+    Ok((frames, Vec::new()))
+}
+
+fn inspect_media_transcript(
+    engine: &MediaEngine,
+    path: &Path,
+    is_video: bool,
+    range: (f64, f64),
+) -> Result<opentake_media::TranscriptionResult, String> {
+    if let Some(full) = opentake_media::transcribe::cache::cached_on_disk(engine.cache_root(), path)
+    {
+        return Ok(opentake_media::transcribe::cache::filter(&full, range));
+    }
+    let backend = crate::transcribe::load_backend(engine)?;
+    let cache = opentake_media::TranscriptCache::new(engine.cache_root());
+    cache
+        .transcript(path, is_video, Some(range), &backend)
+        .map_err(|error| error.to_string())
+}
+
+fn encode_rgba_jpeg(frame: &RgbaFrame) -> Option<Vec<u8>> {
+    encode_jpeg(&DecodedFrame::new(
+        frame.width,
+        frame.height,
+        frame.rgba.clone(),
+        false,
+    ))
+}
+
+fn encode_storyboard_jpeg(frames: &[(f64, RgbaFrame)]) -> Option<(Vec<u8>, u32, u32)> {
+    let count = u32::try_from(frames.len()).ok()?;
+    let columns = count.clamp(1, INSPECT_MEDIA_OVERVIEW_COLUMNS);
+    let rows = count.div_ceil(columns);
+    let width = columns * INSPECT_MEDIA_OVERVIEW_TILE.0;
+    let height = rows * INSPECT_MEDIA_OVERVIEW_TILE.1;
+    let mut canvas = image::RgbaImage::from_pixel(width, height, image::Rgba([128, 128, 128, 255]));
+
+    for (index, (_, frame)) in frames.iter().enumerate() {
+        let image = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.clone())?;
+        let tile = image::imageops::thumbnail(
+            &image,
+            INSPECT_MEDIA_OVERVIEW_TILE.0,
+            INSPECT_MEDIA_OVERVIEW_TILE.1,
+        );
+        let index = u32::try_from(index).ok()?;
+        let cell_x = (index % columns) * INSPECT_MEDIA_OVERVIEW_TILE.0;
+        let cell_y = (index / columns) * INSPECT_MEDIA_OVERVIEW_TILE.1;
+        let x = cell_x + (INSPECT_MEDIA_OVERVIEW_TILE.0 - tile.width()) / 2;
+        let y = cell_y + (INSPECT_MEDIA_OVERVIEW_TILE.1 - tile.height()) / 2;
+        image::imageops::overlay(&mut canvas, &tile, i64::from(x), i64::from(y));
+    }
+    let bytes = encode_rgba_jpeg(&RgbaFrame::new(width, height, canvas.into_raw()))?;
+    Some((bytes, width, height))
+}
+
 // MARK: - Timeline compositing for inspect_timeline
 
 /// Aspect-preserving downscale so the longest edge is at most `longest_edge`
@@ -1669,6 +1917,125 @@ mod tests {
         let bytes = encode_jpeg(&frame).expect("jpeg encodes");
         // JPEG files start with the SOI marker 0xFFD8.
         assert_eq!(&bytes[..2], &[0xff, 0xd8]);
+    }
+
+    #[test]
+    fn inspect_media_decodes_an_imported_image_end_to_end() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let source = tmp.path().join("source.png");
+        image::RgbaImage::from_pixel(48, 24, image::Rgba([12, 34, 56, 255]))
+            .save(&source)
+            .expect("write image fixture");
+
+        let core = AppCore::new();
+        core.save_project(Some(tmp.path().join("Inspect.opentake")))
+            .expect("save image project");
+        let entry = core
+            .import_media_file(
+                &source,
+                "source",
+                &ProbedMedia {
+                    width: Some(48),
+                    height: Some(24),
+                    ..ProbedMedia::default()
+                },
+            )
+            .expect("import image fixture");
+        let engine = MediaEngine::new(tmp.path().join("cache"), tmp.path().join("models"));
+
+        let result = inspect_source_media(
+            &core,
+            &engine,
+            &InspectMediaRequest {
+                media_ref: entry.id,
+                kind: ClipType::Image,
+                start_seconds: None,
+                end_seconds: None,
+                max_frames: 1,
+                overview: false,
+            },
+        )
+        .expect("inspect imported image");
+
+        assert_eq!(result.width, Some(48));
+        assert_eq!(result.height, Some(24));
+        assert_eq!(result.frames.len(), 1);
+        assert_eq!(result.frames[0].media_type, "image/jpeg");
+        assert_eq!(result.frames[0].timestamp_seconds, 0.0);
+        assert_eq!(
+            image::load_from_memory(&result.frames[0].bytes)
+                .expect("decode inspected JPEG")
+                .into_rgba8()
+                .dimensions(),
+            (48, 24)
+        );
+        assert_eq!(
+            result.byte_size,
+            std::fs::metadata(source).expect("source metadata").len()
+        );
+    }
+
+    #[test]
+    fn inspect_media_overview_encodes_the_expected_storyboard_grid() {
+        let frames = (0..7)
+            .map(|index| {
+                (
+                    f64::from(index),
+                    RgbaFrame::new(16, 9, vec![index as u8; 16 * 9 * 4]),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let (bytes, width, height) =
+            encode_storyboard_jpeg(&frames).expect("encode overview storyboard");
+
+        assert_eq!((width, height), (6 * 192, 2 * 108));
+        assert_eq!(
+            image::load_from_memory(&bytes)
+                .expect("decode overview JPEG")
+                .into_rgba8()
+                .dimensions(),
+            (width, height)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspect_media_rejects_a_symlink_source() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let target = tmp.path().join("target.png");
+        let source = tmp.path().join("source.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 255, 255, 255]))
+            .save(&target)
+            .expect("write image target");
+        std::os::unix::fs::symlink(&target, &source).expect("create image symlink");
+
+        let core = AppCore::new();
+        core.save_project(Some(tmp.path().join("Symlink.opentake")))
+            .expect("save symlink project");
+        let entry = core
+            .import_media_file(&source, "source", &ProbedMedia::default())
+            .expect("import symlink fixture");
+        let engine = MediaEngine::new(tmp.path().join("cache"), tmp.path().join("models"));
+
+        let error = inspect_source_media(
+            &core,
+            &engine,
+            &InspectMediaRequest {
+                media_ref: entry.id,
+                kind: ClipType::Image,
+                start_seconds: None,
+                end_seconds: None,
+                max_frames: 1,
+                overview: false,
+            },
+        )
+        .expect_err("symlink source must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "inspect_media: source media is not a regular file"
+        );
     }
 
     #[test]

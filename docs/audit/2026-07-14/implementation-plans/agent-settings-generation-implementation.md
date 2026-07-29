@@ -12,6 +12,8 @@
 
 ### Task 1: advertised-mcp-tool-reachability + AG-advertised-tool-surface-acceptance (implementation-slice-6a8f42f312c40661)
 
+**2026-07-29 progress (not closed):** The production discovery surface now contains 38 tools with real dispatch paths. `inspect_media` is wired through the desktop `MediaBridge` for image/video/audio inspection, storyboard sampling, and local/cached transcription; deterministic dispatcher tests plus Tauri image/storyboard/symlink tests pass. The six generation/upscale/Motion names remain schema-known for compatibility but are absent from MCP/Chat discovery and from the system prompt until their production backends exist. This satisfies the fail-closed discovery portion, but this task remains incomplete: Lottie inspection, generation authorization/job lifecycle/provider integration, Motion rendering/import, and retained runtime/device evidence below are still outstanding.
+
 **Covered records:**
 - `requirement-1c40dd077c50436b` (requirement)
 - `requirement-5676fb351f12a534` (requirement)
@@ -45,7 +47,7 @@
 - Modify: `docs/specs/agent/10-implementation.md`
 - Modify: `docs/specs/agent/2-tools.md`
 - Modify: `docs/superpowers/specs/2026-07-10-opentake-full-convergence-design.md`
-- Test (existing-owned): `crates/opentake-agent/src/mcp/dispatch.rs#stub_tool_reports_not_implemented`
+- Test (existing-owned): `crates/opentake-agent/src/mcp/dispatch.rs#hidden_tool_is_rejected_as_unadvertised`
 - Test (reviewed-planned): `crates/opentake-agent/tests/advertised_tool_acceptance.rs#every_advertised_tool_is_live_or_absent`
 
 **Candidate-bound contracts:**
@@ -223,14 +225,14 @@
 
 - [ ] **Step 1: Write or extend every reviewed owning test**
 
-  - `crates/opentake-agent/src/mcp/dispatch.rs#stub_tool_reports_not_implemented` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
+  - `crates/opentake-agent/src/mcp/dispatch.rs#hidden_tool_is_rejected_as_unadvertised` (existing-owned) — Exact named test records the fail-closed compatibility-name boundary.
   - `crates/opentake-agent/tests/advertised_tool_acceptance.rs#every_advertised_tool_is_live_or_absent` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
 - [ ] **Step 2: Run all focused tests and verify RED**
 
-  - Run: `cargo test -p opentake-agent stub_tool_reports_not_implemented`
+  - Run: `cargo test -p opentake-agent hidden_tool_is_rejected_as_unadvertised`
   - Run: `cargo test -p opentake-agent --test advertised_tool_acceptance every_advertised_tool_is_live_or_absent -- --exact`
 
   Expected: FAIL because one or more of the 17 candidate-bound contracts are not yet satisfied.

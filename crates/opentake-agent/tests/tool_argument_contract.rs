@@ -307,7 +307,7 @@ fn all_tool_schemas_reject_unknown_missing_wrong_type_and_nonfinite() {
         }),
     );
     assert!(
-        motion.text_joined().contains("not yet implemented"),
+        motion.text_joined().contains("not advertised"),
         "dynamic motion params must remain open: {}",
         motion.text_joined()
     );

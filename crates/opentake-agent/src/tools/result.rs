@@ -51,6 +51,8 @@ pub struct ToolResult {
 pub(crate) enum PublicErrorKind {
     UnknownTool,
     InvalidArguments(ToolName),
+    ResourceNotFound(ToolName),
+    CapabilityUnavailable(ToolName),
 }
 
 impl PublicErrorKind {
@@ -58,6 +60,8 @@ impl PublicErrorKind {
         match self {
             Self::UnknownTool => "MCP_UNKNOWN_TOOL",
             Self::InvalidArguments(_) => "MCP_INVALID_ARGUMENTS",
+            Self::ResourceNotFound(_) => "MCP_RESOURCE_NOT_FOUND",
+            Self::CapabilityUnavailable(_) => "MCP_CAPABILITY_UNAVAILABLE",
         }
     }
 
@@ -65,6 +69,10 @@ impl PublicErrorKind {
         match self {
             Self::UnknownTool => "The requested tool is not available.",
             Self::InvalidArguments(_) => "The tool request has invalid arguments.",
+            Self::ResourceNotFound(_) => "The referenced project resource was not found.",
+            Self::CapabilityUnavailable(_) => {
+                "This capability is unavailable for the referenced media."
+            }
         }
     }
 
@@ -72,6 +80,12 @@ impl PublicErrorKind {
         match self {
             Self::UnknownTool => "Choose a tool returned by the current tool catalog, then retry.",
             Self::InvalidArguments(_) => "Correct the reported arguments, then retry.",
+            Self::ResourceNotFound(_) => {
+                "Refresh project state, choose an existing resource ID, then retry."
+            }
+            Self::CapabilityUnavailable(_) => {
+                "Use a supported source type or restore the source media, then retry."
+            }
         }
     }
 }

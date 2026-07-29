@@ -94,9 +94,9 @@
 - Shell 好 (short_id、encode_timeline、context_signal、dispatch 管道、描述 verbatim port)。
 
 **问题/风险**:
-- 大量 stub (dispatch.rs:177-189 + 注释): InspectMedia/GetTranscript/InspectTimeline/SearchMedia/Generate*/Upscale/Import/AddCaptions/Motion。
-- CoreHandle 窄，未暴露 media/render。
-- 细节: rippleDeleteRanges 不完整、batch folders 未实现、canGenerate 硬编码 false、undo scoping 弱。
+- 38 个发现面工具均已脱离 `not yet implemented` 分支；`inspect_media` 已通过 Tauri `MediaBridge` 接入图片/视频抽帧及本地转写。
+- 生成/超分/Motion 六个兼容线名在生产后端完成前从 MCP、Chat 与系统提示隐藏；Lottie 源检查仍明确不支持。
+- 细节:生成作业/授权/恢复仍未实现，`canGenerate` 仍为 false；这些是未完成能力，不是可发现工具。
 - 严重性: **高** (AI 协作核心缺失 → transcript-driven 编辑等 workflow 不可用)。
 
 **测试**: mcp_http.rs (传输) 存在；全工具执行弱。
@@ -142,7 +142,7 @@
 
 **Critical**:
 1. 预览不反映真实合成 (DOM 主导 + GPU 合成 infrastructure 已就绪但未接入 Preview.tsx) → [BUGS.md](BUGS.md#d1-预览未接入-gpu-合成高)
-2. Agent/MCP 工具大量 stub (inspect/transcript/search/generate/captions/import 等) → [BUGS.md](BUGS.md#d2-agentmcp-工具-1240-为-stub高)
+2. Agent/MCP 的生成/超分/Motion 隐藏能力仍缺生产后端，`inspect_media` 尚缺 Lottie → [BUGS.md](BUGS.md#d2-agentmcp-隐藏能力仍待生产后端高)
 3. Media thumbnails 永远 None、import 无反馈/进度 → [BUGS.md](BUGS.md#d3-media-缩略图始终返回-none中)
 
 **High**:

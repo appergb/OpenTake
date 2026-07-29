@@ -138,14 +138,14 @@ default-off Rust renderer or to perform the then-missing first device check.
 
 - **现状**:`web/src/components/agent/AgentPanel.tsx` 仅渲染占位文案;`crates/opentake-agent/src/` 只有 mcp/plugin/prompt/signal/tools,**无会话循环**。
 - **怎么写**(对照上游 `Sources/PalmierPro/` 的 Agent 聊天 UI 结构):
-  1. 后端 `crates/opentake-agent/src/chat/`:会话结构(消息历史 + streaming)+ LLM 调用走 `opentake-gen` 的 provider/keys 基建(BYOK,钥匙串已有);工具调用直接复用 `tools/` 现有 44 工具的 dispatch(与 MCP 同一入口,保证"唯一编辑入口"不破)。
+  1. 后端 `crates/opentake-agent/src/chat/`:会话结构(消息历史 + streaming)+ LLM 调用走 `opentake-gen` 的 provider/keys 基建(BYOK,钥匙串已有);工具调用直接复用统一 dispatch(当前发现面 38 个真实路径工具；44 个兼容线名保留在 `KNOWN`)。
   2. `src-tauri` 命令:`chat_send`/`chat_history`/`chat_cancel` + `chat_delta` 事件流(参照 `transcribe` 的进度事件模式)。
   3. 前端:AgentPanel 消息列表 + streaming 渲染 + 工具调用卡片;Context Signal(`signal/`)注入系统提示已有,接上即可。
 - **验收**:面板内发"把这段静音剪掉"能走 tighten_silences 工具链并落 EditCommand;无 key 时有引导文案。
 
 ### 3.4 【P1】生成式 UI + `generate_*`/`upscale` 去 stub(#30 切片)
 
-- **现状**:`opentake-gen` client/job/provider/keys **全部建成、零调用**;MCP `GenerateVideo/Image/Audio | UpscaleMedia` 返回 "not yet implemented"(`dispatch.rs:158-166`);`encode_timeline(..., false)` 硬编 canGenerate=false;web 无任何生成 UI(上游 `GenerationView.swift` 1884 行)。
+- **现状**:`opentake-gen` client/job/provider/keys 已建成但尚未形成生产调用；`GenerateVideo/Image/Audio | UpscaleMedia` 兼容线名在后端完成前不进入 MCP/Chat 发现面或系统提示；`encode_timeline(..., false)` 仍硬编 canGenerate=false；web 无生成 UI。
 - **怎么写**:
   1. `src-tauri` 命令层:`generate_start(params)->job_id` / `generate_status` / `generate_cancel`,内部 `opentake-gen::client` 异步 job 轮询,产物落项目 `media/` 并走 `import_media` 现有通路(保证出现在素材面板 + 可撤销)。
   2. MCP dispatch 同一命令复用,去掉 4 个 stub;canGenerate 改为"有 BYOK key 即 true"(`keys.rs` 可查)。
@@ -198,7 +198,7 @@ default-off Rust renderer or to perform the then-missing first device check.
 | 布局常量(#148) | 对照上游 rulerHeight/dropZoneHeight/trackHeight 改 `theme.ts`,纯数值对齐 |
 | CSP 加固(#161) | null→非 null 白屏高风险,**必须真机逐项验证**,独立小 PR |
 | Storage/Models 设置页 | `SettingsView.tsx` 加两 pane:模型缓存管理(whisper/SigLIP 已下载模型列表+删除)、存储占用(项目/缓存目录大小) |
-| MCP 剩余 stub | `InspectMedia`(接 MediaBridge 已有通路)、`AddMotionGraphic/EditMotionGraphic`(依赖 Lottie 接线) |
+| MCP 隐藏能力 | `InspectMedia` 已接 MediaBridge（剩 Lottie）；生成/超分/Motion 六个兼容线名在生产后端完成前不进入发现面 |
 | 技术债 | `fcpxml.rs` 1489 行拆分;`export_fcpxml` 名实不符(产物 XMEML)可改名 `export_xml`;`library.rs:322` remove 静默吞错补 `tracing::warn!` |
 
 ---
