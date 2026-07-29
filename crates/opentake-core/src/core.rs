@@ -2145,4 +2145,18 @@ mod tests {
             ]
         );
     }
+
+    /// Composite acceptance entry tracked by the data-safety implementation
+    /// plan. These child slices cover authoritative versions/events, stale edit
+    /// refusal, manifest undo, coherent concurrent snapshots, and save/reopen.
+    #[test]
+    fn cross_cutting_runtime_acceptance() {
+        apply_bumps_version_and_emits_once();
+        deferred_apply_rejects_version_and_project_drift_without_mutation();
+        manifest_edit_and_undo_emit_media_changed();
+        undo_redo_through_core_bumps_version_and_emits();
+        runtime_snapshot_never_mixes_timeline_media_and_project_dir();
+        open_save_roundtrip_through_core_emits_lifecycle_events();
+        prepared_media_batch_writer_failure_restores_full_editor_state();
+    }
 }

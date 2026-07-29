@@ -35,6 +35,8 @@ assert(stdout.include?("c1b-ci-validation=ok"), "canonical success marker missin
 
 raw = File.read(WORKFLOW)
 assert(raw.include?(%q{printf ' %q' "$@"}), "native gate logs lack an exact command marker")
+windows_product = raw[/^  windows-product:\n.*?(?=^  windows-security:)/m]
+assert(windows_product, "canonical workflow lacks the Windows product job")
 red_harness_raw = File.read(RED_HARNESS)
 assert(
   red_harness_raw.lines.map(&:strip).reject(&:empty?).last == "exit 0",
@@ -101,6 +103,22 @@ Dir.mktmpdir("c1b-ci-mutations") do |directory|
   end
 
   structural_mutations = {
+    "missing-windows-product" => raw.sub("  windows-product:\n", "  disabled-windows-product:\n"),
+    "windows-product-target-not-bound" => raw.sub(
+      windows_product,
+      windows_product.sub(
+        "TARGET_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
+        "TARGET_SHA: ${{ github.sha }}"
+      )
+    ),
+    "windows-product-checkout-not-bound" => raw.sub(
+      windows_product,
+      windows_product.sub("ref: ${{ env.TARGET_SHA }}", "ref: main")
+    ),
+    "windows-product-checkout-persists-credentials" => raw.sub(
+      windows_product,
+      windows_product.sub("persist-credentials: false", "persist-credentials: true")
+    ),
     "extra-normal-job" => raw.sub("jobs:\n", <<~YAML),
       jobs:
         rogue-normal:

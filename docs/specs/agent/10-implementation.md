@@ -48,7 +48,7 @@ src/
 **Phase 7 — MCP + chat + 工具（核心）**
 1. [ ] `tools/names.rs` + `tools/descriptions.rs`：31 工具名 + 描述原样落地（产品名替换为 OpenTake，URI `opentake://`）。— 验证：描述与 §2.2 行号逐条对拍。
 2. [ ] `tools/short_id.rs`：§3 出站缩短 + 入站展开 + 歧义报错。— 验证：§3.4 四个对拍用例（与 Swift 一致）。
-3. [ ] `tools/errors.rs` + `tools/args.rs`：`serde_path_to_error` 路径化 + `allowedKeys` 未知字段拒绝 + 非有限数拒绝。— 验证：构造 `entries[3].startFrame` 缺失/类型错/未知字段/NaN，输出措辞与 §4.2 一致。
+3. [x] `tools/errors.rs` + `tools/args.rs` + `mcp/server.rs`：`serde_path_to_error` 路径化 + `allowedKeys` 未知字段拒绝 + MCP 原始 JSON 非有限数拒绝。— 已验证：`entries[3].startFrame` 缺失/类型错/未知字段/`NaN`/`Infinity`/`-Infinity`/`1e400` 输出 §4.2 精确措辞，失败时不进入编辑分发；`cargo clippy --workspace --all-targets -- -D warnings` 与 `cargo test --workspace --no-fail-fast` 通过。
 4. [ ] `tools/executor.rs`：§4.1 统一壳（快照→展开→run→undo 记账→signal→缩短）。
 5. [ ] `tools/encode_timeline.rs`：§8.3 压缩编码（默认值剥离、captionGroups 折叠 200 行、浮点 3 位、窗口分页）。
 6. [ ] `mcp/server.rs` + `mcp/guards.rs` + `mcp/resources.rs`：rmcp + axum 绑 `127.0.0.1:19789` + 三个 tower layer + 2 resources + 偏好开关幂等。— 验证：`claude mcp add` 连通；每工具走通；伪造 Origin/外网 IP 被拒。

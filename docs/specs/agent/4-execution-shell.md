@@ -30,6 +30,8 @@ execute(name, args) -> ToolResult:
 
 ## 4.2 严格输入校验（三层，**面向 LLM 的错误工程**）
 
+Rust 实现分为两个边界：MCP transport 在受 `MCP_REQUEST_BODY_MAX` 限制的原始请求体上先拒绝标准 JSON 无法表达的 `NaN`/`Infinity`/`-Infinity` 以及解析为无穷大的指数（如 `1e400`），避免解码器丢失字段路径；进入 dispatcher 后，工具参数仍按“未知字段 → 可表示数值的有限性 → `serde_path_to_error` 强类型解码”执行。任一边界失败都在命令分发前返回，不产生编辑副作用。
+
 ### 4.2.1 未知字段拒绝（`validateUnknownKeys:166-171`）
 
 ```
@@ -51,6 +53,8 @@ firstNonFiniteNumberPath(value, path):
   return None
 // 命中 → error "{badPath}: value must be finite"
 ```
+
+MCP transport 对原始 JSON 使用同一条错误契约。原始扫描只在已经过 Host/Origin、协议版本、Content-Type 与请求体大小保护之后运行；递归深度和路径长度有硬上限。已知的静态工具路径（例如 `entries[3].startFrame`）可以精确返回，其他调用方自定义键统一退化为 `arguments`，避免在错误响应中反射潜在敏感字段名。
 
 ### 4.2.3 路径化解码错误（`formatDecodingError:210-229` + `decodeToolArgs:177`）
 
@@ -78,6 +82,8 @@ fn decode_tool_args<T: DeserializeOwned>(dict: &Value, path: &str) -> Result<T, 
 }
 ```
 `normalize_path` 把 serde_path_to_error 的 `.` 分隔数字段转成 `[n]`，对齐上游 `entries[3].startFrame` 风格。`map_serde_err` 把 `serde_json::error::Category`（Data/Syntax）+ classify 成上游四类措辞。
+
+实现证据：`tools/errors.rs` 的 `unknown_field_lists_sorted_allowed`、`nested_array_index_uses_brackets`、`non_finite_number_rejected_with_path`，以及 `tests/tool_argument_contract.rs` 的 `all_tool_schemas_reject_unknown_missing_wrong_type_and_nonfinite`。MCP 传输层的四种非有限输入和零分发断言由 `tests/mcp_http.rs#transport_rejects_nonfinite_numbers_before_dispatch` 覆盖。
 
 > **为什么重要**：ARCHITECTURE §7 `:152` 与分析 04 `:209` 明确「这种精确路径错误直接决定 agent 自我纠正率」。这是必须复刻的、对 LLM 行为强相关的设计。
 

@@ -6,6 +6,7 @@ use opentake_agent::mcp::core_handle::CoreHandle;
 use opentake_agent::mcp::dispatch::Dispatcher;
 use opentake_agent::plugin::registry::PluginRegistry;
 use opentake_agent::tools::descriptions::input_schema;
+use opentake_agent::tools::errors::first_non_finite_json_number_path;
 use opentake_agent::tools::names::ToolName;
 use opentake_domain::{MediaManifest, Timeline};
 use opentake_ops::{EditCommand, EditResult};
@@ -47,7 +48,7 @@ fn dispatcher() -> (Dispatcher, Arc<AtomicUsize>) {
 }
 
 #[test]
-fn all_tool_schemas_reject_unknown_missing_wrong_type() {
+fn all_tool_schemas_reject_unknown_missing_wrong_type_and_nonfinite() {
     let (dispatcher, apply_calls) = dispatcher();
 
     for tool in ToolName::ALL {
@@ -226,6 +227,17 @@ fn all_tool_schemas_reject_unknown_missing_wrong_type() {
             "{case} case reached the edit boundary"
         );
     }
+
+    let raw_nonfinite = br#"{"params":{"arguments":{"entries":[
+        {"mediaRef":"asset","startFrame":0,"durationFrames":1},
+        {"mediaRef":"asset","startFrame":0,"durationFrames":1},
+        {"mediaRef":"asset","startFrame":0,"durationFrames":1},
+        {"mediaRef":"asset","startFrame":1e400,"durationFrames":1}
+    ]}}}"#;
+    assert_eq!(
+        first_non_finite_json_number_path(raw_nonfinite).as_deref(),
+        Some("entries[3].startFrame")
+    );
 
     let add_texts_schema = input_schema(ToolName::AddTexts);
     let text_transform_schema = add_texts_schema

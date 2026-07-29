@@ -507,13 +507,10 @@ async fn transport_rejects_nonfinite_numbers_before_dispatch() {
             .expect("raw non-finite request sent");
         let status = response.status();
         let text = response.text().await.expect("parser response body");
-        assert!(
-            status.is_client_error()
-                && (text.contains("deserialize")
-                    || text.contains("expected value")
-                    || text.contains("number out of range")
-                    || text.contains("\"error\"")),
-            "{number} was not rejected by the JSON/MCP parser: {status} {text}"
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{number}: {text}");
+        assert_eq!(
+            text, "entries[3].startFrame: value must be finite",
+            "{number} path/message drifted"
         );
         assert_eq!(
             calls.load(Ordering::Acquire),
