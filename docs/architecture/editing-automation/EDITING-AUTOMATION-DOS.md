@@ -42,7 +42,7 @@ The v1 editing automation set is:
 - `detect_beats`: read audio PCM and return beat/onset candidates without changing the timeline.
 - `auto_cut_to_beats`: align selected clips or media ranges to beat candidates through existing edit commands.
 - `tighten_silences`: find low-energy gaps and produce ripple delete ranges.
-- `remove_filler_words`: disabled until timeline transcript tooling is truly wired; it depends on word-level transcript frames.
+- `remove_filler_words`: uses the live timeline transcript bridge to return reviewable word-aligned filler cuts and exact `ripple_delete_ranges` commands; it is discovered only when that bridge is present.
 
 ## Scope Boundaries
 
@@ -52,14 +52,14 @@ Automatic music beat sync v1 uses PCM energy/onset detection. It must not add he
 
 Agent tools may suggest edits without applying them. A write path must apply via `EditCommand` only.
 
-Current MCP status: `detect_beats`, `auto_cut_to_beats`, and `tighten_silences` are typed tools backed by `CoreHandle::extract_analysis_pcm`, so they can produce PCM-based frame hints and candidate edit commands without mutating the timeline. `smart_reframe` is still a typed preflight surface that returns a vision-backend diagnostic until sampled-frame/saliency access is exposed. `remove_filler_words` remains disabled until transcript access is truly wired.
+Current MCP status: `detect_beats`, `auto_cut_to_beats`, and `tighten_silences` are typed tools backed by `CoreHandle::extract_analysis_pcm`, so they can produce PCM-based frame hints and candidate edit commands without mutating the timeline. `remove_filler_words` is backed by word-level project-frame transcripts, supports configurable multi-word lexicons, and returns per-cut review data plus undoable ripple commands without mutating the timeline. `smart_reframe` is still a typed preflight surface that returns a vision-backend diagnostic until sampled-frame/saliency access is exposed.
 
 ## Failure Semantics
 
 - No media decode: return a structured diagnostic and no edit.
 - Ambiguous short IDs: fail before typed args or command creation.
 - Analysis confidence below threshold: return suggestions, not writes.
-- Transcript unavailable: `remove_filler_words` remains unavailable; `tighten_silences` can still use PCM energy.
+- Transcript bridge unavailable: `remove_filler_words` is absent from discovery and direct calls fail closed as not advertised; `tighten_silences` can still use PCM energy.
 - `ripple_delete_ranges` accepts exactly one of `trackIndex` or `clipId`. `units="frames"` is the default; `units="seconds"` is valid only with `clipId` and is converted through the timeline fps plus the clip's source-frame trim/speed mapping before producing half-open project-frame ranges.
 - `add_clips` with omitted `trackIndex` must route through one atomic auto-track `EditCommand`; track creation and clip placement must undo together.
 - `swapMedia` consumes only `clipId` + `mediaRef`. Frontend types and wrappers must not expose duration/type/trim options unless the backend starts consuming them.

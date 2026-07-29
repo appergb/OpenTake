@@ -61,6 +61,8 @@ pub fn description(tool: ToolName) -> &'static str {
 
         ToolName::TightenSilences => "Plans silence tightening by finding low-energy PCM spans and converting them into ripple_delete_ranges candidate commands. Returns a preview only; it does not mutate the timeline.",
 
+        ToolName::RemoveFillerWords => "Transcribes the current spoken timeline and returns reviewable filler-word cuts aligned to word timestamps. Supports an exact configurable lexicon including multi-word phrases. It does not mutate the timeline: remove rejected cuts, then call each returned ripple_delete_ranges command to apply the accepted ranges as one undoable edit per track.",
+
         ToolName::GenerateVideo => "Starts an async AI video generation. Returns a placeholder asset ID immediately; generation runs in the background and the asset becomes usable in add_clips once ready. Costs real money and is not undoable.",
 
         ToolName::GenerateImage => "Starts an async AI image generation. Returns a placeholder asset ID immediately; generation runs in the background. Costs real money and is not undoable.",
@@ -396,6 +398,16 @@ pub fn input_schema(tool: ToolName) -> Value {
                 "thresholdDb": {"type": "number", "description": "Optional silence threshold in dB."},
                 "minSilenceFrames": {"type": "integer", "description": "Optional minimum silence span to cut."},
                 "paddingFrames": {"type": "integer", "description": "Optional context to preserve around each silence."}
+            }),
+            &[],
+        ),
+
+        ToolName::RemoveFillerWords => object(
+            json!({
+                "clipIds": {"type": "array", "items": {"type": "string"}, "description": "Optional spoken clip ids to transcribe and analyze."},
+                "trackIndex": {"type": "integer", "description": "Optional spoken track index to analyze. Mutually exclusive with clipIds."},
+                "fillerWords": {"type": "array", "items": {"type": "string"}, "description": "Optional exact filler lexicon. Multi-word phrases such as 'you know' are supported."},
+                "paddingFrames": {"type": "integer", "minimum": 0, "description": "Optional context frames to preserve before and after each matched filler phrase."}
             }),
             &[],
         ),

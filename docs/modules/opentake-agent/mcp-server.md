@@ -17,7 +17,7 @@
 `McpServer` 实现 rmcp 的 `ServerHandler`，持有一个 `Arc<Dispatcher>`（自带会话级 agent-undo 栈）+ 构造时快照的系统提示 `instructions`。
 
 - **`get_info`** — 广告 `instructions`（base 提示 + 激活插件，构造时由 [`assemble_system_prompt`](prompt.md) 生成）与 tools 能力；`server_info.name = "opentake"`，版本取 `CARGO_PKG_VERSION`。
-- **`list_tools`** — 返回当前 38 个真实路径工具 schema（`ToolName::ALL`，描述/Schema 来自 [`tools::descriptions`](dispatch-tools.md)）。其余 6 个兼容线名在后端完成前仅保留于 `ToolName::KNOWN`，不进入发现面。
+- **`list_tools`** — 从最多 39 个基础工具（`ToolName::ALL`）按当前主机的媒体桥能力过滤，并在授权可用时追加 4 个生成工具；描述/Schema 来自 [`tools::descriptions`](dispatch-tools.md)。Motion 两个兼容线名仅保留于 `ToolName::KNOWN`，不进入发现面。
 - **`call_tool`** — 把工具调用交给 `Dispatcher::dispatch`。因为所有已接线工具是同步的，用 `tokio::task::spawn_blocking` 在阻塞线程池跑，避免堵住 async 运行时；结果经 [`convert::to_call_tool_result`](core-handle-convert.md) 转成 rmcp `CallToolResult`。
 - **`call`** — 与 `call_tool` 等价的同步入口，单独拆出以便**不构造传输 `RequestContext`** 就能单测一次工具派发。
 

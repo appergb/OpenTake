@@ -71,13 +71,17 @@ pub fn clear_region(
                 if find(timeline, &clip_id).is_some() {
                     // Split at `start`; the right half is what now covers the region.
                     split_clip(timeline, &clip_id, start, ids);
-                    // Locate the freshly created right half (starts at `start`, not the original id).
-                    let right = timeline
-                        .tracks
-                        .iter()
-                        .flat_map(|t| &t.clips)
-                        .find(|c| c.start_frame == start && c.id != clip_id)
-                        .map(|c| (c.id.clone(), c.end_frame()));
+                    // Locate the freshly created right half on the original
+                    // clip's track. Linked splits mint a right half on every
+                    // partner track; a global search can select the wrong
+                    // partner and leave a duplicate middle fragment behind.
+                    let right = find(timeline, &clip_id).and_then(|(ti, _)| {
+                        timeline.tracks[ti]
+                            .clips
+                            .iter()
+                            .find(|c| c.start_frame == start && c.id != clip_id)
+                            .map(|c| (c.id.clone(), c.end_frame()))
+                    });
                     if let Some((right_id, right_end)) = right {
                         if right_end > end {
                             // Right half overruns the region — split again at `end`,

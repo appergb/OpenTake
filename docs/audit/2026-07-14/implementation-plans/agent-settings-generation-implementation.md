@@ -12,7 +12,7 @@
 
 ### Task 1: advertised-mcp-tool-reachability + AG-advertised-tool-surface-acceptance (implementation-slice-6a8f42f312c40661)
 
-**2026-07-29 progress (not closed):** The production discovery surface now contains 38 tools with real dispatch paths. `inspect_media` is wired through the desktop `MediaBridge` for image/video/audio inspection, storyboard sampling, and local/cached transcription; deterministic dispatcher tests plus Tauri image/storyboard/symlink tests pass. The six generation/upscale/Motion names remain schema-known for compatibility but are absent from MCP/Chat discovery and from the system prompt until their production backends exist. This satisfies the fail-closed discovery portion, but this task remains incomplete: Lottie inspection, generation authorization/job lifecycle/provider integration, Motion rendering/import, and retained runtime/device evidence below are still outstanding.
+**2026-07-29 progress (not closed):** The production base catalog now contains 39 real dispatch paths and is filtered per host session: seven media/transcript tools require the desktop `MediaBridge`; four generation/upscale tools are appended only with compatible managed or BYOK authorization; Motion remains schema-known but hidden. `inspect_media` is wired for image/video/audio inspection, storyboard sampling, and local/cached transcription; generation has durable provider jobs, progress/cancel/retry and deterministic finalization. This satisfies the fail-closed discovery and generation portions, but Task 1 remains open for Lottie inspection, Motion rendering/import, retained real-device evidence, and final ledger reconciliation.
 
 **Covered records:**
 - `requirement-1c40dd077c50436b` (requirement)
@@ -488,6 +488,8 @@
 Completion evidence (2026-07-29): the four named focused tests pass; `generation::tests` covers configured image/video/audio/upscale production dispatch, authorization, N ordering, cancel, restart, retry, auth/rate-limit mapping, safe result URLs and exact 2x; `generation_persistence` covers durable logs/costs/restart and ready+cancelled partial terminal state. Full `cargo fmt`, Clippy `-D warnings`, workspace tests, web production build, 703 web tests, and `git diff --check` pass. Exact commands and asserted artifact state are recorded in `runtime-artifacts/automated/generation-finalization-2026-07-29.md`.
 
 ### Task 3: advanced-ai-workflows (implementation-slice-aec7c23c8d96431e)
+
+**2026-07-29 decomposition note (not closed):** This umbrella combines ten independent product capabilities and cannot be completed by editing only `ToolName::ALL` plus one document. Work is proceeding as independently verified vertical slices. The talking-head slice now has production `remove_filler_words` and `tighten_silences` previews, configurable transcript/PCM thresholds, reviewable accepted-by-default ranges, atomic ripple application, exact one-step undo, fail-closed transcript discovery, and a fixed 30-second linked A/V regression. `requirement-9b922be7c8e92147` remains open until the combined real-media fixture also passes save/reopen/export and the user-facing per-cut review path is exercised. The other nine capabilities below remain open.
 
 **Covered records:**
 - `requirement-fdd45062091b48f3` (requirement)

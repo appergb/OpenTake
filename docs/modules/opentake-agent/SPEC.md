@@ -156,7 +156,7 @@ capabilities: { resources: { subscribe:false, listChanged:false },
 
 枚举顺序严格按 `ToolName`（`ToolDefinitions.swift:4-36`）：`get_timeline, get_media, add_clips, insert_clips, remove_clips, remove_tracks, move_clips, set_clip_properties, set_keyframes, split_clip, ripple_delete_ranges, undo, add_texts, add_captions, generate_video, generate_image, generate_audio, upscale_media, import_media, list_models, inspect_media, get_transcript, inspect_timeline, search_media, list_folders, create_folder, move_to_folder, rename_media, rename_folder, delete_media, delete_folder`。
 
-> OpenTake 生产发现面按能力动态组成：基础 38 个真实路径工具始终可见；托管凭据或 fal/Replicate/OpenAI/ElevenLabs 兼容 BYOK 可用时再发布四个生成工具。四个工具都要求调用方传 `costAuthorized:true`，MCP 与应用内 Chat 共用同一 GenerationBridge；无凭据时 `get_timeline.canGenerate=false` 且工具不进入目录/系统提示。
+> OpenTake 生产发现面按能力动态组成：基础集合最多 39 个真实路径工具，其中七个媒体/转写工具要求主机注入 `MediaBridge`；托管凭据或 fal/Replicate/OpenAI/ElevenLabs 兼容 BYOK 可用时再发布四个生成工具。四个生成工具都要求调用方传 `costAuthorized:true`，MCP 与应用内 Chat 共用同一 GenerationBridge；无凭据时 `get_timeline.canGenerate=false` 且工具不进入目录/系统提示。
 
 #### A. 读 / 内省（只读，7 个）
 
@@ -1074,7 +1074,7 @@ src/
 
 **OpenTake 增强（ARCHITECTURE §7 `:154`，可后置）**
 16. [ ] 系统提示词分层化 + 模型策略从 `opentake-gen` 配置注入（§6.5.1）。
-17. [ ] 高阶工具 `remove_filler_words` / `tighten_silences`（把易错帧算术在 Rust 内一次完成）。
+17. [x] 高阶工具 `remove_filler_words` / `tighten_silences`（返回可审阅项目帧区间与原子 `ripple_delete_ranges` 命令；完整实机保存/重开/导出验收仍由审计计划跟踪）。
 18. [ ] 写工具统一返回结构化 JSON（§4.4 增强）。
 19. [ ] `get_capabilities`（一次性返回 ASR/视觉索引/生成/编解码就绪状态）。
 

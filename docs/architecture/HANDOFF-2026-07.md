@@ -138,7 +138,7 @@ default-off Rust renderer or to perform the then-missing first device check.
 
 - **现状**:`web/src/components/agent/AgentPanel.tsx` 仅渲染占位文案;`crates/opentake-agent/src/` 只有 mcp/plugin/prompt/signal/tools,**无会话循环**。
 - **怎么写**(对照上游 `Sources/PalmierPro/` 的 Agent 聊天 UI 结构):
-  1. 后端 `crates/opentake-agent/src/chat/`:会话结构(消息历史 + streaming)+ LLM 调用走 `opentake-gen` 的 provider/keys 基建(BYOK,钥匙串已有);工具调用直接复用统一 dispatch(当前发现面 38 个真实路径工具；44 个兼容线名保留在 `KNOWN`)。
+  1. 后端 `crates/opentake-agent/src/chat/`:会话结构(消息历史 + streaming)+ LLM 调用走 `opentake-gen` 的 provider/keys 基建(BYOK,钥匙串已有);工具调用直接复用统一 dispatch(基础集合最多 39 个、按主机能力过滤，另有 4 个动态生成工具；45 个兼容线名保留在 `KNOWN`)。
   2. `src-tauri` 命令:`chat_send`/`chat_history`/`chat_cancel` + `chat_delta` 事件流(参照 `transcribe` 的进度事件模式)。
   3. 前端:AgentPanel 消息列表 + streaming 渲染 + 工具调用卡片;Context Signal(`signal/`)注入系统提示已有,接上即可。
 - **验收**:面板内发"把这段静音剪掉"能走 tighten_silences 工具链并落 EditCommand;无 key 时有引导文案。

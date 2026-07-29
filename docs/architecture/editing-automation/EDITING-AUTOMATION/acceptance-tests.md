@@ -46,7 +46,7 @@ Parent contract: [Editing Automation DOS](../EDITING-AUTOMATION-DOS.md). Source 
 ## Agent / Workflow Checks
 
 - `detect_beats`, `auto_cut_to_beats`, `smart_reframe`, and `tighten_silences` are visible in tool metadata when implemented.
-- `remove_filler_words` reports unavailable until word-level transcript is wired to timeline frames.
+- `remove_filler_words` is advertised only with the transcript bridge; it returns word-aligned review cuts and direct dispatch fails closed when the bridge is absent.
 - Active workflow plugin roles affect tool target selection.
 - Plugin rules appear in `context_signal` warnings without suppressing built-in warnings.
 - Agent `ripple_delete_ranges` rejects calls that pass both `trackIndex` and `clipId`, accepts `clipId + units=seconds`, and emits half-open project-frame ranges after fps/source-trim conversion.

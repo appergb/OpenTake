@@ -17,7 +17,7 @@
 //! names for compatibility but stay out of discovery until their backends are
 //! production-ready.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, RwLock};
 
 use opentake_domain::{AnimPair, Crop, Interpolation, Keyframe, KeyframeTrack};
@@ -63,16 +63,6 @@ const INSPECT_MEDIA_DEFAULT_FRAMES: usize = 6;
 const INSPECT_MEDIA_MAX_FRAMES: usize = 12;
 const INSPECT_MEDIA_MAX_SEGMENTS: usize = 400;
 const INSPECT_MEDIA_MAX_WORDS: usize = 10_000;
-
-fn is_generation_tool(tool: ToolName) -> bool {
-    matches!(
-        tool,
-        ToolName::GenerateVideo
-            | ToolName::GenerateImage
-            | ToolName::GenerateAudio
-            | ToolName::UpscaleMedia
-    )
-}
 
 /// The in-process tool dispatcher. Holds the [`CoreHandle`] boundary, the plugin
 /// registry (read-locked for the active plugin), and a per-dispatcher agent-undo
@@ -142,6 +132,9 @@ impl Dispatcher {
 
     pub fn advertised_tools(&self) -> Vec<ToolName> {
         let mut tools = ToolName::ALL.to_vec();
+        if !self.has_media_bridge() {
+            tools.retain(|tool| !tool.requires_media_bridge());
+        }
         if self.can_generate() {
             tools.extend(ToolName::GENERATION);
         }
@@ -184,9 +177,7 @@ impl Dispatcher {
                 error.message,
             );
         }
-        if !(ToolName::ALL.contains(&tool)
-            || is_generation_tool(tool) && self.generation_bridge.is_some())
-        {
+        if !self.advertised_tools().contains(&tool) {
             return ToolResult::public_error(
                 PublicErrorKind::UnknownTool,
                 format!("Tool is not advertised: {}", tool.as_str()),
@@ -303,6 +294,7 @@ impl Dispatcher {
             ToolName::AutoCutToBeats => self.auto_cut_to_beats(args, before),
             ToolName::SmartReframe => self.smart_reframe(args),
             ToolName::TightenSilences => self.tighten_silences(args, before),
+            ToolName::RemoveFillerWords => self.remove_filler_words(args, before, manifest),
 
             // --- Render + import + transcript + search (wired to the injected MediaBridge) ---
             ToolName::InspectTimeline => self.inspect_timeline(args, before),
@@ -1481,6 +1473,205 @@ impl Dispatcher {
         Ok(ToolResult::ok(round_floats_3dp(payload).to_string()))
     }
 
+    fn remove_filler_words(
+        &self,
+        args: &Value,
+        before: &Timeline,
+        manifest: &MediaManifest,
+    ) -> Result<ToolResult, ToolError> {
+        let a: RemoveFillerWordsArgs = decode_tool_args(args, "")?;
+        if a.clip_ids.is_some() && a.track_index.is_some() {
+            return Err(ToolError::new(
+                "remove_filler_words: pass clipIds or trackIndex, not both",
+            ));
+        }
+        if let Some(ids) = a.clip_ids.as_ref() {
+            if ids.is_empty() {
+                return Err(ToolError::new("remove_filler_words: clipIds is empty"));
+            }
+            for id in ids {
+                if find_clip(before, id).is_none() {
+                    return Err(ToolError::new(format!(
+                        "remove_filler_words: clip not found: {id}"
+                    )));
+                }
+            }
+        }
+        if let Some(track_index) = a.track_index {
+            if before.tracks.get(track_index).is_none() {
+                return Err(ToolError::new(format!(
+                    "remove_filler_words: track not found: {track_index}"
+                )));
+            }
+        }
+
+        let lexicon = a.filler_words.unwrap_or_else(|| {
+            ["um", "uh", "er", "erm", "ah", "like", "you know"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        });
+        let mut phrases = lexicon
+            .into_iter()
+            .filter_map(|phrase| {
+                let tokens = phrase
+                    .split_whitespace()
+                    .map(normalize_spoken_token)
+                    .filter(|token| !token.is_empty())
+                    .collect::<Vec<_>>();
+                (!tokens.is_empty()).then_some(tokens)
+            })
+            .collect::<Vec<_>>();
+        phrases.sort();
+        phrases.dedup();
+        phrases.sort_by_key(|tokens| std::cmp::Reverse(tokens.len()));
+        if phrases.is_empty() {
+            return Err(ToolError::new(
+                "remove_filler_words: fillerWords has no usable phrases",
+            ));
+        }
+
+        let transcript = self.get_transcript(&serde_json::json!({}), before, manifest)?;
+        if transcript.is_error {
+            return Ok(transcript);
+        }
+        let transcript_json: Value = serde_json::from_str(&transcript.text_joined())
+            .map_err(|_| ToolError::new("remove_filler_words: transcript response is invalid"))?;
+        let clips = transcript_json["clips"]
+            .as_array()
+            .ok_or_else(|| ToolError::new("remove_filler_words: transcript clips are missing"))?;
+        let requested_ids = a
+            .clip_ids
+            .as_ref()
+            .map(|ids| ids.iter().map(String::as_str).collect::<Vec<_>>())
+            .or_else(|| {
+                a.track_index.map(|track_index| {
+                    before.tracks[track_index]
+                        .clips
+                        .iter()
+                        .map(|clip| clip.id.as_str())
+                        .collect::<Vec<_>>()
+                })
+            });
+        let selected_ids = requested_ids.map(|requested| {
+            let mut expanded = requested
+                .iter()
+                .map(|id| (*id).to_string())
+                .collect::<BTreeSet<_>>();
+            let link_groups = requested
+                .iter()
+                .filter_map(|id| find_clip(before, id))
+                .filter_map(|clip| clip.link_group_id.as_deref())
+                .collect::<BTreeSet<_>>();
+            for clip in before.tracks.iter().flat_map(|track| &track.clips) {
+                if clip
+                    .link_group_id
+                    .as_deref()
+                    .is_some_and(|group| link_groups.contains(group))
+                {
+                    expanded.insert(clip.id.clone());
+                }
+            }
+            expanded
+        });
+        let padding = a.padding_frames.unwrap_or(1).max(0) as i64;
+        let mut cuts = Vec::new();
+        let mut ranges_by_track: BTreeMap<u64, Vec<[i64; 2]>> = BTreeMap::new();
+
+        for clip in clips {
+            let Some(clip_id) = clip["clipId"].as_str() else {
+                continue;
+            };
+            let Some(track_index) = clip["trackIndex"].as_u64() else {
+                continue;
+            };
+            if selected_ids
+                .as_ref()
+                .is_some_and(|ids| !ids.contains(clip_id))
+            {
+                continue;
+            }
+            let clip_start = clip["startFrame"].as_i64().unwrap_or(0);
+            let clip_end = clip["endFrame"].as_i64().unwrap_or(clip_start);
+            let Some(rows) = clip["words"].as_array() else {
+                continue;
+            };
+            let normalized = rows
+                .iter()
+                .map(|row| normalize_spoken_token(row[0].as_str().unwrap_or_default()))
+                .collect::<Vec<_>>();
+            let mut word_index = 0;
+            while word_index < rows.len() {
+                let Some(phrase) = phrases.iter().find(|phrase| {
+                    word_index + phrase.len() <= normalized.len()
+                        && normalized[word_index..word_index + phrase.len()] == phrase[..]
+                }) else {
+                    word_index += 1;
+                    continue;
+                };
+                let last_index = word_index + phrase.len() - 1;
+                let start = (rows[word_index][1].as_i64().unwrap_or(clip_start) + padding)
+                    .clamp(clip_start, clip_end);
+                let end = (rows[last_index][2].as_i64().unwrap_or(start) - padding)
+                    .clamp(clip_start, clip_end);
+                if end > start {
+                    let text = rows[word_index..=last_index]
+                        .iter()
+                        .filter_map(|row| row[0].as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let cut_id = format!("filler-{clip_id}-{word_index}");
+                    cuts.push(serde_json::json!({
+                        "id": cut_id,
+                        "clipId": clip_id,
+                        "trackIndex": track_index,
+                        "text": text,
+                        "range": [start, end],
+                        "accepted": true,
+                    }));
+                    ranges_by_track
+                        .entry(track_index)
+                        .or_default()
+                        .push([start, end]);
+                }
+                word_index += phrase.len();
+            }
+        }
+
+        for ranges in ranges_by_track.values_mut() {
+            ranges.sort_unstable();
+            ranges.dedup();
+        }
+        cuts.sort_by_key(|cut| {
+            (
+                cut["trackIndex"].as_u64().unwrap_or(0),
+                cut["range"][0].as_i64().unwrap_or(0),
+            )
+        });
+        let commands = ranges_by_track
+            .into_iter()
+            .map(|(track_index, ranges)| {
+                serde_json::json!({
+                    "tool": "ripple_delete_ranges",
+                    "args": {
+                        "trackIndex": track_index,
+                        "units": "frames",
+                        "ranges": ranges,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(ToolResult::ok(
+            serde_json::json!({
+                "applied": false,
+                "cuts": cuts,
+                "commands": commands,
+                "note": "Review cuts and remove rejected ranges before calling each returned ripple_delete_ranges command. Each command applies as one undoable edit.",
+            })
+            .to_string(),
+        ))
+    }
+
     fn detect_beat_hints(
         &self,
         timeline: &Timeline,
@@ -2050,6 +2241,7 @@ fn validate_tool_args(tool: ToolName, args: &Value) -> Result<(), ToolError> {
         ToolName::AutoCutToBeats => decode!(AutoCutToBeatsArgs),
         ToolName::SmartReframe => decode!(SmartReframeArgs),
         ToolName::TightenSilences => decode!(TightenSilencesArgs),
+        ToolName::RemoveFillerWords => decode!(RemoveFillerWordsArgs),
         ToolName::GenerateVideo => decode!(GenerateVideoArgs),
         ToolName::GenerateImage => decode!(GenerateImageArgs),
         ToolName::GenerateAudio => decode!(GenerateAudioArgs),
@@ -2667,6 +2859,14 @@ fn normalized_speed(clip: &opentake_domain::Clip) -> f64 {
     } else {
         1.0
     }
+}
+
+fn normalize_spoken_token(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|character| character.is_alphanumeric() || *character == '\'')
+        .collect()
 }
 
 fn source_seconds_to_timeline_frame_clamped(
@@ -4543,16 +4743,97 @@ mod tests {
     }
 
     #[test]
-    fn remove_filler_words_stays_disabled_until_transcript_is_wired() {
-        let d = dispatcher_with(empty_manifest_handle(vec![]));
-        let r = d.dispatch("remove_filler_words", serde_json::json!({}));
-        assert!(r.is_error);
-        assert!(
-            r.text_joined()
-                .contains("Unknown tool: remove_filler_words"),
-            "{}",
-            r.text_joined()
+    fn remove_filler_words_returns_reviewable_word_aligned_ranges() {
+        let (d, _bridge) = transcript_dispatcher(transcript(vec![
+            word("Well", 0.0, 0.2),
+            word("um", 0.2, 0.4),
+            word("you", 0.5, 0.7),
+            word("know", 0.7, 0.9),
+            word("go", 1.0, 1.2),
+        ]));
+        assert!(d.advertised_tools().contains(&ToolName::RemoveFillerWords));
+        let r = d.dispatch(
+            "remove_filler_words",
+            serde_json::json!({
+                "clipIds": ["clip-a"],
+                "fillerWords": ["um", "you know"],
+                "paddingFrames": 0
+            }),
         );
+        assert!(!r.is_error, "{}", r.text_joined());
+        let json = first_json(&r);
+        assert_eq!(json["applied"], false);
+        assert_eq!(json["cuts"].as_array().unwrap().len(), 2);
+        assert_eq!(json["cuts"][0]["text"], "um");
+        assert_eq!(json["cuts"][0]["range"], serde_json::json!([6, 12]));
+        assert_eq!(json["cuts"][1]["text"], "you know");
+        assert_eq!(json["cuts"][1]["range"], serde_json::json!([15, 27]));
+        assert_eq!(
+            json["commands"][0]["args"]["ranges"],
+            serde_json::json!([[6, 12], [15, 27]])
+        );
+    }
+
+    #[test]
+    fn reviewed_filler_cut_applies_once_and_undo_restores_the_timeline() {
+        let (d, _bridge) = linked_talking_head_dispatcher(transcript(vec![
+            word("Well", 0.0, 0.2),
+            word("um", 0.2, 0.4),
+            word("you", 0.5, 0.7),
+            word("know", 0.7, 0.9),
+            word("go", 1.0, 1.2),
+        ]));
+        let before = d.handle.timeline();
+        let preview = d.dispatch(
+            "remove_filler_words",
+            serde_json::json!({
+                "clipIds": ["clip-v"],
+                "fillerWords": ["um", "you know"],
+                "paddingFrames": 0
+            }),
+        );
+        let json = first_json(&preview);
+        let apply = d.dispatch(
+            "ripple_delete_ranges",
+            serde_json::json!({
+                "trackIndex": 1,
+                "units": "frames",
+                "ranges": [json["cuts"][0]["range"].clone()]
+            }),
+        );
+        assert!(!apply.is_error, "{}", apply.text_joined());
+        let after = d.handle.timeline();
+        assert_ne!(after, before);
+        assert_eq!(after.tracks.len(), 2);
+        let video_ranges = after.tracks[0]
+            .clips
+            .iter()
+            .map(|clip| (clip.start_frame, clip.end_frame()))
+            .collect::<Vec<_>>();
+        let audio_ranges = after.tracks[1]
+            .clips
+            .iter()
+            .map(|clip| (clip.start_frame, clip.end_frame()))
+            .collect::<Vec<_>>();
+        assert_eq!(video_ranges, audio_ranges, "linked A/V ranges drifted");
+        assert_eq!(video_ranges.last().map(|range| range.1), Some(894));
+
+        let post_cut = d.dispatch("get_transcript", serde_json::json!({}));
+        assert!(!post_cut.is_error, "{}", post_cut.text_joined());
+        let post_cut_json = first_json(&post_cut);
+        let spoken = post_cut_json["clips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|clip| clip["words"].as_array().unwrap())
+            .filter_map(|word| word[0].as_str())
+            .collect::<Vec<_>>();
+        assert!(!spoken.contains(&"um"), "{spoken:?}");
+        assert!(spoken.windows(2).any(|words| words == ["you", "know"]));
+
+        let undo = d.dispatch("undo", serde_json::json!({}));
+        assert!(!undo.is_error, "{}", undo.text_joined());
+        assert_eq!(d.handle.timeline(), before);
     }
 
     #[test]
@@ -5140,14 +5421,12 @@ mod tests {
     }
 
     #[test]
-    fn inspect_timeline_without_bridge_reports_unavailable() {
-        // The seeded TestHandle timeline is empty, so first assert the empty guard,
-        // then a non-empty timeline with no bridge reports "not available".
+    fn inspect_timeline_without_bridge_is_not_advertised() {
         let d = dispatcher_with(seeded_handle());
         let r = d.dispatch("inspect_timeline", serde_json::json!({ "startFrame": 0 }));
         assert!(r.is_error);
         assert!(
-            r.text_joined().contains("not available"),
+            r.text_joined().contains("not advertised"),
             "{}",
             r.text_joined()
         );
@@ -5272,7 +5551,7 @@ mod tests {
     }
 
     #[test]
-    fn import_media_without_bridge_reports_unavailable() {
+    fn import_media_without_bridge_is_not_advertised() {
         let d = dispatcher_with(seeded_handle());
         let r = d.dispatch(
             "import_media",
@@ -5280,7 +5559,7 @@ mod tests {
         );
         assert!(r.is_error);
         assert!(
-            r.text_joined().contains("not available"),
+            r.text_joined().contains("not advertised"),
             "{}",
             r.text_joined()
         );
@@ -5617,7 +5896,7 @@ mod tests {
     }
 
     #[test]
-    fn search_media_without_bridge_reports_unavailable() {
+    fn search_media_without_bridge_is_not_advertised() {
         let mut m = MediaManifest::new();
         m.entries.push(entry("v", "Clip"));
         let handle = Arc::new(StateHandle::new(Timeline::new(), m));
@@ -5625,7 +5904,7 @@ mod tests {
         let r = d.dispatch("search_media", serde_json::json!({ "query": "x" }));
         assert!(r.is_error);
         assert!(
-            r.text_joined().contains("not available in this build"),
+            r.text_joined().contains("not advertised"),
             "{}",
             r.text_joined()
         );
@@ -5674,6 +5953,39 @@ mod tests {
         (d, bridge)
     }
 
+    /// A fixed 30-second talking-head fixture with linked video/audio clips.
+    /// Only the audio partner is transcribed, matching production caption target
+    /// selection, while a reviewed ripple cut must keep both tracks frame-exact.
+    fn linked_talking_head_dispatcher(t: TranscriptionResult) -> (Dispatcher, Arc<FakeBridge>) {
+        let mut tl = Timeline::new();
+        tl.fps = 30;
+
+        let mut video_track = Track::new("track-v", ClipType::Video);
+        let mut video = Clip::new("clip-v", "vid", 0, 30 * 30);
+        video.link_group_id = Some("talking-head-av".into());
+        video_track.clips.push(video);
+
+        let mut audio_track = Track::new("track-a", ClipType::Audio);
+        let mut audio = Clip::new("clip-a", "aud", 0, 30 * 30);
+        audio.media_type = ClipType::Audio;
+        audio.link_group_id = Some("talking-head-av".into());
+        audio_track.clips.push(audio);
+
+        tl.tracks.push(video_track);
+        tl.tracks.push(audio_track);
+        let mut manifest = MediaManifest::new();
+        manifest.entries.push(entry("vid", "Camera"));
+        manifest.entries.push(audio_entry("aud", "Voice"));
+        let handle = Arc::new(StateHandle::new(tl, manifest));
+        let bridge = Arc::new(FakeBridge::default().with_transcript("aud", t));
+        let dispatcher = Dispatcher::with_bridge(
+            handle,
+            Arc::new(RwLock::new(PluginRegistry::new())),
+            Some(bridge.clone() as Arc<dyn MediaBridge>),
+        );
+        (dispatcher, bridge)
+    }
+
     #[test]
     fn get_transcript_maps_words_to_project_frames() {
         let (d, _b) = transcript_dispatcher(transcript(vec![
@@ -5700,8 +6012,7 @@ mod tests {
     }
 
     #[test]
-    fn get_transcript_without_bridge_reports_unavailable() {
-        // Same audio timeline but no bridge wired → honest "not available".
+    fn get_transcript_without_bridge_is_not_advertised() {
         let mut tl = Timeline::new();
         tl.fps = 30;
         let mut track = opentake_domain::Track::new("track-a", ClipType::Audio);
@@ -5715,7 +6026,7 @@ mod tests {
         let r = d.dispatch("get_transcript", serde_json::json!({}));
         assert!(r.is_error);
         assert!(
-            r.text_joined().contains("not available"),
+            r.text_joined().contains("not advertised"),
             "{}",
             r.text_joined()
         );
@@ -6061,7 +6372,7 @@ mod tests {
     }
 
     #[test]
-    fn add_captions_without_bridge_reports_unavailable() {
+    fn add_captions_without_bridge_is_not_advertised() {
         let mut tl = Timeline::new();
         tl.fps = 30;
         tl.width = 1920;
@@ -6077,7 +6388,7 @@ mod tests {
         let r = d.dispatch("add_captions", serde_json::json!({}));
         assert!(r.is_error);
         assert!(
-            r.text_joined().contains("not available"),
+            r.text_joined().contains("not advertised"),
             "{}",
             r.text_joined()
         );

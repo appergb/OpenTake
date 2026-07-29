@@ -8,7 +8,7 @@
 
 枚举顺序严格按 `ToolName`（`ToolDefinitions.swift:4-36`）：`get_timeline, get_media, add_clips, insert_clips, remove_clips, remove_tracks, move_clips, set_clip_properties, set_keyframes, split_clip, ripple_delete_ranges, undo, add_texts, add_captions, generate_video, generate_image, generate_audio, upscale_media, import_media, list_models, inspect_media, get_transcript, inspect_timeline, search_media, list_folders, create_folder, move_to_folder, rename_media, rename_folder, delete_media, delete_folder`。
 
-> 这是上游 31 工具契约清单，不等于当前发现面。OpenTake 在 `ToolName::KNOWN` 保留 44 个兼容线名：基础 38 个真实路径工具始终发布；存在托管或 fal/Replicate/OpenAI/ElevenLabs 兼容 BYOK 凭据时动态增加 `generate_video`、`generate_image`、`generate_audio`、`upscale_media`。Motion 两个兼容线名仍不发布。
+> 这是上游 31 工具契约清单，不等于当前发现面。OpenTake 在 `ToolName::KNOWN` 保留 45 个兼容线名：基础集合最多 39 个，其中媒体桥相关工具仅在主机桥存在时发布；存在托管或 fal/Replicate/OpenAI/ElevenLabs 兼容 BYOK 凭据时动态增加 `generate_video`、`generate_image`、`generate_audio`、`upscale_media`。Motion 两个兼容线名仍不发布。
 
 ### A. 读 / 内省（只读，7 个）
 

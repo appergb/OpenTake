@@ -34,6 +34,7 @@ pub enum ToolName {
     AutoCutToBeats,
     SmartReframe,
     TightenSilences,
+    RemoveFillerWords,
     // --- Media generation / import (5) ---
     GenerateVideo,
     GenerateImage,
@@ -63,6 +64,22 @@ pub enum ToolName {
 }
 
 impl ToolName {
+    /// Whether discovery of this tool requires a live host media bridge.
+    /// Keeping this predicate next to the catalog prevents MCP and in-app Chat
+    /// from drifting into different fail-closed capability sets.
+    pub const fn requires_media_bridge(self) -> bool {
+        matches!(
+            self,
+            ToolName::InspectMedia
+                | ToolName::GetTranscript
+                | ToolName::InspectTimeline
+                | ToolName::SearchMedia
+                | ToolName::AddCaptions
+                | ToolName::RemoveFillerWords
+                | ToolName::ImportMedia
+        )
+    }
+
     /// The wire name (matches upstream / spec exactly).
     pub fn as_str(self) -> &'static str {
         match self {
@@ -89,6 +106,7 @@ impl ToolName {
             ToolName::AutoCutToBeats => "auto_cut_to_beats",
             ToolName::SmartReframe => "smart_reframe",
             ToolName::TightenSilences => "tighten_silences",
+            ToolName::RemoveFillerWords => "remove_filler_words",
             ToolName::GenerateVideo => "generate_video",
             ToolName::GenerateImage => "generate_image",
             ToolName::GenerateAudio => "generate_audio",
@@ -116,7 +134,7 @@ impl ToolName {
     /// Tools advertised to MCP and in-app Chat in registration order. Provider-
     /// backed generation and Motion Canvas tools remain known wire names, but
     /// stay out of discovery until their production backends are connected.
-    pub const ALL: [ToolName; 38] = [
+    pub const ALL: [ToolName; 39] = [
         ToolName::GetTimeline,
         ToolName::GetMedia,
         ToolName::InspectMedia,
@@ -140,6 +158,7 @@ impl ToolName {
         ToolName::AutoCutToBeats,
         ToolName::SmartReframe,
         ToolName::TightenSilences,
+        ToolName::RemoveFillerWords,
         ToolName::ImportMedia,
         ToolName::ListFolders,
         ToolName::CreateFolder,
@@ -170,7 +189,7 @@ impl ToolName {
     /// hidden from discovery until a real backend exists. Keeping this set lets
     /// strict argument validation and compatibility tests cover future tools
     /// without advertising placeholder behavior to models.
-    pub const KNOWN: [ToolName; 44] = [
+    pub const KNOWN: [ToolName; 45] = [
         ToolName::GetTimeline,
         ToolName::GetMedia,
         ToolName::InspectMedia,
@@ -194,6 +213,7 @@ impl ToolName {
         ToolName::AutoCutToBeats,
         ToolName::SmartReframe,
         ToolName::TightenSilences,
+        ToolName::RemoveFillerWords,
         ToolName::GenerateVideo,
         ToolName::GenerateImage,
         ToolName::GenerateAudio,
@@ -274,9 +294,9 @@ mod tests {
     }
 
     #[test]
-    fn advertised_set_is_38_and_known_set_is_44() {
-        assert_eq!(ToolName::ALL.len(), 38);
-        assert_eq!(ToolName::KNOWN.len(), 44);
+    fn advertised_set_is_39_and_known_set_is_45() {
+        assert_eq!(ToolName::ALL.len(), 39);
+        assert_eq!(ToolName::KNOWN.len(), 45);
         assert!(ToolName::ALL
             .iter()
             .all(|tool| ToolName::KNOWN.contains(tool)));
@@ -288,11 +308,13 @@ mod tests {
         assert_eq!(ToolName::AutoCutToBeats.as_str(), "auto_cut_to_beats");
         assert_eq!(ToolName::SmartReframe.as_str(), "smart_reframe");
         assert_eq!(ToolName::TightenSilences.as_str(), "tighten_silences");
+        assert_eq!(ToolName::RemoveFillerWords.as_str(), "remove_filler_words");
         for t in [
             ToolName::DetectBeats,
             ToolName::AutoCutToBeats,
             ToolName::SmartReframe,
             ToolName::TightenSilences,
+            ToolName::RemoveFillerWords,
         ] {
             assert_eq!(ToolName::from_str(t.as_str()), Ok(t));
             assert!(!ToolName::UPSTREAM.contains(&t));

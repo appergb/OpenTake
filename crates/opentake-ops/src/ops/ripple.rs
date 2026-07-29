@@ -489,6 +489,34 @@ mod tests {
     }
 
     #[test]
+    fn ripple_delete_ranges_keeps_linked_av_frame_exact() {
+        let mut tl = Timeline::new();
+        let mut video = Track::new("video", ClipType::Video);
+        let mut video_clip = clip("video-clip", 0, 900);
+        video_clip.link_group_id = Some("av".into());
+        video.clips.push(video_clip);
+        let mut audio = Track::new("audio", ClipType::Audio);
+        let mut audio_clip = clip("audio-clip", 0, 900);
+        audio_clip.media_type = ClipType::Audio;
+        audio_clip.link_group_id = Some("av".into());
+        audio.clips.push(audio_clip);
+        tl.tracks.extend([video, audio]);
+
+        let g = SeqIdGen::new("r-");
+        let out = ripple_delete_ranges_on_track(&mut tl, 1, &[FrameRange::new(6, 12)], &label, &g);
+        assert!(matches!(out, RippleOutcome::Ok(_)));
+        let spans = |track: &Track| {
+            track
+                .clips
+                .iter()
+                .map(|clip| (clip.start_frame, clip.end_frame()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(spans(&tl.tracks[0]), vec![(0, 6), (6, 894)]);
+        assert_eq!(spans(&tl.tracks[1]), vec![(0, 6), (6, 894)]);
+    }
+
+    #[test]
     fn ripple_delete_ranges_refuses_on_locked_follower_collision() {
         let mut tl = Timeline::new();
         tl.tracks.push(one_track(vec![clip("a", 0, 200)], true));

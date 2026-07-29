@@ -33,29 +33,30 @@
 - `apply(cmd)` → `apply_raw` 调 `handle.apply`；若 `res.changed`，把 `action_name` 压入 agent-undo 栈。
 - `undo()` 只在栈非空（即本会话 Agent 真改过）时弹栈并 `apply_raw(EditCommand::Undo)`；否则 `"undo: no agent edits to revert"`。这保护用户的手动编辑不被 Agent 撤销（照搬上游 `agentUndoStack` 守卫）。
 
-### body 分类（38 个发现面工具；44 个兼容线名）
+### body 分类（最多 39 个基础工具；45 个兼容线名）
 
 - **读类（序列化状态/媒体桥）**：`get_timeline`、`get_media`、`list_folders`、`list_models`、`inspect_media`、`get_transcript`、`inspect_timeline`、`search_media`。
 - **编辑类（→ EditCommand → CoreHandle::apply）**：`add_clips`（含 `AddClipsAutoTrack` 自动建轨）、`insert_clips`、`move_clips`、`remove_clips`、`remove_tracks`、`split_clip`、`set_keyframes`、`ripple_delete_ranges`、`add_texts`、`set_clip_properties`、`create_folder`、`move_to_folder`、`rename_media`、`rename_folder`、`delete_media`、`delete_folder`、`set_color_grade`、`chroma_key`、`set_mask`、`apply_effect`、`undo`。
 - **工作流插件类**：`list_workflows` / `activate_workflow` / `deactivate_workflow`（操作 `PluginRegistry`，激活时回发插件 `instructions.md`）。
-- **分析驱动类（预览/建议，`applied:false`）**：`detect_beats` / `auto_cut_to_beats` / `tighten_silences`。经 `CoreHandle::extract_analysis_pcm` 抽 16k 单声道 PCM，调 `opentake-media` 的 `detect_beats` / `detect_silences`，把结果折算回项目帧后**返回建议**（节拍帧 / 切点 / 待执行的 `ripple_delete_ranges` 命令列表），由模型再调编辑工具落地——不直接改时间线。
+- **分析驱动类（预览/建议，`applied:false`）**：`detect_beats` / `auto_cut_to_beats` / `tighten_silences` / `remove_filler_words`。前三者经 `CoreHandle::extract_analysis_pcm` 抽 16k 单声道 PCM；`remove_filler_words` 经真实媒体桥读取词级项目帧转写，匹配可配置多词语气词表。四者都返回待审阅建议/`ripple_delete_ranges` 命令，不直接改时间线。
 - **桌面媒体桥**：`inspect_media`、`get_transcript`、`inspect_timeline`、`search_media`、`import_media`、`add_captions` 执行真实 Tauri/媒体路径；`inspect_media` 的 Lottie 分支返回明确不支持。
 - **结构化不可用**：`smart_reframe`（需视觉/显著性后端）。
-- **发现面外兼容线名**：`generate_video`、`generate_image`、`generate_audio`、`upscale_media`、`add_motion_graphic`、`edit_motion_graphic` 保留 schema/严格解码覆盖，但不在生产目录和系统提示中出现。
+- **动态生成类**：存在兼容托管或 BYOK 凭据时，`generate_video`、`generate_image`、`generate_audio`、`upscale_media` 进入发现面并走持久化任务、进度/取消/重试/结果导入链路；无可用授权时不发布。
+- **发现面外兼容线名**：`add_motion_graphic`、`edit_motion_graphic` 保留 schema/严格解码覆盖，但不在生产目录和系统提示中出现。
 
 帧/秒折算、`speed` 归一、`source↔timeline` 帧映射等纯数学集中在本文件的自由函数（如 `source_seconds_to_timeline_frame_clamped`），遵循移植铁律的取整方向。
 
 ## 工具层文件（`tools/`）
 
-### names.rs：44 工具枚举
+### names.rs：45 工具枚举
 
 `ToolName` 枚举 + `as_str()`（线名，与上游/规格逐字一致）+ `FromStr`。三个常量：
 
-- **`ALL: [ToolName; 38]`** — 当前发现面工具，注册顺序。
-- **`KNOWN: [ToolName; 44]`** — 含尚未发布能力的全部兼容线名。
+- **`ALL: [ToolName; 39]`** — 最大基础发现面，注册顺序；其中 7 个媒体桥工具按主机能力 fail-closed 过滤。
+- **`KNOWN: [ToolName; 45]`** — 含动态生成与尚未发布 Motion 能力的全部兼容线名。
 - **`UPSTREAM: [ToolName; 31]`** — 上游对齐子集（Issue #9 的"31 工具"）。
 
-13 个 OpenTake 扩展由分析驱动 4 + 工作流 3 + A-tier 效果 4 + Motion Canvas 2 组成；Motion 2 当前仅在 `KNOWN`（详见 [总览](OVERVIEW.md)）。
+14 个 OpenTake 扩展由分析驱动 5 + 工作流 3 + A-tier 效果 4 + Motion Canvas 2 组成；Motion 2 当前仅在 `KNOWN`（详见 [总览](OVERVIEW.md)）。
 
 ### args.rs：类型化参数
 

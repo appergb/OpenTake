@@ -68,9 +68,10 @@ fn every_advertised_tool_is_live_or_absent() {
             serde_json::json!({"clipId": "clip", "code": "export default {}"}),
         ),
     ];
+    let advertised = dispatcher.advertised_tools();
 
     for (tool, args) in cases {
-        if !ToolName::ALL.contains(&tool) {
+        if !advertised.contains(&tool) {
             let result = dispatcher.dispatch(tool.as_str(), args);
             assert!(
                 result.text_joined().contains("not advertised"),

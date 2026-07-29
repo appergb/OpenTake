@@ -678,6 +678,20 @@ impl ToolArgs for TightenSilencesArgs {
     ];
 }
 
+// --- remove_filler_words ---
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveFillerWordsArgs {
+    pub clip_ids: Option<Vec<String>>,
+    pub track_index: Option<usize>,
+    pub filler_words: Option<Vec<String>>,
+    pub padding_frames: Option<i32>,
+}
+impl ToolArgs for RemoveFillerWordsArgs {
+    const ALLOWED_KEYS: &'static [&'static str] =
+        &["clipIds", "trackIndex", "fillerWords", "paddingFrames"];
+}
+
 // --- generate_video ---
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]

@@ -612,12 +612,17 @@ mod tests {
     #[test]
     fn lists_every_advertised_tool() {
         let server = server();
-        assert_eq!(server.tools().len(), ToolName::ALL.len());
+        let expected = ToolName::ALL
+            .iter()
+            .filter(|tool| !tool.requires_media_bridge())
+            .count();
+        assert_eq!(server.tools().len(), expected);
         // Names round-trip to the wire names.
         let names: Vec<String> = server.tools().iter().map(|t| t.name.to_string()).collect();
         assert!(names.contains(&"add_clips".to_string()));
         assert!(names.contains(&"detect_beats".to_string()));
         assert!(names.contains(&"activate_workflow".to_string()));
+        assert!(!names.contains(&"remove_filler_words".to_string()));
     }
 
     #[test]

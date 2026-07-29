@@ -94,7 +94,7 @@
 - Shell 好 (short_id、encode_timeline、context_signal、dispatch 管道、描述 verbatim port)。
 
 **问题/风险**:
-- 38 个发现面工具均已脱离 `not yet implemented` 分支；`inspect_media` 已通过 Tauri `MediaBridge` 接入图片/视频抽帧及本地转写。
+- 最多 39 个基础工具均已脱离 `not yet implemented` 分支，并按主机媒体桥能力 fail-closed 过滤；`inspect_media` 与 `remove_filler_words` 已通过 Tauri `MediaBridge` 接入抽帧/本地转写与词级项目帧分析。
 - 生成/超分四个工具已接共享生产 GenerationBridge：仅在托管或兼容 BYOK 凭据可用时动态发布；Motion 两个兼容线名仍隐藏，Lottie 源检查仍明确不支持。
 - 生成作业已具备成本授权、耐久占位/日志、进度、取消、部分成功、失败码、重试与重启恢复；结果下载受协议/地址/大小/重定向约束并在探测后原子导入。
 - 严重性: **中**（生成主竖切已闭合；高级 AI workflow、Motion 与付费真实账号冒烟仍属发布验证项）。
