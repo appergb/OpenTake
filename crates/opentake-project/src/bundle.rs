@@ -318,6 +318,31 @@ impl Project {
         }
         publisher.publish()
     }
+
+    /// Replace the same bundle represented by an owned retained root.
+    ///
+    /// Windows refuses to rename a directory while a process still owns an
+    /// open directory handle to it. Complete same-target transactions therefore
+    /// stage and copy through the retained authority first, explicitly close
+    /// that authority, and only then enter the existing journaled publication
+    /// commit. Save-As keeps using [`Self::publish_complete_to`] because its
+    /// source and destination are distinct.
+    pub fn publish_complete_replacing_root(
+        &self,
+        bundle: impl AsRef<Path>,
+        media_source: ProjectRoot,
+    ) -> Result<ProjectRoot> {
+        let encoded = EncodedProject::prepare(self)?;
+        let publisher = ProjectRoot::begin_replace(bundle.as_ref())?;
+        encoded.write_to(publisher.stage())?;
+        media_source.copy_media_to(publisher.stage())?;
+        media_source.copy_chat_sessions_to(publisher.stage())?;
+        if self.thumbnail.is_none() {
+            media_source.copy_thumbnail_to(publisher.stage())?;
+        }
+        drop(media_source);
+        publisher.publish()
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -638,6 +663,31 @@ mod tests {
             fs::read(target.join("chat-sessions/chat-1.json")).unwrap(),
             br#"{"id":"chat-1","messages":[]}"#
         );
+    }
+
+    #[test]
+    fn complete_publish_replaces_the_owned_source_root() {
+        let tmp = TmpDir::new("complete-same-target");
+        let target = tmp.path().join("Project.opentake");
+        let mut project = Project::new(&target);
+        project.timeline.fps = 24;
+        project.save().unwrap();
+        fs::create_dir_all(target.join("media")).unwrap();
+        fs::write(target.join("media/clip.bin"), b"media").unwrap();
+        fs::write(target.join("thumbnail.jpg"), b"cover").unwrap();
+        let source_root = ProjectRoot::open(&target).unwrap();
+
+        project.timeline.fps = 48;
+        let published = project
+            .publish_complete_replacing_root(&target, source_root)
+            .expect("same-target publication must release the old root before rename");
+
+        assert_eq!(
+            Project::open_from_root(&published).unwrap().timeline.fps,
+            48
+        );
+        assert_eq!(fs::read(target.join("media/clip.bin")).unwrap(), b"media");
+        assert_eq!(fs::read(target.join("thumbnail.jpg")).unwrap(), b"cover");
     }
 
     #[cfg(unix)]

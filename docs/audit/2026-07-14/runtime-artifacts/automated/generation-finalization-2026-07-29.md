@@ -31,3 +31,9 @@ git diff --check
 ```
 
 Final result: all commands passed. Workspace tests reported zero failures; repository-declared ignored tests remained ignored. Web result: 70 test files, 703 tests passed. Vite emitted only the pre-existing chunk-size/dynamic-import optimization warnings.
+
+## Windows CI correction
+
+The first exact-tree Windows full-product run (`30459985870`, job `90603221524`) failed all three `generation_persistence` tests with Win32 error 32 while replacing `Generation.opentake`. The durable generation transaction had correctly staged a complete sibling bundle, but the live session still retained an open `ProjectRoot` directory handle when the journaled publisher tried to rename the old target. Windows forbids that rename even though macOS permits it.
+
+The corrected path copies the complete bundle through the retained root, explicitly consumes and closes that root, and only then invokes the existing journal/backup/restore publication commit. Save-As continues to retain its distinct source root. `complete_publish_replaces_the_owned_source_root` pins this same-target Windows requirement, and the three generation persistence tests plus full format/Clippy/workspace gates pass locally after the correction. The replacement keeps whole-bundle atomicity; it does not fall back to two independently visible JSON writes.

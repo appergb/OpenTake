@@ -1012,7 +1012,18 @@ impl EditorSession {
         // Generation spans media.json + generation-log.json. Publish a complete
         // sibling bundle so both become visible at one rename commit point.
         // The source root carries media/chat/thumbnail into the fresh stage.
-        let new_root = project.publish_complete_to(&target, self.project_root.as_ref())?;
+        let source_root = self.project_root.take().ok_or(CoreError::NoProjectOpen)?;
+        let new_root = match project.publish_complete_replacing_root(&target, source_root) {
+            Ok(root) => root,
+            Err(error) => {
+                // A pre-commit failure restores the original target; recover
+                // retained authority when possible while preserving the exact
+                // publication error for the caller. Post-commit ambiguity stays
+                // fail-closed if the target cannot be reopened.
+                self.project_root = ProjectRoot::open(&target).ok();
+                return Err(error.into());
+            }
+        };
         self.project_root = Some(new_root);
         self.generation_log_component_present = true;
         Ok(target)
