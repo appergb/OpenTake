@@ -2,9 +2,8 @@
 //!
 //! Durable placeholder state is committed before provider submission. Provider
 //! keys stay in the OS keychain; signed result URLs and provider diagnostics are
-//! never persisted. Terminal downloads are probed and imported through retained
-//! project-media capabilities before the original placeholder identity becomes
-//! ready.
+//! never persisted. Terminal downloads are probed, then streamed into the same
+//! complete-bundle publication that makes the original placeholder ready.
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{Read, Write};
@@ -32,8 +31,6 @@ use opentake_gen::{
     ProviderRegistry, ReplicateAdapter, ReqwestTransport, StaticToken, UiCapabilities,
 };
 use opentake_media::{MediaCancelToken, MediaEngine};
-
-use crate::library::ProjectMediaCapability;
 
 const RESULT_BYTES_MAX: u64 = 1024 * 1024 * 1024;
 const DATA_URL_ENCODED_MAX: usize = 512 * 1024 * 1024;
@@ -1381,25 +1378,10 @@ impl GenerationFinalizationStore for TauriFinalizationStore {
             probe.format_name.as_deref(),
         )?;
         let leaf = format!("{asset_id}.{extension}");
-        let capability = ProjectMediaCapability::open_verified(
-            &self.bridge.core,
-            self.project_epoch,
-            &self.project_dir,
-            true,
-        )?;
-        let mut import = capability.create_import(Path::new(&leaf))?;
         let mut source = std::fs::File::open(&artifact.path).map_err(|error| error.to_string())?;
-        std::io::copy(&mut source, import.file_mut()).map_err(|error| error.to_string())?;
-        import
-            .file()
-            .sync_all()
-            .map_err(|error| error.to_string())?;
-        if !capability.matches_leaf(&import)? {
-            return Err("generation import identity changed".to_string());
-        }
         self.bridge
             .core
-            .finalize_generation_output_for_project(
+            .finalize_generation_output_with_media_for_project(
                 self.project_epoch,
                 &self.project_dir,
                 PreparedGenerationOutput {
@@ -1414,9 +1396,11 @@ impl GenerationFinalizationStore for TauriFinalizationStore {
                     },
                     created_at: Some(now_apple_reference_seconds()),
                 },
+                &leaf,
+                artifact.byte_size,
+                &mut source,
             )
             .map_err(|error| error.to_string())?;
-        import.commit();
         let _ = std::fs::remove_file(&artifact.path);
         Ok(())
     }
@@ -2736,7 +2720,8 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(&cache).unwrap();
         let staged = cache.join("upscale.png");
-        std::fs::write(&staged, png_bytes(6, 4)).unwrap();
+        let staged_bytes = png_bytes(6, 4);
+        std::fs::write(&staged, &staged_bytes).unwrap();
         let store = TauriFinalizationStore {
             bridge: bridge.as_ref().clone(),
             project_epoch: snapshot.project_epoch,
@@ -2748,7 +2733,7 @@ mod tests {
                 DownloadedGenerationArtifact {
                     path: staged,
                     media_type: "image/png".to_string(),
-                    byte_size: 0,
+                    byte_size: staged_bytes.len() as u64,
                 },
             )
             .unwrap();

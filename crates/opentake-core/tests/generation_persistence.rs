@@ -125,9 +125,10 @@ fn placeholders_job_events_and_finalized_output_survive_restart() {
     )
     .unwrap();
 
-    let relative_path = format!("media/{asset_id}.png");
-    fs::write(bundle.join(&relative_path), b"upscaled-bytes").unwrap();
-    core.finalize_generation_output_for_project(
+    let media_leaf = format!("{asset_id}.png");
+    let relative_path = format!("media/{media_leaf}");
+    let mut generated_media = std::io::Cursor::new(b"upscaled-bytes");
+    core.finalize_generation_output_with_media_for_project(
         runtime.project_epoch,
         &bundle,
         PreparedGenerationOutput {
@@ -142,6 +143,9 @@ fn placeholders_job_events_and_finalized_output_survive_restart() {
             },
             created_at: Some(800_000_002.0),
         },
+        &media_leaf,
+        14,
+        &mut generated_media,
     )
     .unwrap();
 
@@ -167,10 +171,19 @@ fn placeholders_job_events_and_finalized_output_survive_restart() {
         .unwrap();
     assert_eq!(output.source_width, Some(8));
     assert_eq!(output.source_height, Some(6));
-    assert_eq!(output.source, MediaSource::Project { relative_path });
+    assert_eq!(
+        output.source,
+        MediaSource::Project {
+            relative_path: relative_path.clone()
+        }
+    );
     assert_eq!(
         output.generation_input.as_ref().unwrap().status,
         Some(GenerationJobStatus::Ready)
+    );
+    assert_eq!(
+        fs::read(bundle.join(&relative_path)).unwrap(),
+        b"upscaled-bytes"
     );
     assert_eq!(fs::read(bundle.join("thumbnail.jpg")).unwrap(), b"cover");
 

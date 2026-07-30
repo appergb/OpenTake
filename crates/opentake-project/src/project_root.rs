@@ -157,6 +157,57 @@ impl ProjectRoot {
         self.copy_directory_component_to(destination, crate::layout::MEDIA_DIR, "media-copy")
     }
 
+    /// Write one fresh media leaf into this retained bundle.
+    ///
+    /// Complete generation publication uses this only on an unpublished stage,
+    /// after the existing media tree has been copied. The final leaf is created
+    /// with `create_new`, streamed without an ambient destination path, checked
+    /// against the downloader's exact byte count, synced, and kept only after
+    /// every write succeeds.
+    pub(crate) fn write_new_media_leaf(
+        &self,
+        name: &str,
+        expected_bytes: u64,
+        source: &mut dyn Read,
+    ) -> Result<()> {
+        validate_leaf(name).map_err(|error| {
+            ProjectError::io(self.path.join(crate::layout::MEDIA_DIR).join(name), error)
+        })?;
+        let media_path = self.path.join(crate::layout::MEDIA_DIR);
+        match self.dir.create_dir(crate::layout::MEDIA_DIR) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(ProjectError::io(&media_path, error)),
+        }
+        let media = self
+            .dir
+            .open_dir_nofollow(crate::layout::MEDIA_DIR)
+            .map_err(|error| ProjectError::io(&media_path, error))?;
+        let mut leaf = TransactionLeaf::create(&media, name)
+            .map_err(|error| ProjectError::io(media_path.join(name), error))?;
+        let copied = std::io::copy(
+            &mut source.take(expected_bytes.saturating_add(1)),
+            leaf.handle.as_file_mut(),
+        )
+        .map_err(|error| ProjectError::io(media_path.join(name), error))?;
+        if copied != expected_bytes {
+            return Err(ProjectError::io(
+                media_path.join(name),
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "generated media size changed before publication",
+                ),
+            ));
+        }
+        leaf.handle
+            .as_file_mut()
+            .flush()
+            .and_then(|()| leaf.handle.as_file().sync_all())
+            .map_err(|error| ProjectError::io(media_path.join(name), error))?;
+        leaf.cleanup_on_drop = false;
+        Ok(())
+    }
+
     /// Copy project-local Agent conversations during complete-bundle
     /// publication (Save As / archive) through retained no-follow roots.
     pub fn copy_chat_sessions_to(&self, destination: &ProjectRoot) -> Result<()> {

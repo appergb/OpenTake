@@ -625,11 +625,9 @@ impl ProjectMediaCapability {
             };
             options
                 .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
-                // Generation publishes media.json + generation-log.json by
-                // replacing the complete bundle. Keep the retained import
-                // handle authoritative without blocking that directory rename
-                // on Windows; identity checks and handle-relative rollback
-                // remain valid after a namespace move.
+                // Keep the retained import compatible with a whole-bundle
+                // rename on Windows while preserving identity validation and
+                // handle-relative rollback after a namespace move.
                 .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
         }
         let file = self

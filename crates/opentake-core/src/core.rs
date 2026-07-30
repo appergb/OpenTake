@@ -722,6 +722,31 @@ impl AppCore {
         )
     }
 
+    /// Finalize a generated output and stream its media bytes into the same
+    /// complete-bundle publication as the manifest and generation log.
+    pub fn finalize_generation_output_with_media_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        output: PreparedGenerationOutput,
+        media_leaf: &str,
+        media_byte_size: u64,
+        media: &mut dyn std::io::Read,
+    ) -> Result<()> {
+        let expected_relative_path = format!("media/{media_leaf}");
+        if output.relative_path != expected_relative_path {
+            return Err(CoreError::Media(
+                "generation output path does not match its media leaf".to_string(),
+            ));
+        }
+        self.persist_generation_mutation_using(
+            expected_project_epoch,
+            expected_project_dir,
+            |editor, ids| editor.finalize_generation_output(output, ids),
+            |editor| editor.save_generation_state_with_media(media_leaf, media_byte_size, media),
+        )
+    }
+
     pub fn fail_generation_output_for_project(
         &self,
         expected_project_epoch: u64,
@@ -757,13 +782,28 @@ impl AppCore {
         expected_project_dir: &Path,
         mutate: impl FnOnce(&mut EditorSession, &dyn IdGen) -> Result<T>,
     ) -> Result<T> {
+        self.persist_generation_mutation_using(
+            expected_project_epoch,
+            expected_project_dir,
+            mutate,
+            |editor| editor.save_generation_state(),
+        )
+    }
+
+    fn persist_generation_mutation_using<T>(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        mutate: impl FnOnce(&mut EditorSession, &dyn IdGen) -> Result<T>,
+        persist: impl FnOnce(&mut EditorSession) -> Result<PathBuf>,
+    ) -> Result<T> {
         let (value, count, written) = {
             let mut session = self.lock();
             ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
             let checkpoint = session.editor.checkpoint_generation_state();
             let result = (|| {
                 let value = mutate(&mut session.editor, self.ids.as_ref())?;
-                let written = session.editor.save_generation_state()?;
+                let written = persist(&mut session.editor)?;
                 Ok((value, written))
             })();
             match result {

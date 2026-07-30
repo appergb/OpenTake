@@ -1029,6 +1029,38 @@ impl EditorSession {
         Ok(target)
     }
 
+    pub(crate) fn save_generation_state_with_media(
+        &mut self,
+        media_leaf: &str,
+        media_byte_size: u64,
+        media: &mut dyn std::io::Read,
+    ) -> Result<PathBuf> {
+        self.ensure_mutable()?;
+        let target = self.project_dir.clone().ok_or(CoreError::NoProjectOpen)?;
+        let mut project =
+            Project::new_with_compatibility(target.clone(), self.compatibility.clone());
+        project.timeline = self.state.timeline.clone();
+        project.manifest = self.state.manifest.clone();
+        project.generation_log = Some(self.generation_log.clone());
+        let source_root = self.project_root.take().ok_or(CoreError::NoProjectOpen)?;
+        let new_root = match project.publish_complete_replacing_root_with_media(
+            &target,
+            source_root,
+            media_leaf,
+            media_byte_size,
+            media,
+        ) {
+            Ok(root) => root,
+            Err(error) => {
+                self.project_root = ProjectRoot::open(&target).ok();
+                return Err(error.into());
+            }
+        };
+        self.project_root = Some(new_root);
+        self.generation_log_component_present = true;
+        Ok(target)
+    }
+
     pub(crate) fn checkpoint_generation_state(&self) -> GenerationStateCheckpoint {
         GenerationStateCheckpoint {
             manifest: self.state.manifest.clone(),
