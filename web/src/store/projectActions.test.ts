@@ -62,6 +62,7 @@ const srv = vi.hoisted(() => {
     }),
     projectSave: vi.fn(async (path: string | null) => path ?? ""),
     getMedia: vi.fn(async () => media),
+    openDialog: vi.fn(async () => undefined),
   };
 });
 
@@ -89,10 +90,15 @@ vi.mock("../components/preview/nativePlaybackSession", () => ({
 
 vi.mock("../lib/dialog", () => ({
   saveDialog: async () => async () => "/tmp/fresh.opentake",
-  openDialog: async () => undefined,
+  openDialog: srv.openDialog,
 }));
 
-import { newProjectAndEnter, openProjectPath, saveCurrentProject } from "./projectActions";
+import {
+  newProjectAndEnter,
+  openProjectPath,
+  openProjectViaDialog,
+  saveCurrentProject,
+} from "./projectActions";
 import { useEditorUiStore } from "./uiStore";
 import { useMediaStore } from "./mediaStore";
 import { useProjectStore } from "./projectStore";
@@ -109,10 +115,13 @@ describe("openProjectPath", () => {
     srv.getMedia.mockImplementation(async () => srv.media);
     srv.projectSave.mockReset();
     srv.projectSave.mockImplementation(async (path: string | null) => path ?? "");
+    srv.openDialog.mockReset();
+    srv.openDialog.mockResolvedValue(undefined);
     useMediaStore.setState({ items: [], folders: [], importing: false, error: null });
     useRecentStore.setState({ recents: [] });
     useProjectStore.setState({ projectPath: null, timelineVersion: 0 });
     useEditorUiStore.setState({ view: "home", toast: null });
+    useI18nStore.setState({ locale: "zh-CN" });
   });
 
   it("refreshes the media mirror after opening a project", async () => {
@@ -132,6 +141,15 @@ describe("openProjectPath", () => {
     expect(useMediaStore.getState().error).toBeNull();
   });
 
+  it("reports a native picker failure before project-open delegation", async () => {
+    srv.openDialog.mockRejectedValueOnce(new Error("picker unavailable"));
+
+    await expect(openProjectViaDialog()).rejects.toThrow("picker unavailable");
+
+    expect(useEditorUiStore.getState().toast?.message).toBe("打开失败：picker unavailable");
+    expect(srv.projectOpen).not.toHaveBeenCalled();
+  });
+
   it("preserves media transient state when project open fails", async () => {
     const oldFolder = { id: "old-folder", name: "Old", parentFolderId: null };
     useMediaStore.setState({
@@ -140,14 +158,18 @@ describe("openProjectPath", () => {
       importing: true,
       error: "old project error",
     });
-    srv.projectOpen.mockRejectedValueOnce(new Error("open failed"));
+    const failure = { code: "engine", message: "project open timed out after 15s" };
+    srv.projectOpen.mockRejectedValueOnce(failure);
 
-    await expect(openProjectPath("/tmp/broken.opentake")).rejects.toThrow("open failed");
+    await expect(openProjectPath("/tmp/broken.opentake")).rejects.toBe(failure);
 
     expect(useMediaStore.getState().importing).toBe(true);
     expect(useMediaStore.getState().error).toBe("old project error");
     expect(useMediaStore.getState().items).toEqual(srv.media.items);
     expect(useMediaStore.getState().folders).toEqual([oldFolder]);
+    expect(useEditorUiStore.getState().toast?.message).toBe(
+      "打开失败：project open timed out after 15s",
+    );
   });
 
   it("clears the old catalog immediately, then installs the opened project catalog", async () => {

@@ -1,10 +1,11 @@
 //! The `#[tauri::command]` surface.
 //!
-//! Each command is a thin shim: it locks nothing of its own, delegates to an
-//! `opentake_core::dto::handle_*` function (which wraps [`AppCore`]). Most
-//! boundary `CmdError`s become strings; playback-aware project lifecycle
-//! commands preserve the structured playback error code so overlap is reported
-//! as `busy` before core mutation.
+//! Each command is a thin shim over an `opentake_core::dto::handle_*` function
+//! (which wraps [`AppCore`]). Project New/Open additionally share one boundary
+//! single-flight gate so asynchronous project preparation cannot race another
+//! lifecycle transition. Most boundary `CmdError`s become strings;
+//! playback-aware lifecycle commands preserve the structured playback error
+//! code so overlap is reported as `busy` before core mutation.
 //!
 //! `EditCommand` itself is not `Deserialize` (it carries engine value types with
 //! no serde derives), so the editing entry point takes a local serde-friendly
@@ -13,6 +14,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
+use opentake_core::core::PreparedProjectOpen;
 use opentake_core::dto::{
     handle_edit_apply, handle_get_timeline, handle_project_new, handle_redo, handle_undo,
     EditResultDto, TimelineSnapshotDto,
@@ -28,6 +30,20 @@ use opentake_domain::{
     AnimPair, ChromaKey, ClipType, ColorGrade, Crop, Effect, Interpolation, Keyframe,
     KeyframeTrack, Mask, TextStyle, Transform,
 };
+
+#[derive(Clone, Default)]
+pub(crate) struct ProjectLifecycleCoordinator {
+    gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+}
+
+impl ProjectLifecycleCoordinator {
+    fn try_acquire(&self) -> Result<tokio::sync::OwnedMutexGuard<()>, String> {
+        self.gate
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| "another project lifecycle transition is already in progress".to_string())
+    }
+}
 
 // MARK: - Read / lifecycle commands (direct DTO passthrough)
 
@@ -56,7 +72,11 @@ pub fn project_new(
     core: State<'_, AppCore>,
     playback: State<'_, crate::playback::PlaybackState>,
     prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
+    lifecycle: State<'_, ProjectLifecycleCoordinator>,
 ) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
+    let _lifecycle = lifecycle
+        .try_acquire()
+        .map_err(crate::playback::session::PlaybackCommandError::busy)?;
     project_new_with_playback_and_prewarm(&core, &playback, &prewarm)
 }
 
@@ -92,7 +112,9 @@ fn project_new_with_playback_and_prewarm(
 pub fn project_new(
     core: State<'_, AppCore>,
     prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
+    lifecycle: State<'_, ProjectLifecycleCoordinator>,
 ) -> Result<TimelineSnapshotDto, String> {
+    let _lifecycle = lifecycle.try_acquire()?;
     prewarm.begin_project_transition()?;
     let snapshot = handle_project_new(&core);
     prewarm.activate_project(snapshot.project_epoch);
@@ -100,15 +122,57 @@ pub fn project_new(
 }
 
 /// `project_open`: open a `.opentake` bundle, returning the first snapshot.
+const PROJECT_OPEN_PREPARE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+async fn run_blocking_with_timeout<T, F>(
+    operation: &'static str,
+    timeout: std::time::Duration,
+    build: F,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let task = tokio::task::spawn_blocking(build);
+    match tokio::time::timeout(timeout, task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(format!("{operation} task failed: {error}")),
+        Err(_) => Err(format!("{operation} timed out after {timeout:?}")),
+    }
+}
+
+async fn prepare_project_open_off_thread(
+    path: std::path::PathBuf,
+) -> Result<PreparedProjectOpen, String> {
+    run_blocking_with_timeout("project open", PROJECT_OPEN_PREPARE_TIMEOUT, move || {
+        AppCore::prepare_project_open(path).map_err(|error| error.to_string())
+    })
+    .await
+}
+
 #[cfg(feature = "playback-engine")]
 #[tauri::command]
-pub fn project_open(
-    core: State<'_, AppCore>,
+pub async fn project_open(
+    app: AppHandle,
     path: String,
-    playback: State<'_, crate::playback::PlaybackState>,
-    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
 ) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
-    project_open_with_playback_and_prewarm(&core, path, &playback, &prewarm)
+    let _lifecycle = app
+        .state::<ProjectLifecycleCoordinator>()
+        .try_acquire()
+        .map_err(crate::playback::session::PlaybackCommandError::busy)?;
+    // Fail fast if another project transition is already active, but never hold
+    // a managed-state guard across the blocking filesystem prepare.
+    app.state::<crate::playback::PlaybackState>()
+        .ensure_project_transition_available()?;
+    let prepared = prepare_project_open_off_thread(std::path::PathBuf::from(path))
+        .await
+        .map_err(crate::playback::session::PlaybackCommandError::engine)?;
+    commit_prepared_project_open_with_playback_and_prewarm(
+        &app.state::<AppCore>(),
+        prepared,
+        &app.state::<crate::playback::PlaybackState>(),
+        &app.state::<crate::media::prewarm::PrewarmScheduler>(),
+    )
 }
 
 #[cfg(all(feature = "playback-engine", test))]
@@ -122,7 +186,7 @@ pub(crate) fn project_open_with_playback(
     project_open_with_playback_and_prewarm(core, path, playback, &prewarm)
 }
 
-#[cfg(feature = "playback-engine")]
+#[cfg(all(feature = "playback-engine", test))]
 pub(crate) fn project_open_with_playback_and_prewarm(
     core: &AppCore,
     path: String,
@@ -134,6 +198,16 @@ pub(crate) fn project_open_with_playback_and_prewarm(
         AppCore::prepare_project_open(std::path::PathBuf::from(path)).map_err(|error| {
             crate::playback::session::PlaybackCommandError::engine(error.to_string())
         })?;
+    commit_prepared_project_open_with_playback_and_prewarm(core, prepared, playback, prewarm)
+}
+
+#[cfg(feature = "playback-engine")]
+fn commit_prepared_project_open_with_playback_and_prewarm(
+    core: &AppCore,
+    prepared: PreparedProjectOpen,
+    playback: &crate::playback::PlaybackState,
+    prewarm: &crate::media::prewarm::PrewarmScheduler,
+) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
     let transition = playback.begin_project_transition()?;
     if let Err(error) = prewarm.begin_project_transition() {
         playback.cancel_project_transition(transition);
@@ -147,13 +221,11 @@ pub(crate) fn project_open_with_playback_and_prewarm(
 
 #[cfg(not(feature = "playback-engine"))]
 #[tauri::command]
-pub fn project_open(
-    core: State<'_, AppCore>,
-    path: String,
-    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
-) -> Result<TimelineSnapshotDto, String> {
-    let prepared = AppCore::prepare_project_open(std::path::PathBuf::from(path))
-        .map_err(|error| error.to_string())?;
+pub async fn project_open(app: AppHandle, path: String) -> Result<TimelineSnapshotDto, String> {
+    let _lifecycle = app.state::<ProjectLifecycleCoordinator>().try_acquire()?;
+    let prepared = prepare_project_open_off_thread(std::path::PathBuf::from(path)).await?;
+    let core = app.state::<AppCore>();
+    let prewarm = app.state::<crate::media::prewarm::PrewarmScheduler>();
     prewarm.begin_project_transition()?;
     let snapshot = TimelineSnapshotDto::from(core.commit_project_open(prepared));
     prewarm.activate_project(snapshot.project_epoch);
@@ -1186,6 +1258,71 @@ impl KeyframeValueDto {
             KeyframeValueDto::Pair { value } => KeyframeValue::Pair(value),
             KeyframeValueDto::Crop { value } => KeyframeValue::Crop(value),
         }
+    }
+}
+
+#[cfg(test)]
+mod project_open_async_tests {
+    use super::{run_blocking_with_timeout, ProjectLifecycleCoordinator};
+    use opentake_core::core::PreparedProjectOpen;
+    use opentake_core::AppCore;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_project_prepare_runs_off_the_async_caller_thread() {
+        let caller = std::thread::current().id();
+
+        let worker = run_blocking_with_timeout("test prepare", Duration::from_secs(1), || {
+            Ok(std::thread::current().id())
+        })
+        .await
+        .expect("blocking task completes");
+
+        assert_ne!(worker, caller);
+    }
+
+    #[test]
+    fn project_lifecycle_transitions_are_single_flight() {
+        let coordinator = ProjectLifecycleCoordinator::default();
+        let incumbent = coordinator.try_acquire().expect("first transition starts");
+
+        assert_eq!(
+            coordinator
+                .try_acquire()
+                .expect_err("overlapping transition must be busy"),
+            "another project lifecycle transition is already in progress"
+        );
+
+        drop(incumbent);
+        coordinator
+            .try_acquire()
+            .expect("transition may retry after incumbent settles");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timed_out_prepare_cannot_commit_a_late_project() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let bundle = fixture.path().join("slow.opentake");
+        AppCore::new()
+            .save_project(Some(bundle.clone()))
+            .expect("save project fixture");
+        let core = AppCore::new();
+        let before = core.project_revision();
+
+        let result: Result<PreparedProjectOpen, String> =
+            run_blocking_with_timeout("project open", Duration::from_millis(10), move || {
+                std::thread::sleep(Duration::from_millis(75));
+                AppCore::prepare_project_open(bundle).map_err(|error| error.to_string())
+            })
+            .await;
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("slow prepare must time out"),
+        };
+        assert_eq!(error, "project open timed out after 10ms");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(core.project_revision(), before);
     }
 }
 

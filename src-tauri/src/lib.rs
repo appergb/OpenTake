@@ -164,6 +164,7 @@ pub fn run() {
             };
 
             app.manage(core);
+            app.manage(commands::ProjectLifecycleCoordinator::default());
             app.manage(generation_bridge);
             app.manage(chat_state);
             app.manage(MediaState::new(engine));

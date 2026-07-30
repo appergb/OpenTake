@@ -34,8 +34,23 @@ const PROJECT_PATH = "/tmp/Recent Demo.opentake";
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function buttonsNamed(label: string): HTMLButtonElement[] {
+  return [...(container?.querySelectorAll<HTMLButtonElement>("button") ?? [])]
+    .filter((button) => button.textContent === label);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.openProjectPath.mockResolvedValue(undefined);
+  mocks.openProjectViaDialog.mockResolvedValue(undefined);
   localStorage.clear();
   useRecentStore.setState({
     recents: [{ path: PROJECT_PATH, name: "Recent Demo", openedAt: 1 }],
@@ -54,6 +69,102 @@ afterEach(async () => {
 });
 
 describe("Home recent-project controls", () => {
+  it("control-ef78873f98fcab84 open a project from the Home sidebar", async () => {
+    const pending = deferred<void>();
+    mocks.openProjectViaDialog.mockReturnValueOnce(pending.promise);
+    await act(async () => root?.render(<HomeView />));
+    const sidebarOpen = buttonsNamed("home.openProject")[0];
+
+    await act(async () => sidebarOpen?.click());
+    expect(mocks.openProjectViaDialog).toHaveBeenCalledTimes(1);
+    expect(sidebarOpen?.textContent).toBe("home.opening");
+    expect(sidebarOpen?.disabled).toBe(true);
+    expect(buttonsNamed("home.opening")).toHaveLength(2);
+    expect(buttonsNamed("home.opening").every((button) => button.disabled)).toBe(true);
+    expect(buttonsNamed("home.newProject").every((button) => button.disabled)).toBe(true);
+    const recent = container?.querySelector<HTMLButtonElement>("button.home-project-card");
+    expect(recent?.disabled).toBe(true);
+
+    await act(async () => buttonsNamed("home.opening")[1]?.click());
+    expect(mocks.openProjectViaDialog).toHaveBeenCalledTimes(1);
+
+    await act(async () => pending.resolve());
+    await vi.waitFor(() => expect(sidebarOpen?.textContent).toBe("home.openProject"));
+    expect(sidebarOpen?.disabled).toBe(false);
+    expect(buttonsNamed("home.newProject").every((button) => !button.disabled)).toBe(true);
+    expect(recent?.disabled).toBe(false);
+  });
+
+  it("control-2121d7b9fdc279b9 open a project from the empty launcher", async () => {
+    const pending = deferred<void>();
+    mocks.openProjectViaDialog.mockReturnValueOnce(pending.promise);
+    useRecentStore.setState({ recents: [] });
+    await act(async () => root?.render(<HomeView />));
+    const emptyOpen = buttonsNamed("home.openProject")[1];
+
+    await act(async () => emptyOpen?.click());
+    expect(mocks.openProjectViaDialog).toHaveBeenCalledTimes(1);
+    expect(emptyOpen?.textContent).toBe("home.opening");
+    expect(emptyOpen?.disabled).toBe(true);
+
+    await act(async () => pending.resolve());
+    await vi.waitFor(() => expect(emptyOpen?.textContent).toBe("home.openProject"));
+    expect(emptyOpen?.disabled).toBe(false);
+  });
+
+  it("control-ab109c708bb0efbf open a project from the populated launcher", async () => {
+    const pending = deferred<void>();
+    mocks.openProjectViaDialog.mockReturnValueOnce(pending.promise);
+    await act(async () => root?.render(<HomeView />));
+    const populatedOpen = buttonsNamed("home.openProject")[1];
+
+    await act(async () => populatedOpen?.click());
+    expect(mocks.openProjectViaDialog).toHaveBeenCalledTimes(1);
+    expect(populatedOpen?.textContent).toBe("home.opening");
+    expect(populatedOpen?.disabled).toBe(true);
+
+    await act(async () => pending.resolve());
+    await vi.waitFor(() => expect(populatedOpen?.textContent).toBe("home.openProject"));
+    expect(populatedOpen?.disabled).toBe(false);
+  });
+
+  it("restores an open control after the native project command rejects", async () => {
+    const failure = new Error("project open timed out");
+    mocks.openProjectViaDialog.mockRejectedValueOnce(failure);
+    await act(async () => root?.render(<HomeView />));
+    const sidebarOpen = buttonsNamed("home.openProject")[0];
+
+    await act(async () => sidebarOpen?.click());
+
+    expect(mocks.openProjectViaDialog).toHaveBeenCalledTimes(1);
+    expect(sidebarOpen?.textContent).toBe("home.openProject");
+    expect(sidebarOpen?.disabled).toBe(false);
+  });
+
+  it("serializes a recent-card open through the shared Home pending state", async () => {
+    const pending = deferred<void>();
+    mocks.openProjectPath.mockReturnValueOnce(pending.promise);
+    await act(async () => root?.render(<HomeView />));
+    const card = container?.querySelector<HTMLButtonElement>("button.home-project-card");
+
+    await act(async () =>
+      card?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })),
+    );
+
+    expect(mocks.openProjectPath).toHaveBeenCalledTimes(1);
+    expect(buttonsNamed("home.opening")).toHaveLength(2);
+    expect(card?.disabled).toBe(true);
+
+    await act(async () =>
+      card?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })),
+    );
+    expect(mocks.openProjectPath).toHaveBeenCalledTimes(1);
+
+    await act(async () => pending.resolve());
+    await vi.waitFor(() => expect(card?.disabled).toBe(false));
+    expect(buttonsNamed("home.openProject")).toHaveLength(2);
+  });
+
   it("control-f4a6b4f8789ea013 open the global Library from Home", async () => {
     await act(async () => root?.render(<HomeView />));
     const library = [...(container?.querySelectorAll<HTMLButtonElement>("button") ?? [])]

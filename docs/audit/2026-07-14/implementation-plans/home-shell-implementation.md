@@ -749,7 +749,7 @@
   - Visible/accessibility/return path: success=open a project from the populated launcher: sets opening while openProjectViaDialog runs; accessibility={"focus":"Custom LauncherButton focus behavior depends on its implementation","label":"Visible child text/title or caller-provided label; verify at runtime","shortcut":"None declared on this control"}; returnPath=["Project actions enter the editor; Library/Settings provide explicit Home/close actions."].
   - Outcome matrix: {"success":"open a project from the populated launcher: sets opening while openProjectViaDialog runs","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/home/HomeView.tsx:422; no additional state is inferred beyond the source.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/home/HomeView.tsx:422; the candidate-specific interaction test must assert that exact guard.","disabled":"No explicit disabled prop on this candidate.","cancel":"Cancellation/dismissal follows the exact guard in sets opening while openProjectViaDialog runs; no broader cancellation behavior is assumed.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in sets opening while openProjectViaDialog runs.","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/home/HomeView.tsx:422; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/home/HomeView.interaction.test.tsx#control-ef78873f98fcab84 open a project from the Home sidebar` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
   - `web/src/components/home/HomeView.interaction.test.tsx#control-2121d7b9fdc279b9 open a project from the empty launcher` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
@@ -757,7 +757,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-ef78873f98fcab84 open a project from the Home sidebar"`
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-2121d7b9fdc279b9 open a project from the empty launcher"`
@@ -765,11 +765,11 @@
 
   Expected: FAIL because one or more of the 3 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/home/HomeView.tsx`, `web/src/store/projectActions.ts#openProjectViaDialog`, `web/src/store/projectActions.ts#openProjectPath`, `web/src/lib/api.ts#projectOpen`, `src-tauri/src/commands.rs#project_open`, `crates/opentake-core/src/core.rs#AppCore::prepare_project_open`, `web/src/components/home/HomeView.tsx#HomeView`, `crates/opentake-core/src/core.rs#AppCore` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-ef78873f98fcab84 open a project from the Home sidebar"`
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-2121d7b9fdc279b9 open a project from the empty launcher"`
@@ -777,7 +777,7 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 

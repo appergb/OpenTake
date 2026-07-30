@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Plus, FolderOpen, Settings as SettingsIcon, Film, Trash2, Library } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { useT } from "../../i18n";
@@ -50,6 +50,23 @@ const subtleTransition = "background-color var(--anim-hover) var(--ease-out), bo
 
 export function HomeView() {
   const recents = useRecentStore((s) => s.recents);
+  const [opening, setOpening] = useState(false);
+  const openingRef = useRef(false);
+
+  const runProjectOpen = async (operation: () => Promise<void>) => {
+    if (openingRef.current) return;
+    openingRef.current = true;
+    setOpening(true);
+    try {
+      await operation();
+    } catch {
+      // openProjectViaDialog/openProjectPath own the localized error toast;
+      // keep the UI gesture handled so a native rejection is not unhandled.
+    } finally {
+      openingRef.current = false;
+      setOpening(false);
+    }
+  };
 
   // Validate recent projects on mount to filter out folders deleted on disk
   useEffect(() => {
@@ -58,30 +75,32 @@ export function HomeView() {
 
   return (
     <div style={homeShellStyle}>
-      <Sidebar />
+      <Sidebar opening={opening} onOpen={() => void runProjectOpen(openProjectViaDialog)} />
       <main style={homeMainStyle}>
         <section style={homeWorkspaceStyle}>
-          {recents.length === 0 ? <EmptyLauncher /> : <ProjectLauncher recents={recents} />}
+          {recents.length === 0 ? (
+            <EmptyLauncher
+              opening={opening}
+              onOpen={() => void runProjectOpen(openProjectViaDialog)}
+            />
+          ) : (
+            <ProjectLauncher
+              recents={recents}
+              opening={opening}
+              onOpen={() => void runProjectOpen(openProjectViaDialog)}
+              onOpenPath={(path) => void runProjectOpen(() => openProjectPath(path))}
+            />
+          )}
         </section>
       </main>
     </div>
   );
 }
 
-function Sidebar() {
+function Sidebar({ opening, onOpen }: { opening: boolean; onOpen: () => void }) {
   const t = useT();
   const setView = useEditorUiStore((s) => s.setView);
   const setSettingsOpen = useEditorUiStore((s) => s.setSettingsOpen);
-  const [opening, setOpening] = useState(false);
-
-  const handleOpen = async () => {
-    setOpening(true);
-    try {
-      await openProjectViaDialog();
-    } finally {
-      setOpening(false);
-    }
-  };
 
   return (
     <aside data-tauri-drag-region style={homeSidebarStyle}>
@@ -99,11 +118,18 @@ function Sidebar() {
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
-        <SidebarRow primary icon={Plus} label={t("home.newProject")} onClick={() => void newProjectAndEnter()} />
+        <SidebarRow
+          primary
+          icon={Plus}
+          label={t("home.newProject")}
+          onClick={() => void newProjectAndEnter()}
+          disabled={opening}
+        />
         <SidebarRow
           icon={FolderOpen}
           label={opening ? t("home.opening") : t("home.openProject")}
-          onClick={() => void handleOpen()}
+          onClick={onOpen}
+          disabled={opening}
         />
       </div>
 
@@ -122,16 +148,20 @@ function SidebarRow({
   label,
   onClick,
   primary = false,
+  disabled = false,
 }: {
   icon: typeof Plus;
   label: string;
   onClick: () => void;
   primary?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
+      aria-busy={disabled || undefined}
       className="hover-area"
       style={{
         display: "flex",
@@ -147,6 +177,7 @@ function SidebarRow({
         fontWeight: "var(--fw-medium)",
         textAlign: "left",
         transition: subtleTransition,
+        opacity: disabled ? 0.55 : 1,
       }}
     >
       <Icon icon={icon} size={15} />
@@ -155,18 +186,8 @@ function SidebarRow({
   );
 }
 
-function EmptyLauncher() {
+function EmptyLauncher({ opening, onOpen }: { opening: boolean; onOpen: () => void }) {
   const t = useT();
-  const [opening, setOpening] = useState(false);
-
-  const handleOpen = async () => {
-    setOpening(true);
-    try {
-      await openProjectViaDialog();
-    } finally {
-      setOpening(false);
-    }
-  };
 
   return (
     <section
@@ -231,8 +252,17 @@ function EmptyLauncher() {
           {t("app.tagline")}
         </p>
         <div style={{ display: "flex", gap: "var(--space-sm)", marginTop: "var(--space-xl)" }}>
-          <LauncherButton primary label={t("home.newProject")} onClick={() => void newProjectAndEnter()} />
-          <LauncherButton label={opening ? t("home.opening") : t("home.openProject")} onClick={() => void handleOpen()} />
+          <LauncherButton
+            primary
+            label={t("home.newProject")}
+            onClick={() => void newProjectAndEnter()}
+            disabled={opening}
+          />
+          <LauncherButton
+            label={opening ? t("home.opening") : t("home.openProject")}
+            onClick={onOpen}
+            disabled={opening}
+          />
         </div>
         <div
           style={{
@@ -253,15 +283,19 @@ function LauncherButton({
   label,
   onClick,
   primary = false,
+  disabled = false,
 }: {
   label: string;
   onClick: () => void;
   primary?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
+      aria-busy={disabled || undefined}
       style={{
         height: 34,
         padding: "0 var(--space-lg-xl)",
@@ -272,6 +306,7 @@ function LauncherButton({
         fontSize: "var(--fs-sm-md)",
         fontWeight: primary ? "var(--fw-semibold)" : "var(--fw-medium)",
         transition: subtleTransition,
+        opacity: disabled ? 0.55 : 1,
       }}
     >
       {label}
@@ -279,24 +314,24 @@ function LauncherButton({
   );
 }
 
-function ProjectLauncher({ recents }: { recents: RecentProject[] }) {
+function ProjectLauncher({
+  recents,
+  opening,
+  onOpen,
+  onOpenPath,
+}: {
+  recents: RecentProject[];
+  opening: boolean;
+  onOpen: () => void;
+  onOpenPath: (path: string) => void;
+}) {
   const t = useT();
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const [opening, setOpening] = useState(false);
-
-  const handleOpen = async () => {
-    setOpening(true);
-    try {
-      await openProjectViaDialog();
-    } finally {
-      setOpening(false);
-    }
-  };
 
   // Listen to KeyDown to open project when selected + Enter is pressed
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Enter" && selectedPath) {
+      if (e.key === "Enter" && selectedPath && !opening) {
         const target = e.target instanceof Element ? e.target : null;
         const interactiveTarget = target?.closest(
           "button, a, input, textarea, select, [role='button'], [contenteditable='true']",
@@ -306,13 +341,13 @@ function ProjectLauncher({ recents }: { recents: RecentProject[] }) {
         if (selectedPath === "new") {
           void newProjectAndEnter();
         } else {
-          void openProjectPath(selectedPath);
+          onOpenPath(selectedPath);
         }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedPath]);
+  }, [onOpenPath, opening, selectedPath]);
 
   return (
     <div
@@ -326,7 +361,7 @@ function ProjectLauncher({ recents }: { recents: RecentProject[] }) {
         flexDirection: "column",
       }}
     >
-      <ProjectHero opening={opening} onOpen={() => void handleOpen()} />
+      <ProjectHero opening={opening} onOpen={onOpen} />
       <div
         style={{
           display: "flex",
@@ -358,8 +393,9 @@ function ProjectLauncher({ recents }: { recents: RecentProject[] }) {
             key={entry.path}
             entry={entry}
             selected={selectedPath === entry.path}
+            disabled={opening}
             onSelect={() => setSelectedPath(entry.path)}
-            onDoubleClick={() => void openProjectPath(entry.path)}
+            onDoubleClick={() => onOpenPath(entry.path)}
           />
         ))}
       </div>
@@ -421,8 +457,17 @@ function ProjectHero({ opening, onOpen }: { opening: boolean; onOpen: () => void
         {t("app.tagline")}
       </p>
       <div style={{ display: "flex", gap: "var(--space-sm)", marginTop: "var(--space-xl)" }}>
-        <LauncherButton primary label={t("home.newProject")} onClick={() => void newProjectAndEnter()} />
-        <LauncherButton label={opening ? t("home.opening") : t("home.openProject")} onClick={onOpen} />
+        <LauncherButton
+          primary
+          label={t("home.newProject")}
+          onClick={() => void newProjectAndEnter()}
+          disabled={opening}
+        />
+        <LauncherButton
+          label={opening ? t("home.opening") : t("home.openProject")}
+          onClick={onOpen}
+          disabled={opening}
+        />
       </div>
     </section>
   );
@@ -431,11 +476,13 @@ function ProjectHero({ opening, onOpen }: { opening: boolean; onOpen: () => void
 function ProjectGridCard({
   entry,
   selected,
+  disabled,
   onSelect,
   onDoubleClick,
 }: {
   entry: RecentProject;
   selected: boolean;
+  disabled: boolean;
   onSelect: () => void;
   onDoubleClick: () => void;
 }) {
@@ -456,6 +503,7 @@ function ProjectGridCard({
     >
       <button
         type="button"
+        disabled={disabled}
         aria-label={entry.name}
         aria-pressed={selected}
         onClick={(event) => {
@@ -476,6 +524,7 @@ function ProjectGridCard({
           transition: subtleTransition,
           cursor: "default",
           textAlign: "left",
+          opacity: disabled ? 0.55 : 1,
         }}
       >
         <div
@@ -534,7 +583,7 @@ function ProjectGridCard({
         </div>
       </button>
 
-      {hovered && (
+      {hovered && !disabled && (
         <button
           type="button"
           title={t("home.remove")}

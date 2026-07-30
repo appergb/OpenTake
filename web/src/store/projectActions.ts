@@ -184,9 +184,25 @@ export function saveCurrentProject(): Promise<void> {
 
 /** Open `path` (a `.opentake` bundle), refresh the mirror, record it, and enter
  *  the editor. Used by both the dialog flow and the recents list. */
+function projectOpenErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "object" && error !== null && "message" in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string") return message;
+  }
+  return String(error);
+}
+
 export async function openProjectPath(path: string): Promise<void> {
   await stopNativePlaybackForProjectBoundary();
-  const snap = await api.projectOpen(path);
+  let snap: Awaited<ReturnType<typeof api.projectOpen>>;
+  try {
+    snap = await api.projectOpen(path);
+  } catch (error) {
+    const message = projectOpenErrorMessage(error);
+    useEditorUiStore.getState().pushToast(t("project.openFailed", { error: message }));
+    throw error;
+  }
   useProjectStore.getState().replaceProjectSnapshot(snap);
   resetProjectMediaState();
   useProjectStore.getState().markSaved();
@@ -200,13 +216,26 @@ export async function openProjectPath(path: string): Promise<void> {
  *  bundles are directories, so the picker is a directory chooser (mirrors
  *  upstream's package-as-folder open panel). */
 export async function openProjectViaDialog(): Promise<void> {
-  const open = await openDialog();
-  if (!open) {
-    // Browser shell: no file system. Just enter the editor on the demo mirror.
-    useEditorUiStore.getState().setView("editor");
-    return;
+  let delegatedToProjectOpen = false;
+  try {
+    const open = await openDialog();
+    if (!open) {
+      // Browser shell: no file system. Just enter the editor on the demo mirror.
+      useEditorUiStore.getState().setView("editor");
+      return;
+    }
+    const selected = await open({ directory: true, multiple: false });
+    if (typeof selected !== "string") return; // cancelled
+    delegatedToProjectOpen = true;
+    await openProjectPath(selected);
+  } catch (error) {
+    // openProjectPath reports its own downstream failures. Dialog acquisition
+    // and picker failures happen before delegation, so report them here.
+    if (!delegatedToProjectOpen) {
+      useEditorUiStore.getState().pushToast(
+        t("project.openFailed", { error: projectOpenErrorMessage(error) }),
+      );
+    }
+    throw error;
   }
-  const selected = await open({ directory: true, multiple: false });
-  if (typeof selected !== "string") return; // cancelled
-  await openProjectPath(selected);
 }
