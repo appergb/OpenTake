@@ -76,7 +76,7 @@ OpenTake 补齐这些进阶能力,**几乎不需要新建基础设施**,全部�
 | 复合片段嵌套 nested clip | missing | high | p2 | **过渡方案先做**:`saveTimelineRange` 用 FFmpeg/wgpu 重写为「打组烧成内部媒体 + content-hash 缓存」满足「精简图层」;**完整方案后做**:domain 新增 `MediaSource::Nested(child_timeline_id)`,RenderPlan 递归展开或子序列离屏渲染成单层 |
 | 多机位自动对齐 multicam | missing | medium | p2 | 纯本地:各机位音轨 → PCM → rustfft **互相关**求最佳时移 → ops 整体平移到同一时基;多角度切换面板作后续 UI |
 | 字幕样式全局批量同步 | partial(共享样式在,批量算子缺) | low | p1 | 新增「改一处 → 批量回写整 captionGroup」编辑命令 |
-| 导出 .srt 字幕文件 | missing | low | p1 | 从 caption 模型按时码序列化 SubRip;顺带支持 .vtt |
+| 导出 .srt 字幕文件 | **已有** | low | p1 | caption 模型按时码序列化 SubRip/WebVTT；TitleBar 原生保存对话框接 `export_subtitles`，SRT/VTT 均有 Rust 与 UI 路由测试 |
 
 ---
 

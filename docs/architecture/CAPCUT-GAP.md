@@ -157,7 +157,7 @@
 
 ## 模块4:音频工程与智能字幕
 
-**整体差距**:总体判断:本模块在 OpenTake/上游中呈"字幕强、音频空"的两极分布。字幕侧上游有完整端上转写子系统(Transcription 模块)+确定性断句计时(CaptionBuilder)+一键生成(CaptionTab/generateCaptions)+ MCP 工具(add_captions/get_transcript),OpenTake 设计稿已在 ARCHITECTURE §6 与 Phase 8 明确把这套纯逻辑直译进 opentake-domain/opentake-media,并用 whisper-rs 替换 Apple Speech——故"高精度 ASR 一键转字幕"判 has。音频工程侧(响度统一/降噪/人声分离)经 word-boundary grep 确认上游零实现:全工程无 loudness/LUFS/EBU-R128/loudnorm/denoise/noise gate/vocal isolation/source separation/EQ/compressor 任一关键字(唯一的 VideoCompressor 是上传前视频体积压缩,与音频无关),音频能力只有 Clip 静态 volume(线性)+ volumeTrack 关键帧(以 dB 存,VolumeScale=20·log10,floor -60/ceil +15)+ fade in/out + track mute。OpenTake 设计稿同样只移植 volume 包络与 VolumeScale,未引入测量/降噪/分离——故三项音频修复全判 missing。字幕翻译上游仅以 LLM Agent 草稿提示形式存在(captionTask("translate the captions to X")→handoff 到聊天面板),非独立 MT 引擎,OpenTake 继承同一 agent 机制但无一等公民翻译能力,判 partial。字幕样式全局批量同步:上游用 captionGroupId 把同组字幕共享样式、get_timeline 把众数样式 hoist 进 shared,但无"改一处样式→批量回写整组"的命令(实际靠 agent 逐条 set_clip_properties),数据模型在、批量算子缺,判 partial。导出 .srt:上游 Export 仅有视频渲染(文字经 CoreAnimation 烤进画面)+ FCPXML/XMEML(XMLExporter 明确声明文字不导出)+ .palmier 打包,全工程零 .srt/.vtt/SubRip,OpenTake 文档亦从未提及字幕文件导出,判 missing。落地优先级:ASR 已覆盖(p0 仅指接 whisper);响度统一与 SRT 导出是高性价比纯 FFmpeg/纯逻辑补齐(p1);降噪 p1(FFmpeg 内置滤镜先行,深度学习降噪 p2);批量样式同步是低成本编辑命令(p1);人声分离需引入额外深度模型,工程量最大(p2);翻译可先靠 agent 兜底再补离线/外部 API(p2)。所有音频特性的"施加层"已存在(per-clip dB 增益 + FFmpeg 音频滤镜链),真正缺口在"分析/处理层"。
+**整体差距**:总体判断:本模块在 OpenTake/上游中呈"字幕强、音频处理弱"的两极分布。字幕侧 OpenTake 已用 whisper-rs + 确定性断句/计时完成一键字幕，并已补齐上游没有的 SRT/VTT 软字幕导出；前端、Tauri 文件边界和纯序列化层均已接通。音频工程侧(响度统一/降噪/人声分离)在上游和 OpenTake 中仍缺分析/处理层，现有能力主要是 Clip 静态 volume、volumeTrack 关键帧、fade 和 track mute。字幕翻译仍只是 Agent 草稿路径，未形成一等公民翻译工作流，判 partial。字幕样式已具备 captionGroupId 与共享样式模型，但缺少"改一处→原子批量回写整组"的完整 UI/命令闭环，判 partial。当前落地优先级是响度统一、降噪和字幕批量样式；人声分离与一等公民翻译保持后续独立验收项。
 
 ### 音频响度统一(loudness normalization / LUFS 归一) — `missing` · 难度 medium · 优先级 p1
 - **判定依据**:上游源码 word-boundary grep 对 loudness/LUFS/EBU/R128/loudnorm 全部 0 命中;音频模型仅 Models/Timeline.swift 的 volume(线性静态)+ volumeTrack(dB 关键帧)+ fadeIn/Out + track muted。VolumeScale(Inspector/InspectorView.swift:1072,20·log10,floor -60dB/ceil +15dB)证明只有手动增益、无任何自动测量/归一。OpenTake docs(MODULE-PORT-MAP Preview/Timeline 移植策略)只把 VolumeScale 与 volume 包络 direct-port,未提响度测量;ARCHITECTURE/ROADMAP 无任何响度相关条目。
@@ -195,10 +195,10 @@
 - **实现方案**:纯编辑层、零媒体依赖、低成本:按 captionGroupId 选出组内全部文本 clip,对 textStyle 做不可变 partial merge(字体/字号/颜色/背景/描边/对齐/大小写),复用既有 mutateClips 快照撤销与 timelineFrame 不变性;样式 patch 语义对齐 set_clip_properties 文本字段。可选支持'跨组/全工程所有字幕'范围与'仅改差异项'。高频刚需且实现廉价,建议早做。
 - **前置依赖**:依赖 opentake-domain captionGroupId 与 TextStyle(Phase 1 就绪)、opentake-ops 命令/撤销栈(Phase 1)、前端 Inspector(Phase 6)。无前置 blocker。
 
-### 导出 .srt 字幕文件 — `missing` · 难度 low · 优先级 p1
-- **判定依据**:上游 Export 模块(ExportService/XMLExporter/PalmierProjectExporter)对 .srt/.vtt/SubRip/WebVTT 全部 0 命中;导出只有三类——视频渲染(文字经 AVVideoCompositionCoreAnimationTool 烤进画面)、FCPXML/XMEML(MODULE-PORT-MAP 明确'文字不导出'/XMLExporter 注释声明文字叠加不进 XMEML)、.palmier 工程包。OpenTake docs(ARCHITECTURE/ROADMAP/MODULE-PORT-MAP Export)从未提及字幕文件导出。完全空白。
-- **落点(crate/层)**:opentake-project 或 opentake-render 导出层新增 subtitle exporter(纯函数 Timeline→SRT/VTT 文本);opentake-agent 可加 export_captions 工具;前端导出对话框加'导出字幕(.srt/.vtt)'选项。
-- **实现方案**:纯逻辑、跨平台、极低成本:遍历时间线文本/字幕 clip(优先 captionGroupId 组),按 startFrame/durationFrames 用 timeline.fps 反算时间码(SRT 用 HH:MM:SS,mmm 逗号毫秒;VTT 用点毫秒),按起始时间排序、合并同帧、输出标准 SubRip。帧→时间用既有 frameToSeconds(f/fps)、秒→时码做整毫秒;可选导出'烧录字幕'(已有,走视频渲染)对'软字幕文件'(本项)两条路。无外部依赖,纯字符串生成。建议同时支持 .vtt 便于 Web/平台分发。
+### 导出 .srt 字幕文件 — `has` · 难度 low · 优先级 p1
+- **判定依据**:上游仍没有 .srt/.vtt/SubRip/WebVTT 导出；OpenTake 已补齐并反超。`opentake-domain::subtitle_export` 从 caption clip 生成标准 SRT/VTT，Tauri `export_subtitles` 负责落盘并返回 cueCount，TitleBar 通过原生保存对话框提供两种格式且对完成、空字幕、失败给出可见反馈。
+- **落点(crate/层)**:`crates/opentake-domain/src/subtitle_export.rs`（纯 Timeline→SRT/VTT）→ `src-tauri/src/commands.rs#export_subtitles`（文件边界）→ `web/src/lib/api.ts#exportSubtitles` → `web/src/components/shell/TitleBar.tsx#onExportSubtitles`。
+- **验证**:`exports_non_empty_srt_with_cue_count` / `exports_vtt_with_header` 验证标准文件内容；`subtitle export menu routes srt and vtt` 与 TitleBar 交互测试验证 SRT/VTT 的扩展名、保存过滤器和 typed API 路由。真实工程文件导出证据另存审计 runtime artifact。
 - **前置依赖**:依赖 opentake-domain clip 时间字段与帧/秒换算(Phase 1 就绪);前端入口依赖导出 UI(Phase 6)。无 blocker。
 
 ## 模块5:AI 生成式创作(AIGC)

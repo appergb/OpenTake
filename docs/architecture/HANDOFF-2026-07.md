@@ -100,7 +100,7 @@ default-off Rust renderer or to perform the then-missing first device check.
 |---|---|---|
 | #13 进阶能力 | 调色链/绿幕/蒙版着色器(`8813df2`) | 转场(§3.9)、AI 推理(#27)、音频工程(#28) |
 | #25 Inspector/MediaPanel tab | 关键帧钻石(#187)、Text MVP(#107)、Captions(#184) | AI-Edit tab、Music tab(§3.6) |
-| #29 进阶纯逻辑 | SRT/VTT 纯逻辑(#110)、字幕批量样式纯逻辑(#113) | 两者接 UI/命令;曲线变速(§3.10)、多机位、复合片段 |
+| #29 进阶纯逻辑 | SRT/VTT 已接 UI/Tauri 命令(#110)、字幕批量样式纯逻辑(#113) | 字幕批量样式接 UI/命令；曲线变速(§3.10)、多机位、复合片段 |
 | #37 全局素材库 | 后端+前端全量(#104/#106/#115) | 库→时间线拖拽、媒体面板星标迁 `library_favorite` |
 | #48 片段编辑收尾 | 右键菜单(Copy/Swap 已接)、nudge/间隙/ripple(#186) | **Save as Media 仅前端菜单占位,后端零实现**(§3.5) |
 | #131 编解码/无缝切换 | 播放路径已被流式引擎取代 | ffmpeg 未随包分发(§3.12) |

@@ -1154,33 +1154,37 @@
   - Visible/accessibility/return path: success=export SRT or VTT subtitles: close menu -> save dialog -> done/empty/failure toast; accessibility={"focus":"Native keyboard-focusable control","label":"menuitem","shortcut":"None declared on this control"}; returnPath=["Navigation changes the full-screen view; popup actions should close and return focus to the title-bar trigger."].
   - Outcome matrix: {"success":"export SRT or VTT subtitles: close menu -> save dialog -> done/empty/failure toast","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/shell/TitleBar.tsx:289; no additional state is inferred beyond the source.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/shell/TitleBar.tsx:289; the candidate-specific interaction test must assert that exact guard.","disabled":"No explicit disabled prop on this candidate.","cancel":"Cancellation/dismissal follows the exact guard in close menu -> save dialog -> done/empty/failure toast; no broader cancellation behavior is assumed.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in close menu -> save dialog -> done/empty/failure toast.","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/shell/TitleBar.tsx:289; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/TitleBar.interaction.test.tsx#control-f54f4037ab7bffbe export SRT or VTT subtitles` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify the baseline**
 
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-f54f4037ab7bffbe export SRT or VTT subtitles"`
 
-  Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
+  Observed: the production UI/API/Tauri slice already existed, so the newly registered owning test passed immediately. No artificial production failure was introduced; the missing deliverable was exact owning evidence.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/TitleBar.tsx`, `web/src/components/shell/TitleBar.tsx#onExportSubtitles`, `web/src/lib/api.ts#getDefaultProjectDir`, `src-tauri/src/commands.rs`, `web/src/lib/api.ts#exportSubtitles`, `src-tauri/src/commands.rs#export_subtitles`, `crates/opentake-domain/src/subtitle_export.rs#export_srt`, `web/src/components/shell/TitleBar.tsx#TitleBar` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Observed: production code required no change. The owning DOM test now covers SRT/VTT success, zero-cue empty state, write failure, user cancellation, default-directory fallback, extension completion, and typed API arguments.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-f54f4037ab7bffbe export SRT or VTT subtitles"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. See `docs/audit/2026-07-14/runtime-artifacts/automated/subtitle-export-real-device-2026-07-30.md` for the native title-bar/save-panel run and generated-file validation.
 
 ### Task 15: control-acceptance (implementation-slice-a85196307f399399)
 

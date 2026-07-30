@@ -65,7 +65,7 @@
 ## Phase 8 — 文字/字幕渲染 + 转写 + 语义搜索
 - **做**:cosmic-text + tiny-skia/Vello 文字渲染(阴影/描边/背景/对齐/换行,逐帧 opacity)接入合成器;whisper-rs 转写(word/segment 时间戳,`TranscriptionResult` 模型复用);candle/ort 跑 SigLIP2 + tokenizers 做视觉/口语搜索。
 - **验证**:字幕静态渲染像素对齐上游;转写时间码映射正确;`search_media` 视觉/口语命中合理。
-- **进度**:SRT/VTT 字幕**导出纯逻辑**已落地(#110,`crates/opentake-domain/src/subtitle_export.rs`,按 `caption_group_id` 分组序列化,16 单测);剩接导出层 + `export_captions` agent 工具 + 前端导出对话框。
+- **进度**:SRT/VTT 字幕导出端到端已落地：`opentake-domain::subtitle_export` 按 `caption_group_id` 生成标准时码，Tauri `export_subtitles` 安全落盘，TitleBar 提供 SRT/VTT 原生保存入口；Rust 导出与前端菜单/交互路由均有测试。可选 Agent `export_captions` 工具不属于本 UI 导出验收项。
 - **进阶扩展(ADVANCED-FEATURES B/C/D 层)**:
   - AI 推理特性(统一 ort worker):超分(Real-ESRGAN/SeedVR)、AI 抠像(RVM/BiRefNet)、运动追踪(CoTracker)、防抖(FFmpeg vidstab 起步)、光流补帧(RIFE/FILM,p3)、消除瑕疵(p3)。
   - 音频工程(FFmpeg):响度统一(loudnorm/EBU R128)、降噪(afftdn/arnndn→DeepFilterNet)、人声分离(Demucs via ort)。
