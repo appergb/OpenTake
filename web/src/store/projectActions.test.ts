@@ -37,6 +37,7 @@ const srv = vi.hoisted(() => {
     timeline,
     media,
     order,
+    createdPath: null as string | null,
     stopBoundary: vi.fn(async () => order.push("stop")),
     projectOpen: vi.fn(async () => {
       order.push("open");
@@ -49,13 +50,14 @@ const srv = vi.hoisted(() => {
         compatibilityBlockers: [],
       };
     }),
-    projectNew: vi.fn(async () => {
+    projectNew: vi.fn(async (path: string | null = null) => {
       order.push("new");
+      srv.createdPath = path;
       return {
         timeline,
         projectEpoch: 5,
         version: 0,
-        projectPath: null,
+        projectPath: path,
         compatibilityReadOnly: false,
         compatibilityBlockers: [],
       };
@@ -75,7 +77,7 @@ vi.mock("../lib/api", () => ({
     timeline: srv.timeline,
     projectEpoch: 5,
     version: 0,
-    projectPath: null,
+    projectPath: srv.createdPath,
     compatibilityReadOnly: false,
     compatibilityBlockers: [],
   }),
@@ -108,9 +110,22 @@ import { useI18nStore } from "../i18n";
 describe("openProjectPath", () => {
   beforeEach(() => {
     srv.order.length = 0;
+    srv.createdPath = null;
     srv.stopBoundary.mockClear();
     srv.projectOpen.mockClear();
-    srv.projectNew.mockClear();
+    srv.projectNew.mockReset();
+    srv.projectNew.mockImplementation(async (path: string | null = null) => {
+      srv.order.push("new");
+      srv.createdPath = path;
+      return {
+        timeline: srv.timeline,
+        projectEpoch: 5,
+        version: 0,
+        projectPath: path,
+        compatibilityReadOnly: false,
+        compatibilityBlockers: [],
+      };
+    });
     srv.getMedia.mockReset();
     srv.getMedia.mockImplementation(async () => srv.media);
     srv.projectSave.mockReset();
@@ -242,8 +257,51 @@ describe("openProjectPath", () => {
     await newProjectAndEnter();
 
     expect(srv.order.slice(0, 2)).toEqual(["stop", "new"]);
+    expect(srv.projectNew).toHaveBeenCalledWith("/tmp/fresh.opentake");
+    expect(srv.projectSave).not.toHaveBeenCalled();
     expect(useProjectStore.getState().projectEpoch).toBe(5);
     expect(useProjectStore.getState().projectPath).toBe("/tmp/fresh.opentake");
+  });
+
+  it("preserves the current project when initial creation fails", async () => {
+    const oldTimeline: Timeline = {
+      ...srv.timeline,
+      tracks: [
+        {
+          id: "old-track",
+          type: "video",
+          muted: false,
+          hidden: false,
+          syncLocked: true,
+          clips: [],
+        },
+      ],
+    };
+    useProjectStore.setState({
+      projectEpoch: 3,
+      timelineVersion: 12,
+      timeline: oldTimeline,
+      projectPath: "/tmp/current.opentake",
+      lastSavedVersion: 11,
+    });
+    useMediaStore.setState({ items: srv.media.items, folders: [], error: "old media state" });
+    const failure = { code: "engine", message: "project create timed out after 15s" };
+    srv.projectNew.mockRejectedValueOnce(failure);
+
+    await expect(newProjectAndEnter()).rejects.toBe(failure);
+
+    const project = useProjectStore.getState();
+    expect(project.projectEpoch).toBe(3);
+    expect(project.timelineVersion).toBe(12);
+    expect(project.timeline).toBe(oldTimeline);
+    expect(project.projectPath).toBe("/tmp/current.opentake");
+    expect(useMediaStore.getState().items).toEqual(srv.media.items);
+    expect(useMediaStore.getState().error).toBe("old media state");
+    expect(useEditorUiStore.getState().view).toBe("home");
+    expect(useEditorUiStore.getState().toast?.message).toBe(
+      "创建失败：project create timed out after 15s",
+    );
+    expect(srv.projectSave).not.toHaveBeenCalled();
   });
 });
 

@@ -64,20 +64,38 @@ pub fn redo(core: State<'_, AppCore>) -> Result<EditResultDto, String> {
     handle_redo(&core).map_err(msg)
 }
 
-/// `project_new`: replace the session with a fresh, unsaved project and return
-/// its first snapshot.
+/// `project_new`: replace the session with a fresh project and return its first
+/// snapshot. When `path` is supplied, build and persist the new bundle away
+/// from the live session, then install it atomically only after preparation
+/// succeeds.
 #[cfg(feature = "playback-engine")]
 #[tauri::command]
-pub fn project_new(
-    core: State<'_, AppCore>,
-    playback: State<'_, crate::playback::PlaybackState>,
-    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
-    lifecycle: State<'_, ProjectLifecycleCoordinator>,
+pub async fn project_new(
+    app: AppHandle,
+    path: Option<String>,
 ) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
-    let _lifecycle = lifecycle
+    let _lifecycle = app
+        .state::<ProjectLifecycleCoordinator>()
         .try_acquire()
         .map_err(crate::playback::session::PlaybackCommandError::busy)?;
-    project_new_with_playback_and_prewarm(&core, &playback, &prewarm)
+    if let Some(path) = path {
+        app.state::<crate::playback::PlaybackState>()
+            .ensure_project_transition_available()?;
+        let prepared = prepare_saved_project_off_thread(std::path::PathBuf::from(path))
+            .await
+            .map_err(crate::playback::session::PlaybackCommandError::engine)?;
+        return commit_prepared_project_open_with_playback_and_prewarm(
+            &app.state::<AppCore>(),
+            prepared,
+            &app.state::<crate::playback::PlaybackState>(),
+            &app.state::<crate::media::prewarm::PrewarmScheduler>(),
+        );
+    }
+    project_new_with_playback_and_prewarm(
+        &app.state::<AppCore>(),
+        &app.state::<crate::playback::PlaybackState>(),
+        &app.state::<crate::media::prewarm::PrewarmScheduler>(),
+    )
 }
 
 #[cfg(all(feature = "playback-engine", test))]
@@ -109,12 +127,22 @@ fn project_new_with_playback_and_prewarm(
 
 #[cfg(not(feature = "playback-engine"))]
 #[tauri::command]
-pub fn project_new(
-    core: State<'_, AppCore>,
-    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
-    lifecycle: State<'_, ProjectLifecycleCoordinator>,
+pub async fn project_new(
+    app: AppHandle,
+    path: Option<String>,
 ) -> Result<TimelineSnapshotDto, String> {
-    let _lifecycle = lifecycle.try_acquire()?;
+    let _lifecycle = app.state::<ProjectLifecycleCoordinator>().try_acquire()?;
+    if let Some(path) = path {
+        let prepared = prepare_saved_project_off_thread(std::path::PathBuf::from(path)).await?;
+        let core = app.state::<AppCore>();
+        let prewarm = app.state::<crate::media::prewarm::PrewarmScheduler>();
+        prewarm.begin_project_transition()?;
+        let snapshot = TimelineSnapshotDto::from(core.commit_project_open(prepared));
+        prewarm.activate_project(snapshot.project_epoch);
+        return Ok(snapshot);
+    }
+    let core = app.state::<AppCore>();
+    let prewarm = app.state::<crate::media::prewarm::PrewarmScheduler>();
     prewarm.begin_project_transition()?;
     let snapshot = handle_project_new(&core);
     prewarm.activate_project(snapshot.project_epoch);
@@ -122,7 +150,7 @@ pub fn project_new(
 }
 
 /// `project_open`: open a `.opentake` bundle, returning the first snapshot.
-const PROJECT_OPEN_PREPARE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const PROJECT_LIFECYCLE_PREPARE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 async fn run_blocking_with_timeout<T, F>(
     operation: &'static str,
@@ -144,9 +172,27 @@ where
 async fn prepare_project_open_off_thread(
     path: std::path::PathBuf,
 ) -> Result<PreparedProjectOpen, String> {
-    run_blocking_with_timeout("project open", PROJECT_OPEN_PREPARE_TIMEOUT, move || {
-        AppCore::prepare_project_open(path).map_err(|error| error.to_string())
-    })
+    run_blocking_with_timeout(
+        "project open",
+        PROJECT_LIFECYCLE_PREPARE_TIMEOUT,
+        move || AppCore::prepare_project_open(path).map_err(|error| error.to_string()),
+    )
+    .await
+}
+
+async fn prepare_saved_project_off_thread(
+    path: std::path::PathBuf,
+) -> Result<PreparedProjectOpen, String> {
+    run_blocking_with_timeout(
+        "project create",
+        PROJECT_LIFECYCLE_PREPARE_TIMEOUT,
+        move || {
+            AppCore::new()
+                .save_project(Some(path.clone()))
+                .map_err(|error| error.to_string())?;
+            AppCore::prepare_project_open(path).map_err(|error| error.to_string())
+        },
+    )
     .await
 }
 
@@ -1263,7 +1309,9 @@ impl KeyframeValueDto {
 
 #[cfg(test)]
 mod project_open_async_tests {
-    use super::{run_blocking_with_timeout, ProjectLifecycleCoordinator};
+    use super::{
+        prepare_saved_project_off_thread, run_blocking_with_timeout, ProjectLifecycleCoordinator,
+    };
     use opentake_core::core::PreparedProjectOpen;
     use opentake_core::AppCore;
     use std::time::Duration;
@@ -1322,6 +1370,43 @@ mod project_open_async_tests {
         };
         assert_eq!(error, "project open timed out after 10ms");
         tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(core.project_revision(), before);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn saved_project_is_prepared_without_mutating_live_core_until_commit() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let bundle = fixture.path().join("Fresh.opentake");
+        let core = AppCore::new();
+        let before = core.project_revision();
+
+        let prepared = prepare_saved_project_off_thread(bundle.clone())
+            .await
+            .expect("new project bundle prepares");
+
+        assert_eq!(core.project_revision(), before);
+        assert!(bundle.join("project.json").is_file());
+        let snapshot = core.commit_project_open(prepared);
+        assert_eq!(snapshot.project_path.as_deref(), Some(bundle.as_path()));
+        assert_eq!(snapshot.version, 0);
+        assert_ne!(snapshot.project_epoch, before.project_epoch);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_saved_project_prepare_preserves_live_core() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let regular_file = fixture.path().join("not-a-directory");
+        std::fs::write(&regular_file, b"occupied").expect("write blocking fixture");
+        let bundle = regular_file.join("Fresh.opentake");
+        let core = AppCore::new();
+        let before = core.project_revision();
+
+        let error = match prepare_saved_project_off_thread(bundle).await {
+            Err(error) => error,
+            Ok(_) => panic!("invalid destination must fail"),
+        };
+
+        assert!(!error.is_empty());
         assert_eq!(core.project_revision(), before);
     }
 }

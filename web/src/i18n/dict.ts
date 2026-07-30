@@ -26,6 +26,7 @@ const zh: Dict = {
     "此项目包含当前版本无法安全保存的字段。仍可查看项目内容，但编辑和保存已停用。",
   "compatibility.blockerCount.one": "{count} 个兼容性问题",
   "compatibility.blockerCount.many": "{count} 个兼容性问题",
+  "project.createFailed": "创建失败：{error}",
   "project.openFailed": "打开失败：{error}",
   "project.saveFailed": "保存失败：{error}",
 
@@ -469,6 +470,7 @@ const zh: Dict = {
   "home.recentEmpty": "还没有最近的项目。新建一个开始吧。",
   "home.untitled": "未命名",
   "home.remove": "从最近中移除",
+  "home.creating": "正在创建…",
   "home.opening": "正在打开…",
 
   // Settings
@@ -665,6 +667,7 @@ const en: Dict = {
     "This project contains fields this version cannot safely save. You can still inspect the project, but editing and saving are disabled.",
   "compatibility.blockerCount.one": "{count} compatibility issue",
   "compatibility.blockerCount.many": "{count} compatibility issues",
+  "project.createFailed": "Create failed: {error}",
   "project.openFailed": "Open failed: {error}",
   "project.saveFailed": "Save failed: {error}",
 
@@ -1097,6 +1100,7 @@ const en: Dict = {
   "home.recentEmpty": "No recent projects yet. Create one to get started.",
   "home.untitled": "Untitled",
   "home.remove": "Remove from Recents",
+  "home.creating": "Creating…",
   "home.opening": "Opening…",
 
   "settings.title": "Settings",

@@ -49,6 +49,7 @@ function buttonsNamed(label: string): HTMLButtonElement[] {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.newProjectAndEnter.mockResolvedValue(undefined);
   mocks.openProjectPath.mockResolvedValue(undefined);
   mocks.openProjectViaDialog.mockResolvedValue(undefined);
   localStorage.clear();
@@ -69,6 +70,69 @@ afterEach(async () => {
 });
 
 describe("Home recent-project controls", () => {
+  it("control-e2d0f1ed3415ea45 create a new project from the Home sidebar", async () => {
+    const pending = deferred<void>();
+    mocks.newProjectAndEnter.mockReturnValueOnce(pending.promise);
+    await act(async () => root?.render(<HomeView />));
+    const sidebarNew = buttonsNamed("home.newProject")[0];
+
+    await act(async () => sidebarNew?.click());
+
+    expect(mocks.newProjectAndEnter).toHaveBeenCalledTimes(1);
+    expect(buttonsNamed("home.creating")).toHaveLength(2);
+    expect(buttonsNamed("home.creating").every((button) => button.disabled)).toBe(true);
+    await act(async () => pending.resolve());
+    await vi.waitFor(() => expect(buttonsNamed("home.newProject")).toHaveLength(2));
+  });
+
+  it("control-575978f9bced5959 create a new project from the empty launcher", async () => {
+    const pending = deferred<void>();
+    mocks.newProjectAndEnter.mockReturnValueOnce(pending.promise);
+    useRecentStore.setState({ recents: [] });
+    await act(async () => root?.render(<HomeView />));
+    const emptyNew = buttonsNamed("home.newProject")[1];
+
+    await act(async () => emptyNew?.click());
+
+    expect(mocks.newProjectAndEnter).toHaveBeenCalledTimes(1);
+    expect(buttonsNamed("home.creating")).toHaveLength(2);
+    expect(buttonsNamed("home.openProject").every((button) => button.disabled)).toBe(true);
+    await act(async () => pending.resolve());
+    await vi.waitFor(() => expect(buttonsNamed("home.newProject")).toHaveLength(2));
+  });
+
+  it("control-74f414d717baaed3 create a new project from the populated launcher", async () => {
+    const pending = deferred<void>();
+    mocks.newProjectAndEnter.mockReturnValueOnce(pending.promise);
+    await act(async () => root?.render(<HomeView />));
+    const populatedNew = buttonsNamed("home.newProject")[1];
+
+    await act(async () => populatedNew?.click());
+
+    expect(mocks.newProjectAndEnter).toHaveBeenCalledTimes(1);
+    expect(buttonsNamed("home.creating")).toHaveLength(2);
+    expect(container?.querySelector<HTMLButtonElement>("button.home-project-card")?.disabled).toBe(
+      true,
+    );
+    await act(async () => pending.resolve());
+    await vi.waitFor(() => expect(buttonsNamed("home.newProject")).toHaveLength(2));
+  });
+
+  it("restores all project controls after new-project creation rejects", async () => {
+    mocks.newProjectAndEnter.mockRejectedValueOnce(new Error("project create failed"));
+    await act(async () => root?.render(<HomeView />));
+
+    await act(async () => buttonsNamed("home.newProject")[0]?.click());
+
+    expect(mocks.newProjectAndEnter).toHaveBeenCalledTimes(1);
+    expect(buttonsNamed("home.newProject")).toHaveLength(2);
+    expect(buttonsNamed("home.newProject").every((button) => !button.disabled)).toBe(true);
+    expect(buttonsNamed("home.openProject").every((button) => !button.disabled)).toBe(true);
+    expect(container?.querySelector<HTMLButtonElement>("button.home-project-card")?.disabled).toBe(
+      false,
+    );
+  });
+
   it("control-ef78873f98fcab84 open a project from the Home sidebar", async () => {
     const pending = deferred<void>();
     mocks.openProjectViaDialog.mockReturnValueOnce(pending.promise);

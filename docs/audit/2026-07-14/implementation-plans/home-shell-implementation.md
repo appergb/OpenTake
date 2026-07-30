@@ -651,7 +651,7 @@
   - Visible/accessibility/return path: success=create a new project from the populated launcher: newProjectAndEnter enters a fresh editor project; accessibility={"focus":"Custom LauncherButton focus behavior depends on its implementation","label":"Visible child text/title or caller-provided label; verify at runtime","shortcut":"None declared on this control"}; returnPath=["Project actions enter the editor; Library/Settings provide explicit Home/close actions."].
   - Outcome matrix: {"success":"create a new project from the populated launcher: newProjectAndEnter enters a fresh editor project","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/home/HomeView.tsx:421; no additional state is inferred beyond the source.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/home/HomeView.tsx:421; the candidate-specific interaction test must assert that exact guard.","disabled":"No explicit disabled prop on this candidate.","cancel":"Not applicable — this immediate handler has no cancellable operation or dismissible transient surface.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in newProjectAndEnter enters a fresh editor project.","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/home/HomeView.tsx:421; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/home/HomeView.interaction.test.tsx#control-e2d0f1ed3415ea45 create a new project from the Home sidebar` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
   - `web/src/components/home/HomeView.interaction.test.tsx#control-575978f9bced5959 create a new project from the empty launcher` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
@@ -659,7 +659,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-e2d0f1ed3415ea45 create a new project from the Home sidebar"`
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-575978f9bced5959 create a new project from the empty launcher"`
@@ -667,11 +667,11 @@
 
   Expected: FAIL because one or more of the 3 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/home/HomeView.tsx`, `web/src/store/projectActions.ts#newProjectAndEnter`, `web/src/lib/api.ts#getDefaultProjectDir`, `src-tauri/src/commands.rs#get_default_project_dir`, `web/src/lib/api.ts#projectNew`, `src-tauri/src/commands.rs#project_new`, `crates/opentake-core/src/dto.rs#handle_project_new`, `crates/opentake-core/src/core.rs`, `web/src/components/home/HomeView.tsx#HomeView` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-e2d0f1ed3415ea45 create a new project from the Home sidebar"`
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-575978f9bced5959 create a new project from the empty launcher"`
@@ -679,7 +679,7 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 

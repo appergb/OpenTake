@@ -108,10 +108,10 @@ export async function canRedo(): Promise<boolean> {
   return false;
 }
 
-export async function projectNew(): Promise<RuntimeTimelineSnapshot> {
+export async function projectNew(path: string | null = null): Promise<RuntimeTimelineSnapshot> {
   await ensureTauri();
   if (invokeImpl) {
-    return invokeImpl<RuntimeTimelineSnapshot>("project_new");
+    return invokeImpl<RuntimeTimelineSnapshot>("project_new", { path });
   }
   fallback.reset();
   return {

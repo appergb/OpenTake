@@ -34,43 +34,52 @@ function withExt(path: string): string {
  * in-memory session so the UI is still explorable.
  */
 export async function newProjectAndEnter(): Promise<void> {
-  const save = await saveDialog();
-  if (!save) {
+  try {
+    const save = await saveDialog();
+    if (!save) {
+      await stopNativePlaybackForProjectBoundary();
+      const snapshot = await api.projectNew(null);
+      useProjectStore.getState().replaceProjectSnapshot(snapshot);
+      resetProjectMediaState();
+      await forceRefresh();
+      useEditorUiStore.getState().resetProjectRuntimeState();
+      useEditorUiStore.getState().setView("editor");
+      return;
+    }
+
+    const defaultDir = await api.getDefaultProjectDir().catch(() => "");
+    const sep = defaultDir && !defaultDir.endsWith("/") ? "/" : "";
+    const defaultPath = defaultDir
+      ? `${defaultDir}${sep}${t("home.untitled")}.${PROJECT_EXT}`
+      : undefined;
+
+    const chosen = await save({
+      title: t("home.newProject"),
+      defaultPath,
+      filters: [{ name: "OpenTake", extensions: [PROJECT_EXT] }],
+    });
+    if (typeof chosen !== "string") return; // cancelled
+
+    const requestedPath = withExt(chosen);
     await stopNativePlaybackForProjectBoundary();
-    const snapshot = await api.projectNew();
+    // The desktop command persists a separate fresh session first and only
+    // replaces the live project after that bundle can be reopened. A failed
+    // initial save therefore leaves the current project and UI untouched.
+    const snapshot = await api.projectNew(requestedPath);
     useProjectStore.getState().replaceProjectSnapshot(snapshot);
     resetProjectMediaState();
     await forceRefresh();
+    const committedPath = snapshot.projectPath ?? requestedPath;
+    useProjectStore.getState().markSaved();
+    useRecentStore.getState().add(committedPath);
     useEditorUiStore.getState().resetProjectRuntimeState();
     useEditorUiStore.getState().setView("editor");
-    return;
+  } catch (error) {
+    useEditorUiStore
+      .getState()
+      .pushToast(t("project.createFailed", { error: projectLifecycleErrorMessage(error) }));
+    throw error;
   }
-
-  const defaultDir = await api.getDefaultProjectDir().catch(() => "");
-  const sep = defaultDir && !defaultDir.endsWith("/") ? "/" : "";
-  const defaultPath = defaultDir
-    ? `${defaultDir}${sep}${t("home.untitled")}.${PROJECT_EXT}`
-    : undefined;
-
-  const chosen = await save({
-    title: t("home.newProject"),
-    defaultPath,
-    filters: [{ name: "OpenTake", extensions: [PROJECT_EXT] }],
-  });
-  if (typeof chosen !== "string") return; // cancelled
-
-  const path = withExt(chosen);
-  await stopNativePlaybackForProjectBoundary();
-  const snapshot = await api.projectNew();
-  useProjectStore.getState().replaceProjectSnapshot(snapshot);
-  resetProjectMediaState();
-  await api.projectSave(path);
-  await forceRefresh();
-  useProjectStore.getState().setProjectPath(path);
-  useProjectStore.getState().markSaved();
-  useRecentStore.getState().add(path);
-  useEditorUiStore.getState().resetProjectRuntimeState();
-  useEditorUiStore.getState().setView("editor");
 }
 
 interface SaveSnapshot {
@@ -184,7 +193,7 @@ export function saveCurrentProject(): Promise<void> {
 
 /** Open `path` (a `.opentake` bundle), refresh the mirror, record it, and enter
  *  the editor. Used by both the dialog flow and the recents list. */
-function projectOpenErrorMessage(error: unknown): string {
+function projectLifecycleErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === "object" && error !== null && "message" in error) {
     const message = (error as { message?: unknown }).message;
@@ -199,7 +208,7 @@ export async function openProjectPath(path: string): Promise<void> {
   try {
     snap = await api.projectOpen(path);
   } catch (error) {
-    const message = projectOpenErrorMessage(error);
+    const message = projectLifecycleErrorMessage(error);
     useEditorUiStore.getState().pushToast(t("project.openFailed", { error: message }));
     throw error;
   }
@@ -233,7 +242,7 @@ export async function openProjectViaDialog(): Promise<void> {
     // and picker failures happen before delegation, so report them here.
     if (!delegatedToProjectOpen) {
       useEditorUiStore.getState().pushToast(
-        t("project.openFailed", { error: projectOpenErrorMessage(error) }),
+        t("project.openFailed", { error: projectLifecycleErrorMessage(error) }),
       );
     }
     throw error;

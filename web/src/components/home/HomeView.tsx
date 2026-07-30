@@ -48,23 +48,28 @@ const homeWorkspaceStyle: CSSProperties = {
 
 const subtleTransition = "background-color var(--anim-hover) var(--ease-out), border-color var(--anim-hover) var(--ease-out), color var(--anim-hover) var(--ease-out)";
 
+type ProjectAction = "new" | "open" | null;
+
 export function HomeView() {
   const recents = useRecentStore((s) => s.recents);
-  const [opening, setOpening] = useState(false);
-  const openingRef = useRef(false);
+  const [projectAction, setProjectAction] = useState<ProjectAction>(null);
+  const projectActionRef = useRef<ProjectAction>(null);
 
-  const runProjectOpen = async (operation: () => Promise<void>) => {
-    if (openingRef.current) return;
-    openingRef.current = true;
-    setOpening(true);
+  const runProjectAction = async (
+    action: Exclude<ProjectAction, null>,
+    operation: () => Promise<void>,
+  ) => {
+    if (projectActionRef.current) return;
+    projectActionRef.current = action;
+    setProjectAction(action);
     try {
       await operation();
     } catch {
-      // openProjectViaDialog/openProjectPath own the localized error toast;
+      // Project actions own their localized error toast;
       // keep the UI gesture handled so a native rejection is not unhandled.
     } finally {
-      openingRef.current = false;
-      setOpening(false);
+      projectActionRef.current = null;
+      setProjectAction(null);
     }
   };
 
@@ -75,20 +80,28 @@ export function HomeView() {
 
   return (
     <div style={homeShellStyle}>
-      <Sidebar opening={opening} onOpen={() => void runProjectOpen(openProjectViaDialog)} />
+      <Sidebar
+        projectAction={projectAction}
+        onNew={() => void runProjectAction("new", newProjectAndEnter)}
+        onOpen={() => void runProjectAction("open", openProjectViaDialog)}
+      />
       <main style={homeMainStyle}>
         <section style={homeWorkspaceStyle}>
           {recents.length === 0 ? (
             <EmptyLauncher
-              opening={opening}
-              onOpen={() => void runProjectOpen(openProjectViaDialog)}
+              projectAction={projectAction}
+              onNew={() => void runProjectAction("new", newProjectAndEnter)}
+              onOpen={() => void runProjectAction("open", openProjectViaDialog)}
             />
           ) : (
             <ProjectLauncher
               recents={recents}
-              opening={opening}
-              onOpen={() => void runProjectOpen(openProjectViaDialog)}
-              onOpenPath={(path) => void runProjectOpen(() => openProjectPath(path))}
+              projectAction={projectAction}
+              onNew={() => void runProjectAction("new", newProjectAndEnter)}
+              onOpen={() => void runProjectAction("open", openProjectViaDialog)}
+              onOpenPath={(path) =>
+                void runProjectAction("open", () => openProjectPath(path))
+              }
             />
           )}
         </section>
@@ -97,10 +110,19 @@ export function HomeView() {
   );
 }
 
-function Sidebar({ opening, onOpen }: { opening: boolean; onOpen: () => void }) {
+function Sidebar({
+  projectAction,
+  onNew,
+  onOpen,
+}: {
+  projectAction: ProjectAction;
+  onNew: () => void;
+  onOpen: () => void;
+}) {
   const t = useT();
   const setView = useEditorUiStore((s) => s.setView);
   const setSettingsOpen = useEditorUiStore((s) => s.setSettingsOpen);
+  const busy = projectAction !== null;
 
   return (
     <aside data-tauri-drag-region style={homeSidebarStyle}>
@@ -121,15 +143,15 @@ function Sidebar({ opening, onOpen }: { opening: boolean; onOpen: () => void }) 
         <SidebarRow
           primary
           icon={Plus}
-          label={t("home.newProject")}
-          onClick={() => void newProjectAndEnter()}
-          disabled={opening}
+          label={projectAction === "new" ? t("home.creating") : t("home.newProject")}
+          onClick={onNew}
+          disabled={busy}
         />
         <SidebarRow
           icon={FolderOpen}
-          label={opening ? t("home.opening") : t("home.openProject")}
+          label={projectAction === "open" ? t("home.opening") : t("home.openProject")}
           onClick={onOpen}
-          disabled={opening}
+          disabled={busy}
         />
       </div>
 
@@ -186,8 +208,17 @@ function SidebarRow({
   );
 }
 
-function EmptyLauncher({ opening, onOpen }: { opening: boolean; onOpen: () => void }) {
+function EmptyLauncher({
+  projectAction,
+  onNew,
+  onOpen,
+}: {
+  projectAction: ProjectAction;
+  onNew: () => void;
+  onOpen: () => void;
+}) {
   const t = useT();
+  const busy = projectAction !== null;
 
   return (
     <section
@@ -254,14 +285,14 @@ function EmptyLauncher({ opening, onOpen }: { opening: boolean; onOpen: () => vo
         <div style={{ display: "flex", gap: "var(--space-sm)", marginTop: "var(--space-xl)" }}>
           <LauncherButton
             primary
-            label={t("home.newProject")}
-            onClick={() => void newProjectAndEnter()}
-            disabled={opening}
+            label={projectAction === "new" ? t("home.creating") : t("home.newProject")}
+            onClick={onNew}
+            disabled={busy}
           />
           <LauncherButton
-            label={opening ? t("home.opening") : t("home.openProject")}
+            label={projectAction === "open" ? t("home.opening") : t("home.openProject")}
             onClick={onOpen}
-            disabled={opening}
+            disabled={busy}
           />
         </div>
         <div
@@ -316,22 +347,25 @@ function LauncherButton({
 
 function ProjectLauncher({
   recents,
-  opening,
+  projectAction,
+  onNew,
   onOpen,
   onOpenPath,
 }: {
   recents: RecentProject[];
-  opening: boolean;
+  projectAction: ProjectAction;
+  onNew: () => void;
   onOpen: () => void;
   onOpenPath: (path: string) => void;
 }) {
   const t = useT();
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const busy = projectAction !== null;
 
   // Listen to KeyDown to open project when selected + Enter is pressed
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Enter" && selectedPath && !opening) {
+      if (e.key === "Enter" && selectedPath && !busy) {
         const target = e.target instanceof Element ? e.target : null;
         const interactiveTarget = target?.closest(
           "button, a, input, textarea, select, [role='button'], [contenteditable='true']",
@@ -339,7 +373,7 @@ function ProjectLauncher({
         if (interactiveTarget && !target?.closest(".home-project-card")) return;
         e.preventDefault();
         if (selectedPath === "new") {
-          void newProjectAndEnter();
+          onNew();
         } else {
           onOpenPath(selectedPath);
         }
@@ -347,7 +381,7 @@ function ProjectLauncher({
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onOpenPath, opening, selectedPath]);
+  }, [busy, onNew, onOpenPath, selectedPath]);
 
   return (
     <div
@@ -361,7 +395,7 @@ function ProjectLauncher({
         flexDirection: "column",
       }}
     >
-      <ProjectHero opening={opening} onOpen={onOpen} />
+      <ProjectHero projectAction={projectAction} onNew={onNew} onOpen={onOpen} />
       <div
         style={{
           display: "flex",
@@ -393,7 +427,7 @@ function ProjectLauncher({
             key={entry.path}
             entry={entry}
             selected={selectedPath === entry.path}
-            disabled={opening}
+            disabled={busy}
             onSelect={() => setSelectedPath(entry.path)}
             onDoubleClick={() => onOpenPath(entry.path)}
           />
@@ -403,8 +437,17 @@ function ProjectLauncher({
   );
 }
 
-function ProjectHero({ opening, onOpen }: { opening: boolean; onOpen: () => void }) {
+function ProjectHero({
+  projectAction,
+  onNew,
+  onOpen,
+}: {
+  projectAction: ProjectAction;
+  onNew: () => void;
+  onOpen: () => void;
+}) {
   const t = useT();
+  const busy = projectAction !== null;
 
   return (
     <section
@@ -459,14 +502,14 @@ function ProjectHero({ opening, onOpen }: { opening: boolean; onOpen: () => void
       <div style={{ display: "flex", gap: "var(--space-sm)", marginTop: "var(--space-xl)" }}>
         <LauncherButton
           primary
-          label={t("home.newProject")}
-          onClick={() => void newProjectAndEnter()}
-          disabled={opening}
+          label={projectAction === "new" ? t("home.creating") : t("home.newProject")}
+          onClick={onNew}
+          disabled={busy}
         />
         <LauncherButton
-          label={opening ? t("home.opening") : t("home.openProject")}
+          label={projectAction === "open" ? t("home.opening") : t("home.openProject")}
           onClick={onOpen}
-          disabled={opening}
+          disabled={busy}
         />
       </div>
     </section>
