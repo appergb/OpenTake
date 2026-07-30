@@ -60,7 +60,7 @@
   3. 应用内 chat(reqwest→Anthropic SSE,BYOK;prompt caching)。
   4. **OpenTake 增强**:分层可组合系统提示词 + 模型策略配置化;高阶工具 `remove_filler_words`/`tighten_silences`;写工具返回结构化 JSON;新增 `get_capabilities`。
 - **验证**:`claude mcp add` 能连;每个工具走通;应用内 chat 能完成多步链式编辑;助手专属 undo 正确。
-- **进度**:`list_models` 已接 `opentake-gen` 本地 catalog；`inspect_media` 已接桌面媒体桥并有图片端到端、视频故事板和转写契约测试。当前发现面发布 38 个真实路径工具；`generate_*`/`upscale_media`/Motion 六个兼容线名在 async ProviderRegistry + BYOK/确定性渲染完成前保持隐藏，仍是 Phase 7 未完成项。
+- **进度**:`list_models` 与 `inspect_media` 已接生产桥。基础发现面为 38 个真实路径工具；存在托管或兼容 BYOK 凭据时动态增加 `generate_*`/`upscale_media` 四个工具，无凭据时保持隐藏；Motion 两个兼容线名仍未发布。生成与 Chat/MCP 复用同一 Dispatcher/GenerationBridge。
 
 ## Phase 8 — 文字/字幕渲染 + 转写 + 语义搜索
 - **做**:cosmic-text + tiny-skia/Vello 文字渲染(阴影/描边/背景/对齐/换行,逐帧 opacity)接入合成器;whisper-rs 转写(word/segment 时间戳,`TranscriptionResult` 模型复用);candle/ort 跑 SigLIP2 + tokenizers 做视觉/口语搜索。
@@ -75,6 +75,7 @@
 对应 `opentake-gen` + `services/opentake-gen-proxy`。
 - **做**:`GenClient`(复刻 `GenerationParams` 联合类型 + job 状态机);**BYOK 模式**(本地直连 fal/Replicate/OpenAI,keyring 存 key,内置静态 models catalog);**托管模式**(axum 代理 + provider adapters + 对象存储预签名 + 可选积分计费)。
 - **验证**:BYOK 下能用自己的 fal key 生图/生视频并落回时间线;模型目录数据驱动 UI;托管代理可自部署。
+- **进度(2026-07-29)**:provider-neutral 耐久作业、BYOK/托管授权、成本确认、fal/Replicate/OpenAI/ElevenLabs dispatch、N 输出终局化、进度/取消/重试/恢复、MediaPanel 状态与安全下载已完成；确定性配置 provider 测试覆盖 image/video/audio/upscale 且不发起付费网络。托管代理自部署与真实账号付费冒烟仍需在 Beta 发布验证阶段完成。
 - **进阶扩展 · AIGC 编排(ADVANCED-FEATURES E 层)**:智能剪口播(本地词级转写+静音检测→Rust 内算 ripple,高阶工具 `remove_filler_words`/`tighten_silences`)、图文成片(agent 编排既有工具+SigLIP2 选素材)、音色克隆(ElevenLabs 等)、虚拟数字人(HeyGen/fal,新增 catalog kind)、多语种字幕翻译(MT/LLM,保时码)。
 
 ## Phase 10 —(新)Motion Canvas 动效 / AI Video 插件

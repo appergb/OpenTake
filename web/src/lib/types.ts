@@ -587,6 +587,9 @@ export interface MediaItem {
    *  sections (mirror of `MediaItemDto.generationInput` / upstream
    *  `MediaAsset.generationInput`). */
   generationInput?: GenerationInput | null;
+  generationStatus?: "none" | "generating" | "downloading" | "failed" | "cancelled";
+  generationProgress?: number | null;
+  generationErrorCode?: string | null;
   /** `true` when the source file is offline (moved/deleted). Derived from file
    *  existence on the backend; clears after a successful relink. */
   missing?: boolean;
@@ -610,6 +613,18 @@ export interface GenerationInput {
   referenceImageAssetIds?: string[] | null;
   referenceVideoAssetIds?: string[] | null;
   referenceAudioAssetIds?: string[] | null;
+  jobId?: string | null;
+  provider?: string | null;
+  providerJobId?: string | null;
+  status?: "queued" | "generating" | "downloading" | "finalizing" | "ready" | "failed" | "cancelled";
+  progress?: number | null;
+  errorCode?: string | null;
+  outputIndex?: number | null;
+  sourceAssetId?: string | null;
+  sourceClipId?: string | null;
+  sourceStartFrame?: number | null;
+  sourceEndFrame?: number | null;
+  estimatedCostCredits?: number | null;
 }
 
 /** A media-library folder (flat list; nest via `parentFolderId`). */

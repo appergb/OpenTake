@@ -50,7 +50,15 @@ import { BoundedCache } from "../../lib/lru";
 import { childFolders, folderTrail, normalizeFolderId } from "../../lib/folderTree";
 import { useProjectStore } from "../../store/projectStore";
 import { addMediaToTimeline } from "../../store/editActions";
-import { extractAudio, generateThumbnail, getWaveform, preloadMedia, toggleFavorite } from "../../lib/api";
+import {
+  cancelGeneration,
+  retryGeneration,
+  extractAudio,
+  generateThumbnail,
+  getWaveform,
+  preloadMedia,
+  toggleFavorite,
+} from "../../lib/api";
 import { saveDialog } from "../../lib/dialog";
 import type { MediaFolder, MediaItem } from "../../lib/types";
 import { MediaTabBar, MediaSubTabBar, MATERIAL_SUB_TABS, AUDIO_SUB_TABS } from "./MediaTabBar";
@@ -807,6 +815,10 @@ function MediaCard({ item }: { item: MediaItem }) {
   const durationFrames = Math.round(item.duration * fps);
   const selected = previewMediaId === item.id;
   const favorite = item.favorite ?? false;
+  const generationActive =
+    item.generationStatus === "generating" || item.generationStatus === "downloading";
+  const generationFailed =
+    item.generationStatus === "failed" || item.generationStatus === "cancelled";
   const thumbnailKey = mediaThumbnailKey(item);
   const [lazyThumbnail, setLazyThumbnail] = useState<string | null>(
     item.thumbnail ?? mediaThumbnailCache.get(thumbnailKey) ?? null,
@@ -923,20 +935,28 @@ function MediaCard({ item }: { item: MediaItem }) {
   return (
     <div
       ref={cardRef}
-      draggable
+      draggable={!generationActive}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onClick={() => {
+        if (generationActive) return;
         setPreviewMedia(item.id);
         // Warm poster/sprite/waveform caches so preview + a later timeline drop
         // are instant instead of decoding on the interaction path.
         void preloadMedia(item.id);
       }}
-      onDoubleClick={() => void addMediaToTimeline(item)}
+      onDoubleClick={() => {
+        if (!generationActive && !generationFailed) void addMediaToTimeline(item);
+      }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       title={item.name}
-      style={{ display: "flex", flexDirection: "column", gap: 4, cursor: "grab" }}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 4,
+        cursor: generationActive ? "progress" : generationFailed ? "default" : "grab",
+      }}
     >
       {/* Thumbnail: generated cache image only. Missing thumbnails are requested
           lazily as cards enter view, so import/list commands stay cheap. */}
@@ -990,6 +1010,98 @@ function MediaCard({ item }: { item: MediaItem }) {
           >
             {formatTimecode(durationFrames, fps)}
           </span>
+        )}
+        {generationActive && (
+          <div
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 6,
+              background: "rgba(15,18,24,0.76)",
+              color: "#fff",
+              textAlign: "center",
+              padding: 8,
+            }}
+          >
+            <Icon icon={Sparkles} size={18} />
+            <span style={{ fontSize: "var(--fs-micro)", fontWeight: "var(--fw-medium)" }}>
+              {item.generationStatus === "downloading" ? "正在下载结果" : "正在生成"}
+              {typeof item.generationProgress === "number"
+                ? ` ${Math.round(item.generationProgress * 100)}%`
+                : ""}
+            </span>
+            {item.generationInput?.jobId && (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void cancelGeneration(item.generationInput!.jobId!);
+                }}
+                style={{
+                  fontSize: "var(--fs-micro)",
+                  padding: "2px 8px",
+                  borderRadius: "var(--radius-xs)",
+                  background: "rgba(255,255,255,0.14)",
+                  color: "#fff",
+                }}
+              >
+                取消
+              </button>
+            )}
+          </div>
+        )}
+        {generationFailed && (
+          <div
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 4,
+              background: "rgba(180,35,35,0.55)",
+              color: "#fff",
+              textAlign: "center",
+              padding: 6,
+            }}
+          >
+            <Icon icon={AlertTriangle} size={18} />
+            <span style={{ fontSize: "var(--fs-micro)", fontWeight: "var(--fw-medium)" }}>
+              {item.generationStatus === "cancelled"
+                ? "生成已取消"
+                : item.generationErrorCode ?? "GENERATION_FAILED"}
+            </span>
+            {item.generationInput?.jobId && (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  const approved = window.confirm(
+                    "重试会再次调用生成服务并可能产生费用。是否继续？",
+                  );
+                  if (approved) {
+                    void retryGeneration(item.generationInput!.jobId!, true);
+                  }
+                }}
+                style={{
+                  fontSize: "var(--fs-micro)",
+                  padding: "2px 8px",
+                  borderRadius: "var(--radius-xs)",
+                  background: "rgba(255,255,255,0.16)",
+                  color: "#fff",
+                }}
+              >
+                重试
+              </button>
+            )}
+          </div>
         )}
         {/* Offline overlay: the source file is missing. Relink keeps the asset
             id, so the timeline clips referencing it recover (no re-import). */}

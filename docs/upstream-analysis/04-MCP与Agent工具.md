@@ -112,6 +112,8 @@ require('mcp-remote/dist/proxy.js');
 | **upscale_media** | 升分辨率(视频/图) | `mediaRef`,`model?`,`sourceClipId?`(只 upscale trim 段) | `EditSubmitter.submitUpscale(...)`。`+Generate.swift:313` |
 | **import_media** | 导入外部媒体(其它 MCP / 本地文件)。**异构来源的桥** | `source`{三选一:`url`(HTTPS,≤1GB,后台下载)/`path`(本地,可目录递归)/`bytes`(base64,≤~15MB),`mimeType?`},`name?`,`folderId?` | url 走带 `ImportDownloadDelegate`(超限取消)的后台下载→`editor.importMediaAsset`;path/bytes 同步;目录走 `editor.importFinderItems`。校验 https/无凭据/有 host/扩展名白名单。`+Import.swift:11` |
 
+> **OpenTake 复刻状态(2026-07-29)**：四个生成工具已接 provider-neutral Tauri GenerationBridge，并额外要求 `costAuthorized:true`。fal/Replicate/OpenAI/ElevenLabs BYOK 与托管模式共用耐久占位、日志、进度、取消、重试、重启恢复和安全下载终局化；配置 provider 的确定性生产路径测试已覆盖 image/video/audio/upscale，N 图按下标配对，超分结果必须严格 2x 且不修改源资产。当前内置音频目录没有 `inputs:["video"]` 模型，因此视频配乐输入会按模型能力明确拒绝，时间线区间渲染上传路径保留给未来兼容模型。
+
 ### D. 媒体库组织(写,7 个)
 
 全部在 `+Folders.swift`,均可撤销,均支持"单条参数 或 `entries[]` 批量"二选一:

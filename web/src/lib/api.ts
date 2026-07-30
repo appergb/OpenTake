@@ -312,6 +312,23 @@ export async function cancelExport(operationId: string): Promise<void> {
   if (invokeImpl) await invokeImpl<void>("cancel_export", { operationId });
 }
 
+export async function cancelGeneration(jobId: string): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("generation_cancel", { jobId });
+  return false;
+}
+
+export async function retryGeneration(
+  jobId: string,
+  costAuthorized: boolean,
+): Promise<{ jobId: string; placeholderAssetIds: string[]; status: string }> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl("generation_retry", { jobId, costAuthorized });
+  }
+  throw new Error("Generation retry is available only in the desktop app");
+}
+
 /** Progress payload for `"export://progress"`: `done` of `total` frames
  *  composited so far. */
 export interface ExportProgress {

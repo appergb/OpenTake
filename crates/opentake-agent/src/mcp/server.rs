@@ -27,11 +27,13 @@ use serde_json::{Map, Value};
 use crate::mcp::convert::to_call_tool_result;
 use crate::mcp::core_handle::CoreHandle;
 use crate::mcp::dispatch::Dispatcher;
+use crate::mcp::generation::GenerationBridge;
 use crate::mcp::media_bridge::{MediaBridge, MCP_REQUEST_BODY_MAX};
 use crate::plugin::registry::PluginRegistry;
 use crate::prompt::assemble::assemble_system_prompt;
 use crate::tools::descriptions::{description, input_schema};
 use crate::tools::errors::first_non_finite_json_number_path;
+#[cfg(test)]
 use crate::tools::names::ToolName;
 use crate::tools::panic_boundary::with_redacted_dispatch_panic;
 
@@ -70,21 +72,36 @@ impl McpServer {
         registry: Arc<RwLock<PluginRegistry>>,
         bridge: Option<Arc<dyn MediaBridge>>,
     ) -> Self {
+        Self::with_bridges(handle, registry, bridge, None)
+    }
+
+    pub fn with_bridges(
+        handle: Arc<dyn CoreHandle>,
+        registry: Arc<RwLock<PluginRegistry>>,
+        bridge: Option<Arc<dyn MediaBridge>>,
+        generation_bridge: Option<Arc<dyn GenerationBridge>>,
+    ) -> Self {
         let instructions = registry
             .read()
             .map(|r| assemble_system_prompt(&r, "default"))
             .unwrap_or_default();
         McpServer {
-            dispatcher: Arc::new(Dispatcher::with_bridge(handle, registry, bridge)),
+            dispatcher: Arc::new(Dispatcher::with_bridges(
+                handle,
+                registry,
+                bridge,
+                generation_bridge,
+            )),
             instructions,
         }
     }
 
-    /// All tool schemas (1:1 with [`ToolName::ALL`]).
-    fn tools() -> Vec<Tool> {
-        ToolName::ALL
-            .iter()
-            .map(|&t| {
+    /// Tool schemas for capabilities live in this exact host session.
+    fn tools(&self) -> Vec<Tool> {
+        self.dispatcher
+            .advertised_tools()
+            .into_iter()
+            .map(|t| {
                 let obj = input_schema(t)
                     .as_object()
                     .cloned()
@@ -121,7 +138,7 @@ impl ServerHandler for McpServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         Ok(ListToolsResult {
-            tools: Self::tools(),
+            tools: self.tools(),
             next_cursor: None,
             meta: None,
         })
@@ -454,6 +471,16 @@ pub fn build_router_with_bridge_for_port(
     bridge: Option<Arc<dyn MediaBridge>>,
     expected_port: u16,
 ) -> axum::Router {
+    build_router_with_bridges_for_port(handle, registry, bridge, None, expected_port)
+}
+
+pub fn build_router_with_bridges_for_port(
+    handle: Arc<dyn CoreHandle>,
+    registry: Arc<RwLock<PluginRegistry>>,
+    bridge: Option<Arc<dyn MediaBridge>>,
+    generation_bridge: Option<Arc<dyn GenerationBridge>>,
+    expected_port: u16,
+) -> axum::Router {
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService,
@@ -463,10 +490,11 @@ pub fn build_router_with_bridge_for_port(
 
     let service = StreamableHttpService::new(
         move || {
-            Ok(McpServer::with_bridge(
+            Ok(McpServer::with_bridges(
                 handle.clone(),
                 registry.clone(),
                 bridge.clone(),
+                generation_bridge.clone(),
             ))
         },
         Arc::new(LocalSessionManager::default()),
@@ -509,6 +537,16 @@ pub async fn serve_with_bridge(
     registry: Arc<RwLock<PluginRegistry>>,
     bridge: Option<Arc<dyn MediaBridge>>,
 ) -> std::io::Result<()> {
+    serve_with_bridges(addr, handle, registry, bridge, None).await
+}
+
+pub async fn serve_with_bridges(
+    addr: SocketAddr,
+    handle: Arc<dyn CoreHandle>,
+    registry: Arc<RwLock<PluginRegistry>>,
+    bridge: Option<Arc<dyn MediaBridge>>,
+    generation_bridge: Option<Arc<dyn GenerationBridge>>,
+) -> std::io::Result<()> {
     if !addr.ip().is_loopback() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -517,7 +555,13 @@ pub async fn serve_with_bridge(
     }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound_addr = listener.local_addr()?;
-    let router = build_router_with_bridge_for_port(handle, registry, bridge, bound_addr.port());
+    let router = build_router_with_bridges_for_port(
+        handle,
+        registry,
+        bridge,
+        generation_bridge,
+        bound_addr.port(),
+    );
     tracing::info!("MCP server listening on http://{bound_addr}/mcp");
     axum::serve(listener, router).await
 }
@@ -567,12 +611,10 @@ mod tests {
 
     #[test]
     fn lists_every_advertised_tool() {
-        assert_eq!(McpServer::tools().len(), ToolName::ALL.len());
+        let server = server();
+        assert_eq!(server.tools().len(), ToolName::ALL.len());
         // Names round-trip to the wire names.
-        let names: Vec<String> = McpServer::tools()
-            .iter()
-            .map(|t| t.name.to_string())
-            .collect();
+        let names: Vec<String> = server.tools().iter().map(|t| t.name.to_string()).collect();
         assert!(names.contains(&"add_clips".to_string()));
         assert!(names.contains(&"detect_beats".to_string()));
         assert!(names.contains(&"activate_workflow".to_string()));

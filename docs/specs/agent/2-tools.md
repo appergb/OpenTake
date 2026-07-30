@@ -8,7 +8,7 @@
 
 枚举顺序严格按 `ToolName`（`ToolDefinitions.swift:4-36`）：`get_timeline, get_media, add_clips, insert_clips, remove_clips, remove_tracks, move_clips, set_clip_properties, set_keyframes, split_clip, ripple_delete_ranges, undo, add_texts, add_captions, generate_video, generate_image, generate_audio, upscale_media, import_media, list_models, inspect_media, get_transcript, inspect_timeline, search_media, list_folders, create_folder, move_to_folder, rename_media, rename_folder, delete_media, delete_folder`。
 
-> 这是上游 31 工具契约清单，不等于当前发现面。OpenTake 目前在 `ToolName::KNOWN` 保留 44 个兼容线名，仅将 38 个真实路径工具放入 `ToolName::ALL`；`generate_video`、`generate_image`、`generate_audio`、`upscale_media`、`add_motion_graphic`、`edit_motion_graphic` 在生产后端完成前不会出现在 MCP/Chat 目录或系统提示中。
+> 这是上游 31 工具契约清单，不等于当前发现面。OpenTake 在 `ToolName::KNOWN` 保留 44 个兼容线名：基础 38 个真实路径工具始终发布；存在托管或 fal/Replicate/OpenAI/ElevenLabs 兼容 BYOK 凭据时动态增加 `generate_video`、`generate_image`、`generate_audio`、`upscale_media`。Motion 两个兼容线名仍不发布。
 
 ### A. 读 / 内省（只读，7 个）
 
@@ -43,10 +43,12 @@
 
 | # | 工具 | 关键参数 | required | 背后命令 |
 |---|---|---|---|---|
-| 20 | `generate_video` | `prompt*`,`name?`,`model?`,`duration?`,`aspectRatio?`,`resolution?`,`startFrameMediaRef?`,`endFrameMediaRef?`,`sourceVideoMediaRef?`,`sourceClipId?`,`referenceImageMediaRefs?[]`,`referenceVideoMediaRefs?[]`,`referenceAudioMediaRefs?[]`,`folderId?` | `prompt` | `opentake-gen`：异步提交，立即返回 placeholder asset ID；**花钱、不可撤销** |
-| 21 | `generate_image` | `prompt*`,`name?`,`model?`,`aspectRatio?`,`resolution?`,`quality?`,`referenceMediaRefs?[]`,`folderId?` | `prompt` | `opentake-gen`：异步提交 placeholder |
-| 22 | `generate_audio` | `prompt?`,`name?`,`model?`,`voice?`,`lyrics?`,`styleInstructions?`,`instrumental?`,`duration?`,`videoSourceStartFrame?`,`videoSourceEndFrame?`,`videoSourceMediaRef?`,`folderId?` | （无） | `opentake-gen`：TTS / 文生乐 / 视频配乐；时间线区间结果自动落轨 |
-| 23 | `upscale_media` | `mediaRef*`,`model?`,`sourceClipId?` | `mediaRef` | `opentake-gen`：升分辨率 placeholder |
+| 20 | `generate_video` | `costAuthorized*:bool`,`prompt*`,`name?`,`model?`,`duration?`,`aspectRatio?`,`resolution?`,`startFrameMediaRef?`,`endFrameMediaRef?`,`sourceVideoMediaRef?`,`sourceClipId?`,`referenceImageMediaRefs?[]`,`referenceVideoMediaRefs?[]`,`referenceAudioMediaRefs?[]`,`folderId?` | `costAuthorized,prompt` | `opentake-gen`：先持久化占位再异步提交；进度/取消/重试/恢复；**花钱、不可撤销** |
+| 21 | `generate_image` | `costAuthorized*:bool`,`prompt*`,`name?`,`model?`,`aspectRatio?`,`resolution?`,`quality?`,`numImages?:1..4`,`referenceMediaRefs?[]`,`folderId?` | `costAuthorized,prompt` | `opentake-gen`：N 个有序占位，逐项下载/失败终局化 |
+| 22 | `generate_audio` | `costAuthorized*:bool`,`prompt?`,`name?`,`model?`,`voice?`,`lyrics?`,`styleInstructions?`,`instrumental?`,`duration?`,`videoSourceStartFrame?`,`videoSourceEndFrame?`,`videoSourceMediaRef?`,`folderId?` | `costAuthorized` | `opentake-gen`：TTS / 文生乐 / 能力允许时的视频配乐；时间线区间先渲染再上传 |
+| 23 | `upscale_media` | `costAuthorized*:bool`,`mediaRef*`,`model?`,`sourceClipId?` | `costAuthorized,mediaRef` | `opentake-gen`：严格 2x 新资产，源资产不变 |
+
+生成请求由 MCP/Chat 共用的 Tauri GenerationBridge 执行。接受请求前必须有显式成本授权；占位与 generation log 先原子持久化，后台再上传/提交/轮询。固定状态为 queued/generating/downloading/finalizing/ready/failed/cancelled；重启时有 provider job id 则恢复轮询，无 id 则以固定错误码要求显式重试，避免重复扣费。结果 URL 不落盘，下载后探测真实容器再导入。
 | 24 | `import_media` | `source*`{三选一 `url?`(HTTPS≤1GB)/`path?`(本地，可目录递归)/`bytes?`(base64≤~15MB)，`mimeType?`},`name?`,`folderId?` | `source` | `opentake-core`/`opentake-project`：url 后台下载、path/bytes 同步；扩展名白名单 |
 
 ### D. 媒体库组织（写，7 个）——均可撤销，均支持「单条参数 或 `entries[]` 批量」二选一

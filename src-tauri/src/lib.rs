@@ -14,6 +14,7 @@ mod commands;
 // drive the export orchestrator (`export::run_export`) against the library
 // target. The Tauri command itself is registered below like the other modules.
 pub mod export;
+mod generation;
 mod haptic;
 mod library;
 mod mcp;
@@ -116,17 +117,21 @@ pub fn run() {
                 .app_data_dir()
                 .unwrap_or_else(|_| std::env::temp_dir())
                 .join("workflows");
+            let generation_bridge =
+                generation::build_bridge(core.clone(), cache_root.clone(), models_dir.clone());
             mcp::spawn(
                 core.clone(),
                 workflows_dir.clone(),
                 cache_root.clone(),
                 models_dir.clone(),
+                generation_bridge.clone(),
             );
-            let chat_state = chat::ChatState::new(
+            let chat_state = chat::ChatState::new_with_generation(
                 core.clone(),
                 workflows_dir,
                 cache_root.clone(),
                 models_dir.clone(),
+                generation_bridge.clone(),
             );
 
             // A global favorite must never silently become a temporary file.
@@ -142,6 +147,7 @@ pub fn run() {
             };
 
             app.manage(core);
+            app.manage(generation_bridge);
             app.manage(chat_state);
             app.manage(MediaState::new(engine));
             app.manage(PrewarmScheduler::new(initial_project_epoch));
@@ -207,6 +213,8 @@ pub fn run() {
             export::export_video,
             export::save_range_as_media,
             export::cancel_export,
+            generation::generation_cancel,
+            generation::generation_retry,
             secret::secret_save,
             secret::secret_load,
             secret::secret_delete,
@@ -314,6 +322,11 @@ fn forward_event(app: &tauri::AppHandle, event: &CoreEvent) {
     if let CoreEvent::ProjectOpened { project_epoch, .. } = event {
         if let Some(prewarm) = app.try_state::<PrewarmScheduler>() {
             prewarm.activate_project(*project_epoch);
+        }
+        if let Some(generation) =
+            app.try_state::<std::sync::Arc<generation::TauriGenerationBridge>>()
+        {
+            generation.recover_current_project();
         }
     }
     #[cfg(feature = "playback-engine")]

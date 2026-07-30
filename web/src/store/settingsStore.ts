@@ -11,7 +11,13 @@ import { create } from "zustand";
 import { isTauri } from "../lib/api";
 
 export type Theme = "dark" | "light";
-export type ByokProvider = "anthropic" | "openai" | "google";
+export type ByokProvider =
+  | "anthropic"
+  | "fal"
+  | "replicate"
+  | "openai"
+  | "elevenlabs"
+  | "google";
 export type WindowSizeOpt = "standard" | "compact";
 
 const LS = {
@@ -31,7 +37,13 @@ function loadString(key: string): string | null {
 }
 function loadProvider(): ByokProvider {
   const v = loadString(LS.byokProvider);
-  return v === "openai" || v === "google" ? v : "anthropic";
+  return v === "fal" ||
+    v === "replicate" ||
+    v === "openai" ||
+    v === "elevenlabs" ||
+    v === "google"
+    ? v
+    : "anthropic";
 }
 function loadWindowSize(): WindowSizeOpt {
   if (typeof localStorage === "undefined") return "standard";

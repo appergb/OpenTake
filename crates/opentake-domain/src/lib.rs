@@ -48,8 +48,8 @@ pub use keyframe::{
     KeyframeInterpolatable, KeyframeTrack,
 };
 pub use media::{
-    GenerationInput, GenerationStatus, MediaAsset, MediaFolder, MediaManifest, MediaManifestEntry,
-    MediaResolver, MediaSource,
+    GenerationInput, GenerationJobStatus, GenerationStatus, MediaAsset, MediaFolder, MediaManifest,
+    MediaManifestEntry, MediaResolver, MediaSource,
 };
 pub use signal::{
     ContextSignal, EditingSkeleton, EditingStage, StageGuidance, TrackHint, TrackRole,

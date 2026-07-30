@@ -49,7 +49,8 @@ pub use crate::core::{
     ProjectRevision, ProjectRuntimeSnapshot, TimelineSnapshot,
 };
 pub use session::{
-    importable_clip_type, EditorSession, ProbedMedia, SUPPORTED_AUDIO_EXTENSIONS,
+    importable_clip_type, EditorSession, GenerationJobCommit, GenerationStateUpdate,
+    PreparedGenerationJob, PreparedGenerationOutput, ProbedMedia, SUPPORTED_AUDIO_EXTENSIONS,
     SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS,
 };
 

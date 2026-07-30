@@ -488,7 +488,10 @@ function ImportPane() {
 
 const PROVIDERS: Array<{ id: ByokProvider; label: string }> = [
   { id: "anthropic", label: "Anthropic" },
+  { id: "fal", label: "fal.ai" },
+  { id: "replicate", label: "Replicate" },
   { id: "openai", label: "OpenAI" },
+  { id: "elevenlabs", label: "ElevenLabs" },
   { id: "google", label: "Google" },
 ];
 

@@ -13,5 +13,6 @@ pub mod convert;
 pub mod core_handle;
 pub mod dispatch;
 pub mod gen_catalog;
+pub mod generation;
 pub mod media_bridge;
 pub mod server;

@@ -143,14 +143,14 @@ default-off Rust renderer or to perform the then-missing first device check.
   3. 前端:AgentPanel 消息列表 + streaming 渲染 + 工具调用卡片;Context Signal(`signal/`)注入系统提示已有,接上即可。
 - **验收**:面板内发"把这段静音剪掉"能走 tighten_silences 工具链并落 EditCommand;无 key 时有引导文案。
 
-### 3.4 【P1】生成式 UI + `generate_*`/`upscale` 去 stub(#30 切片)
+### 3.4 【P1，代码竖切已完成】生成式 UI + `generate_*`/`upscale` 去 stub(#30 切片)
 
-- **现状**:`opentake-gen` client/job/provider/keys 已建成但尚未形成生产调用；`GenerateVideo/Image/Audio | UpscaleMedia` 兼容线名在后端完成前不进入 MCP/Chat 发现面或系统提示；`encode_timeline(..., false)` 仍硬编 canGenerate=false；web 无生成 UI。
+- **现状(2026-07-29)**:`GenerateVideo/Image/Audio | UpscaleMedia` 已通过 MCP/Chat 共用的 Tauri GenerationBridge 接入 fal/Replicate/OpenAI/ElevenLabs；先持久化占位和 generation log，再异步上传/提交/轮询/下载/探测/导入。`canGenerate` 由可用凭据派生，四工具仅在能力可用时动态发布。MediaPanel 卡片显示进度、取消、固定错误码与需重新确认成本的重试。
 - **怎么写**:
   1. `src-tauri` 命令层:`generate_start(params)->job_id` / `generate_status` / `generate_cancel`,内部 `opentake-gen::client` 异步 job 轮询,产物落项目 `media/` 并走 `import_media` 现有通路(保证出现在素材面板 + 可撤销)。
   2. MCP dispatch 同一命令复用,去掉 4 个 stub;canGenerate 改为"有 BYOK key 即 true"(`keys.rs` 可查)。
   3. 前端:对照上游 GenerationView 做 MediaPanel「AI 生成」分区(与 #91 的左侧分区合流):模型选择(`catalog/` 已有 list_models)、提示词、参考图、进度卡片。
-- **验收**:配 fal.ai key 后文生图落库并可拖上时间线;无 key 显示引导;取消可用。
+- **验收状态**:无付费网络的配置 provider 生产路径已覆盖 image/video/audio/upscale、N 图顺序、部分/全部失败、取消、恢复、鉴权/限流、重试和精确 2x；完整工作区测试通过。真实账号付费请求保留到 Beta 实机验证清单，未在自动化中消费用户额度。
 
 ### 3.5 【P1】Save as Media(#48 尾巴)
 
@@ -198,7 +198,7 @@ default-off Rust renderer or to perform the then-missing first device check.
 | 布局常量(#148) | 对照上游 rulerHeight/dropZoneHeight/trackHeight 改 `theme.ts`,纯数值对齐 |
 | CSP 加固(#161) | null→非 null 白屏高风险,**必须真机逐项验证**,独立小 PR |
 | Storage/Models 设置页 | `SettingsView.tsx` 加两 pane:模型缓存管理(whisper/SigLIP 已下载模型列表+删除)、存储占用(项目/缓存目录大小) |
-| MCP 隐藏能力 | `InspectMedia` 已接 MediaBridge（剩 Lottie）；生成/超分/Motion 六个兼容线名在生产后端完成前不进入发现面 |
+| MCP 隐藏能力 | `InspectMedia` 已接 MediaBridge（剩 Lottie）；生成/超分四工具按凭据能力动态发布，Motion 两个兼容线名仍隐藏 |
 | 技术债 | `fcpxml.rs` 1489 行拆分;`export_fcpxml` 名实不符(产物 XMEML)可改名 `export_xml`;`library.rs:322` remove 静默吞错补 `tracing::warn!` |
 
 ---
