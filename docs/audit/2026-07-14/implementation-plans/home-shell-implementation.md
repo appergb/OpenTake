@@ -857,7 +857,7 @@
   - Visible/accessibility/return path: success=remove a recent project entry: recentStore.remove(entry.path); accessibility={"focus":"Native keyboard-focusable control","label":"t(\"home.remove\")","shortcut":"None declared on this control"}; returnPath=["Project actions enter the editor; Library/Settings provide explicit Home/close actions."].
   - Outcome matrix: {"success":"remove a recent project entry: recentStore.remove(entry.path)","pending":"Not applicable — this activation only changes local/caller state and starts no Promise, API, Tauri command, or Rust work.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/home/HomeView.tsx:521; the candidate-specific interaction test must assert that exact guard.","disabled":"No explicit disabled prop on this candidate.","cancel":"Not applicable — this immediate handler has no cancellable operation or dismissible transient surface.","retry":"Not applicable as an error-recovery state — the synchronous local action can simply be activated again.","failure":"Not applicable — this immediate activation calls no API/Tauri/Rust boundary, so there is no backend rejection path."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/home/HomeView.interaction.test.tsx#control-f4a6b4f8789ea013 open the global Library from Home` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
   - `web/src/components/home/HomeView.interaction.test.tsx#control-810a7d793fcd8323 open Settings from Home` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
@@ -866,7 +866,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-f4a6b4f8789ea013 open the global Library from Home"`
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-810a7d793fcd8323 open Settings from Home"`
@@ -875,11 +875,15 @@
 
   Expected: FAIL because one or more of the 4 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Result: The file existed only because Task 12 had just introduced it, but all four Task 11 names were absent; the focused filter executed zero candidates and reported the file/test as skipped. This is the missing-owning-evidence baseline rather than a manufactured production failure.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/home/HomeView.tsx`, `web/src/components/home/HomeView.tsx#HomeView` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Result: Existing Library, Settings, background-clear, and recent-store removal handlers already satisfied the four contracts. Added the four exact owning tests; no further product code change was required after Task 12 made the card and removal control natively accessible.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-f4a6b4f8789ea013 open the global Library from Home"`
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-810a7d793fcd8323 open Settings from Home"`
@@ -888,11 +892,15 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Result: PASS, all four exact candidate tests executed in the 5/5 Home interaction runner.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS, 72 Web files / 731 tests and production build. The packaged macOS app opened Library and Settings, selected then cleared a project card, removed only the recent entry while preserving the bundle, and reopened the bundle to restore the 2-entry Home state. Runtime evidence: `runtime-artifacts/automated/home-secondary-controls-real-device-2026-07-30.md`.
 
 ### Task 12: control-acceptance (implementation-slice-8e481b772d7d2357)
 
