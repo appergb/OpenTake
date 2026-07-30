@@ -621,11 +621,16 @@ impl ProjectMediaCapability {
             use cap_std::fs::OpenOptionsExt;
             use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
             use windows_sys::Win32::Storage::FileSystem::{
-                DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+                DELETE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
             };
             options
                 .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+                // Generation publishes media.json + generation-log.json by
+                // replacing the complete bundle. Keep the retained import
+                // handle authoritative without blocking that directory rename
+                // on Windows; identity checks and handle-relative rollback
+                // remain valid after a namespace move.
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
         }
         let file = self
             .media
