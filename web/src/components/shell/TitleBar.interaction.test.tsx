@@ -30,6 +30,7 @@ vi.mock("../../lib/dialog", () => ({
 
 import { useEditorUiStore } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
+import type { Clip } from "../../lib/types";
 import { TitleBar } from "./TitleBar";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -41,7 +42,13 @@ let container: HTMLDivElement | null = null;
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
-  useEditorUiStore.setState({ agentPanelVisible: false, toast: null });
+  useEditorUiStore.setState({
+    agentPanelVisible: false,
+    exportDialogOpen: false,
+    settingsOpen: false,
+    toast: null,
+    view: "editor",
+  });
   useProjectStore.setState({
     projectPath: "/tmp/TalkingHeadQA.opentake",
     timeline: {
@@ -104,6 +111,106 @@ describe("TitleBar Agent entry", () => {
 
     await act(async () => agentItem?.click());
     expect(useEditorUiStore.getState().agentPanelVisible).toBe(true);
+  });
+});
+
+describe("TitleBar navigation and video export controls", () => {
+  it("control-f52cc89817361a19 return from editor to Home", async () => {
+    await act(async () => root?.render(<TitleBar />));
+    const home = container?.querySelector<HTMLButtonElement>('button[aria-label="title.backHome"]');
+    expect(home).not.toBeNull();
+
+    await act(async () => home?.click());
+    expect(useEditorUiStore.getState().view).toBe("home");
+  });
+
+  it("control-4bda8f075e1f3a14 open the global Library", async () => {
+    await act(async () => root?.render(<TitleBar />));
+    const library = container?.querySelector<HTMLButtonElement>('button[aria-label="library.entry"]');
+    expect(library).not.toBeNull();
+
+    await act(async () => library?.click());
+    expect(useEditorUiStore.getState().view).toBe("library");
+  });
+
+  it("control-ff132f94a8c87906 open Settings from the editor", async () => {
+    await act(async () => root?.render(<TitleBar />));
+    const settings = container?.querySelector<HTMLButtonElement>('button[aria-label="title.settings"]');
+    expect(settings).not.toBeNull();
+
+    await act(async () => settings?.click());
+    expect(useEditorUiStore.getState().settingsOpen).toBe(true);
+  });
+
+  it("control-d7ba227c6447e43e open Video Export", async () => {
+    await act(async () => root?.render(<TitleBar />));
+    const emptyExport = container?.querySelector<HTMLButtonElement>(
+      'button[aria-label="title.exportVideo"]',
+    );
+    expect(emptyExport?.disabled).toBe(true);
+    await act(async () => emptyExport?.click());
+    expect(useEditorUiStore.getState().exportDialogOpen).toBe(false);
+
+    await act(async () => useProjectStore.setState({
+      timeline: {
+        ...useProjectStore.getState().timeline,
+        tracks: [{
+          id: "v1",
+          type: "video",
+          muted: false,
+          hidden: false,
+          syncLocked: true,
+          clips: [{} as Clip],
+        }],
+      },
+    }));
+    const populatedExport = container?.querySelector<HTMLButtonElement>(
+      'button[aria-label="title.exportVideo"]',
+    );
+    expect(populatedExport?.disabled).toBe(false);
+    await act(async () => populatedExport?.click());
+    expect(useEditorUiStore.getState().exportDialogOpen).toBe(true);
+  });
+
+  it("control-229710d0115f07bc open/close interchange export menu", async () => {
+    await act(async () => root?.render(<TitleBar />));
+    const trigger = container?.querySelector<HTMLButtonElement>('button[aria-label="title.export"]');
+    expect(trigger?.getAttribute("aria-expanded")).toBe("false");
+
+    await act(async () => trigger?.click());
+    expect(trigger?.getAttribute("aria-expanded")).toBe("true");
+    await act(async () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
+    expect(trigger?.getAttribute("aria-expanded")).toBe("false");
+
+    await act(async () => trigger?.click());
+    await act(async () => window.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
+    expect(trigger?.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("control-02d1bf7fff7c1e3a open Video Export from the interchange menu", async () => {
+    useProjectStore.setState({
+      timeline: {
+        ...useProjectStore.getState().timeline,
+        tracks: [{
+          id: "v1",
+          type: "video",
+          muted: false,
+          hidden: false,
+          syncLocked: true,
+          clips: [{} as Clip],
+        }],
+      },
+    });
+    await act(async () => root?.render(<TitleBar />));
+    const trigger = container?.querySelector<HTMLButtonElement>('button[aria-label="title.export"]');
+    await act(async () => trigger?.click());
+    const renderVideo = [...(container?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])]
+      .find((button) => button.textContent === "title.exportRenderVideo");
+    expect(renderVideo?.disabled).toBe(false);
+
+    await act(async () => renderVideo?.click());
+    expect(trigger?.getAttribute("aria-expanded")).toBe("false");
+    expect(useEditorUiStore.getState().exportDialogOpen).toBe(true);
   });
 });
 

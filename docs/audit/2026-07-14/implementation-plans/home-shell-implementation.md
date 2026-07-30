@@ -1076,7 +1076,7 @@
   - Visible/accessibility/return path: success=open Video Export from the interchange menu: close menu -> open Export dialog; accessibility={"focus":"Native keyboard-focusable control","label":"menuitem","shortcut":"None declared on this control"}; returnPath=["Navigation changes the full-screen view; popup actions should close and return focus to the title-bar trigger."].
   - Outcome matrix: {"success":"open Video Export from the interchange menu: close menu -> open Export dialog","pending":"Not applicable — this activation only changes local/caller state and starts no Promise, API, Tauri command, or Rust work.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/shell/TitleBar.tsx:359; the candidate-specific interaction test must assert that exact guard.","disabled":"Disabled when {!hasClips}.","cancel":"Cancellation/dismissal follows the exact guard in close menu -> open Export dialog; no broader cancellation behavior is assumed.","retry":"Not applicable as an error-recovery state — the synchronous local action can simply be activated again.","failure":"Not applicable — this immediate activation calls no API/Tauri/Rust boundary, so there is no backend rejection path."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/TitleBar.interaction.test.tsx#control-f52cc89817361a19 return from editor to Home` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
   - `web/src/components/shell/TitleBar.interaction.test.tsx#control-4bda8f075e1f3a14 open the global Library` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
@@ -1088,7 +1088,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify the baseline**
 
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-f52cc89817361a19 return from editor to Home"`
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-4bda8f075e1f3a14 open the global Library"`
@@ -1098,13 +1098,15 @@
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-229710d0115f07bc open/close interchange export menu"`
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-02d1bf7fff7c1e3a open Video Export from the interchange menu"`
 
-  Expected: FAIL because one or more of the 7 candidate-bound contracts are not yet satisfied.
+  Observed: all seven production controls already existed. The exact owning tests were absent, so the new candidate-bound tests passed against the existing implementation without introducing an artificial production failure.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/TitleBar.tsx`, `web/src/components/shell/TitleBar.tsx#TitleBar` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Observed: production code required no change. The owning test now covers all seven planned controls, including empty-timeline video-export disablement and both Escape and outside-click menu dismissal.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-f52cc89817361a19 return from editor to Home"`
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-4bda8f075e1f3a14 open the global Library"`
@@ -1116,11 +1118,13 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS, 70 files / 715 web tests. See `docs/audit/2026-07-14/runtime-artifacts/automated/titlebar-controls-real-device-2026-07-30.md` for the real application loop.
 
 ### Task 14: control-acceptance (implementation-slice-2e210a4b1ab6c5e9)
 
