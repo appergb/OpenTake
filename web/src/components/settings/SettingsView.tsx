@@ -32,7 +32,7 @@ import {
   type ByokProvider,
   type WindowSizeOpt,
 } from "../../store/settingsStore";
-import { useEditorUiStore } from "../../store/uiStore";
+import { useEditorUiStore, type SettingsPaneId } from "../../store/uiStore";
 import { openDialog } from "../../lib/dialog";
 import { secretSave, secretLoad, secretDelete } from "../../lib/api";
 import type { SecretStatus } from "../../lib/types";
@@ -63,21 +63,13 @@ const settingsControlStyle: CSSProperties = {
   border: "none",
 };
 
-type SettingsPaneId =
-  | "general"
-  | "appearance"
-  | "import"
-  | "ai"
-  | "mcp"
-  | "account"
-  | "about";
-
 const SETTINGS_PANES: Array<{ id: SettingsPaneId; icon: typeof SettingsIcon; labelKey: string }> = [
   { id: "general", icon: SettingsIcon, labelKey: "settings.section.general" },
   { id: "appearance", icon: Palette, labelKey: "settings.section.appearance" },
   { id: "import", icon: Download, labelKey: "settings.section.import" },
   { id: "ai", icon: Bot, labelKey: "settings.section.ai" },
   { id: "mcp", icon: Plug, labelKey: "settings.section.mcp" },
+  { id: "shortcuts", icon: Copy, labelKey: "settings.section.shortcuts" },
   { id: "account", icon: User, labelKey: "settings.section.account" },
   { id: "about", icon: Info, labelKey: "settings.section.about" },
 ];
@@ -92,7 +84,8 @@ const settingsSidebarStyle: CSSProperties = {
 export function SettingsView() {
   const t = useT();
   const setSettingsOpen = useEditorUiStore((s) => s.setSettingsOpen);
-  const [activePane, setActivePane] = useState<SettingsPaneId>("general");
+  const activePane = useEditorUiStore((s) => s.settingsPane);
+  const setActivePane = useEditorUiStore((s) => s.setSettingsPane);
 
   return (
     <div
@@ -250,6 +243,8 @@ function renderActivePane(activePane: SettingsPaneId) {
       return <AiPane />;
     case "mcp":
       return <McpPane />;
+    case "shortcuts":
+      return <ShortcutsPane />;
     case "account":
       return <AccountPane />;
     case "about":
@@ -668,6 +663,33 @@ function AboutPane() {
       <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)" }}>
         {t("settings.aboutDesc")}
       </div>
+    </Section>
+  );
+}
+
+function ShortcutsPane() {
+  const t = useT();
+  const rows = [
+    [t("settings.shortcutsPlay"), "Space"],
+    [t("settings.shortcutsUndo"), "⌘Z"],
+    [t("settings.shortcutsRedo"), "⇧⌘Z"],
+    [t("settings.shortcutsDelete"), "⌫"],
+    [t("settings.shortcutsSave"), "⌘S"],
+    [t("settings.shortcutsNew"), "⌘N"],
+    [t("view.mediaPanel"), "⌘0"],
+    [t("view.inspector"), "⌘⌥0"],
+    [t("view.agentPanel"), "⌘⌥A"],
+    [t("view.maximizeFocused"), "`"],
+    [t("view.layoutDefault"), "⌘1"],
+    [t("view.layoutMedia"), "⌘2"],
+    [t("view.layoutVertical"), "⌘3"],
+    [t("view.enterFullScreen"), "⌘F"],
+  ];
+  return (
+    <Section title={t("settings.section.shortcuts")}>
+      {rows.map(([label, shortcut]) => (
+        <Field key={label} label={label} control={<Value>{shortcut}</Value>} />
+      ))}
     </Section>
   );
 }

@@ -191,6 +191,35 @@ export function saveCurrentProject(): Promise<void> {
   return tracked;
 }
 
+/** Save the current project to a newly chosen `.opentake` bundle and adopt that
+ *  path as the live session. The core performs an atomic Save As (including
+ *  project-local media) and only changes its retained root after publication
+ *  succeeds; the front-end mirrors the returned canonical path afterwards. */
+export async function saveCurrentProjectAs(): Promise<void> {
+  const project = useProjectStore.getState();
+  if (!project.projectPath || project.compatibilityReadOnly) return;
+  try {
+    const save = await saveDialog();
+    if (!save) return;
+    const selected = await save({
+      title: t("menu.saveAs"),
+      defaultPath: project.projectPath,
+      filters: [{ name: "OpenTake", extensions: [PROJECT_EXT] }],
+    });
+    if (typeof selected !== "string") return;
+    const committedPath = await api.projectSave(withExt(selected));
+    const current = useProjectStore.getState();
+    current.setProjectPath(committedPath);
+    useProjectStore.getState().markSaved();
+    useRecentStore.getState().add(committedPath);
+  } catch (error) {
+    useEditorUiStore.getState().pushToast(
+      t("project.saveFailed", { error: projectLifecycleErrorMessage(error) }),
+    );
+    throw error;
+  }
+}
+
 /** Open `path` (a `.opentake` bundle), refresh the mirror, record it, and enter
  *  the editor. Used by both the dialog flow and the recents list. */
 function projectLifecycleErrorMessage(error: unknown): string {

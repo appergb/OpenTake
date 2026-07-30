@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { TitleBar } from "./components/shell/TitleBar";
+import { ApplicationMenuBridge } from "./components/shell/ViewMenu";
 import { ExportDialog } from "./components/shell/ExportDialog";
 import { SaveAsProgress } from "./components/shell/SaveAsProgress";
 import { EditorSplit } from "./components/shell/EditorSplit";
@@ -104,6 +105,7 @@ export default function App() {
       }}
     >
       <CompatibilityBanner />
+      <ApplicationMenuBridge />
       {view === "home" ? (
         <HomeView />
       ) : view === "library" ? (

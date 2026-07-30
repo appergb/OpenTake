@@ -85,6 +85,7 @@ export function handleAgentPanelKeyDown(
     view !== "editor" ||
     e.code !== "KeyA" ||
     !e.altKey ||
+    e.shiftKey ||
     (!e.metaKey && !e.ctrlKey) ||
     isTextEntry(e.target)
   ) {
@@ -92,6 +93,47 @@ export function handleAgentPanelKeyDown(
   }
   e.preventDefault();
   if (!e.repeat) toggle();
+  return true;
+}
+
+interface ViewShortcutUi {
+  view: AppView;
+  setLayoutPreset: (preset: "default" | "media" | "vertical") => void;
+  toggleAgentPanel: () => void;
+  toggleMediaPanel: () => void;
+  toggleInspectorPanel: () => void;
+  toggleMaximizedFocusedPanel: () => void;
+  toggleFullscreen: () => Promise<void>;
+}
+
+/** Shared View-command accelerator boundary used by the app menu and the
+ *  global key listener. Returning true means the native/browser shortcut was
+ *  consumed, including held-key repeats (which are intentionally no-ops). */
+export function handleViewShortcutKeyDown(e: KeyboardEvent, ui: ViewShortcutUi): boolean {
+  if (ui.view !== "editor" || isTextEntry(e.target)) return false;
+  const mod = e.metaKey || e.ctrlKey;
+  let action: (() => void) | undefined;
+
+  if (mod) {
+    if (e.altKey && !e.shiftKey && e.code === "KeyA") action = ui.toggleAgentPanel;
+    else if (!e.shiftKey && e.code === "Digit0") {
+      action = e.altKey ? ui.toggleInspectorPanel : ui.toggleMediaPanel;
+    } else if (!e.altKey && !e.shiftKey && e.code === "Digit1") {
+      action = () => ui.setLayoutPreset("default");
+    } else if (!e.altKey && !e.shiftKey && e.code === "Digit2") {
+      action = () => ui.setLayoutPreset("media");
+    } else if (!e.altKey && !e.shiftKey && e.code === "Digit3") {
+      action = () => ui.setLayoutPreset("vertical");
+    } else if (!e.altKey && !e.shiftKey && e.code === "KeyF") {
+      action = () => void ui.toggleFullscreen();
+    }
+  } else if (!e.altKey && !e.shiftKey && e.code === "Backquote") {
+    action = ui.toggleMaximizedFocusedPanel;
+  }
+
+  if (!action) return false;
+  e.preventDefault();
+  if (!e.repeat) action();
   return true;
 }
 
@@ -136,7 +178,7 @@ export function useKeyboardShortcuts() {
       };
 
       if (handleProjectSaveKeyDown(e)) return;
-      if (handleAgentPanelKeyDown(e, ui.view, ui.toggleAgentPanel)) return;
+      if (handleViewShortcutKeyDown(e, ui)) return;
 
       // Cmd-modified actions.
       if (mod) {
@@ -162,23 +204,6 @@ export function useKeyboardShortcuts() {
             // ⌘K (existing) and ⌘B (剪映 split-at-playhead) both split.
             e.preventDefault();
             edit.splitAtPlayhead();
-            return;
-          case "Digit1":
-            e.preventDefault();
-            ui.setLayoutPreset("default");
-            return;
-          case "Digit2":
-            e.preventDefault();
-            ui.setLayoutPreset("media");
-            return;
-          case "Digit3":
-            e.preventDefault();
-            ui.setLayoutPreset("vertical");
-            return;
-          case "Digit0":
-            e.preventDefault();
-            if (e.altKey) ui.toggleInspectorPanel();
-            else ui.toggleMediaPanel();
             return;
           case "KeyC":
             e.preventDefault();
@@ -285,12 +310,6 @@ export function useKeyboardShortcuts() {
             ui.setScroll(0, ui.scrollTop);
           }
           return;
-        case "Backquote": {
-          e.preventDefault();
-          const focused = ui.focusedPanel;
-          ui.setMaximizedPanel(ui.maximizedPanel ? null : focused);
-          return;
-        }
         case "Escape":
           if (ui.maximizedPanel) ui.setMaximizedPanel(null);
           else {

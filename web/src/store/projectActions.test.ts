@@ -100,6 +100,7 @@ import {
   openProjectPath,
   openProjectViaDialog,
   saveCurrentProject,
+  saveCurrentProjectAs,
 } from "./projectActions";
 import { useEditorUiStore } from "./uiStore";
 import { useMediaStore } from "./mediaStore";
@@ -455,5 +456,56 @@ describe("saveCurrentProject", () => {
     expect(srv.projectSave).toHaveBeenCalledTimes(1);
     expect(useProjectStore.getState().lastSavedVersion).toBe(4);
     expect(useProjectStore.getState().timelineVersion).toBe(5);
+  });
+});
+
+describe("saveCurrentProjectAs", () => {
+  beforeEach(() => {
+    srv.projectSave.mockReset();
+    srv.projectSave.mockImplementation(async (path: string | null) => path ?? "");
+    useRecentStore.setState({ recents: [] });
+    useProjectStore.setState({
+      snapshotMutationRevision: 0,
+      projectEpoch: 1,
+      projectPath: "/tmp/current.opentake",
+      compatibilityReadOnly: false,
+      timelineVersion: 9,
+      lastSavedVersion: 8,
+    });
+    useEditorUiStore.setState({ toast: null });
+    useI18nStore.setState({ locale: "zh-CN" });
+  });
+
+  it("adopts the core-returned Save As path only after publication succeeds", async () => {
+    srv.projectSave.mockResolvedValueOnce("/tmp/canonical-fresh.opentake");
+
+    await saveCurrentProjectAs();
+
+    expect(srv.projectSave).toHaveBeenCalledWith("/tmp/fresh.opentake");
+    expect(useProjectStore.getState().projectPath).toBe("/tmp/canonical-fresh.opentake");
+    expect(useProjectStore.getState().lastSavedVersion).toBe(9);
+    expect(useRecentStore.getState().recents[0]?.path).toBe(
+      "/tmp/canonical-fresh.opentake",
+    );
+  });
+
+  it("preserves the active path and dirty state when Save As fails", async () => {
+    srv.projectSave.mockRejectedValueOnce(new Error("destination denied"));
+
+    await expect(saveCurrentProjectAs()).rejects.toThrow("destination denied");
+
+    expect(useProjectStore.getState().projectPath).toBe("/tmp/current.opentake");
+    expect(useProjectStore.getState().lastSavedVersion).toBe(8);
+    expect(useRecentStore.getState().recents).toEqual([]);
+    expect(useEditorUiStore.getState().toast?.message).toBe("保存失败：destination denied");
+  });
+
+  it("does not open a Save As flow for compatibility read-only projects", async () => {
+    useProjectStore.setState({ compatibilityReadOnly: true });
+
+    await saveCurrentProjectAs();
+
+    expect(srv.projectSave).not.toHaveBeenCalled();
+    expect(useProjectStore.getState().projectPath).toBe("/tmp/current.opentake");
   });
 });

@@ -11,6 +11,8 @@ import { totalFrames } from "../lib/geometry";
 import type { CropAspectLock } from "../lib/cropOverlay";
 import { withRangeStart, withRangeEnd, type TimelineRange } from "../lib/timelineRange";
 import type { GapSelection } from "../lib/timelineGap";
+import { isTauri } from "../lib/api";
+import { t } from "../i18n";
 
 export type Panel = "agent" | "media" | "preview" | "inspector" | "timeline";
 /** Top-level app view (SPEC: 启动先进主页). The editor is one of three views;
@@ -18,6 +20,15 @@ export type Panel = "agent" | "media" | "preview" | "inspector" | "timeline";
 export type AppView = "home" | "editor" | "settings" | "library";
 export type ToolMode = "pointer" | "razor";
 export type LayoutPreset = "default" | "media" | "vertical";
+export type SettingsPaneId =
+  | "general"
+  | "appearance"
+  | "import"
+  | "ai"
+  | "mcp"
+  | "shortcuts"
+  | "account"
+  | "about";
 /** 剪映式顶部素材面板主标签（英文标识符，中文文案在 dict）。
  *  目前仅 material/audio 可用，其余为置灰占位（功能未做）。 */
 export type MediaTabId =
@@ -75,6 +86,9 @@ interface UiState {
   setView: (view: AppView) => void;
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
+  settingsPane: SettingsPaneId;
+  openSettingsPane: (pane: SettingsPaneId) => void;
+  setSettingsPane: (pane: SettingsPaneId) => void;
   /** Whether the video-export dialog (§2.4 / #112) is shown. */
   exportDialogOpen: boolean;
   setExportDialogOpen: (open: boolean) => void;
@@ -137,6 +151,9 @@ interface UiState {
   // Panels
   focusedPanel: Panel | null;
   maximizedPanel: Panel | null;
+  /** Mirrors the desktop/browser window's fullscreen state for the checked View
+   *  menu item. The action always queries the real window before toggling. */
+  fullscreen: boolean;
   layoutPreset: LayoutPreset;
   agentPanelVisible: boolean;
   mediaPanelVisible: boolean;
@@ -218,6 +235,9 @@ interface UiState {
 
   focusPanel: (panel: Panel) => void;
   setMaximizedPanel: (panel: Panel | null) => void;
+  toggleMaximizedFocusedPanel: () => void;
+  syncFullscreen: () => Promise<void>;
+  toggleFullscreen: () => Promise<void>;
   setLayoutPreset: (preset: LayoutPreset) => void;
   toggleAgentPanel: () => void;
   toggleMediaPanel: () => void;
@@ -242,6 +262,9 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   setView: (view) => set({ view }),
   settingsOpen: false,
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  settingsPane: "general",
+  openSettingsPane: (settingsPane) => set({ settingsPane, settingsOpen: true }),
+  setSettingsPane: (settingsPane) => set({ settingsPane }),
   exportDialogOpen: false,
   setExportDialogOpen: (exportDialogOpen) => set({ exportDialogOpen }),
   saveAsProgress: null,
@@ -276,6 +299,7 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
 
   focusedPanel: "timeline",
   maximizedPanel: null,
+  fullscreen: false,
   layoutPreset: loadPreset(),
   agentPanelVisible: loadBool(LS.agentPanelVisible, false),
   mediaPanelVisible: loadBool(LS.mediaPanelVisible, true),
@@ -398,6 +422,41 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
     else set({ focusedPanel: panel });
   },
   setMaximizedPanel: (maximizedPanel) => set({ maximizedPanel }),
+  toggleMaximizedFocusedPanel: () =>
+    set((state) => {
+      if (!state.focusedPanel) return {};
+      return {
+        maximizedPanel: state.maximizedPanel ? null : state.focusedPanel,
+      };
+    }),
+  syncFullscreen: async () => {
+    if (isTauri) {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      set({ fullscreen: await getCurrentWindow().isFullscreen() });
+      return;
+    }
+    set({ fullscreen: Boolean(document.fullscreenElement) });
+  },
+  toggleFullscreen: async () => {
+    try {
+      if (isTauri) {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const window = getCurrentWindow();
+        const fullscreen = !(await window.isFullscreen());
+        await window.setFullscreen(fullscreen);
+        set({ fullscreen });
+        return;
+      }
+      if (document.fullscreenElement) {
+        await document.exitFullscreen?.();
+      } else {
+        await document.documentElement.requestFullscreen?.();
+      }
+      set({ fullscreen: Boolean(document.fullscreenElement) });
+    } catch {
+      get().pushToast(t("view.fullscreenFailed"));
+    }
+  },
   setLayoutPreset: (layoutPreset) => {
     persist(LS.layoutPreset, layoutPreset);
     set({ layoutPreset });
@@ -406,19 +465,43 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
     set((s) => {
       const agentPanelVisible = !s.agentPanelVisible;
       persist(LS.agentPanelVisible, String(agentPanelVisible));
-      return { agentPanelVisible };
+      return {
+        agentPanelVisible,
+        ...(agentPanelVisible
+          ? {}
+          : {
+              focusedPanel: s.focusedPanel === "agent" ? "timeline" : s.focusedPanel,
+              maximizedPanel: s.maximizedPanel === "agent" ? null : s.maximizedPanel,
+            }),
+      };
     }),
   toggleMediaPanel: () =>
     set((s) => {
       const mediaPanelVisible = !s.mediaPanelVisible;
       persist(LS.mediaPanelVisible, String(mediaPanelVisible));
-      return { mediaPanelVisible };
+      return {
+        mediaPanelVisible,
+        ...(mediaPanelVisible
+          ? {}
+          : {
+              focusedPanel: s.focusedPanel === "media" ? "timeline" : s.focusedPanel,
+              maximizedPanel: s.maximizedPanel === "media" ? null : s.maximizedPanel,
+            }),
+      };
     }),
   toggleInspectorPanel: () =>
     set((s) => {
       const inspectorPanelVisible = !s.inspectorPanelVisible;
       persist(LS.inspectorPanelVisible, String(inspectorPanelVisible));
-      return { inspectorPanelVisible };
+      return {
+        inspectorPanelVisible,
+        ...(inspectorPanelVisible
+          ? {}
+          : {
+              focusedPanel: s.focusedPanel === "inspector" ? "timeline" : s.focusedPanel,
+              maximizedPanel: s.maximizedPanel === "inspector" ? null : s.maximizedPanel,
+            }),
+      };
     }),
   toggleKeyframesPanel: () =>
     set((s) => {

@@ -102,3 +102,16 @@ Tauri 原生菜单（macOS）/ 应用内菜单（Win/Linux）需复刻以下项�
 - **Help**：Tutorial / Keyboard Shortcuts(⌘?) / MCP Instructions / Send Feedback…
 
 菜单项勾选态:layout 三项、三个面板可见性、最大化态都带 checkmark/state(`EditorWindowController.validateMenuItem`,`EditorWindowController.swift:270-303`)。
+
+OpenTake 的跨平台应用内 `ViewMenu` 是 **View 组命令的单一所有者**：按上表顺序提供
+Media / Inspector / Agent、最大化聚焦面板、三种布局和全屏共八项。菜单每次打开时从真实
+store/宿主窗口同步勾选态；无聚焦面板时仅“最大化聚焦面板”禁用。折叠当前聚焦或最大化的
+可折叠面板时，焦点回落到 timeline 并退出最大化，避免留下指向不可见面板的状态。鼠标命令
+与 `⌘/Ctrl` 快捷键复用同一组 store actions；打开菜单后焦点进入第一项，方向键/Home/End
+遍历可用项，Esc 关闭并把焦点还给菜单按钮。
+
+打包后的桌面应用同时安装完整原生 App / File / Edit / View / Help 菜单。原生菜单与应用内
+入口复用同一 action，不复制业务逻辑；enabled、checked 与中英文文本均从 store 实时同步。
+尚未交付的检查更新、教程、反馈入口保留可见但明确标记 Beta 暂不可用并禁用。Save As 必须
+先完成 Core 原子发布，成功后才切换当前工程路径和最近项目；失败时原路径、dirty 状态与最近
+项目保持不变。
