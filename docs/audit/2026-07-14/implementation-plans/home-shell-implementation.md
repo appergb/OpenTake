@@ -1350,7 +1350,7 @@
   - Visible/accessibility/return path: success=toggle the Inspector panel: toggleInspectorPanel; accessibility={"focus":"Custom MenuItem focus behavior depends on its implementation","label":"Visible child text/title or caller-provided label; verify at runtime","shortcut":"None declared on this control"}; returnPath=["Preset selection closes the menu; panel toggles leave it open; focus return is not managed."].
   - Outcome matrix: {"success":"toggle the Inspector panel: toggleInspectorPanel","pending":"Not applicable — this activation only changes local/caller state and starts no Promise, API, Tauri command, or Rust work.","empty":"Not applicable — this control does not consume a collection, selection, or free-form payload that has an empty state.","disabled":"No explicit disabled prop on this candidate.","cancel":"Not applicable — this immediate handler has no cancellable operation or dismissible transient surface.","retry":"Not applicable as an error-recovery state — the synchronous local action can simply be activated again.","failure":"Not applicable — this immediate activation calls no API/Tauri/Rust boundary, so there is no backend rejection path."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/ViewMenu.interaction.test.tsx#control-d826a0ad433703cb open/close the View menu` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
   - `web/src/components/shell/ViewMenu.interaction.test.tsx#control-a2d1b5cb37952878 select a layout preset` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
@@ -1360,7 +1360,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ViewMenu.interaction.test.tsx -t "control-d826a0ad433703cb open/close the View menu"`
   - Run: `pnpm -C web test -- --run src/components/shell/ViewMenu.interaction.test.tsx -t "control-a2d1b5cb37952878 select a layout preset"`
@@ -1370,11 +1370,11 @@
 
   Expected: FAIL because one or more of the 5 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/ViewMenu.tsx`, `web/src/components/shell/ViewMenu.tsx#ViewMenu` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ViewMenu.interaction.test.tsx -t "control-d826a0ad433703cb open/close the View menu"`
   - Run: `pnpm -C web test -- --run src/components/shell/ViewMenu.interaction.test.tsx -t "control-a2d1b5cb37952878 select a layout preset"`
@@ -1384,8 +1384,10 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. The reviewed owning runner was the missing RED artifact; the existing `ViewMenu` implementation already satisfied all five contracts, so no production-code change was required. The true focused Vitest invocation passed 5/5, the complete web suite passed 726/726, and the production web build passed with only the pre-existing bundle warnings. The rebuilt macOS app then verified preset selection, checked states, three panel toggles, Escape dismissal, and outside-click dismissal. Runtime evidence: `runtime-artifacts/automated/view-menu-real-device-2026-07-30.md`.
