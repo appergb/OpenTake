@@ -5,7 +5,11 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  exportEdl: vi.fn(),
+  exportFcpxmlModern: vi.fn(),
+  exportOtio: vi.fn(),
   exportSubtitles: vi.fn(),
+  exportXmeml: vi.fn(),
   getDefaultProjectDir: vi.fn(),
   save: vi.fn(),
   saveDialog: vi.fn(),
@@ -16,11 +20,11 @@ vi.mock("../../i18n", () => ({
 }));
 
 vi.mock("../../lib/api", () => ({
-  exportEdl: vi.fn(),
-  exportFcpxmlModern: vi.fn(),
-  exportOtio: vi.fn(),
+  exportEdl: mocks.exportEdl,
+  exportFcpxmlModern: mocks.exportFcpxmlModern,
+  exportOtio: mocks.exportOtio,
   exportSubtitles: mocks.exportSubtitles,
-  exportXmeml: vi.fn(),
+  exportXmeml: mocks.exportXmeml,
   getDefaultProjectDir: mocks.getDefaultProjectDir,
 }));
 
@@ -211,6 +215,72 @@ describe("TitleBar navigation and video export controls", () => {
     await act(async () => renderVideo?.click());
     expect(trigger?.getAttribute("aria-expanded")).toBe("false");
     expect(useEditorUiStore.getState().exportDialogOpen).toBe(true);
+  });
+});
+
+describe("TitleBar interchange export", () => {
+  it.each([
+    ["xml", "title.exportXmeml", mocks.exportXmeml],
+    ["fcpxml", "title.exportFcpxml", mocks.exportFcpxmlModern],
+    ["otio", "title.exportOtio", mocks.exportOtio],
+    ["edl", "title.exportEdl", mocks.exportEdl],
+  ] as const)("control-0d98e5e5a0c417ed export XMEML/FCPXML/OTIO/EDL (%s)", async (ext, label, run) => {
+    mocks.save.mockResolvedValue("/tmp/interchange");
+    run.mockResolvedValue(undefined);
+    await act(async () => root?.render(<TitleBar />));
+    const trigger = container?.querySelector<HTMLButtonElement>('button[aria-label="title.export"]');
+    await act(async () => trigger?.click());
+    const formatItem = [...(container?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])]
+      .find((button) => button.textContent === label);
+    expect(formatItem).not.toBeUndefined();
+
+    await act(async () => {
+      formatItem?.click();
+      await Promise.resolve();
+    });
+    expect(trigger?.getAttribute("aria-expanded")).toBe("false");
+    expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({
+      defaultPath: `/tmp/TalkingHeadQA.${ext}`,
+    }));
+    expect(mocks.save.mock.calls[0]?.[0]).not.toHaveProperty("filters");
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledWith(`/tmp/interchange.${ext}`);
+    expect(useEditorUiStore.getState().toast?.message).toBe("title.exportInterchangeDone");
+  });
+
+  it("control-0d98e5e5a0c417ed export XMEML/FCPXML/OTIO/EDL reports failure", async () => {
+    mocks.save.mockResolvedValueOnce("/tmp/failed.xml");
+    mocks.exportXmeml.mockRejectedValueOnce(new Error("write failed"));
+    await act(async () => root?.render(<TitleBar />));
+    const trigger = container?.querySelector<HTMLButtonElement>('button[aria-label="title.export"]');
+    await act(async () => trigger?.click());
+    const xmeml = [...(container?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])]
+      .find((button) => button.textContent === "title.exportXmeml");
+
+    await act(async () => {
+      xmeml?.click();
+      await Promise.resolve();
+    });
+    expect(useEditorUiStore.getState().toast?.message).toBe("title.exportInterchangeFailed");
+  });
+
+  it("control-0d98e5e5a0c417ed export XMEML/FCPXML/OTIO/EDL preserves cancel and default-directory behavior", async () => {
+    useProjectStore.setState({ projectPath: null });
+    mocks.save.mockResolvedValueOnce(null);
+    await act(async () => root?.render(<TitleBar />));
+    const trigger = container?.querySelector<HTMLButtonElement>('button[aria-label="title.export"]');
+    await act(async () => trigger?.click());
+    const edl = [...(container?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])]
+      .find((button) => button.textContent === "title.exportEdl");
+
+    await act(async () => {
+      edl?.click();
+      await Promise.resolve();
+    });
+    expect(mocks.getDefaultProjectDir).toHaveBeenCalledTimes(1);
+    expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ defaultPath: "/tmp/Timeline.edl" }));
+    expect(mocks.exportEdl).not.toHaveBeenCalled();
+    expect(useEditorUiStore.getState().toast).toBeNull();
   });
 });
 

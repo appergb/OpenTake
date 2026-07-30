@@ -1222,33 +1222,43 @@
   - Visible/accessibility/return path: success=export XMEML/FCPXML/OTIO/EDL: close menu -> save dialog -> format command -> success/failure toast; accessibility={"focus":"Native keyboard-focusable control","label":"menuitem","shortcut":"None declared on this control"}; returnPath=["Navigation changes the full-screen view; popup actions should close and return focus to the title-bar trigger."].
   - Outcome matrix: {"success":"export XMEML/FCPXML/OTIO/EDL: close menu -> save dialog -> format command -> success/failure toast","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/shell/TitleBar.tsx:396; no additional state is inferred beyond the source.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/shell/TitleBar.tsx:396; the candidate-specific interaction test must assert that exact guard.","disabled":"No explicit disabled prop on this candidate.","cancel":"Cancellation/dismissal follows the exact guard in close menu -> save dialog -> format command -> success/failure toast; no broader cancellation behavior is assumed.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in close menu -> save dialog -> format command -> success/failure toast.","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/shell/TitleBar.tsx:396; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/TitleBar.interaction.test.tsx#control-0d98e5e5a0c417ed export XMEML/FCPXML/OTIO/EDL` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+  Result: Added the exact planned control test for XMEML, FCPXML, OTIO, and EDL, plus failure, cancellation, default-directory, extension, menu-dismissal, and macOS 26 native-dialog compatibility coverage.
+
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-0d98e5e5a0c417ed export XMEML/FCPXML/OTIO/EDL"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Result: The production interchange routes already existed, so the initial owning test passed rather than manufacturing an artificial RED. Real-device verification then supplied the missing failure evidence: EDL selected caption overlays as `Offline`, and the native extension filter disabled Save on macOS 26.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/TitleBar.tsx`, `web/src/components/shell/TitleBar.tsx#INTERCHANGE_FORMATS`, `web/src/lib/api.ts#getDefaultProjectDir`, `src-tauri/src/commands.rs`, `web/src/lib/api.ts`, `src-tauri/src/commands.rs#selected`, `crates/opentake-project/src/fcpxml.rs#export_xmeml`, `web/src/components/shell/TitleBar.tsx#TitleBar` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Result: Preserved the project-derived save path while avoiding the incompatible macOS native filter, and corrected EDL to skip text/Lottie overlays in favor of actual video/image clips. See `docs/audit/2026-07-14/runtime-artifacts/automated/interchange-export-real-device-2026-07-30.md`.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-0d98e5e5a0c417ed export XMEML/FCPXML/OTIO/EDL"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Result: PASS. The repository web suite passed 70 files / 721 tests, including all six exact interchange-control cases; the EDL module passed 14/14 focused tests.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. The full Rust workspace, warnings-denied workspace clippy, web build, formatting, and diff checks completed successfully. The rebuilt macOS application exported and parsed all four formats, and the corrected three-event EDL was deterministic.
 
 ### Task 16: control-acceptance (implementation-slice-4a4cd45e11211989)
 

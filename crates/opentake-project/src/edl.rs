@@ -48,7 +48,7 @@
 //! no cross-platform tape/source-timecode reader — see `fcpxml.rs`); the source
 //! window is `[trim_start, trim_start + source_frames_consumed)`.
 
-use opentake_domain::{Clip, MediaManifest, MediaResolver, Timeline, Track};
+use opentake_domain::{Clip, ClipType, MediaManifest, MediaResolver, Timeline, Track};
 
 /// Reel name for every event. Real source-tape names need a tape-timecode
 /// reader OpenTake lacks; `AX` ("auxiliary") is the CMX3600 convention for
@@ -100,14 +100,30 @@ impl Builder<'_> {
         out
     }
 
-    /// Clips of the topmost video track, sorted by start frame. CMX3600 holds a
-    /// single video track, so we pick the first visual track in timeline order.
+    /// Clips of the topmost editorial-media track, sorted by start frame.
+    ///
+    /// `ClipType::is_visual()` also includes text and Lottie tracks. Those are
+    /// overlays rather than CMX3600 video events, so selecting the first visual
+    /// track would export captions as `Offline` clips and hide the real video
+    /// track below. Pick the first track that actually contains video/image
+    /// media and omit overlay clips even when a mixed visual track contains
+    /// them.
     fn top_video_clips(&self) -> Vec<Clip> {
-        let track: Option<&Track> = self.timeline.tracks.iter().find(|t| t.kind.is_visual());
-        let Some(track) = track else {
-            return Vec::new();
-        };
-        let mut clips: Vec<Clip> = track.clips.clone();
+        let mut clips = self
+            .timeline
+            .tracks
+            .iter()
+            .filter(|track: &&Track| track.kind.is_visual())
+            .find_map(|track| {
+                let clips: Vec<Clip> = track
+                    .clips
+                    .iter()
+                    .filter(|clip| matches!(clip.media_type, ClipType::Video | ClipType::Image))
+                    .cloned()
+                    .collect();
+                (!clips.is_empty()).then_some(clips)
+            })
+            .unwrap_or_default();
         clips.sort_by_key(|c| c.start_frame);
         clips
     }
@@ -183,7 +199,7 @@ fn format_timecode(frame: i32, fps: i32, drop_frame: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opentake_domain::{ClipType, MediaManifestEntry, MediaSource};
+    use opentake_domain::{MediaManifestEntry, MediaSource};
 
     fn entry(id: &str, name: &str, kind: ClipType, duration: f64) -> MediaManifestEntry {
         MediaManifestEntry {
@@ -363,6 +379,37 @@ mod tests {
         assert!(edl.contains("shot.mp4"));
         assert!(!edl.contains("song.mp3"));
         // Exactly one event.
+        assert!(edl.contains("001  AX"));
+        assert!(!edl.contains("002  AX"));
+    }
+
+    #[test]
+    fn caption_overlay_track_does_not_shadow_video_track() {
+        let mut tl = Timeline::new();
+        tl.fps = 30;
+
+        let mut captions = Track::new("captions", ClipType::Text);
+        let mut caption = Clip::new("caption", "caption-media", 0, 90);
+        caption.media_type = ClipType::Text;
+        caption.source_clip_type = ClipType::Text;
+        caption.text_content = Some("Do not export me as Offline".into());
+        captions.clips.push(caption);
+
+        let mut video = Track::new("video", ClipType::Video);
+        video.clips.push(Clip::new("shot", "v1", 0, 120));
+
+        // Top-to-bottom order matches the real editor: captions above video.
+        tl.tracks.push(captions);
+        tl.tracks.push(video);
+
+        let edl = export_edl(
+            &tl,
+            &manifest(vec![entry("v1", "talking-head.mp4", ClipType::Video, 4.0)]),
+        );
+
+        assert!(edl.contains("* FROM CLIP NAME: talking-head.mp4"));
+        assert!(!edl.contains("Do not export me"));
+        assert!(!edl.contains("* FROM CLIP NAME: Offline"));
         assert!(edl.contains("001  AX"));
         assert!(!edl.contains("002  AX"));
     }
