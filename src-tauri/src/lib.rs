@@ -31,7 +31,9 @@ mod transcribe;
 #[cfg(feature = "playback-engine")]
 pub mod playback;
 
-use opentake_core::{AppCore, CoreEvent};
+use std::sync::Arc;
+
+use opentake_core::{AppCore, CoreEvent, IdGen};
 use opentake_media::library::LibraryStore;
 use opentake_media::MediaEngine;
 use tauri::{Emitter, Manager, WindowEvent};
@@ -41,6 +43,20 @@ use tauri::RunEvent;
 
 use crate::media::prewarm::PrewarmScheduler;
 use crate::media::MediaState;
+
+/// Production entity IDs must remain unique across save/reopen boundaries.
+/// The core's sequential default is intentionally deterministic for tests, but
+/// a new desktop process would restart it at `id-1` and collide with IDs loaded
+/// from an existing project. UUIDs match the upstream persistence contract and
+/// need no mutable state to survive an application restart.
+#[derive(Debug, Default)]
+struct UuidIdGen;
+
+impl IdGen for UuidIdGen {
+    fn next_id(&self) -> String {
+        uuid::Uuid::new_v4().to_string()
+    }
+}
 
 /// Build and run the Tauri application. The `main.rs` binary calls this.
 ///
@@ -80,7 +96,8 @@ pub fn run() {
                 .set_activation_policy(tauri::ActivationPolicy::Regular);
 
             // The one authoritative editing session, shared with every command.
-            let core = AppCore::new();
+            let mut core = AppCore::new();
+            core.set_id_gen(Arc::new(UuidIdGen));
             let initial_project_epoch = core.project_revision().project_epoch;
 
             // Forward core events to the WebView. The closure runs on whatever
@@ -359,4 +376,22 @@ fn forward_event(app: &tauri::AppHandle, event: &CoreEvent) {
     // Best-effort: a missing WebView (e.g. during teardown) must not panic the
     // emitting thread.
     let _ = app.emit(name, event);
+}
+
+#[cfg(test)]
+mod id_tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    #[test]
+    fn production_ids_are_unique_and_uuid_shaped() {
+        let generator = UuidIdGen;
+        let ids = (0..256)
+            .map(|_| generator.next_id())
+            .collect::<HashSet<_>>();
+
+        assert_eq!(ids.len(), 256);
+        assert!(ids.iter().all(|id| uuid::Uuid::parse_str(id).is_ok()));
+    }
 }

@@ -41,7 +41,7 @@
 
 use opentake_domain::Clip;
 
-use super::{TranscriptionResult, TranscriptionSegment};
+use super::{TranscriptionResult, TranscriptionSegment, TranscriptionWord};
 
 /// Per-phrase floor display duration, in **seconds**. 1:1 with upstream
 /// `AppTheme.Caption.minDisplayDuration = 0.7` (`AppTheme.swift:249`), the
@@ -395,8 +395,7 @@ pub fn caption_specs<F: Fn(&str) -> bool>(
         if clips.is_empty() {
             continue;
         }
-        let seg_phrases: Vec<Phrase> = result
-            .segments
+        let seg_phrases: Vec<Phrase> = visible_caption_segments(result, &clips, fps)
             .iter()
             .flat_map(|seg| phrases(seg, fits, MIN_DISPLAY_DURATION_SECS))
             .collect();
@@ -432,6 +431,151 @@ pub fn caption_specs<F: Fn(&str) -> bool>(
         out.extend(specs(&cased, t.clip, fps, caption_group_id, 1));
     }
     out
+}
+
+/// Rebuild source segments from the words that are still visible through the
+/// current clip fragments. A cached source segment keeps its original text even
+/// after a ripple cut; using it verbatim would resurrect deleted fillers in
+/// newly generated captions. Uncut segments retain their original punctuation,
+/// while cut segments are sliced from that original text using the surviving
+/// Whisper token sequence (including subword tokens such as `synchron` +
+/// `ized`).
+fn visible_caption_segments(
+    result: &TranscriptionResult,
+    clips: &[&CaptionTarget<'_>],
+    fps: i32,
+) -> Vec<TranscriptionSegment> {
+    let fps_d = fps as f64;
+    let mut rebuilt = Vec::new();
+    for segment in &result.segments {
+        let segment_words = result
+            .words
+            .iter()
+            .filter(|word| match (word.start, word.end) {
+                (Some(start), Some(end)) => {
+                    let midpoint = (start + end) / 2.0;
+                    midpoint >= segment.start && midpoint < segment.end
+                }
+                _ => false,
+            })
+            .collect::<Vec<_>>();
+        if segment_words.is_empty() {
+            rebuilt.push(segment.clone());
+            continue;
+        }
+
+        let owners = segment_words
+            .iter()
+            .map(|word| {
+                let (start, end) = (word.start?, word.end?);
+                let midpoint_frame = (start + end) / 2.0 * fps_d;
+                clips.iter().position(|target| {
+                    let (visible_start, visible_end) = visible_source_span(target.clip);
+                    visible_start <= midpoint_frame && midpoint_frame < visible_end
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if owners.iter().all(Option::is_some) && owners.windows(2).all(|pair| pair[0] == pair[1]) {
+            rebuilt.push(segment.clone());
+            continue;
+        }
+
+        let token_ranges = token_byte_ranges(&segment.text, &segment_words);
+        let mut index = 0;
+        while index < segment_words.len() {
+            let Some(owner) = owners[index] else {
+                index += 1;
+                continue;
+            };
+            let run_start = index;
+            index += 1;
+            while index < segment_words.len() && owners[index] == Some(owner) {
+                index += 1;
+            }
+            let run_end = index;
+            let text = token_ranges
+                .as_ref()
+                .and_then(|ranges| slice_token_run(&segment.text, ranges, run_start, run_end))
+                .unwrap_or_else(|| detokenize(&segment_words[run_start..run_end]));
+            let start = segment_words[run_start].start.unwrap_or(segment.start);
+            let end = segment_words[run_end - 1].end.unwrap_or(segment.end);
+            if !text.trim().is_empty() && end > start {
+                rebuilt.push(TranscriptionSegment { text, start, end });
+            }
+        }
+    }
+    rebuilt
+}
+
+fn token_byte_ranges(text: &str, words: &[&TranscriptionWord]) -> Option<Vec<(usize, usize)>> {
+    let mut normalized = Vec::new();
+    for (byte_start, ch) in text.char_indices() {
+        if !ch.is_alphanumeric() {
+            continue;
+        }
+        let byte_end = byte_start + ch.len_utf8();
+        for folded in ch.to_lowercase() {
+            normalized.push((folded, byte_start, byte_end));
+        }
+    }
+
+    let mut cursor = 0;
+    let mut ranges = Vec::with_capacity(words.len());
+    for word in words {
+        let needle = word
+            .text
+            .chars()
+            .filter(|ch| ch.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect::<Vec<_>>();
+        if needle.is_empty() {
+            return None;
+        }
+        if cursor > normalized.len() || needle.len() > normalized.len() - cursor {
+            return None;
+        }
+        let position = (cursor..=normalized.len().saturating_sub(needle.len())).find(|start| {
+            normalized[*start..*start + needle.len()]
+                .iter()
+                .map(|entry| entry.0)
+                .eq(needle.iter().copied())
+        })?;
+        let end_position = position + needle.len() - 1;
+        ranges.push((normalized[position].1, normalized[end_position].2));
+        cursor = position + needle.len();
+    }
+    Some(ranges)
+}
+
+fn slice_token_run(
+    text: &str,
+    ranges: &[(usize, usize)],
+    start: usize,
+    end: usize,
+) -> Option<String> {
+    let byte_start = ranges.get(start)?.0;
+    let mut byte_end = ranges.get(end.checked_sub(1)?)?.1;
+    let next_start = ranges.get(end).map(|range| range.0).unwrap_or(text.len());
+    let punctuation_start = byte_end;
+    // Preserve punctuation attached to the final surviving token, but not the
+    // whitespace leading into a removed token.
+    for (offset, ch) in text[punctuation_start..next_start].char_indices() {
+        if ch.is_whitespace() || ch.is_alphanumeric() {
+            break;
+        }
+        byte_end = punctuation_start + offset + ch.len_utf8();
+    }
+    Some(text.get(byte_start..byte_end)?.trim().to_string())
+}
+
+fn detokenize(words: &[&TranscriptionWord]) -> String {
+    words
+        .iter()
+        .map(|word| word.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The clip whose visible source window overlaps phrase `p` the most, but only
@@ -784,6 +928,45 @@ mod tests {
         assert_eq!(out[0].content, "HELLO WORLD");
         assert_eq!(out[0].caption_group_id, "grp");
         assert_eq!(out[0].start_frame, 0);
+    }
+
+    #[test]
+    fn caption_specs_rebuild_cut_segment_from_visible_words() {
+        // A three-frame ripple cut removes only "Um" between two fragments of
+        // the same source. A cached segment still contains the old full text;
+        // regenerated captions must use the surviving words and preserve a
+        // split Whisper token as the original "synchronized" spelling.
+        let before = clip("before", 0, 151, 0, 1.0);
+        let after = clip("after", 151, 746, 154, 1.0);
+        let transcript = result(
+            vec![
+                word("Um", 5.0, 5.1),
+                word("today", 5.2, 5.4),
+                word("synchron", 5.4, 5.7),
+                word("ized", 5.7, 5.9),
+            ],
+            vec![seg("Um, today synchronized", 5.0, 5.9)],
+        );
+        let targets = vec![
+            CaptionTarget {
+                clip_id: "before".into(),
+                track_id: "voice".into(),
+                clip: &before,
+                transcript: Some(&transcript),
+            },
+            CaptionTarget {
+                clip_id: "after".into(),
+                track_id: "voice".into(),
+                clip: &after,
+                transcript: Some(&transcript),
+            },
+        ];
+
+        let out = caption_specs(&targets, 30, CaptionCase::Auto, "g", &fits_words(5));
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].content, "today synchronized");
+        assert!(!out[0].content.contains("Um"));
     }
 
     #[test]
