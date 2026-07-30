@@ -2174,6 +2174,10 @@ mod tests {
         let committed = core
             .begin_generation_job_for_project(1, &bundle, image_plan())
             .unwrap();
+        // Model a real process restart. A second independent AppCore retaining
+        // the old bundle at the same time is not a supported runtime state and
+        // prevents same-target directory publication on Windows.
+        drop(core);
         let reopened = AppCore::new();
         reopened.open_project(&bundle).unwrap();
         let mock = MockTransport::new();
@@ -2227,6 +2231,8 @@ mod tests {
         )
         .unwrap();
 
+        // Model a real process restart before opening the same bundle again.
+        drop(core);
         let reopened = AppCore::new();
         let reopened_snapshot = reopened.open_project(&bundle).unwrap();
         let mock = MockTransport::new();
