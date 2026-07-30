@@ -926,33 +926,41 @@
   - Visible/accessibility/return path: success=select or open a recent project card: onClick stops propagation and setSelectedPath(entry.path); onDoubleClick calls openProjectPath(entry.path); the launcher window Enter branch opens selectedPath; accessibility={"focus":"ProjectGridCard call site supplies pointer handlers; the implementation div is not keyboard focusable even though a window-level Enter handler exists","label":"Visible child text/title or caller-provided label; verify at runtime","shortcut":"None declared on this control"}; returnPath=["Project actions enter the editor; Library/Settings provide explicit Home/close actions."].
   - Outcome matrix: {"success":"select or open a recent project card: onClick stops propagation and setSelectedPath(entry.path); onDoubleClick calls openProjectPath(entry.path); the launcher window Enter branch opens selectedPath","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/home/HomeView.tsx:351; no additional state is inferred beyond the source.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/home/HomeView.tsx:351; the candidate-specific interaction test must assert that exact guard.","disabled":"No explicit disabled prop on this candidate.","cancel":"Cancellation/dismissal follows the exact guard in onClick stops propagation and setSelectedPath(entry.path); onDoubleClick calls openProjectPath(entry.path); the launcher window Enter branch opens selectedPath; no broader cancellation behavior is assumed.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in onClick stops propagation and setSelectedPath(entry.path); onDoubleClick calls openProjectPath(entry.path); the launcher window Enter branch opens selectedPath.","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/home/HomeView.tsx:351; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/home/HomeView.interaction.test.tsx#control-9697b53d4d2cf1ca select or open a recent project card` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-9697b53d4d2cf1ca select or open a recent project card"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Result: RED. The declared owning runner did not exist, and the direct focused Vitest command exited 1 with `No test files found`. The first packaged-app inspection also exposed the existing card as text rather than a keyboard-focusable action.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/home/HomeView.tsx`, `web/src/components/home/HomeView.tsx#ProjectLauncher`, `web/src/store/projectActions.ts#openProjectPath`, `web/src/lib/api.ts#projectOpen`, `src-tauri/src/commands.rs#project_open`, `crates/opentake-core/src/core.rs#AppCore::prepare_project_open`, `web/src/components/home/HomeView.tsx#HomeView`, `crates/opentake-core/src/core.rs#AppCore` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Result: Replaced the pointer-only card surface with a real focusable button carrying the project name and `aria-pressed` selection state. Kept the remove action as a separate sibling button, while preserving single-click selection, double-click open, focus selection, and the launcher-level Enter/Return open path. The global Return handler now ignores other focused interactive controls so it cannot open a stale selected project while activating another Home action.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-9697b53d4d2cf1ca select or open a recent project card"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Result: PASS, 1/1 exact candidate test. The nearby Home visual suite also passed 11/11.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. The complete Web suite passed 72 files / 727 tests, the production Web build passed with only the pre-existing bundle warnings, and the complete Rust workspace passed. The rebuilt packaged macOS app verified single-click selection, native keyboard focus plus Return, and native double-click opening the same project. Runtime evidence: `runtime-artifacts/automated/recent-project-card-real-device-2026-07-30.md`.
 
 ### Task 13: control-acceptance (implementation-slice-1f94f01d3b65a701)
 

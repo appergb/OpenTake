@@ -297,6 +297,12 @@ function ProjectLauncher({ recents }: { recents: RecentProject[] }) {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Enter" && selectedPath) {
+        const target = e.target instanceof Element ? e.target : null;
+        const interactiveTarget = target?.closest(
+          "button, a, input, textarea, select, [role='button'], [contenteditable='true']",
+        );
+        if (interactiveTarget && !target?.closest(".home-project-card")) return;
+        e.preventDefault();
         if (selectedPath === "new") {
           void newProjectAndEnter();
         } else {
@@ -352,10 +358,7 @@ function ProjectLauncher({ recents }: { recents: RecentProject[] }) {
             key={entry.path}
             entry={entry}
             selected={selectedPath === entry.path}
-            onClick={(e) => {
-              e.stopPropagation();
-              setSelectedPath(entry.path);
-            }}
+            onSelect={() => setSelectedPath(entry.path)}
             onDoubleClick={() => void openProjectPath(entry.path)}
           />
         ))}
@@ -428,12 +431,12 @@ function ProjectHero({ opening, onOpen }: { opening: boolean; onOpen: () => void
 function ProjectGridCard({
   entry,
   selected,
-  onClick,
+  onSelect,
   onDoubleClick,
 }: {
   entry: RecentProject;
   selected: boolean;
-  onClick: (e: React.MouseEvent) => void;
+  onSelect: () => void;
   onDoubleClick: () => void;
 }) {
   const t = useT();
@@ -444,78 +447,92 @@ function ProjectGridCard({
 
   return (
     <div
-      onClick={onClick}
-      onDoubleClick={onDoubleClick}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      className="home-project-card"
       style={{
         position: "relative",
         minWidth: 0,
-        minHeight: 96,
-        padding: "var(--space-md)",
-        borderRadius: "var(--radius-md)",
-        background: selected ? "var(--home-selected)" : "rgba(255,255,255,0.018)",
-        border: selected ? "1px solid rgba(255,255,255,0.32)" : "1px solid var(--home-border)",
-        color: "var(--home-foreground)",
-        transition: subtleTransition,
-        cursor: "default",
       }}
     >
-      <div
+      <button
+        type="button"
+        aria-label={entry.name}
+        aria-pressed={selected}
+        onClick={(event) => {
+          event.stopPropagation();
+          onSelect();
+        }}
+        onFocus={onSelect}
+        onDoubleClick={onDoubleClick}
+        className="home-project-card"
         style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "flex-start",
-          gap: "var(--space-md)",
-          minWidth: 0,
           width: "100%",
+          minHeight: 96,
+          padding: "var(--space-md)",
+          borderRadius: "var(--radius-md)",
+          background: selected ? "var(--home-selected)" : "rgba(255,255,255,0.018)",
+          border: selected ? "1px solid rgba(255,255,255,0.32)" : "1px solid var(--home-border)",
+          color: "var(--home-foreground)",
+          transition: subtleTransition,
+          cursor: "default",
+          textAlign: "left",
         }}
       >
         <div
           style={{
-            width: 24,
-            height: 24,
-            flex: "0 0 auto",
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            borderRadius: "var(--radius-md)",
-            background: "var(--home-muted)",
-            color: "var(--home-muted-foreground)",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "flex-start",
+            gap: "var(--space-md)",
+            minWidth: 0,
+            width: "100%",
           }}
         >
-          <Icon icon={Film} size={13} />
-        </div>
-        <div style={{ minWidth: 0, width: "100%" }}>
           <div
             style={{
-              fontSize: "var(--fs-sm-md)",
-              color: "var(--home-foreground)",
-              fontWeight: selected ? "var(--fw-semibold)" : "var(--fw-medium)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {entry.name}
-          </div>
-          <div
-            className="tabular"
-            title={entry.path}
-            style={{
-              marginTop: "var(--space-xs)",
-              fontSize: "var(--fs-xs)",
+              width: 24,
+              height: 24,
+              flex: "0 0 auto",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              borderRadius: "var(--radius-md)",
+              background: "var(--home-muted)",
               color: "var(--home-muted-foreground)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
             }}
           >
-            {cleanDisplayPath}
+            <Icon icon={Film} size={13} />
+          </div>
+          <div style={{ minWidth: 0, width: "100%" }}>
+            <div
+              style={{
+                fontSize: "var(--fs-sm-md)",
+                color: "var(--home-foreground)",
+                fontWeight: selected ? "var(--fw-semibold)" : "var(--fw-medium)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {entry.name}
+            </div>
+            <div
+              className="tabular"
+              title={entry.path}
+              style={{
+                marginTop: "var(--space-xs)",
+                fontSize: "var(--fs-xs)",
+                color: "var(--home-muted-foreground)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {cleanDisplayPath}
+            </div>
           </div>
         </div>
-      </div>
+      </button>
 
       {hovered && (
         <button
