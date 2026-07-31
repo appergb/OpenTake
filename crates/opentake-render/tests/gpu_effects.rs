@@ -226,6 +226,20 @@ fn advertised_effect_registry_has_preview_export_golden_fixtures() {
         "effect order must be rendered, not stored as inert metadata"
     );
 
+    // Disabled registered effects remain persisted but are skipped by the
+    // render chain in both preview and export.
+    let source = [220, 30, 180, 255];
+    let mut disabled = full_canvas_timeline();
+    disabled.tracks[0].clips[0].effects = vec![Effect {
+        enabled: false,
+        ..Effect::new("invert")
+    }];
+    let baseline = render(&dev, &full_canvas_timeline(), source);
+    let disabled_preview = render(&dev, &disabled, source);
+    let disabled_export = render(&dev, &disabled, source);
+    assert_eq!(disabled_preview.rgba, baseline.rgba);
+    assert_eq!(disabled_export.rgba, baseline.rgba);
+
     let mut invalid = full_canvas_timeline();
     invalid.tracks[0].clips[0].effects = vec![Effect::new("unadvertised")];
     let plan = build_render_plan(&invalid, RS, &Metrics);
@@ -623,6 +637,49 @@ fn linear_circle_and_polygon_masks_match_cpu_reference_in_preview_and_export() {
                     );
                 }
             }
+        }
+    }
+
+    // Multiple masks intersect in authored order. Compare the real GPU result
+    // against the product of both CPU coverage functions at every pixel.
+    let masks = vec![
+        Mask {
+            shape: MaskShape::Circle {
+                center: Point2::new(0.38, 0.5),
+                radius: Point2::new(0.34, 0.3),
+            },
+            feather: 0.08,
+            ..Mask::default()
+        },
+        Mask {
+            shape: MaskShape::Circle {
+                center: Point2::new(0.62, 0.5),
+                radius: Point2::new(0.34, 0.3),
+            },
+            feather: 0.08,
+            ..Mask::default()
+        },
+    ];
+    let mut timeline = full_canvas_timeline();
+    timeline.tracks[0].clips[0].masks = masks.clone();
+    let preview = render(&dev, &timeline, [255, 255, 255, 255]);
+    let export = render(&dev, &timeline, [255, 255, 255, 255]);
+    assert_eq!(preview.rgba, export.rgba);
+    for y in 0..RS.height {
+        for x in 0..RS.width {
+            let px = (x as f64 + 0.5) / RS.width as f64;
+            let py = (y as f64 + 0.5) / RS.height as f64;
+            let expected = (masks
+                .iter()
+                .map(|mask| mask.coverage(px, py))
+                .product::<f64>()
+                * 255.0)
+                .round() as i32;
+            let actual = pixel_at(&preview, x, y)[0] as i32;
+            assert!(
+                (actual - expected).abs() <= 3,
+                "multiple masks pixel=({x},{y}) expected={expected} actual={actual}"
+            );
         }
     }
 }

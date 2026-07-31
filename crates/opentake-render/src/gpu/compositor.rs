@@ -157,7 +157,8 @@ fn grade_blocks(g: &ColorGrade) -> GradeBlocks {
 /// Pack a draw's masks into the fixed-capacity uniform array, returning the count
 /// the shader should evaluate. Polygon paths are bounded to [`POLY_POINT_CAP`]
 /// points. The shared edit-command validation prevents authored data from
-/// exceeding either fixed GPU capacity.
+/// exceeding either fixed GPU capacity; the `min`/`break` here is a deterministic
+/// defensive fallback for an in-memory timeline that bypassed that boundary.
 fn pack_masks(draw: &LayerDraw<'_>) -> ([MaskGpu; MASK_CAP], f32) {
     let mut out = [MaskGpu::default(); MASK_CAP];
     let mut n = 0usize;
