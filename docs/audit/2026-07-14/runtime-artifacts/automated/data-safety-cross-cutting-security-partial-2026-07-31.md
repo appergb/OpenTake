@@ -2,7 +2,7 @@
 
 ## Status
 
-Task 10 `DS-cross-cutting-security-headings` remains **open**. This checkpoint closes the concrete CSP, asset-scope, packaged-sidecar supply, and offline WebView2 configuration defects discovered during audit, but does not claim the task's Windows installed-package or release-signing criteria.
+Task 10 `DS-cross-cutting-security-headings` remains **open**. This checkpoint closes the concrete CSP, asset-scope, packaged-sidecar supply, Windows installed-package, and offline WebView2 configuration defects discovered during audit, but does not claim the task's release-signing criteria or a native Windows WebView UI smoke.
 
 ## Defect found and corrected
 
@@ -32,6 +32,21 @@ The corrected packaged boundary now has:
 
 Result: PASS, 6/6. The four existing cross-cutting owning tests also pass 1/1 each, the Web suite passes 82 files / 774 tests, and the complete Rust workspace regression passed after the hardening patch.
 
+The exact-source Windows product run also passed:
+
+- source SHA: `9eeeb6ffe3088a16f19946ceb7db5e90090356ac`;
+- workflow: [run 30614001607](https://github.com/appergb/OpenTake/actions/runs/30614001607), success;
+- product job: [job 91102897263](https://github.com/appergb/OpenTake/actions/runs/30614001607/job/91102897263), success;
+- installed-package owning test: `PASS: packaged_macos_windows_sidecars_resolve_and_execute`;
+- artifact: ID `8787369512`, server digest `sha256:f287f5a9309245b9e415b55d52b72c75ddaaae1651fccfe03bfc8c15514b3a63`;
+- MSI SHA-256: `2dfe332521214fab8892be21bd5800e2708cf38161fa0c401c3602be507c6dd7`;
+- NSIS SHA-256: `d85002098bdf6883811251261947d399800140fa3cc2c2850bc7e3fbceedb95c`.
+
+That job bundled the offline WebView2 installer, built both native installers,
+silently installed NSIS, ran the media owning test from the installed directory
+with an empty `PATH`, and bound the uploaded installer receipt to the exact
+source SHA.
+
 ## Packaged application evidence
 
 The exact hardened tree built successfully with:
@@ -51,8 +66,7 @@ The persisted runtime files `.persisted-scope` and `.persisted-scope-asset` exis
 
 ## Remaining Task 10 blockers
 
-- The macOS package contains and has executed its pinned FFmpeg/FFprobe sidecars without ambient `PATH`; the corresponding Windows installed-package receipt is still pending.
-- Native Windows offline WebView2 installation and packaged-app smoke evidence is not yet attached on the final tree.
+- Native Windows packaged-WebView launch and interactive UI smoke evidence is not yet attached. The installer itself and its installed sidecars are covered by the exact-SHA native CI receipt above.
 - macOS distribution identity signing and Apple notarization evidence is not yet available; the current debug `.app` is only a local QA artifact.
 
 Accordingly, no Task 10 plan checkbox is marked complete and this checkpoint does not authorize Beta publication.

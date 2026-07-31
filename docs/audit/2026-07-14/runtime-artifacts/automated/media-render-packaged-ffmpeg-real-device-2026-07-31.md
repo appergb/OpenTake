@@ -1,8 +1,8 @@
 # Media Render Task 33 — Packaged FFmpeg real-device evidence (2026-07-31)
 
-Status: **macOS acceptance complete; Windows installed-app CI receipt pending.**
-Do not close `MR-packaged-ffmpeg` until the exact-SHA Windows product job has
-installed the NSIS artifact and passed the same owning smoke test.
+Status: **cross-platform acceptance complete.** The exact-source macOS bundle
+and Windows installed NSIS package have both passed the owning real-media smoke
+without relying on ambient `PATH`.
 
 ## Bound contract
 
@@ -134,7 +134,7 @@ In the real Tauri WebView:
    missing-FFmpeg error despite the poisoned ambient paths.
 4. The application was exited after inspection; no project edit was made.
 
-## Remaining cross-platform receipt
+## Windows x64 installed-package receipt
 
 The first exact-head Windows run for `21f7e9ebe1a4e16a16d1ef7931f48d7ee9e9fc62`
 ([run 30612593449](https://github.com/appergb/OpenTake/actions/runs/30612593449))
@@ -145,6 +145,21 @@ Windows Tauri test jobs that compiled before provisioning the new external
 binaries. Both CI portability defects are now covered by regression contracts;
 neither partial run is an installed-package receipt.
 
-Record the next exact workflow URL, source SHA, installer digests, installed
-path, offline WebView2 installation, and passing owning test here before
-declaring Task 33 or Data Safety Task 10 complete.
+The corrected exact-SHA workflow then completed on source
+`9eeeb6ffe3088a16f19946ceb7db5e90090356ac`:
+
+- workflow: [run 30614001607](https://github.com/appergb/OpenTake/actions/runs/30614001607), success;
+- product job: [Windows product build, bundle, install, and smoke](https://github.com/appergb/OpenTake/actions/runs/30614001607/job/91102897263), success;
+- uploaded artifact: `opentake-windows-9eeeb6ffe3088a16f19946ceb7db5e90090356ac`, artifact ID `8787369512`, 546,654,352 bytes, server digest `sha256:f287f5a9309245b9e415b55d52b72c75ddaaae1651fccfe03bfc8c15514b3a63`;
+- MSI: `target/release/bundle/msi/OpenTake_1.0.0_x64_en-US.msi`, 283,295,744 bytes, SHA-256 `2dfe332521214fab8892be21bd5800e2708cf38161fa0c401c3602be507c6dd7`;
+- NSIS: `target/release/bundle/nsis/OpenTake_1.0.0_x64-setup.exe`, 263,758,072 bytes, SHA-256 `d85002098bdf6883811251261947d399800140fa3cc2c2850bc7e3fbceedb95c`.
+
+The job provisioned the locked Windows sidecars, passed the source empty-`PATH`
+smoke, built both native installers, silently installed the NSIS package, found
+the installed application directory from Windows itself, and passed
+`packaged_macos_windows_sidecars_resolve_and_execute` against that installed
+directory. It then bound the uploaded installer receipt to the same source SHA.
+
+This closes the Task 33 cross-platform installed-package criterion. It does not
+claim the independently tracked distribution-signing/notarization criteria in
+Data Safety Task 10.
