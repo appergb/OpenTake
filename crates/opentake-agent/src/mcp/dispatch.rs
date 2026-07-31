@@ -3271,6 +3271,7 @@ fn color_grade_from_args(a: &SetColorGradeArgs) -> ColorGrade {
         },
         contrast: a.contrast.unwrap_or(base.contrast),
         saturation: a.saturation.unwrap_or(base.saturation),
+        hsl_secondary: None,
     }
 }
 

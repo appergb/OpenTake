@@ -154,9 +154,117 @@ impl LiftGammaGain {
     }
 }
 
+/// One feathered HSL qualifier applied after the primary color controls.
+/// Hue values are normalized turns, so the range wraps continuously across
+/// red (`0 == 1`) without a seam.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HslSecondary {
+    /// Center of the selected hue range in normalized turns (`0..=1`).
+    pub hue_center: f64,
+    /// Full width of the selected hue range (`0 < width <= 1`).
+    pub hue_width: f64,
+    /// Soft edge width measured inward from both range boundaries (`0..=0.5`).
+    pub feather: f64,
+    /// Hue rotation in normalized turns (`-0.5..=0.5`).
+    pub hue_shift: f64,
+    /// Relative saturation adjustment (`-1..=1`).
+    pub saturation: f64,
+    /// Additive lightness adjustment (`-1..=1`).
+    pub lightness: f64,
+}
+
+impl Default for HslSecondary {
+    fn default() -> Self {
+        Self {
+            hue_center: 0.0,
+            hue_width: 0.24,
+            feather: 0.08,
+            hue_shift: 0.0,
+            saturation: 0.0,
+            lightness: 0.0,
+        }
+    }
+}
+
+impl HslSecondary {
+    fn is_identity(&self) -> bool {
+        self.hue_shift == 0.0 && self.saturation == 0.0 && self.lightness == 0.0
+    }
+
+    fn weight(&self, hue: f64, saturation: f64) -> f64 {
+        // Achromatic pixels have no stable hue and must not be selected.
+        if saturation <= f64::EPSILON {
+            return 0.0;
+        }
+        let distance = ((hue - self.hue_center + 0.5).rem_euclid(1.0) - 0.5).abs();
+        let outer = self.hue_width * 0.5;
+        if distance > outer {
+            return 0.0;
+        }
+        if self.feather <= f64::EPSILON {
+            return 1.0;
+        }
+        let inner = (outer - self.feather).max(0.0);
+        1.0 - smoothstep01(inner, outer, distance)
+    }
+
+    fn apply(&self, r: f64, g: f64, b: f64) -> (f64, f64, f64) {
+        let (mut hue, mut saturation, mut lightness) = rgb_to_hsl(r, g, b);
+        let weight = self.weight(hue, saturation);
+        if weight <= f64::EPSILON {
+            return (r, g, b);
+        }
+        hue = (hue + self.hue_shift * weight).rem_euclid(1.0);
+        saturation = clamp01(saturation * (1.0 + self.saturation * weight));
+        lightness = clamp01(lightness + self.lightness * weight);
+        hsl_to_rgb(hue, saturation, lightness)
+    }
+}
+
+fn rgb_to_hsl(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    let lightness = (max + min) * 0.5;
+    if delta <= f64::EPSILON {
+        return (0.0, 0.0, lightness);
+    }
+    let saturation = delta / (1.0 - (2.0 * lightness - 1.0).abs()).max(f64::EPSILON);
+    let sector = if max == r {
+        ((g - b) / delta).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / delta + 2.0
+    } else {
+        (r - g) / delta + 4.0
+    };
+    (sector / 6.0, saturation, lightness)
+}
+
+fn hsl_to_rgb(hue: f64, saturation: f64, lightness: f64) -> (f64, f64, f64) {
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let sector = hue.rem_euclid(1.0) * 6.0;
+    let x = chroma * (1.0 - (sector.rem_euclid(2.0) - 1.0).abs());
+    let (r1, g1, b1) = if sector < 1.0 {
+        (chroma, x, 0.0)
+    } else if sector < 2.0 {
+        (x, chroma, 0.0)
+    } else if sector < 3.0 {
+        (0.0, chroma, x)
+    } else if sector < 4.0 {
+        (0.0, x, chroma)
+    } else if sector < 5.0 {
+        (x, 0.0, chroma)
+    } else {
+        (chroma, 0.0, x)
+    };
+    let m = lightness - chroma * 0.5;
+    (r1 + m, g1 + m, b1 + m)
+}
+
 /// High-end floating-point color grade, applied in **linear light** in the order
 /// locked by the spec:
-/// `exposure -> white balance -> lift/gamma/gain -> contrast -> saturation`.
+/// `exposure -> white balance -> lift/gamma/gain -> contrast -> saturation -> HSL secondary`.
 ///
 /// Every field defaults to a no-op, so `ColorGrade::default()` is the identity
 /// transform (verified by [`ColorGrade::is_identity`] and a unit test).
@@ -182,6 +290,10 @@ pub struct ColorGrade {
     /// Saturation multiplier (identity `1`; `0` = greyscale, `>1` = boosted).
     #[serde(default = "default_one")]
     pub saturation: f64,
+    /// Optional feathered hue qualifier. Absence preserves legacy projects and
+    /// avoids uploading an active secondary block for identity grades.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hsl_secondary: Option<HslSecondary>,
 }
 
 /// Stable validation failure for authored color-grade parameters. The bounds
@@ -210,6 +322,7 @@ impl Default for ColorGrade {
             lift_gamma_gain: LiftGammaGain::default(),
             contrast: 0.0,
             saturation: 1.0,
+            hsl_secondary: None,
         }
     }
 }
@@ -227,6 +340,9 @@ impl ColorGrade {
             && self.lift_gamma_gain.is_identity()
             && self.contrast == 0.0
             && self.saturation == 1.0
+            && self
+                .hsl_secondary
+                .is_none_or(|secondary| secondary.is_identity())
     }
 
     /// Validate the persisted grade against the finite parameter ranges exposed
@@ -295,7 +411,49 @@ impl ColorGrade {
             self.saturation,
             0.0..=3.0,
             "finite and within [0, 3]",
-        )
+        )?;
+        if let Some(secondary) = self.hsl_secondary {
+            inclusive(
+                "hslSecondary.hueCenter",
+                secondary.hue_center,
+                0.0..=1.0,
+                "finite and within [0, 1]",
+            )?;
+            if !secondary.hue_width.is_finite()
+                || secondary.hue_width <= 0.0
+                || secondary.hue_width > 1.0
+            {
+                return Err(ColorGradeValidationError {
+                    field: "hslSecondary.hueWidth",
+                    rule: "finite and within (0, 1]",
+                });
+            }
+            inclusive(
+                "hslSecondary.feather",
+                secondary.feather,
+                0.0..=0.5,
+                "finite and within [0, 0.5]",
+            )?;
+            inclusive(
+                "hslSecondary.hueShift",
+                secondary.hue_shift,
+                -0.5..=0.5,
+                "finite and within [-0.5, 0.5]",
+            )?;
+            inclusive(
+                "hslSecondary.saturation",
+                secondary.saturation,
+                -1.0..=1.0,
+                "finite and within [-1, 1]",
+            )?;
+            inclusive(
+                "hslSecondary.lightness",
+                secondary.lightness,
+                -1.0..=1.0,
+                "finite and within [-1, 1]",
+            )?;
+        }
+        Ok(())
     }
 
     /// Per-channel white-balance gain derived from `temperature` / `tint`. A
@@ -356,6 +514,14 @@ impl ColorGrade {
             rr = l + (rr - l) * self.saturation;
             gg = l + (gg - l) * self.saturation;
             bb = l + (bb - l) * self.saturation;
+        }
+
+        // 6. Feathered HSL secondary qualifier.
+        if let Some(secondary) = self
+            .hsl_secondary
+            .filter(|secondary| !secondary.is_identity())
+        {
+            (rr, gg, bb) = secondary.apply(rr, gg, bb);
         }
 
         (clamp01(rr), clamp01(gg), clamp01(bb))
@@ -1129,9 +1295,18 @@ mod tests {
             },
             contrast: 0.3,
             saturation: 1.2,
+            hsl_secondary: Some(HslSecondary {
+                hue_center: 0.98,
+                hue_width: 0.2,
+                feather: 0.05,
+                hue_shift: 0.1,
+                saturation: -0.2,
+                lightness: 0.05,
+            }),
         };
         let json = serde_json::to_string(&g).unwrap();
         assert!(json.contains("\"liftGammaGain\""));
+        assert!(json.contains("\"hslSecondary\""));
         assert!(json.contains("\"exposure\":0.5"));
         let back: ColorGrade = serde_json::from_str(&json).unwrap();
         assert_eq!(g, back);
@@ -1141,6 +1316,42 @@ mod tests {
     fn color_grade_decodes_missing_fields_as_identity() {
         let g: ColorGrade = serde_json::from_str("{}").unwrap();
         assert!(g.is_identity());
+    }
+
+    #[test]
+    fn hsl_secondary_wraps_red_and_isolates_other_hues() {
+        let grade = ColorGrade {
+            hsl_secondary: Some(HslSecondary {
+                hue_center: 0.98,
+                hue_width: 0.16,
+                feather: 0.04,
+                hue_shift: 0.2,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        grade.validate().unwrap();
+        let red = grade.apply_linear(1.0, 0.0, 0.0);
+        assert!(
+            red.1 > 0.2 || red.2 > 0.2,
+            "wrapped red must rotate: {red:?}"
+        );
+        let green = grade.apply_linear(0.0, 1.0, 0.0);
+        approx(green.0, 0.0);
+        approx(green.1, 1.0);
+        approx(green.2, 0.0);
+
+        let invalid = ColorGrade {
+            hsl_secondary: Some(HslSecondary {
+                hue_width: 0.0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            invalid.validate().unwrap_err().to_string(),
+            "hslSecondary.hueWidth must be finite and within (0, 1]"
+        );
     }
 
     #[test]

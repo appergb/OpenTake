@@ -496,39 +496,41 @@ Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/auto
 
 - Candidate/source: `doc-9edde6aa1ce22995` at `docs/architecture/CAPCUT-GAP.md:139` (requirement)
 - Expected behavior: HSL secondary controls are editable and rendered.
-- Resolution: `reviewed-mapping-report:MR-hsl-secondary` — No tracked HSL-secondary representation or render path was found.
+- Resolution: `implemented-and-verified:MR-hsl-secondary` — A bounded feathered HSL qualifier now persists through `ColorGrade`, renders through the shared CPU/WGSL chain, and is editable/resettable through the transactional Inspector path. Real GPU chart isolation and packaged preview/playback/export evidence are recorded below.
 - Exact acceptance contract:
   - Persist bounded hue-range, feather, hue, saturation, and lightness adjustments in the grade model.
   - Expose range selection and parameter edits with reset and undo/redo in Inspector.
   - Use a color-chart fixture to verify selected hues change while pixels outside the feathered range remain within the project pixel-diff tolerance in preview and export.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/gpu_effects.rs#hsl_secondary_hue_boundary_feather_and_isolation` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test gpu_effects hsl_secondary_hue_boundary_feather_and_isolation -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-domain/src/grade.rs`, `crates/opentake-render/src/gpu/shader.wgsl`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test gpu_effects hsl_secondary_hue_boundary_feather_and_isolation -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/automated/hsl-secondary-real-device-2026-07-31.md`.
 
 ### Task 10: MR-lut (implementation-slice-10ed256c8194fc18)
 

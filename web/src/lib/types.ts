@@ -117,6 +117,15 @@ export interface LiftGammaGain {
   gain: Rgb;
 }
 
+export interface HslSecondary {
+  hueCenter: number;
+  hueWidth: number;
+  feather: number;
+  hueShift: number;
+  saturation: number;
+  lightness: number;
+}
+
 export interface ColorGrade {
   exposure: number;
   temperature: number;
@@ -124,6 +133,7 @@ export interface ColorGrade {
   liftGammaGain: LiftGammaGain;
   contrast: number;
   saturation: number;
+  hslSecondary?: HslSecondary;
 }
 
 export interface ChromaKey {
@@ -175,6 +185,7 @@ export interface ColorGradeInput {
   liftGammaGain?: LiftGammaGainInput;
   contrast?: number;
   saturation?: number;
+  hslSecondary?: Partial<HslSecondary>;
 }
 
 export interface ChromaKeyInput {

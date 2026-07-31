@@ -347,6 +347,36 @@ describe("browser fallback edit store", () => {
     expect(clip?.colorGrade).toBeUndefined();
   });
 
+  it("normalizes and validates HSL secondary authored state", () => {
+    const fallback = createFallbackStore();
+    const applied = fallback.editApply({
+      type: "setColorGrade",
+      clipIds: ["c1"],
+      grade: { hslSecondary: { hueCenter: 0.98, hueShift: 0.2 } },
+    });
+    const clip = fallback
+      .getTimeline()
+      .timeline.tracks.flatMap((track) => track.clips)
+      .find((candidate) => candidate.id === "c1");
+    expect(applied.changed).toBe(true);
+    expect(clip?.colorGrade?.hslSecondary).toEqual({
+      hueCenter: 0.98,
+      hueWidth: 0.24,
+      feather: 0.08,
+      hueShift: 0.2,
+      saturation: 0,
+      lightness: 0,
+    });
+
+    const rejected = fallback.editApply({
+      type: "setColorGrade",
+      clipIds: ["c1"],
+      grade: { hslSecondary: { hueWidth: 0 } },
+    });
+    expect(rejected.changed).toBe(false);
+    expect(clip?.colorGrade?.hslSecondary?.hueCenter).toBe(0.98);
+  });
+
   it("stores both pair ids and rejects an oversized adjacent cross dissolve", () => {
     const fallback = createFallbackStore();
     fallback.reset();

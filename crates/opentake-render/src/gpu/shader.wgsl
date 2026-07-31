@@ -73,6 +73,8 @@ struct U {
     grade_lift: vec4<f32>,     // lift_r, lift_g, lift_b, contrast
     grade_gamma: vec4<f32>,    // gamma_r, gamma_g, gamma_b, saturation
     grade_gain: vec4<f32>,     // gain_r, gain_g, gain_b, pad
+    hsl_secondary_meta: vec4<f32>, // enabled, hue center, full width, feather
+    hsl_secondary_adjust: vec4<f32>, // hue shift, saturation, lightness, pad
     // Chroma key.
     chroma0: vec4<f32>,        // key_r, key_g, key_b, similarity
     chroma1: vec4<f32>,        // smoothness, spill, pad, pad
@@ -132,8 +134,77 @@ fn apply_channel_lgg(x: f32, lift: f32, gamma: f32, gain: f32) -> f32 {
     return gain * shaped;
 }
 
+fn rgb_to_hsl(c: vec3<f32>) -> vec3<f32> {
+    let maximum = max(c.r, max(c.g, c.b));
+    let minimum = min(c.r, min(c.g, c.b));
+    let delta = maximum - minimum;
+    let lightness = (maximum + minimum) * 0.5;
+    if (delta <= 1e-7) {
+        return vec3<f32>(0.0, 0.0, lightness);
+    }
+    let saturation = delta / max(1.0 - abs(2.0 * lightness - 1.0), 1e-7);
+    var sector = 0.0;
+    if (maximum == c.r) {
+        sector = ((c.g - c.b) / delta) % 6.0;
+        if (sector < 0.0) {
+            sector = sector + 6.0;
+        }
+    } else if (maximum == c.g) {
+        sector = (c.b - c.r) / delta + 2.0;
+    } else {
+        sector = (c.r - c.g) / delta + 4.0;
+    }
+    return vec3<f32>(sector / 6.0, saturation, lightness);
+}
+
+fn hsl_to_rgb(hsl: vec3<f32>) -> vec3<f32> {
+    let chroma = (1.0 - abs(2.0 * hsl.z - 1.0)) * hsl.y;
+    let sector = fract(hsl.x) * 6.0;
+    let x = chroma * (1.0 - abs((sector % 2.0) - 1.0));
+    var rgb = vec3<f32>(0.0);
+    if (sector < 1.0) {
+        rgb = vec3<f32>(chroma, x, 0.0);
+    } else if (sector < 2.0) {
+        rgb = vec3<f32>(x, chroma, 0.0);
+    } else if (sector < 3.0) {
+        rgb = vec3<f32>(0.0, chroma, x);
+    } else if (sector < 4.0) {
+        rgb = vec3<f32>(0.0, x, chroma);
+    } else if (sector < 5.0) {
+        rgb = vec3<f32>(x, 0.0, chroma);
+    } else {
+        rgb = vec3<f32>(chroma, 0.0, x);
+    }
+    return rgb + vec3<f32>(hsl.z - chroma * 0.5);
+}
+
+fn apply_hsl_secondary(c: vec3<f32>) -> vec3<f32> {
+    if (u.hsl_secondary_meta.x < 0.5) {
+        return c;
+    }
+    var hsl = rgb_to_hsl(c);
+    if (hsl.y <= 1e-7) {
+        return c;
+    }
+    let delta = abs(fract(hsl.x - u.hsl_secondary_meta.y + 0.5) - 0.5);
+    let outer = u.hsl_secondary_meta.z * 0.5;
+    if (delta > outer) {
+        return c;
+    }
+    let feather = u.hsl_secondary_meta.w;
+    var weight = 1.0;
+    if (feather > 1e-7) {
+        weight = 1.0 - smoothstep01(max(outer - feather, 0.0), outer, delta);
+    }
+    hsl.x = fract(hsl.x + u.hsl_secondary_adjust.x * weight + 1.0);
+    hsl.y = clamp(hsl.y * (1.0 + u.hsl_secondary_adjust.y * weight), 0.0, 1.0);
+    hsl.z = clamp(hsl.z + u.hsl_secondary_adjust.z * weight, 0.0, 1.0);
+    return hsl_to_rgb(hsl);
+}
+
 // Applies the grade to a LINEAR-rgb triple, returning clamped linear rgb. Mirror
-// of ColorGrade::apply_linear (exposure -> wb -> lgg -> contrast -> saturation).
+// of ColorGrade::apply_linear
+// (exposure -> wb -> lgg -> contrast -> saturation -> HSL secondary).
 fn apply_grade_linear(rgb_in: vec3<f32>) -> vec3<f32> {
     var c = rgb_in;
 
@@ -163,6 +234,9 @@ fn apply_grade_linear(rgb_in: vec3<f32>) -> vec3<f32> {
     let saturation = u.grade_gamma.w;
     let l = luma709(c);
     c = vec3<f32>(l) + (c - vec3<f32>(l)) * saturation;
+
+    // 6. Feathered HSL secondary qualifier.
+    c = apply_hsl_secondary(c);
 
     return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
 }

@@ -142,8 +142,9 @@
 - **实现方案**:纯本地方案:前端用控制点定义曲线,Rust 端把每条曲线在 CPU 预烘焙成 1D LUT(256/1024 项),作为 1D 纹理上传,着色器对 R/G/B 各通道做 1D 纹理采样(textureSample)即可,运行时零计算开销。曲线插值可复用 Catmull-Rom 或单调三次样条(可直接引 crate splines)。Master 曲线作用于亮度或三通道统一,RGB 各自独立。注意曲线应在合适色彩空间(常用 gamma 编码空间而非线性,需与色轮顺序明确定义)。
 - **前置依赖**:依赖'高阶浮点调色引擎'(P0);需明确调色链内曲线相对色轮/LUT 的次序。
 
-### HSL 分区调色 — `missing` · 难度 medium · 优先级 p1
-- **判定依据**:grep HSL/hue/saturation 上游命中 0(全部 color 标识符均为 UI 主题色 primaryColor/TrackColor/textColor,见 grep 统计);Clip 无颜色字段;设计稿无规划。
+### HSL 分区调色 — `has` · 难度 medium · 优先级 p1
+- **OpenTake 当前状态(2026-07-31)**:`ColorGrade` 已持久化可环绕的色相中心/范围、羽化、色相偏移、相对饱和度和明度偏移，并在命令与合成器入口拒绝非有限或越界值。CPU 参考与 WGSL 共享圆周色相距离和 smoothstep 羽化，灰色像素不被误选；Inspector 提供启用、六参数编辑和重置，全部走统一 `SetColorGrade` 撤销/重做。真实 Metal/wgpu 四色色卡测试证明选中红色改变、边界橙色只受羽化影响、绿/蓝保持在 2 码容差内，预览/导出逐字节一致。打包应用已完成可见蓝转紫、五步撤销/重做、重置恢复、保存重开、原生播放和 920 帧完整 H.264/AAC 导出；证据见 `docs/audit/2026-07-14/runtime-artifacts/automated/hsl-secondary-real-device-2026-07-31.md`。
+- **判定依据**:上游仍无 HSL/hue/saturation 调色实现；本状态描述的是 OpenTake 已完成的增强能力。
 - **落点(crate/层)**:opentake-render(着色器内 RGB↔HSL 转换 + 分区加权)+ opentake-domain(ColorGrade 内 8 个色相区的 H/S/L 偏移)+ web 前端(分区滑杆/取色器)
 - **实现方案**:纯本地着色器方案:片元着色器内把像素 RGB 转 HSL,按目标色相区(如红/橙/黄/绿/青/蓝/紫/品红 8 区)用平滑权重(基于色相距离的高斯/三角窗,避免硬边带)对落在该区的像素施加 H/S/L 偏移,再转回 RGB。这是 Lumetri/达芬奇 HSL Qualifier 的简化版。进阶可做'限定器'(luma/sat/hue 三维 key + 羽化),但首版做 8 固定区即可覆盖剪映同类能力。全部为本地像素数学,无需外部模型。
 - **前置依赖**:依赖'高阶浮点调色引擎'(P0);需 RGB↔HSL 着色器工具函数。

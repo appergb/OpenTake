@@ -4,7 +4,9 @@
 //! the refusal path — the behaviors the port must match upstream.
 
 use opentake_domain::{AnimPair, Interpolation, Keyframe, KeyframeTrack, TransitionKind};
-use opentake_domain::{ChromaKey, ColorGrade, Effect, LiftGammaGain, Mask, MaskShape, Point2, Rgb};
+use opentake_domain::{
+    ChromaKey, ColorGrade, Effect, HslSecondary, LiftGammaGain, Mask, MaskShape, Point2, Rgb,
+};
 use opentake_domain::{
     Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track, Transform,
 };
@@ -1673,6 +1675,11 @@ fn set_color_grade_applies_and_undoes() {
     let grade = ColorGrade {
         exposure: 0.5,
         saturation: 1.2,
+        hsl_secondary: Some(HslSecondary {
+            hue_center: 0.65,
+            hue_shift: 0.15,
+            ..Default::default()
+        }),
         ..Default::default()
     };
     let res = apply(
@@ -1692,6 +1699,8 @@ fn set_color_grade_applies_and_undoes() {
     // Undo restores the cleared grade.
     apply(&mut st, EditCommand::Undo, &g).unwrap();
     assert_eq!(find_clip(&st, "c").color_grade, None);
+    apply(&mut st, EditCommand::Redo, &g).unwrap();
+    assert_eq!(find_clip(&st, "c").color_grade, Some(grade));
 }
 
 #[test]

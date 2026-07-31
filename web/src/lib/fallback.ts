@@ -56,6 +56,16 @@ function normalizeColorGrade(
     },
     contrast: grade.contrast ?? 0,
     saturation: grade.saturation ?? 1,
+    hslSecondary: grade.hslSecondary
+      ? {
+          hueCenter: grade.hslSecondary.hueCenter ?? 0,
+          hueWidth: grade.hslSecondary.hueWidth ?? 0.24,
+          feather: grade.hslSecondary.feather ?? 0.08,
+          hueShift: grade.hslSecondary.hueShift ?? 0,
+          saturation: grade.hslSecondary.saturation ?? 0,
+          lightness: grade.hslSecondary.lightness ?? 0,
+        }
+      : undefined,
   };
 }
 
@@ -63,6 +73,7 @@ function isValidColorGrade(grade: NonNullable<Clip["colorGrade"]>): boolean {
   const finiteRange = (value: number, min: number, max: number) =>
     Number.isFinite(value) && value >= min && value <= max;
   const { lift, gamma, gain } = grade.liftGammaGain;
+  const secondary = grade.hslSecondary;
   return (
     finiteRange(grade.exposure, -5, 5) &&
     finiteRange(grade.temperature, -1, 1) &&
@@ -71,7 +82,14 @@ function isValidColorGrade(grade: NonNullable<Clip["colorGrade"]>): boolean {
     [gamma.r, gamma.g, gamma.b].every((value) => Number.isFinite(value) && value > 0 && value <= 4) &&
     [gain.r, gain.g, gain.b].every((value) => finiteRange(value, 0, 4)) &&
     finiteRange(grade.contrast, -1, 2) &&
-    finiteRange(grade.saturation, 0, 3)
+    finiteRange(grade.saturation, 0, 3) &&
+    (secondary == null ||
+      (finiteRange(secondary.hueCenter, 0, 1) &&
+        Number.isFinite(secondary.hueWidth) && secondary.hueWidth > 0 && secondary.hueWidth <= 1 &&
+        finiteRange(secondary.feather, 0, 0.5) &&
+        finiteRange(secondary.hueShift, -0.5, 0.5) &&
+        finiteRange(secondary.saturation, -1, 1) &&
+        finiteRange(secondary.lightness, -1, 1)))
   );
 }
 

@@ -66,55 +66,89 @@ struct MaskGpu {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Uniforms {
-    affine0: [f32; 4],         // a, b, c, d
-    crop_uv: [f32; 4],         // u0, v0, u1, v1
-    affine1_nat: [f32; 4],     // tx, ty, natW, natH
-    canvas_op_flags: [f32; 4], // canvasW, canvasH, opacity, flags-as-f32
-    grade_exp_wb: [f32; 4],    // exposure, wb_r, wb_g, wb_b
-    grade_lift: [f32; 4],      // lift_r, lift_g, lift_b, contrast
-    grade_gamma: [f32; 4],     // gamma_r, gamma_g, gamma_b, saturation
-    grade_gain: [f32; 4],      // gain_r, gain_g, gain_b, pad
-    chroma0: [f32; 4],         // key_r, key_g, key_b, similarity
-    chroma1: [f32; 4],         // smoothness, spill, pad, pad
-    mask_meta: [f32; 4],       // mask_count, pad, pad, pad
+    affine0: [f32; 4],              // a, b, c, d
+    crop_uv: [f32; 4],              // u0, v0, u1, v1
+    affine1_nat: [f32; 4],          // tx, ty, natW, natH
+    canvas_op_flags: [f32; 4],      // canvasW, canvasH, opacity, flags-as-f32
+    grade_exp_wb: [f32; 4],         // exposure, wb_r, wb_g, wb_b
+    grade_lift: [f32; 4],           // lift_r, lift_g, lift_b, contrast
+    grade_gamma: [f32; 4],          // gamma_r, gamma_g, gamma_b, saturation
+    grade_gain: [f32; 4],           // gain_r, gain_g, gain_b, pad
+    hsl_secondary_meta: [f32; 4],   // enabled, hue center, full width, feather
+    hsl_secondary_adjust: [f32; 4], // hue shift, saturation, lightness, pad
+    chroma0: [f32; 4],              // key_r, key_g, key_b, similarity
+    chroma1: [f32; 4],              // smoothness, spill, pad, pad
+    mask_meta: [f32; 4],            // mask_count, pad, pad, pad
     masks: [MaskGpu; MASK_CAP],
     effect_meta: [f32; 4], // effect_count, pad, pad, pad
     effects: [EffectGpu; MAX_EFFECTS_PER_CLIP],
 }
 
-/// Identity color-grade uniform block (exposure 0, wb/gain 1, lift 0, gamma 1,
-/// contrast 0, saturation 1). Used when a draw has no grade.
-fn identity_grade_blocks() -> ([f32; 4], [f32; 4], [f32; 4], [f32; 4]) {
-    (
-        [0.0, 1.0, 1.0, 1.0], // exposure, wb
-        [0.0, 0.0, 0.0, 0.0], // lift, contrast
-        [1.0, 1.0, 1.0, 1.0], // gamma, saturation
-        [1.0, 1.0, 1.0, 0.0], // gain, pad
-    )
+#[derive(Clone, Copy)]
+struct GradeBlocks {
+    exp_wb: [f32; 4],
+    lift: [f32; 4],
+    gamma: [f32; 4],
+    gain: [f32; 4],
+    hsl_meta: [f32; 4],
+    hsl_adjust: [f32; 4],
 }
 
-/// Pack a [`ColorGrade`] into the four uniform vec4 blocks the shader reads. The
+/// Identity color-grade uniform block (exposure 0, wb/gain 1, lift 0, gamma 1,
+/// contrast 0, saturation 1). Used when a draw has no grade.
+fn identity_grade_blocks() -> GradeBlocks {
+    GradeBlocks {
+        exp_wb: [0.0, 1.0, 1.0, 1.0],   // exposure, wb
+        lift: [0.0, 0.0, 0.0, 0.0],     // lift, contrast
+        gamma: [1.0, 1.0, 1.0, 1.0],    // gamma, saturation
+        gain: [1.0, 1.0, 1.0, 0.0],     // gain, pad
+        hsl_meta: [0.0, 0.0, 1.0, 0.0], // disabled, center, width, feather
+        hsl_adjust: [0.0; 4],           // hue shift, saturation, lightness, pad
+    }
+}
+
+/// Pack a [`ColorGrade`] into the six uniform vec4 blocks the shader reads. The
 /// white balance is resolved to per-channel gain CPU-side (the shader multiplies
 /// it directly), keeping the WGSL mirror of `ColorGrade::apply_linear` simple.
-fn grade_blocks(g: &ColorGrade) -> ([f32; 4], [f32; 4], [f32; 4], [f32; 4]) {
+fn grade_blocks(g: &ColorGrade) -> GradeBlocks {
     let wb = g.white_balance_gain();
     let LiftGammaGain { lift, gamma, gain } = g.lift_gamma_gain;
-    (
-        [g.exposure as f32, wb.r as f32, wb.g as f32, wb.b as f32],
-        [
+    let (hsl_meta, hsl_adjust) =
+        g.hsl_secondary
+            .map_or(([0.0, 0.0, 1.0, 0.0], [0.0; 4]), |secondary| {
+                (
+                    [
+                        1.0,
+                        secondary.hue_center as f32,
+                        secondary.hue_width as f32,
+                        secondary.feather as f32,
+                    ],
+                    [
+                        secondary.hue_shift as f32,
+                        secondary.saturation as f32,
+                        secondary.lightness as f32,
+                        0.0,
+                    ],
+                )
+            });
+    GradeBlocks {
+        exp_wb: [g.exposure as f32, wb.r as f32, wb.g as f32, wb.b as f32],
+        lift: [
             lift.r as f32,
             lift.g as f32,
             lift.b as f32,
             g.contrast as f32,
         ],
-        [
+        gamma: [
             gamma.r as f32,
             gamma.g as f32,
             gamma.b as f32,
             g.saturation as f32,
         ],
-        [gain.r as f32, gain.g as f32, gain.b as f32, 0.0],
-    )
+        gain: [gain.r as f32, gain.g as f32, gain.b as f32, 0.0],
+        hsl_meta,
+        hsl_adjust,
+    }
 }
 
 /// Pack a draw's masks into the fixed-capacity uniform array, returning the count
@@ -491,7 +525,7 @@ impl Compositor {
             } else {
                 0
             };
-            let (grade_exp_wb, grade_lift, grade_gamma, grade_gain) = match draw.color_grade {
+            let grade = match draw.color_grade {
                 Some(g) if !g.is_identity() => {
                     flags |= FLAG_GRADE;
                     grade_blocks(g)
@@ -546,10 +580,12 @@ impl Compositor {
                     draw.opacity as f32,
                     f32::from_bits(flags),
                 ],
-                grade_exp_wb,
-                grade_lift,
-                grade_gamma,
-                grade_gain,
+                grade_exp_wb: grade.exp_wb,
+                grade_lift: grade.lift,
+                grade_gamma: grade.gamma,
+                grade_gain: grade.gain,
+                hsl_secondary_meta: grade.hsl_meta,
+                hsl_secondary_adjust: grade.hsl_adjust,
                 chroma0,
                 chroma1,
                 mask_meta: [mask_count, 0.0, 0.0, 0.0],

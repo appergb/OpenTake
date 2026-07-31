@@ -77,6 +77,7 @@ import type {
   MaskShape,
   MediaItem,
   Rgb,
+  HslSecondary,
   Timeline,
   Effect,
 } from "../../lib/types";
@@ -1230,14 +1231,32 @@ function ColorGradeSection({ clip, t }: { clip: Clip; t: TFunction }) {
     setDraft(next);
     void edit.setColorGrade([clip.id], next);
   };
-  const updateField = (field: keyof Omit<ColorGrade, "liftGammaGain">, value: number) =>
+  const updateField = (field: keyof Omit<ColorGrade, "liftGammaGain" | "hslSecondary">, value: number) =>
     setDraft((g) => ({ ...g, [field]: value }));
-  const commitField = (field: keyof Omit<ColorGrade, "liftGammaGain">, value: number) =>
+  const commitField = (field: keyof Omit<ColorGrade, "liftGammaGain" | "hslSecondary">, value: number) =>
     commitGrade({ ...draft, [field]: value });
   const updateLgg = (band: keyof ColorGrade["liftGammaGain"], channel: keyof Rgb, value: number) =>
     setDraft((g) => setLggChannel(g, band, channel, value));
   const commitLgg = (band: keyof ColorGrade["liftGammaGain"], channel: keyof Rgb, value: number) =>
     commitGrade(setLggChannel(draft, band, channel, value));
+  const defaultSecondary = (): HslSecondary => ({
+    hueCenter: 0,
+    hueWidth: 0.24,
+    feather: 0.08,
+    hueShift: 0,
+    saturation: 0,
+    lightness: 0,
+  });
+  const secondary = draft.hslSecondary ?? defaultSecondary();
+  const setSecondaryEnabled = (enabled: boolean) =>
+    commitGrade({ ...draft, hslSecondary: enabled ? secondary : undefined });
+  const updateSecondary = (field: keyof HslSecondary, value: number) =>
+    setDraft((grade) => ({
+      ...grade,
+      hslSecondary: { ...(grade.hslSecondary ?? defaultSecondary()), [field]: value },
+    }));
+  const commitSecondary = (field: keyof HslSecondary, value: number) =>
+    commitGrade({ ...draft, hslSecondary: { ...secondary, [field]: value } });
 
   return (
     <section>
@@ -1308,6 +1327,51 @@ function ColorGradeSection({ clip, t }: { clip: Clip; t: TFunction }) {
         onChange={(v) => updateField("saturation", v)}
         onCommit={(v) => commitField("saturation", v)}
       />
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <SectionHeader label={t("inspector.section.hslSecondary")} />
+        <HoverButton
+          title={t("inspector.action.resetHslSecondary")}
+          disabled={!draft.hslSecondary}
+          onClick={() => commitGrade({ ...draft, hslSecondary: undefined })}
+          size={18}
+        >
+          <Icon icon={RotateCcw} size={12} />
+        </HoverButton>
+      </div>
+      <Row label={t("inspector.field.enabled")}>
+        <input
+          type="checkbox"
+          checked={draft.hslSecondary != null}
+          style={checkboxStyle}
+          onChange={(event) => setSecondaryEnabled(event.target.checked)}
+        />
+      </Row>
+      {draft.hslSecondary && (
+        <>
+          {([
+            ["hueCenter", 0, 1, 0.005],
+            ["hueWidth", 0.01, 1, 0.005],
+            ["feather", 0, 0.5, 0.005],
+            ["hueShift", -0.5, 0.5, 0.005],
+            ["saturation", -1, 1, 0.005],
+            ["lightness", -1, 1, 0.005],
+          ] as Array<[keyof HslSecondary, number, number, number]>).map(
+            ([field, min, max, sensitivity]) => (
+              <EffectNumberRow
+                key={field}
+                label={t(`inspector.field.hsl.${field}`)}
+                value={secondary[field]}
+                min={min}
+                max={max}
+                sensitivity={sensitivity}
+                format={(value) => value.toFixed(3)}
+                onChange={(value) => updateSecondary(field, value)}
+                onCommit={(value) => commitSecondary(field, value)}
+              />
+            ),
+          )}
+        </>
+      )}
     </section>
   );
 }
@@ -1817,6 +1881,7 @@ function completeColorGrade(grade: ColorGrade | undefined): ColorGrade {
     },
     contrast: grade?.contrast ?? 0,
     saturation: grade?.saturation ?? 1,
+    hslSecondary: grade?.hslSecondary ? { ...grade.hslSecondary } : undefined,
   };
 }
 

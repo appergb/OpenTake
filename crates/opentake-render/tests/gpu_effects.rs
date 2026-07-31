@@ -11,7 +11,8 @@ use std::rc::Rc;
 
 use opentake_domain::{
     effect_registry, ChromaKey, Clip, ClipType, ColorGrade, Effect, EffectValidationError,
-    LiftGammaGain, Mask, MaskShape, MaskTransform, Point, Point2, Rgb, Timeline, Track, Transform,
+    HslSecondary, LiftGammaGain, Mask, MaskShape, MaskTransform, Point, Point2, Rgb, Timeline,
+    Track, Transform,
 };
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::source::DecodedFrame;
@@ -41,6 +42,39 @@ struct SolidResolver<'d> {
     queue: &'d wgpu::Queue,
     rgba: [u8; 4],
     cached: Option<Rc<GpuTexture>>,
+}
+
+/// Four equal-width chart bars: red, orange, green and blue. This lets the HSL
+/// qualifier test an in-range hue, its feather boundary and two isolated hues
+/// in one real compositor submission.
+struct ColorChartResolver<'d> {
+    device: &'d wgpu::Device,
+    queue: &'d wgpu::Queue,
+    cached: Option<Rc<GpuTexture>>,
+}
+
+impl TextureResolver for ColorChartResolver<'_> {
+    fn resolve(&mut self, _source: &TextureSource, _frame: i64) -> Option<Rc<GpuTexture>> {
+        if self.cached.is_none() {
+            let colors = [
+                [255, 0, 0, 255],
+                [255, 200, 0, 255],
+                [0, 255, 0, 255],
+                [0, 0, 255, 255],
+            ];
+            let mut buf = vec![0u8; 16 * 16 * 4];
+            for y in 0..16 {
+                for x in 0..16 {
+                    let i = (y * 16 + x) * 4;
+                    buf[i..i + 4].copy_from_slice(&colors[x / 4]);
+                }
+            }
+            let frame = DecodedFrame::new(16, 16, buf, true);
+            let tex = upload_rgba(self.device, self.queue, &frame, false, Some("hsl-chart"));
+            self.cached = Some(Rc::new(tex));
+        }
+        self.cached.clone()
+    }
 }
 
 impl TextureResolver for SolidResolver<'_> {
@@ -116,6 +150,20 @@ fn render(dev: &RenderDevice, tl: &Timeline, rgba: [u8; 4]) -> DecodedFrame {
     compositor
         .render_to_rgba(&dev.device, &dev.queue, RS, &fp, &mut resolver)
         .expect("render")
+}
+
+fn render_color_chart(dev: &RenderDevice, tl: &Timeline) -> DecodedFrame {
+    let plan = build_render_plan(tl, RS, &Metrics);
+    let fp = plan.frame(tl, 0);
+    let compositor = Compositor::new(&dev.device);
+    let mut resolver = ColorChartResolver {
+        device: &dev.device,
+        queue: &dev.queue,
+        cached: None,
+    };
+    compositor
+        .render_to_rgba(&dev.device, &dev.queue, RS, &fp, &mut resolver)
+        .expect("render color chart")
 }
 
 #[test]
@@ -355,6 +403,62 @@ fn lift_gamma_gain_matches_cpu_reference() {
         resolver.cached.is_none(),
         "invalid grade resolved source data"
     );
+}
+
+#[test]
+fn hsl_secondary_hue_boundary_feather_and_isolation() {
+    let grade = ColorGrade {
+        hsl_secondary: Some(HslSecondary {
+            hue_center: 0.0,
+            hue_width: 0.24,
+            feather: 0.08,
+            hue_shift: 0.20,
+            saturation: -0.25,
+            lightness: 0.10,
+        }),
+        ..Default::default()
+    };
+    grade.validate().expect("bounded HSL secondary validates");
+
+    // Persisted authored state must survive a save/reopen boundary exactly.
+    let json = serde_json::to_string(&grade).expect("serialize HSL secondary");
+    let reopened: ColorGrade = serde_json::from_str(&json).expect("reopen HSL secondary");
+    assert_eq!(reopened, grade);
+
+    let Some(dev) = device_or_skip("hsl_secondary_hue_boundary_feather_and_isolation") else {
+        return;
+    };
+    let plain = render_color_chart(&dev, &full_canvas_timeline());
+    let mut timeline = full_canvas_timeline();
+    timeline.tracks[0].clips[0].color_grade = Some(grade);
+    let preview = render_color_chart(&dev, &timeline);
+    let export = render_color_chart(&dev, &timeline);
+    assert_eq!(preview.rgba, export.rgba, "preview/export HSL drift");
+
+    let delta = |x: u32| {
+        let before = pixel_at(&plain, x, 8);
+        let after = pixel_at(&preview, x, 8);
+        before[..3]
+            .iter()
+            .zip(&after[..3])
+            .map(|(a, b)| (i16::from(*a) - i16::from(*b)).unsigned_abs())
+            .max()
+            .unwrap()
+    };
+    let selected_red = delta(2);
+    let feathered_orange = delta(6);
+    let isolated_green = delta(10);
+    let isolated_blue = delta(14);
+    assert!(
+        selected_red > 20,
+        "selected red did not change: {selected_red}"
+    );
+    assert!(
+        feathered_orange > 2 && feathered_orange < selected_red,
+        "orange must receive only the feathered adjustment: red={selected_red}, orange={feathered_orange}"
+    );
+    assert!(isolated_green <= 2, "green leaked by {isolated_green}");
+    assert!(isolated_blue <= 2, "blue leaked by {isolated_blue}");
 }
 
 #[test]
