@@ -1106,7 +1106,7 @@ tests/build, and packaged macOS playback/export/WAV probes pass. Full receipt:
   - Visible/returned assertion: assert the exact returned status plus deterministic frame/audio/container properties or typed unsupported/error output, and verify preview/export parity when both paths are named.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_428f02e756802f9f.rs#completion_428f02e756802f9f_the_playback_subsystem_implements_project_source.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/preview/playbackRoute.test.ts#routes plain forward video to WebKit` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `web/src/components/preview/nativePlaybackSession.test.ts#publishes only increasing matching frame sequences` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -1115,7 +1115,7 @@ tests/build, and packaged macOS playback/export/WAV probes pass. Full receipt:
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/preview/playbackRoute.test.ts -t "routes plain forward video to WebKit"`
   - Run: `pnpm -C web test -- --run src/components/preview/nativePlaybackSession.test.ts -t "publishes only increasing matching frame sequences"`
@@ -1124,11 +1124,16 @@ tests/build, and packaged macOS playback/export/WAV probes pass. Full receipt:
 
   Expected: FAIL because one or more of the 6 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Reconciliation note (2026-08-01): this slice was implemented and reviewed in
+  the historical commits already named by `PLAYBACK-ENGINE.md` before this
+  generated checklist existed. The current baseline therefore produced GREEN;
+  no approved implementation was reverted merely to manufacture a new RED.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/preview/playbackRoute.ts#resolveTimelinePlaybackRoute`, `web/src/components/preview/nativePlaybackSession.ts`, `web/src/components/preview/rustFrameBuffer.ts`, `src-tauri/src/playback/engine.rs#PlaybackEngine`, `src-tauri/src/playback/resolver.rs#PlaybackResolverState`, `docs/architecture/PLAYBACK-ENGINE.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/preview/playbackRoute.test.ts -t "routes plain forward video to WebKit"`
   - Run: `pnpm -C web test -- --run src/components/preview/nativePlaybackSession.test.ts -t "publishes only increasing matching frame sequences"`
@@ -1137,11 +1142,19 @@ tests/build, and packaged macOS playback/export/WAV probes pass. Full receipt:
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Verified 2026-08-01 as a reconciliation-only slice: all four exact owning tests
+pass on the current implementation; the complete Web suite is 93 files / 824
+tests, and the Task16 workspace gate already passed without an intervening code
+change. The final packaged application advanced and paused both WebKit and Rust
+routes, then reopened the WebKit project at its own zero playhead and 60-second
+duration after the Rust project boundary. Full receipt:
+`../runtime-artifacts/automated/playback-route-lifecycle-real-device-2026-08-01.md`.
 
 ### Task 19: MR-release-readiness-composite (implementation-slice-dd9855c810140649)
 
