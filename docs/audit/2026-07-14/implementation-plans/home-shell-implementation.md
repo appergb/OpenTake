@@ -34,33 +34,35 @@
   - Add browser interaction tests for every named Home, project, persistence, error, keyboard, and state transition; the affected web and Rust suites must pass.
   - Exercise the packaged application through create/open/close/reopen or the named Home path and retain exact runtime evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/home/HomeView.test.tsx#upstream_home_children_close_one_composite_acceptance` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.test.tsx -t "upstream_home_children_close_one_composite_acceptance"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/home/HomeView.tsx#HomeView`, `web/src/store/recentStore.ts#useRecentStore`, `web/src/store/projectActions.ts#openProjectPath`, `docs/architecture/MODULE-PORT-MAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.test.tsx -t "upstream_home_children_close_one_composite_acceptance"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. The missing exact composite runner first produced a zero-candidate skipped RED baseline, then passed 1/1 after the Home boundary covered sidebar, samples, first-run welcome, version update, project-card keyboard open, missing/context state, and safe-trash confirmation. Welcome/update state uses the build-time application version, persists only after dismissal, receives initial focus, and supports Escape. The complete Web suite passed 82 files / 774 tests and the production build passed with only the pre-existing bundle warnings. The rebuilt macOS app displayed the v1.0.0 update surface, returned to the complete Home shell, and did not redisplay it after quit/relaunch; child runtime records cover native new/open/sample, safe trash, autosave/reopen, and secondary controls. Runtime evidence: [`home-upstream-composite-real-device-2026-07-31.md`](../runtime-artifacts/automated/home-upstream-composite-real-device-2026-07-31.md).
 
 ### Task 2: HS-new-open-sample (implementation-slice-406b2853a5d6f67b)
 

@@ -699,6 +699,8 @@ const zh: Dict = {
   "home.welcomeOverlayTitle": "欢迎使用 OpenTake",
   "home.welcomeOverlayBody": "点击「新建」开始你的第一个项目。",
   "home.welcomeOverlayStart": "开始",
+  "home.updateOverlayBody": "AI 编辑、音乐工作流与交叉溶解转场现已接入可撤销的工程编辑链路。",
+  "home.updateOverlayDismiss": "了解",
 
   // Home relative time
   "home.relative.today": "今天",
@@ -1414,6 +1416,8 @@ const en: Dict = {
   "home.welcomeOverlayTitle": "Welcome to OpenTake",
   "home.welcomeOverlayBody": "Click \"New Project\" to start your first project.",
   "home.welcomeOverlayStart": "Get started",
+  "home.updateOverlayBody": "AI Edit, music workflows, and cross-dissolve transitions now use the undoable project editing pipeline.",
+  "home.updateOverlayDismiss": "Continue",
 
   // Home relative time
   "home.relative.today": "Today",

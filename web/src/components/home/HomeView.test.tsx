@@ -17,7 +17,11 @@ vi.mock("../../lib/asset", () => ({ assetUrl: (path: string | null) => path }));
 vi.mock("../../store/projectActions", () => mocks);
 
 import { useRecentStore } from "../../store/recentStore";
-import { HomeView } from "./HomeView";
+import {
+  HOME_NOTICE_STORAGE_KEY,
+  HOME_NOTICE_VERSION,
+  HomeView,
+} from "./HomeView";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
@@ -29,6 +33,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   for (const mock of Object.values(mocks)) mock.mockResolvedValue(undefined);
   localStorage.clear();
+  localStorage.setItem(HOME_NOTICE_STORAGE_KEY, HOME_NOTICE_VERSION);
   useRecentStore.setState({
     recents: [{ path: "/tmp/Existing.opentake", name: "Existing", openedAt: 1 }],
   });
@@ -167,4 +172,76 @@ it("missing_card_reveal_remove_and_trash_states", async () => {
     .find((button) => button.textContent === "home.removeFromRecents")?.click());
   await vi.waitFor(() => expect(remove).toHaveBeenCalledTimes(2));
   expect(useRecentStore.getState().recents).toEqual([]);
+});
+
+it("upstream_home_children_close_one_composite_acceptance", async () => {
+  localStorage.removeItem(HOME_NOTICE_STORAGE_KEY);
+  useRecentStore.setState({ recents: [] });
+  await act(async () => root.render(<HomeView />));
+
+  expect(container.querySelector("aside")).not.toBeNull();
+  expect(container.textContent).toContain("home.samples");
+  expect(container.textContent).toContain("home.sampleDemo");
+  expect(container.textContent).toContain("home.welcome");
+  expect(container.querySelector('[role="dialog"][aria-modal="true"]')?.textContent).toContain(
+    "home.welcomeOverlayTitle",
+  );
+  const welcomeDismiss = [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent === "home.welcomeOverlayStart");
+  expect(document.activeElement).toBe(welcomeDismiss);
+  await act(async () => window.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+  ));
+  expect(localStorage.getItem(HOME_NOTICE_STORAGE_KEY)).toBe(HOME_NOTICE_VERSION);
+  expect(container.querySelector('[role="dialog"][aria-modal="true"]')).toBeNull();
+
+  await act(async () => root.unmount());
+  container.replaceChildren();
+  root = createRoot(container);
+  localStorage.setItem(HOME_NOTICE_STORAGE_KEY, "0.9.0");
+  const reveal = vi.fn().mockResolvedValue(undefined);
+  const trash = vi.fn().mockResolvedValue(undefined);
+  useRecentStore.setState({
+    recents: [
+      { path: "/tmp/Existing.opentake", name: "Existing", openedAt: Date.now() },
+      { path: "/tmp/Missing.opentake", name: "Missing", openedAt: 1, missing: true },
+    ],
+    reveal,
+    trash,
+  });
+  await act(async () => root.render(<HomeView />));
+
+  const updateDialog = container.querySelector('[role="dialog"][aria-modal="true"]');
+  expect(updateDialog?.textContent).toContain("home.newInVersion");
+  expect(updateDialog?.textContent).toContain("home.updateOverlayBody");
+  await act(async () => [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent === "home.updateOverlayDismiss")?.click());
+
+  expect(container.querySelector<HTMLButtonElement>('button[aria-label="Existing"]')).not.toBeNull();
+  const missingCard = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Missing · home.fileMissing"]',
+  );
+  expect(missingCard).not.toBeNull();
+  await act(async () => missingCard?.parentElement?.dispatchEvent(
+    new MouseEvent("contextmenu", { bubbles: true }),
+  ));
+  expect(container.textContent).toContain("home.revealInFinder");
+  expect(container.textContent).toContain("home.moveToTrash");
+  await act(async () => [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent?.includes("home.moveToTrash"))?.click());
+  expect(container.textContent).toContain("home.confirmTrashBody");
+  await act(async () => [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent === "common.cancel")?.click());
+  expect(trash).not.toHaveBeenCalled();
+
+  const existingCard = container.querySelector<HTMLButtonElement>('button[aria-label="Existing"]')!;
+  await act(async () => existingCard.focus());
+  await act(async () => existingCard.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+  ));
+  expect(mocks.openProjectPath).toHaveBeenCalledWith("/tmp/Existing.opentake");
+
+  await act(async () => [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent === "home.sampleDemo")?.click());
+  expect(mocks.openSampleProject).toHaveBeenCalledWith("product-demo", false);
 });

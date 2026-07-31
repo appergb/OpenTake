@@ -24,7 +24,11 @@ vi.mock("../../store/projectActions", () => ({
 
 import { useRecentStore } from "../../store/recentStore";
 import { useEditorUiStore } from "../../store/uiStore";
-import { HomeView } from "./HomeView";
+import {
+  HOME_NOTICE_STORAGE_KEY,
+  HOME_NOTICE_VERSION,
+  HomeView,
+} from "./HomeView";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
@@ -53,6 +57,7 @@ beforeEach(() => {
   mocks.openProjectPath.mockResolvedValue(undefined);
   mocks.openProjectViaDialog.mockResolvedValue(undefined);
   localStorage.clear();
+  localStorage.setItem(HOME_NOTICE_STORAGE_KEY, HOME_NOTICE_VERSION);
   useRecentStore.setState({
     recents: [{ path: PROJECT_PATH, name: "Recent Demo", openedAt: 1 }],
   });

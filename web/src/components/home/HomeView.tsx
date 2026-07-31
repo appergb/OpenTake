@@ -7,6 +7,7 @@ import {
   Trash2,
   Library,
   MoreHorizontal,
+  Sparkles,
 } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { useT, type TFunction } from "../../i18n";
@@ -81,10 +82,48 @@ const subtleTransition = "background-color var(--anim-hover) var(--ease-out), bo
 
 type ProjectAction = "new" | "open" | "sample" | null;
 
+export const HOME_NOTICE_STORAGE_KEY = "opentake.home.lastSeenVersion";
+export const HOME_NOTICE_VERSION = __APP_VERSION__;
+
+type HomeNotice = "welcome" | "whatsNew" | null;
+
+export function resolveHomeNotice(
+  lastSeenVersion: string | null,
+  hasRecentProjects: boolean,
+): Exclude<HomeNotice, null> | null {
+  if (lastSeenVersion === HOME_NOTICE_VERSION) return null;
+  return lastSeenVersion === null && !hasRecentProjects ? "welcome" : "whatsNew";
+}
+
+function loadHomeNotice(hasRecentProjects: boolean): HomeNotice {
+  try {
+    return resolveHomeNotice(localStorage.getItem(HOME_NOTICE_STORAGE_KEY), hasRecentProjects);
+  } catch {
+    return hasRecentProjects ? "whatsNew" : "welcome";
+  }
+}
+
+function persistHomeNoticeSeen() {
+  try {
+    localStorage.setItem(HOME_NOTICE_STORAGE_KEY, HOME_NOTICE_VERSION);
+  } catch {
+    // Storage can be unavailable in privacy-restricted browser previews. The
+    // notice still dismisses for this session; the editor remains usable.
+  }
+}
+
 export function HomeView() {
   const recents = useRecentStore((s) => s.recents);
   const [projectAction, setProjectAction] = useState<ProjectAction>(null);
+  const [homeNotice, setHomeNotice] = useState<HomeNotice>(() =>
+    loadHomeNotice(recents.length > 0),
+  );
   const projectActionRef = useRef<ProjectAction>(null);
+
+  const dismissHomeNotice = () => {
+    persistHomeNoticeSeen();
+    setHomeNotice(null);
+  };
 
   const runProjectAction = async (
     action: Exclude<ProjectAction, null>,
@@ -143,6 +182,87 @@ export function HomeView() {
           )}
         </section>
       </main>
+      {homeNotice && <HomeNoticeDialog kind={homeNotice} onDismiss={dismissHomeNotice} />}
+    </div>
+  );
+}
+
+function HomeNoticeDialog({
+  kind,
+  onDismiss,
+}: {
+  kind: Exclude<HomeNotice, null>;
+  onDismiss: () => void;
+}) {
+  const t = useT();
+  const buttonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    buttonRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onDismiss();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onDismiss]);
+
+  const isWelcome = kind === "welcome";
+  return (
+    <div
+      data-testid="home-notice-backdrop"
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 40,
+        display: "grid",
+        placeItems: "center",
+        padding: "var(--space-xl)",
+        background: "rgba(0,0,0,0.62)",
+        backdropFilter: "blur(8px)",
+      }}
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="home-notice-title"
+        style={{
+          width: "min(520px, 100%)",
+          padding: "var(--space-xl-xxl)",
+          border: "1px solid var(--home-border)",
+          borderRadius: "var(--radius-xl)",
+          background: "var(--home-popover)",
+          boxShadow: "var(--home-panel-shadow)",
+          color: "var(--home-foreground)",
+        }}
+      >
+        <Icon icon={Sparkles} size={24} />
+        <h1 id="home-notice-title" style={{ margin: "var(--space-md) 0 var(--space-sm)", fontSize: "var(--fs-title2)" }}>
+          {isWelcome
+            ? t("home.welcomeOverlayTitle")
+            : t("home.newInVersion", { version: HOME_NOTICE_VERSION })}
+        </h1>
+        <p style={{ margin: 0, color: "var(--home-muted-foreground)", lineHeight: 1.6 }}>
+          {isWelcome ? t("home.welcomeOverlayBody") : t("home.updateOverlayBody")}
+        </p>
+        <button
+          ref={buttonRef}
+          type="button"
+          onClick={onDismiss}
+          style={{
+            marginTop: "var(--space-xl)",
+            minHeight: 34,
+            padding: "0 var(--space-lg-xl)",
+            borderRadius: "var(--radius-md)",
+            background: "var(--home-primary)",
+            color: "var(--home-primary-foreground)",
+            fontWeight: "var(--fw-semibold)",
+          }}
+        >
+          {isWelcome ? t("home.welcomeOverlayStart") : t("home.updateOverlayDismiss")}
+        </button>
+      </section>
     </div>
   );
 }
