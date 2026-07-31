@@ -1696,36 +1696,50 @@ not the separately owned desktop motion/Lottie materialization.
   - Visible/returned assertion: assert the returned project/error variant, exact post-operation files and decoded state, and save-then-reopen equality or the specified fail-closed no-write result.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_3a71829a7b489aae.rs#completion_3a71829a7b489aae_apply_sandbox_document_size_checks_before_both_s.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-motion/src/sandbox.rs#document_size_ceiling_enforced` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-motion/src/renderer.rs#chromium_applies_sandbox_size_before_unavailable` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-motion document_size_ceiling_enforced`
   - Run: `cargo test -p opentake-motion chromium_applies_sandbox_size_before_unavailable`
 
   Expected: FAIL because one or more of the 3 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Reconciliation note (2026-08-01): both checks predated this generated plan,
+  so the baseline owners were already GREEN. Owners were extended with exact
+  byte/UTF-8 boundaries, both renderer paths, both Chromium feature modes, and
+  zero cache-directory side effects; valid code was not reverted to manufacture
+  RED.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-motion/src/renderer.rs#StubRenderer::render`, `crates/opentake-motion/src/renderer.rs#HeadlessChromiumRenderer::render`, `crates/opentake-motion/src/sandbox.rs#SandboxPolicy::check_document_size`, `docs/modules/opentake-motion/renderer.md`, `docs/modules/opentake-motion/sandbox.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-motion document_size_ceiling_enforced`
   - Run: `cargo test -p opentake-motion chromium_applies_sandbox_size_before_unavailable`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Verified 2026-08-01. Equality at the byte ceiling passes; one byte over and a
+  multi-byte UTF-8 overflow fail. Stub, unfeatured Chromium, and feature-enabled
+  Chromium all return `Sandbox` before creating a content-hash directory.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. Both focused owners in default mode, the Chromium owner
+  with the live feature, feature-enabled warnings-denied Clippy, formatting, and
+  the full workspace Rust suite pass.
 
 ### Task 27: MR-motion-png-complete (implementation-slice-329d3a7fb3b066f7)
 

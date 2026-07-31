@@ -58,13 +58,13 @@ pub struct SandboxPolicy {
 - 否则当且仅当 URL 的 origin 精确匹配白名单（origin 后只能是 `/`、`?`、`#` 或结束）时放行；`https://allowed.example.evil` 不会因字符串前缀误放行。空白名单 ⇒ 所有远程 URL 拒绝，返回 `MotionError::Sandbox`。
 
 ### `check_document_size(document)`（纯）
-- 文档字节长度超 `max_document_bytes` 即 `Err(MotionError::Sandbox)`。
+- 按 UTF-8 **字节**计费；等于 `max_document_bytes` 可接受，超 1 字节即 `Err(MotionError::Sandbox)`。测试覆盖 ASCII 精确边界与多字节字符。
 
 ---
 
 ## 谁在调用
 
-- `StubRenderer` 与 `HeadlessChromiumRenderer` 都在 `render()` 里对 `MotionSource::Code` 调 `check_document_size`——连 stub 与 "renderer unavailable" 路径都不放过（见 [renderer.md](renderer.md)）。
+- `StubRenderer` 与 `HeadlessChromiumRenderer` 都在 `render()` 里对 `MotionSource::Code` 调 `check_document_size`——连 stub、默认的 "renderer unavailable" 与 feature-enabled live 路径都不放过，并且都在创建内容哈希输出目录前拒绝（见 [renderer.md](renderer.md)）。
 - live Chromium 后端把 CSP meta 注入作者文档最前，并通过 `Fetch.enable` 拦截所有页面请求；每次请求（含重定向）调用 `check_url`，CSP/拦截拒绝以 `Sandbox` 返回。浏览器使用独立空 profile，启动参数关闭后台网络/扩展/同步/FileSystem Access API，render 结束或失败都终止进程并删 profile。
 
 ---

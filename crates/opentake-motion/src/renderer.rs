@@ -1270,8 +1270,19 @@ mod tests {
 
     #[test]
     fn chromium_applies_sandbox_size_before_unavailable() {
-        // A document over the ceiling fails with a Sandbox error, proving the
-        // policy is enforced even though no browser runs.
+        // Stub checks the default ceiling before creating its content-hash dir.
+        let stub_tmp = tempfile::tempdir().unwrap();
+        let stub = StubRenderer::new(MotionCache::new(stub_tmp.path()));
+        let oversized = "x".repeat(crate::sandbox::DEFAULT_MAX_DOCUMENT_BYTES + 1);
+        let stub_req = MotionRenderRequest::new(MotionSource::code(oversized), 30, 1, 10, 10);
+        assert!(matches!(
+            stub.render(&stub_req),
+            Err(MotionError::Sandbox(_))
+        ));
+        assert_eq!(std::fs::read_dir(stub_tmp.path()).unwrap().count(), 0);
+
+        // Chromium checks its policy before browser discovery/launch and before
+        // creating a content-hash dir, in both feature configurations.
         let tmp = tempfile::tempdir().unwrap();
         let policy = SandboxPolicy {
             max_document_bytes: 4,
@@ -1282,6 +1293,7 @@ mod tests {
             MotionRenderRequest::new(MotionSource::code("<this-is-too-long/>"), 30, 1, 10, 10);
         let err = r.render(&req).unwrap_err();
         assert!(matches!(err, MotionError::Sandbox(_)), "got {err:?}");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
     }
 
     #[test]

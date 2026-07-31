@@ -166,7 +166,9 @@ impl SandboxPolicy {
         }
     }
 
-    /// Reject an inline document larger than the configured ceiling.
+    /// Reject an inline document larger than the configured byte ceiling.
+    /// Equality is accepted; UTF-8 text is charged by encoded bytes, matching
+    /// what is handed to Chromium and what consumes memory.
     pub fn check_document_size(&self, document: &str) -> MotionResult<()> {
         if document.len() > self.max_document_bytes {
             return Err(MotionError::sandbox(format!(
@@ -236,8 +238,15 @@ mod tests {
             max_document_bytes: 10,
             ..Default::default()
         };
-        assert!(p.check_document_size("under10").is_ok());
-        assert!(p.check_document_size("this is way over ten bytes").is_err());
+        assert!(p.check_document_size("0123456789").is_ok());
+        assert!(p.check_document_size("01234567890").is_err());
+
+        let utf8 = SandboxPolicy {
+            max_document_bytes: 3,
+            ..Default::default()
+        };
+        assert!(utf8.check_document_size("é").is_ok()); // 2 UTF-8 bytes
+        assert!(utf8.check_document_size("éé").is_err()); // 4 UTF-8 bytes
     }
 
     #[test]

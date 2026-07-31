@@ -44,7 +44,7 @@ pub trait MotionRenderer {
 
 - 每帧是一块纯色 RGBA 填充，颜色是 `(帧号, content-hash)` 的纯函数（`frame_color`：从 hash 前几字节 XOR/加帧号派生 RGB）——保证可复现、且不同请求不同。
 - 透明时 alpha 沿 clip 线性渐变 `0..=255`（单帧 clip 不透明），让测试能断言 alpha 通道存活。
-- 即便是 stub 也执行沙箱**文档大小检查**（`SandboxPolicy::default().check_document_size`），让安全契约被测试覆盖。
+- 即便是 stub 也执行沙箱**文档大小检查**（`SandboxPolicy::default().check_document_size`），且在创建内容哈希目录之前拒绝超限输入；精确拥有者与 Chromium 路径共同断言零缓存副作用。
 - 流程：`req.validate()` → 大小检查 → `content_hash(req)` → `cache.ensure_dir` → 逐帧 `write_solid_rgba_png` 到 `frame_{i:05}.png` → 返回 `RenderedClip`。
 
 ### 自制 PNG 编码器（无依赖）
