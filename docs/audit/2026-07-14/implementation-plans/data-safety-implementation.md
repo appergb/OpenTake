@@ -300,36 +300,38 @@ Completion evidence: [`data-safety-mcp-redaction-real-device-2026-07-31.md`](../
   - Add deterministic fixtures for every named current, legacy, missing, malformed, and fail-closed branch; the focused round-trip and compatibility suites must pass.
   - Exercise open, edit, save, and reopen on representative bundles and attach the exact implementation symbols plus test or runtime evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-project/tests/roundtrip.rs#malformed_generation_log_is_ignored` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-core/tests/project_open.rs#missing_generation_log_seeds_manifest_provenance_once` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-project --test roundtrip malformed_generation_log_is_ignored -- --exact`
   - Run: `cargo test -p opentake-core --test project_open missing_generation_log_seeds_manifest_provenance_once -- --exact`
 
   Expected: FAIL because one or more of the 2 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-project/src/bundle.rs#Project`, `crates/opentake-core/src/session.rs#EditorSession`, `docs/modules/opentake-core/SPEC.md`, `docs/specs/core/5-assembly.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-project --test roundtrip malformed_generation_log_is_ignored -- --exact`
   - Run: `cargo test -p opentake-core --test project_open missing_generation_log_seeds_manifest_provenance_once -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completion evidence: [`data-safety-generation-seed-real-device-2026-07-31.md`](../runtime-artifacts/automated/data-safety-generation-seed-real-device-2026-07-31.md). Both exact owning tests already passed at the initial baseline; the packaged application additionally proved missing-log seed, duplicate-provenance collapse, edit/save/reopen, and byte-stable idempotence.
 
 ### Task 6: DS-cache-identity-complete (implementation-slice-5af4f1ababc7b495)
 
