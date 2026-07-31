@@ -1052,12 +1052,17 @@ before namespace mutation; downstream algorithm tests use test-only trusted fixt
   - Acquisition, DACL checks, I/O, quarantine, no-replace publish, cleanup, reparse-point, source-swap, and cancellation regressions pass on native Windows.
   - The x86_64-pc-windows-msvc build, warnings-denied clippy, repository Windows jobs, and independent review all pass for the exact tree.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-project/src/safe_fs/tests.rs#windows_contract` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
   - `crates/opentake-project/src/safe_fs/tests.rs#synchronous_nt_pending_is_invariant_error` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
+
+  Result: Both exact names now execute in the common owning runner on native
+  Windows. Adapter-local tests cover DACL bounds and malformed descriptors,
+  retained I/O, rollback, quarantine, no-replace publish, recursive reparse
+  cleanup, and source-name rebinding resistance.
 
 - [ ] **Step 2: Run all focused tests and verify RED**
 
@@ -1066,16 +1071,28 @@ before namespace mutation; downstream algorithm tests use test-only trusted fixt
 
   Expected: FAIL because one or more of the 3 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-project/src/safe_fs/capability.rs#DirectoryAuthority`, `crates/opentake-project/src/safe_fs/ops.rs#capture_absolute_directory`, `docs/superpowers/plans/c1b/2026-07-12-c1b-windows-ci-normative.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Result: `windows.rs` is a compile-complete retained-HANDLE backend with
+  capability-relative no-follow acquisition, synchronous NT status handling,
+  owner-only security descriptors, I/O, quarantine, no-replace publish, and
+  non-traversing cleanup. It contains no unsupported-backend include or bypass
+  implementation.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-project windows_contract`
   - Run: `cargo test -p opentake-project synchronous_nt_pending_is_invariant_error`
 
   Expected: PASS with every candidate-bound assertion executed.
+
+  Result: Native Windows run 30617000877, job 91112395644, executed 26 safe-fs
+  tests: 26 passed, 0 failed. Formatting, warnings-denied native clippy, and the
+  archive-security integration suite also exited zero. The immutable receipt is
+  recorded in
+  `runtime-artifacts/automated/data-safety-windows-safe-fs-native-2026-07-31.md`.
 
 - [ ] **Step 5: Run the subsystem regression gate**
 
