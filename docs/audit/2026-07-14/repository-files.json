@@ -43,8 +43,8 @@
       "domain": "ci",
       "kind": "yml",
       "material": true,
-      "bytes": 5804,
-      "sha256": "3fc3f217490d1e7256537c0e543f7effad2f1067a0eca1763e979fe64086d7e1"
+      "bytes": 22326,
+      "sha256": "5c9003d210ff8321bba02312f560261b13310f37458f4ecd1513360caab48200"
     },
     {
       "id": "file-bc37d034bad56458",
@@ -54,6 +54,24 @@
       "material": true,
       "bytes": 279,
       "sha256": "b93f80050368a0d8158210f81acfc92e892ad27de6d8e4361f6fc378f061bf86"
+    },
+    {
+      "id": "file-794550be5bbee1a7",
+      "path": ".superpowers/sdd/task-11-red-replay.md",
+      "domain": "repository",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 6328,
+      "sha256": "966a7fd7550b829bc081745922c0146e5cedf18d550535375a0af853b05e85f5"
+    },
+    {
+      "id": "file-4a547f596950c48e",
+      "path": ".superpowers/sdd/task-11-report.md",
+      "domain": "repository",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 9631,
+      "sha256": "edada7a16aed1d29348ed666a0979cde89dd056a1729033715b6a88cffaccfa9"
     },
     {
       "id": "file-a7634fad0877aa7d",
@@ -115,8 +133,8 @@
       "domain": "repository",
       "kind": "markdown",
       "material": true,
-      "bytes": 14438,
-      "sha256": "25bcc6200e6dcbea9a708eea66b36927a16a6805fb83b642ab0abf1c9c26d853"
+      "bytes": 14507,
+      "sha256": "30e765da63167c9f1c4130d2e017a2f2d47d36dd30f65ddcd4e7731de7c02629"
     },
     {
       "id": "file-eca12c0a30e25b4b",
@@ -133,8 +151,8 @@
       "domain": "repository",
       "kind": "lock",
       "material": true,
-      "bytes": 179112,
-      "sha256": "eb11d1de4293c81bf1b56326a04c65b651f97c88621bda0d4a74cfc1d5cd4166"
+      "bytes": 179453,
+      "sha256": "3bd0c1830c7a11da8cdf9caef921946084983e0c199a71deaff0dda346201e0e"
     },
     {
       "id": "file-2e9d962a08321605",
@@ -142,8 +160,8 @@
       "domain": "repository",
       "kind": "toml",
       "material": true,
-      "bytes": 1037,
-      "sha256": "44ee820ebe8673c7652c56d1decab52902c63ea6697aa5c58226363e055110e4"
+      "bytes": 1081,
+      "sha256": "741bc589177a82c628f64bf6c1a12e45054764558d34f9802883b99a8255d077"
     },
     {
       "id": "file-be5c3eb56c8a1eeb",
@@ -214,8 +232,8 @@
       "domain": "opentake-agent",
       "kind": "toml",
       "material": true,
-      "bytes": 1431,
-      "sha256": "755d92abae3878ac2a247a3ed837658a97cc54b098ebe8053118eac1f3f14cba"
+      "bytes": 1499,
+      "sha256": "e32fd98cbbdf82b0b2c4491994e053b8a0a862f7dd4e12a3a835b82b49f1d84e"
     },
     {
       "id": "file-61ee2d8b44c55f7e",
@@ -223,8 +241,8 @@
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 27006,
-      "sha256": "ffb7160d1805d94e4e04e70472993ec096e11585e2ebd3ca8ec8bda4340e2d94"
+      "bytes": 31399,
+      "sha256": "47da79e7c30a2671c6adb3e8a5729e1b606735dd3e6c1b8651141ab8d12d2b1f"
     },
     {
       "id": "file-93b6ddec4e563077",
@@ -232,8 +250,8 @@
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 17688,
-      "sha256": "85d36597912ab9e1030ff8dbc0131b6edac334c8a4b2fa9055cb78ae9bd5b432"
+      "bytes": 27000,
+      "sha256": "f7b8856503269807b708d5f3550b2063b6e8a71f7226012124e9d96cd628c2a5"
     },
     {
       "id": "file-a25c65feaf9e6dfb",
@@ -241,8 +259,8 @@
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 1182,
-      "sha256": "7f0f55758e8f7839937d1ace01d501390f34b774e22c941d6ddf5c31acc11540"
+      "bytes": 1288,
+      "sha256": "1c8b5ca27c22bbc92dd6355038adfa6e059aacecb586defa1de229a7b6cfb603"
     },
     {
       "id": "file-356d36c67e7dc8fb",
@@ -250,8 +268,17 @@
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 7981,
-      "sha256": "00a19ca0bf05042e87723731d93d2a85568739dcd554766035039c16f6e1656f"
+      "bytes": 19384,
+      "sha256": "8e99f5b5e01f1ae167a70352734871ff4db9af65135812487e325de74ea8ec6a"
+    },
+    {
+      "id": "file-377db82c1cdf8436",
+      "path": "crates/opentake-agent/src/chat/store.rs",
+      "domain": "opentake-agent",
+      "kind": "rust-source",
+      "material": true,
+      "bytes": 11600,
+      "sha256": "b67569b09fd9175a25eb91272146afe2864a5fa32f5a0921e46495142dddf74b"
     },
     {
       "id": "file-2ed205da9bb64591",
@@ -268,8 +295,8 @@
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 1704,
-      "sha256": "2062668d472594081df0f39ccfe787f3b96971d9ed18c1f9efa3d5ff955bc672"
+      "bytes": 13561,
+      "sha256": "7ee5a7ac8cfcb15393951eaa8b7bbe448297347386f6b38971238de7ada5fa91"
     },
     {
       "id": "file-d89355d2865b518d",
@@ -277,8 +304,8 @@
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 3485,
-      "sha256": "a7437fa7013f2543d1a7661634f327c9e9ceb24ea75781e82cdcf17bc4b316e6"
+      "bytes": 8654,
+      "sha256": "975a4337730a55da51da9752959ef44b119092456a18b13c1d0251019a2e8b3c"
     },
     {
       "id": "file-7b4d98ba4f1e4141",
@@ -286,8 +313,8 @@
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 206167,
-      "sha256": "edacf5ba89f31f5d070fb43b795fc5b411a6221f1f71b9cade97630104a3a193"
+      "bytes": 255099,
+      "sha256": "4f323a5c05932745657085c3ea411c2702ceff2822dc4483ce679c1f122a1492"
     },
     {
       "id": "file-ec00ac2e9198052c",
@@ -299,13 +326,22 @@
       "sha256": "2bd962fa4a737ff000dee18001077971b1a20d7e768044e9338a5f5ad6ece4cb"
     },
     {
+      "id": "file-382c6993731440fa",
+      "path": "crates/opentake-agent/src/mcp/generation.rs",
+      "domain": "opentake-agent",
+      "kind": "rust-source",
+      "material": true,
+      "bytes": 8175,
+      "sha256": "53f65febc5bb84683d32dfed89ae54d26f94621669757d0d8bde3a8919a53d88"
+    },
+    {
       "id": "file-609120a95eccf46c",
       "path": "crates/opentake-agent/src/mcp/media_bridge.rs",
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 15915,
-      "sha256": "398e83e2caec71501853c09a10eddb673a7cc11635ad4e9ae732a9014b3f1728"
+      "bytes": 20074,
+      "sha256": "884ad048ad72889081f8fe067c00a5fa76d06d34220cfc722a5d887571be4efa"
     },
     {
       "id": "file-4a3d29e5617072cf",
@@ -313,8 +349,8 @@
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 794,
-      "sha256": "fd2c4600d655450482276c0f40e1de069c700214b9b1be74d8b1ff072d390aec"
+      "bytes": 814,
+      "sha256": "eb0c3b4683d793b0727d1768919c2c0371a25dc31f1233b60dc2ba2f4b44968c"
     },
     {
       "id": "file-59f49f8425ad3213",
@@ -322,8 +358,8 @@
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 12729,
-      "sha256": "7d97e733a9876a976e1515fc4d705cf64e34bec7cb32c67f18bce118ec12530e"
+      "bytes": 27704,
+      "sha256": "80b02b960782d39a0bc6e1182869d0932b9db321e71583602efcd04e28329be2"
     },
     {
       "id": "file-7b57d853b2e6c0a8",
@@ -394,8 +430,8 @@
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 12017,
-      "sha256": "aca20c1fa0b8f79775b86777b3a7ec54e89d977ebbd3ec43028fc65d233dc784"
+      "bytes": 14535,
+      "sha256": "487de71151ac210a288f4492d60dfe4cd8e079fbd45a74bc3a06e61edabec3ce"
     },
     {
       "id": "file-2f0297d9f81bf61e",
@@ -466,8 +502,8 @@
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 41533,
-      "sha256": "c297bab4e90b753cb9f224232cfc1f0f63d46e7e26615d4c0acad9ba336db02c"
+      "bytes": 42737,
+      "sha256": "dd13eac4a0fc12b2add97ddfc9c303b80c8c2d4f57b78e9e285fe3fcbfe6734a"
     },
     {
       "id": "file-e9984f87096d7780",
@@ -475,8 +511,8 @@
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 84765,
-      "sha256": "903e3e9b8acf9c9f5559124c2134e240a1f0661e18db2b8934cb6478cbd954f7"
+      "bytes": 88386,
+      "sha256": "3f3fa211561004e3757c38c043d2d524a7c0d95b7029cee76a2fb38a370a9b96"
     },
     {
       "id": "file-cb6009297ca476be",
@@ -493,8 +529,8 @@
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 13310,
-      "sha256": "93d2ac58febb1d82b5085bea25da2bd1ad7c3d491b30e1cfe0133045938840a5"
+      "bytes": 20776,
+      "sha256": "92d6d2af4c8a97a93d0cd9e0de795f7f802a26fffcdeedb8db8188a309ca00fb"
     },
     {
       "id": "file-e7ddb4f5c7317b84",
@@ -502,8 +538,8 @@
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 514,
-      "sha256": "25a28d247b7ff94782f1004667894026d2b53b004f167d37ee6f150891e3e0bb"
+      "bytes": 534,
+      "sha256": "1ce9a9f5247ae5fbfc92f52001633488daeda1b99177fde3b1d347a940fa064e"
     },
     {
       "id": "file-9c2700d27172ff3f",
@@ -511,8 +547,17 @@
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 10000,
-      "sha256": "486bb5def2c6cbceac4dc4e430bf86805d9a8483ff878256ce1556058b053df9"
+      "bytes": 13377,
+      "sha256": "04b23637e9fc70fa2db4b756b65f4656f1d12fb4601a042fbf7f20bda580544c"
+    },
+    {
+      "id": "file-8148de41883b6008",
+      "path": "crates/opentake-agent/src/tools/panic_boundary.rs",
+      "domain": "opentake-agent",
+      "kind": "rust-source",
+      "material": true,
+      "bytes": 1196,
+      "sha256": "eeb78a58fc1c3ebe769bd98a6167fd4019e5338a0493b57413ec5c37d46a7b4d"
     },
     {
       "id": "file-75e29cea1ec354e9",
@@ -520,8 +565,8 @@
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 3664,
-      "sha256": "78a4045a4730773ef2226ac37ff063dc0fe82c85b5f02d61d405bf13053ac7f5"
+      "bytes": 7267,
+      "sha256": "a05ab320d66b7e4893a5c15dea30012f035bd96107c185c9ceb5064678e243ef"
     },
     {
       "id": "file-7ecf2b1099b92f69",
@@ -529,8 +574,35 @@
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 12544,
-      "sha256": "9ff114afbde89db8e8ad88dc9ecbcb1de385c35abcf6f6a9b5fad534371c1e9a"
+      "bytes": 12581,
+      "sha256": "fd92aae9d10bf08ca750b91a24aad65731b0bf9ad6beb3e7b880ec470cd67af8"
+    },
+    {
+      "id": "file-73a89c630d1579c0",
+      "path": "crates/opentake-agent/tests/advertised_tool_acceptance.rs",
+      "domain": "opentake-agent",
+      "kind": "rust-source",
+      "material": true,
+      "bytes": 2683,
+      "sha256": "230d158844a927c113c334cce5c9e51125e1dd3a5eaa87d3861f67f4cf1898d2"
+    },
+    {
+      "id": "file-db48a10c0e163420",
+      "path": "crates/opentake-agent/tests/generation_dispatch.rs",
+      "domain": "opentake-agent",
+      "kind": "rust-source",
+      "material": true,
+      "bytes": 9368,
+      "sha256": "298eb3a5c10d86a58a2ca1f661c372c2990898b4dbb0564a4f17c1927e14fe71"
+    },
+    {
+      "id": "file-3ea0e278b456025a",
+      "path": "crates/opentake-agent/tests/mcp_error_redaction.rs",
+      "domain": "opentake-agent",
+      "kind": "rust-source",
+      "material": true,
+      "bytes": 2189,
+      "sha256": "e95e865a277b129069eef0f138343fbc64ba347dc1fb045e932887227fce7a28"
     },
     {
       "id": "file-8e2aa1156746a3b6",
@@ -538,8 +610,17 @@
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 4439,
-      "sha256": "878a6288486793c18b5dc25341659d1f413d2e161d31c68cbfaa8ed094bea98d"
+      "bytes": 26121,
+      "sha256": "03765fc5c16c381563ff86a5808e2a753c5eb5e53ff3a00849412e884f59e89e"
+    },
+    {
+      "id": "file-e615916a9aa07214",
+      "path": "crates/opentake-agent/tests/tool_argument_contract.rs",
+      "domain": "opentake-agent",
+      "kind": "rust-source",
+      "material": true,
+      "bytes": 12791,
+      "sha256": "f7735761c8dacd4ec16cdff57d7699e427e0f2862bafab275d35f6747c4730ff"
     },
     {
       "id": "file-af1a277a729753c5",
@@ -547,8 +628,8 @@
       "domain": "opentake-core",
       "kind": "toml",
       "material": true,
-      "bytes": 455,
-      "sha256": "ebf8789d1cb6989c57fc1e44e3ea6d4e3068f04dff4a1c500e75d78ee53dbcf8"
+      "bytes": 490,
+      "sha256": "d55806d5b0612ed0fdece6040ca5c1b70a006a7ac2ef1b3eaec0da7f2eca548a"
     },
     {
       "id": "file-32693b3be33817aa",
@@ -556,8 +637,8 @@
       "domain": "opentake-core",
       "kind": "rust-source",
       "material": true,
-      "bytes": 59136,
-      "sha256": "67e8554b1d26b4022593a329475423fc6ec840f5f3285cb0a381c3d0d52d53c5"
+      "bytes": 87553,
+      "sha256": "d622a65a1a90364705ad8c6114c0c5abca87140796b41b884273ab8625d843a8"
     },
     {
       "id": "file-85c6f4503ae834fc",
@@ -592,8 +673,8 @@
       "domain": "opentake-core",
       "kind": "rust-source",
       "material": true,
-      "bytes": 8633,
-      "sha256": "d5a6ce889d0044bf44e6b7d84ab467bdde55eba4f2a302db2c1125f64706018b"
+      "bytes": 8655,
+      "sha256": "7af010348fe4bca01bab170c33c86c30e7b63ad6d8c2bac69c10818dd075233c"
     },
     {
       "id": "file-311db8a049c88090",
@@ -601,8 +682,8 @@
       "domain": "opentake-core",
       "kind": "rust-source",
       "material": true,
-      "bytes": 3275,
-      "sha256": "c264c11de3acb60878a75ff3df17b56f93f3ae523ac9516c3110f981dd1fb8b1"
+      "bytes": 3445,
+      "sha256": "766b333146ac21456c7a069ec040bee62071e9f67cf1e39244b1e7e8b7e193e5"
     },
     {
       "id": "file-a086b7d54b10f544",
@@ -610,8 +691,26 @@
       "domain": "opentake-core",
       "kind": "rust-source",
       "material": true,
-      "bytes": 44615,
-      "sha256": "6bf44d8ecba3488ca4ffa26ec277a46d98e6a34e7e2c31dc18ea18a10966fa6d"
+      "bytes": 66590,
+      "sha256": "5abe782b3149d588e81aebc8fd6a7a66098254c0b74c987bbfc3090af61cff45"
+    },
+    {
+      "id": "file-3182b96162a89305",
+      "path": "crates/opentake-core/tests/generation_persistence.rs",
+      "domain": "opentake-core",
+      "kind": "rust-source",
+      "material": true,
+      "bytes": 10795,
+      "sha256": "f0bca585b58ee694b70b3f8ef31550ad4609341e9e216189a4f5aa38024f3e58"
+    },
+    {
+      "id": "file-876c83d0b300f941",
+      "path": "crates/opentake-core/tests/project_open.rs",
+      "domain": "opentake-core",
+      "kind": "rust-source",
+      "material": true,
+      "bytes": 19688,
+      "sha256": "d857be9bcd2d1aa11c892272c90a595a97fd81c14f0d77b358a9af04a1ca2ca9"
     },
     {
       "id": "file-212b09846f91bd29",
@@ -646,8 +745,8 @@
       "domain": "opentake-domain",
       "kind": "rust-source",
       "material": true,
-      "bytes": 36838,
-      "sha256": "5176392658f38e6de3ba029322cdc1903a3a24207df5fafd6edc945b1c2d4a29"
+      "bytes": 42157,
+      "sha256": "e76b31712271b881325d7b6f091af31c50ca3d3afb04c9e99b565811b4506c51"
     },
     {
       "id": "file-e350e7272c332edd",
@@ -657,6 +756,15 @@
       "material": true,
       "bytes": 4003,
       "sha256": "6cf5c9084907862a8933826a33ada95c2bcc3c8930e00c7a72d3b73e11a3830b"
+    },
+    {
+      "id": "file-ec25a28e754095ea",
+      "path": "crates/opentake-domain/src/clip_wire.rs",
+      "domain": "opentake-domain",
+      "kind": "rust-source",
+      "material": true,
+      "bytes": 3812,
+      "sha256": "520083763be52d680356e72e30f3a0b663b53d42fb3288f1e6d892c16a93a847"
     },
     {
       "id": "file-1f40c2e8dcecaef5",
@@ -673,8 +781,8 @@
       "domain": "opentake-domain",
       "kind": "rust-source",
       "material": true,
-      "bytes": 17993,
-      "sha256": "7570de41a152019926c1aad93da67382d8f0973f495ff8e1c63d5ea0835a1b2a"
+      "bytes": 18696,
+      "sha256": "7ebe1229dd22148ec46a2576f391370db1c7607530e27cf3340405e23f4b2bb6"
     },
     {
       "id": "file-f077249dad8bff35",
@@ -682,8 +790,8 @@
       "domain": "opentake-domain",
       "kind": "rust-source",
       "material": true,
-      "bytes": 2494,
-      "sha256": "31a8bfa61f0c5b8440b65e950ca777c3d470107575547916eefc827a8395384e"
+      "bytes": 2665,
+      "sha256": "33e87730c123776d09da54ce8efb2503d409085331a25d1c3762c976d4408923"
     },
     {
       "id": "file-770e89ffe24a8b60",
@@ -691,8 +799,8 @@
       "domain": "opentake-domain",
       "kind": "rust-source",
       "material": true,
-      "bytes": 35784,
-      "sha256": "3fdc0261acc7a2a2fd6ad08a07fe6b642e3c12567448ecc4e85c3c76eed217e0"
+      "bytes": 39278,
+      "sha256": "43caa73ab184f6a93c5cabfa0e3f45f335782feada0f29aab5ff92c1352b6b5e"
     },
     {
       "id": "file-ef3fbfe997a280c3",
@@ -709,8 +817,8 @@
       "domain": "opentake-domain",
       "kind": "rust-source",
       "material": true,
-      "bytes": 12368,
-      "sha256": "a23373f92b3fed28d547408c50244faed8355b045830c78b59b0a82fdc570b8a"
+      "bytes": 12409,
+      "sha256": "914d97cd08725e4531b40e70d2b6f67cbd6480eec0770b2ac1833b3d19606c88"
     },
     {
       "id": "file-c60900dd2e853ca2",
@@ -727,8 +835,17 @@
       "domain": "opentake-domain",
       "kind": "rust-source",
       "material": true,
-      "bytes": 17539,
-      "sha256": "d567b9c6d9682d452206a4c1f3868736e11edde24e3bc974bbfb658012c0133a"
+      "bytes": 21350,
+      "sha256": "23759c95832cbe511aac91a5439e7ced9a35b52537b2d091c501fdf509311bf5"
+    },
+    {
+      "id": "file-3254ae60a738e60e",
+      "path": "crates/opentake-domain/src/text_wire.rs",
+      "domain": "opentake-domain",
+      "kind": "rust-source",
+      "material": true,
+      "bytes": 4020,
+      "sha256": "100cabac860632417ef807ca000a0924c27f2b0d04984db624cb12e303f13535"
     },
     {
       "id": "file-753f0fa2e016fbdc",
@@ -736,8 +853,8 @@
       "domain": "opentake-domain",
       "kind": "rust-source",
       "material": true,
-      "bytes": 8299,
-      "sha256": "441e4ae0f878c496f986e9fdea52c00d98fda7a39bb1ceaa8b99c930a173e082"
+      "bytes": 10286,
+      "sha256": "ddbdbcf657790b06912f8d481917c65510f7e227d3640c588ba8f9d6836557a8"
     },
     {
       "id": "file-1ca2b8d7b5b23159",
@@ -745,8 +862,17 @@
       "domain": "opentake-domain",
       "kind": "rust-source",
       "material": true,
-      "bytes": 15333,
-      "sha256": "4d4a4b20852a0664669448d96c1c104d7c525877cbefb652a91ed989a03f3de3"
+      "bytes": 16442,
+      "sha256": "3aafa07091ba9a3dc5629c677d7c530bc6ff26cf4e5bd60a8caba150fdb62fd3"
+    },
+    {
+      "id": "file-3047b992dcbf3bcc",
+      "path": "crates/opentake-domain/tests/wire_schema.rs",
+      "domain": "opentake-domain",
+      "kind": "rust-source",
+      "material": true,
+      "bytes": 4970,
+      "sha256": "b0e1db4fc838d94d0f03961e169f932ba7faaa1e4dbf7cc27ceae2d99d0c6761"
     },
     {
       "id": "file-10ad5e3746bf7f6b",
@@ -763,8 +889,8 @@
       "domain": "opentake-gen",
       "kind": "rust-source",
       "material": true,
-      "bytes": 12307,
-      "sha256": "1a74d8af6222eaf1d03b20a3bbd5266b3d3648f5565b4667df1908a01fc12779"
+      "bytes": 13234,
+      "sha256": "2b8659b6fa564a222544be31227a864b6b2d117a4f505ef1f006d51dc0486747"
     },
     {
       "id": "file-f6ea76dd4e64c2b8",
@@ -925,8 +1051,8 @@
       "domain": "opentake-media",
       "kind": "toml",
       "material": true,
-      "bytes": 3672,
-      "sha256": "88a569f07f80abedb14985e92d5a95aa6da25398cbafb05660b497a11d4508b4"
+      "bytes": 3689,
+      "sha256": "c26d29d1d090bcc7ae6e9d48103f54b30606c0eef771d3a9a8ca697fb48370eb"
     },
     {
       "id": "file-7b9f07dc6f209aec",
@@ -970,8 +1096,8 @@
       "domain": "opentake-media",
       "kind": "rust-source",
       "material": true,
-      "bytes": 6624,
-      "sha256": "72c93b2a9549af2680e56982d1cbafb6cc5ab1327085c8b23ceb81a730f6542f"
+      "bytes": 13881,
+      "sha256": "bc16f9df98dd24ce4085766e95737946be1b6a78e95bcba8ff655c7d45000160"
     },
     {
       "id": "file-9ae1b2d212b18fc9",
@@ -1096,8 +1222,8 @@
       "domain": "opentake-media",
       "kind": "rust-source",
       "material": true,
-      "bytes": 16705,
-      "sha256": "1413493b2d321958925b446e4b8311adea30fd00890644c53824c835eec1e3bb"
+      "bytes": 20540,
+      "sha256": "ae9edfbc7b263b171ad78d0da05774da1635203a6a8ad04d029f4e71ccdff70a"
     },
     {
       "id": "file-5cfee53910ab5ac2",
@@ -1105,8 +1231,8 @@
       "domain": "opentake-media",
       "kind": "rust-source",
       "material": true,
-      "bytes": 110813,
-      "sha256": "bad30cb95e9eac2279748d48e135a694a1b8cd588d10b0048163313c20b4f1e3"
+      "bytes": 111575,
+      "sha256": "e0fe3d5c74a1af6cfc104e9bcf7f2389b78d393dfa416c9d9cc16227fd597e10"
     },
     {
       "id": "file-87d6c97ee66c198c",
@@ -1132,8 +1258,8 @@
       "domain": "opentake-media",
       "kind": "rust-source",
       "material": true,
-      "bytes": 11697,
-      "sha256": "3b39f9e7c18815148ec5a9ecabcd165be28cd9072fc23023224dea4be0eca0fe"
+      "bytes": 13363,
+      "sha256": "89511e647305503c0a3f6cba711ef0c90992628f71e83fdb5358e2f3d61744f7"
     },
     {
       "id": "file-c4e2ec61a3543273",
@@ -1150,8 +1276,8 @@
       "domain": "opentake-media",
       "kind": "rust-source",
       "material": true,
-      "bytes": 13179,
-      "sha256": "f085c65b0a4b76196fbcb37f9190c30ae0b970fc64c39fbefe585157d553bd48"
+      "bytes": 13151,
+      "sha256": "b526dc447d8fe1ce0f76ccd891b8a24bea85bf9f68d8ede430db1c50fda0930e"
     },
     {
       "id": "file-fbdcf5971fc33fa5",
@@ -1231,8 +1357,8 @@
       "domain": "opentake-media",
       "kind": "rust-source",
       "material": true,
-      "bytes": 7135,
-      "sha256": "fcfc4871addcb943354d42b4b67956344b2dd9c27daf2af0c224359577fe98f7"
+      "bytes": 8179,
+      "sha256": "fc878e040b7608e9f47be9d082a633fea6d44cf43b3c3970d33a9a51000545c3"
     },
     {
       "id": "file-196938092cc2e60a",
@@ -1249,8 +1375,8 @@
       "domain": "opentake-media",
       "kind": "rust-source",
       "material": true,
-      "bytes": 11633,
-      "sha256": "07ba9020e47f56b5fad4c13204092b28d9e8c0cefda9c94d6d8028c311cdb67a"
+      "bytes": 12594,
+      "sha256": "7130836ac14e7a1c825fc874e47863e6257ac76a0667bcb2c33cbebc5f5c9de0"
     },
     {
       "id": "file-a03167acf3a1f231",
@@ -1267,8 +1393,8 @@
       "domain": "opentake-media",
       "kind": "rust-source",
       "material": true,
-      "bytes": 14158,
-      "sha256": "060ff0da7b6801f8bb462c08d33a18f895d69e8b2ce867a0297fd9e77d30da93"
+      "bytes": 14078,
+      "sha256": "0c0802bbbd843cd866c049a4da788748c71d4cb2c86a49502975d8a8acb857a3"
     },
     {
       "id": "file-a194bec50f45f143",
@@ -1276,8 +1402,8 @@
       "domain": "opentake-media",
       "kind": "rust-source",
       "material": true,
-      "bytes": 35160,
-      "sha256": "19f41801e464f7257d0d7eefdc07dad622175ab245f53cff838fb59b4323a464"
+      "bytes": 41979,
+      "sha256": "488d8a3c80f5ad9b39fe3c080ddeeba3ef6695863d14e4d9a878380acb60be68"
     },
     {
       "id": "file-7753135bb39f0279",
@@ -1339,8 +1465,8 @@
       "domain": "opentake-media",
       "kind": "rust-source",
       "material": true,
-      "bytes": 6181,
-      "sha256": "16e7f0e974caa97b76dd53aaa65615f0fdc58cd29806663f1f787fccefe7feac"
+      "bytes": 17647,
+      "sha256": "cf5abb961399917d37e2b253e74cc20c31d116917584d6d1dee4d6d7cd28b738"
     },
     {
       "id": "file-5b7e406b19f7c1b3",
@@ -1357,8 +1483,8 @@
       "domain": "opentake-media",
       "kind": "rust-source",
       "material": true,
-      "bytes": 4396,
-      "sha256": "0f95ff9091dee3d6cb5a6d7a5fd305f254a5c76d750f231b88281d9ee6b8f48d"
+      "bytes": 4382,
+      "sha256": "eb9ad5d2a184ab46899e2bff7a5b8e204220bbe695ea1c22bf10bee63ef12c8e"
     },
     {
       "id": "file-37c2917cda66efdf",
@@ -1375,8 +1501,8 @@
       "domain": "opentake-media",
       "kind": "rust-source",
       "material": true,
-      "bytes": 12872,
-      "sha256": "882410410076c635ef5977e2650e5e055ff62cfa4194b10ddef4c84a786f23b4"
+      "bytes": 14267,
+      "sha256": "2bbffbfbbb95e7b26b20969c586e9d5700781fe065616da0c87092b0b234b246"
     },
     {
       "id": "file-183b22cd430a725a",
@@ -1483,8 +1609,8 @@
       "domain": "opentake-ops",
       "kind": "rust-source",
       "material": true,
-      "bytes": 159263,
-      "sha256": "29af81feb988b97ba27c0d96e43d1357ee3faecae1927e15d4879214610678cc"
+      "bytes": 161690,
+      "sha256": "355c0888b01bfff86a3afcd5ff7f19a9b6295153a9dee5c3a3f8f53ae9a7a21a"
     },
     {
       "id": "file-dd2047dc3a0d231f",
@@ -1564,8 +1690,8 @@
       "domain": "opentake-ops",
       "kind": "rust-source",
       "material": true,
-      "bytes": 7688,
-      "sha256": "8722edea6ae271c7add5dc7e30be5d13b703275d0c521056d0e2121d9a9d3467"
+      "bytes": 7963,
+      "sha256": "810c6ac589f04316e4f029c20ee8a8ff1f09f69490eb3cc471174534b02dff5d"
     },
     {
       "id": "file-4961a36676f850a4",
@@ -1627,8 +1753,8 @@
       "domain": "opentake-ops",
       "kind": "rust-source",
       "material": true,
-      "bytes": 20530,
-      "sha256": "533741ce8f083d96b206c94c1bde2596bfacc78bf8825124c9ed6b2917b483c4"
+      "bytes": 23119,
+      "sha256": "496b508effc41dc72d9daaa957d8c1f3a4ad407f12a9c425b1ee77d2f556b64a"
     },
     {
       "id": "file-de9d54b47020b10b",
@@ -1681,8 +1807,8 @@
       "domain": "opentake-ops",
       "kind": "rust-source",
       "material": true,
-      "bytes": 51212,
-      "sha256": "a045187a267fef9908c261518bb979045f3bccf7abefbdacf5f6312e6ec9ac83"
+      "bytes": 51742,
+      "sha256": "f1b9118c7790c89c2ce88325cd972f6db3a55cec8d9882918a38451051ef93c1"
     },
     {
       "id": "file-61effa008dc46e6a",
@@ -1699,8 +1825,8 @@
       "domain": "opentake-project",
       "kind": "toml",
       "material": true,
-      "bytes": 707,
-      "sha256": "0076ae611fb26a8692385a590bff877b4d85e86aaf9e2b1cf299317217da447c"
+      "bytes": 1032,
+      "sha256": "02aeab0899a24aca9bb5bd957a8c0a4ed5d4ed23aebdf572f22976a4e438dc62"
     },
     {
       "id": "file-81f5446a52eed42a",
@@ -1717,8 +1843,17 @@
       "domain": "opentake-project",
       "kind": "rust-source",
       "material": true,
-      "bytes": 27229,
-      "sha256": "b355b8f67776363e21b16294ddfc6c5db23f0bd4d282df506b94ed69236d96e2"
+      "bytes": 35653,
+      "sha256": "5046afa5c7ee09900bed7873b5b309ec8c9f01397102d2a0a43d5e60f971ce6a"
+    },
+    {
+      "id": "file-eadce47afb443af3",
+      "path": "crates/opentake-project/src/compatibility.rs",
+      "domain": "opentake-project",
+      "kind": "rust-source",
+      "material": true,
+      "bytes": 18852,
+      "sha256": "d6b6b59f9d68a393ea84d37b156cb8c452d95096c84d2995de8581434e0d9629"
     },
     {
       "id": "file-0d0cad185e1c6853",
@@ -1726,8 +1861,8 @@
       "domain": "opentake-project",
       "kind": "rust-source",
       "material": true,
-      "bytes": 15028,
-      "sha256": "3f00a544c20c824d824e58f066601b10918675891c15e73caed9a80b0a5e3bd8"
+      "bytes": 16836,
+      "sha256": "b7903d7590e2db65fa5350ee8f6d2cc62f1f95a6d36d0cc1630b0ac50b83888e"
     },
     {
       "id": "file-10de10c15dcfc4dd",
@@ -1771,8 +1906,8 @@
       "domain": "opentake-project",
       "kind": "rust-source",
       "material": true,
-      "bytes": 8167,
-      "sha256": "5ee4832fb3b933db0557caf20fba061cc7e08f50d2865e5a2c1cbd386e933dd6"
+      "bytes": 11685,
+      "sha256": "101567b6eab0a96fe1b4ffe17200da2b5a98e0697500e0386371aba1b455177c"
     },
     {
       "id": "file-ce914be66d2ae909",
@@ -1789,8 +1924,8 @@
       "domain": "opentake-project",
       "kind": "rust-source",
       "material": true,
-      "bytes": 3260,
-      "sha256": "b44aedabd4785281c859cca920234cd9aa47649120321cdbe819ca9c30c8a9a7"
+      "bytes": 3279,
+      "sha256": "cc4511de881232786538fa693ab9af2c4f277d04ccb4c68c736c5dc7292db3f3"
     },
     {
       "id": "file-87454e6f7dfbfce4",
@@ -1807,8 +1942,8 @@
       "domain": "opentake-project",
       "kind": "rust-source",
       "material": true,
-      "bytes": 103087,
-      "sha256": "3119cd5562d5f7d1fe5a24a65ad9550afcd1747a3c0e67e86a006df0939e5bc4"
+      "bytes": 117503,
+      "sha256": "98c7cf58bceec72a51c71a04a473fd8aa28c4480bafff2e3de3c535677a45d86"
     },
     {
       "id": "file-26ba2bd33f27241b",
@@ -1861,8 +1996,8 @@
       "domain": "opentake-project",
       "kind": "rust-source",
       "material": true,
-      "bytes": 7482,
-      "sha256": "8ce380d1ef6352c7cbcd3a396ba75d66cff47996355ccfa82a3a9510672d7a4c"
+      "bytes": 7755,
+      "sha256": "44b19ae28f609a52ebb2b6253fc7654460d6d05b7d952bce08f5286a67d678ef"
     },
     {
       "id": "file-048086814373a1b6",
@@ -1870,8 +2005,8 @@
       "domain": "opentake-project",
       "kind": "rust-source",
       "material": true,
-      "bytes": 3974,
-      "sha256": "1e35580c67e6681b6f662e621670035636a15506090f18a1fc1a782c1c72b479"
+      "bytes": 47144,
+      "sha256": "40fb5ffc6b4a9c4429a18b43977c357e6776922b572800935bc738255c3d851e"
     },
     {
       "id": "file-23f292ad0d1f748f",
@@ -1879,8 +2014,8 @@
       "domain": "opentake-project",
       "kind": "rust-source",
       "material": true,
-      "bytes": 28,
-      "sha256": "cf0c78e68a295d25e3c77c1ec1a102bc096d6ea4099c655ef9c77b78b5ad522d"
+      "bytes": 53564,
+      "sha256": "6288e09b12ad4e9b55090d22c662024c619c00366f98e297fea85f0ccf083628"
     },
     {
       "id": "file-5502d48ab1da1b22",
@@ -1897,8 +2032,8 @@
       "domain": "opentake-project",
       "kind": "rust-source",
       "material": true,
-      "bytes": 28,
-      "sha256": "cf0c78e68a295d25e3c77c1ec1a102bc096d6ea4099c655ef9c77b78b5ad522d"
+      "bytes": 84972,
+      "sha256": "e1a911839d0f6aa7e5614ede23f07e0ed138aef21c1623e0e9f37afeb1853967"
     },
     {
       "id": "file-b85f7b6d28d86d85",
@@ -1933,8 +2068,8 @@
       "domain": "opentake-project",
       "kind": "rust-source",
       "material": true,
-      "bytes": 1850,
-      "sha256": "cf283499c0cff40935a92419054cdc6dbb8f24628637fd2ea69e643d04308a74"
+      "bytes": 4547,
+      "sha256": "a8158681923042dd813620991e270c747f3b36b569b620536da9e0ba79d9dca0"
     },
     {
       "id": "file-fe797fcbf81fa0a8",
@@ -1942,8 +2077,8 @@
       "domain": "opentake-project",
       "kind": "rust-source",
       "material": true,
-      "bytes": 9286,
-      "sha256": "3c2c368614c9603a18c4f0c0e8955eca92be09fd45bb33160584c3da434526d4"
+      "bytes": 10389,
+      "sha256": "27ddaf1c7d46d7d36d6338d3c6354fd3f2adb6ced6a2b9fc6698542e6132ba97"
     },
     {
       "id": "file-eea7d53b32b5bf2c",
@@ -1951,8 +2086,8 @@
       "domain": "opentake-project",
       "kind": "rust-source",
       "material": true,
-      "bytes": 11106,
-      "sha256": "c15ae393f949d90acf2e46b977872354007a8d5c68278f3c1dc9f5224da42422"
+      "bytes": 18851,
+      "sha256": "96b8718240a6fde4372c5be1be6799033b12f7e9dc0cadaac42723c468d95466"
     },
     {
       "id": "file-bc71245924815035",
@@ -1960,8 +2095,8 @@
       "domain": "opentake-project",
       "kind": "rust-source",
       "material": true,
-      "bytes": 9483,
-      "sha256": "a0652d76bccf15e89e6fd0c0f9e5072fba5d77ed31d4eaf649d344af99769d33"
+      "bytes": 37096,
+      "sha256": "ea27af6004ba1a6719324f07c2fe97d69c0e8037b3316767abb37efcda5b36ba"
     },
     {
       "id": "file-5a2cf4662bdd00b6",
@@ -2185,8 +2320,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 10134,
-      "sha256": "670c3b17f2321d9b4f1f9cdeed22039192622da54c1590f8d114cb9a7e4bb72a"
+      "bytes": 10219,
+      "sha256": "1c005486e0b1115021faf7f5b3234c9d76eeed4ec2f2914942bc5d7ba8c5813c"
     },
     {
       "id": "file-10b457f2fdd4efd9",
@@ -2203,8 +2338,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 6940,
-      "sha256": "dc5d09a08235ec0ee70d2b4d015141519e67975c837ddcb7e87f1057dcc6e1b0"
+      "bytes": 7288,
+      "sha256": "223d7e31896d3afe07e3adbae056cc3ba3c4e11242bf454f004d6d7bbb8a7fbc"
     },
     {
       "id": "file-87758427c64ff1be",
@@ -2212,8 +2347,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 68622,
-      "sha256": "649b1597c0357c663a9e38aa3005bc2f88c4827375985507f7ce29433df1e94b"
+      "bytes": 67681,
+      "sha256": "4c832b63ba2a547a9f47fd842686a3e49a28d1a75227dbd45fd79c0f4cce835d"
     },
     {
       "id": "file-50bf195d30eafab2",
@@ -2230,8 +2365,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 10762,
-      "sha256": "48c6b9c686f37d16777b0b25792f948ddf556f92c43bb35376d1d76af6fa0b44"
+      "bytes": 11384,
+      "sha256": "9ea17fdc7eb1305e57816748367417dad74f406e8a6645df6f9f883e6ee18ba9"
     },
     {
       "id": "file-ef9fcc3cb79eacf5",
@@ -2239,8 +2374,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 18354,
-      "sha256": "d9c1e56a186d05ff7266bbcf533c84fbdc81b075da2b7ca142cc7d249de08a61"
+      "bytes": 18829,
+      "sha256": "923b86b9ac7f3a805a6036a882e9cb0e66882d561485a15d218dcc23562b2304"
     },
     {
       "id": "file-113d5c22cbe456f7",
@@ -2257,8 +2392,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 377035,
-      "sha256": "16fae852b08fd005f24b13d9203c61e65995b5f58a9c3d8683e87ae7553f8682"
+      "bytes": 377543,
+      "sha256": "8294a2bf65b126e79b5ca5718b94e00f57a8e29476bbaaa0071e6ac6e7911b0a"
     },
     {
       "id": "file-8fb895ecdd8c9390",
@@ -2266,8 +2401,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 6830,
-      "sha256": "7856c853a6a7faa75ad1092d87e830a3cbdb57a3bbaae50fbffa7bca6351de0a"
+      "bytes": 7312,
+      "sha256": "5f3b896b523c680c60e98bd9e2ad12f51633fb40a3919756161adf15e12982f5"
     },
     {
       "id": "file-959fb83f8891cb7b",
@@ -2284,8 +2419,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 13805,
-      "sha256": "ab3aa0f41e10b0d308f4e7e1f9f35542f22d93b60d02ede5bda25c3c04e08e22"
+      "bytes": 14480,
+      "sha256": "800f34f7eda762d1de9aa5f59af3d76277ac1b0acef2b3c302634ae5b2a434a0"
     },
     {
       "id": "file-67df688c7efbd94e",
@@ -2293,8 +2428,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 5187,
-      "sha256": "c45322fb5d7fb3855c6e6fa963cd45ae94712d3a1b9462ae0bb8466d67029302"
+      "bytes": 5454,
+      "sha256": "6673877f5003d46bba30f2bf3ebfcc8536d2655b209bec210ecb6b984efa9633"
     },
     {
       "id": "file-e43cc13d10d1eb22",
@@ -2302,8 +2437,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 4169,
-      "sha256": "d7af49ce40bb93d23ad00fccb77577fa3fef3bb477348e8f9d9957f929473546"
+      "bytes": 4235,
+      "sha256": "e723f3ca961c352c7b258acb9d4f074b40d209201245423483f87a7e325c332c"
     },
     {
       "id": "file-028543244a351492",
@@ -2311,8 +2446,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 3476,
-      "sha256": "acf0c3e1f05ed778112b2491d30af973fa65256e06dd2ffe242eeaeb0f112344"
+      "bytes": 3720,
+      "sha256": "ee16125198db3fb1da2dbd9424824918941d19d69b7546295c2b9ee44aa0aa14"
     },
     {
       "id": "file-fa8c17f2d7bf4cdc",
@@ -2338,8 +2473,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 3452,
-      "sha256": "4af601143d9e992cf24163a2e48df51070160506ee87eb0f3df87fc54909abbd"
+      "bytes": 3517,
+      "sha256": "e8ff09adde85b1acf919e597070653132b6dec557adc7b02b6d72ed428ee6550"
     },
     {
       "id": "file-9e856e01ab84687a",
@@ -2356,10 +2491,8 @@
       "domain": "docs",
       "kind": "json",
       "material": true,
-      "bytes": null,
-      "sha256": null,
-      "hashStatus": "deterministic-generated-output",
-      "reason": "content is regenerated and compared byte-for-byte by the all-scope verifier after inventory generation"
+      "bytes": 2902659,
+      "sha256": "522dfb873cbadca54d624a0512179938f72a2142d992f7af5bb2ae2e57c86edb"
     },
     {
       "id": "file-e8e6978cfbfaac20",
@@ -2367,10 +2500,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": null,
-      "sha256": null,
-      "hashStatus": "deterministic-generated-output",
-      "reason": "content is regenerated and compared byte-for-byte by the all-scope verifier after inventory generation"
+      "bytes": 1485,
+      "sha256": "9f301906f3cee26d3c8633ad31efb5930a07316477fd9f76ef9b613de18aa36c"
     },
     {
       "id": "file-591150a2a9d7497f",
@@ -2432,10 +2563,8 @@
       "domain": "docs",
       "kind": "json",
       "material": true,
-      "bytes": null,
-      "sha256": null,
-      "hashStatus": "deterministic-generated-output",
-      "reason": "content is regenerated and compared byte-for-byte by the all-scope verifier after inventory generation"
+      "bytes": 3535,
+      "sha256": "4c15c427ff32ad8015eeba15eb12b4ec48a1feae5eb60337990a7f75e08a272c"
     },
     {
       "id": "file-1619a9ed4ed640a6",
@@ -2471,7 +2600,7 @@
       "kind": "markdown",
       "material": true,
       "bytes": 186047,
-      "sha256": "fecd05aa78c270841077ad9acf6b8108b39dc5972187d522c1aa32db25a45d75"
+      "sha256": "b32dcb48df8e4762bb3ad5fc06b7d7966243a7d3435131560d4e3d801a981640"
     },
     {
       "id": "file-860727d8859464ce",
@@ -2488,8 +2617,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 528917,
-      "sha256": "0010c10967e999bacc30f47ed853da7cb95528146dff7e2785bd6002ce8862c7"
+      "bytes": 532311,
+      "sha256": "f1f9d1a3eaed05080baef20fca0671d8bb407f6616bd25ef2fd90e410ee4add6"
     },
     {
       "id": "file-1cd53949bf9617bb",
@@ -2515,8 +2644,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 92792,
-      "sha256": "78fdf5d9b90c89cb5d58e99d8bd0015ce55845f8b33ea8a5b6b3438cb7f97470"
+      "bytes": 100766,
+      "sha256": "f0f0678b6270ccb94b966e3583c101e517e0785dd82060a2acf9babccc6d6ab9"
     },
     {
       "id": "file-9d4338de53f376c7",
@@ -2524,8 +2653,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 104267,
-      "sha256": "654eb06308d2bceffc489c53737ee4fcafe0247cc972e24578ac13d268a68c04"
+      "bytes": 112807,
+      "sha256": "a19ac04e79ecb88d48cbf33f5d8a9f4116a2b23b512e2e7c4a24b4c4e369bd93"
     },
     {
       "id": "file-3f35eb757d5d95ba",
@@ -2560,8 +2689,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 160071,
-      "sha256": "83082e2ed81f6e39f439dee39f21bf7edb3e8489936963362f213cad28634ba3"
+      "bytes": 165222,
+      "sha256": "8f31d1b22053b3f3332778c0913aa3ff1785317b5d2d8b9c1645472cef90c4dd"
     },
     {
       "id": "file-55b6b718c705afb7",
@@ -2578,8 +2707,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 378437,
-      "sha256": "097592c3db83247c197aea642c06a5bf0d41e21d34452bd79084fd455fc53ce5"
+      "bytes": 378928,
+      "sha256": "bc0d9dff57f3285a648d42606c7e8ce1601309401b4fd55ee0db3ae587924916"
     },
     {
       "id": "file-bb23f423d5ac7f25",
@@ -2683,6 +2812,15 @@
       "sha256": "32a9bfa25bc5381d12a70c0dedd6bbe4daab5188d0d3f32be75620e7a9fe3e21"
     },
     {
+      "id": "file-e3db0e79bd7445ac",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/five-panel-layout-real-device-2026-07-31.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 4000,
+      "sha256": "f22d2512a6b2070bbc33c325cc4d386fab816c330fa6519d7162e9d664128719"
+    },
+    {
       "id": "file-7ea00bc6a5b00bcb",
       "path": "docs/audit/2026-07-14/runtime-artifacts/automated/full-suite-process.txt",
       "domain": "docs",
@@ -2690,6 +2828,114 @@
       "material": true,
       "bytes": 31772,
       "sha256": "458f74c7bc9f923b92c6175e07ae9d76e190e6cbc0e48a59a250fb0d45338af4"
+    },
+    {
+      "id": "file-c885ea57086ec985",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/generation-finalization-2026-07-29.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 5612,
+      "sha256": "dad4f8d6e83bec8ff3b7470d0099fd7d02dbc0f7332ccf959308b558bfddb4f8"
+    },
+    {
+      "id": "file-5100a64989c60b5b",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/home-new-project-real-device-2026-07-31.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 4498,
+      "sha256": "85c36937c847659c1385abc4faed113fb7a55731537494cb391ec487d3569daa"
+    },
+    {
+      "id": "file-73afff5d91e378d7",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/home-open-project-real-device-2026-07-30.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 3667,
+      "sha256": "7e01cae7c67906fa2f6cfc97b9e08953b5458ed60db334a21ff9be6ac085522c"
+    },
+    {
+      "id": "file-e88d648441e169a7",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/home-secondary-controls-real-device-2026-07-30.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 1884,
+      "sha256": "7938f27967d81e83764d70d27d8d3ed4a629de285617d2e6086328402fe36a2d"
+    },
+    {
+      "id": "file-eb894f034460bde2",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/interchange-export-real-device-2026-07-30.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 5455,
+      "sha256": "7c4970ae750655ac15c6c04f51d507ed64a84112fc24322cb046b452f50ac67d"
+    },
+    {
+      "id": "file-969b5b9ef06a22dc",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/recent-project-card-real-device-2026-07-30.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 2279,
+      "sha256": "1509612c43ba4983db4302af0c525f0e5ccc6211d49e9c4e4ac1ca0502772571"
+    },
+    {
+      "id": "file-b1b835e0d75c41f0",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/schema-safe-persistence-real-device-2026-07-31.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 2798,
+      "sha256": "81b48176ccde05df7c9631cfd5575f7a75d42e100213ddcaeb057e996eb69111"
+    },
+    {
+      "id": "file-eb77a9140aca8c0d",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/subtitle-export-real-device-2026-07-30.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 3852,
+      "sha256": "cdab73a5ed08eef986a9a41d4283fa140f59746a9555f3135043e622861e3feb"
+    },
+    {
+      "id": "file-ce49c6bfc7ee6a9b",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/talking-head-cleanup-2026-07-29.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 7783,
+      "sha256": "a657183bedd399b7dc282e730c9f4f4bb7246457c45fb0c6fb267ad33c2329c0"
+    },
+    {
+      "id": "file-3fc87d6771511b2b",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/titlebar-controls-real-device-2026-07-30.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 2944,
+      "sha256": "9b5a3da919a3fe06268a7a4e7be409d0843aeb8a436c71734dd9d4ac80890dcd"
+    },
+    {
+      "id": "file-d7d1d7e9d40d98b1",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/view-menu-contract-real-device-2026-07-31.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 7809,
+      "sha256": "cf0403157312b2c2796156e85427665eaafc2f48a5b79db8640f16bb9f2668ef"
+    },
+    {
+      "id": "file-6ff7841a9c971a60",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/view-menu-real-device-2026-07-30.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 2229,
+      "sha256": "97ecbc4f02dfb6915178b251e52d1c838ecc5f4317e5d3947c81a499f0d6c936"
     },
     {
       "id": "file-8d0ec76268da0668",
@@ -3093,8 +3339,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 10069,
-      "sha256": "6c44b4cda515a10694ad282fe40a408f7ce1bb7cc9c2d3eb0f0711d38d201201"
+      "bytes": 10217,
+      "sha256": "7a29ca4230a44fcba05e5f4a2a38547d0512c0030c2a2405f5349ef4eff59dd3"
     },
     {
       "id": "file-6e79ea78fc564798",
@@ -3102,8 +3348,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 80834,
-      "sha256": "d994c216df3f66fcc3ce0ac997331dfffb4c74f0dc84b35dd599a1ba8877d2ab"
+      "bytes": 86518,
+      "sha256": "0709c5f5041ad9448ffd9de83b598721a9c629c340f75b63d8c9a797fb6b6b8b"
     },
     {
       "id": "file-cfd18ced3f48a451",
@@ -3138,8 +3384,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 8779,
-      "sha256": "e317b63a966cfb2924454c9204fc959a12b163c2bce39706635351849a9340f4"
+      "bytes": 9266,
+      "sha256": "dbb941d2c5b2d41a382e6d699136bfe3acfc0077f0f31ceb265e07f3c89a31d8"
     },
     {
       "id": "file-36de69af75ca13ae",
@@ -3147,8 +3393,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 4765,
-      "sha256": "d02358946647ab2c39e60ca65198a365d6bc419d97e38f8174d72ca6111f0ccb"
+      "bytes": 4927,
+      "sha256": "fb298dcf4f38b21e4342cd03b3f0c2930b8f7d5844dc302394c72d60b70de040"
     },
     {
       "id": "file-6ee449d7112fb9f0",
@@ -3183,8 +3429,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 17726,
-      "sha256": "6504f6519e4aac219f249e8e63f9ecdaa5e7b6fd0f4ed078999fe06b3e18b0f7"
+      "bytes": 18063,
+      "sha256": "3c3f4b1a8137279f683ea9618a36da1849747b85baa0da9313fc4c5e9209d79d"
     },
     {
       "id": "file-4ea218993d069cb2",
@@ -3192,8 +3438,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 44656,
-      "sha256": "b277ff6c963445db64146ff80472c5cfe18a864878a854410dce93f7a04495cb"
+      "bytes": 45683,
+      "sha256": "ba6704f020cd34ae8841b62b8bb07e2c56b7c37b5f6e10e6698445a94d396974"
     },
     {
       "id": "file-1af20158beda1e67",
@@ -3201,8 +3447,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 8498,
-      "sha256": "f2a739caa9badca74de8a5add35c9e9bd4bdf81f6a2dec2fd63bf44505c220db"
+      "bytes": 9155,
+      "sha256": "d769c6c5197e8aeed15b3faead36e9f297a4dbf50dcbe300c1d6056a721c1524"
     },
     {
       "id": "file-6bdb79ad3ef2746f",
@@ -3228,8 +3474,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 5140,
-      "sha256": "4e650bc1848f36c1c59157622eb454a0275fcde262c995ff527b854e0f0f1f7d"
+      "bytes": 5377,
+      "sha256": "ad6ba4bcdfa59d563a4c1ac4b121e145d62c257b4df1ffd4abf3def9f0746746"
     },
     {
       "id": "file-43ff2815bbda63d1",
@@ -3399,8 +3645,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 71677,
-      "sha256": "d660d9ca8bd3e78b34dc330dadda92f589e73d0603f1dd356b36b2e457bdf835"
+      "bytes": 72012,
+      "sha256": "9c52274ae5e614af29fde8c40d1b6fd52db0d944fb9184926d4e5df9ece5e553"
     },
     {
       "id": "file-ad3a63f0cbab340c",
@@ -3570,8 +3816,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 9489,
-      "sha256": "ab3efd126a63e3ec7caba4cd5fead8bc686fb17d6d954533d818eb3224e9cb48"
+      "bytes": 9549,
+      "sha256": "d75c125d327871150bdba3f73c0deb573058faff012d58eebf689e5992ce5b25"
     },
     {
       "id": "file-859acbc80102a569",
@@ -3579,8 +3825,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 6679,
-      "sha256": "c226ad4ec80cd1c48ffae8496630699d799151678861375bba525c858b550c5c"
+      "bytes": 7143,
+      "sha256": "67ef8a564695bae527b0631b9de97a2c7f1d31f7c63a1ae6f5bd3558bca96661"
     },
     {
       "id": "file-5211d3f15216e422",
@@ -3606,8 +3852,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 8695,
-      "sha256": "e7d23207d7fdb738087f100b164c12cb258b72d749c51dd88fb307202b4b319e"
+      "bytes": 8788,
+      "sha256": "f8723bf6d6e3d1fe6f501856be5c512828b0072ea884ca56444e9646c8de7ec4"
     },
     {
       "id": "file-b49e100b23dac8a3",
@@ -3831,8 +4077,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 93013,
-      "sha256": "9b545b417dc58a4bf710911aeb6fdba6bf32720d4f33419d88430cb424a63111"
+      "bytes": 93662,
+      "sha256": "d0584b9914d8a98eb554c93f8740e81c20dcc94b27c14e7041c5a4caa77d70fd"
     },
     {
       "id": "file-d2c0e61a0d7f9fa2",
@@ -4101,8 +4347,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 8919,
-      "sha256": "45951c85a4ddf6f9bb1e5a96fdfc677ea6b8350e8b2d1669a1b08db79db91487"
+      "bytes": 9211,
+      "sha256": "76bf71c78f8ba77ea28a905d0dd21f95e05734c39d5a73fa23bccaac9d911aeb"
     },
     {
       "id": "file-d145e72dcdfaff35",
@@ -4110,8 +4356,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 13108,
-      "sha256": "da443d479626f4a9c1504ffc190b7a7752763e877c135d7f4571bf0d2d0d2621"
+      "bytes": 14205,
+      "sha256": "be777b6fab9ca32a40821eaf1d0aad37ff1c7c13b62cc99d5e7707bb73811e5c"
     },
     {
       "id": "file-ce82f13f0b6f2e2d",
@@ -4128,8 +4374,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 7598,
-      "sha256": "331e34581082811a0b9db2d7bc0059f888b0a73c4517350805496ccbede62ea9"
+      "bytes": 8893,
+      "sha256": "db3b5b4a0336a9c4995d6ea885d2df2762925decfd504249e460946f8b132b5f"
     },
     {
       "id": "file-9aafdc64ce09390d",
@@ -4191,8 +4437,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 4613,
-      "sha256": "1bfb31a1c62ffd598f155abce75a8edf3d9c6f59b248bcb74afe9e6b670347ac"
+      "bytes": 3850,
+      "sha256": "5b481868925c04386aa6663375438cf053034637536fdcaca7a7b9364c3df54c"
     },
     {
       "id": "file-be2fb85c84fd3ddc",
@@ -4200,8 +4446,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 12450,
-      "sha256": "50dc3691d26ef7fc4586c006f4861560fde9cbe9551dbb740b46b7069a9346f8"
+      "bytes": 5910,
+      "sha256": "ab3192a88e5def8f0527edf29364d0c47d026d1d36c59cadd69d1c4549b8a944"
     },
     {
       "id": "file-a86f23f3bc6af6af",
@@ -4227,8 +4473,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 4743,
-      "sha256": "22acbc3e2e53d0533ccc7d8fbbca15507806bdb54499884ee85524aba69d3407"
+      "bytes": 10646,
+      "sha256": "eb2444e167806a412ded18d4df95f0dc41d72445cc876cc144f9e356eb522265"
     },
     {
       "id": "file-d11e8042e30d85ff",
@@ -4308,8 +4554,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 7486,
-      "sha256": "18ce1457fbe91a29af46817a4bfb2622e96836ca3206bec0aec3cb0ddd97a82d"
+      "bytes": 8135,
+      "sha256": "c05de4f65e3a4f5b0945b5b70c04db3372a491a3f7ed5ce877fad2815dd435e7"
     },
     {
       "id": "file-1dfc0f776a5b444b",
@@ -4317,8 +4563,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 8932,
-      "sha256": "1ad41dab60433f3681d5c16b8fcf83eafb8fc17b7a7b701bca72c30d0f3e4ac9"
+      "bytes": 10603,
+      "sha256": "6eb9c81147c6143a82a49902e7a611e211c61a8e1fe87c5245f338e7c6ab2290"
     },
     {
       "id": "file-8e724e1c1c6c87de",
@@ -4600,13 +4846,22 @@
       "sha256": "511056be3b3dd9ebecd1ea83f66e9b57b20d18f496605af2b069aaf078ce1b64"
     },
     {
+      "id": "file-8fe6485efceaebea",
+      "path": "docs/superpowers/plans/2026-07-18-long-media-playback-handoff.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 11432,
+      "sha256": "f9a9457707a334a25e3338f101d3464c5ab1ea00d9973858054553bc13f8064c"
+    },
+    {
       "id": "file-e5d42b2a62372214",
       "path": "docs/superpowers/plans/c1b/2026-07-12-c1b-common-unix-normative.md",
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 147928,
-      "sha256": "e6b4ca142cf8ed4c4ce682a5638f352d8a1bd97d1f714557e849ad08631739c8"
+      "bytes": 158012,
+      "sha256": "6afe42ab56f9295ec15d8b3f07bebc1a3fae9a772d5d3b6ed6bd36a8403e84f5"
     },
     {
       "id": "file-7ddb729677321284",
@@ -4686,8 +4941,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 29482,
-      "sha256": "8b689173989513e923997f1666ed7d6468638912f23462a8797cdf62f6694d0c"
+      "bytes": 30119,
+      "sha256": "bd7687460f54cc7a440c80c6745a4f527dcdaf4f58058727cd4a120431fd9069"
     },
     {
       "id": "file-6a6a9091058f9ed3",
@@ -4735,13 +4990,85 @@
       "sha256": "a6a0bbd29ffaa8182dc22d1d9149709f1091e47df40ed96eb8a78a711c66a4ce"
     },
     {
+      "id": "file-406b1de1dbb0e467",
+      "path": "scripts/c1b-evidence-policy.json",
+      "domain": "repository",
+      "kind": "json",
+      "material": true,
+      "bytes": 1639,
+      "sha256": "8bab67a40c0c4c68e4af484258698ef7f5b5b62223355923c133ee1068dad5c2"
+    },
+    {
+      "id": "file-92b244dd280fe9ba",
+      "path": "scripts/check_windows_product_ci.py",
+      "domain": "repository",
+      "kind": "py",
+      "material": true,
+      "bytes": 8440,
+      "sha256": "2be095bf7c896fa8345e8eb59e4db1317bd14b50c56ef001a0284305a660d574"
+    },
+    {
+      "id": "file-b507e76382a66cfa",
+      "path": "scripts/run-c1b-windows-red.ps1",
+      "domain": "repository",
+      "kind": "ps1",
+      "material": true,
+      "bytes": 6551,
+      "sha256": "f3579b3b17312daa16f0c1a07a2179263576fab064c188204e4a474023a39f81"
+    },
+    {
+      "id": "file-db6b5d0dcebd41d9",
+      "path": "scripts/test_check_windows_product_ci.py",
+      "domain": "repository",
+      "kind": "py",
+      "material": true,
+      "bytes": 4198,
+      "sha256": "13e0c7a6703244fc068e997fa4ba5b05b161165cb714cd0b3f8c2b4dbb33d225"
+    },
+    {
+      "id": "file-83e5630c0e7aaafc",
+      "path": "scripts/tests/validate-c1b-ci-test.rb",
+      "domain": "repository",
+      "kind": "rb",
+      "material": true,
+      "bytes": 8310,
+      "sha256": "3f3d427e0c86f713a7fcaba763cc448452bd8885a3d56f2cc972f6049ba082b6"
+    },
+    {
+      "id": "file-bfcb1cd9bc3e3d66",
+      "path": "scripts/tests/validate-c1b-evidence-test.rb",
+      "domain": "repository",
+      "kind": "rb",
+      "material": true,
+      "bytes": 16604,
+      "sha256": "9761a46ca0533eb68228bdae3d8226baf8f8074ac28a85f63690470e301fa46f"
+    },
+    {
+      "id": "file-bfe40f47416289d4",
+      "path": "scripts/validate-c1b-ci.rb",
+      "domain": "repository",
+      "kind": "rb",
+      "material": true,
+      "bytes": 25546,
+      "sha256": "44ababedff2147ca19aa21029243e91056f10c3d1f1a76ec412529dd93f1950c"
+    },
+    {
+      "id": "file-b74e067ea1583cd8",
+      "path": "scripts/validate-c1b-evidence.rb",
+      "domain": "repository",
+      "kind": "rb",
+      "material": true,
+      "bytes": 25164,
+      "sha256": "5fcb9279a0c2804fe36c0ea7aed24174697d7d3d3e80be38255d5e1b0adca214"
+    },
+    {
       "id": "file-fe4c6a80a21e8133",
       "path": "src-tauri/Cargo.toml",
       "domain": "src-tauri",
       "kind": "toml",
       "material": true,
-      "bytes": 5052,
-      "sha256": "9c5cc87125dd3468d544d401e8aaf0d83664252cfa8ff1b3e55a090791674d31"
+      "bytes": 5019,
+      "sha256": "750762926950f670cf0eeca6ddcf3f5880954bd89b706bbf4ccc7b054daccc13"
     },
     {
       "id": "file-f18b5d0480de73d6",
@@ -4767,8 +5094,8 @@
       "domain": "src-tauri",
       "kind": "json",
       "material": true,
-      "bytes": 382,
-      "sha256": "dfb2175923b3755374f6e346b16372e669f67f06dd9c7131ef8eacc8cfca4ef6"
+      "bytes": 422,
+      "sha256": "8617455e2f5abf707cfb0ffd07ded32a4054d8c1f9395f9e74d0c439e71ae95d"
     },
     {
       "id": "file-f59990cf7bab6341",
@@ -5262,8 +5589,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 41295,
-      "sha256": "4c47ad709160067ca18c61184ed3d1d4563ccca7e1d8625dd8f3c1f6854798d0"
+      "bytes": 41738,
+      "sha256": "3045c88919f136425137d39a0a2e899842e718dc767763372ce9fee10def0305"
     },
     {
       "id": "file-e7f96b59876dbd63",
@@ -5271,8 +5598,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 20831,
-      "sha256": "0bedade0213039c70e0d72fe17386f4b43bb97bd07424baaf65ef223c54e85c6"
+      "bytes": 22745,
+      "sha256": "4c597020fa49b74d45cb62e0561fc3c6490d91838feb046b3c6b63b6cf05e497"
     },
     {
       "id": "file-5e85f18652484a37",
@@ -5280,8 +5607,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 10056,
-      "sha256": "54cc5ab9849b9b54a96eed63da6335ebcae43a0afe42fd80119a4b14c8c1f208"
+      "bytes": 40779,
+      "sha256": "82759d3171a128ac59448f5564c02fc4e9b06bbf4e6399454607fb32b7857a0b"
     },
     {
       "id": "file-59f7096c7cd88d5d",
@@ -5289,8 +5616,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 68089,
-      "sha256": "007588fa90f951f23945d4a28a5a27d090b77dc8692fb088ac57e6dbffab86e1"
+      "bytes": 81358,
+      "sha256": "425db6ec1ba7b20d2d783de93dcc970128fdcf4381883d0cb70260085d8ae357"
     },
     {
       "id": "file-2217a1d7692b2f2b",
@@ -5298,8 +5625,17 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 110692,
-      "sha256": "4340ea3fc1563d83122a622e5ea307b9b6b9c97418d378379ae78283a3e1a10f"
+      "bytes": 110999,
+      "sha256": "091e628dc4f23724ca48dc1ab6f6b62c81b59fba1100c1ef29e5fe3065d2b183"
+    },
+    {
+      "id": "file-f9fc2f27bf264d59",
+      "path": "src-tauri/src/generation.rs",
+      "domain": "src-tauri",
+      "kind": "rust-source",
+      "material": true,
+      "bytes": 111462,
+      "sha256": "1b93b03d0a04750c4f38f6656f94a4f1b174f64e9b007af0b44a200eea5bd5d8"
     },
     {
       "id": "file-3b21d6462693c8f2",
@@ -5316,8 +5652,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 14877,
-      "sha256": "1183a88ab90f26afca08200e2a3415e7326c55dc52a49940c078db75ad8f6df7"
+      "bytes": 16753,
+      "sha256": "912e857a13895d82f8933c01cf090504652f021ca0fde377acd0c4b38a263d75"
     },
     {
       "id": "file-18c6c092770d0fbe",
@@ -5325,8 +5661,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 71475,
-      "sha256": "ff64d2fc02180e8e2284b8e179390e534fd489b636f3fcda5e1881d59dcc961c"
+      "bytes": 72888,
+      "sha256": "51f72d0af40fce584a042fd21add477f863ee6c3cc9e1a03f94f7dfd45f8e08c"
     },
     {
       "id": "file-2f5e0a90d4195e99",
@@ -5343,8 +5679,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 48986,
-      "sha256": "6d7338deb75219ee09df5f0eff489c45bddc71adaf5b98711a6626bda32005c1"
+      "bytes": 106525,
+      "sha256": "452ecc644f03fd26a0e07a2e1e34a0f1e7c2a1b941e2400807fd8121f397b8f2"
     },
     {
       "id": "file-50631421194847f6",
@@ -5352,8 +5688,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 165720,
-      "sha256": "0876cf1ebb2305f1d94612c890adc4e0432d5680953fba2392762d92655dc9b4"
+      "bytes": 181211,
+      "sha256": "fc3fa56f07641bba90504ca4e41184adeae640d461afda3279cde5383754712f"
     },
     {
       "id": "file-00fccdeb612425bd",
@@ -5361,8 +5697,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 24102,
-      "sha256": "21840437fb31d1e2c24cb10547de4c31f864c14ba62527ecaa5dd94bfa68aca1"
+      "bytes": 32333,
+      "sha256": "cd385b477676a0fe11eb6c3c2ae45a018d2e498c41e9c82708f6de7ef4c4fc8d"
     },
     {
       "id": "file-999847d88a2d0b9a",
@@ -5370,8 +5706,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 54707,
-      "sha256": "71b437594257f32919a77f18239f17cdfa6ba2aad7683f75d59a8b09d849719b"
+      "bytes": 57652,
+      "sha256": "4e8486d97276c666e6efc682b2090046fefef07cd451731cccf960d06d5000db"
     },
     {
       "id": "file-66f953856cccc888",
@@ -5379,8 +5715,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 67155,
-      "sha256": "ae4ce868f394f44e2c7418baeb7bad2d33abbf10c11406ddac240fa103019e05"
+      "bytes": 70089,
+      "sha256": "f04f6c17e2f8e34f3fd9d8cd485e56e39f20db2d7c5aa14453ee241b8e4d110d"
     },
     {
       "id": "file-2598bce61e9e2dfc",
@@ -5388,8 +5724,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 27395,
-      "sha256": "ffd6876f5d90bd460c74faecfecf09f06d0c0f1f87b7022253b772507490abe4"
+      "bytes": 30854,
+      "sha256": "d17b2024e15184abce32c960855c1016c9b71bb9d18cac085c17212f094de63b"
     },
     {
       "id": "file-5d4e1d555d02fcc7",
@@ -5442,8 +5778,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 33530,
-      "sha256": "27d02b643ae5f6b9efd1b4bde642ce2121ec6f3d632f4ab8113b5f7d009f3d52"
+      "bytes": 41711,
+      "sha256": "6f321af99a4298683ff51044a2709cb3ce5d651796cfcd248e1fc9fdb6fc725e"
     },
     {
       "id": "file-ddf9ce8b65978bce",
@@ -5451,8 +5787,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 31768,
-      "sha256": "9538fa801add2d18884bb487e30617dd50197e0b0bb5448d2af3ed8707676394"
+      "bytes": 32050,
+      "sha256": "a1704f73d7411bdae185cf8172f24c962314bccc4a0a649285107d096388c366"
     },
     {
       "id": "file-a6c368a30424c97c",
@@ -5460,8 +5796,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 5198,
-      "sha256": "b21373f474152f36d5437a34e5af88446c421cd17642f7304bd438554110eef5"
+      "bytes": 5388,
+      "sha256": "abc7729d0a0c1b21ce39af5608ed39d3924b557d3a34369a8d0259a9f2e40637"
     },
     {
       "id": "file-57080efd4faf1903",
@@ -5469,8 +5805,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 14408,
-      "sha256": "d0b654ab6a4af4a8f9a624db087a71d8b307e12bc2fe990857144813c85b2f7f"
+      "bytes": 14796,
+      "sha256": "48635db15628e4cc2d49460789cd2280a59fdb6959a859838aed4508243f66dc"
     },
     {
       "id": "file-fa09f1dac39604a7",
@@ -5523,8 +5859,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 22577,
-      "sha256": "98853db5ab46be4de90cccb6b08afda22c356c515651f32024810385f9a7e770"
+      "bytes": 22586,
+      "sha256": "4b2d5b3c3f159cf90b86e79c7aff37124c80f450ea69ba639746dbbf814c5bd8"
     },
     {
       "id": "file-52d189b1203fc821",
@@ -5532,8 +5868,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 12702,
-      "sha256": "d909cc571692faf1e02dccab0625cca212c74bf509c188239a37e57f6a1b8080"
+      "bytes": 16978,
+      "sha256": "15cf5d7efd3d6c1f7fb79e0d663ae63dd1f40ec081f6b466672e22e0c362db22"
     },
     {
       "id": "file-021489b54faed6f9",
@@ -5613,8 +5949,8 @@
       "domain": "web",
       "kind": "json",
       "material": true,
-      "bytes": 703,
-      "sha256": "44b8e2d0d82580a6f243b3f903d730a989620b59a55383dd3142e20c450b5ee1"
+      "bytes": 729,
+      "sha256": "25294db641337caff6ae358337915ffffa6124726d3cd7000d4f49d752f21233"
     },
     {
       "id": "file-f11bfba22b3604b3",
@@ -5622,8 +5958,8 @@
       "domain": "web",
       "kind": "yaml",
       "material": true,
-      "bytes": 35923,
-      "sha256": "2ac19dc2da235d2348a7fae9c9b577e8f1ed4856795e5e324ddc66c87f044dfc"
+      "bytes": 35989,
+      "sha256": "9b19bf159f1c706d87ecb22d4ea3253694e58ed4a9218b8b4edba4a79a3c5b58"
     },
     {
       "id": "file-4829df35b6769af4",
@@ -5640,8 +5976,17 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 4049,
-      "sha256": "2116f9c1b6164b0ceef1fd8192a35ef48630bfec17a3fa753d66ea1978ff916c"
+      "bytes": 4150,
+      "sha256": "635b256e45f1aeb04e04f95f0b64d7c8e34d3ca819e4cc7bb4e570ae9172e4f7"
+    },
+    {
+      "id": "file-66c4f3d81c7cc0d6",
+      "path": "web/src/components/agent/AgentPanel.persistence.test.tsx",
+      "domain": "web",
+      "kind": "tsx-source",
+      "material": true,
+      "bytes": 13265,
+      "sha256": "b2358987521a66c4e4bf77708ee11ba7cdeafe70bcd4c23c05d5192d13683f4c"
     },
     {
       "id": "file-01475de413560f94",
@@ -5649,8 +5994,17 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 12811,
-      "sha256": "2ff15bea101796ddcc29987e99f537eb69a4166b70a6f575a70405ad9938eba8"
+      "bytes": 22518,
+      "sha256": "9810cac091fbb3920aba774f26b05e7eba66bc8e5f58bb9837474663edc300ef"
+    },
+    {
+      "id": "file-71317cb158cfdd21",
+      "path": "web/src/components/home/HomeView.interaction.test.tsx",
+      "domain": "web",
+      "kind": "tsx-source",
+      "material": true,
+      "bytes": 13333,
+      "sha256": "7fe21609498c0cbf8d0a7cb559f3ef698bc9563063bfacc62270367a48d1d223"
     },
     {
       "id": "file-0bae1db2d44e11b0",
@@ -5658,8 +6012,8 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 15348,
-      "sha256": "27fdd26cc39b6811b21d1449ce724e679c19559029ff64e8ed497153bba9a552"
+      "bytes": 18420,
+      "sha256": "98f210c8e89c0dc815f7647e26d945e2326d5310eb4ffb599c678d6b9b6966d9"
     },
     {
       "id": "file-0d2496801df2e6df",
@@ -5667,8 +6021,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 4379,
-      "sha256": "b6a40f7822e4fa1f48adc431abad75a2ef2fd0a0d92da69dd007a7dd1e5e3e7e"
+      "bytes": 4403,
+      "sha256": "055d17ec5adfbfc3d025981930d50fcd81fed45e38e9c996fe95db6738e0d6bc"
     },
     {
       "id": "file-675291e4c2699421",
@@ -5766,8 +6120,8 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 7684,
-      "sha256": "23aeceac7ece7f85dbb12658c26443c12aaeda6068e7072fa8a004888a17035b"
+      "bytes": 9677,
+      "sha256": "ef6cb8021989af9169775bdc3f804180b78925c0312ae483e7ba5f6b14a611fc"
     },
     {
       "id": "file-dcf82e6012ef7453",
@@ -5775,8 +6129,8 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 41613,
-      "sha256": "7b078bc0c59f8edd84c440282815200c185dd07cabf3f6b289e4eddb20f18724"
+      "bytes": 46761,
+      "sha256": "f82ebd35324ed6af647042f49197593ff171296da3c96fac1fd62cafc457a5d7"
     },
     {
       "id": "file-e90b04dae96268a8",
@@ -5784,8 +6138,8 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 20516,
-      "sha256": "eee013fdeddc9b3df20fbc6dc3a073070ebbb0ddea549dd3943405ec231df1aa"
+      "bytes": 21322,
+      "sha256": "deca4f69b193b50c973d7897be4bca5492bb069a0f074f32843aad0ec3a0ec87"
     },
     {
       "id": "file-4c2341f1cd34504c",
@@ -5838,8 +6192,8 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 10945,
-      "sha256": "95915ae0bec0ccbd031c2d474dde1b3025bcec29195d7e2d569927a0df45682b"
+      "bytes": 13595,
+      "sha256": "70389716cfa093417cffcd7dac88d31d905d8b806bcfd055a77ff04030e8fda5"
     },
     {
       "id": "file-5b23ea46f33052b0",
@@ -5847,8 +6201,17 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 38228,
-      "sha256": "c4c037b5ae2315ce19c97a22bc92cd2971379b47b7852ebdd883dc0b28b8ed3e"
+      "bytes": 40554,
+      "sha256": "38c6d4bc78d1d843e3cb9cd05dff273acd297dd03d3cda0280247a39cf8f59eb"
+    },
+    {
+      "id": "file-2da2e6e91da15cdc",
+      "path": "web/src/components/preview/RustFrameBuffer.dom.test.tsx",
+      "domain": "web",
+      "kind": "tsx-source",
+      "material": true,
+      "bytes": 14596,
+      "sha256": "9cbb5d9fc884a15092651a40be87e874333185822409138224c5de65f1c75d5a"
     },
     {
       "id": "file-af4faf0757db4b51",
@@ -5856,8 +6219,17 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 8434,
-      "sha256": "07761eb1ae27be2bd586d024ce099e4489bb769a065759e071db089ef73b1e5c"
+      "bytes": 16388,
+      "sha256": "4c0989f0cffdafd4f79a4fefd8afe3811d6a3fdd2f5cc376d08576ca014fec1d"
+    },
+    {
+      "id": "file-f4ffde8f268bfa02",
+      "path": "web/src/components/preview/TimelinePlaybackLayer.dom.test.tsx",
+      "domain": "web",
+      "kind": "tsx-source",
+      "material": true,
+      "bytes": 2784,
+      "sha256": "e7af08ef3a70769df2ba86a3c87392bc4f89b8c0a6659d057200a8caaaede8ab"
     },
     {
       "id": "file-b1478d286a6756e8",
@@ -5865,8 +6237,8 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 5191,
-      "sha256": "f7a9561bc969035ebfcbda6faf06e85c19c6be331deab094da274a5c4fccb8e2"
+      "bytes": 5340,
+      "sha256": "adab2780497cfd9518416eca8ff86d06b2a39a5b890857e0b8360850070f9122"
     },
     {
       "id": "file-ebd6b5d5a4e08f81",
@@ -5910,8 +6282,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 4505,
-      "sha256": "e61679cf93b749f36bc549985bf0a4cab76b4c9b4762122797cfde0515956f46"
+      "bytes": 5325,
+      "sha256": "de133341185184a5a91942525e008ecb858c33f7a1427e7a72d6148d0a93bc52"
     },
     {
       "id": "file-01a8be8b66b08d08",
@@ -5919,8 +6291,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 7429,
-      "sha256": "0586c156e4bfb875d9483d71edd60049a6d487cc24060e32a8b9964097649579"
+      "bytes": 7601,
+      "sha256": "a119588ce2837a658c1b6356d8bdd1234aee67283985f87397afbb42f1764c85"
     },
     {
       "id": "file-a2b23839b3415fb1",
@@ -5928,8 +6300,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 6935,
-      "sha256": "e00baf4e60ef467edd26ee05f9e4d900886b24d4260c3d28df968522fdd37cd2"
+      "bytes": 9003,
+      "sha256": "403a49d23a20f49ca8ad06f4bd8f38025e8de032c85ff0bb53f5ac5f5c219612"
     },
     {
       "id": "file-6a3175a254123cc7",
@@ -5937,8 +6309,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 3306,
-      "sha256": "9475838ba54cd3125a7c0479d83e78d9eee4e746208f17b2efe45890e98fee80"
+      "bytes": 4654,
+      "sha256": "034c010fca8995450296c77559690821ae296394d8d5c03278f61dfb19aa14c3"
     },
     {
       "id": "file-999803a8e4df7e07",
@@ -5946,8 +6318,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 19099,
-      "sha256": "a86c593e0c8b72cca88fe053a22134c66985beab49ee7a21ac624db2551a3bdd"
+      "bytes": 19932,
+      "sha256": "572bd34285e66e40bc1e3c2a37ba39366edf1d8446c2fd62fd6905700dd06f48"
     },
     {
       "id": "file-95f404ec51f737b4",
@@ -5955,8 +6327,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 23708,
-      "sha256": "059f32da90bab89facebff5129a1c1e5dc0b514457b6ed801d9e860c47a16e45"
+      "bytes": 24689,
+      "sha256": "346193ea66535ac40a617c6dc1829029d2925d10a75b4aded6d8da4474e994b9"
     },
     {
       "id": "file-a7497777dc16c9e9",
@@ -6013,13 +6385,31 @@
       "sha256": "6164e4c78c6cbcd55c69b00686191dc2c3cafc24b5e306ed6c510965da7d4f63"
     },
     {
+      "id": "file-b6e0379305dbdfcc",
+      "path": "web/src/components/preview/scrubGesture.test.ts",
+      "domain": "web",
+      "kind": "typescript-source",
+      "material": true,
+      "bytes": 1492,
+      "sha256": "ec075842a05181b79413b0fb9aae2e5d2ccf519340f0a7ca01534cd493a2b0cb"
+    },
+    {
+      "id": "file-f964eadf351f5513",
+      "path": "web/src/components/preview/scrubGesture.ts",
+      "domain": "web",
+      "kind": "typescript-source",
+      "material": true,
+      "bytes": 1245,
+      "sha256": "bfe176fe20159608b0f99fc18c7dab619c3f9ca1c89a3561e8cf78436e6098a0"
+    },
+    {
       "id": "file-ec1282ed1bc227a1",
       "path": "web/src/components/preview/timelinePlayback.test.ts",
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 13029,
-      "sha256": "77b6fee6ec682c104f1e58fedb599747d102a4e0958edf43511e112907e7c1c9"
+      "bytes": 13890,
+      "sha256": "2b62b7b982145e22dababa7a564e8d9ecf9f0320f014fcb0ccf75b6775176504"
     },
     {
       "id": "file-485cccadb8a9d0bb",
@@ -6063,8 +6453,8 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 24016,
-      "sha256": "ada82ee56e53aec5ef7a2578b7476b34e82ccf1bfd73f7eb955f493290f514ef"
+      "bytes": 25088,
+      "sha256": "4728a6d7cbc31e73fea64bda017d36f23365eac666eb6258fd85503a72da25ba"
     },
     {
       "id": "file-2223c7b7b503205f",
@@ -6094,13 +6484,22 @@
       "sha256": "e618542071665b7558a7d9bea7b032ac59fc145d11c2a0942597923714510bdc"
     },
     {
+      "id": "file-a3783d441439ab2f",
+      "path": "web/src/components/shell/EditorSplit.test.tsx",
+      "domain": "web",
+      "kind": "tsx-source",
+      "material": true,
+      "bytes": 8519,
+      "sha256": "af655dd777986d2f0b406ac62ff8d89d91b4dd5340c5c759de5293beacdd3806"
+    },
+    {
       "id": "file-c54269cf1dc14bc1",
       "path": "web/src/components/shell/EditorSplit.tsx",
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 8652,
-      "sha256": "ccc71c6d81f852b5696136f4c6ab0dae25f01045edc2fb2ad78c76e7ac38b620"
+      "bytes": 9506,
+      "sha256": "e372272a3c4bb1646256bc8bd4a41aa2986ab78160293e62f9972ce580b58513"
     },
     {
       "id": "file-5a95caf8d6841b44",
@@ -6144,8 +6543,17 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 2903,
-      "sha256": "9c7fe861b62677546ca055214529a655059f2c7d2918c10e7102ddedc6f9b19c"
+      "bytes": 4979,
+      "sha256": "00f6234e69770ffa886cc2a685f3d9a23e7df32540aced18936454da6760952c"
+    },
+    {
+      "id": "file-31a4638adebb8775",
+      "path": "web/src/components/shell/TitleBar.interaction.test.tsx",
+      "domain": "web",
+      "kind": "tsx-source",
+      "material": true,
+      "bytes": 15947,
+      "sha256": "d1848f451c5a7d65c405462ccf9cde070794fbaff7cf900bccc218c8fb936aa6"
     },
     {
       "id": "file-55eb01164e2b8a0d",
@@ -6153,8 +6561,8 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 16416,
-      "sha256": "2b1cc35c17904b3b538b88d4ebc4ceba56c023eb6836af1ce872e3f085682443"
+      "bytes": 18121,
+      "sha256": "60565ae18f70f45eef0444f42b4cc5137c81533f4386b54b0d3462b4508f8d9a"
     },
     {
       "id": "file-4a48b89ebd289857",
@@ -6162,8 +6570,26 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 2432,
-      "sha256": "10f95af1add2bc8b52987b038dd6d9993c7063ffd14945c1b45cedc6da9a6a81"
+      "bytes": 2840,
+      "sha256": "22de0a38a5bdc940ad12884cb5396476a06c0e2ecc54448db802d29c5617bed2"
+    },
+    {
+      "id": "file-b93ea61a0e676f1c",
+      "path": "web/src/components/shell/ViewMenu.interaction.test.tsx",
+      "domain": "web",
+      "kind": "tsx-source",
+      "material": true,
+      "bytes": 4599,
+      "sha256": "d35d786820bd34d5312d45687eea76d2682374ff37b6cf0632692d6f4980bbaf"
+    },
+    {
+      "id": "file-b39756f012a0f028",
+      "path": "web/src/components/shell/ViewMenu.test.tsx",
+      "domain": "web",
+      "kind": "tsx-source",
+      "material": true,
+      "bytes": 12127,
+      "sha256": "f1af45462979c3aab9fbcb33ea61072a88e55cf31065418a06d6762d4dea528e"
     },
     {
       "id": "file-bea78307e6c1f77f",
@@ -6171,8 +6597,8 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 6558,
-      "sha256": "e36204b148e1e32bec4242a6a667d78183ab92ee0b144de632d07aefec6de756"
+      "bytes": 26821,
+      "sha256": "8962a84d3bc7600bb3da5c7b66deb90b14c79c60b482bdc366741805f2d8f348"
     },
     {
       "id": "file-7bca5461921c41c3",
@@ -6225,8 +6651,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 13438,
-      "sha256": "d123887e4aea8fd04839a6c32abe446b99c2b1763e0ae39a55f1fb1e3688f434"
+      "bytes": 15973,
+      "sha256": "5561ae8bbdab7844c2494b3023f27cfdb0b166828e3e5a67dc0b0c0bc5e3f312"
     },
     {
       "id": "file-75d719c24e13273c",
@@ -6234,8 +6660,8 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 84258,
-      "sha256": "408abd877ba052c743176e26ec076d5925000bb1c77ad1a07ed0e6dc180bb99b"
+      "bytes": 87905,
+      "sha256": "5b01ac1e4b12be7cd89b80c36ba12b9acbf77b8745ef67b181d2f9047b6134fe"
     },
     {
       "id": "file-c9cbf95e2414ae9d",
@@ -6279,8 +6705,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 8879,
-      "sha256": "c4518f1e66f903eda78a65ab6000c33d5b8ba03dc4277c77595d7ce5f74d6bbe"
+      "bytes": 11201,
+      "sha256": "221521cdb8f5171a02c1f5379702ac54236b9ff4c3c364ef7f3498e50d53a879"
     },
     {
       "id": "file-17be501ac069880b",
@@ -6288,8 +6714,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 25995,
-      "sha256": "bfa600299657dbfe9de3fc2c735608875856bb6864465107ec074267ba3cc871"
+      "bytes": 27355,
+      "sha256": "8b2fb8462bb941269d8f5b82d3f61fd7f0d56c3d9e585003c716fec8948d678e"
     },
     {
       "id": "file-e08fad6fb6b117d7",
@@ -6324,8 +6750,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 16504,
-      "sha256": "e21d2badd50a3cd5a1af8de04841ef4681da7273cb4c28dacd3cb81fee08f8c5"
+      "bytes": 16558,
+      "sha256": "b934a9d22145b765a2c28ba38b0cfc49d6876ae18d212ac56dad187560b9f48a"
     },
     {
       "id": "file-62445fc9c3b24134",
@@ -6333,8 +6759,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 7203,
-      "sha256": "024498389bbc78476dae073295139aa79778f94230916883f52f928472b42ea5"
+      "bytes": 7788,
+      "sha256": "4b0401afdd62d993976455bec3210a41499cb1aef1702f17c0747ffb56fde1c2"
     },
     {
       "id": "file-650d4950ca665282",
@@ -6396,8 +6822,8 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 2531,
-      "sha256": "d4a28feb7bc9cb1bb6abd96e42efdbbd20e70d7a43e7d3aa3af33c2139ad7f35"
+      "bytes": 2111,
+      "sha256": "cb2bec0065030b28927a3e0ca9374254d3f398b1c803135c0aa2d3cb6070582c"
     },
     {
       "id": "file-436997b0a341f594",
@@ -6414,8 +6840,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 3314,
-      "sha256": "b94219a8b0f1573cc3843e211ed8539a693253169b0e8be3866f637c1e2bb7c0"
+      "bytes": 4617,
+      "sha256": "e61733924df38ec6f307d8ac7affb5eedc8df63c184cd0750bf422f5b5f1d3d5"
     },
     {
       "id": "file-2b922617af696aa3",
@@ -6423,8 +6849,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 10335,
-      "sha256": "bf8c67f84343b8b2ea898f26ace03f78ec7b817a10d08c5720a52d8e41153d24"
+      "bytes": 11597,
+      "sha256": "964266195c372b8a19e04337c3e9afff3bfd342a5f3705dffd5a27a0ba89a15f"
     },
     {
       "id": "file-86a5e8f04367ae61",
@@ -6432,8 +6858,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 56987,
-      "sha256": "908150142828885d368f16c66a481e5df144ab3061676c1860cf052d5cc47fc8"
+      "bytes": 60337,
+      "sha256": "eceedc986d0ad750795e95370df0b44852b99e88f2d937f80d19e7f9d09b83b4"
     },
     {
       "id": "file-4965754bcf377f58",
@@ -6477,8 +6903,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 41487,
-      "sha256": "39c4e471568221e0b8434fc8b6fa31c4ce34367273c9787f33976c57af8549b0"
+      "bytes": 46045,
+      "sha256": "c8d971fbb7b980481a66bf68756bff1b8f69dc4f8702eb858ae9682841ef9365"
     },
     {
       "id": "file-d9a7857e58914645",
@@ -6873,8 +7299,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 20303,
-      "sha256": "67d1733b88ea257a1111dddcccad16b28780069b8b928b02280bac7bc7cd7dc3"
+      "bytes": 21610,
+      "sha256": "388929947a5874c923087587657a8fd9ba033b3fac140c05658075f2cdf298a7"
     },
     {
       "id": "file-3de9c2f92acb8585",
@@ -7035,8 +7461,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 13247,
-      "sha256": "296eb08bd5e72d4b5435b1c44c7cd67b6d08b75711e72c156f3128c7ff9d5263"
+      "bytes": 18103,
+      "sha256": "918acbc311765197ac55d01d56b02cc7025c37f69672e2dca7cf35be80873435"
     },
     {
       "id": "file-ae123ba03cd6ac29",
@@ -7044,8 +7470,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 8004,
-      "sha256": "cad849b40ed4473a28df3bea683f357dae6b96e6e0930692bd1c29e8427fe320"
+      "bytes": 10759,
+      "sha256": "1337f4b25878faedfcf4e25e0b239a5440a001745014568296901a7576a50528"
     },
     {
       "id": "file-6c82a868b1fb4916",
@@ -7089,8 +7515,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 4381,
-      "sha256": "1419b2e0427ddef1d4cf750b8d82dc94b6d13325d8bcedf723f9735991e0bd20"
+      "bytes": 4514,
+      "sha256": "84e31e19636d1435d545d4aaafe89fbb884acfd2e3baf2d7e92ed211f1763c82"
     },
     {
       "id": "file-1cee16a36c760ade",
@@ -7111,6 +7537,15 @@
       "sha256": "e2a15117b1c2aab824cd369e798a08395f2abf20a65de0c1690b5301aa542fec"
     },
     {
+      "id": "file-df23b317193b321b",
+      "path": "web/src/store/uiStore.persistence.test.ts",
+      "domain": "web",
+      "kind": "typescript-source",
+      "material": true,
+      "bytes": 5151,
+      "sha256": "33b9660d6fb14d80d548365e7138718faca502a9d4702f213859b8d10c59c51d"
+    },
+    {
       "id": "file-16b56f7f0491b365",
       "path": "web/src/store/uiStore.test.ts",
       "domain": "web",
@@ -7125,8 +7560,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 18619,
-      "sha256": "c68e0d195829b7cf402930738600c6c0664d67a0ae801255be7983cf88c51aca"
+      "bytes": 23155,
+      "sha256": "99779767edc0d59c6636fd0973f2f86b7b94f424526150a1b35b46f2e8fdc0ac"
     },
     {
       "id": "file-962ac4047b1046f3",
@@ -7134,8 +7569,8 @@
       "domain": "web",
       "kind": "css",
       "material": true,
-      "bytes": 2705,
-      "sha256": "35105a71a4f9351dc28d2cb63b9308f5966b53a02609643b4cb5f20d35aeda3a"
+      "bytes": 3768,
+      "sha256": "9305547097c51b51a6678c614593983c5a1fd71444ceb44aba83ab9edafb5f25"
     },
     {
       "id": "file-5dea34a364b2d988",

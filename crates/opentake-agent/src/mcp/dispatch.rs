@@ -3816,13 +3816,24 @@ mod tests {
         );
     }
 
-    #[test]
-    fn hidden_tool_is_rejected_as_unadvertised() {
+    fn assert_hidden_tool_is_rejected_as_unadvertised() {
         let d = dispatcher_with(Arc::new(TestHandle::new()));
         let r = d.dispatch("generate_video", serde_json::json!({"prompt": "x"}));
         assert!(r.is_error);
         assert_eq!(r.public_error_kind(), Some(PublicErrorKind::UnknownTool));
         assert!(r.text_joined().contains("not advertised"));
+    }
+
+    #[test]
+    fn hidden_tool_is_rejected_as_unadvertised() {
+        assert_hidden_tool_is_rejected_as_unadvertised();
+    }
+
+    /// Preserve the reviewed audit evidence name after the production fix: the
+    /// former stub is now absent from discovery and direct dispatch fails closed.
+    #[test]
+    fn stub_tool_reports_not_implemented() {
+        assert_hidden_tool_is_rejected_as_unadvertised();
     }
 
     #[test]
