@@ -12,6 +12,10 @@
 关键分工：**`opentake-render` 定义** `SourceMetrics` / `FrameProvider` 两个 trait 与 `DecodedFrame` 类型；本模块**实现**它们于 `RenderedClip` 之上。合成器问 clip 的自然尺寸（渲染画布），并按需拉取解码后的 RGBA 帧。
 
 > 完成状态：`MotionClipSource` 适配器**已实现并全测**；但合成器**尚未真正接入** motion 帧序列（v1 走 Motion Canvas 视频导入，native frame-sequence source 属后续，见 [OVERVIEW.md](OVERVIEW.md) §5）。
+>
+> 2026-08-01 复核：两个精确拥有者、完整 motion 包 58 项测试和
+> warnings-denied Clippy 通过；生产 `Cargo.toml` 仍只把 `image` 放在
+> `dev-dependencies`。
 
 ---
 

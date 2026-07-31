@@ -90,6 +90,11 @@ MotionSource (Code 内联文档 | Template id + params)
 
 > **Lottie 方法澄清**：`MotionClipSource` 为满足 render 的 `FrameProvider` trait 实现了 `lottie_frame`，但它只是把请求转发到自身的帧序列——motion clip 始终是帧序列，不存在真正的 Lottie 内部帧概念。真正的 Lottie 渲染在 render（`TextureSource::Lottie`，见 [opentake-render](../opentake-render/INDEX.md)）。
 
+> **2026-08-01 注入边界复核 PASS**：生产依赖仍不包含 image/ffmpeg
+> 解码器；解码完全由 `MotionClipSource::new` 的闭包注入。两个精确拥有者、
+> motion 全包 58 项测试及 warnings-denied Clippy 通过。此结论只关闭库边界，
+> 不代表桌面 motion/Lottie 物化已接线。
+
 ---
 
 ## 4. 对应上游 Swift
