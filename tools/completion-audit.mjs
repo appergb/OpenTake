@@ -6492,6 +6492,8 @@ const REVIEWED_REPORT_SLICE_DEFINITIONS_RAW = [
     tests: [
       { path: "crates/opentake-core/src/events.rs", name: "core_event_serializes_with_kind_tag", evidenceClass: "existing-owned" },
       { path: "crates/opentake-core/src/events.rs", name: "media_changed_serializes_with_kind_tag", evidenceClass: "existing-owned" },
+      { path: "src-tauri/src/lib.rs", name: "core_event_forwarding_maps_every_name_and_tagged_payload", evidenceClass: "reviewed-planned" },
+      { path: "src-tauri/src/lib.rs", name: "core_event_forwarding_swallows_emit_failure_and_delivery_continues", evidenceClass: "reviewed-planned" },
     ],
     rationale: "Core mapping report CC-event-forwarding-complete: tagged events and intentional nonfatal WebView forwarding are implemented and need ledger evidence closure.",
   },

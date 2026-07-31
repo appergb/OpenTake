@@ -510,6 +510,8 @@
 - Modify: `docs/modules/src-tauri/setup-lib.md`
 - Test (existing-owned): `crates/opentake-core/src/events.rs#core_event_serializes_with_kind_tag`
 - Test (existing-owned): `crates/opentake-core/src/events.rs#media_changed_serializes_with_kind_tag`
+- Test (reviewed-planned): `src-tauri/src/lib.rs#core_event_forwarding_maps_every_name_and_tagged_payload`
+- Test (reviewed-planned): `src-tauri/src/lib.rs#core_event_forwarding_swallows_emit_failure_and_delivery_continues`
 
 **Candidate-bound contracts:**
 
@@ -522,36 +524,63 @@
   - Extract or inject an event emitter boundary that can be exercised without a live Tauri window.
   - Focused tests assert every CoreEvent maps to the expected event name and tagged payload, and an emit failure is swallowed without panicking or affecting the core session.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-core/src/events.rs#core_event_serializes_with_kind_tag` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-core/src/events.rs#media_changed_serializes_with_kind_tag` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
+  - `src-tauri/src/lib.rs#core_event_forwarding_maps_every_name_and_tagged_payload` (reviewed-planned) — The emitted name and unchanged tagged payload for every variant are owned at the shell boundary.
+  - `src-tauri/src/lib.rs#core_event_forwarding_swallows_emit_failure_and_delivery_continues` (reviewed-planned) — The best-effort failure policy is owned at the shell boundary without a live WebView.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+  Result: Extended the exact core serialization owner across all four variants.
+  Added Tauri-boundary owners
+  `core_event_forwarding_maps_every_name_and_tagged_payload` and
+  `core_event_forwarding_swallows_emit_failure_and_delivery_continues`, using
+  no live window or `AppHandle`.
+
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-core core_event_serializes_with_kind_tag`
   - Run: `cargo test -p opentake-core media_changed_serializes_with_kind_tag`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Result: RED reproduced at the actual missing seam: the new Tauri owner failed
+  to compile because `forward_core_event` did not exist. The two pre-existing
+  core serialization tests alone could not exercise the WebView emit-failure
+  policy.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-core/src/events.rs#CoreEvent`, `src-tauri/src/lib.rs#forward_event`, `docs/modules/src-tauri/setup-lib.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Result: Extracted a typed `forward_core_event` seam that exhaustively maps
+  every variant, forwards the unchanged tagged event, and consumes emitter
+  errors. `forward_event` retains the session side effects and delegates only
+  emission; module documentation now records that boundary.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-core core_event_serializes_with_kind_tag`
   - Run: `cargo test -p opentake-core media_changed_serializes_with_kind_tag`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Result: GREEN. Both exact core owners and both Tauri boundary owners passed
+  1/1. The failure owner also proved a later `EventBus` observer still receives
+  the event after a simulated WebView teardown error.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. `cargo fmt --all -- --check` and
+  `cargo test --workspace --no-fail-fast` completed successfully. The only
+  diagnostic was the repository's existing future-incompatibility notice for
+  transitive `block v0.1.6`.
 
 ### Task 6: CC-edit-gesture-parity (implementation-slice-6d2ce8b116a3ccd9)
 

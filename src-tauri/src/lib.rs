@@ -399,15 +399,23 @@ fn forward_event(app: &tauri::AppHandle, event: &CoreEvent) {
             }
         }
     }
+    forward_core_event(event, |name, payload| app.emit(name, payload));
+}
+
+/// Emit the stable front-end name and the original tagged payload while making
+/// teardown failures explicitly non-fatal. Keeping this boundary independent
+/// of `AppHandle` lets the full mapping and failure policy run in unit tests.
+fn forward_core_event<E>(
+    event: &CoreEvent,
+    emit: impl FnOnce(&'static str, &CoreEvent) -> Result<(), E>,
+) {
     let name = match event {
         CoreEvent::TimelineChanged { .. } => "timeline_changed",
         CoreEvent::ProjectOpened { .. } => "project_opened",
         CoreEvent::ProjectSaved { .. } => "project_saved",
         CoreEvent::MediaChanged { .. } => "media_changed",
     };
-    // Best-effort: a missing WebView (e.g. during teardown) must not panic the
-    // emitting thread.
-    let _ = app.emit(name, event);
+    let _ = emit(name, event);
 }
 
 #[cfg(test)]
@@ -425,5 +433,90 @@ mod id_tests {
 
         assert_eq!(ids.len(), 256);
         assert!(ids.iter().all(|id| uuid::Uuid::parse_str(id).is_ok()));
+    }
+
+    #[test]
+    fn core_event_forwarding_maps_every_name_and_tagged_payload() {
+        let cases = [
+            (
+                CoreEvent::TimelineChanged {
+                    project_epoch: 1,
+                    version: 2,
+                },
+                "timeline_changed",
+                serde_json::json!({
+                    "kind": "timeline_changed",
+                    "projectEpoch": 1,
+                    "version": 2,
+                }),
+            ),
+            (
+                CoreEvent::ProjectOpened {
+                    path: "/project.otk".into(),
+                    project_epoch: 3,
+                    version: 0,
+                },
+                "project_opened",
+                serde_json::json!({
+                    "kind": "project_opened",
+                    "path": "/project.otk",
+                    "projectEpoch": 3,
+                    "version": 0,
+                }),
+            ),
+            (
+                CoreEvent::ProjectSaved {
+                    path: "/project.otk".into(),
+                    project_epoch: 3,
+                },
+                "project_saved",
+                serde_json::json!({
+                    "kind": "project_saved",
+                    "path": "/project.otk",
+                    "projectEpoch": 3,
+                }),
+            ),
+            (
+                CoreEvent::MediaChanged {
+                    project_epoch: 3,
+                    count: 4,
+                },
+                "media_changed",
+                serde_json::json!({
+                    "kind": "media_changed",
+                    "projectEpoch": 3,
+                    "count": 4,
+                }),
+            ),
+        ];
+
+        for (event, expected_name, expected_payload) in cases {
+            forward_core_event(&event, |name, payload| {
+                assert_eq!(name, expected_name);
+                assert_eq!(serde_json::to_value(payload).unwrap(), expected_payload);
+                Ok::<(), ()>(())
+            });
+        }
+    }
+
+    #[test]
+    fn core_event_forwarding_swallows_emit_failure_and_delivery_continues() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let bus = opentake_core::EventBus::new();
+        let delivered = Arc::new(AtomicUsize::new(0));
+        bus.subscribe(|event| {
+            forward_core_event(event, |_name, _payload| Err::<(), _>("WebView unavailable"));
+        });
+        let delivered_sink = Arc::clone(&delivered);
+        bus.subscribe(move |_| {
+            delivered_sink.fetch_add(1, Ordering::SeqCst);
+        });
+
+        bus.emit(&CoreEvent::TimelineChanged {
+            project_epoch: 5,
+            version: 8,
+        });
+        assert_eq!(delivered.load(Ordering::SeqCst), 1);
     }
 }
