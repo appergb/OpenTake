@@ -289,33 +289,61 @@
   - Visible/returned assertion: assert the exact returned success/error and the observable state described by “Minimum Local Verification”, including deterministic no-op behavior when the operation is rejected.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:tools/completion-tests/doc-6b9188efd87853b7.test.mjs#completion_6b9188efd87853b7_the_named_automation_checks_have_matching_source.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-agent/tests/editing_automation_acceptance.rs#automation_children_are_atomic_reviewable_and_command_routed` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+  Result: Added the exact integration owner plus all seven candidate-bound Node
+  completion owners. The integration fixture exercises deterministic beat and
+  autocrop analysis, review-only MCP beat/silence results, typed smart-reframe
+  unavailability, single-command reframe/beat plans, linked-A/V intent flags,
+  rejected-plan no-op behavior, command-routed mutation, and exact undo.
+
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-agent --test editing_automation_acceptance automation_children_are_atomic_reviewable_and_command_routed -- --exact`
 
   Expected: FAIL because one or more of the 7 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Result: RED reproduced: Cargo reported that no
+  `editing_automation_acceptance` test target existed, so the reviewed owner
+  could not execute.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-agent/src/mcp/dispatch.rs#Dispatcher`, `crates/opentake-media/src/analysis/autocrop.rs#detect_autocrop`, `crates/opentake-ops/src/intent.rs#plan_smart_reframe`, `crates/opentake-media/src/analysis/beat.rs#detect_beats`, `docs/architecture/editing-automation/EDITING-AUTOMATION-DOS.md`, `docs/architecture/editing-automation/EDITING-AUTOMATION/acceptance-tests.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Result: Review confirmed the mapped production children already satisfy this
+  shared umbrella: pure detectors are deterministic/fail closed; Dispatcher
+  preview tools do not apply; smart reframe returns a typed unavailable result;
+  intent planners emit exactly one existing `EditCommand`; and the command layer
+  owns mutation/undo. Added the missing cross-boundary acceptance suite and
+  source-specific completion adapters, then recorded the concrete evidence in
+  both source documents. No redundant production branch was introduced.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-agent --test editing_automation_acceptance automation_children_are_atomic_reviewable_and_command_routed -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Result: GREEN; the exact Rust owner passed 1/1 with `--exact`. All seven Node
+  completion owners passed 7/7 and each verifies that Cargo executed exactly one
+  owning test.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: `cargo fmt --all -- --check`, `cargo clippy -p opentake-agent --tests
+  -- -D warnings`, `cargo test --workspace --no-fail-fast`, the exact Rust
+  owner, all seven source owners, and the local relative Markdown-link gate
+  passed. The workspace retained only its seven explicitly ignored real-device
+  probes, which belong to packaged-app verification.
 
 ### Task 4: CC-beat-auto-cut (implementation-slice-d9ac8c92f3d41fea)
 

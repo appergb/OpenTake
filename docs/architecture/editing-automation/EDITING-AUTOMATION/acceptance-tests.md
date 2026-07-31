@@ -56,3 +56,5 @@ Parent contract: [Editing Automation DOS](../EDITING-AUTOMATION-DOS.md). Source 
 ## Minimum Local Verification
 
 Run a local Markdown link existence check over `docs/DOS/**/*.md`. This does not prove implementation behavior, but it prevents stale cross-document references in the DOS set.
+
+Current verification (2026-07-31): the source-bound completion owners for Documentation Checks, Shared Implementation Checks, Beat Sync Checks, and Minimum Local Verification all execute `crates/opentake-agent/tests/editing_automation_acceptance.rs#automation_children_are_atomic_reviewable_and_command_routed`. That integration test covers deterministic media analysis, review-only MCP results, typed failure with zero mutation, single-command plans, linked-A/V intent flags, command-bound mutation, and exact undo restoration. A local relative-link check over this file and its parent DOS passed with no unresolved targets.

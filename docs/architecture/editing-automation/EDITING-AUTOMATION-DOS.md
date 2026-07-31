@@ -54,6 +54,8 @@ Agent tools may suggest edits without applying them. A write path must apply via
 
 Current MCP status: `detect_beats`, `auto_cut_to_beats`, and `tighten_silences` are typed tools backed by `CoreHandle::extract_analysis_pcm`, so they can produce PCM-based frame hints and candidate edit commands without mutating the timeline. `remove_filler_words` is backed by word-level project-frame transcripts, supports configurable multi-word lexicons, and returns per-cut review data plus undoable ripple commands without mutating the timeline. `smart_reframe` is still a typed preflight surface that returns a vision-backend diagnostic until sampled-frame/saliency access is exposed.
 
+Completion evidence (2026-07-31): `crates/opentake-agent/tests/editing_automation_acceptance.rs#automation_children_are_atomic_reviewable_and_command_routed` executes the shared contract across deterministic beat and autocrop analysis, MCP beat/silence preview payloads, the typed unavailable smart-reframe boundary, one-command smart-reframe and beat-placement plans, rejection with zero mutation, and exact single-undo restoration. The seven source-bound owners in `tools/completion-tests/doc-*.test.mjs` delegate to that exact integration owner and reject a zero-test Cargo filter.
+
 ## Failure Semantics
 
 - No media decode: return a structured diagnostic and no edit.
