@@ -362,7 +362,7 @@ Completion evidence: [`data-safety-generation-seed-real-device-2026-07-31.md`](.
   - Visible/returned assertion: assert the exact success payload for the valid case and a stable typed error for the invalid case, including zero partial side effects and no leaked internal path or credential.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_1cb2f0539425a14e.rs#completion_1cb2f0539425a14e_derive_a_stable_lowercase_32_hex_file_identity_f.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-media/src/cache_key.rs#identity_hex_is_stable_and_lowercase` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-media/src/cache_key.rs#identity_hex_matches_swift_for_whole_second_mtime` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -370,7 +370,7 @@ Completion evidence: [`data-safety-generation-seed-real-device-2026-07-31.md`](.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-media identity_hex_is_stable_and_lowercase`
   - Run: `cargo test -p opentake-media identity_hex_matches_swift_for_whole_second_mtime`
@@ -378,11 +378,11 @@ Completion evidence: [`data-safety-generation-seed-real-device-2026-07-31.md`](.
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-media/src/cache_key.rs#file_identity_key`, `crates/opentake-media/src/cache_key.rs#identity_hex`, `docs/modules/opentake-media/SPEC.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-media identity_hex_is_stable_and_lowercase`
   - Run: `cargo test -p opentake-media identity_hex_matches_swift_for_whole_second_mtime`
@@ -390,11 +390,13 @@ Completion evidence: [`data-safety-generation-seed-real-device-2026-07-31.md`](.
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completion evidence: [`data-safety-cache-identity-real-device-2026-07-31.md`](../runtime-artifacts/automated/data-safety-cache-identity-real-device-2026-07-31.md). The three exact owning tests already passed at baseline; a packaged-app waveform cache filename also matched an independent Foundation/CryptoKit calculation for the same real file byte-for-byte.
 
 ### Task 7: DS-shared-core-command-complete (implementation-slice-63ec0e639957e775)
 
