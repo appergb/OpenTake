@@ -79,7 +79,7 @@ export function Toolbar() {
   const canUndo = useProjectStore((s) => s.canUndo);
   const canRedo = useProjectStore((s) => s.canRedo);
   const [toolbarPending, setToolbarPending] = useState<
-    "undo" | "redo" | "split" | "trimStart" | null
+    "undo" | "redo" | "split" | "trimStart" | "trimEnd" | null
   >(null);
 
   // Logarithmic slider mapping (ToolbarView.swift:50-53): travel uniform per
@@ -140,6 +140,19 @@ export function Toolbar() {
     } catch (reason: unknown) {
       const message = reason instanceof Error ? reason.message : String(reason);
       pushToast(`${t("toolbar.trimStart")}: ${message}`);
+    } finally {
+      setToolbarPending(null);
+    }
+  };
+
+  const onTrimEnd = async () => {
+    if (toolbarPending) return;
+    setToolbarPending("trimEnd");
+    try {
+      await edit.trimEndToPlayhead();
+    } catch (reason: unknown) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      pushToast(`${t("toolbar.trimEnd")}: ${message}`);
     } finally {
       setToolbarPending(null);
     }
@@ -224,7 +237,17 @@ export function Toolbar() {
             onClick={() => void onTrimStart()}
           />
         </span>
-        <GlyphButton glyph="]" title={t("toolbar.trimEnd")} onClick={() => edit.trimEndToPlayhead()} />
+        <span
+          aria-busy={toolbarPending === "trimEnd" || undefined}
+          style={{ display: "inline-flex" }}
+        >
+          <GlyphButton
+            glyph="]"
+            title={t("toolbar.trimEnd")}
+            disabled={toolbarPending !== null}
+            onClick={() => void onTrimEnd()}
+          />
+        </span>
       </div>
 
       <Divider />
