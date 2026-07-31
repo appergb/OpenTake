@@ -20,6 +20,7 @@ import type {
   EditResult,
   GenerateCaptionsResult,
   MediaList,
+  LutReference,
   ModelStatus,
   PlaybackCommandError,
   PlaybackFrameEvent,
@@ -510,6 +511,13 @@ export async function importMedia(paths: string[]): Promise<MediaList> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<MediaList>("import_media", { paths });
   return { items: [], folders: [] };
+}
+
+/** Validate and copy one `.cube` into the active project's managed storage. */
+export async function importLut(path: string): Promise<LutReference> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<LutReference>("import_lut", { path });
+  throw new Error("3D LUT import requires the desktop app");
 }
 
 export async function getMedia(): Promise<MediaList> {

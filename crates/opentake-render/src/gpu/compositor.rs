@@ -10,10 +10,10 @@ use std::rc::Rc;
 use bytemuck::{Pod, Zeroable};
 
 use opentake_domain::{
-    validate_effect_chain, ColorGrade, LiftGammaGain, MaskShape, MAX_EFFECTS_PER_CLIP,
+    validate_effect_chain, ColorGrade, LiftGammaGain, LutReference, MaskShape, MAX_EFFECTS_PER_CLIP,
 };
 
-use crate::gpu::texture::GpuTexture;
+use crate::gpu::texture::{GpuLutTexture, GpuTexture};
 use crate::gpu::RenderError;
 use crate::plan::{FramePlan, LayerDraw, RenderSize, TextureSource};
 use crate::source::DecodedFrame;
@@ -76,6 +76,9 @@ struct Uniforms {
     grade_gain: [f32; 4],           // gain_r, gain_g, gain_b, pad
     hsl_secondary_meta: [f32; 4],   // enabled, hue center, full width, feather
     hsl_secondary_adjust: [f32; 4], // hue shift, saturation, lightness, pad
+    lut_meta: [f32; 4],             // enabled, intensity, table size, pad
+    lut_domain_min: [f32; 4],       // min r/g/b, pad
+    lut_domain_scale: [f32; 4],     // reciprocal domain span r/g/b, pad
     chroma0: [f32; 4],              // key_r, key_g, key_b, similarity
     chroma1: [f32; 4],              // smoothness, spill, pad, pad
     mask_meta: [f32; 4],            // mask_count, pad, pad, pad
@@ -327,6 +330,16 @@ pub trait TextureResolver {
     ) -> Option<Rc<GpuTexture>> {
         self.resolve(request.source, request.source_frame)
     }
+
+    /// Resolve a validated project-managed LUT reference. The default keeps
+    /// source-only resolvers source-compatible; the compositor still fails a
+    /// draw carrying a LUT when no asset is returned.
+    fn resolve_lut(
+        &mut self,
+        _reference: &LutReference,
+    ) -> Result<Option<Rc<GpuLutTexture>>, RenderError> {
+        Ok(None)
+    }
 }
 
 /// A textured-quad compositor bound to one device.
@@ -334,6 +347,7 @@ pub struct Compositor {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    fallback_lut: GpuLutTexture,
 }
 
 impl Compositor {
@@ -369,6 +383,22 @@ impl Compositor {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
@@ -437,10 +467,38 @@ impl Compositor {
             ..Default::default()
         });
 
+        // A bound texture is required even when a draw has no active LUT. The
+        // shader never samples this uninitialized 1x1 fallback when disabled.
+        let fallback_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("opentake-render inactive LUT binding"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let fallback_view = fallback_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D3),
+            ..Default::default()
+        });
+
         Compositor {
             pipeline,
             bind_group_layout,
             sampler,
+            fallback_lut: GpuLutTexture {
+                texture: fallback_texture,
+                view: fallback_view,
+                size: 1,
+                domain_min: [0.0; 3],
+                domain_max: [1.0; 3],
+            },
         }
     }
 
@@ -501,6 +559,7 @@ impl Compositor {
         struct Prepared {
             bind_group: wgpu::BindGroup,
             _tex: Rc<GpuTexture>,
+            _lut: Option<Rc<GpuLutTexture>>,
         }
         let mut prepared: Vec<Prepared> = Vec::with_capacity(frame_plan.draws.len());
 
@@ -511,6 +570,9 @@ impl Compositor {
             let (effects, effect_count) = pack_effects(draw)?;
             if let Some(grade) = draw.color_grade {
                 grade.validate()?;
+            }
+            if let Some(reference) = draw.lut {
+                reference.validate()?;
             }
             let Some(tex) = resolver.resolve_with_interpolation(TextureResolveRequest {
                 source: draw.source,
@@ -548,6 +610,33 @@ impl Compositor {
                 None => ([0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]),
             };
             let (masks, mask_count) = pack_masks(draw);
+            let resolved_lut = match draw.lut {
+                Some(reference) => Some(
+                    resolver
+                        .resolve_lut(reference)?
+                        .ok_or_else(|| RenderError::MissingLut(reference.id.clone()))?,
+                ),
+                None => None,
+            };
+            let (lut_meta, lut_domain_min, lut_domain_scale) = match draw.lut {
+                Some(reference) => {
+                    let parsed = resolved_lut.as_ref().expect("resolved above");
+                    let domain_scale: [f32; 3] = std::array::from_fn(|channel| {
+                        1.0 / (parsed.domain_max[channel] - parsed.domain_min[channel])
+                    });
+                    (
+                        [1.0, reference.intensity as f32, parsed.size as f32, 0.0],
+                        [
+                            parsed.domain_min[0],
+                            parsed.domain_min[1],
+                            parsed.domain_min[2],
+                            0.0,
+                        ],
+                        [domain_scale[0], domain_scale[1], domain_scale[2], 0.0],
+                    )
+                }
+                None => ([0.0; 4], [0.0; 4], [1.0, 1.0, 1.0, 0.0]),
+            };
             let u = Uniforms {
                 affine0: [
                     draw.affine[0] as f32,
@@ -586,6 +675,9 @@ impl Compositor {
                 grade_gain: grade.gain,
                 hsl_secondary_meta: grade.hsl_meta,
                 hsl_secondary_adjust: grade.hsl_adjust,
+                lut_meta,
+                lut_domain_min,
+                lut_domain_scale,
                 chroma0,
                 chroma1,
                 mask_meta: [mask_count, 0.0, 0.0, 0.0],
@@ -600,6 +692,10 @@ impl Compositor {
                 mapped_at_creation: false,
             });
             queue.write_buffer(&ubuf, 0, bytemuck::bytes_of(&u));
+
+            let lut_view = resolved_lut
+                .as_ref()
+                .map_or(&self.fallback_lut.view, |lut| &lut.view);
 
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("opentake-render bind group"),
@@ -617,11 +713,20 @@ impl Compositor {
                         binding: 2,
                         resource: wgpu::BindingResource::Sampler(&self.sampler),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(lut_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
                 ],
             });
             prepared.push(Prepared {
                 bind_group,
                 _tex: tex,
+                _lut: resolved_lut,
             });
         }
 

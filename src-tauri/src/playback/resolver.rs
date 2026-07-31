@@ -29,15 +29,17 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::mpsc::TryRecvError;
 
+use opentake_domain::LutReference;
 use opentake_media::decode::{
     spawn_video_stream, StreamVideoFrame, VideoStream, VideoStreamRequest,
 };
 use opentake_media::{decode_frame_at_cancellable, FrameRequest, MediaCancelToken, MediaError};
+use opentake_project::ProjectRoot;
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::wgpu;
 use opentake_render::{
-    CosmicTextRasterizer, DecodedFrame, FramePlan, GpuTexture, TextRasterRequest, TextRasterizer,
-    TextureCache, TextureResolver, TextureSource,
+    CosmicTextRasterizer, DecodedFrame, FramePlan, GpuLutTexture, GpuTexture, TextRasterRequest,
+    TextRasterizer, TextureCache, TextureResolver, TextureSource,
 };
 
 use super::project::{MediaInfo, TextInfo};
@@ -210,6 +212,8 @@ pub struct PlaybackResolverState {
     /// Decode / raster downscale box (matches the playback render size).
     render_box: (u32, u32),
     cancel: MediaCancelToken,
+    project_root: Option<ProjectRoot>,
+    lut_cache: HashMap<String, Rc<GpuLutTexture>>,
 }
 
 impl PlaybackResolverState {
@@ -220,6 +224,17 @@ impl PlaybackResolverState {
         render_box: (u32, u32),
         cancel: MediaCancelToken,
     ) -> Self {
+        Self::new_with_project_root(media, text, timeline_fps, render_box, cancel, None)
+    }
+
+    pub fn new_with_project_root(
+        media: HashMap<String, MediaInfo>,
+        text: HashMap<String, TextInfo>,
+        timeline_fps: i32,
+        render_box: (u32, u32),
+        cancel: MediaCancelToken,
+        project_root: Option<ProjectRoot>,
+    ) -> Self {
         PlaybackResolverState {
             streams: HashMap::new(),
             static_cache: TextureCache::new(STATIC_CACHE_CAP),
@@ -229,6 +244,8 @@ impl PlaybackResolverState {
             timeline_fps,
             render_box,
             cancel,
+            project_root,
+            lut_cache: HashMap::new(),
         }
     }
 
@@ -458,6 +475,28 @@ impl TextureResolver for StreamingResolver<'_, '_> {
             // the preview resolver (`render.rs`).
             TextureSource::Lottie { .. } => None,
         }
+    }
+
+    fn resolve_lut(
+        &mut self,
+        reference: &LutReference,
+    ) -> Result<Option<Rc<GpuLutTexture>>, opentake_render::RenderError> {
+        if let Some(cached) = self.state.lut_cache.get(&reference.id) {
+            return Ok(Some(cached.clone()));
+        }
+        let resolved = crate::lut::resolve_project_lut(
+            self.state.project_root.as_ref(),
+            reference,
+            self.device,
+            self.queue,
+            "playback-lut",
+        )?;
+        if let Some(texture) = &resolved {
+            self.state
+                .lut_cache
+                .insert(reference.id.clone(), texture.clone());
+        }
+        Ok(resolved)
     }
 }
 

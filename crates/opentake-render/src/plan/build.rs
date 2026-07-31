@@ -168,6 +168,7 @@ fn make_clip_plan(
         // independent this round). Drop a color grade that is the identity so the
         // compositor can skip it cheaply.
         color_grade: clip.color_grade.filter(|g| !g.is_identity()),
+        lut: clip.lut.clone(),
         chroma_key: clip.chroma_key,
         masks: clip.masks.clone(),
         effects: clip.effects.clone(),
@@ -600,6 +601,7 @@ fn eval_layer<'a>(
         needs_premultiply: plan.needs_premultiply,
         clip_id: &plan.clip_id,
         color_grade: plan.color_grade.as_ref(),
+        lut: plan.lut.as_ref(),
         chroma_key: plan.chroma_key.as_ref(),
         masks: &plan.masks,
         effects: &plan.effects,
@@ -646,6 +648,7 @@ fn eval_transition_incoming<'a>(
         needs_premultiply: plan.needs_premultiply,
         clip_id: &plan.clip_id,
         color_grade: plan.color_grade.as_ref(),
+        lut: plan.lut.as_ref(),
         chroma_key: plan.chroma_key.as_ref(),
         masks: &plan.masks,
         effects: &plan.effects,

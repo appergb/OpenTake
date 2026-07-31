@@ -28,7 +28,7 @@ use opentake_ops::{
 
 use opentake_domain::{
     AnimPair, ChromaKey, ClipType, ColorGrade, Crop, Effect, Interpolation, Keyframe,
-    KeyframeTrack, Mask, StabilizationTrack, TextStyle, Transform, TransitionKind,
+    KeyframeTrack, LutReference, Mask, StabilizationTrack, TextStyle, Transform, TransitionKind,
 };
 
 #[derive(Clone, Default)]
@@ -697,6 +697,11 @@ pub enum EditRequest {
         grade: Option<ColorGrade>,
     },
     #[serde(rename_all = "camelCase")]
+    SetLut {
+        clip_ids: Vec<String>,
+        lut: Option<LutReference>,
+    },
+    #[serde(rename_all = "camelCase")]
     SetChromaKey {
         clip_ids: Vec<String>,
         chroma_key: Option<ChromaKey>,
@@ -912,6 +917,7 @@ impl EditRequest {
             EditRequest::SetColorGrade { clip_ids, grade } => {
                 EditCommand::SetColorGrade { clip_ids, grade }
             }
+            EditRequest::SetLut { clip_ids, lut } => EditCommand::SetLut { clip_ids, lut },
             EditRequest::SetChromaKey {
                 clip_ids,
                 chroma_key,
@@ -1692,6 +1698,7 @@ mod edit_request_serde_tests {
             EditRequest::MoveKeyframe { .. } => "MoveKeyframe",
             EditRequest::SetKeyframeInterpolation { .. } => "SetKeyframeInterpolation",
             EditRequest::SetColorGrade { .. } => "SetColorGrade",
+            EditRequest::SetLut { .. } => "SetLut",
             EditRequest::SetChromaKey { .. } => "SetChromaKey",
             EditRequest::SetMasks { .. } => "SetMasks",
             EditRequest::SetEffects { .. } => "SetEffects",
@@ -1756,6 +1763,7 @@ mod edit_request_serde_tests {
                     EditCommand::SetKeyframeInterpolation { .. }
                 )
                 | ("SetColorGrade", EditCommand::SetColorGrade { .. })
+                | ("SetLut", EditCommand::SetLut { .. })
                 | ("SetChromaKey", EditCommand::SetChromaKey { .. })
                 | ("SetMasks", EditCommand::SetMasks { .. })
                 | ("SetEffects", EditCommand::SetEffects { .. })
@@ -1863,6 +1871,7 @@ mod edit_request_serde_tests {
                 r#"{"type":"setColorGrade","clipIds":[],"grade":null}"#,
                 "SetColorGrade",
             ),
+            (r#"{"type":"setLut","clipIds":[],"lut":null}"#, "SetLut"),
             (
                 r#"{"type":"setChromaKey","clipIds":[],"chromaKey":null}"#,
                 "SetChromaKey",
@@ -1944,7 +1953,7 @@ mod edit_request_serde_tests {
             ),
         ];
 
-        assert_eq!(cases.len(), 48);
+        assert_eq!(cases.len(), 49);
         for (json, expected_route) in cases {
             let mut hostile = serde_json::from_str::<serde_json::Value>(json).unwrap();
             hostile

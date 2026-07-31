@@ -5,7 +5,8 @@
 
 use opentake_domain::{AnimPair, Interpolation, Keyframe, KeyframeTrack, TransitionKind};
 use opentake_domain::{
-    ChromaKey, ColorGrade, Effect, HslSecondary, LiftGammaGain, Mask, MaskShape, Point2, Rgb,
+    ChromaKey, ColorGrade, Effect, HslSecondary, LiftGammaGain, LutReference, Mask, MaskShape,
+    Point2, Rgb,
 };
 use opentake_domain::{
     Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track, Transform,
@@ -1701,6 +1702,54 @@ fn set_color_grade_applies_and_undoes() {
     assert_eq!(find_clip(&st, "c").color_grade, None);
     apply(&mut st, EditCommand::Redo, &g).unwrap();
     assert_eq!(find_clip(&st, "c").color_grade, Some(grade));
+}
+
+#[test]
+fn set_lut_applies_adjusts_removes_and_round_trips_history() {
+    let mut state = one_clip_state();
+    let ids = SeqIdGen::default();
+    let reference =
+        LutReference::new("0123456789abcdef".repeat(4), "Known Transform", 1.0).unwrap();
+    apply(
+        &mut state,
+        EditCommand::SetLut {
+            clip_ids: vec!["c".into()],
+            lut: Some(reference.clone()),
+        },
+        &ids,
+    )
+    .unwrap();
+    assert_eq!(find_clip(&state, "c").lut.as_ref(), Some(&reference));
+
+    let adjusted = LutReference {
+        intensity: 0.35,
+        ..reference.clone()
+    };
+    apply(
+        &mut state,
+        EditCommand::SetLut {
+            clip_ids: vec!["c".into()],
+            lut: Some(adjusted.clone()),
+        },
+        &ids,
+    )
+    .unwrap();
+    assert_eq!(find_clip(&state, "c").lut.as_ref(), Some(&adjusted));
+    apply(&mut state, EditCommand::Undo, &ids).unwrap();
+    assert_eq!(find_clip(&state, "c").lut.as_ref(), Some(&reference));
+    apply(&mut state, EditCommand::Redo, &ids).unwrap();
+    assert_eq!(find_clip(&state, "c").lut.as_ref(), Some(&adjusted));
+
+    apply(
+        &mut state,
+        EditCommand::SetLut {
+            clip_ids: vec!["c".into()],
+            lut: None,
+        },
+        &ids,
+    )
+    .unwrap();
+    assert!(find_clip(&state, "c").lut.is_none());
 }
 
 #[test]

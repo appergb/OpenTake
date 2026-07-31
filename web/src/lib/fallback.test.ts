@@ -377,6 +377,46 @@ describe("browser fallback edit store", () => {
     expect(clip?.colorGrade?.hslSecondary?.hueCenter).toBe(0.98);
   });
 
+  it("sets, adjusts, and removes a path-free managed LUT reference", () => {
+    const fallback = createFallbackStore();
+    const id = "0123456789abcdef".repeat(4);
+    const applied = fallback.editApply({
+      type: "setLut",
+      clipIds: ["c1"],
+      lut: { id, name: "Known Transform", intensity: 1 },
+    });
+    expect(applied.changed).toBe(true);
+    expect(fallback.getTimeline().timeline.tracks[0].clips[0].lut).toEqual({
+      id,
+      name: "Known Transform",
+      intensity: 1,
+    });
+
+    expect(
+      fallback.editApply({
+        type: "setLut",
+        clipIds: ["c1"],
+        lut: { id, name: "Known Transform", intensity: 1.5 },
+      }).changed,
+    ).toBe(false);
+    expect(
+      fallback.editApply({
+        type: "setLut",
+        clipIds: ["c1"],
+        lut: { id, name: "bad\u0000name", intensity: 0.5 },
+      }).changed,
+    ).toBe(false);
+    expect(
+      fallback.editApply({
+        type: "setLut",
+        clipIds: ["c1"],
+        lut: { id, name: "界".repeat(43), intensity: 0.5 },
+      }).changed,
+    ).toBe(false);
+    expect(fallback.editApply({ type: "setLut", clipIds: ["c1"], lut: null }).changed).toBe(true);
+    expect(fallback.getTimeline().timeline.tracks[0].clips[0].lut).toBeUndefined();
+  });
+
   it("stores both pair ids and rejects an oversized adjacent cross dissolve", () => {
     const fallback = createFallbackStore();
     fallback.reset();

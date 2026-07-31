@@ -22,6 +22,6 @@ pub use size::{even, export_render_size, ExportResolution};
 pub use source::{DecodedFrame, FrameProvider, SourceMetrics};
 
 pub use gpu::{
-    Compositor, CosmicTextRasterizer, GpuTexture, NullTextRasterizer, RenderDevice, RenderError,
-    TextRasterRequest, TextRasterizer, TextureCache, TextureResolver,
+    Compositor, CosmicTextRasterizer, GpuLutTexture, GpuTexture, NullTextRasterizer, RenderDevice,
+    RenderError, TextRasterRequest, TextRasterizer, TextureCache, TextureResolver,
 };

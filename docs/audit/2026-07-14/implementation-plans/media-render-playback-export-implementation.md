@@ -549,39 +549,41 @@ Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/auto
 
 - Candidate/source: `doc-0b8b56b94a928929` at `docs/architecture/CAPCUT-GAP.md:145` (requirement)
 - Expected behavior: Validated 3D LUT files can be imported, previewed, and exported.
-- Resolution: `reviewed-mapping-report:MR-lut` — No validated LUT import, persisted reference, GPU 3D texture or preview/export path exists.
+- Resolution: `implemented-and-verified:MR-lut` — Validated 17/33-point `.cube` tables now publish into content-addressed project storage, persist as path-free clip references, and render through one shared 3D-texture path for preview, playback, inspection, and export. Transactional Inspector editing, real-GPU identity/known-transform parity, save/reopen, and complete packaged export evidence are recorded below.
 - Exact acceptance contract:
   - Parse and validate .cube LUT metadata, domain bounds, and 17- and 33-point tables; reject malformed or oversized input with typed errors.
   - Import, select, set intensity, remove, and undo LUT changes without copying arbitrary files outside project-managed storage.
   - Compare identity and known-transform LUT fixtures in GPU preview and export using the existing pixel-diff threshold, including save/reopen.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/lut.rs#malformed_and_oversized_luts_fail_closed_and_valid_lut_matches_preview_export` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test lut malformed_and_oversized_luts_fail_closed_and_valid_lut_matches_preview_export -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-domain/src/lut.rs`, `crates/opentake-render/src/gpu/compositor.rs`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test lut malformed_and_oversized_luts_fail_closed_and_valid_lut_matches_preview_export -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/automated/lut-real-device-2026-07-31.md`.
 
 ### Task 11: MR-loudness (implementation-slice-e668f03cd9c414d2)
 

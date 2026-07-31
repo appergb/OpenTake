@@ -574,6 +574,33 @@ export function createFallbackStore() {
           }
           return result(changed, "Set Color Grade", cmd.clipIds);
         }
+        case "setLut": {
+          const locations = findAllClips(cmd.clipIds);
+          if (!locations) return result(false, "Set LUT", []);
+          const next = cmd.lut ?? undefined;
+          const nameBytes = next ? new TextEncoder().encode(next.name).length : 0;
+          if (
+            next &&
+            (!/^[0-9a-f]{64}$/.test(next.id) ||
+              nameBytes < 1 ||
+              nameBytes > 128 ||
+              /\p{Cc}/u.test(next.name) ||
+              !Number.isFinite(next.intensity) ||
+              next.intensity < 0 ||
+              next.intensity > 1)
+          ) {
+            return result(false, "Set LUT", []);
+          }
+          let changed = false;
+          for (const loc of locations) {
+            const clip = timeline.tracks[loc[0]].clips[loc[1]];
+            if (JSON.stringify(clip.lut) !== JSON.stringify(next)) {
+              clip.lut = next ? { ...next } : undefined;
+              changed = true;
+            }
+          }
+          return result(changed, "Set LUT", cmd.clipIds);
+        }
         case "setChromaKey": {
           const locations = findAllClips(cmd.clipIds);
           if (!locations) return result(false, "Set Chroma Key", []);

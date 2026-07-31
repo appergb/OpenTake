@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 use opentake_core::AppCore;
-use opentake_domain::{Clip, ClipType, MediaSource, TextStyle};
+use opentake_domain::{Clip, ClipType, LutReference, MediaSource, TextStyle};
 use opentake_media::encode::{mix, ClipAudio, MIX_SAMPLE_RATE};
 use opentake_media::{
     decode_frame_at, extract_pcm, extract_pcm_cancellable_with_progress, interpolate_frame_pair,
@@ -54,6 +54,7 @@ use opentake_media::{
     FrameInterpolationMode, FrameRequest, MediaCancelToken, PcmBuffer, PcmFormat,
     PcmProgressCallback, PcmSpec, RgbaFrame, VideoCodec, VideoEncoder,
 };
+use opentake_project::ProjectRoot;
 use opentake_render::gpu::compositor::{
     TextureInterpolationConfig, TextureInterpolationFallback, TextureInterpolationMode,
     TextureResolveRequest,
@@ -61,8 +62,8 @@ use opentake_render::gpu::compositor::{
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::{
     export_render_size, try_build_render_plan, AudioClipPlan, Compositor, CosmicTextRasterizer,
-    DecodedFrame, ExportResolution as RenderResolution, GpuTexture, RenderDevice, SourceMetrics,
-    TextRasterRequest, TextRasterizer, TextureCache, TextureResolver, TextureSource,
+    DecodedFrame, ExportResolution as RenderResolution, GpuLutTexture, GpuTexture, RenderDevice,
+    SourceMetrics, TextRasterRequest, TextRasterizer, TextureCache, TextureResolver, TextureSource,
 };
 
 /// Per-frame texture cache size. Export advances monotonically, so video-frame
@@ -470,6 +471,8 @@ struct MediaResolver<'d> {
     text_rasterizer: &'d CosmicTextRasterizer,
     /// Decode/raster box for source frames (matches the export render size).
     render_box: (u32, u32),
+    project_root: Option<&'d ProjectRoot>,
+    lut_cache: &'d mut HashMap<String, Rc<GpuLutTexture>>,
 }
 
 impl MediaResolver<'_> {
@@ -614,6 +617,26 @@ impl TextureResolver for MediaResolver<'_> {
             }
             _ => self.resolve(request.source, request.source_frame),
         }
+    }
+
+    fn resolve_lut(
+        &mut self,
+        reference: &LutReference,
+    ) -> Result<Option<Rc<GpuLutTexture>>, opentake_render::RenderError> {
+        if let Some(cached) = self.lut_cache.get(&reference.id) {
+            return Ok(Some(cached.clone()));
+        }
+        let resolved = crate::lut::resolve_project_lut(
+            self.project_root,
+            reference,
+            self.device,
+            self.queue,
+            "export-lut",
+        )?;
+        if let Some(texture) = &resolved {
+            self.lut_cache.insert(reference.id.clone(), texture.clone());
+        }
+        Ok(resolved)
     }
 }
 
@@ -1157,6 +1180,11 @@ pub(crate) fn run_export_with_control(
     let metrics = ManifestMetrics { sizes };
     let plan = try_build_render_plan(timeline, render_size, &metrics)
         .map_err(|error| format!("invalid timeline graph: {error}"))?;
+    let project_root = project_dir
+        .as_ref()
+        .map(ProjectRoot::open)
+        .transpose()
+        .map_err(|error| format!("open project LUT storage: {error}"))?;
 
     // Acquire the GPU device + compositor for this export. Unlike the preview
     // (which caches the context in Tauri state for repeated scrubs), an export is
@@ -1199,6 +1227,7 @@ pub(crate) fn run_export_with_control(
     let range_total = end_frame - start_frame;
 
     let mut last_progress_emit = Instant::now();
+    let mut lut_cache = HashMap::new();
     for f in start_frame..end_frame {
         if control.is_some_and(|c| c.is_cancelled())
             || external_cancel
@@ -1227,6 +1256,8 @@ pub(crate) fn run_export_with_control(
             text: &text,
             text_rasterizer: &text_rasterizer,
             render_box: (render_size.width, render_size.height),
+            project_root: project_root.as_ref(),
+            lut_cache: &mut lut_cache,
         };
         let interpolation = TextureInterpolationConfig::new(
             plan.fps as f64,

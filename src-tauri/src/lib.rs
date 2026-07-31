@@ -18,6 +18,7 @@ mod generation;
 mod haptic;
 mod home;
 mod library;
+mod lut;
 mod mcp;
 mod media;
 mod render;
@@ -227,6 +228,7 @@ pub fn run() {
             samples::sample_project_materialize,
             media::import_folder,
             media::import_media,
+            lut::import_lut,
             media::relink_media,
             media::get_media,
             media::toggle_favorite,

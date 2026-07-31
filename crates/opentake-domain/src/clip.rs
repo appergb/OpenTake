@@ -19,6 +19,7 @@ use crate::clip_wire::{
 };
 use crate::grade::{ChromaKey, ColorGrade, Effect, Mask};
 use crate::keyframe::{AnimPair, AnimatableProperty, Interpolation, KeyframeTrack};
+use crate::lut::LutReference;
 use crate::stabilization::StabilizationTrack;
 use crate::text::TextStyle;
 use crate::transform::{Crop, Point, Transform};
@@ -217,6 +218,10 @@ pub struct Clip {
     /// High-end floating-point color grade (linear-light chain). `None` = no grade.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_grade: Option<ColorGrade>,
+    /// Project-managed 3D LUT reference. The persisted id maps only to the
+    /// bundle's canonical `media/luts/<sha256>.cube` location.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lut: Option<LutReference>,
     /// Green/blue-screen chroma key. `None` = no keying.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chroma_key: Option<ChromaKey>,
@@ -277,6 +282,7 @@ impl Clip {
         "cropTrack",
         "volumeTrack",
         "colorGrade",
+        "lut",
         "chromaKey",
         "masks",
         "effects",
@@ -369,6 +375,7 @@ impl Clip {
             crop_track: None,
             volume_track: None,
             color_grade: None,
+            lut: None,
             chroma_key: None,
             masks: Vec::new(),
             effects: Vec::new(),

@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 
 use opentake_domain::{
     AnimPair, ChromaKey, Clip, ClipType, ColorGrade, Crop, Effect, Fill, Interpolation, Keyframe,
-    KeyframeTrack, Mask, Rgba, Shadow, StabilizationKeyframe, StabilizationTrack, TextAlignment,
-    TextStyle, Track, Transform, Transition, TransitionKind,
+    KeyframeTrack, LutReference, Mask, Rgba, Shadow, StabilizationKeyframe, StabilizationTrack,
+    TextAlignment, TextStyle, Track, Transform, Transition, TransitionKind,
 };
 use serde::Serialize;
 
@@ -100,6 +100,10 @@ fn full_clip() -> Clip {
     )]));
     clip.volume_track = Some(KeyframeTrack::from_keyframes(vec![Keyframe::new(0, 0.9)]));
     clip.color_grade = Some(ColorGrade::default());
+    clip.lut = Some(
+        LutReference::new("0123456789abcdef".repeat(4), "Wire schema LUT", 0.75)
+            .expect("wire LUT reference is valid"),
+    );
     clip.chroma_key = Some(ChromaKey::default());
     clip.masks = vec![Mask::default()];
     clip.effects = vec![Effect::new("wire").with_param("amount", 1.0)];

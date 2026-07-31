@@ -30,12 +30,13 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use opentake_core::{AppCore, EditCommand, ProjectRevision};
-use opentake_domain::{ClipType, MediaSource, TextStyle, Timeline};
+use opentake_domain::{ClipType, LutReference, MediaSource, TextStyle, Timeline};
 use opentake_media::{
     decode_frame_at, decode_frame_at_cancellable, interpolate_frame_pair,
     FrameInterpolationFallback, FrameInterpolationMode, FrameRequest, MediaCancelToken,
 };
 use opentake_ops::command::RenameEntry;
+use opentake_project::ProjectRoot;
 use opentake_render::gpu::compositor::{
     TextureInterpolationConfig, TextureInterpolationFallback, TextureInterpolationMode,
     TextureResolveRequest,
@@ -43,9 +44,9 @@ use opentake_render::gpu::compositor::{
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::wgpu;
 use opentake_render::{
-    even, try_build_render_plan, Compositor, CosmicTextRasterizer, DecodedFrame, GpuTexture,
-    RenderDevice, RenderSize, SourceMetrics, TextRasterRequest, TextRasterizer, TextureCache,
-    TextureResolver, TextureSource,
+    even, try_build_render_plan, Compositor, CosmicTextRasterizer, DecodedFrame, GpuLutTexture,
+    GpuTexture, RenderDevice, RenderSize, SourceMetrics, TextRasterRequest, TextRasterizer,
+    TextureCache, TextureResolver, TextureSource,
 };
 
 /// Cap (longest canvas side, px) for a composite when the caller passes no
@@ -291,6 +292,8 @@ struct MediaResolver<'d> {
     /// Downscale box for decoded source frames (matches the preview render size).
     preview_box: (u32, u32),
     cancel: &'d MediaCancelToken,
+    project_root: Option<&'d ProjectRoot>,
+    lut_cache: HashMap<String, Rc<GpuLutTexture>>,
 }
 
 impl MediaResolver<'_> {
@@ -454,6 +457,26 @@ impl TextureResolver for MediaResolver<'_> {
             _ => self.resolve(request.source, request.source_frame),
         }
     }
+
+    fn resolve_lut(
+        &mut self,
+        reference: &LutReference,
+    ) -> Result<Option<Rc<GpuLutTexture>>, opentake_render::RenderError> {
+        if let Some(cached) = self.lut_cache.get(&reference.id) {
+            return Ok(Some(cached.clone()));
+        }
+        let resolved = crate::lut::resolve_project_lut(
+            self.project_root,
+            reference,
+            self.device,
+            self.queue,
+            "preview-lut",
+        )?;
+        if let Some(texture) = &resolved {
+            self.lut_cache.insert(reference.id.clone(), texture.clone());
+        }
+        Ok(resolved)
+    }
 }
 
 /// Preview render size: even-ized canvas, optionally downscaled so the longest
@@ -571,6 +594,11 @@ fn composite_rgba_for_snapshot(
     let plan = try_build_render_plan(timeline, render_size, &metrics)
         .map_err(|error| format!("invalid timeline graph: {error}"))?;
     let frame_plan = plan.frame(timeline, frame);
+    let project_root = project_dir
+        .as_deref()
+        .map(ProjectRoot::open)
+        .transpose()
+        .map_err(|error| format!("open project LUT storage: {error}"))?;
 
     // Acquire (or reuse) the GPU context, then composite + read back. The lock is
     // held across the render so the `Rc`-based texture cache never crosses threads.
@@ -604,6 +632,8 @@ fn composite_rgba_for_snapshot(
         text_rasterizer: &ctx.text_rasterizer,
         preview_box: (render_size.width, render_size.height),
         cancel,
+        project_root: project_root.as_ref(),
+        lut_cache: HashMap::new(),
     };
     let interpolation = TextureInterpolationConfig::new(
         plan.fps as f64,

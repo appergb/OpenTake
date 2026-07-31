@@ -564,7 +564,19 @@ pub async fn playback_start(
 
     // Snapshot the session synchronously — no managed-state guard is held across
     // the await below (Tauri async commands require a Send future).
-    let (timeline, sizes, media, text, render_size, fps, sink, emitter, publication, server) = {
+    let (
+        timeline,
+        sizes,
+        media,
+        text,
+        render_size,
+        fps,
+        sink,
+        emitter,
+        publication,
+        server,
+        project_dir,
+    ) = {
         let timeline = snapshot.timeline;
         let manifest = snapshot.media;
         let project_dir = snapshot.project_dir;
@@ -593,6 +605,7 @@ pub async fn playback_start(
             emitter,
             publication,
             server,
+            project_dir,
         )
     };
 
@@ -637,7 +650,7 @@ pub async fn playback_start(
 
     let ready_cancel = cancel.clone();
     let engine = match spawn_ready_off_executor(move || {
-        PlaybackEngine::spawn_ready_cancellable(
+        PlaybackEngine::spawn_ready_cancellable_with_project(
             timeline,
             media,
             text,
@@ -648,6 +661,7 @@ pub async fn playback_start(
             emitter,
             start_at,
             ready_cancel,
+            project_dir,
         )
     })
     .await

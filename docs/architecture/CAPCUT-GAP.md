@@ -149,8 +149,9 @@
 - **实现方案**:纯本地着色器方案:片元着色器内把像素 RGB 转 HSL,按目标色相区(如红/橙/黄/绿/青/蓝/紫/品红 8 区)用平滑权重(基于色相距离的高斯/三角窗,避免硬边带)对落在该区的像素施加 H/S/L 偏移,再转回 RGB。这是 Lumetri/达芬奇 HSL Qualifier 的简化版。进阶可做'限定器'(luma/sat/hue 三维 key + 羽化),但首版做 8 固定区即可覆盖剪映同类能力。全部为本地像素数学,无需外部模型。
 - **前置依赖**:依赖'高阶浮点调色引擎'(P0);需 RGB↔HSL 着色器工具函数。
 
-### 3D LUT 导入 — `missing` · 难度 medium · 优先级 p1
-- **判定依据**:grep LUT/.cube/colorMatrix 上游命中 0;_analysis/02:11 明确上游无任何 GPU shader/CoreImage 滤镜;设计稿(含技术选型清单 ARCHITECTURE.md:172-190)无 LUT 解析或 3D 纹理规划。
+### 3D LUT 导入 — `has` · 难度 medium · 优先级 p1
+- **OpenTake 当前状态(2026-07-31)**:已实现 4 MiB 上限、严格元数据/DOMAIN 校验和完整 17/33 点表解析；导入只接受绝对路径的 no-follow 普通 `.cube` 文件，验证后按 SHA-256 原子发布到工程 `media/luts`，Clip 仅持久化无路径的 id/name/intensity。预览、原生播放、MCP 检查与导出共享同一哈希复验/解析/RGBA16F 3D 纹理三线性采样链，缺失或篡改时显式失败。Inspector 已提供导入、名称、强度、移除和撤销/重做。真实 Metal/wgpu 测试覆盖 identity、已知变换、预览/导出逐字节一致与损坏/过大拒绝；打包应用已完成可见导入、35% 强度、撤销/重做、移除恢复、保存重开、播放和 920 帧完整 H.264/AAC 导出，证据见 `docs/audit/2026-07-14/runtime-artifacts/automated/lut-real-device-2026-07-31.md`。
+- **判定依据**:上游仍无 LUT/.cube/colorMatrix 或 GPU shader/CoreImage 滤镜；本状态描述的是 OpenTake 已完成的增强能力。
 - **落点(crate/层)**:opentake-media 或 opentake-project(.cube/.3dl 文件解析 + 校验)+ opentake-render(3D 纹理三线性采样)+ opentake-domain(ColorGrade 内 lut_ref 指向工程内 LUT 资产 + 强度 0..1)
 - **实现方案**:纯本地、跨平台、无外部模型:Rust 端写 .cube 解析器(行业标准 ASCII 格式:LUT_3D_SIZE N + N³ 行 RGB,可参考 crate 'lut' 或几十行自写,顺带支持 .3dl/.cube 1D)。把 LUT 上传为 wgpu 3D 纹理(rgba16f),着色器对线性/log 输入做三线性插值采样,再按强度与原图 mix。LUT 应放进 .opentake 工程包(媒体清单管理,复刻 content-hash 缓存机制 ARCHITECTURE.md:121),clip 只存 lut_ref(=资产 id),与上游'clip 永不存路径'语义一致(_analysis/01:127)。需明确 LUT 期望的输入色彩空间(sRGB/Rec709/Log)并在采样前做对应转换,否则色偏。
 - **前置依赖**:依赖'高阶浮点调色引擎'(P0)的色彩空间约定;依赖工程包媒体管理(opentake-project,Phase 2 已规划)。

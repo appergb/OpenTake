@@ -68,6 +68,7 @@ import {
   setChromaKey,
   setClipProperties,
   setColorGrade,
+  setLut,
   setEffects,
   setKeyframeInterpolation,
   setKeyframes,
@@ -227,6 +228,7 @@ describe("edit gesture command routing", () => {
       () => setKeyframeInterpolation("clip-a", "opacity", 14, "hold"),
     );
     await route({ type: "setColorGrade", clipIds: ["clip-a"], grade: null }, () => setColorGrade(["clip-a"], null));
+    await route({ type: "setLut", clipIds: ["clip-a"], lut: null }, () => setLut(["clip-a"], null));
     await route({ type: "setChromaKey", clipIds: ["clip-a"], chromaKey: null }, () => setChromaKey(["clip-a"], null));
     await route(
       { type: "setMasks", clipIds: ["clip-a"], masks: [{ shape: { kind: "circle", center: { x: 0.5, y: 0.5 }, radius: { x: 0.25, y: 0.25 } }, feather: 0, invert: false }] },

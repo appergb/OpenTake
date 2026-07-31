@@ -19,9 +19,9 @@
 use std::collections::{HashMap, HashSet};
 
 use opentake_domain::{
-    ChromaKey, Clip, ClipType, ColorGrade, Crop, Effect, Interpolation, Mask, MaskShape,
-    NestedSequence, StabilizationTrack, Timeline, Track, Transform, Transition, TransitionKind,
-    MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS,
+    ChromaKey, Clip, ClipType, ColorGrade, Crop, Effect, Interpolation, LutReference, Mask,
+    MaskShape, NestedSequence, StabilizationTrack, Timeline, Track, Transform, Transition,
+    TransitionKind, MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS,
 };
 
 use crate::editor_state::EditorState;
@@ -352,6 +352,11 @@ pub enum EditCommand {
         clip_ids: Vec<String>,
         grade: Option<ColorGrade>,
     },
+    /// Set or clear one project-managed 3D LUT on one or more clips.
+    SetLut {
+        clip_ids: Vec<String>,
+        lut: Option<LutReference>,
+    },
     /// Set (or clear with `None`) the chroma key on one or more clips.
     SetChromaKey {
         clip_ids: Vec<String>,
@@ -639,6 +644,7 @@ pub fn apply(
             interpolation,
         } => set_keyframe_interpolation(state, clip_id, property, frame, interpolation),
         EditCommand::SetColorGrade { clip_ids, grade } => set_color_grade(state, clip_ids, grade),
+        EditCommand::SetLut { clip_ids, lut } => set_lut(state, clip_ids, lut),
         EditCommand::SetChromaKey {
             clip_ids,
             chroma_key,
@@ -2516,6 +2522,22 @@ fn set_color_grade(
     reject_compound_effect_targets(state, &clip_ids, grade.is_some())?;
     set_clip_effect_field(state, clip_ids, "Set Color Grade", move |clip| {
         clip.color_grade = grade;
+    })
+}
+
+fn set_lut(
+    state: &mut EditorState,
+    clip_ids: Vec<String>,
+    lut: Option<LutReference>,
+) -> Result<EditResult, EditError> {
+    if let Some(reference) = &lut {
+        reference
+            .validate()
+            .map_err(|error| EditError::Invalid(format!("invalid LUT reference: {error}")))?;
+    }
+    reject_compound_effect_targets(state, &clip_ids, lut.is_some())?;
+    set_clip_effect_field(state, clip_ids, "Set LUT", move |clip| {
+        clip.lut = lut.clone();
     })
 }
 

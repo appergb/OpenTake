@@ -38,6 +38,7 @@ import type {
   KeyframeProperty,
   KeyframeValueReq,
   MaskInput,
+  LutReference,
   MediaItem,
   StabilizationTrack,
   RenameEntryReq,
@@ -76,6 +77,7 @@ export const EDIT_GESTURE_COMMAND_MATRIX = [
   { gesture: "drag keyframe", action: "moveKeyframe", requestType: "moveKeyframe", backend: "MoveKeyframe" },
   { gesture: "keyframe interpolation menu", action: "setKeyframeInterpolation", requestType: "setKeyframeInterpolation", backend: "SetKeyframeInterpolation" },
   { gesture: "color grade commit", action: "setColorGrade", requestType: "setColorGrade", backend: "SetColorGrade" },
+  { gesture: "LUT select, intensity, or remove", action: "setLut", requestType: "setLut", backend: "SetLut" },
   { gesture: "chroma key commit", action: "setChromaKey", requestType: "setChromaKey", backend: "SetChromaKey" },
   { gesture: "mask commit", action: "setMasks", requestType: "setMasks", backend: "SetMasks" },
   { gesture: "effect chain commit", action: "setEffects", requestType: "setEffects", backend: "SetEffects" },
@@ -315,6 +317,11 @@ export async function setClipProperties(clipIds: string[], properties: ClipPrope
 export async function setColorGrade(clipIds: string[], grade: ColorGradeInput | null) {
   if (clipIds.length === 0) return;
   await applyAndRefresh({ type: "setColorGrade", clipIds, grade });
+}
+
+export async function setLut(clipIds: string[], lut: LutReference | null) {
+  if (clipIds.length === 0) return;
+  await applyAndRefresh({ type: "setLut", clipIds, lut });
 }
 
 export async function setChromaKey(clipIds: string[], chromaKey: ChromaKeyInput | null) {

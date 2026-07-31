@@ -34,6 +34,8 @@ import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
 import * as edit from "../../store/editActions";
+import * as api from "../../lib/api";
+import { openDialog } from "../../lib/dialog";
 import { formatTimecode } from "../../lib/geometry";
 import {
   cropAt,
@@ -1222,10 +1224,31 @@ function StabilizationSection({ clip, t }: { clip: Clip; t: TFunction }) {
 
 function ColorGradeSection({ clip, t }: { clip: Clip; t: TFunction }) {
   const [draft, setDraft] = useState<ColorGrade>(() => completeColorGrade(clip.colorGrade));
+  const [lutIntensity, setLutIntensity] = useState(clip.lut?.intensity ?? 1);
+  const [lutError, setLutError] = useState<string | null>(null);
 
   useEffect(() => {
     setDraft(completeColorGrade(clip.colorGrade));
-  }, [clip.id, clip.colorGrade]);
+    setLutIntensity(clip.lut?.intensity ?? 1);
+  }, [clip.id, clip.colorGrade, clip.lut]);
+
+  const importLut = async () => {
+    setLutError(null);
+    try {
+      const open = await openDialog();
+      if (!open) return;
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        filters: [{ name: "3D LUT", extensions: ["cube"] }],
+      });
+      if (typeof selected !== "string") return;
+      const reference = await api.importLut(selected);
+      await edit.setLut([clip.id], reference);
+    } catch (error) {
+      setLutError(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   const commitGrade = (next: ColorGrade) => {
     setDraft(next);
@@ -1327,6 +1350,42 @@ function ColorGradeSection({ clip, t }: { clip: Clip; t: TFunction }) {
         onChange={(v) => updateField("saturation", v)}
         onCommit={(v) => commitField("saturation", v)}
       />
+      <SectionHeader label={t("inspector.section.lut")} />
+      <Row label={t("inspector.field.lutFile")}>
+        <div style={{ display: "flex", alignItems: "center", gap: SPACE.xs, minWidth: 0 }}>
+          <span
+            title={clip.lut?.name}
+            style={{ color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          >
+            {clip.lut?.name ?? t("inspector.value.noLut")}
+          </span>
+          <button type="button" style={controlStyle} onClick={() => void importLut()}>
+            {t("inspector.action.importLut")}
+          </button>
+          {clip.lut && (
+            <button type="button" style={controlStyle} onClick={() => void edit.setLut([clip.id], null)}>
+              {t("inspector.action.removeLut")}
+            </button>
+          )}
+        </div>
+      </Row>
+      {clip.lut && (
+        <EffectNumberRow
+          label={t("inspector.field.lutIntensity")}
+          value={lutIntensity}
+          min={0}
+          max={1}
+          sensitivity={0.005}
+          format={(value) => value.toFixed(3)}
+          onChange={setLutIntensity}
+          onCommit={(intensity) => void edit.setLut([clip.id], { ...clip.lut!, intensity })}
+        />
+      )}
+      {lutError && (
+        <div role="alert" style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, color: "var(--danger)" }}>
+          {lutError}
+        </div>
+      )}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <SectionHeader label={t("inspector.section.hslSecondary")} />
         <HoverButton

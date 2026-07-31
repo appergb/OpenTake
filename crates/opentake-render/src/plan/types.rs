@@ -13,7 +13,7 @@
 //! The black background is NOT a clip here — it is the compositor clear color
 //! `(0,0,0,1)` (SPEC §3.5).
 
-use opentake_domain::{ChromaKey, Clip, ClipType, ColorGrade, Effect, Mask};
+use opentake_domain::{ChromaKey, Clip, ClipType, ColorGrade, Effect, LutReference, Mask};
 
 /// Canvas pixel size (already even-ized; see [`crate::size`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -130,6 +130,8 @@ pub struct ClipPlan {
     // shader; the pure pixel math lives in `opentake_domain::grade`.
     /// Linear-light color grade, or `None` when the clip has no grade.
     pub color_grade: Option<ColorGrade>,
+    /// Project-managed 3D LUT applied after the primary grade.
+    pub lut: Option<LutReference>,
     /// Chroma key, or `None` when the clip has no keying.
     pub chroma_key: Option<ChromaKey>,
     /// Vector masks (intersected coverage). Empty = no masking.
@@ -191,6 +193,8 @@ pub struct LayerDraw<'a> {
     /// Color grade applied in-shader (linear-light chain), borrowed from the
     /// [`ClipPlan`]. `None` = no grade.
     pub color_grade: Option<&'a ColorGrade>,
+    /// Project-managed 3D LUT applied after the primary grade.
+    pub lut: Option<&'a LutReference>,
     /// Chroma key applied in-shader, borrowed from the [`ClipPlan`]. `None` = none.
     pub chroma_key: Option<&'a ChromaKey>,
     /// Masks applied in-shader (intersected coverage), borrowed from the

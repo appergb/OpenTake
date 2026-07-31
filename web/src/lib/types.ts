@@ -136,6 +136,12 @@ export interface ColorGrade {
   hslSecondary?: HslSecondary;
 }
 
+export interface LutReference {
+  id: string;
+  name: string;
+  intensity: number;
+}
+
 export interface ChromaKey {
   keyColor: Rgb;
   similarity: number;
@@ -255,6 +261,7 @@ export interface Clip {
   cropTrack?: KeyframeTrack<Crop>;
   volumeTrack?: KeyframeTrack<number>;
   colorGrade?: ColorGrade;
+  lut?: LutReference;
   chromaKey?: ChromaKey;
   masks?: Mask[];
   effects?: Effect[];
@@ -385,6 +392,7 @@ export type EditRequest =
   | { type: "moveKeyframe"; clipId: string; property: KeyframeProperty; fromFrame: number; toFrame: number }
   | { type: "setKeyframeInterpolation"; clipId: string; property: KeyframeProperty; frame: number; interpolation: Interpolation }
   | { type: "setColorGrade"; clipIds: string[]; grade?: ColorGradeInput | null }
+  | { type: "setLut"; clipIds: string[]; lut?: LutReference | null }
   | { type: "setChromaKey"; clipIds: string[]; chromaKey?: ChromaKeyInput | null }
   | { type: "setMasks"; clipIds: string[]; masks: MaskInput[] }
   | { type: "setEffects"; clipIds: string[]; effects: EffectInput[] }

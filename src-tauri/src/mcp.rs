@@ -43,13 +43,14 @@ use opentake_core::{
     importable_clip_type, AppCore, CoreError, DeferredCoreEvents, ProbedMedia,
     ProjectRuntimeSnapshot,
 };
-use opentake_domain::{ClipType, MediaSource, TextStyle};
+use opentake_domain::{ClipType, LutReference, MediaSource, TextStyle};
 use opentake_media::{decode_frame_at, decode_frames_at, FrameRequest, MediaEngine, RgbaFrame};
+use opentake_project::ProjectRoot;
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::{
-    even, try_build_render_plan, Compositor, CosmicTextRasterizer, DecodedFrame, GpuTexture,
-    RenderDevice, RenderSize, SourceMetrics, TextRasterRequest, TextRasterizer, TextureCache,
-    TextureResolver, TextureSource,
+    even, try_build_render_plan, Compositor, CosmicTextRasterizer, DecodedFrame, GpuLutTexture,
+    GpuTexture, RenderDevice, RenderSize, SourceMetrics, TextRasterRequest, TextRasterizer,
+    TextureCache, TextureResolver, TextureSource,
 };
 
 use crate::library::ProjectMediaCapability;
@@ -1480,6 +1481,12 @@ fn composite_frames_jpeg(
     let plan = try_build_render_plan(timeline, render_size, &metrics)
         .map_err(|error| BridgeError::new(format!("invalid timeline graph: {error}")))?;
 
+    let project_root = project_dir
+        .as_deref()
+        .map(ProjectRoot::open)
+        .transpose()
+        .map_err(|error| BridgeError::new(format!("open project LUT storage: {error}")))?;
+
     let dev =
         RenderDevice::try_new().map_err(|e| BridgeError::new(format!("no GPU device: {e}")))?;
     let compositor = Compositor::new(&dev.device);
@@ -1489,6 +1496,7 @@ fn composite_frames_jpeg(
     }
 
     let mut out_frames: Vec<InspectedFrame> = Vec::with_capacity(frames.len());
+    let mut lut_cache = HashMap::new();
     for &f in frames {
         let frame_plan = plan.frame(timeline, f);
         let mut resolver = InspectResolver {
@@ -1500,6 +1508,8 @@ fn composite_frames_jpeg(
             text: &text,
             text_rasterizer: &text_rasterizer,
             render_box: (render_size.width, render_size.height),
+            project_root: project_root.as_ref(),
+            lut_cache: &mut lut_cache,
         };
         let composite = match compositor.render_to_rgba(
             &dev.device,
@@ -1600,6 +1610,8 @@ struct InspectResolver<'d> {
     text: &'d HashMap<String, TextInfo>,
     text_rasterizer: &'d CosmicTextRasterizer,
     render_box: (u32, u32),
+    project_root: Option<&'d ProjectRoot>,
+    lut_cache: &'d mut HashMap<String, Rc<GpuLutTexture>>,
 }
 
 impl InspectResolver<'_> {
@@ -1619,6 +1631,26 @@ impl InspectResolver<'_> {
         let frame = self.text_rasterizer.rasterize(&req)?;
         let tex = upload_rgba(self.device, self.queue, &frame, false, Some("inspect-text"));
         Some(self.cache.insert(key, tex))
+    }
+
+    fn resolve_managed_lut(
+        &mut self,
+        reference: &LutReference,
+    ) -> Result<Option<Rc<GpuLutTexture>>, opentake_render::RenderError> {
+        if let Some(cached) = self.lut_cache.get(&reference.id) {
+            return Ok(Some(cached.clone()));
+        }
+        let resolved = crate::lut::resolve_project_lut(
+            self.project_root,
+            reference,
+            self.device,
+            self.queue,
+            "inspect-lut",
+        )?;
+        if let Some(texture) = &resolved {
+            self.lut_cache.insert(reference.id.clone(), texture.clone());
+        }
+        Ok(resolved)
     }
 }
 
@@ -1662,6 +1694,13 @@ impl TextureResolver for InspectResolver<'_> {
             Some("inspect-src"),
         );
         Some(self.cache.insert(key, tex))
+    }
+
+    fn resolve_lut(
+        &mut self,
+        reference: &LutReference,
+    ) -> Result<Option<Rc<GpuLutTexture>>, opentake_render::RenderError> {
+        self.resolve_managed_lut(reference)
     }
 }
 

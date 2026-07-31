@@ -75,6 +75,9 @@ struct U {
     grade_gain: vec4<f32>,     // gain_r, gain_g, gain_b, pad
     hsl_secondary_meta: vec4<f32>, // enabled, hue center, full width, feather
     hsl_secondary_adjust: vec4<f32>, // hue shift, saturation, lightness, pad
+    lut_meta: vec4<f32>,       // enabled, intensity, table size, pad
+    lut_domain_min: vec4<f32>, // min r/g/b, pad
+    lut_domain_scale: vec4<f32>, // reciprocal domain span r/g/b, pad
     // Chroma key.
     chroma0: vec4<f32>,        // key_r, key_g, key_b, similarity
     chroma1: vec4<f32>,        // smoothness, spill, pad, pad
@@ -88,6 +91,25 @@ struct U {
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var t_color: texture_2d<f32>;
 @group(0) @binding(2) var s_color: sampler;
+@group(0) @binding(3) var t_lut: texture_3d<f32>;
+@group(0) @binding(4) var s_lut: sampler;
+
+fn apply_lut(rgb: vec3<f32>) -> vec3<f32> {
+    if (u.lut_meta.x < 0.5 || u.lut_meta.y <= 0.0) {
+        return rgb;
+    }
+    let normalized = clamp(
+        (rgb - u.lut_domain_min.xyz) * u.lut_domain_scale.xyz,
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+    let table_size = u.lut_meta.z;
+    // Align authored grid points i/(N-1) with texel centers before hardware
+    // trilinear filtering.
+    let coordinate = (normalized * (table_size - 1.0) + vec3<f32>(0.5)) / table_size;
+    let transformed = textureSample(t_lut, s_lut, coordinate).rgb;
+    return mix(rgb, transformed, clamp(u.lut_meta.y, 0.0, 1.0));
+}
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -506,10 +528,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         rgb = linear_to_srgb(graded);
     }
 
-    // 3. Ordered, schema-validated generic effects.
+    // 3. Project-managed 3D LUT in display-encoded RGB.
+    rgb = apply_lut(rgb);
+
+    // 4. Ordered, schema-validated generic effects.
     rgb = apply_effect_chain(rgb);
 
-    // 4. Masks (intersected coverage) scale alpha.
+    // 5. Masks (intersected coverage) scale alpha.
     alpha = alpha * masks_coverage(in.canvas_uv);
 
     // Premultiply once (the compositor blends premultiplied over), then apply the

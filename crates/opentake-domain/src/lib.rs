@@ -26,6 +26,7 @@ pub mod clip_type;
 mod clip_wire;
 pub mod grade;
 pub mod keyframe;
+pub mod lut;
 pub mod media;
 pub mod signal;
 pub mod split;
@@ -51,6 +52,7 @@ pub use keyframe::{
     smoothstep, split_keyframe_track, AnimPair, AnimatableProperty, Interpolation, Keyframe,
     KeyframeInterpolatable, KeyframeTrack,
 };
+pub use lut::{CubeLut, CubeLutError, LutReference, LutReferenceValidationError};
 pub use media::{
     GenerationInput, GenerationJobStatus, GenerationStatus, MediaAsset, MediaFolder, MediaManifest,
     MediaManifestEntry, MediaResolver, MediaSource,
