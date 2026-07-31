@@ -61,6 +61,8 @@ impl<'a> MotionClipSource<'a> {
 
     /// Decode the frame at a 0-based index, clamping past-the-end to the last
     /// frame (freeze-frame hold, consistent with [`RenderedClip::frame_path`]).
+    /// Missing/corrupt input remains an absent frame (`None`); this adapter does
+    /// not repair, replace, or otherwise mutate the frame cache.
     pub fn frame(&self, frame: i64) -> Option<DecodedFrame> {
         let idx = if frame < 0 { 0usize } else { frame as usize };
         let path = self.clip.frame_path(idx)?;
@@ -169,9 +171,29 @@ mod tests {
     #[test]
     fn missing_decoder_result_is_none() {
         let (clip, _tmp) = render_clip(true);
-        // A decoder that always fails surfaces None (compositor treats as absent).
-        let src = MotionClipSource::new(clip, |_p: &Path| None);
-        assert!(src.decoded_frame("ref", 0).is_none());
+        let valid_path = clip.frames[0].clone();
+        let corrupt_path = clip.frames[1].clone();
+        let missing_path = clip.frames[2].clone();
+        let cache_dir = valid_path.parent().unwrap().to_path_buf();
+        let src = MotionClipSource::new(clip, image_decoder);
+
+        let valid = src
+            .decoded_frame("ref", 0)
+            .expect("valid frame remains decodable");
+        assert_eq!((valid.width, valid.height), (6, 4));
+
+        std::fs::write(&corrupt_path, b"not a png").unwrap();
+        std::fs::remove_file(&missing_path).unwrap();
+        let entries_before = std::fs::read_dir(&cache_dir).unwrap().count();
+
+        assert!(src.decoded_frame("ref", 1).is_none());
+        assert_eq!(std::fs::read(&corrupt_path).unwrap(), b"not a png");
+        assert!(src.decoded_frame("ref", 2).is_none());
+        assert!(!missing_path.exists());
+        assert_eq!(
+            std::fs::read_dir(&cache_dir).unwrap().count(),
+            entries_before
+        );
     }
 
     #[test]

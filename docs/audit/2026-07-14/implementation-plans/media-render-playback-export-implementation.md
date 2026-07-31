@@ -1593,33 +1593,48 @@ not the separately owned desktop motion/Lottie materialization.
   - Visible/returned assertion: assert the exact success payload for the valid case and a stable typed error for the invalid case, including zero partial side effects and no leaked internal path or credential.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_379e138c3e674f1b.rs#completion_379e138c3e674f1b_treat_a_missing_corrupt_decoded_motion_frame_as_.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-motion/src/integration.rs#missing_decoder_result_is_none` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-motion missing_decoder_result_is_none`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Reconciliation note (2026-08-01): `MotionClipSource::frame` already returned
+  the injected decoder's `None` unchanged, so the baseline owner was GREEN.
+  The owner was strengthened to use one valid PNG, one actually corrupted PNG,
+  and one actually deleted frame and still remained GREEN; valid code was not
+  reverted to manufacture RED.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-motion/src/integration.rs#MotionClipSource::frame`, `docs/modules/opentake-motion/integration.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-motion missing_decoder_result_is_none`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Verified 2026-08-01. The valid frame decodes at `6x4`; corrupt and missing
+  frames both return `None`; decoder calls do not recreate the missing file,
+  rewrite the corrupt bytes, or change the cache directory entry count.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. Focused owner, warnings-denied motion Clippy,
+  formatting, and the full workspace Rust suite pass. Evidence:
+  code:`crates/opentake-motion/src/integration.rs#MotionClipSource::frame` and
+  test:`crates/opentake-motion/src/integration.rs#missing_decoder_result_is_none`.
 
 ### Task 26: MR-motion-sandbox-complete (implementation-slice-70b5cbcce858ecde)
 
