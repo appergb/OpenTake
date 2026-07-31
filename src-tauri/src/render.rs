@@ -32,9 +32,14 @@ use tauri::State;
 use opentake_core::{AppCore, EditCommand, ProjectRevision};
 use opentake_domain::{ClipType, MediaSource, TextStyle, Timeline};
 use opentake_media::{
-    decode_frame_at, decode_frame_at_cancellable, FrameRequest, MediaCancelToken,
+    decode_frame_at, decode_frame_at_cancellable, interpolate_frame_pair,
+    FrameInterpolationFallback, FrameInterpolationMode, FrameRequest, MediaCancelToken,
 };
 use opentake_ops::command::RenameEntry;
+use opentake_render::gpu::compositor::{
+    TextureInterpolationConfig, TextureInterpolationFallback, TextureInterpolationMode,
+    TextureResolveRequest,
+};
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::wgpu;
 use opentake_render::{
@@ -245,6 +250,7 @@ impl PreviewCompositeCoordinator {
 /// Resolvable info for one media asset, projected from the manifest.
 struct MediaInfo {
     path: PathBuf,
+    source_fps: Option<f64>,
 }
 
 /// A text clip projected from the timeline, keyed by clip id. The box's width /
@@ -310,6 +316,76 @@ impl MediaResolver<'_> {
         let tex = upload_rgba(self.device, self.queue, &frame, false, Some("preview-text"));
         Some(self.cache.insert(key, tex))
     }
+
+    fn resolve_interpolated_video(
+        &mut self,
+        media_ref: &str,
+        source_frame: i64,
+        interpolation: TextureInterpolationConfig,
+    ) -> Option<Rc<GpuTexture>> {
+        let key = format!(
+            "vf:{media_ref}:{source_frame}:{:?}:{:.6}:{:.6}",
+            interpolation.mode, interpolation.source_fps, interpolation.target_fps
+        );
+        if let Some(tex) = self.cache.get(&key) {
+            return Some(tex);
+        }
+        let info = self.media.get(media_ref)?;
+        let source_fps = info.source_fps.unwrap_or(interpolation.source_fps);
+        if !source_fps.is_finite() || source_fps <= 0.0 {
+            return None;
+        }
+        let timestamp = source_frame.max(0) as f64 / interpolation.target_fps;
+        let source_position = timestamp * source_fps;
+        let first_index = source_position.floor().max(0.0) as i64;
+        let next_index = source_position.ceil().max(0.0) as i64;
+        let alpha = source_position - first_index as f64;
+        let decode = |index: i64| {
+            decode_frame_at_cancellable(
+                &info.path,
+                &FrameRequest {
+                    time_secs: index as f64 / source_fps,
+                    max_size: self.preview_box,
+                    tolerance_secs: 0.0,
+                    apply_rotation: true,
+                },
+                self.cancel,
+            )
+            .ok()
+            .map(|(_, frame)| frame)
+        };
+        let first = decode(first_index)?;
+        let last = if next_index == first_index {
+            first.clone()
+        } else {
+            // A half-open media duration may not expose the mathematical next
+            // frame at the tail. Hold the last decodable endpoint instead of
+            // dropping the whole layer to black.
+            decode(next_index).unwrap_or_else(|| first.clone())
+        };
+        let requested = match interpolation.mode {
+            TextureInterpolationMode::Nearest => FrameInterpolationMode::Nearest,
+            TextureInterpolationMode::Blend => FrameInterpolationMode::Blend,
+            TextureInterpolationMode::OpticalFlow => FrameInterpolationMode::OpticalFlow,
+        };
+        let fallback = match interpolation.fallback {
+            TextureInterpolationFallback::Nearest => FrameInterpolationFallback::Nearest,
+            TextureInterpolationFallback::Blend => FrameInterpolationFallback::Blend,
+            TextureInterpolationFallback::Error => FrameInterpolationFallback::Error,
+        };
+        let frame = interpolate_frame_pair(&first, &last, alpha, requested, fallback, true)
+            .ok()?
+            .frame;
+        let decoded = DecodedFrame::new(frame.width, frame.height, frame.rgba, false);
+        let tex = upload_rgba(
+            self.device,
+            self.queue,
+            &decoded,
+            false,
+            Some("preview-optical-flow"),
+        );
+        Some(self.cache.insert(key, tex))
+    }
 }
 
 impl TextureResolver for MediaResolver<'_> {
@@ -359,6 +435,24 @@ impl TextureResolver for MediaResolver<'_> {
             Some("preview-src"),
         );
         Some(self.cache.insert(key, tex))
+    }
+
+    fn resolve_with_interpolation(
+        &mut self,
+        request: TextureResolveRequest<'_>,
+    ) -> Option<Rc<GpuTexture>> {
+        match request.source {
+            TextureSource::Decoded { media_ref }
+                if request.interpolation.mode != TextureInterpolationMode::Nearest =>
+            {
+                self.resolve_interpolated_video(
+                    media_ref,
+                    request.source_frame,
+                    request.interpolation,
+                )
+            }
+            _ => self.resolve(request.source, request.source_frame),
+        }
     }
 }
 
@@ -462,7 +556,13 @@ fn composite_rgba_for_snapshot(
                 sizes.insert(entry.id.clone(), (w as u32, h as u32));
             }
         }
-        media.insert(entry.id.clone(), MediaInfo { path });
+        media.insert(
+            entry.id.clone(),
+            MediaInfo {
+                path,
+                source_fps: entry.source_fps,
+            },
+        );
     }
 
     let render_size = preview_render_size(timeline.width, timeline.height, max_size);
@@ -505,13 +605,21 @@ fn composite_rgba_for_snapshot(
         preview_box: (render_size.width, render_size.height),
         cancel,
     };
+    let interpolation = TextureInterpolationConfig::new(
+        plan.fps as f64,
+        plan.fps as f64,
+        TextureInterpolationMode::OpticalFlow,
+        TextureInterpolationFallback::Blend,
+    )
+    .map_err(str::to_string)?;
     ctx.compositor
-        .render_to_rgba(
+        .render_to_rgba_with_interpolation(
             &ctx.device,
             &ctx.queue,
             render_size,
             &frame_plan,
             &mut resolver,
+            interpolation,
         )
         .map_err(|e| format!("composite render failed: {e}"))
 }

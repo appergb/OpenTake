@@ -149,11 +149,92 @@ fn pack_masks(draw: &LayerDraw<'_>) -> ([MaskGpu; MASK_CAP], f32) {
 /// directly, matching AVFoundation most closely. Read-back returns those bytes.
 const RT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
+/// Frame reconstruction requested from the media resolver when source and
+/// project rates differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextureInterpolationMode {
+    Nearest,
+    Blend,
+    OpticalFlow,
+}
+
+/// Deterministic recovery policy when the requested optical-flow backend is
+/// unavailable for a resolver/device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextureInterpolationFallback {
+    Nearest,
+    Blend,
+    Error,
+}
+
+/// Explicit source/target-rate contract shared by preview and export.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextureInterpolationConfig {
+    pub source_fps: f64,
+    pub target_fps: f64,
+    pub mode: TextureInterpolationMode,
+    pub fallback: TextureInterpolationFallback,
+}
+
+impl TextureInterpolationConfig {
+    pub fn new(
+        source_fps: f64,
+        target_fps: f64,
+        mode: TextureInterpolationMode,
+        fallback: TextureInterpolationFallback,
+    ) -> Result<Self, &'static str> {
+        if !source_fps.is_finite() || source_fps <= 0.0 {
+            return Err("source_fps must be finite and greater than zero");
+        }
+        if !target_fps.is_finite() || target_fps <= 0.0 {
+            return Err("target_fps must be finite and greater than zero");
+        }
+        Ok(Self {
+            source_fps,
+            target_fps,
+            mode,
+            fallback,
+        })
+    }
+
+    /// Backward-compatible resolver behavior for callers that have not selected
+    /// a rate-conversion mode.
+    pub const fn passthrough() -> Self {
+        Self {
+            source_fps: 1.0,
+            target_fps: 1.0,
+            mode: TextureInterpolationMode::Nearest,
+            fallback: TextureInterpolationFallback::Nearest,
+        }
+    }
+}
+
+/// Complete per-layer texture request. Keeping the interpolation contract on
+/// the request prevents preview/export adapters from silently selecting
+/// different reconstruction modes.
+#[derive(Clone, Copy, Debug)]
+pub struct TextureResolveRequest<'a> {
+    pub source: &'a TextureSource,
+    pub source_frame: i64,
+    pub interpolation: TextureInterpolationConfig,
+}
+
 /// Resolves a draw's [`TextureSource`] + source frame to a GPU texture. The
 /// compositor is decode-agnostic; the integrating layer (or a test) supplies
 /// pixels (e.g. via [`crate::source::FrameProvider`] + a cache).
 pub trait TextureResolver {
     fn resolve(&mut self, source: &TextureSource, source_frame: i64) -> Option<Rc<GpuTexture>>;
+
+    /// Resolve through an explicit rate-conversion contract. Existing
+    /// resolvers remain nearest-frame compatible; optical-flow-aware resolvers
+    /// override this method and apply the requested fallback policy before GPU
+    /// upload.
+    fn resolve_with_interpolation(
+        &mut self,
+        request: TextureResolveRequest<'_>,
+    ) -> Option<Rc<GpuTexture>> {
+        self.resolve(request.source, request.source_frame)
+    }
 }
 
 /// A textured-quad compositor bound to one device.
@@ -285,6 +366,28 @@ impl Compositor {
         frame_plan: &FramePlan<'_>,
         resolver: &mut dyn TextureResolver,
     ) -> Result<DecodedFrame, RenderError> {
+        self.render_to_rgba_with_interpolation(
+            device,
+            queue,
+            size,
+            frame_plan,
+            resolver,
+            TextureInterpolationConfig::passthrough(),
+        )
+    }
+
+    /// Render with an explicit source/target-rate interpolation policy. Preview
+    /// and export pass the same value here so their resolver behavior cannot
+    /// drift independently.
+    pub fn render_to_rgba_with_interpolation(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        size: RenderSize,
+        frame_plan: &FramePlan<'_>,
+        resolver: &mut dyn TextureResolver,
+        interpolation: TextureInterpolationConfig,
+    ) -> Result<DecodedFrame, RenderError> {
         let rt = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("opentake-render target"),
             size: wgpu::Extent3d {
@@ -310,7 +413,11 @@ impl Compositor {
         let mut prepared: Vec<Prepared> = Vec::with_capacity(frame_plan.draws.len());
 
         for draw in &frame_plan.draws {
-            let Some(tex) = resolver.resolve(draw.source, draw.source_frame) else {
+            let Some(tex) = resolver.resolve_with_interpolation(TextureResolveRequest {
+                source: draw.source,
+                source_frame: draw.source_frame,
+                interpolation,
+            }) else {
                 continue;
             };
             // Assemble flags + the A-tier parameter blocks for this draw.

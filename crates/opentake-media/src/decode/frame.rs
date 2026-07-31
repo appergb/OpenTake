@@ -48,6 +48,257 @@ impl Default for FrameRequest {
     }
 }
 
+/// Source-frame reconstruction policy used when a timeline requests frames at
+/// a different rate than the decoded asset. Optical flow is a deterministic
+/// local motion-compensated path; it never implies a cloud/model dependency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameInterpolationMode {
+    Nearest,
+    Blend,
+    OpticalFlow,
+}
+
+/// Explicit recovery behavior when optical flow is unavailable on the current
+/// device/runtime. The caller chooses quality, determinism, or fail-closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameInterpolationFallback {
+    Nearest,
+    Blend,
+    Error,
+}
+
+/// One target-rate sample mapped back into the source-frame interval.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrameRateSample {
+    pub timestamp_secs: f64,
+    pub source_frame: u64,
+    pub next_source_frame: u64,
+    pub source_alpha: f64,
+}
+
+/// Result of one pair interpolation, including the effective mode after an
+/// explicit unsupported-device fallback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameInterpolationResult {
+    pub frame: RgbaFrame,
+    pub mode_used: FrameInterpolationMode,
+}
+
+/// Map a finite source sequence onto a target frame rate while preserving both
+/// endpoint timestamps exactly. Interior timestamps follow the target-rate
+/// grid; the final sample is pinned to the source's final presentation time.
+pub fn convert_frame_rate(
+    source_frame_count: u64,
+    source_fps: f64,
+    target_fps: f64,
+) -> Result<Vec<FrameRateSample>> {
+    if source_frame_count == 0 {
+        return Err(MediaError::Decode(
+            "source_frame_count must be greater than zero".to_string(),
+        ));
+    }
+    if !source_fps.is_finite() || source_fps <= 0.0 {
+        return Err(MediaError::Decode(
+            "source_fps must be finite and greater than zero".to_string(),
+        ));
+    }
+    if !target_fps.is_finite() || target_fps <= 0.0 {
+        return Err(MediaError::Decode(
+            "target_fps must be finite and greater than zero".to_string(),
+        ));
+    }
+    if source_frame_count == 1 {
+        return Ok(vec![FrameRateSample {
+            timestamp_secs: 0.0,
+            source_frame: 0,
+            next_source_frame: 0,
+            source_alpha: 0.0,
+        }]);
+    }
+
+    let source_last = source_frame_count - 1;
+    let duration_secs = source_last as f64 / source_fps;
+    let target_intervals = (duration_secs * target_fps).round().max(1.0) as u64;
+    let mut samples = Vec::with_capacity(target_intervals as usize + 1);
+    for output_frame in 0..=target_intervals {
+        let timestamp_secs = if output_frame == target_intervals {
+            duration_secs
+        } else {
+            (output_frame as f64 / target_fps).min(duration_secs)
+        };
+        let source_position = (timestamp_secs * source_fps).clamp(0.0, source_last as f64);
+        let source_frame = source_position.floor() as u64;
+        let next_source_frame = source_frame.saturating_add(1).min(source_last);
+        let source_alpha = if source_frame == next_source_frame {
+            0.0
+        } else {
+            source_position - source_frame as f64
+        };
+        samples.push(FrameRateSample {
+            timestamp_secs,
+            source_frame,
+            next_source_frame,
+            source_alpha,
+        });
+    }
+    Ok(samples)
+}
+
+/// Interpolate two equal-size RGBA frames at `alpha` in `[0, 1]`.
+///
+/// The optical-flow path estimates a deterministic global luminance motion
+/// vector, warps both endpoints toward the requested instant, then blends the
+/// aligned pixels. This traditional local path is intentionally model-free and
+/// provides a stable baseline for preview/export parity.
+pub fn interpolate_frame_pair(
+    first: &RgbaFrame,
+    last: &RgbaFrame,
+    alpha: f64,
+    requested: FrameInterpolationMode,
+    fallback: FrameInterpolationFallback,
+    optical_flow_available: bool,
+) -> Result<FrameInterpolationResult> {
+    if first.width != last.width
+        || first.height != last.height
+        || first.rgba.len() != last.rgba.len()
+    {
+        return Err(MediaError::Decode(
+            "interpolation frames must have identical dimensions".to_string(),
+        ));
+    }
+    if !alpha.is_finite() {
+        return Err(MediaError::Decode(
+            "interpolation alpha must be finite".to_string(),
+        ));
+    }
+
+    let mode_used = if requested == FrameInterpolationMode::OpticalFlow && !optical_flow_available {
+        match fallback {
+            FrameInterpolationFallback::Nearest => FrameInterpolationMode::Nearest,
+            FrameInterpolationFallback::Blend => FrameInterpolationMode::Blend,
+            FrameInterpolationFallback::Error => {
+                return Err(MediaError::Decode(
+                    "optical-flow interpolation is unavailable and fallback is Error".to_string(),
+                ));
+            }
+        }
+    } else {
+        requested
+    };
+
+    let alpha = alpha.clamp(0.0, 1.0);
+    let frame = if alpha == 0.0 {
+        first.clone()
+    } else if alpha == 1.0 {
+        last.clone()
+    } else {
+        match mode_used {
+            FrameInterpolationMode::Nearest => {
+                if alpha < 0.5 {
+                    first.clone()
+                } else {
+                    last.clone()
+                }
+            }
+            FrameInterpolationMode::Blend => blend_frames(first, last, alpha),
+            FrameInterpolationMode::OpticalFlow => optical_flow_frame(first, last, alpha),
+        }
+    };
+
+    Ok(FrameInterpolationResult { frame, mode_used })
+}
+
+fn blend_frames(first: &RgbaFrame, last: &RgbaFrame, alpha: f64) -> RgbaFrame {
+    let rgba = first
+        .rgba
+        .iter()
+        .zip(&last.rgba)
+        .map(|(&a, &b)| lerp_channel(a, b, alpha))
+        .collect();
+    RgbaFrame::new(first.width, first.height, rgba)
+}
+
+fn optical_flow_frame(first: &RgbaFrame, last: &RgbaFrame, alpha: f64) -> RgbaFrame {
+    let first_center = luminance_centroid(first);
+    let last_center = luminance_centroid(last);
+    let Some(((first_x, first_y), (last_x, last_y))) = first_center.zip(last_center) else {
+        return blend_frames(first, last, alpha);
+    };
+    let motion_x = last_x - first_x;
+    let motion_y = last_y - first_y;
+    let mut rgba = vec![0; first.rgba.len()];
+    for y in 0..first.height {
+        for x in 0..first.width {
+            let x = x as f64;
+            let y = y as f64;
+            let from_first = sample_bilinear(first, x - alpha * motion_x, y - alpha * motion_y);
+            let from_last = sample_bilinear(
+                last,
+                x + (1.0 - alpha) * motion_x,
+                y + (1.0 - alpha) * motion_y,
+            );
+            let offset = ((y as u32 * first.width + x as u32) * 4) as usize;
+            for channel in 0..4 {
+                rgba[offset + channel] =
+                    lerp_channel(from_first[channel], from_last[channel], alpha);
+            }
+        }
+    }
+    RgbaFrame::new(first.width, first.height, rgba)
+}
+
+fn luminance_centroid(frame: &RgbaFrame) -> Option<(f64, f64)> {
+    let mut weighted_x = 0.0;
+    let mut weighted_y = 0.0;
+    let mut total = 0.0;
+    for y in 0..frame.height {
+        for x in 0..frame.width {
+            let offset = ((y * frame.width + x) * 4) as usize;
+            let r = frame.rgba[offset] as f64;
+            let g = frame.rgba[offset + 1] as f64;
+            let b = frame.rgba[offset + 2] as f64;
+            let a = frame.rgba[offset + 3] as f64 / 255.0;
+            let weight = (0.2126 * r + 0.7152 * g + 0.0722 * b) * a;
+            weighted_x += x as f64 * weight;
+            weighted_y += y as f64 * weight;
+            total += weight;
+        }
+    }
+    (total > f64::EPSILON).then_some((weighted_x / total, weighted_y / total))
+}
+
+fn sample_bilinear(frame: &RgbaFrame, x: f64, y: f64) -> [u8; 4] {
+    let x0 = x.floor() as i64;
+    let y0 = y.floor() as i64;
+    let fx = x - x0 as f64;
+    let fy = y - y0 as f64;
+    let mut out = [0; 4];
+    for (channel, value) in out.iter_mut().enumerate() {
+        let p00 = sample_channel(frame, x0, y0, channel);
+        let p10 = sample_channel(frame, x0 + 1, y0, channel);
+        let p01 = sample_channel(frame, x0, y0 + 1, channel);
+        let p11 = sample_channel(frame, x0 + 1, y0 + 1, channel);
+        let top = p00 + (p10 - p00) * fx;
+        let bottom = p01 + (p11 - p01) * fx;
+        *value = (top + (bottom - top) * fy).round().clamp(0.0, 255.0) as u8;
+    }
+    out
+}
+
+fn sample_channel(frame: &RgbaFrame, x: i64, y: i64, channel: usize) -> f64 {
+    if x < 0 || y < 0 || x >= frame.width as i64 || y >= frame.height as i64 {
+        return if channel == 3 { 255.0 } else { 0.0 };
+    }
+    let offset = ((y as u32 * frame.width + x as u32) * 4) as usize;
+    frame.rgba[offset + channel] as f64
+}
+
+fn lerp_channel(first: u8, last: u8, alpha: f64) -> u8 {
+    (first as f64 + (last as f64 - first as f64) * alpha)
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
 /// Scale `(w, h)` down to fit within `max` while preserving aspect ratio. Never
 /// enlarges. A zero in either `max` dimension disables that bound. Mirrors
 /// `AVAssetImageGenerator.maximumSize` semantics ("not larger than this box,

@@ -3525,6 +3525,7 @@ dependencies = [
  "cosmic-text",
  "image",
  "opentake-domain",
+ "opentake-media",
  "pollster",
  "serde_json",
  "thiserror 2.0.18",
