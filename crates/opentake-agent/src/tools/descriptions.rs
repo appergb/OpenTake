@@ -55,7 +55,7 @@ pub fn description(tool: ToolName) -> &'static str {
 
         ToolName::DetectBeats => "Detects musical beat positions for a clip or media asset using lightweight PCM energy/onset analysis. Returns project-frame beat hints and strengths; it does not mutate the timeline.",
 
-        ToolName::AutoCutToBeats => "Plans beat-synced cuts for one or more clips against an audio or music source. Returns beat frames, suggested cut frames, and optional clip placement hints; it does not mutate the timeline. Apply the plan with existing edit tools.",
+        ToolName::AutoCutToBeats => "Plans beat-synced alignment for visual clips against an audio or music source. The default write=false returns beat frames, suggested cut frames, and clip placement hints without mutation. Set write=true to align the selected visual clips and their linked A/V partners through one atomic MoveClips command.",
 
         ToolName::SmartReframe => "Plans subject-aware reframing for target aspect ratios such as 9:16 or 1:1. The typed surface is present, but MCP frame sampling / vision analysis is not wired yet; calls return a deterministic needs-vision-backend error and do not mutate the timeline.",
 
@@ -376,7 +376,8 @@ pub fn input_schema(tool: ToolName) -> Value {
                 "endFrame": {"type": "integer", "description": "Optional project-frame window end (exclusive)."},
                 "minClipFrames": {"type": "integer", "description": "Optional lower bound for generated cut lengths."},
                 "maxClipFrames": {"type": "integer", "description": "Optional upper bound for generated cut lengths."},
-                "alignCuts": {"type": "boolean", "description": "Optional. true means move/split cuts to the detected beat grid."}
+                "alignCuts": {"type": "boolean", "description": "Optional. true means align proposed cuts to the detected beat grid."},
+                "write": {"type": "boolean", "description": "Optional, default false. true applies all selected clip placements and linked A/V partners in one atomic command."}
             }),
             &[],
         ),

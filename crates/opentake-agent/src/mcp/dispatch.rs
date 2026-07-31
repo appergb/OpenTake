@@ -291,7 +291,7 @@ impl Dispatcher {
 
             // --- Analysis-driven edit surface ---
             ToolName::DetectBeats => self.detect_beats(args, before),
-            ToolName::AutoCutToBeats => self.auto_cut_to_beats(args, before),
+            ToolName::AutoCutToBeats => self.auto_cut_to_beats(args, before, op),
             ToolName::SmartReframe => self.smart_reframe(args),
             ToolName::TightenSilences => self.tighten_silences(args, before),
             ToolName::RemoveFillerWords => self.remove_filler_words(args, before, manifest),
@@ -1313,8 +1313,19 @@ impl Dispatcher {
         Ok(ToolResult::ok(round_floats_3dp(payload).to_string()))
     }
 
-    fn auto_cut_to_beats(&self, args: &Value, before: &Timeline) -> Result<ToolResult, ToolError> {
+    fn auto_cut_to_beats(
+        &self,
+        args: &Value,
+        before: &Timeline,
+        op: &mut OpContext,
+    ) -> Result<ToolResult, ToolError> {
         let a: AutoCutToBeatsArgs = decode_tool_args(args, "")?;
+        let write = a.write.unwrap_or(false);
+        if write && a.align_cuts == Some(false) {
+            return Err(ToolError::new(
+                "auto_cut_to_beats: write=true conflicts with alignCuts=false",
+            ));
+        }
         let beats = self.detect_beat_hints(
             before,
             BeatAnalysisRequest {
@@ -1346,10 +1357,9 @@ impl Dispatcher {
         cut_frames.sort_unstable();
         cut_frames.dedup();
 
-        let placements = a
-            .clip_ids
-            .unwrap_or_default()
-            .into_iter()
+        let requested_clip_ids = a.clip_ids.unwrap_or_default();
+        let placements = requested_clip_ids
+            .iter()
             .zip(cut_frames.iter().copied())
             .map(|(clip_id, to_frame)| {
                 serde_json::json!({
@@ -1359,16 +1369,35 @@ impl Dispatcher {
             })
             .collect::<Vec<_>>();
 
+        let (applied, summary, placements) = if write {
+            let (moves, applied_placements) =
+                plan_beat_alignment_moves(before, &requested_clip_ids, &cut_frames)?;
+            op.clip_ids = moves
+                .iter()
+                .map(|movement| movement.clip_id.clone())
+                .collect();
+            op.track_index = moves.first().map(|movement| movement.to_track);
+            let result = self.apply(EditCommand::MoveClips { moves })?;
+            (result.changed, Some(result.summary), applied_placements)
+        } else {
+            (false, None, placements)
+        };
+
         let payload = serde_json::json!({
-            "applied": false,
-            "alignCuts": a.align_cuts.unwrap_or(false),
+            "applied": applied,
+            "alignCuts": a.align_cuts.unwrap_or(write),
             "beats": beats.iter().map(|beat| serde_json::json!({
                 "frame": beat.frame,
                 "strength": beat.strength,
             })).collect::<Vec<_>>(),
             "cutFrames": cut_frames,
             "placements": placements,
-            "note": "Preview only. Apply returned frames through split_clip/move_clips/ripple_delete_ranges as needed.",
+            "summary": summary,
+            "note": if write {
+                "Applied selected clip placements and linked A/V partners through one atomic move_clips command."
+            } else {
+                "Preview only. Set write=true to apply placements atomically, or use returned frames with existing edit tools."
+            },
         });
         Ok(ToolResult::ok(round_floats_3dp(payload).to_string()))
     }
@@ -2624,6 +2653,107 @@ fn clip_location(timeline: &Timeline, clip_id: &str) -> (Option<usize>, Option<i
         }
     }
     (None, None)
+}
+
+/// Build one deterministic [`EditCommand::MoveClips`] payload that aligns each
+/// selected visual root to a beat and expands every linked A/V partner with the
+/// same delta. Validation completes before the caller reaches `CoreHandle::apply`.
+fn plan_beat_alignment_moves(
+    timeline: &Timeline,
+    clip_ids: &[String],
+    beat_frames: &[i32],
+) -> Result<(Vec<ClipMove>, Vec<Value>), ToolError> {
+    if clip_ids.is_empty() {
+        return Err(ToolError::new(
+            "auto_cut_to_beats: write=true requires a non-empty clipIds array",
+        ));
+    }
+
+    let mut roots = Vec::new();
+    let mut seen_roots = BTreeSet::new();
+    for clip_id in clip_ids {
+        let clip = find_clip(timeline, clip_id).ok_or_else(|| {
+            ToolError::new(format!("auto_cut_to_beats: clip not found: {clip_id}"))
+        })?;
+        if !clip.media_type.is_visual() {
+            return Err(ToolError::new(format!(
+                "auto_cut_to_beats: clip is not visual: {clip_id}"
+            )));
+        }
+        let root_key = clip
+            .link_group_id
+            .as_ref()
+            .map(|group| format!("link:{group}"))
+            .unwrap_or_else(|| format!("clip:{clip_id}"));
+        if seen_roots.insert(root_key) {
+            roots.push((
+                clip.id.clone(),
+                clip.start_frame,
+                clip.link_group_id.clone(),
+            ));
+        }
+    }
+    if beat_frames.len() < roots.len() {
+        return Err(ToolError::new(format!(
+            "auto_cut_to_beats: need at least {} beat frame(s) for write, got {}",
+            roots.len(),
+            beat_frames.len()
+        )));
+    }
+
+    let mut moves = Vec::new();
+    let mut placements = Vec::new();
+    let mut moved_ids = BTreeSet::new();
+    for ((root_id, root_start, link_group), beat_frame) in
+        roots.into_iter().zip(beat_frames.iter().copied())
+    {
+        let delta = beat_frame
+            .checked_sub(root_start)
+            .ok_or_else(|| ToolError::new("auto_cut_to_beats: placement frame delta overflow"))?;
+        let mut linked_clip_ids = Vec::new();
+        for (track_index, clip) in
+            timeline
+                .tracks
+                .iter()
+                .enumerate()
+                .flat_map(|(track_index, track)| {
+                    track.clips.iter().map(move |clip| (track_index, clip))
+                })
+        {
+            let belongs = match link_group.as_deref() {
+                Some(group) => clip.link_group_id.as_deref() == Some(group),
+                None => clip.id == root_id,
+            };
+            if !belongs || !moved_ids.insert(clip.id.clone()) {
+                continue;
+            }
+            let to_frame = clip.start_frame.checked_add(delta).ok_or_else(|| {
+                ToolError::new(format!(
+                    "auto_cut_to_beats: linked placement frame overflow: {}",
+                    clip.id
+                ))
+            })?;
+            if to_frame < 0 {
+                return Err(ToolError::new(format!(
+                    "auto_cut_to_beats: linked placement would start before frame zero: {}",
+                    clip.id
+                )));
+            }
+            linked_clip_ids.push(clip.id.clone());
+            moves.push(ClipMove {
+                clip_id: clip.id.clone(),
+                to_track: track_index,
+                to_frame,
+            });
+        }
+        placements.push(serde_json::json!({
+            "clipId": root_id,
+            "fromFrame": root_start,
+            "toFrame": beat_frame,
+            "linkedClipIds": linked_clip_ids,
+        }));
+    }
+    Ok((moves, placements))
 }
 
 #[derive(Clone, Debug)]
@@ -3912,6 +4042,12 @@ mod tests {
         pcm: opentake_media::PcmBuffer,
     }
 
+    struct WritableAnalysisHandle {
+        state: Mutex<EditorState>,
+        pcm: opentake_media::PcmBuffer,
+        commands: Mutex<Vec<EditCommand>>,
+    }
+
     impl CoreHandle for AnalysisHandle {
         fn timeline(&self) -> Timeline {
             self.timeline.clone()
@@ -3938,6 +4074,32 @@ mod tests {
             if media_ref.is_empty() {
                 anyhow::bail!("media path not found for mediaRef: {media_ref}");
             }
+            Ok(self.pcm.clone())
+        }
+    }
+
+    impl CoreHandle for WritableAnalysisHandle {
+        fn timeline(&self) -> Timeline {
+            self.state.lock().unwrap().timeline.clone()
+        }
+        fn media(&self) -> MediaManifest {
+            self.state.lock().unwrap().manifest.clone()
+        }
+        fn apply(&self, cmd: EditCommand) -> anyhow::Result<EditResult> {
+            self.commands.lock().unwrap().push(cmd.clone());
+            let ids = SeqIdGen::new("beat-");
+            ops_apply(&mut self.state.lock().unwrap(), cmd, &ids)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }
+        fn project_dir(&self) -> Option<PathBuf> {
+            None
+        }
+        fn extract_analysis_pcm(
+            &self,
+            _media_ref: &str,
+            _spec: opentake_media::PcmSpec,
+            _range: Option<(f64, f64)>,
+        ) -> anyhow::Result<opentake_media::PcmBuffer> {
             Ok(self.pcm.clone())
         }
     }
@@ -4006,6 +4168,32 @@ mod tests {
             absolute_path: format!("/{id}.mp3"),
         };
         e
+    }
+
+    fn linked_beat_handle() -> Arc<WritableAnalysisHandle> {
+        let mut timeline = Timeline::new();
+        timeline.fps = 10;
+        let mut video_track = Track::new("video-track", ClipType::Video);
+        let mut video = Clip::new("video-a", "video-source", 20, 5);
+        video.link_group_id = Some("linked-av".into());
+        video_track.clips.push(video);
+        let mut audio_track = Track::new("audio-track", ClipType::Audio);
+        let mut audio = Clip::new("audio-a", "video-source", 20, 5);
+        audio.media_type = ClipType::Audio;
+        audio.source_clip_type = ClipType::Audio;
+        audio.link_group_id = Some("linked-av".into());
+        audio_track.clips.push(audio);
+        timeline.tracks = vec![video_track, audio_track];
+
+        let mut manifest = MediaManifest::new();
+        manifest.entries.push(audio_entry("music", "Music"));
+        let mut samples = vec![0.0; 1_000];
+        samples[500..530].fill(1.0);
+        Arc::new(WritableAnalysisHandle {
+            state: Mutex::new(EditorState::new(timeline, manifest)),
+            pcm: pcm(samples, 1_000),
+            commands: Mutex::new(Vec::new()),
+        })
     }
 
     /// A video asset whose source carries an audio track (`hasAudio: true`) —
@@ -4576,6 +4764,88 @@ mod tests {
             frames.iter().any(|frame| (4..=5).contains(frame)),
             "{frames:?}"
         );
+    }
+
+    #[test]
+    fn auto_cut_to_beats_write_false_is_read_only() {
+        let handle = linked_beat_handle();
+        let before = handle.timeline();
+        let dispatcher = dispatcher_with(handle.clone());
+
+        let result = dispatcher.dispatch(
+            "auto_cut_to_beats",
+            serde_json::json!({
+                "clipIds": ["video-a"],
+                "beatMediaRef": "music",
+                "write": false
+            }),
+        );
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        assert_eq!(first_json(&result)["applied"], false);
+        assert!(handle.commands.lock().unwrap().is_empty());
+        assert_eq!(handle.timeline(), before);
+    }
+
+    #[test]
+    fn auto_cut_to_beats_write_true_is_one_atomic_command_and_preserves_links() {
+        let handle = linked_beat_handle();
+        let dispatcher = dispatcher_with(handle.clone());
+
+        let before = handle.timeline();
+        let contradictory = dispatcher.dispatch(
+            "auto_cut_to_beats",
+            serde_json::json!({
+                "clipIds": ["video-a"],
+                "beatMediaRef": "music",
+                "alignCuts": false,
+                "write": true
+            }),
+        );
+        assert!(contradictory.is_error);
+        assert!(contradictory.text_joined().contains("conflicts"));
+        assert!(handle.commands.lock().unwrap().is_empty());
+        assert_eq!(handle.timeline(), before);
+
+        let rejected = dispatcher.dispatch(
+            "auto_cut_to_beats",
+            serde_json::json!({
+                "clipIds": ["missing-clip"],
+                "beatMediaRef": "music",
+                "write": true
+            }),
+        );
+        assert!(rejected.is_error);
+        assert!(rejected.text_joined().contains("clip not found"));
+        assert!(handle.commands.lock().unwrap().is_empty());
+        assert_eq!(handle.timeline(), before);
+
+        let result = dispatcher.dispatch(
+            "auto_cut_to_beats",
+            serde_json::json!({
+                "clipIds": ["video-a"],
+                "beatMediaRef": "music",
+                "write": true
+            }),
+        );
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        assert_eq!(first_json(&result)["applied"], true);
+        let commands = handle.commands.lock().unwrap();
+        assert_eq!(commands.len(), 1);
+        let EditCommand::MoveClips { moves } = &commands[0] else {
+            panic!("auto cut must use one MoveClips command: {:?}", commands[0]);
+        };
+        assert_eq!(moves.len(), 2);
+        drop(commands);
+
+        let after = handle.timeline();
+        let video = find_clip(&after, "video-a").expect("video remains");
+        let audio = find_clip(&after, "audio-a").expect("linked audio remains");
+        assert!((4..=5).contains(&video.start_frame));
+        assert_eq!(audio.start_frame, video.start_frame);
+        assert_eq!(video.link_group_id.as_deref(), Some("linked-av"));
+        assert_eq!(audio.link_group_id, video.link_group_id);
     }
 
     #[test]

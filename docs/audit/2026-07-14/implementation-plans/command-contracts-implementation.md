@@ -436,7 +436,7 @@
   - Visible/returned assertion: assert the exact returned success/error and the observable state described by “Acceptance Hooks”, including deterministic no-op behavior when the operation is rejected.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:tools/completion-tests/doc-e7610731e7410ad4.test.mjs#completion_e7610731e7410ad4_beat_detection_inputs_produce_bounded_reviewable.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-media/src/analysis/beat.rs#pulse_audio_detects_beat_frame_with_strength` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-agent/src/mcp/dispatch.rs#auto_cut_to_beats_write_false_is_read_only` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
@@ -445,7 +445,12 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+  Result: Added both exact Dispatcher owners and the low-energy detector owner,
+  retained the pulse owner, and added a frontend atomic-adapter regression. Five
+  source-bound Node owners execute all mapped boundaries and reject zero-test
+  filters.
+
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-media pulse_audio_detects_beat_frame_with_strength`
   - Run: `cargo test -p opentake-agent auto_cut_to_beats_write_false_is_read_only`
@@ -454,11 +459,23 @@
 
   Expected: FAIL because one or more of the 5 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Result: RED reproduced in two independent failures. Quiet alternating speech
+  energy generated false beats, and both Dispatcher owners rejected `write` as
+  an unknown field before any auto-cut write path existed.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-media/src/analysis/beat.rs#detect_beats`, `crates/opentake-agent/src/mcp/dispatch.rs#Dispatcher`, `web/src/store/editActions.ts#applyAutomationCommands`, `docs/architecture/editing-automation/EDITING-AUTOMATION/beat-sync-auto-cut.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Result: Added an absolute onset-energy floor before relative normalization.
+  `auto_cut_to_beats` now accepts explicit `write` (default false), validates
+  visual roots and beat capacity, expands linked A/V members with one shared
+  delta, and applies exactly one existing `MoveClips` command. Preview remains
+  read-only. The frontend automation adapter now refuses multi-request
+  pseudo-transactions instead of serially committing partial edits; tool schema,
+  descriptions, and DOS documents reflect the production behavior.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-media pulse_audio_detects_beat_frame_with_strength`
   - Run: `cargo test -p opentake-agent auto_cut_to_beats_write_false_is_read_only`
@@ -467,11 +484,20 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Result: GREEN. Each of the four exact Rust owners passed 1/1, the frontend
+  atomic owner passed 1/1, and all five source-bound owners passed 5/5.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. `cargo fmt --all -- --check`, the complete Web suite (84
+  files / 780 tests), production Web build, and
+  `cargo test --workspace --no-fail-fast` all completed successfully. The only
+  Web build diagnostics were the repository's existing dynamic-import and
+  chunk-size warnings; `git diff --check` was clean.
 
 ### Task 5: CC-event-forwarding-complete (implementation-slice-c35c845cbc3492dd)
 

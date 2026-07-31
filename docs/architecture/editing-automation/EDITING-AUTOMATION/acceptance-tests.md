@@ -51,7 +51,7 @@ Parent contract: [Editing Automation DOS](../EDITING-AUTOMATION-DOS.md). Source 
 - Plugin rules appear in `context_signal` warnings without suppressing built-in warnings.
 - Agent `ripple_delete_ranges` rejects calls that pass both `trackIndex` and `clipId`, accepts `clipId + units=seconds`, and emits half-open project-frame ranges after fps/source-trim conversion.
 - Agent `add_clips` with omitted `trackIndex` creates shared auto tracks and clips in one undoable transaction; one `undo` removes both clips and auto-created tracks.
-- PCM-backed MCP tools return deterministic preview data: `detect_beats` returns beat frame hints, `auto_cut_to_beats` returns beat/cut/placement suggestions, and `tighten_silences` returns `ripple_delete_ranges` candidate commands without mutating the timeline. `smart_reframe` still returns a deterministic vision-backend diagnostic until sampled-frame analysis is wired.
+- PCM-backed MCP tools return deterministic preview data: `detect_beats` returns beat frame hints, `auto_cut_to_beats(write=false)` returns beat/cut/placement suggestions, and `tighten_silences` returns `ripple_delete_ranges` candidate commands without mutating the timeline. `auto_cut_to_beats(write=true)` applies selected visual placements and linked A/V partners through exactly one `MoveClips` command. `smart_reframe` still returns a deterministic vision-backend diagnostic until sampled-frame analysis is wired.
 
 ## Minimum Local Verification
 

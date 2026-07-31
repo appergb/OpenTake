@@ -279,6 +279,7 @@ import {
   addMediaToTimelineAt,
   addMomentToTimelineAt,
   addTextClip,
+  applyAutomationCommands,
   buildMediaInsertPlan,
   insertClips,
   insertTrack,
@@ -514,6 +515,27 @@ describe("addMediaToTimeline", () => {
     await swapTracks(0, 1);
 
     expect(srv.state.tracks.map((track) => track.id)).toEqual(["t2", "t1"]);
+  });
+});
+
+describe("applyAutomationCommands", () => {
+  beforeEach(() => {
+    srv.reset();
+    useProjectStore.getState().setMirror(EMPTY, 0, 1);
+  });
+
+  it("accepts one atomic request and refuses a multi-command pseudo-transaction", async () => {
+    const result = await applyAutomationCommands([{ type: "insertTrack", kind: "video" }]);
+    expect(result).toHaveLength(1);
+    expect(srv.state.commands.map((command) => command.type)).toEqual(["insertTrack"]);
+
+    await expect(
+      applyAutomationCommands([
+        { type: "insertTrack", kind: "video" },
+        { type: "insertTrack", kind: "audio" },
+      ]),
+    ).rejects.toThrow("one atomic EditRequest");
+    expect(srv.state.commands.map((command) => command.type)).toEqual(["insertTrack"]);
   });
 });
 

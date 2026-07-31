@@ -354,11 +354,12 @@ export async function swapMedia(clipId: string, mediaRef: string) {
 
 export async function applyAutomationCommands(commands: EditRequest[]) {
   if (commands.length === 0) return [];
-  const results = [];
-  for (const command of commands) {
-    results.push(await applyAndRefresh(command));
+  if (commands.length !== 1) {
+    throw new Error(
+      "Automation writes must arrive as one atomic EditRequest; multi-command batches are refused",
+    );
   }
-  return results;
+  return [await applyAndRefresh(commands[0])];
 }
 
 export async function applySmartReframe(clipIds: string[], crop: Crop, transform?: Transform) {

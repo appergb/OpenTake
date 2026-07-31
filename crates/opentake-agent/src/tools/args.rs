@@ -631,6 +631,7 @@ pub struct AutoCutToBeatsArgs {
     pub min_clip_frames: Option<i32>,
     pub max_clip_frames: Option<i32>,
     pub align_cuts: Option<bool>,
+    pub write: Option<bool>,
 }
 impl ToolArgs for AutoCutToBeatsArgs {
     const ALLOWED_KEYS: &'static [&'static str] = &[
@@ -642,6 +643,7 @@ impl ToolArgs for AutoCutToBeatsArgs {
         "minClipFrames",
         "maxClipFrames",
         "alignCuts",
+        "write",
     ];
 }
 
