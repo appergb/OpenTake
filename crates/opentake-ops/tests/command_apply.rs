@@ -328,6 +328,7 @@ fn dissolve_remaps_link_groups_and_transition_targets() {
     let mut first = Clip::new("first", "first-asset", 0, 10);
     first.link_group_id = Some("av".into());
     first.transition_out = Some(opentake_domain::Transition {
+        from_clip_id: "first".into(),
         to_clip_id: "second".into(),
         kind: TransitionKind::CrossDissolve,
         duration_frames: 3,
@@ -1227,7 +1228,7 @@ fn set_clip_properties_multiple_fields_at_once() {
 }
 
 #[test]
-fn set_transition_validates_pair_clamps_duration_and_undoes() {
+fn set_transition_validates_pair_rejects_oversize_and_undoes() {
     let mut st = state(vec![video_track(
         "v",
         true,
@@ -1241,7 +1242,7 @@ fn set_transition_validates_pair_clamps_duration_and_undoes() {
             from_clip_id: "a".into(),
             to_clip_id: "b".into(),
             kind: Some(TransitionKind::CrossDissolve),
-            duration_frames: 80,
+            duration_frames: 20,
         },
         &g,
     )
@@ -1254,6 +1255,7 @@ fn set_transition_validates_pair_clamps_duration_and_undoes() {
         .as_ref()
         .expect("transition stored on outgoing clip");
     assert_eq!(transition.to_clip_id, "b");
+    assert_eq!(transition.from_clip_id, "a");
     assert_eq!(transition.kind, TransitionKind::CrossDissolve);
     assert_eq!(transition.duration_frames, 20);
 
@@ -1272,6 +1274,19 @@ fn set_transition_validates_pair_clamps_duration_and_undoes() {
     )
     .unwrap_err();
     assert!(matches!(error, EditError::Invalid(_)));
+
+    let oversized = apply(
+        &mut st,
+        EditCommand::SetTransition {
+            from_clip_id: "a".into(),
+            to_clip_id: "b".into(),
+            kind: Some(TransitionKind::CrossDissolve),
+            duration_frames: 21,
+        },
+        &g,
+    )
+    .unwrap_err();
+    assert!(matches!(oversized, EditError::Invalid(_)));
 }
 
 #[test]

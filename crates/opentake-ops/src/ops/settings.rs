@@ -189,6 +189,7 @@ mod tests {
         let mut tl = Timeline::new();
         let mut a = clip("a", 0, 60);
         a.transition_out = Some(Transition {
+            from_clip_id: "a".into(),
             to_clip_id: "b".into(),
             kind: TransitionKind::CrossDissolve,
             duration_frames: 15,

@@ -110,7 +110,7 @@ describe("TransitionTab", () => {
 
     useProjectStore.setState({
       timeline: timeline([
-        { ...a, transitionOut: { toClipId: "b", kind: "crossDissolve", durationFrames: 15 } },
+        { ...a, transitionOut: { fromClipId: "a", toClipId: "b", kind: "crossDissolve", durationFrames: 15 } },
         b,
       ]),
     });
@@ -179,7 +179,7 @@ describe("TransitionTab", () => {
     const a = clip("a", 0, 60);
     const b = clip("b", 60, 60);
     const withTransition = timeline([
-      { ...a, transitionOut: { toClipId: "b", kind: "crossDissolve", durationFrames: 15 } },
+      { ...a, transitionOut: { fromClipId: "a", toClipId: "b", kind: "crossDissolve", durationFrames: 15 } },
       b,
     ]);
     useProjectStore.setState({ timeline: withTransition });

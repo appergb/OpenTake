@@ -76,10 +76,13 @@ export function TransitionTab({
   useEffect(() => {
     if (!pair) return;
     const current = pair.from.transitionOut;
+    const matchesPair =
+      current?.toClipId === pair.to.id &&
+      (!current.fromClipId || current.fromClipId === pair.from.id);
     setDurationFrames(
       Math.min(
         pair.maximumDurationFrames,
-        Math.max(1, current?.toClipId === pair.to.id ? current.durationFrames : Math.round(timeline.fps / 2)),
+        Math.max(1, matchesPair ? current.durationFrames : Math.round(timeline.fps / 2)),
       ),
     );
   }, [pair?.from.id, pair?.from.transitionOut?.durationFrames, pair?.to.id, pair?.maximumDurationFrames, timeline.fps]);
@@ -121,7 +124,12 @@ export function TransitionTab({
     );
   }
 
-  const current = pair.from.transitionOut?.toClipId === pair.to.id ? pair.from.transitionOut : null;
+  const authored = pair.from.transitionOut;
+  const current =
+    authored?.toClipId === pair.to.id &&
+    (!authored.fromClipId || authored.fromClipId === pair.from.id)
+      ? authored
+      : null;
   const currentFeedback =
     feedback &&
     (feedback.transitionKind === null

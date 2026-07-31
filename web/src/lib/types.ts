@@ -10,6 +10,7 @@ export type Interpolation = "linear" | "hold" | "smooth";
 export type TransitionKind = "crossDissolve";
 
 export interface Transition {
+  fromClipId: string;
   toClipId: string;
   kind: TransitionKind;
   durationFrames: number;

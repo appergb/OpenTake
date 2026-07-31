@@ -387,33 +387,35 @@ Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/auto
   - Enable the transitions media surface.
   - Add pixel/runtime tests for preview/export parity and undo.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/transitions.rs#adjacent_clip_transition_is_editable_undoable_and_matches_preview_export` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test transitions adjacent_clip_transition_is_editable_undoable_and_matches_preview_export -- --exact`
 
   Expected: FAIL because one or more of the 2 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-domain/src/transition.rs`, `crates/opentake-render/src/plan/build.rs`, `crates/opentake-render/src/gpu/compositor.rs`, `docs/architecture/CAPCUT-GAP.md`, `docs/architecture/HANDOFF-2026-07.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test transitions adjacent_clip_transition_is_editable_undoable_and_matches_preview_export -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/automated/transition-real-device-2026-07-31.md`.
 
 ### Task 8: MR-lgg-proof (implementation-slice-4c614d7762698953)
 

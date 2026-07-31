@@ -666,6 +666,8 @@ impl RenderPlan {
             let transition = clip.transition_out.as_ref().and_then(|transition| {
                 let incoming_plan = self.clip_plans.get(index + 1)?;
                 if transition.kind != TransitionKind::CrossDissolve
+                    || (!transition.from_clip_id.is_empty()
+                        && transition.from_clip_id != plan.clip_id)
                     || incoming_plan.track_index != plan.track_index
                     || incoming_plan.clip_id != transition.to_clip_id
                     || incoming_plan.start_frame != plan.end_frame
@@ -686,10 +688,7 @@ impl RenderPlan {
                 Some((incoming_plan, incoming, progress))
             });
 
-            if let Some(mut d) = eval_layer(plan, clip, f, self.render_size) {
-                if let Some((_, _, progress)) = transition {
-                    d.opacity *= 1.0 - progress;
-                }
+            if let Some(d) = eval_layer(plan, clip, f, self.render_size) {
                 if d.opacity > 0.0 {
                     draws.push(d);
                 }

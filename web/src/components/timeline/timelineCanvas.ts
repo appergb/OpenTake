@@ -263,6 +263,7 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
         : undefined;
       if (
         transition?.kind === "crossDissolve" &&
+        (!transition.fromClipId || transition.fromClipId === clip.id) &&
         incoming &&
         clip.startFrame + clip.durationFrames === incoming.startFrame
       ) {

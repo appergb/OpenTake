@@ -611,7 +611,11 @@ export function createFallbackStore() {
           if (!fromLocation) return result(false, "Set Transition", []);
           const from = timeline.tracks[fromLocation[0]].clips[fromLocation[1]];
           if (cmd.kind == null) {
-            if (from.transitionOut?.toClipId !== cmd.toClipId) {
+            if (
+              from.transitionOut?.toClipId !== cmd.toClipId ||
+              (from.transitionOut.fromClipId !== undefined &&
+                from.transitionOut.fromClipId !== cmd.fromClipId)
+            ) {
               return result(false, "Remove Transition", []);
             }
             delete from.transitionOut;
@@ -640,10 +644,14 @@ export function createFallbackStore() {
             return result(false, "Set Transition", []);
           }
           const maximum = Math.max(1, Math.floor(Math.min(from.durationFrames, to.durationFrames) / 2));
+          if (cmd.durationFrames > maximum) {
+            return result(false, "Set Transition", []);
+          }
           const next = {
+            fromClipId: from.id,
             toClipId: to.id,
             kind: cmd.kind,
-            durationFrames: Math.max(1, Math.min(cmd.durationFrames, maximum)),
+            durationFrames: cmd.durationFrames,
           };
           if (JSON.stringify(from.transitionOut) === JSON.stringify(next)) {
             return result(false, "Set Transition", []);

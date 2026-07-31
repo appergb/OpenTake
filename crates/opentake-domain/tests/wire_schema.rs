@@ -120,6 +120,7 @@ fn full_clip() -> Clip {
         ],
     });
     clip.transition_out = Some(Transition {
+        from_clip_id: "clip".to_owned(),
         to_clip_id: "next".to_owned(),
         kind: TransitionKind::CrossDissolve,
         duration_frames: 5,

@@ -1134,6 +1134,7 @@ fn dissolve_nested_sequence(
                     child_clip.transition_out =
                         child_clip.transition_out.take().and_then(|mut transition| {
                             id_map.get(&transition.to_clip_id).map(|to_id| {
+                                transition.from_clip_id = child_clip.id.clone();
                                 transition.to_clip_id = to_id.clone();
                                 transition
                             })
@@ -1248,10 +1249,13 @@ fn prune_invalid_transitions(timeline: &mut Timeline) {
                 clip.transition_out = None;
                 continue;
             };
-            if transition.to_clip_id != *to_id {
+            if (!transition.from_clip_id.is_empty() && transition.from_clip_id != clip.id)
+                || transition.to_clip_id != *to_id
+            {
                 clip.transition_out = None;
                 continue;
             }
+            transition.from_clip_id = clip.id.clone();
             transition.duration_frames = transition.duration_frames.clamp(1, *maximum);
         }
     }
@@ -2667,11 +2671,10 @@ fn set_transition(
             |st| {
                 let clip = &mut st.timeline.tracks[from_location.track_index].clips
                     [from_location.clip_index];
-                if clip
-                    .transition_out
-                    .as_ref()
-                    .is_some_and(|transition| transition.to_clip_id == to_clip_id)
-                {
+                if clip.transition_out.as_ref().is_some_and(|transition| {
+                    (transition.from_clip_id.is_empty() || transition.from_clip_id == from_clip_id)
+                        && transition.to_clip_id == to_clip_id
+                }) {
                     clip.transition_out = None;
                 }
                 Ok(vec![from_clip_id.clone(), to_clip_id.clone()])
@@ -2733,7 +2736,11 @@ fn set_transition(
     }
 
     let maximum = (from.duration_frames.min(to.duration_frames) / 2).max(1);
-    let clamped = duration_frames.min(maximum);
+    if duration_frames > maximum {
+        return Err(EditError::Invalid(format!(
+            "durationFrames exceeds the available transition handle ({duration_frames} > {maximum})"
+        )));
+    }
     let kind = kind.expect("kind checked above");
     transact(
         state,
@@ -2742,9 +2749,10 @@ fn set_transition(
         |st| {
             st.timeline.tracks[from_location.track_index].clips[from_location.clip_index]
                 .transition_out = Some(Transition {
+                from_clip_id: from_clip_id.clone(),
                 to_clip_id: to_clip_id.clone(),
                 kind,
-                duration_frames: clamped,
+                duration_frames,
             });
             Ok(vec![from_clip_id.clone(), to_clip_id.clone()])
         },

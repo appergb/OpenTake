@@ -330,7 +330,7 @@ describe("browser fallback edit store", () => {
     expect(clip?.effects).toBeUndefined();
   });
 
-  it("stores and clamps an adjacent cross dissolve", () => {
+  it("stores both pair ids and rejects an oversized adjacent cross dissolve", () => {
     const fallback = createFallbackStore();
     fallback.reset();
     fallback.editApply({ type: "insertTrack", kind: "video" });
@@ -348,15 +348,23 @@ describe("browser fallback edit store", () => {
       fromClipId: first,
       toClipId: second,
       kind: "crossDissolve",
-      durationFrames: 99,
+      durationFrames: 15,
     });
 
     expect(result.changed).toBe(true);
     expect(fallback.getTimeline().timeline.tracks[0].clips[0].transitionOut).toEqual({
+      fromClipId: first,
       toClipId: second,
       kind: "crossDissolve",
       durationFrames: 15,
     });
+    expect(fallback.editApply({
+      type: "setTransition",
+      fromClipId: first,
+      toClipId: second,
+      kind: "crossDissolve",
+      durationFrames: 16,
+    }).changed).toBe(false);
   });
 
   it("rejects an invalid or non-successor fallback transition", () => {

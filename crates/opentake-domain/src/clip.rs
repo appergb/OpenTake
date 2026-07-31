@@ -1193,13 +1193,14 @@ mod tests {
     fn clip_transition_roundtrips_and_legacy_projects_default_to_none() {
         let mut c = base_clip();
         c.transition_out = Some(crate::transition::Transition {
+            from_clip_id: "c1".into(),
             to_clip_id: "c2".into(),
             kind: crate::transition::TransitionKind::CrossDissolve,
             duration_frames: 12,
         });
         let json = serde_json::to_string(&c).unwrap();
         assert!(json.contains(
-            r#""transitionOut":{"toClipId":"c2","kind":"crossDissolve","durationFrames":12}"#
+            r#""transitionOut":{"fromClipId":"c1","toClipId":"c2","kind":"crossDissolve","durationFrames":12}"#
         ));
         let back: Clip = serde_json::from_str(&json).unwrap();
         assert_eq!(c, back);
@@ -1209,6 +1210,19 @@ mod tests {
         )
         .unwrap();
         assert!(legacy.transition_out.is_none());
+
+        let legacy_transition: Clip = serde_json::from_str(
+            r#"{"id":"c1","mediaRef":"m","startFrame":0,"durationFrames":12,"transitionOut":{"toClipId":"c2","kind":"crossDissolve","durationFrames":4}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy_transition
+                .transition_out
+                .as_ref()
+                .unwrap()
+                .from_clip_id,
+            ""
+        );
     }
 
     #[test]

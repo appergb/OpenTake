@@ -13,8 +13,11 @@ pub enum TransitionKind {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transition {
-    /// Pair identity prevents a transition from silently binding to a different
-    /// neighbor after timeline edits.
+    /// Both sides are persisted so a transition cannot silently rebind when a
+    /// project is reordered. Empty is accepted only for legacy project files;
+    /// the next validated edit normalizes it to the containing clip id.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from_clip_id: String,
     pub to_clip_id: String,
     pub kind: TransitionKind,
     pub duration_frames: i32,

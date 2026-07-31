@@ -98,7 +98,7 @@ default-off Rust renderer or to perform the then-missing first device check.
 
 | Issue | 已做 | 剩余 |
 |---|---|---|
-| #13 进阶能力 | 调色链/绿幕/蒙版着色器(`8813df2`) | 转场(§3.9)、AI 推理(#27)、音频工程(#28) |
+| #13 进阶能力 | 调色链/绿幕/蒙版着色器(`8813df2`)、首个交叉溶解转场竖切(§3.9) | 扩展转场库、AI 推理(#27)、音频工程(#28) |
 | #25 Inspector/MediaPanel tab | 关键帧钻石(#187)、Text MVP(#107)、Captions(#184) | AI-Edit tab、Music tab(§3.6) |
 | #29 进阶纯逻辑 | SRT/VTT 已接 UI/Tauri 命令(#110)、字幕批量样式纯逻辑(#113) | 字幕批量样式接 UI/命令；曲线变速(§3.10)、多机位、复合片段 |
 | #37 全局素材库 | 后端+前端全量(#104/#106/#115) | 库→时间线拖拽、媒体面板星标迁 `library_favorite` |
@@ -177,7 +177,7 @@ default-off Rust renderer or to perform the then-missing first device check.
 
 ### 3.9 【P2】转场(#13 切片,对标剪映)
 
-- **怎么写**:`opentake-domain` 加 `Transition { kind, duration_frames }` 挂在相邻 clip 对;`opentake-ops` 加 `SetTransition` 命令(校验相邻/时长夹取);`opentake-render` 合成器对重叠区做双纹理混合 pass(cross-dissolve 起步,shader 框架已有调色链可挂);前端时间线 clip 接缝处画转场标记 + Inspector 选型。**先 cross-dissolve 一种打通全链,再扩库。**
+- **完成状态(2026-07-31)**:cross-dissolve 首个竖切已打通。`opentake-domain::Transition` 持久化双方 clip ID、类型和时长；`SetTransition` 校验同轨、视觉源、直接相邻和最大 handle，过长请求显式失败。素材面板转场页支持添加/调时长/删除，操作进入统一 undo/redo，时间线接缝显示标记。RenderPlan 在转场区保持出片完整底层、以进度 alpha-over 入片，消除了旧双透明度造成的中点变暗；拥有测试 `crates/opentake-render/tests/transitions.rs#adjacent_clip_transition_is_editable_undoable_and_matches_preview_export` 覆盖保存重开、拒绝/恢复和四个关键帧的像素/预览导出一致性。后续工作仅是扩展 wipe/slide/3D 等转场库，不再属于首个竖切缺口。
 
 ### 3.10 【P2】曲线变速(#29 切片)
 

@@ -80,6 +80,7 @@ const RS: RenderSize = RenderSize {
 fn cross_dissolve_emits_two_weighted_layers_before_the_cut() {
     let mut a = video_clip("a", 0, 30);
     a.transition_out = Some(Transition {
+        from_clip_id: "a".into(),
         to_clip_id: "b".into(),
         kind: TransitionKind::CrossDissolve,
         duration_frames: 10,
@@ -95,7 +96,7 @@ fn cross_dissolve_emits_two_weighted_layers_before_the_cut() {
     assert_eq!(midpoint.draws.len(), 2);
     assert_eq!(midpoint.draws[0].clip_id, "a");
     assert_eq!(midpoint.draws[1].clip_id, "b");
-    approx(midpoint.draws[0].opacity, 0.5);
+    approx(midpoint.draws[0].opacity, 1.0);
     approx(midpoint.draws[1].opacity, 0.5);
     assert_eq!(midpoint.draws[1].source_frame, 0);
 
