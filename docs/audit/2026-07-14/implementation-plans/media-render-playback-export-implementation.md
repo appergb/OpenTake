@@ -321,33 +321,35 @@ pass with matching frame-1 motion bounds and SSIM 0.999515.
   - Expose add/reorder/parameter-change/remove operations through undoable Inspector commands.
   - Add one pixel fixture per advertised effect/filter and assert preview/export parity at default and non-default parameters.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/gpu_effects.rs#advertised_effect_registry_has_preview_export_golden_fixtures` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test gpu_effects advertised_effect_registry_has_preview_export_golden_fixtures -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-domain/src/grade.rs#Effect`, `crates/opentake-render/src/plan/types.rs#LayerDraw`, `crates/opentake-render/src/gpu/compositor.rs`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test gpu_effects advertised_effect_registry_has_preview_export_golden_fixtures -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/automated/generic-effects-real-device-2026-07-31.md`.
 
 ### Task 7: MR-transitions (implementation-slice-36596c6aa0eb94d6)
 

@@ -249,4 +249,64 @@ describe("Inspector completion surface", () => {
     reset.mockRestore();
     await act(async () => root.unmount());
   });
+
+  it("adds reorders adjusts toggles and removes generic effects through undoable commands", async () => {
+    const clip = visualClip({
+      effects: [
+        { name: "grayscale", params: {}, enabled: true },
+        { name: "invert", params: { amount: 0.5 }, enabled: true },
+      ],
+    });
+    useProjectStore.setState({ timeline: timelineWith(clip), projectPath: "/tmp/demo.opentake" });
+    useEditorUiStore.setState({ selectedClipIds: new Set([clip.id]), inspectorTab: "video" });
+    const setEffects = vi.spyOn(edit, "setEffects").mockResolvedValue();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Inspector />));
+
+    const section = container.querySelector('[data-testid="generic-effects-section"]');
+    expect(section).not.toBeNull();
+    const add = [...(section?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent === "添加效果",
+    );
+    await act(async () => add?.click());
+    expect(setEffects).toHaveBeenLastCalledWith(
+      [clip.id],
+      expect.arrayContaining([expect.objectContaining({ name: "grayscale" })]),
+    );
+
+    let items = [...(section?.querySelectorAll<HTMLElement>('[data-testid="generic-effect-item"]') ?? [])];
+    const moveUp = items[2]?.querySelector<HTMLButtonElement>('button[aria-label="上移效果"]');
+    await act(async () => moveUp?.click());
+    expect(setEffects.mock.calls.at(-1)?.[1].map((effect) => effect.name)).toEqual([
+      "grayscale",
+      "grayscale",
+      "invert",
+    ]);
+
+    items = [...(section?.querySelectorAll<HTMLElement>('[data-testid="generic-effect-item"]') ?? [])];
+    const amount = items[0]?.querySelector<HTMLInputElement>('input[type="range"]');
+    await act(async () => {
+      if (amount) {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
+          amount,
+          "0.35",
+        );
+      }
+      amount?.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    });
+    expect(setEffects.mock.calls.at(-1)?.[1][0]?.params.amount).toBe(0.35);
+
+    const enabled = items[0]?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+    await act(async () => enabled?.click());
+    expect(setEffects.mock.calls.at(-1)?.[1][0]?.enabled).toBe(false);
+
+    const remove = items[0]?.querySelector<HTMLButtonElement>('button[aria-label="删除效果"]');
+    await act(async () => remove?.click());
+    expect(setEffects.mock.calls.at(-1)?.[1]).toHaveLength(2);
+
+    setEffects.mockRestore();
+    await act(async () => root.unmount());
+  });
 });

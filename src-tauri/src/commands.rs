@@ -2360,13 +2360,13 @@ mod edit_request_serde_tests {
         ));
 
         let effects = serde_json::from_str::<EditRequest>(
-            r#"{"type":"setEffects","clipIds":["clip-1"],"effects":[{"name":"gaussianBlur","params":{"radius":4.0}}]}"#,
+            r#"{"type":"setEffects","clipIds":["clip-1"],"effects":[{"name":"grayscale","params":{"amount":0.4}}]}"#,
         )
         .expect("setEffects camelCase");
         match effects.into_command().expect("setEffects command") {
             EditCommand::SetEffects { effects, .. } => {
-                assert_eq!(effects[0].name, "gaussianBlur");
-                assert_eq!(effects[0].param("radius", 0.0), 4.0);
+                assert_eq!(effects[0].name, "grayscale");
+                assert_eq!(effects[0].param("amount", 0.0), 0.4);
             }
             other => panic!("expected SetEffects, got {other:?}"),
         }

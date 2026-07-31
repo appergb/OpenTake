@@ -29,4 +29,6 @@ pub enum RenderError {
     DeviceRequest(String),
     #[error("frame read-back failed: {0}")]
     Readback(String),
+    #[error("invalid effect chain: {0}")]
+    InvalidEffect(#[from] opentake_domain::EffectValidationError),
 }

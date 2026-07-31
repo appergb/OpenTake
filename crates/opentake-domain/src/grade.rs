@@ -650,20 +650,129 @@ fn point_segment_dist2(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> 
 // Effect (generic named-parameter effect chain)
 // ===========================================================================
 
-/// A generic named pixel effect with a flat parameter map — the extensible chain
-/// the spec calls for (`Clip.effects: Vec<Effect>`, each = one wgpu pass). The
-/// `name` selects a shader/kernel; `params` are its named scalar inputs and
-/// `enabled` lets a clip carry a disabled effect without removing it.
-///
-/// Concrete effects (blur, glow, sharpen, ...) are deferred (see module TODO);
-/// this type and its serde/round-trip are the stable contract that ops + agent
-/// tools target now, and the render layer can grow per-name handling
-/// incrementally without further domain changes.
+/// Maximum authored effects evaluated for one clip. A fixed bound keeps the
+/// persisted contract aligned with the portable GPU uniform layout.
+pub const MAX_EFFECTS_PER_CLIP: usize = 8;
+
+/// One persisted scalar in an advertised effect's closed schema.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct EffectParameterDescriptor {
+    pub name: &'static str,
+    pub default: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+/// An effect available to the editor, agent tools, preview, and export.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct EffectDescriptor {
+    pub name: &'static str,
+    pub parameters: &'static [EffectParameterDescriptor],
+}
+
+const AMOUNT_PARAMETER: [EffectParameterDescriptor; 1] = [EffectParameterDescriptor {
+    name: "amount",
+    default: 1.0,
+    min: 0.0,
+    max: 1.0,
+}];
+
+const EFFECT_REGISTRY: [EffectDescriptor; 3] = [
+    EffectDescriptor {
+        name: "grayscale",
+        parameters: &AMOUNT_PARAMETER,
+    },
+    EffectDescriptor {
+        name: "sepia",
+        parameters: &AMOUNT_PARAMETER,
+    },
+    EffectDescriptor {
+        name: "invert",
+        parameters: &AMOUNT_PARAMETER,
+    },
+];
+
+/// The complete effect list advertised by every product surface.
+pub fn effect_registry() -> &'static [EffectDescriptor] {
+    &EFFECT_REGISTRY
+}
+
+/// Typed rejection for invalid persisted effect data.
+#[derive(Clone, PartialEq, Debug)]
+pub enum EffectValidationError {
+    TooManyEffects {
+        count: usize,
+        limit: usize,
+    },
+    UnknownEffect {
+        name: String,
+    },
+    UnknownParameter {
+        effect: String,
+        parameter: String,
+    },
+    NonFiniteParameter {
+        effect: String,
+        parameter: String,
+    },
+    ParameterOutOfRange {
+        effect: String,
+        parameter: String,
+        value: f64,
+        min: f64,
+        max: f64,
+    },
+}
+
+impl std::fmt::Display for EffectValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooManyEffects { count, limit } => {
+                write!(f, "effect chain contains {count} entries; limit is {limit}")
+            }
+            Self::UnknownEffect { name } => write!(f, "unknown effect `{name}`"),
+            Self::UnknownParameter { effect, parameter } => {
+                write!(f, "unknown parameter `{parameter}` for effect `{effect}`")
+            }
+            Self::NonFiniteParameter { effect, parameter } => write!(
+                f,
+                "parameter `{parameter}` for effect `{effect}` must be finite"
+            ),
+            Self::ParameterOutOfRange {
+                effect,
+                parameter,
+                value,
+                min,
+                max,
+            } => write!(
+                f,
+                "parameter `{parameter}` for effect `{effect}` is {value}; expected {min}..={max}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for EffectValidationError {}
+
+/// Validate a complete authored chain before an edit or render boundary.
+pub fn validate_effect_chain(effects: &[Effect]) -> Result<(), EffectValidationError> {
+    if effects.len() > MAX_EFFECTS_PER_CLIP {
+        return Err(EffectValidationError::TooManyEffects {
+            count: effects.len(),
+            limit: MAX_EFFECTS_PER_CLIP,
+        });
+    }
+    effects.iter().try_for_each(Effect::validate)
+}
+
+/// A named pixel effect with a flat parameter map. Names and parameters remain
+/// string-keyed for stable JSON compatibility, but every edit and render path
+/// validates them against [`effect_registry`] rather than silently ignoring an
+/// unknown value.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Effect {
-    /// Effect identifier (e.g. `"gaussianBlur"`). Free-form; the render layer maps
-    /// known names to passes and ignores unknown ones.
+    /// Identifier from [`effect_registry`].
     pub name: String,
     /// Named scalar parameters. Insertion-stable ordering is not required; the
     /// render layer reads by key.
@@ -697,6 +806,60 @@ impl Effect {
     /// Read a parameter, or `default` when absent.
     pub fn param(&self, key: &str, default: f64) -> f64 {
         self.params.get(key).copied().unwrap_or(default)
+    }
+
+    /// Validate this persisted value against the advertised closed schema.
+    pub fn validate(&self) -> Result<(), EffectValidationError> {
+        let descriptor = effect_registry()
+            .iter()
+            .find(|candidate| candidate.name == self.name)
+            .ok_or_else(|| EffectValidationError::UnknownEffect {
+                name: self.name.clone(),
+            })?;
+        for (name, value) in &self.params {
+            let parameter = descriptor
+                .parameters
+                .iter()
+                .find(|candidate| candidate.name == name)
+                .ok_or_else(|| EffectValidationError::UnknownParameter {
+                    effect: self.name.clone(),
+                    parameter: name.clone(),
+                })?;
+            if !value.is_finite() {
+                return Err(EffectValidationError::NonFiniteParameter {
+                    effect: self.name.clone(),
+                    parameter: name.clone(),
+                });
+            }
+            if *value < parameter.min || *value > parameter.max {
+                return Err(EffectValidationError::ParameterOutOfRange {
+                    effect: self.name.clone(),
+                    parameter: name.clone(),
+                    value: *value,
+                    min: parameter.min,
+                    max: parameter.max,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Read a registered scalar using its schema default.
+    pub fn registered_param(&self, key: &str) -> Result<f64, EffectValidationError> {
+        self.validate()?;
+        let descriptor = effect_registry()
+            .iter()
+            .find(|candidate| candidate.name == self.name)
+            .expect("validated effect is registered");
+        let parameter = descriptor
+            .parameters
+            .iter()
+            .find(|candidate| candidate.name == key)
+            .ok_or_else(|| EffectValidationError::UnknownParameter {
+                effect: self.name.clone(),
+                parameter: key.to_owned(),
+            })?;
+        Ok(self.param(key, parameter.default))
     }
 }
 
@@ -1146,24 +1309,24 @@ mod tests {
 
     #[test]
     fn effect_new_is_enabled_no_params() {
-        let e = Effect::new("gaussianBlur");
-        assert_eq!(e.name, "gaussianBlur");
+        let e = Effect::new("grayscale");
+        assert_eq!(e.name, "grayscale");
         assert!(e.enabled);
         assert!(e.params.is_empty());
-        approx(e.param("radius", 3.0), 3.0); // default fallback
+        approx(e.registered_param("amount").unwrap(), 1.0);
     }
 
     #[test]
     fn effect_with_param_and_read() {
-        let e = Effect::new("glow").with_param("intensity", 0.8);
-        approx(e.param("intensity", 0.0), 0.8);
+        let e = Effect::new("sepia").with_param("amount", 0.8);
+        approx(e.registered_param("amount").unwrap(), 0.8);
     }
 
     #[test]
     fn effect_roundtrip_with_params() {
-        let e = Effect::new("sharpen").with_param("amount", 0.5);
+        let e = Effect::new("invert").with_param("amount", 0.5);
         let json = serde_json::to_string(&e).unwrap();
-        assert!(json.contains("\"name\":\"sharpen\""));
+        assert!(json.contains("\"name\":\"invert\""));
         assert!(json.contains("\"amount\":0.5"));
         let back: Effect = serde_json::from_str(&json).unwrap();
         assert_eq!(e, back);

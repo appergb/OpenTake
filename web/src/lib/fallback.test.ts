@@ -319,7 +319,7 @@ describe("browser fallback edit store", () => {
     const result = fallback.editApply({
       type: "setEffects",
       clipIds: ["c1", "missing"],
-      effects: [{ name: "gaussianBlur", params: { radius: 4 }, enabled: true }],
+      effects: [{ name: "grayscale", params: { amount: 0.4 }, enabled: true }],
     });
     const clip = fallback
       .getTimeline()

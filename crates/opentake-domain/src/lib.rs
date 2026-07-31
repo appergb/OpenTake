@@ -42,8 +42,10 @@ pub use caption_sync::{caption_group_ids, clips_in_group, sync_caption_group_sty
 pub use clip::{Clip, FadeEdge, KeyframeTrackWireField, KeyframeValueWireShape, VolumeScale};
 pub use clip_type::ClipType;
 pub use grade::{
-    chroma_cb_cr, luma709, smoothstep01, ChromaKey, ColorGrade, Effect, LiftGammaGain, Mask,
-    MaskShape, MaskTransform, Point2, Rgb, MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS,
+    chroma_cb_cr, effect_registry, luma709, smoothstep01, validate_effect_chain, ChromaKey,
+    ColorGrade, Effect, EffectDescriptor, EffectParameterDescriptor, EffectValidationError,
+    LiftGammaGain, Mask, MaskShape, MaskTransform, Point2, Rgb, MAX_EFFECTS_PER_CLIP,
+    MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS,
 };
 pub use keyframe::{
     smoothstep, split_keyframe_track, AnimPair, AnimatableProperty, Interpolation, Keyframe,

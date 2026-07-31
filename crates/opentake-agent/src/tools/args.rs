@@ -1201,13 +1201,13 @@ mod tests {
     fn apply_effect_decodes_with_params() {
         let v = serde_json::json!({
             "clipIds": ["a"],
-            "effects": [{"name": "gaussianBlur", "params": {"radius": 4.0}}]
+            "effects": [{"name": "grayscale", "params": {"amount": 0.4}}]
         });
         let a: ApplyEffectArgs = decode_tool_args(&v, "").unwrap();
         assert_eq!(a.effects.len(), 1);
         let e: EffectArg = decode_tool_args(&a.effects[0], "effects[0]").unwrap();
-        assert_eq!(e.name, "gaussianBlur");
-        assert_eq!(e.params.unwrap().get("radius"), Some(&4.0));
+        assert_eq!(e.name, "grayscale");
+        assert_eq!(e.params.unwrap().get("amount"), Some(&0.4));
     }
 
     #[test]

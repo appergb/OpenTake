@@ -2551,6 +2551,8 @@ fn set_effects(
     clip_ids: Vec<String>,
     effects: Vec<Effect>,
 ) -> Result<EditResult, EditError> {
+    opentake_domain::validate_effect_chain(&effects)
+        .map_err(|error| EditError::Invalid(error.to_string()))?;
     reject_compound_effect_targets(state, &clip_ids, !effects.is_empty())?;
     set_clip_effect_field(state, clip_ids, "Set Effects", move |clip| {
         clip.effects = effects.clone();

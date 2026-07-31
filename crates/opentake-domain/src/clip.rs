@@ -1285,7 +1285,7 @@ mod tests {
             invert: false,
             ..Mask::default()
         }];
-        c.effects = vec![Effect::new("gaussianBlur").with_param("radius", 4.0)];
+        c.effects = vec![Effect::new("grayscale").with_param("amount", 0.4)];
         let json = serde_json::to_string(&c).unwrap();
         assert!(json.contains("\"colorGrade\""));
         assert!(json.contains("\"chromaKey\""));

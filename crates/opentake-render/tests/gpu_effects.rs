@@ -10,15 +10,15 @@
 use std::rc::Rc;
 
 use opentake_domain::{
-    ChromaKey, Clip, ClipType, ColorGrade, Mask, MaskShape, MaskTransform, Point, Point2, Rgb,
-    Timeline, Track, Transform,
+    effect_registry, ChromaKey, Clip, ClipType, ColorGrade, Effect, EffectValidationError, Mask,
+    MaskShape, MaskTransform, Point, Point2, Rgb, Timeline, Track, Transform,
 };
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::source::DecodedFrame;
 use opentake_render::wgpu;
 use opentake_render::{
-    build_render_plan, Compositor, GpuTexture, RenderDevice, RenderSize, SourceMetrics,
-    TextureResolver, TextureSource,
+    build_render_plan, Compositor, GpuTexture, RenderDevice, RenderError, RenderSize,
+    SourceMetrics, TextureResolver, TextureSource,
 };
 
 const RS: RenderSize = RenderSize {
@@ -116,6 +116,87 @@ fn render(dev: &RenderDevice, tl: &Timeline, rgba: [u8; 4]) -> DecodedFrame {
     compositor
         .render_to_rgba(&dev.device, &dev.queue, RS, &fp, &mut resolver)
         .expect("render")
+}
+
+#[test]
+fn advertised_effect_registry_has_preview_export_golden_fixtures() {
+    let Some(dev) = device_or_skip("advertised_effect_registry_has_preview_export_golden_fixtures")
+    else {
+        return;
+    };
+
+    let registry = effect_registry();
+    assert_eq!(
+        registry
+            .iter()
+            .map(|effect| effect.name)
+            .collect::<Vec<_>>(),
+        ["grayscale", "sepia", "invert"]
+    );
+
+    // Golden center pixels for a fixed opaque source. Each advertised effect is
+    // exercised at its persisted default and a non-default amount. Preview and
+    // export deliberately render through fresh resolver state and must agree
+    // byte-for-byte.
+    let fixtures = [
+        ("grayscale", None, [81, 81, 81, 255]),
+        ("grayscale", Some(0.4), [164, 50, 140, 255]),
+        ("sepia", None, [144, 128, 99, 255]),
+        ("sepia", Some(0.4), [189, 69, 148, 255]),
+        ("invert", None, [35, 225, 75, 255]),
+        ("invert", Some(0.4), [146, 108, 138, 255]),
+    ];
+    for (name, amount, golden) in fixtures {
+        let mut timeline = full_canvas_timeline();
+        let effect = amount.map_or_else(
+            || Effect::new(name),
+            |value| Effect::new(name).with_param("amount", value),
+        );
+        effect.validate().expect("advertised effect validates");
+        timeline.tracks[0].clips[0].effects = vec![effect];
+
+        let preview = render(&dev, &timeline, [220, 30, 180, 255]);
+        let export = render(&dev, &timeline, [220, 30, 180, 255]);
+        assert_eq!(preview.rgba, export.rgba, "preview/export drift for {name}");
+        let actual = center_pixel(&preview);
+        for channel in 0..4 {
+            assert!(
+                (actual[channel] as i32 - golden[channel]).abs() <= 3,
+                "{name} amount={amount:?}: expected {golden:?}, got {actual:?}"
+            );
+        }
+    }
+
+    // The sequence itself is authored state: changing order must change pixels.
+    let mut first = full_canvas_timeline();
+    first.tracks[0].clips[0].effects = vec![Effect::new("sepia"), Effect::new("invert")];
+    let mut second = full_canvas_timeline();
+    second.tracks[0].clips[0].effects = vec![Effect::new("invert"), Effect::new("sepia")];
+    assert_ne!(
+        center_pixel(&render(&dev, &first, [220, 30, 180, 255])),
+        center_pixel(&render(&dev, &second, [220, 30, 180, 255])),
+        "effect order must be rendered, not stored as inert metadata"
+    );
+
+    let mut invalid = full_canvas_timeline();
+    invalid.tracks[0].clips[0].effects = vec![Effect::new("unadvertised")];
+    let plan = build_render_plan(&invalid, RS, &Metrics);
+    let frame_plan = plan.frame(&invalid, 0);
+    let compositor = Compositor::new(&dev.device);
+    let mut resolver = SolidResolver {
+        device: &dev.device,
+        queue: &dev.queue,
+        rgba: [220, 30, 180, 255],
+        cached: None,
+    };
+    let error = compositor
+        .render_to_rgba(&dev.device, &dev.queue, RS, &frame_plan, &mut resolver)
+        .expect_err("unknown effects must fail instead of rendering unchanged");
+    assert!(matches!(
+        error,
+        RenderError::InvalidEffect(EffectValidationError::UnknownEffect { ref name })
+            if name == "unadvertised"
+    ));
 }
 
 #[test]

@@ -271,10 +271,17 @@ describe("resolveTimelinePlaybackRoute", () => {
     });
   });
 
-  it("returns Unsupported for Lottie enabled effects and mask overflow", () => {
+  it("routes advertised effects through Rust and rejects unknown persisted effects", () => {
+    expect(
+      resolveTimelinePlaybackRoute(
+        timeline(clip({ effects: [{ name: "sepia", params: {}, enabled: true }] })),
+        runtime,
+      ),
+    ).toEqual({ kind: "rust", reasons: [] });
+
     const cases: Array<[Clip, string]> = [
       [clip({ mediaType: "lottie", sourceClipType: "lottie" }), "lottie"],
-      [clip({ effects: [{ name: "blur", params: {}, enabled: true }] }), "enabled-effect"],
+      [clip({ effects: [{ name: "blur", params: {}, enabled: true }] }), "unknown-effect"],
       [
         clip({
           masks: Array.from({ length: 5 }, () => ({

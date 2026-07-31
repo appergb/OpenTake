@@ -78,8 +78,15 @@ import type {
   MediaItem,
   Rgb,
   Timeline,
+  Effect,
 } from "../../lib/types";
 import { formatFileSize, formatMediaDuration } from "../../lib/mediaFormat";
+import {
+  EFFECT_REGISTRY,
+  isAdvertisedEffectName,
+  newAdvertisedEffect,
+  type AdvertisedEffectName,
+} from "../../lib/effects";
 
 function gcd(a: number, b: number): number {
   return b === 0 ? a : gcd(b, a % b);
@@ -992,7 +999,104 @@ function ShaderEffectsSection({ clip, t }: { clip: Clip; t: TFunction }) {
       <ColorGradeSection clip={clip} t={t} />
       <ChromaKeySection clip={clip} t={t} />
       <MaskSection clip={clip} t={t} />
+      <GenericEffectsSection clip={clip} t={t} />
     </>
+  );
+}
+
+function GenericEffectsSection({ clip, t }: { clip: Clip; t: TFunction }) {
+  const [draft, setDraft] = useState<Effect[]>(() => clip.effects ?? []);
+  const [selectedName, setSelectedName] = useState<AdvertisedEffectName>("grayscale");
+
+  useEffect(() => setDraft(clip.effects ?? []), [clip.id, clip.effects]);
+
+  const commit = (next: Effect[]) => {
+    setDraft(next);
+    void edit.setEffects([clip.id], next);
+  };
+  const replace = (index: number, nextEffect: Effect) => {
+    const next = [...draft];
+    next[index] = nextEffect;
+    commit(next);
+  };
+  const move = (from: number, to: number) => {
+    if (to < 0 || to >= draft.length) return;
+    const next = [...draft];
+    const [moved] = next.splice(from, 1);
+    if (!moved) return;
+    next.splice(to, 0, moved);
+    commit(next);
+  };
+
+  return (
+    <section data-testid="generic-effects-section">
+      <SectionHeader label={t("inspector.section.effects")} icon={SlidersHorizontal} />
+      <div style={{ display: "flex", gap: SPACE.xs, padding: `0 ${SPACE.lg}px ${SPACE.sm}px` }}>
+        <select
+          aria-label={t("inspector.effects.add")}
+          value={selectedName}
+          onChange={(event) => setSelectedName(event.target.value as AdvertisedEffectName)}
+          style={controlStyle}
+        >
+          {EFFECT_REGISTRY.map((effect) => (
+            <option key={effect.name} value={effect.name}>{t(effect.labelKey)}</option>
+          ))}
+        </select>
+        <button type="button" style={controlStyle} onClick={() => commit([...draft, newAdvertisedEffect(selectedName)])}>
+          {t("inspector.effects.add")}
+        </button>
+      </div>
+      {draft.length === 0 && (
+        <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, color: "var(--text-tertiary)" }}>
+          {t("inspector.effects.empty")}
+        </div>
+      )}
+      {draft.map((effect, index) => {
+        const advertised = isAdvertisedEffectName(effect.name);
+        const label = advertised
+          ? t(EFFECT_REGISTRY.find((item) => item.name === effect.name)!.labelKey)
+          : `${effect.name} (${t("inspector.effects.unknown")})`;
+        const amount = effect.params.amount ?? 1;
+        return (
+          <div
+            key={`${effect.name}-${index}`}
+            data-testid="generic-effect-item"
+            style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, borderTop: "var(--bw-thin) solid var(--border-primary)" }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: SPACE.xs, paddingTop: SPACE.xs }}>
+              <input
+                aria-label={`${label} ${t("inspector.field.enabled")}`}
+                type="checkbox"
+                checked={effect.enabled}
+                style={checkboxStyle}
+                onChange={(event) => replace(index, { ...effect, enabled: event.target.checked })}
+              />
+              <span style={{ flex: 1 }}>{label}</span>
+              <button type="button" aria-label={t("inspector.effects.moveUp")} style={controlStyle} disabled={index === 0} onClick={() => move(index, index - 1)}>↑</button>
+              <button type="button" aria-label={t("inspector.effects.moveDown")} style={controlStyle} disabled={index === draft.length - 1} onClick={() => move(index, index + 1)}>↓</button>
+              <button type="button" aria-label={t("inspector.effects.remove")} style={controlStyle} onClick={() => commit(draft.filter((_, itemIndex) => itemIndex !== index))}>×</button>
+            </div>
+            {advertised && (
+              <Row label={t("inspector.effects.amount")}>
+                <input
+                  aria-label={`${label} ${t("inspector.effects.amount")}`}
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={amount}
+                  onChange={(event) => replace(index, {
+                    ...effect,
+                    params: { amount: Number(event.target.value) },
+                  })}
+                />
+                <span className="tabular" style={{ marginLeft: SPACE.xs }}>{Math.round(amount * 100)}%</span>
+              </Row>
+            )}
+          </div>
+        );
+      })}
+    </section>
   );
 }
 

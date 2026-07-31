@@ -9,7 +9,9 @@ use std::rc::Rc;
 
 use bytemuck::{Pod, Zeroable};
 
-use opentake_domain::{ColorGrade, LiftGammaGain, MaskShape};
+use opentake_domain::{
+    validate_effect_chain, ColorGrade, LiftGammaGain, MaskShape, MAX_EFFECTS_PER_CLIP,
+};
 
 use crate::gpu::texture::GpuTexture;
 use crate::gpu::RenderError;
@@ -32,6 +34,18 @@ const MASK_LINEAR: f32 = 0.0;
 const MASK_CIRCLE: f32 = 1.0;
 const MASK_POLY: f32 = 2.0;
 const POLY_POINT_CAP: usize = MAX_POLYGON_MASK_POINTS;
+
+/// Effect kind tags mirror the closed registry and WGSL implementation.
+const EFFECT_GRAYSCALE: f32 = 0.0;
+const EFFECT_SEPIA: f32 = 1.0;
+const EFFECT_INVERT: f32 = 2.0;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Default)]
+struct EffectGpu {
+    // (kind, amount, pad, pad)
+    data: [f32; 4],
+}
 
 /// One mask in the uniform (mirrors WGSL `MaskGpu`): `head = (kind, feather,
 /// invert, polygon-point-count)`, `geo` packs linear/circle geometry, and
@@ -64,6 +78,8 @@ struct Uniforms {
     chroma1: [f32; 4],         // smoothness, spill, pad, pad
     mask_meta: [f32; 4],       // mask_count, pad, pad, pad
     masks: [MaskGpu; MASK_CAP],
+    effect_meta: [f32; 4], // effect_count, pad, pad, pad
+    effects: [EffectGpu; MAX_EFFECTS_PER_CLIP],
 }
 
 /// Identity color-grade uniform block (exposure 0, wb/gain 1, lift 0, gamma 1,
@@ -163,6 +179,27 @@ fn pack_masks(draw: &LayerDraw<'_>) -> ([MaskGpu; MASK_CAP], f32) {
         n += 1;
     }
     (out, n as f32)
+}
+
+fn pack_effects(
+    draw: &LayerDraw<'_>,
+) -> Result<([EffectGpu; MAX_EFFECTS_PER_CLIP], f32), RenderError> {
+    validate_effect_chain(draw.effects)?;
+    let mut out = [EffectGpu::default(); MAX_EFFECTS_PER_CLIP];
+    let mut count = 0usize;
+    for effect in draw.effects.iter().filter(|effect| effect.enabled) {
+        let kind = match effect.name.as_str() {
+            "grayscale" => EFFECT_GRAYSCALE,
+            "sepia" => EFFECT_SEPIA,
+            "invert" => EFFECT_INVERT,
+            _ => unreachable!("validate_effect_chain accepts only registered effects"),
+        };
+        out[count] = EffectGpu {
+            data: [kind, effect.registered_param("amount")? as f32, 0.0, 0.0],
+        };
+        count += 1;
+    }
+    Ok((out, count as f32))
 }
 
 /// Working color format. The PoC composites in the sRGB non-linear domain
@@ -434,6 +471,9 @@ impl Compositor {
         let mut prepared: Vec<Prepared> = Vec::with_capacity(frame_plan.draws.len());
 
         for draw in &frame_plan.draws {
+            // Reject invalid persisted data even when the source is offline;
+            // an unknown effect must never degrade into an unchanged frame.
+            let (effects, effect_count) = pack_effects(draw)?;
             let Some(tex) = resolver.resolve_with_interpolation(TextureResolveRequest {
                 source: draw.source,
                 source_frame: draw.source_frame,
@@ -510,6 +550,8 @@ impl Compositor {
                 chroma1,
                 mask_meta: [mask_count, 0.0, 0.0, 0.0],
                 masks,
+                effect_meta: [effect_count, 0.0, 0.0, 0.0],
+                effects,
             };
             let ubuf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("opentake-render uniform"),

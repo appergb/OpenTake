@@ -233,8 +233,8 @@ describe("edit gesture command routing", () => {
       () => setMasks(["clip-a"], [{ shape: { kind: "circle", center: { x: 0.5, y: 0.5 }, radius: { x: 0.25, y: 0.25 } }, feather: 0, invert: false }]),
     );
     await route(
-      { type: "setEffects", clipIds: ["clip-a"], effects: [{ name: "blur", params: { radius: 2 }, enabled: true }] },
-      () => setEffects(["clip-a"], [{ name: "blur", params: { radius: 2 }, enabled: true }]),
+      { type: "setEffects", clipIds: ["clip-a"], effects: [{ name: "grayscale", params: { amount: 0.4 }, enabled: true }] },
+      () => setEffects(["clip-a"], [{ name: "grayscale", params: { amount: 0.4 }, enabled: true }]),
     );
     const stabilization = {
       model: "opentake.motion-smoothing",

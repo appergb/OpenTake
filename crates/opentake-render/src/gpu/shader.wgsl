@@ -31,6 +31,7 @@
 
 const MASK_CAP: u32 = 4u;
 const POLY_POINT_CAP: u32 = 16u;
+const EFFECT_CAP: u32 = 8u;
 
 // Flag bits packed into U.canvas_op_flags.w (bitcast to u32).
 const FLAG_PREMULTIPLY: u32 = 1u;   // straight-alpha source needs premultiply
@@ -55,6 +56,11 @@ struct MaskGpu {
     points: array<vec4<f32>, POLY_POINT_CAP>,
 };
 
+struct EffectGpu {
+    // (kind, amount, pad, pad)
+    data: vec4<f32>,
+};
+
 // Laid out as vec4s so every field is 16-byte aligned (no implicit WGSL padding)
 // and the Rust POD mirror is unambiguous.
 struct U {
@@ -73,6 +79,8 @@ struct U {
     // Mask count (x) + padding.
     mask_meta: vec4<f32>,      // mask_count, pad, pad, pad
     masks: array<MaskGpu, MASK_CAP>,
+    effect_meta: vec4<f32>,    // effect_count, pad, pad, pad
+    effects: array<EffectGpu, EFFECT_CAP>,
 };
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -295,6 +303,39 @@ fn masks_coverage(p: vec2<f32>) -> f32 {
     return cov;
 }
 
+// ---- Closed generic effect chain ------------------------------------------
+
+const EFFECT_GRAYSCALE: u32 = 0u;
+const EFFECT_SEPIA: u32 = 1u;
+const EFFECT_INVERT: u32 = 2u;
+
+fn apply_effect(effect: EffectGpu, input: vec3<f32>) -> vec3<f32> {
+    let kind = u32(effect.data.x + 0.5);
+    let amount = clamp(effect.data.y, 0.0, 1.0);
+    var transformed = input;
+    if (kind == EFFECT_GRAYSCALE) {
+        transformed = vec3<f32>(luma709(input));
+    } else if (kind == EFFECT_SEPIA) {
+        transformed = vec3<f32>(
+            dot(input, vec3<f32>(0.393, 0.769, 0.189)),
+            dot(input, vec3<f32>(0.349, 0.686, 0.168)),
+            dot(input, vec3<f32>(0.272, 0.534, 0.131)),
+        );
+    } else if (kind == EFFECT_INVERT) {
+        transformed = vec3<f32>(1.0) - input;
+    }
+    return clamp(mix(input, transformed, amount), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+fn apply_effect_chain(input: vec3<f32>) -> vec3<f32> {
+    let count = min(u32(u.effect_meta.x + 0.5), EFFECT_CAP);
+    var result = input;
+    for (var i: u32 = 0u; i < count; i = i + 1u) {
+        result = apply_effect(u.effects[i], result);
+    }
+    return result;
+}
+
 @vertex
 fn vs(@builtin(vertex_index) vi: u32) -> VsOut {
     // Triangle-strip quad: (0,0) (1,0) (0,1) (1,1).
@@ -391,7 +432,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         rgb = linear_to_srgb(graded);
     }
 
-    // 3. Masks (intersected coverage) scale alpha.
+    // 3. Ordered, schema-validated generic effects.
+    rgb = apply_effect_chain(rgb);
+
+    // 4. Masks (intersected coverage) scale alpha.
     alpha = alpha * masks_coverage(in.canvas_uv);
 
     // Premultiply once (the compositor blends premultiplied over), then apply the

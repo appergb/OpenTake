@@ -1853,8 +1853,8 @@ fn set_effects_replaces_chain() {
     let mut st = one_clip_state();
     let g = SeqIdGen::default();
     let effects = vec![
-        Effect::new("gaussianBlur").with_param("radius", 4.0),
-        Effect::new("glow").with_param("intensity", 0.6),
+        Effect::new("grayscale").with_param("amount", 0.4),
+        Effect::new("sepia").with_param("amount", 0.6),
     ];
     let res = apply(
         &mut st,
@@ -1868,6 +1868,30 @@ fn set_effects_replaces_chain() {
     assert!(res.changed);
     assert_eq!(res.action_name, "Set Effects");
     assert_eq!(find_clip(&st, "c").effects, effects);
+}
+
+#[test]
+fn set_effects_rejects_unknown_names_and_invalid_parameters_without_history() {
+    let g = SeqIdGen::default();
+    for effect in [
+        Effect::new("blur"),
+        Effect::new("sepia").with_param("radius", 2.0),
+        Effect::new("invert").with_param("amount", 1.1),
+    ] {
+        let mut st = one_clip_state();
+        let error = apply(
+            &mut st,
+            EditCommand::SetEffects {
+                clip_ids: vec!["c".into()],
+                effects: vec![effect],
+            },
+            &g,
+        )
+        .unwrap_err();
+        assert!(matches!(error, EditError::Invalid(_)));
+        assert!(find_clip(&st, "c").effects.is_empty());
+        assert_eq!(st.version(), 0);
+    }
 }
 
 #[test]
@@ -1892,7 +1916,7 @@ fn advanced_effect_commands_reject_empty_and_missing() {
             &mut st,
             EditCommand::SetEffects {
                 clip_ids: vec!["nope".into()],
-                effects: vec![Effect::new("blur")]
+                effects: vec![Effect::new("grayscale")]
             },
             &g
         ),

@@ -340,7 +340,7 @@ mod tests {
             invert: false,
             ..Mask::default()
         }];
-        src.effects = vec![Effect::new("gaussianBlur").with_param("radius", 4.0)];
+        src.effects = vec![Effect::new("grayscale").with_param("amount", 0.4)];
         let orig_color_grade = src.color_grade;
         let orig_chroma_key = src.chroma_key;
         let g = SeqIdGen::default();
