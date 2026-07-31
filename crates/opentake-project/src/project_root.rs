@@ -642,15 +642,33 @@ impl BundlePublisher {
     }
 
     pub(crate) fn publish(mut self) -> Result<ProjectRoot> {
-        #[cfg(test)]
-        if FAIL_PUBLISH_AFTER_BACKUP.with(|fail| fail.replace(false)) {
-            return self.publish_with_hook(|| {
-                Err(std::io::Error::other(
-                    "injected publication failure after backup",
-                ))
-            });
+        let result = {
+            #[cfg(test)]
+            if FAIL_PUBLISH_AFTER_BACKUP.with(|fail| fail.replace(false)) {
+                self.publish_with_hook(|| {
+                    Err(std::io::Error::other(
+                        "injected publication failure after backup",
+                    ))
+                })
+            } else {
+                self.publish_with_hook(|| Ok(()))
+            }
+
+            #[cfg(not(test))]
+            self.publish_with_hook(|| Ok(()))
+        };
+
+        // A caller may immediately start the next complete-bundle save while
+        // retaining the returned ProjectRoot. Make that successful handoff
+        // explicit instead of depending on the two cloned lock handles being
+        // dropped at the end of this function. Error paths retain the lock
+        // through Drop's staged-artifact cleanup. Closing the handles remains
+        // the fallback; an unlock error cannot safely turn an already
+        // committed publication into a reported failure.
+        if result.is_ok() {
+            let _ = self._lock.unlock();
         }
-        self.publish_with_hook(|| Ok(()))
+        result
     }
 
     fn publish_with_hook(
@@ -2174,6 +2192,38 @@ mod tests {
             .path()
             .join(".Existing.opentake.opentake-journal")
             .exists());
+    }
+
+    #[test]
+    fn publish_releases_the_transaction_lock_before_returning() {
+        let tmp = TmpDir::new("publish-lock-handoff");
+        let target = tmp.path().join("Existing.opentake");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("project.json"), b"initial timeline").unwrap();
+        let lock_path = tmp.path().join(".Existing.opentake.opentake-lock");
+
+        for generation in 0..32 {
+            let publisher = ProjectRoot::begin_replace(&target).unwrap();
+            let expected = format!("timeline generation {generation}");
+            publisher
+                .stage()
+                .write_atomic("project.json", expected.as_bytes())
+                .unwrap();
+            let root = publisher.publish().unwrap();
+
+            let lock = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .unwrap();
+            lock.try_lock()
+                .expect("publish must hand off its transaction lock before returning");
+            lock.unlock().unwrap();
+            assert_eq!(
+                root.read_optional("project.json").unwrap().unwrap(),
+                expected.as_bytes()
+            );
+        }
     }
 
     #[test]
