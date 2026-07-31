@@ -76,7 +76,7 @@ export function Toolbar() {
   const pushToast = useEditorUiStore((s) => s.pushToast);
   const canUndo = useProjectStore((s) => s.canUndo);
   const canRedo = useProjectStore((s) => s.canRedo);
-  const [undoPending, setUndoPending] = useState(false);
+  const [historyPending, setHistoryPending] = useState<"undo" | "redo" | null>(null);
 
   // Logarithmic slider mapping (ToolbarView.swift:50-53): travel uniform per
   // zoom factor; get=log(zoom), set=exp(value).
@@ -90,15 +90,28 @@ export function Toolbar() {
   };
 
   const onUndo = async () => {
-    if (!canUndo || undoPending) return;
-    setUndoPending(true);
+    if (!canUndo || historyPending) return;
+    setHistoryPending("undo");
     try {
       await edit.undo();
     } catch (reason: unknown) {
       const message = reason instanceof Error ? reason.message : String(reason);
       pushToast(`${t("toolbar.undo")}: ${message}`);
     } finally {
-      setUndoPending(false);
+      setHistoryPending(null);
+    }
+  };
+
+  const onRedo = async () => {
+    if (!canRedo || historyPending) return;
+    setHistoryPending("redo");
+    try {
+      await edit.redo();
+    } catch (reason: unknown) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      pushToast(`${t("toolbar.redo")}: ${message}`);
+    } finally {
+      setHistoryPending(null);
     }
   };
 
@@ -117,18 +130,24 @@ export function Toolbar() {
     >
       {/* Undo / Redo */}
       <div style={{ display: "flex", alignItems: "center" }}>
-        <span aria-busy={undoPending || undefined} style={{ display: "inline-flex" }}>
+        <span aria-busy={historyPending === "undo" || undefined} style={{ display: "inline-flex" }}>
           <HoverButton
             title={t("toolbar.undo")}
-            disabled={!canUndo || undoPending}
+            disabled={!canUndo || historyPending !== null}
             onClick={() => void onUndo()}
           >
             <Icon icon={RotateCcw} size={13} />
           </HoverButton>
         </span>
-        <HoverButton title={t("toolbar.redo")} disabled={!canRedo} onClick={() => edit.redo()}>
-          <Icon icon={RotateCw} size={13} />
-        </HoverButton>
+        <span aria-busy={historyPending === "redo" || undefined} style={{ display: "inline-flex" }}>
+          <HoverButton
+            title={t("toolbar.redo")}
+            disabled={!canRedo || historyPending !== null}
+            onClick={() => void onRedo()}
+          >
+            <Icon icon={RotateCw} size={13} />
+          </HoverButton>
+        </span>
       </div>
 
       <Divider />

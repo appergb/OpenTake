@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const edit = vi.hoisted(() => ({
   undo: vi.fn<() => Promise<void>>(),
-  redo: vi.fn(),
+  redo: vi.fn<() => Promise<void>>(),
   splitAtPlayhead: vi.fn(),
   trimStartToPlayhead: vi.fn(),
   trimEndToPlayhead: vi.fn(),
@@ -44,6 +44,14 @@ function undoButton(): HTMLButtonElement {
     'button[aria-label="toolbar.undo"]',
   );
   if (!button) throw new Error("undo control was not rendered");
+  return button;
+}
+
+function redoButton(): HTMLButtonElement {
+  const button = container?.querySelector<HTMLButtonElement>(
+    'button[aria-label="toolbar.redo"]',
+  );
+  if (!button) throw new Error("redo control was not rendered");
   return button;
 }
 
@@ -114,5 +122,56 @@ describe("Toolbar command controls", () => {
     expect(actionSource).toMatch(/export async function undo\(\)[\s\S]*?await api\.undo\(\)/);
     expect(apiSource).toMatch(/export async function undo\(\)[\s\S]*?invokeImpl<EditResult>\("undo"\)/);
     expect(rustSource).toMatch(/pub fn undo[\s\S]*?handle_undo\(&core\)/);
+  });
+
+  it("control-b001ac6b21c97ad0 redo the last undone edit", async () => {
+    await act(async () => root?.render(<Toolbar />));
+
+    expect(redoButton().title).toBe("toolbar.redo");
+    expect(redoButton().disabled).toBe(true);
+    redoButton().click();
+    redoButton().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(edit.redo).not.toHaveBeenCalled();
+
+    await act(async () => useProjectStore.setState({ canUndo: false, canRedo: true }));
+    redoButton().focus();
+    const first = deferred();
+    edit.redo.mockImplementationOnce(async () => {
+      await first.promise;
+      useProjectStore.setState({ canUndo: true, canRedo: false });
+    });
+
+    await act(async () => redoButton().click());
+    expect(edit.redo).toHaveBeenCalledTimes(1);
+    expect(redoButton().disabled).toBe(true);
+    expect(redoButton().parentElement?.getAttribute("aria-busy")).toBe("true");
+    redoButton().click();
+    expect(edit.redo).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(redoButton());
+
+    await act(async () => first.resolve());
+    expect(useProjectStore.getState()).toMatchObject({ canUndo: true, canRedo: false });
+    expect(redoButton().disabled).toBe(true);
+    expect(redoButton().parentElement?.hasAttribute("aria-busy")).toBe(false);
+
+    await act(async () => useProjectStore.setState({ canRedo: true }));
+    edit.redo.mockRejectedValueOnce(new Error("redo history locked"));
+    await act(async () => redoButton().click());
+    expect(useEditorUiStore.getState().toast?.message).toContain("redo history locked");
+    expect(redoButton().disabled).toBe(false);
+
+    edit.redo.mockResolvedValueOnce();
+    await act(async () => redoButton().click());
+    expect(edit.redo).toHaveBeenCalledTimes(3);
+
+    const webRoot = process.cwd();
+    const toolbarSource = readFileSync(join(webRoot, "src/components/toolbar/Toolbar.tsx"), "utf8");
+    const actionSource = readFileSync(join(webRoot, "src/store/editActions.ts"), "utf8");
+    const apiSource = readFileSync(join(webRoot, "src/lib/api.ts"), "utf8");
+    const rustSource = readFileSync(join(webRoot, "../src-tauri/src/commands.rs"), "utf8");
+    expect(toolbarSource).toMatch(/await edit\.redo\(\)/);
+    expect(actionSource).toMatch(/export async function redo\(\)[\s\S]*?await api\.redo\(\)/);
+    expect(apiSource).toMatch(/export async function redo\(\)[\s\S]*?invokeImpl<EditResult>\("redo"\)/);
+    expect(rustSource).toMatch(/pub fn redo[\s\S]*?handle_redo\(&core\)/);
   });
 });
