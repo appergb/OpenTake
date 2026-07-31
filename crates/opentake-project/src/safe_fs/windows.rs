@@ -1634,10 +1634,33 @@ fn verify_owner_only(handle: HANDLE, expected: &OwnerOnlySecurity) -> Result<()>
     {
         return Err(malformed_security());
     }
+    #[cfg(test)]
+    let descriptor_fixture = take_owner_descriptor_fixture();
+    #[cfg(test)]
+    if descriptor_fixture == Some(OwnerDescriptorFixture::NullOwner) {
+        owner = null_mut();
+    }
+    #[cfg(test)]
+    if descriptor_fixture == Some(OwnerDescriptorFixture::InvalidOwner) {
+        owner = descriptor_bytes
+            .as_mut_ptr()
+            .wrapping_add(descriptor_bytes.len() - 1)
+            .cast();
+    }
+    if owner.is_null() {
+        return Err(malformed_security());
+    }
     checked_sid_length(descriptor_bytes, owner.cast_const())?;
     // SAFETY: owner SID is fully bounded and validated in descriptor_bytes.
     if unsafe { EqualSid(owner, expected.sid.as_ptr().cast_mut().cast()) } == 0 {
         return Err(malformed_security());
+    }
+    #[cfg(test)]
+    if descriptor_fixture == Some(OwnerDescriptorFixture::DaclOutOfRange) {
+        dacl = descriptor_bytes
+            .as_mut_ptr()
+            .wrapping_add(descriptor_bytes.len() + 1)
+            .cast();
     }
     checked_subslice(
         descriptor_bytes.as_ptr() as usize,
@@ -1655,9 +1678,19 @@ fn verify_owner_only(handle: HANDLE, expected: &OwnerOnlySecurity) -> Result<()>
             AclSizeInformation,
         )
     } == 0
-        || acl_info.AceCount != 1
     {
         return Err(malformed_security());
+    }
+    #[cfg(test)]
+    if descriptor_fixture == Some(OwnerDescriptorFixture::WrongAceCount) {
+        acl_info.AceCount = 2;
+    }
+    if acl_info.AceCount != 1 {
+        return Err(malformed_security());
+    }
+    #[cfg(test)]
+    if descriptor_fixture == Some(OwnerDescriptorFixture::AclBytesOutOfRange) {
+        acl_info.AclBytesInUse = u32::MAX;
     }
     let acl_bytes_in_use =
         usize::try_from(acl_info.AclBytesInUse).map_err(|_| malformed_security())?;
@@ -1672,6 +1705,43 @@ fn verify_owner_only(handle: HANDLE, expected: &OwnerOnlySecurity) -> Result<()>
     if unsafe { GetAce(dacl, 0, &mut ace) } == 0 || ace.is_null() {
         return Err(last_win32(operation));
     }
+    #[cfg(test)]
+    if descriptor_fixture == Some(OwnerDescriptorFixture::AceOutOfRange) {
+        ace = descriptor_bytes
+            .as_mut_ptr()
+            .wrapping_add(descriptor_bytes.len() + 1)
+            .cast();
+    }
+    #[cfg(test)]
+    if let Some(fixture) = descriptor_fixture {
+        // SAFETY: GetAce returned storage inside the already bounded single-entry
+        // ACL. Mutations remain inside that allocation and are consumed by the
+        // release bounds-first verifier before any kernel call.
+        unsafe {
+            let header = ace.cast::<windows_sys::Win32::Security::ACE_HEADER>();
+            match fixture {
+                OwnerDescriptorFixture::WrongAceType => (*header).AceType = 0x7f,
+                OwnerDescriptorFixture::UndersizedAce => {
+                    (*header).AceSize =
+                        size_of::<windows_sys::Win32::Security::ACE_HEADER>() as u16;
+                }
+                OwnerDescriptorFixture::OversizedSid => {
+                    let sid = (ace as *mut u8).add(offset_of!(ACCESS_ALLOWED_ACE, SidStart));
+                    *sid.add(1) = u8::MAX;
+                }
+                OwnerDescriptorFixture::InvalidSid => {
+                    let sid = (ace as *mut u8).add(offset_of!(ACCESS_ALLOWED_ACE, SidStart));
+                    *sid = 0;
+                }
+                OwnerDescriptorFixture::NullOwner
+                | OwnerDescriptorFixture::InvalidOwner
+                | OwnerDescriptorFixture::DaclOutOfRange
+                | OwnerDescriptorFixture::AclBytesOutOfRange
+                | OwnerDescriptorFixture::WrongAceCount
+                | OwnerDescriptorFixture::AceOutOfRange => {}
+            }
+        }
+    }
     verify_single_owner_ace(descriptor_bytes, dacl, acl_bytes_in_use, ace, expected)
 }
 
@@ -1682,6 +1752,64 @@ static FORCE_DACL_VERIFY_FAILURE: std::sync::atomic::AtomicBool =
 #[cfg(test)]
 fn force_next_owner_verification_failure() {
     FORCE_DACL_VERIFY_FAILURE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OwnerDescriptorFixture {
+    WrongAceType,
+    UndersizedAce,
+    OversizedSid,
+    InvalidSid,
+    NullOwner,
+    InvalidOwner,
+    DaclOutOfRange,
+    AclBytesOutOfRange,
+    WrongAceCount,
+    AceOutOfRange,
+}
+
+#[cfg(test)]
+static OWNER_DESCRIPTOR_FIXTURE: std::sync::OnceLock<
+    std::sync::Mutex<Option<OwnerDescriptorFixture>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+struct OwnerDescriptorFixtureGuard;
+
+#[cfg(test)]
+impl Drop for OwnerDescriptorFixtureGuard {
+    fn drop(&mut self) {
+        *OWNER_DESCRIPTOR_FIXTURE
+            .get_or_init(Default::default)
+            .lock()
+            .expect("owner descriptor fixture mutex poisoned") = None;
+    }
+}
+
+#[cfg(test)]
+fn install_owner_descriptor_fixture(
+    fixture: OwnerDescriptorFixture,
+) -> OwnerDescriptorFixtureGuard {
+    let mut slot = OWNER_DESCRIPTOR_FIXTURE
+        .get_or_init(Default::default)
+        .lock()
+        .expect("owner descriptor fixture mutex poisoned");
+    assert!(
+        slot.is_none(),
+        "owner descriptor tests require --test-threads=1"
+    );
+    *slot = Some(fixture);
+    OwnerDescriptorFixtureGuard
+}
+
+#[cfg(test)]
+fn take_owner_descriptor_fixture() -> Option<OwnerDescriptorFixture> {
+    OWNER_DESCRIPTOR_FIXTURE
+        .get_or_init(Default::default)
+        .lock()
+        .expect("owner descriptor fixture mutex poisoned")
+        .take()
 }
 
 fn verify_created_owner_only(handle: HANDLE, expected: &OwnerOnlySecurity) -> Result<()> {
@@ -3067,6 +3195,69 @@ mod tests {
             query_child_nofollow(&authority, &name("leaf")).unwrap(),
             ChildState::Absent
         ));
+    }
+
+    fn assert_owner_descriptor_fixture_rejected(fixture: OwnerDescriptorFixture, leaf: &str) {
+        let temp = TestDir::new(leaf);
+        let authority = root(&temp);
+        let _fixture = install_owner_descriptor_fixture(fixture);
+        assert!(matches!(
+            create_file_new(&authority, &name(leaf), CreatePermissions::OwnerOnly),
+            Err(SafeFsError::InvalidNativeBuffer {
+                operation: SafeFsOperation::VerifySecurityDescriptor,
+                reason: NativeBufferReason::SecurityDescriptorMalformed,
+            })
+        ));
+        assert!(matches!(
+            query_child_nofollow(&authority, &name(leaf)).unwrap(),
+            ChildState::Absent
+        ));
+    }
+
+    #[test]
+    fn owner_only_dacl_rejects_wrong_ace_type() {
+        assert_owner_descriptor_fixture_rejected(
+            OwnerDescriptorFixture::WrongAceType,
+            "wrong-ace-type",
+        );
+    }
+
+    #[test]
+    fn owner_only_dacl_rejects_undersized_ace_and_out_of_range_acl_fields() {
+        for (fixture, leaf) in [
+            (OwnerDescriptorFixture::UndersizedAce, "undersized-ace"),
+            (OwnerDescriptorFixture::DaclOutOfRange, "dacl-out-of-range"),
+            (
+                OwnerDescriptorFixture::AclBytesOutOfRange,
+                "acl-bytes-out-of-range",
+            ),
+            (OwnerDescriptorFixture::WrongAceCount, "wrong-ace-count"),
+            (OwnerDescriptorFixture::AceOutOfRange, "ace-out-of-range"),
+        ] {
+            assert_owner_descriptor_fixture_rejected(fixture, leaf);
+        }
+    }
+
+    #[test]
+    fn owner_only_dacl_rejects_oversized_sid() {
+        assert_owner_descriptor_fixture_rejected(
+            OwnerDescriptorFixture::OversizedSid,
+            "oversized-sid",
+        );
+    }
+
+    #[test]
+    fn owner_only_dacl_rejects_invalid_sid() {
+        assert_owner_descriptor_fixture_rejected(OwnerDescriptorFixture::InvalidSid, "invalid-sid");
+    }
+
+    #[test]
+    fn owner_only_dacl_rejects_null_or_invalid_owner() {
+        assert_owner_descriptor_fixture_rejected(OwnerDescriptorFixture::NullOwner, "null-owner");
+        assert_owner_descriptor_fixture_rejected(
+            OwnerDescriptorFixture::InvalidOwner,
+            "invalid-owner",
+        );
     }
 
     #[test]
