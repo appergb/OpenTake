@@ -53,7 +53,7 @@ lib 代码里不引 `image` 依赖，而用一个微型**无依赖** RGBA PNG �
 - `zlib_store`：用 stored（type 0，未压缩）deflate 块 + Adler-32 包裹原始扫描线，能被任意标准 PNG 解码器还原。
 - `write_chunk` / `Crc32`（表-free，PNG/zlib 多项式）/ `adler32`：手写校验和。
 
-输出是有效（虽未压缩）的 PNG；dev-test 用真实 `image` crate 解码回来验证尺寸与 alpha。
+输出是有效（虽未压缩）的 PNG；dev-test 用真实 `image` crate 解码回来验证尺寸、alpha、精确 RGBA，并覆盖原始扫描线超过 65,535 bytes、必须拆成多个 stored-deflate block 的边界。相同输入直接编码两次及跨两个独立缓存渲染均逐字节一致。`image` 仍只在本 crate 的 `dev-dependencies`，不进入 production 直接依赖。
 
 ---
 

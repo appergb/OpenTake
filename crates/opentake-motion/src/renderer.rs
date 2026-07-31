@@ -1209,6 +1209,7 @@ mod tests {
         for (fa, fb) in ca.frames.iter().zip(cb.frames.iter()) {
             let ba = std::fs::read(fa).unwrap();
             let bb = std::fs::read(fb).unwrap();
+            assert!(ba.starts_with(b"\x89PNG\r\n\x1a\n"));
             assert_eq!(ba, bb, "same request must produce identical bytes");
         }
     }
@@ -1228,6 +1229,20 @@ mod tests {
         assert_eq!(first.get_pixel(0, 0)[3], 0);
         let last = image::open(clip.frames.last().unwrap()).unwrap().to_rgba8();
         assert_eq!(last.get_pixel(0, 0)[3], 255);
+
+        // 200x100 RGBA scanlines exceed one 65,535-byte stored-deflate block.
+        // Decode a direct encoder result to prove multi-block zlib framing and
+        // exact RGBA values, not just the tiny single-block fixture above.
+        let rgba = [17, 34, 51, 68];
+        let big_a = encode_solid_rgba_png(200, 100, rgba);
+        let big_b = encode_solid_rgba_png(200, 100, rgba);
+        assert_eq!(big_a, big_b);
+        let big = image::load_from_memory_with_format(&big_a, image::ImageFormat::Png)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(big.dimensions(), (200, 100));
+        assert_eq!(big.get_pixel(0, 0).0, rgba);
+        assert_eq!(big.get_pixel(199, 99).0, rgba);
     }
 
     #[test]

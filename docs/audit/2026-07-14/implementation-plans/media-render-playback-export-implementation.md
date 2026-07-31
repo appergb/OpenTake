@@ -1768,36 +1768,51 @@ not the separately owned desktop motion/Lottie materialization.
   - Visible/returned assertion: assert the returned project/error variant, exact post-operation files and decoded state, and save-then-reopen equality or the specified fail-closed no-write result.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_2071153f8053805d.rs#completion_2071153f8053805d_emit_deterministic_rgba_png_frames_from_the_stub.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-motion/src/renderer.rs#stub_output_is_deterministic` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-motion/src/renderer.rs#stub_png_decodes_with_correct_dimensions_and_alpha` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-motion stub_output_is_deterministic`
   - Run: `cargo test -p opentake-motion stub_png_decodes_with_correct_dimensions_and_alpha`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Reconciliation note (2026-08-01): the dependency-free encoder and both
+  owners predated this generated plan, so baseline was already GREEN. Owners
+  were strengthened with PNG magic, exact RGBA, direct byte identity, and a
+  multi-block stored-deflate boundary; valid code was not reverted to
+  manufacture RED.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-motion/src/renderer.rs#encode_solid_rgba_png`, `docs/modules/opentake-motion/renderer.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-motion stub_output_is_deterministic`
   - Run: `cargo test -p opentake-motion stub_png_decodes_with_correct_dimensions_and_alpha`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Verified 2026-08-01. Separate cache roots emit byte-identical PNGs; the real
+  decoder confirms dimensions/alpha and exact corner RGBA for a `200x100`
+  image whose scanlines cross the 65,535-byte deflate block boundary. `image`
+  remains dev-only in `opentake-motion/Cargo.toml`.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. Both focused owners, warnings-denied motion Clippy,
+  formatting, and the full workspace Rust suite pass. `image` is listed only
+  under `opentake-motion` dev-dependencies.
 
 ### Task 28: MR-project-serde-complete (implementation-slice-9c460dd3f289f9bd)
 
