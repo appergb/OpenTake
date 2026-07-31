@@ -3404,8 +3404,16 @@ mod tests {
         file.write_all(b"original").unwrap();
         drop(file);
         let quarantine = quarantine_stage(stage, &authority, name("quarantine")).unwrap();
+        let cleanup = open_cleanup_child_nofollow(&quarantine, &name("leaf")).unwrap();
+        let expected_source = match &cleanup {
+            CleanupCapability::Entry(entry) => entry.native.handle.raw() as usize,
+            CleanupCapability::Directory(_) => panic!("leaf opened as a directory"),
+        };
         let _guard = install_before_retained_delete_hook(Arc::new(
             move |source, parent, _old_name| {
+                if source as usize != expected_source {
+                    return Ok(());
+                }
                 let buffer = RenameInformationBuffer::new(
                     parent.native.node.handle.raw(),
                     &name("moved-original"),
@@ -3429,7 +3437,6 @@ mod tests {
                 Ok(())
             },
         ));
-        let cleanup = open_cleanup_child_nofollow(&quarantine, &name("leaf")).unwrap();
         delete_quarantined_entry(cleanup).unwrap();
         assert!(!temp.path().join("quarantine").join("leaf").exists());
         assert!(!temp
