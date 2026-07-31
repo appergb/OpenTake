@@ -330,6 +330,68 @@ describe("browser fallback edit store", () => {
     expect(clip?.effects).toBeUndefined();
   });
 
+  it("stores and clamps an adjacent cross dissolve", () => {
+    const fallback = createFallbackStore();
+    fallback.reset();
+    fallback.editApply({ type: "insertTrack", kind: "video" });
+    const first = fallback.editApply({
+      type: "addClips",
+      entries: [{ mediaRef: "a", mediaType: "video", sourceClipType: "video", trackIndex: 0, startFrame: 0, durationFrames: 60 }],
+    }).affectedClipIds[0];
+    const second = fallback.editApply({
+      type: "addClips",
+      entries: [{ mediaRef: "b", mediaType: "video", sourceClipType: "video", trackIndex: 0, startFrame: 60, durationFrames: 30 }],
+    }).affectedClipIds[0];
+
+    const result = fallback.editApply({
+      type: "setTransition",
+      fromClipId: first,
+      toClipId: second,
+      kind: "crossDissolve",
+      durationFrames: 99,
+    });
+
+    expect(result.changed).toBe(true);
+    expect(fallback.getTimeline().timeline.tracks[0].clips[0].transitionOut).toEqual({
+      toClipId: second,
+      kind: "crossDissolve",
+      durationFrames: 15,
+    });
+  });
+
+  it("rejects an invalid or non-successor fallback transition", () => {
+    const fallback = createFallbackStore();
+    fallback.reset();
+    fallback.editApply({ type: "insertTrack", kind: "video" });
+    const first = fallback.editApply({
+      type: "addClips",
+      entries: [{ mediaRef: "a", mediaType: "video", sourceClipType: "video", trackIndex: 0, startFrame: 0, durationFrames: 60 }],
+    }).affectedClipIds[0];
+    const blocker = fallback.editApply({
+      type: "addClips",
+      entries: [{ mediaRef: "b", mediaType: "video", sourceClipType: "video", trackIndex: 0, startFrame: 30, durationFrames: 30 }],
+    }).affectedClipIds[0];
+    const successor = fallback.editApply({
+      type: "addClips",
+      entries: [{ mediaRef: "c", mediaType: "video", sourceClipType: "video", trackIndex: 0, startFrame: 60, durationFrames: 30 }],
+    }).affectedClipIds[0];
+
+    expect(fallback.editApply({
+      type: "setTransition",
+      fromClipId: first,
+      toClipId: successor,
+      kind: "crossDissolve",
+      durationFrames: 15,
+    }).changed).toBe(false);
+    expect(fallback.editApply({
+      type: "setTransition",
+      fromClipId: blocker,
+      toClipId: successor,
+      kind: "crossDissolve",
+      durationFrames: 0,
+    }).changed).toBe(false);
+  });
+
   it("does not emulate swapMedia without the Tauri media manifest", () => {
     const fallback = createFallbackStore();
 

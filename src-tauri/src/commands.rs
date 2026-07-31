@@ -28,7 +28,7 @@ use opentake_ops::{
 
 use opentake_domain::{
     AnimPair, ChromaKey, ClipType, ColorGrade, Crop, Effect, Interpolation, Keyframe,
-    KeyframeTrack, Mask, TextStyle, Transform,
+    KeyframeTrack, Mask, TextStyle, Transform, TransitionKind,
 };
 
 #[derive(Clone, Default)]
@@ -686,6 +686,13 @@ pub enum EditRequest {
         effects: Vec<Effect>,
     },
     #[serde(rename_all = "camelCase")]
+    SetTransition {
+        from_clip_id: String,
+        to_clip_id: String,
+        kind: Option<TransitionKind>,
+        duration_frames: i32,
+    },
+    #[serde(rename_all = "camelCase")]
     RippleDeleteRanges {
         track_index: usize,
         ranges: Vec<FrameRangeDto>,
@@ -861,6 +868,17 @@ impl EditRequest {
             EditRequest::SetEffects { clip_ids, effects } => {
                 EditCommand::SetEffects { clip_ids, effects }
             }
+            EditRequest::SetTransition {
+                from_clip_id,
+                to_clip_id,
+                kind,
+                duration_frames,
+            } => EditCommand::SetTransition {
+                from_clip_id,
+                to_clip_id,
+                kind,
+                duration_frames,
+            },
             EditRequest::RippleDeleteRanges {
                 track_index,
                 ranges,
@@ -1579,7 +1597,7 @@ mod project_prewarm_lifecycle_tests {
 mod edit_request_serde_tests {
     use super::{validate_freeze_frame_request, EditRequest};
     use opentake_core::{AppCore, EditCommand};
-    use opentake_domain::ClipType;
+    use opentake_domain::{ClipType, TransitionKind};
     use opentake_ops::ClipEntry;
 
     // Regression: the front end sends camelCase keys (clipIds/clipId/atFrame…).
@@ -1637,6 +1655,29 @@ mod edit_request_serde_tests {
                 assert_eq!(properties.reversed, Some(true));
             }
             other => panic!("expected SetClipProperties, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_set_transition_pair_and_kind() {
+        let request: EditRequest = serde_json::from_str(
+            r#"{"type":"setTransition","fromClipId":"a","toClipId":"b","kind":"crossDissolve","durationFrames":15}"#,
+        )
+        .expect("setTransition camelCase");
+
+        match request.into_command().expect("setTransition command") {
+            EditCommand::SetTransition {
+                from_clip_id,
+                to_clip_id,
+                kind,
+                duration_frames,
+            } => {
+                assert_eq!(from_clip_id, "a");
+                assert_eq!(to_clip_id, "b");
+                assert_eq!(kind, Some(TransitionKind::CrossDissolve));
+                assert_eq!(duration_frames, 15);
+            }
+            other => panic!("expected SetTransition, got {other:?}"),
         }
     }
 

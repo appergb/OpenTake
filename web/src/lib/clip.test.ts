@@ -3,6 +3,7 @@ import {
   clampTrimDeltaFrames,
   dbFromLinear,
   findCropEditingClip,
+  findLogicalSingleClip,
   findSelectedVisualClip,
   fitTransformForMedia,
   liveVolumeKfLinearAt,
@@ -516,6 +517,26 @@ describe("findCropEditingClip (upstream CropOverlayView.selectedClip port)", () 
 
   it("returns null for an id that doesn't exist in the timeline", () => {
     expect(findCropEditingClip(tl, new Set(["missing"]))).toBeNull();
+  });
+});
+
+describe("findLogicalSingleClip", () => {
+  const visual = clip({ id: "linked-video", linkGroupId: "group" });
+  const audio = clip({ id: "linked-audio", mediaType: "audio", linkGroupId: "group" });
+  const other = clip({ id: "other" });
+  const tl = timeline([
+    track({ id: "vt", type: "video", clips: [visual, other] }),
+    track({ id: "at", type: "audio", clips: [audio] }),
+  ]);
+
+  it("treats one linked video and audio companion as one logical clip", () => {
+    expect(findLogicalSingleClip(tl, new Set([visual.id, audio.id]))).toBe(visual);
+    expect(findSelectedVisualClip(tl, new Set([visual.id, audio.id]))).toBe(visual);
+    expect(findCropEditingClip(tl, new Set([visual.id, audio.id]))).toBe(visual);
+  });
+
+  it("keeps unrelated clips as a genuine marquee selection", () => {
+    expect(findLogicalSingleClip(tl, new Set([visual.id, other.id]))).toBeNull();
   });
 });
 

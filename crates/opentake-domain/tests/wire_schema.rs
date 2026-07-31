@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 
 use opentake_domain::{
     AnimPair, ChromaKey, Clip, ClipType, ColorGrade, Crop, Effect, Fill, Interpolation, Keyframe,
-    KeyframeTrack, Mask, Rgba, Shadow, TextAlignment, TextStyle, Track, Transform,
+    KeyframeTrack, Mask, Rgba, Shadow, TextAlignment, TextStyle, Track, Transform, Transition,
+    TransitionKind,
 };
 use serde::Serialize;
 
@@ -101,6 +102,11 @@ fn full_clip() -> Clip {
     clip.chroma_key = Some(ChromaKey::default());
     clip.masks = vec![Mask::default()];
     clip.effects = vec![Effect::new("wire").with_param("amount", 1.0)];
+    clip.transition_out = Some(Transition {
+        to_clip_id: "next".to_owned(),
+        kind: TransitionKind::CrossDissolve,
+        duration_frames: 5,
+    });
     clip.reversed = true;
     clip
 }

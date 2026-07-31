@@ -13,6 +13,10 @@ interface ChatStoreState {
   messages: ChatMessage[];
   streaming: boolean;
   streamingId: string | null;
+  /** A reversible hand-off from another editor surface into the Agent composer.
+   *  The AgentPanel consumes and clears it after copying it into its local input. */
+  composerDraft: string | null;
+  setComposerDraft: (draft: string | null) => void;
   pushUser: (text: string) => void;
   beginStream: (id: string) => void;
   appendDelta: (delta: string) => void;
@@ -53,6 +57,8 @@ export const useChatStore = create<ChatStoreState>((set) => ({
   messages: [],
   streaming: false,
   streamingId: null,
+  composerDraft: null,
+  setComposerDraft: (composerDraft) => set({ composerDraft }),
 
   pushUser: (text) =>
     set((state) => ({

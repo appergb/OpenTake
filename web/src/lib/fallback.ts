@@ -574,6 +574,51 @@ export function createFallbackStore() {
           }
           return result(changed, "Set Effects", cmd.clipIds);
         }
+        case "setTransition": {
+          const fromLocation = findClip(cmd.fromClipId);
+          if (!fromLocation) return result(false, "Set Transition", []);
+          const from = timeline.tracks[fromLocation[0]].clips[fromLocation[1]];
+          if (cmd.kind == null) {
+            if (from.transitionOut?.toClipId !== cmd.toClipId) {
+              return result(false, "Remove Transition", []);
+            }
+            delete from.transitionOut;
+            return result(true, "Remove Transition", [cmd.fromClipId, cmd.toClipId]);
+          }
+          const toLocation = findClip(cmd.toClipId);
+          if (!toLocation || toLocation[0] !== fromLocation[0]) {
+            return result(false, "Set Transition", []);
+          }
+          const track = timeline.tracks[fromLocation[0]];
+          const to = timeline.tracks[toLocation[0]].clips[toLocation[1]];
+          const ordered = track.clips
+            .slice()
+            .sort((left, right) => left.startFrame - right.startFrame || left.id.localeCompare(right.id));
+          const fromIndex = ordered.findIndex((clip) => clip.id === from.id);
+          if (
+            cmd.durationFrames < 1 ||
+            track.type === "audio" ||
+            from.mediaType === "audio" ||
+            from.mediaType === "text" ||
+            to.mediaType === "audio" ||
+            to.mediaType === "text" ||
+            from.startFrame + from.durationFrames !== to.startFrame ||
+            ordered[fromIndex + 1]?.id !== to.id
+          ) {
+            return result(false, "Set Transition", []);
+          }
+          const maximum = Math.max(1, Math.floor(Math.min(from.durationFrames, to.durationFrames) / 2));
+          const next = {
+            toClipId: to.id,
+            kind: cmd.kind,
+            durationFrames: Math.max(1, Math.min(cmd.durationFrames, maximum)),
+          };
+          if (JSON.stringify(from.transitionOut) === JSON.stringify(next)) {
+            return result(false, "Set Transition", []);
+          }
+          from.transitionOut = next;
+          return result(true, "Set Transition", [cmd.fromClipId, cmd.toClipId]);
+        }
         case "swapMedia": {
           return result(false, "Swap Media", []);
         }

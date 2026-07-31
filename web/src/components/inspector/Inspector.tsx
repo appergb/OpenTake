@@ -1,11 +1,11 @@
 /**
  * Inspector (SPEC §6). Title bar + one of four content states: marquee summary,
- * clip inspector (with Video/Audio tabs), media-asset source, or project
+ * clip inspector (with Text/Video/Audio/AI Edit tabs), media-asset source, or project
  * metadata. Editable fields commit via SetClipProperties; a field whose
  * property already has an active keyframe track stays editable but commits
  * via UpsertKeyframe at the playhead instead (see `../../lib/keyframeValue`).
- * The keyframe lane and Text/AI-Edit tabs are scaffolded (TODO: full parity
- * in a later pass).
+ * AI Edit proposals are reviewed here and accepted through the same undoable
+ * command layer as direct Inspector edits.
  */
 
 import { useEffect, useState } from "react";
@@ -27,6 +27,7 @@ import { Icon } from "../ui/Icon";
 import { HoverButton } from "../ui/HoverButton";
 import { ScrubbableNumberField } from "./ScrubbableNumberField";
 import { TextTab } from "./TextTab";
+import { AiEditTab } from "./AiEditTab";
 import { KeyframesPanel } from "./KeyframesPanel";
 import { SwapMediaSection } from "./SwapMediaSection";
 import { useProjectStore } from "../../store/projectStore";
@@ -37,6 +38,7 @@ import { formatTimecode } from "../../lib/geometry";
 import {
   cropAt,
   liveVolumeKfLinearAt,
+  findLogicalSingleClip,
   mediaCanvasAspect,
   rawOpacityAt,
   resizeTransformKeepingSourceAspect,
@@ -101,8 +103,8 @@ export function Inspector() {
   );
 
   const selectedClips = collectSelected(timeline, selectedClipIds);
-  const isMarquee = selectedClips.length > 1;
-  const single = selectedClips.length === 1 ? selectedClips[0] : null;
+  const single = findLogicalSingleClip(timeline, selectedClipIds);
+  const isMarquee = selectedClips.length > 0 && single === null;
   // State priority mirrors upstream `InspectorView.body` (:49-56):
   // marquee > clip(visual/audio) > mediaAsset > projectMetadata. Clip selection
   // is checked before the media asset, so a selected clip always wins.
@@ -135,7 +137,6 @@ export function Inspector() {
             clip={single}
             tab={inspectorTab}
             setTab={setInspectorTab}
-            hasAudio={single.mediaType === "audio"}
             keyframesOpen={keyframesPanelVisible}
             onToggleKeyframes={toggleKeyframesPanel}
             t={t}
@@ -376,7 +377,6 @@ function ClipInspector({
   clip,
   tab,
   setTab,
-  hasAudio,
   keyframesOpen,
   onToggleKeyframes,
   t,
@@ -384,24 +384,29 @@ function ClipInspector({
   clip: Clip;
   tab: string;
   setTab: (t: "text" | "video" | "audio" | "aiEdit") => void;
-  hasAudio: boolean;
   keyframesOpen: boolean;
   onToggleKeyframes: () => void;
   t: TFunction;
 }) {
-  // Available tabs depend on selection (SPEC §6.3).
-  const tabs: Array<"text" | "video" | "audio" | "aiEdit"> = [];
-  if (clip.mediaType === "text") tabs.push("text");
-  else tabs.push("video");
-  if (hasAudio) tabs.push("audio");
-
-  const activeTab = tabs.includes(tab as never) ? tab : tabs[0];
-
   // Live sampling: read the current playhead frame so every numeric field shows
   // the value at the playhead (upstream `InspectorView.livePreview`).
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
   const timeline = useProjectStore((s) => s.timeline);
   const mediaItem = useMediaStore((s) => s.items.find((m) => m.id === clip.mediaRef) ?? null);
+  // Available tabs depend on selection (SPEC §6.3). Visual source clips expose
+  // AI Edit; video with an embedded audio stream also exposes Audio. Missing
+  // source media keeps AI Edit visible and presents a typed unavailable state
+  // inside the tab instead of silently changing the tab set.
+  const tabs: Array<"text" | "video" | "audio" | "aiEdit"> = [];
+  if (clip.mediaType === "text") tabs.push("text");
+  else if (clip.mediaType === "audio") tabs.push("audio");
+  else {
+    tabs.push("video");
+    if (mediaItem?.hasAudio) tabs.push("audio");
+    tabs.push("aiEdit");
+  }
+
+  const activeTab = tabs.includes(tab as never) ? tab : tabs[0];
   const aspect = mediaCanvasAspect(
     mediaItem?.width,
     mediaItem?.height,
@@ -439,6 +444,8 @@ function ClipInspector({
     <div>
       {tabs.length > 1 && (
         <div
+          role="tablist"
+          aria-label={t("inspector.title")}
           style={{
             display: "flex",
             gap: "var(--space-md)",
@@ -448,12 +455,23 @@ function ClipInspector({
           {tabs.map((tabId) => (
             <button
               key={tabId}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tabId}
               onClick={() => setTab(tabId)}
               style={{
                 paddingBottom: 4,
                 fontSize: "var(--fs-sm-md)",
                 fontWeight: activeTab === tabId ? "var(--fw-medium)" : "var(--fw-regular)",
                 color: activeTab === tabId ? "var(--text-primary)" : "var(--text-tertiary)",
+                ...(tabId === "aiEdit"
+                  ? {
+                      background: "var(--ai-gradient)",
+                      WebkitBackgroundClip: "text",
+                      WebkitTextFillColor: "transparent",
+                      opacity: activeTab === tabId ? 1 : 0.6,
+                    }
+                  : {}),
                 borderBottom:
                   activeTab === tabId ? "var(--bw-medium) solid var(--text-primary)" : "none",
               }}
@@ -468,6 +486,12 @@ function ClipInspector({
         {clip.mediaType !== "text" && <SwapMediaSection clip={clip} t={t} />}
         {activeTab === "text" ? (
           <TextTab clip={clip} t={t} />
+        ) : activeTab === "aiEdit" ? (
+          <AiEditTab
+            clip={clip}
+            fps={timeline.fps}
+            unavailableReason={mediaItem?.missing ? t("inspector.aiEdit.unavailable") : null}
+          />
         ) : activeTab === "audio" ? (
           <section>
             <SectionHeader label={t("inspector.section.levels")} />

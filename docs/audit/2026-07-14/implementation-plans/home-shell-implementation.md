@@ -564,33 +564,35 @@ Runtime evidence: [`home-autosave-metadata-real-device-2026-07-31.md`](../runtim
   - Wire each component to live commands/state.
   - Add component-map and visual acceptance coverage.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/ShellComponentMapping.test.tsx#every_documented_shell_component_has_exact_owner` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ShellComponentMapping.test.tsx -t "every_documented_shell_component_has_exact_owner"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/home/HomeView.tsx#HomeView`, `web/src/components/shell/EditorSplit.tsx#EditorSplit`, `web/src/components/shell/ViewMenu.tsx#ViewMenu`, `docs/specs/frontend/3-components.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ShellComponentMapping.test.tsx -t "every_documented_shell_component_has_exact_owner"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. Added the executable component-owner index and completed the missing AI Edit, Music, and cross-dissolve transition vertical slices through shared project commands/state. The complete Web suite passed 82 files / 773 tests, the production Web build passed with only the pre-existing chunk/dynamic-import warnings, the complete Rust workspace passed, and formatting plus diff checks passed. The rebuilt macOS application verified linked A/V selection, AI proposal/reject/apply/undo, project and library music placement, paid-generation confirmation handoff, transition apply/remove/undo, save/reopen persistence, and a parseable 720p H.264/AAC export. Runtime evidence: [`home-component-mapping-real-device-2026-07-31.md`](../runtime-artifacts/automated/home-component-mapping-real-device-2026-07-31.md).
 
 ### Task 9: control-acceptance (implementation-slice-60d775675af9091c)
 

@@ -29,11 +29,11 @@ export type SettingsPaneId =
   | "shortcuts"
   | "account"
   | "about";
-/** 剪映式顶部素材面板主标签（英文标识符，中文文案在 dict）。
- *  目前仅 material/audio 可用，其余为置灰占位（功能未做）。 */
+/** 剪映式顶部素材面板主标签（英文标识符，中文文案在 dict）。 */
 export type MediaTabId =
   | "material"
   | "audio"
+  | "music"
   | "text"
   | "sticker"
   | "effect"

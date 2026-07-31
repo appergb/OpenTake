@@ -7,6 +7,13 @@
 
 export type ClipType = "video" | "audio" | "image" | "text" | "lottie";
 export type Interpolation = "linear" | "hold" | "smooth";
+export type TransitionKind = "crossDissolve";
+
+export interface Transition {
+  toClipId: string;
+  kind: TransitionKind;
+  durationFrames: number;
+}
 
 export interface Timeline {
   fps: number; // default 30
@@ -207,6 +214,7 @@ export interface Clip {
   chromaKey?: ChromaKey;
   masks?: Mask[];
   effects?: Effect[];
+  transitionOut?: Transition;
 }
 
 // MARK: - Command DTOs (mirror src-tauri EditRequest)
@@ -331,6 +339,13 @@ export type EditRequest =
   | { type: "setChromaKey"; clipIds: string[]; chromaKey?: ChromaKeyInput | null }
   | { type: "setMasks"; clipIds: string[]; masks: MaskInput[] }
   | { type: "setEffects"; clipIds: string[]; effects: EffectInput[] }
+  | {
+      type: "setTransition";
+      fromClipId: string;
+      toClipId: string;
+      kind?: TransitionKind | null;
+      durationFrames: number;
+    }
   | { type: "rippleDeleteRanges"; trackIndex: number; ranges: FrameRangeReq[] }
   | { type: "rippleDeleteClips"; clipIds: string[] }
   | { type: "addTexts"; entries: TextEntryReq[] }

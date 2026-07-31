@@ -42,6 +42,7 @@ import type {
   TextStyle,
   Timeline,
   Transform,
+  TransitionKind,
   TrimEditReq,
 } from "../lib/types";
 
@@ -185,6 +186,21 @@ export async function setMasks(clipIds: string[], masks: MaskInput[]) {
 export async function setEffects(clipIds: string[], effects: EffectInput[]) {
   if (clipIds.length === 0) return;
   await applyAndRefresh({ type: "setEffects", clipIds, effects });
+}
+
+export async function setTransition(
+  fromClipId: string,
+  toClipId: string,
+  kind: TransitionKind | null,
+  durationFrames: number,
+) {
+  await applyAndRefresh({
+    type: "setTransition",
+    fromClipId,
+    toClipId,
+    kind,
+    durationFrames,
+  });
 }
 
 /** Inspector Transform section "Reset" button (upstream `transformHeader`

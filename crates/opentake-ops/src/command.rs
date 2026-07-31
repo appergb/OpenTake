@@ -16,10 +16,11 @@
 //! Ripple refusals (a sync-locked follower can't absorb the shift) abort like a
 //! validation error: `Err(EditError::Refused)`, document untouched.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use opentake_domain::{
     ChromaKey, ClipType, ColorGrade, Crop, Effect, Interpolation, Mask, Timeline, Transform,
+    Transition, TransitionKind,
 };
 
 use crate::editor_state::EditorState;
@@ -337,6 +338,13 @@ pub enum EditCommand {
         clip_ids: Vec<String>,
         effects: Vec<Effect>,
     },
+    /// Set or clear the visual transition at one exact adjacent clip boundary.
+    SetTransition {
+        from_clip_id: String,
+        to_clip_id: String,
+        kind: Option<TransitionKind>,
+        duration_frames: i32,
+    },
     /// Ripple-delete project-frame ranges on a track, closing the gaps.
     RippleDeleteRanges {
         track_index: usize,
@@ -563,6 +571,12 @@ pub fn apply(
         } => set_chroma_key(state, clip_ids, chroma_key),
         EditCommand::SetMasks { clip_ids, masks } => set_masks(state, clip_ids, masks),
         EditCommand::SetEffects { clip_ids, effects } => set_effects(state, clip_ids, effects),
+        EditCommand::SetTransition {
+            from_clip_id,
+            to_clip_id,
+            kind,
+            duration_frames,
+        } => set_transition(state, from_clip_id, to_clip_id, kind, duration_frames),
         EditCommand::RippleDeleteRanges {
             track_index,
             ranges,
@@ -622,6 +636,7 @@ fn transact(
             return Err(error);
         }
     };
+    prune_invalid_transitions(&mut state.timeline);
     let after = state.snapshot();
     let timeline_changed = before.timeline != after.timeline;
     let manifest_changed = before.manifest != after.manifest;
@@ -638,6 +653,59 @@ fn transact(
         affected,
         &summary,
     ))
+}
+
+/// Keep transition pair identity aligned with the actual cut graph after every
+/// transactional edit. A move/delete/trim must never leave a dormant transition
+/// that could later bind to a different neighbor.
+fn prune_invalid_transitions(timeline: &mut Timeline) {
+    for track in &mut timeline.tracks {
+        if track.kind == ClipType::Audio {
+            for clip in &mut track.clips {
+                clip.transition_out = None;
+            }
+            continue;
+        }
+        let mut order: Vec<usize> = (0..track.clips.len()).collect();
+        order.sort_by_key(|&index| {
+            (
+                track.clips[index].start_frame,
+                track.clips[index].id.clone(),
+            )
+        });
+        let mut valid: HashMap<String, (String, i32)> = HashMap::new();
+        for pair in order.windows(2) {
+            let from = &track.clips[pair[0]];
+            let to = &track.clips[pair[1]];
+            if from.end_frame() != to.start_frame
+                || matches!(from.media_type, ClipType::Audio | ClipType::Text)
+                || matches!(to.media_type, ClipType::Audio | ClipType::Text)
+            {
+                continue;
+            }
+            valid.insert(
+                from.id.clone(),
+                (
+                    to.id.clone(),
+                    (from.duration_frames.min(to.duration_frames) / 2).max(1),
+                ),
+            );
+        }
+        for clip in &mut track.clips {
+            let Some(transition) = &mut clip.transition_out else {
+                continue;
+            };
+            let Some((to_id, maximum)) = valid.get(&clip.id) else {
+                clip.transition_out = None;
+                continue;
+            };
+            if transition.to_clip_id != *to_id {
+                clip.transition_out = None;
+                continue;
+            }
+            transition.duration_frames = transition.duration_frames.clamp(1, *maximum);
+        }
+    }
 }
 
 fn result(
@@ -1863,6 +1931,103 @@ fn set_effects(
     set_clip_effect_field(state, clip_ids, "Set Effects", move |clip| {
         clip.effects = effects.clone();
     })
+}
+
+fn set_transition(
+    state: &mut EditorState,
+    from_clip_id: String,
+    to_clip_id: String,
+    kind: Option<TransitionKind>,
+    duration_frames: i32,
+) -> Result<EditResult, EditError> {
+    let from_location = state
+        .find_clip(&from_clip_id)
+        .ok_or_else(|| EditError::Invalid(format!("Clip not found: {from_clip_id}")))?;
+
+    // Clearing is allowed even after the pair stopped being adjacent so stale
+    // metadata can always be removed safely. Pair identity must still match.
+    if kind.is_none() {
+        return transact(
+            state,
+            "Remove Transition",
+            |_| "Removed transition".to_string(),
+            |st| {
+                let clip = &mut st.timeline.tracks[from_location.track_index].clips
+                    [from_location.clip_index];
+                if clip
+                    .transition_out
+                    .as_ref()
+                    .is_some_and(|transition| transition.to_clip_id == to_clip_id)
+                {
+                    clip.transition_out = None;
+                }
+                Ok(vec![from_clip_id.clone(), to_clip_id.clone()])
+            },
+        );
+    }
+
+    if duration_frames < 1 {
+        return Err(EditError::Invalid(format!(
+            "durationFrames must be >= 1 (got {duration_frames})"
+        )));
+    }
+    let to_location = state
+        .find_clip(&to_clip_id)
+        .ok_or_else(|| EditError::Invalid(format!("Clip not found: {to_clip_id}")))?;
+    if from_location.track_index != to_location.track_index {
+        return Err(EditError::Invalid(
+            "A transition requires clips on the same track".into(),
+        ));
+    }
+    let track = &state.timeline.tracks[from_location.track_index];
+    if track.kind == ClipType::Audio {
+        return Err(EditError::Invalid(
+            "Visual transitions are unavailable on audio tracks".into(),
+        ));
+    }
+    let from = &track.clips[from_location.clip_index];
+    let to = &track.clips[to_location.clip_index];
+    if matches!(from.media_type, ClipType::Audio | ClipType::Text)
+        || matches!(to.media_type, ClipType::Audio | ClipType::Text)
+    {
+        return Err(EditError::Invalid(
+            "A transition requires two visual source clips".into(),
+        ));
+    }
+    if from.end_frame() != to.start_frame {
+        return Err(EditError::Invalid(
+            "A transition requires an exact adjacent clip boundary".into(),
+        ));
+    }
+    let mut ordered: Vec<&opentake_domain::Clip> = track.clips.iter().collect();
+    ordered.sort_by_key(|clip| (clip.start_frame, clip.id.as_str()));
+    let successor = ordered
+        .iter()
+        .position(|clip| clip.id == from_clip_id)
+        .and_then(|index| ordered.get(index + 1));
+    if successor.map(|clip| clip.id.as_str()) != Some(to_clip_id.as_str()) {
+        return Err(EditError::Invalid(
+            "A transition requires the immediate next clip".into(),
+        ));
+    }
+
+    let maximum = (from.duration_frames.min(to.duration_frames) / 2).max(1);
+    let clamped = duration_frames.min(maximum);
+    let kind = kind.expect("kind checked above");
+    transact(
+        state,
+        "Set Transition",
+        |_| format!("Set transition from {from_clip_id} to {to_clip_id}"),
+        |st| {
+            st.timeline.tracks[from_location.track_index].clips[from_location.clip_index]
+                .transition_out = Some(Transition {
+                to_clip_id: to_clip_id.clone(),
+                kind,
+                duration_frames: clamped,
+            });
+            Ok(vec![from_clip_id.clone(), to_clip_id.clone()])
+        },
+    )
 }
 
 fn ripple_delete_ranges(

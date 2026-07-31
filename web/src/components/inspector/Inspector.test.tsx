@@ -1,0 +1,130 @@
+// @vitest-environment happy-dom
+
+import React from "react";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+import { afterEach, describe, expect, it } from "vitest";
+import type { Clip, Timeline } from "../../lib/types";
+import { useEditorUiStore } from "../../store/uiStore";
+import { useMediaStore } from "../../store/mediaStore";
+import { useProjectStore } from "../../store/projectStore";
+import { Inspector } from "./Inspector";
+
+function visualClip(overrides: Partial<Clip> = {}): Clip {
+  return {
+    id: "clip-1",
+    mediaRef: "media-1",
+    mediaType: "video",
+    sourceClipType: "video",
+    startFrame: 0,
+    durationFrames: 90,
+    trimStartFrame: 0,
+    trimEndFrame: 90,
+    speed: 1,
+    volume: 1,
+    fadeInFrames: 0,
+    fadeOutFrames: 0,
+    fadeInInterpolation: "linear",
+    fadeOutInterpolation: "linear",
+    opacity: 1,
+    transform: {
+      centerX: 0.5,
+      centerY: 0.5,
+      width: 1,
+      height: 1,
+      rotation: 0,
+      flipHorizontal: false,
+      flipVertical: false,
+    },
+    crop: { left: 0, top: 0, right: 0, bottom: 0 },
+    ...overrides,
+  };
+}
+
+function timelineWith(clip: Clip): Timeline {
+  return {
+    fps: 30,
+    width: 1920,
+    height: 1080,
+    settingsConfigured: true,
+    tracks: [
+      {
+        id: "video-1",
+        name: "Video 1",
+        type: "video",
+        muted: false,
+        hidden: false,
+        syncLocked: false,
+        clips: [clip],
+      },
+    ],
+  };
+}
+
+afterEach(() => {
+  document.body.replaceChildren();
+  useEditorUiStore.setState({
+    selectedClipIds: new Set(),
+    inspectorTab: "video",
+    keyframesPanelVisible: false,
+  });
+  useMediaStore.setState({ items: [], folders: [], importing: false, error: null });
+  useProjectStore.getState().clearProjectSnapshot();
+});
+
+describe("Inspector completion surface", () => {
+  it("four_states_tabs_fields_and_lanes", async () => {
+    const clip = visualClip();
+    useProjectStore.setState({ timeline: timelineWith(clip), projectPath: "/tmp/demo.opentake" });
+    useEditorUiStore.setState({ selectedClipIds: new Set([clip.id]), inspectorTab: "video" });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Inspector />));
+
+    const tabs = [...container.querySelectorAll<HTMLElement>('[role="tab"]')];
+    expect(tabs.map((tab) => tab.textContent)).toEqual(["视频", "AI 编辑"]);
+    expect(tabs[0]?.getAttribute("aria-selected")).toBe("true");
+
+    await act(async () => tabs[1]?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(container.querySelector('[data-testid="ai-edit-tab"]')).not.toBeNull();
+
+    await act(async () => root.unmount());
+  });
+
+  it("opens_video_and_ai_tabs_for_one_linked_av_selection", async () => {
+    const video = visualClip({ id: "video", linkGroupId: "linked" });
+    const audio = visualClip({
+      id: "audio",
+      mediaRef: "media-1",
+      mediaType: "audio",
+      linkGroupId: "linked",
+    });
+    const linkedTimeline = timelineWith(video);
+    linkedTimeline.tracks.push({
+      id: "audio-1",
+      type: "audio",
+      muted: false,
+      hidden: false,
+      syncLocked: true,
+      clips: [audio],
+    });
+    useProjectStore.setState({ timeline: linkedTimeline });
+    useEditorUiStore.setState({
+      selectedClipIds: new Set([video.id, audio.id]),
+      inspectorTab: "video",
+    });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Inspector />));
+
+    expect(container.textContent).not.toContain("已选择 2 项");
+    expect(
+      [...container.querySelectorAll<HTMLElement>('[role="tab"]')].map((tab) => tab.textContent),
+    ).toEqual(["视频", "AI 编辑"]);
+    await act(async () => root.unmount());
+  });
+});

@@ -6,7 +6,7 @@
 //! keyframe / fade / dB sample goes through the domain `*_at` methods (SPEC §0
 //! iron rule); this module only adds geometry projection + frame scheduling.
 
-use opentake_domain::{Clip, ClipType, Timeline};
+use opentake_domain::{Clip, ClipType, Timeline, TransitionKind};
 
 use super::affine::{affine_transform, compose, crop_to_uv};
 use super::types::{ClipPlan, FramePlan, LayerDraw, RenderPlan, RenderSize, TextureSource};
@@ -316,6 +316,45 @@ fn eval_layer<'a>(
     })
 }
 
+/// Evaluate the incoming side of a cross dissolve before its nominal timeline
+/// start. The first source frame is held during the dissolve, then regular
+/// playback begins at the cut; this avoids reading outside the clip's source
+/// window while preserving timeline duration and adjacency.
+fn eval_transition_incoming<'a>(
+    plan: &'a ClipPlan,
+    clip: &Clip,
+    progress: f64,
+    render_size: RenderSize,
+) -> Option<LayerDraw<'a>> {
+    let sample_frame = plan.start_frame;
+    let opacity = clip.raw_opacity_at(sample_frame) * progress.clamp(0.0, 1.0);
+    if opacity <= 0.0 {
+        return None;
+    }
+    let transform = if clip.has_transform_animation() {
+        clip.transform_at(sample_frame)
+    } else {
+        clip.transform
+    };
+    Some(LayerDraw {
+        source: &plan.source,
+        source_frame: source_frame_index(plan, sample_frame),
+        affine: compose(
+            plan.preferred_transform,
+            affine_transform(&transform, plan.nat_size, render_size),
+        ),
+        nat_size: plan.nat_size,
+        crop_uv: crop_to_uv(clip.crop_at(sample_frame)),
+        opacity,
+        needs_premultiply: plan.needs_premultiply,
+        clip_id: &plan.clip_id,
+        color_grade: plan.color_grade.as_ref(),
+        chroma_key: plan.chroma_key.as_ref(),
+        masks: &plan.masks,
+        effects: &plan.effects,
+    })
+}
+
 impl RenderPlan {
     /// Evaluate the ordered draw list for frame `f` (SPEC §2.4).
     ///
@@ -325,12 +364,47 @@ impl RenderPlan {
     pub fn frame<'a>(&'a self, timeline: &'a Timeline, f: i32) -> FramePlan<'a> {
         let mut draws: Vec<LayerDraw<'a>> = Vec::new();
 
-        for plan in &self.clip_plans {
+        for (index, plan) in self.clip_plans.iter().enumerate() {
             let Some(clip) = clip_for(timeline, plan) else {
                 continue;
             };
-            if let Some(d) = eval_layer(plan, clip, f, self.render_size) {
-                draws.push(d);
+            let transition = clip.transition_out.as_ref().and_then(|transition| {
+                let incoming_plan = self.clip_plans.get(index + 1)?;
+                if transition.kind != TransitionKind::CrossDissolve
+                    || incoming_plan.track_index != plan.track_index
+                    || incoming_plan.clip_id != transition.to_clip_id
+                    || incoming_plan.start_frame != plan.end_frame
+                {
+                    return None;
+                }
+                let incoming = clip_for(timeline, incoming_plan)?;
+                let duration = transition
+                    .duration_frames
+                    .max(1)
+                    .min(clip.duration_frames.max(1))
+                    .min(incoming.duration_frames.max(1));
+                let start = plan.end_frame - duration;
+                if f < start || f >= plan.end_frame {
+                    return None;
+                }
+                let progress = (f - start) as f64 / duration as f64;
+                Some((incoming_plan, incoming, progress))
+            });
+
+            if let Some(mut d) = eval_layer(plan, clip, f, self.render_size) {
+                if let Some((_, _, progress)) = transition {
+                    d.opacity *= 1.0 - progress;
+                }
+                if d.opacity > 0.0 {
+                    draws.push(d);
+                }
+            }
+            if let Some((incoming_plan, incoming, progress)) = transition {
+                if let Some(d) =
+                    eval_transition_incoming(incoming_plan, incoming, progress, self.render_size)
+                {
+                    draws.push(d);
+                }
             }
         }
         for plan in &self.text_plans {

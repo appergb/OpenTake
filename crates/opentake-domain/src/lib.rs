@@ -34,6 +34,7 @@ pub mod text;
 mod text_wire;
 pub mod timeline;
 pub mod transform;
+pub mod transition;
 
 // Flat re-export of the public domain API for ergonomic downstream use.
 pub use caption_sync::{caption_group_ids, clips_in_group, sync_caption_group_style};
@@ -60,3 +61,4 @@ pub use subtitle_export::{collect_caption_cues, export_srt, export_vtt, Subtitle
 pub use text::{Fill, Rgba, Shadow, TextAlignment, TextLayout, TextStyle};
 pub use timeline::{ClipLocation, Timeline, Track};
 pub use transform::{Crop, CropAspectLock, Point, Transform};
+pub use transition::{Transition, TransitionKind};

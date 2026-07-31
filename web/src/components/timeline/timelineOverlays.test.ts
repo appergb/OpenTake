@@ -144,6 +144,19 @@ describe("gap overlay (content canvas)", () => {
   });
 });
 
+describe("transition marker (content canvas)", () => {
+  it("paints a cut marker for a valid adjacent cross dissolve", () => {
+    const a = clip("a", 0, 100);
+    const b = clip("b", 100, 100);
+    a.transitionOut = { toClipId: "b", kind: "crossDissolve", durationFrames: 15 };
+    const withTransition = timeline();
+    withTransition.tracks[0].clips = [a, b];
+    const { ctx, calls } = recordingCtx();
+    paintTimeline(ctx, baseState({ timeline: withTransition }));
+    expect(calls.some((call) => call.op === "fill" && call.style === RANGE.edge)).toBe(true);
+  });
+});
+
 describe("ripple-insert indicator (content canvas)", () => {
   it("draws a yellow insertion line when the media ghost is a ripple insert", () => {
     const ghost: MediaGhostPaint = { startFrame: 120, durationFrames: 60, trackIndex: 0, newTrackIndex: null, rippleInsert: true };

@@ -45,12 +45,20 @@ export function AgentPanel() {
   const finalize = useChatStore((state) => state.finalize);
   const setMessages = useChatStore((state) => state.setMessages);
   const reset = useChatStore((state) => state.reset);
+  const composerDraft = useChatStore((state) => state.composerDraft);
+  const setComposerDraft = useChatStore((state) => state.setComposerDraft);
 
   const [input, setInput] = useState("");
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const sessionsRef = useRef<ChatSession[]>([]);
   const tabMutationRef = useRef<Promise<void>>(Promise.resolve());
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (composerDraft === null) return;
+    setInput(composerDraft);
+    setComposerDraft(null);
+  }, [composerDraft, setComposerDraft]);
 
   function commitSessions(next: ChatSession[]) {
     sessionsRef.current = next;

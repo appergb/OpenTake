@@ -3,7 +3,7 @@
 //! resulting `Timeline` / `MediaManifest`, undo/redo behavior, versioning, and
 //! the refusal path — the behaviors the port must match upstream.
 
-use opentake_domain::{AnimPair, Interpolation, Keyframe, KeyframeTrack};
+use opentake_domain::{AnimPair, Interpolation, Keyframe, KeyframeTrack, TransitionKind};
 use opentake_domain::{ChromaKey, ColorGrade, Effect, Mask, MaskShape, Point2};
 use opentake_domain::{
     Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track, Transform,
@@ -751,6 +751,102 @@ fn set_clip_properties_multiple_fields_at_once() {
     assert!(c.transform.flip_horizontal);
     assert!((c.opacity - 0.8).abs() < 1e-9);
     assert!(c.opacity_track.is_none()); // opacity scalar cleared its track
+}
+
+#[test]
+fn set_transition_validates_pair_clamps_duration_and_undoes() {
+    let mut st = state(vec![video_track(
+        "v",
+        true,
+        vec![clip("a", 0, 100), clip("b", 100, 40)],
+    )]);
+    let g = SeqIdGen::default();
+
+    let result = apply(
+        &mut st,
+        EditCommand::SetTransition {
+            from_clip_id: "a".into(),
+            to_clip_id: "b".into(),
+            kind: Some(TransitionKind::CrossDissolve),
+            duration_frames: 80,
+        },
+        &g,
+    )
+    .unwrap();
+
+    assert!(result.changed);
+    assert_eq!(result.action_name, "Set Transition");
+    let transition = st.timeline.tracks[0].clips[0]
+        .transition_out
+        .as_ref()
+        .expect("transition stored on outgoing clip");
+    assert_eq!(transition.to_clip_id, "b");
+    assert_eq!(transition.kind, TransitionKind::CrossDissolve);
+    assert_eq!(transition.duration_frames, 20);
+
+    apply(&mut st, EditCommand::Undo, &g).unwrap();
+    assert!(st.timeline.tracks[0].clips[0].transition_out.is_none());
+
+    let error = apply(
+        &mut st,
+        EditCommand::SetTransition {
+            from_clip_id: "b".into(),
+            to_clip_id: "a".into(),
+            kind: Some(TransitionKind::CrossDissolve),
+            duration_frames: 10,
+        },
+        &g,
+    )
+    .unwrap_err();
+    assert!(matches!(error, EditError::Invalid(_)));
+}
+
+#[test]
+fn moving_either_side_of_a_transition_prunes_it_and_undo_restores_it() {
+    let mut st = state(vec![video_track(
+        "v",
+        true,
+        vec![clip("a", 0, 100), clip("b", 100, 40)],
+    )]);
+    let g = SeqIdGen::default();
+    apply(
+        &mut st,
+        EditCommand::SetTransition {
+            from_clip_id: "a".into(),
+            to_clip_id: "b".into(),
+            kind: Some(TransitionKind::CrossDissolve),
+            duration_frames: 12,
+        },
+        &g,
+    )
+    .unwrap();
+
+    apply(
+        &mut st,
+        EditCommand::MoveClips {
+            moves: vec![ClipMove {
+                clip_id: "b".into(),
+                to_track: 0,
+                to_frame: 110,
+            }],
+        },
+        &g,
+    )
+    .unwrap();
+    let outgoing = st.timeline.tracks[0]
+        .clips
+        .iter()
+        .find(|clip| clip.id == "a")
+        .unwrap();
+    assert!(outgoing.transition_out.is_none());
+
+    apply(&mut st, EditCommand::Undo, &g).unwrap();
+    let outgoing = st.timeline.tracks[0]
+        .clips
+        .iter()
+        .find(|clip| clip.id == "a")
+        .unwrap();
+    assert_eq!(outgoing.transition_out.as_ref().unwrap().to_clip_id, "b");
 }
 
 // ---- set_keyframes --------------------------------------------------------

@@ -21,6 +21,7 @@ use crate::grade::{ChromaKey, ColorGrade, Effect, Mask};
 use crate::keyframe::{AnimPair, AnimatableProperty, Interpolation, KeyframeTrack};
 use crate::text::TextStyle;
 use crate::transform::{Crop, Point, Transform};
+use crate::transition::Transition;
 
 /// Linear amplitude <-> dB mapping for the volume slider. 1:1 port of
 /// upstream `VolumeScale`. Below the floor we snap to true 0 (hard mute).
@@ -215,6 +216,14 @@ pub struct Clip {
     /// Generic named-effect chain. Empty = no effects.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<Effect>,
+    /// Optional visual transition into one exact adjacent successor. Pair
+    /// identity prevents stale transitions from rebinding after moves/deletes.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_default_on_error",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub transition_out: Option<Transition>,
     /// Reverse playback. When true, video clips sample their referenced source
     /// window in reverse order. Non-video sources ignore this flag.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -257,6 +266,7 @@ impl Clip {
         "chromaKey",
         "masks",
         "effects",
+        "transitionOut",
         "reversed",
     ];
     pub const TOLERANT_SCALAR_WIRE_FIELDS: &'static [&'static str] = &[
@@ -346,6 +356,7 @@ impl Clip {
             chroma_key: None,
             masks: Vec::new(),
             effects: Vec::new(),
+            transition_out: None,
             reversed: false,
         }
     }
@@ -1147,6 +1158,28 @@ mod tests {
         assert!(json.contains("\"volumeTrack\""));
         let back: Clip = serde_json::from_str(&json).unwrap();
         assert_eq!(c, back);
+    }
+
+    #[test]
+    fn clip_transition_roundtrips_and_legacy_projects_default_to_none() {
+        let mut c = base_clip();
+        c.transition_out = Some(crate::transition::Transition {
+            to_clip_id: "c2".into(),
+            kind: crate::transition::TransitionKind::CrossDissolve,
+            duration_frames: 12,
+        });
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains(
+            r#""transitionOut":{"toClipId":"c2","kind":"crossDissolve","durationFrames":12}"#
+        ));
+        let back: Clip = serde_json::from_str(&json).unwrap();
+        assert_eq!(c, back);
+
+        let legacy: Clip = serde_json::from_str(
+            r#"{"id":"old","mediaRef":"m","startFrame":0,"durationFrames":12}"#,
+        )
+        .unwrap();
+        assert!(legacy.transition_out.is_none());
     }
 
     #[test]

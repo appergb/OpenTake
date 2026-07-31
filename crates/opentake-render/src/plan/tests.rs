@@ -3,7 +3,7 @@
 
 use opentake_domain::{
     AnimPair, Clip, ClipType, Crop, Interpolation, Keyframe, KeyframeTrack, Point, Timeline, Track,
-    Transform,
+    Transform, Transition, TransitionKind,
 };
 
 use super::affine::affine_transform;
@@ -75,6 +75,35 @@ const RS: RenderSize = RenderSize {
     width: 1920,
     height: 1080,
 };
+
+#[test]
+fn cross_dissolve_emits_two_weighted_layers_before_the_cut() {
+    let mut a = video_clip("a", 0, 30);
+    a.transition_out = Some(Transition {
+        to_clip_id: "b".into(),
+        kind: TransitionKind::CrossDissolve,
+        duration_frames: 10,
+    });
+    let b = video_clip("b", 30, 30);
+    let mut tl = Timeline::new();
+    let mut track = Track::new("v", ClipType::Video);
+    track.clips = vec![a, b];
+    tl.tracks.push(track);
+    let plan = build_render_plan(&tl, RS, &TestMetrics::default());
+
+    let midpoint = plan.frame(&tl, 25);
+    assert_eq!(midpoint.draws.len(), 2);
+    assert_eq!(midpoint.draws[0].clip_id, "a");
+    assert_eq!(midpoint.draws[1].clip_id, "b");
+    approx(midpoint.draws[0].opacity, 0.5);
+    approx(midpoint.draws[1].opacity, 0.5);
+    assert_eq!(midpoint.draws[1].source_frame, 0);
+
+    let after_cut = plan.frame(&tl, 30);
+    assert_eq!(after_cut.draws.len(), 1);
+    assert_eq!(after_cut.draws[0].clip_id, "b");
+    approx(after_cut.draws[0].opacity, 1.0);
+}
 
 // --- Single clip, no transform: full-canvas identity-ish affine ---
 
