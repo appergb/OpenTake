@@ -23,15 +23,24 @@ pub enum ExecutionProvider { Cpu, CoreML, Cuda, DirectMl, Tensorrt } // 按平�
 ## 7.2 worker(序列化 GPU/重负载,导出期让路)
 
 ```rust
-/// 单后台执行器:把推理任务排队,序列化访问昂贵 EP,导出活跃时暂停(与 §7.7 共享暂停信号)。
-pub struct OrtWorker { /* tokio mpsc + 单 worker */ }
+/// 固定容量 admission channel + 一个专用线程；不随调用数增加 worker。
+pub struct OrtWorker { /* sync_channel + one worker + live-key dedupe */ }
 impl OrtWorker {
-    pub fn spawn(export_pause: ExportPause) -> Self;
-    pub async fn submit<F, T>(&self, job: F) -> Result<T>
-        where F: FnOnce(&OrtModelRegistry) -> Result<T> + Send + 'static, T: Send + 'static;
+    pub fn spawn(export_pause: ExportPause, capacity: usize) -> Self;
+    pub fn submit<T, F>(&self, request: JobRequest, job: F)
+        -> Result<JobHandle<T>, WorkerError>;
+    pub fn active_jobs(&self) -> usize;
+    pub fn shutdown(&self) -> Result<(), WorkerError>;
 }
-pub struct OrtModelRegistry { /* 按 key 懒加载并缓存 OrtModel,避免重复 load */ }
+pub enum JobState { Queued, Running, Cancelled, Completed, Failed }
+pub enum JobPriority { Background, Interactive }
+pub struct JobRequest { kind: JobKind, model_identity: String,
+                        dedupe_key: String, priority: JobPriority }
+pub struct OrtModelRegistry { /* 按 model_identity 懒加载并缓存，避免重复 load */ }
 ```
+- **有界与顺序**:`try_send` 在容量满时返回 typed `QueueFull`；每个优先级内部按单调 sequence FIFO，连续 4 个 interactive 后强制服务一个 background，给出明确的 starvation bound。
+- **取消与终态**:`JobHandle` 暴露 `state/cancel/wait/wait_until_running`；排队和运行中取消都收敛到 `Cancelled`。job error、model error 与 panic 收敛到 `Failed`，worker 捕获 panic 后继续服务下一项；`shutdown` 取消队列、join 唯一线程并保证 `active_jobs()==0`。
+- **去重与结果**:同一 live `dedupe_key` 返回同一 shared typed result，不二次占队列/执行；终态前先移除 live key，因此失败可以立即用同 key 重试。
 - **张量辅助**(`ort_worker/tensor.rs`):`ndarray ↔ ort::Value`、NCHW/NHWC 转换、mean/std 归一、`Array4<f32>` ↔ 图像。SigLIP 预处理(§5.2)即复用这里。
 - **EP 回退**:首选平台 EP(CoreML/CUDA/DirectML),不可用回退 CPU,日志 `tracing::warn`。
 - **复用点**:`OrtEmbedder`(§5.7)内部即一个 `OrtModel`(image)+ 一个 `OrtModel`(text);进阶特性各自定义自己的预处理/后处理,共用 `OrtModel::run` + `OrtWorker` 调度。
@@ -40,38 +49,24 @@ pub struct OrtModelRegistry { /* 按 key 懒加载并缓存 OrtModel,避免重�
 
 ## 7.3 后台索引/转写调度 `IndexCoordinator`(替 `SearchIndexCoordinator`)
 
-`Search/SearchIndexCoordinator.swift` + `MODULE-PORT-MAP` L864/L867。上游是 `@MainActor @Observable`;Rust 用 **tokio 单 worker 队列 + AtomicUsize 导出暂停 + 事件向前端推进度**(MODULE-PORT-MAP L881 (6))。**注意:UI 状态(进度/`@Observable`)属上层**;本 crate 提供调度内核 + 进度回调,UI 镜像在 `opentake-core`/前端。
+`Search/SearchIndexCoordinator.swift` + `MODULE-PORT-MAP` L864/L867。上游是 `@MainActor @Observable`;Rust 的生产拥有者是 Tauri `search_index_start` + `index_assets`，通过上面的固定容量单 worker、共享 `ExportPause` 和 `search://index` 事件实现。同步 Tauri 命令在调用线程等待 typed handle，真正的重负载只在唯一专用 worker 执行，重复命令共享结果而不是启动第二次索引。
 
 ```rust
 // index_coordinator.rs
-#[derive(Clone)] pub struct ExportPause(Arc<AtomicUsize>); // 引用计数,跨窗口
+#[derive(Clone)] pub struct ExportPause(Arc<ExportPauseInner>); // 引用计数+Condvar,跨窗口
 impl ExportPause {
     pub fn begin(&self); pub fn end(&self);      // exportDidBegin/End(:46-47)
     pub fn is_active(&self) -> bool;             // exportActive(:45)
-    pub async fn wait_while_active(&self);       // 每 2s 轮询(:49-53)
-}
-
-pub struct IndexCoordinator { /* queue, failed set, single worker, loaded_indexes cache */ }
-impl IndexCoordinator {
-    pub fn new(export_pause: ExportPause, embedder: Arc<dyn Embedder>,
-               transcriber: Arc<dyn Transcriber>, cache_root: PathBuf) -> Self;
-
-    /// 入队需要(重)索引的素材(视觉 needsIndex 或 转写无磁盘缓存)。
-    pub fn schedule(&self, asset: &opentake_domain::media::MediaAsset);
-    pub fn sweep(&self, assets: &[opentake_domain::media::MediaAsset]);
-    pub async fn cancel_all(&self);
-
-    /// 查询:快照候选 → off-thread 加载/编码/排名 → 返回 Hit(视觉)。
-    pub async fn search_visual(&self, query: &str, limit: usize,
-        within: Option<&HashSet<String>>, assets: &[MediaAsset]) -> Vec<Hit>;
-
-    pub fn progress(&self) -> IndexProgress; // {batch_total, batch_completed, current_fraction}
+    pub fn guard(&self) -> ExportPauseGuard;     // Drop 自动平衡 end
+    pub fn wait_while_active(&self, cancelled: impl Fn() -> bool) -> bool;
 }
 ```
 逐项对齐(`SearchIndexCoordinator.swift`):
-- **schedule 条件**:enabled 且有 embedder 且 `!asset.is_generating`;id 不在 queue/failed;`needsVisual(video|image 且 VisualIndexer.needs_index)` 或 `needsTranscript(audio|video+hasAudio 且 转写无磁盘缓存)` 成立才入队;`batch_total+=1`;`ensure_worker`(`:107-124`)。
-- **worker**:单个(`tokio::spawn`),`utility` 优先级;循环 dequeue,`export_pause.wait_while_active()` 每 2s 轮询(`:148-160`);`index_one`(`:178-221`)。
-- **index_one**:需转写则视觉占进度 0.5 否则 1.0(`visualShare`,`:181-185`);`async let`/`tokio::join!` 并发跑转写(`TranscriptCache.transcript`)与视觉索引;视觉完成后置 `current_fraction = visualShare` 再 await 转写(`:189-214`)。失败(非取消)记 `failed`(`:217-220`)。
-- **dequeue**:跳过已不存在的 id(`batch_completed+=1`);队列空 `reset_batch` 返回 None(`:162-170`)。
+- **schedule 条件**:`search_index_start` 固化一次 manifest snapshot；视觉只取 `needs_index` 为真者，音频/有音轨视频只取无 fingerprint cache 者。job key 包含 cache root、每个 source fingerprint 与 SigLIP model/version；live duplicate 合并。
+- **worker**:进程内一个 `OrtWorker`，容量 8；`OrtModelRegistry` 以 model/version/models-root 懒加载 SigLIP。每项开始和素材 batch boundary 都检查 cancellation 与 `ExportPause`，最终 holder drop 后 Condvar 立即唤醒（取消最多 20 ms 被观察），不再用 2 s 忙轮询。
+- **index_one**:视觉与自动转写都在同一个 heavy worker 中串行，避免两个模型同时争用 GPU/CPU；单素材失败只记录并继续，取消则终止整个 job。embedding 由原子 store 写入，transcript 由 fingerprint cache 保存；重启重新 sweep，已完成项跳过，未完成项继续。
+- **dequeue**:提交时的 owned snapshot 使项目切换不会混合素材；缺失/离线文件被该轮跳过，下一轮 source identity 变化后可重试。
 - **search**:main 快照候选 `(id,url)` + `loaded_indexes`;off-thread 算 key、命中内存缓存(key 相等)复用否则 `EmbeddingStore::load`、`encode_text(query)`、`VisualSearch::search`;回主合并 `loaded_indexes`;空 query → `[]`(`:225-257`)。
-- **generation 让路**:`exportPause` 跨窗口引用计数(`ExportPauseCounter`,`:37-47`);导出开始/结束由 `opentake-render` 调 `begin/end`(对齐上游 `ExportService.isExporting.didSet`)。
+- **generation 让路**:`ExportPause` 是跨窗口引用计数；播放/导出压力拥有者持有 `guard` 时不启动新 job，运行 job 在下一素材边界让行，嵌套 holder 仅在最后一个离开时恢复。
+
+拥有测试:`search::tests::bounded_single_worker_cancels_skips_stale_and_yields_to_playback_export` 覆盖容量、优先级 FIFO、4-job 防饥饿、live-key 去重、排队/运行取消、model error、panic 后恢复、失败同 key 重试、model registry 单次加载、压力恢复、source/model identity 失效、shutdown 与 restart；`index_coordinator::tests::export_pause_ref_counts` 覆盖嵌套 guard、唤醒与取消。

@@ -2149,36 +2149,49 @@ not the separately owned desktop motion/Lottie materialization.
   - Deduplicate duplicate requests, persist completed state atomically, invalidate changed media/model, and resume interrupted work after restart.
   - Test duplicate enqueue, source change, model upgrade, export pause/resume, cancellation, crash/restart, failure retry, and final index/transcript equality.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-media/src/index_coordinator.rs#export_pause_ref_counts` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `src-tauri/src/search.rs#bounded_single_worker_cancels_skips_stale_and_yields_to_playback_export` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-media export_pause_ref_counts`
   - Run: `cargo test -p opentake-tauri bounded_single_worker_cancels_skips_stale_and_yields_to_playback_export`
 
   Expected: FAIL because one or more of the 4 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `src-tauri/src/search.rs#search_index_start`, `src-tauri/src/search.rs#index_assets`, `crates/opentake-media/src/index_coordinator.rs#ExportPause`, `crates/opentake-media/src/ort_worker/mod.rs#OrtModel`, `docs/specs/media/10-acceptance.md`, `docs/specs/media/7-ort-worker.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-media export_pause_ref_counts`
   - Run: `cargo test -p opentake-tauri bounded_single_worker_cancels_skips_stale_and_yields_to_playback_export`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. The owning tests first failed because the shared
+  pressure primitive had no balanced guard/wait protocol and no bounded worker
+  existed. Production `search_index_start` now submits one source/model-keyed
+  job to a process-wide capacity-8 `OrtWorker`; that job uses a lazy typed model
+  registry and serially performs missing visual and transcript work, checking
+  cancellation and playback/export pressure at every asset boundary. The
+  executor proves single-worker execution, live-key result dedupe, priority
+  FIFO, a four-interactive-job starvation bound, queue-full rejection,
+  queued/running cancellation, model-error and panic recovery, immediate failure
+  retry, balanced nested pressure wakeup, source/model invalidation, restart,
+  and clean shutdown with zero active jobs. Both focused owners, rustfmt,
+  all-feature clippy with `-D warnings`, and the full workspace suite pass.
 
 ### Task 33: MR-packaged-ffmpeg (implementation-slice-ddfcf34d5292a998)
 
