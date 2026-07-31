@@ -474,6 +474,8 @@ const zh: Dict = {
   "timeline.moveTrackUp": "上移轨道",
   "timeline.moveTrackDown": "下移轨道",
   "timeline.dropHint": "将媒体拖到此处开始",
+  "timeline.compoundBreadcrumb": "复合时间线导航",
+  "timeline.main": "主时间线",
 
   // Clip context menu (right-click)
   "contextMenu.copy": "复制",
@@ -493,6 +495,10 @@ const zh: Dict = {
   "contextMenu.saveRangeAsMedia": "将范围另存为媒体",
   "contextMenu.clearRange": "清除范围",
   "contextMenu.extractAudio": "提取音频",
+  "contextMenu.createCompound": "创建复合片段",
+  "contextMenu.openCompound": "打开复合时间线",
+  "contextMenu.dissolveCompound": "展开复合片段",
+  "compound.defaultName": "复合片段",
   "swapMedia.noCandidates": "没有同类型素材可替换",
 
   // Preview
@@ -1202,6 +1208,8 @@ const en: Dict = {
   "timeline.moveTrackUp": "Move Track Up",
   "timeline.moveTrackDown": "Move Track Down",
   "timeline.dropHint": "Drop media here to start",
+  "timeline.compoundBreadcrumb": "Compound timeline breadcrumb",
+  "timeline.main": "Main timeline",
 
   // Clip context menu (right-click)
   "contextMenu.copy": "Copy",
@@ -1221,6 +1229,10 @@ const en: Dict = {
   "contextMenu.saveRangeAsMedia": "Save Range as Media",
   "contextMenu.clearRange": "Clear Range",
   "contextMenu.extractAudio": "Extract Audio",
+  "contextMenu.createCompound": "Create Compound Clip",
+  "contextMenu.openCompound": "Open Compound Timeline",
+  "contextMenu.dissolveCompound": "Dissolve Compound Clip",
+  "compound.defaultName": "Compound Clip",
   "swapMedia.noCandidates": "No compatible media to swap",
 
   "preview.fit": "Fit",

@@ -55,8 +55,8 @@ use opentake_media::{
 };
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::{
-    build_render_plan, export_render_size, Compositor, CosmicTextRasterizer, DecodedFrame,
-    ExportResolution as RenderResolution, GpuTexture, RenderDevice, SourceMetrics,
+    export_render_size, try_build_render_plan, AudioClipPlan, Compositor, CosmicTextRasterizer,
+    DecodedFrame, ExportResolution as RenderResolution, GpuTexture, RenderDevice, SourceMetrics,
     TextRasterRequest, TextRasterizer, TextureCache, TextureResolver, TextureSource,
 };
 
@@ -528,23 +528,30 @@ impl TextureResolver for MediaResolver<'_> {
 /// lookup the resolver rasterizes from. Keyed by clip id.
 fn project_text(timeline: &opentake_domain::Timeline) -> HashMap<String, TextInfo> {
     let mut text: HashMap<String, TextInfo> = HashMap::new();
-    for track in &timeline.tracks {
-        for clip in &track.clips {
-            if clip.media_type != ClipType::Text {
-                continue;
+    for candidate in std::iter::once(timeline).chain(
+        timeline
+            .nested_sequences
+            .iter()
+            .map(|sequence| &sequence.timeline),
+    ) {
+        for track in &candidate.tracks {
+            for clip in &track.clips {
+                if clip.media_type != ClipType::Text {
+                    continue;
+                }
+                let (Some(content), Some(style)) = (&clip.text_content, &clip.text_style) else {
+                    continue;
+                };
+                let tl = clip.transform.top_left();
+                text.insert(
+                    clip.id.clone(),
+                    TextInfo {
+                        content: content.clone(),
+                        style: style.clone(),
+                        box_norm: (tl.x, tl.y, clip.transform.width, clip.transform.height),
+                    },
+                );
             }
-            let (Some(content), Some(style)) = (&clip.text_content, &clip.text_style) else {
-                continue;
-            };
-            let tl = clip.transform.top_left();
-            text.insert(
-                clip.id.clone(),
-                TextInfo {
-                    content: content.clone(),
-                    style: style.clone(),
-                    box_norm: (tl.x, tl.y, clip.transform.width, clip.transform.height),
-                },
-            );
         }
     }
     text
@@ -672,13 +679,39 @@ fn retime_pcm_to_len_with_control(
 /// Returns `Ok(None)` when the clip contributes no audio (no media path, no
 /// audio track, zero-length window, or a fully-decoded-to-empty buffer). Decode
 /// failures other than "no audio track" propagate as `Err`.
-fn project_clip_audio(
-    clip: &Clip,
+trait AudioPlanLike {
+    fn clip(&self) -> &Clip;
+    fn volume_at(&self, frame: i32) -> f64;
+}
+
+impl AudioPlanLike for Clip {
+    fn clip(&self) -> &Clip {
+        self
+    }
+
+    fn volume_at(&self, frame: i32) -> f64 {
+        Clip::volume_at(self, frame)
+    }
+}
+
+impl AudioPlanLike for AudioClipPlan {
+    fn clip(&self) -> &Clip {
+        &self.clip
+    }
+
+    fn volume_at(&self, frame: i32) -> f64 {
+        AudioClipPlan::volume_at(self, frame)
+    }
+}
+
+fn project_clip_audio<T: AudioPlanLike>(
+    plan: &T,
     media: &HashMap<String, MediaInfo>,
     timeline_fps: i32,
     control: Option<&ExportControl>,
     decode_progress: Option<PcmProgressCallback>,
 ) -> Result<Option<ClipAudio>, String> {
+    let clip = plan.clip();
     if clip.duration_frames <= 0 || timeline_fps <= 0 {
         return Ok(None);
     }
@@ -739,7 +772,7 @@ fn project_clip_audio(
             }
         }
         let tl_frame = clip.start_frame + (k as f64 / samples_per_frame).floor() as i32;
-        let g = clip.volume_at(tl_frame) as f32;
+        let g = plan.volume_at(tl_frame) as f32;
         if (g - 1.0).abs() > f32::EPSILON {
             all_unity = false;
         }
@@ -827,48 +860,45 @@ fn mix_timeline_audio(
     control: Option<&ExportControl>,
     on_progress: Option<AudioExportProgress>,
 ) -> Result<Option<PcmBuffer>, String> {
-    let eligible_count = timeline
+    let clips = timeline
         .tracks
         .iter()
         .filter(|track| !track.muted)
         .flat_map(|track| &track.clips)
         .filter(|clip| matches!(clip.media_type, ClipType::Audio | ClipType::Video))
-        .count();
+        .cloned()
+        .collect::<Vec<_>>();
+    mix_flattened_audio(&clips, timeline.fps, media, control, on_progress)
+}
+
+fn mix_flattened_audio<T: AudioPlanLike>(
+    clips: &[T],
+    timeline_fps: i32,
+    media: &HashMap<String, MediaInfo>,
+    control: Option<&ExportControl>,
+    on_progress: Option<AudioExportProgress>,
+) -> Result<Option<PcmBuffer>, String> {
+    let eligible_count = clips.len();
     let mut clips_audio: Vec<ClipAudio> = Vec::new();
-    let mut eligible_index = 0_usize;
-    for track in &timeline.tracks {
-        if track.muted {
-            continue;
-        }
-        for clip in &track.clips {
-            // Only audio and video clips carry sound; text/image/lottie don't.
-            if clip.media_type != ClipType::Audio && clip.media_type != ClipType::Video {
-                continue;
+    for (eligible_index, clip) in clips.iter().enumerate() {
+        let decode_progress = match (control, &on_progress) {
+            (Some(_), Some(emit)) => {
+                let emit = Arc::clone(emit);
+                let index = eligible_index;
+                Some(Arc::new(move |done: usize, total: usize| {
+                    let total = total.max(1);
+                    let numerator = index
+                        .saturating_mul(AUDIO_DECODE_END as usize)
+                        .saturating_mul(total)
+                        .saturating_add(done.min(total).saturating_mul(AUDIO_DECODE_END as usize));
+                    let denominator = eligible_count.saturating_mul(total).max(1);
+                    emit((numerator / denominator) as i32, AUDIO_PROGRESS_TOTAL);
+                }) as PcmProgressCallback)
             }
-            let decode_progress = match (control, &on_progress) {
-                (Some(_), Some(emit)) => {
-                    let emit = Arc::clone(emit);
-                    let index = eligible_index;
-                    Some(Arc::new(move |done: usize, total: usize| {
-                        let total = total.max(1);
-                        let numerator = index
-                            .saturating_mul(AUDIO_DECODE_END as usize)
-                            .saturating_mul(total)
-                            .saturating_add(
-                                done.min(total).saturating_mul(AUDIO_DECODE_END as usize),
-                            );
-                        let denominator = eligible_count.saturating_mul(total).max(1);
-                        emit((numerator / denominator) as i32, AUDIO_PROGRESS_TOTAL);
-                    }) as PcmProgressCallback)
-                }
-                _ => None,
-            };
-            eligible_index += 1;
-            if let Some(ca) =
-                project_clip_audio(clip, media, timeline.fps, control, decode_progress)?
-            {
-                clips_audio.push(ca);
-            }
+            _ => None,
+        };
+        if let Some(ca) = project_clip_audio(clip, media, timeline_fps, control, decode_progress)? {
+            clips_audio.push(ca);
         }
     }
     if clips_audio.is_empty() {
@@ -1026,7 +1056,8 @@ pub(crate) fn run_export_with_control(
     );
 
     let metrics = ManifestMetrics { sizes };
-    let plan = build_render_plan(timeline, render_size, &metrics);
+    let plan = try_build_render_plan(timeline, render_size, &metrics)
+        .map_err(|error| format!("invalid timeline graph: {error}"))?;
 
     // Acquire the GPU device + compositor for this export. Unlike the preview
     // (which caches the context in Tauri state for repeated scrubs), an export is
@@ -1142,7 +1173,8 @@ pub(crate) fn run_export_with_control(
             emit(mapped, AUDIO_PROGRESS_TOTAL);
         }) as AudioExportProgress
     });
-    let mixed_audio = mix_timeline_audio(timeline, &media, control, audio_progress)?;
+    let mixed_audio =
+        mix_flattened_audio(&plan.audio_clips, plan.fps, &media, control, audio_progress)?;
     let mut has_audio = false;
     if let Some(pcm) = mixed_audio {
         // Once any audio overlaps the exported interval, pad its trailing

@@ -33,13 +33,21 @@ pub fn set_timeline_settings(timeline: &mut Timeline, fps: i32, width: i32, heig
         return false;
     }
 
+    // Nested timelines share one project timebase and output canvas. Keep every
+    // stored child synchronized (including frame/keyframe rescaling) so entering
+    // a compound never exposes stale settings after the root changes.
+    let mut nested_changed = false;
+    for sequence in &mut timeline.nested_sequences {
+        nested_changed |= set_timeline_settings(&mut sequence.timeline, fps, width, height);
+    }
+
     let prev_fps = timeline.fps;
     let prev_width = timeline.width;
     let prev_height = timeline.height;
     let prev_configured = timeline.settings_configured;
 
     if fps == prev_fps && width == prev_width && height == prev_height && prev_configured {
-        return false;
+        return nested_changed;
     }
 
     // Rescale all frame-based values when FPS changes (upstream :26-52).
@@ -121,6 +129,29 @@ mod tests {
         assert!(set_timeline_settings(&mut tl, 30, 3840, 2160));
         let c = &tl.tracks[0].clips[0];
         assert_eq!((c.start_frame, c.duration_frames), (10, 40));
+    }
+
+    #[test]
+    fn settings_change_rescales_registered_nested_timelines() {
+        use opentake_domain::NestedSequence;
+
+        let mut child = Timeline::new();
+        child.tracks.push(track(
+            "child",
+            ClipType::Video,
+            vec![clip("nested", 15, 30)],
+        ));
+        let mut root = Timeline::new();
+        root.nested_sequences
+            .push(NestedSequence::new("sequence", "Scene", child));
+
+        assert!(set_timeline_settings(&mut root, 60, 1280, 720));
+
+        let child = &root.nested_sequences[0].timeline;
+        assert_eq!((child.fps, child.width, child.height), (60, 1280, 720));
+        assert!(child.settings_configured);
+        assert_eq!(child.tracks[0].clips[0].start_frame, 30);
+        assert_eq!(child.tracks[0].clips[0].duration_frames, 60);
     }
 
     #[test]

@@ -607,6 +607,17 @@ fn validate_freeze_frame_request(
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum EditRequest {
     #[serde(rename_all = "camelCase")]
+    CreateNestedSequence { name: String, clip_ids: Vec<String> },
+    #[serde(rename_all = "camelCase")]
+    EditNestedSequence {
+        sequence_id: String,
+        command: Box<EditRequest>,
+    },
+    #[serde(rename_all = "camelCase")]
+    RenameNestedSequence { sequence_id: String, name: String },
+    #[serde(rename_all = "camelCase")]
+    DissolveNestedSequence { clip_id: String },
+    #[serde(rename_all = "camelCase")]
     AddClips { entries: Vec<ClipEntryDto> },
     #[serde(rename_all = "camelCase")]
     InsertClips {
@@ -768,6 +779,22 @@ pub enum EditRequest {
 impl EditRequest {
     fn into_command(self) -> Result<EditCommand, String> {
         Ok(match self {
+            EditRequest::CreateNestedSequence { name, clip_ids } => {
+                EditCommand::CreateNestedSequenceFromClips { name, clip_ids }
+            }
+            EditRequest::EditNestedSequence {
+                sequence_id,
+                command,
+            } => EditCommand::EditNestedSequence {
+                sequence_id,
+                command: Box::new(command.into_command()?),
+            },
+            EditRequest::RenameNestedSequence { sequence_id, name } => {
+                EditCommand::RenameNestedSequence { sequence_id, name }
+            }
+            EditRequest::DissolveNestedSequence { clip_id } => {
+                EditCommand::DissolveNestedSequence { clip_id }
+            }
             EditRequest::AddClips { entries } => EditCommand::AddClips {
                 entries: entries.into_iter().map(ClipEntryDto::into_entry).collect(),
             },
@@ -1617,6 +1644,10 @@ mod edit_request_serde_tests {
 
     fn request_route(request: &EditRequest) -> &'static str {
         match request {
+            EditRequest::CreateNestedSequence { .. } => "CreateNestedSequence",
+            EditRequest::EditNestedSequence { .. } => "EditNestedSequence",
+            EditRequest::RenameNestedSequence { .. } => "RenameNestedSequence",
+            EditRequest::DissolveNestedSequence { .. } => "DissolveNestedSequence",
             EditRequest::AddClips { .. } => "AddClips",
             EditRequest::InsertClips { .. } => "InsertClips",
             EditRequest::MoveClips { .. } => "MoveClips",
@@ -1664,7 +1695,19 @@ mod edit_request_serde_tests {
     fn command_matches_route(command: &EditCommand, route: &str) -> bool {
         matches!(
             (route, command),
-            ("AddClips", EditCommand::AddClips { .. })
+            (
+                "CreateNestedSequence",
+                EditCommand::CreateNestedSequenceFromClips { .. }
+            ) | ("EditNestedSequence", EditCommand::EditNestedSequence { .. })
+                | (
+                    "RenameNestedSequence",
+                    EditCommand::RenameNestedSequence { .. }
+                )
+                | (
+                    "DissolveNestedSequence",
+                    EditCommand::DissolveNestedSequence { .. }
+                )
+                | ("AddClips", EditCommand::AddClips { .. })
                 | ("InsertClips", EditCommand::InsertClips { .. })
                 | ("MoveClips", EditCommand::MoveClips { .. })
                 | ("DuplicateClips", EditCommand::DuplicateClips { .. })
@@ -1715,6 +1758,22 @@ mod edit_request_serde_tests {
 
     fn assert_every_edit_request_maps_to_exact_edit_command() {
         let cases = [
+            (
+                r#"{"type":"createNestedSequence","name":"Scene","clipIds":["c"]}"#,
+                "CreateNestedSequence",
+            ),
+            (
+                r#"{"type":"editNestedSequence","sequenceId":"s","command":{"type":"removeClips","clipIds":["c"]}}"#,
+                "EditNestedSequence",
+            ),
+            (
+                r#"{"type":"renameNestedSequence","sequenceId":"s","name":"Scene"}"#,
+                "RenameNestedSequence",
+            ),
+            (
+                r#"{"type":"dissolveNestedSequence","clipId":"c"}"#,
+                "DissolveNestedSequence",
+            ),
             (r#"{"type":"addClips","entries":[]}"#, "AddClips"),
             (
                 r#"{"type":"insertClips","trackIndex":0,"atFrame":0,"entries":[]}"#,
@@ -1836,7 +1895,7 @@ mod edit_request_serde_tests {
             ),
         ];
 
-        assert_eq!(cases.len(), 41);
+        assert_eq!(cases.len(), 45);
         for (json, expected_route) in cases {
             let mut hostile = serde_json::from_str::<serde_json::Value>(json).unwrap();
             hostile

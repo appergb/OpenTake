@@ -20,7 +20,14 @@ export interface Timeline {
   width: number; // default 1920
   height: number; // default 1080
   settingsConfigured: boolean;
+  nestedSequences?: NestedSequence[];
   tracks: Track[];
+}
+
+export interface NestedSequence {
+  id: string;
+  name: string;
+  timeline: Timeline;
 }
 
 export interface Track {
@@ -202,6 +209,7 @@ export interface Clip {
   crop: Crop;
   linkGroupId?: string;
   captionGroupId?: string;
+  nestedSequenceId?: string;
   textContent?: string;
   textStyle?: TextStyle;
   opacityTrack?: KeyframeTrack<number>;
@@ -309,6 +317,10 @@ export interface FrameRangeReq {
 
 /** The discriminated union mapped to Rust `EditRequest` (tag = "type"). */
 export type EditRequest =
+  | { type: "createNestedSequence"; name: string; clipIds: string[] }
+  | { type: "editNestedSequence"; sequenceId: string; command: EditRequest }
+  | { type: "renameNestedSequence"; sequenceId: string; name: string }
+  | { type: "dissolveNestedSequence"; clipId: string }
   | { type: "addClips"; entries: ClipEntryReq[] }
   | { type: "insertClips"; trackIndex: number; atFrame: number; entries: ClipEntryReq[] }
   | { type: "moveClips"; moves: ClipMoveReq[] }

@@ -6,10 +6,15 @@
 //! keyframe / fade / dB sample goes through the domain `*_at` methods (SPEC §0
 //! iron rule); this module only adds geometry projection + frame scheduling.
 
-use opentake_domain::{Clip, ClipType, Timeline, TransitionKind};
+use std::collections::{HashMap, HashSet};
+
+use opentake_domain::{Clip, ClipType, NestedSequence, Timeline, TransitionKind};
 
 use super::affine::{affine_transform, compose, crop_to_uv};
-use super::types::{ClipPlan, FramePlan, LayerDraw, RenderPlan, RenderSize, TextureSource};
+use super::types::{
+    AudioClipPlan, ClipPlan, CompoundAncestor, FramePlan, LayerDraw, RenderPlan, RenderSize,
+    TextureSource,
+};
 use crate::source::SourceMetrics;
 
 /// Half-away-from-zero round, matching the domain convention (`clip.rs` L7).
@@ -66,10 +71,16 @@ fn texture_source_for(clip: &Clip) -> TextureSource {
 }
 
 /// Build a [`ClipPlan`] for one selected clip.
+#[allow(clippy::too_many_arguments)]
 fn make_clip_plan(
     clip: &Clip,
     track_index: usize,
     clip_index: usize,
+    blend_path: Vec<usize>,
+    compound_ancestors: Vec<CompoundAncestor>,
+    visible_start: i32,
+    visible_end: i32,
+    effective_trim_start: i32,
     sources: &dyn SourceMetrics,
     render_size: RenderSize,
 ) -> ClipPlan {
@@ -111,18 +122,21 @@ fn make_clip_plan(
     };
 
     ClipPlan {
+        clip: clip.clone(),
         clip_id: clip.id.clone(),
         track_index,
         clip_index,
+        blend_path,
+        compound_ancestors,
         source: texture_source_for(clip),
-        start_frame: clip.start_frame,
-        end_frame: clip.end_frame(),
+        start_frame: visible_start,
+        end_frame: visible_end,
         nat_size,
         preferred_transform,
         needs_premultiply,
         speed: clip.speed,
         reversed: clip.reversed,
-        trim_start_frame: clip.trim_start_frame,
+        trim_start_frame: effective_trim_start,
         media_type: clip.media_type,
         lottie_frame_count,
         // Advanced pixel-effect inputs, copied verbatim from the clip (frame-
@@ -151,10 +165,84 @@ pub fn build_render_plan(
     render_size: RenderSize,
     sources: &dyn SourceMetrics,
 ) -> RenderPlan {
+    try_build_render_plan(timeline, render_size, sources)
+        .expect("timeline graph must be valid before building a render plan")
+}
+
+/// Fail-closed render-plan construction used by preview, export, and agents.
+pub fn try_build_render_plan(
+    timeline: &Timeline,
+    render_size: RenderSize,
+    sources: &dyn SourceMetrics,
+) -> Result<RenderPlan, String> {
+    timeline.validate_nested_sequences()?;
+    validate_nested_render_constraints(timeline)?;
     let total_frames = timeline.total_frames();
     let mut clip_plans: Vec<ClipPlan> = Vec::new();
     let mut text_plans: Vec<ClipPlan> = Vec::new();
+    let mut audio_clips: Vec<AudioClipPlan> = Vec::new();
 
+    let registry: HashMap<&str, &NestedSequence> = timeline
+        .nested_sequences
+        .iter()
+        .map(|sequence| (sequence.id.as_str(), sequence))
+        .collect();
+    collect_timeline_plans(
+        timeline,
+        &registry,
+        0,
+        None,
+        None,
+        &[],
+        &[],
+        render_size,
+        sources,
+        &mut clip_plans,
+        &mut text_plans,
+    );
+    collect_nested_audio(
+        timeline,
+        &registry,
+        0,
+        None,
+        None,
+        false,
+        &[],
+        &mut audio_clips,
+    );
+
+    // Final blend order: bottom-to-top. Upstream keeps visual track 0 topmost,
+    // so higher track indexes draw first and lower indexes draw last.
+    clip_plans.sort_by(|a, b| {
+        b.blend_path
+            .cmp(&a.blend_path)
+            .then(a.start_frame.cmp(&b.start_frame))
+    });
+
+    Ok(RenderPlan {
+        fps: timeline.fps,
+        render_size,
+        total_frames,
+        clip_plans,
+        text_plans,
+        audio_clips,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_timeline_plans(
+    timeline: &Timeline,
+    registry: &HashMap<&str, &NestedSequence>,
+    frame_offset: i32,
+    parent_start: Option<i32>,
+    parent_end: Option<i32>,
+    parent_blend_path: &[usize],
+    compound_ancestors: &[CompoundAncestor],
+    render_size: RenderSize,
+    sources: &dyn SourceMetrics,
+    clip_plans: &mut Vec<ClipPlan>,
+    text_plans: &mut Vec<ClipPlan>,
+) {
     for (track_index, track) in timeline.tracks.iter().enumerate() {
         if track.hidden {
             continue;
@@ -167,17 +255,79 @@ pub fn build_render_plan(
         order.sort_by_key(|&i| track.clips[i].start_frame);
 
         let mut prev_end_frame = i32::MIN;
+        let mut blend_path = parent_blend_path.to_vec();
+        blend_path.push(track_index);
         for &clip_index in &order {
             let clip = &track.clips[clip_index];
+
+            let unclamped_start = frame_offset.saturating_add(clip.start_frame);
+            let absolute_start = unclamped_start.max(parent_start.unwrap_or(i32::MIN));
+            let absolute_end = frame_offset
+                .saturating_add(clip.end_frame())
+                .min(parent_end.unwrap_or(i32::MAX));
+            if absolute_end <= absolute_start {
+                continue;
+            }
+
+            let clipped_left = absolute_start - unclamped_start;
+            let effective_trim_start = clip
+                .trim_start_frame
+                .saturating_add((clipped_left as f64 * clip.speed).round() as i32);
+            let mut mapped_clip = clip.clone();
+            mapped_clip.start_frame = unclamped_start;
+
+            // Apply the same overlap policy to compound and ordinary visual
+            // clips before recursively expanding the selected compound.
+            if clip.media_type != ClipType::Text {
+                if clip.duration_frames <= 0 || clip.start_frame < prev_end_frame {
+                    continue;
+                }
+                prev_end_frame = clip.end_frame();
+            }
+
+            if let Some(sequence_id) = clip.nested_sequence_id.as_deref() {
+                let sequence = registry
+                    .get(sequence_id)
+                    .expect("validated nested reference must exist");
+                let mut child_ancestors = compound_ancestors.to_vec();
+                child_ancestors.push(CompoundAncestor {
+                    clip: mapped_clip,
+                    // Flattened leaves are already projected into the output
+                    // canvas' normalized coordinate space. Compound transforms
+                    // therefore operate on that output canvas as their source;
+                    // using the authored child pixel size here would scale the
+                    // same normalization a second time.
+                    canvas_size: (render_size.width_f(), render_size.height_f()),
+                });
+                collect_timeline_plans(
+                    &sequence.timeline,
+                    registry,
+                    absolute_start.saturating_sub(effective_trim_start),
+                    Some(absolute_start),
+                    Some(absolute_end),
+                    &blend_path,
+                    &child_ancestors,
+                    render_size,
+                    sources,
+                    clip_plans,
+                    text_plans,
+                );
+                continue;
+            }
 
             if clip.media_type == ClipType::Text {
                 // Text: no overlap skip, no audio gate; each text clip stands
                 // alone (SPEC §4.2). Defensive: require a positive span.
                 if clip.duration_frames > 0 {
                     text_plans.push(make_clip_plan(
-                        clip,
+                        &mapped_clip,
                         track_index,
                         clip_index,
+                        blend_path.clone(),
+                        compound_ancestors.to_vec(),
+                        absolute_start,
+                        absolute_end,
+                        effective_trim_start,
                         sources,
                         render_size,
                     ));
@@ -191,34 +341,143 @@ pub fn build_render_plan(
             }
 
             // Video-track de-dup (upstream L152 / L424).
-            if clip.duration_frames <= 0 || clip.start_frame < prev_end_frame {
-                continue;
-            }
             clip_plans.push(make_clip_plan(
-                clip,
+                &mapped_clip,
                 track_index,
                 clip_index,
+                blend_path.clone(),
+                compound_ancestors.to_vec(),
+                absolute_start,
+                absolute_end,
+                effective_trim_start,
                 sources,
                 render_size,
             ));
-            prev_end_frame = clip.end_frame();
         }
     }
+}
 
-    // Final blend order: bottom-to-top. Upstream keeps visual track 0 topmost,
-    // so higher track indexes draw first and lower indexes draw last.
-    clip_plans.sort_by(|a, b| {
-        b.track_index
-            .cmp(&a.track_index)
-            .then(a.start_frame.cmp(&b.start_frame))
-    });
+fn validate_nested_render_constraints(timeline: &Timeline) -> Result<(), String> {
+    let mut timelines = Vec::with_capacity(timeline.nested_sequences.len() + 1);
+    timelines.push(timeline);
+    timelines.extend(
+        timeline
+            .nested_sequences
+            .iter()
+            .map(|sequence| &sequence.timeline),
+    );
+    let compound_ids = timelines
+        .iter()
+        .flat_map(|candidate| candidate.tracks.iter())
+        .flat_map(|track| &track.clips)
+        .filter(|clip| clip.nested_sequence_id.is_some())
+        .map(|clip| clip.id.as_str())
+        .collect::<HashSet<_>>();
+    for candidate in timelines {
+        for clip in candidate.tracks.iter().flat_map(|track| &track.clips) {
+            if clip
+                .transition_out
+                .as_ref()
+                .is_some_and(|transition| compound_ids.contains(transition.to_clip_id.as_str()))
+            {
+                return Err(format!(
+                    "transition into compound clip {} requires offscreen nesting",
+                    clip.transition_out
+                        .as_ref()
+                        .expect("transition was matched")
+                        .to_clip_id
+                ));
+            }
+        }
+        for clip in candidate
+            .tracks
+            .iter()
+            .flat_map(|track| track.clips.iter())
+            .filter(|clip| clip.nested_sequence_id.is_some())
+        {
+            if (clip.speed - 1.0).abs() > f64::EPSILON || clip.reversed {
+                return Err(format!(
+                    "compound clip {} must use forward 1x playback",
+                    clip.id
+                ));
+            }
+            if clip.crop != Default::default()
+                || clip.crop_track.is_some()
+                || clip.color_grade.is_some()
+                || clip.chroma_key.is_some()
+                || !clip.masks.is_empty()
+                || !clip.effects.is_empty()
+                || clip.transition_out.is_some()
+            {
+                return Err(format!(
+                    "compound clip {} uses effects that require offscreen nesting",
+                    clip.id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
-    RenderPlan {
-        fps: timeline.fps,
-        render_size,
-        total_frames,
-        clip_plans,
-        text_plans,
+#[allow(clippy::too_many_arguments)]
+fn collect_nested_audio(
+    timeline: &Timeline,
+    registry: &HashMap<&str, &NestedSequence>,
+    frame_offset: i32,
+    parent_start: Option<i32>,
+    parent_end: Option<i32>,
+    parent_muted: bool,
+    compound_ancestors: &[Clip],
+    audio_clips: &mut Vec<AudioClipPlan>,
+) {
+    for track in &timeline.tracks {
+        let muted = parent_muted || track.muted;
+        for clip in &track.clips {
+            let unclamped_start = frame_offset.saturating_add(clip.start_frame);
+            let absolute_start = unclamped_start.max(parent_start.unwrap_or(i32::MIN));
+            let absolute_end = frame_offset
+                .saturating_add(clip.end_frame())
+                .min(parent_end.unwrap_or(i32::MAX));
+            if absolute_end <= absolute_start {
+                continue;
+            }
+            let clipped_left = absolute_start - unclamped_start;
+            let effective_trim_start = clip
+                .trim_start_frame
+                .saturating_add((clipped_left as f64 * clip.speed).round() as i32);
+            let mut mapped_gain_clip = clip.clone();
+            mapped_gain_clip.start_frame = unclamped_start;
+            if let Some(sequence_id) = clip.nested_sequence_id.as_deref() {
+                let sequence = registry
+                    .get(sequence_id)
+                    .expect("validated nested reference must exist");
+                let mut child_ancestors = compound_ancestors.to_vec();
+                child_ancestors.push(mapped_gain_clip);
+                collect_nested_audio(
+                    &sequence.timeline,
+                    registry,
+                    absolute_start.saturating_sub(effective_trim_start),
+                    Some(absolute_start),
+                    Some(absolute_end),
+                    muted,
+                    &child_ancestors,
+                    audio_clips,
+                );
+                continue;
+            }
+            if muted || !matches!(clip.media_type, ClipType::Audio | ClipType::Video) {
+                continue;
+            }
+            let mut flattened = clip.clone();
+            flattened.start_frame = absolute_start;
+            flattened.duration_frames = absolute_end - absolute_start;
+            flattened.trim_start_frame = effective_trim_start;
+            audio_clips.push(AudioClipPlan {
+                clip: flattened,
+                gain_clip: mapped_gain_clip,
+                compound_ancestors: compound_ancestors.to_vec(),
+            });
+        }
     }
 }
 
@@ -276,7 +535,10 @@ fn eval_layer<'a>(
     if f < plan.start_frame || f >= plan.end_frame {
         return None;
     }
-    let opacity = clip.opacity_at(f);
+    let mut opacity = clip.opacity_at(f);
+    for ancestor in plan.compound_ancestors.iter().rev() {
+        opacity *= ancestor.clip.opacity_at(f);
+    }
     if opacity <= 0.0 {
         return None; // behavior-equivalent skip (SPEC §2.4 step 3).
     }
@@ -290,10 +552,21 @@ fn eval_layer<'a>(
     } else {
         clip.transform
     };
-    let affine = compose(
+    let mut affine = compose(
         plan.preferred_transform,
         affine_transform(&transform, plan.nat_size, render_size),
     );
+    for ancestor in plan.compound_ancestors.iter().rev() {
+        let transform = if ancestor.clip.has_transform_animation() {
+            ancestor.clip.transform_at(f)
+        } else {
+            ancestor.clip.transform
+        };
+        affine = compose(
+            affine,
+            affine_transform(&transform, ancestor.canvas_size, render_size),
+        );
+    }
     let crop_uv = crop_to_uv(clip.crop_at(f));
     let source_frame = source_frame_index(plan, f);
 
@@ -327,7 +600,10 @@ fn eval_transition_incoming<'a>(
     render_size: RenderSize,
 ) -> Option<LayerDraw<'a>> {
     let sample_frame = plan.start_frame;
-    let opacity = clip.raw_opacity_at(sample_frame) * progress.clamp(0.0, 1.0);
+    let mut opacity = clip.raw_opacity_at(sample_frame) * progress.clamp(0.0, 1.0);
+    for ancestor in plan.compound_ancestors.iter().rev() {
+        opacity *= ancestor.clip.opacity_at(sample_frame);
+    }
     if opacity <= 0.0 {
         return None;
     }
@@ -336,13 +612,25 @@ fn eval_transition_incoming<'a>(
     } else {
         clip.transform
     };
+    let mut affine = compose(
+        plan.preferred_transform,
+        affine_transform(&transform, plan.nat_size, render_size),
+    );
+    for ancestor in plan.compound_ancestors.iter().rev() {
+        let transform = if ancestor.clip.has_transform_animation() {
+            ancestor.clip.transform_at(sample_frame)
+        } else {
+            ancestor.clip.transform
+        };
+        affine = compose(
+            affine,
+            affine_transform(&transform, ancestor.canvas_size, render_size),
+        );
+    }
     Some(LayerDraw {
         source: &plan.source,
         source_frame: source_frame_index(plan, sample_frame),
-        affine: compose(
-            plan.preferred_transform,
-            affine_transform(&transform, plan.nat_size, render_size),
-        ),
+        affine,
         nat_size: plan.nat_size,
         crop_uv: crop_to_uv(clip.crop_at(sample_frame)),
         opacity,
@@ -361,13 +649,11 @@ impl RenderPlan {
     /// `timeline` must be the same one the plan was built from (they share clip
     /// indices). Video clips composite first; text clips composite last (on
     /// top), matching upstream's text-over-video layering (SPEC §4.2).
-    pub fn frame<'a>(&'a self, timeline: &'a Timeline, f: i32) -> FramePlan<'a> {
+    pub fn frame<'a>(&'a self, _timeline: &'a Timeline, f: i32) -> FramePlan<'a> {
         let mut draws: Vec<LayerDraw<'a>> = Vec::new();
 
         for (index, plan) in self.clip_plans.iter().enumerate() {
-            let Some(clip) = clip_for(timeline, plan) else {
-                continue;
-            };
+            let clip = &plan.clip;
             let transition = clip.transition_out.as_ref().and_then(|transition| {
                 let incoming_plan = self.clip_plans.get(index + 1)?;
                 if transition.kind != TransitionKind::CrossDissolve
@@ -377,7 +663,7 @@ impl RenderPlan {
                 {
                     return None;
                 }
-                let incoming = clip_for(timeline, incoming_plan)?;
+                let incoming = &incoming_plan.clip;
                 let duration = transition
                     .duration_frames
                     .max(1)
@@ -408,9 +694,7 @@ impl RenderPlan {
             }
         }
         for plan in &self.text_plans {
-            let Some(clip) = clip_for(timeline, plan) else {
-                continue;
-            };
+            let clip = &plan.clip;
             if let Some(d) = eval_layer(plan, clip, f, self.render_size) {
                 draws.push(d);
             }
@@ -421,20 +705,4 @@ impl RenderPlan {
             draws,
         }
     }
-}
-
-/// Resolve the `&Clip` for a plan via its stored indices, falling back to an id
-/// search if the indices no longer line up (defensive; the indexed path is the
-/// fast one per SPEC §2.4).
-fn clip_for<'a>(timeline: &'a Timeline, plan: &ClipPlan) -> Option<&'a Clip> {
-    if let Some(track) = timeline.tracks.get(plan.track_index) {
-        if let Some(clip) = track.clips.get(plan.clip_index) {
-            if clip.id == plan.clip_id {
-                return Some(clip);
-            }
-        }
-        // Indices drifted: fall back to id lookup within the track.
-        return track.clips.iter().find(|c| c.id == plan.clip_id);
-    }
-    None
 }

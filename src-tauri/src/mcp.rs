@@ -47,7 +47,7 @@ use opentake_domain::{ClipType, MediaSource, TextStyle};
 use opentake_media::{decode_frame_at, decode_frames_at, FrameRequest, MediaEngine, RgbaFrame};
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::{
-    build_render_plan, even, Compositor, CosmicTextRasterizer, DecodedFrame, GpuTexture,
+    even, try_build_render_plan, Compositor, CosmicTextRasterizer, DecodedFrame, GpuTexture,
     RenderDevice, RenderSize, SourceMetrics, TextRasterRequest, TextRasterizer, TextureCache,
     TextureResolver, TextureSource,
 };
@@ -1477,7 +1477,8 @@ fn composite_frames_jpeg(
     let text = project_text(timeline);
     let (sizes, media) = project_media(manifest, project_dir);
     let metrics = ManifestMetrics { sizes };
-    let plan = build_render_plan(timeline, render_size, &metrics);
+    let plan = try_build_render_plan(timeline, render_size, &metrics)
+        .map_err(|error| BridgeError::new(format!("invalid timeline graph: {error}")))?;
 
     let dev =
         RenderDevice::try_new().map_err(|e| BridgeError::new(format!("no GPU device: {e}")))?;
@@ -1668,23 +1669,30 @@ impl TextureResolver for InspectResolver<'_> {
 /// lookup the resolver rasterizes from. Keyed by clip id.
 fn project_text(timeline: &opentake_domain::Timeline) -> HashMap<String, TextInfo> {
     let mut text: HashMap<String, TextInfo> = HashMap::new();
-    for track in &timeline.tracks {
-        for clip in &track.clips {
-            if clip.media_type != ClipType::Text {
-                continue;
+    for candidate in std::iter::once(timeline).chain(
+        timeline
+            .nested_sequences
+            .iter()
+            .map(|sequence| &sequence.timeline),
+    ) {
+        for track in &candidate.tracks {
+            for clip in &track.clips {
+                if clip.media_type != ClipType::Text {
+                    continue;
+                }
+                let (Some(content), Some(style)) = (&clip.text_content, &clip.text_style) else {
+                    continue;
+                };
+                let tl = clip.transform.top_left();
+                text.insert(
+                    clip.id.clone(),
+                    TextInfo {
+                        content: content.clone(),
+                        style: style.clone(),
+                        box_norm: (tl.x, tl.y, clip.transform.width, clip.transform.height),
+                    },
+                );
             }
-            let (Some(content), Some(style)) = (&clip.text_content, &clip.text_style) else {
-                continue;
-            };
-            let tl = clip.transform.top_left();
-            text.insert(
-                clip.id.clone(),
-                TextInfo {
-                    content: content.clone(),
-                    style: style.clone(),
-                    box_norm: (tl.x, tl.y, clip.transform.width, clip.transform.height),
-                },
-            );
         }
     }
     text

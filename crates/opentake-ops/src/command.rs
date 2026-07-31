@@ -19,8 +19,8 @@
 use std::collections::{HashMap, HashSet};
 
 use opentake_domain::{
-    ChromaKey, ClipType, ColorGrade, Crop, Effect, Interpolation, Mask, Timeline, Transform,
-    Transition, TransitionKind,
+    ChromaKey, Clip, ClipType, ColorGrade, Crop, Effect, Interpolation, Mask, NestedSequence,
+    Timeline, Track, Transform, Transition, TransitionKind,
 };
 
 use crate::editor_state::EditorState;
@@ -224,6 +224,34 @@ pub enum KeyframeValue {
 /// The unified editing command. Every editing surface routes through this.
 #[derive(Clone, Debug)]
 pub enum EditCommand {
+    /// Register an editable child timeline and place one compound clip that
+    /// references it. Sequence + clip creation is one undoable transaction.
+    CreateNestedSequence {
+        name: String,
+        timeline: Timeline,
+        track_index: usize,
+        start_frame: i32,
+        duration_frames: i32,
+    },
+    /// Turn selected root clips into one editable compound clip. The child
+    /// timeline keeps their relative tracks/timing and source edits.
+    CreateNestedSequenceFromClips { name: String, clip_ids: Vec<String> },
+    /// Apply any ordinary edit command to a child timeline while preserving one
+    /// root-level undo snapshot and the shared media manifest.
+    EditNestedSequence {
+        sequence_id: String,
+        command: Box<EditCommand>,
+    },
+    /// Replace the editable contents of one existing nested sequence.
+    SetNestedSequenceTimeline {
+        sequence_id: String,
+        timeline: Timeline,
+    },
+    /// Rename a nested sequence without changing references.
+    RenameNestedSequence { sequence_id: String, name: String },
+    /// Replace one compound clip with clipped copies of its child timeline
+    /// tracks, preserving media edits and keeping the operation undoable.
+    DissolveNestedSequence { clip_id: String },
     /// Overwrite-place clips (clears each destination range first).
     AddClips { entries: Vec<ClipEntry> },
     /// Overwrite-place clips on fresh shared tracks chosen by media type.
@@ -505,6 +533,38 @@ pub fn apply(
             ))
         }
 
+        EditCommand::CreateNestedSequence {
+            name,
+            timeline,
+            track_index,
+            start_frame,
+            duration_frames,
+        } => create_nested_sequence(
+            state,
+            name,
+            timeline,
+            track_index,
+            start_frame,
+            duration_frames,
+            ids,
+        ),
+        EditCommand::CreateNestedSequenceFromClips { name, clip_ids } => {
+            create_nested_sequence_from_clips(state, name, clip_ids, ids)
+        }
+        EditCommand::EditNestedSequence {
+            sequence_id,
+            command,
+        } => edit_nested_sequence(state, sequence_id, *command, ids),
+        EditCommand::SetNestedSequenceTimeline {
+            sequence_id,
+            timeline,
+        } => set_nested_sequence_timeline(state, sequence_id, timeline),
+        EditCommand::RenameNestedSequence { sequence_id, name } => {
+            rename_nested_sequence(state, sequence_id, name)
+        }
+        EditCommand::DissolveNestedSequence { clip_id } => {
+            dissolve_nested_sequence(state, clip_id, ids)
+        }
         EditCommand::AddClips { entries } => add_clips(state, entries, ids),
         EditCommand::AddClipsAutoTrack { entries } => add_clips_auto_track(state, entries, ids),
         EditCommand::InsertClips {
@@ -617,6 +677,465 @@ pub fn apply(
     }
 }
 
+fn create_nested_sequence(
+    state: &mut EditorState,
+    name: String,
+    timeline: Timeline,
+    track_index: usize,
+    start_frame: i32,
+    duration_frames: i32,
+    ids: &dyn IdGen,
+) -> Result<EditResult, EditError> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(EditError::Invalid(
+            "nested sequence name must not be empty".into(),
+        ));
+    }
+    if track_index >= state.timeline.tracks.len() {
+        return Err(EditError::Invalid(format!(
+            "track index out of range: {track_index}"
+        )));
+    }
+    if state.timeline.tracks[track_index].kind == ClipType::Audio {
+        return Err(EditError::Invalid(
+            "a compound clip requires a visual track".into(),
+        ));
+    }
+    if start_frame < 0 || duration_frames < 1 {
+        return Err(EditError::Invalid(
+            "compound timing requires startFrame >= 0 and durationFrames >= 1".into(),
+        ));
+    }
+    if !timeline.nested_sequences.is_empty() {
+        return Err(EditError::Invalid(
+            "child timelines must reference the root nested sequence registry".into(),
+        ));
+    }
+
+    transact(
+        state,
+        "Create Compound Clip",
+        |affected| format!("Created compound clip {}", affected.join(", ")),
+        |st| {
+            let sequence_id = ids.next_id();
+            let clip_id = ids.next_id();
+            st.timeline.nested_sequences.push(NestedSequence::new(
+                sequence_id.clone(),
+                name,
+                timeline,
+            ));
+            ops::clear_region(
+                &mut st.timeline,
+                track_index,
+                start_frame,
+                start_frame.saturating_add(duration_frames),
+                false,
+                ids,
+            );
+            st.timeline.tracks[track_index].clips.push(Clip::new_nested(
+                clip_id.clone(),
+                sequence_id,
+                start_frame,
+                duration_frames,
+            ));
+            ops::sort_clips(&mut st.timeline.tracks[track_index]);
+            Ok(vec![clip_id])
+        },
+    )
+}
+
+fn create_nested_sequence_from_clips(
+    state: &mut EditorState,
+    name: String,
+    clip_ids: Vec<String>,
+    ids: &dyn IdGen,
+) -> Result<EditResult, EditError> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(EditError::Invalid(
+            "nested sequence name must not be empty".into(),
+        ));
+    }
+    if clip_ids.is_empty() {
+        return Err(EditError::Invalid(
+            "at least one clip is required to create a compound".into(),
+        ));
+    }
+    let requested: HashSet<String> = clip_ids.iter().cloned().collect();
+    if requested.len() != clip_ids.len() {
+        return Err(EditError::Invalid(
+            "compound clip selection contains duplicate ids".into(),
+        ));
+    }
+    // Keep linked A/V partners inside the same edit boundary. Leaving one half
+    // at root would create a link group spanning independent timelines, which
+    // child edit commands cannot preserve safely.
+    let selected = ops::expand_to_link_group(&state.timeline, &requested);
+
+    let mut start_frame = i32::MAX;
+    let mut end_frame = i32::MIN;
+    let mut target_track = None;
+    let mut child = Timeline::new();
+    child.fps = state.timeline.fps;
+    child.width = state.timeline.width;
+    child.height = state.timeline.height;
+    child.settings_configured = state.timeline.settings_configured;
+    for (track_index, track) in state.timeline.tracks.iter().enumerate() {
+        let clips: Vec<Clip> = track
+            .clips
+            .iter()
+            .filter(|clip| selected.contains(&clip.id))
+            .cloned()
+            .collect();
+        if clips.is_empty() {
+            continue;
+        }
+        if target_track.is_none() && track.kind != ClipType::Audio {
+            target_track = Some(track_index);
+        }
+        for clip in &clips {
+            start_frame = start_frame.min(clip.start_frame);
+            end_frame = end_frame.max(clip.end_frame());
+        }
+        let mut child_track = Track::new(ids.next_id(), track.kind);
+        child_track.muted = track.muted;
+        child_track.hidden = track.hidden;
+        child_track.sync_locked = track.sync_locked;
+        child_track.clips = clips;
+        child.tracks.push(child_track);
+    }
+    let found: usize = child.tracks.iter().map(|track| track.clips.len()).sum();
+    if found != selected.len() {
+        return Err(EditError::Invalid(
+            "one or more clips selected for the compound no longer exist".into(),
+        ));
+    }
+    let target_track = target_track.ok_or_else(|| {
+        EditError::Invalid("a compound clip requires at least one visual clip".into())
+    })?;
+    if state.timeline.tracks[target_track]
+        .clips
+        .iter()
+        .any(|clip| {
+            !selected.contains(&clip.id)
+                && clip.start_frame < end_frame
+                && start_frame < clip.end_frame()
+        })
+    {
+        return Err(EditError::Invalid(
+            "compound selection span overlaps an unselected clip on its destination track".into(),
+        ));
+    }
+    for track in &mut child.tracks {
+        for clip in &mut track.clips {
+            clip.start_frame -= start_frame;
+        }
+    }
+    let duration_frames = end_frame - start_frame;
+
+    transact(
+        state,
+        "Create Compound Clip",
+        |affected| format!("Created compound clip {}", affected.join(", ")),
+        |st| {
+            for track in &mut st.timeline.tracks {
+                track.clips.retain(|clip| !selected.contains(&clip.id));
+            }
+            let sequence_id = ids.next_id();
+            let compound_id = ids.next_id();
+            st.timeline.nested_sequences.push(NestedSequence::new(
+                sequence_id.clone(),
+                name,
+                child,
+            ));
+            ops::clear_region(
+                &mut st.timeline,
+                target_track,
+                start_frame,
+                end_frame,
+                false,
+                ids,
+            );
+            st.timeline.tracks[target_track]
+                .clips
+                .push(Clip::new_nested(
+                    compound_id.clone(),
+                    sequence_id,
+                    start_frame,
+                    duration_frames,
+                ));
+            ops::sort_clips(&mut st.timeline.tracks[target_track]);
+            ops::prune_empty_tracks(&mut st.timeline);
+            Ok(vec![compound_id])
+        },
+    )
+}
+
+fn edit_nested_sequence(
+    state: &mut EditorState,
+    sequence_id: String,
+    command: EditCommand,
+    ids: &dyn IdGen,
+) -> Result<EditResult, EditError> {
+    if matches!(
+        &command,
+        EditCommand::Undo
+            | EditCommand::Redo
+            | EditCommand::CreateNestedSequence { .. }
+            | EditCommand::CreateNestedSequenceFromClips { .. }
+            | EditCommand::EditNestedSequence { .. }
+            | EditCommand::SetNestedSequenceTimeline { .. }
+            | EditCommand::RenameNestedSequence { .. }
+            | EditCommand::DissolveNestedSequence { .. }
+            | EditCommand::CreateFolder { .. }
+            | EditCommand::MoveToFolder { .. }
+            | EditCommand::RenameMedia { .. }
+            | EditCommand::RenameFolder { .. }
+            | EditCommand::DeleteMedia { .. }
+            | EditCommand::DeleteFolder { .. }
+            | EditCommand::SetTimelineSettings { .. }
+    ) {
+        return Err(EditError::Invalid(
+            "nested-sequence, media-library, and project-settings commands must target the root timeline".into(),
+        ));
+    }
+    let child = state
+        .timeline
+        .nested_sequences
+        .iter()
+        .find(|sequence| sequence.id == sequence_id)
+        .map(|sequence| sequence.timeline.clone())
+        .ok_or_else(|| EditError::Invalid(format!("Nested sequence not found: {sequence_id}")))?;
+
+    transact(
+        state,
+        "Edit Compound Clip",
+        |_| format!("Edited nested sequence {sequence_id}"),
+        |st| {
+            // Supply the root registry during the inner transaction so child
+            // references resolve against the same identities as preview/export.
+            // The target sequence's stored (pre-edit) contents are blanked in
+            // this temporary view: `editable` already represents those clips,
+            // and counting both copies would manufacture duplicate clip ids.
+            // The enclosing root transaction validates the fully replaced graph
+            // (including cycles through this sequence) before it can commit.
+            let mut editable = child;
+            editable.nested_sequences = st.timeline.nested_sequences.clone();
+            editable
+                .nested_sequences
+                .iter_mut()
+                .find(|sequence| sequence.id == sequence_id)
+                .expect("sequence was resolved before transaction")
+                .timeline = Timeline::new();
+            let mut child_state = EditorState::new(editable, st.manifest.clone());
+            let inner = apply(&mut child_state, command, ids)?;
+            child_state.timeline.nested_sequences.clear();
+            let sequence = st
+                .timeline
+                .nested_sequences
+                .iter_mut()
+                .find(|sequence| sequence.id == sequence_id)
+                .expect("sequence was resolved before transaction");
+            sequence.timeline = child_state.timeline;
+            st.manifest = child_state.manifest;
+            Ok(inner.affected_clip_ids)
+        },
+    )
+}
+
+fn set_nested_sequence_timeline(
+    state: &mut EditorState,
+    sequence_id: String,
+    timeline: Timeline,
+) -> Result<EditResult, EditError> {
+    if !timeline.nested_sequences.is_empty() {
+        return Err(EditError::Invalid(
+            "child timelines must reference the root nested sequence registry".into(),
+        ));
+    }
+    transact(
+        state,
+        "Edit Compound Clip",
+        |_| format!("Edited nested sequence {sequence_id}"),
+        |st| {
+            let sequence = st
+                .timeline
+                .nested_sequences
+                .iter_mut()
+                .find(|sequence| sequence.id == sequence_id)
+                .ok_or_else(|| {
+                    EditError::Invalid(format!("Nested sequence not found: {sequence_id}"))
+                })?;
+            sequence.timeline = timeline;
+            Ok(Vec::new())
+        },
+    )
+}
+
+fn rename_nested_sequence(
+    state: &mut EditorState,
+    sequence_id: String,
+    name: String,
+) -> Result<EditResult, EditError> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(EditError::Invalid(
+            "nested sequence name must not be empty".into(),
+        ));
+    }
+    transact(
+        state,
+        "Rename Compound Clip",
+        |_| format!("Renamed nested sequence {sequence_id}"),
+        |st| {
+            let sequence = st
+                .timeline
+                .nested_sequences
+                .iter_mut()
+                .find(|sequence| sequence.id == sequence_id)
+                .ok_or_else(|| {
+                    EditError::Invalid(format!("Nested sequence not found: {sequence_id}"))
+                })?;
+            sequence.name = name;
+            Ok(Vec::new())
+        },
+    )
+}
+
+fn dissolve_nested_sequence(
+    state: &mut EditorState,
+    clip_id: String,
+    ids: &dyn IdGen,
+) -> Result<EditResult, EditError> {
+    let location = state
+        .find_clip(&clip_id)
+        .ok_or_else(|| EditError::Invalid(format!("Clip not found: {clip_id}")))?;
+    let compound = state.timeline.tracks[location.track_index].clips[location.clip_index].clone();
+    let sequence_id = compound
+        .nested_sequence_id
+        .as_deref()
+        .ok_or_else(|| EditError::Invalid(format!("Clip is not a compound clip: {clip_id}")))?;
+    if (compound.speed - 1.0).abs() > f64::EPSILON || compound.reversed {
+        return Err(EditError::Invalid(
+            "retimed or reversed compound clips must be normalized before dissolve".into(),
+        ));
+    }
+    let has_parent_edits = (compound.volume - 1.0).abs() > f64::EPSILON
+        || compound.fade_in_frames != 0
+        || compound.fade_out_frames != 0
+        || (compound.opacity - 1.0).abs() > f64::EPSILON
+        || compound.transform != Transform::default()
+        || compound.crop != Crop::default()
+        || compound.link_group_id.is_some()
+        || compound.caption_group_id.is_some()
+        || compound.text_content.is_some()
+        || compound.text_style.is_some()
+        || compound.opacity_track.is_some()
+        || compound.position_track.is_some()
+        || compound.scale_track.is_some()
+        || compound.rotation_track.is_some()
+        || compound.crop_track.is_some()
+        || compound.volume_track.is_some()
+        || compound.color_grade.is_some()
+        || compound.chroma_key.is_some()
+        || !compound.masks.is_empty()
+        || !compound.effects.is_empty()
+        || compound.transition_out.is_some();
+    if has_parent_edits {
+        return Err(EditError::Invalid(
+            "compound clips with parent-level edits must be normalized before dissolve".into(),
+        ));
+    }
+    let child = state
+        .timeline
+        .nested_sequences
+        .iter()
+        .find(|sequence| sequence.id == sequence_id)
+        .map(|sequence| sequence.timeline.clone())
+        .ok_or_else(|| EditError::Invalid(format!("Nested sequence not found: {sequence_id}")))?;
+
+    transact(
+        state,
+        "Dissolve Compound Clip",
+        |affected| format!("Dissolved compound into {} clip(s)", affected.len()),
+        |st| {
+            let source_start = compound.trim_start_frame;
+            let source_end = source_start.saturating_add(compound.duration_frames);
+            let mut id_map = HashMap::new();
+            let mut link_counts: HashMap<String, usize> = HashMap::new();
+            for child_clip in child.tracks.iter().flat_map(|track| &track.clips) {
+                let visible_start = child_clip.start_frame.max(source_start);
+                let visible_end = child_clip.end_frame().min(source_end);
+                if visible_end <= visible_start {
+                    continue;
+                }
+                id_map.insert(child_clip.id.clone(), ids.next_id());
+                if let Some(group) = &child_clip.link_group_id {
+                    *link_counts.entry(group.clone()).or_default() += 1;
+                }
+            }
+            let mut link_map: HashMap<String, String> = HashMap::new();
+
+            ops::clear_region::remove_clip(&mut st.timeline, &clip_id);
+            let mut affected = Vec::new();
+
+            for child_track in child.tracks {
+                let requested = st.timeline.tracks.len();
+                let target = ops::insert_track(&mut st.timeline, requested, child_track.kind, ids);
+                st.timeline.tracks[target].muted = child_track.muted;
+                st.timeline.tracks[target].hidden = child_track.hidden;
+                st.timeline.tracks[target].sync_locked = child_track.sync_locked;
+
+                for mut child_clip in child_track.clips {
+                    let visible_start = child_clip.start_frame.max(source_start);
+                    let visible_end = child_clip.end_frame().min(source_end);
+                    if visible_end <= visible_start {
+                        continue;
+                    }
+                    let clipped_left = visible_start - child_clip.start_frame;
+                    let clipped_right = child_clip.end_frame() - visible_end;
+                    let old_id = child_clip.id.clone();
+                    child_clip.id = id_map
+                        .get(&old_id)
+                        .expect("visible child clip received a replacement id")
+                        .clone();
+                    child_clip.link_group_id = child_clip.link_group_id.take().and_then(|group| {
+                        (link_counts.get(&group).copied().unwrap_or(0) > 1).then(|| {
+                            link_map
+                                .entry(group)
+                                .or_insert_with(|| ids.next_id())
+                                .clone()
+                        })
+                    });
+                    child_clip.transition_out =
+                        child_clip.transition_out.take().and_then(|mut transition| {
+                            id_map.get(&transition.to_clip_id).map(|to_id| {
+                                transition.to_clip_id = to_id.clone();
+                                transition
+                            })
+                        });
+                    child_clip.start_frame = compound
+                        .start_frame
+                        .saturating_add(visible_start - source_start);
+                    child_clip.duration_frames = visible_end - visible_start;
+                    child_clip.trim_start_frame = child_clip
+                        .trim_start_frame
+                        .saturating_add((clipped_left as f64 * child_clip.speed).round() as i32);
+                    child_clip.trim_end_frame = child_clip
+                        .trim_end_frame
+                        .saturating_add((clipped_right as f64 * child_clip.speed).round() as i32);
+                    affected.push(child_clip.id.clone());
+                    st.timeline.tracks[target].clips.push(child_clip);
+                }
+                ops::sort_clips(&mut st.timeline.tracks[target]);
+            }
+            ops::prune_empty_tracks(&mut st.timeline);
+            Ok(affected)
+        },
+    )
+}
+
 // MARK: - Transaction helper
 
 /// Run `work` inside a transaction: snapshot, mutate, commit-if-changed. `work`
@@ -637,6 +1156,10 @@ fn transact(
         }
     };
     prune_invalid_transitions(&mut state.timeline);
+    if let Err(reason) = state.timeline.validate_nested_sequences() {
+        state.restore(before);
+        return Err(EditError::Invalid(reason));
+    }
     let after = state.snapshot();
     let timeline_changed = before.timeline != after.timeline;
     let manifest_changed = before.manifest != after.manifest;
@@ -659,6 +1182,9 @@ fn transact(
 /// transactional edit. A move/delete/trim must never leave a dormant transition
 /// that could later bind to a different neighbor.
 fn prune_invalid_transitions(timeline: &mut Timeline) {
+    for sequence in &mut timeline.nested_sequences {
+        prune_invalid_transitions(&mut sequence.timeline);
+    }
     for track in &mut timeline.tracks {
         if track.kind == ClipType::Audio {
             for clip in &mut track.clips {
@@ -1257,8 +1783,22 @@ fn set_clip_properties(
         ));
     }
     for id in &clip_ids {
-        if state.find_clip(id).is_none() {
-            return Err(EditError::Invalid(format!("Clip not found: {id}")));
+        let location = state
+            .find_clip(id)
+            .ok_or_else(|| EditError::Invalid(format!("Clip not found: {id}")))?;
+        let clip = &state.timeline.tracks[location.track_index].clips[location.clip_index];
+        if clip.nested_sequence_id.is_some()
+            && (props
+                .speed
+                .is_some_and(|speed| (speed - 1.0).abs() > f64::EPSILON)
+                || props.reversed == Some(true)
+                || props.crop.is_some_and(|crop| crop != Crop::default())
+                || props.text_content.is_some()
+                || props.text_style.is_some())
+        {
+            return Err(EditError::Invalid(format!(
+                "compound clip {id} does not support retime, reverse, crop, or text properties"
+            )));
         }
     }
     if let Some(df) = props.duration_frames {
@@ -1404,8 +1944,17 @@ fn set_keyframes(
     property: KeyframeProperty,
     payload: KeyframePayload,
 ) -> Result<EditResult, EditError> {
-    if state.find_clip(&clip_id).is_none() {
-        return Err(EditError::Invalid(format!("Clip not found: {clip_id}")));
+    let location = state
+        .find_clip(&clip_id)
+        .ok_or_else(|| EditError::Invalid(format!("Clip not found: {clip_id}")))?;
+    if property == KeyframeProperty::Crop
+        && state.timeline.tracks[location.track_index].clips[location.clip_index]
+            .nested_sequence_id
+            .is_some()
+    {
+        return Err(EditError::Invalid(
+            "compound clips do not support crop keyframes".into(),
+        ));
     }
     // Type/property agreement check.
     let ok = matches!(
@@ -1466,6 +2015,11 @@ fn stamp_keyframe(
         .find_clip(&clip_id)
         .ok_or_else(|| EditError::Invalid(format!("Clip not found: {clip_id}")))?;
     let clip = &state.timeline.tracks[loc.track_index].clips[loc.clip_index];
+    if property == KeyframeProperty::Crop && clip.nested_sequence_id.is_some() {
+        return Err(EditError::Invalid(
+            "compound clips do not support crop keyframes".into(),
+        ));
+    }
     if !clip.contains(frame) {
         return Err(EditError::Invalid(format!(
             "Frame {frame} is outside clip range ({}..{})",
@@ -1549,6 +2103,11 @@ fn upsert_keyframe(
         .find_clip(&clip_id)
         .ok_or_else(|| EditError::Invalid(format!("Clip not found: {clip_id}")))?;
     let clip = &state.timeline.tracks[loc.track_index].clips[loc.clip_index];
+    if property == KeyframeProperty::Crop && clip.nested_sequence_id.is_some() {
+        return Err(EditError::Invalid(
+            "compound clips do not support crop keyframes".into(),
+        ));
+    }
     if !clip.contains(frame) {
         return Err(EditError::Invalid(format!(
             "Frame {frame} is outside clip range ({}..{})",
@@ -1893,11 +2452,36 @@ fn set_clip_effect_field(
     )
 }
 
+fn reject_compound_effect_targets(
+    state: &EditorState,
+    clip_ids: &[String],
+    adding_effect: bool,
+) -> Result<(), EditError> {
+    if !adding_effect {
+        return Ok(());
+    }
+    for id in clip_ids {
+        let location = state
+            .find_clip(id)
+            .ok_or_else(|| EditError::Invalid(format!("Clip not found: {id}")))?;
+        if state.timeline.tracks[location.track_index].clips[location.clip_index]
+            .nested_sequence_id
+            .is_some()
+        {
+            return Err(EditError::Invalid(format!(
+                "compound clip {id} does not support direct pixel effects"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn set_color_grade(
     state: &mut EditorState,
     clip_ids: Vec<String>,
     grade: Option<ColorGrade>,
 ) -> Result<EditResult, EditError> {
+    reject_compound_effect_targets(state, &clip_ids, grade.is_some())?;
     set_clip_effect_field(state, clip_ids, "Set Color Grade", move |clip| {
         clip.color_grade = grade;
     })
@@ -1908,6 +2492,7 @@ fn set_chroma_key(
     clip_ids: Vec<String>,
     chroma_key: Option<ChromaKey>,
 ) -> Result<EditResult, EditError> {
+    reject_compound_effect_targets(state, &clip_ids, chroma_key.is_some())?;
     set_clip_effect_field(state, clip_ids, "Set Chroma Key", move |clip| {
         clip.chroma_key = chroma_key;
     })
@@ -1918,6 +2503,7 @@ fn set_masks(
     clip_ids: Vec<String>,
     masks: Vec<Mask>,
 ) -> Result<EditResult, EditError> {
+    reject_compound_effect_targets(state, &clip_ids, !masks.is_empty())?;
     set_clip_effect_field(state, clip_ids, "Set Masks", move |clip| {
         clip.masks = masks.clone();
     })
@@ -1928,6 +2514,7 @@ fn set_effects(
     clip_ids: Vec<String>,
     effects: Vec<Effect>,
 ) -> Result<EditResult, EditError> {
+    reject_compound_effect_targets(state, &clip_ids, !effects.is_empty())?;
     set_clip_effect_field(state, clip_ids, "Set Effects", move |clip| {
         clip.effects = effects.clone();
     })
@@ -1943,6 +2530,16 @@ fn set_transition(
     let from_location = state
         .find_clip(&from_clip_id)
         .ok_or_else(|| EditError::Invalid(format!("Clip not found: {from_clip_id}")))?;
+
+    if kind.is_some()
+        && state.timeline.tracks[from_location.track_index].clips[from_location.clip_index]
+            .nested_sequence_id
+            .is_some()
+    {
+        return Err(EditError::Invalid(
+            "compound clips do not support direct transitions".into(),
+        ));
+    }
 
     // Clearing is allowed even after the pair stopped being adjacent so stale
     // metadata can always be removed safely. Pair identity must still match.
@@ -1974,6 +2571,14 @@ fn set_transition(
     let to_location = state
         .find_clip(&to_clip_id)
         .ok_or_else(|| EditError::Invalid(format!("Clip not found: {to_clip_id}")))?;
+    if state.timeline.tracks[to_location.track_index].clips[to_location.clip_index]
+        .nested_sequence_id
+        .is_some()
+    {
+        return Err(EditError::Invalid(
+            "compound clips do not support direct transitions".into(),
+        ));
+    }
     if from_location.track_index != to_location.track_index {
         return Err(EditError::Invalid(
             "A transition requires clips on the same track".into(),

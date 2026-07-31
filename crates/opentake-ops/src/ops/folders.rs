@@ -131,9 +131,15 @@ pub fn delete_folder(
     (folders_removed, assets_removed, clips_removed)
 }
 
-/// Remove every clip whose `media_ref` is in `asset_ids`, then prune any tracks
-/// left empty (mirroring `remove_clips`). Returns the count of clips removed.
+/// Remove every clip whose `media_ref` is in `asset_ids` from the root and all
+/// registered nested timelines, then prune tracks left empty (mirroring
+/// `remove_clips`). Returns the total count of clips removed across the graph.
 fn cascade_remove_clips(timeline: &mut Timeline, asset_ids: &HashSet<String>) -> usize {
+    let nested_count = timeline
+        .nested_sequences
+        .iter_mut()
+        .map(|sequence| cascade_remove_clips(&mut sequence.timeline, asset_ids))
+        .sum::<usize>();
     let doomed: Vec<String> = timeline
         .tracks
         .iter()
@@ -148,7 +154,7 @@ fn cascade_remove_clips(timeline: &mut Timeline, asset_ids: &HashSet<String>) ->
     if count > 0 {
         crate::ops::prune_empty_tracks(timeline);
     }
-    count
+    nested_count + count
 }
 
 /// Expand a set of root folder ids to include all transitive descendant folders
@@ -309,6 +315,40 @@ mod tests {
         // Only the clip referencing 'a' was removed.
         assert_eq!(tl.tracks[0].clips.len(), 1);
         assert_eq!(tl.tracks[0].clips[0].id, "clip-2");
+    }
+
+    #[test]
+    fn delete_media_cascades_through_nested_timelines() {
+        use opentake_domain::{Clip, NestedSequence, Track};
+
+        let mut m = MediaManifest::new();
+        m.entries.push(entry("a"));
+        m.entries.push(entry("b"));
+
+        let mut child = timeline_with_clip("nested-a", "a");
+        child.tracks[0]
+            .clips
+            .push(Clip::new("nested-b", "b", 40, 30));
+        let mut root = Timeline::new();
+        let mut root_track = Track::new("root-track", ClipType::Video);
+        root_track
+            .clips
+            .push(Clip::new_nested("compound", "sequence", 0, 70));
+        root.tracks.push(root_track);
+        root.nested_sequences
+            .push(NestedSequence::new("sequence", "Nested", child));
+
+        let (assets, clips) =
+            delete_media(&mut root, &mut m, &["a".to_string()].into_iter().collect());
+
+        assert_eq!(assets, 1);
+        assert_eq!(clips, 1);
+        assert_eq!(root.nested_sequences[0].timeline.tracks.len(), 1);
+        assert_eq!(
+            root.nested_sequences[0].timeline.tracks[0].clips[0].id,
+            "nested-b"
+        );
+        assert_eq!(root.tracks[0].clips[0].id, "compound");
     }
 
     #[test]

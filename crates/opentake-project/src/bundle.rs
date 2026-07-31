@@ -192,6 +192,12 @@ impl Project {
         let (mut timeline, timeline_blockers, timeline_document) =
             decode_component::<Timeline>(&timeline_bytes, layout::TIMELINE_FILE)?;
         compatibility::repair_timeline_ids(&mut timeline, &timeline_document);
+        timeline
+            .validate_nested_sequences()
+            .map_err(|reason| ProjectError::InvalidTimeline {
+                file: layout::TIMELINE_FILE,
+                reason,
+            })?;
         after_component(layout::TIMELINE_FILE);
         let mut compatibility = ProjectCompatibility::default();
         compatibility.extend(timeline_blockers);
@@ -396,6 +402,13 @@ impl EncodedProject {
     /// Produce the exact byte snapshot before any destination path is created.
     fn prepare(project: &Project) -> Result<Self> {
         project.compatibility.ensure_writable()?;
+        project
+            .timeline
+            .validate_nested_sequences()
+            .map_err(|reason| ProjectError::InvalidTimeline {
+                file: layout::TIMELINE_FILE,
+                reason,
+            })?;
         Ok(Self {
             timeline: encode_component(layout::TIMELINE_FILE, &project.timeline)?,
             manifest: encode_component(layout::MANIFEST_FILE, &project.manifest)?,

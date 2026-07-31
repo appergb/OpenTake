@@ -54,6 +54,10 @@ import type {
  * until its production gesture route is recorded here.
  */
 export const EDIT_GESTURE_COMMAND_MATRIX = [
+  { gesture: "group selected clips", action: "createNestedSequence", requestType: "createNestedSequence", backend: "CreateNestedSequenceFromClips" },
+  { gesture: "edit inside compound", action: "editNestedSequence", requestType: "editNestedSequence", backend: "EditNestedSequence" },
+  { gesture: "rename compound", action: "renameNestedSequence", requestType: "renameNestedSequence", backend: "RenameNestedSequence" },
+  { gesture: "dissolve compound", action: "dissolveNestedSequence", requestType: "dissolveNestedSequence", backend: "DissolveNestedSequence" },
   { gesture: "media overwrite drop", action: "addClips", requestType: "addClips", backend: "AddClips" },
   { gesture: "media ripple insert", action: "insertClips", requestType: "insertClips", backend: "InsertClips" },
   { gesture: "clip drag commit", action: "moveClips", requestType: "moveClips", backend: "MoveClips" },
@@ -108,12 +112,63 @@ export const EDIT_GESTURE_COMMAND_MATRIX_IS_EXHAUSTIVE: [MissingEditRequestType]
   ? true
   : never = true;
 
-async function applyAndRefresh(cmd: Parameters<typeof api.editApply>[0]) {
-  const res = await api.editApply(cmd);
+export function currentTimeline(): Timeline {
+  const root = useProjectStore.getState().timeline;
+  const sequenceId = useEditorUiStore.getState().activeNestedSequenceId;
+  return root.nestedSequences?.find((sequence) => sequence.id === sequenceId)?.timeline ?? root;
+}
+
+const ROOT_SCOPED_EDIT_REQUEST_TYPES = new Set<EditRequest["type"]>([
+  "createNestedSequence",
+  "editNestedSequence",
+  "renameNestedSequence",
+  "dissolveNestedSequence",
+  "createFolder",
+  "moveToFolder",
+  "renameMedia",
+  "renameFolder",
+  "deleteMedia",
+  "deleteFolder",
+  "setTimelineSettings",
+]);
+
+async function applyAndRefresh(
+  cmd: Parameters<typeof api.editApply>[0],
+  options: { root?: boolean } = {},
+) {
+  const sequenceId = useEditorUiStore.getState().activeNestedSequenceId;
+  const targetsRoot = options.root || ROOT_SCOPED_EDIT_REQUEST_TYPES.has(cmd.type);
+  const request =
+    sequenceId && !targetsRoot
+      ? ({ type: "editNestedSequence", sequenceId, command: cmd } as const)
+      : cmd;
+  const res = await api.editApply(request);
   // Tauri pushes timeline_changed -> sync re-fetches. The browser fallback has
   // no event channel, so refresh explicitly there.
   if (!isTauri && res.changed) await forceRefresh();
   return res;
+}
+
+export async function createNestedSequence(name = "Compound clip") {
+  const clipIds = Array.from(useEditorUiStore.getState().selectedClipIds);
+  if (clipIds.length === 0) return;
+  const result = await applyAndRefresh({ type: "createNestedSequence", name, clipIds }, { root: true });
+  if (result.affectedClipIds[0]) {
+    useEditorUiStore.getState().selectClips(new Set([result.affectedClipIds[0]]));
+  }
+  return result;
+}
+
+export async function renameNestedSequence(sequenceId: string, name: string) {
+  return applyAndRefresh({ type: "renameNestedSequence", sequenceId, name }, { root: true });
+}
+
+export async function editNestedSequence(sequenceId: string, command: EditRequest) {
+  return applyAndRefresh({ type: "editNestedSequence", sequenceId, command }, { root: true });
+}
+
+export async function dissolveNestedSequence(clipId: string) {
+  return applyAndRefresh({ type: "dissolveNestedSequence", clipId }, { root: true });
 }
 
 export async function addClips(entries: ClipEntryReq[]) {
@@ -486,7 +541,7 @@ export async function splitAtPlayhead() {
   let ids = selected;
   if (ids.length === 0) {
     // No selection: target every clip the playhead currently intersects.
-    const timeline = useProjectStore.getState().timeline;
+    const timeline = currentTimeline();
     ids = [];
     for (const track of timeline.tracks) {
       for (const c of track.clips) {
@@ -508,7 +563,7 @@ function clipsUnderPlayhead(): Clip[] {
   const selected = new Set(ui.selectedClipIds);
   const restrict = selected.size > 0;
   const out: Clip[] = [];
-  for (const track of useProjectStore.getState().timeline.tracks) {
+  for (const track of currentTimeline().tracks) {
     for (const c of track.clips) {
       if (frame <= c.startFrame || frame >= c.startFrame + c.durationFrames) continue;
       if (restrict && !selected.has(c.id)) continue;
@@ -539,7 +594,7 @@ export async function trimEndToPlayhead() {
  *  to live ids first is what makes ⌫ reliably delete. */
 function liveSelectedClipIds(): string[] {
   const live = new Set<string>();
-  for (const track of useProjectStore.getState().timeline.tracks) {
+  for (const track of currentTimeline().tracks) {
     for (const clip of track.clips) live.add(clip.id);
   }
   return [...useEditorUiStore.getState().selectedClipIds].filter((id) => live.has(id));
@@ -691,7 +746,7 @@ export async function rippleDeleteMarkedRange(): Promise<boolean> {
   // Anchor = the selected clip's track (upstream `rippleDeleteRanges(anchorClipId:)`).
   const anchorId = liveSelectedClipIds()[0];
   if (!anchorId) return false;
-  const timeline = useProjectStore.getState().timeline;
+  const timeline = currentTimeline();
   let trackIndex = -1;
   for (let ti = 0; ti < timeline.tracks.length && trackIndex < 0; ti++) {
     if (timeline.tracks[ti].clips.some((c) => c.id === anchorId)) trackIndex = ti;
@@ -718,7 +773,7 @@ export async function rippleDeleteSelectedGap(): Promise<boolean> {
   const gap = ui.selectedGap;
   if (!gap || gap.endFrame <= gap.startFrame) return false;
   // Guard: an out-of-band edit may have filled the gap (upstream re-checks).
-  const timeline = useProjectStore.getState().timeline;
+  const timeline = currentTimeline();
   const track = timeline.tracks[gap.trackIndex];
   if (
     !track ||
@@ -745,7 +800,7 @@ export async function rippleDeleteSelectedGap(): Promise<boolean> {
 export async function nudgeSelectedClips(deltaFrames: number) {
   const ui = useEditorUiStore.getState();
   if (ui.selectedClipIds.size === 0) return;
-  const timeline = useProjectStore.getState().timeline;
+  const timeline = currentTimeline();
   // Linked partners travel together (the backend moveClips does NOT auto-expand
   // link groups — the drag path expands them too).
   const expanded = expandLinkGroup(timeline, ui.selectedClipIds);
@@ -939,7 +994,7 @@ async function applyProjectSettings(settings: ProjectSettingsTarget): Promise<vo
 }
 
 async function reconcileProjectSettings(item: MediaItem): Promise<void> {
-  const timeline = useProjectStore.getState().timeline;
+  const timeline = currentTimeline();
   const decision = checkProjectSettings(timeline, [item]);
   if (decision.kind === "proceed") return;
   if (decision.kind === "apply") {
@@ -1009,13 +1064,13 @@ export function addMomentToTimelineAt(
 
 async function addMediaToTimelineInner(item: MediaItem): Promise<void> {
   await reconcileProjectSettings(item);
-  let timeline = useProjectStore.getState().timeline;
+  let timeline = currentTimeline();
   if (firstCompatibleTrackIndex(timeline, item.type) === null) {
     await insertTrack(item.type === "audio" ? "audio" : "video");
     // Ensure the mirror reflects the new track before computing the entry
     // (Tauri's timeline_changed refresh is async; force it synchronously here).
     await forceRefresh();
-    timeline = useProjectStore.getState().timeline;
+    timeline = currentTimeline();
   }
   const entry = entryForMedia(timeline, item);
   if (!entry) return;
@@ -1040,11 +1095,11 @@ async function addMediaToTimelineAtInner(
   insertTrackAt?: number,
 ): Promise<void> {
   await reconcileProjectSettings(item);
-  let timeline = useProjectStore.getState().timeline;
+  let timeline = currentTimeline();
   if (insertTrackAt !== undefined) {
     const res = await insertTrack(item.type === "audio" ? "audio" : "video", insertTrackAt);
     await forceRefresh();
-    timeline = useProjectStore.getState().timeline;
+    timeline = currentTimeline();
     const insertedTrackId = res?.affectedClipIds[0];
     const insertedIndex = insertedTrackId
       ? timeline.tracks.findIndex((track) => track.id === insertedTrackId)
@@ -1056,7 +1111,7 @@ async function addMediaToTimelineAtInner(
     const fallbackInsertAt = preferredTrackIndex ?? undefined;
     const res = await insertTrack(item.type === "audio" ? "audio" : "video", fallbackInsertAt);
     await forceRefresh();
-    timeline = useProjectStore.getState().timeline;
+    timeline = currentTimeline();
     const insertedTrackId = res?.affectedClipIds[0];
     const insertedIndex = insertedTrackId
       ? timeline.tracks.findIndex((track) => track.id === insertedTrackId)
@@ -1136,11 +1191,11 @@ async function addMomentToTimelineAtInner(
   }
 
   await reconcileProjectSettings(item);
-  let timeline = useProjectStore.getState().timeline;
+  let timeline = currentTimeline();
   if (insertTrackAt !== undefined) {
     const res = await insertTrack(item.type === "audio" ? "audio" : "video", insertTrackAt);
     await forceRefresh();
-    timeline = useProjectStore.getState().timeline;
+    timeline = currentTimeline();
     const insertedTrackId = res?.affectedClipIds[0];
     const insertedIndex = insertedTrackId
       ? timeline.tracks.findIndex((track) => track.id === insertedTrackId)
@@ -1152,7 +1207,7 @@ async function addMomentToTimelineAtInner(
     const fallbackInsertAt = preferredTrackIndex ?? undefined;
     const res = await insertTrack(item.type === "audio" ? "audio" : "video", fallbackInsertAt);
     await forceRefresh();
-    timeline = useProjectStore.getState().timeline;
+    timeline = currentTimeline();
     const insertedTrackId = res?.affectedClipIds[0];
     const insertedIndex = insertedTrackId
       ? timeline.tracks.findIndex((track) => track.id === insertedTrackId)
@@ -1227,7 +1282,7 @@ const DEFAULT_TEXT_STYLE: TextStyle = {
 export async function addTextClip() {
   const ui = useEditorUiStore.getState();
   const startFrame = ui.activeFrame;
-  const timeline = useProjectStore.getState().timeline;
+  const timeline = currentTimeline();
 
   const durationFrames = durationSecondsToFrames(DEFAULT_TEXT_SECONDS, timeline.fps);
   const entry: TextAutoTrackEntryReq = {
@@ -1286,7 +1341,7 @@ export async function generateCaptions(request: CaptionRequest) {
  *  linked companions, so a paste reproduces the video+audio pair). */
 export function copyClips() {
   const ui = useEditorUiStore.getState();
-  const tl = useProjectStore.getState().timeline;
+  const tl = currentTimeline();
   const ids = ui.selectedClipIds;
   if (ids.size === 0) return;
   // Expand selection to include linked companions.
@@ -1332,7 +1387,7 @@ export async function pasteClipsAtPlayhead() {
   const cb = useClipboardStore.getState();
   if (!cb.hasContent || cb.entries.length === 0) return;
   const ui = useEditorUiStore.getState();
-  const tl = useProjectStore.getState().timeline;
+  const tl = currentTimeline();
   const offset = ui.activeFrame - cb.sourceFirstFrame;
   const entries: ClipEntryReq[] = [];
   const sourceLinkGroups: (string | undefined)[] = [];

@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use opentake_domain::Timeline;
 use opentake_media::MediaCancelToken;
 use opentake_render::{
-    build_render_plan, Compositor, DecodedFrame, RenderDevice, RenderPlan, RenderSize,
+    try_build_render_plan, Compositor, DecodedFrame, RenderDevice, RenderPlan, RenderSize,
 };
 
 use super::project::{ManifestMetrics, MediaInfo, TextInfo};
@@ -314,7 +314,8 @@ impl RenderLoop {
         let dev = RenderDevice::try_new().map_err(|e| format!("no GPU device: {e}"))?;
         let compositor = Compositor::new(&dev.device);
         let metrics = ManifestMetrics { sizes };
-        let plan = build_render_plan(&timeline, render_size, &metrics);
+        let plan = try_build_render_plan(&timeline, render_size, &metrics)
+            .map_err(|error| format!("invalid timeline graph: {error}"))?;
         let state = PlaybackResolverState::new(
             media,
             text,

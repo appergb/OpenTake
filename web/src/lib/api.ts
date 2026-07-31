@@ -925,6 +925,7 @@ export interface CompositeStillRequest {
   sessionId: string;
   sessionGeneration: number;
   seekGeneration: number;
+  sequenceId?: string;
 }
 
 export interface CancelCompositeStillRequest {

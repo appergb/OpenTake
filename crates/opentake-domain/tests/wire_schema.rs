@@ -74,6 +74,7 @@ fn full_clip() -> Clip {
     };
     clip.link_group_id = Some("link".to_owned());
     clip.caption_group_id = Some("caption".to_owned());
+    clip.nested_sequence_id = Some("sequence".to_owned());
     clip.text_content = Some("text".to_owned());
     clip.text_style = Some(full_text_style());
     clip.opacity_track = Some(KeyframeTrack::from_keyframes(vec![

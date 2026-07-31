@@ -24,6 +24,7 @@ import { useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { useProjectStore } from "../../store/projectStore";
+import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
 import * as edit from "../../store/editActions";
 import { type TFunction } from "../../i18n";
@@ -48,7 +49,12 @@ function mediaTypeLabel(type: MediaItem["type"]): string {
 export function SwapMediaSection({ clip, t }: { clip: Clip; t: TFunction }) {
   const [open, setOpen] = useState(false);
   const items = useMediaStore((s) => s.items);
-  const timeline = useProjectStore((s) => s.timeline);
+  const rootTimeline = useProjectStore((s) => s.timeline);
+  const activeNestedSequenceId = useEditorUiStore((s) => s.activeNestedSequenceId);
+  const timeline =
+    rootTimeline.nestedSequences?.find(
+      (sequence) => sequence.id === activeNestedSequenceId,
+    )?.timeline ?? rootTimeline;
 
   // "单链组" gate: hide when the clip belongs to a link group with > 1 member.
   if (clip.linkGroupId) {

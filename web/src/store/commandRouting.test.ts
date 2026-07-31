@@ -36,6 +36,10 @@ import {
   addClips,
   addTexts,
   addTextsAutoTrack,
+  createNestedSequence,
+  editNestedSequence,
+  renameNestedSequence,
+  dissolveNestedSequence,
   createFolder,
   deleteFolder,
   deleteMedia,
@@ -75,7 +79,7 @@ import {
   upsertKeyframe,
 } from "./editActions";
 import { useProjectStore } from "./projectStore";
-import { createEditorUiStore } from "./uiStore";
+import { createEditorUiStore, useEditorUiStore } from "./uiStore";
 
 const transform: Transform = {
   centerX: 0.5,
@@ -125,6 +129,7 @@ describe("edit gesture command routing", () => {
   beforeEach(() => {
     ipc.calls.length = 0;
     ipc.failure = null;
+    useEditorUiStore.getState().exitNestedSequence();
   });
 
   afterEach(() => vi.unstubAllGlobals());
@@ -141,6 +146,27 @@ describe("edit gesture command routing", () => {
       expect(ipc.calls.slice(before)).toEqual([expected]);
     };
 
+    useEditorUiStore.getState().selectClips(new Set(["clip-a"]));
+    await route(
+      { type: "createNestedSequence", name: "Scene", clipIds: ["clip-a"] },
+      () => createNestedSequence("Scene"),
+    );
+    await route(
+      {
+        type: "editNestedSequence",
+        sequenceId: "sequence-a",
+        command: { type: "removeClips", clipIds: ["child-a"] },
+      },
+      () => editNestedSequence("sequence-a", { type: "removeClips", clipIds: ["child-a"] }),
+    );
+    await route(
+      { type: "renameNestedSequence", sequenceId: "sequence-a", name: "Edited" },
+      () => renameNestedSequence("sequence-a", "Edited"),
+    );
+    await route(
+      { type: "dissolveNestedSequence", clipId: "compound-a" },
+      () => dissolveNestedSequence("compound-a"),
+    );
     await route({ type: "addClips", entries: [clipEntry] }, () => addClips([clipEntry]));
     await route(
       { type: "insertClips", trackIndex: 0, atFrame: 5, entries: [clipEntry] },
@@ -263,6 +289,26 @@ describe("edit gesture command routing", () => {
     expect(illegal).toEqual([]);
   });
 
+  it("routes child edits to the active sequence but keeps global commands at root", async () => {
+    useEditorUiStore.getState().enterNestedSequence("sequence-a");
+
+    await addClips([clipEntry]);
+    await deleteMedia(["media-a"]);
+    await createFolder("Selects");
+    await setTimelineSettings(24, 1280, 720);
+
+    expect(ipc.calls).toEqual([
+      {
+        type: "editNestedSequence",
+        sequenceId: "sequence-a",
+        command: { type: "addClips", entries: [clipEntry] },
+      },
+      { type: "deleteMedia", assetIds: ["media-a"] },
+      { type: "createFolder", name: "Selects" },
+      { type: "setTimelineSettings", fps: 24, width: 1280, height: 720 },
+    ]);
+  });
+
   it("project_store_has_no_timeline_mutator_and_refreshes_only_from_native_events", () => {
     const store = useProjectStore.getState();
     expect("setMirror" in store).toBe(false);
@@ -293,6 +339,23 @@ describe("edit gesture command routing", () => {
     expect(() => {
       useProjectStore.getState().timeline.fps = 120;
     }).toThrow();
+  });
+
+  it("nested timeline gestures are wrapped with the active sequence authority", async () => {
+    useEditorUiStore.getState().enterNestedSequence("sequence-a");
+
+    await moveClips([{ clipId: "child-a", toTrack: 0, toFrame: 12 }]);
+
+    expect(ipc.calls).toEqual([
+      {
+        type: "editNestedSequence",
+        sequenceId: "sequence-a",
+        command: {
+          type: "moveClips",
+          moves: [{ clipId: "child-a", toTrack: 0, toFrame: 12 }],
+        },
+      },
+    ]);
   });
 
   it("rust_authority_and_ui_persistence_are_independently_owned", async () => {

@@ -148,6 +148,15 @@ pub struct Clip {
         skip_serializing_if = "Option::is_none"
     )]
     pub caption_group_id: Option<String>,
+    /// ID of an editable child timeline in the root timeline's
+    /// `nestedSequences` registry. Nested clips never overload `mediaRef` with
+    /// a sentinel value, so media and sequence identity remain unambiguous.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_default_on_error",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub nested_sequence_id: Option<String>,
 
     // Text clips only.
     #[serde(
@@ -254,6 +263,7 @@ impl Clip {
         "crop",
         "linkGroupId",
         "captionGroupId",
+        "nestedSequenceId",
         "textContent",
         "textStyle",
         "opacityTrack",
@@ -344,6 +354,7 @@ impl Clip {
             crop: Crop::default(),
             link_group_id: None,
             caption_group_id: None,
+            nested_sequence_id: None,
             text_content: None,
             text_style: None,
             opacity_track: None,
@@ -359,6 +370,18 @@ impl Clip {
             transition_out: None,
             reversed: false,
         }
+    }
+
+    /// Construct a clip that references one editable nested sequence.
+    pub fn new_nested(
+        id: impl Into<String>,
+        sequence_id: impl Into<String>,
+        start_frame: i32,
+        duration_frames: i32,
+    ) -> Self {
+        let mut clip = Self::new(id, "", start_frame, duration_frames);
+        clip.nested_sequence_id = Some(sequence_id.into());
+        clip
     }
 
     /// Frame where this clip ends on the timeline (exclusive end).

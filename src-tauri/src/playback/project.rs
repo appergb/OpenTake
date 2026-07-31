@@ -53,23 +53,30 @@ impl SourceMetrics for ManifestMetrics {
 /// `export::project_text`'s identical projection.
 pub fn project_text(timeline: &Timeline) -> HashMap<String, TextInfo> {
     let mut text: HashMap<String, TextInfo> = HashMap::new();
-    for track in &timeline.tracks {
-        for clip in &track.clips {
-            if clip.media_type != ClipType::Text {
-                continue;
+    for candidate in std::iter::once(timeline).chain(
+        timeline
+            .nested_sequences
+            .iter()
+            .map(|sequence| &sequence.timeline),
+    ) {
+        for track in &candidate.tracks {
+            for clip in &track.clips {
+                if clip.media_type != ClipType::Text {
+                    continue;
+                }
+                let (Some(content), Some(style)) = (&clip.text_content, &clip.text_style) else {
+                    continue;
+                };
+                let tl = clip.transform.top_left();
+                text.insert(
+                    clip.id.clone(),
+                    TextInfo {
+                        content: content.clone(),
+                        style: style.clone(),
+                        box_norm: (tl.x, tl.y, clip.transform.width, clip.transform.height),
+                    },
+                );
             }
-            let (Some(content), Some(style)) = (&clip.text_content, &clip.text_style) else {
-                continue;
-            };
-            let tl = clip.transform.top_left();
-            text.insert(
-                clip.id.clone(),
-                TextInfo {
-                    content: content.clone(),
-                    style: style.clone(),
-                    box_norm: (tl.x, tl.y, clip.transform.width, clip.transform.height),
-                },
-            );
         }
     }
     text

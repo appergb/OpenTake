@@ -193,6 +193,10 @@ interface UiState {
   selectedGap: GapSelection | null;
 
   // Timeline view
+  /** Root-registry sequence currently opened for direct timeline editing. */
+  activeNestedSequenceId: string | null;
+  enterNestedSequence: (sequenceId: string) => void;
+  exitNestedSequence: () => void;
   zoomScale: number;
   minZoomScale: number;
   scrollLeft: number;
@@ -365,6 +369,29 @@ export const createEditorUiStore = () => create<UiState>((set, get) => ({
   selectedTimelineRange: null,
   selectedGap: null,
 
+  activeNestedSequenceId: null,
+  enterNestedSequence: (activeNestedSequenceId) =>
+    set({
+      activeNestedSequenceId,
+      selectedClipIds: new Set(),
+      selectedGap: null,
+      selectedTimelineRange: null,
+      currentFrame: 0,
+      activeFrame: 0,
+      scrollLeft: 0,
+      scrollTop: 0,
+    }),
+  exitNestedSequence: () =>
+    set({
+      activeNestedSequenceId: null,
+      selectedClipIds: new Set(),
+      selectedGap: null,
+      selectedTimelineRange: null,
+      currentFrame: 0,
+      activeFrame: 0,
+      scrollLeft: 0,
+      scrollTop: 0,
+    }),
   zoomScale: loadZoomScale(),
   minZoomScale: 0.05,
   scrollLeft: 0,

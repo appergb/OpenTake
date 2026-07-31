@@ -13,7 +13,7 @@
 //! The black background is NOT a clip here — it is the compositor clear color
 //! `(0,0,0,1)` (SPEC §3.5).
 
-use opentake_domain::{ChromaKey, ClipType, ColorGrade, Effect, Mask};
+use opentake_domain::{ChromaKey, Clip, ClipType, ColorGrade, Effect, Mask};
 
 /// Canvas pixel size (already even-ized; see [`crate::size`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -56,16 +56,50 @@ pub enum TextureSource {
     Text { clip_id: String },
 }
 
+/// One compound clip surrounding a flattened leaf, plus the child canvas size
+/// that clip transforms as its source.
+#[derive(Clone, PartialEq, Debug)]
+pub struct CompoundAncestor {
+    pub clip: Clip,
+    pub canvas_size: (f64, f64),
+}
+
+/// One audio-bearing leaf projected into root timeline coordinates. `clip`
+/// owns the visible source window used for decode/placement, while `gain_clip`
+/// and `compound_ancestors` retain unclipped timing for frame-accurate volume
+/// keyframe and fade sampling.
+#[derive(Clone, PartialEq, Debug)]
+pub struct AudioClipPlan {
+    pub clip: Clip,
+    pub gain_clip: Clip,
+    pub compound_ancestors: Vec<Clip>,
+}
+
+impl AudioClipPlan {
+    pub fn volume_at(&self, frame: i32) -> f64 {
+        self.compound_ancestors
+            .iter()
+            .fold(self.gain_clip.volume_at(frame), |gain, ancestor| {
+                gain * ancestor.volume_at(frame)
+            })
+    }
+}
+
 /// Static (frame-independent) render description for one clip.
 #[derive(Clone, PartialEq, Debug)]
 pub struct ClipPlan {
+    /// Immutable clip snapshot owned by this plan. This lets recursively
+    /// flattened nested clips use the exact same plan in preview and export
+    /// without indexing back into a different timeline tree.
+    pub clip: Clip,
     pub clip_id: String,
-    /// Index of the timeline track this clip belongs to (blend order; SPEC §1.5).
+    /// Flattened track index retained for diagnostics and compatibility.
     pub track_index: usize,
-    /// Index of the clip inside `timeline.tracks[track_index].clips`, so
-    /// [`RenderPlan::frame`](crate::plan::RenderPlan::frame) can fetch the `&Clip`
-    /// without a string search (SPEC §2.4 note).
+    /// Index of the source clip inside its immediate timeline track.
     pub clip_index: usize,
+    /// Root-to-leaf track path used for deterministic nested blend order.
+    pub blend_path: Vec<usize>,
+    pub compound_ancestors: Vec<CompoundAncestor>,
     pub source: TextureSource,
     pub start_frame: i32,
     /// Half-open end (`start_frame + duration_frames`).
@@ -121,6 +155,10 @@ pub struct RenderPlan {
     /// ExportService L237-248; SPEC §4.2). Ordered by appearance, NOT deduped
     /// per track (upstream collects text clips without the per-track skip rule).
     pub text_plans: Vec<ClipPlan>,
+    /// Audio-bearing leaf clips flattened through the same nested timing map.
+    /// Export consumes this list so compound preview/video and audio share
+    /// identical in/out boundaries.
+    pub audio_clips: Vec<AudioClipPlan>,
 }
 
 /// One draw after evaluating a single frame (instantaneous).

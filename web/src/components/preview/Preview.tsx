@@ -72,7 +72,12 @@ import { createScrubGesture, transitionScrubGesture } from "./scrubGesture";
 
 export function Preview() {
   const t = useT();
-  const timeline = useProjectStore((s) => s.timeline);
+  const rootTimeline = useProjectStore((s) => s.timeline);
+  const activeNestedSequenceId = useEditorUiStore((s) => s.activeNestedSequenceId);
+  const timeline =
+    rootTimeline.nestedSequences?.find(
+      (sequence) => sequence.id === activeNestedSequenceId,
+    )?.timeline ?? rootTimeline;
   const projectEpoch = useProjectStore((s) => s.projectEpoch);
   const timelineVersion = useProjectStore((s) => s.timelineVersion);
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
@@ -215,7 +220,7 @@ export function Preview() {
   const activeShownFrame = previewing ? Math.round(mediaTime * fps) : activeFrame;
   const playing = previewing ? mediaPlaying : isPlaying;
   const playbackRoute = resolveTimelinePlaybackRoute(timeline, {
-    rustAvailable: isTauri,
+    rustAvailable: isTauri && !activeNestedSequenceId,
     rustEnabled: rustEngineEnabled() && !rustEngineFailed,
     forceRust:
       webkitPlaybackFailedRevision === `${projectEpoch}:${timelineVersion}`,
@@ -229,10 +234,10 @@ export function Preview() {
   const requestCompositeStill = useCallback(
     (request: Parameters<typeof compositeFrame>[0]) =>
       compositeFrame(
-        request,
+        { ...request, sequenceId: activeNestedSequenceId ?? undefined },
         previewQualityMaxSize(previewQualityShortEdge, timeline.width, timeline.height),
       ),
-    [previewQualityShortEdge, timeline.height, timeline.width],
+    [activeNestedSequenceId, previewQualityShortEdge, timeline.height, timeline.width],
   );
 
   const seekTo = (frame: number) => {

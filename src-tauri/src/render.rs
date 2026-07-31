@@ -38,7 +38,7 @@ use opentake_ops::command::RenameEntry;
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::wgpu;
 use opentake_render::{
-    build_render_plan, even, Compositor, CosmicTextRasterizer, DecodedFrame, GpuTexture,
+    even, try_build_render_plan, Compositor, CosmicTextRasterizer, DecodedFrame, GpuTexture,
     RenderDevice, RenderSize, SourceMetrics, TextRasterRequest, TextRasterizer, TextureCache,
     TextureResolver, TextureSource,
 };
@@ -74,6 +74,8 @@ pub struct CompositeFrameRequest {
     pub session_id: String,
     pub session_generation: u64,
     pub seek_generation: u64,
+    #[serde(default)]
+    pub sequence_id: Option<String>,
 }
 
 /// Lazily-acquired GPU device + compositor, cached across composite calls.
@@ -417,23 +419,30 @@ fn composite_rgba_for_snapshot(
     // Project text clips (content + style + box) so the resolver can rasterize
     // them on demand. Keyed by clip id, matching `TextureSource::Text { clip_id }`.
     let mut text: HashMap<String, TextInfo> = HashMap::new();
-    for track in &timeline.tracks {
-        for clip in &track.clips {
-            if clip.media_type != ClipType::Text {
-                continue;
+    for candidate in std::iter::once(timeline).chain(
+        timeline
+            .nested_sequences
+            .iter()
+            .map(|sequence| &sequence.timeline),
+    ) {
+        for track in &candidate.tracks {
+            for clip in &track.clips {
+                if clip.media_type != ClipType::Text {
+                    continue;
+                }
+                let (Some(content), Some(style)) = (&clip.text_content, &clip.text_style) else {
+                    continue;
+                };
+                let tl = clip.transform.top_left();
+                text.insert(
+                    clip.id.clone(),
+                    TextInfo {
+                        content: content.clone(),
+                        style: style.clone(),
+                        box_norm: (tl.x, tl.y, clip.transform.width, clip.transform.height),
+                    },
+                );
             }
-            let (Some(content), Some(style)) = (&clip.text_content, &clip.text_style) else {
-                continue;
-            };
-            let tl = clip.transform.top_left();
-            text.insert(
-                clip.id.clone(),
-                TextInfo {
-                    content: content.clone(),
-                    style: style.clone(),
-                    box_norm: (tl.x, tl.y, clip.transform.width, clip.transform.height),
-                },
-            );
         }
     }
 
@@ -459,7 +468,8 @@ fn composite_rgba_for_snapshot(
     let render_size = preview_render_size(timeline.width, timeline.height, max_size);
 
     let metrics = ManifestMetrics { sizes };
-    let plan = build_render_plan(timeline, render_size, &metrics);
+    let plan = try_build_render_plan(timeline, render_size, &metrics)
+        .map_err(|error| format!("invalid timeline graph: {error}"))?;
     let frame_plan = plan.frame(timeline, frame);
 
     // Acquire (or reuse) the GPU context, then composite + read back. The lock is
@@ -512,10 +522,30 @@ fn composite_rgba(
     frame: i32,
     max_size: u32,
     cancel: &MediaCancelToken,
+    sequence_id: Option<&str>,
 ) -> Result<DecodedFrame, String> {
     let snapshot = core.runtime_snapshot();
+    let selected = sequence_id
+        .map(|sequence_id| {
+            let mut timeline = snapshot
+                .timeline
+                .nested_sequences
+                .iter()
+                .find(|sequence| sequence.id == sequence_id)
+                .map(|sequence| sequence.timeline.clone())
+                .ok_or_else(|| format!("nested sequence not found: {sequence_id}"))?;
+            timeline.nested_sequences = snapshot.timeline.nested_sequences.clone();
+            timeline
+                .nested_sequences
+                .iter_mut()
+                .find(|sequence| sequence.id == sequence_id)
+                .expect("selected sequence came from this registry")
+                .timeline = opentake_domain::Timeline::new();
+            Ok::<_, String>(timeline)
+        })
+        .transpose()?;
     composite_rgba_for_snapshot(
-        &snapshot.timeline,
+        selected.as_ref().unwrap_or(&snapshot.timeline),
         &snapshot.media,
         &snapshot.project_dir,
         render,
@@ -554,6 +584,7 @@ pub fn composite_frame(
         request.frame,
         max_size.unwrap_or(DEFAULT_PREVIEW_CAP),
         &cancel,
+        request.sequence_id.as_deref(),
     )?;
     if cancel.is_cancelled()
         || core.project_revision() != revision
@@ -666,7 +697,7 @@ fn capture_frame_to_media_workflow(
 ) -> Result<crate::media::MediaListDto, String> {
     // Frame → RGBA. Timeline tab composites; video tab decodes the source frame.
     let composite = match source_media_id {
-        None => composite_rgba(core, render, frame, 0, &MediaCancelToken::new())?,
+        None => composite_rgba(core, render, frame, 0, &MediaCancelToken::new(), None)?,
         Some(id) => decode_source_frame(core, id, frame)?,
     };
 

@@ -59,6 +59,6 @@ pub use signal::{
 pub use split::split_clip;
 pub use subtitle_export::{collect_caption_cues, export_srt, export_vtt, SubtitleCue};
 pub use text::{Fill, Rgba, Shadow, TextAlignment, TextLayout, TextStyle};
-pub use timeline::{ClipLocation, Timeline, Track};
+pub use timeline::{ClipLocation, NestedSequence, Timeline, Track};
 pub use transform::{Crop, CropAspectLock, Point, Transform};
 pub use transition::{Transition, TransitionKind};

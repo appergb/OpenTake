@@ -587,7 +587,17 @@ function moveParticipantsForIds(timeline: Timeline, ids: string[]): MoveParticip
 }
 
 export function TimelineContainer() {
-  const timeline = useProjectStore((s) => s.timeline);
+  const rootTimeline = useProjectStore((s) => s.timeline);
+  const activeNestedSequenceId = useEditorUiStore((s) => s.activeNestedSequenceId);
+  const enterNestedSequence = useEditorUiStore((s) => s.enterNestedSequence);
+  const exitNestedSequence = useEditorUiStore((s) => s.exitNestedSequence);
+  const timeline = useMemo(
+    () =>
+      rootTimeline.nestedSequences?.find(
+        (sequence) => sequence.id === activeNestedSequenceId,
+      )?.timeline ?? rootTimeline,
+    [rootTimeline, activeNestedSequenceId],
+  );
   const projectEpoch = useProjectStore((s) => s.projectEpoch);
   const zoomScale = useEditorUiStore((s) => s.zoomScale);
   const setZoomScale = useEditorUiStore((s) => s.setZoomScale);
@@ -610,6 +620,15 @@ export function TimelineContainer() {
   const selectGap = useEditorUiStore((s) => s.selectGap);
   const trackHeights = useEditorUiStore((s) => s.trackDisplayHeights);
   const mediaItems = useMediaStore((s) => s.items);
+
+  useEffect(() => {
+    if (
+      activeNestedSequenceId &&
+      !rootTimeline.nestedSequences?.some((sequence) => sequence.id === activeNestedSequenceId)
+    ) {
+      exitNestedSequence();
+    }
+  }, [activeNestedSequenceId, rootTimeline.nestedSequences, exitNestedSequence]);
 
   // Asset ids whose source file is offline → clips referencing them get the
   // error wash. Recomputed when the catalog changes (so a relink clears it).
@@ -1902,6 +1921,26 @@ export function TimelineContainer() {
     ],
   );
 
+  const onDoubleClick = useCallback(
+    (event: React.MouseEvent) => {
+      const { docX, docY } = toDoc(event);
+      const hit = hitTestAccessibleClip(
+        timeline,
+        docX,
+        docY,
+        zoomScale,
+        trackHeights,
+        docWidth,
+        docHeight,
+      );
+      if (hit?.clip.nestedSequenceId) {
+        event.preventDefault();
+        enterNestedSequence(hit.clip.nestedSequenceId);
+      }
+    },
+    [toDoc, timeline, zoomScale, trackHeights, docWidth, docHeight, enterNestedSequence],
+  );
+
   // Media dropped from the panel lands AT the cursor: its start frame = the drop
   // X, on the track under the drop Y. `addMediaToTimelineAt` skips tracks where it
   // would overlap an existing clip (and makes a new track if none is free), so a
@@ -2095,6 +2134,7 @@ export function TimelineContainer() {
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onContextMenu={onContextMenu}
+        onDoubleClick={onDoubleClick}
         onPointerCancel={endDrag}
         onLostPointerCapture={endDrag}
         style={{
@@ -2253,7 +2293,12 @@ function AudioVolumeKeyframeContextMenu({
   onClose: () => void;
 }) {
   const t = useT();
-  const timeline = useProjectStore((s) => s.timeline);
+  const rootTimeline = useProjectStore((s) => s.timeline);
+  const activeNestedSequenceId = useEditorUiStore((s) => s.activeNestedSequenceId);
+  const timeline =
+    rootTimeline.nestedSequences?.find(
+      (sequence) => sequence.id === activeNestedSequenceId,
+    )?.timeline ?? rootTimeline;
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ left: x, top: y });
   const currentInterpolation = findVolumeKeyframeInterpolation(timeline, clipId, frame);

@@ -28,3 +28,4 @@ cosmic-text = { version = "0.12", default-features = false, features = ["std", "
 [dev-dependencies]
 # PNG read-back round-trip checks in the GPU smoke test (offline, no assets).
 image = { version = "0.25", default-features = false, features = ["png"] }
+serde_json = { workspace = true }

@@ -87,7 +87,12 @@ function gcd(a: number, b: number): number {
 
 export function Inspector() {
   const t = useT();
-  const timeline = useProjectStore((s) => s.timeline);
+  const rootTimeline = useProjectStore((s) => s.timeline);
+  const activeNestedSequenceId = useEditorUiStore((s) => s.activeNestedSequenceId);
+  const timeline =
+    rootTimeline.nestedSequences?.find(
+      (sequence) => sequence.id === activeNestedSequenceId,
+    )?.timeline ?? rootTimeline;
   const selectedClipIds = useEditorUiStore((s) => s.selectedClipIds);
   const inspectorTab = useEditorUiStore((s) => s.inspectorTab);
   const setInspectorTab = useEditorUiStore((s) => s.setInspectorTab);
@@ -391,7 +396,12 @@ function ClipInspector({
   // Live sampling: read the current playhead frame so every numeric field shows
   // the value at the playhead (upstream `InspectorView.livePreview`).
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
-  const timeline = useProjectStore((s) => s.timeline);
+  const rootTimeline = useProjectStore((s) => s.timeline);
+  const activeNestedSequenceId = useEditorUiStore((s) => s.activeNestedSequenceId);
+  const timeline =
+    rootTimeline.nestedSequences?.find(
+      (sequence) => sequence.id === activeNestedSequenceId,
+    )?.timeline ?? rootTimeline;
   const mediaItem = useMediaStore((s) => s.items.find((m) => m.id === clip.mediaRef) ?? null);
   // Available tabs depend on selection (SPEC §6.3). Visual source clips expose
   // AI Edit; video with an embedded audio stream also exposes Audio. Missing
