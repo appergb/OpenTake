@@ -32,7 +32,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use opentake_core::{
     importable_clip_type, AppCore, CommittedMediaImport, CoreError, DeferredCoreEvents,
-    PreparedMediaFolderRef, PreparedMediaImportOp, ProbedMedia,
+    DerivedStemProvenance, PreparedMediaFolderRef, PreparedMediaImportOp, ProbedMedia,
 };
 use opentake_domain::{
     AudioDenoise, Clip, ClipType, DenoiseMode, GenerationInput, GenerationJobStatus,
@@ -45,8 +45,8 @@ use opentake_media::MediaCancelToken;
 use opentake_media::{
     analysis::{
         analyze_loudness_with_progress, analyze_stabilization as build_stabilization,
-        denoise_interleaved, track_translation_motion, LoudnessNormalizationConfig,
-        StabilizationConfig,
+        denoise_interleaved, separate_stems, track_translation_motion, LoudnessNormalizationConfig,
+        StabilizationConfig, StemExecution, StemSeparationRequest,
     },
     cache_key::visual_file_identity_key,
     decode_frame_at, decode_frame_at_cancellable, decode_frames_at, decode_frames_at_cancellable,
@@ -87,6 +87,51 @@ pub struct LoudnessAnalysisState {
 #[derive(Default)]
 pub struct DenoiseAnalysisState {
     active: Mutex<Option<opentake_media::MediaCancelToken>>,
+}
+
+/// Single-flight cooperative cancellation for a two-stem separation job.
+#[derive(Default)]
+pub struct StemSeparationState {
+    active: Mutex<Option<opentake_media::MediaCancelToken>>,
+}
+
+impl StemSeparationState {
+    fn begin(&self) -> Result<opentake_media::MediaCancelToken, String> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.is_some() {
+            return Err("stem_separation_busy".to_string());
+        }
+        let token = opentake_media::MediaCancelToken::new();
+        *active = Some(token.clone());
+        Ok(token)
+    }
+
+    fn finish(&self, token: &opentake_media::MediaCancelToken) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active
+            .as_ref()
+            .is_some_and(|current| current.same_instance(token))
+        {
+            *active = None;
+        }
+    }
+
+    fn cancel(&self) -> bool {
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        active.as_ref().is_some_and(|token| {
+            token.cancel();
+            true
+        })
+    }
 }
 
 impl DenoiseAnalysisState {
@@ -244,8 +289,8 @@ pub struct MediaItemDto {
     pub source_fps: Option<f64>,
     /// Whether the asset carries audio.
     pub has_audio: bool,
-    /// Absolute path to the source file, when resolvable (external assets only
-    /// in this phase, which is all importing produces).
+    /// Absolute path to the source file, when resolvable. Project-relative
+    /// derived assets are resolved against the open project bundle.
     pub path: Option<String>,
     /// On-disk thumbnail path, or `None` to render a type placeholder.
     pub thumbnail: Option<String>,
@@ -289,12 +334,9 @@ impl MediaItemDto {
         favorite: bool,
     ) -> Self {
         let resolved = resolve_source_path(entry, project_dir);
-        let path = match &entry.source {
-            MediaSource::External { absolute_path } => Some(absolute_path.clone()),
-            // Project-relative assets need the bundle base to resolve; not
-            // produced by importing (always external) but handled for safety.
-            MediaSource::Project { .. } => None,
-        };
+        let path = resolved
+            .as_deref()
+            .map(|path| path.to_string_lossy().into_owned());
         let generation_input = entry.generation_input.as_ref();
         let generation_status = match generation_input.and_then(|input| input.status) {
             Some(GenerationJobStatus::Queued | GenerationJobStatus::Generating) => "generating",
@@ -3039,6 +3081,193 @@ pub fn cancel_denoise_analysis(analysis: State<'_, DenoiseAnalysisState>) -> boo
     analysis.cancel()
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StemProgressEvent {
+    source_asset_id: String,
+    done: usize,
+    total: usize,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StemSeparationDto {
+    pub vocals_asset_id: String,
+    pub accompaniment_asset_id: String,
+    pub source_sha256: String,
+    pub execution: String,
+    pub model_sha256: Option<String>,
+    pub vocal_sdr_improvement_db: f64,
+}
+
+/// Run local stem separation off the UI thread, import both outputs atomically,
+/// and persist their source/model provenance. Hosted mode is fail-closed until
+/// a concrete provider adapter is configured; no upload occurs in this command.
+#[tauri::command]
+pub async fn separate_audio_stems(
+    app: AppHandle,
+    source_asset_id: String,
+    execution: String,
+    provider: Option<String>,
+    model: Option<String>,
+    upload_confirmed: bool,
+) -> Result<StemSeparationDto, String> {
+    if execution != "local" {
+        if provider.as_deref().is_none_or(str::is_empty)
+            || model.as_deref().is_none_or(str::is_empty)
+        {
+            return Err("stem_hosted_provider_and_model_required".to_string());
+        }
+        if !upload_confirmed {
+            return Err("stem_hosted_privacy_confirmation_required".to_string());
+        }
+        return Err("stem_hosted_provider_not_configured".to_string());
+    }
+
+    let cancel = app.state::<StemSeparationState>().begin()?;
+    let result = async {
+        let core = app.state::<AppCore>();
+        core.ensure_project_mutable()
+            .map_err(|error| error.to_string())?;
+        let snapshot = core.runtime_snapshot();
+        let project_dir = snapshot
+            .project_dir
+            .clone()
+            .ok_or_else(|| "stem_project_must_be_saved".to_string())?;
+        let source_entry = snapshot
+            .media
+            .entries
+            .iter()
+            .find(|entry| entry.id == source_asset_id)
+            .cloned()
+            .ok_or_else(|| format!("stem_source_not_found:{source_asset_id}"))?;
+        if !matches!(source_entry.kind, ClipType::Audio | ClipType::Video)
+            || !source_entry
+                .has_audio
+                .unwrap_or(source_entry.kind == ClipType::Audio)
+        {
+            return Err("stem_source_has_no_audio".to_string());
+        }
+        let source_path = source_path_for_entry(&source_entry, Some(&project_dir))?;
+        if !source_path.is_file() {
+            return Err("stem_source_unreadable".to_string());
+        }
+        let output_dir = project_dir
+            .join("media")
+            .join(format!("stems-{}", uuid::Uuid::new_v4()));
+        let model_dir = app
+            .state::<MediaState>()
+            .engine()
+            .models_dir()
+            .to_path_buf();
+        let worker_app = app.clone();
+        let worker_asset_id = source_asset_id.clone();
+        let worker_cancel = cancel.clone();
+        let worker_output_dir = output_dir.clone();
+        let separated = match tauri::async_runtime::spawn_blocking(move || {
+            let progress_app = worker_app.clone();
+            let progress_asset_id = worker_asset_id.clone();
+            let progress = Arc::new(move |done: usize, total: usize| {
+                let _ = progress_app.emit(
+                    "stems://progress",
+                    StemProgressEvent {
+                        source_asset_id: progress_asset_id.clone(),
+                        done,
+                        total,
+                    },
+                );
+            });
+            separate_stems(
+                StemSeparationRequest {
+                    source: &source_path,
+                    output_dir: &worker_output_dir,
+                    execution: StemExecution::Local {
+                        model_dir: &model_dir,
+                    },
+                },
+                &worker_cancel,
+                Some(progress),
+            )
+        })
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(MediaError::Cancelled)) => {
+                let _ = std::fs::remove_dir_all(&output_dir);
+                return Err("stem_separation_cancelled".to_string());
+            }
+            Ok(Err(error)) => {
+                let _ = std::fs::remove_dir_all(&output_dir);
+                return Err(format!("stem_separation_failed:{error}"));
+            }
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&output_dir);
+                return Err(format!("stem_separation_task_failed:{error}"));
+            }
+        };
+        if cancel.is_cancelled() {
+            let _ = std::fs::remove_dir_all(&output_dir);
+            return Err("stem_separation_cancelled".to_string());
+        }
+        let media = app.state::<MediaState>();
+        let vocals_probe = probe_media(media.engine(), &separated.vocals.path);
+        let accompaniment_probe = probe_media(media.engine(), &separated.accompaniment.path);
+        if !vocals_probe.has_audio || !accompaniment_probe.has_audio {
+            let _ = std::fs::remove_dir_all(&output_dir);
+            return Err("stem_output_probe_failed".to_string());
+        }
+        let common = |stem: &str| DerivedStemProvenance {
+            source_asset_id: source_asset_id.clone(),
+            source_sha256: separated.provenance.source_sha256.clone(),
+            execution: separated.provenance.execution.clone(),
+            model_sha256: separated.provenance.model_sha256.clone(),
+            stem: stem.to_string(),
+        };
+        let committed = core
+            .import_media_batch_for_project_persisted(
+                snapshot.project_epoch,
+                &project_dir,
+                vec![
+                    PreparedMediaImportOp::ImportDerivedStem {
+                        path: separated.vocals.path.clone(),
+                        name: separated.vocals.name.clone(),
+                        probe: vocals_probe,
+                        provenance: common("vocals"),
+                    },
+                    PreparedMediaImportOp::ImportDerivedStem {
+                        path: separated.accompaniment.path.clone(),
+                        name: separated.accompaniment.name.clone(),
+                        probe: accompaniment_probe,
+                        provenance: common("accompaniment"),
+                    },
+                ],
+            )
+            .map_err(|error| {
+                let _ = std::fs::remove_dir_all(&output_dir);
+                format!("stem_import_failed:{error}")
+            })?;
+        if committed.len() != 2 {
+            return Err("stem_import_incomplete".to_string());
+        }
+        Ok(StemSeparationDto {
+            vocals_asset_id: committed[0].entry.id.clone(),
+            accompaniment_asset_id: committed[1].entry.id.clone(),
+            source_sha256: separated.provenance.source_sha256,
+            execution: separated.provenance.execution,
+            model_sha256: separated.provenance.model_sha256,
+            vocal_sdr_improvement_db: separated.metrics.vocal_sdr_improvement_db,
+        })
+    }
+    .await;
+    app.state::<StemSeparationState>().finish(&cancel);
+    result
+}
+
+#[tauri::command]
+pub fn cancel_stem_separation(state: State<'_, StemSeparationState>) -> bool {
+    state.cancel()
+}
+
 fn find_runtime_clip<'a>(timeline: &'a Timeline, clip_id: &str) -> Option<&'a Clip> {
     timeline
         .tracks
@@ -4627,6 +4856,38 @@ mod tests {
     }
 
     #[test]
+    fn dto_projects_project_relative_entry_with_resolved_path() {
+        let bundle = tempfile::tempdir().unwrap();
+        let relative_path = PathBuf::from("media/stems/job/vocals.wav");
+        let source = bundle.path().join(&relative_path);
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"derived-audio").unwrap();
+        let entry = MediaManifestEntry {
+            id: "stem-vocals".into(),
+            name: "Mix Vocals".into(),
+            kind: ClipType::Audio,
+            source: MediaSource::Project {
+                relative_path: relative_path.to_string_lossy().into_owned(),
+            },
+            duration: 5.0,
+            generation_input: None,
+            source_width: None,
+            source_height: None,
+            source_fps: None,
+            has_audio: Some(true),
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        };
+
+        let dto = MediaItemDto::from_entry(&entry, Some(bundle.path()), None, false);
+
+        assert_eq!(dto.path.as_deref(), Some(source.to_string_lossy().as_ref()));
+        assert!(!dto.missing);
+        assert_eq!(dto.file_size, Some(13));
+    }
+
+    #[test]
     fn dto_reports_file_size_for_present_source() {
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("clip.mp4");
@@ -5327,6 +5588,23 @@ mod tests {
 
         let second = state.begin().expect("the slot can be reused after finish");
         assert!(!second.is_cancelled());
+        state.finish(&second);
+    }
+
+    #[test]
+    fn stem_separation_state_cancels_and_releases_single_flight_slot() {
+        let state = StemSeparationState::default();
+        let first = state.begin().expect("first separation reserves the slot");
+        let concurrent = match state.begin() {
+            Ok(_) => panic!("a concurrent separation must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(concurrent, "stem_separation_busy");
+        assert!(state.cancel());
+        assert!(first.is_cancelled());
+        state.finish(&first);
+        assert!(!state.cancel());
+        let second = state.begin().expect("slot is reusable");
         state.finish(&second);
     }
 }

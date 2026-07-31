@@ -78,6 +78,55 @@ afterEach(() => {
 });
 
 describe("Inspector completion surface", () => {
+  it("renders a generated media source without entering a selector update loop", async () => {
+    useProjectStore.setState({
+      timeline: {
+        fps: 30,
+        width: 1920,
+        height: 1080,
+        settingsConfigured: false,
+        tracks: [],
+      },
+      projectPath: "/tmp/demo.opentake",
+    });
+    useMediaStore.setState({
+      items: [
+        {
+          id: "stem-vocals",
+          name: "Mix Vocals",
+          type: "audio",
+          duration: 5,
+          hasAudio: true,
+          generationInput: {
+            prompt: "stem:vocals",
+            model: "opentake-center-v1",
+            duration: 5,
+            aspectRatio: "audio",
+            provider: "local",
+            status: "ready",
+            progress: 1,
+          },
+        },
+      ],
+      folders: [],
+      importing: false,
+      error: null,
+    });
+    useEditorUiStore.setState({
+      selectedClipIds: new Set(),
+      previewMediaId: "stem-vocals",
+    });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Inspector />));
+
+    expect(container.textContent).toContain("Mix Vocals");
+    expect(container.textContent).toContain("opentake-center-v1");
+    await act(async () => root.unmount());
+  });
+
   it("four_states_tabs_fields_and_lanes", async () => {
     const clip = visualClip();
     useProjectStore.setState({ timeline: timelineWith(clip), projectPath: "/tmp/demo.opentake" });
@@ -406,6 +455,77 @@ describe("Inspector completion surface", () => {
     listen.mockRestore();
     prepare.mockRestore();
     setDenoise.mockRestore();
+    cancel.mockRestore();
+    await act(async () => root.unmount());
+  });
+
+  it("separates stems locally with privacy copy, progress, cancellation, and success", async () => {
+    const clip = visualClip();
+    useProjectStore.setState({ timeline: timelineWith(clip), projectPath: "/tmp/demo.opentake" });
+    useMediaStore.setState({
+      items: [{ id: clip.mediaRef, name: "mix.wav", type: "video", duration: 5, hasAudio: true }],
+      folders: [],
+      importing: false,
+      error: null,
+    });
+    useEditorUiStore.setState({ selectedClipIds: new Set([clip.id]), inspectorTab: "audio" });
+    const unlisten = vi.fn();
+    const listen = vi.spyOn(api, "onStemSeparationProgress").mockImplementation(async (_id, handler) => {
+      handler({ sourceAssetId: clip.mediaRef, done: 700, total: 1000 });
+      return unlisten;
+    });
+    const separate = vi.spyOn(api, "separateAudioStems").mockResolvedValue({
+      vocalsAssetId: "vocals",
+      accompanimentAssetId: "music",
+      sourceSha256: "a".repeat(64),
+      execution: "local:opentake-center-v1",
+      modelSha256: "b".repeat(64),
+      vocalSdrImprovementDb: 60,
+    });
+    const cancel = vi.spyOn(api, "cancelStemSeparation").mockResolvedValue(true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Inspector />));
+
+    const section = container.querySelector('[data-testid="stem-separation-section"]');
+    expect(section?.textContent).toContain("音频不会上传");
+    const button = [...(section?.querySelectorAll("button") ?? [])].find(
+      (candidate) => candidate.textContent === "分离人声与伴奏",
+    );
+    await act(async () => {
+      button?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(listen).toHaveBeenCalledWith(clip.mediaRef, expect.any(Function));
+    expect(separate).toHaveBeenCalledWith(clip.mediaRef, "local", null, null, false);
+    expect(unlisten).toHaveBeenCalledOnce();
+    expect(container.querySelector('[data-testid="stem-separation-result"]')?.textContent).toContain(
+      "已将人声和伴奏添加到素材库",
+    );
+
+    let rejectSeparation!: (reason: Error) => void;
+    separate.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSeparation = reject;
+        }),
+    );
+    await act(async () => {
+      button?.click();
+      await Promise.resolve();
+    });
+    const cancelButton = [...(section?.querySelectorAll("button") ?? [])].find(
+      (candidate) => candidate.textContent === "取消分离",
+    );
+    await act(async () => cancelButton?.click());
+    expect(cancel).toHaveBeenCalledOnce();
+    await act(async () => rejectSeparation(new Error("stem_separation_cancelled")));
+    expect(section?.querySelector('[role="alert"]')).toBeNull();
+
+    listen.mockRestore();
+    separate.mockRestore();
     cancel.mockRestore();
     await act(async () => root.unmount());
   });

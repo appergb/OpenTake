@@ -720,39 +720,41 @@ Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/auto
 
 - Candidate/source: `doc-8a0fdfbeaab482c5` at `docs/architecture/CAPCUT-GAP.md:176` (requirement)
 - Expected behavior: Separate vocals/music/stems locally or through an explicitly configured generation provider.
-- Resolution: `reviewed-mapping-report:MR-stems` — No stem separation implementation was found; results must re-enter the shared media import and provenance path.
+- Resolution: `reviewed-mapping-report:MR-stems` — Completed for the explicitly scoped local centre/side extractor: both results re-enter the shared media import and provenance path; broader semantic separation remains tracked as a separate partial gap.
 - Exact acceptance contract:
   - Implementation: Implement an asynchronous stem-separation job with model installation/integrity checks, progress/cancel, derived-asset import, privacy/error UX, and audio-quality/integration fixtures; document local versus hosted execution.
   - Add deterministic media fixtures and golden frame, audio, timeline, or export assertions for every named capability and boundary; the affected render/media suites must pass.
   - Run the packaged preview/export path on representative media and retain exact output or runtime evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-media/tests/stems.rs#local_or_explicit_provider_selection_cancellation_provenance_and_cleanup` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-media --test stems local_or_explicit_provider_selection_cancellation_provenance_and_cleanup -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-media/src/analysis/stems.rs`, `crates/opentake-gen/src/stems.rs`, `crates/opentake-core/src/session.rs`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-media --test stems local_or_explicit_provider_selection_cancellation_provenance_and_cleanup -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. The reviewed owning test first failed because no stem owner existed, then passed after adding the bundled `opentake-center-v1` integrity-checked local profile, cancellable progress reporting, atomic two-output publication, explicit hosted-provider/privacy policy, atomic derived-asset import and source/model provenance. A packaged-runtime defect review then produced three additional RED regressions: selecting a generated source entered a Zustand selector update loop, project-relative derived media did not expose its resolved preview path, and the original side-channel accompaniment cancelled in the current mono export mixdown. Stable selectors, resolved DTO paths and dual-mono stem publication fixed those failures. The rebuilt ad-hoc-signed macOS app exercised local privacy copy, hosted consent/configuration fail-closed behavior, successful separation, save/reopen provenance, direct preview, timeline playback, independent vocals/accompaniment export, and cancellation of a 1,800-second job with no derived manifest entries or partial files. The local profile is deliberately a deterministic centre/side extractor for centred voice/dialogue, not semantic Demucs/MDX separation; hosted transport remains unavailable until an adapter is configured. Architecture and execution boundaries are documented in [`STEM-SEPARATION.md`](../../../architecture/STEM-SEPARATION.md). Runtime evidence: [`stems-real-device-2026-08-01.md`](../runtime-artifacts/automated/stems-real-device-2026-08-01.md).
 
 ### Task 14: MR-linked-audio-complete (implementation-slice-cbce9a4174a73347)
 

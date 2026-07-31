@@ -70,6 +70,18 @@ pub struct ProbedMedia {
     pub has_audio: bool,
 }
 
+/// Non-secret provenance attached when a separated audio stem re-enters the
+/// ordinary media manifest. Content/model hashes make the derivation auditable
+/// without persisting provider credentials or result URLs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DerivedStemProvenance {
+    pub source_asset_id: String,
+    pub source_sha256: String,
+    pub execution: String,
+    pub model_sha256: Option<String>,
+    pub stem: String,
+}
+
 /// Validated provider-neutral generation job prepared by the Agent/Tauri host.
 /// Credentials, signed URLs, and provider diagnostics are deliberately absent.
 #[derive(Clone, Debug)]
@@ -165,6 +177,10 @@ fn safe_provider_prefix(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn safe_generation_error_code(value: &str) -> bool {
@@ -475,6 +491,98 @@ impl EditorSession {
         probe: &ProbedMedia,
     ) -> Result<MediaManifestEntry> {
         self.import_media_file_checked(path, id, name, probe, || Ok(()))
+    }
+
+    /// Import a ready vocals/accompaniment file through the shared media path
+    /// and attach durable provenance. The original asset remains immutable.
+    pub fn import_derived_stem_file(
+        &mut self,
+        path: impl AsRef<Path>,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+        provenance: DerivedStemProvenance,
+    ) -> Result<MediaManifestEntry> {
+        self.ensure_mutable()?;
+        let source = self
+            .state
+            .manifest
+            .entries
+            .iter()
+            .find(|entry| entry.id == provenance.source_asset_id)
+            .ok_or_else(|| {
+                CoreError::Media(format!(
+                    "stem source asset does not exist: {}",
+                    provenance.source_asset_id
+                ))
+            })?;
+        if !matches!(source.kind, ClipType::Audio | ClipType::Video)
+            || !source.has_audio.unwrap_or(source.kind == ClipType::Audio)
+        {
+            return Err(CoreError::Media(
+                "stem source asset has no audio".to_string(),
+            ));
+        }
+        if !valid_sha256(&provenance.source_sha256)
+            || provenance
+                .model_sha256
+                .as_deref()
+                .is_some_and(|digest| !valid_sha256(digest))
+        {
+            return Err(CoreError::Media(
+                "stem provenance checksum is invalid".to_string(),
+            ));
+        }
+        let (provider, model) = provenance.execution.split_once(':').ok_or_else(|| {
+            CoreError::Media("stem execution must be '<provider>:<model>'".to_string())
+        })?;
+        if !safe_provider_prefix(provider) || model.trim().is_empty() {
+            return Err(CoreError::Media(
+                "stem execution provider or model is invalid".to_string(),
+            ));
+        }
+        let output_index = match provenance.stem.as_str() {
+            "vocals" => 0,
+            "accompaniment" => 1,
+            _ => {
+                return Err(CoreError::Media(
+                    "stem kind must be vocals or accompaniment".to_string(),
+                ))
+            }
+        };
+
+        let before = self.state.manifest.clone();
+        let result = (|| {
+            let entry = self.import_media_file(path, id, name, probe)?;
+            let target = self
+                .state
+                .manifest
+                .entries
+                .iter_mut()
+                .find(|candidate| candidate.id == entry.id)
+                .ok_or_else(|| CoreError::Media("imported stem disappeared".to_string()))?;
+            target.generation_input = Some(GenerationInput {
+                prompt: format!("stem:{}", provenance.stem),
+                model: model.to_string(),
+                duration: probe.duration_secs.max(0.0).round() as i32,
+                aspect_ratio: "audio".to_string(),
+                quality: provenance
+                    .model_sha256
+                    .map(|digest| format!("model-sha256:{digest}")),
+                reference_audio_urls: Some(vec![format!("sha256:{}", provenance.source_sha256)]),
+                provider: Some(provider.to_string()),
+                status: Some(GenerationJobStatus::Ready),
+                progress: Some(1.0),
+                output_index: Some(output_index),
+                source_asset_id: Some(provenance.source_asset_id),
+                ..GenerationInput::default()
+            });
+            Ok(target.clone())
+        })();
+        if result.is_err() {
+            self.state.manifest = before;
+        }
+        result
     }
 
     /// Import one file and roll the manifest back if `postcondition` fails.
@@ -1395,6 +1503,48 @@ mod tests {
             Some("asset-1")
         );
         assert_eq!(s.version(), 0);
+    }
+
+    #[test]
+    fn derived_stem_import_reuses_media_path_and_persists_provenance() {
+        let mut session = EditorSession::new_project();
+        let source_probe = ProbedMedia {
+            duration_secs: 5.0,
+            has_audio: true,
+            ..ProbedMedia::default()
+        };
+        session
+            .import_media_file("/abs/source.wav", "source-asset", "Source", &source_probe)
+            .unwrap();
+        let stem = session
+            .import_derived_stem_file(
+                "/abs/source-vocals.wav",
+                "stem-asset",
+                "Source Vocals",
+                &source_probe,
+                DerivedStemProvenance {
+                    source_asset_id: "source-asset".into(),
+                    source_sha256: "a".repeat(64),
+                    execution: "local:opentake-center-v1".into(),
+                    model_sha256: Some("b".repeat(64)),
+                    stem: "vocals".into(),
+                },
+            )
+            .unwrap();
+        let provenance = stem.generation_input.expect("derived provenance");
+        assert_eq!(provenance.prompt, "stem:vocals");
+        assert_eq!(provenance.provider.as_deref(), Some("local"));
+        assert_eq!(provenance.model, "opentake-center-v1");
+        assert_eq!(provenance.source_asset_id.as_deref(), Some("source-asset"));
+        assert_eq!(
+            provenance.reference_audio_urls,
+            Some(vec![format!("sha256:{}", "a".repeat(64))])
+        );
+        assert_eq!(
+            provenance.quality,
+            Some(format!("model-sha256:{}", "b".repeat(64)))
+        );
+        assert_eq!(provenance.status, Some(GenerationJobStatus::Ready));
     }
 
     #[test]

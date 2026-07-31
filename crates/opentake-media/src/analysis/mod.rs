@@ -6,6 +6,7 @@ pub mod denoise;
 pub mod loudness;
 pub mod silence;
 pub mod stabilization;
+pub mod stems;
 
 pub use autocrop::{
     detect_autocrop, AutocropConfig, AutocropPlan, CropRect, CropTransform, FrameBuffer,
@@ -20,4 +21,9 @@ pub use loudness::{
 pub use silence::{detect_silences, SilenceDetectionConfig, SilenceRange};
 pub use stabilization::{
     analyze_stabilization, track_translation_motion, StabilizationConfig, StabilizationMotionSample,
+};
+pub use stems::{
+    ensure_local_stem_model, separate_stems, verify_local_stem_model, InstalledStemModel,
+    StemExecution, StemMetrics, StemOutput, StemProgressCallback, StemProvenance,
+    StemSeparationRequest, StemSeparationResult,
 };

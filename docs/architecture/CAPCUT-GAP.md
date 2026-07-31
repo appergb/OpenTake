@@ -164,7 +164,7 @@
 
 ## 模块4:音频工程与智能字幕
 
-**整体差距**:总体判断:本模块在 OpenTake/上游中呈"字幕强、音频处理逐项补齐"的分布。字幕侧 OpenTake 已用 whisper-rs + 确定性断句/计时完成一键字幕，并已补齐上游没有的 SRT/VTT 软字幕导出；前端、Tauri 文件边界和纯序列化层均已接通。音频工程侧已完成响度归一与本地智能降噪，两者均具备可撤销持久化、预览和导出共享处理链；人声分离仍待实现。字幕翻译仍只是 Agent 草稿路径，未形成一等公民翻译工作流，判 partial。字幕样式已具备 captionGroupId 与共享样式模型，但缺少"改一处→原子批量回写整组"的完整 UI/命令闭环，判 partial。当前落地优先级是字幕批量样式；人声分离与一等公民翻译保持后续独立验收项。
+**整体差距**:总体判断:本模块在 OpenTake/上游中呈"字幕强、音频处理逐项补齐"的分布。字幕侧 OpenTake 已用 whisper-rs + 确定性断句/计时完成一键字幕，并已补齐上游没有的 SRT/VTT 软字幕导出；前端、Tauri 文件边界和纯序列化层均已接通。音频工程侧已完成响度归一、本地智能降噪和限定范围的本地 centre/side 双 stem 提取，三者都接入真实预览/导出链；其中 stem 提取尚不等同于对任意混音进行语义级人声/伴奏分离，仍判 partial。字幕翻译仍只是 Agent 草稿路径，未形成一等公民翻译工作流，判 partial。字幕样式已具备 captionGroupId 与共享样式模型，但缺少"改一处→原子批量回写整组"的完整 UI/命令闭环，判 partial。当前落地优先级是字幕批量样式；语义级人声分离与一等公民翻译保持后续独立验收项。
 
 ### 音频响度统一(loudness normalization / LUFS 归一) — `has` · 难度 medium · 优先级 p1
 - **判定依据**:OpenTake 已实现本地 EBU R128/BS.1770 集成响度、门限分块和 4× 插值真峰值分析，并把目标 LUFS、真峰值上限、测量值和增益持久化在 Clip。操作可撤销/重做，检查器提供分析、重新分析、重置、进度、取消和静音/无法读取的类型错误。
@@ -178,11 +178,11 @@
 - **验收结果**:在重建的 macOS release `.app` 中，真实操作覆盖两种模式、强度、预览开关、应用/重置、长素材取消、撤销/重做、播放、保存重开和“预览关闭仍导出处理”。确定性语音加噪声夹具的 SDR 从 `10.414 dB` 提升至 `16.2872 dB`（`+5.8732 dB`），AAC 成片峰值为 `-8.645 dB`，无削顶。详见 `docs/audit/2026-07-14/runtime-artifacts/automated/denoise-real-device-2026-08-01.md`。
 - **前置依赖**:仅使用现有 PCM 解码/编码路径与新增纯 Rust FFT 处理，无云 API、模型下载或联网依赖。
 
-### 人声分离 / 提取人声(vocal isolation / source separation) — `missing` · 难度 high · 优先级 p2
-- **判定依据**:上游对 vocalIsolation/sourceSeparation/stemSeparation/demucs/spleeter 全部 0 命中(grep 命中的 stem 是 ToolExecutor+Import.swift 文件名变量,与音频无关)。无任何 stem 分离能力。OpenTake docs 无相关条目。
-- **落点(crate/层)**:opentake-media 新增 stem-separation 模块(输入音频源→输出 vocals/accompaniment 多轨 stem,落工程 media/ 作为派生素材);分离出的 stem 作为新 MediaAsset 回填,经 opentake-ops AddClips 放新轨,复用既有素材/轨道机制,无需改 domain 核心。
-- **实现方案**:必须引入深度模型,无纯 FFmpeg 等价。优先本地跨平台:用 ort(onnxruntime 已在栈)跑 Demucs(htdemucs)或 MDX-Net 的 ONNX 导出,GPU 可选 CPU 兜底;或集成成熟 C/C++ 推理库经 FFI。把分离做成异步任务(对齐上游 generate 的 job 语义:placeholder→ready),结果作为派生 stem 入库。次选:托管模式走 opentake-gen-proxy 外接分离 API。本地优先以保隐私与零成本。这是本模块工程量最大、最依赖模型与算力一项。
-- **前置依赖**:依赖 ort/candle 推理运行时 + 模型权重分发 + opentake-media 音频 IO + 任务/进度框架(可复用 opentake-gen job 状态机);GPU 加速可选。建议放在音频基建(解码/缓存/效果链)就绪之后。
+### 人声分离 / 提取人声(vocal isolation / source separation) — `partial` · 难度 high · 优先级 p2
+- **判定依据**:OpenTake 已提供可用的本地 `opentake-center-v1` centre/side 双 stem 提取：模型清单原子安装并校验 SHA-256，异步任务支持进度/取消/失败清理，vocals/accompaniment 作为带源素材和模型哈希 provenance 的派生素材原子回填工程。检查器明确显示本地不上传；托管模式必须填写 provider/model 并确认上传，但在无适配器时 fail-closed，当前不会发生网络上传。该本地算法适合人声/对白位于立体声中央、伴奏具有侧向差异的素材；它不是 Demucs/MDX 语义模型，对居中乐器、混响或单声道混音不能保证语义隔离，因此不判 `has`。
+- **落点(crate/层)**:`opentake-media::analysis::stems` 拥有安装、校验、解码、centre/side 处理和原子 WAV 发布；`opentake-gen::stems` 拥有本地/托管显式路由与隐私门槛；`opentake-core` 以普通 MediaAsset 批量导入两个 stem 并持久化 provenance；Tauri 单飞任务和 Inspector 提供进度、取消、恢复提示及直接预览。两路输出采用 stereo dual-mono，以兼容当前 mono 导出混音。
+- **验收结果**:重建的 macOS release `.app` 已验证托管门槛、本地分离、保存重开、直接预览、时间线播放、两路 H.264/AAC 导出和 1,800 秒任务取消清理。确定性 centre/side 夹具的直接 vocals/accompaniment SDR 分别为 `85.3732 dB` / `83.8316 dB`；导出 AAC 相对对应参考为 `34.1008 dB` / `25.5688 dB`。详见 `docs/architecture/STEM-SEPARATION.md` 与 `docs/audit/2026-07-14/runtime-artifacts/automated/stems-real-device-2026-08-01.md`。
+- **剩余差距**:若目标是任意混音的语义级人声/伴奏分离，仍需受校验的 Demucs/MDX 等本地模型及运行时，或实现经过隐私同意的托管 provider adapter；该能力保持独立验收项。
 
 ### 高精度 ASR 一键转字幕 — `has` · 难度 medium · 优先级 p0
 - **判定依据**:上游有完整链路:Transcription 模块(Transcription.swift/TranscriptCache.swift,词级+段级时间戳、语言匹配、缓存)、CaptionBuilder(确定性断句+按字符计时+最小时长防重叠)、EditorViewModel.generateCaptions(可见源区间转写→短语归属 clip→插新文本轨,一步撤销)、CaptionTab 一键 Generate Captions UI、MCP 工具 add_captions/get_transcript(ToolDefinitions.swift)。OpenTake 在 ARCHITECTURE §6(转写=whisper-rs,word/segment 时间戳)、Phase 8、MODULE-PORT-MAP Transcription 移植策略明确:数据模型与 CaptionBuilder/缓存/搜索算法 direct-port 进 Rust,ASR 引擎换 whisper-rs,上层'区间转写→切行→归属'逻辑不变。设计稿已完整覆盖。

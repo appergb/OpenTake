@@ -21,6 +21,7 @@ pub mod job;
 pub mod keys;
 pub mod params;
 pub mod provider;
+pub mod stems;
 pub mod transport;
 
 // Public API surface.
@@ -43,6 +44,7 @@ pub use provider::{
     content_type_for, ElevenLabsAdapter, FalAdapter, ModelRoute, OpenAiAdapter, ProviderAdapter,
     ProviderRegistry, ReplicateAdapter,
 };
+pub use stems::{resolve_stem_execution, StemExecutionPlan, StemProviderSelection};
 pub use transport::{
     Body, HttpRequest, HttpResponse, HttpTransport, Method, MockTransport, ReqwestTransport,
 };

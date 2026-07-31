@@ -41,8 +41,8 @@ use crate::deps::CoreDeps;
 use crate::error::{CoreError, Result};
 use crate::events::{CoreEvent, EventBus, SubscriptionId};
 use crate::session::{
-    EditorSession, GenerationJobCommit, GenerationStateUpdate, PreparedGenerationJob,
-    PreparedGenerationOutput, ProbedMedia,
+    DerivedStemProvenance, EditorSession, GenerationJobCommit, GenerationStateUpdate,
+    PreparedGenerationJob, PreparedGenerationOutput, ProbedMedia,
 };
 
 type ProjectIdentityTransitionListener = Arc<dyn Fn(bool) + Send + Sync + 'static>;
@@ -149,6 +149,12 @@ pub enum PreparedMediaImportOp {
         name: String,
         probe: ProbedMedia,
         folder: Option<PreparedMediaFolderRef>,
+    },
+    ImportDerivedStem {
+        path: PathBuf,
+        name: String,
+        probe: ProbedMedia,
+        provenance: DerivedStemProvenance,
     },
 }
 
@@ -1006,6 +1012,18 @@ impl AppCore {
                                 )?;
                                 entry.folder_id = Some(folder_id);
                             }
+                            imports.push(CommittedMediaImport { path, entry });
+                        }
+                        PreparedMediaImportOp::ImportDerivedStem {
+                            path,
+                            name,
+                            probe,
+                            provenance,
+                        } => {
+                            let id = self.ids.next_id();
+                            let entry = session
+                                .editor
+                                .import_derived_stem_file(&path, id, name, &probe, provenance)?;
                             imports.push(CommittedMediaImport { path, entry });
                         }
                     }

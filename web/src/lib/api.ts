@@ -1130,6 +1130,65 @@ export async function onDenoiseProgress(
   });
 }
 
+export interface StemSeparationProgress {
+  sourceAssetId: string;
+  done: number;
+  total: number;
+}
+
+export interface StemSeparationResult {
+  vocalsAssetId: string;
+  accompanimentAssetId: string;
+  sourceSha256: string;
+  execution: string;
+  modelSha256?: string | null;
+  vocalSdrImprovementDb: number;
+}
+
+export async function separateAudioStems(
+  sourceAssetId: string,
+  execution: "local" | "hosted",
+  provider: string | null = null,
+  model: string | null = null,
+  uploadConfirmed = false,
+): Promise<StemSeparationResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<StemSeparationResult>("separate_audio_stems", {
+      sourceAssetId,
+      execution,
+      provider,
+      model,
+      uploadConfirmed,
+    });
+  }
+  throw new Error("stem separation requires the desktop app");
+}
+
+export async function cancelStemSeparation(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("cancel_stem_separation");
+  return false;
+}
+
+export async function onStemSeparationProgress(
+  sourceAssetId: string,
+  handler: (progress: StemSeparationProgress) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("stems://progress", (event) => {
+    const progress = event.payload as Partial<StemSeparationProgress> | undefined;
+    if (
+      progress?.sourceAssetId === sourceAssetId &&
+      typeof progress.done === "number" &&
+      typeof progress.total === "number"
+    ) {
+      handler(progress as StemSeparationProgress);
+    }
+  });
+}
+
 // MARK: - BYOK secret store
 //
 // API keys are stored in the OS keychain by the Rust backend (`secret_*`

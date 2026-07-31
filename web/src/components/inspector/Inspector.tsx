@@ -539,6 +539,7 @@ function ClipInspector({
             <FadeSection clip={clip} commit={commit} t={t} />
             <LoudnessSection clip={clip} t={t} />
             <DenoiseSection clip={clip} t={t} />
+            <StemSeparationSection sourceAssetId={clip.mediaRef} t={t} />
           </section>
         ) : (
           <>
@@ -1312,6 +1313,139 @@ function DenoiseSection({ clip, t }: { clip: Clip; t: TFunction }) {
             onClick={() => void (applying ? edit.cancelDenoiseAnalysis() : edit.setAudioDenoise(clip.id, null))}
           >
             {applying ? t("inspector.denoise.cancel") : t("inspector.denoise.reset")}
+          </button>
+        )}
+      </div>
+      {error && <div role="alert" style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, color: "var(--danger)" }}>{error}</div>}
+    </section>
+  );
+}
+
+function StemSeparationSection({
+  sourceAssetId,
+  t,
+}: {
+  sourceAssetId: string;
+  t: TFunction;
+}) {
+  const [execution, setExecution] = useState<"local" | "hosted">("local");
+  const [provider, setProvider] = useState("");
+  const [model, setModel] = useState("");
+  const [uploadConfirmed, setUploadConfirmed] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [result, setResult] = useState<api.StemSeparationResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setRunning(false);
+    setProgress(0);
+    setResult(null);
+    setError(null);
+  }, [sourceAssetId]);
+
+  const separate = async () => {
+    setRunning(true);
+    setProgress(0);
+    setResult(null);
+    setError(null);
+    let unlisten = () => {};
+    try {
+      unlisten = await api.onStemSeparationProgress(sourceAssetId, ({ done, total }) => {
+        setProgress(total > 0 ? Math.min(1, done / total) : 0);
+      });
+      const separated = await api.separateAudioStems(
+        sourceAssetId,
+        execution,
+        execution === "hosted" ? provider : null,
+        execution === "hosted" ? model : null,
+        execution === "hosted" && uploadConfirmed,
+      );
+      setResult(separated);
+      setProgress(1);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      if (!/stem_separation_cancelled/i.test(message)) {
+        if (/stem_hosted_privacy_confirmation_required/i.test(message)) {
+          setError(t("inspector.stems.error.confirm"));
+        } else if (/stem_hosted_provider_not_configured/i.test(message)) {
+          setError(t("inspector.stems.error.notConfigured"));
+        } else {
+          setError(message);
+        }
+      }
+    } finally {
+      unlisten();
+      setRunning(false);
+    }
+  };
+
+  return (
+    <section data-testid="stem-separation-section" style={{ marginTop: SPACE.md }}>
+      <SectionHeader label={t("inspector.section.stems")} />
+      <Row label={t("inspector.stems.execution")}>
+        <select
+          aria-label={t("inspector.stems.execution")}
+          value={execution}
+          disabled={running}
+          onChange={(event) => setExecution(event.target.value as "local" | "hosted")}
+          style={controlStyle}
+        >
+          <option value="local">{t("inspector.stems.local")}</option>
+          <option value="hosted">{t("inspector.stems.hosted")}</option>
+        </select>
+      </Row>
+      <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, color: "var(--text-tertiary)", fontSize: FS.xs }}>
+        {execution === "local" ? t("inspector.stems.localPrivacy") : t("inspector.stems.hostedPrivacy")}
+      </div>
+      {execution === "hosted" && (
+        <>
+          <Row label={t("inspector.stems.provider")}>
+            <input
+              aria-label={t("inspector.stems.provider")}
+              value={provider}
+              disabled={running}
+              onChange={(event) => setProvider(event.target.value)}
+              style={controlStyle}
+            />
+          </Row>
+          <Row label={t("inspector.stems.model")}>
+            <input
+              aria-label={t("inspector.stems.model")}
+              value={model}
+              disabled={running}
+              onChange={(event) => setModel(event.target.value)}
+              style={controlStyle}
+            />
+          </Row>
+          <Row label={t("inspector.stems.confirmUpload")}>
+            <input
+              aria-label={t("inspector.stems.confirmUpload")}
+              type="checkbox"
+              checked={uploadConfirmed}
+              disabled={running}
+              onChange={(event) => setUploadConfirmed(event.target.checked)}
+            />
+          </Row>
+        </>
+      )}
+      {running && (
+        <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.xs}px`, color: "var(--text-tertiary)", fontSize: FS.xs }}>
+          {t("inspector.stems.processing")} {Math.round(progress * 100)}%
+        </div>
+      )}
+      {result && (
+        <div data-testid="stem-separation-result" style={{ padding: `0 ${SPACE.lg}px ${SPACE.xs}px`, color: "var(--accent-primary)", fontSize: FS.xs }}>
+          {t("inspector.stems.complete")} · {result.execution}
+        </div>
+      )}
+      <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px` }}>
+        <button type="button" style={controlStyle} disabled={running} onClick={() => void separate()}>
+          {t("inspector.stems.separate")}
+        </button>
+        {running && (
+          <button type="button" style={{ ...controlStyle, marginLeft: SPACE.xs }} onClick={() => void api.cancelStemSeparation()}>
+            {t("inspector.stems.cancel")}
           </button>
         )}
       </div>
@@ -2366,11 +2500,14 @@ function GenerationSections({ gen, t }: { gen: GenerationInput; t: TFunction }) 
     ...(gen.referenceVideoAssetIds ?? []),
     ...(gen.referenceAudioAssetIds ?? []),
   ];
-  const references = useMediaStore((s) =>
-    referenceIds
-      .map((id) => s.items.find((m) => m.id === id))
-      .filter((m): m is MediaItem => m != null),
-  );
+  // Select the stable catalog array, then derive references during render.
+  // Returning a freshly allocated array from the Zustand selector makes
+  // useSyncExternalStore treat every snapshot as changed and sends generated
+  // assets into an infinite render loop (blanking the whole WebView).
+  const mediaItems = useMediaStore((s) => s.items);
+  const references = referenceIds
+    .map((id) => mediaItems.find((m) => m.id === id))
+    .filter((m): m is MediaItem => m != null);
   return (
     <>
       {references.length > 0 && (
