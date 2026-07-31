@@ -910,36 +910,44 @@ remove/recreate/persist/playback and original-only export pass. Full receipt:
   - Handle seek, pause, resume, underrun, and cancellation.
   - Add long-duration memory and A/V sync runtime tests.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `src-tauri/src/playback/audio.rs#large_mix_observes_cancellation_between_chunks` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `src-tauri/src/playback/audio.rs#long_timeline_mix_has_constant_peak_allocation_and_matches_short_reference` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-tauri large_mix_observes_cancellation_between_chunks`
   - Run: `cargo test -p opentake-tauri long_timeline_mix_has_constant_peak_allocation_and_matches_short_reference`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `src-tauri/src/playback/audio.rs#mix_timeline_stereo`, `src-tauri/src/export.rs#mix_timeline_audio`, `crates/opentake-media/src/encode/mod.rs#VideoEncoder`, `docs/architecture/HANDOFF-2026-07.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-tauri large_mix_observes_cancellation_between_chunks`
   - Run: `cargo test -p opentake-tauri long_timeline_mix_has_constant_peak_allocation_and_matches_short_reference`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completed 2026-08-01. The reviewed RED first failed because
+`mix_stereo_windows` did not exist. Playback now uses a bounded 2-second/4-slot
+generation queue; seek, pause/resume, underrun, cancellation, and teardown are
+covered. Export and save-as-WAV stream the same bounded windows to file-backed
+output. Both reviewed focused tests, the workspace gate, strict Clippy, Web
+tests/build, and packaged macOS playback/export/WAV probes pass. Full receipt:
+`../runtime-artifacts/automated/bounded-audio-streaming-real-device-2026-08-01.md`.
 
 ### Task 17: MR-renderer-debt-composite (implementation-slice-827681eebfb87194)
 

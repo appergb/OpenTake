@@ -2333,26 +2333,19 @@ fn save_clip_as_media_workflow(
             SavedMediaMetadata::Video(summary)
         }
         "wav" => {
-            let pcm = crate::export::mix_timeline_audio_for_manifest_with_control(
+            let mut writer = output.writer()?;
+            let sample_count = crate::export::write_timeline_audio_wav_for_manifest_with_control(
                 &single_timeline,
                 &subset,
                 &project_dir_option,
+                &mut writer,
                 control,
                 Some(Arc::clone(&on_progress)),
             )?
             .ok_or_else(|| "audio clip contains no decodable audio".to_string())?;
-            let mut writer = output.writer()?;
-            crate::export::write_wav_s16le_cancellable_to_file(
-                &pcm.samples_f32,
-                pcm.spec.sample_rate,
-                &mut writer,
-                guard.cancel_token(),
-                Some(on_progress.as_ref()),
-                None,
-            )?;
             SavedMediaMetadata::Wav {
-                sample_count: pcm.samples_f32.len(),
-                sample_rate: pcm.spec.sample_rate,
+                sample_count,
+                sample_rate: opentake_media::encode::MIX_SAMPLE_RATE,
             }
         }
         _ => unreachable!("save clip extension is fixed by clip type"),

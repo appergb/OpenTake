@@ -186,8 +186,8 @@ default-off Rust renderer or to perform the then-missing first device check.
 
 ### 3.11 【P2】流式音频分块解码(#160 剩余)
 
-- **现状**:播放前一次性 `extract_pcm` 全时间线预混(长工程首帧慢、改动即整段重混)。
-- **怎么写**:按 N 秒窗口分块解码 + 环形缓冲后台填充(cpal 回调只读环形缓冲,不破 lock-free);seek 丢弃未播块。参照 `playback/audio.rs` 现有 `AtomicU64` 主时钟结构。
+- **完成状态(2026-08-01) PASS**:播放以 2 秒窗口解码、4 窗口有界队列后台填充；cpal 回调只做非阻塞读取，underrun 输出静音且音频主时钟继续前进。seek 递增 generation、取消在途解码并丢弃旧块；pause 保留当前 generation 的下一块，resume 从同一音频时钟继续。停止会取消并回收解码、音频和协调线程。
+- **导出与另存 PASS**:视频导出逐窗口混音并把 PCM 直接追加到 encoder 私有文件 spool，完成时再 mux，不保留全时间线 `Vec`；音频片段另存 WAV 也逐窗口写文件。60 秒打包 GUI 时间线完成跨窗口播放、暂停/继续、首尾跳转后继续、完整 H.264/AAC 导出和 8 秒 WAV 另存。自动化覆盖长时间线恒定峰值分配、短参考一致性、取消、underrun、暂停不吞块及增量 spool。证据见 [`bounded-audio-streaming-real-device-2026-08-01.md`](../audit/2026-07-14/runtime-artifacts/automated/bounded-audio-streaming-real-device-2026-08-01.md)。
 
 ### 3.12 【P2】收尾杂项
 

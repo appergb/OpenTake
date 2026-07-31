@@ -21,7 +21,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::cancel::MediaCancelToken;
-use crate::decode::pcm::PcmBuffer;
+use crate::decode::pcm::{PcmBuffer, PcmFormat, PcmSpec};
 use crate::error::{MediaError, Result};
 use crate::frame::RgbaFrame;
 
@@ -117,8 +117,14 @@ pub struct VideoEncoder {
     first_pass: PathBuf,
     output: File,
     acodec: &'static str,
-    pending_audio: Option<PcmBuffer>,
+    pending_audio: Option<PendingAudio>,
     child_reaped: bool,
+}
+
+struct PendingAudio {
+    path: PathBuf,
+    spec: PcmSpec,
+    sample_count: u64,
 }
 
 impl VideoEncoder {
@@ -229,16 +235,81 @@ impl VideoEncoder {
         Ok(())
     }
 
-    /// Record the mixed-down mono audio buffer to mux on `finish`. The buffer's
-    /// `spec.sample_rate` is the rate ffmpeg is told to read the muxed PCM at
-    /// (the orchestrator decodes/mixes at [`MIX_SAMPLE_RATE`]). An empty buffer
-    /// is ignored — `finish` then keeps the video-only output.
-    pub fn push_audio(&mut self, pcm: PcmBuffer) {
-        if pcm.samples_f32.is_empty() {
-            self.pending_audio = None;
-        } else {
-            self.pending_audio = Some(pcm);
+    /// Record one complete mixed-down mono audio buffer. Internally this uses
+    /// the same file-backed chunk sink as long-timeline export, so the encoder
+    /// never retains the caller's `Vec` until `finish`.
+    pub fn push_audio(&mut self, pcm: PcmBuffer) -> Result<()> {
+        if let Some(pending) = self.pending_audio.take() {
+            let _ = std::fs::remove_file(pending.path);
         }
+        if pcm.samples_f32.is_empty() {
+            return Ok(());
+        }
+        self.push_audio_chunk(pcm.spec, &pcm.samples_f32, &MediaCancelToken::new())
+    }
+
+    /// Append one bounded mono f32 chunk to the private PCM spool used by the
+    /// final mux. The spool is file-backed, cancellable, and requires every
+    /// chunk to keep the same PCM contract.
+    pub fn push_audio_chunk(
+        &mut self,
+        spec: PcmSpec,
+        samples: &[f32],
+        cancel: &MediaCancelToken,
+    ) -> Result<()> {
+        if samples.is_empty() {
+            return Ok(());
+        }
+        if spec.channels != 1 || spec.format != PcmFormat::F32 || spec.sample_rate == 0 {
+            return Err(MediaError::Encode(
+                "streamed audio must be mono f32 at a positive sample rate".to_string(),
+            ));
+        }
+        let path = self.workspace.path().join("audio.pcm");
+        let mut output = if let Some(pending) = &self.pending_audio {
+            if pending.spec != spec {
+                return Err(MediaError::Encode(
+                    "streamed audio format changed between chunks".to_string(),
+                ));
+            }
+            OpenOptions::new()
+                .append(true)
+                .open(&pending.path)
+                .map_err(MediaError::Io)?
+        } else {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(MediaError::Io)?
+        };
+        for chunk in samples.chunks(OUTPUT_COPY_CHUNK / 2) {
+            if cancel.checkpoint() {
+                return Err(MediaError::Cancelled);
+            }
+            output
+                .write_all(&mix::mono_f32_to_s16le(chunk))
+                .map_err(MediaError::Io)?;
+        }
+        output.flush().map_err(MediaError::Io)?;
+        let appended = u64::try_from(samples.len())
+            .map_err(|_| MediaError::Encode("streamed audio sample count overflow".to_string()))?;
+        match &mut self.pending_audio {
+            Some(pending) => {
+                pending.sample_count =
+                    pending.sample_count.checked_add(appended).ok_or_else(|| {
+                        MediaError::Encode("streamed audio sample count overflow".to_string())
+                    })?;
+            }
+            None => {
+                self.pending_audio = Some(PendingAudio {
+                    path,
+                    spec,
+                    sample_count: appended,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Abort a mid-stream encode (e.g. a user cancel): kill the ffmpeg child and
@@ -276,7 +347,7 @@ impl VideoEncoder {
         report_progress(progress, FIRST_PASS_END);
 
         match self.pending_audio.take() {
-            Some(pcm) => self.mux_audio(&pcm, cancel, progress, mux_wait_hook)?,
+            Some(audio) => self.mux_audio(&audio, cancel, progress, mux_wait_hook)?,
             None => self.copy_video_only(cancel, progress)?,
         };
         if cancel.checkpoint() {
@@ -397,20 +468,11 @@ impl VideoEncoder {
 
     fn mux_audio(
         &mut self,
-        pcm: &PcmBuffer,
+        audio: &PendingAudio,
         cancel: &MediaCancelToken,
         progress: Option<&EncodeProgressCallback>,
         mux_wait_hook: Option<&dyn Fn()>,
     ) -> Result<()> {
-        let pcm_path = self.workspace.path().join("audio.pcm");
-        let mut pcm_tmp = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&pcm_path)
-            .map_err(MediaError::Io)?;
-        write_pcm_s16le_cancellable(&pcm.samples_f32, &mut pcm_tmp, cancel, progress, None)?;
-        pcm_tmp.flush().map_err(MediaError::Io)?;
         report_progress(progress, PCM_WRITE_END);
 
         let mux_path = self.workspace.path().join(
@@ -427,9 +489,9 @@ impl VideoEncoder {
         );
         let args = mux_args(
             &self.first_pass,
-            &pcm_path,
+            &audio.path,
             &mux_path,
-            pcm.spec.sample_rate,
+            audio.spec.sample_rate,
             self.acodec,
         );
         let mut child = crate::ff::ffmpeg()
@@ -572,6 +634,7 @@ fn drain_stderr(mut stderr: ChildStderr) -> Result<()> {
     }
 }
 
+#[cfg(test)]
 fn write_pcm_s16le_cancellable(
     samples: &[f32],
     destination: &mut File,
@@ -677,6 +740,36 @@ mod tests {
             .args(["-p", &pid.to_string()])
             .status()
             .is_ok_and(|status| status.success())
+    }
+
+    #[test]
+    fn audio_chunks_spool_incrementally_without_retaining_the_timeline_mix() {
+        assert!(crate::ff::ffmpeg_available(), "test requires FFmpeg");
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("chunked.mp4");
+        let preset = ExportPreset::new(VideoCodec::H264, ExportResolution::P720);
+        let mut encoder = VideoEncoder::new(&output, 2, 2, 1, &preset).unwrap();
+        encoder
+            .push_frame(&RgbaFrame::new(2, 2, vec![0; 2 * 2 * 4]))
+            .unwrap();
+        let spec = PcmSpec {
+            sample_rate: 48_000,
+            channels: 1,
+            format: PcmFormat::F32,
+        };
+        let cancel = MediaCancelToken::new();
+        encoder
+            .push_audio_chunk(spec, &[0.25, -0.25], &cancel)
+            .unwrap();
+        encoder
+            .push_audio_chunk(spec, &[0.5, -0.5], &cancel)
+            .unwrap();
+        let pending = encoder.pending_audio.as_ref().unwrap();
+        assert_eq!(pending.sample_count, 4);
+        assert_eq!(std::fs::metadata(&pending.path).unwrap().len(), 8);
+
+        encoder.finish().unwrap();
+        assert!(output.is_file());
     }
 
     #[cfg(unix)]

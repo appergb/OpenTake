@@ -29,7 +29,7 @@
 //! preview path in `render.rs` is not touched). A later refactor can hoist the
 //! shared projection into a `pub(crate)` helper once both paths are stable.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
@@ -47,7 +47,9 @@ use tauri::{AppHandle, Emitter, State};
 
 use opentake_core::AppCore;
 use opentake_domain::{AudioDenoise, Clip, ClipType, LutReference, MediaSource, TextStyle};
-use opentake_media::encode::{mix, ClipAudio, MIX_SAMPLE_RATE};
+#[cfg(test)]
+use opentake_media::encode::ClipAudio;
+use opentake_media::encode::{mix, MIX_SAMPLE_RATE};
 use opentake_media::{
     decode_frame_at, extract_pcm, extract_pcm_cancellable_with_progress, interpolate_frame_pair,
     ExportPreset, ExportResolution as EncodeResolution, FrameInterpolationFallback,
@@ -70,6 +72,7 @@ use opentake_render::{
 /// hit rate is low; a small cache still helps text/image layers re-used across
 /// frames. Bounds VRAM during the export loop.
 const TEXTURE_CACHE_CAP: usize = 64;
+const AUDIO_STREAM_WINDOW_SAMPLES: usize = MIX_SAMPLE_RATE as usize * 2;
 
 /// Requested output codec, projected from the front-end.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -300,6 +303,7 @@ impl ExportGuard<'_> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn cancel_token(&self) -> &MediaCancelToken {
         &self.cancel
     }
@@ -717,9 +721,9 @@ const AUDIO_DECODE_SPEC: PcmSpec = PcmSpec {
 pub(crate) type AudioExportProgress = Arc<dyn Fn(i32, i32) + Send + Sync>;
 
 pub(crate) const AUDIO_PROGRESS_TOTAL: i32 = 1_000;
-const AUDIO_DECODE_END: i32 = 800;
 const AUDIO_MIX_START: i32 = 850;
 const AUDIO_MIX_END: i32 = 980;
+#[cfg(test)]
 const AUDIO_WAV_START: i32 = AUDIO_MIX_END;
 const AUDIO_WAV_END: i32 = 990;
 const AUDIO_CANCEL_CHUNK_SAMPLES: usize = 8 * 1024;
@@ -853,6 +857,7 @@ impl AudioPlanLike for AudioClipPlan {
     }
 }
 
+#[cfg(test)]
 fn project_clip_audio<T: AudioPlanLike>(
     plan: &T,
     media: &HashMap<String, MediaInfo>,
@@ -962,74 +967,13 @@ fn apply_export_denoise(
     })
 }
 
-fn mix_clips_with_control(
-    clips: &[ClipAudio],
-    control: &ExportControl,
-    progress: Option<&dyn Fn(usize, usize)>,
-) -> Result<Vec<f32>, String> {
-    for (index, clip) in clips.iter().enumerate() {
-        if !clip.gains.is_empty() && clip.gains.len() != clip.samples.len() {
-            return Err(format!(
-                "audio mix failed: clip {index}: gains len {} != samples len {}",
-                clip.gains.len(),
-                clip.samples.len()
-            ));
-        }
-    }
-    let total = clips
-        .iter()
-        .map(|clip| clip.start_sample + clip.samples.len())
-        .max()
-        .unwrap_or(0);
-    let work_total = clips
-        .iter()
-        .map(|clip| clip.samples.len())
-        .sum::<usize>()
-        .saturating_add(total)
-        .max(1);
-    let mut completed = 0_usize;
-    let mut mixed = vec![0.0_f32; total];
-
-    for clip in clips {
-        for (offset, &sample) in clip.samples.iter().enumerate() {
-            if completed.is_multiple_of(AUDIO_CANCEL_CHUNK_SAMPLES) {
-                check_audio_cancel(control)?;
-                if let Some(report) = progress {
-                    report(completed, work_total);
-                }
-            }
-            let gain = if clip.gains.is_empty() {
-                1.0
-            } else {
-                clip.gains[offset]
-            };
-            mixed[clip.start_sample + offset] += sample * gain;
-            completed += 1;
-        }
-    }
-    for sample in &mut mixed {
-        if completed.is_multiple_of(AUDIO_CANCEL_CHUNK_SAMPLES) {
-            check_audio_cancel(control)?;
-            if let Some(report) = progress {
-                report(completed, work_total);
-            }
-        }
-        *sample = sample.clamp(-1.0, 1.0);
-        completed += 1;
-    }
-    check_audio_cancel(control)?;
-    if let Some(report) = progress {
-        report(work_total, work_total);
-    }
-    Ok(mixed)
-}
-
 /// Decode + mix every audio-bearing clip on the timeline into one mono buffer.
 ///
 /// Walks audio and video clips (video clips can carry an audio track), projects
 /// each through [`project_clip_audio`], and linearly mixes the lot. Returns
 /// `None` when nothing contributes audio (→ the caller keeps the video-only
 /// output). Errors surface decode/mix failures to the front-end.
+#[cfg(test)]
 fn mix_timeline_audio(
     timeline: &opentake_domain::Timeline,
     media: &HashMap<String, MediaInfo>,
@@ -1044,84 +988,249 @@ fn mix_timeline_audio(
         .filter(|clip| matches!(clip.media_type, ClipType::Audio | ClipType::Video))
         .cloned()
         .collect::<Vec<_>>();
-    mix_flattened_audio(&clips, timeline.fps, media, control, on_progress)
+    let mut samples_f32 = Vec::new();
+    let has_audio = stream_flattened_audio(
+        &clips,
+        media,
+        AudioStreamOptions {
+            timeline_fps: timeline.fps,
+            start_frame: 0,
+            end_frame: timeline.total_frames(),
+            control,
+            on_progress,
+        },
+        |samples| {
+            samples_f32
+                .try_reserve(samples.len())
+                .map_err(|error| format!("audio output allocation failed: {error}"))?;
+            samples_f32.extend_from_slice(samples);
+            Ok(())
+        },
+    )?;
+    Ok(has_audio.then_some(PcmBuffer {
+        spec: AUDIO_DECODE_SPEC,
+        samples_f32,
+    }))
 }
 
-fn mix_flattened_audio<T: AudioPlanLike>(
-    clips: &[T],
+struct AudioStreamOptions<'a> {
     timeline_fps: i32,
-    media: &HashMap<String, MediaInfo>,
-    control: Option<&ExportControl>,
+    start_frame: i32,
+    end_frame: i32,
+    control: Option<&'a ExportControl>,
     on_progress: Option<AudioExportProgress>,
-) -> Result<Option<PcmBuffer>, String> {
+}
+
+fn stream_flattened_audio<T: AudioPlanLike>(
+    clips: &[T],
+    media: &HashMap<String, MediaInfo>,
+    options: AudioStreamOptions<'_>,
+    mut emit: impl FnMut(&[f32]) -> Result<(), String>,
+) -> Result<bool, String> {
+    let AudioStreamOptions {
+        timeline_fps,
+        start_frame,
+        end_frame,
+        control,
+        on_progress,
+    } = options;
+    if timeline_fps <= 0 || start_frame >= end_frame {
+        return Ok(false);
+    }
+    let mut audible_media = HashSet::new();
+    for plan in clips {
+        let clip = plan.clip();
+        let clip_end = clip.start_frame.saturating_add(clip.duration_frames);
+        if clip.duration_frames <= 0 || clip_end <= start_frame || clip.start_frame >= end_frame {
+            continue;
+        }
+        let Some(info) = media.get(&clip.media_ref) else {
+            continue;
+        };
+        let metadata = opentake_media::probe(&info.path)
+            .map_err(|error| format!("audio probe failed for {}: {error}", clip.media_ref))?;
+        if metadata.has_audio {
+            audible_media.insert(clip.media_ref.clone());
+        }
+    }
+    if audible_media.is_empty() {
+        return Ok(false);
+    }
+
+    let sample_at_frame = |frame: i32| {
+        ((frame.max(0) as f64 / timeline_fps as f64) * MIX_SAMPLE_RATE as f64).round() as usize
+    };
+    let range_start = sample_at_frame(start_frame);
+    let range_end = sample_at_frame(end_frame);
+    let total_samples = range_end.saturating_sub(range_start);
     let true_peak_ceiling_dbtp = clips
         .iter()
         .filter_map(AudioPlanLike::true_peak_ceiling_dbtp)
         .min_by(f64::total_cmp);
-    let eligible_count = clips.len();
-    let mut clips_audio: Vec<ClipAudio> = Vec::new();
-    for (eligible_index, clip) in clips.iter().enumerate() {
-        let decode_progress = match (control, &on_progress) {
-            (Some(_), Some(emit)) => {
-                let emit = Arc::clone(emit);
-                let index = eligible_index;
-                Some(Arc::new(move |done: usize, total: usize| {
-                    let total = total.max(1);
-                    let numerator = index
-                        .saturating_mul(AUDIO_DECODE_END as usize)
-                        .saturating_mul(total)
-                        .saturating_add(done.min(total).saturating_mul(AUDIO_DECODE_END as usize));
-                    let denominator = eligible_count.saturating_mul(total).max(1);
-                    emit((numerator / denominator) as i32, AUDIO_PROGRESS_TOTAL);
-                }) as PcmProgressCallback)
-            }
-            _ => None,
-        };
-        if let Some(ca) = project_clip_audio(clip, media, timeline_fps, control, decode_progress)? {
-            clips_audio.push(ca);
+    let cancel = control
+        .map(ExportControl::media_cancel_token)
+        .unwrap_or_default();
+
+    for relative_start in (0..total_samples).step_by(AUDIO_STREAM_WINDOW_SAMPLES) {
+        if let Some(control) = control {
+            check_audio_cancel(control)?;
         }
-    }
-    if clips_audio.is_empty() {
-        return Ok(None);
-    }
-    let mut mixed = match control {
-        Some(control) => {
-            if let Some(emit) = &on_progress {
-                emit(AUDIO_MIX_START, AUDIO_PROGRESS_TOTAL);
+        let window_len = AUDIO_STREAM_WINDOW_SAMPLES.min(total_samples - relative_start);
+        let window_start = range_start.saturating_add(relative_start);
+        let window_end = window_start.saturating_add(window_len);
+        let mut mixed = vec![0.0_f32; window_len];
+        for plan in clips {
+            let clip = plan.clip();
+            if !audible_media.contains(&clip.media_ref) || clip.duration_frames <= 0 {
+                continue;
             }
-            let mix_progress = |done: usize, total: usize| {
-                if let Some(emit) = &on_progress {
-                    let span = (AUDIO_MIX_END - AUDIO_MIX_START) as usize;
-                    let mapped = AUDIO_MIX_START
-                        + (done.min(total.max(1)).saturating_mul(span) / total.max(1)) as i32;
-                    emit(mapped, AUDIO_PROGRESS_TOTAL);
+            let clip_start = sample_at_frame(clip.start_frame);
+            let clip_end = sample_at_frame(clip.start_frame.saturating_add(clip.duration_frames));
+            let overlap_start = window_start.max(clip_start);
+            let overlap_end = window_end.min(clip_end);
+            if overlap_start >= overlap_end || clip_end <= clip_start {
+                continue;
+            }
+            let Some(info) = media.get(&clip.media_ref) else {
+                continue;
+            };
+            let Some((source_lo, source_hi)) = clip_source_window_secs(clip, timeline_fps) else {
+                continue;
+            };
+            let source_span = source_hi - source_lo;
+            let relative_lo = (overlap_start - clip_start) as f64 / (clip_end - clip_start) as f64;
+            let relative_hi = (overlap_end - clip_start) as f64 / (clip_end - clip_start) as f64;
+            let source_range = (
+                source_lo + source_span * relative_lo,
+                source_lo + source_span * relative_hi,
+            );
+            let decoded = match control {
+                Some(control) => decode_pcm_with_export_control(
+                    control,
+                    &info.path,
+                    Some(source_range),
+                    None,
+                    extract_pcm_cancellable_with_progress,
+                ),
+                None => extract_pcm(&info.path, &AUDIO_DECODE_SPEC, Some(source_range)),
+            };
+            let pcm = match decoded {
+                Ok(pcm) => pcm,
+                Err(opentake_media::MediaError::NoTrack(_, _)) => continue,
+                Err(opentake_media::MediaError::Cancelled) => {
+                    return Err(CANCELLED_SENTINEL.to_string());
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "audio decode failed for {}: {error}",
+                        clip.media_ref
+                    ));
                 }
             };
-            mix_clips_with_control(&clips_audio, control, Some(&mix_progress))?
+            let target_len = overlap_end - overlap_start;
+            let retimed = retime_pcm_to_len_with_control(&pcm.samples_f32, target_len, control)?;
+            let processed = apply_export_denoise(&retimed, 1, plan.audio_denoise(), control)?;
+            let output_start = overlap_start - window_start;
+            for (offset, sample) in processed.into_iter().take(target_len).enumerate() {
+                if offset.is_multiple_of(AUDIO_CANCEL_CHUNK_SAMPLES) {
+                    if let Some(control) = control {
+                        check_audio_cancel(control)?;
+                    }
+                }
+                let absolute_sample = overlap_start.saturating_add(offset);
+                let timeline_frame = ((absolute_sample as f64 / MIX_SAMPLE_RATE as f64)
+                    * timeline_fps as f64)
+                    .floor() as i32;
+                mixed[output_start + offset] += sample * plan.volume_at(timeline_frame) as f32;
+            }
         }
-        None => mix::mix_clips(&clips_audio).map_err(|e| format!("audio mix failed: {e}"))?,
-    };
-    if let Some(ceiling_dbtp) = true_peak_ceiling_dbtp {
-        mix::apply_true_peak_ceiling(&mut mixed, Some(ceiling_dbtp));
+        for sample in &mut mixed {
+            *sample = sample.clamp(-1.0, 1.0);
+        }
+        mix::apply_true_peak_ceiling(&mut mixed, true_peak_ceiling_dbtp);
+        emit(&mixed)?;
+        if let Some(report) = &on_progress {
+            let completed = relative_start.saturating_add(window_len);
+            let span = (AUDIO_MIX_END - AUDIO_MIX_START) as usize;
+            let mapped =
+                AUDIO_MIX_START + (completed.saturating_mul(span) / total_samples.max(1)) as i32;
+            report(mapped, AUDIO_PROGRESS_TOTAL);
+        }
+        if cancel.checkpoint() {
+            return Err(CANCELLED_SENTINEL.to_string());
+        }
     }
-    if mixed.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(PcmBuffer {
-        spec: AUDIO_DECODE_SPEC,
-        samples_f32: mixed,
-    }))
+    Ok(true)
 }
 
-pub(crate) fn mix_timeline_audio_for_manifest_with_control(
+/// Mix a timeline in bounded windows and append each window directly to a WAV.
+///
+/// The output header is written lazily after the audio preflight succeeds, so
+/// callers can distinguish a silent timeline without materializing a full PCM
+/// buffer or leaving a header-only file behind.
+pub(crate) fn write_timeline_audio_wav_for_manifest_with_control(
     timeline: &opentake_domain::Timeline,
     manifest: &opentake_domain::MediaManifest,
     project_dir: &Option<PathBuf>,
+    file: &mut File,
     control: &ExportControl,
     on_progress: Option<AudioExportProgress>,
-) -> Result<Option<PcmBuffer>, String> {
+) -> Result<Option<usize>, String> {
     let (_sizes, media) = project_media(manifest, project_dir);
-    mix_timeline_audio(timeline, &media, Some(control), on_progress)
+    let clips = timeline
+        .tracks
+        .iter()
+        .filter(|track| !track.muted)
+        .flat_map(|track| &track.clips)
+        .filter(|clip| matches!(clip.media_type, ClipType::Audio | ClipType::Video))
+        .cloned()
+        .collect::<Vec<_>>();
+    let end_frame = timeline.total_frames();
+    let expected_samples = if timeline.fps > 0 {
+        ((end_frame.max(0) as f64 / timeline.fps as f64) * MIX_SAMPLE_RATE as f64).round() as usize
+    } else {
+        0
+    };
+    let mut written_samples = 0_usize;
+    let cancel = control.media_cancel_token();
+    let has_audio = stream_flattened_audio(
+        &clips,
+        &media,
+        AudioStreamOptions {
+            timeline_fps: timeline.fps,
+            start_frame: 0,
+            end_frame,
+            control: Some(control),
+            on_progress: on_progress.clone(),
+        },
+        |samples| {
+            if written_samples == 0 {
+                write_wav_header(file, expected_samples, MIX_SAMPLE_RATE)?;
+            }
+            if cancel.checkpoint() {
+                return Err(CANCELLED_SENTINEL.to_string());
+            }
+            let data = opentake_media::encode::mono_f32_to_s16le(samples);
+            file.write_all(&data)
+                .map_err(|error| format!("write wav samples: {error}"))?;
+            written_samples = written_samples.saturating_add(samples.len());
+            Ok(())
+        },
+    )?;
+    if !has_audio {
+        return Ok(None);
+    }
+    if written_samples != expected_samples {
+        return Err(format!(
+            "WAV sample count mismatch: wrote {written_samples}, expected {expected_samples}"
+        ));
+    }
+    file.flush()
+        .map_err(|error| format!("flush wav output: {error}"))?;
+    if let Some(report) = &on_progress {
+        report(AUDIO_WAV_END, AUDIO_PROGRESS_TOTAL);
+    }
+    Ok(Some(written_samples))
 }
 
 /// `export_video`: render the whole timeline to a video file on disk.
@@ -1361,8 +1470,9 @@ pub(crate) fn run_export_with_control(
         }
     }
 
-    // Decode + linearly mix every audio-bearing clip, then hand the mixed PCM to
-    // the encoder so `finish` mux's it into the container. No audio → video-only.
+    // Decode + linearly mix every audio-bearing clip in bounded windows, then
+    // append each window to the encoder's private PCM spool. `finish` muxes that
+    // file into the container; no audio keeps the output video-only.
     let audio_progress = on_progress.as_ref().map(|emit| {
         let emit = Arc::clone(emit);
         Arc::new(move |done: i32, total: i32| {
@@ -1372,21 +1482,25 @@ pub(crate) fn run_export_with_control(
             emit(mapped, AUDIO_PROGRESS_TOTAL);
         }) as AudioExportProgress
     });
-    let mixed_audio =
-        mix_flattened_audio(&plan.audio_clips, plan.fps, &media, control, audio_progress)?;
-    let mut has_audio = false;
-    if let Some(pcm) = mixed_audio {
-        // Once any audio overlaps the exported interval, pad its trailing
-        // silence to the exact video duration. The muxer uses `-shortest`, so
-        // this keeps the completed container's frame_count/fps duration true.
-        let pcm = slice_pcm(pcm, start_frame, end_frame, plan.fps);
-        has_audio = !pcm.samples_f32.is_empty();
-        encoder.push_audio(pcm);
-    }
-
     let cancel = control
         .map(ExportControl::media_cancel_token)
         .unwrap_or_default();
+    let has_audio = stream_flattened_audio(
+        &plan.audio_clips,
+        &media,
+        AudioStreamOptions {
+            timeline_fps: plan.fps,
+            start_frame,
+            end_frame,
+            control,
+            on_progress: audio_progress,
+        },
+        |samples| {
+            encoder
+                .push_audio_chunk(AUDIO_DECODE_SPEC, samples, &cancel)
+                .map_err(|error| format!("audio spool failed: {error}"))
+        },
+    )?;
     let finalize_progress = on_progress.as_ref().map(|emit| {
         let emit = Arc::clone(emit);
         move |done: usize, total: usize| {
@@ -1444,6 +1558,7 @@ fn completion_progress(defer_completion: bool) -> i32 {
     }
 }
 
+#[cfg(test)]
 fn slice_pcm(pcm: PcmBuffer, start_frame: i32, end_frame: i32, fps: i32) -> PcmBuffer {
     if fps <= 0 || start_frame >= end_frame {
         return PcmBuffer {
@@ -1489,6 +1604,7 @@ pub(crate) fn write_wav_s16le(samples: &[f32], sample_rate: u32, out: &Path) -> 
     result
 }
 
+#[cfg(test)]
 pub(crate) fn write_wav_s16le_cancellable_to_file(
     samples: &[f32],
     sample_rate: u32,
@@ -1497,37 +1613,12 @@ pub(crate) fn write_wav_s16le_cancellable_to_file(
     on_progress: Option<&dyn Fn(i32, i32)>,
     checkpoint_hook: Option<&dyn Fn(usize)>,
 ) -> Result<(), String> {
-    let data_bytes = samples
-        .len()
-        .checked_mul(2)
-        .ok_or_else(|| "wav output is too large".to_string())?;
-    let data_len = u32::try_from(data_bytes).map_err(|_| "wav output is too large".to_string())?;
-    let chunk_size = 36 + data_len;
-    let mut header = Vec::with_capacity(44);
-    header.extend_from_slice(b"RIFF");
-    header.extend_from_slice(&chunk_size.to_le_bytes());
-    header.extend_from_slice(b"WAVE");
-    header.extend_from_slice(b"fmt ");
-    header.extend_from_slice(&16u32.to_le_bytes());
-    header.extend_from_slice(&1u16.to_le_bytes());
-    header.extend_from_slice(&1u16.to_le_bytes());
-    header.extend_from_slice(&sample_rate.to_le_bytes());
-    header.extend_from_slice(&(sample_rate * 2).to_le_bytes());
-    header.extend_from_slice(&2u16.to_le_bytes());
-    header.extend_from_slice(&16u16.to_le_bytes());
-    header.extend_from_slice(b"data");
-    header.extend_from_slice(&data_len.to_le_bytes());
+    write_wav_header(file, samples.len(), sample_rate)?;
 
     (|| {
         if cancel.checkpoint() {
             return Err(CANCELLED_SENTINEL.to_string());
         }
-        file.set_len(0)
-            .map_err(|error| format!("truncate WAV output: {error}"))?;
-        file.seek(SeekFrom::Start(0))
-            .map_err(|error| format!("seek WAV output: {error}"))?;
-        file.write_all(&header)
-            .map_err(|error| format!("write wav header: {error}"))?;
         for (chunk_index, chunk) in samples.chunks(AUDIO_CANCEL_CHUNK_SAMPLES).enumerate() {
             let done = chunk_index.saturating_mul(AUDIO_CANCEL_CHUNK_SAMPLES);
             if let Some(hook) = checkpoint_hook {
@@ -1554,6 +1645,35 @@ pub(crate) fn write_wav_s16le_cancellable_to_file(
             .map_err(|error| format!("flush wav output: {error}"))?;
         Ok(())
     })()
+}
+
+fn write_wav_header(file: &mut File, sample_count: usize, sample_rate: u32) -> Result<(), String> {
+    let data_bytes = sample_count
+        .checked_mul(2)
+        .ok_or_else(|| "wav output is too large".to_string())?;
+    let data_len = u32::try_from(data_bytes).map_err(|_| "wav output is too large".to_string())?;
+    let chunk_size = 36 + data_len;
+    let mut header = Vec::with_capacity(44);
+    header.extend_from_slice(b"RIFF");
+    header.extend_from_slice(&chunk_size.to_le_bytes());
+    header.extend_from_slice(b"WAVE");
+    header.extend_from_slice(b"fmt ");
+    header.extend_from_slice(&16u32.to_le_bytes());
+    header.extend_from_slice(&1u16.to_le_bytes());
+    header.extend_from_slice(&1u16.to_le_bytes());
+    header.extend_from_slice(&sample_rate.to_le_bytes());
+    header.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+    header.extend_from_slice(&2u16.to_le_bytes());
+    header.extend_from_slice(&16u16.to_le_bytes());
+    header.extend_from_slice(b"data");
+    header.extend_from_slice(&data_len.to_le_bytes());
+
+    file.set_len(0)
+        .map_err(|error| format!("truncate WAV output: {error}"))?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| format!("seek WAV output: {error}"))?;
+    file.write_all(&header)
+        .map_err(|error| format!("write wav header: {error}"))
 }
 
 fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {

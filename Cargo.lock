@@ -3545,6 +3545,7 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "cpal",
+ "crossbeam-channel",
  "futures",
  "futures-util",
  "image",
