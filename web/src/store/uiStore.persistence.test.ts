@@ -9,6 +9,7 @@ const V1 = {
   mediaPanelVisible: "opentake.ui.v1.mediaPanelVisible",
   inspectorPanelVisible: "opentake.ui.v1.inspectorPanelVisible",
   keyframesPanelVisible: "opentake.ui.v1.keyframesPanelVisible",
+  zoomScale: "opentake.ui.v1.zoomScale",
 } as const;
 
 const LEGACY = {
@@ -17,6 +18,7 @@ const LEGACY = {
   mediaPanelVisible: "mediaPanelVisible",
   inspectorPanelVisible: "inspectorPanelVisible",
   keyframesPanelVisible: "keyframesPanelVisible",
+  zoomScale: "zoomScale",
 } as const;
 
 function expectDefaults() {
@@ -45,12 +47,14 @@ describe("uiStore schema-safe persistence", () => {
     localStorage.setItem(V1.mediaPanelVisible, "false");
     localStorage.setItem(V1.inspectorPanelVisible, "false");
     localStorage.setItem(V1.keyframesPanelVisible, "true");
+    localStorage.setItem(V1.zoomScale, "8");
     expect(createEditorUiStore().getState()).toMatchObject({
       layoutPreset: "vertical",
       agentPanelVisible: true,
       mediaPanelVisible: false,
       inspectorPanelVisible: false,
       keyframesPanelVisible: true,
+      zoomScale: 8,
     });
 
     localStorage.clear();
@@ -59,12 +63,14 @@ describe("uiStore schema-safe persistence", () => {
     localStorage.setItem(LEGACY.mediaPanelVisible, "false");
     localStorage.setItem(LEGACY.inspectorPanelVisible, "false");
     localStorage.setItem(LEGACY.keyframesPanelVisible, "true");
+    localStorage.setItem(LEGACY.zoomScale, "6");
     expect(createEditorUiStore().getState()).toMatchObject({
       layoutPreset: "media",
       agentPanelVisible: true,
       mediaPanelVisible: false,
       inspectorPanelVisible: false,
       keyframesPanelVisible: true,
+      zoomScale: 6,
     });
     for (const key of Object.keys(V1) as Array<keyof typeof V1>) {
       expect(localStorage.getItem(V1[key])).toBe(localStorage.getItem(LEGACY[key]));
@@ -76,12 +82,15 @@ describe("uiStore schema-safe persistence", () => {
     localStorage.setItem(V1.mediaPanelVisible, "yes");
     localStorage.setItem(V1.inspectorPanelVisible, "FALSE");
     localStorage.setItem(V1.keyframesPanelVisible, "null");
+    localStorage.setItem(V1.zoomScale, "41");
     expectDefaults();
+    for (const key of Object.values(V1)) expect(localStorage.getItem(key)).toBeNull();
 
     localStorage.clear();
     for (const key of Object.values(LEGACY)) localStorage.setItem(key, "corrupt");
     expectDefaults();
     for (const key of Object.values(V1)) expect(localStorage.getItem(key)).toBeNull();
+    for (const key of Object.values(LEGACY)) expect(localStorage.getItem(key)).toBeNull();
 
     localStorage.clear();
     const first = createEditorUiStore();
@@ -96,6 +105,7 @@ describe("uiStore schema-safe persistence", () => {
     writesOnly(V1.mediaPanelVisible, () => first.getState().toggleMediaPanel(), "false");
     writesOnly(V1.inspectorPanelVisible, () => first.getState().toggleInspectorPanel(), "false");
     writesOnly(V1.keyframesPanelVisible, () => first.getState().toggleKeyframesPanel(), "true");
+    writesOnly(V1.zoomScale, () => first.getState().setZoomScale(8), "8");
 
     first.getState().setView("editor");
     first.getState().setCurrentFrame(120);
@@ -111,6 +121,7 @@ describe("uiStore schema-safe persistence", () => {
       mediaPanelVisible: false,
       inspectorPanelVisible: false,
       keyframesPanelVisible: true,
+      zoomScale: 8,
     });
     expect(restarted.selectedClipIds).toEqual(new Set());
 

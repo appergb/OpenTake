@@ -2,15 +2,23 @@ import { readdirSync, readFileSync } from "node:fs";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EditRequest, TextStyle, Transform } from "../lib/types";
 
-const ipc = vi.hoisted(() => ({ calls: [] as EditRequest[] }));
+const ipc = vi.hoisted(() => ({
+  calls: [] as EditRequest[],
+  failure: null as Error | null,
+}));
 
 vi.mock("../lib/api", () => ({
   isTauri: true,
   editApply: async (command: EditRequest) => {
     ipc.calls.push(structuredClone(command));
+    if (ipc.failure) {
+      const failure = ipc.failure;
+      ipc.failure = null;
+      throw failure;
+    }
     return {
       changed: false,
       actionName: command.type,
@@ -67,6 +75,7 @@ import {
   upsertKeyframe,
 } from "./editActions";
 import { useProjectStore } from "./projectStore";
+import { createEditorUiStore } from "./uiStore";
 
 const transform: Transform = {
   centerX: 0.5,
@@ -115,7 +124,10 @@ function sourceFiles(root: string): string[] {
 describe("edit gesture command routing", () => {
   beforeEach(() => {
     ipc.calls.length = 0;
+    ipc.failure = null;
   });
+
+  afterEach(() => vi.unstubAllGlobals());
 
   it("every_edit_action_emits_exact_edit_request", async () => {
     expect(EDIT_GESTURE_COMMAND_MATRIX_IS_EXHAUSTIVE).toBe(true);
@@ -281,5 +293,97 @@ describe("edit gesture command routing", () => {
     expect(() => {
       useProjectStore.getState().timeline.fps = 120;
     }).toThrow();
+  });
+
+  it("rust_authority_and_ui_persistence_are_independently_owned", async () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+      clear: () => values.clear(),
+    });
+
+    const ui = createEditorUiStore();
+    ui.getState().setLayoutPreset("vertical");
+    ui.getState().toggleAgentPanel();
+    ui.getState().setZoomScale(8);
+    ui.getState().setCurrentFrame(240);
+    ui.getState().selectClips(new Set(["project-a-clip"]));
+    ui.getState().setPreviewMedia("project-a-media");
+
+    expect([...values.keys()].sort()).toEqual([
+      "opentake.ui.v1.agentPanelVisible",
+      "opentake.ui.v1.layoutPreset",
+      "opentake.ui.v1.zoomScale",
+    ]);
+    expect([...values.values()].join(" ")).not.toContain("project-a");
+
+    const restarted = createEditorUiStore().getState();
+    expect(restarted).toMatchObject({
+      layoutPreset: "vertical",
+      agentPanelVisible: true,
+      zoomScale: 8,
+      currentFrame: 0,
+      previewMediaId: null,
+    });
+    expect(restarted.selectedClipIds).toEqual(new Set());
+
+    const project = useProjectStore.getState();
+    const snapshot = {
+      timeline: {
+        fps: 30,
+        width: 1920,
+        height: 1080,
+        settingsConfigured: true,
+        tracks: [],
+      },
+      projectEpoch: 50,
+      version: 2,
+      projectPath: "/project-a.opentake",
+      compatibilityReadOnly: false,
+      compatibilityBlockers: [],
+    };
+    project.replaceProjectSnapshot(snapshot);
+    project.replaceProjectSnapshot({ ...snapshot, version: 1, projectPath: "/stale.opentake" });
+    expect(useProjectStore.getState()).toMatchObject({
+      projectEpoch: 50,
+      timelineVersion: 2,
+      projectPath: "/project-a.opentake",
+    });
+
+    const authoritativeTimeline = useProjectStore.getState().timeline;
+    await Promise.all([removeClips(["clip-a"]), removeClips(["clip-b"])]);
+    expect(ipc.calls.slice(-2)).toEqual([
+      { type: "removeClips", clipIds: ["clip-a"] },
+      { type: "removeClips", clipIds: ["clip-b"] },
+    ]);
+    expect(useProjectStore.getState()).toMatchObject({
+      projectEpoch: 50,
+      timelineVersion: 2,
+      projectPath: "/project-a.opentake",
+      timeline: authoritativeTimeline,
+    });
+
+    ipc.failure = new Error("native edit failed");
+    await expect(removeClips(["failed-clip"])).rejects.toThrow("native edit failed");
+    expect(useProjectStore.getState()).toMatchObject({
+      projectEpoch: 50,
+      timelineVersion: 2,
+      projectPath: "/project-a.opentake",
+      timeline: authoritativeTimeline,
+    });
+
+    ui.getState().resetProjectRuntimeState();
+    expect(ui.getState()).toMatchObject({
+      layoutPreset: "vertical",
+      agentPanelVisible: true,
+      zoomScale: 8,
+      currentFrame: 0,
+      previewMediaId: null,
+    });
+
+    const uiSource = readFileSync(new URL("./uiStore.ts", import.meta.url), "utf8");
+    expect(uiSource).not.toMatch(/localStorage[^\n]*(?:timeline|clip|media|credential|secret)/i);
   });
 });

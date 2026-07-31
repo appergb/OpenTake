@@ -67,6 +67,7 @@ const LS = {
   mediaPanelVisible: `${STORAGE_PREFIX}mediaPanelVisible`,
   inspectorPanelVisible: `${STORAGE_PREFIX}inspectorPanelVisible`,
   keyframesPanelVisible: `${STORAGE_PREFIX}keyframesPanelVisible`,
+  zoomScale: `${STORAGE_PREFIX}zoomScale`,
 } as const;
 
 type UiStorageKey = (typeof LS)[keyof typeof LS];
@@ -77,6 +78,7 @@ const LEGACY_LS: Record<UiStorageKey, string> = {
   [LS.mediaPanelVisible]: "mediaPanelVisible",
   [LS.inspectorPanelVisible]: "inspectorPanelVisible",
   [LS.keyframesPanelVisible]: "keyframesPanelVisible",
+  [LS.zoomScale]: "zoomScale",
 };
 
 function readPersisted(key: UiStorageKey): { value: string | null; legacy: boolean } {
@@ -90,19 +92,44 @@ function readPersisted(key: UiStorageKey): { value: string | null; legacy: boole
   }
 }
 
+function discardPersisted(key: UiStorageKey): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.removeItem(key);
+    localStorage.removeItem(LEGACY_LS[key]);
+  } catch {
+    // Storage may be unavailable; defaults still fail closed for this session.
+  }
+}
+
 function loadBool(key: UiStorageKey, fallback: boolean): boolean {
   const stored = readPersisted(key);
-  if (stored.value !== "true" && stored.value !== "false") return fallback;
+  if (stored.value !== "true" && stored.value !== "false") {
+    if (stored.value !== null) discardPersisted(key);
+    return fallback;
+  }
   if (stored.legacy) persist(key, stored.value);
   return stored.value === "true";
 }
 function loadPreset(): LayoutPreset {
   const stored = readPersisted(LS.layoutPreset);
   if (stored.value !== "default" && stored.value !== "media" && stored.value !== "vertical") {
+    if (stored.value !== null) discardPersisted(LS.layoutPreset);
     return "default";
   }
   if (stored.legacy) persist(LS.layoutPreset, stored.value);
   return stored.value;
+}
+function loadZoomScale(): number {
+  const stored = readPersisted(LS.zoomScale);
+  if (stored.value === null) return ZOOM.default;
+  const value = Number(stored.value);
+  if (!Number.isFinite(value) || value < 0.05 || value > ZOOM.max) {
+    discardPersisted(LS.zoomScale);
+    return ZOOM.default;
+  }
+  if (stored.legacy) persist(LS.zoomScale, String(value));
+  return value;
 }
 function persist(key: UiStorageKey, value: string): void {
   if (typeof localStorage === "undefined") return;
@@ -338,7 +365,7 @@ export const createEditorUiStore = () => create<UiState>((set, get) => ({
   selectedTimelineRange: null,
   selectedGap: null,
 
-  zoomScale: ZOOM.default,
+  zoomScale: loadZoomScale(),
   minZoomScale: 0.05,
   scrollLeft: 0,
   scrollTop: 0,
@@ -451,8 +478,12 @@ export const createEditorUiStore = () => create<UiState>((set, get) => ({
   selectGap: (selectedGap) =>
     set(selectedGap ? { selectedGap, selectedClipIds: new Set() } : { selectedGap: null }),
 
-  setZoomScale: (zoomScale) =>
-    set({ zoomScale: Math.max(get().minZoomScale, Math.min(ZOOM.max, zoomScale)) }),
+  setZoomScale: (zoomScale) => {
+    const requested = Number.isFinite(zoomScale) ? zoomScale : ZOOM.default;
+    const bounded = Math.max(get().minZoomScale, Math.min(ZOOM.max, requested));
+    persist(LS.zoomScale, String(bounded));
+    set({ zoomScale: bounded });
+  },
   setMinZoomScale: (minZoomScale) => set({ minZoomScale }),
   setScroll: (scrollLeft, scrollTop) => set({ scrollLeft, scrollTop }),
   setVisibleWidth: (timelineVisibleWidth) => set({ timelineVisibleWidth }),
