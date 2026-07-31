@@ -2,7 +2,7 @@
 //!
 //! Ports PalmierPro's AVFoundation / DSWaveformImage / macOS-Speech / CoreML
 //! media stack to cross-platform Rust:
-//! - **probe / decode / encode**: system ffmpeg CLI via [`ff`] (no libav* link).
+//! - **probe / decode / encode**: packaged/development ffmpeg CLI via [`ff`] (no libav* link).
 //! - **thumbnails**: seek-decode + JPEG sprite-grid disk cache.
 //! - **waveform**: Symphonia PCM decode → RMS downsample → normalized buckets.
 //! - **transcribe**: `Transcriber` trait (+ data model, locale, cache, search);
@@ -20,8 +20,9 @@
 //! ## Why ffmpeg over the CLI
 //! The local toolchain is ffmpeg 8.1 (libavcodec 62), which the C-binding crates
 //! (`ffmpeg-next` / `ffmpeg-the-third`) do not support, and `pkg-config` is
-//! absent. `ffmpeg-sidecar` drives the binaries on `PATH` — zero native linkage
-//! and a clean cross-platform build — so it is the chosen backend (SPEC §1.2,
+//! absent. `ffmpeg-sidecar` drives checksum-pinned packaged binaries (or PATH in
+//! development only) — zero native linkage and a clean cross-platform build —
+//! so it is the chosen backend (SPEC §1.2,
 //! "若 ffmpeg-next 不支持 8.x … 改用 ffmpeg-sidecar").
 
 mod ff;
@@ -179,7 +180,9 @@ pub use ort_worker::ExecutionProvider;
 /// ffmpeg/ffprobe availability probes (re-exported for integration tests and
 /// host-capability checks).
 pub mod ffmpeg_status {
-    pub use crate::ff::{ffmpeg_available, ffprobe_available};
+    pub use crate::ff::{
+        ffmpeg_available, ffprobe_available, packaged_sidecar_beside, packaged_sidecar_path,
+    };
 }
 
 /// Facade bundling the media engine's roots for `opentake-core` (SPEC §8.4).

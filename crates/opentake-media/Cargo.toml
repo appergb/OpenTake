@@ -29,8 +29,9 @@ tempfile = "3"
 # Media IO. We drive the system ffmpeg/ffprobe over the CLI rather than linking
 # libav*: the local toolchain is ffmpeg 8.1 (libavcodec 62), which the C-binding
 # crates (ffmpeg-next / ffmpeg-the-third) do not support, and pkg-config is not
-# installed. ffmpeg-sidecar shells out to the binaries on PATH — zero native
-# linkage, and it never auto-downloads here (we only use its command/parse API).
+# installed. ffmpeg-sidecar shells out to OpenTake's checksum-pinned packaged
+# binaries (or PATH during development) — zero native linkage, and it never
+# auto-downloads here (we only use its command/parse API).
 # `default-features = false` drops the `download_ffmpeg` feature, whose ureq +
 # rustls + zip/tar/xz2 stack is the crate's only HTTP/TLS dependency and is dead
 # weight for us; the FfmpegCommand command/parse API lives in the always-on core.

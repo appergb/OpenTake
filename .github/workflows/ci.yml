@@ -160,8 +160,16 @@ jobs:
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
 
-      - name: Install FFmpeg
-        run: choco install ffmpeg --no-progress -y
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+
+      - name: Provision checksum-pinned packaged FFmpeg sidecars
+        run: python scripts/provision_ffmpeg_sidecars.py --target x86_64-pc-windows-msvc
+
+      - name: Verify sidecar supply and probe/decode/encode boundary without PATH
+        shell: bash
+        run: ruby scripts/tests/packaged-sidecars-test.rb --name packaged_macos_windows_sidecars_resolve_and_execute
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -199,6 +207,32 @@ jobs:
           Remove-Item 'target/release/bundle/msi' -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item 'target/release/bundle/nsis' -Recurse -Force -ErrorAction SilentlyContinue
           & .\web\node_modules\.bin\tauri.cmd build --ci --bundles msi,nsis
+
+      - name: Install NSIS package and execute installed sidecars without PATH
+        shell: pwsh
+        run: |
+          $installer = @(Get-ChildItem 'target/release/bundle/nsis/*.exe' -File)
+          if ($installer.Count -ne 1) { throw 'expected exactly one NSIS installer' }
+          $process = Start-Process -FilePath $installer[0].FullName -ArgumentList '/S' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "silent NSIS install failed: $($process.ExitCode)" }
+          $candidates = @(
+            (Join-Path $env:LOCALAPPDATA 'OpenTake/opentake.exe'),
+            (Join-Path $env:LOCALAPPDATA 'Programs/OpenTake/opentake.exe'),
+            (Join-Path $env:ProgramFiles 'OpenTake/opentake.exe')
+          )
+          $application = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $application) {
+            $uninstall = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' `
+              -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'OpenTake' } | Select-Object -First 1
+            if ($uninstall.InstallLocation) {
+              $application = Get-ChildItem $uninstall.InstallLocation -Filter 'opentake.exe' -File `
+                -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1
+            }
+          }
+          if (-not $application) { throw "installed OpenTake executable not found: $($candidates -join ', ')" }
+          ruby scripts/tests/packaged-sidecars-test.rb `
+            --name packaged_macos_windows_sidecars_resolve_and_execute `
+            --package (Split-Path -Parent $application)
 
       - name: Bind installers to the exact source SHA
         shell: pwsh

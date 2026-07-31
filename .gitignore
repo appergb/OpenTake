@@ -11,6 +11,8 @@ dist/
 # Tauri
 src-tauri/target/
 src-tauri/gen/
+src-tauri/binaries/ffmpeg-*
+src-tauri/binaries/ffprobe-*
 
 # Env / secrets (never commit API keys)
 .env

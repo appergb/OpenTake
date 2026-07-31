@@ -1,0 +1,42 @@
+{
+  "schema": "opentake-ffmpeg-sidecars-v1",
+  "release": "https://github.com/eugeneware/ffmpeg-static/releases/tag/b6.1.1",
+  "targets": {
+    "aarch64-apple-darwin": {
+      "ffmpeg": {
+        "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-arm64",
+        "sha256": "a90e3db6a3fd35f6074b013f948b1aa45b31c6375489d39e572bea3f18336584",
+        "version": "6.0"
+      },
+      "ffprobe": {
+        "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffprobe-darwin-arm64",
+        "sha256": "bb2db6f5d8cef919da12fbf592119a987202a8c060a886f3cab091f9cab90b64",
+        "version": "6.0"
+      }
+    },
+    "x86_64-apple-darwin": {
+      "ffmpeg": {
+        "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-x64",
+        "sha256": "ebdddc936f61e14049a2d4b549a412b8a40deeff6540e58a9f2a2da9e6b18894",
+        "version": "6.1.1"
+      },
+      "ffprobe": {
+        "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffprobe-darwin-x64",
+        "sha256": "fa3add0ce901f7241abe0dfc0155d958fc834aca3f8ce61f87cc712ae669c1e0",
+        "version": "6.1.1"
+      }
+    },
+    "x86_64-pc-windows-msvc": {
+      "ffmpeg": {
+        "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-win32-x64",
+        "sha256": "04e1307997530f9cf2fe35cba2ca7e8875ca91da02f89d6c7243df819c94ad00",
+        "version": "6.1.1"
+      },
+      "ffprobe": {
+        "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffprobe-win32-x64",
+        "sha256": "3a7e2dc003dc2cd1472827e4c7c4f056ae1ae0ae7c5bbc580c99b49827351ba4",
+        "version": "6.1.1"
+      }
+    }
+  }
+}

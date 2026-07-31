@@ -1,5 +1,26 @@
 # ffmpeg-sidecar:解码 / 编码 / 缩略图(seek 解帧)/ 抽 PCM
 
+## 2.0 发布包中的可验证侧车
+
+- macOS（Apple Silicon / Intel）和 Windows x64 的 `ffmpeg` / `ffprobe`
+  由 `scripts/provision_ffmpeg_sidecars.py` 依据
+  `scripts/ffmpeg-sidecars.lock.json` 的固定 URL、实测版本和 SHA-256 供应；
+  下载断线、版本不符或校验不符均终止打包。
+- `tauri.macos.conf.json` / `tauri.windows.conf.json` 通过 Tauri `externalBin`
+  把目标三元组后缀的两个侧车放在应用可执行文件旁。发布包运行时
+  只使用这两个普通文件；侧车缺失时保留预期的同目录路径并返回 FFmpeg
+  错误，不回退到开发者 `PATH`。
+- Debug/测试运行仍可用 `OPENTAKE_FFMPEG` / `OPENTAKE_FFPROBE`
+  显式覆盖；打包运行时同目录侧车优先且会覆盖环境注入。
+- 所有发布候选包都必须运行
+  `scripts/tests/packaged-sidecars-test.rb#packaged_macos_windows_sidecars_resolve_and_execute`：
+  在清空 `PATH` 的环境中对供应文件和安装后文件分别执行版本、探测、单帧
+  RGBA 解码和编码回探。Windows CI 必须静默安装 NSIS 后执行该门；
+  macOS 候选 `.app` 亦从 `Contents/MacOS` 执行同一门。
+
+二进制来源与许可说明随包放在 `resources/ffmpeg/SOURCE.md`，OpenTake
+与该 FFmpeg 分发均使用 GPL 兼容条款。
+
 ## 2.1 媒体探测 `MediaProbe`(替 `MediaAsset.loadMetadata` 的视频/音频分支)
 
 上游 `MediaAsset.loadMetadata`(`MediaAsset.swift:96-162`)用 AVFoundation 读:时长(优先 video track timeRange,否则 asset duration)、`naturalSize.applying(preferredTransform)` 校正后的像素宽高、`nominalFrameRate`、是否有音轨。Rust 用 ffprobe 等价。

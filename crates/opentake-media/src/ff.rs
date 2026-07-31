@@ -1,4 +1,5 @@
-//! Thin internal helpers for driving the system `ffmpeg`/`ffprobe` binaries.
+//! Thin internal helpers for driving bundled or development `ffmpeg`/`ffprobe`
+//! binaries.
 //!
 //! We deliberately do **not** link libav*: the local toolchain is ffmpeg 8.1
 //! (libavcodec 62) which the C-binding crates do not support, and pkg-config is
@@ -6,23 +7,61 @@
 //! binary discovery and one-shot ffprobe JSON queries so the higher-level decode
 //! modules stay readable.
 //!
-//! Environment overrides `OPENTAKE_FFMPEG` / `OPENTAKE_FFPROBE` let callers (and
-//! packaged builds) point at a bundled binary.
+//! Packaged binaries live beside the OpenTake executable. Environment overrides
+//! `OPENTAKE_FFMPEG` / `OPENTAKE_FFPROBE` remain available to tests and
+//! development tools; the desktop shell pins them to the bundled sidecars before
+//! media initialization.
 
 use std::ffi::OsString;
 use std::io::{Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use ffmpeg_sidecar::command::FfmpegCommand;
 
-/// Path to the `ffmpeg` binary: `$OPENTAKE_FFMPEG`, else `ffmpeg` on `PATH`.
-pub fn ffmpeg_path() -> OsString {
-    std::env::var_os("OPENTAKE_FFMPEG").unwrap_or_else(|| OsString::from("ffmpeg"))
+fn sidecar_filename(binary: &str) -> String {
+    if cfg!(windows) {
+        format!("{binary}.exe")
+    } else {
+        binary.to_string()
+    }
 }
 
-/// Path to the `ffprobe` binary: `$OPENTAKE_FFPROBE`, else `ffprobe` on `PATH`.
+/// Return a regular, non-symlink sidecar next to `executable`.
+///
+/// Keeping this pure helper separate makes the packaged-path security boundary
+/// deterministic to test without mutating the process executable or PATH.
+pub fn packaged_sidecar_beside(executable: &Path, binary: &str) -> Option<PathBuf> {
+    let parent = executable.parent()?;
+    let candidate = parent.join(sidecar_filename(binary));
+    let metadata = std::fs::symlink_metadata(&candidate).ok()?;
+    if metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+/// Find a verified-by-the-package-manager sidecar beside the current executable.
+/// Runtime code still checks that the path is a regular file; the build/package
+/// pipeline owns its pinned SHA-256 and version verification.
+pub fn packaged_sidecar_path(binary: &str) -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    packaged_sidecar_beside(&executable, binary)
+}
+
+/// Path to `ffmpeg`: explicit development override, packaged sidecar, then PATH.
+pub fn ffmpeg_path() -> OsString {
+    std::env::var_os("OPENTAKE_FFMPEG")
+        .or_else(|| packaged_sidecar_path("ffmpeg").map(PathBuf::into_os_string))
+        .unwrap_or_else(|| OsString::from("ffmpeg"))
+}
+
+/// Path to `ffprobe`: explicit development override, packaged sidecar, then PATH.
 pub fn ffprobe_path() -> OsString {
-    std::env::var_os("OPENTAKE_FFPROBE").unwrap_or_else(|| OsString::from("ffprobe"))
+    std::env::var_os("OPENTAKE_FFPROBE")
+        .or_else(|| packaged_sidecar_path("ffprobe").map(PathBuf::into_os_string))
+        .unwrap_or_else(|| OsString::from("ffprobe"))
 }
 
 /// A fresh `FfmpegCommand` bound to [`ffmpeg_path`].
@@ -126,5 +165,40 @@ mod tests {
         if std::env::var_os("OPENTAKE_FFPROBE").is_none() {
             assert_eq!(ffprobe_path(), OsString::from("ffprobe"));
         }
+    }
+
+    #[test]
+    fn packaged_sidecar_must_be_regular_and_beside_executable() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join(if cfg!(windows) {
+            "opentake.exe"
+        } else {
+            "opentake"
+        });
+        std::fs::write(&executable, b"app").unwrap();
+        let sidecar = temp.path().join(sidecar_filename("ffmpeg"));
+        std::fs::write(&sidecar, b"sidecar").unwrap();
+
+        assert_eq!(
+            packaged_sidecar_beside(&executable, "ffmpeg"),
+            Some(sidecar)
+        );
+        assert_eq!(packaged_sidecar_beside(&executable, "ffprobe"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn packaged_sidecar_rejects_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("opentake");
+        let outside = temp.path().join("outside");
+        let sidecar = temp.path().join("ffmpeg");
+        std::fs::write(&executable, b"app").unwrap();
+        std::fs::write(&outside, b"untrusted").unwrap();
+        symlink(&outside, &sidecar).unwrap();
+
+        assert_eq!(packaged_sidecar_beside(&executable, "ffmpeg"), None);
     }
 }

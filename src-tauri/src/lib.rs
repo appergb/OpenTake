@@ -310,18 +310,35 @@ pub fn run() {
         });
 }
 
-/// Locate `ffmpeg` / `ffprobe` and export `OPENTAKE_FFMPEG` / `OPENTAKE_FFPROBE`
-/// (the override `opentake-media`'s `ff` module reads) so decoding works in a
-/// packaged app.
+/// Pin `OPENTAKE_FFMPEG` / `OPENTAKE_FFPROBE` before any media initialization.
 ///
-/// A macOS `.app` launched from Finder/Dock inherits the minimal **launchd**
-/// `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`), which omits Homebrew
-/// (`/opt/homebrew/bin`) and `/usr/local/bin`. A PATH-only `ffmpeg` lookup then
-/// fails and every frame decode returns nothing — the timeline preview stays
-/// black even though the code is correct. Pin an absolute path from the common
-/// install locations instead. (Bundling the binaries via Tauri `externalBin` is
-/// the cross-machine follow-up; this unblocks any host that has ffmpeg on disk.)
+/// A packaged application must use the two regular sidecars beside its own
+/// executable. Release builds deliberately pin the expected sibling paths even
+/// when a file is missing, so a corrupt package fails closed instead of silently
+/// invoking an attacker-controlled or developer-installed binary from PATH.
+/// Debug builds retain explicit overrides and host discovery for development.
 fn resolve_media_tools() {
+    let packaged = ["ffmpeg", "ffprobe"].map(opentake_media::ffmpeg_status::packaged_sidecar_path);
+    if let [Some(ffmpeg), Some(ffprobe)] = packaged {
+        std::env::set_var("OPENTAKE_FFMPEG", ffmpeg);
+        std::env::set_var("OPENTAKE_FFPROBE", ffprobe);
+        return;
+    }
+
+    if !cfg!(debug_assertions) {
+        if let Ok(executable) = std::env::current_exe() {
+            if let Some(parent) = executable.parent() {
+                let extension = if cfg!(windows) { ".exe" } else { "" };
+                std::env::set_var("OPENTAKE_FFMPEG", parent.join(format!("ffmpeg{extension}")));
+                std::env::set_var(
+                    "OPENTAKE_FFPROBE",
+                    parent.join(format!("ffprobe{extension}")),
+                );
+            }
+        }
+        return;
+    }
+
     for (key, bin) in [
         ("OPENTAKE_FFMPEG", "ffmpeg"),
         ("OPENTAKE_FFPROBE", "ffprobe"),
