@@ -38,7 +38,7 @@
   - Add deterministic fixtures for every named current, legacy, missing, malformed, and fail-closed branch; the focused round-trip and compatibility suites must pass.
   - Exercise open, edit, save, and reopen on representative bundles and attach the exact implementation symbols plus test or runtime evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-project/tests/upstream_compat.rs#applies_clip_defaults_for_omitted_fields` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-project/tests/upstream_compat.rs#migrates_legacy_transform_xy_to_center` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -47,7 +47,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-project --test upstream_compat applies_clip_defaults_for_omitted_fields -- --exact`
   - Run: `cargo test -p opentake-project --test upstream_compat migrates_legacy_transform_xy_to_center -- --exact`
@@ -56,11 +56,11 @@
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-project/src/bundle.rs#Project`, `crates/opentake-domain/src/clip.rs#Clip`, `crates/opentake-domain/src/media.rs#MediaManifest`, `crates/opentake-project/src/gen_log.rs#GenerationLogEntry`, `docs/architecture/MODULE-PORT-MAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-project --test upstream_compat applies_clip_defaults_for_omitted_fields -- --exact`
   - Run: `cargo test -p opentake-project --test upstream_compat migrates_legacy_transform_xy_to_center -- --exact`
@@ -69,11 +69,13 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completion evidence: [`data-safety-legacy-default-matrix-real-device-2026-07-31.md`](../runtime-artifacts/automated/data-safety-legacy-default-matrix-real-device-2026-07-31.md). The four exact owning tests already passed at the initial baseline, so Task 1 required evidence closure and a packaged-app round trip rather than a new production patch; no artificial RED failure was introduced.
 
 ### Task 2: DS-mcp-transport (implementation-slice-078ed22bfa23f28a)
 
