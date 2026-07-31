@@ -1164,7 +1164,7 @@ before namespace mutation; downstream algorithm tests use test-only trusted fixt
   - Visible/returned assertion: assert the returned project/error variant, exact post-operation files and decoded state, and save-then-reopen equality or the specified fail-closed no-write result.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:tools/completion-tests/doc-bf6666ce4bc65294.test.mjs#completion_bf6666ce4bc65294_resolve_media_ref_to_an_expected_path_while_dist.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-domain/src/media.rs#resolver_expected_path_external` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `src-tauri/src/media.rs#dto_reports_file_size_for_present_source` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -1172,7 +1172,12 @@ before namespace mutation; downstream algorithm tests use test-only trusted fixt
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+  Result: The three reviewed Rust owners remain at their declared symbols, and
+  `tools/completion-tests/doc-bf6666ce4bc65294.test.mjs` now binds them under
+  the exact generated completion-test name. The runner rejects a zero-test
+  filter by requiring each Cargo invocation to report exactly one passing test.
+
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-domain resolver_expected_path_external`
   - Run: `cargo test -p opentake-tauri dto_reports_file_size_for_present_source`
@@ -1180,11 +1185,22 @@ before namespace mutation; downstream algorithm tests use test-only trusted fixt
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Result: The product behavior predated this generated completion slice, so the
+  honest missing-evidence RED was the absent declared completion-test path; the
+  required `node --test tools/completion-tests/doc-bf6666ce4bc65294.test.mjs`
+  entry point could not run. No product regression was manufactured.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-domain/src/media.rs#MediaResolver`, `src-tauri/src/media.rs#relink_media`, `docs/upstream-analysis/01-架构与数据流.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Result: The reviewed implementation already resolved external and
+  project-relative sources, derived present/offline state from the filesystem,
+  and relinked an offline asset in place while preserving its ID. The missing
+  work was the deterministic evidence bridge; no production-code change was
+  needed.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-domain resolver_expected_path_external`
   - Run: `cargo test -p opentake-tauri dto_reports_file_size_for_present_source`
@@ -1192,8 +1208,17 @@ before namespace mutation; downstream algorithm tests use test-only trusted fixt
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Result: `node --test
+  tools/completion-tests/doc-bf6666ce4bc65294.test.mjs` passed 1/1. Its three
+  exact Cargo filters each executed one owner and passed, covering expected-path
+  resolution, present-source size/state, and offline-to-present relink with a
+  stable media ID.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: `cargo fmt --all -- --check && cargo test --workspace
+  --no-fail-fast` passed on the exact local tree.
