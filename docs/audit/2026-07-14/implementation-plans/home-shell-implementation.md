@@ -391,29 +391,29 @@
   - Visible/returned assertion: assert the exact visible text/control/state/focus result and the returned success or typed failure, including a no-op assertion for disabled, cancelled, or rejected input.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:web/src/__tests__/completion/doc-59fbdae28c9200a7.test.ts#completion_59fbdae28c9200a7_the_editor_shell_implements_the_specified_panel_.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/EditorSplit.test.tsx#all_presets_match_geometry_visibility_maximize_and_focus_shell` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/shell/EditorSplit.test.tsx -t "all_presets_match_geometry_visibility_maximize_and_focus_shell"`
 
   Expected: FAIL because one or more of the 10 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/store/uiStore.ts#useEditorUiStore`, `web/src/components/shell/EditorSplit.tsx#EditorSplit`, `web/src/components/shell/EditorSplit.tsx#DefaultLayout`, `web/src/components/shell/EditorSplit.tsx#MediaLayout`, `web/src/components/shell/EditorSplit.tsx#VerticalLayout`, `web/src/components/ui/PanelShell.tsx#PanelShell`, `docs/modules/web/SPEC.md`, `web/src/components/shell/ViewMenu.tsx#ViewMenu`, `docs/specs/frontend/2-layout.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/EditorSplit.test.tsx -t "all_presets_match_geometry_visibility_maximize_and_focus_shell"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 

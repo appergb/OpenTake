@@ -84,6 +84,12 @@
 - **最大化**:聚焦面板 + 反引号键 `` ` ``（无修饰键）→ `maximizedPanel`（`MainMenu.swift:118-120`,`EditorWindowController.swift:123-128`）。最大化时折叠所有兄弟,Esc 退出（`EditorWindowController.swift:152-155`）。前端等价:把目标面板 grid 区域扩满,其余 `display:none`。
 - 折叠用动画(`item.animator().isCollapsed`,`EditorView.swift:164-166`)→ CSS 宽/高过渡。
 
+OpenTake 的每个叶面板以本地化名称暴露为 accessibility region；分隔条以
+`separator` 暴露当前像素位置，支持鼠标拖拽以及方向键每次 10px、Home/End 到边界。
+这为拖拽提供了完整键盘替代，同时保留上游 5px 命中区。Vertical 预设折叠 Inspector
+时不保留空白分栏，Media 占满左上区域；Media 和 Inspector 都折叠时该区域为空，Preview
+和 Timeline 仍不可折叠。最大化只渲染聚焦叶面板，Escape 恢复原预设。
+
 ### 2.8 窗口 chrome / 标题栏（`Editor/TitleBarView.swift`，窗口尺寸 `AppTheme.swift:231-237`）
 
 Tauri 自定义标题栏区域：
