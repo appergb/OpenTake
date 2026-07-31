@@ -136,7 +136,10 @@ fn windows_bundle_installs_webview2_without_network_access() {
 
 #[test]
 fn every_windows_tauri_ci_job_provisions_packaged_sidecars_first() {
-    let workflow = include_str!("../../.github/workflows/ci.yml");
+    // Git may materialize the workflow with CRLF on Windows runners. Normalize
+    // before finding YAML job boundaries so this contract tests the workflow,
+    // not the checkout's line-ending policy.
+    let workflow = include_str!("../../.github/workflows/ci.yml").replace("\r\n", "\n");
     for (job, next_job) in [
         ("  windows-product:\n", "  windows-security:\n"),
         ("  windows-security:\n", "  web:\n"),
