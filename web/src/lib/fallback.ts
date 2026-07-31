@@ -579,6 +579,33 @@ export function createFallbackStore() {
           }
           return result(changed, "Set Effects", cmd.clipIds);
         }
+        case "applyStabilization": {
+          const loc = findClip(cmd.clipId);
+          if (!loc) return result(false, "Apply Stabilization", []);
+          const clip = timeline.tracks[loc[0]].clips[loc[1]];
+          if (clip.mediaType !== "video" || cmd.solution.sourceIdentity !== clip.mediaRef) {
+            return result(false, "Apply Stabilization", []);
+          }
+          clip.stabilization = structuredClone(cmd.solution);
+          return result(true, "Apply Stabilization", [cmd.clipId]);
+        }
+        case "adjustStabilization": {
+          const loc = findClip(cmd.clipId);
+          if (!loc) return result(false, "Adjust Stabilization", []);
+          const clip = timeline.tracks[loc[0]].clips[loc[1]];
+          if (!clip.stabilization) return result(false, "Adjust Stabilization", []);
+          if (cmd.strength !== undefined) clip.stabilization.strength = cmd.strength;
+          if (cmd.cropMargin !== undefined) clip.stabilization.cropMargin = cmd.cropMargin;
+          return result(true, "Adjust Stabilization", [cmd.clipId]);
+        }
+        case "resetStabilization": {
+          const loc = findClip(cmd.clipId);
+          if (!loc) return result(false, "Reset Stabilization", []);
+          const clip = timeline.tracks[loc[0]].clips[loc[1]];
+          if (!clip.stabilization) return result(false, "Reset Stabilization", []);
+          delete clip.stabilization;
+          return result(true, "Reset Stabilization", [cmd.clipId]);
+        }
         case "setTransition": {
           const fromLocation = findClip(cmd.fromClipId);
           if (!fromLocation) return result(false, "Set Transition", []);

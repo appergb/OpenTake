@@ -630,6 +630,10 @@ function ClipInspector({
 
             <FadeSection clip={clip} commit={commit} t={t} />
 
+            {clip.mediaType === "video" && !clip.nestedSequenceId && (
+              <StabilizationSection clip={clip} t={t} />
+            )}
+
             <section>
               <SectionHeader label={t("inspector.section.playback")} />
               <Row label={t("inspector.field.speed")}>
@@ -989,6 +993,125 @@ function ShaderEffectsSection({ clip, t }: { clip: Clip; t: TFunction }) {
       <ChromaKeySection clip={clip} t={t} />
       <MaskSection clip={clip} t={t} />
     </>
+  );
+}
+
+function StabilizationSection({ clip, t }: { clip: Clip; t: TFunction }) {
+  const [analyzing, setAnalyzing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const solution = clip.stabilization;
+
+  useEffect(() => {
+    setAnalyzing(false);
+    setError(null);
+  }, [clip.id]);
+
+  const analyze = async () => {
+    setAnalyzing(true);
+    setError(null);
+    try {
+      await edit.analyzeAndApplyStabilization(clip.id);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      if (!/\bcancell?ed\b/i.test(message)) setError(message);
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  return (
+    <section data-testid="stabilization-section">
+      <SectionHeader label={t("inspector.section.stabilization")} />
+      {!solution ? (
+        <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px` }}>
+          <button type="button" style={controlStyle} disabled={analyzing} onClick={() => void analyze()}>
+            {analyzing
+              ? t("inspector.stabilization.analyzing")
+              : t("inspector.stabilization.analyzeApply")}
+          </button>
+          {analyzing && (
+            <button
+              type="button"
+              style={{ ...controlStyle, marginLeft: SPACE.xs }}
+              onClick={() => void edit.cancelStabilizationAnalysis()}
+            >
+              {t("inspector.stabilization.cancel")}
+            </button>
+          )}
+        </div>
+      ) : (
+        <>
+          <Row label={t("inspector.stabilization.strength")}>
+            <ScrubbableNumberField
+              value={solution.strength * 100}
+              min={0}
+              max={100}
+              sensitivity={1}
+              format={(value) => value.toFixed(0)}
+              suffix="%"
+              width={56}
+              onCommit={(value) =>
+                void edit.adjustStabilization(clip.id, { strength: value / 100 })
+              }
+            />
+          </Row>
+          <Row label={t("inspector.stabilization.cropMargin")}>
+            <ScrubbableNumberField
+              value={solution.cropMargin * 100}
+              min={0}
+              max={50}
+              sensitivity={0.5}
+              format={(value) => value.toFixed(1)}
+              suffix="%"
+              width={56}
+              onCommit={(value) =>
+                void edit.adjustStabilization(clip.id, { cropMargin: value / 100 })
+              }
+            />
+          </Row>
+          <div
+            style={{
+              padding: `0 ${SPACE.lg}px ${SPACE.sm}px`,
+              color: "var(--text-tertiary)",
+              fontSize: FS.xs,
+            }}
+          >
+            {solution.model} v{solution.modelVersion} · {solution.keyframes.length}{" "}
+            {t("inspector.stabilization.samples")}
+          </div>
+          <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px` }}>
+            <button
+              type="button"
+              style={controlStyle}
+              disabled={analyzing}
+              onClick={() => void analyze()}
+            >
+              {analyzing
+                ? t("inspector.stabilization.analyzing")
+                : t("inspector.stabilization.reanalyze")}
+            </button>
+            <button
+              type="button"
+              style={{ ...controlStyle, marginLeft: SPACE.xs }}
+              onClick={() =>
+                void (analyzing
+                  ? edit.cancelStabilizationAnalysis()
+                  : edit.resetStabilization(clip.id))
+              }
+            >
+              {analyzing
+                ? t("inspector.stabilization.cancel")
+                : t("inspector.stabilization.reset")}
+            </button>
+          </div>
+        </>
+      )}
+      {error && (
+        <div role="alert" style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, color: "var(--danger)" }}>
+          {error}
+        </div>
+      )}
+    </section>
   );
 }
 

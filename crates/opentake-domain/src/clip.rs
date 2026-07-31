@@ -19,6 +19,7 @@ use crate::clip_wire::{
 };
 use crate::grade::{ChromaKey, ColorGrade, Effect, Mask};
 use crate::keyframe::{AnimPair, AnimatableProperty, Interpolation, KeyframeTrack};
+use crate::stabilization::StabilizationTrack;
 use crate::text::TextStyle;
 use crate::transform::{Crop, Point, Transform};
 use crate::transition::Transition;
@@ -225,6 +226,9 @@ pub struct Clip {
     /// Generic named-effect chain. Empty = no effects.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<Effect>,
+    /// Non-destructive camera compensation composed with authored transform tracks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stabilization: Option<StabilizationTrack>,
     /// Optional visual transition into one exact adjacent successor. Pair
     /// identity prevents stale transitions from rebinding after moves/deletes.
     #[serde(
@@ -276,6 +280,7 @@ impl Clip {
         "chromaKey",
         "masks",
         "effects",
+        "stabilization",
         "transitionOut",
         "reversed",
     ];
@@ -367,6 +372,7 @@ impl Clip {
             chroma_key: None,
             masks: Vec::new(),
             effects: Vec::new(),
+            stabilization: None,
             transition_out: None,
             reversed: false,
         }

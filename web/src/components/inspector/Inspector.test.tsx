@@ -171,4 +171,82 @@ describe("Inspector completion surface", () => {
     setMasks.mockRestore();
     await act(async () => root.unmount());
   });
+
+  it("analyzes, displays, and resets stabilization through production actions", async () => {
+    const clip = visualClip();
+    useProjectStore.setState({ timeline: timelineWith(clip), projectPath: "/tmp/demo.opentake" });
+    useEditorUiStore.setState({ selectedClipIds: new Set([clip.id]), inspectorTab: "video" });
+    const solution = {
+      model: "opentake.motion-smoothing",
+      modelVersion: 1,
+      sourceIdentity: clip.mediaRef,
+      strength: 1,
+      cropMargin: 0,
+      keyframes: [
+        { frame: 0, translationX: 0, translationY: 0, rotationDegrees: 0 },
+        { frame: 89, translationX: 0.02, translationY: -0.01, rotationDegrees: 0 },
+      ],
+    };
+    const analyze = vi
+      .spyOn(edit, "analyzeAndApplyStabilization")
+      .mockResolvedValue(solution);
+    const cancel = vi.spyOn(edit, "cancelStabilizationAnalysis").mockResolvedValue(true);
+    const reset = vi.spyOn(edit, "resetStabilization").mockResolvedValue();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Inspector />));
+
+    const analyzeButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="stabilization-section"] button',
+    );
+    expect(analyzeButton).not.toBeNull();
+    await act(async () => {
+      analyzeButton?.click();
+      await Promise.resolve();
+    });
+    expect(analyze).toHaveBeenCalledWith(clip.id);
+
+    await act(async () => {
+      useProjectStore.setState({
+        timeline: timelineWith(visualClip({ stabilization: solution })),
+      });
+    });
+    const stabilization = container.querySelector('[data-testid="stabilization-section"]');
+    expect(stabilization?.textContent).toContain("opentake.motion-smoothing v1");
+    expect(stabilization?.textContent).toContain("100%");
+    let failReanalysis!: (reason: Error) => void;
+    analyze.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          failReanalysis = reject;
+        }),
+    );
+    const reanalyzeButton = [...(stabilization?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent === "重新分析",
+    );
+    await act(async () => {
+      reanalyzeButton?.click();
+      await Promise.resolve();
+    });
+    expect(reanalyzeButton?.disabled).toBe(true);
+    const cancelButton = [...(stabilization?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent === "取消分析",
+    );
+    expect(cancelButton).not.toBeNull();
+    await act(async () => cancelButton?.click());
+    expect(cancel).toHaveBeenCalledOnce();
+    await act(async () => failReanalysis(new Error("cancelled")));
+    expect(stabilization?.querySelector('[role="alert"]')).toBeNull();
+    const resetButton = [...(stabilization?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent === "重置防抖",
+    );
+    await act(async () => resetButton?.click());
+    expect(reset).toHaveBeenCalledWith(clip.id);
+
+    analyze.mockRestore();
+    cancel.mockRestore();
+    reset.mockRestore();
+    await act(async () => root.unmount());
+  });
 });

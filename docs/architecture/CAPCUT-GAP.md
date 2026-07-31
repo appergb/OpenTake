@@ -84,8 +84,8 @@
 - **实现方案**:本地推理优先,与 chroma key 共用合成下游(都是给 clip 一张 alpha)。① 视频抠像本地模型:RobustVideoMatting(RVM,轻量、时序稳定、有 ONNX 权重)是首选,经 ort 跑,逐帧出 alpha;人像场景可用 MODNet/BiRefNet,通用前景可用 SAM2(分割+追踪一体,但较重)。② 复用上游已验证的 ONNX 推理通道(ort/candle + ModelDownloader 先例,Search/Models/ModelDownloader.swift),模型按需下载缓存,与 SigLIP2/whisper 同套基础设施。③ alpha matte 用 content-hash 缓存(ARCHITECTURE §6 已有物化缓存策略),避免重复推理。④ 外部 API 兜底:质量优先可接 fal/Replicate 的 matting 端点,作为 BYOK 可选(沿用 opentake-gen 双模),默认本地零成本。⑤ matte 出来后下游与 chroma key 完全一致(clip alpha → 多轨混合),边缘可再过 wgpu 羽化/前景色净化。
 - **前置依赖**:依赖 candle/ort 推理栈 + ModelDownloader(设计稿已含同类先例);依赖 wgpu 合成器消费 alpha;受益于追踪(SAM2 可一体化)
 
-### 视频防抖(stabilization) — `missing` · 难度 medium · 优先级 p2
-- **判定依据**:上游零实现:全目录 grep 不到 stabiliz/stabilis/VNDetectTrajectories/opticalFlow/任何防抖逻辑;无 Vision 框架引用。无运动估计基础设施。
+### 视频防抖(stabilization) — `has` · 难度 medium · 优先级 p2
+- **判定依据**:上游零实现；OpenTake 已落地本地运动估计和平滑补偿。Clip 持久化独立的防抖轨道（模型/版本、源身份、强度、额外裁切和逐帧平移/旋转关键帧），不覆盖手工变换或源媒体；渲染计划把补偿与手工变换组合，并按最坏位移/旋转自动安全缩放，预览与导出共用同一路径。Inspector 支持分析、重新分析、取消、强度/裁切调整、重置和完整撤销/重做；分析在后台阻塞任务运行，取消保持旧结果且不产生历史事务。打包 macOS 工程已验证 48 个运动采样、65% 强度、3% 裁切、保存重开、重置恢复与 H.264 导出；导出为 1920×1080、60 fps、120 帧，预览/导出第 0 帧 SSIM 0.999557、PSNR 56.843845 dB。证据见 `docs/audit/2026-07-14/runtime-artifacts/automated/stabilization-real-device-2026-07-31.md`。
 - **落点(crate/层)**:opentake-media(防抖 worker:两遍分析——估计逐帧全局运动→平滑相机轨迹→反向补偿)+ opentake-domain(把补偿写成 position/scale/rotation 关键帧,或标记 stabilize 参数由 render 应用)
 - **实现方案**:成熟开源算法可移植,本地、无需重型 AI、难度中。① 最省力路线:直接复用 FFmpeg vidstab(vidstabdetect + vidstabtransform 两遍),OpenTake 已绑 ffmpeg-next(ARCHITECTURE §10),导出路径几乎零成本接入;实时预览可先用降采样代理。② 自研路线(更可控):光流/特征点(KLT)估全局仿射运动 → 用低通/高斯平滑相机路径 → 反向仿射补偿 + 自动裁掉边缘黑边(轻微放大)。补偿量可烘焙进现有 transform 关键帧轨,复用既有合成,无需新合成原语。③ 平滑强度/裁切比例作为可调参数。④ 可选 AI 增强(深度学习防抖如 DUT)作为远期 p3,默认经典算法已够用。
 - **前置依赖**:FFmpeg vidstab 路线仅依赖 ffmpeg-next(已有);自研路线依赖光流(与追踪共用);补偿应用依赖关键帧引擎/wgpu

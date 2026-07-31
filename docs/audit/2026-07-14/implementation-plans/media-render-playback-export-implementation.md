@@ -214,32 +214,32 @@ pass with matching frame-1 motion bounds and SSIM 0.999515.
   - Expose mask creation, point editing, delete, and undo/redo in Inspector/Preview without mutating source media.
   - Add GPU pixel fixtures for all three shapes at feather 0 and nonzero feather; preview and exported boundary frames must match within the project pixel-diff tolerance.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/gpu_effects.rs#circle_mask_clips_to_center` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-render/tests/gpu_effects.rs#linear_circle_and_polygon_masks_match_cpu_reference_in_preview_and_export` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test gpu_effects circle_mask_clips_to_center -- --exact`
   - Run: `cargo test -p opentake-render --test gpu_effects linear_circle_and_polygon_masks_match_cpu_reference_in_preview_and_export -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-domain/src/grade.rs#Mask`, `crates/opentake-render/src/plan/build.rs`, `crates/opentake-render/src/gpu/compositor.rs#pack_masks`, `crates/opentake-render/src/gpu/shader.wgsl`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test gpu_effects circle_mask_clips_to_center -- --exact`
   - Run: `cargo test -p opentake-render --test gpu_effects linear_circle_and_polygon_masks_match_cpu_reference_in_preview_and_export -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
@@ -269,29 +269,29 @@ pass with matching frame-1 motion bounds and SSIM 0.999515.
   - Expose analyze, strength/crop adjustment, cancellation, apply, reset, and undo without overwriting source media.
   - For a synthetic jitter fixture, demonstrate lower frame-to-frame tracked displacement, no uncovered pixels, and preview/export transform parity.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/stabilization.rs#synthetic_shake_produces_editable_undoable_preview_export_solution` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test stabilization synthetic_shake_produces_editable_undoable_preview_export_solution -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-media/src/analysis/stabilization.rs`, `crates/opentake-ops/src/command.rs`, `crates/opentake-render/src/plan/build.rs`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test stabilization synthetic_shake_produces_editable_undoable_preview_export_solution -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 

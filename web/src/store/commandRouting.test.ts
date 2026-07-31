@@ -36,6 +36,8 @@ import {
   addClips,
   addTexts,
   addTextsAutoTrack,
+  adjustStabilization,
+  applyStabilization,
   createNestedSequence,
   copyClips,
   currentTimelineEndFrame,
@@ -60,6 +62,7 @@ import {
   renameFolder,
   renameMedia,
   resetTransform,
+  resetStabilization,
   rippleDeleteClips,
   rippleDeleteRanges,
   setChromaKey,
@@ -232,6 +235,29 @@ describe("edit gesture command routing", () => {
     await route(
       { type: "setEffects", clipIds: ["clip-a"], effects: [{ name: "blur", params: { radius: 2 }, enabled: true }] },
       () => setEffects(["clip-a"], [{ name: "blur", params: { radius: 2 }, enabled: true }]),
+    );
+    const stabilization = {
+      model: "opentake.motion-smoothing",
+      modelVersion: 1,
+      sourceIdentity: "media-a",
+      strength: 1,
+      cropMargin: 0,
+      keyframes: [
+        { frame: 0, translationX: 0, translationY: 0, rotationDegrees: 0 },
+        { frame: 10, translationX: 0.01, translationY: 0, rotationDegrees: 0 },
+      ],
+    };
+    await route(
+      { type: "applyStabilization", clipId: "clip-a", solution: stabilization },
+      () => applyStabilization("clip-a", stabilization),
+    );
+    await route(
+      { type: "adjustStabilization", clipId: "clip-a", strength: 0.75, cropMargin: 0.02 },
+      () => adjustStabilization("clip-a", { strength: 0.75, cropMargin: 0.02 }),
+    );
+    await route(
+      { type: "resetStabilization", clipId: "clip-a" },
+      () => resetStabilization("clip-a"),
     );
     await route(
       { type: "setTransition", fromClipId: "clip-a", toClipId: "clip-b", kind: "crossDissolve", durationFrames: 8 },

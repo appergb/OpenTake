@@ -28,7 +28,7 @@ use opentake_ops::{
 
 use opentake_domain::{
     AnimPair, ChromaKey, ClipType, ColorGrade, Crop, Effect, Interpolation, Keyframe,
-    KeyframeTrack, Mask, TextStyle, Transform, TransitionKind,
+    KeyframeTrack, Mask, StabilizationTrack, TextStyle, Transform, TransitionKind,
 };
 
 #[derive(Clone, Default)]
@@ -712,6 +712,19 @@ pub enum EditRequest {
         effects: Vec<Effect>,
     },
     #[serde(rename_all = "camelCase")]
+    ApplyStabilization {
+        clip_id: String,
+        solution: StabilizationTrack,
+    },
+    #[serde(rename_all = "camelCase")]
+    AdjustStabilization {
+        clip_id: String,
+        strength: Option<f64>,
+        crop_margin: Option<f64>,
+    },
+    #[serde(rename_all = "camelCase")]
+    ResetStabilization { clip_id: String },
+    #[serde(rename_all = "camelCase")]
     SetTransition {
         from_clip_id: String,
         to_clip_id: String,
@@ -909,6 +922,21 @@ impl EditRequest {
             EditRequest::SetMasks { clip_ids, masks } => EditCommand::SetMasks { clip_ids, masks },
             EditRequest::SetEffects { clip_ids, effects } => {
                 EditCommand::SetEffects { clip_ids, effects }
+            }
+            EditRequest::ApplyStabilization { clip_id, solution } => {
+                EditCommand::ApplyStabilization { clip_id, solution }
+            }
+            EditRequest::AdjustStabilization {
+                clip_id,
+                strength,
+                crop_margin,
+            } => EditCommand::AdjustStabilization {
+                clip_id,
+                strength,
+                crop_margin,
+            },
+            EditRequest::ResetStabilization { clip_id } => {
+                EditCommand::ResetStabilization { clip_id }
             }
             EditRequest::SetTransition {
                 from_clip_id,
@@ -1667,6 +1695,9 @@ mod edit_request_serde_tests {
             EditRequest::SetChromaKey { .. } => "SetChromaKey",
             EditRequest::SetMasks { .. } => "SetMasks",
             EditRequest::SetEffects { .. } => "SetEffects",
+            EditRequest::ApplyStabilization { .. } => "ApplyStabilization",
+            EditRequest::AdjustStabilization { .. } => "AdjustStabilization",
+            EditRequest::ResetStabilization { .. } => "ResetStabilization",
             EditRequest::SetTransition { .. } => "SetTransition",
             EditRequest::RippleDeleteRanges { .. } => "RippleDeleteRanges",
             EditRequest::RippleDeleteClips { .. } => "RippleDeleteClips",
@@ -1728,6 +1759,12 @@ mod edit_request_serde_tests {
                 | ("SetChromaKey", EditCommand::SetChromaKey { .. })
                 | ("SetMasks", EditCommand::SetMasks { .. })
                 | ("SetEffects", EditCommand::SetEffects { .. })
+                | ("ApplyStabilization", EditCommand::ApplyStabilization { .. })
+                | (
+                    "AdjustStabilization",
+                    EditCommand::AdjustStabilization { .. }
+                )
+                | ("ResetStabilization", EditCommand::ResetStabilization { .. })
                 | ("SetTransition", EditCommand::SetTransition { .. })
                 | ("RippleDeleteRanges", EditCommand::RippleDeleteRanges { .. })
                 | ("RippleDeleteClips", EditCommand::RippleDeleteClips { .. })
@@ -1836,6 +1873,18 @@ mod edit_request_serde_tests {
                 "SetEffects",
             ),
             (
+                r#"{"type":"applyStabilization","clipId":"c","solution":{"model":"opentake.motion-smoothing","modelVersion":1,"sourceIdentity":"asset","strength":1.0,"cropMargin":0.0,"keyframes":[{"frame":0,"translationX":0.0,"translationY":0.0,"rotationDegrees":0.0},{"frame":1,"translationX":0.0,"translationY":0.0,"rotationDegrees":0.0}]}}"#,
+                "ApplyStabilization",
+            ),
+            (
+                r#"{"type":"adjustStabilization","clipId":"c","strength":0.75,"cropMargin":0.02}"#,
+                "AdjustStabilization",
+            ),
+            (
+                r#"{"type":"resetStabilization","clipId":"c"}"#,
+                "ResetStabilization",
+            ),
+            (
                 r#"{"type":"setTransition","fromClipId":"a","toClipId":"b","kind":null,"durationFrames":1}"#,
                 "SetTransition",
             ),
@@ -1895,7 +1944,7 @@ mod edit_request_serde_tests {
             ),
         ];
 
-        assert_eq!(cases.len(), 45);
+        assert_eq!(cases.len(), 48);
         for (json, expected_route) in cases {
             let mut hostile = serde_json::from_str::<serde_json::Value>(json).unwrap();
             hostile

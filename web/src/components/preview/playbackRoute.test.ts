@@ -137,7 +137,7 @@ describe("resolveTimelinePlaybackRoute", () => {
     ).toBe("webkit");
   });
 
-  it("routes text color chroma and supported masks to Rust", () => {
+  it("routes text color chroma stabilization and supported masks to Rust", () => {
     const text = clip({ id: "text", mediaType: "text", sourceClipType: "text" });
     const color = clip({
       id: "color",
@@ -178,7 +178,21 @@ describe("resolveTimelinePlaybackRoute", () => {
         },
       ],
     });
-    for (const item of [text, color, chroma, masks]) {
+    const stabilization = clip({
+      id: "stabilization",
+      stabilization: {
+        model: "opentake.motion-smoothing",
+        modelVersion: 1,
+        sourceIdentity: "media-1",
+        strength: 1,
+        cropMargin: 0,
+        keyframes: [
+          { frame: 0, translationX: 0, translationY: 0, rotationDegrees: 0 },
+          { frame: 89, translationX: 0.01, translationY: 0, rotationDegrees: 0 },
+        ],
+      },
+    });
+    for (const item of [text, color, chroma, stabilization, masks]) {
       expect(resolveTimelinePlaybackRoute(timeline(item), runtime)).toEqual({
         kind: "rust",
         reasons: [],

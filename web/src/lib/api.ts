@@ -29,6 +29,7 @@ import type {
   SearchModelStatus,
   SearchResults,
   SecretStatus,
+  StabilizationTrack,
   Transcript,
 } from "./types";
 
@@ -1008,6 +1009,20 @@ export async function getWaveform(mediaRef: string): Promise<number[] | null> {
     }
   }
   return null;
+}
+
+export async function analyzeStabilization(clipId: string): Promise<StabilizationTrack> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<StabilizationTrack>("analyze_stabilization", { clipId });
+  }
+  throw new Error("stabilization analysis requires the desktop app");
+}
+
+export async function cancelStabilizationAnalysis(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("cancel_stabilization_analysis");
+  return false;
 }
 
 // MARK: - BYOK secret store

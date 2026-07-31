@@ -39,6 +39,7 @@ import type {
   KeyframeValueReq,
   MaskInput,
   MediaItem,
+  StabilizationTrack,
   RenameEntryReq,
   TextEntryReq,
   TextAutoTrackEntryReq,
@@ -78,6 +79,9 @@ export const EDIT_GESTURE_COMMAND_MATRIX = [
   { gesture: "chroma key commit", action: "setChromaKey", requestType: "setChromaKey", backend: "SetChromaKey" },
   { gesture: "mask commit", action: "setMasks", requestType: "setMasks", backend: "SetMasks" },
   { gesture: "effect chain commit", action: "setEffects", requestType: "setEffects", backend: "SetEffects" },
+  { gesture: "stabilization analysis apply", action: "analyzeAndApplyStabilization", requestType: "applyStabilization", backend: "ApplyStabilization" },
+  { gesture: "stabilization strength or crop", action: "adjustStabilization", requestType: "adjustStabilization", backend: "AdjustStabilization" },
+  { gesture: "stabilization reset", action: "resetStabilization", requestType: "resetStabilization", backend: "ResetStabilization" },
   { gesture: "transition commit", action: "setTransition", requestType: "setTransition", backend: "SetTransition" },
   { gesture: "ripple delete range", action: "rippleDeleteRanges", requestType: "rippleDeleteRanges", backend: "RippleDeleteRanges" },
   { gesture: "shift-delete clips", action: "rippleDeleteClips", requestType: "rippleDeleteClips", backend: "RippleDeleteClips" },
@@ -326,6 +330,31 @@ export async function setMasks(clipIds: string[], masks: MaskInput[]) {
 export async function setEffects(clipIds: string[], effects: EffectInput[]) {
   if (clipIds.length === 0) return;
   await applyAndRefresh({ type: "setEffects", clipIds, effects });
+}
+
+export async function applyStabilization(clipId: string, solution: StabilizationTrack) {
+  await applyAndRefresh({ type: "applyStabilization", clipId, solution });
+}
+
+export async function analyzeAndApplyStabilization(clipId: string) {
+  const solution = await api.analyzeStabilization(clipId);
+  await applyStabilization(clipId, solution);
+  return solution;
+}
+
+export async function cancelStabilizationAnalysis() {
+  return api.cancelStabilizationAnalysis();
+}
+
+export async function adjustStabilization(
+  clipId: string,
+  adjustment: { strength?: number; cropMargin?: number },
+) {
+  await applyAndRefresh({ type: "adjustStabilization", clipId, ...adjustment });
+}
+
+export async function resetStabilization(clipId: string) {
+  await applyAndRefresh({ type: "resetStabilization", clipId });
 }
 
 export async function setTransition(

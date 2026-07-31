@@ -176,6 +176,7 @@ pub fn run() {
             app.manage(generation_bridge);
             app.manage(chat_state);
             app.manage(MediaState::new(engine));
+            app.manage(media::StabilizationAnalysisState::default());
             app.manage(PrewarmScheduler::new(initial_project_epoch));
             app.manage(library_state);
             // Lazily-acquired GPU context for timeline composite previews (#47).
@@ -233,6 +234,8 @@ pub fn run() {
             media::save_clip_as_media,
             media::extract_audio,
             media::get_waveform,
+            media::analyze_stabilization,
+            media::cancel_stabilization_analysis,
             media::generate_thumbnail,
             media::request_timeline_sprite,
             media::set_timeline_sprite_interactive,

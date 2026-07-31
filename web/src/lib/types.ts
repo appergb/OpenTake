@@ -196,6 +196,22 @@ export interface EffectInput {
   enabled?: boolean;
 }
 
+export interface StabilizationKeyframe {
+  frame: number;
+  translationX: number;
+  translationY: number;
+  rotationDegrees: number;
+}
+
+export interface StabilizationTrack {
+  model: string;
+  modelVersion: number;
+  sourceIdentity: string;
+  strength: number;
+  cropMargin: number;
+  keyframes: StabilizationKeyframe[];
+}
+
 export interface Clip {
   id: string;
   mediaRef: string;
@@ -230,6 +246,7 @@ export interface Clip {
   chromaKey?: ChromaKey;
   masks?: Mask[];
   effects?: Effect[];
+  stabilization?: StabilizationTrack;
   transitionOut?: Transition;
 }
 
@@ -359,6 +376,14 @@ export type EditRequest =
   | { type: "setChromaKey"; clipIds: string[]; chromaKey?: ChromaKeyInput | null }
   | { type: "setMasks"; clipIds: string[]; masks: MaskInput[] }
   | { type: "setEffects"; clipIds: string[]; effects: EffectInput[] }
+  | { type: "applyStabilization"; clipId: string; solution: StabilizationTrack }
+  | {
+      type: "adjustStabilization";
+      clipId: string;
+      strength?: number;
+      cropMargin?: number;
+    }
+  | { type: "resetStabilization"; clipId: string }
   | {
       type: "setTransition";
       fromClipId: string;

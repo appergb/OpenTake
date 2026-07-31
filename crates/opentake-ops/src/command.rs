@@ -20,8 +20,8 @@ use std::collections::{HashMap, HashSet};
 
 use opentake_domain::{
     ChromaKey, Clip, ClipType, ColorGrade, Crop, Effect, Interpolation, Mask, MaskShape,
-    NestedSequence, Timeline, Track, Transform, Transition, TransitionKind, MAX_MASKS_PER_CLIP,
-    MAX_POLYGON_MASK_POINTS,
+    NestedSequence, StabilizationTrack, Timeline, Track, Transform, Transition, TransitionKind,
+    MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS,
 };
 
 use crate::editor_state::EditorState;
@@ -367,6 +367,19 @@ pub enum EditCommand {
         clip_ids: Vec<String>,
         effects: Vec<Effect>,
     },
+    /// Persist a source-bound, editable stabilization analysis on one video clip.
+    ApplyStabilization {
+        clip_id: String,
+        solution: StabilizationTrack,
+    },
+    /// Change user-facing stabilization strength and/or safety crop margin.
+    AdjustStabilization {
+        clip_id: String,
+        strength: Option<f64>,
+        crop_margin: Option<f64>,
+    },
+    /// Remove stabilization while preserving authored transforms and source media.
+    ResetStabilization { clip_id: String },
     /// Set or clear the visual transition at one exact adjacent clip boundary.
     SetTransition {
         from_clip_id: String,
@@ -632,6 +645,15 @@ pub fn apply(
         } => set_chroma_key(state, clip_ids, chroma_key),
         EditCommand::SetMasks { clip_ids, masks } => set_masks(state, clip_ids, masks),
         EditCommand::SetEffects { clip_ids, effects } => set_effects(state, clip_ids, effects),
+        EditCommand::ApplyStabilization { clip_id, solution } => {
+            apply_stabilization(state, clip_id, solution)
+        }
+        EditCommand::AdjustStabilization {
+            clip_id,
+            strength,
+            crop_margin,
+        } => adjust_stabilization(state, clip_id, strength, crop_margin),
+        EditCommand::ResetStabilization { clip_id } => reset_stabilization(state, clip_id),
         EditCommand::SetTransition {
             from_clip_id,
             to_clip_id,
@@ -2532,6 +2554,83 @@ fn set_effects(
     reject_compound_effect_targets(state, &clip_ids, !effects.is_empty())?;
     set_clip_effect_field(state, clip_ids, "Set Effects", move |clip| {
         clip.effects = effects.clone();
+    })
+}
+
+fn stabilization_clip<'a>(state: &'a EditorState, clip_id: &str) -> Result<&'a Clip, EditError> {
+    let location = state
+        .find_clip(clip_id)
+        .ok_or_else(|| EditError::Invalid(format!("Clip not found: {clip_id}")))?;
+    let clip = &state.timeline.tracks[location.track_index].clips[location.clip_index];
+    if clip.media_type != ClipType::Video || clip.nested_sequence_id.is_some() {
+        return Err(EditError::Invalid(format!(
+            "stabilization requires an ordinary video clip: {clip_id}"
+        )));
+    }
+    Ok(clip)
+}
+
+fn apply_stabilization(
+    state: &mut EditorState,
+    clip_id: String,
+    solution: StabilizationTrack,
+) -> Result<EditResult, EditError> {
+    solution.validate().map_err(EditError::Invalid)?;
+    let clip = stabilization_clip(state, &clip_id)?;
+    if solution.source_identity != clip.media_ref {
+        return Err(EditError::Invalid(format!(
+            "stabilization source identity {} does not match clip source {}",
+            solution.source_identity, clip.media_ref
+        )));
+    }
+    set_clip_effect_field(state, vec![clip_id], "Apply Stabilization", move |clip| {
+        clip.stabilization = Some(solution.clone());
+    })
+}
+
+fn adjust_stabilization(
+    state: &mut EditorState,
+    clip_id: String,
+    strength: Option<f64>,
+    crop_margin: Option<f64>,
+) -> Result<EditResult, EditError> {
+    if strength.is_none() && crop_margin.is_none() {
+        return Err(EditError::Invalid(
+            "strength or cropMargin is required".to_string(),
+        ));
+    }
+    if strength.is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value)) {
+        return Err(EditError::Invalid(
+            "stabilization strength must be finite and within 0..=1".to_string(),
+        ));
+    }
+    if crop_margin.is_some_and(|value| !value.is_finite() || !(0.0..=0.5).contains(&value)) {
+        return Err(EditError::Invalid(
+            "stabilization crop margin must be finite and within 0..=0.5".to_string(),
+        ));
+    }
+    let clip = stabilization_clip(state, &clip_id)?;
+    if clip.stabilization.is_none() {
+        return Err(EditError::Invalid(format!(
+            "Clip has no stabilization analysis: {clip_id}"
+        )));
+    }
+    set_clip_effect_field(state, vec![clip_id], "Adjust Stabilization", move |clip| {
+        if let Some(solution) = &mut clip.stabilization {
+            if let Some(value) = strength {
+                solution.strength = value;
+            }
+            if let Some(value) = crop_margin {
+                solution.crop_margin = value;
+            }
+        }
+    })
+}
+
+fn reset_stabilization(state: &mut EditorState, clip_id: String) -> Result<EditResult, EditError> {
+    stabilization_clip(state, &clip_id)?;
+    set_clip_effect_field(state, vec![clip_id], "Reset Stabilization", |clip| {
+        clip.stabilization = None;
     })
 }
 

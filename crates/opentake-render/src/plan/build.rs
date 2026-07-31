@@ -70,6 +70,31 @@ fn texture_source_for(clip: &Clip) -> TextureSource {
     }
 }
 
+/// Compose authored transform animation with the clip-relative stabilization
+/// track. The same helper is used by ordinary frames, transitions, preview, and
+/// export, preventing separate stabilization math from drifting by surface.
+fn evaluated_transform(
+    clip: &Clip,
+    frame: i32,
+    render_size: RenderSize,
+) -> opentake_domain::Transform {
+    let mut transform = if clip.has_transform_animation() {
+        clip.transform_at(frame)
+    } else {
+        clip.transform
+    };
+    if let Some(stabilization) = &clip.stabilization {
+        let correction = stabilization.sample(frame - clip.start_frame);
+        let scale = stabilization.crop_scale(render_size.width_f() / render_size.height_f());
+        transform.center_x += correction.translation_x;
+        transform.center_y += correction.translation_y;
+        transform.width *= scale;
+        transform.height *= scale;
+        transform.rotation += correction.rotation_degrees;
+    }
+    transform
+}
+
 /// Build a [`ClipPlan`] for one selected clip.
 #[allow(clippy::too_many_arguments)]
 fn make_clip_plan(
@@ -547,21 +572,13 @@ fn eval_layer<'a>(
     // path uses `clip.transformAt(frame)` (which rebuilds top-left/size/rotation
     // and intentionally drops flip — matching domain `transform_at`). Replicate
     // that split so flip behaves exactly as upstream.
-    let transform = if clip.has_transform_animation() {
-        clip.transform_at(f)
-    } else {
-        clip.transform
-    };
+    let transform = evaluated_transform(clip, f, render_size);
     let mut affine = compose(
         plan.preferred_transform,
         affine_transform(&transform, plan.nat_size, render_size),
     );
     for ancestor in plan.compound_ancestors.iter().rev() {
-        let transform = if ancestor.clip.has_transform_animation() {
-            ancestor.clip.transform_at(f)
-        } else {
-            ancestor.clip.transform
-        };
+        let transform = evaluated_transform(&ancestor.clip, f, render_size);
         affine = compose(
             affine,
             affine_transform(&transform, ancestor.canvas_size, render_size),
@@ -607,21 +624,13 @@ fn eval_transition_incoming<'a>(
     if opacity <= 0.0 {
         return None;
     }
-    let transform = if clip.has_transform_animation() {
-        clip.transform_at(sample_frame)
-    } else {
-        clip.transform
-    };
+    let transform = evaluated_transform(clip, sample_frame, render_size);
     let mut affine = compose(
         plan.preferred_transform,
         affine_transform(&transform, plan.nat_size, render_size),
     );
     for ancestor in plan.compound_ancestors.iter().rev() {
-        let transform = if ancestor.clip.has_transform_animation() {
-            ancestor.clip.transform_at(sample_frame)
-        } else {
-            ancestor.clip.transform
-        };
+        let transform = evaluated_transform(&ancestor.clip, sample_frame, render_size);
         affine = compose(
             affine,
             affine_transform(&transform, ancestor.canvas_size, render_size),

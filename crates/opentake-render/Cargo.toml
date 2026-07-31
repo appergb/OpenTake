@@ -30,3 +30,4 @@ cosmic-text = { version = "0.12", default-features = false, features = ["std", "
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde_json = { workspace = true }
 opentake-media = { workspace = true }
+opentake-ops = { workspace = true }

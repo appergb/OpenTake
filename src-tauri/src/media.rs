@@ -24,26 +24,29 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use image::ImageEncoder;
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use opentake_core::{
     importable_clip_type, AppCore, CommittedMediaImport, CoreError, DeferredCoreEvents,
     PreparedMediaFolderRef, PreparedMediaImportOp, ProbedMedia,
 };
 use opentake_domain::{
-    ClipType, GenerationInput, GenerationJobStatus, MediaManifest, MediaManifestEntry, MediaSource,
-    Timeline,
+    Clip, ClipType, GenerationInput, GenerationJobStatus, MediaManifest, MediaManifestEntry,
+    MediaSource, StabilizationTrack, Timeline,
 };
 use opentake_media::library::{FavoriteRequest, LibraryStore, PreparedFavorite};
 #[cfg(test)]
 use opentake_media::MediaCancelToken;
 use opentake_media::{
+    analysis::{
+        analyze_stabilization as build_stabilization, track_translation_motion, StabilizationConfig,
+    },
     cache_key::visual_file_identity_key,
-    decode_frame_at, decode_frame_at_cancellable, decode_frames_at,
+    decode_frame_at, decode_frame_at_cancellable, decode_frames_at, decode_frames_at_cancellable,
     thumbnail::{
         encode_sprite, representative_thumbnail_times, save_sprite, sprite::grid_geometry,
         video_thumbnail_times, EncodedSpriteArtifact, ThumbnailCacheMeta, VideoThumb,
@@ -62,6 +65,53 @@ pub mod prewarm;
 /// state.
 pub struct MediaState {
     engine: MediaEngine,
+}
+
+/// Single-flight cooperative cancellation for an Inspector stabilization run.
+#[derive(Default)]
+pub struct StabilizationAnalysisState {
+    active: Mutex<Option<opentake_media::MediaCancelToken>>,
+}
+
+impl StabilizationAnalysisState {
+    fn begin(&self) -> Result<opentake_media::MediaCancelToken, String> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.is_some() {
+            return Err("a stabilization analysis is already running".to_string());
+        }
+        let token = opentake_media::MediaCancelToken::new();
+        *active = Some(token.clone());
+        Ok(token)
+    }
+
+    fn finish(&self, token: &opentake_media::MediaCancelToken) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active
+            .as_ref()
+            .is_some_and(|current| current.same_instance(token))
+        {
+            *active = None;
+        }
+    }
+
+    fn cancel(&self) -> bool {
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(token) = active.as_ref() {
+            token.cancel();
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl MediaState {
@@ -2522,6 +2572,131 @@ pub fn get_waveform(
     })
 }
 
+/// Analyze one video clip into a source-bound editable stabilization track.
+/// Decoding is bounded to at most 48 downscaled frames; the source file is
+/// strictly read-only and the caller applies the returned solution separately
+/// through `edit_apply`.
+#[tauri::command]
+pub async fn analyze_stabilization(
+    app: AppHandle,
+    clip_id: String,
+) -> Result<StabilizationTrack, String> {
+    let cancel = app.state::<StabilizationAnalysisState>().begin()?;
+    let prepared = (|| {
+        let snapshot = app.state::<AppCore>().runtime_snapshot();
+        let clip = find_runtime_clip(&snapshot.timeline, &clip_id)
+            .ok_or_else(|| format!("clip not found: {clip_id}"))?;
+        if clip.media_type != ClipType::Video || clip.nested_sequence_id.is_some() {
+            return Err("stabilization requires an ordinary video clip".to_string());
+        }
+        let (path, is_video) =
+            crate::transcribe::resolve_asset_from_snapshot(&snapshot, &clip.media_ref)?;
+        if !is_video {
+            return Err("stabilization source is not a video".to_string());
+        }
+        let fps = snapshot.timeline.fps.max(1) as f64;
+        let sample_count = (clip.duration_frames.max(2) as usize).min(48);
+        let last_relative_frame = (clip.duration_frames - 1).max(1);
+        let relative_frames = (0..sample_count)
+            .map(|index| {
+                ((index as f64 * last_relative_frame as f64 / (sample_count - 1) as f64).round()
+                    as i32)
+                    .clamp(0, last_relative_frame)
+            })
+            .collect::<Vec<_>>();
+        let source_start = clip.trim_start_frame as f64 / fps;
+        let times = relative_frames
+            .iter()
+            .map(|frame| source_start + *frame as f64 * clip.speed.max(0.0001) / fps)
+            .collect::<Vec<_>>();
+        Ok((
+            path,
+            times,
+            relative_frames,
+            source_start,
+            fps,
+            clip.speed,
+            last_relative_frame,
+            clip.media_ref.clone(),
+        ))
+    })();
+
+    let result = match prepared {
+        Err(error) => Err(error),
+        Ok((
+            path,
+            times,
+            relative_frames,
+            source_start,
+            fps,
+            speed,
+            last_relative_frame,
+            source_identity,
+        )) => {
+            let worker_cancel = cancel.clone();
+            match tauri::async_runtime::spawn_blocking(move || {
+                let request = FrameRequest {
+                    max_size: (320, 180),
+                    tolerance_secs: 0.1,
+                    ..FrameRequest::default()
+                };
+                let decoded = decode_frames_at_cancellable(&path, &times, &request, &worker_cancel);
+                let mut frames = decoded
+                    .into_iter()
+                    .filter_map(|result| result.ok())
+                    .map(|(actual, frame)| {
+                        let relative =
+                            ((actual - source_start) * fps / speed.max(0.0001)).round() as i32;
+                        (relative.clamp(0, last_relative_frame), frame)
+                    })
+                    .collect::<Vec<_>>();
+                if frames.len() < relative_frames.len() && worker_cancel.is_cancelled() {
+                    return Err(MediaError::Cancelled.to_string());
+                }
+                frames.sort_by_key(|(frame, _)| *frame);
+                frames.dedup_by_key(|(frame, _)| *frame);
+                let motion = track_translation_motion(&frames, &worker_cancel)
+                    .map_err(|error| error.to_string())?;
+                build_stabilization(
+                    &motion,
+                    source_identity,
+                    StabilizationConfig::default(),
+                    &worker_cancel,
+                )
+                .map_err(|error| error.to_string())
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => Err(format!("stabilization analysis task failed: {error}")),
+            }
+        }
+    };
+    app.state::<StabilizationAnalysisState>().finish(&cancel);
+    result
+}
+
+#[tauri::command]
+pub fn cancel_stabilization_analysis(analysis: State<'_, StabilizationAnalysisState>) -> bool {
+    analysis.cancel()
+}
+
+fn find_runtime_clip<'a>(timeline: &'a Timeline, clip_id: &str) -> Option<&'a Clip> {
+    timeline
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .find(|clip| clip.id == clip_id)
+        .or_else(|| {
+            timeline
+                .nested_sequences
+                .iter()
+                .flat_map(|sequence| &sequence.timeline.tracks)
+                .flat_map(|track| &track.clips)
+                .find(|clip| clip.id == clip_id)
+        })
+}
+
 /// `preload_media`: enqueue the smallest cache that makes the selected media
 /// immediately useful — a hi-res first-frame poster for video or a waveform for
 /// audio. The bounded project scheduler keeps this fire-and-forget work off the
@@ -4759,5 +4934,21 @@ mod tests {
             err.contains("no extension"),
             "extensionless path must be rejected: got {err}"
         );
+    }
+
+    #[test]
+    fn stabilization_analysis_state_cancels_and_releases_single_flight_slot() {
+        let state = StabilizationAnalysisState::default();
+        let first = state.begin().expect("first analysis reserves the slot");
+        assert!(state.begin().is_err(), "a concurrent analysis is rejected");
+
+        assert!(state.cancel(), "the active analysis is cancellable");
+        assert!(first.is_cancelled());
+        state.finish(&first);
+        assert!(!state.cancel(), "finishing clears the active token");
+
+        let second = state.begin().expect("the slot can be reused after finish");
+        assert!(!second.is_cancelled());
+        state.finish(&second);
     }
 }

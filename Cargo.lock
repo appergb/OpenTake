@@ -3526,6 +3526,7 @@ dependencies = [
  "image",
  "opentake-domain",
  "opentake-media",
+ "opentake-ops",
  "pollster",
  "serde_json",
  "thiserror 2.0.18",

@@ -29,6 +29,7 @@ pub mod keyframe;
 pub mod media;
 pub mod signal;
 pub mod split;
+pub mod stabilization;
 pub mod subtitle_export;
 pub mod text;
 mod text_wire;
@@ -57,6 +58,7 @@ pub use signal::{
     TrackRoleAssignment, VideoType,
 };
 pub use split::split_clip;
+pub use stabilization::{StabilizationKeyframe, StabilizationTrack, StabilizationTransform};
 pub use subtitle_export::{collect_caption_cues, export_srt, export_vtt, SubtitleCue};
 pub use text::{Fill, Rgba, Shadow, TextAlignment, TextLayout, TextStyle};
 pub use timeline::{ClipLocation, NestedSequence, Timeline, Track};

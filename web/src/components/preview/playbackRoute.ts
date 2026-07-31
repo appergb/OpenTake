@@ -52,6 +52,7 @@ function inspectClip(
     clip.sourceClipType === "text" ||
     clip.colorGrade !== undefined ||
     clip.chromaKey !== undefined ||
+    clip.stabilization !== undefined ||
     masks.length > 0;
 
   if (isLottie) reasons.push({ code: "lottie", clipId: clip.id });
