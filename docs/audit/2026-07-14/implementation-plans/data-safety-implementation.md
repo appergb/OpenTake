@@ -760,14 +760,14 @@ Completion evidence: [`data-safety-cache-identity-real-device-2026-07-31.md`](..
   - Add deterministic fixtures for every named current, legacy, missing, malformed, and fail-closed branch; the focused round-trip and compatibility suites must pass.
   - Exercise open, edit, save, and reopen on a complete current version-2 bundle. Prove every rejected open/save leaves the full nofollow bundle tree unchanged, and prove rejected Save As creates no destination, journal, staging, symlink, or other sibling artifact.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-project/tests/roundtrip.rs#malformed_manifest_is_an_error` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-project/tests/schema_compat.rs#malformed_manifest_contract_matches_authoritative_source` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-project --test roundtrip malformed_manifest_is_an_error -- --exact`
   - Run: `cargo test -p opentake-project --test schema_compat malformed_manifest_contract_matches_authoritative_source -- --exact`
@@ -775,20 +775,20 @@ Completion evidence: [`data-safety-cache-identity-real-device-2026-07-31.md`](..
   Expected: the existing round-trip smoke passes, while the reviewed-planned
   schema contract is absent (`running 0 tests`), so the gate is not satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Add the missing owning test and reconcile the comments/spec/plan in the files
   listed for Task 9. Do not change the already-correct `Project` or
   `MediaManifest` runtime behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-project --test roundtrip malformed_manifest_is_an_error -- --exact`
   - Run: `cargo test -p opentake-project --test schema_compat malformed_manifest_contract_matches_authoritative_source -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
