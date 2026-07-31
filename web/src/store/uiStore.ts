@@ -54,26 +54,58 @@ export interface SaveAsProgressState {
   cancelling: boolean;
 }
 
+const STORAGE_PREFIX = "opentake.ui.v1.";
 const LS = {
-  layoutPreset: "layoutPreset",
-  agentPanelVisible: "agentPanelVisible",
-  mediaPanelVisible: "mediaPanelVisible",
-  inspectorPanelVisible: "inspectorPanelVisible",
-  keyframesPanelVisible: "keyframesPanelVisible",
+  layoutPreset: `${STORAGE_PREFIX}layoutPreset`,
+  agentPanelVisible: `${STORAGE_PREFIX}agentPanelVisible`,
+  mediaPanelVisible: `${STORAGE_PREFIX}mediaPanelVisible`,
+  inspectorPanelVisible: `${STORAGE_PREFIX}inspectorPanelVisible`,
+  keyframesPanelVisible: `${STORAGE_PREFIX}keyframesPanelVisible`,
 } as const;
 
-function loadBool(key: string, fallback: boolean): boolean {
-  if (typeof localStorage === "undefined") return fallback;
-  const v = localStorage.getItem(key);
-  return v === null ? fallback : v === "true";
+type UiStorageKey = (typeof LS)[keyof typeof LS];
+
+const LEGACY_LS: Record<UiStorageKey, string> = {
+  [LS.layoutPreset]: "layoutPreset",
+  [LS.agentPanelVisible]: "agentPanelVisible",
+  [LS.mediaPanelVisible]: "mediaPanelVisible",
+  [LS.inspectorPanelVisible]: "inspectorPanelVisible",
+  [LS.keyframesPanelVisible]: "keyframesPanelVisible",
+};
+
+function readPersisted(key: UiStorageKey): { value: string | null; legacy: boolean } {
+  if (typeof localStorage === "undefined") return { value: null, legacy: false };
+  try {
+    const value = localStorage.getItem(key);
+    if (value !== null) return { value, legacy: false };
+    return { value: localStorage.getItem(LEGACY_LS[key]), legacy: true };
+  } catch {
+    return { value: null, legacy: false };
+  }
+}
+
+function loadBool(key: UiStorageKey, fallback: boolean): boolean {
+  const stored = readPersisted(key);
+  if (stored.value !== "true" && stored.value !== "false") return fallback;
+  if (stored.legacy) persist(key, stored.value);
+  return stored.value === "true";
 }
 function loadPreset(): LayoutPreset {
-  if (typeof localStorage === "undefined") return "default";
-  const v = localStorage.getItem(LS.layoutPreset);
-  return v === "media" || v === "vertical" ? v : "default";
+  const stored = readPersisted(LS.layoutPreset);
+  if (stored.value !== "default" && stored.value !== "media" && stored.value !== "vertical") {
+    return "default";
+  }
+  if (stored.legacy) persist(LS.layoutPreset, stored.value);
+  return stored.value;
 }
-function persist(key: string, value: string) {
-  if (typeof localStorage !== "undefined") localStorage.setItem(key, value);
+function persist(key: UiStorageKey, value: string): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Sandboxed/private browsing can deny storage. UI state must still update
+    // for the current session and simply fall back to defaults next launch.
+  }
 }
 
 function settledFrame(frame: number): number {
@@ -257,7 +289,7 @@ interface UiState {
   clearToast: () => void;
 }
 
-export const useEditorUiStore = create<UiState>((set, get) => ({
+export const createEditorUiStore = () => create<UiState>((set, get) => ({
   view: "home",
   setView: (view) => set({ view }),
   settingsOpen: false,
@@ -549,3 +581,5 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   pushToast: (message) => set({ toast: { message, id: Date.now() } }),
   clearToast: () => set({ toast: null }),
 }));
+
+export const useEditorUiStore = createEditorUiStore();

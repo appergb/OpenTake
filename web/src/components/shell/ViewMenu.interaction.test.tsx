@@ -76,7 +76,7 @@ describe("ViewMenu planned control acceptance", () => {
     await act(async () => mediaLayout?.click());
 
     expect(useEditorUiStore.getState().layoutPreset).toBe("media");
-    expect(localStorage.getItem("layoutPreset")).toBe("media");
+    expect(localStorage.getItem("opentake.ui.v1.layoutPreset")).toBe("media");
     expect(trigger?.getAttribute("aria-expanded")).toBe("false");
     expect(container?.querySelector('[role="menu"]')).toBeNull();
   });
@@ -89,7 +89,7 @@ describe("ViewMenu planned control acceptance", () => {
     await act(async () => agent?.click());
 
     expect(useEditorUiStore.getState().agentPanelVisible).toBe(true);
-    expect(localStorage.getItem("agentPanelVisible")).toBe("true");
+    expect(localStorage.getItem("opentake.ui.v1.agentPanelVisible")).toBe("true");
     expect(agent?.getAttribute("aria-checked")).toBe("true");
     expect(container?.querySelector('[role="menu"]')).not.toBeNull();
   });
@@ -102,7 +102,7 @@ describe("ViewMenu planned control acceptance", () => {
     await act(async () => media?.click());
 
     expect(useEditorUiStore.getState().mediaPanelVisible).toBe(false);
-    expect(localStorage.getItem("mediaPanelVisible")).toBe("false");
+    expect(localStorage.getItem("opentake.ui.v1.mediaPanelVisible")).toBe("false");
     expect(media?.getAttribute("aria-checked")).toBe("false");
     expect(container?.querySelector('[role="menu"]')).not.toBeNull();
   });
@@ -115,7 +115,7 @@ describe("ViewMenu planned control acceptance", () => {
     await act(async () => inspector?.click());
 
     expect(useEditorUiStore.getState().inspectorPanelVisible).toBe(false);
-    expect(localStorage.getItem("inspectorPanelVisible")).toBe("false");
+    expect(localStorage.getItem("opentake.ui.v1.inspectorPanelVisible")).toBe("false");
     expect(inspector?.getAttribute("aria-checked")).toBe("false");
     expect(container?.querySelector('[role="menu"]')).not.toBeNull();
   });

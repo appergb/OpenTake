@@ -1286,7 +1286,14 @@ interface Clip {                  // Timeline.swift:75-117
 **D. 状态/契约**
 - [ ] 镜像只由 `timeline_changed`→`get_timeline` 更新；前端无任何直接改 timeline 的路径。
 - [ ] 每个编辑手势映射到正确 `edit_apply` 命令（§11.1）。
-- [ ] 持久化键（layoutPreset/三面板可见性/keyframes）跨会话保留。
+- [x] 持久化键（layoutPreset/三面板可见性/keyframes）跨会话保留。
+
+持久化契约使用逐字段、带 schema 版本的键：`opentake.ui.v1.layoutPreset`、
+`opentake.ui.v1.agentPanelVisible`、`opentake.ui.v1.mediaPanelVisible`、
+`opentake.ui.v1.inspectorPanelVisible`、`opentake.ui.v1.keyframesPanelVisible`。首次读取时仅迁移
+通过严格校验的旧版无前缀键；非法/损坏值回落到 default / false / true / true / false，且不把
+损坏值写入新 schema。localStorage 不可用、读取抛错或写入失败时不得阻止当次 UI 更新。只持久化
+这五项全局 UI 偏好；工程 view、播放头、选择、最大化等工程/会话态在新 store 中必须恢复默认。
 
 ### 13.3 关键陷阱备忘（防止 1:1 偏差）
 

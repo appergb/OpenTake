@@ -95,7 +95,7 @@ describe("TitleBar Agent entry", () => {
     expect(useEditorUiStore.getState().agentPanelVisible).toBe(true);
     expect(button?.getAttribute("aria-pressed")).toBe("true");
     expect(button?.style.opacity).toBe("1");
-    expect(localStorage.getItem("agentPanelVisible")).toBe("true");
+    expect(localStorage.getItem("opentake.ui.v1.agentPanelVisible")).toBe("true");
 
     await act(async () => button?.click());
     expect(useEditorUiStore.getState().agentPanelVisible).toBe(false);
