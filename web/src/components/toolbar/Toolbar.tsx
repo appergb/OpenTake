@@ -13,6 +13,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
+import { useState } from "react";
 import { HoverButton } from "../ui/HoverButton";
 import { Icon } from "../ui/Icon";
 import { useEditorUiStore } from "../../store/uiStore";
@@ -72,8 +73,10 @@ export function Toolbar() {
   const zoomScale = useEditorUiStore((s) => s.zoomScale);
   const minZoomScale = useEditorUiStore((s) => s.minZoomScale);
   const setZoomScale = useEditorUiStore((s) => s.setZoomScale);
+  const pushToast = useEditorUiStore((s) => s.pushToast);
   const canUndo = useProjectStore((s) => s.canUndo);
   const canRedo = useProjectStore((s) => s.canRedo);
+  const [undoPending, setUndoPending] = useState(false);
 
   // Logarithmic slider mapping (ToolbarView.swift:50-53): travel uniform per
   // zoom factor; get=log(zoom), set=exp(value).
@@ -84,6 +87,19 @@ export function Toolbar() {
   const onSlider = (e: React.ChangeEvent<HTMLInputElement>) => {
     const t = Number(e.target.value);
     setZoomScale(Math.exp(logMin + t * (logMax - logMin)));
+  };
+
+  const onUndo = async () => {
+    if (!canUndo || undoPending) return;
+    setUndoPending(true);
+    try {
+      await edit.undo();
+    } catch (reason: unknown) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      pushToast(`${t("toolbar.undo")}: ${message}`);
+    } finally {
+      setUndoPending(false);
+    }
   };
 
   return (
@@ -101,9 +117,15 @@ export function Toolbar() {
     >
       {/* Undo / Redo */}
       <div style={{ display: "flex", alignItems: "center" }}>
-        <HoverButton title={t("toolbar.undo")} disabled={!canUndo} onClick={() => edit.undo()}>
-          <Icon icon={RotateCcw} size={13} />
-        </HoverButton>
+        <span aria-busy={undoPending || undefined} style={{ display: "inline-flex" }}>
+          <HoverButton
+            title={t("toolbar.undo")}
+            disabled={!canUndo || undoPending}
+            onClick={() => void onUndo()}
+          >
+            <Icon icon={RotateCcw} size={13} />
+          </HoverButton>
+        </span>
         <HoverButton title={t("toolbar.redo")} disabled={!canRedo} onClick={() => edit.redo()}>
           <Icon icon={RotateCw} size={13} />
         </HoverButton>
