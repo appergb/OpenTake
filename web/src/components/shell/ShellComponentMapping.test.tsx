@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 interface ExactOwner {
@@ -49,6 +51,7 @@ const exactOwners: ExactOwner[] = [
 
 describe("ShellComponentMapping", () => {
   it("every_documented_shell_component_has_exact_owner", () => {
+    const repositoryRoot = fileURLToPath(new URL("../../../../", import.meta.url));
     const componentMap = readFileSync(
       new URL("../../../../docs/specs/frontend/3-components.md", import.meta.url),
       "utf8",
@@ -57,7 +60,9 @@ describe("ShellComponentMapping", () => {
     for (const entry of exactOwners) {
       const source = readFileSync(entry.source, "utf8");
       const evidence = readFileSync(entry.visibleEvidence, "utf8");
-      const relativeSource = entry.source.pathname.split("/OpenTake-generation/")[1];
+      const relativeSource = relative(repositoryRoot, fileURLToPath(entry.source))
+        .split(sep)
+        .join("/");
 
       expect(componentMap, `${entry.capability} is missing from the component map`).toContain(
         `| ${entry.capability} |`,

@@ -136,7 +136,15 @@ In the real Tauri WebView:
 
 ## Remaining cross-platform receipt
 
-Windows source assets are locked and the full-product job now owns the installed
-NSIS smoke, but no Windows runner has executed this commit yet. Record the exact
-workflow URL, source SHA, installer digests, installed path, and passing owning
-test here before declaring Task 33 or Data Safety Task 10 complete.
+The first exact-head Windows run for `21f7e9ebe1a4e16a16d1ef7931f48d7ee9e9fc62`
+([run 30612593449](https://github.com/appergb/OpenTake/actions/runs/30612593449))
+passed provisioning and the source-side empty-`PATH` probe/decode/encode smoke.
+It did not reach installer creation because a Web documentation-owner test
+hard-coded the local checkout directory name. The same run also exposed two
+Windows Tauri test jobs that compiled before provisioning the new external
+binaries. Both CI portability defects are now covered by regression contracts;
+neither partial run is an installed-package receipt.
+
+Record the next exact workflow URL, source SHA, installer digests, installed
+path, offline WebView2 installation, and passing owning test here before
+declaring Task 33 or Data Safety Task 10 complete.

@@ -283,6 +283,9 @@ jobs:
       - name: Install Rust toolchain
         run: rustup component add rustfmt
 
+      - name: Provision checksum-pinned packaged FFmpeg sidecars
+        run: python scripts/provision_ffmpeg_sidecars.py --target x86_64-pc-windows-msvc
+
       - name: Install FFmpeg
         run: choco install ffmpeg --no-progress -y
 
@@ -344,6 +347,9 @@ jobs:
 
       - name: Install Rust toolchain
         run: rustup component add rustfmt clippy
+
+      - name: Provision checksum-pinned packaged FFmpeg sidecars
+        run: python scripts/provision_ffmpeg_sidecars.py --target x86_64-pc-windows-msvc
 
       - name: Cache cargo
         uses: actions/cache@v4

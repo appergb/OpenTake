@@ -4,6 +4,11 @@ fn config() -> Value {
     serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json must parse")
 }
 
+fn windows_config() -> Value {
+    serde_json::from_str(include_str!("../tauri.windows.conf.json"))
+        .expect("tauri.windows.conf.json must parse")
+}
+
 #[test]
 fn packaged_webview_csp_is_explicit_and_local_only() {
     let config = config();
@@ -118,4 +123,43 @@ fn dialog_asset_grants_are_persisted_after_fs_initialization() {
         .find(".plugin(tauri_plugin_persisted_scope::init())")
         .expect("persisted-scope plugin must be initialized");
     assert!(fs < persisted, "fs must initialize before persisted-scope");
+}
+
+#[test]
+fn windows_bundle_installs_webview2_without_network_access() {
+    let config = windows_config();
+    let install_mode = &config["bundle"]["windows"]["webviewInstallMode"];
+
+    assert_eq!(install_mode["type"].as_str(), Some("offlineInstaller"));
+    assert_eq!(install_mode["silent"].as_bool(), Some(true));
+}
+
+#[test]
+fn every_windows_tauri_ci_job_provisions_packaged_sidecars_first() {
+    let workflow = include_str!("../../.github/workflows/ci.yml");
+    for (job, next_job) in [
+        ("  windows-product:\n", "  windows-security:\n"),
+        ("  windows-security:\n", "  web:\n"),
+        ("  windows-library-security:\n", "  safe-filesystem:\n"),
+    ] {
+        let body = workflow
+            .split_once(job)
+            .unwrap_or_else(|| panic!("missing CI job {job}"))
+            .1
+            .split_once(next_job)
+            .unwrap_or_else(|| panic!("missing CI boundary after {job}"))
+            .0;
+        let provision = body
+            .find("python scripts/provision_ffmpeg_sidecars.py --target x86_64-pc-windows-msvc")
+            .unwrap_or_else(|| panic!("{job} must provision packaged sidecars"));
+        let tauri_compile = body
+            .find("opentake-tauri")
+            .or_else(|| body.find("tauri build"))
+            .unwrap_or_else(|| panic!("{job} must exercise Tauri"));
+
+        assert!(
+            provision < tauri_compile,
+            "{job} must provision sidecars before compiling Tauri"
+        );
+    }
 }

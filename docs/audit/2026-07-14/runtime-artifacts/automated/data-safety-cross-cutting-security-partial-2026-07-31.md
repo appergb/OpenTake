@@ -2,7 +2,7 @@
 
 ## Status
 
-Task 10 `DS-cross-cutting-security-headings` remains **open**. This checkpoint closes the concrete CSP and asset-scope defect discovered during audit, but does not claim the task's Windows packaged sidecar or release-signing criteria.
+Task 10 `DS-cross-cutting-security-headings` remains **open**. This checkpoint closes the concrete CSP, asset-scope, packaged-sidecar supply, and offline WebView2 configuration defects discovered during audit, but does not claim the task's Windows installed-package or release-signing criteria.
 
 ## Defect found and corrected
 
@@ -16,6 +16,8 @@ The corrected packaged boundary now has:
 - explicit deny precedence for `.ssh`, `.gnupg`, and `.aws` home trees;
 - native dialog runtime grants persisted across restart via `tauri-plugin-persisted-scope` with its `protocol-asset` feature;
 - no shell, filesystem, HTTP, or process plugin command permission exposed to the main WebView.
+- the Windows NSIS/MSI bundle embeds the silent WebView2 offline installer, so a fresh installation does not depend on network access;
+- each Windows CI job that compiles the Tauri crate provisions the checksum- and version-pinned FFmpeg/FFprobe sidecars before compilation.
 
 ## Automated evidence
 
@@ -25,8 +27,10 @@ The corrected packaged boundary now has:
 - asset scope contains exactly the three application-owned allow patterns and no global/home wildcard;
 - the main capability contains no shell/fs/http/process command permission;
 - persisted-scope is enabled for the asset protocol and initializes after the required fs plugin.
+- the Windows platform bundle selects `offlineInstaller` with silent installation;
+- all three Windows Tauri CI jobs provision the pinned sidecars before their first Tauri compile/build step.
 
-Result: PASS, 4/4. The four existing cross-cutting owning tests also pass 1/1 each, and the complete Rust workspace regression passed after the hardening patch.
+Result: PASS, 6/6. The four existing cross-cutting owning tests also pass 1/1 each, the Web suite passes 82 files / 774 tests, and the complete Rust workspace regression passed after the hardening patch.
 
 ## Packaged application evidence
 
@@ -47,8 +51,8 @@ The persisted runtime files `.persisted-scope` and `.persisted-scope-asset` exis
 
 ## Remaining Task 10 blockers
 
-- The `.app` still discovers host `ffmpeg`/`ffprobe`; verified target-specific sidecars are not yet bundled in the package.
-- Native Windows WebView2/package smoke evidence is not yet attached on the final tree.
+- The macOS package contains and has executed its pinned FFmpeg/FFprobe sidecars without ambient `PATH`; the corresponding Windows installed-package receipt is still pending.
+- Native Windows offline WebView2 installation and packaged-app smoke evidence is not yet attached on the final tree.
 - macOS distribution identity signing and Apple notarization evidence is not yet available; the current debug `.app` is only a local QA artifact.
 
 Accordingly, no Task 10 plan checkbox is marked complete and this checkpoint does not authorize Beta publication.
