@@ -2052,33 +2052,42 @@ not the separately owned desktop motion/Lottie materialization.
   - Visible/returned assertion: assert the exact returned status plus deterministic frame/audio/container properties or typed unsupported/error output, and verify preview/export parity when both paths are named.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-render/tests/completion_3336fb8bef6f3a49.rs#completion_3336fb8bef6f3a49_media_code_follows_cross_platform_frame_time_cac.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/composite_acceptance.rs#media_principles_headings_reference_exact_child_capabilities` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test composite_acceptance media_principles_headings_reference_exact_child_capabilities -- --exact`
 
   Expected: FAIL because one or more of the 2 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `docs/specs/media/0-principles.md`, `docs/specs/media/9-domain-contract.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test composite_acceptance media_principles_headings_reference_exact_child_capabilities -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `node --test tools/completion-audit.test.mjs`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. The aggregate owner first failed because neither
+  principle heading bound itself to executable children. Both documents now
+  reference the exact real-media probe, RGBA decode, 16 kHz PCM, waveform,
+  encode/reprobe, and export-pause owners; every child passes against local
+  generated fixtures. The compliance document now describes the actual FFmpeg
+  subprocess-sidecar architecture and explicitly retains the bundled
+  `--enable-nonfree` binary as a Beta release blocker. The focused aggregate,
+  formatting, and completion-audit Node gate pass.
 
 ### Task 32: MR-bounded-index-runtime (implementation-slice-603290a188109040)
 
