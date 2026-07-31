@@ -234,33 +234,35 @@ Completion evidence: [`data-safety-mcp-tool-import-real-device-2026-07-31.md`](.
   - Introduce a boundary sanitizer with typed safe error codes/details and private structured logging.
   - Adversarial tests inject a home path, API key, bearer token, signed URL query, provider body, and nested source error and assert none appear in MCP content while remediation remains actionable.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-agent/tests/mcp_error_redaction.rs#llm_errors_redact_paths_credentials_headers_provider_bodies` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-agent --test mcp_error_redaction llm_errors_redact_paths_credentials_headers_provider_bodies -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `src-tauri/src/mcp.rs#TauriMediaBridge`, `crates/opentake-agent/src/mcp/convert.rs#to_call_tool_result`, `docs/modules/opentake-agent/SPEC.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-agent --test mcp_error_redaction llm_errors_redact_paths_credentials_headers_provider_bodies -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completion evidence: [`data-safety-mcp-redaction-real-device-2026-07-31.md`](../runtime-artifacts/automated/data-safety-mcp-redaction-real-device-2026-07-31.md). The exact owning matrix already passed at the initial baseline; the packaged MCP server independently proved adversarial path, credential, authorization, signed-query, and provider-style strings never reached response content.
 
 ### Task 5: DS-generation-seed (implementation-slice-4f2d8bcaff47a37f)
 
