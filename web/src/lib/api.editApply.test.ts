@@ -39,4 +39,24 @@ describe("edit_apply production IPC envelope", () => {
       summary: "Moved 1 clip",
     });
   });
+
+  it("preserves the stable typed command error", async () => {
+    mocks.invoke.mockRejectedValueOnce({
+      code: "validation",
+      message: "clipIds[0]: unknown clip",
+    });
+    const { editApply, TauriCommandError } = await import("./api");
+
+    await expect(editApply({ type: "removeClips", clipIds: ["missing"] })).rejects.toEqual(
+      expect.objectContaining({
+        name: "TauriCommandError",
+        code: "validation",
+        message: "clipIds[0]: unknown clip",
+      }),
+    );
+    await expect(
+      editApply({ type: "removeClips", clipIds: ["missing"] }),
+    ).resolves.toBeDefined();
+    expect(TauriCommandError.prototype).toBeInstanceOf(Error);
+  });
 });

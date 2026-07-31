@@ -35,9 +35,23 @@ pub struct CmdError {
 
 impl From<CoreError> for CmdError {
     fn from(err: CoreError) -> Self {
+        let code = err.code();
+        let message = match &err {
+            CoreError::Edit(_)
+            | CoreError::Media(_)
+            | CoreError::Project(opentake_project::ProjectError::CompatibilityReadOnly {
+                ..
+            })
+            | CoreError::NoProjectOpen
+            | CoreError::Unsupported(_) => err.to_string(),
+            CoreError::Project(_) => {
+                eprintln!("project command failed: {err}");
+                "Project operation failed".to_string()
+            }
+        };
         CmdError {
-            code: err.code().to_string(),
-            message: err.to_string(),
+            code: code.to_string(),
+            message,
         }
     }
 }
@@ -239,9 +253,42 @@ mod tests {
     #[test]
     fn edit_apply_handler_maps_validation_error() {
         let core = core_with_track();
+        let before = core.get_timeline();
+        let events = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = events.clone();
+        core.subscribe(move |_| {
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+
         let err = handle_edit_apply(&core, EditCommand::AddClips { entries: vec![] }).unwrap_err();
+
         assert_eq!(err.code, "validation");
         assert!(!err.message.is_empty());
+        let after = core.get_timeline();
+        assert_eq!(
+            after.timeline, before.timeline,
+            "failed edit mutated timeline"
+        );
+        assert_eq!(after.version, before.version, "failed edit mutated version");
+        assert_eq!(
+            after.project_epoch, before.project_epoch,
+            "failed edit mutated project identity"
+        );
+        assert_eq!(events.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn internal_command_error_does_not_expose_project_paths() {
+        let error = CmdError::from(CoreError::Project(
+            opentake_project::ProjectError::MissingTimeline {
+                file: "project.json",
+                bundle: "/private/customer/secret.opentake".into(),
+            },
+        ));
+
+        assert_eq!(error.code, "internal");
+        assert_eq!(error.message, "Project operation failed");
+        assert!(!error.message.contains("/private"));
     }
 
     #[test]

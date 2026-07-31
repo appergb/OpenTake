@@ -43,6 +43,31 @@ type ListenFn = (
   handler: (e: { payload: unknown }) => void,
 ) => Promise<() => void>;
 
+/** Stable machine-readable error returned by typed core/edit Tauri commands. */
+export class TauriCommandError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "TauriCommandError";
+    this.code = code;
+  }
+}
+
+function asTauriCommandError(error: unknown): Error {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    "message" in error &&
+    typeof error.message === "string"
+  ) {
+    return new TauriCommandError(error.code, error.message);
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
 let invokeImpl: InvokeFn | null = null;
 let listenImpl: ListenFn | null = null;
 
@@ -70,19 +95,31 @@ export async function getTimeline(): Promise<RuntimeTimelineSnapshot> {
 
 export async function editApply(command: EditRequest): Promise<EditResult> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<EditResult>("edit_apply", { command });
+  if (invokeImpl) {
+    return invokeImpl<EditResult>("edit_apply", { command }).catch((error: unknown) => {
+      throw asTauriCommandError(error);
+    });
+  }
   return fallback.editApply(command);
 }
 
 export async function undo(): Promise<EditResult> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<EditResult>("undo");
+  if (invokeImpl) {
+    return invokeImpl<EditResult>("undo").catch((error: unknown) => {
+      throw asTauriCommandError(error);
+    });
+  }
   return fallback.noop("Undo");
 }
 
 export async function redo(): Promise<EditResult> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<EditResult>("redo");
+  if (invokeImpl) {
+    return invokeImpl<EditResult>("redo").catch((error: unknown) => {
+      throw asTauriCommandError(error);
+    });
+  }
   return fallback.noop("Redo");
 }
 
@@ -127,7 +164,11 @@ export async function projectOpen(path: string): Promise<RuntimeTimelineSnapshot
 
 export async function projectSave(path: string | null): Promise<string> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<string>("project_save", { path });
+  if (invokeImpl) {
+    return invokeImpl<string>("project_save", { path }).catch((error: unknown) => {
+      throw asTauriCommandError(error);
+    });
+  }
   return path ?? "";
 }
 
@@ -409,7 +450,11 @@ export async function onExportProgress(
 
 // MARK: - Self-contained `.opentake` bundle export (#29 / upstream `.palmier`)
 //
-// `export_bundle` writes a self-contained `.opentake` bundle to disk: every
+// The self-contained `.opentake` bundle capability is intentionally withdrawn:
+// its Rust-owned destination/disclosure workflow is not integrated yet. The
+// compatibility types and fail-closed function stay available to the disabled
+// UI branch, but no renderer call is sent to an unregistered Tauri command.
+// A future secure command may write a bundle containing every
 // resolvable media reference is copied inside and the manifest is rewritten to
 // bundle-relative paths, so the project opens on any machine (port of upstream
 // `ExportService.exportPalmierProject` / `PalmierProjectExporter`). It carries
@@ -438,12 +483,10 @@ export interface BundleReport {
   totalBytes: number;
 }
 
-/** Write a self-contained `.opentake` bundle to `outPath`, returning the
- *  missing-media report. Rejects outside Tauri (no core / no FS). */
+/** Fail-closed capability gate for the unavailable secure bundle workflow. */
 export async function exportBundle(outPath: string): Promise<BundleReport> {
-  await ensureTauri();
-  if (invokeImpl) return invokeImpl<BundleReport>("export_bundle", { outPath });
-  throw new Error("bundle export requires the desktop app");
+  void outPath;
+  throw new Error("secure bundle export is not available in this build");
 }
 
 // MARK: - Media commands

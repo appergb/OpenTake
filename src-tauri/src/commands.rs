@@ -3,9 +3,9 @@
 //! Each command is a thin shim over an `opentake_core::dto::handle_*` function
 //! (which wraps [`AppCore`]). Project New/Open additionally share one boundary
 //! single-flight gate so asynchronous project preparation cannot race another
-//! lifecycle transition. Most boundary `CmdError`s become strings;
-//! playback-aware lifecycle commands preserve the structured playback error
-//! code so overlap is reported as `busy` before core mutation.
+//! lifecycle transition. Core editing/history/save commands preserve
+//! `CmdError` at the IPC boundary; playback-aware lifecycle commands preserve
+//! their structured error code so callers never need to parse display text.
 //!
 //! `EditCommand` itself is not `Deserialize` (it carries engine value types with
 //! no serde derives), so the editing entry point takes a local serde-friendly
@@ -55,13 +55,13 @@ pub fn get_timeline(core: State<'_, AppCore>) -> TimelineSnapshotDto {
 
 /// `undo` / `redo`: global history navigation.
 #[tauri::command]
-pub fn undo(core: State<'_, AppCore>) -> Result<EditResultDto, String> {
-    handle_undo(&core).map_err(msg)
+pub fn undo(core: State<'_, AppCore>) -> Result<EditResultDto, CmdError> {
+    handle_undo(&core)
 }
 
 #[tauri::command]
-pub fn redo(core: State<'_, AppCore>) -> Result<EditResultDto, String> {
-    handle_redo(&core).map_err(msg)
+pub fn redo(core: State<'_, AppCore>) -> Result<EditResultDto, CmdError> {
+    handle_redo(&core)
 }
 
 /// `project_new`: replace the session with a fresh project and return its first
@@ -291,7 +291,7 @@ pub async fn project_open(app: AppHandle, path: String) -> Result<TimelineSnapsh
 /// risk lock reentrancy for no fidelity gain. Capture is best-effort: a failure
 /// yields `None`, leaving any existing cover untouched, and never fails the save.
 #[tauri::command]
-pub fn project_save(core: State<'_, AppCore>, path: Option<String>) -> Result<String, String> {
+pub fn project_save(core: State<'_, AppCore>, path: Option<String>) -> Result<String, CmdError> {
     let snapshot = core.runtime_snapshot();
     let thumbnail = opentake_media::capture_project_thumbnail(
         &snapshot.timeline,
@@ -302,7 +302,7 @@ pub fn project_save(core: State<'_, AppCore>, path: Option<String>) -> Result<St
     let target = path.map(std::path::PathBuf::from);
     core.save_project_with_thumbnail(target, thumbnail)
         .map(|p| p.to_string_lossy().into_owned())
-        .map_err(|e| e.to_string())
+        .map_err(CmdError::from)
 }
 
 /// `get_default_project_dir`: the default folder new projects save into
@@ -516,16 +516,21 @@ pub fn edit_apply(
     render: State<'_, crate::render::RenderState>,
     media: State<'_, crate::media::MediaState>,
     command: EditRequest,
-) -> Result<EditResultDto, String> {
+) -> Result<EditResultDto, CmdError> {
     let cmd = match command {
         EditRequest::FreezeFrame {
             clip_id,
             at_frame,
             duration_frames,
         } => {
-            validate_freeze_frame_request(&core, &clip_id, at_frame, duration_frames)?;
+            validate_freeze_frame_request(&core, &clip_id, at_frame, duration_frames)
+                .map_err(validation_error)?;
             let media_ref =
-                crate::render::capture_freeze_frame(&core, &render, &media, &clip_id, at_frame)?;
+                crate::render::capture_freeze_frame(&core, &render, &media, &clip_id, at_frame)
+                    .map_err(|error| {
+                        eprintln!("freeze-frame capture failed: {error}");
+                        internal_error("Freeze-frame capture failed")
+                    })?;
             EditCommand::FreezeFrame {
                 clip_id,
                 at_frame,
@@ -533,9 +538,9 @@ pub fn edit_apply(
                 media_ref,
             }
         }
-        other => other.into_command()?,
+        other => other.into_command().map_err(validation_error)?,
     };
-    handle_edit_apply(&core, cmd).map_err(msg)
+    handle_edit_apply(&core, cmd)
 }
 
 /// `check_path_exists`: checks if a path (e.g. project bundle folder) exists on disk.
@@ -544,8 +549,18 @@ pub fn check_path_exists(path: String) -> bool {
     std::path::Path::new(&path).exists()
 }
 
-fn msg(e: CmdError) -> String {
-    e.message
+fn validation_error(message: String) -> CmdError {
+    CmdError {
+        code: "validation".to_string(),
+        message,
+    }
+}
+
+fn internal_error(message: impl Into<String>) -> CmdError {
+    CmdError {
+        code: "internal".to_string(),
+        message: message.into(),
+    }
 }
 
 fn validate_freeze_frame_request(
@@ -589,7 +604,7 @@ fn validate_freeze_frame_request(
 /// union. Engine value types (`ClipMove`, `TrimEdit`, `FrameRange`, keyframe
 /// tracks) are mirrored as local serde DTOs and converted in [`into_command`].
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum EditRequest {
     #[serde(rename_all = "camelCase")]
     AddClips { entries: Vec<ClipEntryDto> },
@@ -1698,8 +1713,7 @@ mod edit_request_serde_tests {
         )
     }
 
-    #[test]
-    fn every_frontend_edit_request_deserializes_to_intended_command() {
+    fn assert_every_edit_request_maps_to_exact_edit_command() {
         let cases = [
             (r#"{"type":"addClips","entries":[]}"#, "AddClips"),
             (
@@ -1824,6 +1838,16 @@ mod edit_request_serde_tests {
 
         assert_eq!(cases.len(), 41);
         for (json, expected_route) in cases {
+            let mut hostile = serde_json::from_str::<serde_json::Value>(json).unwrap();
+            hostile
+                .as_object_mut()
+                .unwrap()
+                .insert("unexpected".to_string(), serde_json::json!(true));
+            assert!(
+                serde_json::from_value::<EditRequest>(hostile).is_err(),
+                "{expected_route} must reject unknown fields"
+            );
+
             let request = serde_json::from_str::<EditRequest>(json)
                 .unwrap_or_else(|error| panic!("{expected_route} DTO failed: {error}"));
             assert_eq!(request_route(&request), expected_route);
@@ -1837,6 +1861,16 @@ mod edit_request_serde_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_frontend_edit_request_deserializes_to_intended_command() {
+        assert_every_edit_request_maps_to_exact_edit_command();
+    }
+
+    #[test]
+    fn every_edit_request_maps_to_exact_edit_command() {
+        assert_every_edit_request_maps_to_exact_edit_command();
     }
 
     // Regression: the front end sends camelCase keys (clipIds/clipId/atFrame…).
