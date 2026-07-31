@@ -936,6 +936,7 @@ fn probe_or_default_file(
             height: p.height.map(|h| h as i32),
             fps: p.fps,
             has_audio: p.has_audio,
+            color: p.color,
         },
         Err(_) => ProbedMedia::default(),
     }

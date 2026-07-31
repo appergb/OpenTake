@@ -2462,10 +2462,93 @@ function MediaAssetSource({ asset, t }: { asset: MediaItem; t: TFunction }) {
           <MetaRow label={t("inspector.source.size")} value={formatFileSize(asset.fileSize)} />
         )}
         {asset.path && <MetaRow label={t("inspector.source.path")} value={asset.path} />}
+        {asset.isHdr && (
+          <MetaRow
+            label={t("inspector.source.hdr")}
+            value={t("inspector.source.hdrDelivery", {
+              transfer: asset.color?.transfer ?? "HDR",
+            })}
+          />
+        )}
       </section>
+
+      {asset.type === "video" && <ProxyMediaSection asset={asset} t={t} />}
 
       {gen && <GenerationSections gen={gen} t={t} />}
     </div>
+  );
+}
+
+function ProxyMediaSection({ asset, t }: { asset: MediaItem; t: TFunction }) {
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setRunning(false);
+    setProgress(0);
+    setError(null);
+  }, [asset.id]);
+
+  const create = async () => {
+    setRunning(true);
+    setProgress(0);
+    setError(null);
+    let unlisten = () => {};
+    try {
+      unlisten = await api.onMediaProxyProgress(asset.id, ({ done, total }) => {
+        setProgress(total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0);
+      });
+      await api.createMediaProxy(asset.id);
+      setProgress(100);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      unlisten();
+      setRunning(false);
+    }
+  };
+
+  const remove = async () => {
+    setError(null);
+    try {
+      await api.removeMediaProxy(asset.id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  return (
+    <section data-testid="media-proxy-section">
+      <SectionHeader label={t("inspector.source.proxy")} />
+      {asset.proxyPath ? (
+        <MetaRow
+          label={t("inspector.source.proxy")}
+          value={t("inspector.source.proxyReady", {
+            width: asset.proxyWidth ?? 0,
+            height: asset.proxyHeight ?? 0,
+          })}
+        />
+      ) : null}
+      <button
+        type="button"
+        disabled={running || asset.missing}
+        onClick={() => void (asset.proxyPath ? remove() : create())}
+        style={controlStyle}
+      >
+        {running
+          ? t("inspector.source.proxyCreating", { progress })
+          : asset.proxyPath
+            ? t("inspector.source.proxyRemove")
+            : t("inspector.source.proxyCreate")}
+      </button>
+      {running && (
+        <button type="button" onClick={() => void api.cancelMediaProxy()} style={controlStyle}>
+          {t("common.cancel")}
+        </button>
+      )}
+      {error && <div style={{ color: "var(--destructive)", fontSize: FS.xs }}>{error}</div>}
+    </section>
   );
 }
 

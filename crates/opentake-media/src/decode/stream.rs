@@ -182,7 +182,10 @@ fn run_video_stream(
     tx: SyncSender<Result<StreamVideoFrame>>,
     control: StreamDecodeControl,
 ) {
-    let args = video_stream_args(&req);
+    let color = crate::probe::probe(&req.path)
+        .ok()
+        .and_then(|probe| probe.color);
+    let args = video_stream_args_with_color(&req, color.as_ref());
     let mut child = match ff::ffmpeg().args(args).spawn() {
         Ok(child) => child,
         Err(e) => {
@@ -275,10 +278,21 @@ fn frame_to_secs(frame: i64, fps: i32) -> f64 {
     frame.max(0) as f64 / fps.max(1) as f64
 }
 
+#[cfg(test)]
 fn video_stream_args(req: &VideoStreamRequest) -> Vec<String> {
+    video_stream_args_with_color(req, None)
+}
+
+fn video_stream_args_with_color(
+    req: &VideoStreamRequest,
+    color: Option<&opentake_domain::MediaColorMetadata>,
+) -> Vec<String> {
     let mut args = Vec::new();
     args.push("-ss".to_string());
     args.push(format!("{:.6}", req.start_secs()));
+    if let Some(color) = color {
+        args.extend(crate::color::hdr_decode_input_args(color));
+    }
     if !req.apply_rotation {
         args.push("-noautorotate".to_string());
     }
@@ -294,7 +308,11 @@ fn video_stream_args(req: &VideoStreamRequest) -> Vec<String> {
         args.push(frame_limit.to_string());
     }
 
-    let mut filters = vec![format!("fps=fps={}", req.timeline_fps)];
+    let mut filters = Vec::new();
+    if let Some(filter) = color.and_then(crate::color::hdr_tonemap_filter) {
+        filters.push(filter);
+    }
+    filters.push(format!("fps=fps={}", req.timeline_fps));
     if req.max_size.0 > 0 || req.max_size.1 > 0 {
         let mw = if req.max_size.0 > 0 {
             req.max_size.0.to_string()

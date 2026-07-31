@@ -384,9 +384,21 @@ pub fn fit_within(w: u32, h: u32, max: (u32, u32)) -> (u32, u32) {
 
 /// Build the ffmpeg arg list for decoding one frame to rawvideo RGBA on stdout.
 /// Pure so the exact CLI contract is testable.
+#[cfg(test)]
 fn frame_args(path: &Path, req: &FrameRequest) -> Vec<String> {
+    frame_args_with_color(path, req, None)
+}
+
+fn frame_args_with_color(
+    path: &Path,
+    req: &FrameRequest,
+    color: Option<&opentake_domain::MediaColorMetadata>,
+) -> Vec<String> {
     let seek = (req.time_secs - req.tolerance_secs).max(0.0);
     let mut args: Vec<String> = Vec::new();
+    if let Some(color) = color {
+        args.extend(crate::color::hdr_decode_input_args(color));
+    }
     // Fast input seek to just before the target keyframe window.
     args.push("-ss".into());
     args.push(format!("{seek:.6}"));
@@ -397,6 +409,9 @@ fn frame_args(path: &Path, req: &FrameRequest) -> Vec<String> {
     args.push("1".into());
 
     let mut filters: Vec<String> = Vec::new();
+    if let Some(filter) = color.and_then(crate::color::hdr_tonemap_filter) {
+        filters.push(filter);
+    }
     if req.apply_rotation {
         // Honor the display matrix when transposing (ffmpeg applies it via the
         // autorotate behavior; the scale filter runs after rotation).
@@ -444,8 +459,17 @@ pub fn decode_frame_at_cancellable(
     if cancel.is_cancelled() {
         return Err(MediaError::Cancelled);
     }
+    // Probe color only for ordinary files. FIFOs/device inputs are valid FFmpeg
+    // sources too; opening them once for ffprobe would consume or block the
+    // stream before the actual cancellable decoder child is spawned.
+    let color = path
+        .metadata()
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .and_then(|_| crate::probe::probe(path).ok())
+        .and_then(|probe| probe.color);
     let mut child = ff::ffmpeg()
-        .args(frame_args(path, req))
+        .args(frame_args_with_color(path, req, color.as_ref()))
         .spawn()
         .map_err(|e| MediaError::Ffmpeg(format!("spawn: {e}")))?;
     cancel.child_spawned();

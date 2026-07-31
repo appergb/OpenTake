@@ -170,10 +170,11 @@ default-off Rust renderer or to perform the then-missing first device check.
 
 ### 3.8 【P1·用户加单】HDR v1 / 代理媒体 / 账号脚手架
 
-- **HDR v1**:`probe.rs:MediaProbe` 加 `color_primaries/transfer/matrix`(ffprobe 已能给);导出 `encode/preset.rs:80` 从硬编 BT.709 改透传;预览 wgpu 加 PQ/HLG→SDR tonemap pass(shader 链已有挂点)。
-- **代理媒体**:`opentake-media` 加 `proxy.rs`(ffmpeg 半分辨率 H.264 后台转码,进度事件);`MediaItemDto` 加 `proxyPath`;流式引擎 resolver 优先解代理、导出永远用原件;设置页加开关。
-- **账号脚手架**:可配置后端 URL 的登录面板(设置页新 pane),仅 token 存钥匙串 + 状态显示,**如实标注无官方后端**;不阻塞任何本地功能。
-- **验收**:HDR 素材导出色彩元数据不丢;4K 素材开代理后时间线流畅;账号面板断网不影响编辑。
+- **功能完成状态(2026-08-01)**:三个独立 child 均已通过，并由 `crates/opentake-render/tests/composite_acceptance.rs#hdr_proxy_account_children_close_one_composite_acceptance` 关闭同一个父验收。
+- **HDR v1 PASS**:`MediaColorMetadata` 持久化 primaries/transfer/matrix/range；PQ/HLG 在单帧、流式预览和导出共用路径进入 BT.709 SDR。运行时按实际 FFmpeg filter 能力选择 `scale_vt` 或 `zscale`，已修复 bundled sidecar 导出全黑。当前是明确的 SDR delivery policy，不声称 HDR passthrough。
+- **代理媒体 PASS**:项目内 `media/proxies/<uuid>.mp4` 以 H.264/AAC 原子生成并记录原件 SHA-256；设置开关驱动播放 resolver，导出只读原件。创建、目录祖先、授权、移除和重连均使用 exact-leaf/no-follow 约束，拒绝符号链接/Windows reparse；项目切换会取消在途转码，移除/重连在旧代理文件清理完成前持续持有项目身份租约。打包 GUI 已完成开关、播放、移除、重建、保存重开与原件导出验证。
+- **账号脚手架 PASS**:设置页如实标注无官方后端；远端只接受 HTTPS，本机回环 HTTP 仅作开发例外；token 只进钥匙串。失败登录和断网时，播放、编辑、保存与导出不被账号状态门控。
+- **证据与限制**:[`hdr-proxy-account-real-device-2026-08-01.md`](../audit/2026-07-14/runtime-artifacts/automated/hdr-proxy-account-real-device-2026-08-01.md)。最新本地 `.app`/DMG 仅为 ad-hoc 签名且未 notarize，不能作为 Developer ID Beta 发布证据；完成度账本仍需在不覆盖用户改动的前提下重建文件清单。
 
 ### 3.9 【P2】转场(#13 切片,对标剪映)
 

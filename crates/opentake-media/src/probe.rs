@@ -8,6 +8,8 @@
 
 use std::path::Path;
 
+use opentake_domain::MediaColorMetadata;
+
 use crate::error::{MediaError, Result};
 use crate::ff;
 
@@ -28,6 +30,9 @@ pub struct MediaProbe {
     /// `mov,mp4,m4a,3gp,3g2,mj2`). Security-sensitive import boundaries use
     /// this to verify that downloaded bytes match their declared container.
     pub format_name: Option<String>,
+    /// Source video color signalling retained for HDR-aware decode and durable
+    /// project metadata. Absent only when the stream reports no color fields.
+    pub color: Option<MediaColorMetadata>,
 }
 
 /// Open the container and read the first video stream + audio presence.
@@ -125,6 +130,7 @@ pub fn parse_probe(json: &serde_json::Value) -> MediaProbe {
     let mut height = None;
     let mut fps = None;
     let mut video_duration = None;
+    let mut color = None;
 
     if let Some(v) = video {
         let w = v.get("width").and_then(|x| x.as_u64()).map(|x| x as u32);
@@ -152,6 +158,28 @@ pub fn parse_probe(json: &serde_json::Value) -> MediaProbe {
             .get("duration")
             .and_then(|x| x.as_str())
             .and_then(|s| s.parse::<f64>().ok());
+
+        let metadata = MediaColorMetadata {
+            primaries: v
+                .get("color_primaries")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+            transfer: v
+                .get("color_transfer")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+            matrix: v
+                .get("color_space")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+            range: v
+                .get("color_range")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+        };
+        if !metadata.is_empty() {
+            color = Some(metadata);
+        }
     }
 
     let container_duration = json
@@ -175,6 +203,7 @@ pub fn parse_probe(json: &serde_json::Value) -> MediaProbe {
         has_audio,
         has_video,
         format_name,
+        color,
     }
 }
 

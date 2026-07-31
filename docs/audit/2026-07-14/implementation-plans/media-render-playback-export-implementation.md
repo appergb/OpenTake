@@ -840,23 +840,23 @@ Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/auto
   - Implement proxy creation, switching, relink, and persistence.
   - Finish account/provider session integration and cover offline/reopen behavior.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/composite_acceptance.rs#hdr_proxy_account_children_close_one_composite_acceptance` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test composite_acceptance hdr_proxy_account_children_close_one_composite_acceptance -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `docs/architecture/HANDOFF-2026-07.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test composite_acceptance hdr_proxy_account_children_close_one_composite_acceptance -- --exact`
 
@@ -867,6 +867,23 @@ Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/auto
   Run: `node --test tools/completion-audit.test.mjs`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Current result (2026-08-01): product verification is GREEN (`cargo test
+  --workspace --no-fail-fast`, workspace Clippy with `-D warnings`, Rust fmt,
+  Web 93 files / 824 tests, and the production build). The exact completion
+  audit ran 206 tests with 205 passing; its only failure is the protected
+  `repository-files.json` inventory omitting previously tracked files. This
+  step remains unchecked until that user-owned inventory is reconciled rather
+  than overwritten by this slice.
+
+Functional completion evidence (2026-08-01): the owning composite test first
+failed because the target did not exist, then passed after separate HDR, proxy,
+and account children were implemented and verified. Packaged macOS testing
+found and fixed bundled-FFmpeg HDR black output, missing asset-protocol scope
+for proxies, and a final no-follow ancestor-directory boundary. The latest
+ad-hoc-signed app and its DMG copy pass strict deep verification; packaged GUI
+remove/recreate/persist/playback and original-only export pass. Full receipt:
+`../runtime-artifacts/automated/hdr-proxy-account-real-device-2026-08-01.md`.
 
 ### Task 16: MR-bounded-audio-streaming (implementation-slice-d1864a5db0605004)
 

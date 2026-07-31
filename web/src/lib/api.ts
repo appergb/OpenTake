@@ -1171,6 +1171,74 @@ export async function cancelStemSeparation(): Promise<boolean> {
   return false;
 }
 
+export interface MediaProxyResult {
+  assetId: string;
+  path: string;
+  sourceSha256: string;
+  width: number;
+  height: number;
+}
+
+export interface MediaProxyProgress {
+  assetId: string;
+  done: number;
+  total: number;
+}
+
+export async function createMediaProxy(
+  assetId: string,
+  maxWidth = 1280,
+  maxHeight = 720,
+): Promise<MediaProxyResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<MediaProxyResult>("create_media_proxy", { assetId, maxWidth, maxHeight });
+  }
+  throw new Error("proxy creation requires the desktop app");
+}
+
+export async function cancelMediaProxy(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("cancel_media_proxy");
+  return false;
+}
+
+export async function removeMediaProxy(assetId: string): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("remove_media_proxy", { assetId });
+  return false;
+}
+
+export async function setProxyPlaybackEnabled(enabled: boolean): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("set_proxy_playback_enabled", { enabled });
+  return enabled;
+}
+
+export async function getProxyPlaybackEnabled(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("get_proxy_playback_enabled");
+  return false;
+}
+
+export async function onMediaProxyProgress(
+  assetId: string,
+  handler: (progress: MediaProxyProgress) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("proxy://progress", (event) => {
+    const progress = event.payload as Partial<MediaProxyProgress> | undefined;
+    if (
+      progress?.assetId === assetId &&
+      typeof progress.done === "number" &&
+      typeof progress.total === "number"
+    ) {
+      handler(progress as MediaProxyProgress);
+    }
+  });
+}
+
 export async function onStemSeparationProgress(
   sourceAssetId: string,
   handler: (progress: StemSeparationProgress) => void,

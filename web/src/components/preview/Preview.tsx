@@ -21,6 +21,7 @@ import { Icon } from "../ui/Icon";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore, refreshMedia } from "../../store/mediaStore";
+import { useSettingsStore } from "../../store/settingsStore";
 import { formatTimecode, totalFrames } from "../../lib/geometry";
 import { snapFrameToEdge } from "../../lib/snap";
 import { maybeSnapFeedback } from "../../lib/haptic";
@@ -617,7 +618,9 @@ function MediaPreview({
   onPlayingChange: (playing: boolean) => void;
 }) {
   const t = useT();
-  const url = assetUrl(item.path);
+  const proxyPlaybackEnabled = useSettingsStore((state) => state.proxyPlaybackEnabled);
+  const playbackPath = proxyPlaybackEnabled ? (item.proxyPath ?? item.path) : item.path;
+  const url = assetUrl(playbackPath);
   // Hi-res first-frame poster, painted INSTANTLY behind the <video> so a cold
   // click shows a sharp frame with no blank/spinner. Decoded (and cached) by the
   // backend on select; the asset protocol then streams the real video

@@ -69,20 +69,22 @@ impl ExportPreset {
         }
     }
 
-    /// BT.709 color-tagging args (primaries/transfer/matrix), applied for the
-    /// H.26x lossy codecs to match upstream's locked BT.709 pipeline.
+    /// BT.709 delivery tagging. `setparams` writes all three properties onto
+    /// every frame before the encoder sees it; the stream flags are retained as
+    /// an explicit container/codec request. This combination is required by
+    /// current FFmpeg/libx264, where stream flags alone leave primaries and
+    /// transfer as `unknown` in the produced bitstream.
     pub fn color_args(&self) -> Vec<String> {
-        match self.codec {
-            VideoCodec::ProRes422 => vec![],
-            _ => vec![
-                "-colorspace".into(),
-                "bt709".into(),
-                "-color_primaries".into(),
-                "bt709".into(),
-                "-color_trc".into(),
-                "bt709".into(),
-            ],
-        }
+        vec![
+            "-vf".into(),
+            "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709".into(),
+            "-colorspace".into(),
+            "bt709".into(),
+            "-color_primaries".into(),
+            "bt709".into(),
+            "-color_trc".into(),
+            "bt709".into(),
+        ]
     }
 }
 
@@ -119,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn h26x_get_bt709_color_args_prores_does_not() {
+    fn every_delivery_codec_gets_bt709_frame_and_stream_tags() {
         let h265 = ExportPreset::new(VideoCodec::H265, ExportResolution::P720);
         let args = h265.color_args();
         assert!(args.windows(2).any(|w| w == ["-colorspace", "bt709"]));
@@ -127,7 +129,10 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["-color_trc", "bt709"]));
 
         let prores = ExportPreset::new(VideoCodec::ProRes422, ExportResolution::P720);
-        assert!(prores.color_args().is_empty());
+        assert!(prores
+            .color_args()
+            .iter()
+            .any(|arg| arg.contains("setparams=color_primaries=bt709")));
     }
 
     #[test]

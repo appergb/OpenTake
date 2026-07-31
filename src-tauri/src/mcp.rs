@@ -643,6 +643,7 @@ impl TauriMediaBridge {
             height: probe.height.map(|value| value as i32),
             fps: probe.fps,
             has_audio: probe.has_audio,
+            color: probe.color,
         })
     }
 
@@ -1851,6 +1852,8 @@ mod tests {
                 source_height: None,
                 source_fps: None,
                 has_audio: Some(true),
+                color: None,
+                proxy: None,
                 folder_id: None,
                 cached_remote_url: None,
                 cached_remote_url_expires_at: None,
@@ -2774,6 +2777,8 @@ mod tests {
             source_height: Some(h),
             source_fps: Some(30.0),
             has_audio: Some(false),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,

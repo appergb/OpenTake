@@ -24,7 +24,7 @@ use super::audio::{
 use super::engine::{
     BoundedReaper, FrameSink, PlaybackClock, PlaybackEngine, PlayheadEmitter, ReapPermit,
 };
-use super::project::{project_media, project_text};
+use super::project::{project_media_with_proxies, project_text};
 use super::session::{
     PlaybackCommandError, PlaybackIdentity, ProjectTransition, SessionControl, SessionRegistry,
     StartDecision, StartTicket,
@@ -580,7 +580,8 @@ pub async fn playback_start(
         let timeline = snapshot.timeline;
         let manifest = snapshot.media;
         let project_dir = snapshot.project_dir;
-        let (sizes, media) = project_media(&manifest, &project_dir);
+        let prefer_proxy = app.state::<crate::media::MediaProxyState>().enabled();
+        let (sizes, media) = project_media_with_proxies(&manifest, &project_dir, prefer_proxy);
         let text = project_text(&timeline);
         let render_size =
             playback_render_size(timeline.width, timeline.height, PLAYBACK_PREVIEW_CAP);

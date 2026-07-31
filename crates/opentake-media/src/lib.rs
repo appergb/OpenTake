@@ -30,6 +30,7 @@ mod ff;
 pub mod analysis;
 pub mod cache_key;
 pub mod cancel;
+pub mod color;
 pub mod decode;
 pub mod encode;
 pub mod error;
@@ -38,6 +39,7 @@ pub mod index_coordinator;
 pub mod library;
 pub mod ort_worker;
 pub mod probe;
+pub mod proxy;
 pub mod search;
 pub mod thumbnail;
 pub mod timecode;
@@ -124,7 +126,9 @@ pub use cancel::MediaCancelToken;
 pub use error::{MediaError, Result};
 pub use frame::RgbaFrame;
 
-pub use probe::{probe, MediaProbe};
+pub use color::{hdr_decode_input_args, hdr_tonemap_filter};
+pub use probe::{parse_probe, probe, MediaProbe};
+pub use proxy::{create_proxy, file_sha256, ProxyProgressCallback, ProxyRequest, ProxyResult};
 
 pub use decode::{
     convert_frame_rate, decode_frame_at, decode_frame_at_cancellable, decode_frames_at,

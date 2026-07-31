@@ -16,7 +16,7 @@ import { startSync } from "./store/sync";
 import { startMediaSync } from "./store/mediaStore";
 import { useEditorUiStore } from "./store/uiStore";
 import { initI18n } from "./i18n";
-import { initTheme, initWindowSize } from "./store/settingsStore";
+import { initProxyPlayback, initTheme, initWindowSize } from "./store/settingsStore";
 import { onGoHome } from "./lib/api";
 
 function Toast() {
@@ -67,6 +67,7 @@ export default function App() {
     initI18n();
     initTheme();
     initWindowSize();
+    initProxyPlayback();
     void startSync();
     void startMediaSync();
     // Window closed → app stays resident; return to the launcher (so a

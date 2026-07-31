@@ -24,11 +24,12 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use image::ImageEncoder;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 use opentake_core::{
     importable_clip_type, AppCore, CommittedMediaImport, CoreError, DeferredCoreEvents,
@@ -36,8 +37,8 @@ use opentake_core::{
 };
 use opentake_domain::{
     AudioDenoise, Clip, ClipType, DenoiseMode, GenerationInput, GenerationJobStatus,
-    LoudnessNormalization, MediaManifest, MediaManifestEntry, MediaSource, StabilizationTrack,
-    Timeline,
+    LoudnessNormalization, MediaManifest, MediaManifestEntry, MediaProxy, MediaSource,
+    StabilizationTrack, Timeline,
 };
 use opentake_media::library::{FavoriteRequest, LibraryStore, PreparedFavorite};
 #[cfg(test)]
@@ -49,16 +50,18 @@ use opentake_media::{
         StabilizationConfig, StemExecution, StemSeparationRequest,
     },
     cache_key::visual_file_identity_key,
-    decode_frame_at, decode_frame_at_cancellable, decode_frames_at, decode_frames_at_cancellable,
-    extract_pcm_cancellable_with_progress,
+    create_proxy, decode_frame_at, decode_frame_at_cancellable, decode_frames_at,
+    decode_frames_at_cancellable, extract_pcm_cancellable_with_progress,
     thumbnail::{
         encode_sprite, representative_thumbnail_times, save_sprite, sprite::grid_geometry,
         video_thumbnail_times, EncodedSpriteArtifact, ThumbnailCacheMeta, VideoThumb,
         MAX_VIDEO_THUMBNAILS, THUMB_MAX_SIZE, THUMB_TOLERANCE_SECS,
     },
     waveform::store::CACHE_SUBDIR,
-    FrameRequest, MediaEngine, MediaError, PcmFormat, PcmSpec, RgbaFrame,
+    FrameRequest, MediaEngine, MediaError, PcmFormat, PcmSpec, ProxyProgressCallback, ProxyRequest,
+    RgbaFrame,
 };
+use opentake_project::ProjectRoot;
 
 use crate::library::LibraryState;
 
@@ -93,6 +96,62 @@ pub struct DenoiseAnalysisState {
 #[derive(Default)]
 pub struct StemSeparationState {
     active: Mutex<Option<opentake_media::MediaCancelToken>>,
+}
+
+/// Single-flight proxy transcode plus the app-level playback preference. The
+/// preference is mirrored from localStorage at startup; it changes playback
+/// source selection only and never changes export resolution.
+#[derive(Default)]
+pub struct MediaProxyState {
+    active: Mutex<Option<opentake_media::MediaCancelToken>>,
+    enabled: AtomicBool,
+}
+
+impl MediaProxyState {
+    fn begin(&self) -> Result<opentake_media::MediaCancelToken, String> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.is_some() {
+            return Err("media_proxy_busy".to_string());
+        }
+        let token = opentake_media::MediaCancelToken::new();
+        *active = Some(token.clone());
+        Ok(token)
+    }
+
+    fn finish(&self, token: &opentake_media::MediaCancelToken) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active
+            .as_ref()
+            .is_some_and(|current| current.same_instance(token))
+        {
+            *active = None;
+        }
+    }
+
+    pub(crate) fn cancel(&self) -> bool {
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        active.as_ref().is_some_and(|token| {
+            token.cancel();
+            true
+        })
+    }
+
+    pub(crate) fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Release);
+    }
 }
 
 impl StemSeparationState {
@@ -289,9 +348,17 @@ pub struct MediaItemDto {
     pub source_fps: Option<f64>,
     /// Whether the asset carries audio.
     pub has_audio: bool,
+    /// Original source color signalling retained for HDR-aware UI.
+    pub color: Option<opentake_domain::MediaColorMetadata>,
+    /// True for PQ/HLG sources. The current compositor delivers SDR BT.709.
+    pub is_hdr: bool,
     /// Absolute path to the source file, when resolvable. Project-relative
     /// derived assets are resolved against the open project bundle.
     pub path: Option<String>,
+    /// Absolute project-local playback proxy path when one is materialized.
+    pub proxy_path: Option<String>,
+    pub proxy_width: Option<u32>,
+    pub proxy_height: Option<u32>,
     /// On-disk thumbnail path, or `None` to render a type placeholder.
     pub thumbnail: Option<String>,
     /// Library folder this asset lives in (`None` = root), for the folder view.
@@ -337,6 +404,10 @@ impl MediaItemDto {
         let path = resolved
             .as_deref()
             .map(|path| path.to_string_lossy().into_owned());
+        let resolved_proxy = entry
+            .proxy
+            .as_ref()
+            .and_then(|proxy| trusted_project_proxy_path(project_dir?, &proxy.relative_path));
         let generation_input = entry.generation_input.as_ref();
         let generation_status = match generation_input.and_then(|input| input.status) {
             Some(GenerationJobStatus::Queued | GenerationJobStatus::Generating) => "generating",
@@ -388,7 +459,14 @@ impl MediaItemDto {
             height: entry.source_height,
             source_fps: entry.source_fps,
             has_audio: entry.has_audio.unwrap_or(false),
+            color: entry.color.clone(),
+            is_hdr: entry.color.as_ref().is_some_and(|color| color.is_hdr()),
             path,
+            proxy_path: resolved_proxy
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            proxy_width: entry.proxy.as_ref().map(|proxy| proxy.width),
+            proxy_height: entry.proxy.as_ref().map(|proxy| proxy.height),
             thumbnail,
             folder_id: entry.folder_id.clone(),
             file_size,
@@ -910,6 +988,7 @@ fn probe_media(engine: &MediaEngine, path: &Path) -> ProbedMedia {
             height: p.height.map(|h| h as i32),
             fps: p.fps,
             has_audio: p.has_audio,
+            color: p.color,
         },
         Err(_) => ProbedMedia::default(),
     }
@@ -948,6 +1027,7 @@ impl SavedMediaMetadata {
                     height: Some(height),
                     fps: Some(f64::from(summary.fps)),
                     has_audio: summary.has_audio,
+                    color: None,
                 })
             }
             Self::Wav {
@@ -963,6 +1043,7 @@ impl SavedMediaMetadata {
                     height: None,
                     fps: None,
                     has_audio: true,
+                    color: None,
                 })
             }
         }
@@ -1525,8 +1606,14 @@ fn import_media_impl(
 
 /// `get_media`: the current media catalog for the panel. Infallible.
 #[tauri::command]
-pub fn get_media(core: State<'_, AppCore>, media: State<'_, MediaState>) -> MediaListDto {
-    MediaListDto::from_core(&core, Some(media.engine().cache_root()))
+pub fn get_media(
+    app: AppHandle,
+    core: State<'_, AppCore>,
+    media: State<'_, MediaState>,
+) -> MediaListDto {
+    let mut catalog = MediaListDto::from_core(&core, Some(media.engine().cache_root()));
+    grant_catalog_proxy_asset_scope(&app, &mut catalog);
+    catalog
 }
 
 /// Persist one project asset in the content-addressed global library and mirror
@@ -2385,6 +2472,7 @@ pub fn extract_audio(
 /// entry. Returns the updated catalog (with `missing` recomputed → now `false`).
 #[tauri::command]
 pub fn relink_media(
+    app: AppHandle,
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
     media_ref: String,
@@ -2394,11 +2482,13 @@ pub fn relink_media(
     if !new.is_file() {
         return Err(format!("file not found: {new_path}"));
     }
+    let _identity = core.lock_project_identity_workflow();
     // Validate the target type matches before touching the catalog (upstream
     // rejects relinking across types). `relink_media_file` re-checks, but doing
     // it here yields a precise message and avoids a needless probe.
-    let manifest = core.media();
-    let entry = manifest
+    let snapshot = core.runtime_snapshot();
+    let entry = snapshot
+        .media
         .entries
         .iter()
         .find(|e| e.id == media_ref)
@@ -2413,8 +2503,28 @@ pub fn relink_media(
     }
 
     let probe = probe_media(media.engine(), &new);
+    let old_proxy = entry.proxy.clone();
+    if old_proxy.is_some() {
+        let project_dir = snapshot
+            .project_dir
+            .as_deref()
+            .ok_or_else(|| "media_proxy_project_must_be_saved".to_string())?;
+        let project_root = ProjectRoot::open(project_dir).map_err(|error| error.to_string())?;
+        core.ensure_project_root_identity_for_project(
+            snapshot.project_epoch,
+            project_dir,
+            project_root.identity(),
+        )
+        .map_err(|error| error.to_string())?;
+    }
     core.relink_media_file(&media_ref, &new, &probe)
         .map_err(|e| e.to_string())?;
+    if let (Some(project_dir), Some(proxy)) = (snapshot.project_dir, old_proxy) {
+        if let Some(path) = trusted_project_proxy_path(&project_dir, &proxy.relative_path) {
+            let _ = std::fs::remove_file(&path);
+            revoke_proxy_asset_file(&app, &path);
+        }
+    }
     Ok(MediaListDto::from_core(
         &core,
         Some(media.engine().cache_root()),
@@ -3268,6 +3378,387 @@ pub fn cancel_stem_separation(state: State<'_, StemSeparationState>) -> bool {
     state.cancel()
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaProxyProgressEvent {
+    asset_id: String,
+    done: usize,
+    total: usize,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaProxyDto {
+    pub asset_id: String,
+    pub path: String,
+    pub source_sha256: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+fn resolved_project_proxy_path(project_dir: &Path, relative_path: &str) -> Option<PathBuf> {
+    let relative = Path::new(relative_path);
+    if relative.is_absolute() {
+        return None;
+    }
+    let components: Vec<_> = relative.components().collect();
+    if components.len() != 3
+        || components[0] != std::path::Component::Normal(std::ffi::OsStr::new("media"))
+        || components[1] != std::path::Component::Normal(std::ffi::OsStr::new("proxies"))
+        || !matches!(components[2], std::path::Component::Normal(_))
+        || relative
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("mp4")
+    {
+        return None;
+    }
+    Some(project_dir.join(relative))
+}
+
+fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+fn project_proxy_directory(project_dir: &Path, create: bool) -> Result<PathBuf, String> {
+    let project_metadata = std::fs::symlink_metadata(project_dir)
+        .map_err(|error| format!("media_proxy_project_metadata_failed:{error}"))?;
+    if !project_metadata.is_dir() || metadata_is_symlink_or_reparse(&project_metadata) {
+        return Err("media_proxy_project_directory_required".to_string());
+    }
+    let project_root = project_dir
+        .canonicalize()
+        .map_err(|error| format!("media_proxy_project_resolve_failed:{error}"))?;
+
+    let media_dir = project_dir.join("media");
+    match std::fs::symlink_metadata(&media_dir) {
+        Ok(metadata) if metadata.is_dir() && !metadata_is_symlink_or_reparse(&metadata) => {}
+        Ok(_) => return Err("media_proxy_media_directory_required".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+            std::fs::create_dir(&media_dir)
+                .map_err(|error| format!("media_proxy_media_create_failed:{error}"))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err("media_proxy_media_directory_missing".to_string());
+        }
+        Err(error) => return Err(format!("media_proxy_media_metadata_failed:{error}")),
+    }
+    let media_metadata = std::fs::symlink_metadata(&media_dir)
+        .map_err(|error| format!("media_proxy_media_metadata_failed:{error}"))?;
+    if !media_metadata.is_dir() || metadata_is_symlink_or_reparse(&media_metadata) {
+        return Err("media_proxy_media_directory_required".to_string());
+    }
+    let resolved_media = media_dir
+        .canonicalize()
+        .map_err(|error| format!("media_proxy_media_resolve_failed:{error}"))?;
+    if resolved_media.parent() != Some(project_root.as_path()) {
+        return Err("media_proxy_media_directory_escape".to_string());
+    }
+
+    let proxy_dir = media_dir.join("proxies");
+    match std::fs::symlink_metadata(&proxy_dir) {
+        Ok(metadata) if metadata.is_dir() && !metadata_is_symlink_or_reparse(&metadata) => {}
+        Ok(_) => return Err("media_proxy_directory_required".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+            std::fs::create_dir(&proxy_dir)
+                .map_err(|error| format!("media_proxy_directory_create_failed:{error}"))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err("media_proxy_directory_missing".to_string());
+        }
+        Err(error) => return Err(format!("media_proxy_directory_metadata_failed:{error}")),
+    }
+    let proxy_metadata = std::fs::symlink_metadata(&proxy_dir)
+        .map_err(|error| format!("media_proxy_directory_metadata_failed:{error}"))?;
+    if !proxy_metadata.is_dir() || metadata_is_symlink_or_reparse(&proxy_metadata) {
+        return Err("media_proxy_directory_required".to_string());
+    }
+    let resolved_proxy = proxy_dir
+        .canonicalize()
+        .map_err(|error| format!("media_proxy_directory_resolve_failed:{error}"))?;
+    if resolved_proxy.parent() != Some(resolved_media.as_path()) {
+        return Err("media_proxy_directory_escape".to_string());
+    }
+    Ok(proxy_dir)
+}
+
+pub(crate) fn trusted_project_proxy_path(
+    project_dir: &Path,
+    relative_path: &str,
+) -> Option<PathBuf> {
+    let candidate = resolved_project_proxy_path(project_dir, relative_path)?;
+    let proxy_dir = project_proxy_directory(project_dir, false).ok()?;
+    if candidate.parent() != Some(proxy_dir.as_path()) {
+        return None;
+    }
+    let metadata = std::fs::symlink_metadata(&candidate).ok()?;
+    if !metadata.is_file() || metadata_is_symlink_or_reparse(&metadata) {
+        return None;
+    }
+    Some(candidate)
+}
+
+fn grant_proxy_asset_file<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("media_proxy_scope_metadata_failed:{error}"))?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err("media_proxy_scope_regular_file_required".to_string());
+    }
+    app.asset_protocol_scope()
+        .allow_file(path)
+        .map_err(|error| format!("media_proxy_scope_grant_failed:{error}"))
+}
+
+fn revoke_proxy_asset_file<R: Runtime>(app: &AppHandle<R>, path: &Path) {
+    let scope = app.asset_protocol_scope();
+    // persisted-scope writes on PathAllowed events. Add the exact-file deny
+    // first, then re-emit the exact allow so both patterns are durably saved;
+    // deny precedence keeps the removed path inaccessible after restart.
+    if scope.forbid_file(path).is_ok() {
+        let _ = scope.allow_file(path);
+    }
+}
+
+fn grant_catalog_proxy_asset_scope<R: Runtime>(app: &AppHandle<R>, catalog: &mut MediaListDto) {
+    for item in &mut catalog.items {
+        let Some(path) = item.proxy_path.as_deref().map(Path::new) else {
+            continue;
+        };
+        if grant_proxy_asset_file(app, path).is_err() {
+            item.proxy_path = None;
+        }
+    }
+}
+
+/// Create a bounded project-local H.264 proxy off the UI thread, then persist
+/// its path + source digest in one manifest commit. The original source remains
+/// untouched and is still the only input used by export.
+fn create_media_proxy_blocking(
+    app: AppHandle,
+    asset_id: String,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    cancel: opentake_media::MediaCancelToken,
+) -> Result<MediaProxyDto, String> {
+    let core = app.state::<AppCore>();
+    let _identity = core.lock_project_identity_workflow();
+    core.ensure_project_mutable()
+        .map_err(|error| error.to_string())?;
+    let snapshot = core.runtime_snapshot();
+    let project_dir = snapshot
+        .project_dir
+        .clone()
+        .ok_or_else(|| "media_proxy_project_must_be_saved".to_string())?;
+    let entry = snapshot
+        .media
+        .entries
+        .iter()
+        .find(|entry| entry.id == asset_id)
+        .cloned()
+        .ok_or_else(|| format!("media_proxy_source_not_found:{asset_id}"))?;
+    if entry.kind != ClipType::Video {
+        return Err("media_proxy_video_required".to_string());
+    }
+    let source = source_path_for_entry(&entry, Some(&project_dir))?;
+    if !source.is_file() {
+        return Err("media_proxy_source_unreadable".to_string());
+    }
+
+    let project_root = ProjectRoot::open(&project_dir).map_err(|error| error.to_string())?;
+    core.ensure_project_root_identity_for_project(
+        snapshot.project_epoch,
+        &project_dir,
+        project_root.identity(),
+    )
+    .map_err(|error| error.to_string())?;
+    let proxy_dir = project_proxy_directory(&project_dir, true)?;
+    let leaf = format!("{}.mp4", uuid::Uuid::new_v4());
+    let relative_path = format!("media/proxies/{leaf}");
+    let output = proxy_dir.join(leaf);
+    let progress_app = app.clone();
+    let progress_asset_id = asset_id.clone();
+    let progress: ProxyProgressCallback = Arc::new(move |done, total| {
+        let _ = progress_app.emit(
+            "proxy://progress",
+            MediaProxyProgressEvent {
+                asset_id: progress_asset_id.clone(),
+                done,
+                total,
+            },
+        );
+    });
+    let created = match create_proxy(
+        ProxyRequest {
+            source: &source,
+            output: &output,
+            max_size: (max_width.unwrap_or(1280), max_height.unwrap_or(720)),
+        },
+        &cancel,
+        Some(progress),
+    ) {
+        Ok(created) => created,
+        Err(MediaError::Cancelled) => return Err("media_proxy_cancelled".to_string()),
+        Err(error) => return Err(format!("media_proxy_failed:{error}")),
+    };
+    let proxy = MediaProxy {
+        relative_path: relative_path.clone(),
+        source_sha256: created.source_sha256.clone(),
+        width: created.width,
+        height: created.height,
+    };
+    if let Err(error) = core.ensure_project_root_identity_for_project(
+        snapshot.project_epoch,
+        &project_dir,
+        project_root.identity(),
+    ) {
+        let _ = std::fs::remove_file(&output);
+        return Err(error.to_string());
+    }
+    if let Err(error) = core.set_media_proxy_for_project(
+        snapshot.project_epoch,
+        &project_dir,
+        &asset_id,
+        Some(proxy),
+    ) {
+        let _ = std::fs::remove_file(&output);
+        return Err(format!("media_proxy_persist_failed:{error}"));
+    }
+    if let Err(error) = grant_proxy_asset_file(&app, &output) {
+        let rollback = core.set_media_proxy_for_project(
+            snapshot.project_epoch,
+            &project_dir,
+            &asset_id,
+            entry.proxy.clone(),
+        );
+        let _ = std::fs::remove_file(&output);
+        return match rollback {
+            Ok(_) => Err(error),
+            Err(rollback_error) => Err(format!(
+                "{error};media_proxy_scope_rollback_failed:{rollback_error}"
+            )),
+        };
+    }
+    if let Some(old) = entry
+        .proxy
+        .as_ref()
+        .and_then(|proxy| trusted_project_proxy_path(&project_dir, &proxy.relative_path))
+    {
+        if old != output {
+            let _ = std::fs::remove_file(&old);
+            revoke_proxy_asset_file(&app, &old);
+        }
+    }
+    Ok(MediaProxyDto {
+        asset_id,
+        path: output.to_string_lossy().into_owned(),
+        source_sha256: created.source_sha256,
+        width: created.width,
+        height: created.height,
+    })
+}
+
+#[tauri::command]
+pub async fn create_media_proxy(
+    app: AppHandle,
+    asset_id: String,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+) -> Result<MediaProxyDto, String> {
+    let cancel = app.state::<MediaProxyState>().begin()?;
+    let worker_app = app.clone();
+    let worker_cancel = cancel.clone();
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        create_media_proxy_blocking(worker_app, asset_id, max_width, max_height, worker_cancel)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("media_proxy_task_failed:{error}")),
+    };
+    app.state::<MediaProxyState>().finish(&cancel);
+    result
+}
+
+#[tauri::command]
+pub fn cancel_media_proxy(state: State<'_, MediaProxyState>) -> bool {
+    state.cancel()
+}
+
+#[tauri::command]
+pub fn set_proxy_playback_enabled(state: State<'_, MediaProxyState>, enabled: bool) -> bool {
+    state.set_enabled(enabled);
+    state.enabled()
+}
+
+#[tauri::command]
+pub fn get_proxy_playback_enabled(state: State<'_, MediaProxyState>) -> bool {
+    state.enabled()
+}
+
+fn remove_media_proxy_impl(
+    core: &AppCore,
+    asset_id: &str,
+    cleanup: impl FnOnce(&Path),
+) -> Result<bool, String> {
+    let _identity = core.lock_project_identity_workflow();
+    core.ensure_project_mutable()
+        .map_err(|error| error.to_string())?;
+    let snapshot = core.runtime_snapshot();
+    let project_dir = snapshot
+        .project_dir
+        .clone()
+        .ok_or_else(|| "media_proxy_project_must_be_saved".to_string())?;
+    let old = snapshot
+        .media
+        .entries
+        .iter()
+        .find(|entry| entry.id == asset_id)
+        .ok_or_else(|| format!("media_proxy_source_not_found:{asset_id}"))?
+        .proxy
+        .clone();
+    if old.is_none() {
+        return Ok(false);
+    }
+    let project_root = ProjectRoot::open(&project_dir).map_err(|error| error.to_string())?;
+    core.ensure_project_root_identity_for_project(
+        snapshot.project_epoch,
+        &project_dir,
+        project_root.identity(),
+    )
+    .map_err(|error| error.to_string())?;
+    core.set_media_proxy_for_project(snapshot.project_epoch, &project_dir, asset_id, None)
+        .map_err(|error| error.to_string())?;
+    if let Some(path) = old
+        .as_ref()
+        .and_then(|proxy| trusted_project_proxy_path(&project_dir, &proxy.relative_path))
+    {
+        cleanup(&path);
+    }
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn remove_media_proxy(
+    app: AppHandle,
+    core: State<'_, AppCore>,
+    asset_id: String,
+) -> Result<bool, String> {
+    remove_media_proxy_impl(&core, &asset_id, |path| {
+        let _ = std::fs::remove_file(path);
+        revoke_proxy_asset_file(&app, path);
+    })
+}
+
 fn find_runtime_clip<'a>(timeline: &'a Timeline, clip_id: &str) -> Option<&'a Clip> {
     timeline
         .tracks
@@ -3397,6 +3888,8 @@ mod tests {
             source_height: Some(240),
             source_fps: Some(30.0),
             has_audio: Some(false),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -4229,6 +4722,7 @@ mod tests {
                 height: Some(1080),
                 fps: Some(30.0),
                 has_audio: true,
+                color: None,
             }
         );
     }
@@ -4281,6 +4775,8 @@ mod tests {
             source_height: Some(240),
             source_fps: Some(30.0),
             has_audio: Some(false),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -4357,6 +4853,7 @@ mod tests {
                 height: None,
                 fps: None,
                 has_audio: true,
+                color: None,
             }
         );
     }
@@ -4836,6 +5333,8 @@ mod tests {
             source_height: Some(480),
             source_fps: Some(24.0),
             has_audio: Some(true),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -4875,6 +5374,8 @@ mod tests {
             source_height: None,
             source_fps: None,
             has_audio: Some(true),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -4905,6 +5406,8 @@ mod tests {
             source_height: Some(480),
             source_fps: Some(24.0),
             has_audio: Some(true),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -4925,7 +5428,12 @@ mod tests {
             height: Some(20),
             source_fps: Some(24.0),
             has_audio: false,
+            color: None,
+            is_hdr: false,
             path: Some("/p.png".into()),
+            proxy_path: None,
+            proxy_width: None,
+            proxy_height: None,
             thumbnail: None,
             folder_id: None,
             file_size: Some(2048),
@@ -4971,6 +5479,8 @@ mod tests {
             source_height: Some(1080),
             source_fps: Some(30.0),
             has_audio: Some(true),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -5333,6 +5843,8 @@ mod tests {
                 source_height: Some(480),
                 source_fps: Some(30.0),
                 has_audio: Some(true),
+                color: None,
+                proxy: None,
                 folder_id: None,
                 cached_remote_url: None,
                 cached_remote_url_expires_at: None,
@@ -5413,6 +5925,112 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(dto.skipped, vec!["note.txt", "archive.zip"]);
+    }
+
+    #[test]
+    fn proxy_asset_scope_grants_only_regular_file_and_revoke_denies_it() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle();
+        let temp = tempfile::tempdir().unwrap();
+        let proxy = temp.path().join("proxy.mp4");
+        fs::write(&proxy, b"proxy").unwrap();
+
+        assert!(!handle.asset_protocol_scope().is_allowed(&proxy));
+        grant_proxy_asset_file(handle, &proxy).expect("grant exact proxy file");
+        assert!(handle.asset_protocol_scope().is_allowed(&proxy));
+        revoke_proxy_asset_file(handle, &proxy);
+        assert!(!handle.asset_protocol_scope().is_allowed(&proxy));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proxy_asset_scope_rejects_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let app = tauri::test::mock_app();
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("outside.mp4");
+        let proxy = temp.path().join("proxy.mp4");
+        fs::write(&target, b"outside").unwrap();
+        symlink(&target, &proxy).unwrap();
+
+        assert_eq!(
+            grant_proxy_asset_file(app.handle(), &proxy).unwrap_err(),
+            "media_proxy_scope_regular_file_required"
+        );
+        assert!(!app.handle().asset_protocol_scope().is_allowed(&target));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_proxy_path_rejects_symlinked_ancestor_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().join("ProxyPath.opentake");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(bundle.join("media")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("proxy.mp4"), b"outside").unwrap();
+        symlink(&outside, bundle.join("media/proxies")).unwrap();
+
+        assert!(trusted_project_proxy_path(&bundle, "media/proxies/proxy.mp4").is_none());
+    }
+
+    #[test]
+    fn remove_proxy_holds_project_identity_through_file_cleanup() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().unwrap();
+        let project_a_root = temp.path().join("project-a");
+        let project_b_root = temp.path().join("project-b");
+        fs::create_dir_all(&project_a_root).unwrap();
+        fs::create_dir_all(&project_b_root).unwrap();
+        let (core, _bundle_a, _source_a, asset_id) = saved_core_with_media(&project_a_root);
+        let (_other, bundle_b, _source_b, _asset_b) = saved_core_with_media(&project_b_root);
+        let core = Arc::new(core);
+        let snapshot = core.runtime_snapshot();
+        let project_dir = snapshot.project_dir.clone().unwrap();
+        let proxy_path = project_dir.join("media/proxies/proxy.mp4");
+        fs::create_dir_all(proxy_path.parent().unwrap()).unwrap();
+        fs::write(&proxy_path, b"proxy").unwrap();
+        core.set_media_proxy_for_project(
+            snapshot.project_epoch,
+            &project_dir,
+            &asset_id,
+            Some(MediaProxy {
+                relative_path: "media/proxies/proxy.mp4".into(),
+                source_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .into(),
+                width: 1280,
+                height: 720,
+            }),
+        )
+        .unwrap();
+
+        let (start_tx, start_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let replacement_core = Arc::clone(&core);
+        let replacement = std::thread::spawn(move || {
+            start_rx.recv().unwrap();
+            replacement_core.open_project(bundle_b).unwrap();
+            done_tx.send(()).unwrap();
+        });
+
+        remove_media_proxy_impl(&core, &asset_id, |path| {
+            fs::remove_file(path).unwrap();
+            start_tx.send(()).unwrap();
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+                "project replacement must stay blocked until proxy cleanup returns"
+            );
+        })
+        .unwrap();
+
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        replacement.join().unwrap();
+        assert!(!proxy_path.exists());
     }
 
     #[test]

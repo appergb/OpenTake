@@ -747,13 +747,15 @@ mod tests {
     }
 
     #[test]
-    fn encode_args_prores_pixfmt_and_no_color_tag() {
+    fn encode_args_prores_pixfmt_and_bt709_delivery_tags() {
         let preset = ExportPreset::new(VideoCodec::ProRes422, ExportResolution::P2160);
         let args = encode_args(Path::new("/o.mov"), 3840, 2160, 30, &preset);
         assert!(args.windows(2).any(|w| w == ["-c:v", "prores_ks"]));
         assert!(args.windows(2).any(|w| w == ["-pix_fmt", "yuv422p10le"]));
-        // ProRes path does not add BT.709 color tags here.
-        assert!(!args.windows(2).any(|w| w == ["-colorspace", "bt709"]));
+        assert!(args.windows(2).any(|w| w == ["-colorspace", "bt709"]));
+        assert!(args
+            .iter()
+            .any(|arg| arg.contains("setparams=color_primaries=bt709")));
     }
 
     #[test]

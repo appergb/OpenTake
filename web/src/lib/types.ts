@@ -687,7 +687,20 @@ export interface MediaItem {
   /** Probed source frame rate for first-video project configuration. */
   sourceFps?: number | null;
   hasAudio: boolean;
+  /** Original video stream color signalling. PQ/HLG is delivered as SDR BT.709
+   *  by the current 8-bit preview/export compositor. */
+  color?: {
+    primaries?: string | null;
+    transfer?: string | null;
+    matrix?: string | null;
+    range?: string | null;
+  } | null;
+  isHdr?: boolean;
   path?: string | null;
+  /** Project-local low-resolution playback media; never used for export. */
+  proxyPath?: string | null;
+  proxyWidth?: number | null;
+  proxyHeight?: number | null;
   thumbnail?: string | null;
   /** Library folder this asset lives in (`null`/absent = root). */
   folderId?: string | null;

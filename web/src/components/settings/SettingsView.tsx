@@ -360,6 +360,8 @@ function GeneralPane() {
   const t = useT();
   const locale = useI18nStore((s) => s.locale);
   const setLocale = useI18nStore((s) => s.setLocale);
+  const proxyPlaybackEnabled = useSettingsStore((s) => s.proxyPlaybackEnabled);
+  const setProxyPlaybackEnabled = useSettingsStore((s) => s.setProxyPlaybackEnabled);
   return (
     <Section title={t("settings.section.general")}>
       <Field
@@ -371,6 +373,19 @@ function GeneralPane() {
             options={LOCALES}
             onChange={setLocale}
             ariaLabel={t("settings.language")}
+          />
+        }
+      />
+      <Field
+        label={t("settings.proxyPlayback")}
+        description={t("settings.proxyPlaybackDesc")}
+        control={
+          <input
+            type="checkbox"
+            role="switch"
+            aria-label={t("settings.proxyPlayback")}
+            checked={proxyPlaybackEnabled}
+            onChange={(event) => setProxyPlaybackEnabled(event.currentTarget.checked)}
           />
         }
       />

@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 
-use opentake_domain::{MediaManifest, MediaManifestEntry, Timeline};
+use opentake_domain::{MediaManifest, MediaManifestEntry, MediaProxy, Timeline};
 use opentake_ops::command::{EditCommand, EditResult};
 use opentake_ops::IdGen;
 use opentake_project::{GenerationLog, ProjectCompatibility};
@@ -1348,6 +1348,41 @@ impl AppCore {
         Ok(changed)
     }
 
+    /// Persist one asset's playback proxy as an atomic manifest mutation.
+    /// Failure to write restores the in-memory manifest before the lock is
+    /// released, so UI and disk never disagree about proxy availability.
+    pub fn set_media_proxy_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        asset_id: &str,
+        proxy: Option<MediaProxy>,
+    ) -> Result<MediaManifestEntry> {
+        let (entry, count, written) = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            let before = session.editor.media();
+            let entry = session.editor.set_media_proxy(asset_id, proxy)?;
+            let count = session.editor.media().entries.len();
+            match session.editor.save_media_manifest() {
+                Ok(written) => (entry, count, written),
+                Err(error) => {
+                    session.editor.restore_media(before);
+                    return Err(error);
+                }
+            }
+        };
+        self.events.emit(&CoreEvent::MediaChanged {
+            project_epoch: expected_project_epoch,
+            count,
+        });
+        self.events.emit(&CoreEvent::ProjectSaved {
+            path: written.to_string_lossy().into_owned(),
+            project_epoch: expected_project_epoch,
+        });
+        Ok(entry)
+    }
+
     /// Set or clear one project's global-favorite mapping, emitting the same
     /// media-change signal used by other manifest mutations.
     pub fn set_media_global_favorite(
@@ -1565,16 +1600,34 @@ impl AppCore {
         path: impl AsRef<std::path::Path>,
         probe: &ProbedMedia,
     ) -> Result<MediaManifestEntry> {
-        let (entry, count, project_epoch) = {
+        let (entry, count, project_epoch, saved) = {
             let mut session = self.lock();
+            let before = session.editor.media();
             let entry = session.editor.relink_media_file(asset_id, path, probe)?;
             let count = session.editor.media().entries.len();
-            (entry, count, session.project_epoch)
+            let saved = if session.editor.project_dir().is_some() {
+                match session.editor.save_media_manifest() {
+                    Ok(path) => Some(path),
+                    Err(error) => {
+                        session.editor.restore_media(before);
+                        return Err(error);
+                    }
+                }
+            } else {
+                None
+            };
+            (entry, count, session.project_epoch, saved)
         };
         self.events.emit(&CoreEvent::MediaChanged {
             project_epoch,
             count,
         });
+        if let Some(path) = saved {
+            self.events.emit(&CoreEvent::ProjectSaved {
+                path: path.to_string_lossy().into_owned(),
+                project_epoch,
+            });
+        }
         Ok(entry)
     }
 
@@ -1594,7 +1647,7 @@ impl AppCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opentake_domain::{ClipType, Timeline, Track};
+    use opentake_domain::{ClipType, MediaColorMetadata, MediaProxy, Timeline, Track};
     use opentake_ops::command::ClipEntry;
     use std::sync::Mutex;
 
@@ -2039,6 +2092,7 @@ mod tests {
             height: Some(480),
             fps: Some(24.0),
             has_audio: false,
+            color: None,
         };
         let entry = core.import_media_file("/abs/a.mp4", "a", &probe).unwrap();
 
@@ -2054,6 +2108,58 @@ mod tests {
                 count: 1
             }]
         );
+    }
+
+    #[test]
+    fn hdr_and_proxy_metadata_persist_across_project_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().join("ColorProxy.opentake");
+        let source = temp.path().join("source.mp4");
+        std::fs::write(&source, b"source").unwrap();
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let entry = core
+            .import_media_file(
+                &source,
+                "source",
+                &ProbedMedia {
+                    duration_secs: 1.0,
+                    width: Some(1920),
+                    height: Some(1080),
+                    fps: Some(24.0),
+                    has_audio: false,
+                    color: Some(MediaColorMetadata {
+                        primaries: Some("bt2020".into()),
+                        transfer: Some("smpte2084".into()),
+                        matrix: Some("bt2020nc".into()),
+                        range: Some("tv".into()),
+                    }),
+                },
+            )
+            .unwrap();
+        core.save_project(None).unwrap();
+        let proxy_relative = "media/proxies/source.mp4";
+        std::fs::create_dir_all(bundle.join("media/proxies")).unwrap();
+        std::fs::write(bundle.join(proxy_relative), b"proxy").unwrap();
+        let revision = core.runtime_snapshot();
+        core.set_media_proxy_for_project(
+            revision.project_epoch,
+            &bundle,
+            &entry.id,
+            Some(MediaProxy {
+                relative_path: proxy_relative.into(),
+                source_sha256: "a".repeat(64),
+                width: 640,
+                height: 360,
+            }),
+        )
+        .unwrap();
+
+        let reopened = AppCore::new();
+        reopened.open_project(&bundle).unwrap();
+        let restored = reopened.media().entries.into_iter().next().unwrap();
+        assert!(restored.color.as_ref().is_some_and(|color| color.is_hdr()));
+        assert_eq!(restored.proxy.unwrap().relative_path, proxy_relative);
     }
 
     #[test]

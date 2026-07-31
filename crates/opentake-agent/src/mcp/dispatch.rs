@@ -4156,6 +4156,8 @@ mod tests {
             source_height: None,
             source_fps: None,
             has_audio: Some(false),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,

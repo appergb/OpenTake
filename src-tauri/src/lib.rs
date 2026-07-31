@@ -181,6 +181,16 @@ pub fn run() {
             app.manage(media::LoudnessAnalysisState::default());
             app.manage(media::DenoiseAnalysisState::default());
             app.manage(media::StemSeparationState::default());
+            app.manage(media::MediaProxyState::default());
+            let proxy_transition_handle = app.handle().clone();
+            app.state::<AppCore>()
+                .subscribe_project_identity_transition(move |pending| {
+                    if pending {
+                        proxy_transition_handle
+                            .state::<media::MediaProxyState>()
+                            .cancel();
+                    }
+                });
             app.manage(PrewarmScheduler::new(initial_project_epoch));
             app.manage(library_state);
             // Lazily-acquired GPU context for timeline composite previews (#47).
@@ -247,6 +257,11 @@ pub fn run() {
             media::cancel_denoise_analysis,
             media::separate_audio_stems,
             media::cancel_stem_separation,
+            media::create_media_proxy,
+            media::cancel_media_proxy,
+            media::remove_media_proxy,
+            media::set_proxy_playback_enabled,
+            media::get_proxy_playback_enabled,
             media::generate_thumbnail,
             media::request_timeline_sprite,
             media::set_timeline_sprite_interactive,

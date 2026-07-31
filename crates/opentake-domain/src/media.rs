@@ -50,6 +50,54 @@ pub enum MediaSource {
     Project { relative_path: String },
 }
 
+/// Source color signalling retained from the first playable video stream.
+/// Values use FFmpeg's stable tokens (`bt709`, `bt2020`, `smpte2084`,
+/// `arib-std-b67`, ...). Keeping the original tokens makes older/newer codecs
+/// forward-compatible while helpers can still identify the HDR transfers that
+/// require explicit tone mapping in the current SDR compositor.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaColorMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primaries: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matrix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<String>,
+}
+
+impl MediaColorMetadata {
+    pub fn is_hdr(&self) -> bool {
+        self.transfer.as_deref().is_some_and(|transfer| {
+            matches!(
+                transfer.to_ascii_lowercase().as_str(),
+                "smpte2084" | "pq" | "arib-std-b67" | "hlg"
+            )
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.primaries.is_none()
+            && self.transfer.is_none()
+            && self.matrix.is_none()
+            && self.range.is_none()
+    }
+}
+
+/// Project-local low-resolution media used only for interactive playback.
+/// Export always resolves [`MediaManifestEntry::source`]. The source digest
+/// prevents a stale proxy being paired with bytes that changed in place.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaProxy {
+    pub relative_path: String,
+    pub source_sha256: String,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// Full serializable input snapshot for a generated asset. 1:1 port of
 /// `GenerationInput`. `prompt` / `model` / `duration` / `aspect_ratio` are
 /// required upstream; everything else is optional.
@@ -172,6 +220,10 @@ pub struct MediaManifestEntry {
     pub source_fps: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub has_audio: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<MediaColorMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<MediaProxy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder_id: Option<String>,
     #[serde(
@@ -446,6 +498,10 @@ pub struct MediaAsset {
     #[serde(default)]
     pub has_audio: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<MediaColorMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<MediaProxy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_input: Option<GenerationInput>,
     #[serde(default)]
     pub generation_status: GenerationStatus,
@@ -487,6 +543,8 @@ impl MediaAsset {
             source_height: None,
             source_fps: None,
             has_audio: kind == ClipType::Video,
+            color: None,
+            proxy: None,
             generation_input: None,
             generation_status: GenerationStatus::None,
             folder_id: None,
@@ -509,6 +567,8 @@ impl MediaAsset {
             source_height: entry.source_height,
             source_fps: entry.source_fps,
             has_audio: entry.has_audio.unwrap_or(false),
+            color: entry.color.clone(),
+            proxy: entry.proxy.clone(),
             generation_input: entry.generation_input.clone(),
             generation_status: match entry
                 .generation_input
@@ -602,6 +662,8 @@ impl MediaAsset {
             source_height: self.source_height,
             source_fps: self.source_fps,
             has_audio: Some(self.has_audio),
+            color: self.color.clone(),
+            proxy: self.proxy.clone(),
             folder_id: self.folder_id.clone(),
             cached_remote_url: fresh,
             cached_remote_url_expires_at: expires,
@@ -719,6 +781,8 @@ mod tests {
             source_height: Some(1080),
             source_fps: Some(30.0),
             has_audio: Some(true),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: Some("https://x".into()),
             cached_remote_url_expires_at: Some(700_000_000.0),
@@ -854,6 +918,8 @@ mod tests {
             source_height: None,
             source_fps: None,
             has_audio: None,
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -871,6 +937,8 @@ mod tests {
             source_height: None,
             source_fps: None,
             has_audio: None,
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -1010,6 +1078,8 @@ mod tests {
             source_height: Some(720),
             source_fps: Some(24.0),
             has_audio: Some(true),
+            color: None,
+            proxy: None,
             folder_id: Some("f1".into()),
             cached_remote_url: None,
             cached_remote_url_expires_at: None,

@@ -56,8 +56,8 @@ pub use keyframe::{
 };
 pub use lut::{CubeLut, CubeLutError, LutReference, LutReferenceValidationError};
 pub use media::{
-    GenerationInput, GenerationJobStatus, GenerationStatus, MediaAsset, MediaFolder, MediaManifest,
-    MediaManifestEntry, MediaResolver, MediaSource,
+    GenerationInput, GenerationJobStatus, GenerationStatus, MediaAsset, MediaColorMetadata,
+    MediaFolder, MediaManifest, MediaManifestEntry, MediaProxy, MediaResolver, MediaSource,
 };
 pub use signal::{
     ContextSignal, EditingSkeleton, EditingStage, StageGuidance, TrackHint, TrackRole,
