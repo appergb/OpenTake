@@ -17,7 +17,7 @@
 
 ---
 
-### B2. 前端帧数学截断不一致（高）
+### B2. 前端帧数学截断不一致（已修复）
 
 | 属性 | 值 |
 |---|---|
@@ -25,6 +25,7 @@
 | **描述** | Rust 端 `seconds_to_frame()` 使用截断 `(seconds * fps) as i32`（对应上游 `Int(s*fps)`），前端使用 `Math.round`（四舍五入）。当 `seconds * fps` 小数部分 ≥0.5 时，双方结果差 1 帧，导致同一媒体的计算时长不一致 |
 | **影响** | 媒体导入时的帧数计算偏差可能导致 clip 时长 off-by-1 |
 | **修复方案** | 将前端的 `Math.round(seconds * fps)` 改为 `Math.floor(seconds * fps)` |
+| **验证** | 媒体时长、搜索片段 trim 起点/时长、ripple insert 与默认文本时长统一使用向零截断；`seconds_to_frame_truncates_fractional_boundaries` 覆盖 24/30 fps 的半帧、帧边界和无效输入。仅播放头吸附等明确的 nearest-frame UI 交互继续使用 `Math.round`。 |
 
 ---
 

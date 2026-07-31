@@ -673,13 +673,29 @@ export async function nudgeSelectedClips(deltaFrames: number) {
  *  ≈ 5s) since they have no intrinsic length. */
 const DEFAULT_IMAGE_SECONDS = 5;
 
+/** Match Rust's positive `f64 as i32` frame conversion: truncate toward zero,
+ *  return a finite integer, and keep duration-bearing UI objects visible for at
+ *  least one frame. Callers choose any source-duration fallback first. */
+function durationSecondsToFrames(seconds: number, fps: number): number {
+  const frames = seconds * fps;
+  return Number.isFinite(frames) ? Math.max(1, Math.trunc(frames)) : 1;
+}
+
+/** Same conversion for offsets, where frame zero is valid. */
+function offsetSecondsToFrames(seconds: number, fps: number): number {
+  const frames = seconds * fps;
+  return Number.isFinite(frames) ? Math.trunc(frames) : 0;
+}
+
 /** Frame length a media item occupies when placed on the timeline: its source
  *  duration (seconds → frames), or the still-image default when it has none.
  *  Shared by the clip-entry builders and the drop-ghost preview so the ghost
  *  width matches the clip that actually lands. */
 export function mediaDurationFrames(item: MediaItem, fps: number): number {
-  const seconds = item.duration > 0 ? item.duration : DEFAULT_IMAGE_SECONDS;
-  return Math.max(1, Math.round(seconds * fps));
+  const seconds = Number.isFinite(item.duration) && item.duration > 0
+    ? item.duration
+    : DEFAULT_IMAGE_SECONDS;
+  return durationSecondsToFrames(seconds, fps);
 }
 
 function isVisual(type: MediaItem["type"]): boolean {
@@ -864,7 +880,7 @@ export interface SourceRange {
 /** Frames a moment clip occupies on the timeline for a source `[startSec,endSec)`
  *  range: the range length in frames, clamped to at least one frame. */
 export function momentDurationFrames(range: SourceRange, fps: number): number {
-  return Math.max(1, Math.round((range.endSec - range.startSec) * fps));
+  return durationSecondsToFrames(range.endSec - range.startSec, fps);
 }
 
 /** Place only `range` of `item` on the timeline at `startFrame` — a trimmed clip
@@ -966,7 +982,10 @@ function entryForMomentAt(
 ): ClipEntryReq | null {
   const fps = timeline.fps;
   const totalSource = mediaDurationFrames(item, fps);
-  const trimStartFrame = Math.max(0, Math.min(totalSource, Math.round(range.startSec * fps)));
+  const trimStartFrame = Math.max(
+    0,
+    Math.min(totalSource, offsetSecondsToFrames(range.startSec, fps)),
+  );
   const rangeFrames = momentDurationFrames(range, fps);
   // Clamp the visible span so trimStart + duration never exceed the source.
   const durationFrames = Math.max(1, Math.min(rangeFrames, totalSource - trimStartFrame));
@@ -1100,7 +1119,7 @@ export async function addTextClip() {
   const startFrame = ui.activeFrame;
   const timeline = useProjectStore.getState().timeline;
 
-  const durationFrames = Math.max(1, Math.round(DEFAULT_TEXT_SECONDS * timeline.fps));
+  const durationFrames = durationSecondsToFrames(DEFAULT_TEXT_SECONDS, timeline.fps);
   const entry: TextAutoTrackEntryReq = {
     startFrame,
     durationFrames,

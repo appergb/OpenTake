@@ -34,33 +34,55 @@
   - Keep explicitly nearest-frame UI interactions documented and separate so the conversion policy cannot drift between call sites.
   - Add editActions cases for positive fractional values 0.49, 0.5, 0.99, and 1.01 frames at 24/30 fps plus negative/invalid inputs; assert exact parity with Rust conversion vectors.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/store/editActions.test.ts#seconds_to_frame_truncates_fractional_boundaries` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+  Result: The exact owner covers 24/30 fps at sub-frame, half-frame,
+  near-next-frame, and multi-frame fractional boundaries. It also exercises the
+  media-drop, ripple-insert, search-moment, and default-text call sites plus
+  negative, NaN, and infinite inputs.
+
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/store/editActions.test.ts -t "seconds_to_frame_truncates_fractional_boundaries"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Result: RED reproduced. A 10.5-frame media duration returned 11 rather than
+  the Rust-compatible truncated value 10; Vitest reported 1 failed test and a
+  nonzero pnpm exit.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/store/editActions.ts#mediaDurationFrames`, `web/src/store/editActions.ts#momentDurationFrames`, `web/src/lib/timelineInsert.ts#buildInsertPlan`, `docs/architecture/BUGS.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Result: Duration and offset conversions now truncate toward zero with finite
+  fallbacks. Media placement, moment trim start/length, ripple insertion, and
+  default text duration share the Rust conversion policy. Explicit
+  nearest-frame playhead interactions retain `Math.round` and are documented as
+  a separate UI policy.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/store/editActions.test.ts -t "seconds_to_frame_truncates_fractional_boundaries"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Result: GREEN; the exact owner passed and the command executed the complete
+  82-file Web suite: 775 tests passed, 0 failed.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: `pnpm -C web test -- --run` passed 82 files / 775 tests and
+  `pnpm -C web build` passed. Vite reported only the existing dynamic-import
+  and bundle-size advisory warnings.
 
 ### Task 2: CC-first-video-settings (implementation-slice-699b13ae9742edd8)
 

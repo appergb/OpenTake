@@ -244,6 +244,7 @@ import {
   addMediaToTimelineAt,
   addMomentToTimelineAt,
   addTextClip,
+  buildMediaInsertPlan,
   insertClips,
   insertTrack,
   mediaDurationFrames,
@@ -539,6 +540,62 @@ describe("momentDurationFrames", () => {
 
   it("never returns less than one frame for a tiny range", () => {
     expect(momentDurationFrames({ startSec: 3, endSec: 3.001 }, 30)).toBe(1);
+  });
+
+  it("seconds_to_frame_truncates_fractional_boundaries", async () => {
+    for (const fps of [24, 30]) {
+      for (const [frames, expected] of [
+        [0.49, 1],
+        [0.5, 1],
+        [0.99, 1],
+        [1.01, 1],
+        [10.49, 10],
+        [10.5, 10],
+        [10.99, 10],
+        [11.01, 11],
+      ] as const) {
+        const duration = frames / fps;
+        const item: MediaItem = {
+          id: `v-${fps}-${frames}`,
+          name: "fractional.mp4",
+          type: "video",
+          duration,
+          hasAudio: false,
+        };
+        expect(mediaDurationFrames(item, fps)).toBe(expected);
+        expect(momentDurationFrames({ startSec: 5, endSec: 5 + duration }, fps)).toBe(expected);
+        const plan = buildMediaInsertPlan(
+          {
+            ...EMPTY,
+            fps,
+            tracks: [
+              {
+                id: "video-track",
+                type: "video",
+                muted: false,
+                hidden: false,
+                syncLocked: true,
+                clips: [],
+              },
+            ],
+          },
+          item,
+          0,
+          0,
+        );
+        expect(plan?.entries[0].durationFrames).toBe(expected);
+      }
+    }
+
+    expect(momentDurationFrames({ startSec: 2, endSec: 1 }, 30)).toBe(1);
+    expect(momentDurationFrames({ startSec: Number.NaN, endSec: 1 }, 30)).toBe(1);
+    expect(momentDurationFrames({ startSec: 0, endSec: Number.POSITIVE_INFINITY }, 30)).toBe(1);
+
+    srv.reset();
+    useProjectStore.getState().setMirror({ ...EMPTY, fps: 29.97 }, 0, 1);
+    useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, selectedClipIds: new Set() });
+    await addTextClip();
+    expect(useProjectStore.getState().timeline.tracks[0].clips[0].durationFrames).toBe(89);
   });
 });
 
