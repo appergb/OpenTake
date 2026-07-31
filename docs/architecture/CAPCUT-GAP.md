@@ -6,7 +6,7 @@
 
 **整体差距**:总体判定:6 项里只有「基础线性变速」是 OpenTake 设计稿已完整覆盖(has);「50 条多轨道复杂工程」属于"数据模型已覆盖、但大工程性能尚未验证"的 partial;其余 4 项(复合片段嵌套、多机位自动对齐、高阶曲线变速、光流补帧)在上游 Palmier Pro 源码与 OpenTake 三份设计文档里都完全没有踪迹,均为 missing,且恰好对应上游 FAQ 自述「尚无特效/转场/调色/蒙版/图形」之外的另一类"高阶时间线能力"空白。\n\n关键证据链:① 上游 Clip 模型(Models/Timeline.swift:82-85)速度是单个标量 `var speed: Double = 1.0`,而非关键帧轨;可关键帧的属性枚举 `AnimatableProperty`(Models/Keyframe.swift:77-78)只有 opacity/position/scale/rotation/crop/volume,根本没有 speed → 曲线变速在现模型里不可表达。② 插值类型 `Interpolation` 只有 linear/hold/smooth(Models/Keyframe.swift:3-5),没有任意贝塞尔曲线。③ 对全仓做穷举式 grep,multicam/nested/compound/optical-flow/interpolation/speedCurve/retime/frameblending 这些关键词除了 SF Symbol 图标名"film"和被排除的 compoundPredicate 外零命中;导出器甚至把 `frameblending=FALSE` 写死(Export/XMLExporter.swift:336)。④ 唯一与"嵌套"沾边的是 saveClipAsMedia/saveTimelineRangeAsMedia(Editor/ViewModel/EditorViewModel+SaveAsMedia.swift),那是用 AVMutableComposition 把片段/区间烘焙成一个新扁平媒体的破坏性 flatten,不是活的嵌套序列;OpenTake 设计稿(MODULE-PORT-MAP.md:233)也只把它当 FFmpeg flatten 处理。⑤ 轨道是无上限的 `tracks: [Track]` 数组,没有任何 maxTracks 闸门;多轨编辑逻辑(OverwriteEngine/RippleEngine/SnapEngine)已被 Phase 1 完整规划进 opentake-domain/opentake-ops,所以 50 轨的难点不在"功能缺失"而在 wgpu 合成器/预览引擎(架构文档点名的两大 blocker)能否扛住几十轨逐帧合成的性能。\n\n补齐落点优先级:p0 = 先保证 50 轨工程在 wgpu 合成器/预览引擎上的可用性能(否则其余高阶能力无处施展);p1 = 曲线变速(需把 speed 升级为关键帧轨 + 重做 setpts/RenderPlan 时间映射,工程量中等但牵动核心模型);p2 = 复合片段嵌套(架构性较大,建议先做"非破坏 flatten 缓存"过渡)、多机位自动对齐(可用 FFmpeg 音频互相关纯本地实现,工程独立);p3 = 光流补帧(唯一需要 ML 模型/外部 API、且对画质一致性要求最高的 blocker 级特性,放最后)。
 
-> **2026-07-31 状态更新**：上面的总体判定与证据链是实现前的上游历史基线。当前 OpenTake 已完整覆盖「基础线性变速」和「复合片段嵌套」；「50 条多轨道复杂工程」仍是性能待验证的 partial；多机位自动对齐、高阶曲线变速、光流补帧仍为 missing。当前状态以各条目的验证证据为准。
+> **2026-07-31 状态更新**：上面的总体判定与证据链是实现前的上游历史基线。当前 OpenTake 已完整覆盖「基础线性变速」「复合片段嵌套」和确定性本地光流补帧；「50 条多轨道复杂工程」仍是性能待验证的 partial；多机位自动对齐与高阶曲线变速仍为 missing。当前状态以各条目的验证证据为准。
 
 ### 高达 50 条多轨道复杂工程 — `partial` · 难度 high · 优先级 p0
 - **判定依据**:上游轨道为无上限 `tracks: [Track]` 数组,全仓无 maxTracks/track limit 闸门;多轨编辑算法 OverwriteEngine/RippleEngine/SnapEngine 已是纯函数,OpenTake 已在 Phase 1 规划进 opentake-domain/opentake-ops(ROADMAP.md:10-17、MODULE-PORT-MAP.md:233、304)。但架构文档(ARCHITECTURE.md:22-27)明确把 wgpu 帧合成器与播放/预览引擎列为两大 🔴 blocker,且 PoC 场景只到『单轨视频+1个 transform 关键帧+1条字幕』(ROADMAP.md:29)——几十轨逐帧『解码→采样关键帧→仿射/裁剪/混合→多轨合成』的实时性能完全未验证。结论:数据模型与编辑逻辑层 has,但大工程的渲染/预览性能 partial。
@@ -38,11 +38,11 @@
 - **实现方案**:纯本地 Rust,不需外部模型。(1) domain:把速度从标量升级为可选 `speedCurve: KeyframeTrack<f64>`(或独立 time-remap 曲线,关键帧值=源时间或瞬时速度),复用现有 sample/smoothstep 框架,新增 bezier 段以支持平滑加减速;(2) 核心是时间映射:对速度曲线做累积积分得到『时间线帧→源帧』的单调映射函数,ops 据此重算 durationFrames 与 trim,split/ripple 钳制逻辑要按曲线重做;(3) render:导出走 FFmpeg setpts='非线性表达式' 或预采样成密集 sendcmd/逐帧 PTS(类比上游 smooth 段 8 等分细分思路 MODULE-PORT-MAP.md:347),预览在 wgpu 端按映射取源帧。难点在曲线积分与帧对齐的数值一致性。
 - **前置依赖**:依赖基础线性变速链路先稳;依赖关键帧采样框架(已有);若要配合补帧出丝滑慢动作则进一步依赖光流补帧
 
-### 光流法智能补帧(optical-flow frame interpolation) — `missing` · 难度 blocker · 优先级 p3
-- **判定依据**:上游零实现:穷举 grep optical/interpolat(非关键帧插值)/RIFE/FILM/motion-interpolat 全部零命中;导出器把 frameblending 写死为 FALSE(XMLExporter.swift:336),连最基础的帧混合都不开。OpenTake 媒体引擎清单(ARCHITECTURE.md:123-137)涵盖解码/合成/字幕/转写/语义搜索,但完全没有补帧/插帧条目。该能力 0 覆盖,且是本模块技术门槛最高的一项。
-- **落点(crate/层)**:opentake-media(补帧推理:本地 ort/candle 跑光流或学习式插帧模型;或 opentake-gen 走外部 API)+ opentake-render(变速/慢动作时按需调用补帧填充中间帧)
-- **实现方案**:需要算法/模型,分两条路权衡:【本地优先】用 ort(onnxruntime,项目已用于 SigLIP2)或 candle 加载学习式插帧模型(RIFE/FILM 系)做两帧间插值,GPU 加速(wgpu/CUDA 视平台),完全离线、无云成本,契合 OpenTake 自托管定位;退一步可用传统光流(Farneback,OpenCV/纯 Rust 实现)做 warp,质量弱但零模型依赖。【外部 API 兜底】接 fal.ai/Replicate 的插帧端点(经既有 opentake-gen BYOK/代理),省去本地集成与算力,但要联网且按量计费。建议:慢动作变速场景默认本地补帧,质量不够再降级为帧混合/最近帧。这是 blocker 级:模型体积、跨平台 GPU 推理、与变速曲线的帧对齐都需打通。
-- **前置依赖**:依赖 ort/candle 推理链路(语义搜索已铺,可复用)与 GPU 推理后端;强依赖高阶曲线变速一起用才有意义;模型权重分发与许可需先确认
+### 光流法智能补帧(optical-flow frame interpolation) — `has` · 难度 blocker · 优先级 p3
+- **判定依据**:上游仍为零实现；当前 OpenTake 已在 `opentake-media` 落地确定性的局部分块运动估计、双向 warp 与混合，在 `opentake-render` 建立显式 source/target FPS、OpticalFlow/Blend/Nearest 模式和 Blend/Nearest/Error 降级策略，并让高质量暂停预览与导出使用相同解析策略。24→60 fps 的像素/时序测试固定首尾时间戳、精确目标帧数、反向局部运动与不支持设备降级。打包 macOS 工程已用 48 帧/2 秒的 24 fps 素材验证 120 帧、60/1 fps、2.000 秒 H.264 导出；第 1 帧预览/导出运动边界一致，SSIM 0.999515。证据见 `docs/audit/2026-07-14/runtime-artifacts/automated/optical-flow-24-to-60-real-device-2026-07-31.md`。
+- **落点(crate/层)**:`opentake-media`（帧率映射、局部分块运动场、双向重采样、显式降级）+ `opentake-render`（共享纹理解析契约）+ `src-tauri/render.rs` / `src-tauri/export.rs`（生产预览/导出接线）
+- **实现方案**:当前基线为完全离线、无模型权重与云成本的传统局部 block-matching 光流。它按固定块和有限搜索半径计算亮度 SAD，确定性打破并列候选，按目标 alpha 将两个端点向中间时刻双向 warp 后混合；不可用时由调用方明确选择帧混合、最近帧或 fail-closed。后续若追求极端运动/遮挡质量，可在不改变 render 契约的前提下替换为 RIFE/FILM/RAFT 等模型后端。
+- **前置依赖**:当前本地基线无外部模型依赖；模型级升级才依赖 ort/candle、GPU 后端、权重分发与许可。低延迟连续播放流仍采用独立的实时帧归一化策略，不纳入本条高质量暂停预览/导出验收。
 
 ## 模块2:视觉特效与空间重构
 

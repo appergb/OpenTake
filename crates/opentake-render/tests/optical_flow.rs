@@ -21,6 +21,25 @@ fn moving_square(x: u32) -> RgbaFrame {
     frame
 }
 
+fn opposing_squares(left_x: u32, right_x: u32) -> RgbaFrame {
+    let mut frame = RgbaFrame::black(64, 32);
+    for y in 12..20 {
+        for x in left_x..left_x + 8 {
+            let offset = ((y * frame.width + x) * 4) as usize;
+            frame.rgba[offset..offset + 4].copy_from_slice(&[255, 255, 255, 255]);
+        }
+        for x in right_x..right_x + 8 {
+            let offset = ((y * frame.width + x) * 4) as usize;
+            frame.rgba[offset..offset + 4].copy_from_slice(&[255, 255, 255, 255]);
+        }
+    }
+    frame
+}
+
+fn is_lit(frame: &RgbaFrame, x: u32, y: u32) -> bool {
+    frame.rgba[((y * frame.width + x) * 4) as usize] > 200
+}
+
 fn light_centroid_x(frame: &RgbaFrame) -> f64 {
     let mut weighted_x = 0.0;
     let mut weight = 0.0;
@@ -144,4 +163,27 @@ fn two_frame_fixture_is_deterministic_and_matches_preview_export() {
 
     assert_eq!(preview_resolver.requests, export_resolver.requests);
     assert_eq!(preview_resolver.requests, vec![interpolation]);
+}
+
+#[test]
+fn optical_flow_tracks_opposing_local_motion_without_global_frame_shift() {
+    let first = opposing_squares(4, 52);
+    let last = opposing_squares(12, 44);
+    let result = interpolate_frame_pair(
+        &first,
+        &last,
+        0.5,
+        FrameInterpolationMode::OpticalFlow,
+        FrameInterpolationFallback::Error,
+        true,
+    )
+    .expect("local optical flow should be available");
+
+    // Both objects move toward the center. A single global translation cannot
+    // satisfy these two regions simultaneously; the local field places both at
+    // their respective half-way locations.
+    assert!(is_lit(&result.frame, 10, 15));
+    assert!(is_lit(&result.frame, 50, 15));
+    assert!(!is_lit(&result.frame, 4, 15));
+    assert!(!is_lit(&result.frame, 59, 15));
 }

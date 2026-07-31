@@ -139,33 +139,40 @@ create/edit/reopen/preview, and 231-frame H.264/AAC export now pass.
   - Convert a 24 fps motion fixture to 60 fps with exactly the expected output-frame count and unchanged first/last timestamps.
   - Add pixel/temporal regression tests plus a deterministic unsupported-device fallback; preview and export must select the same interpolation mode.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/optical_flow.rs#two_frame_fixture_is_deterministic_and_matches_preview_export` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test optical_flow two_frame_fixture_is_deterministic_and_matches_preview_export -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-render/src/gpu/compositor.rs#TextureResolver`, `crates/opentake-media/src/decode/frame.rs`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test optical_flow two_frame_fixture_is_deterministic_and_matches_preview_export -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completion evidence (2026-07-31):
+`runtime-artifacts/automated/optical-flow-24-to-60-real-device-2026-07-31.md`.
+The historical owning target failed before the backend existed; the exact
+focused tests, opposing-local-motion regression, full Rust gates, strict local
+package verification, packaged 60 fps preview, and 120-frame H.264 export now
+pass with matching frame-1 motion bounds and SSIM 0.999515.
 
 ### Task 4: MR-mask-rendering (implementation-slice-dacb1d7732ff3450)
 

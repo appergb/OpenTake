@@ -146,10 +146,10 @@ pub fn convert_frame_rate(
 
 /// Interpolate two equal-size RGBA frames at `alpha` in `[0, 1]`.
 ///
-/// The optical-flow path estimates a deterministic global luminance motion
-/// vector, warps both endpoints toward the requested instant, then blends the
-/// aligned pixels. This traditional local path is intentionally model-free and
-/// provides a stable baseline for preview/export parity.
+/// The optical-flow path estimates a deterministic local block-motion field,
+/// warps both endpoints toward the requested instant, then blends the aligned
+/// pixels. This traditional path is intentionally model-free and provides a
+/// stable baseline for preview/export parity.
 pub fn interpolate_frame_pair(
     first: &RgbaFrame,
     last: &RgbaFrame,
@@ -219,16 +219,11 @@ fn blend_frames(first: &RgbaFrame, last: &RgbaFrame, alpha: f64) -> RgbaFrame {
 }
 
 fn optical_flow_frame(first: &RgbaFrame, last: &RgbaFrame, alpha: f64) -> RgbaFrame {
-    let first_center = luminance_centroid(first);
-    let last_center = luminance_centroid(last);
-    let Some(((first_x, first_y), (last_x, last_y))) = first_center.zip(last_center) else {
-        return blend_frames(first, last, alpha);
-    };
-    let motion_x = last_x - first_x;
-    let motion_y = last_y - first_y;
+    let flow = estimate_block_motion(first, last);
     let mut rgba = vec![0; first.rgba.len()];
     for y in 0..first.height {
         for x in 0..first.width {
+            let (motion_x, motion_y) = flow.at(x, y);
             let x = x as f64;
             let y = y as f64;
             let from_first = sample_bilinear(first, x - alpha * motion_x, y - alpha * motion_y);
@@ -247,24 +242,88 @@ fn optical_flow_frame(first: &RgbaFrame, last: &RgbaFrame, alpha: f64) -> RgbaFr
     RgbaFrame::new(first.width, first.height, rgba)
 }
 
-fn luminance_centroid(frame: &RgbaFrame) -> Option<(f64, f64)> {
-    let mut weighted_x = 0.0;
-    let mut weighted_y = 0.0;
-    let mut total = 0.0;
-    for y in 0..frame.height {
-        for x in 0..frame.width {
-            let offset = ((y * frame.width + x) * 4) as usize;
-            let r = frame.rgba[offset] as f64;
-            let g = frame.rgba[offset + 1] as f64;
-            let b = frame.rgba[offset + 2] as f64;
-            let a = frame.rgba[offset + 3] as f64 / 255.0;
-            let weight = (0.2126 * r + 0.7152 * g + 0.0722 * b) * a;
-            weighted_x += x as f64 * weight;
-            weighted_y += y as f64 * weight;
-            total += weight;
+struct BlockMotionField {
+    block_size: u32,
+    columns: u32,
+    rows: u32,
+    vectors: Vec<(f64, f64)>,
+}
+
+impl BlockMotionField {
+    fn at(&self, x: u32, y: u32) -> (f64, f64) {
+        let column = (x / self.block_size).min(self.columns.saturating_sub(1));
+        let row = (y / self.block_size).min(self.rows.saturating_sub(1));
+        self.vectors[(row * self.columns + column) as usize]
+    }
+}
+
+/// Estimate a deterministic local motion field with block matching. Bounded
+/// search and per-block spatial sampling avoid the whole-frame distortion of a
+/// single global translation vector without introducing a model dependency.
+fn estimate_block_motion(first: &RgbaFrame, last: &RgbaFrame) -> BlockMotionField {
+    let shortest = first.width.min(first.height).max(1);
+    let block_size = shortest.min(32);
+    let columns = first.width.div_ceil(block_size);
+    let rows = first.height.div_ceil(block_size);
+    let search_radius = (block_size / 2).clamp(1, 12) as i32;
+    let sample_step = (block_size / 8).max(1);
+    let mut vectors = Vec::with_capacity((columns * rows) as usize);
+
+    for row in 0..rows {
+        for column in 0..columns {
+            let start_x = column * block_size;
+            let start_y = row * block_size;
+            let end_x = (start_x + block_size).min(first.width);
+            let end_y = (start_y + block_size).min(first.height);
+            let mut best = (f64::INFINITY, i32::MAX, 0, 0);
+            for dy in -search_radius..=search_radius {
+                for dx in -search_radius..=search_radius {
+                    let mut error = 0.0;
+                    let mut samples = 0u32;
+                    for y in (start_y..end_y).step_by(sample_step as usize) {
+                        for x in (start_x..end_x).step_by(sample_step as usize) {
+                            let target_x = x as i32 + dx;
+                            let target_y = y as i32 + dy;
+                            let target = if target_x < 0
+                                || target_y < 0
+                                || target_x >= last.width as i32
+                                || target_y >= last.height as i32
+                            {
+                                255.0
+                            } else {
+                                luma_at(last, target_x as u32, target_y as u32)
+                            };
+                            error += (luma_at(first, x, y) - target).abs();
+                            samples += 1;
+                        }
+                    }
+                    let mean_error = error / samples.max(1) as f64;
+                    let distance = dx * dx + dy * dy;
+                    let candidate = (mean_error, distance, dy, dx);
+                    if candidate < best {
+                        best = candidate;
+                    }
+                }
+            }
+            vectors.push((best.3 as f64, best.2 as f64));
         }
     }
-    (total > f64::EPSILON).then_some((weighted_x / total, weighted_y / total))
+
+    BlockMotionField {
+        block_size,
+        columns,
+        rows,
+        vectors,
+    }
+}
+
+fn luma_at(frame: &RgbaFrame, x: u32, y: u32) -> f64 {
+    let offset = ((y * frame.width + x) * 4) as usize;
+    let r = frame.rgba[offset] as f64;
+    let g = frame.rgba[offset + 1] as f64;
+    let b = frame.rgba[offset + 2] as f64;
+    let a = frame.rgba[offset + 3] as f64 / 255.0;
+    (0.2126 * r + 0.7152 * g + 0.0722 * b) * a
 }
 
 fn sample_bilinear(frame: &RgbaFrame, x: f64, y: f64) -> [u8; 4] {
