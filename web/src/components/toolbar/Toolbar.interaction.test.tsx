@@ -12,7 +12,7 @@ const edit = vi.hoisted(() => ({
   splitAtPlayhead: vi.fn<() => Promise<void>>(),
   trimStartToPlayhead: vi.fn<() => Promise<void>>(),
   trimEndToPlayhead: vi.fn<() => Promise<void>>(),
-  addTextClip: vi.fn(),
+  addTextClip: vi.fn<() => Promise<void>>(),
 }));
 
 vi.mock("../../i18n", () => ({
@@ -77,6 +77,14 @@ function trimEndButton(): HTMLButtonElement {
     'button[aria-label="toolbar.trimEnd"]',
   );
   if (!button) throw new Error("trim-end control was not rendered");
+  return button;
+}
+
+function addTextButton(): HTMLButtonElement {
+  const button = container?.querySelector<HTMLButtonElement>(
+    'button[aria-label="toolbar.addText"]',
+  );
+  if (!button) throw new Error("add-text control was not rendered");
   return button;
 }
 
@@ -373,5 +381,38 @@ describe("Toolbar command controls", () => {
 
     const actionSource = readFileSync(join(process.cwd(), "src/store/editActions.ts"), "utf8");
     expect(actionSource).toMatch(/export async function trimEndToPlayhead\(\)[\s\S]*?trimToPlayheadEdits\(clipsUnderPlayhead\(\), frame, "right"\)/);
+  });
+
+  it("control-c6a658045b9e1d6c add a text clip", async () => {
+    await act(async () => root?.render(<Toolbar />));
+
+    expect(addTextButton().title).toBe("toolbar.addText");
+    expect(addTextButton().disabled).toBe(false);
+    addTextButton().focus();
+    const first = deferred();
+    edit.addTextClip.mockReturnValueOnce(first.promise);
+
+    await act(async () => addTextButton().click());
+    expect(edit.addTextClip).toHaveBeenCalledTimes(1);
+    expect(addTextButton().disabled).toBe(true);
+    expect(addTextButton().parentElement?.getAttribute("aria-busy")).toBe("true");
+    addTextButton().click();
+    expect(edit.addTextClip).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(addTextButton());
+
+    await act(async () => first.resolve());
+    expect(addTextButton().disabled).toBe(false);
+
+    edit.addTextClip.mockRejectedValueOnce(new Error("text insert rejected"));
+    await act(async () => addTextButton().click());
+    expect(useEditorUiStore.getState().toast?.message).toContain("text insert rejected");
+    expect(addTextButton().disabled).toBe(false);
+
+    edit.addTextClip.mockResolvedValueOnce();
+    await act(async () => addTextButton().click());
+    expect(edit.addTextClip).toHaveBeenCalledTimes(3);
+
+    const actionSource = readFileSync(join(process.cwd(), "src/store/editActions.ts"), "utf8");
+    expect(actionSource).toMatch(/export async function addTextClip\(\)[\s\S]*?addTextsAutoTrack\(\[entry\]\)[\s\S]*?selectClips/);
   });
 });

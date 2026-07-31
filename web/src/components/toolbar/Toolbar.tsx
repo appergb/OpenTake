@@ -79,7 +79,7 @@ export function Toolbar() {
   const canUndo = useProjectStore((s) => s.canUndo);
   const canRedo = useProjectStore((s) => s.canRedo);
   const [toolbarPending, setToolbarPending] = useState<
-    "undo" | "redo" | "split" | "trimStart" | "trimEnd" | null
+    "undo" | "redo" | "split" | "trimStart" | "trimEnd" | "addText" | null
   >(null);
 
   // Logarithmic slider mapping (ToolbarView.swift:50-53): travel uniform per
@@ -153,6 +153,19 @@ export function Toolbar() {
     } catch (reason: unknown) {
       const message = reason instanceof Error ? reason.message : String(reason);
       pushToast(`${t("toolbar.trimEnd")}: ${message}`);
+    } finally {
+      setToolbarPending(null);
+    }
+  };
+
+  const onAddText = async () => {
+    if (toolbarPending) return;
+    setToolbarPending("addText");
+    try {
+      await edit.addTextClip();
+    } catch (reason: unknown) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      pushToast(`${t("toolbar.addText")}: ${message}`);
     } finally {
       setToolbarPending(null);
     }
@@ -253,7 +266,19 @@ export function Toolbar() {
       <Divider />
 
       {/* Add text */}
-      <GlyphButton glyph="T" title={t("toolbar.addText")} serif fontSize={17} onClick={() => edit.addTextClip()} />
+      <span
+        aria-busy={toolbarPending === "addText" || undefined}
+        style={{ display: "inline-flex" }}
+      >
+        <GlyphButton
+          glyph="T"
+          title={t("toolbar.addText")}
+          serif
+          fontSize={17}
+          disabled={toolbarPending !== null}
+          onClick={() => void onAddText()}
+        />
+      </span>
 
       <div style={{ flex: 1 }} />
 
