@@ -61,3 +61,79 @@ it("new_open_sample_register_only_after_success_and_route_tutorial", async () =>
   await vi.waitFor(() => expect(tutorial?.disabled).toBe(false));
   expect(useRecentStore.getState().recents.map(({ name }) => name)).toEqual(["Existing"]);
 });
+
+it("missing_card_reveal_remove_and_trash_states", async () => {
+  const reveal = vi.fn().mockResolvedValue(undefined);
+  const trash = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("permission denied"))
+    .mockImplementationOnce(async () => {
+      useRecentStore.setState({ recents: [] });
+    });
+  const remove = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("registry is read-only"))
+    .mockImplementationOnce(async () => {
+      useRecentStore.setState({ recents: [] });
+    });
+  useRecentStore.setState({
+    recents: [{
+      path: "/tmp/Missing.opentake",
+      name: "Missing",
+      openedAt: 1,
+      missing: true,
+    }],
+    reveal,
+    trash,
+    remove,
+  });
+  await act(async () => root.render(<HomeView />));
+
+  expect(container.textContent).toContain("home.fileMissing");
+  await act(async () => container.querySelector<HTMLButtonElement>(
+    "button[aria-label='home.projectActions']",
+  )?.click());
+  expect(container.textContent).toContain("home.revealInFinder");
+  expect(container.textContent).toContain("home.removeFromRecents");
+  expect(container.textContent).toContain("home.moveToTrash");
+
+  await act(async () => [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent?.includes("home.revealInFinder"))?.click());
+  expect(reveal).toHaveBeenCalledWith("/tmp/Missing.opentake");
+
+  await act(async () => container.querySelector<HTMLButtonElement>(
+    "button[aria-label='home.projectActions']",
+  )?.click());
+  await act(async () => [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent?.includes("home.moveToTrash"))?.click());
+  expect(container.textContent).toContain("home.confirmTrashBody");
+  await act(async () => [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent?.includes("home.moveToTrash"))?.click());
+  await vi.waitFor(() => expect(container.textContent).toContain("home.trashFailed"));
+  expect(useRecentStore.getState().recents).toHaveLength(1);
+
+  await act(async () => [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent?.includes("home.moveToTrash"))?.click());
+  await vi.waitFor(() => expect(useRecentStore.getState().recents).toEqual([]));
+
+  act(() => useRecentStore.setState({
+    recents: [{
+      path: "/tmp/Missing.opentake",
+      name: "Missing",
+      openedAt: 1,
+      missing: true,
+    }],
+  }));
+  await vi.waitFor(() => expect(container.textContent).toContain("home.fileMissing"));
+  await act(async () => container.querySelector<HTMLButtonElement>(
+    "button[aria-label='home.projectActions']",
+  )?.click());
+  await act(async () => [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent === "home.removeFromRecents")?.click());
+  await vi.waitFor(() => expect(container.textContent).toContain("home.removeFailed"));
+  expect(useRecentStore.getState().recents).toHaveLength(1);
+  await act(async () => [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent === "home.removeFromRecents")?.click());
+  await vi.waitFor(() => expect(remove).toHaveBeenCalledTimes(2));
+  expect(useRecentStore.getState().recents).toEqual([]);
+});

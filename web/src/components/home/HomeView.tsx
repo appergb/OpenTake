@@ -1,5 +1,13 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { Plus, FolderOpen, Settings as SettingsIcon, Film, Trash2, Library } from "lucide-react";
+import {
+  Plus,
+  FolderOpen,
+  Settings as SettingsIcon,
+  Film,
+  Trash2,
+  Library,
+  MoreHorizontal,
+} from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { useT } from "../../i18n";
 import { useEditorUiStore } from "../../store/uiStore";
@@ -434,13 +442,14 @@ function ProjectLauncher({
         if (selectedPath === "new") {
           onNew();
         } else {
-          onOpenPath(selectedPath);
+          const selected = recents.find((entry) => entry.path === selectedPath);
+          if (!selected?.missing) onOpenPath(selectedPath);
         }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [busy, onNew, onOpenPath, selectedPath]);
+  }, [busy, onNew, onOpenPath, recents, selectedPath]);
 
   return (
     <div
@@ -488,7 +497,9 @@ function ProjectLauncher({
             selected={selectedPath === entry.path}
             disabled={busy}
             onSelect={() => setSelectedPath(entry.path)}
-            onDoubleClick={() => onOpenPath(entry.path)}
+            onDoubleClick={() => {
+              if (!entry.missing) onOpenPath(entry.path);
+            }}
           />
         ))}
       </div>
@@ -590,14 +601,72 @@ function ProjectGridCard({
 }) {
   const t = useT();
   const remove = useRecentStore((s) => s.remove);
+  const reveal = useRecentStore((s) => s.reveal);
+  const trash = useRecentStore((s) => s.trash);
   const [hovered, setHovered] = useState(false);
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const [confirmTrash, setConfirmTrash] = useState(false);
+  const [pending, setPending] = useState<"reveal" | "remove" | "trash" | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const cleanDisplayPath = entry.path.replace(/^\/Users\/[^\/]+/, "~");
+  const actionsVisible = hovered || actionsOpen || confirmTrash || actionError !== null;
+
+  const runReveal = async () => {
+    setPending("reveal");
+    setActionError(null);
+    try {
+      await reveal(entry.path);
+      setActionsOpen(false);
+    } catch (error) {
+      setActionError(t("home.revealFailed", {
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    } finally {
+      setPending(null);
+    }
+  };
+
+  const runTrash = async () => {
+    setPending("trash");
+    setActionError(null);
+    try {
+      await trash(entry.path);
+      setConfirmTrash(false);
+      setActionsOpen(false);
+    } catch (error) {
+      setActionError(t("home.trashFailed", {
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    } finally {
+      setPending(null);
+    }
+  };
+
+  const runRemove = async () => {
+    setPending("remove");
+    setActionError(null);
+    try {
+      await remove(entry.path);
+      setActionsOpen(false);
+    } catch (error) {
+      setActionError(t("home.removeFailed", {
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    } finally {
+      setPending(null);
+    }
+  };
 
   return (
     <div
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setActionsOpen(true);
+      }}
       style={{
         position: "relative",
         minWidth: 0,
@@ -606,8 +675,9 @@ function ProjectGridCard({
       <button
         type="button"
         disabled={disabled}
-        aria-label={entry.name}
+        aria-label={entry.missing ? `${entry.name} · ${t("home.fileMissing")}` : entry.name}
         aria-pressed={selected}
+        aria-describedby={entry.missing ? `missing-${entry.path}` : undefined}
         onClick={(event) => {
           event.stopPropagation();
           onSelect();
@@ -679,21 +749,29 @@ function ProjectGridCard({
                 whiteSpace: "nowrap",
               }}
             >
-              {cleanDisplayPath}
+              {entry.missing ? (
+                <span id={`missing-${entry.path}`} style={{ color: "var(--status-error)" }}>
+                  {t("home.fileMissing")}
+                </span>
+              ) : cleanDisplayPath}
             </div>
           </div>
         </div>
       </button>
 
-      {hovered && !disabled && (
+      {!disabled && (
         <button
           type="button"
-          title={t("home.remove")}
-          aria-label={t("home.remove")}
+          title={t("home.projectActions")}
+          aria-label={t("home.projectActions")}
+          aria-expanded={actionsOpen || confirmTrash}
           onClick={(e) => {
             e.stopPropagation();
-            remove(entry.path);
+            setActionsOpen((open) => !open);
+            setConfirmTrash(false);
+            setActionError(null);
           }}
+          onFocus={() => setHovered(true)}
           className="hover-area"
           style={{
             position: "absolute",
@@ -706,13 +784,114 @@ function ProjectGridCard({
             justifyContent: "center",
             borderRadius: "var(--radius-md)",
             background: "var(--home-popover)",
-            color: "var(--status-error)",
+            color: "var(--home-muted-foreground)",
+            opacity: actionsVisible ? 1 : 0.62,
             zIndex: 4,
             border: "1px solid var(--home-border)",
           }}
         >
-          <Icon icon={Trash2} size={14} />
+          <Icon icon={MoreHorizontal} size={14} />
         </button>
+      )}
+
+      {hovered && !disabled && !actionsOpen && !confirmTrash && (
+        <button
+          type="button"
+          title={t("home.remove")}
+          aria-label={t("home.remove")}
+          onClick={(event) => {
+            event.stopPropagation();
+            void runRemove();
+          }}
+          style={{
+            position: "absolute",
+            top: "var(--space-sm)",
+            right: 38,
+            width: 26,
+            height: 26,
+            borderRadius: "var(--radius-md)",
+            border: "1px solid var(--home-border)",
+            background: "var(--home-popover)",
+            color: "var(--status-error)",
+            zIndex: 4,
+          }}
+        >
+          <Icon icon={Trash2} size={13} />
+        </button>
+      )}
+
+      {(actionsOpen || confirmTrash || actionError) && !disabled && (
+        <div
+          role="dialog"
+          aria-label={confirmTrash ? t("home.confirmTrashTitle") : t("home.projectActions")}
+          onClick={(event) => event.stopPropagation()}
+          style={{
+            position: "absolute",
+            top: 38,
+            right: "var(--space-sm)",
+            width: 220,
+            padding: "var(--space-sm)",
+            borderRadius: "var(--radius-md)",
+            border: "1px solid var(--home-border)",
+            background: "var(--home-popover)",
+            boxShadow: "var(--home-panel-shadow)",
+            zIndex: 8,
+          }}
+        >
+          {confirmTrash ? (
+            <>
+              <div style={{ fontSize: "var(--fs-xs)", lineHeight: 1.45 }}>
+                {t("home.confirmTrashBody", { name: entry.name })}
+              </div>
+              <div style={{ display: "flex", gap: "var(--space-xs)", marginTop: "var(--space-sm)" }}>
+                <button
+                  type="button"
+                  disabled={pending !== null}
+                  onClick={() => void runTrash()}
+                  style={{ color: "var(--status-error)" }}
+                >
+                  <Icon icon={Trash2} size={13} /> {pending === "trash" ? t("home.trashing") : t("home.moveToTrash")}
+                </button>
+                <button
+                  type="button"
+                  disabled={pending !== null}
+                  onClick={() => {
+                    setConfirmTrash(false);
+                    setActionError(null);
+                  }}
+                >
+                  {t("common.cancel")}
+                </button>
+              </div>
+            </>
+          ) : (
+            <div style={{ display: "grid", gap: "var(--space-xs)" }}>
+              <button type="button" disabled={pending !== null} onClick={() => void runReveal()}>
+                <Icon icon={FolderOpen} size={13} /> {pending === "reveal" ? t("home.revealing") : t("home.revealInFinder")}
+              </button>
+              <button
+                type="button"
+                disabled={pending !== null}
+                onClick={() => void runRemove()}
+              >
+                {pending === "remove" ? t("home.removing") : t("home.removeFromRecents")}
+              </button>
+              <button
+                type="button"
+                disabled={pending !== null}
+                onClick={() => setConfirmTrash(true)}
+                style={{ color: "var(--status-error)" }}
+              >
+                <Icon icon={Trash2} size={13} /> {t("home.moveToTrash")}
+              </button>
+            </div>
+          )}
+          {actionError && (
+            <div role="alert" style={{ marginTop: "var(--space-sm)", color: "var(--status-error)", fontSize: "var(--fs-xs)" }}>
+              {actionError}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

@@ -155,6 +155,52 @@ export async function sampleProjectMaterialize(slug: string): Promise<string> {
   throw new Error("Sample projects require the OpenTake desktop app");
 }
 
+export interface HomeProjectEntry {
+  path: string;
+  name: string;
+  createdAt: number;
+  openedAt: number;
+  missing: boolean;
+}
+
+export interface LegacyRecentProject {
+  path: string;
+  openedAt: number;
+  createdAt?: number;
+}
+
+export async function homeProjectsSync(
+  entries: LegacyRecentProject[],
+): Promise<HomeProjectEntry[]> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<HomeProjectEntry[]>("home_projects_sync", { entries });
+  throw new Error("Recent project sync requires the OpenTake desktop app");
+}
+
+export async function homeProjectRegister(path: string, openedAt: number): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<void>("home_project_register", { path, openedAt });
+  throw new Error("Recent project registration requires the OpenTake desktop app");
+}
+
+export async function homeProjectRemove(path: string): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<void>("home_project_remove", { path });
+  throw new Error("Recent project removal requires the OpenTake desktop app");
+}
+
+export async function homeProjectTrash(path: string): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<void>("home_project_trash", { path });
+  throw new Error("Moving a project to trash requires the OpenTake desktop app");
+}
+
+export async function homeProjectReveal(path: string): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<void>("home_project_reveal", { path });
+  throw new Error("Revealing a project requires the OpenTake desktop app");
+}
+
 // MARK: - Timeline interchange export (XMEML / EDL / OTIO / FCPXML)
 //
 // Four standard editorial-interchange formats, each a thin path-only command

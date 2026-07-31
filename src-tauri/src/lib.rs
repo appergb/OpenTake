@@ -16,6 +16,7 @@ mod commands;
 pub mod export;
 mod generation;
 mod haptic;
+mod home;
 mod library;
 mod mcp;
 mod media;
@@ -211,6 +212,11 @@ pub fn run() {
             commands::export_otio,
             commands::export_subtitles,
             commands::check_path_exists,
+            home::home_projects_sync,
+            home::home_project_register,
+            home::home_project_remove,
+            home::home_project_trash,
+            home::home_project_reveal,
             samples::sample_project_materialize,
             media::import_folder,
             media::import_media,

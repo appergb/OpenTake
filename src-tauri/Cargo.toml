@@ -76,6 +76,7 @@ cpal = { version = "0.15", optional = true }
 # Tauri, so this only enables the NSHapticFeedback module (incremental build).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSHapticFeedback"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSError", "NSFileManager", "NSString", "NSURL"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

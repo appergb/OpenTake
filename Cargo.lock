@@ -3536,6 +3536,7 @@ dependencies = [
  "image",
  "libc",
  "objc2-app-kit",
+ "objc2-foundation",
  "opentake-agent",
  "opentake-core",
  "opentake-domain",

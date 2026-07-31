@@ -1,8 +1,7 @@
 /**
- * Recent-projects list for the Home view. Stores the absolute paths of recently
- * opened `.opentake` bundles (most-recent first, capped) in localStorage — a
- * front-end-only convenience that mirrors upstream `ProjectRegistry`'s recents,
- * without the on-disk thumbnail/metadata index (a later concern).
+ * Home recent-project mirror. The native registry is authoritative in the
+ * desktop app; localStorage remains a compatible startup cache for browser
+ * previews and migrations from older OpenTake builds.
  */
 
 import { create } from "zustand";
@@ -15,6 +14,8 @@ export interface RecentProject {
   path: string;
   name: string;
   openedAt: number; // epoch ms
+  createdAt?: number;
+  missing?: boolean;
 }
 
 function load(): RecentProject[] {
@@ -25,8 +26,10 @@ function load(): RecentProject[] {
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
     return parsed.filter(
-      (e): e is RecentProject =>
-        !!e && typeof e === "object" && typeof (e as RecentProject).path === "string",
+      (entry): entry is RecentProject =>
+        !!entry &&
+        typeof entry === "object" &&
+        typeof (entry as RecentProject).path === "string",
     );
   } catch {
     return [];
@@ -49,60 +52,92 @@ export function projectNameFromPath(path: string): string {
 interface RecentState {
   recents: RecentProject[];
   add: (path: string) => void;
-  remove: (path: string) => void;
+  remove: (path: string) => Promise<void>;
+  reveal: (path: string) => Promise<void>;
+  trash: (path: string) => Promise<void>;
   validateRecents: () => Promise<void>;
+}
+
+function removeLocal(path: string, recents: RecentProject[]): RecentProject[] {
+  return recents.filter((entry) => entry.path !== path);
+}
+
+function hasTauriRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
 export const useRecentStore = create<RecentState>((set, get) => ({
   recents: load(),
   add: (path) => {
+    const openedAt = Date.now();
+    const existing = get().recents.find((entry) => entry.path === path);
     const entry: RecentProject = {
       path,
       name: projectNameFromPath(path),
-      openedAt: Date.now(),
+      openedAt,
+      createdAt: existing?.createdAt ?? openedAt,
+      missing: false,
     };
-    const next = [entry, ...get().recents.filter((r) => r.path !== path)].slice(0, MAX_RECENTS);
+    const next = [entry, ...get().recents.filter((recent) => recent.path !== path)].slice(
+      0,
+      MAX_RECENTS,
+    );
     persist(next);
     set({ recents: next });
+    if (hasTauriRuntime()) {
+      void import("../lib/api")
+        .then(({ homeProjectRegister }) => homeProjectRegister(path, openedAt))
+        .catch((error) => {
+          console.error("Failed to persist recent project registration:", error);
+        });
+    }
   },
-  remove: (path) => {
-    const next = get().recents.filter((r) => r.path !== path);
+  remove: async (path) => {
+    if (hasTauriRuntime()) {
+      const { homeProjectRemove } = await import("../lib/api");
+      await homeProjectRemove(path);
+    }
+    const next = removeLocal(path, get().recents);
     persist(next);
     set({ recents: next });
 
-    // Clear active project from memory if it matches the removed path
-    const projStore = useProjectStore.getState();
-    if (projStore.projectPath === path) {
-      projStore.clearProjectSnapshot();
+    const project = useProjectStore.getState();
+    if (project.projectPath === path) {
+      project.clearProjectSnapshot();
+    }
+  },
+  reveal: async (path) => {
+    if (!hasTauriRuntime()) throw new Error("Reveal in file manager requires the desktop app");
+    const { homeProjectReveal } = await import("../lib/api");
+    await homeProjectReveal(path);
+  },
+  trash: async (path) => {
+    if (!hasTauriRuntime()) throw new Error("Move to trash requires the desktop app");
+    const { homeProjectTrash } = await import("../lib/api");
+    await homeProjectTrash(path);
+    const next = removeLocal(path, get().recents);
+    persist(next);
+    set({ recents: next });
+
+    const project = useProjectStore.getState();
+    if (project.projectPath === path) {
+      project.clearProjectSnapshot();
     }
   },
   validateRecents: async () => {
-    const list = get().recents;
-    if (list.length === 0) return;
-
-    const { isTauri } = await import("../lib/api");
-    if (!isTauri) return;
-
+    const legacy = get().recents;
+    if (!hasTauriRuntime()) return;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const valid: RecentProject[] = [];
-      for (const entry of list) {
-        try {
-          const exists = await invoke<boolean>("check_path_exists", { path: entry.path });
-          if (exists) {
-            valid.push(entry);
-          }
-        } catch {
-          // If we fail to check, fallback to keeping the project
-          valid.push(entry);
-        }
-      }
-      if (valid.length !== list.length) {
-        persist(valid);
-        set({ recents: valid });
-      }
-    } catch (e) {
-      console.error("Failed to validate recents:", e);
+      const { homeProjectsSync } = await import("../lib/api");
+      const native = await homeProjectsSync(
+        legacy.map(({ path, openedAt, createdAt }) => ({ path, openedAt, createdAt })),
+      );
+      const recents = native.slice(0, MAX_RECENTS);
+      persist(recents);
+      set({ recents });
+    } catch (error) {
+      // A registry read failure must never silently erase a user's Home list.
+      console.error("Failed to synchronize recent projects:", error);
     }
   },
 }));

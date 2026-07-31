@@ -114,6 +114,8 @@
 | P2-11 | isDocumentEdited 脏标记前端反馈 | core 用 `version != last_saved_version` 派生 dirty 传前端,标题栏显示未保存态;驱动防抖保存与退出 flush | `session.rs:251` |
 | P2-12 | 两套窗口尺寸 | 单窗不强求双窗,可设 minWidth 760 避免主页空旷 | `tauri.conf.json:21-26` |
 
+P2-3 已由 `src-tauri/src/home.rs` 与 Home 卡片闭环：桌面端注册表以原子 JSON 持久化最近工程，启动同步只更新 `missing` 而不丢弃缺失条目；Reveal 和废纸篓命令只接受已注册的绝对 `.opentake` 路径。macOS 使用 `NSFileManager.trashItem`，Windows 使用系统回收站 API，Linux 使用 `gio trash`；仅在系统操作成功后才持久化移除。卡片提供缺失态、右键/按钮操作、从最近中移除、废纸篓二次确认、pending 与可重试错误状态。
+
 ---
 
 ## 二、实现批次顺序（每批一个功能分支：写 → 审 → 修 → CI 绿 → 合并）
