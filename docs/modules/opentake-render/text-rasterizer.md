@@ -21,9 +21,9 @@
 `rasterize_box` 流程（对拍 `TextLayerController.applyStyle` L152 + `TextLayout`）：
 1. 空内容 / 退化框（`box_pixels` 返回 `None`）→ `None`；框尺寸钳到 `MAX_BOX_SIDE=8192`。
 2. **画布相对字号**（上游基准）：`font_px = font_size * font_scale * (canvas.h / 1080)`，下限 1px；行高 `1.2×`。`1080` = `CANVAS_BASIS_HEIGHT`（上游 referenceCanvasHeight）。
-3. cosmic-text 排版：`Buffer` 设框尺寸 + `set_text`（`attrs_for` 从 PostScript 名如 `Helvetica-Bold` 切出 family + 推断 bold）+ 行对齐（`to_align`）+ `shape_until_scroll`。
+3. cosmic-text 排版：`Buffer` 设框尺寸 + `set_text`（`attrs_for` 从 PostScript 名如 `Helvetica-Bold` 切出 family + 推断 bold；指定族缺失时走 fontdb 字体/脚本回退）+ 行对齐（`to_align`）+ `shape_until_scroll`。字体库为空时在 shaping 前进入确定性的 headless 分支，避免 cosmic-text 的无默认字体 panic，并继续输出正确尺寸的透明预乘帧（背景与边框仍可绘制）。
 4. **覆盖掩码**：`buffer.draw` 用白色，按 max 合并出每像素 0..255 coverage（重叠 glyph cell 取最强）。
-5. **合成进预乘 RGBA**（底到顶）：背景盒（`background.enabled` 填色）→ 投影（box-blur 掩码，按画布缩放算 `radius`/`offset`，**Y 上→图像行 Y 下故 offset_y 取负**）→ 文字（掩码 × `style.color`）→ 描边（`border` 2px 周边）。`over` 做直通源 alpha-over 到预乘缓冲。
+5. **合成进预乘 RGBA**（底到顶）：背景盒（`background.enabled` 填色）→ 投影（box-blur 掩码，按画布缩放算 `radius`/`offset`，**Y 上→图像行 Y 下故 offset_y 取负**）→ 文字（掩码 × `style.color`）→ 边框（1080p 基准 2px，随画布高度缩放且最小 1px）。`over` 做直通源 alpha-over 到预乘缓冲。
 6. 返回框尺寸的预乘 `DecodedFrame`。
 
 ## 源文件
@@ -35,15 +35,16 @@
 - **文字层 `nat_size` = 框像素尺寸、`preferred_transform` = 单位阵**（由 plan 侧 `make_clip_plan` 文字分支保证），使框纹理经标准 affine 1:1 落位。
 - **文字不做同轨去重**：每个可见文字 clip 各自一张纹理、各自一个 `LayerDraw`，且整体叠在所有视频之上（plan 的 `text_plans`，对齐上游 CoreAnimationTool 文字在视频合成之上）。
 - **输出预乘**：`DecodedFrame.premultiplied = true`，合成器对其 `needs_premultiply=false`。
-- **无字体不崩**：headless 无字面时仍产出框尺寸帧（背景/描边照画），仅 glyph 像素缺失。
+- **无字体不崩**：headless 无字体时仍产出框尺寸帧（背景/边框照画），仅 glyph 像素缺失。
+- **结构而非字体边缘锁定**：固定矩阵以 1080 高度、每侧 12px 阴影余量、2px 边框为上游基准，覆盖中英混排、缺失字体族回退、左右/居中、窄框换行与多分辨率缩放；CoreText/cosmic-text 的抗锯齿边缘差异不作为几何失败。
 
 ## 关系
 - 输入 `TextStyle` / `Rgba` / `TextAlignment` 来自 [opentake-domain](../opentake-domain/INDEX.md)；逐帧 opacity 由 [render-plan.md](render-plan.md) 的 `opacity_at` 提供。
 - 输出预乘 RGBA 纹理给 [gpu-compositor.md](gpu-compositor.md) 合成（文字层 `TextureSource::Text`，经 `TextureResolver` 接入）。
 
-## 计划中
-- 完整样式深化（更精确的换行/字体回退/阴影 padding 12×2 余量对齐、描边宽度按缩放）属 ROADMAP Phase 8 文字渲染收口；当前已覆盖 family+weight / 画布相对字号 / 颜色 / 水平对齐 / 背景盒 / 投影（offset+box-blur）/ 描边。
-- 文字静态渲染像素对拍上游（CoreText vs cosmic-text 边缘 Δ 不可避免，验收对文字区放宽到结构一致 SSIM，几何/字号/对齐需准）见 SPEC §6.2。
+## 已验证边界与后续扩展
+- `gpu_text#fallback_font_no_font_scaled_stroke_and_structural_golden_matrix` 固定上游结构基准并验证 family+weight、字体回退、中英混排、水平对齐、窄框换行、阴影 padding、画布相对字号/边框缩放，以及真实空字体库的非崩溃输出；重复栅格化必须逐字节相等（SSIM 1.0）。
+- CoreText 与 cosmic-text 的抗锯齿边缘存在平台差异，静态文字对拍按 SPEC §6.2 采用结构阈值；富文本多 span、显式 emoji/CJK 首选族提示和竖排仍属于后续扩展，不改变当前单样式横排契约。
 
 ---
 

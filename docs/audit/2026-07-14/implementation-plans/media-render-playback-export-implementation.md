@@ -1966,7 +1966,7 @@ not the separately owned desktop motion/Lottie materialization.
   - Add a pinned upstream comparison fixture for wrapping, fallback fonts, shadow padding, stroke width, size, and alignment across Chinese/Latin text.
   - Pass deterministic structural/pixel thresholds on macOS and the headless fallback while preserving non-crashing no-font behavior.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/gpu_text.rs#rasterize_is_deterministic_ssim_one` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-render/tests/gpu_text.rs#natural_size_shadow_padding_matches_upstream` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -1974,7 +1974,7 @@ not the separately owned desktop motion/Lottie materialization.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test gpu_text rasterize_is_deterministic_ssim_one -- --exact`
   - Run: `cargo test -p opentake-render --test gpu_text natural_size_shadow_padding_matches_upstream -- --exact`
@@ -1982,11 +1982,11 @@ not the separately owned desktop motion/Lottie materialization.
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-render/src/gpu/text_engine.rs#CosmicTextRasterizer`, `crates/opentake-render/src/plan/types.rs#TextureSource::Text`, `docs/modules/opentake-render/text-rasterizer.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test gpu_text rasterize_is_deterministic_ssim_one -- --exact`
   - Run: `cargo test -p opentake-render --test gpu_text natural_size_shadow_padding_matches_upstream -- --exact`
@@ -1994,11 +1994,22 @@ not the separately owned desktop motion/Lottie materialization.
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. The new owner first failed to compile because the
+  explicit no-font constructor did not exist; after adding it, the real empty
+  font database exposed cosmic-text's `no default font found` panic. The
+  production rasterizer now branches before shaping and returns the correctly
+  sized transparent premultiplied frame while preserving background/border
+  rendering. The pinned structural matrix passes for missing-family fallback,
+  Chinese/Latin text, wrapping, alignment, 12px-per-side shadow padding, and
+  1/2/4px border scaling at 540p/1080p/2160p. All eight text integration tests,
+  warnings-denied render Clippy, formatting, and the full workspace Rust suite
+  pass on macOS with real system fonts.
 
 ### Task 31: MR-media-principles-headings (implementation-slice-726e8186554da9b6)
 

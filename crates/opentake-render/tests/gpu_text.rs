@@ -192,6 +192,33 @@ fn y_span(frame: &DecodedFrame) -> u32 {
     }
 }
 
+fn alpha_bounds(frame: &DecodedFrame) -> Option<(u32, u32, u32, u32)> {
+    let mut x0 = frame.width;
+    let mut y0 = frame.height;
+    let mut x1 = 0;
+    let mut y1 = 0;
+    let mut found = false;
+    for y in 0..frame.height {
+        for x in 0..frame.width {
+            if frame.rgba[((y * frame.width + x) * 4 + 3) as usize] > 0 {
+                found = true;
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    found.then_some((x0, y0, x1, y1))
+}
+
+fn left_alpha_run(frame: &DecodedFrame) -> u32 {
+    let y = frame.height / 2;
+    (0..frame.width)
+        .take_while(|&x| frame.rgba[((y * frame.width + x) * 4 + 3) as usize] > 0)
+        .count() as u32
+}
+
 #[test]
 fn font_size_scales_with_canvas_height() {
     let r = CosmicTextRasterizer::new();
@@ -376,4 +403,124 @@ fn natural_size_shadow_padding_matches_upstream() {
     assert_eq!(w_on - w_off, TextLayout::SHADOW_PADDING * 2.0);
     assert_eq!(TextLayout::SHADOW_PADDING, 12.0);
     assert_eq!(TextLayout::REFERENCE_CANVAS_HEIGHT, 1080.0);
+}
+
+#[test]
+fn fallback_font_no_font_scaled_stroke_and_structural_golden_matrix() {
+    // Pinned structural values from the upstream CATextLayer/TextLayout path.
+    // Glyph edge antialiasing is renderer-specific, so the golden compares
+    // geometry and ordering rather than exact CoreText coverage bytes.
+    const UPSTREAM_REFERENCE_HEIGHT: f64 = 1080.0;
+    const UPSTREAM_BORDER_AT_REFERENCE: u32 = 2;
+    const UPSTREAM_SHADOW_PADDING_EACH_SIDE: f64 = 12.0;
+
+    assert_eq!(
+        TextLayout::REFERENCE_CANVAS_HEIGHT,
+        UPSTREAM_REFERENCE_HEIGHT
+    );
+    assert_eq!(
+        TextLayout::SHADOW_PADDING,
+        UPSTREAM_SHADOW_PADDING_EACH_SIDE
+    );
+
+    // A truly empty font database models headless CI. The request still
+    // returns a correctly sized transparent premultiplied frame and never
+    // panics or invents replacement glyphs.
+    let headless = CosmicTextRasterizer::without_system_fonts();
+    assert!(!headless.has_fonts());
+    let mut plain = TextStyle {
+        font_size: 96.0,
+        ..TextStyle::default()
+    };
+    plain.shadow.enabled = false;
+    let no_font = headless
+        .rasterize(&TextRasterRequest {
+            clip_id: "headless",
+            content: "终验 Headless",
+            style: &plain,
+            box_norm: (0.0, 0.0, 1.0, 1.0),
+            canvas: (640, 360),
+        })
+        .expect("headless frame");
+    assert_eq!((no_font.width, no_font.height), (640, 360));
+    assert!(no_font.premultiplied);
+    assert!(alpha_bounds(&no_font).is_none());
+
+    let rasterizer = CosmicTextRasterizer::new();
+    if !rasterizer.has_fonts() {
+        eprintln!("[skip] no system fonts for structural golden matrix");
+        return;
+    }
+
+    // A missing requested family must fall back through cosmic-text/fontdb.
+    let mut fallback = plain.clone();
+    fallback.font_name = "OpenTake-Definitely-Missing-Bold".into();
+    fallback.alignment = TextAlignment::Center;
+    let mixed = rasterizer
+        .rasterize(&TextRasterRequest {
+            clip_id: "fallback",
+            content: "终验 FINAL CHECK",
+            style: &fallback,
+            box_norm: (0.0, 0.0, 1.0, 1.0),
+            canvas: (960, 270),
+        })
+        .expect("fallback frame");
+    let mixed_bounds = alpha_bounds(&mixed).expect("fallback must paint glyphs");
+    assert!(mixed_bounds.0 < mixed.width / 2);
+    assert!(mixed_bounds.2 > mixed.width / 2);
+
+    // Pinned left/center/right structural matrix for the same Latin/CJK run.
+    let centroid = |alignment| {
+        let mut style = fallback.clone();
+        style.alignment = alignment;
+        let frame = rasterizer
+            .rasterize(&TextRasterRequest {
+                clip_id: "alignment",
+                content: "OpenTake 终验",
+                style: &style,
+                box_norm: (0.0, 0.0, 1.0, 1.0),
+                canvas: (960, 270),
+            })
+            .expect("alignment frame");
+        x_centroid(&frame) / frame.width as f64
+    };
+    let left = centroid(TextAlignment::Left);
+    let center = centroid(TextAlignment::Center);
+    let right = centroid(TextAlignment::Right);
+    assert!(left < 0.35, "left centroid {left}");
+    assert!((0.4..0.6).contains(&center), "center centroid {center}");
+    assert!(right > 0.65, "right centroid {right}");
+    assert!(left < center && center < right);
+
+    // A narrow box must wrap the mixed-language fixture into more vertical
+    // structure than a short line.
+    let render = |content: &str| {
+        rasterizer
+            .rasterize(&TextRasterRequest {
+                clip_id: "wrap",
+                content,
+                style: &fallback,
+                box_norm: (0.0, 0.0, 0.34, 1.0),
+                canvas: (960, 540),
+            })
+            .expect("wrap frame")
+    };
+    assert!(y_span(&render("OpenTake 终验 wraps across multiple lines")) > y_span(&render("终验")));
+
+    // The upstream box-border stroke is 2 px at 1080p and scales with canvas
+    // height, with a one-pixel floor for small canvases.
+    let mut border = plain;
+    border.border.enabled = true;
+    for (height, expected) in [(540, 1), (1080, UPSTREAM_BORDER_AT_REFERENCE), (2160, 4)] {
+        let frame = rasterizer
+            .rasterize(&TextRasterRequest {
+                clip_id: "border",
+                content: "I",
+                style: &border,
+                box_norm: (0.0, 0.0, 1.0, 1.0),
+                canvas: (height, height),
+            })
+            .expect("border frame");
+        assert_eq!(left_alpha_run(&frame), expected, "canvas height {height}");
+    }
 }

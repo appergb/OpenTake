@@ -51,8 +51,10 @@ pub enum TextureSource {
     Image { media_ref: String },
     /// Lottie: a texture per "Lottie internal frame" (content-hash cached).
     Lottie { media_ref: String },
-    /// Text: rasterized for this clip at the canvas size (content-hash cached,
-    /// key = style + content + canvas).
+    /// Text clip identity: rasterized at the canvas size. The resolver reads
+    /// content/style from the same timeline snapshot and includes style,
+    /// content, and canvas in its cache key, so an edited clip cannot reuse
+    /// stale pixels based on id alone.
     Text { clip_id: String },
 }
 
