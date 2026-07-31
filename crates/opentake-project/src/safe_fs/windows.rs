@@ -23,22 +23,24 @@ use windows_sys::Win32::Foundation::{
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, STATUS_OBJECT_TYPE_MISMATCH,
     STATUS_PENDING, STATUS_REPARSE_POINT_ENCOUNTERED, STATUS_SHARING_VIOLATION, UNICODE_STRING,
 };
-use windows_sys::Win32::Security::SECURITY_DESCRIPTOR;
+use windows_sys::Win32::Security::*;
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FileAttributeTagInfo, FileIdInfo, FileRemoteProtocolInfo, FileStandardInfo,
     GetDriveTypeW, GetFileInformationByHandleEx, GetVolumeInformationByHandleW,
     GetVolumeNameForVolumeMountPointW, GetVolumePathNameW, DELETE, FILE_ACCESS_RIGHTS,
-    FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_ATTRIBUTE_TAG_INFO, FILE_DELETE_CHILD, FILE_FLAGS_AND_ATTRIBUTES,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_LIST_DIRECTORY,
-    FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_REMOTE_PROTOCOL_INFO, FILE_SHARE_MODE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_TRAVERSE, FILE_WRITE_DATA,
-    GET_FILEEX_INFO_LEVELS, MAXIMUM_REPARSE_DATA_BUFFER_SIZE, OPEN_EXISTING, READ_CONTROL,
-    SYNCHRONIZE,
+    FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_DELETE_CHILD,
+    FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_READ_DATA,
+    FILE_REMOTE_PROTOCOL_INFO, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_STANDARD_INFO, FILE_TRAVERSE, FILE_WRITE_DATA, GET_FILEEX_INFO_LEVELS,
+    MAXIMUM_REPARSE_DATA_BUFFER_SIZE, OPEN_EXISTING, READ_CONTROL, SYNCHRONIZE,
 };
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
-use windows_sys::Win32::System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR;
-use windows_sys::Win32::System::Threading::GetCurrentProcess;
+use windows_sys::Win32::System::SystemServices::{
+    ACCESS_ALLOWED_ACE_TYPE, FILE_CS_FLAG_CASE_SENSITIVE_DIR, SECURITY_DESCRIPTOR_REVISION,
+};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
 const SHARE: FILE_SHARE_MODE = FILE_SHARE_READ | FILE_SHARE_WRITE;
@@ -48,6 +50,7 @@ const DIRECTORY_BUFFER_BYTES: usize = 64 * 1024;
 const REPARSE_HEADER_BYTES: usize = 8;
 const STATUS_SUCCESS: NTSTATUS = 0;
 const BOOL_FALSE: BOOL = 0;
+const BOOL_TRUE: BOOL = 1;
 const DRIVE_REMOVABLE: u32 = 2;
 const DRIVE_FIXED: u32 = 3;
 
@@ -1329,18 +1332,368 @@ fn require_mutation(parent: &DirectoryAuthority, operation: SafeFsOperation) -> 
     }
 }
 
-fn owner_only_refusal<T>() -> Result<T> {
-    Err(SafeFsError::UnsupportedSecureFilesystem {
-        operation: SafeFsOperation::VerifySecurityDescriptor,
-        reason: SecureFilesystemReason::UnsupportedTarget,
-    })
+struct OwnerOnlySecurity {
+    sid: Vec<usize>,
+    _acl: Vec<usize>,
+    descriptor: Box<SECURITY_DESCRIPTOR>,
+    ace_flags: ACE_FLAGS,
 }
 
-fn require_inherited_permissions(permissions: CreatePermissions) -> Result<()> {
-    match permissions {
-        CreatePermissions::Inherit => Ok(()),
-        CreatePermissions::OwnerOnly => owner_only_refusal(),
+impl OwnerOnlySecurity {
+    fn new(directory: bool) -> Result<Self> {
+        let operation = SafeFsOperation::VerifySecurityDescriptor;
+        let mut token_raw = null_mut();
+        // SAFETY: the current-process pseudo-handle is valid and the output pointer is writable.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token_raw) } == 0 {
+            return Err(last_win32(operation));
+        }
+        let token = OwnedHandle::new(token_raw, operation)?;
+        let mut needed = 0u32;
+        // SAFETY: documented sizing call with a null output buffer.
+        let first =
+            unsafe { GetTokenInformation(token.raw(), TokenOwner, null_mut(), 0, &mut needed) };
+        if first != 0
+            || unsafe { GetLastError() }
+                != windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER
+            || needed < size_of::<TOKEN_OWNER>() as u32
+        {
+            return Err(last_win32(operation));
+        }
+        let mut token_words = vec![0usize; (needed as usize).div_ceil(size_of::<usize>())];
+        // SAFETY: aligned storage is writable for exactly `needed` bytes.
+        if unsafe {
+            GetTokenInformation(
+                token.raw(),
+                TokenOwner,
+                token_words.as_mut_ptr().cast(),
+                needed,
+                &mut needed,
+            )
+        } == 0
+        {
+            return Err(last_win32(operation));
+        }
+        // SAFETY: the successful TokenOwner query initialized a TOKEN_OWNER value.
+        let owner = unsafe { (*(token_words.as_ptr().cast::<TOKEN_OWNER>())).Owner };
+        if owner.is_null() || unsafe { IsValidSid(owner) } == 0 {
+            return Err(last_win32(operation));
+        }
+        // SAFETY: `owner` is a validated SID returned in the live token buffer.
+        let sid_len = usize::try_from(unsafe { GetLengthSid(owner) }).map_err(|_| {
+            SafeFsError::InvalidNativeBuffer {
+                operation,
+                reason: NativeBufferReason::SecurityDescriptorMalformed,
+            }
+        })?;
+        let mut sid = vec![0usize; sid_len.div_ceil(size_of::<usize>())];
+        // SAFETY: destination capacity is at least sid_len and owner is a validated SID.
+        if unsafe { CopySid(sid_len as u32, sid.as_mut_ptr().cast(), owner) } == 0 {
+            return Err(last_win32(operation));
+        }
+        drop(token_words);
+        drop(token);
+
+        let acl_bytes = size_of::<ACL>()
+            .checked_add(size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>())
+            .and_then(|value| value.checked_add(sid_len))
+            .ok_or(SafeFsError::InvalidNativeBuffer {
+                operation,
+                reason: NativeBufferReason::LengthOverflow,
+            })?;
+        let acl_len = u32::try_from(acl_bytes).map_err(|_| SafeFsError::InvalidNativeBuffer {
+            operation,
+            reason: NativeBufferReason::LengthOverflow,
+        })?;
+        if acl_bytes > u16::MAX as usize {
+            return Err(SafeFsError::InvalidNativeBuffer {
+                operation,
+                reason: NativeBufferReason::LengthOverflow,
+            });
+        }
+        let mut acl = vec![0usize; acl_bytes.div_ceil(size_of::<usize>())];
+        let ace_flags = if directory {
+            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+        } else {
+            0
+        };
+        // SAFETY: aligned ACL storage and the copied SID remain live inside Self.
+        if unsafe { InitializeAcl(acl.as_mut_ptr().cast(), acl_len, ACL_REVISION) } == 0
+            || unsafe {
+                AddAccessAllowedAceEx(
+                    acl.as_mut_ptr().cast(),
+                    ACL_REVISION,
+                    ace_flags,
+                    FILE_ALL_ACCESS,
+                    sid.as_mut_ptr().cast(),
+                )
+            } == 0
+        {
+            return Err(last_win32(operation));
+        }
+        // SAFETY: SECURITY_DESCRIPTOR is a C POD initialized immediately below.
+        let mut descriptor = Box::<SECURITY_DESCRIPTOR>::new(unsafe { std::mem::zeroed() });
+        // SAFETY: the boxed descriptor has a stable address and ACL storage remains owned by Self.
+        if unsafe {
+            InitializeSecurityDescriptor(
+                (&mut *descriptor as *mut SECURITY_DESCRIPTOR).cast(),
+                SECURITY_DESCRIPTOR_REVISION,
+            )
+        } == 0
+            || unsafe {
+                SetSecurityDescriptorDacl(
+                    (&mut *descriptor as *mut SECURITY_DESCRIPTOR).cast(),
+                    BOOL_TRUE,
+                    acl.as_mut_ptr().cast(),
+                    BOOL_FALSE,
+                )
+            } == 0
+            || unsafe {
+                SetSecurityDescriptorControl(
+                    (&mut *descriptor as *mut SECURITY_DESCRIPTOR).cast(),
+                    SE_DACL_PROTECTED,
+                    SE_DACL_PROTECTED,
+                )
+            } == 0
+        {
+            return Err(last_win32(operation));
+        }
+        Ok(Self {
+            sid,
+            _acl: acl,
+            descriptor,
+            ace_flags,
+        })
     }
+
+    fn descriptor_ptr(&self) -> *const SECURITY_DESCRIPTOR {
+        &*self.descriptor
+    }
+}
+
+fn malformed_security() -> SafeFsError {
+    SafeFsError::InvalidNativeBuffer {
+        operation: SafeFsOperation::VerifySecurityDescriptor,
+        reason: NativeBufferReason::SecurityDescriptorMalformed,
+    }
+}
+
+fn checked_subslice(
+    base: usize,
+    length: usize,
+    pointer: usize,
+    needed: usize,
+) -> Result<std::ops::Range<usize>> {
+    let end = base.checked_add(length).ok_or_else(malformed_security)?;
+    let pointer_end = pointer.checked_add(needed).ok_or_else(malformed_security)?;
+    if pointer < base || pointer_end > end {
+        return Err(malformed_security());
+    }
+    Ok(pointer - base..pointer_end - base)
+}
+
+fn checked_sid_length(buffer: &[u8], sid: *const c_void) -> Result<usize> {
+    const SID_PREFIX: usize = 8;
+    let range = checked_subslice(
+        buffer.as_ptr() as usize,
+        buffer.len(),
+        sid as usize,
+        SID_PREFIX,
+    )?;
+    let count = usize::from(buffer[range.start + 1]);
+    let length = SID_PREFIX
+        .checked_add(
+            count
+                .checked_mul(size_of::<u32>())
+                .ok_or_else(malformed_security)?,
+        )
+        .ok_or_else(malformed_security)?;
+    checked_subslice(buffer.as_ptr() as usize, buffer.len(), sid as usize, length)?;
+    // SAFETY: the SID prefix and every declared sub-authority are inside buffer.
+    if unsafe { IsValidSid(sid.cast_mut()) } == 0 {
+        return Err(malformed_security());
+    }
+    // SAFETY: IsValidSid accepted the fully bounded SID.
+    if usize::try_from(unsafe { GetLengthSid(sid.cast_mut()) }).map_err(|_| malformed_security())?
+        != length
+    {
+        return Err(malformed_security());
+    }
+    Ok(length)
+}
+
+fn verify_single_owner_ace(
+    descriptor_bytes: &[u8],
+    dacl: *mut ACL,
+    acl_bytes_in_use: usize,
+    ace: *mut c_void,
+    expected: &OwnerOnlySecurity,
+) -> Result<()> {
+    let dacl_start = dacl as usize;
+    let dacl_range = checked_subslice(
+        descriptor_bytes.as_ptr() as usize,
+        descriptor_bytes.len(),
+        dacl_start,
+        acl_bytes_in_use.max(size_of::<ACL>()),
+    )?;
+    if acl_bytes_in_use < size_of::<ACL>() || dacl_range.len() != acl_bytes_in_use {
+        return Err(malformed_security());
+    }
+    let ace_start = ace as usize;
+    checked_subslice(
+        dacl_start,
+        acl_bytes_in_use,
+        ace_start,
+        size_of::<windows_sys::Win32::Security::ACE_HEADER>(),
+    )?;
+    // SAFETY: only the fixed ACE header bytes were bounds checked; read unaligned.
+    let header =
+        unsafe { std::ptr::read_unaligned(ace.cast::<windows_sys::Win32::Security::ACE_HEADER>()) };
+    if u32::from(header.AceType) != ACCESS_ALLOWED_ACE_TYPE {
+        return Err(malformed_security());
+    }
+    let ace_size = usize::from(header.AceSize);
+    let sid_offset = offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+    if ace_size < sid_offset.checked_add(8).ok_or_else(malformed_security)? {
+        return Err(malformed_security());
+    }
+    checked_subslice(dacl_start, acl_bytes_in_use, ace_start, ace_size)?;
+    let sid_ptr = ace_start
+        .checked_add(sid_offset)
+        .ok_or_else(malformed_security)? as *const c_void;
+    let sid_length = checked_sid_length(descriptor_bytes, sid_ptr)?;
+    if sid_offset
+        .checked_add(sid_length)
+        .ok_or_else(malformed_security)?
+        != ace_size
+    {
+        return Err(malformed_security());
+    }
+    // SAFETY: ACE type, size, ACL bounds and SID range were established above.
+    let allowed = unsafe { std::ptr::read_unaligned(ace.cast::<ACCESS_ALLOWED_ACE>()) };
+    let expected_flags = u8::try_from(expected.ace_flags).map_err(|_| malformed_security())?;
+    if allowed.Header.AceFlags != expected_flags
+        || allowed.Mask != FILE_ALL_ACCESS
+        || unsafe { EqualSid(sid_ptr.cast_mut(), expected.sid.as_ptr().cast_mut().cast()) } == 0
+    {
+        return Err(malformed_security());
+    }
+    Ok(())
+}
+
+fn verify_owner_only(handle: HANDLE, expected: &OwnerOnlySecurity) -> Result<()> {
+    let operation = SafeFsOperation::VerifySecurityDescriptor;
+    let information = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    let mut needed = 0u32;
+    // SAFETY: documented sizing call against a retained handle.
+    unsafe { GetKernelObjectSecurity(handle, information, null_mut(), 0, &mut needed) };
+    if unsafe { GetLastError() } != windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER {
+        return Err(last_win32(operation));
+    }
+    let mut words = vec![0usize; (needed as usize).div_ceil(size_of::<usize>())];
+    // SAFETY: aligned storage is writable for exactly needed bytes.
+    if unsafe {
+        GetKernelObjectSecurity(
+            handle,
+            information,
+            words.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(last_win32(operation));
+    }
+    // SAFETY: the successful query initialized exactly `needed` bytes.
+    let descriptor_bytes =
+        unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), needed as usize) };
+    if descriptor_bytes.len() < size_of::<SECURITY_DESCRIPTOR>() {
+        return Err(malformed_security());
+    }
+    let descriptor = descriptor_bytes.as_mut_ptr().cast::<SECURITY_DESCRIPTOR>();
+    let mut control = 0u16;
+    let mut revision = 0u32;
+    let mut owner = null_mut();
+    let mut owner_defaulted = BOOL_FALSE;
+    let mut dacl = null_mut();
+    let mut present = BOOL_FALSE;
+    let mut defaulted = BOOL_FALSE;
+    // SAFETY: the kernel returned a self-relative descriptor in aligned storage.
+    if unsafe { GetSecurityDescriptorControl(descriptor.cast(), &mut control, &mut revision) } == 0
+        || unsafe {
+            GetSecurityDescriptorOwner(descriptor.cast(), &mut owner, &mut owner_defaulted)
+        } == 0
+        || unsafe {
+            GetSecurityDescriptorDacl(descriptor.cast(), &mut present, &mut dacl, &mut defaulted)
+        } == 0
+        || control & SE_DACL_PROTECTED == 0
+        || owner_defaulted != BOOL_FALSE
+        || present == BOOL_FALSE
+        || defaulted != BOOL_FALSE
+        || dacl.is_null()
+        || owner.is_null()
+    {
+        return Err(malformed_security());
+    }
+    checked_sid_length(descriptor_bytes, owner.cast_const())?;
+    // SAFETY: owner SID is fully bounded and validated in descriptor_bytes.
+    if unsafe { EqualSid(owner, expected.sid.as_ptr().cast_mut().cast()) } == 0 {
+        return Err(malformed_security());
+    }
+    checked_subslice(
+        descriptor_bytes.as_ptr() as usize,
+        descriptor_bytes.len(),
+        dacl as usize,
+        size_of::<ACL>(),
+    )?;
+    let mut acl_info = ACL_SIZE_INFORMATION::default();
+    // SAFETY: the DACL fixed header is bounded and output is writable.
+    if unsafe {
+        GetAclInformation(
+            dacl,
+            (&mut acl_info as *mut ACL_SIZE_INFORMATION).cast(),
+            size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    } == 0
+        || acl_info.AceCount != 1
+    {
+        return Err(malformed_security());
+    }
+    let acl_bytes_in_use =
+        usize::try_from(acl_info.AclBytesInUse).map_err(|_| malformed_security())?;
+    checked_subslice(
+        descriptor_bytes.as_ptr() as usize,
+        descriptor_bytes.len(),
+        dacl as usize,
+        acl_bytes_in_use.max(size_of::<ACL>()),
+    )?;
+    let mut ace = null_mut();
+    // SAFETY: the ACL and AclBytesInUse are bounded inside descriptor storage.
+    if unsafe { GetAce(dacl, 0, &mut ace) } == 0 || ace.is_null() {
+        return Err(last_win32(operation));
+    }
+    verify_single_owner_ace(descriptor_bytes, dacl, acl_bytes_in_use, ace, expected)
+}
+
+#[cfg(test)]
+static FORCE_DACL_VERIFY_FAILURE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+fn force_next_owner_verification_failure() {
+    FORCE_DACL_VERIFY_FAILURE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn verify_created_owner_only(handle: HANDLE, expected: &OwnerOnlySecurity) -> Result<()> {
+    inject_windows_create_failure(
+        WindowsCreateFailurePoint::SecurityVerification,
+        SafeFsOperation::VerifySecurityDescriptor,
+    )?;
+    #[cfg(test)]
+    if FORCE_DACL_VERIFY_FAILURE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        return Err(malformed_security());
+    }
+    verify_owner_only(handle, expected)
 }
 
 #[allow(clippy::arc_with_non_send_sync)] // Arc retains the HANDLE-bearing parent chain; it is not shared publicly.
@@ -1455,7 +1808,13 @@ fn create_directory_contract(
         SafeFsOperation::CreateDirectory
     };
     require_mutation(parent, operation)?;
-    require_inherited_permissions(permissions)?;
+    let security = match permissions {
+        CreatePermissions::OwnerOnly => Some(OwnerOnlySecurity::new(true)?),
+        CreatePermissions::Inherit => None,
+    };
+    let security_descriptor = security
+        .as_ref()
+        .map_or(null(), OwnerOnlySecurity::descriptor_ptr);
     let handle = nt_create_relative(
         parent.native.node.handle.raw(),
         name,
@@ -1464,7 +1823,7 @@ fn create_directory_contract(
         contract.disposition,
         contract.options,
         contract.attributes,
-        null(),
+        security_descriptor,
         operation,
     )?;
     let validated =
@@ -1484,6 +1843,9 @@ fn create_directory_contract(
                     operation,
                     kind: opened.kind,
                 });
+            }
+            if let Some(expected) = &security {
+                verify_created_owner_only(handle.raw(), expected)?;
             }
             inject_windows_create_failure(WindowsCreateFailurePoint::CaseProof, operation)?;
             let case_mode = query_case_mode(handle.raw())?;
@@ -1902,11 +2264,10 @@ pub(super) fn create_stage_dir_new(
     name: &ComponentName,
     permissions: CreatePermissions,
 ) -> Result<StageCapability> {
-    require_inherited_permissions(permissions)?;
     let directory = create_directory_contract(
         parent,
         name,
-        CreatePermissions::Inherit,
+        permissions,
         DirectoryAccess::Stage,
         contract_for_operation(OpenOperation::CreateStage),
     )?;
@@ -1935,7 +2296,13 @@ pub(super) fn create_file_new(
     permissions: CreatePermissions,
 ) -> Result<FileCapability> {
     require_mutation(parent, SafeFsOperation::CreateFile)?;
-    require_inherited_permissions(permissions)?;
+    let security = match permissions {
+        CreatePermissions::OwnerOnly => Some(OwnerOnlySecurity::new(false)?),
+        CreatePermissions::Inherit => None,
+    };
+    let security_descriptor = security
+        .as_ref()
+        .map_or(null(), OwnerOnlySecurity::descriptor_ptr);
     let contract = contract_for_operation(OpenOperation::CreateFile);
     let handle = nt_create_relative(
         parent.native.node.handle.raw(),
@@ -1945,7 +2312,7 @@ pub(super) fn create_file_new(
         contract.disposition,
         contract.options,
         contract.attributes,
-        null(),
+        security_descriptor,
         SafeFsOperation::CreateFile,
     )?;
     let validated =
@@ -1975,6 +2342,9 @@ pub(super) fn create_file_new(
                     operation: SafeFsOperation::CreateFile,
                     kind: opened.kind,
                 });
+            }
+            if let Some(expected) = &security {
+                verify_created_owner_only(handle.raw(), expected)?;
             }
             Ok(opened)
         })();
@@ -2413,7 +2783,6 @@ enum WindowsCreateFailurePoint {
     CaseProof,
     SnapshotAssembly,
     ParentDuplicate,
-    #[allow(dead_code)] // Task 7A test-only removes this when it constructs the variant.
     SecurityVerification,
 }
 
@@ -2608,6 +2977,96 @@ mod tests {
         assert_eq!(file.read(&mut output).unwrap(), 8);
         assert_eq!(&output, b"retained");
         assert_eq!(enumerate(&b).unwrap(), vec![name("data")]);
+    }
+
+    #[test]
+    fn owner_only_file_directory_stage_succeed_and_rollback() {
+        let temp = TestDir::new("owner-only");
+        let authority = root(&temp);
+
+        let file = create_file_new(&authority, &name("file"), CreatePermissions::OwnerOnly)
+            .expect("owner-only file creation succeeds");
+        drop(file);
+        let directory = create_dir_new(
+            &authority,
+            &name("directory"),
+            CreatePermissions::OwnerOnly,
+            DirectoryAccess::MutateChildren,
+        )
+        .expect("owner-only directory creation succeeds");
+        drop(directory);
+        let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::OwnerOnly)
+            .expect("owner-only stage creation succeeds");
+        drop(stage);
+        for value in ["file", "directory", "stage"] {
+            assert!(matches!(
+                query_child_nofollow(&authority, &name(value)).unwrap(),
+                ChildState::Present(_)
+            ));
+        }
+
+        force_next_owner_verification_failure();
+        assert!(matches!(
+            create_file_new(
+                &authority,
+                &name("rollback-file"),
+                CreatePermissions::OwnerOnly
+            ),
+            Err(SafeFsError::InvalidNativeBuffer {
+                operation: SafeFsOperation::VerifySecurityDescriptor,
+                reason: NativeBufferReason::SecurityDescriptorMalformed,
+            })
+        ));
+        force_next_owner_verification_failure();
+        assert!(matches!(
+            create_dir_new(
+                &authority,
+                &name("rollback-directory"),
+                CreatePermissions::OwnerOnly,
+                DirectoryAccess::MutateChildren,
+            ),
+            Err(SafeFsError::InvalidNativeBuffer {
+                operation: SafeFsOperation::VerifySecurityDescriptor,
+                reason: NativeBufferReason::SecurityDescriptorMalformed,
+            })
+        ));
+        force_next_owner_verification_failure();
+        assert!(matches!(
+            create_stage_dir_new(
+                &authority,
+                &name("rollback-stage"),
+                CreatePermissions::OwnerOnly,
+            ),
+            Err(SafeFsError::InvalidNativeBuffer {
+                operation: SafeFsOperation::VerifySecurityDescriptor,
+                reason: NativeBufferReason::SecurityDescriptorMalformed,
+            })
+        ));
+        for value in ["rollback-file", "rollback-directory", "rollback-stage"] {
+            assert!(matches!(
+                query_child_nofollow(&authority, &name(value)).unwrap(),
+                ChildState::Absent
+            ));
+        }
+    }
+
+    #[test]
+    fn windows_post_create_security_failure_rolls_back_same_handle() {
+        let temp = TestDir::new("security-rollback");
+        let authority = root(&temp);
+        let _failure =
+            install_windows_create_failure(WindowsCreateFailurePoint::SecurityVerification);
+        assert!(matches!(
+            create_file_new(&authority, &name("leaf"), CreatePermissions::OwnerOnly),
+            Err(SafeFsError::Io {
+                operation: SafeFsOperation::VerifySecurityDescriptor,
+                ..
+            })
+        ));
+        assert!(matches!(
+            query_child_nofollow(&authority, &name("leaf")).unwrap(),
+            ChildState::Absent
+        ));
     }
 
     #[test]
