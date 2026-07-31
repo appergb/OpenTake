@@ -50,18 +50,43 @@ pub fn packaged_sidecar_path(binary: &str) -> Option<PathBuf> {
     packaged_sidecar_beside(&executable, binary)
 }
 
+/// Resolve one CLI tool without mutating global process state in tests.
+///
+/// An explicit override always wins, then a regular non-symlink packaged
+/// sidecar beside the executable, and finally the platform command name on
+/// `PATH`.
+fn resolve_cli_path(
+    override_path: Option<OsString>,
+    executable: Option<&Path>,
+    binary: &str,
+) -> OsString {
+    override_path
+        .or_else(|| {
+            executable
+                .and_then(|path| packaged_sidecar_beside(path, binary))
+                .map(PathBuf::into_os_string)
+        })
+        .unwrap_or_else(|| OsString::from(binary))
+}
+
 /// Path to `ffmpeg`: explicit development override, packaged sidecar, then PATH.
 pub fn ffmpeg_path() -> OsString {
-    std::env::var_os("OPENTAKE_FFMPEG")
-        .or_else(|| packaged_sidecar_path("ffmpeg").map(PathBuf::into_os_string))
-        .unwrap_or_else(|| OsString::from("ffmpeg"))
+    let executable = std::env::current_exe().ok();
+    resolve_cli_path(
+        std::env::var_os("OPENTAKE_FFMPEG"),
+        executable.as_deref(),
+        "ffmpeg",
+    )
 }
 
 /// Path to `ffprobe`: explicit development override, packaged sidecar, then PATH.
 pub fn ffprobe_path() -> OsString {
-    std::env::var_os("OPENTAKE_FFPROBE")
-        .or_else(|| packaged_sidecar_path("ffprobe").map(PathBuf::into_os_string))
-        .unwrap_or_else(|| OsString::from("ffprobe"))
+    let executable = std::env::current_exe().ok();
+    resolve_cli_path(
+        std::env::var_os("OPENTAKE_FFPROBE"),
+        executable.as_deref(),
+        "ffprobe",
+    )
 }
 
 /// A fresh `FfmpegCommand` bound to [`ffmpeg_path`].
@@ -153,18 +178,31 @@ mod tests {
 
     #[test]
     fn env_override_is_respected_for_ffmpeg() {
-        // We can't safely mutate process env in parallel tests for the *default*,
-        // but we can assert the default value when the var is unset in this proc.
-        if std::env::var_os("OPENTAKE_FFMPEG").is_none() {
-            assert_eq!(ffmpeg_path(), OsString::from("ffmpeg"));
-        }
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join(if cfg!(windows) {
+            "opentake.exe"
+        } else {
+            "opentake"
+        });
+        std::fs::write(&executable, b"app").unwrap();
+        std::fs::write(temp.path().join(sidecar_filename("ffmpeg")), b"sidecar").unwrap();
+
+        assert_eq!(
+            resolve_cli_path(
+                Some(OsString::from("/opt/opentake/custom-ffmpeg")),
+                Some(&executable),
+                "ffmpeg",
+            ),
+            OsString::from("/opt/opentake/custom-ffmpeg"),
+        );
     }
 
     #[test]
     fn default_ffprobe_is_ffprobe() {
-        if std::env::var_os("OPENTAKE_FFPROBE").is_none() {
-            assert_eq!(ffprobe_path(), OsString::from("ffprobe"));
-        }
+        assert_eq!(
+            resolve_cli_path(None, None, "ffprobe"),
+            OsString::from("ffprobe")
+        );
     }
 
     #[test]
@@ -181,7 +219,11 @@ mod tests {
 
         assert_eq!(
             packaged_sidecar_beside(&executable, "ffmpeg"),
-            Some(sidecar)
+            Some(sidecar.clone())
+        );
+        assert_eq!(
+            resolve_cli_path(None, Some(&executable), "ffmpeg"),
+            sidecar.into_os_string()
         );
         assert_eq!(packaged_sidecar_beside(&executable, "ffprobe"), None);
     }

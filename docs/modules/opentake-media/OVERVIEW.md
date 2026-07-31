@@ -52,7 +52,7 @@ opentake-core / src-tauri / opentake-agent / opentake-render   调用方
 ## 3. 关键概念与数据流
 
 ### FFmpeg sidecar 编解码（与 SPEC 的关键实现偏差）
-**实现走 `ffmpeg` / `ffprobe` 命令行二进制（ffmpeg-sidecar），不链接 `libav*`。** 原因：本机工具链为 ffmpeg 8.1（libavcodec 62），C 绑定 crate（`ffmpeg-next` / `ffmpeg-the-third`）不支持，且 `pkg-config` 缺失。`ff.rs` 封装二进制发现与一次性 ffprobe JSON 查询，上层解码模块用裸 stdin/stdout 管道交换原始像素/PCM。这与多处架构文档（[ARCHITECTURE.md](../../architecture/ARCHITECTURE.md) §1、[ROADMAP.md](../../architecture/ROADMAP.md) Phase 2、本模块 [SPEC.md](SPEC.md) §1.2 仍写 `ffmpeg-next`）存在偏差——以代码为准，详见 [probe-ff.md](probe-ff.md)。
+**实现走 `ffmpeg` / `ffprobe` 命令行二进制（ffmpeg-sidecar），不链接 `libav*`。** 原因：本机工具链为 ffmpeg 8.1（libavcodec 62），C 绑定 crate（`ffmpeg-next` / `ffmpeg-the-third`）不支持，且 `pkg-config` 缺失。`ff.rs` 封装二进制发现与一次性 ffprobe JSON 查询，上层解码模块用裸 stdin/stdout 管道交换原始像素/PCM。路径优先级为显式 `OPENTAKE_FFMPEG` / `OPENTAKE_FFPROBE`、应用可执行文件旁的非符号链接常规文件、开发环境 `PATH`。与多处仍写 `ffmpeg-next` 的历史架构文档相比，以这个已测试的 CLI 边界为准，详见 [probe-ff.md](probe-ff.md)。
 
 ### 缩略图 / 波形 / 转写 / 语义搜索的总体管线
 

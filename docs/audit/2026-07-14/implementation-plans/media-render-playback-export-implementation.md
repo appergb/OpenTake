@@ -1366,36 +1366,46 @@ preceding unchanged-code workspace gate passed in Task16.
   - Visible/returned assertion: assert the returned project/error variant, exact post-operation files and decoded state, and save-then-reopen equality or the specified fail-closed no-write result.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_fd42ddbda4988918.rs#completion_fd42ddbda4988918_use_the_ffmpeg_ffprobe_sidecar_boundary_rather_t.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-media/src/ff.rs#env_override_is_respected_for_ffmpeg` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-media/src/ff.rs#default_ffprobe_is_ffprobe` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-media env_override_is_respected_for_ffmpeg`
   - Run: `cargo test -p opentake-media default_ffprobe_is_ffprobe`
 
   Expected: FAIL because one or more of the 2 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  RED recorded 2026-08-01: the corrected owning tests failed to compile because
+  the pure `resolve_cli_path` decision boundary did not exist.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-media/src/ff.rs#ffmpeg_path`, `crates/opentake-media/src/ff.rs#ffprobe_path`, `crates/opentake-media/Cargo.toml`, `docs/modules/opentake-media/OVERVIEW.md`, `docs/modules/opentake-media/probe-ff.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-media env_override_is_respected_for_ffmpeg`
   - Run: `cargo test -p opentake-media default_ffprobe_is_ffprobe`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completed 2026-08-01. The resolver now has a deterministic tested priority of
+environment override, regular non-symlink packaged sidecar, then PATH. Exact
+owners and package regressions pass. The final macOS app contains runnable
+FFmpeg/ffprobe 6.0 and has no dynamic libav link; its current `--enable-nonfree`
+configuration remains a distribution-license blocker outside this boundary.
+Receipt: `../runtime-artifacts/automated/cli-sidecar-boundary-real-device-2026-08-01.md`.
 
 ### Task 23: MR-motion-decoder-injection-complete (implementation-slice-ee5b0fb9f6f3c487)
 
