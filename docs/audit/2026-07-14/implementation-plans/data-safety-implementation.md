@@ -566,7 +566,7 @@ Completion evidence: [`data-safety-cache-identity-real-device-2026-07-31.md`](..
   - Visible/returned assertion: assert the returned project/error variant, exact post-operation files and decoded state, and save-then-reopen equality or the specified fail-closed no-write result.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:tools/completion-tests/doc-c95515ae8f048e8a.test.mjs#completion_c95515ae8f048e8a_editor_state_and_edits_are_owned_by_the_shared_r.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-ops/src/editor_state.rs#commit_undo_redo_cycle_restores_and_versions` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-core/src/core.rs#apply_bumps_version_and_emits_once` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -575,7 +575,7 @@ Completion evidence: [`data-safety-cache-identity-real-device-2026-07-31.md`](..
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-ops commit_undo_redo_cycle_restores_and_versions`
   - Run: `cargo test -p opentake-core apply_bumps_version_and_emits_once`
@@ -584,11 +584,11 @@ Completion evidence: [`data-safety-cache-identity-real-device-2026-07-31.md`](..
 
   Expected: FAIL because one or more of the 10 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-ops/src/editor_state.rs#EditorState`, `crates/opentake-ops/src/command.rs#EditCommand`, `crates/opentake-core/src/core.rs#AppCore`, `crates/opentake-core/src/events.rs#EventBus`, `docs/specs/core/1-editor-state.md`, `docs/specs/core/2-command-routing.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-ops commit_undo_redo_cycle_restores_and_versions`
   - Run: `cargo test -p opentake-core apply_bumps_version_and_emits_once`
@@ -597,7 +597,7 @@ Completion evidence: [`data-safety-cache-identity-real-device-2026-07-31.md`](..
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
