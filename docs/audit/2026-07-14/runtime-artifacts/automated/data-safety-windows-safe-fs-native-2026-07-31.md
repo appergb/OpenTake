@@ -33,20 +33,22 @@ includes both exact Task 12 tests plus retained-handle I/O, owner-only DACL
 validation and malformed descriptor rejection, same-handle rollback at every
 post-create validation point, quarantine/publish without self-conflict,
 no-replace rename against every target kind, recursive reparse-point cleanup,
-access non-escalation, and proof that the retained delete handle blocks real
-name rebinding before consuming deletion.
+access non-escalation, and retained deletion without following a rebound source
+name.
 
 ## Pre-GREEN failure and correction
 
 The prior exact run
 [30616574158](https://github.com/appergb/OpenTake/actions/runs/30616574158)
 retained all four command exits and failed the aggregate because one newly
-added test expected a leaf to be renamed while its retained handle deliberately
-omitted `FILE_SHARE_DELETE`. Native Windows correctly returned
-`STATUS_SHARING_VIOLATION`. The test was corrected to assert the actual security
-contract: name rebinding is blocked while the retained deletion capability is
-live, and the same handle then deletes the original object. Production share
-or deletion behavior was not weakened to make the test pass.
+added test required a leaf rename even when the filesystem rejected the
+same-handle simulation with `STATUS_SHARING_VIOLATION`. A later parallel suite
+also proved that Windows can allow that same simulation after the retained open.
+The corrected test accepts both native outcomes while asserting the security
+invariant in each: if rebinding is blocked, the original name disappears; if it
+succeeds, consuming deletion removes the retained original and preserves the
+new replacement at that name. Production share or deletion behavior was not
+weakened to make the test pass.
 
 ## Remaining closure
 

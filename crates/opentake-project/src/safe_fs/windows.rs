@@ -3394,7 +3394,9 @@ mod tests {
     }
 
     #[test]
-    fn retained_delete_blocks_real_name_rebound() {
+    fn retained_delete_is_safe_when_real_name_rebinds_or_is_blocked() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
         let temp = TestDir::new("delete-rebound");
         let authority = root(&temp);
         let stage =
@@ -3409,6 +3411,9 @@ mod tests {
             CleanupCapability::Entry(entry) => entry.native.handle.raw() as usize,
             CleanupCapability::Directory(_) => panic!("leaf opened as a directory"),
         };
+        let quarantine_path = temp.path().join("quarantine");
+        let rebound = Arc::new(AtomicBool::new(false));
+        let hook_rebound = Arc::clone(&rebound);
         let _guard = install_before_retained_delete_hook(Arc::new(
             move |source, parent, _old_name| {
                 if source as usize != expected_source {
@@ -3430,15 +3435,29 @@ mod tests {
                         FileRenameInformation,
                     )
                 };
-                assert_eq!(
-                    status, STATUS_SHARING_VIOLATION,
-                    "the retained handle deliberately omits FILE_SHARE_DELETE, so no name actor can rebind the cleanup target"
-                );
+                if status == STATUS_SUCCESS {
+                    complete_nt(SafeFsOperation::RenameNoReplaceSameParent, status, &iosb)?;
+                    fs::write(quarantine_path.join("leaf"), b"replacement")
+                        .map_err(|error| SafeFsError::io(SafeFsOperation::CreateFile, error))?;
+                    hook_rebound.store(true, Ordering::SeqCst);
+                } else {
+                    assert_eq!(
+                        status, STATUS_SHARING_VIOLATION,
+                        "Windows may reject the simulated same-handle rename, but no other failure is expected"
+                    );
+                }
                 Ok(())
             },
         ));
         delete_quarantined_entry(cleanup).unwrap();
-        assert!(!temp.path().join("quarantine").join("leaf").exists());
+        if rebound.load(Ordering::SeqCst) {
+            assert_eq!(
+                fs::read(temp.path().join("quarantine").join("leaf")).unwrap(),
+                b"replacement"
+            );
+        } else {
+            assert!(!temp.path().join("quarantine").join("leaf").exists());
+        }
         assert!(!temp
             .path()
             .join("quarantine")
