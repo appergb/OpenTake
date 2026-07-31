@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const edit = vi.hoisted(() => ({
   undo: vi.fn<() => Promise<void>>(),
   redo: vi.fn<() => Promise<void>>(),
-  splitAtPlayhead: vi.fn(),
+  splitAtPlayhead: vi.fn<() => Promise<void>>(),
   trimStartToPlayhead: vi.fn(),
   trimEndToPlayhead: vi.fn(),
   addTextClip: vi.fn(),
@@ -53,6 +53,14 @@ function redoButton(): HTMLButtonElement {
     'button[aria-label="toolbar.redo"]',
   );
   if (!button) throw new Error("redo control was not rendered");
+  return button;
+}
+
+function splitButton(): HTMLButtonElement {
+  const button = container?.querySelector<HTMLButtonElement>(
+    'button[aria-label="toolbar.split"]',
+  );
+  if (!button) throw new Error("split control was not rendered");
   return button;
 }
 
@@ -242,5 +250,46 @@ describe("Toolbar command controls", () => {
     expect(useEditorUiStore.getState().zoomScale).toBeCloseTo(expected, 10);
     expect(Number(localStorage.getItem("opentake.ui.v1.zoomScale"))).toBeCloseTo(expected, 10);
     expect(document.activeElement).toBe(slider);
+  });
+
+  it("control-c96abe84259649a3 split selected clips at playhead", async () => {
+    await act(async () => root?.render(<Toolbar />));
+
+    expect(splitButton().title).toBe("toolbar.split");
+    expect(splitButton().disabled).toBe(false);
+    splitButton().focus();
+    const first = deferred();
+    edit.splitAtPlayhead.mockReturnValueOnce(first.promise);
+
+    await act(async () => splitButton().click());
+    expect(edit.splitAtPlayhead).toHaveBeenCalledTimes(1);
+    expect(splitButton().disabled).toBe(true);
+    expect(splitButton().parentElement?.getAttribute("aria-busy")).toBe("true");
+    splitButton().click();
+    expect(edit.splitAtPlayhead).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(splitButton());
+
+    await act(async () => first.resolve());
+    expect(splitButton().disabled).toBe(false);
+    expect(splitButton().parentElement?.hasAttribute("aria-busy")).toBe(false);
+
+    edit.splitAtPlayhead.mockRejectedValueOnce(new Error("split rejected"));
+    await act(async () => splitButton().click());
+    expect(useEditorUiStore.getState().toast?.message).toContain("split rejected");
+    expect(splitButton().disabled).toBe(false);
+
+    edit.splitAtPlayhead.mockResolvedValueOnce();
+    await act(async () => splitButton().click());
+    expect(edit.splitAtPlayhead).toHaveBeenCalledTimes(3);
+
+    const webRoot = process.cwd();
+    const actionSource = readFileSync(join(webRoot, "src/store/editActions.ts"), "utf8");
+    const apiSource = readFileSync(join(webRoot, "src/lib/api.ts"), "utf8");
+    const rustSource = readFileSync(join(webRoot, "../src-tauri/src/commands.rs"), "utf8");
+    const opsSource = readFileSync(join(webRoot, "../crates/opentake-ops/src/command.rs"), "utf8");
+    expect(actionSource).toMatch(/export async function splitAtPlayhead\(\)[\s\S]*?splitClip\(id, frame\)/);
+    expect(apiSource).toMatch(/export async function editApply[\s\S]*?invokeImpl<EditResult>\("edit_apply", \{ command \}\)/);
+    expect(rustSource).toMatch(/pub fn edit_apply[\s\S]*?other\.into_command\(\)[\s\S]*?handle_edit_apply/);
+    expect(opsSource).toMatch(/SplitClip \{ clip_id: String, at_frame: i32 \}/);
   });
 });

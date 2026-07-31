@@ -76,7 +76,7 @@ export function Toolbar() {
   const pushToast = useEditorUiStore((s) => s.pushToast);
   const canUndo = useProjectStore((s) => s.canUndo);
   const canRedo = useProjectStore((s) => s.canRedo);
-  const [historyPending, setHistoryPending] = useState<"undo" | "redo" | null>(null);
+  const [toolbarPending, setToolbarPending] = useState<"undo" | "redo" | "split" | null>(null);
 
   // Logarithmic slider mapping (ToolbarView.swift:50-53): travel uniform per
   // zoom factor; get=log(zoom), set=exp(value).
@@ -90,28 +90,41 @@ export function Toolbar() {
   };
 
   const onUndo = async () => {
-    if (!canUndo || historyPending) return;
-    setHistoryPending("undo");
+    if (!canUndo || toolbarPending) return;
+    setToolbarPending("undo");
     try {
       await edit.undo();
     } catch (reason: unknown) {
       const message = reason instanceof Error ? reason.message : String(reason);
       pushToast(`${t("toolbar.undo")}: ${message}`);
     } finally {
-      setHistoryPending(null);
+      setToolbarPending(null);
     }
   };
 
   const onRedo = async () => {
-    if (!canRedo || historyPending) return;
-    setHistoryPending("redo");
+    if (!canRedo || toolbarPending) return;
+    setToolbarPending("redo");
     try {
       await edit.redo();
     } catch (reason: unknown) {
       const message = reason instanceof Error ? reason.message : String(reason);
       pushToast(`${t("toolbar.redo")}: ${message}`);
     } finally {
-      setHistoryPending(null);
+      setToolbarPending(null);
+    }
+  };
+
+  const onSplit = async () => {
+    if (toolbarPending) return;
+    setToolbarPending("split");
+    try {
+      await edit.splitAtPlayhead();
+    } catch (reason: unknown) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      pushToast(`${t("toolbar.split")}: ${message}`);
+    } finally {
+      setToolbarPending(null);
     }
   };
 
@@ -130,19 +143,19 @@ export function Toolbar() {
     >
       {/* Undo / Redo */}
       <div style={{ display: "flex", alignItems: "center" }}>
-        <span aria-busy={historyPending === "undo" || undefined} style={{ display: "inline-flex" }}>
+        <span aria-busy={toolbarPending === "undo" || undefined} style={{ display: "inline-flex" }}>
           <HoverButton
             title={t("toolbar.undo")}
-            disabled={!canUndo || historyPending !== null}
+            disabled={!canUndo || toolbarPending !== null}
             onClick={() => void onUndo()}
           >
             <Icon icon={RotateCcw} size={13} />
           </HoverButton>
         </span>
-        <span aria-busy={historyPending === "redo" || undefined} style={{ display: "inline-flex" }}>
+        <span aria-busy={toolbarPending === "redo" || undefined} style={{ display: "inline-flex" }}>
           <HoverButton
             title={t("toolbar.redo")}
-            disabled={!canRedo || historyPending !== null}
+            disabled={!canRedo || toolbarPending !== null}
             onClick={() => void onRedo()}
           >
             <Icon icon={RotateCw} size={13} />
@@ -174,9 +187,15 @@ export function Toolbar() {
 
       {/* Split / Trim */}
       <div style={{ display: "flex", alignItems: "center" }}>
-        <HoverButton title={t("toolbar.split")} onClick={() => edit.splitAtPlayhead()}>
-          <Icon icon={SplitSquareHorizontal} size={13} />
-        </HoverButton>
+        <span aria-busy={toolbarPending === "split" || undefined} style={{ display: "inline-flex" }}>
+          <HoverButton
+            title={t("toolbar.split")}
+            disabled={toolbarPending !== null}
+            onClick={() => void onSplit()}
+          >
+            <Icon icon={SplitSquareHorizontal} size={13} />
+          </HoverButton>
+        </span>
         <GlyphButton
           glyph="["
           title={t("toolbar.trimStart")}
