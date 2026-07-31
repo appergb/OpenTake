@@ -664,6 +664,21 @@ export function createFallbackStore() {
           clip.loudnessNormalization = next;
           return result(true, next ? "Normalize Loudness" : "Reset Loudness", [cmd.clipId]);
         }
+        case "setAudioDenoise": {
+          const loc = findClip(cmd.clipId);
+          if (!loc) return result(false, "Apply Audio Denoise", []);
+          const clip = timeline.tracks[loc[0]].clips[loc[1]];
+          const next = cmd.denoise ?? undefined;
+          if (JSON.stringify(clip.audioDenoise) === JSON.stringify(next)) {
+            return result(false, next ? "Apply Audio Denoise" : "Reset Audio Denoise", []);
+          }
+          clip.audioDenoise = next ? structuredClone(next) : undefined;
+          return result(
+            true,
+            next ? "Apply Audio Denoise" : "Reset Audio Denoise",
+            [cmd.clipId],
+          );
+        }
         case "applyStabilization": {
           const loc = findClip(cmd.clipId);
           if (!loc) return result(false, "Apply Stabilization", []);

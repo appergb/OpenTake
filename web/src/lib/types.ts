@@ -240,6 +240,14 @@ export interface LoudnessNormalization {
   outputTruePeakDbtp: number;
 }
 
+export type DenoiseMode = "adaptive" | "voice";
+
+export interface AudioDenoise {
+  mode: DenoiseMode;
+  strength: number;
+  previewEnabled: boolean;
+}
+
 export interface Clip {
   id: string;
   mediaRef: string;
@@ -271,6 +279,7 @@ export interface Clip {
   cropTrack?: KeyframeTrack<Crop>;
   volumeTrack?: KeyframeTrack<number>;
   loudnessNormalization?: LoudnessNormalization;
+  audioDenoise?: AudioDenoise;
   colorGrade?: ColorGrade;
   lut?: LutReference;
   chromaKey?: ChromaKey;
@@ -411,6 +420,11 @@ export type EditRequest =
       type: "setLoudnessNormalization";
       clipId: string;
       normalization?: LoudnessNormalization | null;
+    }
+  | {
+      type: "setAudioDenoise";
+      clipId: string;
+      denoise?: AudioDenoise | null;
     }
   | { type: "applyStabilization"; clipId: string; solution: StabilizationTrack }
   | {

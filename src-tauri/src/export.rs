@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 use opentake_core::AppCore;
-use opentake_domain::{Clip, ClipType, LutReference, MediaSource, TextStyle};
+use opentake_domain::{AudioDenoise, Clip, ClipType, LutReference, MediaSource, TextStyle};
 use opentake_media::encode::{mix, ClipAudio, MIX_SAMPLE_RATE};
 use opentake_media::{
     decode_frame_at, extract_pcm, extract_pcm_cancellable_with_progress, interpolate_frame_pair,
@@ -805,6 +805,7 @@ trait AudioPlanLike {
     fn clip(&self) -> &Clip;
     fn volume_at(&self, frame: i32) -> f64;
     fn true_peak_ceiling_dbtp(&self) -> Option<f64>;
+    fn audio_denoise(&self) -> Option<AudioDenoise>;
 }
 
 impl AudioPlanLike for Clip {
@@ -819,6 +820,10 @@ impl AudioPlanLike for Clip {
     fn true_peak_ceiling_dbtp(&self) -> Option<f64> {
         self.loudness_normalization
             .map(|normalization| normalization.true_peak_ceiling_dbtp)
+    }
+
+    fn audio_denoise(&self) -> Option<AudioDenoise> {
+        self.audio_denoise
     }
 }
 
@@ -839,6 +844,12 @@ impl AudioPlanLike for AudioClipPlan {
                     .map(|normalization| normalization.true_peak_ceiling_dbtp)
             })
             .min_by(f64::total_cmp)
+    }
+
+    fn audio_denoise(&self) -> Option<AudioDenoise> {
+        std::iter::once(&self.gain_clip)
+            .chain(self.compound_ancestors.iter())
+            .find_map(|clip| clip.audio_denoise)
     }
 }
 
@@ -889,6 +900,7 @@ fn project_clip_audio<T: AudioPlanLike>(
     let target_len = ((clip.duration_frames as f64) / timeline_fps as f64 * MIX_SAMPLE_RATE as f64)
         .round() as usize;
     let samples = retime_pcm_to_len_with_control(&pcm.samples_f32, target_len, control)?;
+    let samples = apply_export_denoise(&samples, 1, plan.audio_denoise(), control)?;
     if samples.is_empty() {
         return Ok(None);
     }
@@ -922,6 +934,32 @@ fn project_clip_audio<T: AudioPlanLike>(
         samples,
         gains: if all_unity { Vec::new() } else { gains },
     }))
+}
+
+fn apply_export_denoise(
+    samples: &[f32],
+    channels: usize,
+    config: Option<AudioDenoise>,
+    control: Option<&ExportControl>,
+) -> Result<Vec<f32>, String> {
+    let Some(config) = config else {
+        return Ok(samples.to_vec());
+    };
+    let cancel = control
+        .map(ExportControl::media_cancel_token)
+        .unwrap_or_default();
+    opentake_media::analysis::denoise_interleaved(
+        samples,
+        channels,
+        MIX_SAMPLE_RATE,
+        config,
+        &cancel,
+        None,
+    )
+    .map_err(|error| match error {
+        opentake_media::analysis::DenoiseError::Cancelled => CANCELLED_SENTINEL.to_string(),
+        other => format!("audio denoise failed: {other}"),
+    })
 }
 
 fn mix_clips_with_control(
@@ -2253,6 +2291,27 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::Path;
+
+    #[test]
+    fn denoise_export_uses_shared_processing_owner() {
+        let config = opentake_domain::AudioDenoise {
+            mode: opentake_domain::DenoiseMode::Voice,
+            strength: 0.8,
+            preview_enabled: false,
+        };
+        let input = vec![0.2, -0.1, 0.15, -0.05, 0.1, 0.0, 0.05, 0.05];
+        let exported = apply_export_denoise(&input, 1, Some(config), None).expect("export denoise");
+        let shared = opentake_media::analysis::denoise_interleaved(
+            &input,
+            1,
+            MIX_SAMPLE_RATE,
+            config,
+            &MediaCancelToken::new(),
+            None,
+        )
+        .expect("shared denoise");
+        assert_eq!(exported, shared);
+    }
 
     fn unknown_core(root: &Path) -> AppCore {
         let bundle = root.join("Unknown.opentake");

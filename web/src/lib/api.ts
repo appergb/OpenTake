@@ -11,6 +11,7 @@
 import type {
   AccountInfo,
   AccountStatus,
+  AudioDenoise,
   CaptionRequest,
   ChatMessage,
   ChatSession,
@@ -22,6 +23,7 @@ import type {
   MediaList,
   LutReference,
   LoudnessNormalization,
+  DenoiseMode,
   ModelStatus,
   PlaybackCommandError,
   PlaybackFrameEvent,
@@ -1076,6 +1078,54 @@ export async function onLoudnessProgress(
       typeof progress.total === "number"
     ) {
       handler(progress as LoudnessProgress);
+    }
+  });
+}
+
+export interface DenoiseProgress {
+  clipId: string;
+  done: number;
+  total: number;
+}
+
+export async function prepareDenoise(
+  clipId: string,
+  mode: DenoiseMode,
+  strength: number,
+  previewEnabled: boolean,
+): Promise<AudioDenoise> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<AudioDenoise>("prepare_denoise", {
+      clipId,
+      mode,
+      strength,
+      previewEnabled,
+    });
+  }
+  throw new Error("audio denoise requires the desktop app");
+}
+
+export async function cancelDenoiseAnalysis(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("cancel_denoise_analysis");
+  return false;
+}
+
+export async function onDenoiseProgress(
+  clipId: string,
+  handler: (progress: DenoiseProgress) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("denoise://progress", (event) => {
+    const progress = event.payload as Partial<DenoiseProgress> | undefined;
+    if (
+      progress?.clipId === clipId &&
+      typeof progress.done === "number" &&
+      typeof progress.total === "number"
+    ) {
+      handler(progress as DenoiseProgress);
     }
   });
 }

@@ -22,6 +22,7 @@ import { t } from "../i18n";
 import type {
   CaptionEntryReq,
   CaptionRequest,
+  AudioDenoise,
   Clip,
   ClipEntryReq,
   ClipMoveReq,
@@ -40,6 +41,7 @@ import type {
   MaskInput,
   LutReference,
   LoudnessNormalization,
+  DenoiseMode,
   MediaItem,
   StabilizationTrack,
   RenameEntryReq,
@@ -83,6 +85,7 @@ export const EDIT_GESTURE_COMMAND_MATRIX = [
   { gesture: "mask commit", action: "setMasks", requestType: "setMasks", backend: "SetMasks" },
   { gesture: "effect chain commit", action: "setEffects", requestType: "setEffects", backend: "SetEffects" },
   { gesture: "loudness analysis apply or reset", action: "setLoudnessNormalization", requestType: "setLoudnessNormalization", backend: "SetLoudnessNormalization" },
+  { gesture: "denoise apply, preview toggle, or reset", action: "setAudioDenoise", requestType: "setAudioDenoise", backend: "SetAudioDenoise" },
   { gesture: "stabilization analysis apply", action: "analyzeAndApplyStabilization", requestType: "applyStabilization", backend: "ApplyStabilization" },
   { gesture: "stabilization strength or crop", action: "adjustStabilization", requestType: "adjustStabilization", backend: "AdjustStabilization" },
   { gesture: "stabilization reset", action: "resetStabilization", requestType: "resetStabilization", backend: "ResetStabilization" },
@@ -360,6 +363,25 @@ export async function analyzeAndApplyLoudness(
 
 export async function cancelLoudnessAnalysis() {
   return api.cancelLoudnessAnalysis();
+}
+
+export async function setAudioDenoise(clipId: string, denoise: AudioDenoise | null) {
+  await applyAndRefresh({ type: "setAudioDenoise", clipId, denoise });
+}
+
+export async function prepareAndApplyAudioDenoise(
+  clipId: string,
+  mode: DenoiseMode,
+  strength: number,
+  previewEnabled: boolean,
+) {
+  const denoise = await api.prepareDenoise(clipId, mode, strength, previewEnabled);
+  await setAudioDenoise(clipId, denoise);
+  return denoise;
+}
+
+export async function cancelDenoiseAnalysis() {
+  return api.cancelDenoiseAnalysis();
 }
 
 export async function applyStabilization(clipId: string, solution: StabilizationTrack) {

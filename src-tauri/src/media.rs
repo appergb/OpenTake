@@ -35,8 +35,9 @@ use opentake_core::{
     PreparedMediaFolderRef, PreparedMediaImportOp, ProbedMedia,
 };
 use opentake_domain::{
-    Clip, ClipType, GenerationInput, GenerationJobStatus, LoudnessNormalization, MediaManifest,
-    MediaManifestEntry, MediaSource, StabilizationTrack, Timeline,
+    AudioDenoise, Clip, ClipType, DenoiseMode, GenerationInput, GenerationJobStatus,
+    LoudnessNormalization, MediaManifest, MediaManifestEntry, MediaSource, StabilizationTrack,
+    Timeline,
 };
 use opentake_media::library::{FavoriteRequest, LibraryStore, PreparedFavorite};
 #[cfg(test)]
@@ -44,7 +45,8 @@ use opentake_media::MediaCancelToken;
 use opentake_media::{
     analysis::{
         analyze_loudness_with_progress, analyze_stabilization as build_stabilization,
-        track_translation_motion, LoudnessNormalizationConfig, StabilizationConfig,
+        denoise_interleaved, track_translation_motion, LoudnessNormalizationConfig,
+        StabilizationConfig,
     },
     cache_key::visual_file_identity_key,
     decode_frame_at, decode_frame_at_cancellable, decode_frames_at, decode_frames_at_cancellable,
@@ -79,6 +81,51 @@ pub struct StabilizationAnalysisState {
 #[derive(Default)]
 pub struct LoudnessAnalysisState {
     active: Mutex<Option<opentake_media::MediaCancelToken>>,
+}
+
+/// Single-flight cooperative cancellation for an Inspector denoise validation.
+#[derive(Default)]
+pub struct DenoiseAnalysisState {
+    active: Mutex<Option<opentake_media::MediaCancelToken>>,
+}
+
+impl DenoiseAnalysisState {
+    fn begin(&self) -> Result<opentake_media::MediaCancelToken, String> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.is_some() {
+            return Err("denoise_analysis_busy".to_string());
+        }
+        let token = opentake_media::MediaCancelToken::new();
+        *active = Some(token.clone());
+        Ok(token)
+    }
+
+    fn finish(&self, token: &opentake_media::MediaCancelToken) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active
+            .as_ref()
+            .is_some_and(|current| current.same_instance(token))
+        {
+            *active = None;
+        }
+    }
+
+    fn cancel(&self) -> bool {
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        active.as_ref().is_some_and(|token| {
+            token.cancel();
+            true
+        })
+    }
 }
 
 impl LoudnessAnalysisState {
@@ -2860,6 +2907,138 @@ pub fn cancel_loudness_analysis(analysis: State<'_, LoudnessAnalysisState>) -> b
     analysis.cancel()
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DenoiseProgressEvent {
+    clip_id: String,
+    done: usize,
+    total: usize,
+}
+
+/// Decode and process the exact visible source window before an Inspector apply.
+/// The processed copy is discarded: success proves the configured operation is
+/// runnable, while the source stays immutable and the separate edit command is
+/// the only history mutation.
+#[tauri::command]
+pub async fn prepare_denoise(
+    app: AppHandle,
+    clip_id: String,
+    mode: DenoiseMode,
+    strength: f64,
+    preview_enabled: bool,
+) -> Result<AudioDenoise, String> {
+    let cancel = app.state::<DenoiseAnalysisState>().begin()?;
+    let config = AudioDenoise {
+        mode,
+        strength,
+        preview_enabled,
+    };
+    let prepared = (|| {
+        config
+            .validate()
+            .map_err(|error| format!("denoise_invalid_config: {error}"))?;
+        let snapshot = app.state::<AppCore>().runtime_snapshot();
+        let clip = find_runtime_clip(&snapshot.timeline, &clip_id)
+            .ok_or_else(|| format!("denoise_clip_not_found: {clip_id}"))?;
+        if !matches!(clip.media_type, ClipType::Audio | ClipType::Video)
+            || clip.nested_sequence_id.is_some()
+        {
+            return Err(
+                "denoise_unreadable_audio: requires an ordinary audio-bearing clip".to_string(),
+            );
+        }
+        let (path, _) = crate::transcribe::resolve_asset_from_snapshot(&snapshot, &clip.media_ref)
+            .map_err(|error| format!("denoise_unreadable_audio: {error}"))?;
+        let fps = snapshot.timeline.fps.max(1) as f64;
+        let start = clip.trim_start_frame.max(0) as f64 / fps;
+        let duration = clip.source_frames_consumed().max(0) as f64 / fps;
+        if duration <= 0.0 {
+            return Err("denoise_unreadable_audio: clip has no visible duration".to_string());
+        }
+        if duration > 600.0 {
+            return Err(
+                "denoise_audio_too_long: validation is limited to 10 minutes per clip".to_string(),
+            );
+        }
+        Ok((path, (start, start + duration)))
+    })();
+
+    let result = match prepared {
+        Err(error) => Err(error),
+        Ok((path, range)) => {
+            let worker_cancel = cancel.clone();
+            let worker_app = app.clone();
+            let worker_clip_id = clip_id.clone();
+            match tauri::async_runtime::spawn_blocking(move || {
+                const SAMPLE_RATE: u32 = 48_000;
+                let decode_app = worker_app.clone();
+                let decode_clip_id = worker_clip_id.clone();
+                let decode_progress = Arc::new(move |done: usize, total: usize| {
+                    let mapped = done.min(total.max(1)).saturating_mul(60) / total.max(1);
+                    let _ = decode_app.emit(
+                        "denoise://progress",
+                        DenoiseProgressEvent {
+                            clip_id: decode_clip_id.clone(),
+                            done: mapped,
+                            total: 100,
+                        },
+                    );
+                });
+                let pcm = extract_pcm_cancellable_with_progress(
+                    &path,
+                    &PcmSpec {
+                        sample_rate: SAMPLE_RATE,
+                        channels: 1,
+                        format: PcmFormat::F32,
+                    },
+                    Some(range),
+                    &worker_cancel,
+                    Some(decode_progress),
+                )
+                .map_err(|error| match error {
+                    MediaError::Cancelled => "denoise_cancelled".to_string(),
+                    other => format!("denoise_unreadable_audio: {other}"),
+                })?;
+                let process_app = worker_app.clone();
+                let process_clip_id = worker_clip_id.clone();
+                let process_progress = Arc::new(move |done: usize, total: usize| {
+                    let mapped = 60 + done.min(total.max(1)).saturating_mul(40) / total.max(1);
+                    let _ = process_app.emit(
+                        "denoise://progress",
+                        DenoiseProgressEvent {
+                            clip_id: process_clip_id.clone(),
+                            done: mapped,
+                            total: 100,
+                        },
+                    );
+                });
+                let _processed = denoise_interleaved(
+                    &pcm.samples_f32,
+                    1,
+                    SAMPLE_RATE,
+                    config,
+                    &worker_cancel,
+                    Some(process_progress),
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(config)
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => Err(format!("denoise_analysis_task_failed: {error}")),
+            }
+        }
+    };
+    app.state::<DenoiseAnalysisState>().finish(&cancel);
+    result
+}
+
+#[tauri::command]
+pub fn cancel_denoise_analysis(analysis: State<'_, DenoiseAnalysisState>) -> bool {
+    analysis.cancel()
+}
+
 fn find_runtime_clip<'a>(timeline: &'a Timeline, clip_id: &str) -> Option<&'a Clip> {
     timeline
         .tracks
@@ -5120,6 +5299,26 @@ mod tests {
         let state = StabilizationAnalysisState::default();
         let first = state.begin().expect("first analysis reserves the slot");
         assert!(state.begin().is_err(), "a concurrent analysis is rejected");
+
+        assert!(state.cancel(), "the active analysis is cancellable");
+        assert!(first.is_cancelled());
+        state.finish(&first);
+        assert!(!state.cancel(), "finishing clears the active token");
+
+        let second = state.begin().expect("the slot can be reused after finish");
+        assert!(!second.is_cancelled());
+        state.finish(&second);
+    }
+
+    #[test]
+    fn denoise_analysis_state_cancels_and_releases_single_flight_slot() {
+        let state = DenoiseAnalysisState::default();
+        let first = state.begin().expect("first analysis reserves the slot");
+        let concurrent = match state.begin() {
+            Ok(_) => panic!("a concurrent analysis must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(concurrent, "denoise_analysis_busy");
 
         assert!(state.cancel(), "the active analysis is cancellable");
         assert!(first.is_cancelled());

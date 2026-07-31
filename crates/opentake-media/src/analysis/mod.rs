@@ -2,6 +2,7 @@
 
 pub mod autocrop;
 pub mod beat;
+pub mod denoise;
 pub mod loudness;
 pub mod silence;
 pub mod stabilization;
@@ -11,6 +12,7 @@ pub use autocrop::{
     PixelFormat,
 };
 pub use beat::{detect_beats, BeatDetectionConfig, BeatOnset};
+pub use denoise::{denoise_interleaved, DenoiseError, DenoiseProgressCallback};
 pub use loudness::{
     analyze_loudness, analyze_loudness_with_progress, apply_loudness_gain, LoudnessAnalysis,
     LoudnessError, LoudnessNormalizationConfig, LoudnessProgressCallback,

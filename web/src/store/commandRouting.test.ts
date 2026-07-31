@@ -70,6 +70,7 @@ import {
   setColorGrade,
   setLut,
   setLoudnessNormalization,
+  setAudioDenoise,
   setEffects,
   setKeyframeInterpolation,
   setKeyframes,
@@ -251,6 +252,11 @@ describe("edit gesture command routing", () => {
     await route(
       { type: "setLoudnessNormalization", clipId: "clip-a", normalization: loudness },
       () => setLoudnessNormalization("clip-a", loudness),
+    );
+    const denoise = { mode: "voice" as const, strength: 0.85, previewEnabled: true };
+    await route(
+      { type: "setAudioDenoise", clipId: "clip-a", denoise },
+      () => setAudioDenoise("clip-a", denoise),
     );
     const stabilization = {
       model: "opentake.motion-smoothing",

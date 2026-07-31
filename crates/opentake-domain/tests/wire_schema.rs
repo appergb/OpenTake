@@ -1,9 +1,10 @@
 use std::collections::BTreeSet;
 
 use opentake_domain::{
-    AnimPair, ChromaKey, Clip, ClipType, ColorGrade, Crop, Effect, Fill, Interpolation, Keyframe,
-    KeyframeTrack, LoudnessNormalization, LutReference, Mask, Rgba, Shadow, StabilizationKeyframe,
-    StabilizationTrack, TextAlignment, TextStyle, Track, Transform, Transition, TransitionKind,
+    AnimPair, AudioDenoise, ChromaKey, Clip, ClipType, ColorGrade, Crop, DenoiseMode, Effect, Fill,
+    Interpolation, Keyframe, KeyframeTrack, LoudnessNormalization, LutReference, Mask, Rgba,
+    Shadow, StabilizationKeyframe, StabilizationTrack, TextAlignment, TextStyle, Track, Transform,
+    Transition, TransitionKind,
 };
 use serde::Serialize;
 
@@ -107,6 +108,11 @@ fn full_clip() -> Clip {
         gain_db: 8.0,
         output_integrated_lufs: -16.0,
         output_true_peak_dbtp: -2.0,
+    });
+    clip.audio_denoise = Some(AudioDenoise {
+        mode: DenoiseMode::Voice,
+        strength: 0.75,
+        preview_enabled: true,
     });
     clip.color_grade = Some(ColorGrade::default());
     clip.lut = Some(

@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 
-use opentake_domain::{Clip, ClipType, Timeline};
+use opentake_domain::{AudioDenoise, Clip, ClipType, Timeline};
 use opentake_media::{
     decode_pcm_interleaved_cancellable, encode::mix::apply_true_peak_ceiling, MediaCancelToken,
     MediaError, PcmFormat, PcmSpec,
@@ -772,6 +772,8 @@ fn project_clip_audio_stereo(
     };
     let interleaved =
         decode_pcm_interleaved_cancellable(&info.path, &spec, Some((lo, hi)), cancel)?;
+    let interleaved =
+        apply_preview_denoise(&interleaved, MIX_CHANNELS, rate, clip.audio_denoise, cancel)?;
     let frames = interleaved.len() / MIX_CHANNELS;
     if frames == 0 {
         return Ok(None);
@@ -802,6 +804,30 @@ fn project_clip_audio_stereo(
             .loudness_normalization
             .map(|normalization| normalization.true_peak_ceiling_dbtp),
     }))
+}
+
+fn apply_preview_denoise(
+    samples: &[f32],
+    channels: usize,
+    sample_rate: u32,
+    config: Option<AudioDenoise>,
+    cancel: &MediaCancelToken,
+) -> Result<Vec<f32>, MediaError> {
+    let Some(config) = config.filter(|config| config.preview_enabled) else {
+        return Ok(samples.to_vec());
+    };
+    opentake_media::analysis::denoise_interleaved(
+        samples,
+        channels,
+        sample_rate,
+        config,
+        cancel,
+        None,
+    )
+    .map_err(|error| match error {
+        opentake_media::analysis::DenoiseError::Cancelled => MediaError::Cancelled,
+        other => MediaError::Decode(other.to_string()),
+    })
 }
 
 /// Sum placed stereo clips into one interleaved buffer, applying per-frame gains
@@ -1570,6 +1596,23 @@ mod tests {
         let expected = 10.0_f32.powf(-3.0 / 20.0);
         assert!((out[0] - expected).abs() < 1e-6);
         assert!((out[1] + expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn denoise_preview_uses_shared_processing_owner() {
+        let config = opentake_domain::AudioDenoise {
+            mode: opentake_domain::DenoiseMode::Adaptive,
+            strength: 0.75,
+            preview_enabled: true,
+        };
+        let input = vec![0.2, -0.1, 0.15, -0.05, 0.1, 0.0, 0.05, 0.05];
+        let cancel = MediaCancelToken::new();
+        let preview = apply_preview_denoise(&input, 2, 48_000, Some(config), &cancel)
+            .expect("preview denoise");
+        let shared =
+            opentake_media::analysis::denoise_interleaved(&input, 2, 48_000, config, &cancel, None)
+                .expect("shared denoise");
+        assert_eq!(preview, shared);
     }
 
     #[test]

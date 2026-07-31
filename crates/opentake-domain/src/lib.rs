@@ -40,7 +40,7 @@ pub mod transform;
 pub mod transition;
 
 // Flat re-export of the public domain API for ergonomic downstream use.
-pub use audio::LoudnessNormalization;
+pub use audio::{AudioDenoise, DenoiseMode, LoudnessNormalization};
 pub use caption_sync::{caption_group_ids, clips_in_group, sync_caption_group_style};
 pub use clip::{Clip, FadeEdge, KeyframeTrackWireField, KeyframeValueWireShape, VolumeScale};
 pub use clip_type::ClipType;

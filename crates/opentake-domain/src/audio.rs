@@ -1,5 +1,35 @@
 use serde::{Deserialize, Serialize};
 
+/// Deterministic local denoise profiles. Both use the same spectral processing
+/// owner; `Voice` applies stronger subtraction for spoken-word material.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DenoiseMode {
+    #[default]
+    Adaptive,
+    Voice,
+}
+
+/// Non-destructive denoise parameters persisted on one clip.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioDenoise {
+    pub mode: DenoiseMode,
+    pub strength: f64,
+    /// Inspector A/B toggle. Export always applies the configured operation;
+    /// native preview applies it only while this flag is true.
+    pub preview_enabled: bool,
+}
+
+impl AudioDenoise {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !self.strength.is_finite() || !(0.0..=1.0).contains(&self.strength) {
+            return Err("denoise strength must be finite and between 0 and 1");
+        }
+        Ok(())
+    }
+}
+
 /// Persisted result of one clip loudness analysis. The measured values make the
 /// operation reproducible; playback/export consume only `gain_db` and never
 /// need to re-read the source.

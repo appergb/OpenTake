@@ -67,11 +67,13 @@ import { CROP_ASPECT_LOCKS, cropForPreset, type CropAspectLock } from "../../lib
 import { FS, RADIUS, SPACE } from "../../lib/theme";
 import { useT, type TFunction } from "../../i18n";
 import type {
+  AudioDenoise,
   ChromaKey,
   Clip,
   ClipType,
   ColorGrade,
   Crop,
+  DenoiseMode,
   GenerationInput,
   Interpolation,
   KeyframeProperty,
@@ -536,6 +538,7 @@ function ClipInspector({
             </Row>
             <FadeSection clip={clip} commit={commit} t={t} />
             <LoudnessSection clip={clip} t={t} />
+            <DenoiseSection clip={clip} t={t} />
           </section>
         ) : (
           <>
@@ -1191,6 +1194,124 @@ function LoudnessSection({ clip, t }: { clip: Clip; t: TFunction }) {
             onClick={() => void (analyzing ? edit.cancelLoudnessAnalysis() : edit.setLoudnessNormalization(clip.id, null))}
           >
             {analyzing ? t("inspector.loudness.cancel") : t("inspector.loudness.reset")}
+          </button>
+        )}
+      </div>
+      {error && <div role="alert" style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, color: "var(--danger)" }}>{error}</div>}
+    </section>
+  );
+}
+
+function DenoiseSection({ clip, t }: { clip: Clip; t: TFunction }) {
+  const denoise = clip.audioDenoise;
+  const [mode, setMode] = useState<DenoiseMode>(denoise?.mode ?? "adaptive");
+  const [strength, setStrength] = useState(denoise?.strength ?? 0.9);
+  const [previewEnabled, setPreviewEnabled] = useState(denoise?.previewEnabled ?? true);
+  const [applying, setApplying] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setMode(clip.audioDenoise?.mode ?? "adaptive");
+    setStrength(clip.audioDenoise?.strength ?? 0.9);
+    setPreviewEnabled(clip.audioDenoise?.previewEnabled ?? true);
+    setApplying(false);
+    setProgress(0);
+    setError(null);
+  }, [clip.id, clip.audioDenoise]);
+
+  const apply = async () => {
+    setApplying(true);
+    setProgress(0);
+    setError(null);
+    let unlisten = () => {};
+    try {
+      unlisten = await api.onDenoiseProgress(clip.id, ({ done, total }) => {
+        setProgress(total > 0 ? Math.min(1, done / total) : 0);
+      });
+      await edit.prepareAndApplyAudioDenoise(clip.id, mode, strength, previewEnabled);
+      setProgress(1);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      if (!/denoise_cancelled/i.test(message)) setError(message);
+    } finally {
+      unlisten();
+      setApplying(false);
+    }
+  };
+
+  const togglePreview = (enabled: boolean) => {
+    setPreviewEnabled(enabled);
+    if (denoise) {
+      const updated: AudioDenoise = { ...denoise, previewEnabled: enabled };
+      void edit.setAudioDenoise(clip.id, updated).catch((reason) => {
+        setPreviewEnabled(denoise.previewEnabled);
+        setError(reason instanceof Error ? reason.message : String(reason));
+      });
+    }
+  };
+
+  return (
+    <section data-testid="denoise-section" style={{ marginTop: SPACE.md }}>
+      <SectionHeader label={t("inspector.section.denoise")} />
+      <Row label={t("inspector.denoise.mode")}>
+        <select
+          aria-label={t("inspector.denoise.mode")}
+          value={mode}
+          disabled={applying}
+          onChange={(event) => setMode(event.target.value as DenoiseMode)}
+          style={controlStyle}
+        >
+          <option value="adaptive">{t("inspector.denoise.mode.adaptive")}</option>
+          <option value="voice">{t("inspector.denoise.mode.voice")}</option>
+        </select>
+      </Row>
+      <Row label={t("inspector.denoise.strength")}>
+        <input
+          aria-label={t("inspector.denoise.strength")}
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={strength}
+          disabled={applying}
+          onChange={(event) => setStrength(Number(event.target.value))}
+        />
+        <span className="tabular" style={{ marginLeft: SPACE.xs }}>{Math.round(strength * 100)}%</span>
+      </Row>
+      <Row label={t("inspector.denoise.preview")}>
+        <input
+          aria-label={t("inspector.denoise.preview")}
+          type="checkbox"
+          checked={previewEnabled}
+          disabled={applying}
+          onChange={(event) => togglePreview(event.target.checked)}
+        />
+      </Row>
+      {denoise && (
+        <div
+          data-testid="denoise-result"
+          style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, color: "var(--text-tertiary)", fontSize: FS.xs }}
+        >
+          {t(`inspector.denoise.mode.${denoise.mode}`)} · {Math.round(denoise.strength * 100)}% · {denoise.previewEnabled ? t("inspector.denoise.previewOn") : t("inspector.denoise.previewOff")}
+        </div>
+      )}
+      {applying && (
+        <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.xs}px`, color: "var(--text-tertiary)", fontSize: FS.xs }}>
+          {t("inspector.denoise.processing")} {Math.round(progress * 100)}%
+        </div>
+      )}
+      <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px` }}>
+        <button type="button" style={controlStyle} disabled={applying} onClick={() => void apply()}>
+          {denoise ? t("inspector.denoise.reapply") : t("inspector.denoise.apply")}
+        </button>
+        {(applying || denoise) && (
+          <button
+            type="button"
+            style={{ ...controlStyle, marginLeft: SPACE.xs }}
+            onClick={() => void (applying ? edit.cancelDenoiseAnalysis() : edit.setAudioDenoise(clip.id, null))}
+          >
+            {applying ? t("inspector.denoise.cancel") : t("inspector.denoise.reset")}
           </button>
         )}
       </div>

@@ -179,6 +179,7 @@ pub fn run() {
             app.manage(MediaState::new(engine));
             app.manage(media::StabilizationAnalysisState::default());
             app.manage(media::LoudnessAnalysisState::default());
+            app.manage(media::DenoiseAnalysisState::default());
             app.manage(PrewarmScheduler::new(initial_project_epoch));
             app.manage(library_state);
             // Lazily-acquired GPU context for timeline composite previews (#47).
@@ -241,6 +242,8 @@ pub fn run() {
             media::cancel_stabilization_analysis,
             media::analyze_loudness,
             media::cancel_loudness_analysis,
+            media::prepare_denoise,
+            media::cancel_denoise_analysis,
             media::generate_thumbnail,
             media::request_timeline_sprite,
             media::set_timeline_sprite_interactive,

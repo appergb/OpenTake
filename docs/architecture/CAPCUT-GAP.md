@@ -164,7 +164,7 @@
 
 ## 模块4:音频工程与智能字幕
 
-**整体差距**:总体判断:本模块在 OpenTake/上游中呈"字幕强、音频处理逐项补齐"的分布。字幕侧 OpenTake 已用 whisper-rs + 确定性断句/计时完成一键字幕，并已补齐上游没有的 SRT/VTT 软字幕导出；前端、Tauri 文件边界和纯序列化层均已接通。音频工程侧已完成响度归一的分析、可撤销持久化、预览和导出共享处理链；降噪和人声分离仍待实现。字幕翻译仍只是 Agent 草稿路径，未形成一等公民翻译工作流，判 partial。字幕样式已具备 captionGroupId 与共享样式模型，但缺少"改一处→原子批量回写整组"的完整 UI/命令闭环，判 partial。当前落地优先级是降噪和字幕批量样式；人声分离与一等公民翻译保持后续独立验收项。
+**整体差距**:总体判断:本模块在 OpenTake/上游中呈"字幕强、音频处理逐项补齐"的分布。字幕侧 OpenTake 已用 whisper-rs + 确定性断句/计时完成一键字幕，并已补齐上游没有的 SRT/VTT 软字幕导出；前端、Tauri 文件边界和纯序列化层均已接通。音频工程侧已完成响度归一与本地智能降噪，两者均具备可撤销持久化、预览和导出共享处理链；人声分离仍待实现。字幕翻译仍只是 Agent 草稿路径，未形成一等公民翻译工作流，判 partial。字幕样式已具备 captionGroupId 与共享样式模型，但缺少"改一处→原子批量回写整组"的完整 UI/命令闭环，判 partial。当前落地优先级是字幕批量样式；人声分离与一等公民翻译保持后续独立验收项。
 
 ### 音频响度统一(loudness normalization / LUFS 归一) — `has` · 难度 medium · 优先级 p1
 - **判定依据**:OpenTake 已实现本地 EBU R128/BS.1770 集成响度、门限分块和 4× 插值真峰值分析，并把目标 LUFS、真峰值上限、测量值和增益持久化在 Clip。操作可撤销/重做，检查器提供分析、重新分析、重置、进度、取消和静音/无法读取的类型错误。
@@ -172,11 +172,11 @@
 - **验收结果**:在重建的 macOS release `.app` 中，语音和音乐的 AAC 导出成品分别由独立 FFmpeg `loudnorm` 测得 `-16.07 LUFS / -1.15 dBTP` 与 `-16.02 LUFS / -1.74 dBTP`，均满足 `-16 LUFS ±1 LU` 且不超过 `-1 dBTP`。保存/重开保持可写和分析结果，静音文件在真实 UI 返回 `loudness_silent_audio`。详见 `docs/audit/2026-07-14/runtime-artifacts/automated/loudness-real-device-2026-08-01.md`。
 - **前置依赖**:已使用现有 FFmpeg 音频解码链和 Clip volume 包络完成，无外部 API、模型或联网依赖。
 
-### 智能降噪(noise reduction) — `missing` · 难度 medium · 优先级 p1
-- **判定依据**:上游对 denoise/noiseReduction/noiseGate/noiseFloor/spectralGate/audioFilter/AVAudioUnit 全部 0 命中,无任何音频效果链。Export 仅 audioMix 做音量混音(CompositionBuilder),无降噪节点。OpenTake docs 无降噪条目。
-- **落点(crate/层)**:opentake-media 新增 audio-fx 处理层(离线渲染音频片段→处理后 content-hash 缓存,与缩略图/波形缓存同构);opentake-domain clip 新增可空 audio_fx 描述字段,由 opentake-render 在合成/导出时插入 FFmpeg 音频滤镜链。
-- **实现方案**:分两档跨平台。轻量档(p1 先行):FFmpeg 内置 afftdn(FFT 频域)/anlmdn(非局部均值)/highpass+lowpass+agate(噪声门),纯本地零依赖,覆盖稳态底噪/嗡声/嘶声。深度档(p2):引入 RNNoise(成熟 C 库+Rust 绑定,可静态链接,跨平台)或用 candle/ort 跑 DeepFilterNet ONNX 做非稳态人声降噪(贴近剪映'智能降噪')。降噪做成可选音频效果而非破坏式,结果落 content-hash 缓存。避免调外部云 API。
-- **前置依赖**:需先有 opentake-media 音频解码/重编码 PCM 往返;深度档需 ort/candle 运行时(已在栈内用于 SigLIP2)+ 模型分发渠道(可学上游 SearchIndexConfig 静态 CDN 下载);需在 domain 增 clip 效果字段并打通 render 音频路径。
+### 智能降噪(noise reduction) — `has` · 难度 medium · 优先级 p1
+- **判定依据**:OpenTake 已实现自适应/人声两种本地频域降噪模式及可调强度，参数作为可空 `AudioDenoise` 合同持久化在 Clip，源素材保持不变。检查器提供预览开关、应用/重新应用、重置、进度、取消和撤销/重做；保存重开后项目仍可写且参数保持。
+- **落点(crate/层)**:`opentake-media::analysis::denoise` 是共享的纯 Rust FFT 处理 owner；`opentake-domain::AudioDenoise` 与 `opentake-ops::EditCommand::SetAudioDenoise` 分别拥有 wire/持久化和撤销语义；Tauri 原生播放与导出都调用同一参数和处理 owner，异步准备任务具备单飞、进度与取消。
+- **验收结果**:在重建的 macOS release `.app` 中，真实操作覆盖两种模式、强度、预览开关、应用/重置、长素材取消、撤销/重做、播放、保存重开和“预览关闭仍导出处理”。确定性语音加噪声夹具的 SDR 从 `10.414 dB` 提升至 `16.2872 dB`（`+5.8732 dB`），AAC 成片峰值为 `-8.645 dB`，无削顶。详见 `docs/audit/2026-07-14/runtime-artifacts/automated/denoise-real-device-2026-08-01.md`。
+- **前置依赖**:仅使用现有 PCM 解码/编码路径与新增纯 Rust FFT 处理，无云 API、模型下载或联网依赖。
 
 ### 人声分离 / 提取人声(vocal isolation / source separation) — `missing` · 难度 high · 优先级 p2
 - **判定依据**:上游对 vocalIsolation/sourceSeparation/stemSeparation/demucs/spleeter 全部 0 命中(grep 命中的 stem 是 ToolExecutor+Import.swift 文件名变量,与音频无关)。无任何 stem 分离能力。OpenTake docs 无相关条目。

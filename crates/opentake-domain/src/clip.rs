@@ -217,6 +217,11 @@ pub struct Clip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loudness_normalization: Option<crate::LoudnessNormalization>,
 
+    /// Local non-destructive denoise configuration. Source PCM is never
+    /// rewritten; native preview and export process decoded copies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_denoise: Option<crate::AudioDenoise>,
+
     // Advanced pixel-effect fields (A-tier; `docs/ADVANCED-FEATURES.md`). All
     // `#[serde(default)]` + Option/Vec, so older projects (without these keys)
     // decode unchanged, and an all-default clip omits them on the way out.
@@ -287,6 +292,7 @@ impl Clip {
         "cropTrack",
         "volumeTrack",
         "loudnessNormalization",
+        "audioDenoise",
         "colorGrade",
         "lut",
         "chromaKey",
@@ -381,6 +387,7 @@ impl Clip {
             crop_track: None,
             volume_track: None,
             loudness_normalization: None,
+            audio_denoise: None,
             color_grade: None,
             lut: None,
             chroma_key: None,

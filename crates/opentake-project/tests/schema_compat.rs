@@ -49,6 +49,11 @@ fn write_known_bundle(bundle: &Path) {
                         "outputIntegratedLufs": -16.0,
                         "outputTruePeakDbtp": -2.0
                     },
+                    "audioDenoise": {
+                        "mode": "voice",
+                        "strength": 0.8,
+                        "previewEnabled": true
+                    },
                     "effects": [{"name": "blur", "params": {}, "enabled": true}],
                     "masks": [{
                         "shape": {"kind": "circle", "center": {"x": 0.5, "y": 0.5}, "radius": {"x": 0.5, "y": 0.5}},

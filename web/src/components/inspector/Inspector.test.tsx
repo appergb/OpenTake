@@ -313,6 +313,103 @@ describe("Inspector completion surface", () => {
     await act(async () => root.unmount());
   });
 
+  it("prepares, previews, cancels, displays, and resets audio denoise", async () => {
+    const clip = visualClip();
+    useProjectStore.setState({ timeline: timelineWith(clip), projectPath: "/tmp/demo.opentake" });
+    useMediaStore.setState({
+      items: [{ id: clip.mediaRef, name: "speech-noise.wav", type: "video", duration: 5, hasAudio: true }],
+      folders: [],
+      importing: false,
+      error: null,
+    });
+    useEditorUiStore.setState({ selectedClipIds: new Set([clip.id]), inspectorTab: "audio" });
+    const denoise = { mode: "voice" as const, strength: 0.85, previewEnabled: true };
+    const unlisten = vi.fn();
+    const listen = vi.spyOn(api, "onDenoiseProgress").mockImplementation(async (_id, handler) => {
+      handler({ clipId: clip.id, done: 60, total: 100 });
+      return unlisten;
+    });
+    const prepare = vi
+      .spyOn(edit, "prepareAndApplyAudioDenoise")
+      .mockResolvedValue(denoise);
+    const setDenoise = vi.spyOn(edit, "setAudioDenoise").mockResolvedValue();
+    const cancel = vi.spyOn(edit, "cancelDenoiseAnalysis").mockResolvedValue(true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Inspector />));
+
+    const section = container.querySelector('[data-testid="denoise-section"]');
+    const mode = section?.querySelector<HTMLSelectElement>('select[aria-label="模式"]');
+    const strength = section?.querySelector<HTMLInputElement>('input[aria-label="强度"]');
+    await act(async () => {
+      if (mode) mode.value = "voice";
+      mode?.dispatchEvent(new Event("change", { bubbles: true }));
+      if (strength) {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
+          strength,
+          "0.85",
+        );
+      }
+      strength?.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    });
+    const applyButton = [...(section?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent === "应用降噪",
+    );
+    await act(async () => {
+      applyButton?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(listen).toHaveBeenCalledWith(clip.id, expect.any(Function));
+    expect(prepare).toHaveBeenCalledWith(clip.id, "voice", 0.85, true);
+    expect(unlisten).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      useProjectStore.setState({ timeline: timelineWith(visualClip({ audioDenoise: denoise })) });
+    });
+    expect(container.querySelector('[data-testid="denoise-result"]')?.textContent).toContain(
+      "人声 · 85% · 预览开启",
+    );
+    const preview = section?.querySelector<HTMLInputElement>('input[aria-label="预览降噪"]');
+    await act(async () => preview?.click());
+    expect(setDenoise).toHaveBeenCalledWith(clip.id, { ...denoise, previewEnabled: false });
+
+    let rejectReapply!: (reason: Error) => void;
+    prepare.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectReapply = reject;
+        }),
+    );
+    const reapplyButton = [...(section?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent === "重新应用",
+    );
+    await act(async () => {
+      reapplyButton?.click();
+      await Promise.resolve();
+    });
+    const cancelButton = [...(section?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent === "取消处理",
+    );
+    await act(async () => cancelButton?.click());
+    expect(cancel).toHaveBeenCalledOnce();
+    await act(async () => rejectReapply(new Error("denoise_cancelled")));
+    expect(section?.querySelector('[role="alert"]')).toBeNull();
+
+    const resetButton = [...(section?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent === "重置降噪",
+    );
+    await act(async () => resetButton?.click());
+    expect(setDenoise).toHaveBeenLastCalledWith(clip.id, null);
+
+    listen.mockRestore();
+    prepare.mockRestore();
+    setDenoise.mockRestore();
+    cancel.mockRestore();
+    await act(async () => root.unmount());
+  });
+
   it("adds reorders adjusts toggles and removes generic effects through undoable commands", async () => {
     const clip = visualClip({
       effects: [

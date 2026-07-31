@@ -666,7 +666,7 @@ Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/auto
   - Expose preview toggle, apply/reset, cancellation, and undo/redo in the Audio Inspector.
   - On a speech-plus-noise fixture, assert at least 3 dB SNR improvement with no clipping, and verify preview/export use identical denoise parameters.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-media/tests/denoise.rs#deterministic_noise_fixture_and_bypass` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
   - `src-tauri/src/playback/audio.rs#denoise_preview_uses_shared_processing_owner` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
@@ -674,7 +674,7 @@ Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/auto
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-media --test denoise deterministic_noise_fixture_and_bypass -- --exact`
   - Run: `cargo test -p opentake-tauri --no-default-features --features playback-engine denoise_preview_uses_shared_processing_owner`
@@ -682,11 +682,11 @@ Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/auto
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-media/src/analysis/denoise.rs`, `src-tauri/src/playback/audio.rs`, `src-tauri/src/export.rs`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-media --test denoise deterministic_noise_fixture_and_bypass -- --exact`
   - Run: `cargo test -p opentake-tauri --no-default-features --features playback-engine denoise_preview_uses_shared_processing_owner`
@@ -694,11 +694,13 @@ Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/auto
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. The reviewed owning tests first failed because no shared denoise owner existed, then passed after the domain contract, pure-Rust spectral processor, playback/export integration, command/undo path, cancellable Tauri job and Inspector controls were connected. A second RED regression caught a rare STFT boundary peak (`input=0.388362`, `output=1.000000`); the edge crossfade and no-new-peak bound fixed it. The complete Rust workspace, warnings-denied Clippy, formatting and diff checks passed; the Web suite passed 91 files / 818 tests and the production build passed with only the pre-existing chunk/dynamic-import warnings. In the rebuilt ad-hoc-signed macOS app, adaptive and voice modes, strength, preview toggle, apply/reset, cancellation, undo/redo, native playback, save/reopen persistence, and export with preview disabled were exercised. The deterministic speech-plus-noise fixture improved from `10.414 dB` to `16.2872 dB` SDR (`+5.8732 dB`), while the exported AAC peak remained `-8.645 dB`. Runtime evidence: [`denoise-real-device-2026-08-01.md`](../runtime-artifacts/automated/denoise-real-device-2026-08-01.md).
 
 ### Task 13: MR-stems (implementation-slice-9139657f9c8c7ff5)
 

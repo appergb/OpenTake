@@ -25,6 +25,7 @@ ndarray = "0.16"
 tracing = "0.1"
 unicode-normalization = "0.1"
 tempfile = "3"
+rustfft = "6"
 
 # Media IO. We drive the system ffmpeg/ffprobe over the CLI rather than linking
 # libav*: the local toolchain is ffmpeg 8.1 (libavcodec 62), which the C-binding

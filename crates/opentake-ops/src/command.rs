@@ -19,9 +19,10 @@
 use std::collections::{HashMap, HashSet};
 
 use opentake_domain::{
-    ChromaKey, Clip, ClipType, ColorGrade, Crop, Effect, Interpolation, LoudnessNormalization,
-    LutReference, Mask, MaskShape, NestedSequence, StabilizationTrack, Timeline, Track, Transform,
-    Transition, TransitionKind, MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS,
+    AudioDenoise, ChromaKey, Clip, ClipType, ColorGrade, Crop, Effect, Interpolation,
+    LoudnessNormalization, LutReference, Mask, MaskShape, NestedSequence, StabilizationTrack,
+    Timeline, Track, Transform, Transition, TransitionKind, MAX_MASKS_PER_CLIP,
+    MAX_POLYGON_MASK_POINTS,
 };
 
 use crate::editor_state::EditorState;
@@ -113,6 +114,63 @@ mod loudness_command_tests {
             state.timeline.tracks[0].clips[0].loudness_normalization,
             Some(normalization())
         );
+    }
+}
+
+#[cfg(test)]
+mod denoise_command_tests {
+    use super::*;
+    use crate::id::SeqIdGen;
+    use opentake_domain::DenoiseMode;
+
+    #[test]
+    fn denoise_apply_reset_and_undo_are_one_step_operations() {
+        let mut timeline = Timeline::new();
+        let mut track = Track::new("a1", ClipType::Audio);
+        let mut clip = Clip::new("audio", "asset", 0, 90);
+        clip.media_type = ClipType::Audio;
+        clip.source_clip_type = ClipType::Audio;
+        track.clips.push(clip);
+        timeline.tracks.push(track);
+        let mut state = EditorState::from_timeline(timeline);
+        let config = AudioDenoise {
+            mode: DenoiseMode::Voice,
+            strength: 0.8,
+            preview_enabled: true,
+        };
+
+        apply(
+            &mut state,
+            EditCommand::SetAudioDenoise {
+                clip_id: "audio".to_string(),
+                denoise: Some(config),
+            },
+            &SeqIdGen::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state.timeline.tracks[0].clips[0].audio_denoise,
+            Some(config)
+        );
+        assert_eq!(state.undo_depth(), 1);
+        apply(&mut state, EditCommand::Undo, &SeqIdGen::default()).unwrap();
+        assert!(state.timeline.tracks[0].clips[0].audio_denoise.is_none());
+        apply(&mut state, EditCommand::Redo, &SeqIdGen::default()).unwrap();
+        assert_eq!(
+            state.timeline.tracks[0].clips[0].audio_denoise,
+            Some(config)
+        );
+
+        apply(
+            &mut state,
+            EditCommand::SetAudioDenoise {
+                clip_id: "audio".to_string(),
+                denoise: None,
+            },
+            &SeqIdGen::default(),
+        )
+        .unwrap();
+        assert!(state.timeline.tracks[0].clips[0].audio_denoise.is_none());
     }
 }
 
@@ -451,6 +509,11 @@ pub enum EditCommand {
         clip_id: String,
         normalization: Option<LoudnessNormalization>,
     },
+    /// Apply or reset local non-destructive denoise parameters.
+    SetAudioDenoise {
+        clip_id: String,
+        denoise: Option<AudioDenoise>,
+    },
     /// Persist a source-bound, editable stabilization analysis on one video clip.
     ApplyStabilization {
         clip_id: String,
@@ -734,6 +797,9 @@ pub fn apply(
             clip_id,
             normalization,
         } => set_loudness_normalization(state, clip_id, normalization),
+        EditCommand::SetAudioDenoise { clip_id, denoise } => {
+            set_audio_denoise(state, clip_id, denoise)
+        }
         EditCommand::ApplyStabilization { clip_id, solution } => {
             apply_stabilization(state, clip_id, solution)
         }
@@ -2716,6 +2782,44 @@ fn set_loudness_normalization(
                 .ok_or_else(|| EditError::Invalid(format!("Clip not found: {clip_id}")))?;
             st.timeline.tracks[track_index].clips[clip_index].loudness_normalization =
                 normalization;
+            Ok(vec![clip_id.clone()])
+        },
+    )
+}
+
+fn set_audio_denoise(
+    state: &mut EditorState,
+    clip_id: String,
+    denoise: Option<AudioDenoise>,
+) -> Result<EditResult, EditError> {
+    let location = state
+        .find_clip(&clip_id)
+        .ok_or_else(|| EditError::Invalid(format!("Clip not found: {clip_id}")))?;
+    let clip = &state.timeline.tracks[location.track_index].clips[location.clip_index];
+    if !matches!(clip.media_type, ClipType::Audio | ClipType::Video)
+        || clip.nested_sequence_id.is_some()
+    {
+        return Err(EditError::Invalid(
+            "audio denoise requires an ordinary audio-bearing clip".to_string(),
+        ));
+    }
+    if let Some(value) = denoise {
+        value
+            .validate()
+            .map_err(|error| EditError::Invalid(format!("invalid audio denoise: {error}")))?;
+    }
+    transact(
+        state,
+        if denoise.is_some() {
+            "Apply Audio Denoise"
+        } else {
+            "Reset Audio Denoise"
+        },
+        |_| "Updated clip audio denoise".to_string(),
+        move |st| {
+            let (track_index, clip_index) = find(&st.timeline, &clip_id)
+                .ok_or_else(|| EditError::Invalid(format!("Clip not found: {clip_id}")))?;
+            st.timeline.tracks[track_index].clips[clip_index].audio_denoise = denoise;
             Ok(vec![clip_id.clone()])
         },
     )
