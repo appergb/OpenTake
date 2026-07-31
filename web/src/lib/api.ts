@@ -149,6 +149,12 @@ export async function getDefaultProjectDir(): Promise<string> {
   return "";
 }
 
+export async function sampleProjectMaterialize(slug: string): Promise<string> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<string>("sample_project_materialize", { slug });
+  throw new Error("Sample projects require the OpenTake desktop app");
+}
+
 // MARK: - Timeline interchange export (XMEML / EDL / OTIO / FCPXML)
 //
 // Four standard editorial-interchange formats, each a thin path-only command

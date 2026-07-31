@@ -20,6 +20,7 @@ mod library;
 mod mcp;
 mod media;
 mod render;
+mod samples;
 mod search;
 mod secret;
 mod transcribe;
@@ -210,6 +211,7 @@ pub fn run() {
             commands::export_otio,
             commands::export_subtitles,
             commands::check_path_exists,
+            samples::sample_project_materialize,
             media::import_folder,
             media::import_media,
             media::relink_media,

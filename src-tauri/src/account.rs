@@ -109,6 +109,10 @@ pub(crate) fn generation_credential() -> Result<Option<(String, String)>, String
         .map(|credential| (credential.backend_url, credential.token)))
 }
 
+pub(crate) fn configured_backend_url() -> Result<Option<String>, String> {
+    load_backend_url(&keyring_store())
+}
+
 fn advance_generation(runtime: &mut AccountRuntime) -> u64 {
     runtime.generation = runtime.generation.wrapping_add(1);
     runtime.generation

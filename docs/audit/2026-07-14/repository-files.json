@@ -2392,8 +2392,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 377543,
-      "sha256": "8294a2bf65b126e79b5ca5718b94e00f57a8e29476bbaaa0071e6ac6e7911b0a"
+      "bytes": 378018,
+      "sha256": "652b5a6cf7ac2b3dece7b4a0a8ec44867e10e505a9a616caeb40746a8ed99202"
     },
     {
       "id": "file-8fb895ecdd8c9390",
@@ -2689,8 +2689,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 165222,
-      "sha256": "8f31d1b22053b3f3332778c0913aa3ff1785317b5d2d8b9c1645472cef90c4dd"
+      "bytes": 165370,
+      "sha256": "70afa1fd9619ec67f2bfcd3fd3a273f1645ce6b6c4779178cb60f8bd5863605c"
     },
     {
       "id": "file-55b6b718c705afb7",
@@ -2855,6 +2855,15 @@
       "material": true,
       "bytes": 3667,
       "sha256": "7e01cae7c67906fa2f6cfc97b9e08953b5458ed60db334a21ff9be6ac085522c"
+    },
+    {
+      "id": "file-ae0979bad2fd9d32",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/home-sample-project-real-device-2026-07-31.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 3836,
+      "sha256": "14d9e1f38bb66555ed468c9b098138ef3cf278564d4fe611c9fb366c949a5a85"
     },
     {
       "id": "file-e88d648441e169a7",
@@ -5589,8 +5598,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 41738,
-      "sha256": "3045c88919f136425137d39a0a2e899842e718dc767763372ce9fee10def0305"
+      "bytes": 41855,
+      "sha256": "cbc4690482e19e79d49571945f2ab2c1979d38689dcb0180911e36d5298c556a"
     },
     {
       "id": "file-e7f96b59876dbd63",
@@ -5652,8 +5661,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 16753,
-      "sha256": "912e857a13895d82f8933c01cf090504652f021ca0fde377acd0c4b38a263d75"
+      "bytes": 16815,
+      "sha256": "6691f5d983ad3038957b579261e6eedd8287f0fc2fbeab487438b5bcfe67914b"
     },
     {
       "id": "file-18c6c092770d0fbe",
@@ -5780,6 +5789,15 @@
       "material": true,
       "bytes": 41711,
       "sha256": "6f321af99a4298683ff51044a2709cb3ce5d651796cfcd248e1fc9fdb6fc725e"
+    },
+    {
+      "id": "file-03f150fc445ab2dc",
+      "path": "src-tauri/src/samples.rs",
+      "domain": "src-tauri",
+      "kind": "rust-source",
+      "material": true,
+      "bytes": 19478,
+      "sha256": "ca3f6f910fb1dcd1a184db685520d632d8071b874cf7b62fda6b7b2d62fd5965"
     },
     {
       "id": "file-ddf9ce8b65978bce",
@@ -6007,13 +6025,22 @@
       "sha256": "7fe21609498c0cbf8d0a7cb559f3ef698bc9563063bfacc62270367a48d1d223"
     },
     {
+      "id": "file-20d0262d3bce9fa1",
+      "path": "web/src/components/home/HomeView.test.tsx",
+      "domain": "web",
+      "kind": "tsx-source",
+      "material": true,
+      "bytes": 2157,
+      "sha256": "6f3b21c5e0a9086c68ec7fe99feda9a84dda64e80f9d64b50b951b3c4ed97cbd"
+    },
+    {
       "id": "file-0bae1db2d44e11b0",
       "path": "web/src/components/home/HomeView.tsx",
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 18420,
-      "sha256": "98f210c8e89c0dc815f7647e26d945e2326d5310eb4ffb599c678d6b9b6966d9"
+      "bytes": 20247,
+      "sha256": "fcc9c8cf1aab8e36967fadebf5551b986a25ff25ee6db21892208f4290b2f910"
     },
     {
       "id": "file-0d2496801df2e6df",
@@ -6858,8 +6885,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 60337,
-      "sha256": "eceedc986d0ad750795e95370df0b44852b99e88f2d937f80d19e7f9d09b83b4"
+      "bytes": 60671,
+      "sha256": "4befd4cffe6e5c161de16c6a006b8688876274065b856b15d5c71faceb0d3ddb"
     },
     {
       "id": "file-4965754bcf377f58",
@@ -6903,8 +6930,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 46045,
-      "sha256": "c8d971fbb7b980481a66bf68756bff1b8f69dc4f8702eb858ae9682841ef9365"
+      "bytes": 46307,
+      "sha256": "007508bc1d9e3932456217241d3e128a8996d523874c3830f58484f56c272981"
     },
     {
       "id": "file-d9a7857e58914645",
@@ -7461,8 +7488,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 18103,
-      "sha256": "918acbc311765197ac55d01d56b02cc7025c37f69672e2dca7cf35be80873435"
+      "bytes": 20133,
+      "sha256": "223a28479ec731f5019e80a2f20120be4d3f20ceb1c736db43437c20701f46d8"
     },
     {
       "id": "file-ae123ba03cd6ac29",
@@ -7470,8 +7497,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 10759,
-      "sha256": "1337f4b25878faedfcf4e25e0b239a5440a001745014568296901a7576a50528"
+      "bytes": 11809,
+      "sha256": "59a036dbc96e8f342c389c9d3932bffc89d93bc28adf9bde5cb56a9bc932410a"
     },
     {
       "id": "file-6c82a868b1fb4916",

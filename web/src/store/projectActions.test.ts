@@ -63,6 +63,7 @@ const srv = vi.hoisted(() => {
       };
     }),
     projectSave: vi.fn(async (path: string | null) => path ?? ""),
+    sampleProjectMaterialize: vi.fn(async () => "/tmp/cache/quick-tutorial/Tutorial.opentake"),
     getMedia: vi.fn(async () => media),
     openDialog: vi.fn(async () => undefined),
   };
@@ -72,6 +73,7 @@ vi.mock("../lib/api", () => ({
   projectOpen: srv.projectOpen,
   projectNew: srv.projectNew,
   projectSave: srv.projectSave,
+  sampleProjectMaterialize: srv.sampleProjectMaterialize,
   getDefaultProjectDir: async () => "",
   getTimeline: async () => ({
     timeline: srv.timeline,
@@ -99,6 +101,7 @@ import {
   newProjectAndEnter,
   openProjectPath,
   openProjectViaDialog,
+  openSampleProject,
   saveCurrentProject,
   saveCurrentProjectAs,
 } from "./projectActions";
@@ -303,6 +306,51 @@ describe("openProjectPath", () => {
       "创建失败：project create timed out after 15s",
     );
     expect(srv.projectSave).not.toHaveBeenCalled();
+  });
+});
+
+describe("openSampleProject", () => {
+  beforeEach(() => {
+    srv.order.length = 0;
+    srv.sampleProjectMaterialize.mockClear();
+    srv.projectOpen.mockClear();
+    srv.projectOpen.mockImplementation(async () => ({
+      timeline: srv.timeline,
+      projectEpoch: 8,
+      version: 2,
+      projectPath: "/tmp/cache/quick-tutorial/Tutorial.opentake",
+      compatibilityReadOnly: false,
+      compatibilityBlockers: [],
+    }));
+    srv.getMedia.mockResolvedValue(srv.media);
+    useRecentStore.setState({
+      recents: [{ path: "/tmp/User.opentake", name: "User", openedAt: 1 }],
+    });
+    useEditorUiStore.setState({ view: "home", toast: null });
+    useI18nStore.setState({ locale: "en" });
+  });
+
+  it("opens a completed tutorial sample without registering its cache path", async () => {
+    await openSampleProject("quick-tutorial", true);
+
+    expect(srv.sampleProjectMaterialize).toHaveBeenCalledWith("quick-tutorial");
+    expect(srv.projectOpen).toHaveBeenCalledWith(
+      "/tmp/cache/quick-tutorial/Tutorial.opentake",
+    );
+    expect(useRecentStore.getState().recents.map(({ name }) => name)).toEqual(["User"]);
+    expect(useEditorUiStore.getState().view).toBe("editor");
+    expect(useEditorUiStore.getState().toast?.message).toContain("Tutorial project opened");
+  });
+
+  it("does not open or mutate recents when materialization fails", async () => {
+    srv.sampleProjectMaterialize.mockRejectedValueOnce(new Error("download failed"));
+
+    await expect(openSampleProject("quick-tutorial", true)).rejects.toThrow("download failed");
+
+    expect(srv.projectOpen).not.toHaveBeenCalled();
+    expect(useRecentStore.getState().recents.map(({ name }) => name)).toEqual(["User"]);
+    expect(useEditorUiStore.getState().view).toBe("home");
+    expect(useEditorUiStore.getState().toast?.message).toContain("download failed");
   });
 });
 

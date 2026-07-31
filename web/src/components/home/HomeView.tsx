@@ -6,6 +6,7 @@ import { useEditorUiStore } from "../../store/uiStore";
 import { useRecentStore, type RecentProject } from "../../store/recentStore";
 import {
   newProjectAndEnter,
+  openSampleProject,
   openProjectViaDialog,
   openProjectPath,
 } from "../../store/projectActions";
@@ -48,7 +49,7 @@ const homeWorkspaceStyle: CSSProperties = {
 
 const subtleTransition = "background-color var(--anim-hover) var(--ease-out), border-color var(--anim-hover) var(--ease-out), color var(--anim-hover) var(--ease-out)";
 
-type ProjectAction = "new" | "open" | null;
+type ProjectAction = "new" | "open" | "sample" | null;
 
 export function HomeView() {
   const recents = useRecentStore((s) => s.recents);
@@ -87,6 +88,12 @@ export function HomeView() {
       />
       <main style={homeMainStyle}>
         <section style={homeWorkspaceStyle}>
+          <SampleProjectsStrip
+            busy={projectAction !== null}
+            onOpen={(slug, tutorial) =>
+              void runProjectAction("sample", () => openSampleProject(slug, tutorial))
+            }
+          />
           {recents.length === 0 ? (
             <EmptyLauncher
               projectAction={projectAction}
@@ -107,6 +114,58 @@ export function HomeView() {
         </section>
       </main>
     </div>
+  );
+}
+
+const SAMPLE_PROJECTS = [
+  { slug: "product-demo", label: "home.sampleDemo", tutorial: false },
+  { slug: "quick-tutorial", label: "home.sampleTutorial", tutorial: true },
+  { slug: "template-project", label: "home.sampleTemplate", tutorial: false },
+] as const;
+
+function SampleProjectsStrip({
+  busy,
+  onOpen,
+}: {
+  busy: boolean;
+  onOpen: (slug: string, tutorial: boolean) => void;
+}) {
+  const t = useT();
+  return (
+    <section
+      aria-labelledby="home-samples-heading"
+      style={{ padding: "var(--titlebar-safe-top) var(--space-xl-xxl) 0" }}
+    >
+      <h2
+        id="home-samples-heading"
+        style={{ margin: "0 0 var(--space-sm)", fontSize: "var(--fs-xs)", fontWeight: 500 }}
+      >
+        {t("home.samples")}
+      </h2>
+      <div style={{ display: "flex", gap: "var(--space-sm)" }}>
+        {SAMPLE_PROJECTS.map((sample) => (
+          <button
+            key={sample.slug}
+            type="button"
+            disabled={busy}
+            aria-busy={busy || undefined}
+            onClick={() => onOpen(sample.slug, sample.tutorial)}
+            className="hover-area"
+            style={{
+              minHeight: 34,
+              padding: "0 var(--space-md)",
+              border: "1px solid var(--home-border)",
+              borderRadius: "var(--radius-md)",
+              background: "rgba(255,255,255,0.018)",
+              color: "var(--home-muted-foreground)",
+              opacity: busy ? 0.55 : 1,
+            }}
+          >
+            {t(sample.label)}
+          </button>
+        ))}
+      </div>
+    </section>
   );
 }
 

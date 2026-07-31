@@ -89,36 +89,38 @@
   - Add browser interaction tests for every named Home, project, persistence, error, keyboard, and state transition; the affected web and Rust suites must pass.
   - Exercise the packaged application through create/open/close/reopen or the named Home path and retain exact runtime evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `src-tauri/src/samples.rs#failed_materialization_rolls_back_entire_sample_directory` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
   - `web/src/components/home/HomeView.test.tsx#new_open_sample_register_only_after_success_and_route_tutorial` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-tauri failed_materialization_rolls_back_entire_sample_directory`
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.test.tsx -t "new_open_sample_register_only_after_success_and_route_tutorial"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/home/HomeView.tsx#HomeView`, `web/src/store/projectActions.ts#newProjectAndEnter`, `web/src/store/projectActions.ts#openProjectPath`, `web/src/store/projectActions.ts#openProjectViaDialog`, `src-tauri/src/samples.rs#SampleProjectService`, `docs/architecture/MODULE-PORT-MAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-tauri failed_materialization_rolls_back_entire_sample_directory`
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.test.tsx -t "new_open_sample_register_only_after_success_and_route_tutorial"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Runtime evidence: [`home-sample-project-real-device-2026-07-31.md`](../runtime-artifacts/automated/home-sample-project-real-device-2026-07-31.md).
 
 ### Task 3: HS-project-card-lifecycle (implementation-slice-1136a3fb2728f04d)
 
