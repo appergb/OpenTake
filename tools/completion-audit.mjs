@@ -6432,6 +6432,8 @@ const REVIEWED_REPORT_SLICE_DEFINITIONS_RAW = [
     tests: [
       { path: "web/src/store/editActions.test.ts", name: "forwards swapTracks for whole-track reordering", evidenceClass: "existing-owned" },
       { path: "web/src/store/commandRouting.test.ts", name: "every_edit_action_emits_exact_edit_request", evidenceClass: "reviewed-planned" },
+      { path: "web/src/lib/api.editApply.test.ts", name: "edit_apply_forwards_exact_command_envelope", evidenceClass: "reviewed-planned" },
+      { path: "src-tauri/src/commands.rs", name: "every_frontend_edit_request_deserializes_to_intended_command", evidenceClass: "reviewed-planned" },
     ],
     rationale: "Core mapping report CC-edit-gesture-parity: focused gesture tests exist, but no closed inventory proves every UI path emits the exact shared request.",
   },

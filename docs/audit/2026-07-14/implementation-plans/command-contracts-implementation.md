@@ -597,6 +597,8 @@
 - Modify: `docs/specs/frontend/13-implementation.md`
 - Test (existing-owned): `web/src/store/editActions.test.ts#forwards swapTracks for whole-track reordering`
 - Test (reviewed-planned): `web/src/store/commandRouting.test.ts#every_edit_action_emits_exact_edit_request`
+- Test (reviewed-planned): `web/src/lib/api.editApply.test.ts#edit_apply_forwards_exact_command_envelope`
+- Test (reviewed-planned): `src-tauri/src/commands.rs#every_frontend_edit_request_deserializes_to_intended_command`
 
 **Candidate-bound contracts:**
 
@@ -620,36 +622,62 @@
   - Add request/response tests for every named success, boundary, rejection, validation, and secrecy rule; the affected Rust and TypeScript suites must pass.
   - Exercise the production IPC, MCP, or browser entry point end to end and record the exact command payload, result, and test names before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/store/editActions.test.ts#forwards swapTracks for whole-track reordering` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `web/src/store/commandRouting.test.ts#every_edit_action_emits_exact_edit_request` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
+  - `web/src/lib/api.editApply.test.ts#edit_apply_forwards_exact_command_envelope` (reviewed-planned) — Production Tauri invocation must retain the exact command wrapper.
+  - `src-tauri/src/commands.rs#every_frontend_edit_request_deserializes_to_intended_command` (reviewed-planned) — Native serde and command routing must cover the same exhaustive request set.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+  Result: Added the exact planned Web owner plus production IPC and native
+  routing owners. The Web owner executes all 41 typed action routes, exact DTO
+  shapes, representative no-ops, and a static direct-mutation guard.
+
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/store/editActions.test.ts -t "forwards swapTracks for whole-track reordering"`
   - Run: `pnpm -C web test -- --run src/store/commandRouting.test.ts -t "every_edit_action_emits_exact_edit_request"`
 
   Expected: FAIL because one or more of the 2 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Result: RED reproduced: the planned owner loaded an undefined
+  `EDIT_GESTURE_COMMAND_MATRIX`, proving no exhaustive production inventory
+  existed. Audit also found `addTexts` and `removeTracks` request variants with
+  no shared action wrapper.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/timeline/TimelineContainer.tsx#TimelineContainer`, `web/src/store/editActions.ts#buildMediaInsertPlan`, `web/src/lib/api.ts#editApply`, `src-tauri/src/commands.rs#EditRequest`, `docs/modules/web/SPEC.md`, `docs/specs/frontend/13-implementation.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Result: Added an exhaustively typed 41-row gesture/action/request/backend
+  matrix and the missing direct action wrappers. Every low-level action emits
+  exactly one `EditRequest`, empty/same-target boundaries emit none, and the
+  obsolete sequential `editApplyMany` pseudo-transaction was removed. The
+  production IPC envelope and every Rust serde route now have focused owners;
+  both acceptance documents record the concrete evidence.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/store/editActions.test.ts -t "forwards swapTracks for whole-track reordering"`
   - Run: `pnpm -C web test -- --run src/store/commandRouting.test.ts -t "every_edit_action_emits_exact_edit_request"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Result: GREEN. The existing swap owner, exhaustive Web owner, production IPC
+  owner, and 41-case native route owner each passed exactly once.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. Rust formatting, the complete Web suite (86 files / 782
+  tests), production Web build, `cargo test --workspace --no-fail-fast`, and
+  `git diff --check` all completed successfully. Only the repository's existing
+  dynamic-import/chunk-size and transitive `block v0.1.6` diagnostics remained.
 
 ### Task 7: CC-readonly-versioned-mirror (implementation-slice-dc651cd267aea077)
 

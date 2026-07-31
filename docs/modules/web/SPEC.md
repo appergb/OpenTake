@@ -1285,7 +1285,13 @@ interface Clip {                  // Timeline.swift:75-117
 
 **D. 状态/契约**
 - [ ] 镜像只由 `timeline_changed`→`get_timeline` 更新；前端无任何直接改 timeline 的路径。
-- [ ] 每个编辑手势映射到正确 `edit_apply` 命令（§11.1）。
+- [x] 每个编辑手势映射到正确 `edit_apply` 命令（§11.1）。
+
+该项由 `EDIT_GESTURE_COMMAND_MATRIX` 穷举 TypeScript `EditRequest` 的 41 个变体；编译期
+sentinel 在新增但未登记变体时失败。`commandRouting.test.ts` 逐 action 断言完整 camelCase
+DTO、空输入 no-op 和组件/Store 无直接 Timeline mutation；`api.editApply.test.ts` 验证生产
+Tauri envelope；Rust `every_frontend_edit_request_deserializes_to_intended_command` 逐个反序列化
+并核对对应 `EditCommand`（`freezeFrame` 由带媒体捕获的专用 `edit_apply` 分支接管）。
 - [x] 持久化键（layoutPreset/三面板可见性/keyframes）跨会话保留。
 
 持久化契约使用逐字段、带 schema 版本的键：`opentake.ui.v1.layoutPreset`、

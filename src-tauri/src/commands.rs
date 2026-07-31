@@ -1600,6 +1600,245 @@ mod edit_request_serde_tests {
     use opentake_domain::{ClipType, TransitionKind};
     use opentake_ops::ClipEntry;
 
+    fn request_route(request: &EditRequest) -> &'static str {
+        match request {
+            EditRequest::AddClips { .. } => "AddClips",
+            EditRequest::InsertClips { .. } => "InsertClips",
+            EditRequest::MoveClips { .. } => "MoveClips",
+            EditRequest::DuplicateClips { .. } => "DuplicateClips",
+            EditRequest::RemoveClips { .. } => "RemoveClips",
+            EditRequest::SplitClip { .. } => "SplitClip",
+            EditRequest::FreezeFrame { .. } => "FreezeFrame",
+            EditRequest::TrimClips { .. } => "TrimClips",
+            EditRequest::SetClipProperties { .. } => "SetClipProperties",
+            EditRequest::SetKeyframes { .. } => "SetKeyframes",
+            EditRequest::StampKeyframe { .. } => "StampKeyframe",
+            EditRequest::UpsertKeyframe { .. } => "UpsertKeyframe",
+            EditRequest::RemoveKeyframe { .. } => "RemoveKeyframe",
+            EditRequest::MoveKeyframe { .. } => "MoveKeyframe",
+            EditRequest::SetKeyframeInterpolation { .. } => "SetKeyframeInterpolation",
+            EditRequest::SetColorGrade { .. } => "SetColorGrade",
+            EditRequest::SetChromaKey { .. } => "SetChromaKey",
+            EditRequest::SetMasks { .. } => "SetMasks",
+            EditRequest::SetEffects { .. } => "SetEffects",
+            EditRequest::SetTransition { .. } => "SetTransition",
+            EditRequest::RippleDeleteRanges { .. } => "RippleDeleteRanges",
+            EditRequest::RippleDeleteClips { .. } => "RippleDeleteClips",
+            EditRequest::AddTexts { .. } => "AddTexts",
+            EditRequest::AddTextsAutoTrack { .. } => "AddTextsAutoTrack",
+            EditRequest::AddCaptions { .. } => "AddCaptions",
+            EditRequest::Link { .. } => "Link",
+            EditRequest::Unlink { .. } => "Unlink",
+            EditRequest::RemoveTracks { .. } => "RemoveTracks",
+            EditRequest::SwapTracks { .. } => "SwapTracks",
+            EditRequest::SwapClips { .. } => "SwapClips",
+            EditRequest::InsertTrack { .. } => "InsertTrack",
+            EditRequest::SetTrackProps { .. } => "SetTrackProps",
+            EditRequest::CreateFolder { .. } => "CreateFolder",
+            EditRequest::MoveToFolder { .. } => "MoveToFolder",
+            EditRequest::RenameMedia { .. } => "RenameMedia",
+            EditRequest::RenameFolder { .. } => "RenameFolder",
+            EditRequest::DeleteMedia { .. } => "DeleteMedia",
+            EditRequest::DeleteFolder { .. } => "DeleteFolder",
+            EditRequest::SwapMedia { .. } => "SwapMedia",
+            EditRequest::ResetTransform { .. } => "ResetTransform",
+            EditRequest::SetTimelineSettings { .. } => "SetTimelineSettings",
+        }
+    }
+
+    fn command_matches_route(command: &EditCommand, route: &str) -> bool {
+        matches!(
+            (route, command),
+            ("AddClips", EditCommand::AddClips { .. })
+                | ("InsertClips", EditCommand::InsertClips { .. })
+                | ("MoveClips", EditCommand::MoveClips { .. })
+                | ("DuplicateClips", EditCommand::DuplicateClips { .. })
+                | ("RemoveClips", EditCommand::RemoveClips { .. })
+                | ("SplitClip", EditCommand::SplitClip { .. })
+                | ("TrimClips", EditCommand::TrimClips { .. })
+                | ("SetClipProperties", EditCommand::SetClipProperties { .. })
+                | ("SetKeyframes", EditCommand::SetKeyframes { .. })
+                | ("StampKeyframe", EditCommand::StampKeyframe { .. })
+                | ("UpsertKeyframe", EditCommand::UpsertKeyframe { .. })
+                | ("RemoveKeyframe", EditCommand::RemoveKeyframe { .. })
+                | ("MoveKeyframe", EditCommand::MoveKeyframe { .. })
+                | (
+                    "SetKeyframeInterpolation",
+                    EditCommand::SetKeyframeInterpolation { .. }
+                )
+                | ("SetColorGrade", EditCommand::SetColorGrade { .. })
+                | ("SetChromaKey", EditCommand::SetChromaKey { .. })
+                | ("SetMasks", EditCommand::SetMasks { .. })
+                | ("SetEffects", EditCommand::SetEffects { .. })
+                | ("SetTransition", EditCommand::SetTransition { .. })
+                | ("RippleDeleteRanges", EditCommand::RippleDeleteRanges { .. })
+                | ("RippleDeleteClips", EditCommand::RippleDeleteClips { .. })
+                | ("AddTexts", EditCommand::AddTexts { .. })
+                | ("AddTextsAutoTrack", EditCommand::AddTextsAutoTrack { .. })
+                | ("AddCaptions", EditCommand::AddCaptions { .. })
+                | ("Link", EditCommand::Link { .. })
+                | ("Unlink", EditCommand::Unlink { .. })
+                | ("RemoveTracks", EditCommand::RemoveTracks { .. })
+                | ("SwapTracks", EditCommand::SwapTracks { .. })
+                | ("SwapClips", EditCommand::SwapClips { .. })
+                | ("InsertTrack", EditCommand::InsertTrack { .. })
+                | ("SetTrackProps", EditCommand::SetTrackProps { .. })
+                | ("CreateFolder", EditCommand::CreateFolder { .. })
+                | ("MoveToFolder", EditCommand::MoveToFolder { .. })
+                | ("RenameMedia", EditCommand::RenameMedia { .. })
+                | ("RenameFolder", EditCommand::RenameFolder { .. })
+                | ("DeleteMedia", EditCommand::DeleteMedia { .. })
+                | ("DeleteFolder", EditCommand::DeleteFolder { .. })
+                | ("SwapMedia", EditCommand::SwapMedia { .. })
+                | ("ResetTransform", EditCommand::ResetTransform { .. })
+                | (
+                    "SetTimelineSettings",
+                    EditCommand::SetTimelineSettings { .. }
+                )
+        )
+    }
+
+    #[test]
+    fn every_frontend_edit_request_deserializes_to_intended_command() {
+        let cases = [
+            (r#"{"type":"addClips","entries":[]}"#, "AddClips"),
+            (
+                r#"{"type":"insertClips","trackIndex":0,"atFrame":0,"entries":[]}"#,
+                "InsertClips",
+            ),
+            (r#"{"type":"moveClips","moves":[]}"#, "MoveClips"),
+            (
+                r#"{"type":"duplicateClips","clipIds":[],"offsetFrames":0,"targetTrackIndexes":[]}"#,
+                "DuplicateClips",
+            ),
+            (r#"{"type":"removeClips","clipIds":[]}"#, "RemoveClips"),
+            (
+                r#"{"type":"splitClip","clipId":"c","atFrame":1}"#,
+                "SplitClip",
+            ),
+            (
+                r#"{"type":"freezeFrame","clipId":"c","atFrame":1,"durationFrames":1}"#,
+                "FreezeFrame",
+            ),
+            (r#"{"type":"trimClips","edits":[]}"#, "TrimClips"),
+            (
+                r#"{"type":"setClipProperties","clipIds":[],"properties":{}}"#,
+                "SetClipProperties",
+            ),
+            (
+                r#"{"type":"setKeyframes","clipId":"c","property":"opacity","payload":{"kind":"scalar","keyframes":[]}}"#,
+                "SetKeyframes",
+            ),
+            (
+                r#"{"type":"stampKeyframe","clipId":"c","property":"opacity","frame":1}"#,
+                "StampKeyframe",
+            ),
+            (
+                r#"{"type":"upsertKeyframe","clipId":"c","property":"opacity","frame":1,"value":{"kind":"scalar","value":0.5}}"#,
+                "UpsertKeyframe",
+            ),
+            (
+                r#"{"type":"removeKeyframe","clipId":"c","property":"opacity","frame":1}"#,
+                "RemoveKeyframe",
+            ),
+            (
+                r#"{"type":"moveKeyframe","clipId":"c","property":"opacity","fromFrame":1,"toFrame":2}"#,
+                "MoveKeyframe",
+            ),
+            (
+                r#"{"type":"setKeyframeInterpolation","clipId":"c","property":"opacity","frame":1,"interpolation":"hold"}"#,
+                "SetKeyframeInterpolation",
+            ),
+            (
+                r#"{"type":"setColorGrade","clipIds":[],"grade":null}"#,
+                "SetColorGrade",
+            ),
+            (
+                r#"{"type":"setChromaKey","clipIds":[],"chromaKey":null}"#,
+                "SetChromaKey",
+            ),
+            (r#"{"type":"setMasks","clipIds":[],"masks":[]}"#, "SetMasks"),
+            (
+                r#"{"type":"setEffects","clipIds":[],"effects":[]}"#,
+                "SetEffects",
+            ),
+            (
+                r#"{"type":"setTransition","fromClipId":"a","toClipId":"b","kind":null,"durationFrames":1}"#,
+                "SetTransition",
+            ),
+            (
+                r#"{"type":"rippleDeleteRanges","trackIndex":0,"ranges":[]}"#,
+                "RippleDeleteRanges",
+            ),
+            (
+                r#"{"type":"rippleDeleteClips","clipIds":[]}"#,
+                "RippleDeleteClips",
+            ),
+            (r#"{"type":"addTexts","entries":[]}"#, "AddTexts"),
+            (
+                r#"{"type":"addTextsAutoTrack","entries":[]}"#,
+                "AddTextsAutoTrack",
+            ),
+            (r#"{"type":"addCaptions","entries":[]}"#, "AddCaptions"),
+            (r#"{"type":"link","clipIds":[]}"#, "Link"),
+            (r#"{"type":"unlink","clipIds":[]}"#, "Unlink"),
+            (
+                r#"{"type":"removeTracks","trackIndexes":[]}"#,
+                "RemoveTracks",
+            ),
+            (r#"{"type":"swapTracks","a":0,"b":1}"#, "SwapTracks"),
+            (
+                r#"{"type":"swapClips","clipA":"a","clipB":"b"}"#,
+                "SwapClips",
+            ),
+            (
+                r#"{"type":"insertTrack","kind":"video","at":0}"#,
+                "InsertTrack",
+            ),
+            (
+                r#"{"type":"setTrackProps","trackIndex":0,"muted":true}"#,
+                "SetTrackProps",
+            ),
+            (r#"{"type":"createFolder","name":"f"}"#, "CreateFolder"),
+            (
+                r#"{"type":"moveToFolder","assetIds":[],"folderId":null}"#,
+                "MoveToFolder",
+            ),
+            (r#"{"type":"renameMedia","entries":[]}"#, "RenameMedia"),
+            (r#"{"type":"renameFolder","entries":[]}"#, "RenameFolder"),
+            (r#"{"type":"deleteMedia","assetIds":[]}"#, "DeleteMedia"),
+            (r#"{"type":"deleteFolder","folderIds":[]}"#, "DeleteFolder"),
+            (
+                r#"{"type":"swapMedia","clipId":"c","mediaRef":"m"}"#,
+                "SwapMedia",
+            ),
+            (
+                r#"{"type":"resetTransform","clipIds":[]}"#,
+                "ResetTransform",
+            ),
+            (
+                r#"{"type":"setTimelineSettings","fps":24,"width":1920,"height":1080}"#,
+                "SetTimelineSettings",
+            ),
+        ];
+
+        assert_eq!(cases.len(), 41);
+        for (json, expected_route) in cases {
+            let request = serde_json::from_str::<EditRequest>(json)
+                .unwrap_or_else(|error| panic!("{expected_route} DTO failed: {error}"));
+            assert_eq!(request_route(&request), expected_route);
+            if expected_route == "FreezeFrame" {
+                assert!(request.into_command().is_err());
+            } else {
+                let command = request.into_command().expect("request maps to EditCommand");
+                assert!(
+                    command_matches_route(&command, expected_route),
+                    "{expected_route} mapped to {command:?}"
+                );
+            }
+        }
+    }
+
     // Regression: the front end sends camelCase keys (clipIds/clipId/atFrame…).
     // serde's enum-level `rename_all` does NOT rename struct-variant fields, so
     // each variant needs its own `rename_all`; without it RemoveClips/SplitClip/

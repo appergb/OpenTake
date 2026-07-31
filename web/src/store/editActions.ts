@@ -39,6 +39,7 @@ import type {
   MaskInput,
   MediaItem,
   RenameEntryReq,
+  TextEntryReq,
   TextAutoTrackEntryReq,
   TextStyle,
   Timeline,
@@ -46,6 +47,66 @@ import type {
   TransitionKind,
   TrimEditReq,
 } from "../lib/types";
+
+/**
+ * Maintained UI-gesture → wire DTO → Rust command inventory. The exhaustiveness
+ * sentinel below makes a newly-added `EditRequest` variant a compile failure
+ * until its production gesture route is recorded here.
+ */
+export const EDIT_GESTURE_COMMAND_MATRIX = [
+  { gesture: "media overwrite drop", action: "addClips", requestType: "addClips", backend: "AddClips" },
+  { gesture: "media ripple insert", action: "insertClips", requestType: "insertClips", backend: "InsertClips" },
+  { gesture: "clip drag commit", action: "moveClips", requestType: "moveClips", backend: "MoveClips" },
+  { gesture: "option drag copy", action: "duplicateClips", requestType: "duplicateClips", backend: "DuplicateClips" },
+  { gesture: "delete selection", action: "removeClips", requestType: "removeClips", backend: "RemoveClips" },
+  { gesture: "razor or command-k", action: "splitClip", requestType: "splitClip", backend: "SplitClip" },
+  { gesture: "freeze frame", action: "freezeFrame", requestType: "freezeFrame", backend: "FreezeFrame" },
+  { gesture: "trim handle commit", action: "trimClips", requestType: "trimClips", backend: "TrimClips" },
+  { gesture: "inspector property commit", action: "setClipProperties", requestType: "setClipProperties", backend: "SetClipProperties" },
+  { gesture: "replace keyframe lane", action: "setKeyframes", requestType: "setKeyframes", backend: "SetKeyframes" },
+  { gesture: "stamp keyframe", action: "stampKeyframe", requestType: "stampKeyframe", backend: "StampKeyframe" },
+  { gesture: "write animated value", action: "upsertKeyframe", requestType: "upsertKeyframe", backend: "UpsertKeyframe" },
+  { gesture: "delete keyframe", action: "removeKeyframe", requestType: "removeKeyframe", backend: "RemoveKeyframe" },
+  { gesture: "drag keyframe", action: "moveKeyframe", requestType: "moveKeyframe", backend: "MoveKeyframe" },
+  { gesture: "keyframe interpolation menu", action: "setKeyframeInterpolation", requestType: "setKeyframeInterpolation", backend: "SetKeyframeInterpolation" },
+  { gesture: "color grade commit", action: "setColorGrade", requestType: "setColorGrade", backend: "SetColorGrade" },
+  { gesture: "chroma key commit", action: "setChromaKey", requestType: "setChromaKey", backend: "SetChromaKey" },
+  { gesture: "mask commit", action: "setMasks", requestType: "setMasks", backend: "SetMasks" },
+  { gesture: "effect chain commit", action: "setEffects", requestType: "setEffects", backend: "SetEffects" },
+  { gesture: "transition commit", action: "setTransition", requestType: "setTransition", backend: "SetTransition" },
+  { gesture: "ripple delete range", action: "rippleDeleteRanges", requestType: "rippleDeleteRanges", backend: "RippleDeleteRanges" },
+  { gesture: "shift-delete clips", action: "rippleDeleteClips", requestType: "rippleDeleteClips", backend: "RippleDeleteClips" },
+  { gesture: "place text batch", action: "addTexts", requestType: "addTexts", backend: "AddTexts" },
+  { gesture: "toolbar text", action: "addTextsAutoTrack", requestType: "addTextsAutoTrack", backend: "AddTextsAutoTrack" },
+  { gesture: "generate captions", action: "addCaptions", requestType: "addCaptions", backend: "AddCaptions" },
+  { gesture: "link selection", action: "linkClips", requestType: "link", backend: "Link" },
+  { gesture: "unlink selection", action: "unlinkClips", requestType: "unlink", backend: "Unlink" },
+  { gesture: "delete tracks", action: "removeTracks", requestType: "removeTracks", backend: "RemoveTracks" },
+  { gesture: "move track row", action: "swapTracks", requestType: "swapTracks", backend: "SwapTracks" },
+  { gesture: "exchange clip positions", action: "swapClips", requestType: "swapClips", backend: "SwapClips" },
+  { gesture: "insert track drop zone", action: "insertTrack", requestType: "insertTrack", backend: "InsertTrack" },
+  { gesture: "track header toggle", action: "setTrackProps", requestType: "setTrackProps", backend: "SetTrackProps" },
+  { gesture: "create media folder", action: "createFolder", requestType: "createFolder", backend: "CreateFolder" },
+  { gesture: "move media to folder", action: "moveToFolder", requestType: "moveToFolder", backend: "MoveToFolder" },
+  { gesture: "rename media", action: "renameMedia", requestType: "renameMedia", backend: "RenameMedia" },
+  { gesture: "rename folder", action: "renameFolder", requestType: "renameFolder", backend: "RenameFolder" },
+  { gesture: "delete media", action: "deleteMedia", requestType: "deleteMedia", backend: "DeleteMedia" },
+  { gesture: "delete media folder", action: "deleteFolder", requestType: "deleteFolder", backend: "DeleteFolder" },
+  { gesture: "swap source media", action: "swapMedia", requestType: "swapMedia", backend: "SwapMedia" },
+  { gesture: "reset transform", action: "resetTransform", requestType: "resetTransform", backend: "ResetTransform" },
+  { gesture: "project settings commit", action: "setTimelineSettings", requestType: "setTimelineSettings", backend: "SetTimelineSettings" },
+] as const satisfies ReadonlyArray<{
+  gesture: string;
+  action: string;
+  requestType: EditRequest["type"];
+  backend: string;
+}>;
+
+type RoutedEditRequestType = (typeof EDIT_GESTURE_COMMAND_MATRIX)[number]["requestType"];
+type MissingEditRequestType = Exclude<EditRequest["type"], RoutedEditRequestType>;
+export const EDIT_GESTURE_COMMAND_MATRIX_IS_EXHAUSTIVE: [MissingEditRequestType] extends [never]
+  ? true
+  : never = true;
 
 async function applyAndRefresh(cmd: Parameters<typeof api.editApply>[0]) {
   const res = await api.editApply(cmd);
@@ -58,6 +119,18 @@ async function applyAndRefresh(cmd: Parameters<typeof api.editApply>[0]) {
 export async function addClips(entries: ClipEntryReq[]) {
   if (entries.length === 0) return;
   return applyAndRefresh({ type: "addClips", entries });
+}
+
+/** Place prepared text clips on explicit tracks as one edit transaction. */
+export async function addTexts(entries: TextEntryReq[]) {
+  if (entries.length === 0) return;
+  return applyAndRefresh({ type: "addTexts", entries });
+}
+
+/** Place prepared text clips on one fresh top track as one edit transaction. */
+export async function addTextsAutoTrack(entries: TextAutoTrackEntryReq[]) {
+  if (entries.length === 0) return;
+  return applyAndRefresh({ type: "addTextsAutoTrack", entries });
 }
 
 /** Ripple-insert clips at `atFrame` on `trackIndex`: place the entries and push
@@ -235,6 +308,12 @@ export async function unlinkClips(clipIds: string[]) {
   await applyAndRefresh({ type: "unlink", clipIds });
 }
 
+/** Remove one or more tracks in a single undoable edit. */
+export async function removeTracks(trackIndexes: number[]) {
+  if (trackIndexes.length === 0) return;
+  await applyAndRefresh({ type: "removeTracks", trackIndexes });
+}
+
 /** Toggle a track head's mute / hide / sync-lock. Omitted fields are unchanged. */
 export async function setTrackProps(
   trackIndex: number,
@@ -312,6 +391,12 @@ export async function setKeyframeInterpolation(
 export async function rippleDeleteRanges(trackIndex: number, ranges: FrameRangeReq[]) {
   if (ranges.length === 0) return;
   await applyAndRefresh({ type: "rippleDeleteRanges", trackIndex, ranges });
+}
+
+/** Ripple-delete selected clips as one atomic/undoable request. */
+export async function rippleDeleteClips(clipIds: string[]) {
+  if (clipIds.length === 0) return;
+  await applyAndRefresh({ type: "rippleDeleteClips", clipIds });
 }
 
 /** Create a media-library folder (optionally nested under `parentFolderId`). */
@@ -583,7 +668,7 @@ export async function rippleDeleteSelectedClips() {
   const ids = liveSelectedClipIds();
   if (ids.length > 0) {
     try {
-      await applyAndRefresh({ type: "rippleDeleteClips", clipIds: ids });
+      await rippleDeleteClips(ids);
       if (isTauri) await forceRefresh();
     } catch (err) {
       ui.pushToast(`删除失败 / Delete failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -1153,7 +1238,7 @@ export async function addTextClip() {
     transform: DEFAULT_TEXT_TRANSFORM,
   };
 
-  const res = await applyAndRefresh({ type: "addTextsAutoTrack", entries: [entry] });
+  const res = await addTextsAutoTrack([entry]);
   // Tauri's timeline_changed event refreshes the mirror asynchronously; force
   // it synchronously so the mirror (and any caller reading it right after,
   // e.g. selection logic elsewhere) reflects the new track immediately —

@@ -17,7 +17,7 @@
 - **`isTauri`**：检测 `window.__TAURI_INTERNALS__`。Tauri 注入则为 `true`；纯 `vite dev`/`vite preview` 为 `false`。
 - **`ensureTauri()`**：懒加载 `@tauri-apps/api` 的 `invoke`/`listen`，浏览器下不引入。
 - 命令封装（每个都「Tauri → `invoke`；否则 → fallback / 空值」）：
-  - 编辑：`getTimeline` / `editApply(command)` / `editApplyMany`（串行，每条仍走单一 `EditCommand` 权威）/ `undo` / `redo` / `canUndo` / `canRedo`。
+  - 编辑：`getTimeline` / `editApply(command)`（每次只接受一个原子 `EditRequest`）/ `undo` / `redo` / `canUndo` / `canRedo`。
   - 工程：`projectNew` / `projectOpen` / `projectSave` / `getDefaultProjectDir` / `exportFcpxml`（实际产物是 XMEML，注释解释命名）。
   - 媒体：`importFolder` / `importMedia` / `getMedia` / `extractAudio` / `relinkMedia`（保留资产 id 就地恢复离线 clip）。
   - 预览/波形：`compositeFrame(frame, maxSize?)`（GPU 合成一帧 PNG dataURL；`Math.floor(frame)` 后再传，避免 Tauri 反序列化非整数不一致）/ `getWaveform`（**try/catch 包裹**，解码失败 `console.warn` 而非静默吞——这正是当年波形整类失效的根因）。

@@ -42,7 +42,13 @@
 
 **D. 状态/契约**
 - [ ] 镜像只由 `timeline_changed`→`get_timeline` 更新；前端无任何直接改 timeline 的路径。
-- [ ] 每个编辑手势映射到正确 `edit_apply` 命令（§11.1）。
+- [x] 每个编辑手势映射到正确 `edit_apply` 命令（§11.1）。
+
+验收证据：`editActions.ts#EDIT_GESTURE_COMMAND_MATRIX` 穷举全部 41 个请求变体；
+`commandRouting.test.ts#every_edit_action_emits_exact_edit_request` 验证 action 的精确 DTO、
+no-op 与无直接镜像写入；`api.editApply.test.ts#edit_apply_forwards_exact_command_envelope`
+覆盖生产 IPC；Rust `commands.rs#every_frontend_edit_request_deserializes_to_intended_command`
+验证所有 camelCase DTO 到预期 `EditCommand` 的路由。
 - [x] 持久化键（layoutPreset/三面板可见性/keyframes）跨会话保留。
 
 持久化契约使用逐字段、带 schema 版本的键：`opentake.ui.v1.layoutPreset`、
