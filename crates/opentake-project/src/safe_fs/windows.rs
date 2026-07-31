@@ -340,6 +340,16 @@ fn complete_nt(
     Ok(())
 }
 
+#[cfg(test)]
+pub(super) fn synchronous_pending_contract_for_test() -> Result<()> {
+    let mut iosb = IO_STATUS_BLOCK::default();
+    // Initialize the Status member even though `complete_nt` must reject the
+    // returned STATUS_PENDING before reading it.
+    iosb.Anonymous.Status = STATUS_SUCCESS;
+    iosb.Information = usize::MAX;
+    complete_nt(SafeFsOperation::ReadFile, STATUS_PENDING, &iosb)
+}
+
 #[allow(clippy::too_many_arguments)] // Mirrors the fixed NtCreateFile operation contract.
 fn nt_create_relative(
     parent: HANDLE,
@@ -1638,20 +1648,6 @@ fn collect_revalidation_proof(directory: &DirectoryAuthority) -> Result<Revalida
     })
 }
 
-fn filesystem_refusal<T>(operation: SafeFsOperation) -> Result<T> {
-    Err(SafeFsError::UnsupportedSecureFilesystem {
-        operation,
-        reason: SecureFilesystemReason::UnsupportedTarget,
-    })
-}
-
-fn mutation_refusal<T>(operation: SafeFsOperation) -> Result<T> {
-    Err(SafeFsError::UnsupportedAtomicPublish {
-        operation,
-        reason: AtomicPublishReason::PrimitiveUnavailable,
-    })
-}
-
 #[allow(clippy::arc_with_non_send_sync)] // Arc retains the HANDLE-bearing namespace chain; it is not shared publicly.
 pub(super) fn capture_absolute_directory(
     path: &Path,
@@ -2049,35 +2045,364 @@ pub(super) fn metadata_from_file(file: &NativeFile) -> Result<EntryMetadata> {
     )
 }
 
+fn rename_retained_noreplace(
+    native: &NativeDirectory,
+    parent: &DirectoryAuthority,
+    target: &ComponentName,
+) -> Result<()> {
+    require_mutation(parent, SafeFsOperation::RenameNoReplaceSameParent)?;
+    if matches!(
+        query_child_nofollow(parent, target)?,
+        ChildState::Present(_)
+    ) {
+        return Err(SafeFsError::AlreadyExists {
+            operation: SafeFsOperation::RenameNoReplaceSameParent,
+        });
+    }
+    if !native.delete_right {
+        return Err(raw_nt(
+            SafeFsOperation::RenameNoReplaceSameParent,
+            STATUS_ACCESS_DENIED,
+        ));
+    }
+    let buffer = RenameInformationBuffer::new(parent.native.node.handle.raw(), target)?;
+    let mut iosb = IO_STATUS_BLOCK::default();
+    // SAFETY: the retained DELETE source and parent handles plus the aligned,
+    // initialized variable-length buffer remain live for this synchronous call.
+    let status = unsafe {
+        NtSetInformationFile(
+            native.node.handle.raw(),
+            &mut iosb,
+            buffer.as_ptr(),
+            buffer.used,
+            FileRenameInformation,
+        )
+    };
+    if status < STATUS_SUCCESS {
+        return Err(map_rename_failure(
+            status,
+            true,
+            native.delete_right,
+            query_child_nofollow(parent, target),
+        ));
+    }
+    complete_nt(SafeFsOperation::RenameNoReplaceSameParent, status, &iosb)
+}
+
+fn verify_same_parent(expected: &DirectoryAuthority, actual: &DirectoryAuthority) -> Result<()> {
+    if expected.opened.identity == actual.opened.identity && expected.snapshot == actual.snapshot {
+        Ok(())
+    } else {
+        Err(SafeFsError::NamespaceChanged {
+            operation: SafeFsOperation::RenameNoReplaceSameParent,
+        })
+    }
+}
+
 pub(super) fn quarantine_stage(
-    _: StageCapability,
-    _: &DirectoryAuthority,
-    _: ComponentName,
+    stage: StageCapability,
+    parent: &DirectoryAuthority,
+    quarantine_name: ComponentName,
 ) -> Result<QuarantinedCapability> {
-    mutation_refusal(SafeFsOperation::QuarantineNoReplace)
+    let StageCapability {
+        parent: owned_parent,
+        directory,
+        original_name,
+        opened,
+    } = stage;
+    verify_same_parent(&owned_parent, parent)?;
+    revalidate_namespace(parent)?;
+    rename_retained_noreplace(&directory.native, parent, &quarantine_name)?;
+    Ok(QuarantinedCapability {
+        parent: owned_parent,
+        directory,
+        original_name,
+        quarantine_name,
+        opened,
+    })
 }
 
 pub(super) fn publish_stage_noreplace(
-    _: StageCapability,
-    _: &DirectoryAuthority,
-    _: ComponentName,
+    stage: StageCapability,
+    parent: &DirectoryAuthority,
+    destination: ComponentName,
 ) -> Result<()> {
-    mutation_refusal(SafeFsOperation::PublishNoReplace)
+    let StageCapability {
+        parent: owned_parent,
+        directory,
+        opened,
+        ..
+    } = stage;
+    verify_same_parent(&owned_parent, parent)?;
+    revalidate_namespace(parent)?;
+    if directory.opened.identity != opened.identity {
+        return Err(SafeFsError::IdentityChanged {
+            operation: SafeFsOperation::RenameNoReplaceSameParent,
+            expected: opened.identity,
+            actual: directory.opened.identity.clone(),
+        });
+    }
+    rename_retained_noreplace(&directory.native, parent, &destination)?;
+    drop(directory);
+    Ok(())
 }
 
+#[allow(clippy::arc_with_non_send_sync)] // Arc retains the HANDLE parent chain; capabilities never cross threads.
 pub(super) fn open_cleanup_child_nofollow(
-    _: &QuarantinedCapability,
-    _: &ComponentName,
+    quarantined: &QuarantinedCapability,
+    name: &ComponentName,
 ) -> Result<CleanupCapability> {
-    filesystem_refusal(SafeFsOperation::OpenCleanupEntry)
+    let parent = &quarantined.directory;
+    let metadata = match query_child_nofollow(parent, name)? {
+        ChildState::Absent => {
+            return Err(SafeFsError::NotFound {
+                operation: SafeFsOperation::OpenCleanupEntry,
+            })
+        }
+        ChildState::Present(metadata) => metadata,
+    };
+    let contract = contract_for_operation(match metadata.kind {
+        EntryKind::Directory => OpenOperation::CleanupDir,
+        EntryKind::SymlinkOrReparse => OpenOperation::CleanupReparse,
+        _ => OpenOperation::CleanupFile,
+    });
+    let handle = nt_create_relative(
+        parent.native.node.handle.raw(),
+        name,
+        parent.case_mode,
+        contract.desired,
+        contract.disposition,
+        contract.options,
+        contract.attributes,
+        null(),
+        SafeFsOperation::OpenCleanupEntry,
+    )?;
+    let filesystem =
+        parent
+            .opened
+            .filesystem
+            .as_ref()
+            .ok_or(SafeFsError::UnsupportedSecureFilesystem {
+                operation: SafeFsOperation::ProbeFilesystem,
+                reason: SecureFilesystemReason::FilesystemProbeUnavailable,
+            })?;
+    let opened = query_entry_metadata(handle.raw(), filesystem, SafeFsOperation::QueryMetadata)?;
+    if opened.identity != metadata.identity {
+        return Err(SafeFsError::IdentityChanged {
+            operation: SafeFsOperation::QueryMetadata,
+            expected: metadata.identity,
+            actual: opened.identity,
+        });
+    }
+    if opened.kind != metadata.kind {
+        return Err(SafeFsError::UnsupportedEntryType {
+            operation: SafeFsOperation::OpenCleanupEntry,
+            kind: opened.kind,
+        });
+    }
+    if opened.kind == EntryKind::Directory {
+        let duplicated_parent = duplicate_directory(parent)?;
+        let child_case = query_case_mode(handle.raw())?;
+        let child_snapshot = append_snapshot(&parent.snapshot, name.clone(), &opened, child_case)?;
+        let node = Arc::new(DirectoryNode {
+            handle,
+            parent: Some(Arc::clone(&parent.native.node)),
+            name: Some(name.clone()),
+            case_mode: child_case,
+            metadata: opened.clone(),
+            volume: parent.native.node.volume.clone(),
+        });
+        let directory = DirectoryAuthority {
+            anchor: Arc::clone(&parent.anchor),
+            native: NativeDirectory {
+                node,
+                access: DirectoryAccess::MutateChildren,
+                delete_right: true,
+            },
+            access: DirectoryAccess::MutateChildren,
+            opened: opened.clone(),
+            case_mode: child_case,
+            snapshot: child_snapshot,
+        };
+        Ok(CleanupCapability::Directory(Box::new(
+            QuarantinedCapability {
+                parent: duplicated_parent,
+                directory,
+                original_name: name.clone(),
+                quarantine_name: name.clone(),
+                opened,
+            },
+        )))
+    } else {
+        Ok(CleanupCapability::Entry(Box::new(CleanupEntry {
+            parent: duplicate_directory(parent)?,
+            native: NativeFile {
+                handle,
+                opened: opened.clone(),
+                access: FileAccess::Read,
+                delete_right: true,
+            },
+            name: name.clone(),
+            opened,
+            access: CleanupAccess::Delete,
+        })))
+    }
 }
 
-pub(super) fn delete_quarantined_entry(_: CleanupCapability) -> Result<()> {
-    filesystem_refusal(SafeFsOperation::DeleteQuarantinedEntry)
+#[cfg(test)]
+type BeforeRetainedDeleteHook =
+    Arc<dyn Fn(HANDLE, &DirectoryAuthority, &ComponentName) -> Result<()> + Send + Sync>;
+
+#[cfg(test)]
+static BEFORE_RETAINED_DELETE_HOOK: std::sync::OnceLock<
+    std::sync::Mutex<Option<BeforeRetainedDeleteHook>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+struct BeforeRetainedDeleteHookGuard;
+
+#[cfg(test)]
+impl Drop for BeforeRetainedDeleteHookGuard {
+    fn drop(&mut self) {
+        *BEFORE_RETAINED_DELETE_HOOK
+            .get_or_init(Default::default)
+            .lock()
+            .expect("retained-delete hook mutex poisoned") = None;
+    }
 }
 
-pub(super) fn delete_quarantined_empty_directory(_: QuarantinedCapability) -> Result<()> {
-    filesystem_refusal(SafeFsOperation::DeleteQuarantinedEmptyDirectory)
+#[cfg(test)]
+fn install_before_retained_delete_hook(
+    hook: BeforeRetainedDeleteHook,
+) -> BeforeRetainedDeleteHookGuard {
+    let mut slot = BEFORE_RETAINED_DELETE_HOOK
+        .get_or_init(Default::default)
+        .lock()
+        .expect("retained-delete hook mutex poisoned");
+    assert!(
+        slot.is_none(),
+        "retained-delete tests require --test-threads=1"
+    );
+    *slot = Some(hook);
+    BeforeRetainedDeleteHookGuard
+}
+
+fn run_before_retained_delete_hook(
+    handle: HANDLE,
+    parent: &DirectoryAuthority,
+    name: &ComponentName,
+) -> Result<()> {
+    #[cfg(test)]
+    {
+        let hook = BEFORE_RETAINED_DELETE_HOOK
+            .get_or_init(Default::default)
+            .lock()
+            .expect("retained-delete hook mutex poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            return hook(handle, parent, name);
+        }
+    }
+    let _ = (handle, parent, name);
+    Ok(())
+}
+
+fn dispose_retained(
+    mut native: NativeFile,
+    parent: &DirectoryAuthority,
+    name: &ComponentName,
+    expected_kind: EntryKind,
+    operation: SafeFsOperation,
+) -> Result<()> {
+    if !native.delete_right {
+        return Err(SafeFsError::Os {
+            operation,
+            raw: RawOsError::Win32(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED),
+        });
+    }
+    if native.opened.kind != expected_kind {
+        return Err(SafeFsError::UnsupportedEntryType {
+            operation,
+            kind: native.opened.kind,
+        });
+    }
+    run_before_retained_delete_hook(native.handle.raw(), parent, name)?;
+    mark_delete_handle(native.handle.raw(), operation)?;
+    native.delete_right = false;
+    drop(native);
+    Ok(())
+}
+
+pub(super) fn delete_quarantined_entry(cleanup: CleanupCapability) -> Result<()> {
+    match cleanup {
+        CleanupCapability::Entry(entry) => {
+            let CleanupEntry {
+                parent,
+                native,
+                name,
+                opened,
+                access: CleanupAccess::Delete,
+            } = *entry;
+            if native.opened.identity != opened.identity {
+                return Err(SafeFsError::IdentityChanged {
+                    operation: SafeFsOperation::DeleteQuarantinedEntry,
+                    expected: opened.identity,
+                    actual: native.opened.identity,
+                });
+            }
+            dispose_retained(
+                native,
+                &parent,
+                &name,
+                opened.kind,
+                SafeFsOperation::DeleteQuarantinedEntry,
+            )
+        }
+        CleanupCapability::Directory(_) => Err(SafeFsError::UnsupportedEntryType {
+            operation: SafeFsOperation::DeleteQuarantinedEntry,
+            kind: EntryKind::Directory,
+        }),
+    }
+}
+
+pub(super) fn delete_quarantined_empty_directory(quarantined: QuarantinedCapability) -> Result<()> {
+    let QuarantinedCapability {
+        parent,
+        directory,
+        quarantine_name,
+        opened,
+        ..
+    } = quarantined;
+    if directory.opened.identity != opened.identity || !directory.native.delete_right {
+        return Err(SafeFsError::IdentityChanged {
+            operation: SafeFsOperation::DeleteQuarantinedEmptyDirectory,
+            expected: opened.identity,
+            actual: directory.opened.identity,
+        });
+    }
+    let native = NativeFile {
+        handle: Arc::try_unwrap(directory.native.node)
+            .map_err(|node| {
+                SafeFsError::io(
+                    SafeFsOperation::DeleteQuarantinedEmptyDirectory,
+                    io::Error::other(format!(
+                        "directory handle still shared: {}",
+                        Arc::strong_count(&node)
+                    )),
+                )
+            })?
+            .handle,
+        opened: directory.opened,
+        access: FileAccess::Read,
+        delete_right: true,
+    };
+    dispose_retained(
+        native,
+        &parent,
+        &quarantine_name,
+        EntryKind::Directory,
+        SafeFsOperation::DeleteQuarantinedEmptyDirectory,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2174,6 +2499,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     struct TestDir(PathBuf);
@@ -2208,6 +2534,22 @@ mod tests {
     fn root(dir: &TestDir) -> DirectoryAuthority {
         capture_absolute_directory(dir.path(), DirectoryAccess::MutateChildren)
             .expect("capture fixture root")
+    }
+
+    fn present_for_test() -> ChildState {
+        ChildState::Present(EntryMetadata {
+            identity: StableIdentity::Windows {
+                volume_serial: 7,
+                file_id: [3; 16],
+            },
+            kind: EntryKind::RegularFile,
+            len: 0,
+            link_count: 1,
+            filesystem: Some(LocalFilesystemSnapshot::Windows {
+                volume_guid: vec![1],
+                serial: 7,
+            }),
+        })
     }
 
     #[test]
@@ -2266,6 +2608,187 @@ mod tests {
         assert_eq!(file.read(&mut output).unwrap(), 8);
         assert_eq!(&output, b"retained");
         assert_eq!(enumerate(&b).unwrap(), vec![name("data")]);
+    }
+
+    #[test]
+    fn quarantine_and_publish_success_do_not_self_conflict() {
+        let quarantine_temp = TestDir::new("quarantine-success");
+        let authority = root(&quarantine_temp);
+        let stage =
+            create_stage_dir_new(&authority, &name("stage"), CreatePermissions::Inherit).unwrap();
+        let quarantined = quarantine_stage(stage, &authority, name("quarantine"))
+            .expect("retained quarantine rename succeeds");
+        drop(quarantined);
+        assert!(!quarantine_temp.path().join("stage").exists());
+        assert!(quarantine_temp.path().join("quarantine").is_dir());
+
+        let publish_temp = TestDir::new("publish-success");
+        let authority = root(&publish_temp);
+        let stage =
+            create_stage_dir_new(&authority, &name("stage"), CreatePermissions::Inherit).unwrap();
+        publish_stage_noreplace(stage, &authority, name("destination"))
+            .expect("retained publish rename succeeds");
+        assert!(!publish_temp.path().join("stage").exists());
+        assert!(publish_temp.path().join("destination").is_dir());
+    }
+
+    #[test]
+    fn rename_never_replaces_any_target_kind() {
+        assert!(matches!(
+            map_rename_failure(STATUS_ACCESS_DENIED, true, true, Ok(present_for_test())),
+            SafeFsError::AlreadyExists { .. }
+        ));
+        assert!(matches!(
+            map_rename_failure(STATUS_ACCESS_DENIED, true, true, Ok(ChildState::Absent)),
+            SafeFsError::Os {
+                raw: RawOsError::NtStatus {
+                    status: STATUS_ACCESS_DENIED,
+                    ..
+                },
+                ..
+            }
+        ));
+        for kind in ["file", "empty-dir", "nonempty-dir", "reparse"] {
+            let temp = TestDir::new(kind);
+            let target = temp.path().join("target");
+            let external = temp.path().join("external");
+            match kind {
+                "file" => fs::write(&target, b"keep-file").unwrap(),
+                "empty-dir" => fs::create_dir(&target).unwrap(),
+                "nonempty-dir" => {
+                    fs::create_dir(&target).unwrap();
+                    fs::write(target.join("keep"), b"tree").unwrap();
+                }
+                "reparse" => {
+                    fs::create_dir(&external).unwrap();
+                    fs::write(external.join("keep"), b"outside").unwrap();
+                    let output = Command::new("cmd")
+                        .args(["/C", "mklink", "/J"])
+                        .arg(&target)
+                        .arg(&external)
+                        .output()
+                        .unwrap();
+                    assert!(
+                        output.status.success(),
+                        "mklink failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                _ => unreachable!(),
+            }
+            let authority = root(&temp);
+            let before = match query_child_nofollow(&authority, &name("target")).unwrap() {
+                ChildState::Present(value) => value,
+                ChildState::Absent => panic!("collision target absent"),
+            };
+            let stage =
+                create_stage_dir_new(&authority, &name("stage"), CreatePermissions::Inherit)
+                    .unwrap();
+            assert!(matches!(
+                publish_stage_noreplace(stage, &authority, name("target")),
+                Err(SafeFsError::AlreadyExists { .. })
+            ));
+            let after = match query_child_nofollow(&authority, &name("target")).unwrap() {
+                ChildState::Present(value) => value,
+                ChildState::Absent => panic!("collision target removed"),
+            };
+            assert_eq!(after.identity, before.identity);
+            match kind {
+                "file" => assert_eq!(fs::read(&target).unwrap(), b"keep-file"),
+                "nonempty-dir" => assert_eq!(fs::read(target.join("keep")).unwrap(), b"tree"),
+                "reparse" => assert_eq!(fs::read(external.join("keep")).unwrap(), b"outside"),
+                _ => assert!(target.is_dir()),
+            }
+        }
+    }
+
+    #[test]
+    fn cleanup_quarantined_tree_deletes_nested_reparse_without_traversal() {
+        let temp = TestDir::new("cleanup-tree");
+        let external = temp.path().join("external");
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("keep"), b"outside-bytes").unwrap();
+        let authority = root(&temp);
+        let stage =
+            create_stage_dir_new(&authority, &name("stage"), CreatePermissions::Inherit).unwrap();
+        let nested = create_dir_new(
+            stage.directory(),
+            &name("nested"),
+            CreatePermissions::Inherit,
+            DirectoryAccess::MutateChildren,
+        )
+        .unwrap();
+        let mut file = create_file_new(&nested, &name("data"), CreatePermissions::Inherit).unwrap();
+        file.write_all(b"inside").unwrap();
+        drop(file);
+        drop(nested);
+        let output = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(temp.path().join("stage").join("nested").join("link"))
+            .arg(&external)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "mklink failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let quarantine = quarantine_stage(stage, &authority, name("quarantine")).unwrap();
+        super::super::cleanup_quarantined_tree(quarantine)
+            .expect("common recursive cleanup succeeds");
+        assert!(matches!(
+            query_child_nofollow(&authority, &name("quarantine")).unwrap(),
+            ChildState::Absent
+        ));
+        assert_eq!(fs::read(external.join("keep")).unwrap(), b"outside-bytes");
+    }
+
+    #[test]
+    fn retained_delete_survives_real_name_rebound() {
+        let temp = TestDir::new("delete-rebound");
+        let authority = root(&temp);
+        let stage =
+            create_stage_dir_new(&authority, &name("stage"), CreatePermissions::Inherit).unwrap();
+        let mut file =
+            create_file_new(stage.directory(), &name("leaf"), CreatePermissions::Inherit).unwrap();
+        file.write_all(b"original").unwrap();
+        drop(file);
+        let quarantine = quarantine_stage(stage, &authority, name("quarantine")).unwrap();
+        let quarantine_path = temp.path().join("quarantine");
+        let _guard =
+            install_before_retained_delete_hook(Arc::new(move |source, parent, _old_name| {
+                let buffer = RenameInformationBuffer::new(
+                    parent.native.node.handle.raw(),
+                    &name("moved-original"),
+                )?;
+                let mut iosb = IO_STATUS_BLOCK::default();
+                // SAFETY: source is the retained DELETE handle and all inputs
+                // remain live for this synchronous test-only rename.
+                let status = unsafe {
+                    NtSetInformationFile(
+                        source,
+                        &mut iosb,
+                        buffer.as_ptr(),
+                        buffer.used,
+                        FileRenameInformation,
+                    )
+                };
+                complete_nt(SafeFsOperation::RenameNoReplaceSameParent, status, &iosb)?;
+                fs::write(quarantine_path.join("leaf"), b"replacement")
+                    .map_err(|error| SafeFsError::io(SafeFsOperation::CreateFile, error))?;
+                Ok(())
+            }));
+        let cleanup = open_cleanup_child_nofollow(&quarantine, &name("leaf")).unwrap();
+        delete_quarantined_entry(cleanup).unwrap();
+        assert_eq!(
+            fs::read(temp.path().join("quarantine").join("leaf")).unwrap(),
+            b"replacement"
+        );
+        assert!(!temp
+            .path()
+            .join("quarantine")
+            .join("moved-original")
+            .exists());
     }
 
     fn assert_file_create_failure_rolls_back(point: WindowsCreateFailurePoint, label: &str) {
