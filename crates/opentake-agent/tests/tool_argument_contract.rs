@@ -48,7 +48,7 @@ fn dispatcher() -> (Dispatcher, Arc<AtomicUsize>) {
 }
 
 #[test]
-fn all_tool_schemas_reject_unknown_missing_wrong_type_and_nonfinite() {
+fn all_tool_schemas_reject_unknown_missing_wrong_type() {
     let (dispatcher, apply_calls) = dispatcher();
 
     for tool in ToolName::ALL {

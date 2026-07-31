@@ -170,7 +170,7 @@ Completion evidence: [`data-safety-mcp-transport-real-device-2026-07-31.md`](../
   - Reject non-HTTPS/userinfo/redirect-to-non-HTTPS URLs before I/O; infer or validate the extension/MIME allowlist; stream to a staging file while enforcing the 1 GB decoded-byte cap across redirects.
   - Publish only after download, type/probe, and retained-project validation; cancellation/error cleans staging and leaves manifest unchanged.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-agent/src/mcp/dispatch.rs#import_media_requires_exactly_one_source` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-agent/src/mcp/dispatch.rs#import_media_rejects_unknown_nested_source_key` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -180,7 +180,7 @@ Completion evidence: [`data-safety-mcp-transport-real-device-2026-07-31.md`](../
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-agent import_media_requires_exactly_one_source`
   - Run: `cargo test -p opentake-agent import_media_rejects_unknown_nested_source_key`
@@ -190,11 +190,11 @@ Completion evidence: [`data-safety-mcp-transport-real-device-2026-07-31.md`](../
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-agent/src/tools/errors.rs#decode_tool_args`, `crates/opentake-agent/src/mcp/dispatch.rs#Dispatcher`, `src-tauri/src/mcp.rs#TauriMediaBridge`, `docs/modules/opentake-agent/SPEC.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-agent import_media_requires_exactly_one_source`
   - Run: `cargo test -p opentake-agent import_media_rejects_unknown_nested_source_key`
@@ -204,11 +204,13 @@ Completion evidence: [`data-safety-mcp-transport-real-device-2026-07-31.md`](../
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completion evidence: [`data-safety-mcp-tool-import-real-device-2026-07-31.md`](../runtime-artifacts/automated/data-safety-mcp-tool-import-real-device-2026-07-31.md). The initial exact argument-matrix command executed zero tests because its owning test had an extra suffix; the test was renamed to the plan-declared contract and then passed 1/1. Production import guards were already complete, and the packaged server passed path, bytes, HTTPS, rejection, persistence, and UI checks.
 
 ### Task 4: DS-mcp-redaction (implementation-slice-673f9e3f6002f97b)
 
