@@ -19,8 +19,9 @@
 use std::collections::{HashMap, HashSet};
 
 use opentake_domain::{
-    ChromaKey, Clip, ClipType, ColorGrade, Crop, Effect, Interpolation, Mask, NestedSequence,
-    Timeline, Track, Transform, Transition, TransitionKind,
+    ChromaKey, Clip, ClipType, ColorGrade, Crop, Effect, Interpolation, Mask, MaskShape,
+    NestedSequence, Timeline, Track, Transform, Transition, TransitionKind, MAX_MASKS_PER_CLIP,
+    MAX_POLYGON_MASK_POINTS,
 };
 
 use crate::editor_state::EditorState;
@@ -2503,6 +2504,20 @@ fn set_masks(
     clip_ids: Vec<String>,
     masks: Vec<Mask>,
 ) -> Result<EditResult, EditError> {
+    if masks.len() > MAX_MASKS_PER_CLIP {
+        return Err(EditError::Invalid(format!(
+            "a clip supports at most {MAX_MASKS_PER_CLIP} masks"
+        )));
+    }
+    for (index, mask) in masks.iter().enumerate() {
+        if let MaskShape::Poly { points } = &mask.shape {
+            if points.len() < 3 || points.len() > MAX_POLYGON_MASK_POINTS {
+                return Err(EditError::Invalid(format!(
+                    "mask {index} polygon must contain 3..={MAX_POLYGON_MASK_POINTS} points"
+                )));
+            }
+        }
+    }
     reject_compound_effect_targets(state, &clip_ids, !masks.is_empty())?;
     set_clip_effect_field(state, clip_ids, "Set Masks", move |clip| {
         clip.masks = masks.clone();

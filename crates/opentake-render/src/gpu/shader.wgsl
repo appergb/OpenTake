@@ -26,28 +26,33 @@
 //   on the (sampled) color directly, matching the domain reference which is
 //   space-agnostic for those stages.
 //
-// MASK CAP: up to MASK_CAP masks are evaluated in-shader (linear + circle SDF).
-// Polygon masks are carried in the domain/plan and fully unit-tested there, but
-// their variable-length point list does not fit this fixed uniform; wiring
-// polygon points through a storage buffer is a documented render-side TODO.
+// MASK CAP: up to MASK_CAP masks and POLY_POINT_CAP pen points per mask are
+// evaluated in-shader. The fixed point cap keeps the uniform layout portable.
 
 const MASK_CAP: u32 = 4u;
+const POLY_POINT_CAP: u32 = 16u;
 
 // Flag bits packed into U.canvas_op_flags.w (bitcast to u32).
 const FLAG_PREMULTIPLY: u32 = 1u;   // straight-alpha source needs premultiply
 const FLAG_GRADE: u32 = 2u;         // color grade active
 const FLAG_CHROMA: u32 = 4u;        // chroma key active
 
-// Mask kind tags (mirror MaskShape; poly is not evaluated in-shader).
+// Mask kind tags (mirror MaskShape).
 const MASK_LINEAR: u32 = 0u;
 const MASK_CIRCLE: u32 = 1u;
+const MASK_POLY: u32 = 2u;
 
 struct MaskGpu {
-    // (kind-as-f32, feather, invert-as-f32, pad)
+    // (kind-as-f32, feather, invert-as-f32, polygon-point-count)
     head: vec4<f32>,
     // linear: (point.x, point.y, normal.x, normal.y)
     // circle: (center.x, center.y, radius.x, radius.y)
     geo: vec4<f32>,
+    // (offset.x, offset.y, scale.x, scale.y)
+    transform: vec4<f32>,
+    // (rotation radians, pad, pad, pad)
+    transform_meta: vec4<f32>,
+    points: array<vec4<f32>, POLY_POINT_CAP>,
 };
 
 // Laid out as vec4s so every field is 16-byte aligned (no implicit WGSL padding)
@@ -193,10 +198,60 @@ fn suppress_spill(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(nr, c.g, c.b);
 }
 
-// ---- Masks (mirror of Mask::coverage; linear + circle in-shader) ------------
+// ---- Masks (mirror of Mask::coverage) ---------------------------------------
+
+fn mask_local_point(m: MaskGpu, p: vec2<f32>) -> vec2<f32> {
+    let scale = max(abs(m.transform.zw), vec2<f32>(1e-6));
+    let radians = m.transform_meta.x;
+    let c = cos(radians);
+    let s = sin(radians);
+    let delta = p - vec2<f32>(0.5) - m.transform.xy;
+    let unrotated = vec2<f32>(
+        c * delta.x + s * delta.y,
+        -s * delta.x + c * delta.y,
+    );
+    return unrotated / scale + vec2<f32>(0.5);
+}
+
+fn point_segment_dist2(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let ab = b - a;
+    let denom = dot(ab, ab);
+    var t = 0.0;
+    if (denom > 1e-12) {
+        t = clamp(dot(p - a, ab) / denom, 0.0, 1.0);
+    }
+    let delta = p - (a + ab * t);
+    return dot(delta, delta);
+}
+
+fn polygon_signed_distance(m: MaskGpu, p: vec2<f32>) -> f32 {
+    let count = min(u32(m.head.w + 0.5), POLY_POINT_CAP);
+    if (count < 3u) {
+        return 1e6;
+    }
+    var inside = false;
+    var min_d2 = 1e12;
+    var j = count - 1u;
+    for (var i: u32 = 0u; i < count; i = i + 1u) {
+        let a = m.points[i].xy;
+        let b = m.points[j].xy;
+        let crosses_y = (a.y > p.y) != (b.y > p.y);
+        if (crosses_y) {
+            let edge_x = (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x;
+            if (p.x < edge_x) {
+                inside = !inside;
+            }
+        }
+        min_d2 = min(min_d2, point_segment_dist2(p, a, b));
+        j = i;
+    }
+    let distance = sqrt(min_d2);
+    return select(distance, -distance, inside);
+}
 
 fn mask_signed_distance(m: MaskGpu, p: vec2<f32>) -> f32 {
     let kind = u32(m.head.x + 0.5);
+    let local = mask_local_point(m, p);
     if (kind == MASK_LINEAR) {
         let point = m.geo.xy;
         let normal = m.geo.zw;
@@ -205,12 +260,15 @@ fn mask_signed_distance(m: MaskGpu, p: vec2<f32>) -> f32 {
             return 0.0;
         }
         let n = normal / nlen;
-        return -dot(p - point, n);
+        return -dot(local - point, n);
+    }
+    if (kind == MASK_POLY) {
+        return polygon_signed_distance(m, local);
     }
     // Circle (default for any other tag).
     let center = m.geo.xy;
     let radius = max(m.geo.zw, vec2<f32>(1e-6));
-    let d = length((p - center) / radius);
+    let d = length((local - center) / radius);
     return (d - 1.0) * min(radius.x, radius.y);
 }
 

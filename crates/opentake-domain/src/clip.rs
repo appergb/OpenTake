@@ -1277,6 +1277,7 @@ mod tests {
             },
             feather: 0.05,
             invert: false,
+            ..Mask::default()
         }];
         c.effects = vec![Effect::new("gaussianBlur").with_param("radius", 4.0)];
         let json = serde_json::to_string(&c).unwrap();

@@ -338,6 +338,7 @@ mod tests {
             },
             feather: 0.05,
             invert: false,
+            ..Mask::default()
         }];
         src.effects = vec![Effect::new("gaussianBlur").with_param("radius", 4.0)];
         let orig_color_grade = src.color_grade;

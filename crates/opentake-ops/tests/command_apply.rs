@@ -1796,6 +1796,7 @@ fn set_masks_replaces_list() {
         },
         feather: 0.05,
         invert: false,
+        ..Mask::default()
     }];
     let res = apply(
         &mut st,
@@ -1821,6 +1822,29 @@ fn set_masks_replaces_list() {
     )
     .unwrap();
     assert!(res2.changed);
+    assert!(find_clip(&st, "c").masks.is_empty());
+
+    apply(&mut st, EditCommand::Undo, &g).unwrap();
+    assert_eq!(find_clip(&st, "c").masks, masks);
+    apply(&mut st, EditCommand::Redo, &g).unwrap();
+    assert!(find_clip(&st, "c").masks.is_empty());
+
+    let oversized_polygon = Mask {
+        shape: MaskShape::Poly {
+            points: vec![Point2::new(0.5, 0.5); 17],
+        },
+        ..Mask::default()
+    };
+    let err = apply(
+        &mut st,
+        EditCommand::SetMasks {
+            clip_ids: vec!["c".into()],
+            masks: vec![oversized_polygon],
+        },
+        &g,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("3..=16 points"));
     assert!(find_clip(&st, "c").masks.is_empty());
 }
 

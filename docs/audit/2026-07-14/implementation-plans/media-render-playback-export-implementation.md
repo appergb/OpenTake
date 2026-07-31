@@ -31,33 +31,47 @@
   - Add deterministic media fixtures and golden frame, audio, timeline, or export assertions for every named capability and boundary; the affected render/media suites must pass.
   - Run the packaged preview/export path on representative media and retain exact output or runtime evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/composite_acceptance.rs#capcut_children_close_one_composite_acceptance` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test composite_acceptance capcut_children_close_one_composite_acceptance -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test composite_acceptance capcut_children_close_one_composite_acceptance -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `node --test tools/completion-audit.test.mjs`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completion evidence (2026-07-31): the reviewed GPU test first failed on the
+polygon fixture (`pixel=(0,0) expected=0 actual=255`) while polygon masks were
+still encoded as a no-op, preserving the required RED receipt. The completed
+slice adds bounded polygon uniforms, CPU/GPU-matched transform geometry,
+Inspector creation/edit/delete controls, an on-canvas point editor, persistence,
+and command-routed undo/redo with explicit capacity validation. Both exact
+owning GPU tests pass; Web's 89 files / 805 tests, production build,
+`cargo fmt --check`, workspace Clippy with `-D warnings`, and
+`cargo test --workspace --no-fail-fast` pass. The ad-hoc-signed packaged macOS
+app also passes creation, point drag/add/delete, transform, feather, invert,
+undo/redo, save/reopen, preview capture, and 120-frame H.264 export. Preview and
+export frame 60 score SSIM 0.999753 and PSNR 62.854540 dB. Full receipt:
+`docs/audit/2026-07-14/runtime-artifacts/automated/mask-rendering-2026-07-31.md`.
 
 ### Task 2: MR-nested-timeline (implementation-slice-b8f61feebde4e2ab)
 

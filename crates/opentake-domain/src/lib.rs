@@ -42,7 +42,7 @@ pub use clip::{Clip, FadeEdge, KeyframeTrackWireField, KeyframeValueWireShape, V
 pub use clip_type::ClipType;
 pub use grade::{
     chroma_cb_cr, luma709, smoothstep01, ChromaKey, ColorGrade, Effect, LiftGammaGain, Mask,
-    MaskShape, Point2, Rgb,
+    MaskShape, MaskTransform, Point2, Rgb, MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS,
 };
 pub use keyframe::{
     smoothstep, split_keyframe_track, AnimPair, AnimatableProperty, Interpolation, Keyframe,

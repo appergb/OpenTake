@@ -22,6 +22,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Fixed GPU contract shared by editor validation and the compositor uniform.
+pub const MAX_MASKS_PER_CLIP: usize = 4;
+/// Maximum authored vertices in one pen/polygon mask.
+pub const MAX_POLYGON_MASK_POINTS: usize = 16;
+
 // ===========================================================================
 // Small numeric helpers (shared by the reference pixel math).
 // ===========================================================================
@@ -421,7 +426,7 @@ pub enum MaskShape {
 /// [`crate::transform::Point`] only to keep mask serialization self-contained and
 /// `Serialize`/`Deserialize`-derivable (the transform `Point` has hand-written
 /// (de)serialization elsewhere; here a plain derive is what we want).
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Point2 {
     #[serde(default)]
@@ -433,6 +438,56 @@ pub struct Point2 {
 impl Point2 {
     pub fn new(x: f64, y: f64) -> Self {
         Point2 { x, y }
+    }
+}
+
+/// Optional whole-mask transform applied around the canvas center after the
+/// shape's own geometry. Shape coordinates remain editable and portable while
+/// offset/scale/rotation can move the complete mask non-destructively.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaskTransform {
+    #[serde(default)]
+    pub offset: Point2,
+    #[serde(default = "default_mask_scale")]
+    pub scale: Point2,
+    #[serde(default)]
+    pub rotation_degrees: f64,
+}
+
+fn default_mask_scale() -> Point2 {
+    Point2::new(1.0, 1.0)
+}
+
+impl Default for MaskTransform {
+    fn default() -> Self {
+        MaskTransform {
+            offset: Point2::new(0.0, 0.0),
+            scale: default_mask_scale(),
+            rotation_degrees: 0.0,
+        }
+    }
+}
+
+impl MaskTransform {
+    pub fn is_identity(&self) -> bool {
+        self.offset.x == 0.0
+            && self.offset.y == 0.0
+            && self.scale.x == 1.0
+            && self.scale.y == 1.0
+            && self.rotation_degrees == 0.0
+    }
+
+    fn inverse_point(&self, x: f64, y: f64) -> (f64, f64) {
+        let sx = self.scale.x.abs().max(f64::EPSILON);
+        let sy = self.scale.y.abs().max(f64::EPSILON);
+        let radians = self.rotation_degrees.to_radians();
+        let (sin, cos) = radians.sin_cos();
+        let dx = x - 0.5 - self.offset.x;
+        let dy = y - 0.5 - self.offset.y;
+        let unrotated_x = cos * dx + sin * dy;
+        let unrotated_y = -sin * dx + cos * dy;
+        (unrotated_x / sx + 0.5, unrotated_y / sy + 0.5)
     }
 }
 
@@ -452,6 +507,9 @@ pub struct Mask {
     /// Invert coverage (mask out the inside instead of the outside).
     #[serde(default)]
     pub invert: bool,
+    /// Non-destructive whole-mask translation, scale, and rotation.
+    #[serde(default, skip_serializing_if = "MaskTransform::is_identity")]
+    pub transform: MaskTransform,
 }
 
 fn default_mask_shape() -> MaskShape {
@@ -468,6 +526,7 @@ impl Default for Mask {
             shape: default_mask_shape(),
             feather: 0.0,
             invert: false,
+            transform: MaskTransform::default(),
         }
     }
 }
@@ -478,6 +537,7 @@ impl Mask {
     /// polygon variant returns the unsigned distance with an inside/outside sign
     /// from an even-odd test (an exact polygon SDF is overkill for feathering).
     pub fn signed_distance(&self, x: f64, y: f64) -> f64 {
+        let (x, y) = self.transform.inverse_point(x, y);
         match &self.shape {
             MaskShape::Linear { point, normal } => {
                 // Signed distance along the (assumed unit-ish) normal. We
@@ -901,6 +961,7 @@ mod tests {
             },
             feather: 0.0,
             invert: false,
+            ..Mask::default()
         };
         approx(m.coverage(0.5, 0.5), 1.0); // center
         approx(m.coverage(0.5, 0.9), 0.0); // outside radius
@@ -915,6 +976,7 @@ mod tests {
             },
             feather: 0.0,
             invert: true,
+            ..Mask::default()
         };
         approx(m.coverage(0.5, 0.5), 0.0); // center now masked out
         approx(m.coverage(0.5, 0.9), 1.0); // outside now covered
@@ -929,6 +991,7 @@ mod tests {
             },
             feather: 0.1,
             invert: false,
+            ..Mask::default()
         };
         // Exactly on the boundary -> ~0.5 coverage.
         let c = m.coverage(0.7, 0.5);
@@ -947,6 +1010,7 @@ mod tests {
             },
             feather: 0.0,
             invert: false,
+            ..Mask::default()
         };
         approx(m.coverage(0.8, 0.5), 1.0); // +normal side covered
         approx(m.coverage(0.2, 0.5), 0.0); // -normal side not
@@ -964,6 +1028,7 @@ mod tests {
             },
             feather: 0.0,
             invert: false,
+            ..Mask::default()
         };
         approx(m.coverage(0.5, 0.3), 1.0); // inside the triangle
         approx(m.coverage(0.05, 0.05), 0.0); // outside (a corner region)
@@ -977,6 +1042,7 @@ mod tests {
             },
             feather: 0.0,
             invert: false,
+            ..Mask::default()
         };
         approx(m.coverage(0.5, 0.5), 0.0);
     }
@@ -990,6 +1056,7 @@ mod tests {
             },
             feather: 0.05,
             invert: true,
+            ..Mask::default()
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"kind\":\"circle\""));
@@ -1007,6 +1074,7 @@ mod tests {
             },
             feather: 0.0,
             invert: false,
+            ..Mask::default()
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"kind\":\"linear\""));
@@ -1026,11 +1094,52 @@ mod tests {
             },
             feather: 0.0,
             invert: false,
+            ..Mask::default()
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"kind\":\"poly\""));
         let back: Mask = serde_json::from_str(&json).unwrap();
         assert_eq!(m, back);
+    }
+
+    #[test]
+    fn mask_transform_is_non_destructive_and_roundtrips() {
+        let base = Mask {
+            shape: MaskShape::Circle {
+                center: Point2::new(0.5, 0.5),
+                radius: Point2::new(0.1, 0.2),
+            },
+            ..Mask::default()
+        };
+        let transformed = Mask {
+            transform: MaskTransform {
+                offset: Point2::new(0.2, -0.1),
+                scale: Point2::new(2.0, 0.5),
+                rotation_degrees: 90.0,
+            },
+            ..base.clone()
+        };
+
+        // The authored shape stays unchanged while its whole-mask transform
+        // moves the local center (0.5, 0.5) to display point (0.7, 0.4).
+        assert_eq!(transformed.shape, base.shape);
+        approx(transformed.coverage(0.7, 0.4), 1.0);
+        approx(transformed.coverage(0.5, 0.5), 0.0);
+
+        let json = serde_json::to_string(&transformed).unwrap();
+        assert!(json.contains("\"transform\""));
+        assert!(json.contains("\"rotationDegrees\":90.0"));
+        assert_eq!(serde_json::from_str::<Mask>(&json).unwrap(), transformed);
+
+        // Legacy/default projects do not gain noisy transform payloads and
+        // deserialize to the identity transform.
+        let default_json = serde_json::to_string(&base).unwrap();
+        assert!(!default_json.contains("\"transform\""));
+        let legacy: Mask = serde_json::from_str(
+            r#"{"shape":{"kind":"circle","center":{"x":0.5,"y":0.5},"radius":{"x":0.1,"y":0.2}},"feather":0.0,"invert":false}"#,
+        )
+        .unwrap();
+        assert!(legacy.transform.is_identity());
     }
 
     // --- Effect ---

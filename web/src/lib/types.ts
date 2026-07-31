@@ -142,10 +142,17 @@ export type MaskShape =
   | { kind: "circle"; center: Point2; radius: Point2 }
   | { kind: "poly"; points: Point2[] };
 
+export interface MaskTransform {
+  offset: Point2;
+  scale: Point2;
+  rotationDegrees: number;
+}
+
 export interface Mask {
   shape: MaskShape;
   feather: number;
   invert: boolean;
+  transform?: MaskTransform;
 }
 
 export interface Effect {
@@ -180,6 +187,7 @@ export interface MaskInput {
   shape?: MaskShape;
   feather?: number;
   invert?: boolean;
+  transform?: MaskTransform;
 }
 
 export interface EffectInput {

@@ -80,6 +80,11 @@ function normalizeMask(mask: Extract<EditRequest, { type: "setMasks" }>["masks"]
     },
     feather: mask.feather ?? 0,
     invert: mask.invert ?? false,
+    transform: mask.transform ?? {
+      offset: { x: 0, y: 0 },
+      scale: { x: 1, y: 1 },
+      rotationDegrees: 0,
+    },
   };
 }
 

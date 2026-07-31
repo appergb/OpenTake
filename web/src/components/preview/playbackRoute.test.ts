@@ -233,22 +233,34 @@ describe("resolveTimelinePlaybackRoute", () => {
     }
   });
 
-  it("returns Unsupported for Lottie enabled effects polygon masks and mask overflow", () => {
+  it("routes polygon masks through the native compositor", () => {
+    const polygon = clip({
+      masks: [
+        {
+          shape: {
+            kind: "poly",
+            points: [
+              { x: 0.2, y: 0.2 },
+              { x: 0.8, y: 0.2 },
+              { x: 0.5, y: 0.8 },
+            ],
+          },
+          feather: 0.1,
+          invert: false,
+        },
+      ],
+    });
+
+    expect(resolveTimelinePlaybackRoute(timeline(polygon), runtime)).toEqual({
+      kind: "rust",
+      reasons: [],
+    });
+  });
+
+  it("returns Unsupported for Lottie enabled effects and mask overflow", () => {
     const cases: Array<[Clip, string]> = [
       [clip({ mediaType: "lottie", sourceClipType: "lottie" }), "lottie"],
       [clip({ effects: [{ name: "blur", params: {}, enabled: true }] }), "enabled-effect"],
-      [
-        clip({
-          masks: [
-            {
-              shape: { kind: "poly", points: [{ x: 0, y: 0 }, { x: 1, y: 1 }] },
-              feather: 0,
-              invert: false,
-            },
-          ],
-        }),
-        "polygon-mask",
-      ],
       [
         clip({
           masks: Array.from({ length: 5 }, () => ({

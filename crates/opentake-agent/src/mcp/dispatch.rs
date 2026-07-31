@@ -3337,6 +3337,7 @@ fn mask_from_arg(m: &MaskArg, path: &str) -> Result<Mask, ToolError> {
         shape,
         feather: m.feather.unwrap_or(0.0),
         invert: m.invert.unwrap_or(false),
+        ..Mask::default()
     })
 }
 

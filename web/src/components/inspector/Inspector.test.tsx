@@ -3,12 +3,16 @@
 import React from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Clip, Timeline } from "../../lib/types";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
 import { useProjectStore } from "../../store/projectStore";
+import * as edit from "../../store/editActions";
 import { Inspector } from "./Inspector";
+
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true;
 
 function visualClip(overrides: Partial<Clip> = {}): Clip {
   return {
@@ -125,6 +129,46 @@ describe("Inspector completion surface", () => {
     expect(
       [...container.querySelectorAll<HTMLElement>('[role="tab"]')].map((tab) => tab.textContent),
     ).toEqual(["视频", "AI 编辑"]);
+    await act(async () => root.unmount());
+  });
+
+  it("creates edits and deletes a polygon mask through the undoable command route", async () => {
+    const clip = visualClip();
+    useProjectStore.setState({ timeline: timelineWith(clip), projectPath: "/tmp/demo.opentake" });
+    useEditorUiStore.setState({ selectedClipIds: new Set([clip.id]), inspectorTab: "video" });
+    const setMasks = vi.spyOn(edit, "setMasks").mockResolvedValue();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Inspector />));
+
+    const maskSection = [...container.querySelectorAll("section")].find((section) =>
+      section.textContent?.includes("蒙版"),
+    );
+    expect(maskSection).not.toBeUndefined();
+    const enabled = maskSection?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+    await act(async () => enabled?.click());
+    expect(setMasks).toHaveBeenLastCalledWith(
+      [clip.id],
+      [expect.objectContaining({ shape: expect.objectContaining({ kind: "circle" }) })],
+    );
+
+    const select = maskSection?.querySelector<HTMLSelectElement>("select");
+    if (select) select.value = "poly";
+    await act(async () => select?.dispatchEvent(new Event("change", { bubbles: true })));
+    expect(setMasks).toHaveBeenLastCalledWith(
+      [clip.id],
+      [expect.objectContaining({ shape: expect.objectContaining({ kind: "poly" }) })],
+    );
+    expect(maskSection?.textContent).toContain("添加点");
+
+    const deleteButton = [...(maskSection?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent === "删除蒙版",
+    );
+    await act(async () => deleteButton?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(setMasks).toHaveBeenLastCalledWith([clip.id], []);
+
+    setMasks.mockRestore();
     await act(async () => root.unmount());
   });
 });

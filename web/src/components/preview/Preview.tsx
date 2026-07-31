@@ -28,6 +28,7 @@ import { assetUrl } from "../../lib/asset";
 import { TimelinePlayback } from "./TimelinePlaybackLayer";
 import { TransformOverlay } from "./TransformOverlay";
 import { CropOverlay } from "./CropOverlay";
+import { PolygonMaskOverlay } from "./PolygonMaskOverlay";
 import {
   CANVAS_OUTLINE_COLOR,
   aspectFitBox,
@@ -471,14 +472,17 @@ export function Preview() {
                         sourcePixelAspect={cropSourcePixelAspect}
                       />
                     )
-                  : transformClip &&
-                    scaledCanvas && (
-                      <TransformOverlay
-                        clip={transformClip}
-                        canvasPx={scaledCanvas}
-                        mediaAspect={transformMediaAspect}
-                      />
-                    )}
+                  : transformClip && scaledCanvas
+                    ? transformClip.masks?.[0]?.shape.kind === "poly"
+                      ? <PolygonMaskOverlay clip={transformClip} canvasPx={scaledCanvas} />
+                      : (
+                          <TransformOverlay
+                            clip={transformClip}
+                            canvasPx={scaledCanvas}
+                            mediaAspect={transformMediaAspect}
+                          />
+                        )
+                    : null}
               </>
             ) : (
               // Empty timeline: a framed 16:9 canvas surface placeholder.

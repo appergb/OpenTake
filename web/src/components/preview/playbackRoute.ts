@@ -10,7 +10,6 @@ export interface PlaybackRouteRuntime {
 export type UnsupportedPlaybackReason =
   | { code: "lottie"; clipId: string }
   | { code: "enabled-effect"; clipId: string; effect: string }
-  | { code: "polygon-mask"; clipId: string }
   | { code: "mask-overflow"; clipId: string; count: number; limit: 4 }
   | { code: "composited-reverse"; clipId: string }
   | { code: "composited-speed"; clipId: string; speed: number }
@@ -62,10 +61,6 @@ function inspectClip(
   if (masks.length > 4) {
     reasons.push({ code: "mask-overflow", clipId: clip.id, count: masks.length, limit: 4 });
   }
-  if (masks.some((mask) => mask.shape.kind === "poly")) {
-    reasons.push({ code: "polygon-mask", clipId: clip.id });
-  }
-
   return {
     clip,
     needsRust,

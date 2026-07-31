@@ -15,33 +15,35 @@ use crate::gpu::texture::GpuTexture;
 use crate::gpu::RenderError;
 use crate::plan::{FramePlan, LayerDraw, RenderSize, TextureSource};
 use crate::source::DecodedFrame;
+use opentake_domain::{MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS};
 
 /// Maximum masks evaluated in-shader per draw (mirrors `MASK_CAP` in
-/// `shader.wgsl`). Extra masks on a clip beyond this are ignored by the
-/// compositor (the domain still stores and unit-tests all of them).
-const MASK_CAP: usize = 4;
+/// `shader.wgsl`). The shared edit-command validation prevents authored data
+/// from exceeding this fixed uniform capacity.
+const MASK_CAP: usize = MAX_MASKS_PER_CLIP;
 
 /// Flag bits packed into `canvas_op_flags[3]` (bitcast to u32 in WGSL).
 const FLAG_PREMULTIPLY: u32 = 1;
 const FLAG_GRADE: u32 = 2;
 const FLAG_CHROMA: u32 = 4;
 
-/// Mask kind tags (mirror `MaskShape` / the WGSL `MASK_*` consts). Polygon masks
-/// are not rendered in-shader (see shader TODO); they encode as `MASK_NOOP` which
-/// the shader treats as a full-coverage circle (no clipping).
+/// Mask kind tags and polygon point cap mirror the WGSL constants.
 const MASK_LINEAR: f32 = 0.0;
 const MASK_CIRCLE: f32 = 1.0;
-/// A circle large enough to cover the whole canvas — used to make an unsupported
-/// (polygon) mask a no-op instead of silently clipping.
-const MASK_NOOP_GEO: [f32; 4] = [0.5, 0.5, 8.0, 8.0];
+const MASK_POLY: f32 = 2.0;
+const POLY_POINT_CAP: usize = MAX_POLYGON_MASK_POINTS;
 
 /// One mask in the uniform (mirrors WGSL `MaskGpu`): `head = (kind, feather,
-/// invert, pad)`, `geo` packs the shape geometry.
+/// invert, polygon-point-count)`, `geo` packs linear/circle geometry, and
+/// `points` carries a bounded pen path.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default)]
 struct MaskGpu {
     head: [f32; 4],
     geo: [f32; 4],
+    transform: [f32; 4],
+    transform_meta: [f32; 4],
+    points: [[f32; 4]; POLY_POINT_CAP],
 }
 
 /// Uniform mirror of WGSL `struct U` (SPEC §3.2), extended with the A-tier color
@@ -100,9 +102,9 @@ fn grade_blocks(g: &ColorGrade) -> ([f32; 4], [f32; 4], [f32; 4], [f32; 4]) {
 }
 
 /// Pack a draw's masks into the fixed-capacity uniform array, returning the count
-/// the shader should evaluate. Linear + circle masks encode directly; polygon
-/// masks (unsupported in-shader) encode as a full-coverage no-op so they neither
-/// clip nor crash. Masks beyond [`MASK_CAP`] are dropped.
+/// the shader should evaluate. Polygon paths are bounded to [`POLY_POINT_CAP`]
+/// points. The shared edit-command validation prevents authored data from
+/// exceeding either fixed GPU capacity.
 fn pack_masks(draw: &LayerDraw<'_>) -> ([MaskGpu; MASK_CAP], f32) {
     let mut out = [MaskGpu::default(); MASK_CAP];
     let mut n = 0usize;
@@ -111,7 +113,8 @@ fn pack_masks(draw: &LayerDraw<'_>) -> ([MaskGpu; MASK_CAP], f32) {
             break;
         }
         let invert = if mask.invert { 1.0 } else { 0.0 };
-        let (kind, geo) = match &mask.shape {
+        let mut points = [[0.0; 4]; POLY_POINT_CAP];
+        let (kind, geo, point_count) = match &mask.shape {
             MaskShape::Linear { point, normal } => (
                 MASK_LINEAR,
                 [
@@ -120,6 +123,7 @@ fn pack_masks(draw: &LayerDraw<'_>) -> ([MaskGpu; MASK_CAP], f32) {
                     normal.x as f32,
                     normal.y as f32,
                 ],
+                0,
             ),
             MaskShape::Circle { center, radius } => (
                 MASK_CIRCLE,
@@ -129,15 +133,32 @@ fn pack_masks(draw: &LayerDraw<'_>) -> ([MaskGpu; MASK_CAP], f32) {
                     radius.x as f32,
                     radius.y as f32,
                 ],
+                0,
             ),
-            // Polygon masks are unsupported in-shader (TODO: storage buffer for
-            // points). Encode as a full-canvas circle so they are a visual no-op
-            // rather than silently clipping.
-            MaskShape::Poly { .. } => (MASK_CIRCLE, MASK_NOOP_GEO),
+            MaskShape::Poly { points: path } => {
+                let point_count = path.len().min(POLY_POINT_CAP);
+                for (target, point) in points.iter_mut().zip(path).take(point_count) {
+                    *target = [point.x as f32, point.y as f32, 0.0, 0.0];
+                }
+                (MASK_POLY, [0.0; 4], point_count)
+            }
         };
         out[n] = MaskGpu {
-            head: [kind, mask.feather as f32, invert, 0.0],
+            head: [kind, mask.feather as f32, invert, point_count as f32],
             geo,
+            transform: [
+                mask.transform.offset.x as f32,
+                mask.transform.offset.y as f32,
+                mask.transform.scale.x as f32,
+                mask.transform.scale.y as f32,
+            ],
+            transform_meta: [
+                mask.transform.rotation_degrees.to_radians() as f32,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            points,
         };
         n += 1;
     }

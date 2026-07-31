@@ -10,8 +10,8 @@
 use std::rc::Rc;
 
 use opentake_domain::{
-    ChromaKey, Clip, ClipType, ColorGrade, Mask, MaskShape, Point, Point2, Rgb, Timeline, Track,
-    Transform,
+    ChromaKey, Clip, ClipType, ColorGrade, Mask, MaskShape, MaskTransform, Point, Point2, Rgb,
+    Timeline, Track, Transform,
 };
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::source::DecodedFrame;
@@ -238,6 +238,7 @@ fn circle_mask_clips_to_center() {
         },
         feather: 0.0,
         invert: false,
+        ..Mask::default()
     }];
     // White source, masked to a small centered circle over black.
     let frame = render(&dev, &tl, [255, 255, 255, 255]);
@@ -266,6 +267,7 @@ fn inverted_mask_clips_out_center() {
         },
         feather: 0.0,
         invert: true,
+        ..Mask::default()
     }];
     let frame = render(&dev, &tl, [255, 255, 255, 255]);
     // Inverted: center is now masked OUT -> black.
@@ -280,4 +282,74 @@ fn inverted_mask_clips_out_center() {
         corner[0] > 200,
         "corner kept by inverted mask, got {corner:?}"
     );
+}
+
+#[test]
+fn linear_circle_and_polygon_masks_match_cpu_reference_in_preview_and_export() {
+    let Some(dev) =
+        device_or_skip("linear_circle_and_polygon_masks_match_cpu_reference_in_preview_and_export")
+    else {
+        return;
+    };
+    let shapes = [
+        MaskShape::Linear {
+            point: Point2::new(0.45, 0.55),
+            normal: Point2::new(0.8, -0.3),
+        },
+        MaskShape::Circle {
+            center: Point2::new(0.55, 0.45),
+            radius: Point2::new(0.31, 0.22),
+        },
+        MaskShape::Poly {
+            points: vec![
+                Point2::new(0.2, 0.2),
+                Point2::new(0.82, 0.28),
+                Point2::new(0.68, 0.82),
+                Point2::new(0.28, 0.72),
+            ],
+        },
+    ];
+
+    for shape in shapes {
+        for feather in [0.0, 0.18] {
+            let mask = Mask {
+                shape: shape.clone(),
+                feather,
+                invert: feather > 0.0,
+                transform: if matches!(&shape, MaskShape::Poly { .. }) {
+                    MaskTransform {
+                        offset: Point2::new(0.07, -0.04),
+                        scale: Point2::new(0.82, 1.13),
+                        rotation_degrees: 17.0,
+                    }
+                } else {
+                    MaskTransform::default()
+                },
+            };
+            let mut timeline = full_canvas_timeline();
+            timeline.tracks[0].clips[0].masks = vec![mask.clone()];
+
+            // Paused preview and export both consume the same FramePlan and
+            // compositor boundary. Render twice with fresh resolvers to guard
+            // against path-local state and compare both against the CPU mirror.
+            let preview = render(&dev, &timeline, [255, 255, 255, 255]);
+            let export = render(&dev, &timeline, [255, 255, 255, 255]);
+            assert_eq!(preview.rgba, export.rgba);
+
+            for y in 0..RS.height {
+                for x in 0..RS.width {
+                    let expected = (mask.coverage(
+                        (x as f64 + 0.5) / RS.width as f64,
+                        (y as f64 + 0.5) / RS.height as f64,
+                    ) * 255.0)
+                        .round() as i32;
+                    let actual = pixel_at(&preview, x, y)[0] as i32;
+                    assert!(
+                        (actual - expected).abs() <= 3,
+                        "shape={shape:?} feather={feather} pixel=({x},{y}) expected={expected} actual={actual}"
+                    );
+                }
+            }
+        }
+    }
 }

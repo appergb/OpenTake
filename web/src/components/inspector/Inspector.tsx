@@ -8,7 +8,7 @@
  * command layer as direct Inspector edits.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -1204,9 +1204,9 @@ function MaskSection({ clip, t }: { clip: Clip; t: TFunction }) {
     }
   };
   const setShape = (shape: MaskShape) => commitMask({ ...draft, shape });
-  const updateCommon = (field: keyof Omit<Mask, "shape">, value: number | boolean) =>
+  const updateCommon = (field: "feather" | "invert", value: number | boolean) =>
     setDraft((m) => ({ ...m, [field]: value }));
-  const commitCommon = (field: keyof Omit<Mask, "shape">, value: number | boolean) =>
+  const commitCommon = (field: "feather" | "invert", value: number | boolean) =>
     commitMask({ ...draft, [field]: value });
 
   return (
@@ -1229,12 +1229,13 @@ function MaskSection({ clip, t }: { clip: Clip; t: TFunction }) {
                 const kind = e.target.value;
                 if (kind === "circle") setShape(defaultCircleShape());
                 else if (kind === "linear") setShape(defaultLinearShape());
+                else if (kind === "poly") setShape(defaultPolyShape());
               }}
               style={controlStyle}
             >
               <option value="circle">{t("inspector.mask.circle")}</option>
               <option value="linear">{t("inspector.mask.linear")}</option>
-              <option value="poly" disabled>
+              <option value="poly">
                 {t("inspector.mask.polyPending")}
               </option>
             </select>
@@ -1253,7 +1254,20 @@ function MaskSection({ clip, t }: { clip: Clip; t: TFunction }) {
               setDraftShape={(shape) => setDraft((m) => ({ ...m, shape }))}
               t={t}
             />
-          ) : null}
+          ) : (
+            <PolyMaskFields
+              shape={draft.shape}
+              setShape={setShape}
+              setDraftShape={(shape) => setDraft((m) => ({ ...m, shape }))}
+              t={t}
+            />
+          )}
+          <MaskTransformFields
+            mask={draft}
+            setDraft={setDraft}
+            commitMask={commitMask}
+            t={t}
+          />
           <EffectNumberRow
             label={t("inspector.field.feather")}
             value={draft.feather}
@@ -1272,6 +1286,13 @@ function MaskSection({ clip, t }: { clip: Clip; t: TFunction }) {
               onChange={(e) => commitCommon("invert", e.target.checked)}
             />
           </Row>
+          <button
+            type="button"
+            onClick={() => setMaskEnabled(false)}
+            style={{ ...controlStyle, width: "100%", marginTop: SPACE.xs, color: "#ff8f8f" }}
+          >
+            {t("inspector.mask.delete")}
+          </button>
         </>
       )}
     </section>
@@ -1374,6 +1395,109 @@ function LinearMaskFields({
         onChange={(v) => updatePoint("normal", "y", v)}
         onCommit={(v) => commitPoint("normal", "y", v)}
       />
+    </>
+  );
+}
+
+function PolyMaskFields({
+  shape,
+  setShape,
+  setDraftShape,
+  t,
+}: {
+  shape: Extract<MaskShape, { kind: "poly" }>;
+  setShape: (shape: MaskShape) => void;
+  setDraftShape: (shape: MaskShape) => void;
+  t: TFunction;
+}) {
+  const updatePoint = (index: number, axis: keyof RgbPoint, value: number, commit: boolean) => {
+    const points = shape.points.map((point, pointIndex) =>
+      pointIndex === index ? { ...point, [axis]: value } : point,
+    );
+    if (commit) setShape({ ...shape, points });
+    else setDraftShape({ ...shape, points });
+  };
+  const addPoint = () => {
+    if (shape.points.length >= 16) return;
+    const last = shape.points[shape.points.length - 1] ?? { x: 0.5, y: 0.5 };
+    setShape({
+      ...shape,
+      points: [...shape.points, { x: Math.min(1, last.x + 0.05), y: Math.min(1, last.y + 0.05) }],
+    });
+  };
+  const deletePoint = (index: number) => {
+    if (shape.points.length <= 3) return;
+    setShape({ ...shape, points: shape.points.filter((_, pointIndex) => pointIndex !== index) });
+  };
+
+  return (
+    <>
+      {shape.points.map((point, index) => (
+        <div key={index} style={{ borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: SPACE.xs }}>
+          <MaskNumberRow
+            label={`P${index + 1} X`}
+            value={point.x}
+            min={0}
+            max={1}
+            onChange={(value) => updatePoint(index, "x", value, false)}
+            onCommit={(value) => updatePoint(index, "x", value, true)}
+          />
+          <MaskNumberRow
+            label={`P${index + 1} Y`}
+            value={point.y}
+            min={0}
+            max={1}
+            onChange={(value) => updatePoint(index, "y", value, false)}
+            onCommit={(value) => updatePoint(index, "y", value, true)}
+          />
+          <button
+            type="button"
+            disabled={shape.points.length <= 3}
+            onClick={() => deletePoint(index)}
+            style={{ ...controlStyle, width: "100%", opacity: shape.points.length <= 3 ? 0.45 : 1 }}
+          >
+            {t("inspector.mask.deletePoint")} {index + 1}
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        disabled={shape.points.length >= 16}
+        onClick={addPoint}
+        style={{ ...controlStyle, width: "100%", marginTop: SPACE.xs }}
+      >
+        {t("inspector.mask.addPoint")}
+      </button>
+    </>
+  );
+}
+
+function MaskTransformFields({
+  mask,
+  setDraft,
+  commitMask,
+  t,
+}: {
+  mask: Mask;
+  setDraft: Dispatch<SetStateAction<Mask>>;
+  commitMask: (mask: Mask) => void;
+  t: TFunction;
+}) {
+  const transform = completeMaskTransform(mask.transform);
+  const update = (next: typeof transform, commit: boolean) => {
+    if (commit) commitMask({ ...mask, transform: next });
+    else setDraft((current) => ({ ...current, transform: next }));
+  };
+  const pointField = (field: "offset" | "scale", axis: keyof RgbPoint, value: number, commit: boolean) =>
+    update({ ...transform, [field]: { ...transform[field], [axis]: value } }, commit);
+
+  return (
+    <>
+      <MaskNumberRow label={t("inspector.mask.offsetX")} value={transform.offset.x} onChange={(v) => pointField("offset", "x", v, false)} onCommit={(v) => pointField("offset", "x", v, true)} />
+      <MaskNumberRow label={t("inspector.mask.offsetY")} value={transform.offset.y} onChange={(v) => pointField("offset", "y", v, false)} onCommit={(v) => pointField("offset", "y", v, true)} />
+      <MaskNumberRow label={t("inspector.mask.scaleX")} value={transform.scale.x} min={0.05} max={4} onChange={(v) => pointField("scale", "x", v, false)} onCommit={(v) => pointField("scale", "x", v, true)} />
+      <MaskNumberRow label={t("inspector.mask.scaleY")} value={transform.scale.y} min={0.05} max={4} onChange={(v) => pointField("scale", "y", v, false)} onCommit={(v) => pointField("scale", "y", v, true)} />
+      <EffectNumberRow label={t("inspector.mask.rotation")} value={transform.rotationDegrees} min={-180} max={180} sensitivity={0.5} format={(v) => `${v.toFixed(1)}°`} onChange={(v) => update({ ...transform, rotationDegrees: v }, false)} onCommit={(v) => update({ ...transform, rotationDegrees: v }, true)} />
     </>
   );
 }
@@ -1483,6 +1607,15 @@ function completeMask(mask: Mask | undefined): Mask {
     shape: mask?.shape ?? defaultCircleShape(),
     feather: mask?.feather ?? 0,
     invert: mask?.invert ?? false,
+    transform: completeMaskTransform(mask?.transform),
+  };
+}
+
+function completeMaskTransform(transform: Mask["transform"]) {
+  return {
+    offset: { x: transform?.offset.x ?? 0, y: transform?.offset.y ?? 0 },
+    scale: { x: transform?.scale.x ?? 1, y: transform?.scale.y ?? 1 },
+    rotationDegrees: transform?.rotationDegrees ?? 0,
   };
 }
 
@@ -1499,6 +1632,18 @@ function defaultLinearShape(): Extract<MaskShape, { kind: "linear" }> {
     kind: "linear",
     point: { x: 0.5, y: 0.5 },
     normal: { x: 1, y: 0 },
+  };
+}
+
+function defaultPolyShape(): Extract<MaskShape, { kind: "poly" }> {
+  return {
+    kind: "poly",
+    points: [
+      { x: 0.25, y: 0.25 },
+      { x: 0.75, y: 0.25 },
+      { x: 0.75, y: 0.75 },
+      { x: 0.25, y: 0.75 },
+    ],
   };
 }
 
