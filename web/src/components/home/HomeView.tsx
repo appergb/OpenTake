@@ -9,7 +9,8 @@ import {
   MoreHorizontal,
 } from "lucide-react";
 import { Icon } from "../ui/Icon";
-import { useT } from "../../i18n";
+import { useT, type TFunction } from "../../i18n";
+import { assetUrl } from "../../lib/asset";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useRecentStore, type RecentProject } from "../../store/recentStore";
 import {
@@ -18,6 +19,27 @@ import {
   openProjectViaDialog,
   openProjectPath,
 } from "../../store/projectActions";
+
+export function formatProjectRelativeTime(
+  t: TFunction,
+  timestamp: number,
+  now = Date.now(),
+): string {
+  const then = new Date(timestamp);
+  const current = new Date(now);
+  const thenDay = new Date(then.getFullYear(), then.getMonth(), then.getDate()).getTime();
+  const currentDay = new Date(
+    current.getFullYear(),
+    current.getMonth(),
+    current.getDate(),
+  ).getTime();
+  const days = Math.max(0, Math.round((currentDay - thenDay) / 86_400_000));
+  if (days === 0) return t("home.relative.today");
+  if (days === 1) return t("home.relative.yesterday");
+  if (days < 7) return t("home.relative.daysAgo", { count: days });
+  if (days < 35) return t("home.relative.weeksAgo", { count: Math.floor(days / 7) });
+  return t("home.relative.monthsAgo", { count: Math.max(1, Math.floor(days / 30)) });
+}
 
 const homeShellStyle: CSSProperties = {
   display: "flex",
@@ -608,9 +630,16 @@ function ProjectGridCard({
   const [confirmTrash, setConfirmTrash] = useState(false);
   const [pending, setPending] = useState<"reveal" | "remove" | "trash" | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [thumbnailFailed, setThumbnailFailed] = useState(false);
 
-  const cleanDisplayPath = entry.path.replace(/^\/Users\/[^\/]+/, "~");
   const actionsVisible = hovered || actionsOpen || confirmTrash || actionError !== null;
+  const coverUrl = entry.missing || thumbnailFailed ? null : assetUrl(entry.thumbnailPath);
+  const modifiedLabel = formatProjectRelativeTime(t, entry.modifiedAt ?? entry.openedAt);
+
+  useEffect(
+    () => setThumbnailFailed(false),
+    [entry.missing, entry.modifiedAt, entry.thumbnailPath],
+  );
 
   const runReveal = async () => {
     setPending("reveal");
@@ -711,8 +740,8 @@ function ProjectGridCard({
         >
           <div
             style={{
-              width: 24,
-              height: 24,
+              width: "100%",
+              height: 48,
               flex: "0 0 auto",
               display: "inline-flex",
               alignItems: "center",
@@ -720,9 +749,17 @@ function ProjectGridCard({
               borderRadius: "var(--radius-md)",
               background: "var(--home-muted)",
               color: "var(--home-muted-foreground)",
+              overflow: "hidden",
             }}
           >
-            <Icon icon={Film} size={13} />
+            {coverUrl ? (
+              <img
+                src={coverUrl}
+                alt=""
+                onError={() => setThumbnailFailed(true)}
+                style={{ width: "100%", height: "100%", objectFit: "cover" }}
+              />
+            ) : <Icon icon={Film} size={16} />}
           </div>
           <div style={{ minWidth: 0, width: "100%" }}>
             <div
@@ -753,8 +790,20 @@ function ProjectGridCard({
                 <span id={`missing-${entry.path}`} style={{ color: "var(--status-error)" }}>
                   {t("home.fileMissing")}
                 </span>
-              ) : cleanDisplayPath}
+              ) : modifiedLabel}
             </div>
+            {entry.missing && (
+              <div
+                className="tabular"
+                style={{
+                  marginTop: 2,
+                  fontSize: "var(--fs-xs)",
+                  color: "var(--home-muted-foreground)",
+                }}
+              >
+                {modifiedLabel}
+              </div>
+            )}
           </div>
         </div>
       </button>

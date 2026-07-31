@@ -116,6 +116,8 @@
 
 P2-3 已由 `src-tauri/src/home.rs` 与 Home 卡片闭环：桌面端注册表以原子 JSON 持久化最近工程，启动同步只更新 `missing` 而不丢弃缺失条目；Reveal 和废纸篓命令只接受已注册的绝对 `.opentake` 路径。macOS 使用 `NSFileManager.trashItem`，Windows 使用系统回收站 API，Linux 使用 `gio trash`；仅在系统操作成功后才持久化移除。卡片提供缺失态、右键/按钮操作、从最近中移除、废纸篓二次确认、pending 与可重试错误状态。
 
+P1-1、P2-1 与 P2-2 已按独立所有者闭环：`useAutosave` 保持 1.5 秒防抖，原生 CloseRequested 在隐藏窗口前同步 flush；成功保存只刷新最近工程的 `modifiedAt`/`thumbnailPath`，不会改动表示打开排序的 `openedAt`。原生注册表从工程包持久化的 `project.json` 修改时间与 `thumbnail.jpg` 刷新元数据，Home 卡片显示 16:9 封面和本地化相对修改时间（路径仅作 tooltip），缺失工程保留最后元数据并停止加载封面。
+
 ---
 
 ## 二、实现批次顺序（每批一个功能分支：写 → 审 → 修 → CI 绿 → 合并）

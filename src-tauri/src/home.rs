@@ -19,6 +19,10 @@ struct ProjectEntry {
     path: PathBuf,
     created_at: u64,
     last_opened_at: u64,
+    #[serde(default)]
+    modified_at: u64,
+    #[serde(default)]
+    thumbnail_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -28,6 +32,8 @@ pub struct HomeProjectEntry {
     name: String,
     created_at: u64,
     opened_at: u64,
+    modified_at: u64,
+    thumbnail_path: Option<PathBuf>,
     missing: bool,
 }
 
@@ -39,6 +45,10 @@ pub struct LegacyRecentProject {
     opened_at: u64,
     #[serde(default)]
     created_at: Option<u64>,
+    #[serde(default)]
+    modified_at: Option<u64>,
+    #[serde(default)]
+    thumbnail_path: Option<String>,
 }
 
 struct ProjectRegistry {
@@ -70,12 +80,16 @@ impl ProjectRegistry {
         let mut next = self.entries.clone();
         if let Some(entry) = next.iter_mut().find(|entry| same_path(&entry.path, &path)) {
             entry.last_opened_at = opened_at;
+            refresh_entry_metadata(entry);
         } else {
+            let (modified_at, thumbnail_path) = project_metadata(&path, opened_at);
             next.push(ProjectEntry {
                 id: uuid::Uuid::new_v4().to_string(),
                 path,
                 created_at: opened_at,
                 last_opened_at: opened_at,
+                modified_at,
+                thumbnail_path,
             });
         }
         sort_entries(&mut next);
@@ -90,14 +104,38 @@ impl ProjectRegistry {
                 continue;
             }
             let opened_at = item.opened_at.max(1);
+            let expected_thumbnail = path.join("thumbnail.jpg");
+            let legacy_thumbnail = item
+                .thumbnail_path
+                .as_ref()
+                .map(PathBuf::from)
+                .filter(|candidate| candidate == &expected_thumbnail);
+            let (disk_modified_at, disk_thumbnail) = project_metadata(&path, opened_at);
             next.push(ProjectEntry {
                 id: uuid::Uuid::new_v4().to_string(),
                 path,
                 created_at: item.created_at.unwrap_or(opened_at),
                 last_opened_at: opened_at,
+                modified_at: if disk_modified_at == opened_at {
+                    item.modified_at.unwrap_or(opened_at)
+                } else {
+                    disk_modified_at
+                },
+                thumbnail_path: disk_thumbnail.or(legacy_thumbnail),
             });
         }
         sort_entries(&mut next);
+        if next != self.entries {
+            self.replace_entries(next)?;
+        }
+        Ok(())
+    }
+
+    fn refresh_metadata(&mut self) -> Result<(), String> {
+        let mut next = self.entries.clone();
+        for entry in &mut next {
+            refresh_entry_metadata(entry);
+        }
         if next != self.entries {
             self.replace_entries(next)?;
         }
@@ -143,6 +181,12 @@ impl ProjectRegistry {
                 name: project_name(&entry.path),
                 created_at: entry.created_at,
                 opened_at: entry.last_opened_at,
+                modified_at: if entry.modified_at == 0 {
+                    entry.last_opened_at
+                } else {
+                    entry.modified_at
+                },
+                thumbnail_path: entry.thumbnail_path.clone(),
                 missing: !entry.path.exists(),
             })
             .collect()
@@ -190,6 +234,39 @@ fn now_millis() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+fn modified_millis(path: &Path) -> Option<u64> {
+    fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis()
+        .try_into()
+        .ok()
+}
+
+fn project_metadata(path: &Path, fallback_modified_at: u64) -> (u64, Option<PathBuf>) {
+    if !path.exists() {
+        return (fallback_modified_at, None);
+    }
+    let project_file = path.join("project.json");
+    let modified_at = modified_millis(&project_file)
+        .or_else(|| modified_millis(path))
+        .unwrap_or(fallback_modified_at);
+    let thumbnail = path.join("thumbnail.jpg");
+    (modified_at, thumbnail.is_file().then_some(thumbnail))
+}
+
+fn refresh_entry_metadata(entry: &mut ProjectEntry) {
+    if !entry.path.exists() {
+        return;
+    }
+    let (modified_at, thumbnail_path) = project_metadata(&entry.path, entry.last_opened_at);
+    entry.modified_at = modified_at;
+    entry.thumbnail_path = thumbnail_path;
 }
 
 fn validated_project_path(path: &Path) -> Result<PathBuf, String> {
@@ -376,6 +453,7 @@ pub fn home_projects_sync(
 ) -> Result<Vec<HomeProjectEntry>, String> {
     with_registry(&app, |registry| {
         registry.merge_legacy(&entries)?;
+        registry.refresh_metadata()?;
         Ok(registry.snapshot())
     })
 }
@@ -476,5 +554,22 @@ mod tests {
             .is_err());
         assert!(!called);
         assert!(outside.exists());
+    }
+
+    #[test]
+    fn snapshot_reads_persisted_thumbnail_and_modified_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let ledger = directory.path().join("project-registry.json");
+        let project = directory.path().join("Metadata.opentake");
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join("project.json"), b"{}").unwrap();
+        fs::write(project.join("thumbnail.jpg"), b"jpeg").unwrap();
+
+        let mut registry = ProjectRegistry::load(ledger).unwrap();
+        registry.register_at(project.clone(), 10).unwrap();
+        let entry = registry.snapshot().pop().unwrap();
+
+        assert!(entry.modified_at > 0);
+        assert_eq!(entry.thumbnail_path, Some(project.join("thumbnail.jpg")));
     }
 }

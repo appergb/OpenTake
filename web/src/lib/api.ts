@@ -160,6 +160,8 @@ export interface HomeProjectEntry {
   name: string;
   createdAt: number;
   openedAt: number;
+  modifiedAt: number;
+  thumbnailPath?: string | null;
   missing: boolean;
 }
 
@@ -167,6 +169,8 @@ export interface LegacyRecentProject {
   path: string;
   openedAt: number;
   createdAt?: number;
+  modifiedAt?: number;
+  thumbnailPath?: string | null;
 }
 
 export async function homeProjectsSync(

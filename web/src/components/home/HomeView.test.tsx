@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../../i18n", () => ({ useT: () => (key: string) => key }));
 vi.mock("../../lib/api", () => ({ isTauri: false }));
+vi.mock("../../lib/asset", () => ({ assetUrl: (path: string | null) => path }));
 vi.mock("../../store/projectActions", () => mocks);
 
 import { useRecentStore } from "../../store/recentStore";
@@ -60,6 +61,36 @@ it("new_open_sample_register_only_after_success_and_route_tutorial", async () =>
   await act(async () => finish());
   await vi.waitFor(() => expect(tutorial?.disabled).toBe(false));
   expect(useRecentStore.getState().recents.map(({ name }) => name)).toEqual(["Existing"]);
+});
+
+it("project_card_renders_thumbnail_relative_time_and_missing_state", async () => {
+  useRecentStore.setState({
+    recents: [{
+      path: "/tmp/Metadata.opentake",
+      name: "Metadata",
+      openedAt: Date.now() - 86_400_000,
+      modifiedAt: Date.now(),
+      thumbnailPath: "/tmp/Metadata.opentake/thumbnail.jpg",
+      missing: false,
+    }],
+  });
+  await act(async () => root.render(<HomeView />));
+
+  expect(container.querySelector<HTMLImageElement>("img")?.src).toContain("thumbnail.jpg");
+  expect(container.textContent).toContain("home.relative.today");
+
+  act(() => useRecentStore.setState({
+    recents: [{
+      path: "/tmp/Metadata.opentake",
+      name: "Metadata",
+      openedAt: Date.now() - 86_400_000,
+      modifiedAt: Date.now(),
+      thumbnailPath: "/tmp/Metadata.opentake/thumbnail.jpg",
+      missing: true,
+    }],
+  }));
+  await vi.waitFor(() => expect(container.textContent).toContain("home.fileMissing"));
+  expect(container.querySelector("img")).toBeNull();
 });
 
 it("missing_card_reveal_remove_and_trash_states", async () => {

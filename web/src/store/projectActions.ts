@@ -135,7 +135,10 @@ async function runSaveCoordinator(): Promise<void> {
     activeSaveSnapshot = snapshot;
 
     try {
-      await api.projectSave(null);
+      const savedPath = await api.projectSave(null);
+      if (sameProject(snapshot)) {
+        useRecentStore.getState().markSaved(savedPath || snapshot.projectPath);
+      }
     } catch (error) {
       activeSaveSnapshot = null;
       const afterFailure = captureSaveSnapshot();

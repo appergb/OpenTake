@@ -2410,8 +2410,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 27619,
-      "sha256": "895168f49e2917afc9a9646a6ca1966b053617632aa1b2545630d99cc558d60f"
+      "bytes": 28129,
+      "sha256": "ef3cf02b2f92d2b529240cddfc7744a2211673c4f3bed1447a8eb9818e63c1d2"
     },
     {
       "id": "file-5de6d1bbf64c2d34",
@@ -2689,8 +2689,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 165524,
-      "sha256": "bdb243ad4be4995482c6368f5edf4260f52fa2a3f1af4533ebb1be08a873dbe3"
+      "bytes": 165678,
+      "sha256": "1c1bb246f8aa342a50f3620755ba0b678d071c0501bd91450f167a693e1ebd13"
     },
     {
       "id": "file-55b6b718c705afb7",
@@ -2837,6 +2837,15 @@
       "material": true,
       "bytes": 5612,
       "sha256": "dad4f8d6e83bec8ff3b7470d0099fd7d02dbc0f7332ccf959308b558bfddb4f8"
+    },
+    {
+      "id": "file-d380f5ce38f971b9",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/home-autosave-metadata-real-device-2026-07-31.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 4241,
+      "sha256": "5591ddc815e1f3462721e20a27225aee75472e3eef3c1d223b65ca232a3c35ec"
     },
     {
       "id": "file-5100a64989c60b5b",
@@ -5670,8 +5679,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 15676,
-      "sha256": "3fd8b10df2025386c67b49c43c7a86743e6f5b38780c6c7411ac57f523fdbb12"
+      "bytes": 19075,
+      "sha256": "e34268067bac1021cb8e476520628441af448bf4a0f120d7953997f65e6d9b18"
     },
     {
       "id": "file-eabcebd0ae5c9b77",
@@ -6048,8 +6057,8 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 5461,
-      "sha256": "8d67eaf11251e37a308aaebaf38b0c0e027e3b57a36a137f1b00afb497dc5ac3"
+      "bytes": 6540,
+      "sha256": "4f3ee3397b95e265446cb1783d0e6f36d451f787cf579f647c977d07a1d78134"
     },
     {
       "id": "file-0bae1db2d44e11b0",
@@ -6057,8 +6066,8 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 26405,
-      "sha256": "bbf22c45d9ce01b52e27ae6ee06a4e5b9d381cb791cba3560cfed7e57305c1c5"
+      "bytes": 28213,
+      "sha256": "0ecdad5e4718c809dad1be9e6a59a82a06f142343806ee9ebf0411531876bf19"
     },
     {
       "id": "file-0d2496801df2e6df",
@@ -6948,8 +6957,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 47883,
-      "sha256": "3c7527dd1a4f5c603e5be5994bb7ef5108522467f65110c09487028506126ee6"
+      "bytes": 47994,
+      "sha256": "97c743dce8bd978bb8113a0c88040d6cfd16caf67c92d2ffb4a57033723ecb80"
     },
     {
       "id": "file-d9a7857e58914645",
@@ -7515,8 +7524,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 11809,
-      "sha256": "59a036dbc96e8f342c389c9d3932bffc89d93bc28adf9bde5cb56a9bc932410a"
+      "bytes": 11950,
+      "sha256": "023ac8064222c8100dcd4ce4df50d21393eb40b51762d02d7816b3075881aaad"
     },
     {
       "id": "file-6c82a868b1fb4916",
@@ -7546,13 +7555,22 @@
       "sha256": "d5f0226a95d645c376e1b1e3e2f3e2c238abd26ce63e3f2f07089ee18e056760"
     },
     {
+      "id": "file-5c4516cda894cd83",
+      "path": "web/src/store/recentStore.test.ts",
+      "domain": "web",
+      "kind": "typescript-source",
+      "material": true,
+      "bytes": 2093,
+      "sha256": "2aaf44fef7957b25df854fc3ef61a23f6ea6b2a31ea1d19be32369198acd67af"
+    },
+    {
       "id": "file-5318270e4188d9b7",
       "path": "web/src/store/recentStore.ts",
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 4457,
-      "sha256": "706e08bb8435b1fe2baef67ba1630026d221def71fb180d79856147857c2928d"
+      "bytes": 5308,
+      "sha256": "4c5b0ed9f56531483267ac7a7fd7e703216a5d498d94d722f94bdd98ead31cb6"
     },
     {
       "id": "file-341f4d669a84a7d9",

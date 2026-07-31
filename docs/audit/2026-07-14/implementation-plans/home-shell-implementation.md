@@ -203,33 +203,35 @@ Runtime evidence: [`home-project-lifecycle-real-device-2026-07-31.md`](../runtim
   - Add browser interaction tests for every named Home, project, persistence, error, keyboard, and state transition; the affected web and Rust suites must pass.
   - Exercise the packaged application through create/open/close/reopen or the named Home path and retain exact runtime evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/store/recentStore.test.ts#autosave_and_home_metadata_have_separate_owners` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/store/recentStore.test.ts -t "autosave_and_home_metadata_have_separate_owners"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/store/recentStore.ts#useRecentStore`, `web/src/store/projectActions.ts#saveCurrentProject`, `docs/architecture/PORT-1TO1-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/store/recentStore.test.ts -t "autosave_and_home_metadata_have_separate_owners"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Runtime evidence: [`home-autosave-metadata-real-device-2026-07-31.md`](../runtime-artifacts/automated/home-autosave-metadata-real-device-2026-07-31.md).
 
 ### Task 5: HS-layout-geometry + CC-layout-misgrouped (implementation-slice-395babc4fe771bb4)
 

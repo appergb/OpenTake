@@ -15,6 +15,8 @@ export interface RecentProject {
   name: string;
   openedAt: number; // epoch ms
   createdAt?: number;
+  modifiedAt?: number;
+  thumbnailPath?: string | null;
   missing?: boolean;
 }
 
@@ -52,6 +54,7 @@ export function projectNameFromPath(path: string): string {
 interface RecentState {
   recents: RecentProject[];
   add: (path: string) => void;
+  markSaved: (path: string, modifiedAt?: number, thumbnailPath?: string | null) => void;
   remove: (path: string) => Promise<void>;
   reveal: (path: string) => Promise<void>;
   trash: (path: string) => Promise<void>;
@@ -66,6 +69,11 @@ function hasTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+export function projectThumbnailPath(path: string): string {
+  const separator = path.includes("\\") && !path.includes("/") ? "\\" : "/";
+  return `${path.replace(/[\\/]+$/, "")}${separator}thumbnail.jpg`;
+}
+
 export const useRecentStore = create<RecentState>((set, get) => ({
   recents: load(),
   add: (path) => {
@@ -76,6 +84,8 @@ export const useRecentStore = create<RecentState>((set, get) => ({
       name: projectNameFromPath(path),
       openedAt,
       createdAt: existing?.createdAt ?? openedAt,
+      modifiedAt: existing?.modifiedAt ?? openedAt,
+      thumbnailPath: existing?.thumbnailPath ?? null,
       missing: false,
     };
     const next = [entry, ...get().recents.filter((recent) => recent.path !== path)].slice(
@@ -91,6 +101,13 @@ export const useRecentStore = create<RecentState>((set, get) => ({
           console.error("Failed to persist recent project registration:", error);
         });
     }
+  },
+  markSaved: (path, modifiedAt = Date.now(), thumbnailPath = projectThumbnailPath(path)) => {
+    const next = get().recents.map((entry) => (
+      entry.path === path ? { ...entry, modifiedAt, thumbnailPath } : entry
+    ));
+    persist(next);
+    set({ recents: next });
   },
   remove: async (path) => {
     if (hasTauriRuntime()) {
@@ -130,7 +147,13 @@ export const useRecentStore = create<RecentState>((set, get) => ({
     try {
       const { homeProjectsSync } = await import("../lib/api");
       const native = await homeProjectsSync(
-        legacy.map(({ path, openedAt, createdAt }) => ({ path, openedAt, createdAt })),
+        legacy.map(({ path, openedAt, createdAt, modifiedAt, thumbnailPath }) => ({
+          path,
+          openedAt,
+          createdAt,
+          modifiedAt,
+          thumbnailPath,
+        })),
       );
       const recents = native.slice(0, MAX_RECENTS);
       persist(recents);
