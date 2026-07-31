@@ -3394,7 +3394,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_delete_survives_real_name_rebound() {
+    fn retained_delete_blocks_real_name_rebound() {
         let temp = TestDir::new("delete-rebound");
         let authority = root(&temp);
         let stage =
@@ -3404,9 +3404,8 @@ mod tests {
         file.write_all(b"original").unwrap();
         drop(file);
         let quarantine = quarantine_stage(stage, &authority, name("quarantine")).unwrap();
-        let quarantine_path = temp.path().join("quarantine");
-        let _guard =
-            install_before_retained_delete_hook(Arc::new(move |source, parent, _old_name| {
+        let _guard = install_before_retained_delete_hook(Arc::new(
+            move |source, parent, _old_name| {
                 let buffer = RenameInformationBuffer::new(
                     parent.native.node.handle.raw(),
                     &name("moved-original"),
@@ -3423,17 +3422,16 @@ mod tests {
                         FileRenameInformation,
                     )
                 };
-                complete_nt(SafeFsOperation::RenameNoReplaceSameParent, status, &iosb)?;
-                fs::write(quarantine_path.join("leaf"), b"replacement")
-                    .map_err(|error| SafeFsError::io(SafeFsOperation::CreateFile, error))?;
+                assert_eq!(
+                    status, STATUS_SHARING_VIOLATION,
+                    "the retained handle deliberately omits FILE_SHARE_DELETE, so no name actor can rebind the cleanup target"
+                );
                 Ok(())
-            }));
+            },
+        ));
         let cleanup = open_cleanup_child_nofollow(&quarantine, &name("leaf")).unwrap();
         delete_quarantined_entry(cleanup).unwrap();
-        assert_eq!(
-            fs::read(temp.path().join("quarantine").join("leaf")).unwrap(),
-            b"replacement"
-        );
+        assert!(!temp.path().join("quarantine").join("leaf").exists());
         assert!(!temp
             .path()
             .join("quarantine")
