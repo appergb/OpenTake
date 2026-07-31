@@ -394,6 +394,9 @@ impl MediaManifest {
     }
 }
 
+/// Decode a persisted manifest without confusing the current constructor
+/// version with the legacy wire fallback: an omitted version means schema 1,
+/// while every explicitly stored version is retained verbatim.
 impl<'de> Deserialize<'de> for MediaManifest {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

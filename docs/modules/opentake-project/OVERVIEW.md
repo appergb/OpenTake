@@ -114,6 +114,8 @@ Name.opentake/
 5. **路径语义对齐 Foundation**：归档去重用**纯词法** `standardize`（不 stat、不解符号链接，两条指向同一文件的符号链接各拷一份）；扩展名提取用 Swift `URL.pathExtension` 规则而非 `Path::extension`（`foo. mp4`、`..mp4` 均判**无扩展名**）。
 6. **日期是 Apple 参考日秒**：`created_at` 是 `f64`（Apple-reference-date 秒，`JSONEncoder` 默认 `Date` 编码），墙钟换算归上层。
 
+上述 serde 边界由 `upstream_compat` 的精确所有者用例验证：旧工程缺失字段与缺失版本按约定降级，显式版本保持不变，旧美元成本向上取整迁移为 credits；保存后重新打开时，迁移结果和一次性生成的日志 ID 必须完全相等。
+
 ---
 
 > 上级：[模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md) · 本模块目录：[INDEX.md](INDEX.md)

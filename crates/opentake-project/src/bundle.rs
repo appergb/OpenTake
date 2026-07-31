@@ -174,6 +174,11 @@ impl Project {
     }
 
     /// Decode every project component from one retained root capability.
+    ///
+    /// Persisted compatibility is applied by each component's deserializer:
+    /// missing optional fields receive their legacy defaults, while explicit
+    /// schema versions are preserved. Saving the returned project therefore
+    /// writes the decoded state without silently promoting legacy versions.
     pub fn open_from_root(root: &ProjectRoot) -> Result<Self> {
         Self::open_from_root_with_hook(root, |_| {})
     }

@@ -1842,36 +1842,45 @@ not the separately owned desktop motion/Lottie materialization.
   - Visible/returned assertion: assert the returned project/error variant, exact post-operation files and decoded state, and save-then-reopen equality or the specified fail-closed no-write result.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-agent/tests/completion_f2992815147bed14.rs#completion_f2992815147bed14_decode_persisted_project_domain_models_compatibl.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-project/tests/upstream_compat.rs#applies_clip_defaults_for_omitted_fields` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-project/tests/upstream_compat.rs#migrates_generation_log_legacy_cost_and_version` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and reconcile the baseline state**
 
   - Run: `cargo test -p opentake-project --test upstream_compat applies_clip_defaults_for_omitted_fields -- --exact`
   - Run: `cargo test -p opentake-project --test upstream_compat migrates_generation_log_legacy_cost_and_version -- --exact`
 
-  Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
+  Reconciled 2026-08-01: both strengthened owners remained GREEN before the
+  documentation-only implementation pass. The existing deserializers already
+  satisfied the candidate contract, so no artificial production regression
+  was introduced solely to manufacture RED.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-project/src/bundle.rs#Project::open_from_root`, `crates/opentake-domain/src/media.rs#MediaManifest::deserialize`, `docs/modules/opentake-project/OVERVIEW.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-project --test upstream_compat applies_clip_defaults_for_omitted_fields -- --exact`
   - Run: `cargo test -p opentake-project --test upstream_compat migrates_generation_log_legacy_cost_and_version -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. Both focused owners pass with save/reopen equality,
+  explicit and absent manifest-version assertions, legacy generation-cost
+  migration, and stable synthesized IDs. Formatting, warnings-denied Clippy
+  for `opentake-project` and `opentake-domain`, and the full workspace Rust
+  suite pass.
 
 ### Task 29: MR-mask-effect-mixed-duplicate (implementation-slice-35e4fa716888cc28)
 
