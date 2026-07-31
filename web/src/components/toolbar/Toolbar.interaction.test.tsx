@@ -23,6 +23,7 @@ vi.mock("../../store/editActions", () => edit);
 
 import { useEditorUiStore } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
+import { ZOOM } from "../../lib/theme";
 import { Toolbar } from "./Toolbar";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -58,7 +59,12 @@ function redoButton(): HTMLButtonElement {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
-  useEditorUiStore.setState({ toast: null });
+  useEditorUiStore.setState({
+    toast: null,
+    toolMode: "pointer",
+    minZoomScale: 0.05,
+    zoomScale: ZOOM.default,
+  });
   useProjectStore.setState({ canUndo: false, canRedo: false });
   container = document.createElement("div");
   document.body.append(container);
@@ -173,5 +179,68 @@ describe("Toolbar command controls", () => {
     expect(actionSource).toMatch(/export async function redo\(\)[\s\S]*?await api\.redo\(\)/);
     expect(apiSource).toMatch(/export async function redo\(\)[\s\S]*?invokeImpl<EditResult>\("redo"\)/);
     expect(rustSource).toMatch(/pub fn redo[\s\S]*?handle_redo\(&core\)/);
+  });
+
+  it("control-9d69468ce3479312 switch to Pointer tool", async () => {
+    useEditorUiStore.setState({ toolMode: "razor" });
+    await act(async () => root?.render(<Toolbar />));
+
+    const pointer = container?.querySelector<HTMLButtonElement>(
+      'button[aria-label="toolbar.pointer"]',
+    );
+    expect(pointer).not.toBeNull();
+    expect(pointer?.disabled).toBe(false);
+    expect(pointer?.classList.contains("is-active")).toBe(false);
+
+    pointer?.focus();
+    await act(async () => pointer?.click());
+    expect(useEditorUiStore.getState().toolMode).toBe("pointer");
+    expect(pointer?.classList.contains("is-active")).toBe(true);
+    expect(document.activeElement).toBe(pointer);
+  });
+
+  it("control-8105812f9d07bc93 switch to Razor tool", async () => {
+    await act(async () => root?.render(<Toolbar />));
+
+    const razor = container?.querySelector<HTMLButtonElement>(
+      'button[aria-label="toolbar.razor"]',
+    );
+    expect(razor).not.toBeNull();
+    expect(razor?.disabled).toBe(false);
+    expect(razor?.classList.contains("is-active")).toBe(false);
+
+    razor?.focus();
+    await act(async () => razor?.click());
+    expect(useEditorUiStore.getState().toolMode).toBe("razor");
+    expect(razor?.classList.contains("is-active")).toBe(true);
+    expect(document.activeElement).toBe(razor);
+  });
+
+  it("control-582e8fdf1d3d9e7e change timeline zoom", async () => {
+    await act(async () => root?.render(<Toolbar />));
+
+    const slider = container?.querySelector<HTMLInputElement>(
+      'input[type="range"][aria-label="toolbar.zoom"]',
+    );
+    if (!slider) throw new Error("timeline zoom control was not rendered");
+    expect(slider.disabled).toBe(false);
+
+    slider.focus();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      if (!valueSetter) throw new Error("native range value setter is unavailable");
+      valueSetter.call(slider, "0.75");
+      slider.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const expected = Math.exp(
+      Math.log(0.05) + 0.75 * (Math.log(ZOOM.max) - Math.log(0.05)),
+    );
+    expect(useEditorUiStore.getState().zoomScale).toBeCloseTo(expected, 10);
+    expect(Number(localStorage.getItem("opentake.ui.v1.zoomScale"))).toBeCloseTo(expected, 10);
+    expect(document.activeElement).toBe(slider);
   });
 });
