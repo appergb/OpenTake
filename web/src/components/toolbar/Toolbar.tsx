@@ -43,15 +43,17 @@ function GlyphButton({
   serif = false,
   fontSize = 16,
   onClick,
+  disabled = false,
 }: {
   glyph: string;
   title: string;
   serif?: boolean;
   fontSize?: number;
   onClick?: () => void;
+  disabled?: boolean;
 }) {
   return (
-    <HoverButton title={title} onClick={onClick}>
+    <HoverButton title={title} onClick={onClick} disabled={disabled}>
       <span
         style={{
           fontFamily: serif ? "var(--font-serif)" : "var(--font-mono)",
@@ -76,7 +78,9 @@ export function Toolbar() {
   const pushToast = useEditorUiStore((s) => s.pushToast);
   const canUndo = useProjectStore((s) => s.canUndo);
   const canRedo = useProjectStore((s) => s.canRedo);
-  const [toolbarPending, setToolbarPending] = useState<"undo" | "redo" | "split" | null>(null);
+  const [toolbarPending, setToolbarPending] = useState<
+    "undo" | "redo" | "split" | "trimStart" | null
+  >(null);
 
   // Logarithmic slider mapping (ToolbarView.swift:50-53): travel uniform per
   // zoom factor; get=log(zoom), set=exp(value).
@@ -123,6 +127,19 @@ export function Toolbar() {
     } catch (reason: unknown) {
       const message = reason instanceof Error ? reason.message : String(reason);
       pushToast(`${t("toolbar.split")}: ${message}`);
+    } finally {
+      setToolbarPending(null);
+    }
+  };
+
+  const onTrimStart = async () => {
+    if (toolbarPending) return;
+    setToolbarPending("trimStart");
+    try {
+      await edit.trimStartToPlayhead();
+    } catch (reason: unknown) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      pushToast(`${t("toolbar.trimStart")}: ${message}`);
     } finally {
       setToolbarPending(null);
     }
@@ -196,11 +213,17 @@ export function Toolbar() {
             <Icon icon={SplitSquareHorizontal} size={13} />
           </HoverButton>
         </span>
-        <GlyphButton
-          glyph="["
-          title={t("toolbar.trimStart")}
-          onClick={() => edit.trimStartToPlayhead()}
-        />
+        <span
+          aria-busy={toolbarPending === "trimStart" || undefined}
+          style={{ display: "inline-flex" }}
+        >
+          <GlyphButton
+            glyph="["
+            title={t("toolbar.trimStart")}
+            disabled={toolbarPending !== null}
+            onClick={() => void onTrimStart()}
+          />
+        </span>
         <GlyphButton glyph="]" title={t("toolbar.trimEnd")} onClick={() => edit.trimEndToPlayhead()} />
       </div>
 

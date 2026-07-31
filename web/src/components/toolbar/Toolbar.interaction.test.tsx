@@ -10,7 +10,7 @@ const edit = vi.hoisted(() => ({
   undo: vi.fn<() => Promise<void>>(),
   redo: vi.fn<() => Promise<void>>(),
   splitAtPlayhead: vi.fn<() => Promise<void>>(),
-  trimStartToPlayhead: vi.fn(),
+  trimStartToPlayhead: vi.fn<() => Promise<void>>(),
   trimEndToPlayhead: vi.fn(),
   addTextClip: vi.fn(),
 }));
@@ -61,6 +61,14 @@ function splitButton(): HTMLButtonElement {
     'button[aria-label="toolbar.split"]',
   );
   if (!button) throw new Error("split control was not rendered");
+  return button;
+}
+
+function trimStartButton(): HTMLButtonElement {
+  const button = container?.querySelector<HTMLButtonElement>(
+    'button[aria-label="toolbar.trimStart"]',
+  );
+  if (!button) throw new Error("trim-start control was not rendered");
   return button;
 }
 
@@ -291,5 +299,38 @@ describe("Toolbar command controls", () => {
     expect(apiSource).toMatch(/export async function editApply[\s\S]*?invokeImpl<EditResult>\("edit_apply", \{ command \}\)/);
     expect(rustSource).toMatch(/pub fn edit_apply[\s\S]*?other\.into_command\(\)[\s\S]*?handle_edit_apply/);
     expect(opsSource).toMatch(/SplitClip \{ clip_id: String, at_frame: i32 \}/);
+  });
+
+  it("control-f38c30bc83d65d2e trim selected clip starts to playhead", async () => {
+    await act(async () => root?.render(<Toolbar />));
+
+    expect(trimStartButton().title).toBe("toolbar.trimStart");
+    expect(trimStartButton().disabled).toBe(false);
+    trimStartButton().focus();
+    const first = deferred();
+    edit.trimStartToPlayhead.mockReturnValueOnce(first.promise);
+
+    await act(async () => trimStartButton().click());
+    expect(edit.trimStartToPlayhead).toHaveBeenCalledTimes(1);
+    expect(trimStartButton().disabled).toBe(true);
+    expect(trimStartButton().parentElement?.getAttribute("aria-busy")).toBe("true");
+    trimStartButton().click();
+    expect(edit.trimStartToPlayhead).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(trimStartButton());
+
+    await act(async () => first.resolve());
+    expect(trimStartButton().disabled).toBe(false);
+
+    edit.trimStartToPlayhead.mockRejectedValueOnce(new Error("trim start rejected"));
+    await act(async () => trimStartButton().click());
+    expect(useEditorUiStore.getState().toast?.message).toContain("trim start rejected");
+    expect(trimStartButton().disabled).toBe(false);
+
+    edit.trimStartToPlayhead.mockResolvedValueOnce();
+    await act(async () => trimStartButton().click());
+    expect(edit.trimStartToPlayhead).toHaveBeenCalledTimes(3);
+
+    const actionSource = readFileSync(join(process.cwd(), "src/store/editActions.ts"), "utf8");
+    expect(actionSource).toMatch(/export async function trimStartToPlayhead\(\)[\s\S]*?trimToPlayheadEdits\(clipsUnderPlayhead\(\), frame, "left"\)/);
   });
 });
