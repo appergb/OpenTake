@@ -26,10 +26,47 @@ const srv = vi.hoisted(() => {
     transform?: Transform;
   };
   type STrack = { id: string; type: string; clips: SClip[] };
-  const state: { tracks: STrack[]; version: number; seq: number } = {
+  type SCommand = {
+    type: string;
+    kind?: string;
+    at?: number;
+    fps?: number;
+    width?: number;
+    height?: number;
+    entries?: Array<{
+      mediaRef?: string;
+      mediaType?: ClipType;
+      sourceClipType?: ClipType;
+      trackIndex?: number;
+      startFrame: number;
+      durationFrames: number;
+      trimStartFrame?: number;
+      trimEndFrame?: number;
+      transform?: Transform;
+    }>;
+    trackIndex?: number;
+    atFrame?: number;
+    a?: number;
+    b?: number;
+  };
+  const state: {
+    tracks: STrack[];
+    version: number;
+    seq: number;
+    fps: number;
+    width: number;
+    height: number;
+    settingsConfigured: boolean;
+    commands: SCommand[];
+  } = {
     tracks: [],
     version: 0,
     seq: 0,
+    fps: 30,
+    width: 1920,
+    height: 1080,
+    settingsConfigured: true,
+    commands: [],
   };
   // Core overwrite-on-place: clear any clip overlapping [start, end) before placing.
   function clearRegion(track: STrack, start: number, end: number): void {
@@ -43,29 +80,27 @@ const srv = vi.hoisted(() => {
       state.tracks = [];
       state.version = 0;
       state.seq = 0;
+      state.fps = 30;
+      state.width = 1920;
+      state.height = 1080;
+      state.settingsConfigured = true;
+      state.commands = [];
     },
-    apply(cmd: {
-      type: string;
-      kind?: string;
-      at?: number;
-      // `addClips` entries carry `trackIndex`; `addTextsAutoTrack` entries
-      // don't (every entry lands on the one fresh track the command creates).
-      entries?: Array<{
-        mediaRef?: string;
-        mediaType?: ClipType;
-        sourceClipType?: ClipType;
-        trackIndex?: number;
-        startFrame: number;
-        durationFrames: number;
-        trimStartFrame?: number;
-        trimEndFrame?: number;
-        transform?: Transform;
-      }>;
-      trackIndex?: number;
-      atFrame?: number;
-      a?: number;
-      b?: number;
-    }): { changed: boolean; affectedClipIds: string[] } {
+    apply(cmd: SCommand): { changed: boolean; affectedClipIds: string[] } {
+      state.commands.push(cmd);
+      if (
+        cmd.type === "setTimelineSettings" &&
+        cmd.fps !== undefined &&
+        cmd.width !== undefined &&
+        cmd.height !== undefined
+      ) {
+        state.fps = cmd.fps;
+        state.width = cmd.width;
+        state.height = cmd.height;
+        state.settingsConfigured = true;
+        state.version += 1;
+        return { changed: true, affectedClipIds: [] };
+      }
       if (cmd.type === "insertTrack") {
         const at = Math.max(0, Math.min(state.tracks.length, cmd.at ?? state.tracks.length));
         state.tracks.splice(at, 0, {
@@ -189,10 +224,10 @@ vi.mock("../lib/api", () => ({
   },
   getTimeline: async () => ({
     timeline: {
-      fps: 30,
-      width: 1920,
-      height: 1080,
-      settingsConfigured: true,
+      fps: srv.state.fps,
+      width: srv.state.width,
+      height: srv.state.height,
+      settingsConfigured: srv.state.settingsConfigured,
       tracks: srv.state.tracks.map((t) => ({
         id: t.id,
         type: t.type,
@@ -327,6 +362,61 @@ describe("addMediaToTimeline", () => {
     expect(visualClipStarts()).toEqual([0, 60]);
   });
 
+  it("applies first-video settings before placing the first clip", async () => {
+    srv.state.settingsConfigured = false;
+    useProjectStore.getState().setMirror({ ...EMPTY, settingsConfigured: false }, 0, 1);
+
+    await addMediaToTimeline({
+      ...video("first", 3840, 2160),
+      sourceFps: 23.976,
+    });
+
+    expect(srv.state.commands.map((command) => command.type)).toEqual([
+      "setTimelineSettings",
+      "insertTrack",
+      "addClips",
+    ]);
+    expect(srv.state.commands[0]).toMatchObject({
+      type: "setTimelineSettings",
+      fps: 24,
+      width: 3840,
+      height: 2160,
+    });
+    expect(srv.state.commands[2].entries?.[0]).toMatchObject({
+      mediaRef: "first",
+      durationFrames: 48,
+    });
+    expect(useProjectStore.getState().timeline).toMatchObject({
+      fps: 24,
+      width: 3840,
+      height: 2160,
+      settingsConfigured: true,
+    });
+  });
+
+  it("waits for configured-empty mismatch choice and preserves either decision", async () => {
+    const mismatched = { ...video("mismatch", 3840, 2160), sourceFps: 24 };
+    const keep = addMediaToTimeline(mismatched);
+    await vi.waitFor(() => expect(useEditorUiStore.getState().projectSettingsPrompt).not.toBeNull());
+    useEditorUiStore.getState().resolveProjectSettingsPrompt(false);
+    await keep;
+    expect(srv.state.commands.some((command) => command.type === "setTimelineSettings")).toBe(false);
+    expect(srv.state.commands.at(-1)?.entries?.[0]).toMatchObject({ durationFrames: 60 });
+
+    srv.reset();
+    useProjectStore.getState().setMirror(EMPTY, 0, 1);
+    const match = addMediaToTimeline(mismatched);
+    await vi.waitFor(() => expect(useEditorUiStore.getState().projectSettingsPrompt).not.toBeNull());
+    useEditorUiStore.getState().resolveProjectSettingsPrompt(true);
+    await match;
+    expect(srv.state.commands.map((command) => command.type)).toEqual([
+      "setTimelineSettings",
+      "insertTrack",
+      "addClips",
+    ]);
+    expect(srv.state.commands.at(-1)?.entries?.[0]).toMatchObject({ durationFrames: 48 });
+  });
+
   it("drops overlapping media onto a new top overlay track instead of overwriting", async () => {
     await addMediaToTimeline(video("base"));
     await addMediaToTimelineAt(video("overlay"), 0, 0);
@@ -379,7 +469,10 @@ describe("addMediaToTimeline", () => {
   });
 
   it("adds vertical media with the upstream aspect-fit transform", async () => {
-    await addMediaToTimeline(video("vertical", 1080, 1920));
+    const add = addMediaToTimeline(video("vertical", 1080, 1920));
+    await vi.waitFor(() => expect(useEditorUiStore.getState().projectSettingsPrompt).not.toBeNull());
+    useEditorUiStore.getState().resolveProjectSettingsPrompt(false);
+    await add;
 
     const [transform] = visualClipTransforms();
     expect(transform.width).toBeCloseTo(0.31640625);

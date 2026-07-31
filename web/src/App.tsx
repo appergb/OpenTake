@@ -3,6 +3,7 @@ import { TitleBar } from "./components/shell/TitleBar";
 import { ApplicationMenuBridge } from "./components/shell/ViewMenu";
 import { ExportDialog } from "./components/shell/ExportDialog";
 import { SaveAsProgress } from "./components/shell/SaveAsProgress";
+import { ProjectSettingsMismatchDialog } from "./components/shell/ProjectSettingsMismatchDialog";
 import { EditorSplit } from "./components/shell/EditorSplit";
 import { CompatibilityBanner } from "./components/shell/CompatibilityBanner";
 import { HomeView } from "./components/home/HomeView";
@@ -121,6 +122,7 @@ export default function App() {
       {settingsOpen && <SettingsView />}
       <ExportDialog />
       <SaveAsProgress />
+      <ProjectSettingsMismatchDialog />
       <Toast />
     </div>
   );

@@ -13,6 +13,7 @@ import { withRangeStart, withRangeEnd, type TimelineRange } from "../lib/timelin
 import type { GapSelection } from "../lib/timelineGap";
 import { isTauri } from "../lib/api";
 import { t } from "../i18n";
+import type { ProjectSettingsTarget } from "../lib/projectSettings";
 
 export type Panel = "agent" | "media" | "preview" | "inspector" | "timeline";
 /** Top-level app view (SPEC: 启动先进主页). The editor is one of three views;
@@ -52,6 +53,11 @@ export interface SaveAsProgressState {
   total: number;
   cancellable: boolean;
   cancelling: boolean;
+}
+
+export interface ProjectSettingsPromptState {
+  current: ProjectSettingsTarget;
+  suggested: ProjectSettingsTarget;
 }
 
 const STORAGE_PREFIX = "opentake.ui.v1.";
@@ -127,6 +133,10 @@ interface UiState {
   /** Visible progress owner for clip/range save-as operations. */
   saveAsProgress: SaveAsProgressState | null;
   setSaveAsProgress: (progress: SaveAsProgressState | null) => void;
+  projectSettingsPrompt: ProjectSettingsPromptState | null;
+  projectSettingsPromptResolver: ((applySuggested: boolean) => void) | null;
+  requestProjectSettingsPrompt: (prompt: ProjectSettingsPromptState) => Promise<boolean>;
+  resolveProjectSettingsPrompt: (applySuggested: boolean) => void;
 
   // Playback / playhead
   currentFrame: number;
@@ -301,6 +311,18 @@ export const createEditorUiStore = () => create<UiState>((set, get) => ({
   setExportDialogOpen: (exportDialogOpen) => set({ exportDialogOpen }),
   saveAsProgress: null,
   setSaveAsProgress: (saveAsProgress) => set({ saveAsProgress }),
+  projectSettingsPrompt: null,
+  projectSettingsPromptResolver: null,
+  requestProjectSettingsPrompt: (projectSettingsPrompt) =>
+    new Promise<boolean>((resolve) => {
+      get().projectSettingsPromptResolver?.(false);
+      set({ projectSettingsPrompt, projectSettingsPromptResolver: resolve });
+    }),
+  resolveProjectSettingsPrompt: (applySuggested) => {
+    const resolve = get().projectSettingsPromptResolver;
+    set({ projectSettingsPrompt: null, projectSettingsPromptResolver: null });
+    resolve?.(applySuggested);
+  },
 
   currentFrame: 0,
   activeFrame: 0,
@@ -548,7 +570,8 @@ export const createEditorUiStore = () => create<UiState>((set, get) => ({
   // `if newTab != .video { editor.cropEditingActive = false }`).
   setInspectorTab: (inspectorTab) =>
     set({ inspectorTab, cropEditingActive: inspectorTab === "video" ? get().cropEditingActive : false }),
-  resetProjectRuntimeState: () =>
+  resetProjectRuntimeState: () => {
+    get().projectSettingsPromptResolver?.(false);
     set({
       currentFrame: 0,
       activeFrame: 0,
@@ -575,7 +598,10 @@ export const createEditorUiStore = () => create<UiState>((set, get) => ({
       cropAspectLock: "free",
       mediaPanelCurrentFolderId: null,
       pendingSwapClipId: null,
-    }),
+      projectSettingsPrompt: null,
+      projectSettingsPromptResolver: null,
+    });
+  },
 
   toast: null,
   pushToast: (message) => set({ toast: { message, id: Date.now() } }),

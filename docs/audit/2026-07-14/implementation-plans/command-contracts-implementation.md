@@ -109,36 +109,65 @@
   - Add request/response tests for every named success, boundary, rejection, validation, and secrecy rule; the affected Rust and TypeScript suites must pass.
   - Exercise the production IPC, MCP, or browser entry point end to end and record the exact command payload, result, and test names before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-ops/src/command.rs#set_timeline_settings_is_undoable` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `web/src/lib/projectSettings.test.ts#first_video_auto_configures_and_only_configured_empty_mismatch_prompts` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+  Result: The exact reviewed owner now covers no-video, fresh-project,
+  configured-nonempty, configured-empty matching/mismatching, and incomplete
+  metadata branches. `editActions.test.ts` additionally proves the production
+  placement command order and both mismatch choices; the dialog DOM owner
+  verifies its accessible role, labels, focus, values, Match response, and
+  Escape/Keep response. The Rust DTO owner asserts the `sourceFps` wire field.
+
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-ops set_timeline_settings_is_undoable`
   - Run: `pnpm -C web test -- --run src/lib/projectSettings.test.ts -t "first_video_auto_configures_and_only_configured_empty_mismatch_prompts"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Result: RED reproduced before implementation: Vitest could not resolve
+  `./projectSettings` from the declared exact owner because the decision module
+  and its production integration did not exist.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/store/editActions.ts#addMediaToTimelineAt`, `crates/opentake-ops/src/command.rs#EditCommand`, `crates/opentake-ops/src/ops/settings.rs#set_timeline_settings`, `docs/architecture/MODULE-PORT-MAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Result: Added the pure four-branch decision, projected probed source FPS
+  through the Tauri DTO, and reconciled settings on both append and positioned
+  media entry points before placement. Fresh projects apply the existing
+  undoable `setTimelineSettings` command first. Configured-empty mismatches wait
+  for a globally mounted, keyboard-accessible dialog; keeping proceeds without
+  mutation and matching applies the same command before placement. Pending
+  choices are safely resolved when project runtime state resets.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-ops set_timeline_settings_is_undoable`
   - Run: `pnpm -C web test -- --run src/lib/projectSettings.test.ts -t "first_video_auto_configures_and_only_configured_empty_mismatch_prompts"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Result: GREEN. The three focused Web owners passed 33/33 tests, including the
+  exact named owner and production command/dialog integration. The exact Rust
+  undo owner passed 1/1, and the Tauri media DTO owner passed 1/1.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: `cargo fmt --all -- --check`, `cargo test --workspace --no-fail-fast`,
+  `pnpm -C web test -- --run`, and `pnpm -C web build` passed. The Web gate
+  executed 84 files / 779 tests; Cargo's seven explicitly ignored real-device
+  probes remain owned by the later packaged-app verification phase. Vite
+  reported only the pre-existing dynamic-import and chunk-size advisories.
 
 ### Task 3: CC-automation-composite-headings (implementation-slice-7167819f4cff454a)
 

@@ -96,6 +96,8 @@ pub struct MediaItemDto {
     pub width: Option<i32>,
     /// Source height in pixels, when known.
     pub height: Option<i32>,
+    /// Probed source frame rate, used by the first-video settings decision.
+    pub source_fps: Option<f64>,
     /// Whether the asset carries audio.
     pub has_audio: bool,
     /// Absolute path to the source file, when resolvable (external assets only
@@ -198,6 +200,7 @@ impl MediaItemDto {
             duration: entry.duration,
             width: entry.source_width,
             height: entry.source_height,
+            source_fps: entry.source_fps,
             has_audio: entry.has_audio.unwrap_or(false),
             path,
             thumbnail,
@@ -4126,6 +4129,7 @@ mod tests {
             duration: 0.0,
             width: Some(10),
             height: Some(20),
+            source_fps: Some(24.0),
             has_audio: false,
             path: Some("/p.png".into()),
             thumbnail: None,
@@ -4144,6 +4148,7 @@ mod tests {
         assert!(json.contains("\"thumbnail\":null"));
         assert!(json.contains("\"folderId\":null"));
         assert!(json.contains("\"fileSize\":2048"));
+        assert!(json.contains("\"sourceFps\":24.0"));
         assert!(json.contains("\"generationInput\":null"));
         assert!(json.contains("\"missing\":false"));
         assert!(json.contains("\"favorite\":true"));

@@ -29,6 +29,13 @@ const zh: Dict = {
   "project.createFailed": "创建失败：{error}",
   "project.openFailed": "打开失败：{error}",
   "project.saveFailed": "保存失败：{error}",
+  "projectSettingsMismatch.title": "素材与项目设置不一致",
+  "projectSettingsMismatch.description":
+    "时间线还没有内容。你可以保留当前项目设置，或改为匹配第一个视频素材。",
+  "projectSettingsMismatch.current": "当前项目",
+  "projectSettingsMismatch.source": "视频素材",
+  "projectSettingsMismatch.keep": "保持当前设置",
+  "projectSettingsMismatch.match": "改为匹配",
 
   // TitleBar
   "title.toggleAgent": "切换 Agent 面板",
@@ -758,6 +765,13 @@ const en: Dict = {
   "project.createFailed": "Create failed: {error}",
   "project.openFailed": "Open failed: {error}",
   "project.saveFailed": "Save failed: {error}",
+  "projectSettingsMismatch.title": "Media and project settings differ",
+  "projectSettingsMismatch.description":
+    "The timeline is still empty. Keep the current project settings or match the first video asset.",
+  "projectSettingsMismatch.current": "Current project",
+  "projectSettingsMismatch.source": "Video asset",
+  "projectSettingsMismatch.keep": "Keep current settings",
+  "projectSettingsMismatch.match": "Match video",
 
   "title.toggleAgent": "Toggle Agent Panel",
   "title.export": "Export",

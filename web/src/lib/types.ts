@@ -589,6 +589,8 @@ export interface MediaItem {
   duration: number;
   width?: number | null;
   height?: number | null;
+  /** Probed source frame rate for first-video project configuration. */
+  sourceFps?: number | null;
   hasAudio: boolean;
   path?: string | null;
   thumbnail?: string | null;

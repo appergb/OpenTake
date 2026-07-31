@@ -15,6 +15,7 @@ import type { TrackDropTarget } from "../lib/geometry";
 import { validRange, type TimelineRange } from "../lib/timelineRange";
 import { planNudge } from "../lib/timelineNudge";
 import { buildInsertPlan, type InsertPlan } from "../lib/timelineInsert";
+import { checkProjectSettings, type ProjectSettingsTarget } from "../lib/projectSettings";
 import { expandLinkGroup } from "../components/timeline/hitTest";
 import { useClipboardStore } from "./clipboardStore";
 import type {
@@ -216,7 +217,7 @@ export async function resetTransform(clipIds: string[]) {
  *  Quality badge menus (upstream `applyTimelineSettings`). When FPS changes the
  *  Rust engine rescales all clip frames; width/height set the canvas. */
 export async function setTimelineSettings(fps: number, width: number, height: number) {
-  await applyAndRefresh({ type: "setTimelineSettings", fps, width, height });
+  return applyAndRefresh({ type: "setTimelineSettings", fps, width, height });
 }
 
 export async function linkClips(clipIds: string[]) {
@@ -846,6 +847,26 @@ function enqueueMediaAdd(run: () => Promise<void>): Promise<void> {
   return result;
 }
 
+async function applyProjectSettings(settings: ProjectSettingsTarget): Promise<void> {
+  const result = await setTimelineSettings(settings.fps, settings.width, settings.height);
+  if (isTauri && result.changed) await forceRefresh();
+}
+
+async function reconcileProjectSettings(item: MediaItem): Promise<void> {
+  const timeline = useProjectStore.getState().timeline;
+  const decision = checkProjectSettings(timeline, [item]);
+  if (decision.kind === "proceed") return;
+  if (decision.kind === "apply") {
+    await applyProjectSettings(decision.settings);
+    return;
+  }
+  const applySuggested = await useEditorUiStore.getState().requestProjectSettingsPrompt({
+    current: { fps: timeline.fps, width: timeline.width, height: timeline.height },
+    suggested: decision.settings,
+  });
+  if (applySuggested) await applyProjectSettings(decision.settings);
+}
+
 /** Add a media-library item to the timeline (drag-drop / double-click from the
  *  media panel). Resolves the target track and append position from the current
  *  mirror; if the timeline has no compatible track (e.g. a brand-new empty
@@ -901,6 +922,7 @@ export function addMomentToTimelineAt(
 }
 
 async function addMediaToTimelineInner(item: MediaItem): Promise<void> {
+  await reconcileProjectSettings(item);
   let timeline = useProjectStore.getState().timeline;
   if (firstCompatibleTrackIndex(timeline, item.type) === null) {
     await insertTrack(item.type === "audio" ? "audio" : "video");
@@ -931,6 +953,7 @@ async function addMediaToTimelineAtInner(
   preferredTrackIndex: number | null,
   insertTrackAt?: number,
 ): Promise<void> {
+  await reconcileProjectSettings(item);
   let timeline = useProjectStore.getState().timeline;
   if (insertTrackAt !== undefined) {
     const res = await insertTrack(item.type === "audio" ? "audio" : "video", insertTrackAt);
@@ -1026,6 +1049,7 @@ async function addMomentToTimelineAtInner(
     return addMediaToTimelineAtInner(item, startFrame, preferredTrackIndex, insertTrackAt);
   }
 
+  await reconcileProjectSettings(item);
   let timeline = useProjectStore.getState().timeline;
   if (insertTrackAt !== undefined) {
     const res = await insertTrack(item.type === "audio" ? "audio" : "video", insertTrackAt);
