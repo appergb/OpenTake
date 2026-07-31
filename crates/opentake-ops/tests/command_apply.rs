@@ -4,7 +4,7 @@
 //! the refusal path — the behaviors the port must match upstream.
 
 use opentake_domain::{AnimPair, Interpolation, Keyframe, KeyframeTrack, TransitionKind};
-use opentake_domain::{ChromaKey, ColorGrade, Effect, Mask, MaskShape, Point2};
+use opentake_domain::{ChromaKey, ColorGrade, Effect, LiftGammaGain, Mask, MaskShape, Point2, Rgb};
 use opentake_domain::{
     Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track, Transform,
 };
@@ -1692,6 +1692,34 @@ fn set_color_grade_applies_and_undoes() {
     // Undo restores the cleared grade.
     apply(&mut st, EditCommand::Undo, &g).unwrap();
     assert_eq!(find_clip(&st, "c").color_grade, None);
+}
+
+#[test]
+fn set_color_grade_rejects_invalid_without_mutation() {
+    let mut st = one_clip_state();
+    let g = SeqIdGen::default();
+    let error = apply(
+        &mut st,
+        EditCommand::SetColorGrade {
+            clip_ids: vec!["c".into()],
+            grade: Some(ColorGrade {
+                lift_gamma_gain: LiftGammaGain {
+                    gamma: Rgb::new(0.0, 1.0, 1.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        },
+        &g,
+    )
+    .expect_err("zero gamma must be rejected before mutation");
+    assert_eq!(
+        error.to_string(),
+        "invalid color grade: liftGammaGain.gamma.r must be finite and within (0, 4]"
+    );
+    assert_eq!(find_clip(&st, "c").color_grade, None);
+    assert_eq!(st.version(), 0);
+    assert!(!st.can_undo());
 }
 
 #[test]

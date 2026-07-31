@@ -139,16 +139,17 @@ impl LiftGammaGain {
         self.lift.is_zero() && self.gamma.is_one() && self.gain.is_one()
     }
 
-    /// Apply one channel: `gain * (x + lift)` then `^(1/gamma)`. Matches the
-    /// classic lift/gamma/gain operator (gamma applied last, as a display power).
+    /// Apply one channel: `gain * (x + lift * (1 - x))^(1/gamma)`.
+    /// Lift rolls off toward highlights, gamma shapes mid-tones, and gain remains
+    /// an independent highlight multiplier.
     #[inline]
     fn apply_channel(x: f64, lift: f64, gamma: f64, gain: f64) -> f64 {
-        let v = gain * (x + lift);
+        let shaped = x + lift * (1.0 - x);
         if gamma > 0.0 && (gamma - 1.0).abs() > f64::EPSILON {
-            // `v` can be negative after lift; guard the power.
-            v.max(0.0).powf(1.0 / gamma)
+            // `shaped` can be negative after lift; guard fractional powers.
+            gain * shaped.max(0.0).powf(1.0 / gamma)
         } else {
-            v
+            gain * shaped
         }
     }
 }
@@ -183,6 +184,23 @@ pub struct ColorGrade {
     pub saturation: f64,
 }
 
+/// Stable validation failure for authored color-grade parameters. The bounds
+/// mirror the Inspector controls and keep malformed persisted data out of the
+/// command and GPU paths.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ColorGradeValidationError {
+    pub field: &'static str,
+    pub rule: &'static str,
+}
+
+impl std::fmt::Display for ColorGradeValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} must be {}", self.field, self.rule)
+    }
+}
+
+impl std::error::Error for ColorGradeValidationError {}
+
 impl Default for ColorGrade {
     fn default() -> Self {
         ColorGrade {
@@ -209,6 +227,75 @@ impl ColorGrade {
             && self.lift_gamma_gain.is_identity()
             && self.contrast == 0.0
             && self.saturation == 1.0
+    }
+
+    /// Validate the persisted grade against the finite parameter ranges exposed
+    /// by the editor. Gamma is strictly positive because it is used as a power
+    /// denominator in both the CPU reference and WGSL shader.
+    pub fn validate(&self) -> Result<(), ColorGradeValidationError> {
+        fn inclusive(
+            field: &'static str,
+            value: f64,
+            range: std::ops::RangeInclusive<f64>,
+            rule: &'static str,
+        ) -> Result<(), ColorGradeValidationError> {
+            if !value.is_finite() || !range.contains(&value) {
+                return Err(ColorGradeValidationError { field, rule });
+            }
+            Ok(())
+        }
+
+        inclusive(
+            "exposure",
+            self.exposure,
+            -5.0..=5.0,
+            "finite and within [-5, 5]",
+        )?;
+        inclusive(
+            "temperature",
+            self.temperature,
+            -1.0..=1.0,
+            "finite and within [-1, 1]",
+        )?;
+        inclusive("tint", self.tint, -1.0..=1.0, "finite and within [-1, 1]")?;
+        for (field, value) in [
+            ("liftGammaGain.lift.r", self.lift_gamma_gain.lift.r),
+            ("liftGammaGain.lift.g", self.lift_gamma_gain.lift.g),
+            ("liftGammaGain.lift.b", self.lift_gamma_gain.lift.b),
+        ] {
+            inclusive(field, value, -1.0..=1.0, "finite and within [-1, 1]")?;
+        }
+        for (field, value) in [
+            ("liftGammaGain.gamma.r", self.lift_gamma_gain.gamma.r),
+            ("liftGammaGain.gamma.g", self.lift_gamma_gain.gamma.g),
+            ("liftGammaGain.gamma.b", self.lift_gamma_gain.gamma.b),
+        ] {
+            if !value.is_finite() || value <= 0.0 || value > 4.0 {
+                return Err(ColorGradeValidationError {
+                    field,
+                    rule: "finite and within (0, 4]",
+                });
+            }
+        }
+        for (field, value) in [
+            ("liftGammaGain.gain.r", self.lift_gamma_gain.gain.r),
+            ("liftGammaGain.gain.g", self.lift_gamma_gain.gain.g),
+            ("liftGammaGain.gain.b", self.lift_gamma_gain.gain.b),
+        ] {
+            inclusive(field, value, 0.0..=4.0, "finite and within [0, 4]")?;
+        }
+        inclusive(
+            "contrast",
+            self.contrast,
+            -1.0..=2.0,
+            "finite and within [-1, 2]",
+        )?;
+        inclusive(
+            "saturation",
+            self.saturation,
+            0.0..=3.0,
+            "finite and within [0, 3]",
+        )
     }
 
     /// Per-channel white-balance gain derived from `temperature` / `tint`. A
@@ -971,6 +1058,21 @@ mod tests {
         let (r, gg, _) = g.apply_linear(0.4, 0.4, 0.0);
         approx(r, 0.2); // 0.4 * 0.5
         approx(gg, 0.4); // unchanged
+
+        // The authored color-wheel contract is:
+        // gain * (x + lift * (1 - x)) ^ (1 / gamma). Lift therefore rolls off
+        // toward the highlights instead of adding the same offset everywhere,
+        // and gain remains an independent highlight multiplier outside gamma.
+        let combined = ColorGrade {
+            lift_gamma_gain: LiftGammaGain {
+                lift: Rgb::new(0.1, 0.0, 0.0),
+                gamma: Rgb::new(2.0, 1.0, 1.0),
+                gain: Rgb::new(0.8, 1.0, 1.0),
+            },
+            ..Default::default()
+        };
+        let (combined_r, _, _) = combined.apply_linear(0.25, 0.0, 0.0);
+        approx(combined_r, 0.8 * 0.325_f64.sqrt());
     }
 
     #[test]
@@ -984,6 +1086,32 @@ mod tests {
         };
         let (r, _, _) = g.apply_linear(0.0, 0.0, 0.0);
         approx(r, 0.1);
+        let (white, _, _) = g.apply_linear(1.0, 0.0, 0.0);
+        approx(white, 1.0);
+    }
+
+    #[test]
+    fn color_grade_rejects_non_finite_and_zero_gamma() {
+        let zero_gamma = ColorGrade {
+            lift_gamma_gain: LiftGammaGain {
+                gamma: Rgb::new(0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            zero_gamma.validate().unwrap_err().to_string(),
+            "liftGammaGain.gamma.r must be finite and within (0, 4]"
+        );
+
+        let non_finite = ColorGrade {
+            exposure: f64::NAN,
+            ..Default::default()
+        };
+        assert_eq!(
+            non_finite.validate().unwrap_err().to_string(),
+            "exposure must be finite and within [-5, 5]"
+        );
     }
 
     // --- ColorGrade serde ---

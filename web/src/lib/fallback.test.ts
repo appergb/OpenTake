@@ -330,6 +330,23 @@ describe("browser fallback edit store", () => {
     expect(clip?.effects).toBeUndefined();
   });
 
+  it("rejects an invalid color grade before browser fallback mutation", () => {
+    const fallback = createFallbackStore();
+
+    const result = fallback.editApply({
+      type: "setColorGrade",
+      clipIds: ["c1"],
+      grade: { liftGammaGain: { gamma: { r: 0, g: 1, b: 1 } } },
+    });
+    const clip = fallback
+      .getTimeline()
+      .timeline.tracks.flatMap((track) => track.clips)
+      .find((candidate) => candidate.id === "c1");
+
+    expect(result.changed).toBe(false);
+    expect(clip?.colorGrade).toBeUndefined();
+  });
+
   it("stores both pair ids and rejects an oversized adjacent cross dissolve", () => {
     const fallback = createFallbackStore();
     fallback.reset();

@@ -10,8 +10,8 @@
 use std::rc::Rc;
 
 use opentake_domain::{
-    effect_registry, ChromaKey, Clip, ClipType, ColorGrade, Effect, EffectValidationError, Mask,
-    MaskShape, MaskTransform, Point, Point2, Rgb, Timeline, Track, Transform,
+    effect_registry, ChromaKey, Clip, ClipType, ColorGrade, Effect, EffectValidationError,
+    LiftGammaGain, Mask, MaskShape, MaskTransform, Point, Point2, Rgb, Timeline, Track, Transform,
 };
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::source::DecodedFrame;
@@ -267,6 +267,94 @@ fn color_grade_identity_is_passthrough() {
             "identity grade must be passthrough: {a:?} vs {b:?}"
         );
     }
+}
+
+#[test]
+fn lift_gamma_gain_matches_cpu_reference() {
+    let grade = ColorGrade {
+        lift_gamma_gain: LiftGammaGain {
+            lift: Rgb::new(0.08, -0.03, 0.12),
+            gamma: Rgb::new(1.8, 0.75, 1.25),
+            gain: Rgb::new(0.82, 1.15, 0.93),
+        },
+        ..Default::default()
+    };
+    let source = [96_u8, 128, 192, 255];
+    let linear = source[..3]
+        .iter()
+        .map(|channel| opentake_render::gpu::srgb_to_linear(f64::from(*channel) / 255.0))
+        .collect::<Vec<_>>();
+
+    let source_formula = |x: f64, lift: f64, gamma: f64, gain: f64| {
+        gain * (x + lift * (1.0 - x)).max(0.0).powf(1.0 / gamma)
+    };
+    let expected_linear = [
+        source_formula(linear[0], 0.08, 1.8, 0.82),
+        source_formula(linear[1], -0.03, 0.75, 1.15),
+        source_formula(linear[2], 0.12, 1.25, 0.93),
+    ];
+    let cpu = grade.apply_linear(linear[0], linear[1], linear[2]);
+    for (actual, expected) in [cpu.0, cpu.1, cpu.2].into_iter().zip(expected_linear) {
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "CPU color-wheel reference drift: expected {expected}, got {actual}"
+        );
+    }
+
+    let Some(dev) = device_or_skip("lift_gamma_gain_matches_cpu_reference") else {
+        return;
+    };
+    let mut timeline = full_canvas_timeline();
+    timeline.tracks[0].clips[0].color_grade = Some(grade);
+    let preview = render(&dev, &timeline, source);
+    let export = render(&dev, &timeline, source);
+    assert_eq!(preview.rgba, export.rgba, "preview/export LGG drift");
+
+    let expected = expected_linear.map(|channel| {
+        (opentake_render::gpu::linear_to_srgb(channel.clamp(0.0, 1.0)) * 255.0).round() as u8
+    });
+    let actual = center_pixel(&preview);
+    for channel in 0..3 {
+        assert!(
+            (i16::from(actual[channel]) - i16::from(expected[channel])).abs() <= 2,
+            "GPU LGG channel {channel}: expected {expected:?}, got {actual:?}"
+        );
+    }
+    assert_eq!(actual[3], 255);
+
+    // A malformed persisted grade is rejected before source resolution or any
+    // GPU submission, so preview/export cannot silently diverge or render an
+    // unchanged frame.
+    let mut invalid = full_canvas_timeline();
+    invalid.tracks[0].clips[0].color_grade = Some(ColorGrade {
+        lift_gamma_gain: LiftGammaGain {
+            gamma: Rgb::new(0.0, 1.0, 1.0),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    let invalid_plan = build_render_plan(&invalid, RS, &Metrics);
+    let invalid_frame = invalid_plan.frame(&invalid, 0);
+    let compositor = Compositor::new(&dev.device);
+    let mut resolver = SolidResolver {
+        device: &dev.device,
+        queue: &dev.queue,
+        rgba: source,
+        cached: None,
+    };
+    let error = compositor
+        .render_to_rgba(&dev.device, &dev.queue, RS, &invalid_frame, &mut resolver)
+        .expect_err("zero gamma must be rejected before source resolution");
+    assert!(matches!(
+        error,
+        RenderError::InvalidColorGrade(ref invalid)
+            if invalid.to_string()
+                == "liftGammaGain.gamma.r must be finite and within (0, 4]"
+    ));
+    assert!(
+        resolver.cached.is_none(),
+        "invalid grade resolved source data"
+    );
 }
 
 #[test]

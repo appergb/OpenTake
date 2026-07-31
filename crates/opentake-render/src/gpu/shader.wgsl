@@ -125,11 +125,11 @@ fn smoothstep01(edge0: f32, edge1: f32, x: f32) -> f32 {
 const CONTRAST_PIVOT: f32 = 0.18;
 
 fn apply_channel_lgg(x: f32, lift: f32, gamma: f32, gain: f32) -> f32 {
-    let v = gain * (x + lift);
+    let shaped = x + lift * (1.0 - x);
     if (abs(gamma - 1.0) > 1e-6 && gamma > 0.0) {
-        return pow(max(v, 0.0), 1.0 / gamma);
+        return gain * pow(max(shaped, 0.0), 1.0 / gamma);
     }
-    return v;
+    return gain * shaped;
 }
 
 // Applies the grade to a LINEAR-rgb triple, returning clamped linear rgb. Mirror

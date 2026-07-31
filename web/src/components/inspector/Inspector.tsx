@@ -1278,7 +1278,7 @@ function ColorGradeSection({ clip, t }: { clip: Clip; t: TFunction }) {
             key={`${band}-${channel}`}
             label={t(`inspector.field.${band}${channel.toUpperCase()}`)}
             value={draft.liftGammaGain[band][channel]}
-            min={band === "lift" ? -1 : 0}
+            min={band === "lift" ? -1 : band === "gamma" ? 0.01 : 0}
             max={band === "lift" ? 1 : 4}
             sensitivity={band === "lift" ? 0.005 : 0.01}
             format={(v) => v.toFixed(2)}

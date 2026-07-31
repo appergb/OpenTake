@@ -472,8 +472,12 @@ impl Compositor {
 
         for draw in &frame_plan.draws {
             // Reject invalid persisted data even when the source is offline;
-            // an unknown effect must never degrade into an unchanged frame.
+            // an unknown effect or malformed grade must never degrade into an
+            // unchanged frame or reach the GPU as NaN/Inf uniforms.
             let (effects, effect_count) = pack_effects(draw)?;
+            if let Some(grade) = draw.color_grade {
+                grade.validate()?;
+            }
             let Some(tex) = resolver.resolve_with_interpolation(TextureResolveRequest {
                 source: draw.source,
                 source_frame: draw.source_frame,

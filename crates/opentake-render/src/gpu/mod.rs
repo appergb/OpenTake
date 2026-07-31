@@ -31,4 +31,6 @@ pub enum RenderError {
     Readback(String),
     #[error("invalid effect chain: {0}")]
     InvalidEffect(#[from] opentake_domain::EffectValidationError),
+    #[error("invalid color grade: {0}")]
+    InvalidColorGrade(#[from] opentake_domain::ColorGradeValidationError),
 }

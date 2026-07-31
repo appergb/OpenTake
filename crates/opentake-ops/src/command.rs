@@ -2508,6 +2508,11 @@ fn set_color_grade(
     clip_ids: Vec<String>,
     grade: Option<ColorGrade>,
 ) -> Result<EditResult, EditError> {
+    if let Some(grade) = grade {
+        grade
+            .validate()
+            .map_err(|error| EditError::Invalid(format!("invalid color grade: {error}")))?;
+    }
     reject_compound_effect_targets(state, &clip_ids, grade.is_some())?;
     set_clip_effect_field(state, clip_ids, "Set Color Grade", move |clip| {
         clip.color_grade = grade;

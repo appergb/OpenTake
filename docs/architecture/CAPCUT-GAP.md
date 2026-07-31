@@ -129,7 +129,8 @@
 - **实现方案**:纯本地 wgpu 方案,零外部模型:在合成片元着色器里把每帧像素 BT.709→线性光(去 gamma)后,以 f32 RGB 跑统一调色链,最后线性→BT.709 编码回去。这是其余 5 项特性的公共底座——色轮/曲线/HSL/LUT 都是这条链上的算子。domain 加 ColorGrade{exposure,contrast,saturation,temp,tint,lift/gamma/gain,curves,hsl,lut_ref}(全 #[serde(default)] 保证读旧工程不破),render 把它编进 RenderPlan 逐 clip 传 uniform/storage buffer。预览与导出共享同一 RenderPlan 保证像素一致(对齐 ARCHITECTURE.md:120)。导出走 ffmpeg 编码前在 wgpu 已调好,无需 ffmpeg 调色滤镜。
 - **前置依赖**:强依赖 Phase 3 wgpu 帧合成器 blocker 先打通(ARCHITECTURE.md:24 列为🔴命门);需先确立'线性光工作空间'与色彩管理约定(BT.709 解码/编码节点)。
 
-### 色轮(暗部 lift / 中灰 gamma / 亮部 gain 矩阵) — `missing` · 难度 medium · 优先级 p1
+### 色轮(暗部 lift / 中灰 gamma / 亮部 gain 矩阵) — `has` · 难度 medium · 优先级 p1
+- **OpenTake 当前状态(2026-07-31)**:`ColorGrade` 已持久化三组 RGB lift/gamma/gain，Inspector 可逐通道调节并走统一 `SetColorGrade` 撤销/重做。CPU 参考与 WGSL 锁定同一线性光公式 `gain * pow(max(x + lift * (1 - x), 0), 1 / gamma)`：lift 向高光滚降、gamma 塑形中灰、gain 独立控制高光。所有字段按 Inspector 范围做有限数校验，gamma 严格大于 0；命令在变更前拒绝恶意输入，合成器在解析素材前拒绝损坏持久化值。拥有 GPU 测试覆盖三通道非中性参数、CPU/源公式一致、预览/导出逐字节一致和无副作用拒绝。打包应用已完成可见调节、四步撤销/重做、保存重开、播放和 920 帧完整导出；第 0 帧预览/导出 SSIM 0.999283、PSNR 38.47 dB，证据见 `docs/audit/2026-07-14/runtime-artifacts/automated/lgg-real-device-2026-07-31.md`。
 - **判定依据**:grep lift-gamma-gain/colorWheel 上游命中 0;Clip 模型与 6 条关键帧轨(Models/Timeline.swift:102-107)均无颜色通道;设计稿无色轮规划。属浮点调色引擎之上的标准算子,上游/OpenTake 均未覆盖。
 - **落点(crate/层)**:opentake-render(着色器内 lift/gamma/gain 数学)+ opentake-domain(ColorGrade 内 lift/gamma/gain 各一组 RGB 偏移)+ web 前端(三色轮 UI 控件)
 - **实现方案**:纯本地着色器数学,DaVinci 经典公式:out = gain * (in + lift*(1-in)) ^ (1/gamma),三参数各为 RGB 三通道向量。在线性光空间(浮点引擎已建)对每像素做一次乘加+幂运算即可,GPU 成本极低。前端三个色轮控件输出 RGB 偏移,经 Tauri command 写 ColorGrade,走 SetColorGrade 命令入 UndoStack。可叠加关键帧化(复用上游关键帧采样 hold/linear/smoothstep 算法,但需为颜色新增关键帧轨,工作量在 domain 侧)。

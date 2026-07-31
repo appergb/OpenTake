@@ -43,9 +43,9 @@ pub use clip::{Clip, FadeEdge, KeyframeTrackWireField, KeyframeValueWireShape, V
 pub use clip_type::ClipType;
 pub use grade::{
     chroma_cb_cr, effect_registry, luma709, smoothstep01, validate_effect_chain, ChromaKey,
-    ColorGrade, Effect, EffectDescriptor, EffectParameterDescriptor, EffectValidationError,
-    LiftGammaGain, Mask, MaskShape, MaskTransform, Point2, Rgb, MAX_EFFECTS_PER_CLIP,
-    MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS,
+    ColorGrade, ColorGradeValidationError, Effect, EffectDescriptor, EffectParameterDescriptor,
+    EffectValidationError, LiftGammaGain, Mask, MaskShape, MaskTransform, Point2, Rgb,
+    MAX_EFFECTS_PER_CLIP, MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS,
 };
 pub use keyframe::{
     smoothstep, split_keyframe_track, AnimPair, AnimatableProperty, Interpolation, Keyframe,

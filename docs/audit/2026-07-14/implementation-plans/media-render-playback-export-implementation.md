@@ -446,36 +446,38 @@ Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/auto
   - Visible/returned assertion: assert the exact success payload for the valid case and a stable typed error for the invalid case, including zero partial side effects and no leaked internal path or credential.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-render/tests/completion_2016fc49884f6dc7.rs#completion_2016fc49884f6dc7_lift_gamma_and_gain_controls_are_represented_and.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-domain/src/grade.rs#lift_gamma_gain_gain_scales` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-render/tests/gpu_effects.rs#lift_gamma_gain_matches_cpu_reference` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-domain lift_gamma_gain_gain_scales`
   - Run: `cargo test -p opentake-render --test gpu_effects lift_gamma_gain_matches_cpu_reference -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-domain/src/grade.rs#ColorGrade`, `crates/opentake-render/src/gpu/compositor.rs#grade_blocks`, `crates/opentake-render/src/gpu/shader.wgsl`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-domain lift_gamma_gain_gain_scales`
   - Run: `cargo test -p opentake-render --test gpu_effects lift_gamma_gain_matches_cpu_reference -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/automated/lgg-real-device-2026-07-31.md`.
 
 ### Task 9: MR-hsl-secondary (implementation-slice-0e1b61977fdbc412)
 

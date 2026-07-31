@@ -59,6 +59,22 @@ function normalizeColorGrade(
   };
 }
 
+function isValidColorGrade(grade: NonNullable<Clip["colorGrade"]>): boolean {
+  const finiteRange = (value: number, min: number, max: number) =>
+    Number.isFinite(value) && value >= min && value <= max;
+  const { lift, gamma, gain } = grade.liftGammaGain;
+  return (
+    finiteRange(grade.exposure, -5, 5) &&
+    finiteRange(grade.temperature, -1, 1) &&
+    finiteRange(grade.tint, -1, 1) &&
+    [lift.r, lift.g, lift.b].every((value) => finiteRange(value, -1, 1)) &&
+    [gamma.r, gamma.g, gamma.b].every((value) => Number.isFinite(value) && value > 0 && value <= 4) &&
+    [gain.r, gain.g, gain.b].every((value) => finiteRange(value, 0, 4)) &&
+    finiteRange(grade.contrast, -1, 2) &&
+    finiteRange(grade.saturation, 0, 3)
+  );
+}
+
 function normalizeChromaKey(
   chromaKey: Extract<EditRequest, { type: "setChromaKey" }>["chromaKey"],
 ): NonNullable<Clip["chromaKey"]> | undefined {
@@ -527,6 +543,9 @@ export function createFallbackStore() {
           const locations = findAllClips(cmd.clipIds);
           if (!locations) return result(false, "Set Color Grade", []);
           const next = normalizeColorGrade(cmd.grade);
+          if (next && !isValidColorGrade(next)) {
+            return result(false, "Set Color Grade", []);
+          }
           let changed = false;
           for (const loc of locations) {
             const clip = timeline.tracks[loc[0]].clips[loc[1]];
