@@ -103,7 +103,7 @@ Completion evidence: [`data-safety-legacy-default-matrix-real-device-2026-07-31.
   - Origin and Host DNS-rebinding guards, request-size limit, and MCP protocol-version validation are all active and independently tested.
   - HTTP integration tests prove external Host/Origin and unsupported protocol versions never invoke a tool.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-agent/tests/mcp_http.rs#non_local_origin_is_rejected` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-agent/tests/mcp_http.rs#oversized_request_body_is_rejected` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -112,7 +112,7 @@ Completion evidence: [`data-safety-legacy-default-matrix-real-device-2026-07-31.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-agent --test mcp_http non_local_origin_is_rejected -- --exact`
   - Run: `cargo test -p opentake-agent --test mcp_http oversized_request_body_is_rejected -- --exact`
@@ -121,11 +121,11 @@ Completion evidence: [`data-safety-legacy-default-matrix-real-device-2026-07-31.
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-agent/src/mcp/server.rs#McpServer`, `crates/opentake-agent/src/mcp/server.rs#serve_with_bridge`, `docs/modules/opentake-agent/SPEC.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-agent --test mcp_http non_local_origin_is_rejected -- --exact`
   - Run: `cargo test -p opentake-agent --test mcp_http oversized_request_body_is_rejected -- --exact`
@@ -134,11 +134,13 @@ Completion evidence: [`data-safety-legacy-default-matrix-real-device-2026-07-31.
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completion evidence: [`data-safety-mcp-transport-real-device-2026-07-31.md`](../runtime-artifacts/automated/data-safety-mcp-transport-real-device-2026-07-31.md). The four exact owning tests already passed at the initial baseline, so Task 2 required packaged-server verification and evidence closure rather than a new production patch; no artificial RED failure was introduced.
 
 ### Task 3: DS-mcp-tool-import (implementation-slice-a5dcb81bd0966174)
 
