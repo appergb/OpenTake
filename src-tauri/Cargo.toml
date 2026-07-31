@@ -24,6 +24,11 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
+# Dialog selections extend the runtime file/asset scopes. Persist only those
+# user-approved paths so Recents can render media after restart without the
+# previous global `**` asset exposure. The fs plugin must initialize first.
+tauri-plugin-fs = "2"
+tauri-plugin-persisted-scope = { version = "2", features = ["protocol-asset"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 opentake-core = { workspace = true }

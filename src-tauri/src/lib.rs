@@ -74,6 +74,12 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // Native dialog selections expand Tauri's runtime scopes. Persist the
+        // resulting file + asset grants for Recents, while keeping the static
+        // asset scope limited to application-owned cache/data/resources.
+        // Tauri requires fs to be initialized before persisted-scope.
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_persisted_scope::init())
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 // Background-run: don't quit, hide and return to Home.
