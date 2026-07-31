@@ -566,6 +566,23 @@ fn add_clips_applies_supplied_transform() {
 }
 
 #[test]
+fn add_clips_accepts_audio_lane_derived_from_video_asset() {
+    let mut st = state(vec![audio_track("a", true, vec![])]);
+    let g = SeqIdGen::new("n-");
+    let mut e = entry(0, ClipType::Audio, 15, 110);
+    e.source_clip_type = ClipType::Video;
+    e.trim_start_frame = Some(10);
+
+    apply(&mut st, EditCommand::AddClips { entries: vec![e] }, &g).unwrap();
+
+    let placed = &st.timeline.tracks[0].clips[0];
+    assert_eq!(placed.media_type, ClipType::Audio);
+    assert_eq!(placed.source_clip_type, ClipType::Video);
+    assert_eq!(placed.start_frame, 15);
+    assert_eq!(placed.trim_start_frame, 10);
+}
+
+#[test]
 fn add_clips_rejects_out_of_range_track() {
     let mut st = state(vec![video_track("v", true, vec![])]);
     let g = SeqIdGen::default();

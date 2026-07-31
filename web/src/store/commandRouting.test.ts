@@ -3,7 +3,7 @@ import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EditRequest, TextStyle, Transform } from "../lib/types";
+import type { Clip, EditRequest, TextStyle, Timeline, Transform } from "../lib/types";
 
 const ipc = vi.hoisted(() => ({
   calls: [] as EditRequest[],
@@ -37,6 +37,8 @@ import {
   addTexts,
   addTextsAutoTrack,
   createNestedSequence,
+  copyClips,
+  currentTimelineEndFrame,
   editNestedSequence,
   renameNestedSequence,
   dissolveNestedSequence,
@@ -51,6 +53,7 @@ import {
   moveClips,
   moveKeyframe,
   moveToFolder,
+  pasteClipsAtPlayhead,
   removeClips,
   removeKeyframe,
   removeTracks,
@@ -78,6 +81,7 @@ import {
   unlinkClips,
   upsertKeyframe,
 } from "./editActions";
+import { useClipboardStore } from "./clipboardStore";
 import { useProjectStore } from "./projectStore";
 import { createEditorUiStore, useEditorUiStore } from "./uiStore";
 
@@ -130,6 +134,7 @@ describe("edit gesture command routing", () => {
     ipc.calls.length = 0;
     ipc.failure = null;
     useEditorUiStore.getState().exitNestedSequence();
+    useClipboardStore.getState().clear();
   });
 
   afterEach(() => vi.unstubAllGlobals());
@@ -353,6 +358,94 @@ describe("edit gesture command routing", () => {
         command: {
           type: "moveClips",
           moves: [{ clipId: "child-a", toTrack: 0, toFrame: 12 }],
+        },
+      },
+    ]);
+  });
+
+  it("nested clipboard reads, bounds, and paste target the active sequence", async () => {
+    const childClip: Clip = {
+      id: "child-a",
+      mediaRef: "media-a",
+      mediaType: "video",
+      sourceClipType: "video",
+      startFrame: 15,
+      durationFrames: 110,
+      trimStartFrame: 10,
+      trimEndFrame: 0,
+      speed: 1,
+      volume: 1,
+      fadeInFrames: 0,
+      fadeOutFrames: 0,
+      fadeInInterpolation: "linear",
+      fadeOutInterpolation: "linear",
+      opacity: 1,
+      transform,
+      crop: { left: 0, top: 0, right: 0, bottom: 0 },
+    };
+    const childTimeline: Timeline = {
+      fps: 30,
+      width: 1920,
+      height: 1080,
+      settingsConfigured: true,
+      tracks: [
+        {
+          id: "child-video",
+          type: "video",
+          muted: false,
+          hidden: false,
+          syncLocked: true,
+          clips: [childClip],
+        },
+      ],
+    };
+    useProjectStore.getState().replaceProjectSnapshot({
+      timeline: {
+        fps: 30,
+        width: 1920,
+        height: 1080,
+        settingsConfigured: true,
+        tracks: [],
+        nestedSequences: [{ id: "sequence-a", name: "Scene", timeline: childTimeline }],
+      },
+      projectEpoch: 5,
+      version: 2,
+      projectPath: "/nested.opentake",
+      compatibilityReadOnly: false,
+      compatibilityBlockers: [],
+    });
+    useEditorUiStore.getState().enterNestedSequence("sequence-a");
+    useEditorUiStore.setState({
+      selectedClipIds: new Set(["child-a"]),
+      activeFrame: 150,
+      currentFrame: 150,
+    });
+
+    expect(currentTimelineEndFrame()).toBe(125);
+    copyClips();
+    await pasteClipsAtPlayhead();
+
+    expect(ipc.calls).toEqual([
+      {
+        type: "editNestedSequence",
+        sequenceId: "sequence-a",
+        command: {
+          type: "addClips",
+          entries: [
+            {
+              mediaRef: "media-a",
+              mediaType: "video",
+              sourceClipType: "video",
+              trackIndex: 0,
+              startFrame: 150,
+              durationFrames: 110,
+              trimStartFrame: 10,
+              trimEndFrame: 0,
+              hasAudio: true,
+              addLinkedAudio: false,
+              transform,
+            },
+          ],
         },
       },
     ]);

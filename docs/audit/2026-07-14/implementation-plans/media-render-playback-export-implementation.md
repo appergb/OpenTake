@@ -82,33 +82,39 @@
   - Add deterministic media fixtures and golden frame, audio, timeline, or export assertions for every named capability and boundary; the affected render/media suites must pass.
   - Run the packaged preview/export path on representative media and retain exact output or runtime evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/nested_timeline.rs#nested_edits_preview_and_export_same_frames` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test nested_timeline nested_edits_preview_and_export_same_frames -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-domain/src/clip.rs`, `crates/opentake-render/src/plan/build.rs#build_frame_plan`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test nested_timeline nested_edits_preview_and_export_same_frames -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completion evidence (2026-07-31):
+`runtime-artifacts/automated/nested-timeline-compound-real-device-2026-07-31.md`.
+The historical parent failed because the owning targets were absent; the exact
+focused tests, full Rust/Web gates, strict local package verification, packaged
+create/edit/reopen/preview, and 231-frame H.264/AAC export now pass.
 
 ### Task 3: MR-optical-flow (implementation-slice-c85c1acc35668396)
 

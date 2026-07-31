@@ -157,13 +157,7 @@ export function useKeyboardShortcuts() {
       // Editor-only shortcuts: ignore while the Home / Settings views are shown.
       if (ui.view !== "editor") return;
       const mod = e.metaKey || e.ctrlKey;
-      const total = (() => {
-        const tl = useProjectStore.getState().timeline;
-        let m = 0;
-        for (const t of tl.tracks)
-          for (const c of t.clips) m = Math.max(m, c.startFrame + c.durationFrames);
-        return m;
-      })();
+      const total = edit.currentTimelineEndFrame();
 
       // Zoom the timeline by `factor`, keeping the playhead stationary on screen
       // (剪映 zooms around the current position). Uses existing store actions.

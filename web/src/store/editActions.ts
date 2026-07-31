@@ -18,6 +18,7 @@ import { buildInsertPlan, type InsertPlan } from "../lib/timelineInsert";
 import { checkProjectSettings, type ProjectSettingsTarget } from "../lib/projectSettings";
 import { expandLinkGroup } from "../components/timeline/hitTest";
 import { useClipboardStore } from "./clipboardStore";
+import { t } from "../i18n";
 import type {
   CaptionEntryReq,
   CaptionRequest,
@@ -116,6 +117,16 @@ export function currentTimeline(): Timeline {
   const root = useProjectStore.getState().timeline;
   const sequenceId = useEditorUiStore.getState().activeNestedSequenceId;
   return root.nestedSequences?.find((sequence) => sequence.id === sequenceId)?.timeline ?? root;
+}
+
+/** End frame of the timeline currently shown in the editor. Nested timeline
+ *  transport and paste placement must not inherit the root sequence duration. */
+export function currentTimelineEndFrame(): number {
+  let end = 0;
+  for (const track of currentTimeline().tracks) {
+    for (const clip of track.clips) end = Math.max(end, clip.startFrame + clip.durationFrames);
+  }
+  return end;
 }
 
 const ROOT_SCOPED_EDIT_REQUEST_TYPES = new Set<EditRequest["type"]>([
@@ -1413,25 +1424,29 @@ export async function pasteClipsAtPlayhead() {
     sourceLinkGroups.push(e.clip.linkGroupId);
   }
   if (entries.length === 0) return;
-  const res = await addClips(entries);
-  if (!res || res.affectedClipIds.length === 0) return;
+  try {
+    const res = await addClips(entries);
+    if (!res || res.affectedClipIds.length === 0) return;
 
-  // Re-establish link groups: map each old linkGroupId to the set of newly
-  // created clip ids, then call linkClips for each group.
-  const newGroupMap = new Map<string, string[]>();
-  for (let i = 0; i < res.affectedClipIds.length && i < sourceLinkGroups.length; i++) {
-    const oldGroup = sourceLinkGroups[i];
-    if (!oldGroup) continue;
-    const newId = res.affectedClipIds[i];
-    const arr = newGroupMap.get(oldGroup);
-    if (arr) arr.push(newId);
-    else newGroupMap.set(oldGroup, [newId]);
-  }
-  for (const ids of newGroupMap.values()) {
-    if (ids.length >= 2) await linkClips(ids);
-  }
+    // Re-establish link groups: map each old linkGroupId to the set of newly
+    // created clip ids, then call linkClips for each group.
+    const newGroupMap = new Map<string, string[]>();
+    for (let i = 0; i < res.affectedClipIds.length && i < sourceLinkGroups.length; i++) {
+      const oldGroup = sourceLinkGroups[i];
+      if (!oldGroup) continue;
+      const newId = res.affectedClipIds[i];
+      const arr = newGroupMap.get(oldGroup);
+      if (arr) arr.push(newId);
+      else newGroupMap.set(oldGroup, [newId]);
+    }
+    for (const ids of newGroupMap.values()) {
+      if (ids.length >= 2) await linkClips(ids);
+    }
 
-  // Select the freshly pasted clips so the user can immediately move/trim them.
-  ui.selectClips(new Set(res.affectedClipIds));
-  if (isTauri) await forceRefresh();
+    // Select the freshly pasted clips so the user can immediately move/trim them.
+    ui.selectClips(new Set(res.affectedClipIds));
+    if (isTauri) await forceRefresh();
+  } catch (error) {
+    ui.pushToast(t("edit.pasteFailed", { error: String(error) }));
+  }
 }

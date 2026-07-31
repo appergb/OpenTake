@@ -6,17 +6,19 @@
 
 **整体差距**:总体判定:6 项里只有「基础线性变速」是 OpenTake 设计稿已完整覆盖(has);「50 条多轨道复杂工程」属于"数据模型已覆盖、但大工程性能尚未验证"的 partial;其余 4 项(复合片段嵌套、多机位自动对齐、高阶曲线变速、光流补帧)在上游 Palmier Pro 源码与 OpenTake 三份设计文档里都完全没有踪迹,均为 missing,且恰好对应上游 FAQ 自述「尚无特效/转场/调色/蒙版/图形」之外的另一类"高阶时间线能力"空白。\n\n关键证据链:① 上游 Clip 模型(Models/Timeline.swift:82-85)速度是单个标量 `var speed: Double = 1.0`,而非关键帧轨;可关键帧的属性枚举 `AnimatableProperty`(Models/Keyframe.swift:77-78)只有 opacity/position/scale/rotation/crop/volume,根本没有 speed → 曲线变速在现模型里不可表达。② 插值类型 `Interpolation` 只有 linear/hold/smooth(Models/Keyframe.swift:3-5),没有任意贝塞尔曲线。③ 对全仓做穷举式 grep,multicam/nested/compound/optical-flow/interpolation/speedCurve/retime/frameblending 这些关键词除了 SF Symbol 图标名"film"和被排除的 compoundPredicate 外零命中;导出器甚至把 `frameblending=FALSE` 写死(Export/XMLExporter.swift:336)。④ 唯一与"嵌套"沾边的是 saveClipAsMedia/saveTimelineRangeAsMedia(Editor/ViewModel/EditorViewModel+SaveAsMedia.swift),那是用 AVMutableComposition 把片段/区间烘焙成一个新扁平媒体的破坏性 flatten,不是活的嵌套序列;OpenTake 设计稿(MODULE-PORT-MAP.md:233)也只把它当 FFmpeg flatten 处理。⑤ 轨道是无上限的 `tracks: [Track]` 数组,没有任何 maxTracks 闸门;多轨编辑逻辑(OverwriteEngine/RippleEngine/SnapEngine)已被 Phase 1 完整规划进 opentake-domain/opentake-ops,所以 50 轨的难点不在"功能缺失"而在 wgpu 合成器/预览引擎(架构文档点名的两大 blocker)能否扛住几十轨逐帧合成的性能。\n\n补齐落点优先级:p0 = 先保证 50 轨工程在 wgpu 合成器/预览引擎上的可用性能(否则其余高阶能力无处施展);p1 = 曲线变速(需把 speed 升级为关键帧轨 + 重做 setpts/RenderPlan 时间映射,工程量中等但牵动核心模型);p2 = 复合片段嵌套(架构性较大,建议先做"非破坏 flatten 缓存"过渡)、多机位自动对齐(可用 FFmpeg 音频互相关纯本地实现,工程独立);p3 = 光流补帧(唯一需要 ML 模型/外部 API、且对画质一致性要求最高的 blocker 级特性,放最后)。
 
+> **2026-07-31 状态更新**：上面的总体判定与证据链是实现前的上游历史基线。当前 OpenTake 已完整覆盖「基础线性变速」和「复合片段嵌套」；「50 条多轨道复杂工程」仍是性能待验证的 partial；多机位自动对齐、高阶曲线变速、光流补帧仍为 missing。当前状态以各条目的验证证据为准。
+
 ### 高达 50 条多轨道复杂工程 — `partial` · 难度 high · 优先级 p0
 - **判定依据**:上游轨道为无上限 `tracks: [Track]` 数组,全仓无 maxTracks/track limit 闸门;多轨编辑算法 OverwriteEngine/RippleEngine/SnapEngine 已是纯函数,OpenTake 已在 Phase 1 规划进 opentake-domain/opentake-ops(ROADMAP.md:10-17、MODULE-PORT-MAP.md:233、304)。但架构文档(ARCHITECTURE.md:22-27)明确把 wgpu 帧合成器与播放/预览引擎列为两大 🔴 blocker,且 PoC 场景只到『单轨视频+1个 transform 关键帧+1条字幕』(ROADMAP.md:29)——几十轨逐帧『解码→采样关键帧→仿射/裁剪/混合→多轨合成』的实时性能完全未验证。结论:数据模型与编辑逻辑层 has,但大工程的渲染/预览性能 partial。
 - **落点(crate/层)**:opentake-render(wgpu 合成器 + 预览后端,性能关键)+ opentake-domain/opentake-ops(模型与算法,已覆盖)
 - **实现方案**:模型与编辑无需新增,直接沿用既定移植。性能侧需在 wgpu 合成器做工程化:(1) 每帧只对『当前帧实际可见、未被上层完全遮挡且 opacity>0』的轨道解码合成,跳过空轨/全透明轨;(2) ffmpeg 解码器池 + 帧缓存,避免每轨重复 seek;(3) 预览分辨率降档 + scrub 丢帧到最新请求(架构已提该策略 ARCHITECTURE.md:130、MODULE-PORT-MAP.md:308);(4) RenderPlan 预计算每帧合成指令,wgpu 端用单 render pass 批量混合多层纹理。全部跨平台 Rust/wgpu,无需外部依赖。
 - **前置依赖**:强依赖 wgpu 帧合成器(blocker 1)与播放/预览引擎(blocker 2)先落地;Phase 3/4 完成后才能压测 50 轨
 
-### 新建复合片段(工程嵌套 / nested compound clip) — `missing` · 难度 high · 优先级 p2
-- **判定依据**:上游领域模型只有扁平的 Timeline→Track→Clip,Clip 永远指向单个 media_ref(asset id),没有『Clip 引用一个子 Timeline』的类型(Models/Timeline.swift)。全仓 grep nested/compound 零命中(仅 SF Symbol 与被排除的 compoundPredicate)。唯一相邻能力是 saveClipAsMedia/saveTimelineRangeAsMedia(EditorViewModel+SaveAsMedia.swift:8/60),用 AVMutableComposition 把片段或时间线区间烘焙成一个新的扁平 mp4/m4a 媒体——这是破坏性 flatten,不可再编辑内部,且 OpenTake 设计稿(MODULE-PORT-MAP.md:233)也只把它当 FFmpeg flatten 移植。真正的『活的嵌套序列/精简图层』完全缺失。
+### 新建复合片段(工程嵌套 / nested compound clip) — `has` · 难度 high · 优先级 p2
+- **判定依据**:OpenTake 现已具备持久化 `nestedSequenceId` 与子时间线注册表、依赖和循环校验、共享撤销路径下的创建/进入/编辑/重命名/移动/修剪/复制/解散、递归 RenderPlan 展开，以及预览/导出共用的扁平计划。精确 round-trip、递归渲染、循环拒绝测试和 2026-07-31 的打包 macOS 实机流程均通过；实机完成创建、进入、修剪、移动、联动音视频复制粘贴、保存重开、连续预览和 231 帧 H.264/AAC 导出。证据见 `docs/audit/2026-07-14/runtime-artifacts/automated/nested-timeline-compound-real-device-2026-07-31.md`。
 - **落点(crate/层)**:opentake-domain(新增 nested 片段类型与子 Timeline 引用)+ opentake-ops(进入/退出嵌套、子树编辑命令)+ opentake-render(嵌套 RenderPlan 递归展开/物化)+ opentake-project(子序列序列化)
-- **实现方案**:分两步落地,优先级有别。【过渡方案,先做】把上游 saveTimelineRangeAsMedia 的 flatten 用 FFmpeg/wgpu 重写为『一键打组烧成内部媒体』(content-hash 缓存,源区间改了才重烧),立即满足『精简图层』的视觉诉求,纯本地、工程小。【完整方案,后做】在 domain 新增 `MediaSource::Nested(child_timeline_id)` 或独立 `CompoundClip{child: Timeline}`,Clip 可引用子 Timeline;RenderPlan 生成时对嵌套节点递归展开成扁平合成指令(或先渲染子序列为离屏纹理再当单层合成,二选一按性能定);ops 增加 enter/exit 嵌套、子树内复用既有 OverwriteEngine/RippleEngine。全程跨平台 Rust/wgpu,无外部模型。
-- **前置依赖**:完整方案依赖 wgpu 合成器支持离屏渲染/递归 RenderPlan;过渡 flatten 方案依赖导出/FFmpeg 链路可用即可
+- **实现方案**:已采用活的子时间线模型而非破坏性烘焙：父 Clip 保存子序列引用，子树复用既有编辑命令并由根命令提供单次撤销；渲染计划递归展开并对非法循环、缺失引用及当前不支持的复合级像素效果明确失败。Web 时间线提供创建、进入/返回、重命名与解散入口。
+- **前置依赖**:功能实现与 macOS 打包验证已完成；Developer ID/公证和 Windows UI 实机属于独立发布验收，不在本条功能完成声明内。
 
 ### 多机位自动对齐剪辑(multicam auto-sync) — `missing` · 难度 medium · 优先级 p2
 - **判定依据**:上游与 OpenTake 三份设计文档全无 multicam/angle/sync-cam/多机位 任何痕迹(穷举 grep 仅命中无关的 sync-locked 轨道锁与 audio/video 链接 link_group)。上游的 A/V Link(同 link_group_id 作为一个单位移动,ARCHITECTURE.md:113)只是单机位音画捆绑,与多机位多角度对齐切换是两回事。该能力 0 覆盖。

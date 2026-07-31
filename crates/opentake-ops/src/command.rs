@@ -1522,7 +1522,7 @@ fn insert_clips(
     }
     let target_type = state.timeline.tracks[track_index].kind;
     for (i, e) in entries.iter().enumerate() {
-        if !e.source_clip_type.is_compatible(target_type) {
+        if !e.media_type.is_compatible(target_type) {
             return Err(EditError::Invalid(format!(
                 "entries[{i}]: asset type is not compatible with the target track"
             )));
@@ -3420,7 +3420,10 @@ fn validate_entry(state: &EditorState, e: &ClipEntry, i: usize) -> Result<(), Ed
         )));
     }
     let target = state.timeline.tracks[e.track_index].kind;
-    if !e.source_clip_type.is_compatible(target) {
+    // Destination compatibility is determined by the placed lane type. A
+    // linked audio clip can legitimately retain `source_clip_type = Video`
+    // because it still resolves audio from the original video asset.
+    if !e.media_type.is_compatible(target) {
         return Err(EditError::Invalid(format!(
             "entries[{i}]: asset type is not compatible with the destination track"
         )));
@@ -3455,12 +3458,12 @@ fn validate_entry(state: &EditorState, e: &ClipEntry, i: usize) -> Result<(), Ed
 }
 
 fn validate_auto_track_entry(e: &ClipEntry, i: usize) -> Result<(), EditError> {
-    let target = if e.source_clip_type == ClipType::Audio {
+    let target = if e.media_type == ClipType::Audio {
         ClipType::Audio
     } else {
         ClipType::Video
     };
-    if !e.source_clip_type.is_compatible(target) {
+    if !e.media_type.is_compatible(target) {
         return Err(EditError::Invalid(format!(
             "entries[{i}]: asset type is not compatible with an auto-created track"
         )));
