@@ -784,36 +784,40 @@ Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/auto
   - Visible/returned assertion: assert the exact returned status plus deterministic frame/audio/container properties or typed unsupported/error output, and verify preview/export parity when both paths are named.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-render/tests/completion_1c3d81a8b3ab2d59.rs#completion_1c3d81a8b3ab2d59_do_not_create_a_linked_audio_track_when_probe_pr.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-agent/src/mcp/dispatch.rs#add_clips_does_not_link_audio_when_source_has_no_audio` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-agent/src/mcp/dispatch.rs#insert_clips_does_not_link_audio_when_source_has_no_audio` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and adjudicate the inherited baseline**
 
   - Run: `cargo test -p opentake-agent add_clips_does_not_link_audio_when_source_has_no_audio`
   - Run: `cargo test -p opentake-agent insert_clips_does_not_link_audio_when_source_has_no_audio`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Result: The current baseline was already GREEN, not RED. The two exact owning tests entered history in `a2f34cb` with the Agent linked-audio fix, while the zero-channel probe regression entered in `9920468`. No artificial failure was introduced merely to recreate historical RED; the current acceptance run executed both Agent tests and the probe regression directly.
+
+- [x] **Step 3: Verify the existing vertical slice and update its acceptance record**
 
   Modify only `crates/opentake-agent/src/mcp/dispatch.rs`, `crates/opentake-ops/src/ops/place.rs`, `docs/architecture/EDITING-ENGINE-PLAN.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-agent add_clips_does_not_link_audio_when_source_has_no_audio`
   - Run: `cargo test -p opentake-agent insert_clips_does_not_link_audio_when_source_has_no_audio`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. `cargo test -p opentake-agent does_not_link_audio_when_source_has_no_audio` executed both exact add/insert tests with 2/2 passing, and `cargo test -p opentake-media video_with_zero_channel_audio_has_no_audio` executed the probe test with 1/1 passing. The complete workspace gate had already passed on the same executable source immediately before this documentation-only reclassification. In the rebuilt release `.app`, an isolated project imported a five-second H.264 file with no audio stream, persisted `hasAudio:false`, created only a V1 clip with no `linkGroupId`, played normally, and exported 150 frames. Independent FFprobe inspection of the exported MP4 found one H.264 1280×720/30 fps stream and no audio stream. Runtime evidence: [`linked-audio-real-device-2026-08-01.md`](../runtime-artifacts/automated/linked-audio-real-device-2026-08-01.md).
 
 ### Task 15: MR-hdr-proxy-account-composite (implementation-slice-d2a7a5861f5ebc9b)
 
