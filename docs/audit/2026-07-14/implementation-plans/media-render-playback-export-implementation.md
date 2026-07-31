@@ -1514,36 +1514,58 @@ not the separately owned desktop motion/Lottie materialization.
   - Enforce request interception allowlists, CSP, document limits, cancellation, timeout, deterministic clock, and no ambient filesystem/network access.
   - Integration tests render a fixed animation twice byte-identically and cover blocked network, timeout, crash, malformed source, and cancellation.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-motion/src/renderer.rs#chromium_skeleton_reports_unavailable_not_panic` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-motion/tests/chromium.rs#virtual_time_network_csp_timeout_cleanup_and_frame_identity` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-motion chromium_skeleton_reports_unavailable_not_panic`
   - Run: `cargo test -p opentake-motion --test chromium virtual_time_network_csp_timeout_cleanup_and_frame_identity -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  RED recorded 2026-08-01 with `--features chromium`: the planned test failed
+  to compile because cancellation, browser discovery/path injection, and the
+  live backend did not exist. The feature flag is required to exercise the live
+  owner; the unfeatured command intentionally verifies only fail-closed
+  `RendererUnavailable` behavior.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-motion/src/renderer.rs#HeadlessChromiumRenderer::render`, `crates/opentake-motion/src/integration.rs#MotionClipSource`, `docs/modules/opentake-motion/OVERVIEW.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-motion chromium_skeleton_reports_unavailable_not_panic`
   - Run: `cargo test -p opentake-motion --test chromium virtual_time_network_csp_timeout_cleanup_and_frame_identity -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  GREEN verified 2026-08-01 against Google Chrome 150.0.7871.187. The live
+  exact owner rendered a fixed animation twice byte-identically, advanced
+  visible virtual-time frames, decoded a real browser PNG through
+  `MotionClipSource`, allowed an exact loopback origin, blocked a disallowed
+  origin, fused a runaway script, handled process crash and malformed source,
+  cancelled an in-flight render, removed partial frames, and left no browser
+  profile. The existing owner passes both default and feature-enabled builds.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. Formatting, default and feature-enabled warnings-denied
+  Clippy, all 59 feature-enabled motion tests, and the full workspace Rust suite
+  pass. The first workspace attempt stopped only because generated debug
+  artifacts filled the disk; after deleting `target/debug/deps` and
+  `target/debug/incremental` (release bundle preserved), the identical command
+  passed. Runtime receipt:
+  `runtime-artifacts/automated/headless-chromium-real-device-2026-08-01.md`.
 
 ### Task 25: MR-motion-missing-frame-complete (implementation-slice-f16a70f238444e28)
 

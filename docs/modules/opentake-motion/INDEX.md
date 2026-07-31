@@ -3,18 +3,18 @@
 > 上级：[模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 >
 > `opentake-motion` = **原生 web 动态图形 fallback 渲染原语层**：把内联 HTML/CSS/JS（或模板 + 参数）确定性逐帧栅格化为磁盘 RGBA PNG 帧序列、内容寻址缓存、安全沙箱，并适配成 `opentake-render` 的 clip source。
-> ⚠️ **当前是脚手架 / fallback**：动效 / AI Video 的 **v1 主路径走外部 Motion Canvas 插件**（产 `mp4` 按普通视频导入；插件目录 `plugins/motion-canvas-studio/` **尚未存在**）。本 crate 保留给后续透明 alpha overlay / frame-sequence / HTML-CSS fallback。**不是 Lottie 渲染器**（Lottie 在 [opentake-render](../opentake-render/INDEX.md)）。
+> ⚠️ **当前是尚未接入桌面的 native fallback**：动效 / AI Video 的 **v1 主路径规划为外部 Motion Canvas 插件**（产 `mp4` 按普通视频导入；插件目录 `plugins/motion-canvas-studio/` **尚未存在**）。本 crate 已实现 feature-gated 的真实 HTML/CSS/JS → RGBA PNG 后端，但 app/core 尚未调用。**不是 Lottie 渲染器**（Lottie 在 [opentake-render](../opentake-render/INDEX.md)）。
 > 依赖只向下：依赖 `opentake-render`（实现其 source 契约）+ `opentake-domain`；设计上由 `opentake-core`/`src-tauri`/`opentake-agent` 调用（**v1 未接线**）。真实 headless-Chromium 后端在 `chromium` feature 后，**默认 build/CI 离线、不需浏览器**。
 
 ---
 
 ## 总览
 
-- **[OVERVIEW.md](OVERVIEW.md)** — 定位与依赖分层、职责边界（做什么/不做什么，含"不是 Lottie 渲染器""不是 v1 主渲染器"）、关键概念与数据流（fallback 管线、确定性时钟、沙箱、与 render 集成桥）、对应上游 Swift（**无直接对应**，上游动态图形=Lottie 落 render/media）、完成状态（已实现纯逻辑 vs 计划中真实 CDP/Motion Canvas 插件）、移植铁律。
+- **[OVERVIEW.md](OVERVIEW.md)** — 定位与依赖分层、职责边界（做什么/不做什么，含"不是 Lottie 渲染器""不是 v1 主渲染器"）、关键概念与数据流（fallback 管线、确定性时钟、沙箱、与 render 集成桥）、对应上游 Swift（**无直接对应**，上游动态图形=Lottie 落 render/media）、完成状态（真实 CDP 已实现；Motion Canvas/桌面接线仍计划中）、移植铁律。
 
 ## 子系统文档
 
-- **[renderer.md](renderer.md)** — `renderer.rs`：`MotionRenderer` trait + `deterministic_clock_script()`（注入页面、冻结时钟、`OpenTake.seek`）+ `StubRenderer`（确定性纯色帧、无依赖自制 PNG 编码器）+ `HeadlessChromiumRenderer`（真实 CDP 后端**骨架**：`data_url_for_code`/`frame_time_grid`，live 渲染未实现，返回 `RendererUnavailable`）。
+- **[renderer.md](renderer.md)** — `renderer.rs`：`MotionRenderer` trait + `deterministic_clock_script()`（注入页面、冻结时钟、`OpenTake.seek`）+ `StubRenderer`（确定性纯色帧、无依赖自制 PNG 编码器）+ feature-gated `HeadlessChromiumRenderer`（真实 CDP、CSP/请求拦截、超时/取消、逐帧 PNG；默认 build 返回 `RendererUnavailable`）。
 - **[sandbox.md](sandbox.md)** — `sandbox.rs`：`SandboxPolicy`（网络默认全拒 / 超时熔断 / 文档大小上限 / 无文件系统访问，**建模为类型**）+ `AllowedOrigin`（仅 https/loopback、无通配、拒明文远程）+ 纯检查 `check_url`（`data:` 放行）/ `check_document_size`。
 - **[manifest-source.md](manifest-source.md)** — `source.rs`（值类型：`MotionSource` Code/Template、`MotionRenderRequest` camelCase + 范围校验、`RenderedClip` 磁盘帧 + 末帧定格、`ParamValue`、`limits` 硬上限）+ `manifest.rs`（`MotionPlugin` 模板清单：容错解码 + 严格 `validate`/`validate_params`、`DurationMode`/`FpsPolicy`/`ParamSpec`）+ `error.rs`（`MotionError` thiserror）。
 - **[cache.md](cache.md)** — `cache.rs`：`content_hash`（SHA-256 over 源+参数+fps+尺寸+透明，规范字节流 + `opentake-motion/v1` 版本前缀 + 参数类型标签 + `-0.0` 归一）+ `MotionCache`（`root/<hash>/`、`is_cached` 按帧数完整性判定 partial=miss、`frame_file` 零填充）。
@@ -42,11 +42,11 @@
 ```
 crates/opentake-motion/src/
 ├── lib.rs           模块声明 + 公开 API 扁平 re-export + crate 级管线/确定性/安全文档
-├── error.rs         MotionError（thiserror：InvalidSource/Request、Manifest、RendererUnavailable、Timeout、Sandbox、RenderFailed、Io）+ MotionResult
+├── error.rs         MotionError（thiserror：InvalidSource/Request、Manifest、RendererUnavailable、Timeout、Cancelled、Sandbox、RenderFailed、Io）+ MotionResult
 ├── source.rs        值类型：MotionSource(Code/Template)、MotionRenderRequest(camelCase+validate)、RenderedClip(磁盘帧+末帧定格)、ParamValue、limits 硬上限
 ├── manifest.rs      MotionPlugin 模板清单（plugin.json，容错解码 + validate/validate_params）、DurationMode/DurationSpec/FpsPolicy/ParamSpec/MotionPluginAuthor
 ├── cache.rs         content_hash（内容寻址键 + v1 版本前缀）+ MotionCache（root/<hash>/、完整性判定、零填充帧名）
-├── renderer.rs      MotionRenderer trait + deterministic_clock_script + StubRenderer(自制 PNG 编码器) + HeadlessChromiumRenderer(骨架，feature `chromium`)
+├── renderer.rs      MotionRenderer trait + deterministic_clock_script + StubRenderer(自制 PNG 编码器) + HeadlessChromiumRenderer(真实 CDP，feature `chromium`)
 ├── sandbox.rs       SandboxPolicy（网络/超时/文档大小/无 FS，建模为类型）+ AllowedOrigin + check_url/check_document_size
 └── integration.rs   MotionClipSource（impl SourceMetrics + FrameProvider）+ FrameDecoder 解码器注入
 ```

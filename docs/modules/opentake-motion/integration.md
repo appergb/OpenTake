@@ -23,7 +23,7 @@
 
 帧文件→RGBA 的解码**刻意不**在本 crate 硬接某个 PNG 库。帧可能来自：
 - `StubRenderer`（自制 stored-block PNG），
-- 未来 native headless-Chromium fallback（标准 PNG），
+- native headless-Chromium fallback（标准 PNG），
 - Motion Canvas 图片序列输出，
 - 未来裸 RGBA 快路径。
 
@@ -69,7 +69,7 @@ RenderedClip (磁盘 PNG 帧)
             └─ opentake-render 合成器纹理层（未来接入）
 ```
 
-测试覆盖：`natural_size` = 渲染画布、`needs_premultiply` 跟透明、`decoded_frame` 返回正确形状 RGBA、过末端钳位仍解码、解码器失败返回 `None`、负 `source_frame` 映射到首帧。
+测试覆盖：`natural_size` = 渲染画布、`needs_premultiply` 跟透明、`decoded_frame` 返回正确形状 RGBA、过末端钳位仍解码、解码器失败返回 `None`、负 `source_frame` 映射到首帧；feature-gated live 验收还把真实 Chromium PNG 通过注入的 decoder 送入 `MotionClipSource`，验证尺寸与 RGBA 长度。
 
 ---
 

@@ -11,13 +11,15 @@
 //!
 //! Decoding a frame file back to RGBA is deliberately *not* hard-wired to a PNG
 //! library here. Frames may be produced by the [`StubRenderer`](crate::renderer)
-//! (our tiny stored-block PNG), by the later native headless-Chromium fallback
+//! (our tiny stored-block PNG), by the native headless-Chromium fallback
 //! (standard PNG), by Motion Canvas image-sequence output, or by a future
 //! raw-RGBA fast path. So [`MotionClipSource`] takes a
 //! `FrameDecoder` — a `Fn(&Path) -> Option<DecodedFrame>` — supplied by the
 //! integrating layer (which already owns an image/codec stack). Tests inject the
-//! stub's own decoder; the app injects `image`/ffmpeg. This keeps this crate's
-//! default dependency surface free of a decoder while still being fully testable.
+//! stub's own decoder, and the feature-gated Chromium acceptance decodes a live
+//! browser PNG through this same boundary; the app injects `image`/ffmpeg. This
+//! keeps this crate's default dependency surface free of a decoder while still
+//! being fully testable.
 
 use std::path::Path;
 

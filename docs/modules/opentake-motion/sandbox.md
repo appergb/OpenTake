@@ -9,7 +9,7 @@
 
 为渲染**不可信** native fallback 动效代码（agent 生成或社区模板）提供安全策略。核心思路：把安全要求建模成**类型**（`SandboxPolicy`），使渲染器在类型层面无法"忘记应用"某条约束。策略类型与其纯检查住在本 crate、无需引擎即可单测；网络/CSP 的真正执行落在 `chromium` feature 后的真实 CDP 后端。
 
-> 完成状态：策略类型与纯检查（`check_url` / `check_document_size` / origin 解析）**已实现并全测**；其在真实浏览器中的执行（请求拦截 / CSP / 超时熔断）随 `HeadlessChromiumRenderer` 待实现（见 [renderer.md](renderer.md)）。
+> 完成状态：策略类型、纯检查及其在真实浏览器中的 CSP / CDP 请求拦截 / 超时与取消执行均已实现并测试（见 [renderer.md](renderer.md)）。
 
 ---
 
@@ -33,7 +33,7 @@
 
 允许的网络 origin（scheme + host[:port]），如 `https://cdn.jsdelivr.net`。
 
-- `parse(origin)`：规范化为小写、去尾斜杠；只接受 `https://`，或 loopback 的 `http://localhost` / `http://127.0.0.1` / `http://[::1]`（本地 dev 服务器）。**明文远程 origin 一律拒绝**（返回 `None`）。
+- `parse(origin)`：规范化为小写、去尾斜杠；只接受不含 path/query/fragment/userinfo 的 `https://host[:port]`，或精确 loopback 的 `http://localhost[:port]` / `http://127.0.0.1[:port]` / `http://[::1][:port]`。`localhost.evil.example` 等相似域名不会被当作 loopback；**明文远程 origin 一律拒绝**。
 - **不支持通配**：每个 origin 必须显式命名（对齐 web/security.md：不 cargo-cult 宽泛 `connect-src`）。
 
 ---
@@ -55,7 +55,7 @@ pub struct SandboxPolicy {
 
 ### `check_url(url)`（纯）
 - `data:` URI **永远放行**（内联、无网络）。
-- 否则当且仅当 URL（小写）以某个白名单 origin 为前缀时放行；空白名单 ⇒ 所有远程 URL 拒绝，返回 `MotionError::Sandbox`。
+- 否则当且仅当 URL 的 origin 精确匹配白名单（origin 后只能是 `/`、`?`、`#` 或结束）时放行；`https://allowed.example.evil` 不会因字符串前缀误放行。空白名单 ⇒ 所有远程 URL 拒绝，返回 `MotionError::Sandbox`。
 
 ### `check_document_size(document)`（纯）
 - 文档字节长度超 `max_document_bytes` 即 `Err(MotionError::Sandbox)`。
@@ -65,7 +65,7 @@ pub struct SandboxPolicy {
 ## 谁在调用
 
 - `StubRenderer` 与 `HeadlessChromiumRenderer` 都在 `render()` 里对 `MotionSource::Code` 调 `check_document_size`——连 stub 与 "renderer unavailable" 路径都不放过（见 [renderer.md](renderer.md)）。
-- `check_url` 的执行点是计划中的真实 CDP 后端（`Fetch.enable` + 请求拦截），当前仅纯检查 + 单测。
+- live Chromium 后端把 CSP meta 注入作者文档最前，并通过 `Fetch.enable` 拦截所有页面请求；每次请求（含重定向）调用 `check_url`，CSP/拦截拒绝以 `Sandbox` 返回。浏览器使用独立空 profile，启动参数关闭后台网络/扩展/同步/FileSystem Access API，render 结束或失败都终止进程并删 profile。
 
 ---
 
