@@ -41,7 +41,13 @@
 - [ ] 磁吸 findSnap（含黏滞 1.5×、playhead 1.5× 阈值）行为一致。
 
 **D. 状态/契约**
-- [ ] 镜像只由 `timeline_changed`→`get_timeline` 更新；前端无任何直接改 timeline 的路径。
+- [x] 镜像只由 `timeline_changed`→`get_timeline` 更新；前端无任何直接改 timeline 的路径。
+
+Timeline 镜像入口现为 project-identity/version 单调的整快照提交：接受时 clone + deep-freeze，
+旧 epoch/旧版本拒绝；事件承诺版本高于首次快照时会有界重取且绝不发布落后快照。静态检查
+拒绝组件/Store 的 clips/tracks/timing 直接写入，浏览器 fallback 也只通过命令后重取进入同一边界。
+竞态证据见 `sync.test.ts`，只读/隔离证据见
+`commandRouting.test.ts#project_store_has_no_timeline_mutator_and_refreshes_only_from_native_events`。
 - [x] 每个编辑手势映射到正确 `edit_apply` 命令（§11.1）。
 
 验收证据：`editActions.ts#EDIT_GESTURE_COMMAND_MATRIX` 穷举全部 41 个请求变体；

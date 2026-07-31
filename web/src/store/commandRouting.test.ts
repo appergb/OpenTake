@@ -66,6 +66,7 @@ import {
   unlinkClips,
   upsertKeyframe,
 } from "./editActions";
+import { useProjectStore } from "./projectStore";
 
 const transform: Transform = {
   centerX: 0.5,
@@ -248,5 +249,37 @@ describe("edit gesture command routing", () => {
       .filter((path) => !path.endsWith("/lib/fallback.ts") && !path.endsWith("/store/projectStore.ts"))
       .filter((path) => forbidden.test(readFileSync(path, "utf8")));
     expect(illegal).toEqual([]);
+  });
+
+  it("project_store_has_no_timeline_mutator_and_refreshes_only_from_native_events", () => {
+    const store = useProjectStore.getState();
+    expect("setMirror" in store).toBe(false);
+
+    const newest = {
+      timeline: {
+        fps: 30,
+        width: 1920,
+        height: 1080,
+        settingsConfigured: true,
+        tracks: [],
+      },
+      projectEpoch: 4,
+      version: 12,
+      projectPath: "/new.opentake",
+      compatibilityReadOnly: false,
+      compatibilityBlockers: [],
+    };
+    store.replaceProjectSnapshot(newest);
+    store.replaceProjectSnapshot({ ...newest, version: 11, projectPath: "/stale.opentake" });
+
+    const committed = useProjectStore.getState();
+    expect(committed.timelineVersion).toBe(12);
+    expect(committed.projectPath).toBe("/new.opentake");
+    expect(Object.isFrozen(committed.timeline)).toBe(true);
+    newest.timeline.fps = 60;
+    expect(useProjectStore.getState().timeline.fps).toBe(30);
+    expect(() => {
+      useProjectStore.getState().timeline.fps = 120;
+    }).toThrow();
   });
 });

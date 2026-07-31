@@ -390,7 +390,14 @@ describe("saveCurrentProject", () => {
       .mockImplementationOnce(() => second.promise);
 
     const saving = saveCurrentProject();
-    useProjectStore.getState().setMirror(srv.timeline, 10, 1);
+    useProjectStore.getState().replaceProjectSnapshot({
+      timeline: srv.timeline,
+      version: 10,
+      projectEpoch: 1,
+      projectPath: "/tmp/unknown.opentake",
+      compatibilityReadOnly: false,
+      compatibilityBlockers: [],
+    });
     first.resolve("/tmp/unknown.opentake");
 
     await vi.waitFor(() => expect(srv.projectSave).toHaveBeenCalledTimes(2));
@@ -467,7 +474,14 @@ describe("saveCurrentProject", () => {
     useProjectStore.setState({ lastSavedVersion: 9 });
 
     const saving = saveCurrentProject();
-    useProjectStore.getState().setMirror(srv.timeline, 9, 1);
+    useProjectStore.getState().replaceProjectSnapshot({
+      timeline: srv.timeline,
+      version: 9,
+      projectEpoch: 1,
+      projectPath: "/tmp/unknown.opentake",
+      compatibilityReadOnly: false,
+      compatibilityBlockers: [],
+    });
     first.reject("stale save failure");
     await saving;
 
@@ -497,7 +511,14 @@ describe("saveCurrentProject", () => {
       compatibilityReadOnly: false,
       compatibilityBlockers: [],
     });
-    useProjectStore.getState().setMirror(srv.timeline, 5, 3);
+    useProjectStore.getState().replaceProjectSnapshot({
+      timeline: srv.timeline,
+      version: 5,
+      projectEpoch: 3,
+      projectPath: "/tmp/unknown.opentake",
+      compatibilityReadOnly: false,
+      compatibilityBlockers: [],
+    });
     first.resolve("/tmp/unknown.opentake");
     await Promise.all([projectASave, staleProjectBSave]);
 

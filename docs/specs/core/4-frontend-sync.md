@@ -26,4 +26,20 @@
 
 `get_timeline` 返回的不是 Rust `Timeline` 本体,而是**面向前端的 DTO**(serde 序列化)。Phase 6 前端态(ARCHITECTURE §2:「Timeline 只读镜像 + UI-only 态(selection/zoom)」)只读 DTO,**永不写回**——所有变更经 `edit_apply`。DTO 可直接 `serde` 复用 domain 的 `Serialize`(与 `.opentake/project.json` 同 schema,ARCHITECTURE §9),保证"持久化格式 = 线上格式",减少一套映射。
 
+### 4.5 已落地的收敛与只读边界
+
+- `projectStore.replaceProjectSnapshot` 是唯一整棵快照入口；同一工程的低版本、低
+  `projectEpoch` 快照均被拒绝，接受的 Timeline 会先 `structuredClone` 再递归冻结。
+  Store 不再暴露可绕过 identity/version 的 `setMirror`。
+- `sync.refreshMirror` 可携带事件承诺的 `{projectEpoch, version}` 下限。若第一次
+  `get_timeline` 落后，会有界重取；重试耗尽也不会发布旧快照。
+- 并发事件由 refresh generation 仲裁：N、N+2、N+1 乱序完成时只能提交 N+2。
+  工程切换同时以 `projectEpoch` 阻断旧工程快照、历史按钮结果和事件。
+- 浏览器 fallback 仍通过相同 `editApply` → `forceRefresh` → 冻结快照入口，不把其
+  内部可变 Timeline 引用泄露到 UI mirror。
+
+确定性证据：`sync.test.ts` 覆盖乱序、事件版本下限、工程切换、失败/停止边界；
+`commandRouting.test.ts#project_store_has_no_timeline_mutator_and_refreshes_only_from_native_events`
+覆盖无旁路 mutator、单调拒绝、引用隔离与运行时冻结。
+
 ---

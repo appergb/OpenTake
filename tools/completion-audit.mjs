@@ -6416,6 +6416,9 @@ const REVIEWED_REPORT_SLICE_DEFINITIONS_RAW = [
     tests: [
       { path: "web/src/store/sync.test.ts", name: "does not let a late old snapshot replace a newer project", evidenceClass: "existing-owned" },
       { path: "web/src/store/commandRouting.test.ts", name: "project_store_has_no_timeline_mutator_and_refreshes_only_from_native_events", evidenceClass: "reviewed-planned" },
+      { path: "web/src/store/sync.test.ts", name: "refetches when an event-promised version is newer than the first snapshot", evidenceClass: "reviewed-planned" },
+      { path: "web/src/store/sync.test.ts", name: "converges to N+2 when N+1 and N+2 event refreshes complete out of order", evidenceClass: "reviewed-planned" },
+      { path: "web/src/store/sync.test.ts", name: "never publishes a stale snapshot when catch-up retries are exhausted", evidenceClass: "reviewed-planned" },
     ],
     rationale: "Core mapping report CC-readonly-versioned-mirror: the versioned refresh path exists, but whole-store read-only projection ownership lacks a closed proof.",
   },

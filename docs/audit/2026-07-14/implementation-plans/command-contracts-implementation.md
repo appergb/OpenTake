@@ -694,6 +694,9 @@
 - Modify: `docs/specs/frontend/13-implementation.md`
 - Test (existing-owned): `web/src/store/sync.test.ts#does not let a late old snapshot replace a newer project`
 - Test (reviewed-planned): `web/src/store/commandRouting.test.ts#project_store_has_no_timeline_mutator_and_refreshes_only_from_native_events`
+- Test (reviewed-planned): `web/src/store/sync.test.ts#refetches when an event-promised version is newer than the first snapshot`
+- Test (reviewed-planned): `web/src/store/sync.test.ts#converges to N+2 when N+1 and N+2 event refreshes complete out of order`
+- Test (reviewed-planned): `web/src/store/sync.test.ts#never publishes a stale snapshot when catch-up retries are exhausted`
 
 **Candidate-bound contracts:**
 
@@ -727,36 +730,64 @@
   - Add request/response tests for every named success, boundary, rejection, validation, and secrecy rule; the affected Rust and TypeScript suites must pass.
   - Exercise the production IPC, MCP, or browser entry point end to end and record the exact command payload, result, and test names before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/store/sync.test.ts#does not let a late old snapshot replace a newer project` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `web/src/store/commandRouting.test.ts#project_store_has_no_timeline_mutator_and_refreshes_only_from_native_events` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
+  - `web/src/store/sync.test.ts#refetches when an event-promised version is newer than the first snapshot` (reviewed-planned) — An event's version floor must force a stale first response to retry.
+  - `web/src/store/sync.test.ts#converges to N+2 when N+1 and N+2 event refreshes complete out of order` (reviewed-planned) — Concurrent edit event responses must converge to the newest authority.
+  - `web/src/store/sync.test.ts#never publishes a stale snapshot when catch-up retries are exhausted` (reviewed-planned) — Bounded retry failure must remain a deterministic no-op.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+  Result: Added the exact planned store owner and three event-floor/concurrency
+  owners. Existing project-switch/history tests remain in the same runner;
+  schema and project-action suites now use only authoritative full snapshots.
+
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/store/sync.test.ts -t "does not let a late old snapshot replace a newer project"`
   - Run: `pnpm -C web test -- --run src/store/commandRouting.test.ts -t "project_store_has_no_timeline_mutator_and_refreshes_only_from_native_events"`
 
   Expected: FAIL because one or more of the 3 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Result: RED reproduced twice. The project Store still exposed `setMirror`,
+  and a `timeline_changed` promise for version 2 committed the first fetched
+  version-1 snapshot without retrying.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `src-tauri/src/lib.rs#forward_event`, `web/src/store/sync.ts#startSync`, `web/src/store/projectStore.ts#useProjectStore`, `docs/specs/core/4-frontend-sync.md`, `docs/specs/frontend/13-implementation.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Result: Removed the bypass mutator. Full native/fallback snapshots now clone
+  and recursively freeze on acceptance, reject older epochs and same-project
+  versions, and preserve project identity atomically. Event-driven refreshes
+  carry an epoch/version floor, retry stale responses up to a bounded limit,
+  and publish nothing if the floor remains unmet; refresh generations make
+  concurrent N+1/N+2 responses converge only to N+2.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/store/sync.test.ts -t "does not let a late old snapshot replace a newer project"`
   - Run: `pnpm -C web test -- --run src/store/commandRouting.test.ts -t "project_store_has_no_timeline_mutator_and_refreshes_only_from_native_events"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Result: GREEN. Both originally named owners and all three explicit event
+  concurrency/failure owners passed. The project schema, lifecycle, and edit
+  action regression suites also passed after moving fixtures to the production
+  full-snapshot boundary.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. Rust formatting, the complete Web suite (86 files / 786
+  tests), production Web build, `cargo test --workspace --no-fail-fast`, and
+  `git diff --check` all completed successfully. Only the pre-existing build
+  diagnostics remained.
 
 ### Task 8: CC-tauri-command-contract (implementation-slice-00bdb59d43b2ad0c)
 

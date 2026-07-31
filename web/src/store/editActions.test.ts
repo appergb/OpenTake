@@ -301,6 +301,18 @@ const EMPTY: Timeline = {
   tracks: [],
 };
 
+function setMirror(timeline: Timeline, version: number, projectEpoch: number): void {
+  useProjectStore.getState().clearProjectSnapshot();
+  useProjectStore.getState().replaceProjectSnapshot({
+    timeline,
+    version,
+    projectEpoch,
+    projectPath: null,
+    compatibilityReadOnly: false,
+    compatibilityBlockers: [],
+  });
+}
+
 function video(name: string, width?: number, height?: number): MediaItem {
   // duration 2s * 30fps = 60 frames per clip.
   return { id: name, name, type: "video", duration: 2, width, height, hasAudio: false };
@@ -343,7 +355,7 @@ function clipboardClip(transform: Transform): Clip {
 describe("addMediaToTimeline", () => {
   beforeEach(() => {
     srv.reset();
-    useProjectStore.getState().setMirror(EMPTY, 0, 1);
+    setMirror(EMPTY, 0, 1);
     useClipboardStore.getState().clear();
     useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, selectedClipIds: new Set() });
   });
@@ -365,7 +377,7 @@ describe("addMediaToTimeline", () => {
 
   it("applies first-video settings before placing the first clip", async () => {
     srv.state.settingsConfigured = false;
-    useProjectStore.getState().setMirror({ ...EMPTY, settingsConfigured: false }, 0, 1);
+    setMirror({ ...EMPTY, settingsConfigured: false }, 0, 1);
 
     await addMediaToTimeline({
       ...video("first", 3840, 2160),
@@ -405,7 +417,7 @@ describe("addMediaToTimeline", () => {
     expect(srv.state.commands.at(-1)?.entries?.[0]).toMatchObject({ durationFrames: 60 });
 
     srv.reset();
-    useProjectStore.getState().setMirror(EMPTY, 0, 1);
+    setMirror(EMPTY, 0, 1);
     const match = addMediaToTimeline(mismatched);
     await vi.waitFor(() => expect(useEditorUiStore.getState().projectSettingsPrompt).not.toBeNull());
     useEditorUiStore.getState().resolveProjectSettingsPrompt(true);
@@ -521,7 +533,7 @@ describe("addMediaToTimeline", () => {
 describe("applyAutomationCommands", () => {
   beforeEach(() => {
     srv.reset();
-    useProjectStore.getState().setMirror(EMPTY, 0, 1);
+    setMirror(EMPTY, 0, 1);
   });
 
   it("accepts one atomic request and refuses a multi-command pseudo-transaction", async () => {
@@ -707,7 +719,7 @@ describe("momentDurationFrames", () => {
     expect(momentDurationFrames({ startSec: 0, endSec: Number.POSITIVE_INFINITY }, 30)).toBe(1);
 
     srv.reset();
-    useProjectStore.getState().setMirror({ ...EMPTY, fps: 29.97 }, 0, 1);
+    setMirror({ ...EMPTY, fps: 29.97 }, 0, 1);
     useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, selectedClipIds: new Set() });
     await addTextClip();
     expect(useProjectStore.getState().timeline.tracks[0].clips[0].durationFrames).toBe(89);
@@ -717,7 +729,7 @@ describe("momentDurationFrames", () => {
 describe("addMomentToTimelineAt (trimmed source-range drop from a search hit)", () => {
   beforeEach(() => {
     srv.reset();
-    useProjectStore.getState().setMirror(EMPTY, 0, 1);
+    setMirror(EMPTY, 0, 1);
     useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, selectedClipIds: new Set() });
   });
 
@@ -770,7 +782,7 @@ describe("addMomentToTimelineAt (trimmed source-range drop from a search hit)", 
 describe("addTextClip (Toolbar 'T' button)", () => {
   beforeEach(() => {
     srv.reset();
-    useProjectStore.getState().setMirror(EMPTY, 0, 1);
+    setMirror(EMPTY, 0, 1);
     useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, selectedClipIds: new Set() });
   });
 
