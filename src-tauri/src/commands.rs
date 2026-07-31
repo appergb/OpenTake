@@ -28,7 +28,8 @@ use opentake_ops::{
 
 use opentake_domain::{
     AnimPair, ChromaKey, ClipType, ColorGrade, Crop, Effect, Interpolation, Keyframe,
-    KeyframeTrack, LutReference, Mask, StabilizationTrack, TextStyle, Transform, TransitionKind,
+    KeyframeTrack, LoudnessNormalization, LutReference, Mask, StabilizationTrack, TextStyle,
+    Transform, TransitionKind,
 };
 
 #[derive(Clone, Default)]
@@ -717,6 +718,11 @@ pub enum EditRequest {
         effects: Vec<Effect>,
     },
     #[serde(rename_all = "camelCase")]
+    SetLoudnessNormalization {
+        clip_id: String,
+        normalization: Option<LoudnessNormalization>,
+    },
+    #[serde(rename_all = "camelCase")]
     ApplyStabilization {
         clip_id: String,
         solution: StabilizationTrack,
@@ -929,6 +935,13 @@ impl EditRequest {
             EditRequest::SetEffects { clip_ids, effects } => {
                 EditCommand::SetEffects { clip_ids, effects }
             }
+            EditRequest::SetLoudnessNormalization {
+                clip_id,
+                normalization,
+            } => EditCommand::SetLoudnessNormalization {
+                clip_id,
+                normalization,
+            },
             EditRequest::ApplyStabilization { clip_id, solution } => {
                 EditCommand::ApplyStabilization { clip_id, solution }
             }
@@ -1702,6 +1715,7 @@ mod edit_request_serde_tests {
             EditRequest::SetChromaKey { .. } => "SetChromaKey",
             EditRequest::SetMasks { .. } => "SetMasks",
             EditRequest::SetEffects { .. } => "SetEffects",
+            EditRequest::SetLoudnessNormalization { .. } => "SetLoudnessNormalization",
             EditRequest::ApplyStabilization { .. } => "ApplyStabilization",
             EditRequest::AdjustStabilization { .. } => "AdjustStabilization",
             EditRequest::ResetStabilization { .. } => "ResetStabilization",
@@ -1767,6 +1781,10 @@ mod edit_request_serde_tests {
                 | ("SetChromaKey", EditCommand::SetChromaKey { .. })
                 | ("SetMasks", EditCommand::SetMasks { .. })
                 | ("SetEffects", EditCommand::SetEffects { .. })
+                | (
+                    "SetLoudnessNormalization",
+                    EditCommand::SetLoudnessNormalization { .. }
+                )
                 | ("ApplyStabilization", EditCommand::ApplyStabilization { .. })
                 | (
                     "AdjustStabilization",
@@ -1882,6 +1900,10 @@ mod edit_request_serde_tests {
                 "SetEffects",
             ),
             (
+                r#"{"type":"setLoudnessNormalization","clipId":"c","normalization":null}"#,
+                "SetLoudnessNormalization",
+            ),
+            (
                 r#"{"type":"applyStabilization","clipId":"c","solution":{"model":"opentake.motion-smoothing","modelVersion":1,"sourceIdentity":"asset","strength":1.0,"cropMargin":0.0,"keyframes":[{"frame":0,"translationX":0.0,"translationY":0.0,"rotationDegrees":0.0},{"frame":1,"translationX":0.0,"translationY":0.0,"rotationDegrees":0.0}]}}"#,
                 "ApplyStabilization",
             ),
@@ -1953,7 +1975,7 @@ mod edit_request_serde_tests {
             ),
         ];
 
-        assert_eq!(cases.len(), 49);
+        assert_eq!(cases.len(), 50);
         for (json, expected_route) in cases {
             let mut hostile = serde_json::from_str::<serde_json::Value>(json).unwrap();
             hostile

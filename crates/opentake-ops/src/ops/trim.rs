@@ -48,6 +48,7 @@ pub fn trim_clip_internal(
     let c = &mut timeline.tracks[ti].clips[ci];
     c.trim_start_frame = trim_start_frame;
     c.trim_end_frame = trim_end_frame;
+    c.loudness_normalization = None;
     c.start_frame = new_start_frame;
     c.set_duration(new_duration);
 

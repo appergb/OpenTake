@@ -604,39 +604,41 @@ Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/auto
 
 - Candidate/source: `doc-30e9287b5c8858dd` at `docs/architecture/CAPCUT-GAP.md:161` (requirement)
 - Expected behavior: Audio loudness normalization targets and verifies a configured LUFS value.
-- Resolution: `reviewed-mapping-report:MR-loudness` — PCM, playback and export owners exist, but no loudness analysis or normalization target path exists.
+- Resolution: `implemented-and-verified:MR-loudness` — shared PCM analysis, undoable persistence, Inspector controls, native preview and export now form one verified vertical slice.
 - Exact acceptance contract:
   - Persist a target integrated loudness and true-peak ceiling as an undoable audio operation.
   - Expose analyze/apply/reset with progress and typed errors for silent or unreadable audio.
   - On speech and music fixtures, exported integrated loudness must be within ±1 LU of the configured target without exceeding the configured true-peak ceiling; preview gain must use the same computed adjustment.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-media/tests/loudness.rs#normalization_reaches_configured_lufs_within_tolerance` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-media --test loudness normalization_reaches_configured_lufs_within_tolerance -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-media/src/decode/pcm.rs#extract_pcm`, `crates/opentake-media/src/analysis/loudness.rs`, `src-tauri/src/playback/audio.rs`, `src-tauri/src/export.rs`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-media --test loudness normalization_reaches_configured_lufs_within_tolerance -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. The focused runner first failed to compile before the loudness owner existed, then passed with the known FFmpeg-cross-checked fixture and deterministic speech/music fixtures. The complete Rust workspace passed (environment-only integrations remain ignored), warnings-denied workspace Clippy, formatting and diff checks passed; the Web suite passed 90 files / 814 tests and the production build passed with only the pre-existing chunk/dynamic-import warnings. The rebuilt ad-hoc-signed macOS app verified analyze/apply/reanalyze/reset, undo/redo, native playback, writable save/reopen persistence and a typed silent-audio error. Independent FFmpeg measurements of the exported AAC deliverables were `-16.07 LUFS / -1.15 dBTP` for speech and `-16.02 LUFS / -1.74 dBTP` for music. Runtime evidence: [`loudness-real-device-2026-08-01.md`](../runtime-artifacts/automated/loudness-real-device-2026-08-01.md).
 
 ### Task 12: MR-denoise (implementation-slice-3d159672cfd1fc67)
 

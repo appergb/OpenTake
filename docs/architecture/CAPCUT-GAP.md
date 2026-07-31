@@ -164,13 +164,13 @@
 
 ## 模块4:音频工程与智能字幕
 
-**整体差距**:总体判断:本模块在 OpenTake/上游中呈"字幕强、音频处理弱"的两极分布。字幕侧 OpenTake 已用 whisper-rs + 确定性断句/计时完成一键字幕，并已补齐上游没有的 SRT/VTT 软字幕导出；前端、Tauri 文件边界和纯序列化层均已接通。音频工程侧(响度统一/降噪/人声分离)在上游和 OpenTake 中仍缺分析/处理层，现有能力主要是 Clip 静态 volume、volumeTrack 关键帧、fade 和 track mute。字幕翻译仍只是 Agent 草稿路径，未形成一等公民翻译工作流，判 partial。字幕样式已具备 captionGroupId 与共享样式模型，但缺少"改一处→原子批量回写整组"的完整 UI/命令闭环，判 partial。当前落地优先级是响度统一、降噪和字幕批量样式；人声分离与一等公民翻译保持后续独立验收项。
+**整体差距**:总体判断:本模块在 OpenTake/上游中呈"字幕强、音频处理逐项补齐"的分布。字幕侧 OpenTake 已用 whisper-rs + 确定性断句/计时完成一键字幕，并已补齐上游没有的 SRT/VTT 软字幕导出；前端、Tauri 文件边界和纯序列化层均已接通。音频工程侧已完成响度归一的分析、可撤销持久化、预览和导出共享处理链；降噪和人声分离仍待实现。字幕翻译仍只是 Agent 草稿路径，未形成一等公民翻译工作流，判 partial。字幕样式已具备 captionGroupId 与共享样式模型，但缺少"改一处→原子批量回写整组"的完整 UI/命令闭环，判 partial。当前落地优先级是降噪和字幕批量样式；人声分离与一等公民翻译保持后续独立验收项。
 
-### 音频响度统一(loudness normalization / LUFS 归一) — `missing` · 难度 medium · 优先级 p1
-- **判定依据**:上游源码 word-boundary grep 对 loudness/LUFS/EBU/R128/loudnorm 全部 0 命中;音频模型仅 Models/Timeline.swift 的 volume(线性静态)+ volumeTrack(dB 关键帧)+ fadeIn/Out + track muted。VolumeScale(Inspector/InspectorView.swift:1072,20·log10,floor -60dB/ceil +15dB)证明只有手动增益、无任何自动测量/归一。OpenTake docs(MODULE-PORT-MAP Preview/Timeline 移植策略)只把 VolumeScale 与 volume 包络 direct-port,未提响度测量;ARCHITECTURE/ROADMAP 无任何响度相关条目。
-- **落点(crate/层)**:分析落 opentake-media(新增 audio analyze 模块,产出 integrated/true-peak/LRA);应用落 opentake-ops(新增 EditCommand::NormalizeLoudness,把目标 LUFS 反算成 clip 静态 volume 的 dB 增量,复用既有 VolumeScale/volume);单段也可走 opentake-render 导出期 FFmpeg loudnorm 二次扫描。
-- **实现方案**:纯 FFmpeg 跨平台,无需外部 API:用 ffmpeg ebur128 滤镜(或 loudnorm print_format=json 第一遍分析)测得每个音频源的 I/TP/LRA,按目标(常用 -14 LUFS / 短视频 -16 LUFS)算增益,写回 clip.volume(dB→linear 经 VolumeScale)。导出要严格达标时再走 loudnorm 双轨(linear=true,measured_* 回填)。本地算法,零模型、零联网。可做整轨/逐clip/全时间线三档。
-- **前置依赖**:依赖 opentake-media 的 FFmpeg 音频解码链(Phase 2 已规划);写回增益依赖 opentake-domain 的 volume/VolumeScale(Phase 1 已就绪)。无 blocker。
+### 音频响度统一(loudness normalization / LUFS 归一) — `has` · 难度 medium · 优先级 p1
+- **判定依据**:OpenTake 已实现本地 EBU R128/BS.1770 集成响度、门限分块和 4× 插值真峰值分析，并把目标 LUFS、真峰值上限、测量值和增益持久化在 Clip。操作可撤销/重做，检查器提供分析、重新分析、重置、进度、取消和静音/无法读取的类型错误。
+- **落点(crate/层)**:`opentake-media::analysis::loudness` 拥有纯 Rust 分析和增益计算；`opentake-domain::LoudnessNormalization` 拥有持久化合同；`opentake-ops::EditCommand::SetLoudnessNormalization` 拥有撤销语义；Tauri 分析命令、原生播放和导出混音复用同一增益与真峰值限制阶段。
+- **验收结果**:在重建的 macOS release `.app` 中，语音和音乐的 AAC 导出成品分别由独立 FFmpeg `loudnorm` 测得 `-16.07 LUFS / -1.15 dBTP` 与 `-16.02 LUFS / -1.74 dBTP`，均满足 `-16 LUFS ±1 LU` 且不超过 `-1 dBTP`。保存/重开保持可写和分析结果，静音文件在真实 UI 返回 `loudness_silent_audio`。详见 `docs/audit/2026-07-14/runtime-artifacts/automated/loudness-real-device-2026-08-01.md`。
+- **前置依赖**:已使用现有 FFmpeg 音频解码链和 Clip volume 包络完成，无外部 API、模型或联网依赖。
 
 ### 智能降噪(noise reduction) — `missing` · 难度 medium · 优先级 p1
 - **判定依据**:上游对 denoise/noiseReduction/noiseGate/noiseFloor/spectralGate/audioFilter/AVAudioUnit 全部 0 命中,无任何音频效果链。Export 仅 audioMix 做音量混音(CompositionBuilder),无降噪节点。OpenTake docs 无降噪条目。

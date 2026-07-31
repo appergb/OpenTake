@@ -20,6 +20,25 @@
 /// The canonical mixdown sample rate. 48 kHz is the export-audio standard and
 /// what the encoder requests from ffmpeg for the muxed AAC/LPCM track.
 pub const MIX_SAMPLE_RATE: u32 = 48_000;
+/// Headroom reserved below a requested true-peak ceiling for reconstruction
+/// overshoot introduced by lossy codecs such as AAC. Two dB is intentional:
+/// the release export's AAC encoder reconstructed the speech acceptance fixture
+/// 1.77 dB above the clamped PCM sample peak, so a one-dB margin did not keep
+/// the encoded deliverable below the user-selected ceiling.
+pub const TRUE_PEAK_CODEC_SAFETY_DB: f64 = 2.0;
+
+/// Apply the shared preview/export ceiling stage in-place. `None` preserves the
+/// legacy rail clamp performed by the surrounding mixer.
+pub fn apply_true_peak_ceiling(samples: &mut [f32], ceiling_dbtp: Option<f64>) {
+    let Some(ceiling_dbtp) = ceiling_dbtp.filter(|value| value.is_finite()) else {
+        return;
+    };
+    let ceiling = 10.0_f32
+        .powf(((ceiling_dbtp - TRUE_PEAK_CODEC_SAFETY_DB).clamp(-120.0, 0.0) / 20.0) as f32);
+    for sample in samples {
+        *sample = sample.clamp(-ceiling, ceiling);
+    }
+}
 
 /// One audio clip's contribution to the mix: a mono f32 source window plus the
 /// per-sample gain to apply, laid down starting at `start_sample` on the shared
@@ -190,6 +209,16 @@ mod tests {
             gains: vec![0.0, 0.5, 1.0],
         };
         assert_eq!(mix_clips(&[c]).unwrap(), vec![0.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn true_peak_ceiling_reserves_codec_reconstruction_margin() {
+        let mut samples = vec![1.0, -1.0, 0.25];
+        apply_true_peak_ceiling(&mut samples, Some(-1.0));
+        let expected = 10.0_f32.powf(-3.0 / 20.0);
+        assert!((samples[0] - expected).abs() < 1e-6);
+        assert!((samples[1] + expected).abs() < 1e-6);
+        assert_eq!(samples[2], 0.25);
     }
 
     #[test]

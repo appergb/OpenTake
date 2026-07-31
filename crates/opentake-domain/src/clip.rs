@@ -212,6 +212,11 @@ pub struct Clip {
     )]
     pub volume_track: Option<KeyframeTrack<f64>>,
 
+    /// Source analysis plus the static gain used identically by preview and
+    /// export. `None` leaves authored volume behavior unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loudness_normalization: Option<crate::LoudnessNormalization>,
+
     // Advanced pixel-effect fields (A-tier; `docs/ADVANCED-FEATURES.md`). All
     // `#[serde(default)]` + Option/Vec, so older projects (without these keys)
     // decode unchanged, and an all-default clip omits them on the way out.
@@ -281,6 +286,7 @@ impl Clip {
         "rotationTrack",
         "cropTrack",
         "volumeTrack",
+        "loudnessNormalization",
         "colorGrade",
         "lut",
         "chromaKey",
@@ -374,6 +380,7 @@ impl Clip {
             rotation_track: None,
             crop_track: None,
             volume_track: None,
+            loudness_normalization: None,
             color_grade: None,
             lut: None,
             chroma_key: None,
@@ -533,7 +540,7 @@ impl Clip {
             }
             _ => 1.0,
         };
-        self.volume * kf_gain * self.fade_multiplier(frame)
+        self.volume * kf_gain * self.loudness_gain() * self.fade_multiplier(frame)
     }
 
     /// Linear volume without the fade envelope.
@@ -544,7 +551,13 @@ impl Clip {
             }
             _ => 1.0,
         };
-        self.volume * kf_gain
+        self.volume * kf_gain * self.loudness_gain()
+    }
+
+    pub fn loudness_gain(&self) -> f64 {
+        self.loudness_normalization
+            .map(crate::LoudnessNormalization::linear_gain)
+            .unwrap_or(1.0)
     }
 
     /// 0..=1 envelope from the fade head/tail ramps. `min(in, out)`. Returns 0
@@ -948,6 +961,27 @@ mod tests {
         ]));
         // fade ignored -> 1.0 * gain(1.0)
         approx(c.raw_volume_at(105), 1.0);
+    }
+
+    #[test]
+    fn persisted_loudness_gain_is_shared_by_raw_and_effective_volume() {
+        let mut c = base_clip();
+        c.volume = 0.5;
+        c.loudness_normalization = Some(crate::LoudnessNormalization {
+            target_lufs: -16.0,
+            true_peak_ceiling_dbtp: -1.0,
+            input_integrated_lufs: -22.0,
+            input_true_peak_dbtp: -8.0,
+            gain_db: 6.0,
+            output_integrated_lufs: -16.0,
+            output_true_peak_dbtp: -2.0,
+        });
+        let expected = 0.5 * 10.0_f64.powf(6.0 / 20.0);
+        approx(c.raw_volume_at(110), expected);
+        approx(c.volume_at(110), expected);
+        let json = serde_json::to_string(&c).unwrap();
+        let roundtrip: Clip = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.loudness_normalization, c.loudness_normalization);
     }
 
     #[test]

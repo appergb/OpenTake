@@ -699,7 +699,10 @@ export function volumeAt(clip: Clip, frame: number): number {
   const kfGain = trackIsActive(clip.volumeTrack)
     ? linearFromDb(sampleScalarTrack(clip.volumeTrack, keyframeOffset(clip, frame), 0.0))
     : 1.0;
-  return clip.volume * kfGain * fadeMultiplier(clip, frame);
+  const loudnessGain = clip.loudnessNormalization
+    ? 10 ** (Math.max(-120, Math.min(60, clip.loudnessNormalization.gainDb)) / 20)
+    : 1.0;
+  return clip.volume * kfGain * loudnessGain * fadeMultiplier(clip, frame);
 }
 
 /**

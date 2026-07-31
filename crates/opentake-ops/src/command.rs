@@ -19,9 +19,9 @@
 use std::collections::{HashMap, HashSet};
 
 use opentake_domain::{
-    ChromaKey, Clip, ClipType, ColorGrade, Crop, Effect, Interpolation, LutReference, Mask,
-    MaskShape, NestedSequence, StabilizationTrack, Timeline, Track, Transform, Transition,
-    TransitionKind, MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS,
+    ChromaKey, Clip, ClipType, ColorGrade, Crop, Effect, Interpolation, LoudnessNormalization,
+    LutReference, Mask, MaskShape, NestedSequence, StabilizationTrack, Timeline, Track, Transform,
+    Transition, TransitionKind, MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS,
 };
 
 use crate::editor_state::EditorState;
@@ -40,6 +40,80 @@ pub enum EditError {
     Invalid(String),
     /// A ripple edit was refused to preserve sync-lock alignment.
     Refused(String),
+}
+
+#[cfg(test)]
+mod loudness_command_tests {
+    use super::*;
+    use crate::id::SeqIdGen;
+
+    fn normalization() -> LoudnessNormalization {
+        LoudnessNormalization {
+            target_lufs: -16.0,
+            true_peak_ceiling_dbtp: -1.0,
+            input_integrated_lufs: -23.0,
+            input_true_peak_dbtp: -8.0,
+            gain_db: 7.0,
+            output_integrated_lufs: -16.0,
+            output_true_peak_dbtp: -1.0,
+        }
+    }
+
+    #[test]
+    fn loudness_apply_reset_and_undo_are_one_step_operations() {
+        let mut timeline = Timeline::new();
+        let mut track = Track::new("a1", ClipType::Audio);
+        let mut clip = Clip::new("audio", "asset", 0, 90);
+        clip.media_type = ClipType::Audio;
+        clip.source_clip_type = ClipType::Audio;
+        track.clips.push(clip);
+        timeline.tracks.push(track);
+        let mut state = EditorState::from_timeline(timeline);
+        let ids = SeqIdGen::default();
+
+        apply(
+            &mut state,
+            EditCommand::SetLoudnessNormalization {
+                clip_id: "audio".to_string(),
+                normalization: Some(normalization()),
+            },
+            &ids,
+        )
+        .unwrap();
+        assert_eq!(
+            state.timeline.tracks[0].clips[0].loudness_normalization,
+            Some(normalization())
+        );
+        assert_eq!(state.undo_depth(), 1);
+
+        apply(&mut state, EditCommand::Undo, &ids).unwrap();
+        assert!(state.timeline.tracks[0].clips[0]
+            .loudness_normalization
+            .is_none());
+        apply(&mut state, EditCommand::Redo, &ids).unwrap();
+        assert_eq!(
+            state.timeline.tracks[0].clips[0].loudness_normalization,
+            Some(normalization())
+        );
+
+        apply(
+            &mut state,
+            EditCommand::SetLoudnessNormalization {
+                clip_id: "audio".to_string(),
+                normalization: None,
+            },
+            &ids,
+        )
+        .unwrap();
+        assert!(state.timeline.tracks[0].clips[0]
+            .loudness_normalization
+            .is_none());
+        apply(&mut state, EditCommand::Undo, &ids).unwrap();
+        assert_eq!(
+            state.timeline.tracks[0].clips[0].loudness_normalization,
+            Some(normalization())
+        );
+    }
 }
 
 impl std::fmt::Display for EditError {
@@ -372,6 +446,11 @@ pub enum EditCommand {
         clip_ids: Vec<String>,
         effects: Vec<Effect>,
     },
+    /// Apply or reset one source analysis as an undoable audio operation.
+    SetLoudnessNormalization {
+        clip_id: String,
+        normalization: Option<LoudnessNormalization>,
+    },
     /// Persist a source-bound, editable stabilization analysis on one video clip.
     ApplyStabilization {
         clip_id: String,
@@ -651,6 +730,10 @@ pub fn apply(
         } => set_chroma_key(state, clip_ids, chroma_key),
         EditCommand::SetMasks { clip_ids, masks } => set_masks(state, clip_ids, masks),
         EditCommand::SetEffects { clip_ids, effects } => set_effects(state, clip_ids, effects),
+        EditCommand::SetLoudnessNormalization {
+            clip_id,
+            normalization,
+        } => set_loudness_normalization(state, clip_id, normalization),
         EditCommand::ApplyStabilization { clip_id, solution } => {
             apply_stabilization(state, clip_id, solution)
         }
@@ -1902,6 +1985,15 @@ fn apply_property_changes(
     };
     let clip = &mut timeline.tracks[ti].clips[ci];
 
+    if props.duration_frames.is_some()
+        || props.trim_start_frame.is_some()
+        || props.trim_end_frame.is_some()
+        || props.speed.is_some()
+        || props.reversed.is_some()
+    {
+        clip.loudness_normalization = None;
+    }
+
     if let Some(v) = props.duration_frames {
         clip.duration_frames = v;
         clip.clamp_keyframes_to_duration();
@@ -2588,6 +2680,45 @@ fn set_effects(
     set_clip_effect_field(state, clip_ids, "Set Effects", move |clip| {
         clip.effects = effects.clone();
     })
+}
+
+fn set_loudness_normalization(
+    state: &mut EditorState,
+    clip_id: String,
+    normalization: Option<LoudnessNormalization>,
+) -> Result<EditResult, EditError> {
+    let location = state
+        .find_clip(&clip_id)
+        .ok_or_else(|| EditError::Invalid(format!("Clip not found: {clip_id}")))?;
+    let clip = &state.timeline.tracks[location.track_index].clips[location.clip_index];
+    if !matches!(clip.media_type, ClipType::Audio | ClipType::Video)
+        || clip.nested_sequence_id.is_some()
+    {
+        return Err(EditError::Invalid(
+            "loudness normalization requires an ordinary audio-bearing clip".to_string(),
+        ));
+    }
+    if let Some(value) = normalization {
+        value.validate().map_err(|error| {
+            EditError::Invalid(format!("invalid loudness normalization: {error}"))
+        })?;
+    }
+    transact(
+        state,
+        if normalization.is_some() {
+            "Normalize Loudness"
+        } else {
+            "Reset Loudness"
+        },
+        |_| "Updated clip loudness".to_string(),
+        move |st| {
+            let (track_index, clip_index) = find(&st.timeline, &clip_id)
+                .ok_or_else(|| EditError::Invalid(format!("Clip not found: {clip_id}")))?;
+            st.timeline.tracks[track_index].clips[clip_index].loudness_normalization =
+                normalization;
+            Ok(vec![clip_id.clone()])
+        },
+    )
 }
 
 fn stabilization_clip<'a>(state: &'a EditorState, clip_id: &str) -> Result<&'a Clip, EditError> {
@@ -3504,6 +3635,8 @@ fn swap_media(
                 if let Some(loc) = st.find_clip(tid) {
                     st.timeline.tracks[loc.track_index].clips[loc.clip_index].media_ref =
                         media_ref.clone();
+                    st.timeline.tracks[loc.track_index].clips[loc.clip_index]
+                        .loudness_normalization = None;
                     affected.push(tid.clone());
                 }
             }

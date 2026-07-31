@@ -69,6 +69,7 @@ import {
   setClipProperties,
   setColorGrade,
   setLut,
+  setLoudnessNormalization,
   setEffects,
   setKeyframeInterpolation,
   setKeyframes,
@@ -237,6 +238,19 @@ describe("edit gesture command routing", () => {
     await route(
       { type: "setEffects", clipIds: ["clip-a"], effects: [{ name: "grayscale", params: { amount: 0.4 }, enabled: true }] },
       () => setEffects(["clip-a"], [{ name: "grayscale", params: { amount: 0.4 }, enabled: true }]),
+    );
+    const loudness = {
+      targetLufs: -16,
+      truePeakCeilingDbtp: -1,
+      inputIntegratedLufs: -23,
+      inputTruePeakDbtp: -8,
+      gainDb: 7,
+      outputIntegratedLufs: -16,
+      outputTruePeakDbtp: -1,
+    };
+    await route(
+      { type: "setLoudnessNormalization", clipId: "clip-a", normalization: loudness },
+      () => setLoudnessNormalization("clip-a", loudness),
     );
     const stabilization = {
       model: "opentake.motion-smoothing",

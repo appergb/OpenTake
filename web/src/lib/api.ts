@@ -21,6 +21,7 @@ import type {
   GenerateCaptionsResult,
   MediaList,
   LutReference,
+  LoudnessNormalization,
   ModelStatus,
   PlaybackCommandError,
   PlaybackFrameEvent,
@@ -1031,6 +1032,52 @@ export async function cancelStabilizationAnalysis(): Promise<boolean> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<boolean>("cancel_stabilization_analysis");
   return false;
+}
+
+export interface LoudnessProgress {
+  clipId: string;
+  done: number;
+  total: number;
+}
+
+export async function analyzeLoudness(
+  clipId: string,
+  targetLufs: number,
+  truePeakCeilingDbtp: number,
+): Promise<LoudnessNormalization> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<LoudnessNormalization>("analyze_loudness", {
+      clipId,
+      targetLufs,
+      truePeakCeilingDbtp,
+    });
+  }
+  throw new Error("loudness analysis requires the desktop app");
+}
+
+export async function cancelLoudnessAnalysis(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("cancel_loudness_analysis");
+  return false;
+}
+
+export async function onLoudnessProgress(
+  clipId: string,
+  handler: (progress: LoudnessProgress) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("loudness://progress", (event) => {
+    const progress = event.payload as Partial<LoudnessProgress> | undefined;
+    if (
+      progress?.clipId === clipId &&
+      typeof progress.done === "number" &&
+      typeof progress.total === "number"
+    ) {
+      handler(progress as LoudnessProgress);
+    }
+  });
 }
 
 // MARK: - BYOK secret store

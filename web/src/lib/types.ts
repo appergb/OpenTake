@@ -230,6 +230,16 @@ export interface StabilizationTrack {
   keyframes: StabilizationKeyframe[];
 }
 
+export interface LoudnessNormalization {
+  targetLufs: number;
+  truePeakCeilingDbtp: number;
+  inputIntegratedLufs: number;
+  inputTruePeakDbtp: number;
+  gainDb: number;
+  outputIntegratedLufs: number;
+  outputTruePeakDbtp: number;
+}
+
 export interface Clip {
   id: string;
   mediaRef: string;
@@ -260,6 +270,7 @@ export interface Clip {
   rotationTrack?: KeyframeTrack<number>;
   cropTrack?: KeyframeTrack<Crop>;
   volumeTrack?: KeyframeTrack<number>;
+  loudnessNormalization?: LoudnessNormalization;
   colorGrade?: ColorGrade;
   lut?: LutReference;
   chromaKey?: ChromaKey;
@@ -396,6 +407,11 @@ export type EditRequest =
   | { type: "setChromaKey"; clipIds: string[]; chromaKey?: ChromaKeyInput | null }
   | { type: "setMasks"; clipIds: string[]; masks: MaskInput[] }
   | { type: "setEffects"; clipIds: string[]; effects: EffectInput[] }
+  | {
+      type: "setLoudnessNormalization";
+      clipId: string;
+      normalization?: LoudnessNormalization | null;
+    }
   | { type: "applyStabilization"; clipId: string; solution: StabilizationTrack }
   | {
       type: "adjustStabilization";

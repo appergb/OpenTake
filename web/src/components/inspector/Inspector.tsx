@@ -535,6 +535,7 @@ function ClipInspector({
               <KeyframeRowControls clip={clip} property="volume" activeFrame={activeFrame} t={t} />
             </Row>
             <FadeSection clip={clip} commit={commit} t={t} />
+            <LoudnessSection clip={clip} t={t} />
           </section>
         ) : (
           <>
@@ -1099,6 +1100,101 @@ function GenericEffectsSection({ clip, t }: { clip: Clip; t: TFunction }) {
           </div>
         );
       })}
+    </section>
+  );
+}
+
+function LoudnessSection({ clip, t }: { clip: Clip; t: TFunction }) {
+  const normalization = clip.loudnessNormalization;
+  const [target, setTarget] = useState(normalization?.targetLufs ?? -16);
+  const [ceiling, setCeiling] = useState(normalization?.truePeakCeilingDbtp ?? -1);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setTarget(clip.loudnessNormalization?.targetLufs ?? -16);
+    setCeiling(clip.loudnessNormalization?.truePeakCeilingDbtp ?? -1);
+    setAnalyzing(false);
+    setProgress(0);
+    setError(null);
+  }, [clip.id, clip.loudnessNormalization]);
+
+  const analyze = async () => {
+    setAnalyzing(true);
+    setProgress(0);
+    setError(null);
+    let unlisten = () => {};
+    try {
+      unlisten = await api.onLoudnessProgress(clip.id, ({ done, total }) => {
+        setProgress(total > 0 ? Math.min(1, done / total) : 0);
+      });
+      await edit.analyzeAndApplyLoudness(clip.id, target, ceiling);
+      setProgress(1);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      if (!/loudness_cancelled/i.test(message)) setError(message);
+    } finally {
+      unlisten();
+      setAnalyzing(false);
+    }
+  };
+
+  return (
+    <section data-testid="loudness-section" style={{ marginTop: SPACE.md }}>
+      <SectionHeader label={t("inspector.section.loudness")} />
+      <Row label={t("inspector.loudness.target")}>
+        <ScrubbableNumberField
+          value={target}
+          min={-36}
+          max={-5}
+          sensitivity={0.5}
+          format={(value) => value.toFixed(1)}
+          suffix=" LUFS"
+          width={70}
+          onCommit={setTarget}
+        />
+      </Row>
+      <Row label={t("inspector.loudness.ceiling")}>
+        <ScrubbableNumberField
+          value={ceiling}
+          min={-12}
+          max={0}
+          sensitivity={0.25}
+          format={(value) => value.toFixed(1)}
+          suffix=" dBTP"
+          width={70}
+          onCommit={setCeiling}
+        />
+      </Row>
+      {normalization && (
+        <div
+          data-testid="loudness-result"
+          style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, color: "var(--text-tertiary)", fontSize: FS.xs }}
+        >
+          {normalization.inputIntegratedLufs.toFixed(1)} → {normalization.outputIntegratedLufs.toFixed(1)} LUFS · {normalization.gainDb >= 0 ? "+" : ""}{normalization.gainDb.toFixed(1)} dB · {normalization.outputTruePeakDbtp.toFixed(1)} dBTP
+        </div>
+      )}
+      {analyzing && (
+        <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.xs}px`, color: "var(--text-tertiary)", fontSize: FS.xs }}>
+          {t("inspector.loudness.analyzing")} {Math.round(progress * 100)}%
+        </div>
+      )}
+      <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px` }}>
+        <button type="button" style={controlStyle} disabled={analyzing} onClick={() => void analyze()}>
+          {normalization ? t("inspector.loudness.reanalyze") : t("inspector.loudness.analyzeApply")}
+        </button>
+        {(analyzing || normalization) && (
+          <button
+            type="button"
+            style={{ ...controlStyle, marginLeft: SPACE.xs }}
+            onClick={() => void (analyzing ? edit.cancelLoudnessAnalysis() : edit.setLoudnessNormalization(clip.id, null))}
+          >
+            {analyzing ? t("inspector.loudness.cancel") : t("inspector.loudness.reset")}
+          </button>
+        )}
+      </div>
+      {error && <div role="alert" style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, color: "var(--danger)" }}>{error}</div>}
     </section>
   );
 }

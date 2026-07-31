@@ -9,6 +9,7 @@ import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
 import { useProjectStore } from "../../store/projectStore";
 import * as edit from "../../store/editActions";
+import * as api from "../../lib/api";
 import { Inspector } from "./Inspector";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -246,6 +247,68 @@ describe("Inspector completion surface", () => {
 
     analyze.mockRestore();
     cancel.mockRestore();
+    reset.mockRestore();
+    await act(async () => root.unmount());
+  });
+
+  it("analyzes, reports progress, displays, and resets loudness normalization", async () => {
+    const clip = visualClip();
+    useProjectStore.setState({ timeline: timelineWith(clip), projectPath: "/tmp/demo.opentake" });
+    useMediaStore.setState({
+      items: [{ id: clip.mediaRef, name: "speech.wav", type: "video", duration: 3, hasAudio: true }],
+      folders: [],
+      importing: false,
+      error: null,
+    });
+    useEditorUiStore.setState({ selectedClipIds: new Set([clip.id]), inspectorTab: "audio" });
+    const normalization = {
+      targetLufs: -16,
+      truePeakCeilingDbtp: -1,
+      inputIntegratedLufs: -23,
+      inputTruePeakDbtp: -8,
+      gainDb: 7,
+      outputIntegratedLufs: -16,
+      outputTruePeakDbtp: -1,
+    };
+    const listen = vi.spyOn(api, "onLoudnessProgress").mockImplementation(async (_id, handler) => {
+      handler({ clipId: clip.id, done: 40, total: 100 });
+      return () => {};
+    });
+    const analyze = vi.spyOn(edit, "analyzeAndApplyLoudness").mockResolvedValue(normalization);
+    const reset = vi.spyOn(edit, "setLoudnessNormalization").mockResolvedValue();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Inspector />));
+
+    const section = container.querySelector('[data-testid="loudness-section"]');
+    const analyzeButton = [...(section?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent === "分析并应用",
+    );
+    await act(async () => {
+      analyzeButton?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(listen).toHaveBeenCalledWith(clip.id, expect.any(Function));
+    expect(analyze).toHaveBeenCalledWith(clip.id, -16, -1);
+
+    await act(async () => {
+      useProjectStore.setState({
+        timeline: timelineWith(visualClip({ loudnessNormalization: normalization })),
+      });
+    });
+    const result = container.querySelector('[data-testid="loudness-result"]');
+    expect(result?.textContent).toContain("-23.0 → -16.0 LUFS");
+    expect(result?.textContent).toContain("+7.0 dB");
+    const resetButton = [...(section?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent === "重置响度",
+    );
+    await act(async () => resetButton?.click());
+    expect(reset).toHaveBeenCalledWith(clip.id, null);
+
+    listen.mockRestore();
+    analyze.mockRestore();
     reset.mockRestore();
     await act(async () => root.unmount());
   });

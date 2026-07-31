@@ -49,6 +49,7 @@ pub fn clear_region(
                     let new_trim_end = clip.trim_end_frame + source_delta;
                     let c = &mut timeline.tracks[ti].clips[ci];
                     c.trim_end_frame = new_trim_end;
+                    c.loudness_normalization = None;
                     c.set_duration(new_duration);
                 }
             }
@@ -63,6 +64,7 @@ pub fn clear_region(
                     let c = &mut timeline.tracks[ti].clips[ci];
                     c.start_frame = new_start_frame;
                     c.trim_start_frame = new_trim_start;
+                    c.loudness_normalization = None;
                     c.set_duration(new_duration);
                 }
             }

@@ -40,6 +40,15 @@ fn write_known_bundle(bundle: &Path) {
                             "interpolationOut": "smooth"
                         }]
                     },
+                    "loudnessNormalization": {
+                        "targetLufs": -16.0,
+                        "truePeakCeilingDbtp": -1.0,
+                        "inputIntegratedLufs": -24.0,
+                        "inputTruePeakDbtp": -12.0,
+                        "gainDb": 8.0,
+                        "outputIntegratedLufs": -16.0,
+                        "outputTruePeakDbtp": -2.0
+                    },
                     "effects": [{"name": "blur", "params": {}, "enabled": true}],
                     "masks": [{
                         "shape": {"kind": "circle", "center": {"x": 0.5, "y": 0.5}, "radius": {"x": 0.5, "y": 0.5}},

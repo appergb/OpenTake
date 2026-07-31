@@ -804,6 +804,7 @@ fn retime_pcm_to_len_with_control(
 trait AudioPlanLike {
     fn clip(&self) -> &Clip;
     fn volume_at(&self, frame: i32) -> f64;
+    fn true_peak_ceiling_dbtp(&self) -> Option<f64>;
 }
 
 impl AudioPlanLike for Clip {
@@ -814,6 +815,11 @@ impl AudioPlanLike for Clip {
     fn volume_at(&self, frame: i32) -> f64 {
         Clip::volume_at(self, frame)
     }
+
+    fn true_peak_ceiling_dbtp(&self) -> Option<f64> {
+        self.loudness_normalization
+            .map(|normalization| normalization.true_peak_ceiling_dbtp)
+    }
 }
 
 impl AudioPlanLike for AudioClipPlan {
@@ -823,6 +829,16 @@ impl AudioPlanLike for AudioClipPlan {
 
     fn volume_at(&self, frame: i32) -> f64 {
         AudioClipPlan::volume_at(self, frame)
+    }
+
+    fn true_peak_ceiling_dbtp(&self) -> Option<f64> {
+        std::iter::once(&self.gain_clip)
+            .chain(self.compound_ancestors.iter())
+            .filter_map(|clip| {
+                clip.loudness_normalization
+                    .map(|normalization| normalization.true_peak_ceiling_dbtp)
+            })
+            .min_by(f64::total_cmp)
     }
 }
 
@@ -1000,6 +1016,10 @@ fn mix_flattened_audio<T: AudioPlanLike>(
     control: Option<&ExportControl>,
     on_progress: Option<AudioExportProgress>,
 ) -> Result<Option<PcmBuffer>, String> {
+    let true_peak_ceiling_dbtp = clips
+        .iter()
+        .filter_map(AudioPlanLike::true_peak_ceiling_dbtp)
+        .min_by(f64::total_cmp);
     let eligible_count = clips.len();
     let mut clips_audio: Vec<ClipAudio> = Vec::new();
     for (eligible_index, clip) in clips.iter().enumerate() {
@@ -1026,7 +1046,7 @@ fn mix_flattened_audio<T: AudioPlanLike>(
     if clips_audio.is_empty() {
         return Ok(None);
     }
-    let mixed = match control {
+    let mut mixed = match control {
         Some(control) => {
             if let Some(emit) = &on_progress {
                 emit(AUDIO_MIX_START, AUDIO_PROGRESS_TOTAL);
@@ -1043,6 +1063,9 @@ fn mix_flattened_audio<T: AudioPlanLike>(
         }
         None => mix::mix_clips(&clips_audio).map_err(|e| format!("audio mix failed: {e}"))?,
     };
+    if let Some(ceiling_dbtp) = true_peak_ceiling_dbtp {
+        mix::apply_true_peak_ceiling(&mut mixed, Some(ceiling_dbtp));
+    }
     if mixed.is_empty() {
         return Ok(None);
     }

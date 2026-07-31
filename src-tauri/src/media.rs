@@ -28,32 +28,34 @@ use std::sync::{Arc, Mutex};
 
 use image::ImageEncoder;
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use opentake_core::{
     importable_clip_type, AppCore, CommittedMediaImport, CoreError, DeferredCoreEvents,
     PreparedMediaFolderRef, PreparedMediaImportOp, ProbedMedia,
 };
 use opentake_domain::{
-    Clip, ClipType, GenerationInput, GenerationJobStatus, MediaManifest, MediaManifestEntry,
-    MediaSource, StabilizationTrack, Timeline,
+    Clip, ClipType, GenerationInput, GenerationJobStatus, LoudnessNormalization, MediaManifest,
+    MediaManifestEntry, MediaSource, StabilizationTrack, Timeline,
 };
 use opentake_media::library::{FavoriteRequest, LibraryStore, PreparedFavorite};
 #[cfg(test)]
 use opentake_media::MediaCancelToken;
 use opentake_media::{
     analysis::{
-        analyze_stabilization as build_stabilization, track_translation_motion, StabilizationConfig,
+        analyze_loudness_with_progress, analyze_stabilization as build_stabilization,
+        track_translation_motion, LoudnessNormalizationConfig, StabilizationConfig,
     },
     cache_key::visual_file_identity_key,
     decode_frame_at, decode_frame_at_cancellable, decode_frames_at, decode_frames_at_cancellable,
+    extract_pcm_cancellable_with_progress,
     thumbnail::{
         encode_sprite, representative_thumbnail_times, save_sprite, sprite::grid_geometry,
         video_thumbnail_times, EncodedSpriteArtifact, ThumbnailCacheMeta, VideoThumb,
         MAX_VIDEO_THUMBNAILS, THUMB_MAX_SIZE, THUMB_TOLERANCE_SECS,
     },
     waveform::store::CACHE_SUBDIR,
-    FrameRequest, MediaEngine, MediaError, RgbaFrame,
+    FrameRequest, MediaEngine, MediaError, PcmFormat, PcmSpec, RgbaFrame,
 };
 
 use crate::library::LibraryState;
@@ -71,6 +73,51 @@ pub struct MediaState {
 #[derive(Default)]
 pub struct StabilizationAnalysisState {
     active: Mutex<Option<opentake_media::MediaCancelToken>>,
+}
+
+/// Single-flight cooperative cancellation for an Inspector loudness run.
+#[derive(Default)]
+pub struct LoudnessAnalysisState {
+    active: Mutex<Option<opentake_media::MediaCancelToken>>,
+}
+
+impl LoudnessAnalysisState {
+    fn begin(&self) -> Result<opentake_media::MediaCancelToken, String> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.is_some() {
+            return Err("loudness_analysis_busy".to_string());
+        }
+        let token = opentake_media::MediaCancelToken::new();
+        *active = Some(token.clone());
+        Ok(token)
+    }
+
+    fn finish(&self, token: &opentake_media::MediaCancelToken) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active
+            .as_ref()
+            .is_some_and(|current| current.same_instance(token))
+        {
+            *active = None;
+        }
+    }
+
+    fn cancel(&self) -> bool {
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        active.as_ref().is_some_and(|token| {
+            token.cancel();
+            true
+        })
+    }
 }
 
 impl StabilizationAnalysisState {
@@ -2678,6 +2725,138 @@ pub async fn analyze_stabilization(
 
 #[tauri::command]
 pub fn cancel_stabilization_analysis(analysis: State<'_, StabilizationAnalysisState>) -> bool {
+    analysis.cancel()
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LoudnessProgressEvent {
+    clip_id: String,
+    done: usize,
+    total: usize,
+}
+
+/// Analyze the selected clip's exact visible source window. The returned value
+/// is applied in a separate `edit_apply` call so analysis failures never mutate
+/// project history and a successful apply remains one undoable transaction.
+#[tauri::command]
+pub async fn analyze_loudness(
+    app: AppHandle,
+    clip_id: String,
+    target_lufs: f64,
+    true_peak_ceiling_dbtp: f64,
+) -> Result<LoudnessNormalization, String> {
+    let cancel = app.state::<LoudnessAnalysisState>().begin()?;
+    let prepared = (|| {
+        let snapshot = app.state::<AppCore>().runtime_snapshot();
+        let clip = find_runtime_clip(&snapshot.timeline, &clip_id)
+            .ok_or_else(|| format!("loudness_clip_not_found: {clip_id}"))?;
+        if !matches!(clip.media_type, ClipType::Audio | ClipType::Video)
+            || clip.nested_sequence_id.is_some()
+        {
+            return Err(
+                "loudness_unreadable_audio: requires an ordinary audio-bearing clip".to_string(),
+            );
+        }
+        let (path, _) = crate::transcribe::resolve_asset_from_snapshot(&snapshot, &clip.media_ref)
+            .map_err(|error| format!("loudness_unreadable_audio: {error}"))?;
+        let fps = snapshot.timeline.fps.max(1) as f64;
+        let start = clip.trim_start_frame.max(0) as f64 / fps;
+        let duration = clip.source_frames_consumed().max(0) as f64 / fps;
+        if duration <= 0.0 {
+            return Err("loudness_unreadable_audio: clip has no visible duration".to_string());
+        }
+        if duration > 600.0 {
+            return Err(
+                "loudness_audio_too_long: analysis is limited to 10 minutes per clip".to_string(),
+            );
+        }
+        Ok((path, (start, start + duration)))
+    })();
+
+    let result = match prepared {
+        Err(error) => Err(error),
+        Ok((path, range)) => {
+            let worker_cancel = cancel.clone();
+            let worker_app = app.clone();
+            let worker_clip_id = clip_id.clone();
+            match tauri::async_runtime::spawn_blocking(move || {
+                const ANALYSIS_SAMPLE_RATE: u32 = 48_000;
+                let decode_app = worker_app.clone();
+                let decode_clip_id = worker_clip_id.clone();
+                let decode_progress = Arc::new(move |done: usize, total: usize| {
+                    let mapped = done.min(total.max(1)).saturating_mul(60) / total.max(1);
+                    let _ = decode_app.emit(
+                        "loudness://progress",
+                        LoudnessProgressEvent {
+                            clip_id: decode_clip_id.clone(),
+                            done: mapped,
+                            total: 100,
+                        },
+                    );
+                });
+                let pcm = extract_pcm_cancellable_with_progress(
+                    &path,
+                    &PcmSpec {
+                        sample_rate: ANALYSIS_SAMPLE_RATE,
+                        channels: 1,
+                        format: PcmFormat::F32,
+                    },
+                    Some(range),
+                    &worker_cancel,
+                    Some(decode_progress),
+                )
+                .map_err(|error| match error {
+                    MediaError::Cancelled => "loudness_cancelled".to_string(),
+                    other => format!("loudness_unreadable_audio: {other}"),
+                })?;
+                let analysis_app = worker_app.clone();
+                let analysis_clip_id = worker_clip_id.clone();
+                let analysis_progress = Arc::new(move |done: usize, total: usize| {
+                    let mapped = 60 + done.min(total.max(1)).saturating_mul(40) / total.max(1);
+                    let _ = analysis_app.emit(
+                        "loudness://progress",
+                        LoudnessProgressEvent {
+                            clip_id: analysis_clip_id.clone(),
+                            done: mapped,
+                            total: 100,
+                        },
+                    );
+                });
+                let measured = analyze_loudness_with_progress(
+                    &pcm.samples_f32,
+                    ANALYSIS_SAMPLE_RATE,
+                    LoudnessNormalizationConfig {
+                        target_lufs,
+                        true_peak_ceiling_dbtp,
+                    },
+                    &worker_cancel,
+                    Some(analysis_progress),
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(LoudnessNormalization {
+                    target_lufs: measured.target_lufs,
+                    true_peak_ceiling_dbtp: measured.true_peak_ceiling_dbtp,
+                    input_integrated_lufs: measured.input_integrated_lufs,
+                    input_true_peak_dbtp: measured.input_true_peak_dbtp,
+                    gain_db: measured.gain_db,
+                    output_integrated_lufs: measured.output_integrated_lufs,
+                    output_true_peak_dbtp: measured.output_true_peak_dbtp,
+                })
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => Err(format!("loudness_analysis_task_failed: {error}")),
+            }
+        }
+    };
+    app.state::<LoudnessAnalysisState>().finish(&cancel);
+    result
+}
+
+#[tauri::command]
+pub fn cancel_loudness_analysis(analysis: State<'_, LoudnessAnalysisState>) -> bool {
     analysis.cancel()
 }
 

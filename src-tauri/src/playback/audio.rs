@@ -33,7 +33,8 @@ use cpal::{FromSample, SizedSample};
 
 use opentake_domain::{Clip, ClipType, Timeline};
 use opentake_media::{
-    decode_pcm_interleaved_cancellable, MediaCancelToken, MediaError, PcmFormat, PcmSpec,
+    decode_pcm_interleaved_cancellable, encode::mix::apply_true_peak_ceiling, MediaCancelToken,
+    MediaError, PcmFormat, PcmSpec,
 };
 
 use super::engine::{InstantClock, PlaybackClock};
@@ -740,6 +741,9 @@ struct StereoClip {
     interleaved: Vec<f32>,
     /// Per-output-frame gain (length = frames; empty = unity throughout).
     gains: Vec<f32>,
+    /// User true-peak ceiling. The mixer keeps the same codec reconstruction
+    /// safety margin as export so native preview does not audition hotter peaks.
+    true_peak_ceiling_dbtp: Option<f64>,
 }
 
 /// Decode one clip's visible audio window into a placed [`StereoClip`] at `rate`
@@ -794,12 +798,19 @@ fn project_clip_audio_stereo(
         start_frame,
         interleaved,
         gains: if all_unity { Vec::new() } else { gains },
+        true_peak_ceiling_dbtp: clip
+            .loudness_normalization
+            .map(|normalization| normalization.true_peak_ceiling_dbtp),
     }))
 }
 
 /// Sum placed stereo clips into one interleaved buffer, applying per-frame gains
 /// and hard-limiting to [-1, 1] (mirrors the export mixdown, per channel).
 fn mix_stereo(clips: &[StereoClip], cancel: &MediaCancelToken) -> Result<Vec<f32>, MediaError> {
+    let true_peak_ceiling_dbtp = clips
+        .iter()
+        .filter_map(|clip| clip.true_peak_ceiling_dbtp)
+        .min_by(f64::total_cmp);
     let total_frames = clips
         .iter()
         .map(|c| {
@@ -842,6 +853,7 @@ fn mix_stereo(clips: &[StereoClip], cancel: &MediaCancelToken) -> Result<Vec<f32
             *value = value.clamp(-1.0, 1.0);
         }
     }
+    apply_true_peak_ceiling(&mut out, true_peak_ceiling_dbtp);
     Ok(out)
 }
 
@@ -1068,6 +1080,7 @@ mod tests {
             start_frame: 0,
             interleaved: vec![0.25; 12_000_000],
             gains: Vec::new(),
+            true_peak_ceiling_dbtp: None,
         };
         let (done_tx, done_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
@@ -1515,11 +1528,13 @@ mod tests {
             start_frame: 0,
             interleaved: vec![0.6, -0.6, 0.5, 0.5],
             gains: Vec::new(),
+            true_peak_ceiling_dbtp: None,
         };
         let b = StereoClip {
             start_frame: 1,
             interleaved: vec![0.6, 0.6],
             gains: Vec::new(),
+            true_peak_ceiling_dbtp: None,
         };
         let out = mix_stereo(&[a, b], &MediaCancelToken::new()).expect("mix");
         assert_eq!(out.len(), 4); // 2 frames × 2 channels
@@ -1537,9 +1552,24 @@ mod tests {
             start_frame: 0,
             interleaved: vec![1.0, 1.0, 1.0, 1.0],
             gains: vec![0.5, 0.25],
+            true_peak_ceiling_dbtp: None,
         };
         let out = mix_stereo(&[c], &MediaCancelToken::new()).expect("mix");
         assert_eq!(out, vec![0.5, 0.5, 0.25, 0.25]);
+    }
+
+    #[test]
+    fn mix_stereo_enforces_normalized_true_peak_with_codec_margin() {
+        let clip = StereoClip {
+            start_frame: 0,
+            interleaved: vec![1.0, -1.0],
+            gains: Vec::new(),
+            true_peak_ceiling_dbtp: Some(-1.0),
+        };
+        let out = mix_stereo(&[clip], &MediaCancelToken::new()).expect("mix");
+        let expected = 10.0_f32.powf(-3.0 / 20.0);
+        assert!((out[0] - expected).abs() < 1e-6);
+        assert!((out[1] + expected).abs() < 1e-6);
     }
 
     #[test]

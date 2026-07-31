@@ -599,6 +599,24 @@ describe("animated-value inspector seed (raw track sample, no fade/gain)", () =>
     expect(volumeAt(clip, 15)).toBeCloseTo((raw as number) * 2 * 0.25);
   });
 
+  it("volumeAt applies persisted loudness gain on top of authored controls", () => {
+    const clip = fullClip({
+      mediaType: "audio",
+      sourceClipType: "audio",
+      volume: 0.5,
+      loudnessNormalization: {
+        targetLufs: -16,
+        truePeakCeilingDbtp: -1,
+        inputIntegratedLufs: -22,
+        inputTruePeakDbtp: -8,
+        gainDb: 6,
+        outputIntegratedLufs: -16,
+        outputTruePeakDbtp: -2,
+      },
+    });
+    expect(volumeAt(clip, 15)).toBeCloseTo(0.5 * 10 ** (6 / 20));
+  });
+
   it("rawOpacityAt returns the authored track value, excluding the fade envelope", () => {
     const clip = fullClip({
       fadeInFrames: 20,

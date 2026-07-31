@@ -43,6 +43,7 @@ pub fn split_clip(clip: &Clip, at_frame: i32, right_id: impl Into<String>) -> Op
         left.trim_end_frame = clip.trim_end_frame + right_source;
     }
     left.fade_out_frames = 0;
+    left.loudness_normalization = None;
     left.clamp_fades_to_duration();
 
     let mut right = clip.clone();
@@ -55,6 +56,7 @@ pub fn split_clip(clip: &Clip, at_frame: i32, right_id: impl Into<String>) -> Op
         right.trim_start_frame = clip.trim_start_frame + left_source;
     }
     right.fade_in_frames = 0;
+    right.loudness_normalization = None;
     right.clamp_fades_to_duration();
 
     // Split every animatable track at the cut, inserting a boundary keyframe so

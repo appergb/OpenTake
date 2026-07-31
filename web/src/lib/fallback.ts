@@ -530,6 +530,7 @@ export function createFallbackStore() {
             return result(false, "Split Clip", []);
           const rightDur = clip.startFrame + clip.durationFrames - cmd.atFrame;
           clip.durationFrames = cmd.atFrame - clip.startFrame;
+          delete clip.loudnessNormalization;
           const right = newClip(nextId(), clip.mediaRef, clip.mediaType, cmd.atFrame, rightDur);
           timeline.tracks[ti].clips.splice(ci + 1, 0, right);
           return result(true, "Split Clip", [right.id]);
@@ -541,6 +542,15 @@ export function createFallbackStore() {
             if (!loc) continue;
             const c = timeline.tracks[loc[0]].clips[loc[1]];
             const p = cmd.properties;
+            if (
+              p.durationFrames !== undefined ||
+              p.trimStartFrame !== undefined ||
+              p.trimEndFrame !== undefined ||
+              p.speed !== undefined ||
+              p.reversed !== undefined
+            ) {
+              delete c.loudnessNormalization;
+            }
             if (p.opacity !== undefined) (c.opacity = p.opacity), (changed = true);
             if (p.volume !== undefined) (c.volume = p.volume), (changed = true);
             if (p.speed !== undefined) (c.speed = p.speed), (changed = true);
@@ -642,6 +652,17 @@ export function createFallbackStore() {
             }
           }
           return result(changed, "Set Effects", cmd.clipIds);
+        }
+        case "setLoudnessNormalization": {
+          const loc = findClip(cmd.clipId);
+          if (!loc) return result(false, "Normalize Loudness", []);
+          const clip = timeline.tracks[loc[0]].clips[loc[1]];
+          const next = cmd.normalization ?? undefined;
+          if (JSON.stringify(clip.loudnessNormalization) === JSON.stringify(next)) {
+            return result(false, next ? "Normalize Loudness" : "Reset Loudness", []);
+          }
+          clip.loudnessNormalization = next;
+          return result(true, next ? "Normalize Loudness" : "Reset Loudness", [cmd.clipId]);
         }
         case "applyStabilization": {
           const loc = findClip(cmd.clipId);
