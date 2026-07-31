@@ -679,7 +679,7 @@ Completion evidence: [`data-safety-cache-identity-real-device-2026-07-31.md`](..
   - On every pre-commit failure, drop prepared capabilities, restore acquired transitions, publish no usable session, and preserve all project files unchanged.
   - Fault-inject the owned failure boundaries and assert cleanup/event order, then open/save/reopen valid and migrated fixtures with identical IDs, frames, media, and generation history.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-project/tests/upstream_compat.rs#exhaustive_legacy_default_matrix` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
   - `crates/opentake-core/tests/project_open.rs#missing_generation_log_seeds_manifest_provenance_once` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
@@ -693,7 +693,7 @@ Completion evidence: [`data-safety-cache-identity-real-device-2026-07-31.md`](..
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-project --test upstream_compat exhaustive_legacy_default_matrix -- --exact`
   - Run: `cargo test -p opentake-core --test project_open missing_generation_log_seeds_manifest_provenance_once -- --exact`
@@ -707,11 +707,11 @@ Completion evidence: [`data-safety-cache-identity-real-device-2026-07-31.md`](..
 
   Expected: FAIL because one or more of the 4 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only the files listed for Task 8 as required to satisfy every listed acceptance criterion, including atomic combined reads, visible success, and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-project --test upstream_compat exhaustive_legacy_default_matrix -- --exact`
   - Run: `cargo test -p opentake-core --test project_open missing_generation_log_seeds_manifest_provenance_once -- --exact`
@@ -725,7 +725,7 @@ Completion evidence: [`data-safety-cache-identity-real-device-2026-07-31.md`](..
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
