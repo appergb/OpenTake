@@ -89,9 +89,17 @@ build_params(GenerationInput, uploaded)        # params 子系统装配载荷
 ## 完成状态
 
 - **已实现**：`GenClient` 双模调用面（list_models/submit/get/watch/sign_upload/upload_reference）、`watch` 终态轮询、`can_generate`、`HttpTransport` + 生产/Mock 实现、`GenerationJob` 状态机与终态校验、`GenError` 全套错误归类——均有离线单测（托管 + BYOK 两侧）。
+- **2026-08-01 Job 兼容性复核 PASS**：`GenerationJob` 同时接受 proxy
+  `id` 与上游 `_id`；旧载荷缺失 `resultUrls`、`errorMessage`、
+  `costCredits`、`completedAt` 时均稳定解码为 `None`。两个精确拥有者测试与
+  `opentake-gen` 全包测试通过。
+- **生成接线已完成**：桌面 `GenerationBridge` 已把
+  `generate_video`、`generate_image`、`generate_audio`、`upscale_media`
+  接到配置后的托管/BYOK provider，并以授权与模型能力动态发布工具；离线
+  mock-provider 测试覆盖成功、失败、取消、恢复与持久化。Motion 工具仍保持
+  隐藏，直到独立的动效物化切片完成。
 - **计划中 / 未接线**：
   - **托管 proxy 本身未实现**（`opentake-gen-proxy` 是 Phase 9 自建后端目标，含 `/v1/models`、`/v1/generations`、`/v1/uploads/sign`、SSE `/stream`、对象存储预签名、可选积分计费；SPEC §3）。`GenClient` 客户端侧已就绪，等服务端。
-  - **`generate_*` / `upscale_media` 尚未走通 `GenClient`**：`opentake-agent` 的 dispatch 层这四个工具仍是诚实存根（`"...: not yet implemented"`），原因明确写在代码注释——「需要 async GenClient + BYOK auth」。`list_models` 已接（见 [catalog.md](catalog.md)）。需要 async + ProviderRegistry 装配 + [BYOK key 注入](keys-byok.md)（ROADMAP Phase 8/9）。
   - `watch` 的流式 `/v1/generations/:id/stream`（SSE）目前只在客户端以轮询表达；proxy SSE 端点待建。
 
 ## 源码

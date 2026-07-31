@@ -1281,36 +1281,45 @@ duration after the Rust project boundary. Full receipt:
   - Visible/returned assertion: assert the exact success payload for the valid case and a stable typed error for the invalid case, including zero partial side effects and no leaked internal path or credential.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_9900e773f8c063a8.rs#completion_9900e773f8c063a8_decode_both_proxy_id_and_upstream_id_job_shapes_.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-gen/src/job.rs#deserializes_proxy_shape_with_id` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-gen/src/job.rs#deserializes_upstream_shape_with_underscore_id` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-gen deserializes_proxy_shape_with_id`
   - Run: `cargo test -p opentake-gen deserializes_upstream_shape_with_underscore_id`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Reconciliation note (2026-08-01): the serde alias/default implementation and
+  both named tests predate this generated checklist, so the current baseline was
+  already GREEN. The proxy-shape owner was extended to assert all four absent
+  optional fields rather than reverting valid code to manufacture RED.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-gen/src/job.rs#GenerationJob`, `docs/modules/opentake-gen/client-transport.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-gen deserializes_proxy_shape_with_id`
   - Run: `cargo test -p opentake-gen deserializes_upstream_shape_with_underscore_id`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Verified 2026-08-01. Both exact job-shape tests and the complete
+`opentake-gen` package pass; formatting and diff checks pass. The immediately
+preceding unchanged-code workspace gate passed in Task16.
 
 ### Task 22: MR-cli-sidecar-boundary-complete (implementation-slice-bdb1294b5e15ccf0)
 
