@@ -2823,33 +2823,43 @@ the focused owning test, and
   - Visible/accessibility/return path: success=cancel/close Export: idle closes; active video calls cancelExport(operationId); accessibility={"focus":"Native keyboard-focusable control","label":"Visible child text/title or caller-provided label; verify at runtime","shortcut":"None declared on this control"}; returnPath=["Success/cancel closes to the editor; failure keeps the dialog open. Trigger focus restoration is not implemented/tested."].
   - Outcome matrix: {"success":"cancel/close Export: idle closes; active video calls cancelExport(operationId)","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/shell/ExportDialog.tsx:569; no additional state is inferred beyond the source.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/shell/ExportDialog.tsx:569; the candidate-specific interaction test must assert that exact guard.","disabled":"No explicit disabled prop on this candidate.","cancel":"Cancellation/dismissal follows the exact guard in idle closes; active video calls cancelExport(operationId); no broader cancellation behavior is assumed.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in idle closes; active video calls cancelExport(operationId).","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/shell/ExportDialog.tsx:569; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/ExportDialog.interaction.test.tsx#control-af586bdec82ebcc7 cancel/close Export` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ExportDialog.interaction.test.tsx -t "control-af586bdec82ebcc7 cancel/close Export"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/ExportDialog.tsx`, `web/src/components/shell/ExportDialog.tsx#onCancel`, `web/src/lib/api.ts#cancelExport`, `src-tauri/src/export.rs#cancel_export`, `web/src/components/shell/ExportDialog.tsx#ExportDialog` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ExportDialog.interaction.test.tsx -t "control-af586bdec82ebcc7 cancel/close Export"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. The declared owner was absent, and its first execution
+  exposed an unhandled rejection when `cancel_export` failed: the dialog showed
+  neither the backend error nor failure feedback. `onCancel` now retains the
+  active dialog, renders the concrete rejection, and pushes the standard export
+  failure toast while preserving idle close and generation-safe cancellation
+  with the exact active operation id. The focused test passes, the full Web
+  suite passes 94 files / 830 tests, the production Web build passes with only
+  the pre-existing chunk/dynamic-import advisories, rustfmt is clean, and the
+  full Rust workspace suite passes.
 
 ### Task 40: control-acceptance (implementation-slice-73d069e581678e52)
 

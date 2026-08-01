@@ -197,4 +197,31 @@ describe("ExportDialog control acceptance", () => {
       "video-operation-1",
     );
   });
+
+  it("control-af586bdec82ebcc7 cancel/close Export", async () => {
+    await renderDialog();
+    await act(async () => buttonWithText("export.cancel").click());
+    expect(useEditorUiStore.getState().exportDialogOpen).toBe(false);
+    expect(mocks.cancelExport).not.toHaveBeenCalled();
+
+    await act(async () => useEditorUiStore.setState({ exportDialogOpen: true, toast: null }));
+    mocks.exportVideo.mockImplementationOnce(() => new Promise(() => undefined));
+    mocks.cancelExport.mockRejectedValueOnce(new Error("cancel channel unavailable"));
+    await act(async () => {
+      buttonWithText("export.run").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(buttonWithLabel("export.close").disabled).toBe(true);
+
+    await act(async () => {
+      buttonWithText("export.cancel").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mocks.cancelExport).toHaveBeenCalledWith("video-operation-1");
+    expect(useEditorUiStore.getState().exportDialogOpen).toBe(true);
+    expect(container?.textContent).toContain("cancel channel unavailable");
+    expect(useEditorUiStore.getState().toast?.message).toBe("export.failed");
+  });
 });
