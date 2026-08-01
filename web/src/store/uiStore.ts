@@ -14,6 +14,7 @@ import type { GapSelection } from "../lib/timelineGap";
 import { isTauri } from "../lib/api";
 import { t } from "../i18n";
 import type { ProjectSettingsTarget } from "../lib/projectSettings";
+import type { MotionTrackingRegion } from "../lib/types";
 
 export type Panel = "agent" | "media" | "preview" | "inspector" | "timeline";
 /** Top-level app view (SPEC: 启动先进主页). The editor is one of three views;
@@ -58,6 +59,11 @@ export interface SaveAsProgressState {
 export interface ProjectSettingsPromptState {
   current: ProjectSettingsTarget;
   suggested: ProjectSettingsTarget;
+}
+
+export interface MotionTrackingSelection {
+  clipId: string;
+  region: MotionTrackingRegion;
 }
 
 const STORAGE_PREFIX = "opentake.ui.v1.";
@@ -220,6 +226,10 @@ interface UiState {
    *  shows the timeline composite. Mirrors upstream `openPreviewTab(mediaAsset)`. */
   previewMediaId: string | null;
   setPreviewMedia: (id: string | null) => void;
+  /** Active on-canvas subject rectangle for the Inspector motion tracker. */
+  motionTrackingSelection: MotionTrackingSelection | null;
+  setMotionTrackingSelection: (selection: MotionTrackingSelection | null) => void;
+  setMotionTrackingRegion: (region: MotionTrackingRegion) => void;
 
   // Panels
   focusedPanel: Panel | null;
@@ -404,6 +414,14 @@ export const createEditorUiStore = () => create<UiState>((set, get) => ({
   canvasOffset: { width: 0, height: 0 },
   previewQualityShortEdge: null,
   previewMediaId: null,
+  motionTrackingSelection: null,
+  setMotionTrackingSelection: (motionTrackingSelection) => set({ motionTrackingSelection }),
+  setMotionTrackingRegion: (region) =>
+    set((state) => ({
+      motionTrackingSelection: state.motionTrackingSelection
+        ? { ...state.motionTrackingSelection, region }
+        : null,
+    })),
 
   focusedPanel: "timeline",
   maximizedPanel: null,
@@ -474,13 +492,22 @@ export const createEditorUiStore = () => create<UiState>((set, get) => ({
   // Selecting clips clears any gap selection (upstream: a clip mousedown sets
   // `selectedGap = nil` — the two are mutually exclusive).
   selectClips: (selectedClipIds) =>
-    set({ selectedClipIds, selectedGap: null, cropEditingActive: false }),
+    set((state) => ({
+      selectedClipIds,
+      selectedGap: null,
+      cropEditingActive: false,
+      motionTrackingSelection:
+        state.motionTrackingSelection && selectedClipIds.has(state.motionTrackingSelection.clipId)
+          ? state.motionTrackingSelection
+          : null,
+    })),
   clearSelection: () =>
     set({
       selectedClipIds: new Set(),
       selectedGap: null,
       isMarqueeSelecting: false,
       cropEditingActive: false,
+      motionTrackingSelection: null,
     }),
   selectMediaAssets: (selectedMediaAssetIds) => set({ selectedMediaAssetIds }),
   clearMediaSelection: () => set({ selectedMediaAssetIds: new Set() }),
@@ -627,7 +654,12 @@ export const createEditorUiStore = () => create<UiState>((set, get) => ({
   // Leaving the Video tab ends crop editing (InspectorView.swift:66-68:
   // `if newTab != .video { editor.cropEditingActive = false }`).
   setInspectorTab: (inspectorTab) =>
-    set({ inspectorTab, cropEditingActive: inspectorTab === "video" ? get().cropEditingActive : false }),
+    set({
+      inspectorTab,
+      cropEditingActive: inspectorTab === "video" ? get().cropEditingActive : false,
+      motionTrackingSelection:
+        inspectorTab === "video" ? get().motionTrackingSelection : null,
+    }),
   resetProjectRuntimeState: () => {
     get().projectSettingsPromptResolver?.(false);
     set({
@@ -650,6 +682,7 @@ export const createEditorUiStore = () => create<UiState>((set, get) => ({
       canvasZoom: 1,
       canvasOffset: { width: 0, height: 0 },
       previewMediaId: null,
+      motionTrackingSelection: null,
       focusedPanel: "timeline",
       maximizedPanel: null,
       cropEditingActive: false,

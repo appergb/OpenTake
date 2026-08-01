@@ -1,6 +1,8 @@
 # Motion tracking Agent/backend evidence — 2026-08-01
 
-Scope: Task 3 sub-slice `requirement-fdd45062091b48f3`. This artifact records the production backend and Agent boundary only; the requirement remains open for the Inspector/Preview interaction and packaged GUI/export evidence.
+Scope: Task 3 sub-slice `requirement-fdd45062091b48f3`. The production backend,
+Agent boundary, Inspector/Preview interaction, persistence, and export path are
+now complete. Only the final packaged Beta GUI pass remains open.
 
 ## Production path
 
@@ -9,6 +11,14 @@ Scope: Task 3 sub-slice `requirement-fdd45062091b48f3`. This artifact records th
 - Successful analysis returns editable linear position keyframes, algorithm/version provenance, and minimum confidence. Preview is the default and does not mutate the timeline.
 - Confidence below 0.25 returns `MCP_ANALYSIS_LOW_CONFIDENCE`; invalid rectangles/ranges, missing sources, cancellation, and stale project revisions do not commit.
 - `apply=true` writes the complete position track through `EditCommand::SetKeyframes` at the analyzed project revision. It is one ordinary undoable transaction.
+- The desktop command boundary exposes the same capability through
+  `advanced_track_motion`. The Inspector accepts an exact half-open clip range,
+  normalized numeric region fields, cancellation/retry, result confidence and
+  keyframe count, Apply, and visible Undo.
+- “Select region in preview” replaces the ordinary transform overlay with a
+  crosshair rectangle editor. Reverse-direction drags and out-of-canvas drags
+  are normalized and clamped; any region/range change invalidates the reviewed
+  result before Apply can be used.
 
 ## RED/GREEN evidence
 
@@ -23,10 +33,18 @@ CARGO_INCREMENTAL=0 cargo test -p opentake-agent --test advanced_ai_workflows
 CARGO_INCREMENTAL=0 cargo clippy -p opentake-agent -p opentake-media -p opentake-tauri --all-targets -- -D warnings
 ```
 
-The synthetic 96×72 three-frame target moves by `(8,4)` pixels. The final normalized track converts back within five pixels on both axes. The desktop test generates a 12-frame H.264 MP4 with FFmpeg, imports and places it through the real `AppCore`, obtains a mutation-free preview, applies the returned keyframes, verifies the persisted position track, performs one undo, and verifies a pre-cancelled retry leaves the timeline unchanged.
+The synthetic 96×72 three-frame target moves by `(8,4)` pixels. The final normalized track converts back within five pixels on both axes. The desktop test generates a 12-frame H.264 MP4 with FFmpeg, imports and places it through the real `AppCore`, obtains a mutation-free preview, applies the returned keyframes, saves and reopens the exact position track, exports all 12 frames through the production H.264 renderer, performs one undo, and verifies a pre-cancelled retry leaves the timeline unchanged.
+
+The final integrated code gate passed:
+
+- `cargo fmt --all -- --check`;
+- `CARGO_INCREMENTAL=0 cargo test -p opentake-tauri --lib`: 416/416;
+- default and no-default-feature Tauri Clippy with `-D warnings`;
+- `npm test`: 119 files / 880 tests, including the Inspector flow, preview
+  rectangle normalization, cancellation/stale-result isolation, and Tauri
+  command parity;
+- `npm run build` (existing chunk advisories only).
 
 ## Remaining acceptance
 
-- Inspector/Preview region selection, progress, retry, apply, and visible undo.
-- Save/reopen and preview/export transform parity on the same tracked fixture.
 - Packaged macOS GUI evidence retained with the Beta release run.

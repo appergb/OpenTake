@@ -31,6 +31,7 @@ import { AiEditTab } from "./AiEditTab";
 import { MattingSection } from "./MattingSection";
 import { ObjectRemovalSection } from "./ObjectRemovalSection";
 import { ColorMatchSection } from "./ColorMatchSection";
+import { MotionTrackingSection } from "./MotionTrackingSection";
 import { KeyframesPanel } from "./KeyframesPanel";
 import { SwapMediaSection } from "./SwapMediaSection";
 import { useProjectStore } from "../../store/projectStore";
@@ -651,6 +652,7 @@ function ClipInspector({
 
             {clip.mediaType === "video" && !clip.nestedSequenceId && (
               <>
+                <MotionTrackingSection clip={clip} />
                 <StabilizationSection clip={clip} t={t} />
                 <MattingSection clip={clip} />
               </>

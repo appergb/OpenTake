@@ -822,6 +822,28 @@ pub fn cancel_matting_model_download(state: State<'_, MattingModelInstallState>)
 }
 
 #[tauri::command]
+pub async fn advanced_track_motion(
+    state: State<'_, AdvancedWorkflowCommandState>,
+    request: TrackMotionArgs,
+) -> Result<GenerateMatteResultDto, String> {
+    let token = state.begin()?;
+    let bridge = Arc::clone(&state.bridge);
+    let worker_token = token.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        bridge.execute(AdvancedWorkflowRequest::TrackMotion(request), &worker_token)
+    })
+    .await
+    .map_err(|error| format!("advanced workflow worker failed: {error}"))
+    .and_then(|result| result.map_err(|error| error.message));
+    state.finish(&token);
+    let commit = result?;
+    Ok(GenerateMatteResultDto {
+        result: commit.result,
+        action_name: commit.action_name,
+    })
+}
+
+#[tauri::command]
 pub async fn advanced_generate_matte(
     state: State<'_, AdvancedWorkflowCommandState>,
     request: GenerateMatteArgs,
@@ -4144,6 +4166,33 @@ mod tests {
             .find(|clip| clip.id == clip_id)
             .unwrap();
         assert!(clip.position_track.as_ref().unwrap().keyframes.len() >= 2);
+        let tracked_position = clip.position_track.clone();
+        core.save_project(None).unwrap();
+        let reopened = AppCore::new();
+        reopened.open_project(&bundle).unwrap();
+        let reopened_snapshot = reopened.runtime_snapshot();
+        assert_eq!(
+            reopened_snapshot.timeline.tracks[0].clips[0].position_track,
+            tracked_position
+        );
+
+        let out = root.path().join("tracked-export.mp4");
+        let summary = crate::export::run_export(
+            &after.timeline,
+            &after.media,
+            &after.project_dir,
+            &crate::export::ExportRequest {
+                out_path: out.to_string_lossy().into_owned(),
+                codec: crate::export::ExportCodec::H264,
+                quality: crate::export::ExportQuality::P720,
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.frame_count, 12);
+        assert!(!summary.has_audio);
+        let exported = probe(&out).unwrap();
+        assert!(exported.has_video);
+        assert!(!exported.has_audio);
         core.undo().unwrap();
         let undone = core.runtime_snapshot();
         assert!(undone.timeline.tracks[0].clips[0].position_track.is_none());

@@ -22,6 +22,8 @@ import type {
   GenerateCaptionsResult,
   MediaList,
   MattingModelStatus,
+  MotionTrackingRegion,
+  MotionTrackingResult,
   GenerateMatteResult,
   RemoveObjectResult,
   MatchColorResult,
@@ -802,6 +804,27 @@ export async function generateMatte(
     });
   }
   throw new Error("AI matting requires the desktop app");
+}
+
+export async function trackMotion(
+  clipId: string,
+  region: MotionTrackingRegion,
+  range: { startFrame: number; endFrame: number },
+  apply: boolean,
+): Promise<MotionTrackingResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<MotionTrackingResult>("advanced_track_motion", {
+      request: {
+        clipId,
+        region,
+        startFrame: range.startFrame,
+        endFrame: range.endFrame,
+        apply,
+      },
+    });
+  }
+  throw new Error("motion tracking requires the desktop app");
 }
 
 export async function removeObject(

@@ -329,6 +329,7 @@ pub fn run() {
             advanced::matting_model_status,
             advanced::download_matting_model,
             advanced::cancel_matting_model_download,
+            advanced::advanced_track_motion,
             advanced::advanced_generate_matte,
             advanced::advanced_remove_object,
             advanced::advanced_match_color,

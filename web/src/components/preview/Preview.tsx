@@ -30,6 +30,7 @@ import { TimelinePlayback } from "./TimelinePlaybackLayer";
 import { TransformOverlay } from "./TransformOverlay";
 import { CropOverlay } from "./CropOverlay";
 import { PolygonMaskOverlay } from "./PolygonMaskOverlay";
+import { MotionTrackingOverlay } from "./MotionTrackingOverlay";
 import {
   CANVAS_OUTLINE_COLOR,
   aspectFitBox,
@@ -98,6 +99,7 @@ export function Preview() {
   const togglePlayTimeline = useEditorUiStore((s) => s.togglePlay);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
   const selectedClipIds = useEditorUiStore((s) => s.selectedClipIds);
+  const motionTrackingSelection = useEditorUiStore((s) => s.motionTrackingSelection);
   const pushToast = useEditorUiStore((s) => s.pushToast);
   const mediaPanelCurrentFolderId = useEditorUiStore((s) => s.mediaPanelCurrentFolderId);
   // Preview canvas zoom + pan (Item 1). Read here and applied to the timeline
@@ -464,7 +466,9 @@ export function Preview() {
                     unconditional `if editor.cropEditingActive` swap). Overlays get
                     the SCALED canvas box (fittedCanvas × canvasZoom) so their
                     placement + pointer math track the zoomed canvas (invariant). */}
-                {cropEditingActive
+                {motionTrackingSelection?.clipId === transformClip?.id && scaledCanvas
+                  ? <MotionTrackingOverlay canvasPx={scaledCanvas} />
+                  : cropEditingActive
                   ? cropClip &&
                     scaledCanvas && (
                       <CropOverlay

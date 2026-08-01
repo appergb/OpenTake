@@ -623,6 +623,30 @@ export interface MattingModelStatus {
   sha256: string;
 }
 
+export interface MotionTrackingRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface MotionTrackingResult {
+  result: {
+    clipId: string;
+    applied: boolean;
+    algorithm: string;
+    algorithmVersion: number;
+    minimumConfidence: number;
+    region: MotionTrackingRegion;
+    keyframes: Array<{
+      frame: number;
+      position: { x: number; y: number };
+      interpolation: "linear";
+    }>;
+  };
+  actionName?: string | null;
+}
+
 export interface GenerateMatteResult {
   result: {
     clipId: string;
