@@ -359,6 +359,61 @@ jobs:
             throw 'Tauri test image retains a non-portable native runtime dependency'
           }
 
+          $mt = Get-ChildItem (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin') `
+            -Filter mt.exe -File -Recurse |
+            Where-Object { $_.FullName -match '\\x64\\mt\.exe$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $mt) { throw 'mt.exe not found' }
+          $manifestLog = & $mt.FullName "-inputresource:$($testImage.FullName);#1" `
+            '-out:windows-tauri-test.manifest' 2>&1
+          $manifestLog | Set-Content windows-tauri-test-manifest.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Tauri test image has no readable RT_MANIFEST resource #1' }
+          Get-Content windows-tauri-test.manifest | Add-Content windows-tauri-test-manifest.txt
+          if ((Get-Content windows-tauri-test.manifest -Raw) -notmatch 'Microsoft\.Windows\.Common-Controls') {
+            throw 'Tauri test image manifest does not activate Common Controls v6'
+          }
+
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class OpenTakeNativeExportProbe {
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            public static extern IntPtr LoadLibraryExW(string path, IntPtr file, uint flags);
+            [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true, ExactSpelling = true)]
+            public static extern IntPtr GetProcAddress(IntPtr module, string name);
+          }
+          '@
+          $modules = @{}
+          $currentDll = $null
+          $missingExports = @()
+          foreach ($line in (Get-Content windows-tauri-test-imports.txt)) {
+            if ($line -match '^\s{4}([A-Za-z0-9_.-]+\.dll)\s*$') {
+              $currentDll = $Matches[1]
+              if (-not $modules.ContainsKey($currentDll)) {
+                $modules[$currentDll] = [OpenTakeNativeExportProbe]::LoadLibraryExW(
+                  $currentDll, [IntPtr]::Zero, 0x00000800
+                )
+              }
+            } elseif ($currentDll -and $line -match '^\s+[0-9A-F]+\s+(\S+)\s*$') {
+              $name = $Matches[1]
+              $module = $modules[$currentDll]
+              $activationContextExport =
+                $currentDll -ieq 'comctl32.dll' -and $name -eq 'TaskDialogIndirect'
+              if (-not $activationContextExport -and ($module -eq [IntPtr]::Zero -or
+                  [OpenTakeNativeExportProbe]::GetProcAddress($module, $name) -eq [IntPtr]::Zero)) {
+                $missingExports += "$currentDll!$name"
+              }
+            }
+          }
+          $modules.GetEnumerator() | Sort-Object Name | ForEach-Object {
+            "LOAD $($_.Name)=$($_.Value)"
+          } | Set-Content windows-tauri-export-probe.txt
+          $missingExports | ForEach-Object { "MISSING $_" } | Add-Content windows-tauri-export-probe.txt
+          if ($missingExports.Count -ne 0) {
+            throw "Tauri test image imports unavailable system exports: $($missingExports -join ', ')"
+          }
+
       - name: Reserved output identity and reparse safety
         shell: pwsh
         run: |
@@ -371,7 +426,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-tauri-test-imports-${{ github.sha }}
-          path: windows-tauri-test-imports.txt
+          path: |
+            windows-tauri-test-imports.txt
+            windows-tauri-test-manifest.txt
+            windows-tauri-test.manifest
+            windows-tauri-export-probe.txt
           if-no-files-found: error
           retention-days: 7
 
