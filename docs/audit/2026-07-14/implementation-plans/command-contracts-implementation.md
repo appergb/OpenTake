@@ -1231,7 +1231,7 @@
   - Visible/accessibility/return path: success=change timeline zoom: logarithmic slider -> setZoomScale; accessibility={"focus":"Native keyboard-focusable control","label":"t(\"toolbar.zoom\")","shortcut":"None declared on this control"}; returnPath=["Focus remains on the toolbar control; edit commands update the editor mirror/selection."].
   - Outcome matrix: {"success":"change timeline zoom: logarithmic slider -> setZoomScale","pending":"Not applicable — this activation only changes local/caller state and starts no Promise, API, Tauri command, or Rust work.","empty":"Not applicable — this control does not consume a collection, selection, or free-form payload that has an empty state.","disabled":"No explicit disabled prop on this candidate.","cancel":"Not applicable — this immediate handler has no cancellable operation or dismissible transient surface.","retry":"Not applicable as an error-recovery state — the synchronous local action can simply be activated again.","failure":"Not applicable — this immediate activation calls no API/Tauri/Rust boundary, so there is no backend rejection path."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/toolbar/Toolbar.interaction.test.tsx#control-9d69468ce3479312 switch to Pointer tool` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
   - `web/src/components/toolbar/Toolbar.interaction.test.tsx#control-8105812f9d07bc93 switch to Razor tool` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
@@ -1239,7 +1239,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and reconcile the historical baseline**
 
   - Run: `pnpm -C web test -- --run src/components/toolbar/Toolbar.interaction.test.tsx -t "control-9d69468ce3479312 switch to Pointer tool"`
   - Run: `pnpm -C web test -- --run src/components/toolbar/Toolbar.interaction.test.tsx -t "control-8105812f9d07bc93 switch to Razor tool"`
@@ -1247,11 +1247,11 @@
 
   Expected: FAIL because one or more of the 3 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/toolbar/Toolbar.tsx`, `web/src/components/toolbar/Toolbar.tsx#Toolbar` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/toolbar/Toolbar.interaction.test.tsx -t "control-9d69468ce3479312 switch to Pointer tool"`
   - Run: `pnpm -C web test -- --run src/components/toolbar/Toolbar.interaction.test.tsx -t "control-8105812f9d07bc93 switch to Razor tool"`
@@ -1259,11 +1259,19 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Reconciled 2026-08-01 as an already-integrated baseline. All three exact DOM
+  owners pass and prove keyboard/click tool switching, selected-state feedback,
+  focus behavior, and logarithmic zoom mapping with bounded store updates. The
+  owners were added over the existing production implementation in `186f377`;
+  its parent lacks the tests but not the behavior, so the initial honest result
+  was GREEN. The current full Web suite and production build pass. No production
+  change was required.
 
 ### Task 13: control-acceptance (implementation-slice-964535d9ff93a4e8)
 
