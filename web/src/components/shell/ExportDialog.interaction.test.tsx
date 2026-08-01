@@ -224,4 +224,97 @@ describe("ExportDialog control acceptance", () => {
     expect(container?.textContent).toContain("cancel channel unavailable");
     expect(useEditorUiStore.getState().toast?.message).toBe("export.failed");
   });
+
+  it("control-543cacc54290eeba start video export", async () => {
+    await act(async () => useProjectStore.setState({ projectPath: null }));
+    mocks.getDefaultProjectDir.mockResolvedValue("/exports");
+    mocks.save.mockResolvedValue("/exports/final-cut");
+    let reportProgress: ((progress: { done: number; total: number }) => void) | undefined;
+    mocks.onExportProgress.mockImplementationOnce(
+      async (
+        _operationId: string,
+        callback: (progress: { done: number; total: number }) => void,
+      ) => {
+        reportProgress = callback;
+        return mocks.unlisten;
+      },
+    );
+    let finishExport: ((value: { width: number; height: number; frameCount: number }) => void) | null =
+      null;
+    mocks.exportVideo.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishExport = resolve;
+        }),
+    );
+    await renderDialog();
+
+    await act(async () => {
+      buttonWithText("export.run").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mocks.getDefaultProjectDir).toHaveBeenCalledOnce();
+    expect(mocks.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        defaultPath: "/exports/Timeline.mp4",
+        filters: [{ name: "export.saveFilter", extensions: ["mp4"] }],
+      }),
+    );
+    expect(mocks.onExportProgress).toHaveBeenCalledWith(
+      "video-operation-1",
+      expect.any(Function),
+    );
+    expect(mocks.exportVideo).toHaveBeenCalledWith(
+      { outPath: "/exports/final-cut.mp4", codec: "h264", quality: "1080p" },
+      "video-operation-1",
+    );
+
+    await act(async () => reportProgress?.({ done: 15, total: 30 }));
+    expect(container?.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe(
+      "50",
+    );
+    await act(async () => {
+      finishExport?.({ width: 1920, height: 1080, frameCount: 30 });
+      await Promise.resolve();
+    });
+    expect(useEditorUiStore.getState().exportDialogOpen).toBe(false);
+    expect(useEditorUiStore.getState().toast?.message).toBe("export.done");
+    expect(mocks.unlisten).toHaveBeenCalledTimes(1);
+
+    await act(async () => useEditorUiStore.setState({ exportDialogOpen: true, toast: null }));
+    mocks.exportVideo.mockRejectedValueOnce(new Error("export cancelled"));
+    await act(async () => {
+      buttonWithText("export.run").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(useEditorUiStore.getState().exportDialogOpen).toBe(false);
+    expect(useEditorUiStore.getState().toast?.message).toBe("export.cancelled");
+    expect(mocks.unlisten).toHaveBeenCalledTimes(2);
+
+    await act(async () => useEditorUiStore.setState({ exportDialogOpen: true, toast: null }));
+    mocks.exportVideo.mockRejectedValueOnce(new Error("encoder unavailable"));
+    await act(async () => {
+      buttonWithText("export.run").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(useEditorUiStore.getState().exportDialogOpen).toBe(true);
+    expect(container?.textContent).toContain("encoder unavailable");
+    expect(buttonWithLabel("export.close").disabled).toBe(false);
+    expect(container?.querySelector('[role="progressbar"]')).toBeNull();
+    expect(useEditorUiStore.getState().toast?.message).toBe("export.failed");
+    expect(mocks.unlisten).toHaveBeenCalledTimes(3);
+
+    const exportCallCount = mocks.exportVideo.mock.calls.length;
+    mocks.save.mockResolvedValueOnce(null);
+    await act(async () => {
+      buttonWithText("export.run").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mocks.exportVideo).toHaveBeenCalledTimes(exportCallCount);
+    expect(useEditorUiStore.getState().exportDialogOpen).toBe(true);
+  });
 });

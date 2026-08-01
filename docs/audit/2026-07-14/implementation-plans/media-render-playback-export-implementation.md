@@ -2892,33 +2892,44 @@ the focused owning test, and
   - Visible/accessibility/return path: success=start video export: save dialog -> busy/progress -> success/cancel/failure -> cleanup; accessibility={"focus":"Native keyboard-focusable control","label":"Visible child text/title or caller-provided label; verify at runtime","shortcut":"None declared on this control"}; returnPath=["Success/cancel closes to the editor; failure keeps the dialog open. Trigger focus restoration is not implemented/tested."].
   - Outcome matrix: {"success":"start video export: save dialog -> busy/progress -> success/cancel/failure -> cleanup","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/shell/ExportDialog.tsx:587; no additional state is inferred beyond the source.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/shell/ExportDialog.tsx:587; the candidate-specific interaction test must assert that exact guard.","disabled":"Disabled when {busy}.","cancel":"Cancellation/dismissal follows the exact guard in save dialog -> busy/progress -> success/cancel/failure -> cleanup; no broader cancellation behavior is assumed.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in save dialog -> busy/progress -> success/cancel/failure -> cleanup.","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/shell/ExportDialog.tsx:587; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/ExportDialog.interaction.test.tsx#control-543cacc54290eeba start video export` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ExportDialog.interaction.test.tsx -t "control-543cacc54290eeba start video export"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/ExportDialog.tsx`, `web/src/components/shell/ExportDialog.tsx#onExport`, `web/src/lib/api.ts#getDefaultProjectDir`, `src-tauri/src/commands.rs`, `web/src/lib/api.ts#exportVideo`, `src-tauri/src/export.rs#export_video`, `web/src/components/shell/ExportDialog.tsx#ExportDialog` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ExportDialog.interaction.test.tsx -t "control-543cacc54290eeba start video export"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. The declared transaction owner was absent. The new DOM
+  test drives the real component through native-save cancellation, unsaved
+  project default-directory lookup, exact extension/request dispatch, scoped
+  progress delivery, success, backend cancellation, failure, retry readiness,
+  and listener cleanup. It passes together with all seven ExportDialog owners;
+  the full Web suite passes 94 files / 831 tests, the production Web build
+  passes with only the pre-existing chunk/dynamic-import advisories, and the
+  unchanged Rust boundary remains green under the full workspace gate run for
+  the immediately preceding cancellation slice. No production change was
+  required for this slice.
 
 ### Task 41: control-acceptance (implementation-slice-010eea5507e6b9ca)
 
