@@ -1004,33 +1004,43 @@
   - Exclude timeline, clips, media, credentials, transient drag/playback/dialog state, and clear or migrate malformed/old records safely.
   - Restart-test each approved key plus corrupt JSON, old schema, invalid bounds, project switch, logout, and secret scan.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/store/commandRouting.test.ts#rust_authority_and_ui_persistence_are_independently_owned` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and reconcile the historical baseline**
 
   - Run: `pnpm -C web test -- --run src/store/commandRouting.test.ts -t "rust_authority_and_ui_persistence_are_independently_owned"`
 
   Expected: FAIL because one or more of the 3 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/store/sync.ts#startSync`, `web/src/store/projectStore.ts#useProjectStore`, `web/src/store/uiStore.ts#useEditorUiStore`, `docs/specs/frontend/10-state.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/store/commandRouting.test.ts -t "rust_authority_and_ui_persistence_are_independently_owned"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Reconciled 2026-08-01 as an already-integrated baseline. The exact composite
+  owner passes and proves the schema-versioned persistence allowlist, absence of
+  project identifiers from persisted values, restart defaults for transient
+  selection/playback/preview state, stale snapshot rejection, concurrent and
+  failed edit isolation, and project-boundary UI reset. Git history shows the
+  owner, persistence hardening, and corrected specification landed together in
+  `8da75f9`; the parent lacks the owner, so there is no honest historical RED to
+  replay. The current full Web suite (95 files / 832 tests) and production build
+  passed in the immediately preceding slice. No production change was required.
 
 ### Task 10: control-acceptance (implementation-slice-251a11401ef969e1)
 
