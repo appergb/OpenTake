@@ -21,6 +21,8 @@ import type {
   EditResult,
   GenerateCaptionsResult,
   MediaList,
+  MattingModelStatus,
+  GenerateMatteResult,
   LutReference,
   LoudnessNormalization,
   DenoiseMode,
@@ -729,6 +731,75 @@ export async function onTranscribeProgress(
     const p = e.payload as { fraction?: number } | undefined;
     if (p && typeof p.fraction === "number") handler(p.fraction);
   });
+}
+
+// MARK: - On-device AI matting
+
+export async function mattingModelStatus(): Promise<MattingModelStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MattingModelStatus>("matting_model_status");
+  return { installed: false, model: "", bytes: 0, sha256: "" };
+}
+
+export async function downloadMattingModel(): Promise<MattingModelStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MattingModelStatus>("download_matting_model");
+  throw new Error("matting model download requires the desktop app");
+}
+
+export async function cancelMattingModelDownload(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("cancel_matting_model_download");
+  return false;
+}
+
+export async function onMattingProgress(
+  handler: (progress: { fraction: number; downloadedBytes: number; totalBytes: number }) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("matting://progress", (event) => {
+    const value = event.payload as
+      | { fraction?: number; downloadedBytes?: number; totalBytes?: number }
+      | undefined;
+    if (
+      value &&
+      typeof value.fraction === "number" &&
+      typeof value.downloadedBytes === "number" &&
+      typeof value.totalBytes === "number"
+    ) {
+      handler({
+        fraction: value.fraction,
+        downloadedBytes: value.downloadedBytes,
+        totalBytes: value.totalBytes,
+      });
+    }
+  });
+}
+
+export async function generateMatte(
+  clipId: string,
+  apply: boolean,
+  range?: { startFrame?: number; endFrame?: number },
+): Promise<GenerateMatteResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<GenerateMatteResult>("advanced_generate_matte", {
+      request: {
+        clipId,
+        apply,
+        ...(range?.startFrame == null ? {} : { startFrame: range.startFrame }),
+        ...(range?.endFrame == null ? {} : { endFrame: range.endFrame }),
+      },
+    });
+  }
+  throw new Error("AI matting requires the desktop app");
+}
+
+export async function cancelAdvancedWorkflow(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("cancel_advanced_workflow");
+  return false;
 }
 
 /** Transcribe one asset (cached, so repeats are instant). `language` is an

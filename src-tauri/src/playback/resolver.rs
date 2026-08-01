@@ -743,7 +743,13 @@ mod tests {
         let invalid_path = temp.path().join("invalid-lottie.json");
         std::fs::write(&invalid_path, b"{not valid lottie}").expect("write invalid fixture");
         let mut media = HashMap::new();
-        media.insert("invalid".into(), MediaInfo { path: invalid_path });
+        media.insert(
+            "invalid".into(),
+            MediaInfo {
+                path: invalid_path,
+                straight_alpha: false,
+            },
+        );
         let mut state = PlaybackResolverState::new(
             media,
             HashMap::new(),

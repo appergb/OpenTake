@@ -9,6 +9,8 @@ pub enum VideoCodec {
     H264,
     H265,
     ProRes422,
+    /// ProRes 4444 with an alpha plane for local generated derivatives.
+    ProRes4444,
 }
 
 /// Short-edge target resolution.
@@ -48,6 +50,7 @@ impl ExportPreset {
             VideoCodec::H264 => "libx264",
             VideoCodec::H265 => "libx265",
             VideoCodec::ProRes422 => "prores_ks",
+            VideoCodec::ProRes4444 => "prores_ks",
         }
     }
 
@@ -55,7 +58,7 @@ impl ExportPreset {
     /// AAC (upstream presets).
     pub fn acodec_arg(&self) -> &'static str {
         match self.codec {
-            VideoCodec::ProRes422 => "pcm_s16le",
+            VideoCodec::ProRes422 | VideoCodec::ProRes4444 => "pcm_s16le",
             _ => "aac",
         }
     }
@@ -65,6 +68,7 @@ impl ExportPreset {
     pub fn pix_fmt_arg(&self) -> &'static str {
         match self.codec {
             VideoCodec::ProRes422 => "yuv422p10le",
+            VideoCodec::ProRes4444 => "yuva444p10le",
             _ => "yuv420p",
         }
     }
@@ -118,6 +122,11 @@ mod tests {
         assert_eq!(prores.vcodec_arg(), "prores_ks");
         assert_eq!(prores.acodec_arg(), "pcm_s16le"); // LPCM
         assert_eq!(prores.pix_fmt_arg(), "yuv422p10le");
+
+        let alpha = ExportPreset::new(VideoCodec::ProRes4444, ExportResolution::P1080);
+        assert_eq!(alpha.vcodec_arg(), "prores_ks");
+        assert_eq!(alpha.acodec_arg(), "pcm_s16le");
+        assert_eq!(alpha.pix_fmt_arg(), "yuva444p10le");
     }
 
     #[test]

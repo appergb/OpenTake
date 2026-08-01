@@ -19,7 +19,7 @@
 //! (one frame at a time, no GPU contention). The continuous playback engine
 //! (#53) will move this onto a dedicated render thread.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -274,11 +274,16 @@ struct TextInfo {
 /// auto-rotates on decode in this first cut).
 struct ManifestMetrics {
     sizes: HashMap<String, (u32, u32)>,
+    straight_alpha: HashSet<String>,
 }
 
 impl SourceMetrics for ManifestMetrics {
     fn natural_size(&self, media_ref: &str) -> Option<(u32, u32)> {
         self.sizes.get(media_ref).copied()
+    }
+
+    fn needs_premultiply(&self, media_ref: &str) -> bool {
+        self.straight_alpha.contains(media_ref)
     }
 }
 
@@ -841,8 +846,12 @@ pub fn composite_timeline_frame(
 
     // Project the manifest into render-side lookups.
     let mut sizes: HashMap<String, (u32, u32)> = HashMap::new();
+    let mut straight_alpha = HashSet::new();
     let mut media: HashMap<String, MediaInfo> = HashMap::new();
     for entry in &manifest.entries {
+        if entry.carries_straight_alpha() {
+            straight_alpha.insert(entry.id.clone());
+        }
         let path = match &entry.source {
             MediaSource::External { absolute_path } => PathBuf::from(absolute_path),
             MediaSource::Project { relative_path } => match &project_dir {
@@ -866,7 +875,10 @@ pub fn composite_timeline_frame(
 
     let render_size = preview_render_size(timeline.width, timeline.height, max_size);
 
-    let metrics = ManifestMetrics { sizes };
+    let metrics = ManifestMetrics {
+        sizes,
+        straight_alpha,
+    };
     let plan = try_build_render_plan(timeline, render_size, &metrics)
         .map_err(|error| format!("invalid timeline graph: {error}"))?;
     let frame_plan = plan.frame(timeline, frame);

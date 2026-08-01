@@ -1636,7 +1636,10 @@ mod project_prewarm_lifecycle_tests {
                 .path,
             media_path
         );
-        let metrics = crate::playback::ManifestMetrics { sizes };
+        let metrics = crate::playback::ManifestMetrics {
+            sizes,
+            straight_alpha: std::collections::HashSet::new(),
+        };
         let plan = build_render_plan(
             &snapshot.timeline,
             RenderSize::new(

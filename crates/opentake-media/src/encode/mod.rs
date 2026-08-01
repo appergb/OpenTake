@@ -50,6 +50,10 @@ fn encode_args(out: &Path, w: u32, h: u32, fps: i32, preset: &ExportPreset) -> V
     args.push(preset.vcodec_arg().into());
     args.push("-pix_fmt".into());
     args.push(preset.pix_fmt_arg().into());
+    if preset.codec == VideoCodec::ProRes4444 {
+        args.push("-profile:v".into());
+        args.push("4444".into());
+    }
     args.extend(preset.color_args());
 
     args.push(out.to_string_lossy().into_owned());
@@ -155,7 +159,7 @@ impl VideoEncoder {
             <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
         )
         .map_err(MediaError::Io)?;
-        let extension = if preset.codec == VideoCodec::ProRes422 {
+        let extension = if matches!(preset.codec, VideoCodec::ProRes422 | VideoCodec::ProRes4444) {
             "mov"
         } else {
             "mp4"
@@ -849,6 +853,15 @@ mod tests {
         assert!(args
             .iter()
             .any(|arg| arg.contains("setparams=color_primaries=bt709")));
+    }
+
+    #[test]
+    fn encode_args_prores_4444_preserve_alpha() {
+        let preset = ExportPreset::new(VideoCodec::ProRes4444, ExportResolution::P1080);
+        let args = encode_args(Path::new("/matte.mov"), 1920, 1080, 30, &preset);
+        assert!(args.windows(2).any(|w| w == ["-c:v", "prores_ks"]));
+        assert!(args.windows(2).any(|w| w == ["-pix_fmt", "yuva444p10le"]));
+        assert!(args.windows(2).any(|w| w == ["-profile:v", "4444"]));
     }
 
     #[test]

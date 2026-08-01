@@ -605,6 +605,8 @@ mod model {
     use super::ExecutionProvider;
     use crate::error::{MediaError, Result};
 
+    pub type OrtIoContract = (Vec<(String, String)>, Vec<(String, String)>);
+
     /// A loaded ONNX model + a CPU-fallback-friendly session. `Session` is not
     /// `Sync`; wrap in a `Mutex` so the worker can share it.
     pub struct OrtModel {
@@ -663,11 +665,29 @@ mod model {
             }
             Ok(out)
         }
+
+        /// Names and debug-formatted tensor contracts declared by the model.
+        /// Used to fail closed when a downloaded advanced model does not match
+        /// the pinned architecture before any user media reaches inference.
+        pub fn io_contract(&self) -> OrtIoContract {
+            let session = self.session.lock().unwrap();
+            let inputs = session
+                .inputs
+                .iter()
+                .map(|input| (input.name.clone(), format!("{:?}", input.input_type)))
+                .collect();
+            let outputs = session
+                .outputs
+                .iter()
+                .map(|output| (output.name.clone(), format!("{:?}", output.output_type)))
+                .collect();
+            (inputs, outputs)
+        }
     }
 }
 
 #[cfg(feature = "ort-backend")]
-pub use model::OrtModel;
+pub use model::{OrtIoContract, OrtModel};
 
 #[cfg(test)]
 mod tests {
@@ -697,5 +717,22 @@ mod tests {
         };
         assert_eq!(t.shape[0], -1);
         assert_eq!(t.dtype, TensorDType::F32);
+    }
+
+    #[cfg(feature = "ort-backend")]
+    #[test]
+    fn installed_advanced_model_contract_can_be_inspected_before_inference() {
+        let Some(path) = std::env::var_os("OPENTAKE_TEST_ONNX_MODEL") else {
+            return;
+        };
+        let model = OrtModel::load(
+            std::path::Path::new(&path),
+            ExecutionProvider::platform_default(),
+        )
+        .expect("load supplied ONNX model");
+        let contract = model.io_contract();
+        assert!(!contract.0.is_empty());
+        assert!(!contract.1.is_empty());
+        eprintln!("ONNX_IO_CONTRACT={contract:?}");
     }
 }

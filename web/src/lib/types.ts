@@ -560,6 +560,34 @@ export interface ModelStatus {
   bytes: number;
 }
 
+export interface MattingModelStatus {
+  installed: boolean;
+  model: string;
+  bytes: number;
+  sha256: string;
+}
+
+export interface GenerateMatteResult {
+  result: {
+    clipId: string;
+    sourceMediaRef: string;
+    assetId?: string | null;
+    applied: boolean;
+    cacheKey: string;
+    previewPath: string;
+    frameCount: number;
+    width?: number | null;
+    height?: number | null;
+    fps?: number | null;
+    model: string;
+    modelSha256: string;
+    sourceSha256: string;
+    startFrame: number;
+    endFrame: number;
+  };
+  actionName?: string | null;
+}
+
 /** One transcript word/token with optional source-seconds timing. */
 export interface TranscriptWord {
   text: string;

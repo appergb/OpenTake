@@ -240,6 +240,17 @@ pub struct MediaManifestEntry {
     pub cached_remote_url_expires_at: Option<f64>,
 }
 
+impl MediaManifestEntry {
+    /// Generated local matting derivatives contain straight RGBA from FFmpeg's
+    /// ProRes 4444 decoder. The render adapters use this non-secret provenance
+    /// to request one premultiplication before blending.
+    pub fn carries_straight_alpha(&self) -> bool {
+        self.generation_input.as_ref().is_some_and(|input| {
+            input.provider.as_deref() == Some("opentake-matting") && input.model.starts_with("rvm-")
+        })
+    }
+}
+
 /// A media library folder. 1:1 port of `MediaFolder`.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -159,8 +159,11 @@ pub fn run() {
                 core.clone(),
                 cache_root.clone(),
             ));
-            let advanced_bridge =
-                Arc::new(advanced::TauriAdvancedWorkflowBridge::new(core.clone()));
+            let advanced_bridge = Arc::new(advanced::TauriAdvancedWorkflowBridge::new(
+                core.clone(),
+                cache_root.clone(),
+                models_dir.clone(),
+            ));
             mcp::spawn(
                 core.clone(),
                 workflows_dir.clone(),
@@ -177,7 +180,7 @@ pub fn run() {
                 models_dir.clone(),
                 generation_bridge.clone(),
                 motion_bridge.clone(),
-                advanced_bridge,
+                advanced_bridge.clone(),
             );
 
             // A global favorite must never silently become a temporary file.
@@ -204,6 +207,17 @@ pub fn run() {
                     }
                 });
             app.manage(motion_state);
+            app.manage(advanced::AdvancedWorkflowCommandState::new(advanced_bridge));
+            app.manage(advanced::MattingModelInstallState::default());
+            let advanced_transition_handle = app.handle().clone();
+            app.state::<AppCore>()
+                .subscribe_project_identity_transition(move |pending| {
+                    if pending {
+                        advanced_transition_handle
+                            .state::<advanced::AdvancedWorkflowCommandState>()
+                            .cancel_active();
+                    }
+                });
             app.manage(chat_state);
             app.manage(MediaState::new(engine));
             app.manage(media::StabilizationAnalysisState::default());
@@ -311,6 +325,11 @@ pub fn run() {
             motion::motion_add,
             motion::motion_edit,
             motion::motion_cancel,
+            advanced::matting_model_status,
+            advanced::download_matting_model,
+            advanced::cancel_matting_model_download,
+            advanced::advanced_generate_matte,
+            advanced::cancel_advanced_workflow,
             secret::secret_save,
             secret::secret_load,
             secret::secret_delete,

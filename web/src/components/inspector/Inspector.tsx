@@ -28,6 +28,7 @@ import { HoverButton } from "../ui/HoverButton";
 import { ScrubbableNumberField } from "./ScrubbableNumberField";
 import { TextTab } from "./TextTab";
 import { AiEditTab } from "./AiEditTab";
+import { MattingSection } from "./MattingSection";
 import { KeyframesPanel } from "./KeyframesPanel";
 import { SwapMediaSection } from "./SwapMediaSection";
 import { useProjectStore } from "../../store/projectStore";
@@ -646,7 +647,10 @@ function ClipInspector({
             <FadeSection clip={clip} commit={commit} t={t} />
 
             {clip.mediaType === "video" && !clip.nestedSequenceId && (
-              <StabilizationSection clip={clip} t={t} />
+              <>
+                <StabilizationSection clip={clip} t={t} />
+                <MattingSection clip={clip} />
+              </>
             )}
 
             <section>

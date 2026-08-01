@@ -14,7 +14,7 @@
 //! master clock, the MJPEG sink, and the Tauri event emitter without touching the
 //! loop.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, TryRecvError};
@@ -316,7 +316,15 @@ impl RenderLoop {
     ) -> Result<Self, String> {
         let dev = RenderDevice::try_new().map_err(|e| format!("no GPU device: {e}"))?;
         let compositor = Compositor::new(&dev.device);
-        let metrics = ManifestMetrics { sizes };
+        let straight_alpha = media
+            .iter()
+            .filter(|(_, info)| info.straight_alpha)
+            .map(|(id, _)| id.clone())
+            .collect::<HashSet<_>>();
+        let metrics = ManifestMetrics {
+            sizes,
+            straight_alpha,
+        };
         let plan = try_build_render_plan(&timeline, render_size, &metrics)
             .map_err(|error| format!("invalid timeline graph: {error}"))?;
         let project_root = project_dir
