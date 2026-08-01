@@ -505,6 +505,12 @@ mod chromium_backend {
 
     static PROFILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    fn trace(message: impl AsRef<str>) {
+        if std::env::var_os("OPENTAKE_MOTION_TRACE").is_some() {
+            eprintln!("[opentake-motion] {}", message.as_ref());
+        }
+    }
+
     pub(super) fn render(
         renderer: &HeadlessChromiumRenderer,
         req: &MotionRenderRequest,
@@ -522,6 +528,7 @@ mod chromium_backend {
                     "no supported Chrome, Chromium, or Edge executable was found; set OPENTAKE_CHROMIUM_PATH",
                 )
             })?;
+        trace(format!("browser={}", browser_path.display()));
 
         let document = match &req.source {
             MotionSource::Code { html_css_js } => sandboxed_document(html_css_js, &renderer.policy),
@@ -551,9 +558,11 @@ mod chromium_backend {
             renderer.policy.timeout,
             &renderer.cancellation,
         )?;
+        trace("browser launched and CDP endpoint is ready");
         let (socket, _) = tungstenite::connect(websocket_url.as_str()).map_err(|error| {
             MotionError::render_failed(format!("failed to connect to Chromium CDP: {error}"))
         })?;
+        trace("connected to browser CDP");
         set_socket_poll_timeout(&socket)?;
         let mut cdp = Cdp::new(
             socket,
@@ -574,6 +583,7 @@ mod chromium_backend {
             None,
         )?;
         let session = required_string(&attached, "sessionId")?;
+        trace("created and attached render target");
 
         cdp.command("Page.enable", json!({}), Some(&session))?;
         cdp.command("Runtime.enable", json!({}), Some(&session))?;
@@ -610,6 +620,7 @@ mod chromium_backend {
         let url = HeadlessChromiumRenderer::data_url_for_code(&document);
         cdp.command("Page.navigate", json!({"url": url}), Some(&session))?;
         cdp.wait_for_event("Page.loadEventFired", Some(&session))?;
+        trace("inline motion document loaded");
         // Pausing before navigation also pauses the load lifecycle itself in
         // recent Chromium. The deterministic clock is already installed before
         // author code; freeze the browser's own timeline immediately after the
@@ -631,6 +642,19 @@ mod chromium_backend {
             .enumerate()
         {
             check_abort(renderer, deadline)?;
+            trace(format!("frame {index}: seek start at {seconds:.17}s"));
+            // `OpenTake.onSeek` callbacks are allowed to be asynchronous. In
+            // particular, Motion Canvas may use a zero-delay timer while it
+            // initializes layout on Windows. Leaving Chromium virtual time
+            // paused while awaiting that callback deadlocks the CDP command.
+            // Resume only for the callback, then pause again before capture;
+            // the injected clock and document timeline still expose the exact
+            // requested timestamp to author code.
+            cdp.command(
+                "Emulation.setVirtualTimePolicy",
+                json!({"policy": "advance"}),
+                Some(&session),
+            )?;
             let expression = format!(
                 "(async () => {{ if (!window.OpenTake) throw new Error('OpenTake clock missing'); await window.OpenTake.seek({seconds:.17}); return window.OpenTake.currentTime(); }})()"
             );
@@ -643,6 +667,12 @@ mod chromium_backend {
                 }),
                 Some(&session),
             )?;
+            cdp.command(
+                "Emulation.setVirtualTimePolicy",
+                json!({"policy": "pause"}),
+                Some(&session),
+            )?;
+            trace(format!("frame {index}: seek complete and clock paused"));
             if evaluated
                 .get("exceptionDetails")
                 .and_then(Value::as_object)
@@ -668,6 +698,7 @@ mod chromium_backend {
                 }),
                 Some(&session),
             )?;
+            trace(format!("frame {index}: screenshot captured"));
             let encoded = required_string(&captured, "data")?;
             let png = base64::engine::general_purpose::STANDARD
                 .decode(encoded)

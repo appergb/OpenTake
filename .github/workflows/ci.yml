@@ -220,6 +220,8 @@ jobs:
         run: pnpm -C web test
 
       - name: Rust workspace tests
+        env:
+          OPENTAKE_MOTION_TRACE: '1'
         run: cargo test --workspace -- --test-threads=1
 
       - name: Minimal-feature Tauri clippy
