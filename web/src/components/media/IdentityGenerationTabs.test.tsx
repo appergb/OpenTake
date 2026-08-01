@@ -66,6 +66,28 @@ describe("identity generation workflows", () => {
     expect(undo).toHaveBeenCalledOnce();
   });
 
+  it("opens voice cloning for legacy timelines that omit voiceModels", async () => {
+    useProjectStore.setState({
+      timeline: {
+        fps: 30,
+        width: 1920,
+        height: 1080,
+        settingsConfigured: true,
+        tracks: [],
+      },
+    });
+    const dependencies: VoiceDependencies = {
+      run: vi.fn(),
+      cancel: vi.fn().mockResolvedValue(true),
+      undo: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await act(async () => root.render(<VoiceCloneTab dependencies={dependencies} />));
+
+    expect(container.querySelector('[data-testid="voice-clone-tab"]')).not.toBeNull();
+    expect(button(container, "Enroll Voice Model").disabled).toBe(true);
+  });
+
   it("enrolls, generates, auditions, undoes, and revokes a consented voice", async () => {
     const run = vi.fn(async (request: Parameters<VoiceDependencies["run"]>[0]): Promise<VoiceCloneResult> => {
       if (request.action === "enroll") return { result: { action: "enroll", voiceId: "voice-model-1", voiceName: request.voiceName, provider: "elevenlabs", model: "eleven_multilingual_v2", consentId: request.consentId }, actionName: "Enroll Voice Clone" };

@@ -3,12 +3,14 @@ import { useT } from "../../i18n";
 import * as api from "../../lib/api";
 import { assetUrl } from "../../lib/asset";
 import { RADIUS, SPACE } from "../../lib/theme";
-import type { AvatarGenerationResult, VoiceCloneResult } from "../../lib/types";
+import type { AvatarGenerationResult, VoiceCloneResult, VoiceModelRecord } from "../../lib/types";
 import * as edit from "../../store/editActions";
 import { useMediaStore } from "../../store/mediaStore";
 import { useProjectStore } from "../../store/projectStore";
 
 type Phase = "idle" | "running" | "ready" | "applied";
+
+const EMPTY_VOICE_MODELS: readonly VoiceModelRecord[] = [];
 
 function consentId(scope: string): string {
   const id = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -84,7 +86,8 @@ const voiceDefaults: VoiceDependencies = { run: api.cloneVoice, cancel: api.canc
 export function VoiceCloneTab({ dependencies = voiceDefaults }: { dependencies?: VoiceDependencies }) {
   const t = useT();
   const items = useMediaStore((state) => state.items);
-  const records = useProjectStore((state) => state.timeline.voiceModels ?? []);
+  const storedVoiceModels = useProjectStore((state) => state.timeline.voiceModels);
+  const records = storedVoiceModels ?? EMPTY_VOICE_MODELS;
   const references = useMemo(() => items.filter((item) => item.type === "audio" && item.hasAudio), [items]);
   const [referenceAudioMediaRef, setReference] = useState("");
   const [voiceName, setVoiceName] = useState("");
