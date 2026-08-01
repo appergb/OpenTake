@@ -21,13 +21,6 @@ path = "src/main.rs"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
-# The Windows bundle build script stages ONNX Runtime before `tauri-build`
-# validates resources. Keep ort-sys in the build-dependency graph so Cargo
-# guarantees its checksum-pinned DLL copy has completed before our build.rs
-# reads it; the runtime dependency alone does not impose that ordering.
-[target.'cfg(windows)'.build-dependencies]
-ort-sys = { version = "=2.0.0-rc.10", default-features = false, features = ["download-binaries", "copy-dylibs"] }
-
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
@@ -46,10 +39,10 @@ opentake-domain = { workspace = true }
 # `whisper-backend` compiles the whisper.cpp CPU backend (via cmake —
 # preinstalled on GitHub runners, no CUDA); `ort-backend` links ONNX Runtime for
 # the SigLIP2 dual-encoder — its `download-binaries` feature fetches a
-# checksum-pinned prebuilt onnxruntime at build time. Platforms with a static
-# archive bake it into the binary; platforms such as Windows copy the matching
-# runtime DLL next to tests and the application, with the Windows bundle config
-# shipping that DLL beside the installed executable. `model-download` pulls the
+# checksum-pinned prebuilt onnxruntime at build time. The pinned Apple Silicon
+# and Windows x64 distributions are static archives baked into the executable;
+# no separate onnxruntime dynamic library is published by those distributions.
+# `model-download` pulls the
 # model files over HTTPS with checksum verification. All three stay optional at
 # the opentake-media level (its own default tests run offline, without them);
 # ort-inference tests are feature-gated + runtime-skipped like the GPU/ffmpeg

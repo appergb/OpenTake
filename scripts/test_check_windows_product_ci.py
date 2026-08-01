@@ -33,14 +33,7 @@ class WindowsProductCiContractTests(unittest.TestCase):
         )
         self.assert_rejected(mutated, "product cache excludes target")
 
-    def test_installed_product_must_launch_with_matching_ort_runtime(self) -> None:
-        without_runtime = WORKFLOW.replace(
-            "          $ortRuntime = Join-Path $installDirectory 'onnxruntime.dll'\n",
-            "          $ortRuntime = Join-Path $installDirectory 'missing.dll'\n",
-            1,
-        )
-        self.assert_rejected(without_runtime, "installed product launch smoke test")
-
+    def test_installed_product_must_launch(self) -> None:
         without_launch = WORKFLOW.replace(
             "          $app = Start-Process -FilePath $application -PassThru\n",
             "          $app = $null\n",

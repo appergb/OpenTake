@@ -178,8 +178,6 @@ def validate_workflow(workflow: str) -> list[str]:
         steps, "Install NSIS package and execute installed product without PATH"
     )
     installed_product_fragments = (
-        "onnxruntime.dll",
-        "installed ONNX Runtime not found beside OpenTake",
         "packaged_macos_windows_sidecars_resolve_and_execute",
         "Start-Process -FilePath $application -PassThru",
         "installed OpenTake exited during launch smoke test",

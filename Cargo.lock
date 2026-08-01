@@ -3710,7 +3710,6 @@ dependencies = [
  "opentake-ops",
  "opentake-project",
  "opentake-render",
- "ort-sys",
  "reqwest 0.12.28",
  "same-file",
  "sentry",

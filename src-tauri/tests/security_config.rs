@@ -135,37 +135,23 @@ fn windows_bundle_installs_webview2_without_network_access() {
 }
 
 #[test]
-fn windows_bundle_ships_the_linked_onnxruntime_beside_the_executable() {
+fn windows_bundle_does_not_expect_an_unpublished_onnxruntime_dll() {
     let media_manifest = include_str!("../../crates/opentake-media/Cargo.toml");
     assert!(
-        media_manifest
-            .contains("features = [\"std\", \"ndarray\", \"download-binaries\", \"copy-dylibs\"]"),
-        "ort-sys must copy the exact downloaded runtime beside Windows binaries"
-    );
-
-    let tauri_manifest = include_str!("../Cargo.toml");
-    assert!(
-        tauri_manifest.contains("[target.'cfg(windows)'.build-dependencies]")
-            && tauri_manifest.contains(
-                "ort-sys = { version = \"=2.0.0-rc.10\", default-features = false, features = [\"download-binaries\", \"copy-dylibs\"] }",
-            ),
-        "the Tauri build script must wait for ort-sys to stage the Windows DLL"
+        media_manifest.contains("features = [\"std\", \"ndarray\", \"download-binaries\"]"),
+        "the pinned ONNX Runtime distribution must remain statically linked"
     );
 
     let config = windows_config();
     let resources = config["bundle"]["resources"]
         .as_object()
         .expect("the Windows bundle must map runtime resources explicitly");
-    assert_eq!(
+    assert!(
         resources
-            .get("../target/opentake-runtime/onnxruntime.dll")
-            .and_then(Value::as_str),
-        Some("onnxruntime.dll")
+            .keys()
+            .all(|source| !source.contains("onnxruntime")),
+        "the static Windows archive does not publish an onnxruntime DLL"
     );
-
-    let build_script = include_str!("../build.rs");
-    assert!(build_script.contains("profile_dir.join(\"deps/onnxruntime.dll\")"));
-    assert!(build_script.contains("workspace_target.join(\"opentake-runtime/onnxruntime.dll\")"));
 }
 
 #[test]
