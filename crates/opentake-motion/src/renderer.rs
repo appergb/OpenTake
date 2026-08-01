@@ -811,7 +811,8 @@ mod chromium_backend {
         ) -> MotionResult<(Self, String)> {
             let profile = unique_profile_dir();
             std::fs::create_dir_all(&profile)?;
-            let mut child = Command::new(executable)
+            let mut command = Command::new(executable);
+            command
                 .args([
                     "--headless=new",
                     "--remote-debugging-port=0",
@@ -835,22 +836,26 @@ mod chromium_backend {
                 .arg(format!("--user-data-dir={}", profile.display()))
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|error| {
-                    let _ = std::fs::remove_dir_all(&profile);
-                    if error.kind() == std::io::ErrorKind::NotFound {
-                        MotionError::renderer_unavailable(format!(
-                            "Chromium executable does not exist at {}",
-                            executable.display()
-                        ))
-                    } else {
-                        MotionError::render_failed(format!(
-                            "failed to launch Chromium at {}: {error}",
-                            executable.display()
-                        ))
-                    }
-                })?;
+                .stderr(Stdio::piped());
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                command.process_group(0);
+            }
+            let mut child = command.spawn().map_err(|error| {
+                let _ = std::fs::remove_dir_all(&profile);
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    MotionError::renderer_unavailable(format!(
+                        "Chromium executable does not exist at {}",
+                        executable.display()
+                    ))
+                } else {
+                    MotionError::render_failed(format!(
+                        "failed to launch Chromium at {}: {error}",
+                        executable.display()
+                    ))
+                }
+            })?;
             let stderr = child
                 .stderr
                 .take()
@@ -899,15 +904,45 @@ mod chromium_backend {
         }
 
         fn shutdown(&mut self) {
+            #[cfg(unix)]
+            {
+                // Chrome launches renderer and utility helpers. Terminate the
+                // isolated process group so a wedged author script cannot
+                // outlive the browser root and keep mutating its profile.
+                let process_group = -(self.child.id() as i32);
+                // SAFETY: launch places this child in a process group whose id
+                // is the child's pid; a negative pid targets that group only.
+                unsafe {
+                    libc::kill(process_group, libc::SIGKILL);
+                }
+            }
             let _ = self.child.kill();
             let _ = self.child.wait();
+        }
+
+        fn remove_profile(&self) {
+            // Chromium can keep helper processes alive for a few milliseconds
+            // after its root process exits. Those helpers may race a one-shot
+            // remove_dir_all by creating a final state file, leaving profiles
+            // behind on Linux timeout and cancellation paths.
+            const CLEANUP_ATTEMPTS: usize = 100;
+            for attempt in 0..CLEANUP_ATTEMPTS {
+                match std::fs::remove_dir_all(&self.profile) {
+                    Ok(()) => return,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                    Err(_) if attempt + 1 < CLEANUP_ATTEMPTS => {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => return,
+                }
+            }
         }
     }
 
     impl Drop for BrowserProcess {
         fn drop(&mut self) {
             self.shutdown();
-            let _ = std::fs::remove_dir_all(&self.profile);
+            self.remove_profile();
         }
     }
 
