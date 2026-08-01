@@ -24,6 +24,7 @@ use opentake_agent::chat::{
 use opentake_agent::mcp::core_handle::{AppCoreHandle, CoreHandle};
 use opentake_agent::mcp::dispatch::Dispatcher;
 use opentake_agent::mcp::generation::GenerationBridge;
+use opentake_agent::mcp::motion::MotionBridge;
 use opentake_agent::tools::result::ToolResult;
 use opentake_gen::{KeyStore, KeyringStore};
 
@@ -97,17 +98,18 @@ impl ChatState {
         cache_root: PathBuf,
         models_dir: PathBuf,
     ) -> Self {
-        Self::new_inner(core, workflows_dir, cache_root, models_dir, None)
+        Self::new_inner(core, workflows_dir, cache_root, models_dir, None, None)
     }
 
     /// Build the state in `setup`: a dispatcher over the live core + workflow
     /// registry + the same media bridge the desktop MCP server uses.
-    pub fn new_with_generation(
+    pub fn new_with_capabilities(
         core: AppCore,
         workflows_dir: PathBuf,
         cache_root: PathBuf,
         models_dir: PathBuf,
         generation_bridge: Arc<dyn GenerationBridge>,
+        motion_bridge: Arc<dyn MotionBridge>,
     ) -> Self {
         Self::new_inner(
             core,
@@ -115,6 +117,7 @@ impl ChatState {
             cache_root,
             models_dir,
             Some(generation_bridge),
+            Some(motion_bridge),
         )
     }
 
@@ -124,15 +127,17 @@ impl ChatState {
         cache_root: PathBuf,
         models_dir: PathBuf,
         generation_bridge: Option<Arc<dyn GenerationBridge>>,
+        motion_bridge: Option<Arc<dyn MotionBridge>>,
     ) -> Self {
         let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(core.clone()));
         let registry = Arc::new(RwLock::new(crate::mcp::build_registry(&workflows_dir)));
         let bridge = crate::mcp::build_media_bridge(core.clone(), cache_root, models_dir);
-        let dispatcher = Arc::new(Dispatcher::with_bridges(
+        let dispatcher = Arc::new(Dispatcher::with_capability_bridges(
             handle,
             registry.clone(),
             Some(bridge),
             generation_bridge,
+            motion_bridge,
         ));
         let store: Arc<dyn KeyStore> = Arc::new(KeyringStore::new());
         let sessions = Arc::new(Mutex::new(HashMap::new()));

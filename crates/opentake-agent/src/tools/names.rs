@@ -185,6 +185,11 @@ impl ToolName {
         ToolName::UpscaleMedia,
     ];
 
+    /// Motion tools appended only by a host with a production render/import/
+    /// placement bridge. They remain known for strict compatibility parsing in
+    /// all other hosts.
+    pub const MOTION: [ToolName; 2] = [ToolName::AddMotionGraphic, ToolName::EditMotionGraphic];
+
     /// Every recognized schema/wire name, including capabilities deliberately
     /// hidden from discovery until a real backend exists. Keeping this set lets
     /// strict argument validation and compatibility tests cover future tools

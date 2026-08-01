@@ -20,8 +20,8 @@ use std::collections::{HashMap, HashSet};
 
 use opentake_domain::{
     AudioDenoise, ChromaKey, Clip, ClipType, ColorGrade, Crop, Effect, Interpolation,
-    LoudnessNormalization, LutReference, Mask, MaskShape, NestedSequence, StabilizationTrack,
-    Timeline, Track, Transform, Transition, TransitionKind, MAX_MASKS_PER_CLIP,
+    LoudnessNormalization, LutReference, Mask, MaskShape, MediaManifestEntry, NestedSequence,
+    StabilizationTrack, Timeline, Track, Transform, Transition, TransitionKind, MAX_MASKS_PER_CLIP,
     MAX_POLYGON_MASK_POINTS,
 };
 
@@ -41,6 +41,139 @@ pub enum EditError {
     Invalid(String),
     /// A ripple edit was refused to preserve sync-lock alignment.
     Refused(String),
+}
+
+#[cfg(test)]
+mod motion_media_transaction_tests {
+    use super::*;
+    use crate::id::SeqIdGen;
+    use opentake_domain::{MediaSource, Track};
+
+    fn media(id: &str) -> MediaManifestEntry {
+        MediaManifestEntry {
+            id: id.into(),
+            name: format!("{id}.mp4"),
+            kind: ClipType::Video,
+            source: MediaSource::Project {
+                relative_path: format!("media/{id}.mp4"),
+            },
+            duration: 1.0,
+            generation_input: None,
+            source_width: Some(64),
+            source_height: Some(36),
+            source_fps: Some(30.0),
+            has_audio: Some(false),
+            color: None,
+            proxy: None,
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        }
+    }
+
+    fn clip(media_ref: &str, track_index: usize) -> ClipEntry {
+        ClipEntry {
+            media_ref: media_ref.into(),
+            media_type: ClipType::Video,
+            source_clip_type: ClipType::Video,
+            track_index,
+            start_frame: 0,
+            duration_frames: 30,
+            trim_start_frame: None,
+            trim_end_frame: None,
+            has_audio: false,
+            add_linked_audio: false,
+            transform: None,
+        }
+    }
+
+    #[test]
+    fn register_and_add_is_one_undoable_document_transaction() {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+        let result = apply(
+            &mut state,
+            EditCommand::RegisterMediaAndAddClip {
+                media: media("motion-a"),
+                entry: clip("motion-a", 0),
+                auto_track: true,
+            },
+            &ids,
+        )
+        .unwrap();
+
+        assert_eq!(result.action_name, "Add Motion Graphic");
+        assert_eq!(state.manifest.entries.len(), 1);
+        assert_eq!(state.timeline.tracks.len(), 1);
+        assert_eq!(state.timeline.tracks[0].clips.len(), 1);
+        assert_eq!(state.undo_depth(), 1);
+
+        apply(&mut state, EditCommand::Undo, &ids).unwrap();
+        assert!(state.manifest.entries.is_empty());
+        assert!(state.timeline.tracks.is_empty());
+    }
+
+    #[test]
+    fn failed_register_and_place_leaves_manifest_timeline_and_history_unchanged() {
+        let mut state = EditorState::default();
+        state
+            .timeline
+            .tracks
+            .push(Track::new("audio", ClipType::Audio));
+        let before = state.clone();
+        let error = apply(
+            &mut state,
+            EditCommand::RegisterMediaAndAddClip {
+                media: media("motion-a"),
+                entry: clip("motion-a", 0),
+                auto_track: false,
+            },
+            &SeqIdGen::default(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not compatible"));
+        assert_eq!(state.timeline, before.timeline);
+        assert_eq!(state.manifest, before.manifest);
+        assert_eq!(state.undo_depth(), before.undo_depth());
+        assert_eq!(state.version(), before.version());
+    }
+
+    #[test]
+    fn register_and_swap_preserves_clip_identity_and_undo_restores_old_asset() {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+        let added = apply(
+            &mut state,
+            EditCommand::RegisterMediaAndAddClip {
+                media: media("motion-a"),
+                entry: clip("motion-a", 0),
+                auto_track: true,
+            },
+            &ids,
+        )
+        .unwrap();
+        let clip_id = added.affected_clip_ids[0].clone();
+
+        let edited = apply(
+            &mut state,
+            EditCommand::RegisterMediaAndSwapClip {
+                media: media("motion-b"),
+                clip_id: clip_id.clone(),
+            },
+            &ids,
+        )
+        .unwrap();
+        assert_eq!(edited.action_name, "Edit Motion Graphic");
+        assert_eq!(edited.affected_clip_ids, vec![clip_id.clone()]);
+        assert_eq!(state.manifest.entries.len(), 2);
+        assert_eq!(state.timeline.tracks[0].clips[0].id, clip_id);
+        assert_eq!(state.timeline.tracks[0].clips[0].media_ref, "motion-b");
+
+        apply(&mut state, EditCommand::Undo, &ids).unwrap();
+        assert_eq!(state.manifest.entries.len(), 1);
+        assert_eq!(state.timeline.tracks[0].clips[0].media_ref, "motion-a");
+    }
 }
 
 #[cfg(test)]
@@ -391,6 +524,21 @@ pub enum EditCommand {
     /// Visual entries share one new visual track; audio entries share one new
     /// audio track. Track insertion and placement commit as one transaction.
     AddClipsAutoTrack { entries: Vec<ClipEntry> },
+    /// Register one already validated project-managed video and place it in the
+    /// same undo snapshot. Used by deterministic external renderers so undo
+    /// removes both the generated clip and its manifest record.
+    RegisterMediaAndAddClip {
+        media: MediaManifestEntry,
+        entry: ClipEntry,
+        auto_track: bool,
+    },
+    /// Register a newly rendered replacement and swap an existing clip to it in
+    /// one undo snapshot. Undo restores the old media ref and removes the new
+    /// manifest record while leaving the prior rendered asset available.
+    RegisterMediaAndSwapClip {
+        media: MediaManifestEntry,
+        clip_id: String,
+    },
     /// Ripple-insert clips at `at_frame`, pushing later clips right.
     InsertClips {
         track_index: usize,
@@ -728,6 +876,14 @@ pub fn apply(
         }
         EditCommand::AddClips { entries } => add_clips(state, entries, ids),
         EditCommand::AddClipsAutoTrack { entries } => add_clips_auto_track(state, entries, ids),
+        EditCommand::RegisterMediaAndAddClip {
+            media,
+            entry,
+            auto_track,
+        } => register_media_and_add_clip(state, media, entry, auto_track, ids),
+        EditCommand::RegisterMediaAndSwapClip { media, clip_id } => {
+            register_media_and_swap_clip(state, media, clip_id, ids)
+        }
         EditCommand::InsertClips {
             track_index,
             at_frame,
@@ -1676,6 +1832,115 @@ fn swap_clips(state: &mut EditorState, a: String, b: String) -> Result<EditResul
         move |st| {
             ops::swap_clip_positions(&mut st.timeline, &a, &b);
             Ok(vec![a, b])
+        },
+    )
+}
+
+fn validate_registered_media(
+    state: &EditorState,
+    media: &MediaManifestEntry,
+) -> Result<(), EditError> {
+    if media.id.trim().is_empty() {
+        return Err(EditError::Invalid(
+            "generated media id must not be empty".into(),
+        ));
+    }
+    if state
+        .manifest
+        .entries
+        .iter()
+        .any(|entry| entry.id == media.id)
+    {
+        return Err(EditError::Invalid(format!(
+            "Media already exists: {}",
+            media.id
+        )));
+    }
+    if state
+        .manifest
+        .entries
+        .iter()
+        .any(|entry| entry.source == media.source)
+    {
+        return Err(EditError::Invalid(
+            "generated media source is already registered".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn register_media_and_add_clip(
+    state: &mut EditorState,
+    media: MediaManifestEntry,
+    entry: ClipEntry,
+    auto_track: bool,
+    ids: &dyn IdGen,
+) -> Result<EditResult, EditError> {
+    validate_registered_media(state, &media)?;
+    if media.kind != entry.media_type || media.kind != entry.source_clip_type {
+        return Err(EditError::Invalid(
+            "generated media type must match the placed clip type".into(),
+        ));
+    }
+    if entry.media_ref != media.id {
+        return Err(EditError::Invalid(
+            "placed clip must reference the generated media id".into(),
+        ));
+    }
+
+    // Run the existing placement command against a disposable state so all of
+    // its overlap, track, duration, and manifest validation remains the single
+    // source of truth. Only its resulting document is copied into the one outer
+    // transaction; its temporary undo/version bookkeeping is discarded.
+    let mut candidate = state.clone();
+    candidate.manifest.entries.push(media);
+    let placement = if auto_track {
+        add_clips_auto_track(&mut candidate, vec![entry], ids)?
+    } else {
+        add_clips(&mut candidate, vec![entry], ids)?
+    };
+    let timeline = candidate.timeline;
+    let manifest = candidate.manifest;
+    let affected = placement.affected_clip_ids;
+
+    transact(
+        state,
+        "Add Motion Graphic",
+        |ids| format!("Added motion graphic: {}", ids.join(", ")),
+        move |current| {
+            current.timeline = timeline;
+            current.manifest = manifest;
+            Ok(affected)
+        },
+    )
+}
+
+fn register_media_and_swap_clip(
+    state: &mut EditorState,
+    media: MediaManifestEntry,
+    clip_id: String,
+    ids: &dyn IdGen,
+) -> Result<EditResult, EditError> {
+    validate_registered_media(state, &media)?;
+    let mut candidate = state.clone();
+    let media_ref = media.id.clone();
+    candidate.manifest.entries.push(media);
+    let replacement = swap_media(&mut candidate, clip_id, media_ref)?;
+    let timeline = candidate.timeline;
+    let manifest = candidate.manifest;
+    let affected = replacement.affected_clip_ids;
+
+    // `ids` is intentionally accepted to keep the external-render commands on
+    // the same command signature; SwapMedia itself does not mint ids.
+    let _ = ids;
+    transact(
+        state,
+        "Edit Motion Graphic",
+        |ids| format!("Edited motion graphic: {}", ids.join(", ")),
+        move |current| {
+            current.timeline = timeline;
+            current.manifest = manifest;
+            Ok(affected)
         },
     )
 }

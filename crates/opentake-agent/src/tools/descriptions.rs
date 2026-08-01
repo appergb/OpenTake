@@ -105,10 +105,10 @@ pub fn description(tool: ToolName) -> &'static str {
 
         ToolName::ApplyEffect => "Sets the effect chain on one or more clips in one undoable action. The closed effect registry is grayscale, sepia, and invert; each accepts an optional amount from 0 to 1 (default 1). Effects execute in list order in the shared preview/export GPU compositor. Pass enabled:false to retain a disabled effect. The list replaces the current chain; pass an empty array to clear it. Unknown names, parameters, non-finite values, and out-of-range values are rejected instead of rendering unchanged. Applies to every clip in clipIds.",
 
-        // --- OpenTake Motion Canvas graphics (docs/MOTION-GRAPHICS-PLUGIN.md, Issue #34) ---
-        ToolName::AddMotionGraphic => "Adds a Motion Canvas-generated animation/video segment (animated title, explainer card, data callout, timeline insert, or transition card) to the timeline as a single undoable workflow, and returns its clipId. In v1, OpenTake asks the Motion Canvas plugin to render a materialized .mp4, imports that output as a normal media asset, then places it on the timeline. Preview and export therefore reuse the ordinary video pipeline.\n\nThe 'source' object is exactly one of:\n  • { code: \"<Motion Canvas TS/TSX scene or project source>\" } — a self-contained Motion Canvas scene/project snippet. Prefer deterministic frame-driven animation, not wall-clock timers.\n  • { templateId, params } — instantiate a registered Motion Canvas template by id with typed params (string/number/bool/color; colors are hex '#RRGGBB'/'#RRGGBBAA'). The template declares which params it accepts.\n\nstartFrame/durationFrames are project frames (from get_timeline). trackIndex is optional — omit to auto-create a new video track at the top for the generated segment; set it to target an existing non-audio track. transparent is accepted for forward compatibility, but v1 mp4 materialization is opaque; transparent overlays are a later PNG-sequence/native-motion path.",
+        // --- OpenTake deterministic motion graphics (Issue #34 fallback vertical) ---
+        ToolName::AddMotionGraphic => "Renders a deterministic motion graphic to MP4, imports it, and places it on the timeline as one durable undoable workflow. Returns the new clipId. The currently packaged Beta renderer supports either self-contained HTML/CSS/JS code (animated through OpenTake.onSeek) or the registered templates 'title-card' and 'lower-third.glass'. Raw TypeScript/TSX and transparent output are reported as unsupported instead of being accepted as placeholders.\n\nstartFrame/durationFrames are project frames (from get_timeline). trackIndex is optional — omit to auto-create a new visual track; set it to target an existing non-audio track.",
 
-        ToolName::EditMotionGraphic => "Edits an existing Motion Canvas-generated clip and re-renders it as a single undoable workflow. Pass the clipId (from add_motion_graphic or get_timeline) and at least one of:\n  • code — replace the Motion Canvas TS/TSX source of a code-authored graphic.\n  • params — override template params (merged over the current bindings) of a template-authored graphic.\n\nThe clip must carry Motion Canvas metadata from add_motion_graphic; ordinary video clips are rejected. Re-rendering should update or replace the generated media asset and keep the timeline placement stable so later agent steps can keep using the same clip context.",
+        ToolName::EditMotionGraphic => "Re-renders an existing OpenTake motion graphic as one durable undoable workflow while preserving its timeline clipId and placement. Pass the clipId and either replacement self-contained HTML/CSS/JS for a code-authored graphic or parameter overrides for a template-authored graphic. Ordinary video clips and unsupported source types are rejected with typed errors.",
     }
 }
 
@@ -690,16 +690,16 @@ pub fn input_schema(tool: ToolName) -> Value {
             json!({
                 "source": {
                     "type": "object",
-                    "description": "Exactly one of code or templateId must be set. code is Motion Canvas TS/TSX scene/project source; templateId instantiates a registered Motion Canvas template with params.",
+                    "description": "Exactly one of code or templateId must be set. code is self-contained HTML/CSS/JS using OpenTake.onSeek; templateId selects a registered local template.",
                     "properties": {
-                        "code": {"type": "string", "description": "Motion Canvas TypeScript/TSX scene or project source. Prefer deterministic frame-driven animation, not wall-clock timers."},
-                        "templateId": {"type": "string", "description": "Registered Motion Canvas template id (e.g. 'lower-third.glass'). Mutually exclusive with code."},
+                        "code": {"type": "string", "description": "Self-contained HTML/CSS/JS document. Animate deterministically with OpenTake.onSeek; raw TS/TSX is not supported by this Beta renderer."},
+                        "templateId": {"type": "string", "enum": ["title-card", "lower-third.glass"], "description": "Registered local motion template. Mutually exclusive with code."},
                         "params": {"type": "object", "description": "Template params: name -> value. Values are string, number, bool, or a hex color string '#RRGGBB'/'#RRGGBBAA'. Only valid with templateId.", "additionalProperties": {"oneOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]}}
                     }
                 },
                 "startFrame": {"type": "integer", "description": "Timeline frame position to place the graphic (project frames)."},
                 "durationFrames": {"type": "integer", "description": "Clip length on the timeline, in project frames (>= 1)."},
-                "transparent": {"type": "boolean", "description": "Forward-compatible alpha intent. v1 Motion Canvas mp4 materialization is opaque; transparent overlays are a later PNG-sequence/native-motion path."},
+                "transparent": {"type": "boolean", "description": "Forward-compatible alpha intent. The current MP4 path rejects true with a typed unsupported-capability error."},
                 "trackIndex": {"type": "integer", "description": "Optional. Existing non-audio track index (0-based) to place the graphic on. Omit to auto-create a new video track at the top."}
             }),
             &["source", "startFrame", "durationFrames"],
@@ -707,9 +707,9 @@ pub fn input_schema(tool: ToolName) -> Value {
 
         ToolName::EditMotionGraphic => object(
             json!({
-                "clipId": {"type": "string", "description": "The Motion Canvas-generated clip id to edit (from add_motion_graphic or get_timeline)."},
-                "code": {"type": "string", "description": "Replacement Motion Canvas TypeScript/TSX source for a code-authored graphic. Only valid when the clip was authored with code."},
-                "params": {"type": "object", "description": "Template param overrides (merged over current bindings) for a template-authored Motion Canvas graphic. Values are string, number, bool, or a hex color string. Only valid when the clip was authored from a template.", "additionalProperties": {"oneOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]}}
+                "clipId": {"type": "string", "description": "The OpenTake motion clip id to edit (from add_motion_graphic or get_timeline)."},
+                "code": {"type": "string", "description": "Replacement self-contained HTML/CSS/JS for a code-authored graphic."},
+                "params": {"type": "object", "description": "Template parameter overrides merged over current bindings. Only valid for a template-authored graphic.", "additionalProperties": {"oneOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]}}
             }),
             &["clipId"],
         ),

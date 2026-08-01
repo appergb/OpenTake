@@ -3705,6 +3705,7 @@ dependencies = [
  "opentake-domain",
  "opentake-gen",
  "opentake-media",
+ "opentake-motion",
  "opentake-ops",
  "opentake-project",
  "opentake-render",

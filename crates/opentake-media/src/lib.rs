@@ -187,7 +187,8 @@ pub use ort_worker::ExecutionProvider;
 /// host-capability checks).
 pub mod ffmpeg_status {
     pub use crate::ff::{
-        ffmpeg_available, ffprobe_available, packaged_sidecar_beside, packaged_sidecar_path,
+        ffmpeg_available, ffmpeg_path, ffprobe_available, packaged_sidecar_beside,
+        packaged_sidecar_path,
     };
 }
 

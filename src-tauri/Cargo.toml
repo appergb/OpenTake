@@ -50,6 +50,7 @@ opentake-media = { workspace = true, features = ["whisper-backend", "ort-backend
 opentake-render = { workspace = true }
 opentake-gen = { workspace = true }
 opentake-agent = { workspace = true }
+opentake-motion = { workspace = true, features = ["chromium"] }
 # Preview composite frames are returned to the WebView as a base64 PNG data URL;
 # the agent's `inspect_timeline` bridge encodes composited frames as JPEG.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
@@ -59,6 +60,7 @@ cap-std = "4.0.2"
 cap-fs-ext = "4.0.2"
 sha2 = "0.10"
 uuid = { workspace = true }
+tempfile = "3"
 # Optional account scaffold: verify a token only against a user-configured
 # backend. Rustls keeps the desktop build independent of a system OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
@@ -93,7 +95,6 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
-tempfile = "3"
 opentake-media = { workspace = true, features = ["test-faults"] }
 tauri = { version = "2", features = ["protocol-asset", "test"] }
 

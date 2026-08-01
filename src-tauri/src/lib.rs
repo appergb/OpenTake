@@ -22,6 +22,7 @@ mod library;
 mod lut;
 mod mcp;
 mod media;
+pub mod motion;
 mod render;
 mod samples;
 mod search;
@@ -151,19 +152,25 @@ pub fn run() {
                 .join("workflows");
             let generation_bridge =
                 generation::build_bridge(core.clone(), cache_root.clone(), models_dir.clone());
+            let motion_bridge = Arc::new(motion::TauriMotionBridge::new(
+                core.clone(),
+                cache_root.clone(),
+            ));
             mcp::spawn(
                 core.clone(),
                 workflows_dir.clone(),
                 cache_root.clone(),
                 models_dir.clone(),
                 generation_bridge.clone(),
+                motion_bridge.clone(),
             );
-            let chat_state = chat::ChatState::new_with_generation(
+            let chat_state = chat::ChatState::new_with_capabilities(
                 core.clone(),
                 workflows_dir,
                 cache_root.clone(),
                 models_dir.clone(),
                 generation_bridge.clone(),
+                motion_bridge.clone(),
             );
 
             // A global favorite must never silently become a temporary file.
@@ -181,6 +188,15 @@ pub fn run() {
             app.manage(core);
             app.manage(commands::ProjectLifecycleCoordinator::default());
             app.manage(generation_bridge);
+            let motion_state = motion::MotionCommandState::new(motion_bridge);
+            let motion_transition_state = motion_state.clone();
+            app.state::<AppCore>()
+                .subscribe_project_identity_transition(move |pending| {
+                    if pending {
+                        motion_transition_state.cancel_active();
+                    }
+                });
+            app.manage(motion_state);
             app.manage(chat_state);
             app.manage(MediaState::new(engine));
             app.manage(media::StabilizationAnalysisState::default());
@@ -284,6 +300,10 @@ pub fn run() {
             export::cancel_export,
             generation::generation_cancel,
             generation::generation_retry,
+            motion::motion_capability,
+            motion::motion_add,
+            motion::motion_edit,
+            motion::motion_cancel,
             secret::secret_save,
             secret::secret_load,
             secret::secret_delete,

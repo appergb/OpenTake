@@ -43,6 +43,10 @@ use crate::mcp::media_bridge::{
     InspectMediaResult, InspectResult, MediaBridge, SearchCandidate, TranscriptSource,
     IMPORT_BYTES_BASE64_MAX,
 };
+use crate::mcp::motion::{
+    AddMotionRequest, EditMotionRequest, MotionBridge, MotionBridgeError, MotionBridgeErrorKind,
+    MotionSourceRequest,
+};
 use crate::plugin::registry::PluginRegistry;
 use crate::signal::engine;
 use crate::signal::rules::OpContext;
@@ -78,6 +82,9 @@ pub struct Dispatcher {
     /// Paid generation/upscale side-door. The desktop host injects this only
     /// when it can persist jobs and run configured providers.
     generation_bridge: Option<Arc<dyn GenerationBridge>>,
+    /// Deterministic render + atomic import/place host capability. Motion tools
+    /// are discoverable only while this bridge reports production readiness.
+    motion_bridge: Option<Arc<dyn MotionBridge>>,
     /// Action names of agent edits applied through this dispatcher, newest last.
     /// Guards `undo`: we only revert when this session has pushed an edit.
     agent_undo: Mutex<Vec<String>>,
@@ -109,11 +116,25 @@ impl Dispatcher {
         bridge: Option<Arc<dyn MediaBridge>>,
         generation_bridge: Option<Arc<dyn GenerationBridge>>,
     ) -> Self {
+        Self::with_capability_bridges(handle, registry, bridge, generation_bridge, None)
+    }
+
+    /// New dispatcher with every optional host capability injected
+    /// independently. The narrower constructors remain source-compatible for
+    /// non-desktop hosts and tests.
+    pub fn with_capability_bridges(
+        handle: Arc<dyn CoreHandle>,
+        registry: Arc<RwLock<PluginRegistry>>,
+        bridge: Option<Arc<dyn MediaBridge>>,
+        generation_bridge: Option<Arc<dyn GenerationBridge>>,
+        motion_bridge: Option<Arc<dyn MotionBridge>>,
+    ) -> Self {
         Dispatcher {
             handle,
             registry,
             bridge,
             generation_bridge,
+            motion_bridge,
             agent_undo: Mutex::new(Vec::new()),
         }
     }
@@ -130,6 +151,12 @@ impl Dispatcher {
             .is_some_and(|bridge| bridge.can_generate())
     }
 
+    pub fn can_render_motion(&self) -> bool {
+        self.motion_bridge
+            .as_ref()
+            .is_some_and(|bridge| bridge.can_render_motion())
+    }
+
     pub fn advertised_tools(&self) -> Vec<ToolName> {
         let mut tools = ToolName::ALL.to_vec();
         if !self.has_media_bridge() {
@@ -137,6 +164,9 @@ impl Dispatcher {
         }
         if self.can_generate() {
             tools.extend(ToolName::GENERATION);
+        }
+        if self.can_render_motion() {
+            tools.extend(ToolName::MOTION);
         }
         tools
     }
@@ -311,10 +341,78 @@ impl Dispatcher {
             | ToolName::GenerateImage
             | ToolName::GenerateAudio
             | ToolName::UpscaleMedia => self.submit_generation(tool, args, cancel),
-            ToolName::AddMotionGraphic | ToolName::EditMotionGraphic => Ok(ToolResult::error(
-                format!("{}: capability is not advertised", tool.as_str()),
-            )),
+            ToolName::AddMotionGraphic => self.add_motion_graphic(args, cancel),
+            ToolName::EditMotionGraphic => self.edit_motion_graphic(args, cancel),
         }
+    }
+
+    fn add_motion_graphic(
+        &self,
+        args: &Value,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<ToolResult, ToolError> {
+        let decoded: AddMotionGraphicArgs = decode_tool_args(args, "")?;
+        let source: MotionSourceArg = decode_tool_args(&decoded.source, "source")?;
+        let source = match (source.code, source.template_id) {
+            (Some(code), None) => MotionSourceRequest::Code(code),
+            (None, Some(template_id)) => MotionSourceRequest::Template {
+                template_id,
+                params: source.params.unwrap_or_default(),
+            },
+            _ => return Err(ToolError::new("source: exactly one source is required")),
+        };
+        let bridge = self.motion_bridge.as_ref().ok_or_else(|| {
+            ToolError::new("add_motion_graphic: motion renderer is not available")
+        })?;
+        let commit = match bridge.add(
+            AddMotionRequest {
+                source,
+                start_frame: decoded.start_frame,
+                duration_frames: decoded.duration_frames,
+                transparent: decoded.transparent.unwrap_or(false),
+                track_index: decoded.track_index,
+            },
+            cancel,
+        ) {
+            Ok(commit) => commit,
+            Err(error) => return Ok(motion_bridge_error(ToolName::AddMotionGraphic, error)),
+        };
+        self.agent_undo
+            .lock()
+            .expect("agent-undo mutex")
+            .push(commit.action_name.clone());
+        serde_json::to_string(&commit)
+            .map(ToolResult::ok)
+            .map_err(|error| ToolError::new(format!("motion result encoding failed: {error}")))
+    }
+
+    fn edit_motion_graphic(
+        &self,
+        args: &Value,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<ToolResult, ToolError> {
+        let decoded: EditMotionGraphicArgs = decode_tool_args(args, "")?;
+        let bridge = self.motion_bridge.as_ref().ok_or_else(|| {
+            ToolError::new("edit_motion_graphic: motion renderer is not available")
+        })?;
+        let commit = match bridge.edit(
+            EditMotionRequest {
+                clip_id: decoded.clip_id,
+                code: decoded.code,
+                params: decoded.params,
+            },
+            cancel,
+        ) {
+            Ok(commit) => commit,
+            Err(error) => return Ok(motion_bridge_error(ToolName::EditMotionGraphic, error)),
+        };
+        self.agent_undo
+            .lock()
+            .expect("agent-undo mutex")
+            .push(commit.action_name.clone());
+        serde_json::to_string(&commit)
+            .map(ToolResult::ok)
+            .map_err(|error| ToolError::new(format!("motion result encoding failed: {error}")))
     }
 
     // MARK: - Generative read bodies
@@ -2383,6 +2481,22 @@ fn validate_motion_params(
         }
     }
     Ok(())
+}
+
+fn motion_bridge_error(tool: ToolName, error: MotionBridgeError) -> ToolResult {
+    match error.kind {
+        MotionBridgeErrorKind::InvalidArguments => {
+            ToolResult::public_error(PublicErrorKind::InvalidArguments(tool), error.message)
+        }
+        MotionBridgeErrorKind::ResourceNotFound => {
+            ToolResult::public_error(PublicErrorKind::ResourceNotFound(tool), error.message)
+        }
+        MotionBridgeErrorKind::CapabilityUnavailable => {
+            ToolResult::public_error(PublicErrorKind::CapabilityUnavailable(tool), error.message)
+        }
+        MotionBridgeErrorKind::Cancelled => ToolResult::error("motion render cancelled"),
+        MotionBridgeErrorKind::RenderFailed => ToolResult::error("motion render failed"),
+    }
 }
 
 fn validate_array<T: ToolArgs>(args: &Value, field: &str) -> Result<(), ToolError> {

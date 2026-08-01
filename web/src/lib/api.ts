@@ -421,6 +421,65 @@ export async function retryGeneration(
   throw new Error("Generation retry is available only in the desktop app");
 }
 
+export type MotionProgressPhase =
+  | "validating"
+  | "rendering"
+  | "encoding"
+  | "committing"
+  | "complete";
+
+export interface MotionAddRequest {
+  code?: string;
+  templateId?: "title-card" | "lower-third.glass";
+  params?: Record<string, string>;
+  startFrame: number;
+  durationFrames: number;
+  transparent?: boolean;
+  trackIndex?: number;
+}
+
+export interface MotionCommit {
+  clipId: string;
+  assetId: string;
+  contentHash: string;
+  actionName: string;
+}
+
+export async function motionCapability(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("motion_capability");
+  return false;
+}
+
+export async function addMotion(request: MotionAddRequest): Promise<MotionCommit> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MotionCommit>("motion_add", { request });
+  throw new Error("Motion graphics require the desktop app");
+}
+
+export async function cancelMotion(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("motion_cancel");
+  return false;
+}
+
+export async function onMotionProgress(
+  handler: (phase: MotionProgressPhase) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("motion_progress", (event) => {
+    if (
+      typeof event.payload === "string" &&
+      ["validating", "rendering", "encoding", "committing", "complete"].includes(
+        event.payload,
+      )
+    ) {
+      handler(event.payload as MotionProgressPhase);
+    }
+  });
+}
+
 /** Progress payload for `"export://progress"`: `done` of `total` frames
  *  composited so far. */
 export interface ExportProgress {

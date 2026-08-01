@@ -37,6 +37,7 @@ use opentake_agent::mcp::media_bridge::{
     SearchIndexState, SearchMediaResult, SearchSpokenHit, SearchVisualHit, TranscriptSource,
     TranscriptSourceResult, IMPORT_BYTES_DECODED_MAX,
 };
+use opentake_agent::mcp::motion::MotionBridge;
 use opentake_agent::mcp::server;
 use opentake_agent::plugin::registry::PluginRegistry;
 use opentake_core::{
@@ -260,6 +261,7 @@ pub fn spawn(
     cache_root: PathBuf,
     models_dir: PathBuf,
     generation_bridge: Arc<dyn GenerationBridge>,
+    motion_bridge: Arc<dyn MotionBridge>,
 ) {
     let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(core.clone()));
     let bridge = build_media_bridge(core, cache_root, models_dir);
@@ -272,12 +274,13 @@ pub fn spawn(
                 return;
             }
         };
-        if let Err(e) = server::serve_with_bridges(
+        if let Err(e) = server::serve_with_capability_bridges(
             addr,
             handle,
             registry,
             Some(bridge),
             Some(generation_bridge),
+            Some(motion_bridge),
         )
         .await
         {
