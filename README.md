@@ -61,7 +61,7 @@ OpenTake is not a replacement for CapCut / DaVinci Resolve / Final Cut Pro — i
 |:--|:--|:--|
 | Agent doesn't know how to edit | Agent reads skill docs on its own | Software pushes Context Signal — "this track is A-roll, cut with talking-head rhythm" |
 | Cross-platform needs 3 codebases | macOS: Swift/AVFoundation, Windows: C++/DirectShow | Single Rust codebase, FFmpeg + wgpu, identical experience on all 3 platforms |
-| I want to use my own AI keys | Locked into vendor cloud services | BYOK — direct to fal.ai / Replicate / OpenAI, zero backend, zero ops cost |
+| I want to use AI directly | Locked into vendor cloud services | Official Codex / ChatGPT sign-in for Agent, plus BYOK for fal.ai / Replicate / OpenAI |
 | Agent can chat but can't act | CLI agent reads text output | MCP Server with 31 tools — Agent directly runs add_clips / split_clip / set_keyframes |
 | Rewriting prompts for every video type | "You are editing a product review..." every time | Workflow Plugin System: review/tutorial/gaming/wedding, each pre-packaged with methodology |
 | Steep learning curve for new tools | Complex UI, long onboarding | Agent operates for you — just say "edit this interview into a 3-minute highlight" |
@@ -110,7 +110,9 @@ Full MCP server at `127.0.0.1:19789`. Agents control the timeline directly:
 | Library | 7 | `create_folder`, `move_to_folder`, `rename_media` |
 | Resources | 2 | `models/video`, `models/image` |
 
-Built-in Agent chat panel shares tool definitions and system prompt with MCP.
+Built-in Agent chat panel shares tool definitions and system prompt with MCP. It can use direct
+OpenAI/Anthropic BYOK or the user-installed official Codex CLI's ChatGPT sign-in; OpenTake never
+reads or stores the Codex credential.
 
 ### 🎬 Cross-Platform Media Engine
 

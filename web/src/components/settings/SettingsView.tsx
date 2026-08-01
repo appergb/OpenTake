@@ -14,6 +14,7 @@ import {
   Check,
   Copy,
   Download,
+  ExternalLink,
   FolderOpen,
   Info,
   Palette,
@@ -34,7 +35,16 @@ import {
 } from "../../store/settingsStore";
 import { useEditorUiStore, type SettingsPaneId } from "../../store/uiStore";
 import { openDialog } from "../../lib/dialog";
-import { secretSave, secretLoad, secretDelete } from "../../lib/api";
+import {
+  codexAuthStatus,
+  codexLoginCancel,
+  codexLoginStart,
+  codexLogout,
+  secretSave,
+  secretLoad,
+  secretDelete,
+  type CodexAuthStatus,
+} from "../../lib/api";
 import type { SecretStatus } from "../../lib/types";
 import { AccountPane } from "./AccountPane";
 
@@ -497,6 +507,7 @@ function ImportPane() {
 }
 
 const PROVIDERS: Array<{ id: ByokProvider; label: string }> = [
+  { id: "codex", label: "Codex / ChatGPT" },
   { id: "anthropic", label: "Anthropic" },
   { id: "fal", label: "fal.ai" },
   { id: "replicate", label: "Replicate" },
@@ -521,6 +532,8 @@ function AiPane() {
   const [status, setStatus] = useState<SecretStatus>({ hasKey: false, masked: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [codexStatus, setCodexStatus] = useState<CodexAuthStatus | null>(null);
+  const isCodex = provider === "codex";
 
   // Reflect the keychain status for the active provider; reload on switch. The
   // plaintext key is never fetched — only `hasKey` and the masked form.
@@ -528,6 +541,21 @@ function AiPane() {
     let alive = true;
     setDraft("");
     setError(null);
+    if (provider === "codex") {
+      setCodexStatus(null);
+      void codexAuthStatus().then(
+        (next) => {
+          if (alive) setCodexStatus(next);
+        },
+        (reason) => {
+          if (alive) setError(t("settings.codexActionFailed", { error: errorMessage(reason) }));
+        },
+      );
+      return () => {
+        alive = false;
+      };
+    }
+    setCodexStatus(null);
     void secretLoad(provider).then(
       (s) => {
         if (alive) setStatus(s);
@@ -539,7 +567,24 @@ function AiPane() {
     return () => {
       alive = false;
     };
-  }, [provider]);
+  }, [provider, t]);
+
+  useEffect(() => {
+    if (!isCodex || !codexStatus?.loginInProgress) return;
+    let alive = true;
+    const timer = window.setInterval(() => {
+      void codexAuthStatus().then(
+        (next) => {
+          if (alive) setCodexStatus(next);
+        },
+        () => undefined,
+      );
+    }, 1200);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [codexStatus?.loginInProgress, isCodex]);
 
   const trimmed = draft.trim();
 
@@ -571,17 +616,124 @@ function AiPane() {
     }
   };
 
+  const runCodexAction = async (
+    action: () => Promise<CodexAuthStatus>,
+  ) => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setCodexStatus(await action());
+    } catch (reason) {
+      setError(t("settings.codexActionFailed", { error: errorMessage(reason) }));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <Section title={t("settings.section.ai")}>
       <div style={{ fontSize: "var(--fs-sm-md)", color: "var(--text-tertiary)" }}>
-        {t("settings.byokDesc")}
+        {isCodex ? t("settings.codexDesc") : t("settings.byokDesc")}
       </div>
       <Field
         label={t("settings.byokProvider")}
         control={
-          <Segmented<ByokProvider> value={provider} options={PROVIDERS} onChange={setProvider} />
+          <Dropdown<ByokProvider>
+            value={provider}
+            options={PROVIDERS}
+            onChange={setProvider}
+            ariaLabel={t("settings.byokProvider")}
+            minWidth={190}
+          />
         }
       />
+      {isCodex ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              minHeight: 34,
+              padding: "0 var(--space-sm)",
+              borderRadius: "var(--radius-sm)",
+              ...settingsControlStyle,
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "var(--space-sm)" }}>
+              <span
+                aria-hidden="true"
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  background: codexStatus?.authenticated
+                    ? "var(--status-success)"
+                    : codexStatus?.loginInProgress
+                      ? "var(--accent-primary)"
+                      : "var(--text-tertiary)",
+                }}
+              />
+              <span style={{ fontSize: "var(--fs-sm)", color: "var(--text-primary)" }}>
+                {!codexStatus
+                  ? t("settings.codexChecking")
+                  : !codexStatus.available
+                    ? t("settings.codexUnavailable")
+                    : codexStatus.loginInProgress
+                      ? t("settings.codexWaiting")
+                      : codexStatus.authenticated
+                        ? t("settings.codexSignedIn", {
+                            method: codexStatus.authMethod ?? "ChatGPT",
+                          })
+                        : t("settings.codexSignedOut")}
+              </span>
+            </div>
+            {codexStatus?.version && (
+              <span className="tabular" style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)" }}>
+                {codexStatus.version}
+              </span>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: "var(--space-xs)" }}>
+            {codexStatus?.loginInProgress ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void runCodexAction(codexLoginCancel)}
+                className="hover-area"
+                style={{ height: 28, padding: "0 var(--space-lg)", borderRadius: "var(--radius-sm)", ...settingsControlStyle, color: "var(--text-primary)", fontSize: "var(--fs-sm)" }}
+              >
+                {t("settings.codexCancel")}
+              </button>
+            ) : codexStatus?.authenticated ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void runCodexAction(codexLogout)}
+                className="hover-area"
+                style={{ height: 28, padding: "0 var(--space-lg)", borderRadius: "var(--radius-sm)", ...settingsControlStyle, color: "var(--text-primary)", fontSize: "var(--fs-sm)" }}
+              >
+                {t("settings.codexLogout")}
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={busy || codexStatus?.available === false}
+                onClick={() => void runCodexAction(codexLoginStart)}
+                className="hover-area"
+                style={{ display: "inline-flex", alignItems: "center", gap: "var(--space-xs)", height: 28, padding: "0 var(--space-lg)", borderRadius: "var(--radius-sm)", ...settingsControlStyle, color: "var(--text-primary)", fontSize: "var(--fs-sm)", opacity: busy || codexStatus?.available === false ? 0.4 : 1 }}
+              >
+                <Icon icon={ExternalLink} size={13} />
+                {t("settings.codexLogin")}
+              </button>
+            )}
+          </div>
+          {error && (
+            <div style={{ fontSize: "var(--fs-xs)", color: "var(--status-error)" }}>{error}</div>
+          )}
+        </div>
+      ) : (
       <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
         <label style={{ fontSize: "var(--fs-md)", color: "var(--text-primary)" }}>
           {t("settings.byokKey")}
@@ -665,6 +817,7 @@ function AiPane() {
           )
         )}
       </div>
+      )}
     </Section>
   );
 }

@@ -1612,6 +1612,54 @@ export async function secretDelete(provider: string): Promise<SecretStatus> {
   return NO_SECRET;
 }
 
+// MARK: - Official Codex / ChatGPT authentication
+//
+// OpenTake never receives a ChatGPT token. These commands only ask the
+// user-installed official Codex CLI to report, start, cancel, or clear its own
+// login session.
+
+export interface CodexAuthStatus {
+  available: boolean;
+  authenticated: boolean;
+  authMethod: string | null;
+  version: string | null;
+  loginInProgress: boolean;
+  message: string;
+}
+
+const NO_CODEX: CodexAuthStatus = {
+  available: false,
+  authenticated: false,
+  authMethod: null,
+  version: null,
+  loginInProgress: false,
+  message: "Official Codex CLI is available only in the desktop app",
+};
+
+export async function codexAuthStatus(): Promise<CodexAuthStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<CodexAuthStatus>("codex_auth_status");
+  return NO_CODEX;
+}
+
+export async function codexLoginStart(): Promise<CodexAuthStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<CodexAuthStatus>("codex_login_start");
+  return NO_CODEX;
+}
+
+export async function codexLoginCancel(): Promise<CodexAuthStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<CodexAuthStatus>("codex_login_cancel");
+  return NO_CODEX;
+}
+
+export async function codexLogout(): Promise<CodexAuthStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<CodexAuthStatus>("codex_logout");
+  return NO_CODEX;
+}
+
 // MARK: - Optional account backend
 //
 // OpenTake has no official backend. Outside Tauri, and before a user stores a

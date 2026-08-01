@@ -13,7 +13,8 @@ OpenTake 的第一个可安装 Beta。核心闭环为：创建/打开工程 → 
 - 可恢复的工程持久化、全局素材库、缩略图/波形/代理媒体、缺失素材重链接。
 - Rust/WGPU 预览与导出共享合成路径，支持文本、调色、绿幕、蒙版、LUT、HSL、
   Lift/Gamma/Gain、通用特效、交叉溶解、嵌套时间线、补帧与防抖。
-- Agent/MCP 编辑、内置聊天、BYOK 生成作业、Motion Canvas 动效与原生 Chromium fallback。
+- Agent/MCP 编辑、内置聊天、官方 Codex CLI / ChatGPT 登录、BYOK 生成作业、Motion Canvas
+  动效与原生 Chromium fallback。Codex 登录态完全由官方 CLI 管理，OpenTake 不读取或保存令牌。
 - 本地口播清理、响度统一、降噪、声部分离、RVM 抠像、智能擦除、参考色彩匹配和
   可视化运动追踪；字幕翻译、图文成片、数字人与音色克隆提供审阅/同意/成本边界。
 - 完整键盘、焦点、菜单、拖拽、撤销/重做与辅助功能回归门禁。
@@ -28,8 +29,9 @@ OpenTake 的第一个可安装 Beta。核心闭环为：创建/打开工程 → 
 ### Beta 已知边界
 
 - 本地 macOS Beta 包未使用 Developer ID 签名或 Apple 公证；首次打开需要用户明确允许。
-- 数字人、音色克隆、通用云生成和 Agent 云模型需要用户自己的 provider key，并可能产生
-  第三方费用；无 key 时功能会显式不可用或拒绝，不会静默调用。
+- 数字人、音色克隆和通用云生成需要用户自己的 provider key，并可能产生第三方费用；
+  Agent 可选择 provider key，也可复用官方 Codex CLI 的 ChatGPT 登录。无可用登录或 key 时
+  功能会显式不可用或拒绝，不会静默调用。
 - Windows 安装包由精确 SHA CI 构建和验证；原生 Windows WebView 的最终人工交互烟测仍是
   平台发布门槛，不影响本次 Apple Silicon macOS 本地 Beta。
 - 任意 Motion Canvas TSX、透明动效、神经语义级任意人声分离等属于后续 Beta 范围。

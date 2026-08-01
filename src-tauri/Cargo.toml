@@ -73,7 +73,7 @@ sentry = { workspace = true }
 # timers and the loopback runtime), so it cannot be optional in the minimal
 # no-playback shell. The remaining transport dependencies stay feature-gated.
 axum = { version = "0.8", features = ["ws"], optional = true }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "sync", "time", "process", "io-util"] }
 bytes = { version = "1", optional = true }
 futures = { version = "0.3", optional = true }
 # Real-time audio output backing the playback master clock (#63). New crate:

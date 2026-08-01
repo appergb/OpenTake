@@ -39,4 +39,12 @@ describe("SettingsView minimal embedded visual direction", () => {
     expect(settingsSource).toContain('labelKey: "settings.section.account"');
     expect(settingsSource).toContain("return <AccountPane />");
   });
+
+  it("supports official Codex ChatGPT login without rendering an API-key field", () => {
+    expect(settingsSource).toContain('{ id: "codex", label: "Codex / ChatGPT" }');
+    expect(settingsSource).toContain("codexAuthStatus");
+    expect(settingsSource).toContain("codexLoginStart");
+    expect(settingsSource).toContain("codexLogout");
+    expect(settingsSource).toContain("isCodex ? (");
+  });
 });

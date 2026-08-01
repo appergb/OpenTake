@@ -12,6 +12,7 @@ import { isTauri, setProxyPlaybackEnabled as setProxyPlaybackEnabledNative } fro
 
 export type Theme = "dark" | "light";
 export type ByokProvider =
+  | "codex"
   | "anthropic"
   | "fal"
   | "replicate"
@@ -38,7 +39,8 @@ function loadString(key: string): string | null {
 }
 function loadProvider(): ByokProvider {
   const v = loadString(LS.byokProvider);
-  return v === "fal" ||
+  return v === "codex" ||
+    v === "fal" ||
     v === "replicate" ||
     v === "openai" ||
     v === "elevenlabs" ||

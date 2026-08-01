@@ -10,6 +10,7 @@ mod account;
 mod advanced;
 mod captions;
 mod chat;
+mod codex;
 mod commands;
 // `pub` so the ffmpeg-gated integration test (`tests/export_integration.rs`) can
 // drive the export orchestrator (`export::run_export`) against the library
@@ -219,6 +220,7 @@ pub fn run() {
                     }
                 });
             app.manage(chat_state);
+            app.manage(codex::CodexAuthState::default());
             app.manage(MediaState::new(engine));
             app.manage(media::StabilizationAnalysisState::default());
             app.manage(media::LoudnessAnalysisState::default());
@@ -347,6 +349,10 @@ pub fn run() {
             account::account_login,
             account::account_logout,
             account::account_get_status,
+            codex::codex_auth_status,
+            codex::codex_login_start,
+            codex::codex_login_cancel,
+            codex::codex_logout,
             chat::chat_send,
             chat::chat_history,
             chat::chat_sessions,
