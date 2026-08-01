@@ -973,6 +973,8 @@ TimelineContainer (relative)
 
 > **跨平台键位**:macOS ⌘ → Win/Linux Ctrl;⌥ → Alt。Tauri 下用 `accelerator` 字符串复刻。keyCode 是 macOS 物理键码,前端用 `event.code`(如 `Space`/`KeyC`/`BracketLeft`/`Backquote`/`ArrowLeft`)更可靠,**逐键对照上表语义**。
 
+**OpenTake 代码门禁（2026-08-01）**:`resolveDocumentedShortcut` 与 `APPLICATION_MENU_SPEC` 共同构成可审计的 WebView/原生菜单快捷键边界。表驱动测试覆盖 macOS/Windows 修饰键、保存/另存冲突、Space 修饰与 repeat、媒体/时间线焦点、输入控件、弹窗、只读工程及非编辑视图 no-op；实际 hook 只执行解析后的单一语义命令。代码测试与生产构建已通过，打包桌面端逐键证据仍是最终勾选前置。
+
 ### 9.7 Hover / 焦点 / 游标态
 
 | 元素 | hover 效果 | 来源 |
@@ -1277,6 +1279,8 @@ interface Clip {                  // Timeline.swift:75-117
 - [ ] §9.4 razor/split/关键帧/淡变/音量全 8 条。
 - [ ] §9.5 playhead/scrub/缩放全 9 条（含光标锚定缩放、灵敏度常量）。
 - [ ] §9.6 快捷键全表逐键。
+
+代码门禁已完成：完整表、平台修饰键、冲突/抑制规则与菜单动作均有 owning matrix；此项保持未勾选，直到打包应用逐键实际验证完成。
 - [ ] §9.7 hover/游标全表。
 - [ ] §9.8 右键菜单项与分组逐字（§5.10）。
 

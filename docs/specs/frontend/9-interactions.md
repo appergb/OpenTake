@@ -99,6 +99,8 @@
 
 > **跨平台键位**:macOS ⌘ → Win/Linux Ctrl;⌥ → Alt。Tauri 下用 `accelerator` 字符串复刻。keyCode 是 macOS 物理键码,前端用 `event.code`(如 `Space`/`KeyC`/`BracketLeft`/`Backquote`/`ArrowLeft`)更可靠,**逐键对照上表语义**。
 
+**OpenTake 代码门禁（2026-08-01）**:`resolveDocumentedShortcut` 是本表唯一的 WebView 物理键解析边界，按表输出语义命令；`APPLICATION_MENU_SPEC` 继续作为原生菜单 accelerator 与同一动作的声明边界。矩阵已覆盖 macOS/Windows 修饰键、`⌘S`/`⌘⇧S` 冲突、Space 修饰/重复、媒体与时间线方向键、输入控件、弹窗、只读工程及 Home/no-editor no-op。`useKeyboardShortcuts` 只执行解析结果，并对一次性命令抑制 repeat。代码测试与生产构建已通过；本表最终勾选仍须完成打包桌面端逐键取证。
+
 ### 9.7 Hover / 焦点 / 游标态
 
 | 元素 | hover 效果 | 来源 |

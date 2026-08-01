@@ -34,6 +34,8 @@
 - [ ] §9.4 razor/split/关键帧/淡变/音量全 8 条。
 - [ ] §9.5 playhead/scrub/缩放全 9 条（含光标锚定缩放、灵敏度常量）。
 - [ ] §9.6 快捷键全表逐键。
+
+代码门禁已完成：完整快捷键表由 `DOCUMENTED_SHORTCUT_ROWS`、`resolveDocumentedShortcut`、`APPLICATION_MENU_SPEC` 和两个 owning tests 共同约束，覆盖修饰键冲突、焦点/弹窗/只读态、repeat 与语义命令。此项保持未勾选，直到打包应用按表逐键完成实际验证并留存结果。
 - [ ] §9.7 hover/游标全表。
 - [ ] §9.8 右键菜单项与分组逐字（§5.10）。
 

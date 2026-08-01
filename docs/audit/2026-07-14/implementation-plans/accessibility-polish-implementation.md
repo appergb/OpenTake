@@ -569,7 +569,7 @@
   - Conflicting or disabled shortcuts must not mutate state; repeat behavior and undo grouping must match the specified command.
   - Table-drive all shortcut rows across editor focus, text input, modal, locked selection, playback, and no-project states.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/hooks/useKeyboardShortcuts.matrix.test.ts#all_shortcuts_conflicts_editable_suppression_and_platform_modifiers` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
   - `web/src/hooks/useKeyboardShortcuts.test.ts#complete_documented_shortcut_table` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
@@ -580,7 +580,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/hooks/useKeyboardShortcuts.matrix.test.ts -t "all_shortcuts_conflicts_editable_suppression_and_platform_modifiers"`
   - Run: `pnpm -C web test -- --run src/hooks/useKeyboardShortcuts.test.ts -t "complete_documented_shortcut_table"`
@@ -591,11 +591,11 @@
 
   Expected: FAIL because one or more of the 3 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/App.tsx#App`, `web/src/hooks/useKeyboardShortcuts.ts#handleProjectSaveKeyDown`, `web/src/hooks/useKeyboardShortcuts.ts#handleTransportSpaceKeyDown`, `web/src/hooks/useKeyboardShortcuts.ts#useKeyboardShortcuts`, `web/src/store/editActions.ts#splitAtPlayhead`, `docs/modules/web/SPEC.md`, `docs/specs/frontend/13-implementation.md`, `docs/specs/frontend/9-interactions.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/hooks/useKeyboardShortcuts.matrix.test.ts -t "all_shortcuts_conflicts_editable_suppression_and_platform_modifiers"`
   - Run: `pnpm -C web test -- --run src/hooks/useKeyboardShortcuts.test.ts -t "complete_documented_shortcut_table"`
@@ -606,11 +606,23 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: both reviewed owners first failed because the complete
+  resolver/table did not exist. They passed after one physical-key resolver was
+  integrated with the hook and native-menu semantic command boundary. All six
+  named existing/focused owners passed; the full Web gate passed with 99 files /
+  837 tests and the production build passed, with only the existing dynamic-
+  import and chunk-size advisories.
+
+- [ ] **Runtime evidence gate:** exercise every §9.6 row in the packaged desktop
+  app on the macOS accelerator path, including input focus, modal, repeat,
+  disabled/read-only and no-project states; retain the exact command/result and
+  visible-state evidence before final parity reclassification.
 
 ### Task 6: AP-hover-focus-cursor-matrix + complete-hover-cursor-table (implementation-slice-7dce3a0f53283ac9)
 
