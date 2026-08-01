@@ -1823,33 +1823,46 @@
   - Visible/accessibility/return path: success=open/close a reusable enum Dropdown: setOpen toggles; outside/Escape closes; accessibility={"focus":"Native keyboard-focusable control","label":"ariaLabel","shortcut":"None declared on this control"}; returnPath=["Outside click/Escape closes visually; DOM focus is not explicitly restored."].
   - Outcome matrix: {"success":"open/close a reusable enum Dropdown: setOpen toggles; outside/Escape closes","pending":"Not applicable — this activation only changes local/caller state and starts no Promise, API, Tauri command, or Rust work.","empty":"Not applicable — this control does not consume a collection, selection, or free-form payload that has an empty state.","disabled":"No explicit disabled prop on this candidate.","cancel":"Cancellation/dismissal follows the exact guard in setOpen toggles; outside/Escape closes; no broader cancellation behavior is assumed.","retry":"Not applicable as an error-recovery state — the synchronous local action can simply be activated again.","failure":"Not applicable — this immediate activation calls no API/Tauri/Rust boundary, so there is no backend rejection path."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/ui/Dropdown.interaction.test.tsx#control-f1370db38b24cf33 open/close a reusable enum Dropdown` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/ui/Dropdown.interaction.test.tsx -t "control-f1370db38b24cf33 open/close a reusable enum Dropdown"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/ui/Dropdown.tsx`, `web/src/components/ui/Dropdown.tsx#Dropdown` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/ui/Dropdown.interaction.test.tsx -t "control-f1370db38b24cf33 open/close a reusable enum Dropdown"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: the focused owner first failed because the trigger had
+  no programmatic listbox relationship and dismissal did not restore focus.
+  Opening now focuses the selected enabled option (or first enabled fallback),
+  Arrow/Home/End move only among enabled options, and outside click, Escape,
+  option selection or a second trigger activation closes safely and restores
+  the native labeled trigger. The synchronous open/close path emits no caller
+  change. The Web gate passes with 109 files / 858 tests plus a production
+  build.
+
+- [ ] **Runtime evidence gate:** exercise a packaged reusable Dropdown by
+  pointer and keyboard, verify selected/disabled option navigation, then close
+  by outside click, Escape and the trigger while checking focus restoration.
 
 ### Task 22: control-acceptance (implementation-slice-ba029e02db838d36)
 
