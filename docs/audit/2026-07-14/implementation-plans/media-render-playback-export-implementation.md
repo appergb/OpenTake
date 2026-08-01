@@ -2338,7 +2338,7 @@ not the separately owned desktop motion/Lottie materialization.
   - Visible/returned assertion: assert the returned project/error variant, exact post-operation files and decoded state, and save-then-reopen equality or the specified fail-closed no-write result.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_376576e91988107c.rs#completion_376576e91988107c_the_named_ffmpeg_probe_decode_pcm_encode_contrac.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-media/tests/ffmpeg_integration.rs#probe_reports_dimensions_fps_and_audio` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-media/tests/ffmpeg_integration.rs#decode_frame_returns_rgba_of_expected_size` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -2347,7 +2347,7 @@ not the separately owned desktop motion/Lottie materialization.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and reconcile the historical baseline**
 
   - Run: `cargo test -p opentake-media --test ffmpeg_integration probe_reports_dimensions_fps_and_audio -- --exact`
   - Run: `cargo test -p opentake-media --test ffmpeg_integration decode_frame_returns_rgba_of_expected_size -- --exact`
@@ -2356,11 +2356,11 @@ not the separately owned desktop motion/Lottie materialization.
 
   Expected: FAIL because one or more of the 4 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-media/src/probe.rs#probe`, `crates/opentake-media/src/decode/frame.rs#decode_frame_at`, `crates/opentake-media/src/decode/pcm.rs#extract_pcm`, `crates/opentake-media/src/encode/mod.rs#VideoEncoder`, `docs/specs/media/2-ffmpeg.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-media --test ffmpeg_integration probe_reports_dimensions_fps_and_audio -- --exact`
   - Run: `cargo test -p opentake-media --test ffmpeg_integration decode_frame_returns_rgba_of_expected_size -- --exact`
@@ -2369,11 +2369,22 @@ not the separately owned desktop motion/Lottie materialization.
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Reconciled 2026-08-01 as an already-integrated baseline. Git history shows
+  all four named owning fixtures and their production paths landed together in
+  `d9b2812`; its parent does not contain the tests, so there is no honest
+  test-present/implementation-missing RED command to replay. On the current
+  descendant, each exact owner independently passes against generated local
+  media: probe returns dimensions/FPS/audio, frame decode returns the expected
+  RGBA shape, PCM extraction returns 16 kHz mono, and encoded output re-probes
+  as playable video. The checksum-pinned packaged sidecars also pass the
+  empty-`PATH` installed-app smoke, and rustfmt plus the full workspace suite
+  pass. No production change was required for this reconciliation.
 
 ### Task 35: MR-media-facade (implementation-slice-3adf63f547b1f57b)
 
