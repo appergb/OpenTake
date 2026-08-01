@@ -1439,33 +1439,46 @@
   - Visible/accessibility/return path: success=pointer scrub preview playhead: assert exactly pointerdown sets capture, calls onScrubbingChange?.(true), then seekFromEvent(clientX) -> onSeek(Math.round(ratio * total)); pointermove with buttons===1 repeats seek; pointerup/lost capture calls onScrubbingChange?.(false); hover only changes local hover state and no sibling branch/command.; accessibility={"focus":"Scrub div has no role or tabIndex.","label":"No slider accessible name/value semantics exist.","shortcut":"No Arrow/Home/End seek handling exists."}; returnPath=["Pointerup/cancel releases the gesture and remains on the same editor surface.","A keyboard equivalent must retain/restore focus; current custom drag surface does not prove one."].
   - Outcome matrix: {"success":"pointer scrub preview playhead: assert exactly pointerdown sets capture, calls onScrubbingChange?.(true), then seekFromEvent(clientX) -> onSeek(Math.round(ratio * total)); pointermove with buttons===1 repeats seek; pointerup/lost capture calls onScrubbingChange?.(false); hover only changes local hover state and no sibling branch/command.","pending":"N/A — synchronous local/browser state only.","empty":"N/A — owning visibility/handler guards prevent an absent target from emitting a command.","disabled":"No explicit disabled attribute beyond the listed visibility/handler guards.","cancel":"Pointerup or lost capture clears scrubbing; no keyboard/Escape path exists.","retry":"N/A — repeated activation is a new synchronous action.","failure":"N/A — no API/Tauri/Rust failure route."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/preview/Preview.interaction.test.tsx#control-200c9fd6ec3f0f35 pointer scrub preview playhead` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/preview/Preview.interaction.test.tsx -t "control-200c9fd6ec3f0f35 pointer scrub preview playhead"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/preview/Preview.tsx`, `web/src/components/preview/Preview.tsx#ScrubBar`, `web/src/components/preview/Preview.tsx#Preview` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/preview/Preview.interaction.test.tsx -t "control-200c9fd6ec3f0f35 pointer scrub preview playhead"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: RED exposed a real sticky-scrubbing defect: the cancel
+  state transition intentionally has no seek effect, but the component also
+  suppressed the required `scrubbing=false` notification. The owner now proves
+  capture, down/move/exact-up seeks, buttons guard, hover-only state,
+  lost-capture/pointercancel cleanup, horizontal slider semantics and
+  Arrow/Home/End keyboard seeks with retained focus. The full Web gate passes
+  with 106 files / 851 tests and the production build passes, with only the
+  existing dynamic-import and chunk-size advisories.
+
+- [ ] **Runtime evidence gate:** scrub the packaged Preview by pointer, force
+  capture loss/cancel, hover the control and seek by keyboard while confirming
+  playhead/focus/scrubbing state before final control reclassification.
 
 ### Task 17: control-acceptance (implementation-slice-c09938dfb4f83d4c)
 

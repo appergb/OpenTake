@@ -510,6 +510,7 @@ export function Preview() {
           both the timeline composite and (via mediaRef) single-media preview, so
           the <video>/<audio> renders without its native controls. */}
       <ScrubBar
+        ariaLabel={t("preview.scrubBar")}
         frame={activeShownFrame}
         total={total}
         onSeek={seekTo}
@@ -742,12 +743,14 @@ function PreviewTabs({ item }: { item: MediaItem | null }) {
   );
 }
 
-function ScrubBar({
+export function ScrubBar({
+  ariaLabel,
   frame,
   total,
   onSeek,
   onScrubbingChange,
 }: {
+  ariaLabel: string;
   frame: number;
   total: number;
   onSeek: (f: number) => void;
@@ -758,7 +761,9 @@ function ScrubBar({
   const ref = useRef<HTMLDivElement>(null);
   const gestureRef = useRef(createScrubGesture());
   const [hover, setHover] = useState(false);
-  const progress = total > 0 ? frame / total : 0;
+  const safeTotal = Math.max(0, total);
+  const safeFrame = Math.max(0, Math.min(safeTotal, Math.round(frame)));
+  const progress = safeTotal > 0 ? safeFrame / safeTotal : 0;
 
   const seekFromEvent = (clientX: number) => {
     const el = ref.current;
@@ -768,13 +773,40 @@ function ScrubBar({
     onSeek(Math.round(t * total));
   };
 
+  const cancelGesture = useCallback(() => {
+    const wasActive = gestureRef.current.active;
+    const transition = transitionScrubGesture(gestureRef.current, "cancel");
+    gestureRef.current = transition.state;
+    if (wasActive) onScrubbingChange?.(transition.scrubbing);
+  }, [onScrubbingChange]);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    element.addEventListener("lostpointercapture", cancelGesture);
+    element.addEventListener("pointercancel", cancelGesture);
+    return () => {
+      element.removeEventListener("lostpointercapture", cancelGesture);
+      element.removeEventListener("pointercancel", cancelGesture);
+    };
+  }, [cancelGesture]);
+
   return (
     <div
       ref={ref}
+      data-preview-scrub
+      role="slider"
+      tabIndex={0}
+      aria-label={ariaLabel}
+      aria-orientation="horizontal"
+      aria-valuemin={0}
+      aria-valuemax={safeTotal}
+      aria-valuenow={safeFrame}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       onPointerDown={(e) => {
-        (e.target as HTMLElement).setPointerCapture(e.pointerId);
+        e.currentTarget.focus();
+        e.currentTarget.setPointerCapture(e.pointerId);
         const transition = transitionScrubGesture(gestureRef.current, "down");
         gestureRef.current = transition.state;
         onScrubbingChange?.(transition.scrubbing);
@@ -793,10 +825,22 @@ function ScrubBar({
         if (transition.effect === "exact-seek") seekFromEvent(e.clientX);
         onScrubbingChange?.(transition.scrubbing);
       }}
-      onLostPointerCapture={() => {
-        const transition = transitionScrubGesture(gestureRef.current, "cancel");
-        gestureRef.current = transition.state;
-        if (transition.effect !== "none") onScrubbingChange?.(transition.scrubbing);
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          if (gestureRef.current.active) {
+            e.preventDefault();
+            cancelGesture();
+          }
+          return;
+        }
+        let next: number | null = null;
+        if (e.key === "ArrowLeft" || e.key === "ArrowDown") next = safeFrame - 1;
+        if (e.key === "ArrowRight" || e.key === "ArrowUp") next = safeFrame + 1;
+        if (e.key === "Home") next = 0;
+        if (e.key === "End") next = safeTotal;
+        if (next === null || safeTotal <= 0) return;
+        e.preventDefault();
+        onSeek(Math.max(0, Math.min(safeTotal, next)));
       }}
       style={{
         height: 18,
@@ -809,6 +853,7 @@ function ScrubBar({
       }}
     >
       <div
+        data-preview-scrub-track
         style={{
           // position:relative confines the absolute progress fill + handle below.
           // Without it they escape to the nearest positioned ancestor (the preview
