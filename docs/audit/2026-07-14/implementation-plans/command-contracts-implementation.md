@@ -1137,33 +1137,41 @@
   - Visible/accessibility/return path: success=redo the last undone edit: edit.redo -> backend redo -> refresh mirror/canUndo/canRedo; accessibility={"focus":"Custom HoverButton focus behavior depends on its implementation","label":"t(\"toolbar.redo\")","shortcut":"None declared on this control"}; returnPath=["Focus remains on the toolbar control; edit commands update the editor mirror/selection."].
   - Outcome matrix: {"success":"redo the last undone edit: edit.redo -> backend redo -> refresh mirror/canUndo/canRedo","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/toolbar/Toolbar.tsx:107; no additional state is inferred beyond the source.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/toolbar/Toolbar.tsx:107; the candidate-specific interaction test must assert that exact guard.","disabled":"Disabled when {!canRedo}.","cancel":"Not applicable — this immediate handler has no cancellable operation or dismissible transient surface.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in edit.redo -> backend redo -> refresh mirror/canUndo/canRedo.","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/toolbar/Toolbar.tsx:107; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/toolbar/Toolbar.interaction.test.tsx#control-b001ac6b21c97ad0 redo the last undone edit` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and reconcile the historical baseline**
 
   - Run: `pnpm -C web test -- --run src/components/toolbar/Toolbar.interaction.test.tsx -t "control-b001ac6b21c97ad0 redo the last undone edit"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/toolbar/Toolbar.tsx`, `web/src/store/editActions.ts#redo`, `web/src/lib/api.ts#redo`, `src-tauri/src/commands.rs#redo`, `web/src/components/toolbar/Toolbar.tsx#Toolbar` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/toolbar/Toolbar.interaction.test.tsx -t "control-b001ac6b21c97ad0 redo the last undone edit"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Reconciled 2026-08-01 as an already-integrated baseline. The exact Redo DOM
+  owner passes across disabled no-op, pending duplicate suppression, focus,
+  success, failure feedback and retry while statically binding the frontend and
+  Rust command chain. The owner and recoverability fix landed together in
+  `436a30e`, and its parent lacks the owner; no artificial RED was introduced.
+  The current complete Web/build and Rust workspace gates pass. No production
+  change was required.
 
 ### Task 12: control-acceptance (implementation-slice-dc2e1dbf0bbdec19)
 
