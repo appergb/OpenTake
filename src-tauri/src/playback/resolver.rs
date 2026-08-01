@@ -23,7 +23,8 @@
 //! per-frame lookup keyed `v:{media_ref}:{source_frame}`. Multiple clips may
 //! share that key; when one decoder is behind, the exact-frame candidate wins
 //! over its stale fallback regardless of draw order. `resolve()` then degrades
-//! to a table lookup for video, and the usual static cache for image / text.
+//! to a table lookup for video, the static cache for image / text, and the
+//! content-hash + internal-frame LRU for Lottie.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -41,6 +42,8 @@ use opentake_render::{
     CosmicTextRasterizer, DecodedFrame, FramePlan, GpuLutTexture, GpuTexture, TextRasterRequest,
     TextRasterizer, TextureCache, TextureResolver, TextureSource,
 };
+
+use crate::render::LottieMaterializer;
 
 use super::project::{MediaInfo, TextInfo};
 
@@ -203,8 +206,9 @@ pub struct PlaybackResolverState {
     /// Active video streams, keyed by **clip id** (NOT media_ref): a split clip
     /// or a reused asset needs an independent decode position.
     streams: HashMap<String, ClipStream>,
-    /// Image + text textures (persistent across frames).
+    /// Image, text, and bounded Lottie-frame textures (persistent across frames).
     static_cache: TextureCache,
+    lottie: LottieMaterializer,
     text_rasterizer: CosmicTextRasterizer,
     media: HashMap<String, MediaInfo>,
     text: HashMap<String, TextInfo>,
@@ -214,6 +218,7 @@ pub struct PlaybackResolverState {
     cancel: MediaCancelToken,
     project_root: Option<ProjectRoot>,
     lut_cache: HashMap<String, Rc<GpuLutTexture>>,
+    materialization_error: Option<String>,
 }
 
 impl PlaybackResolverState {
@@ -238,6 +243,7 @@ impl PlaybackResolverState {
         PlaybackResolverState {
             streams: HashMap::new(),
             static_cache: TextureCache::new(STATIC_CACHE_CAP),
+            lottie: LottieMaterializer::new(),
             text_rasterizer: CosmicTextRasterizer::new(),
             media,
             text,
@@ -246,6 +252,7 @@ impl PlaybackResolverState {
             cancel,
             project_root,
             lut_cache: HashMap::new(),
+            materialization_error: None,
         }
     }
 
@@ -257,6 +264,13 @@ impl PlaybackResolverState {
         for (_, cs) in self.streams.drain() {
             cs.stream.request_stop();
         }
+    }
+
+    /// Take the first materialization failure recorded during the current
+    /// frame. The render loop turns this into an explicit playback error instead
+    /// of silently dropping the Lottie layer.
+    pub fn take_materialization_error(&mut self) -> Option<String> {
+        self.materialization_error.take()
     }
 }
 
@@ -407,11 +421,12 @@ impl<'d, 's> StreamingResolver<'d, 's> {
     /// Decode (once) and cache a static image layer, mirroring the preview
     /// resolver's image path.
     fn resolve_image(&mut self, media_ref: &str) -> Option<Rc<GpuTexture>> {
-        let key = format!("i:{media_ref}");
+        let info = self.state.media.get(media_ref)?;
+        let content_hash = opentake_media::file_sha256(&info.path).ok()?;
+        let key = format!("i:{content_hash}");
         if let Some(tex) = self.state.static_cache.get(&key) {
             return Some(tex);
         }
-        let info = self.state.media.get(media_ref)?;
         let req = FrameRequest {
             time_secs: 0.0,
             max_size: self.state.render_box,
@@ -471,9 +486,25 @@ impl TextureResolver for StreamingResolver<'_, '_> {
                 .map(|candidate| candidate.texture.clone()),
             TextureSource::Image { media_ref } => self.resolve_image(media_ref),
             TextureSource::Text { clip_id } => self.resolve_text(clip_id),
-            // Lottie bake wiring lands with #65 (PR3); skipped for now, matching
-            // the preview resolver (`render.rs`).
-            TextureSource::Lottie { .. } => None,
+            TextureSource::Lottie { media_ref } => {
+                let info = self.state.media.get(media_ref)?;
+                match self.state.lottie.resolve(
+                    self.device,
+                    self.queue,
+                    &mut self.state.static_cache,
+                    &info.path,
+                    source_frame,
+                    self.state.render_box,
+                    "playback-lottie",
+                ) {
+                    Ok(texture) => Some(texture),
+                    Err(error) => {
+                        eprintln!("[playback] {error}");
+                        self.state.materialization_error = Some(error);
+                        None
+                    }
+                }
+            }
         }
     }
 
@@ -504,6 +535,233 @@ impl TextureResolver for StreamingResolver<'_, '_> {
 mod tests {
     use super::*;
     use opentake_media::RgbaFrame;
+    use opentake_render::plan::LayerDraw;
+    use opentake_render::{Compositor, FramePlan, RenderDevice, RenderSize};
+
+    fn lottie_fixture(first: &str, second: &str) -> String {
+        format!(
+            r##"{{
+  "v":"5.5.2","fr":2,"ip":0,"op":2,"w":16,"h":16,"ddd":0,"assets":[],
+  "layers":[
+    {{"ddd":0,"ind":1,"ty":4,"nm":"first",
+      "ks":{{"o":{{"a":0,"k":100}},"r":{{"a":0,"k":0}},"p":{{"a":0,"k":[8,8,0]}},
+             "a":{{"a":0,"k":[8,8,0]}},"s":{{"a":0,"k":[100,100,100]}}}},
+      "shapes":[
+        {{"ty":"rc","d":1,"s":{{"a":0,"k":[16,16]}},"p":{{"a":0,"k":[8,8]}},"r":{{"a":0,"k":0}}}},
+        {{"ty":"fl","c":{{"a":0,"k":{first}}},"o":{{"a":0,"k":100}},"r":1}}
+      ],
+      "ao":0,"ip":0,"op":1,"st":0,"bm":0}},
+    {{"ddd":0,"ind":2,"ty":4,"nm":"second",
+      "ks":{{"o":{{"a":0,"k":100}},"r":{{"a":0,"k":0}},"p":{{"a":0,"k":[8,8,0]}},
+             "a":{{"a":0,"k":[8,8,0]}},"s":{{"a":0,"k":[100,100,100]}}}},
+      "shapes":[
+        {{"ty":"rc","d":1,"s":{{"a":0,"k":[16,16]}},"p":{{"a":0,"k":[8,8]}},"r":{{"a":0,"k":0}}}},
+        {{"ty":"fl","c":{{"a":0,"k":{second}}},"o":{{"a":0,"k":100}},"r":1}}
+      ],
+      "ao":0,"ip":1,"op":2,"st":0,"bm":0}}
+  ]
+}}"##
+        )
+    }
+
+    fn composite_texture(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: Rc<GpuTexture>,
+    ) -> DecodedFrame {
+        struct FixedResolver(Rc<GpuTexture>);
+        impl TextureResolver for FixedResolver {
+            fn resolve(
+                &mut self,
+                _source: &TextureSource,
+                _source_frame: i64,
+            ) -> Option<Rc<GpuTexture>> {
+                Some(self.0.clone())
+            }
+        }
+
+        let source = TextureSource::Lottie {
+            media_ref: "fixture".into(),
+        };
+        let draw = LayerDraw {
+            source: &source,
+            source_frame: 0,
+            affine: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            nat_size: (16.0, 16.0),
+            crop_uv: (0.0, 0.0, 1.0, 1.0),
+            opacity: 1.0,
+            needs_premultiply: false,
+            clip_id: "fixture-clip",
+            color_grade: None,
+            lut: None,
+            chroma_key: None,
+            masks: &[],
+            effects: &[],
+        };
+        let plan = FramePlan {
+            clear_rgba: [0.0, 0.0, 0.0, 1.0],
+            draws: vec![draw],
+        };
+        Compositor::new(device)
+            .render_to_rgba(
+                device,
+                queue,
+                RenderSize::new(16, 16),
+                &plan,
+                &mut FixedResolver(texture),
+            )
+            .expect("composite Lottie texture")
+    }
+
+    #[test]
+    fn lottie_cache_lifecycle_frame_modulo_and_preview_export_parity() {
+        let Ok(dev) = RenderDevice::try_new() else {
+            return;
+        };
+        let temp = tempfile::tempdir().expect("temp Lottie fixture");
+        let path = temp.path().join("two-frame.json");
+        std::fs::write(&path, lottie_fixture("[1,0,0,1]", "[0,1,0,1]"))
+            .expect("write Lottie fixture");
+
+        let mut preview = crate::render::LottieMaterializer::new();
+        let mut preview_cache = TextureCache::new(8);
+        let first = preview
+            .resolve(
+                &dev.device,
+                &dev.queue,
+                &mut preview_cache,
+                &path,
+                0,
+                (16, 16),
+                "preview-lottie",
+            )
+            .expect("preview frame zero");
+        let second = preview
+            .resolve(
+                &dev.device,
+                &dev.queue,
+                &mut preview_cache,
+                &path,
+                1,
+                (16, 16),
+                "preview-lottie",
+            )
+            .expect("preview frame one");
+        let wrapped = preview
+            .resolve(
+                &dev.device,
+                &dev.queue,
+                &mut preview_cache,
+                &path,
+                2,
+                (16, 16),
+                "preview-lottie",
+            )
+            .expect("preview wrapped frame");
+        assert!(Rc::ptr_eq(&first, &wrapped), "frame 2 must wrap to frame 0");
+        assert!(!Rc::ptr_eq(&first, &second));
+
+        let first_pixels = composite_texture(&dev.device, &dev.queue, first.clone());
+        let second_pixels = composite_texture(&dev.device, &dev.queue, second);
+        let first_center = &first_pixels.rgba[(8 * 16 + 8) * 4..][..4];
+        let second_center = &second_pixels.rgba[(8 * 16 + 8) * 4..][..4];
+        assert!(
+            first_center[0] > 200 && first_center[1] < 30,
+            "{first_center:?}"
+        );
+        assert!(
+            second_center[1] > 200 && second_center[0] < 30,
+            "{second_center:?}"
+        );
+
+        // Export owns an independent materializer/cache on the same source, but
+        // must produce byte-identical pixels for the same internal frame.
+        let mut export = crate::render::LottieMaterializer::new();
+        let mut export_cache = TextureCache::new(8);
+        let export_first = export
+            .resolve(
+                &dev.device,
+                &dev.queue,
+                &mut export_cache,
+                &path,
+                0,
+                (16, 16),
+                "export-lottie",
+            )
+            .expect("export frame zero");
+        assert_eq!(
+            first_pixels,
+            composite_texture(&dev.device, &dev.queue, export_first)
+        );
+
+        // Recreating the device-owned lifecycle drops GPU handles while
+        // retaining deterministic output on the next materialization.
+        let mut rebuilt = crate::render::LottieMaterializer::new();
+        let mut rebuilt_cache = TextureCache::new(8);
+        let rebuilt_first = rebuilt
+            .resolve(
+                &dev.device,
+                &dev.queue,
+                &mut rebuilt_cache,
+                &path,
+                0,
+                (16, 16),
+                "rebuilt-lottie",
+            )
+            .expect("rebuilt frame zero");
+        assert!(!Rc::ptr_eq(&first, &rebuilt_first));
+        assert_eq!(
+            first_pixels,
+            composite_texture(&dev.device, &dev.queue, rebuilt_first)
+        );
+
+        // Same path, changed bytes: the content hash must invalidate the old
+        // texture rather than reusing a stale media-ref-only key.
+        std::fs::write(&path, lottie_fixture("[0,0,1,1]", "[1,1,0,1]"))
+            .expect("replace Lottie fixture");
+        let changed = preview
+            .resolve(
+                &dev.device,
+                &dev.queue,
+                &mut preview_cache,
+                &path,
+                0,
+                (16, 16),
+                "preview-lottie",
+            )
+            .expect("changed frame zero");
+        assert!(!Rc::ptr_eq(&first, &changed));
+        let changed_pixels = composite_texture(&dev.device, &dev.queue, changed);
+        let changed_center = &changed_pixels.rgba[(8 * 16 + 8) * 4..][..4];
+        assert!(
+            changed_center[2] > 200 && changed_center[0] < 30,
+            "{changed_center:?}"
+        );
+
+        // Invalid documents must become a typed frame failure owned by the
+        // playback loop, never a successful frame with a silently missing layer.
+        let invalid_path = temp.path().join("invalid-lottie.json");
+        std::fs::write(&invalid_path, b"{not valid lottie}").expect("write invalid fixture");
+        let mut media = HashMap::new();
+        media.insert("invalid".into(), MediaInfo { path: invalid_path });
+        let mut state = PlaybackResolverState::new(
+            media,
+            HashMap::new(),
+            30,
+            (16, 16),
+            MediaCancelToken::new(),
+        );
+        let invalid_source = TextureSource::Lottie {
+            media_ref: "invalid".into(),
+        };
+        let mut resolver = StreamingResolver::new(&dev.device, &dev.queue, &mut state);
+        assert!(resolver.resolve(&invalid_source, 0).is_none());
+        drop(resolver);
+        let error = state
+            .take_materialization_error()
+            .expect("playback must retain the materialization failure");
+        assert!(error.contains("parse Lottie document"), "{error}");
+    }
 
     #[test]
     fn bootstrap_request_has_zero_tolerance_at_exact_source_frame() {

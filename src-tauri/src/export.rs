@@ -15,6 +15,9 @@
 //!   produces the same video-only file as before.
 //! - Export renders at the **full** export resolution
 //!   ([`opentake_render::export_render_size`]), not the preview cap.
+//! - Image and Lottie sources materialize directly as content-hashed GPU
+//!   textures; Lottie uses the same Velato/Vello frame contract as preview and
+//!   playback, and any unsupported document fails the export explicitly.
 //! - **Progress + cancel** (mirrors upstream `Export/ExportService.swift`'s
 //!   200ms `AVAssetExportSession.progress` poll + cooperative cancel): the frame
 //!   loop emits a throttled `"export://progress"` Tauri event and checks a
@@ -44,6 +47,8 @@ use std::time::{Duration, Instant};
 use same_file::Handle as FileIdentity;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
+
+use crate::render::LottieMaterializer;
 
 use opentake_core::AppCore;
 use opentake_domain::{AudioDenoise, Clip, ClipType, LutReference, MediaSource, TextStyle};
@@ -462,13 +467,14 @@ impl SourceMetrics for ManifestMetrics {
 }
 
 /// `TextureResolver` that decodes a layer's pixels on demand via ffmpeg and
-/// uploads them to the GPU. Video keys per source-frame; images key once; text
-/// rasterizes its box; Lottie returns `None` (skipped) in this cut. Mirrors the
-/// preview resolver, but the decode box is the full export render size.
+/// uploads them to the GPU. Video keys per source-frame; image and Lottie keys
+/// include source content hashes; text rasterizes its box. Mirrors the preview
+/// resolver, but the decode box is the full export render size.
 struct MediaResolver<'d> {
     device: &'d opentake_render::wgpu::Device,
     queue: &'d opentake_render::wgpu::Queue,
-    cache: TextureCache,
+    cache: &'d mut TextureCache,
+    lottie: &'d mut LottieMaterializer,
     media: &'d HashMap<String, MediaInfo>,
     timeline_fps: i32,
     text: &'d HashMap<String, TextInfo>,
@@ -477,6 +483,7 @@ struct MediaResolver<'d> {
     render_box: (u32, u32),
     project_root: Option<&'d ProjectRoot>,
     lut_cache: &'d mut HashMap<String, Rc<GpuLutTexture>>,
+    materialization_error: Option<String>,
 }
 
 impl MediaResolver<'_> {
@@ -570,20 +577,43 @@ impl MediaResolver<'_> {
 
 impl TextureResolver for MediaResolver<'_> {
     fn resolve(&mut self, source: &TextureSource, source_frame: i64) -> Option<Rc<GpuTexture>> {
-        let (media_ref, key, is_image) = match source {
-            TextureSource::Decoded { media_ref } => {
-                (media_ref, format!("v:{media_ref}:{source_frame}"), false)
-            }
-            TextureSource::Image { media_ref } => (media_ref, format!("i:{media_ref}"), true),
+        let (media_ref, is_image) = match source {
+            TextureSource::Decoded { media_ref } => (media_ref, false),
+            TextureSource::Image { media_ref } => (media_ref, true),
             TextureSource::Text { clip_id } => return self.resolve_text(clip_id),
-            TextureSource::Lottie { .. } => return None,
+            TextureSource::Lottie { media_ref } => {
+                let info = self.media.get(media_ref)?;
+                return match self.lottie.resolve(
+                    self.device,
+                    self.queue,
+                    self.cache,
+                    &info.path,
+                    source_frame,
+                    self.render_box,
+                    "export-lottie",
+                ) {
+                    Ok(texture) => Some(texture),
+                    Err(error) => {
+                        eprintln!("[export] {error}");
+                        self.materialization_error = Some(error);
+                        None
+                    }
+                };
+            }
+        };
+
+        let info = self.media.get(media_ref)?;
+        let key = if is_image {
+            let content_hash = opentake_media::file_sha256(&info.path).ok()?;
+            format!("i:{content_hash}")
+        } else {
+            format!("v:{media_ref}:{source_frame}")
         };
 
         if let Some(tex) = self.cache.get(&key) {
             return Some(tex);
         }
 
-        let info = self.media.get(media_ref)?;
         let time_secs = if is_image {
             0.0
         } else {
@@ -1398,6 +1428,8 @@ pub(crate) fn run_export_with_control(
 
     let mut last_progress_emit = Instant::now();
     let mut lut_cache = HashMap::new();
+    let mut texture_cache = TextureCache::new(TEXTURE_CACHE_CAP);
+    let mut lottie = LottieMaterializer::new();
     for f in start_frame..end_frame {
         if control.is_some_and(|c| c.is_cancelled())
             || external_cancel
@@ -1420,7 +1452,8 @@ pub(crate) fn run_export_with_control(
         let mut resolver = MediaResolver {
             device: &dev.device,
             queue: &dev.queue,
-            cache: TextureCache::new(TEXTURE_CACHE_CAP),
+            cache: &mut texture_cache,
+            lottie: &mut lottie,
             media: &media,
             timeline_fps: plan.fps,
             text: &text,
@@ -1428,6 +1461,7 @@ pub(crate) fn run_export_with_control(
             render_box: (render_size.width, render_size.height),
             project_root: project_root.as_ref(),
             lut_cache: &mut lut_cache,
+            materialization_error: None,
         };
         let interpolation = TextureInterpolationConfig::new(
             plan.fps as f64,
@@ -1446,6 +1480,15 @@ pub(crate) fn run_export_with_control(
                 interpolation,
             )
             .map_err(|e| format!("composite render failed at frame {f}: {e}"))?;
+        if let Some(error) = resolver.materialization_error.take() {
+            encoder.abort();
+            if !reserved_output {
+                let _ = std::fs::remove_file(&out_path);
+            }
+            return Err(format!(
+                "Lottie materialization failed at frame {f}: {error}"
+            ));
+        }
         encoder
             .push_frame(&RgbaFrame::new(
                 composite.width,

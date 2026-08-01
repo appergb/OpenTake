@@ -28,7 +28,11 @@ wgpu 合成器）通过 `MediaEngine` **复用本 crate 的**:
 ## 8.3 媒体物化(图片/Lottie → 纹理)的归属
 
 上游用 `ImageVideoGenerator`(图片烧静止视频)、`LottieVideoGenerator`(Lottie 烧 ProRes)、`AlphaVideoNormalizer`(直 alpha 预乘)绕开 AVPlayer 限制。`docs/_analysis/02` 表 L74/L75/L81 与 `docs/ARCHITECTURE.md` §6 L130:**自建 wgpu 合成器后,这三类 hack 整类消失**——图片/Lottie 在合成前**物化为纹理**(content-hash 缓存),由 `opentake-render` 负责。
-- 本 crate **提供**:图片解码 → `RgbaFrame`(§3.2 / `image` crate);(可选)Lottie 解码用 `rlottie` FFI 或 `velato`(`docs/_analysis/02` 表 L81),渲成 `RgbaFrame` 序列。**建议** Lottie 放 render 的物化层或独立 `opentake-motion`(Phase 10),本 crate 仅暴露图片解码;Lottie 列为**有意暂不归本 crate**。
+- 本 crate **提供**:图片解码 → `RgbaFrame`(§3.2 / `image` crate)。三个 Tauri render adapter 共用 `render::LottieMaterializer`:Velato 解析有界 Lottie JSON,Vello 在现有 wgpu 23 设备上按内部帧光栅成预乘 RGBA 纹理;不生成中间视频。
+- 图片键为 `sha256(source bytes)`,Lottie 键为 `sha256(source bytes)+internal frame+texture size`;同路径内容变化不会命中旧纹理。Lottie 内部帧使用 `sourceFrame mod ceil(op-ip)`,因此 preview/playback/export 具有相同循环语义。
+- 生命周期所有权:preview 的 Velato/Vello parser/pipeline 跟 `RenderState::GpuContext` 同生共死,单次 composite 的 `Rc` texture LRU 不进入要求 `Send+Sync` 的 Tauri state;playback LRU 仅归专用 render thread;export LRU 仅归单次 export。preview GPU 错误丢弃完整 context,下一次请求重建设备/pipeline;playback 会话和 export 失败时丢弃它们的本地 context。
+- 失败语义:空文件、超过 8 MiB、画布不在 `1..=4096`、非法帧区间/帧率、解析失败或当前 Velato 不支持的 Lottie 特性都返回明确 materialization error;三个产品路径不得把该层静默当作成功。
+- 拥有测试 `playback::resolver::tests::lottie_cache_lifecycle_frame_modulo_and_preview_export_parity` 用两帧红/绿像素 fixture 证明取模、content-hash 失效、preview/export 字节一致和 context 重建后输出一致。
 - 本 crate **不提供**:静止视频烧制、ProRes 烧制、alpha 预乘转码(整类删除)。
 
 ## 8.4 facade `MediaEngine`(供 `opentake-core` 调用)

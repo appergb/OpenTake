@@ -356,7 +356,8 @@ impl RenderLoop {
         let frame_plan = self.plan.frame(&self.timeline, target);
         let mut resolver = StreamingResolver::new(&self.device, &self.queue, &mut self.state);
         resolver.sync_active(&frame_plan)?;
-        self.compositor
+        let composite = self
+            .compositor
             .render_to_rgba(
                 &self.device,
                 &self.queue,
@@ -364,7 +365,14 @@ impl RenderLoop {
                 &frame_plan,
                 &mut resolver,
             )
-            .map_err(|e| format!("composite render failed at frame {target}: {e}"))
+            .map_err(|e| format!("composite render failed at frame {target}: {e}"));
+        drop(resolver);
+        if let Some(error) = self.state.take_materialization_error() {
+            return Err(format!(
+                "Lottie materialization failed at frame {target}: {error}"
+            ));
+        }
+        composite
     }
 
     /// Restart all decode streams (used on seek): the next `render_frame` re-spawns

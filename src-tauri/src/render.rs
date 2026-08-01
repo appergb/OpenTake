@@ -7,11 +7,11 @@
 //! base64 PNG data URL the WebView paints onto a `<canvas>` (replacing the black
 //! placeholder shown on the Timeline tab).
 //!
-//! Scope: **video + image + text** layers. Text clips rasterize through
+//! Scope: **video + image + text + Lottie** layers. Text clips rasterize through
 //! `CosmicTextRasterizer` (cosmic-text glyph layout + swash raster) to a
 //! premultiplied-RGBA box texture composited last, like upstream's `CATextLayer`
-//! (#65). **Lottie** layers are still skipped (the resolver returns `None`, so
-//! the compositor omits them) until the bake path is wired (#65 follow-up).
+//! (#65). Lottie JSON is parsed by Velato and rasterized by Vello into the same
+//! device-local premultiplied-RGBA texture contract used by playback/export.
 //!
 //! The GPU device + compositor are acquired once and cached in Tauri managed
 //! state ([`RenderState`]); only the per-frame texture cache is short-lived. A
@@ -20,6 +20,7 @@
 //! (#53) will move this onto a dedicated render thread.
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,6 +28,7 @@ use std::sync::Mutex;
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri::State;
 
 use opentake_core::{AppCore, EditCommand, ProjectRevision};
@@ -91,6 +93,10 @@ struct GpuContext {
     compositor: Compositor,
     /// Text rasterizer (system fonts discovered once on first composite).
     text_rasterizer: CosmicTextRasterizer,
+    /// Vector pipelines are discarded when the GPU context is rebuilt, so they
+    /// never cross a device-loss boundary. Rc texture caches remain local to a
+    /// composite call because Tauri managed state must be Send + Sync.
+    lottie: LottieMaterializer,
 }
 
 /// Tauri managed state holding the (lazily created) GPU context. `None` until the
@@ -276,13 +282,229 @@ impl SourceMetrics for ManifestMetrics {
     }
 }
 
+const MAX_LOTTIE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_LOTTIE_DIMENSION: usize = 4096;
+
+struct CachedLottie {
+    content_hash: String,
+    composition: velato::Composition,
+}
+
+/// Device-lifetime Lottie JSON parser/rasterizer shared by preview, playback,
+/// and export. GPU textures live in the caller's [`TextureCache`]; parsed
+/// documents live here and are replaced whenever the source content hash
+/// changes. Dropping the owning GPU context drops both halves, so a recovered
+/// device never receives a texture or Vello pipeline created by the old device.
+pub(crate) struct LottieMaterializer {
+    documents: HashMap<PathBuf, CachedLottie>,
+    scene_renderer: velato::Renderer,
+    gpu_renderer: Option<velato::vello::Renderer>,
+}
+
+impl LottieMaterializer {
+    pub(crate) fn new() -> Self {
+        Self {
+            documents: HashMap::new(),
+            scene_renderer: velato::Renderer::new(),
+            gpu_renderer: None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn resolve(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        textures: &mut TextureCache,
+        path: &std::path::Path,
+        source_frame: i64,
+        render_box: (u32, u32),
+        label: &str,
+    ) -> Result<Rc<GpuTexture>, String> {
+        let bytes = std::fs::read(path)
+            .map_err(|error| format!("read Lottie document {}: {error}", path.display()))?;
+        if bytes.is_empty() || bytes.len() > MAX_LOTTIE_BYTES {
+            return Err(format!(
+                "Lottie document {} must be 1..={MAX_LOTTIE_BYTES} bytes (got {})",
+                path.display(),
+                bytes.len()
+            ));
+        }
+        let content_hash = format!("{:x}", Sha256::digest(&bytes));
+        let needs_parse = self
+            .documents
+            .get(path)
+            .is_none_or(|cached| cached.content_hash != content_hash);
+        if needs_parse {
+            let composition = std::panic::catch_unwind(|| velato::Composition::from_slice(&bytes))
+                .map_err(|_| {
+                    format!(
+                        "Lottie document {} uses an unsupported or malformed feature",
+                        path.display()
+                    )
+                })?
+                .map_err(|error| format!("parse Lottie document {}: {error}", path.display()))?;
+            validate_lottie(&composition, path)?;
+            self.documents.insert(
+                path.to_path_buf(),
+                CachedLottie {
+                    content_hash: content_hash.clone(),
+                    composition,
+                },
+            );
+        }
+
+        let cached = self
+            .documents
+            .get(path)
+            .expect("document inserted or already cached");
+        let composition = &cached.composition;
+        let frame_count = lottie_frame_count(composition);
+        let internal_frame = source_frame.rem_euclid(frame_count);
+        let (width, height) = lottie_texture_size(composition, render_box);
+        let key = format!("l:{content_hash}:{internal_frame}:{width}x{height}");
+        if let Some(texture) = textures.get(&key) {
+            return Ok(texture);
+        }
+
+        let transform = velato::vello::kurbo::Affine::scale_non_uniform(
+            width as f64 / composition.width as f64,
+            height as f64 / composition.height as f64,
+        );
+        let frame = composition.frames.start + internal_frame as f64;
+        let scene = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.scene_renderer
+                .render(composition, frame, transform, 1.0)
+        }))
+        .map_err(|_| {
+            format!(
+                "render Lottie document {} failed on an unsupported feature",
+                path.display()
+            )
+        })?;
+        if self.gpu_renderer.is_none() {
+            self.gpu_renderer = Some(
+                velato::vello::Renderer::new(
+                    device,
+                    velato::vello::RendererOptions {
+                        surface_format: None,
+                        use_cpu: false,
+                        antialiasing_support: velato::vello::AaSupport::area_only(),
+                        num_init_threads: NonZeroUsize::new(1),
+                    },
+                )
+                .map_err(|error| format!("initialize Lottie GPU renderer: {error}"))?,
+            );
+        }
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.gpu_renderer
+            .as_mut()
+            .expect("renderer initialized above")
+            .render_to_texture(
+                device,
+                queue,
+                &scene,
+                &view,
+                &velato::vello::RenderParams {
+                    base_color: velato::vello::peniko::color::palette::css::TRANSPARENT,
+                    width,
+                    height,
+                    antialiasing_method: velato::vello::AaConfig::Area,
+                },
+            )
+            .map_err(|error| format!("render Lottie frame {internal_frame}: {error}"))?;
+
+        Ok(textures.insert(
+            key,
+            GpuTexture {
+                texture,
+                view,
+                width,
+                height,
+            },
+        ))
+    }
+}
+
+impl Default for LottieMaterializer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn validate_lottie(
+    composition: &velato::Composition,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    if composition.width == 0
+        || composition.height == 0
+        || composition.width > MAX_LOTTIE_DIMENSION
+        || composition.height > MAX_LOTTIE_DIMENSION
+    {
+        return Err(format!(
+            "Lottie document {} canvas must be within 1..={MAX_LOTTIE_DIMENSION} (got {}x{})",
+            path.display(),
+            composition.width,
+            composition.height
+        ));
+    }
+    if !composition.frames.start.is_finite()
+        || !composition.frames.end.is_finite()
+        || composition.frames.end <= composition.frames.start
+        || !composition.frame_rate.is_finite()
+        || composition.frame_rate <= 0.0
+    {
+        return Err(format!(
+            "Lottie document {} has an invalid frame range or frame rate",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn lottie_frame_count(composition: &velato::Composition) -> i64 {
+    (composition.frames.end - composition.frames.start)
+        .ceil()
+        .clamp(1.0, i64::MAX as f64) as i64
+}
+
+fn lottie_texture_size(composition: &velato::Composition, render_box: (u32, u32)) -> (u32, u32) {
+    let max_width = render_box.0.max(1) as f64;
+    let max_height = render_box.1.max(1) as f64;
+    let scale = (max_width / composition.width as f64)
+        .min(max_height / composition.height as f64)
+        .min(1.0);
+    (
+        (composition.width as f64 * scale).round().max(1.0) as u32,
+        (composition.height as f64 * scale).round().max(1.0) as u32,
+    )
+}
+
 /// `TextureResolver` that decodes a layer's pixels on demand via ffmpeg and
-/// uploads them to the GPU (with a small LRU cache). Video/image only; text and
-/// Lottie return `None` (skipped by the compositor) in this cut.
+/// uploads them to the GPU (with a small LRU cache). Image and Lottie cache keys
+/// include source content hashes, so edited files cannot reuse stale textures.
 struct MediaResolver<'d> {
     device: &'d wgpu::Device,
     queue: &'d wgpu::Queue,
-    cache: TextureCache,
+    cache: &'d mut TextureCache,
+    lottie: &'d mut LottieMaterializer,
     media: &'d HashMap<String, MediaInfo>,
     timeline_fps: i32,
     /// Text clips by id (content + style + box) for on-demand rasterization.
@@ -293,7 +515,8 @@ struct MediaResolver<'d> {
     preview_box: (u32, u32),
     cancel: &'d MediaCancelToken,
     project_root: Option<&'d ProjectRoot>,
-    lut_cache: HashMap<String, Rc<GpuLutTexture>>,
+    lut_cache: &'d mut HashMap<String, Rc<GpuLutTexture>>,
+    materialization_error: Option<String>,
 }
 
 impl MediaResolver<'_> {
@@ -393,22 +616,43 @@ impl MediaResolver<'_> {
 
 impl TextureResolver for MediaResolver<'_> {
     fn resolve(&mut self, source: &TextureSource, source_frame: i64) -> Option<Rc<GpuTexture>> {
-        // Map the source to (asset id, cache key). Video keys per frame; images
-        // key once. Text rasterizes its box; Lottie is not supported yet.
-        let (media_ref, key, is_image) = match source {
-            TextureSource::Decoded { media_ref } => {
-                (media_ref, format!("v:{media_ref}:{source_frame}"), false)
-            }
-            TextureSource::Image { media_ref } => (media_ref, format!("i:{media_ref}"), true),
+        let (media_ref, is_image) = match source {
+            TextureSource::Decoded { media_ref } => (media_ref, false),
+            TextureSource::Image { media_ref } => (media_ref, true),
             TextureSource::Text { clip_id } => return self.resolve_text(clip_id),
-            TextureSource::Lottie { .. } => return None,
+            TextureSource::Lottie { media_ref } => {
+                let info = self.media.get(media_ref)?;
+                return match self.lottie.resolve(
+                    self.device,
+                    self.queue,
+                    self.cache,
+                    &info.path,
+                    source_frame,
+                    self.preview_box,
+                    "preview-lottie",
+                ) {
+                    Ok(texture) => Some(texture),
+                    Err(error) => {
+                        eprintln!("[render] {error}");
+                        self.materialization_error = Some(error);
+                        None
+                    }
+                };
+            }
+        };
+
+        let info = self.media.get(media_ref)?;
+        let key = if is_image {
+            let content_hash = opentake_media::file_sha256(&info.path).ok()?;
+            format!("i:{content_hash}")
+        } else {
+            format!("v:{media_ref}:{source_frame}")
         };
 
         if let Some(tex) = self.cache.get(&key) {
             return Some(tex);
         }
 
-        let info = self.media.get(media_ref)?;
         let time_secs = if is_image {
             0.0
         } else {
@@ -618,40 +862,58 @@ fn composite_rgba_for_snapshot(
             queue: dev.queue,
             compositor,
             text_rasterizer,
+            lottie: LottieMaterializer::new(),
         });
     }
-    let ctx = guard.as_ref().expect("ctx set above");
-
-    let mut resolver = MediaResolver {
-        device: &ctx.device,
-        queue: &ctx.queue,
-        cache: TextureCache::new(TEXTURE_CACHE_CAP),
-        media: &media,
-        timeline_fps: plan.fps,
-        text: &text,
-        text_rasterizer: &ctx.text_rasterizer,
-        preview_box: (render_size.width, render_size.height),
-        cancel,
-        project_root: project_root.as_ref(),
-        lut_cache: HashMap::new(),
-    };
-    let interpolation = TextureInterpolationConfig::new(
-        plan.fps as f64,
-        plan.fps as f64,
-        TextureInterpolationMode::OpticalFlow,
-        TextureInterpolationFallback::Blend,
-    )
-    .map_err(str::to_string)?;
-    ctx.compositor
-        .render_to_rgba_with_interpolation(
-            &ctx.device,
-            &ctx.queue,
-            render_size,
-            &frame_plan,
-            &mut resolver,
-            interpolation,
+    let result = {
+        let ctx = guard.as_mut().expect("ctx set above");
+        let mut texture_cache = TextureCache::new(TEXTURE_CACHE_CAP);
+        let mut lut_cache = HashMap::new();
+        let mut resolver = MediaResolver {
+            device: &ctx.device,
+            queue: &ctx.queue,
+            cache: &mut texture_cache,
+            lottie: &mut ctx.lottie,
+            media: &media,
+            timeline_fps: plan.fps,
+            text: &text,
+            text_rasterizer: &ctx.text_rasterizer,
+            preview_box: (render_size.width, render_size.height),
+            cancel,
+            project_root: project_root.as_ref(),
+            lut_cache: &mut lut_cache,
+            materialization_error: None,
+        };
+        let interpolation = TextureInterpolationConfig::new(
+            plan.fps as f64,
+            plan.fps as f64,
+            TextureInterpolationMode::OpticalFlow,
+            TextureInterpolationFallback::Blend,
         )
-        .map_err(|e| format!("composite render failed: {e}"))
+        .map_err(str::to_string)?;
+        let composite = ctx
+            .compositor
+            .render_to_rgba_with_interpolation(
+                &ctx.device,
+                &ctx.queue,
+                render_size,
+                &frame_plan,
+                &mut resolver,
+                interpolation,
+            )
+            .map_err(|e| format!("composite render failed: {e}"));
+        match resolver.materialization_error.take() {
+            Some(error) => Err(format!("Lottie materialization failed: {error}")),
+            None => composite,
+        }
+    };
+    if result.is_err() {
+        // A wgpu device loss or validation failure invalidates every pipeline
+        // and parsed-document renderer bound to this context. The next preview
+        // request reacquires a fresh device and starts with empty caches.
+        guard.take();
+    }
+    result
 }
 
 fn composite_rgba(

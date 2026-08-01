@@ -2529,33 +2529,45 @@ not the separately owned desktop motion/Lottie materialization.
   - Define cache invalidation and device-loss behavior.
   - Add pixel, lifecycle, and export tests.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `src-tauri/src/playback/resolver.rs#lottie_cache_lifecycle_frame_modulo_and_preview_export_parity` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-tauri lottie_cache_lifecycle_frame_modulo_and_preview_export_parity`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `src-tauri/src/render.rs#MediaResolver::resolve`, `src-tauri/src/export.rs#MediaResolver::resolve`, `src-tauri/src/playback/resolver.rs#StreamingResolver::resolve`, `docs/specs/media/8-coordinator.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-tauri lottie_cache_lifecycle_frame_modulo_and_preview_export_parity`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+**Verified 2026-08-01:** RED was reproduced because the declared
+`LottieMaterializer` production boundary did not exist and all three product
+resolvers skipped Lottie. The shared Velato/Vello materializer now renders
+bounded, content-hashed textures on the existing wgpu device; preview,
+dedicated playback, and export own caches at their documented lifetimes and
+surface unsupported/invalid documents as explicit failures. The owning GPU
+pixel test passes and proves frame modulo, content invalidation, preview/export
+byte parity, and device-context rebuild behavior. `cargo fmt --all -- --check`,
+`cargo clippy -p opentake-tauri --all-targets --all-features -- -D warnings`,
+the focused owning test, and
+`CARGO_INCREMENTAL=0 cargo test --workspace --no-fail-fast --quiet` all pass.
 
 ### Task 37: MR-interchange-export-complete (implementation-slice-efcc28e98cc9b40e)
 
