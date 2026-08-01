@@ -386,8 +386,20 @@ jobs:
           '@
           $modules = @{}
           $currentDll = $null
+          $inImportSection = $false
           $missingExports = @()
           foreach ($line in (Get-Content windows-tauri-test-imports.txt)) {
+            if ($line -match '^\s*Section contains the following imports:\s*$') {
+              $inImportSection = $true
+              $currentDll = $null
+              continue
+            }
+            if ($line -match '^\s*Summary\s*$') {
+              $inImportSection = $false
+              $currentDll = $null
+              continue
+            }
+            if (-not $inImportSection) { continue }
             if ($line -match '^\s{4}([A-Za-z0-9_.-]+\.dll)\s*$') {
               $currentDll = $Matches[1]
               if (-not $modules.ContainsKey($currentDll)) {
