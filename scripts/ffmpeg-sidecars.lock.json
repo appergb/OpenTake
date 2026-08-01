@@ -1,17 +1,27 @@
 {
-  "schema": "opentake-ffmpeg-sidecars-v1",
-  "release": "https://github.com/eugeneware/ffmpeg-static/releases/tag/b6.1.1",
+  "schema": "opentake-ffmpeg-sidecars-v2",
+  "release": "Per-target, checksum-pinned redistributable FFmpeg builds",
   "targets": {
     "aarch64-apple-darwin": {
       "ffmpeg": {
-        "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-arm64",
-        "sha256": "a90e3db6a3fd35f6074b013f948b1aa45b31c6375489d39e572bea3f18336584",
-        "version": "6.0"
+        "url": "https://www.osxexperts.net/ffmpeg7arm.zip",
+        "sha256": "326895b16940f238d76e902fc71150f10c388c281985756f9850ff800a2f1499",
+        "version": "7.0",
+        "archive": {
+          "format": "zip",
+          "member": "ffmpeg",
+          "sha256": "563111a239fe70d2e5c84a5382204a7d0bf0a332385a92a44baff36d313e27f2"
+        }
       },
       "ffprobe": {
-        "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffprobe-darwin-arm64",
-        "sha256": "bb2db6f5d8cef919da12fbf592119a987202a8c060a886f3cab091f9cab90b64",
-        "version": "6.0"
+        "url": "https://www.osxexperts.net/ffprobe7arm.zip",
+        "sha256": "307e09bc01bd72bde5f441a1a6df68769da3b2b6e431accfbfc9cf3893ad00c4",
+        "version": "7.0",
+        "archive": {
+          "format": "zip",
+          "member": "ffprobe",
+          "sha256": "e5ae34ee2f0b3594892a695fd733646904bbc7eb40af3b359ed91538ddcb5513"
+        }
       }
     },
     "x86_64-apple-darwin": {

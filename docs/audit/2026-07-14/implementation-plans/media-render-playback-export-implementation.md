@@ -1407,6 +1407,12 @@ FFmpeg/ffprobe 6.0 and has no dynamic libav link; its current `--enable-nonfree`
 configuration remains a distribution-license blocker outside this boundary.
 Receipt: `../runtime-artifacts/automated/cli-sidecar-boundary-real-device-2026-08-01.md`.
 
+Superseded later on 2026-08-01: Apple Silicon now uses archive-and-binary
+checksum-pinned FFmpeg/ffprobe 7.0 GPL builds. The provisioner rejects
+`--enable-nonfree` and unredistributable license output before replacement, and
+the complete `opentake-media` suite passes against the replacement pair. See
+`../runtime-artifacts/automated/ffmpeg-license-replacement-2026-08-01.md`.
+
 ### Task 23: MR-motion-decoder-injection-complete (implementation-slice-ee5b0fb9f6f3c487)
 
 **Covered records:**
@@ -2089,6 +2095,11 @@ not the separately owned desktop motion/Lottie materialization.
   `--enable-nonfree` binary as a Beta release blocker. The focused aggregate,
   formatting, and completion-audit Node gate pass.
 
+  Superseded later on 2026-08-01: the Apple Silicon pair is now a pinned GPL
+  7.0 build without `--enable-nonfree`, guarded by a fail-closed license check.
+  Native checks for other packaged targets and final package evidence remain
+  part of release readiness.
+
 ### Task 32: MR-bounded-index-runtime (implementation-slice-603290a188109040)
 
 **Covered records:**
@@ -2260,6 +2271,11 @@ not the separately owned desktop motion/Lottie materialization.
   This closes sidecar resolution/execution only; the separately tracked
   `--enable-nonfree` licensing replacement and Developer-ID/notarization gates
   remain Beta-release blockers.
+
+  Superseded later on 2026-08-01 for Apple Silicon: the licensing replacement
+  is complete and the media suite passes against the new pair. Developer-ID/
+  notarization and native Windows/macOS Intel final-package evidence remain
+  separate release gates.
 
 ### Task 34: MR-ffmpeg-contract-complete (implementation-slice-2edbd096c204bad4)
 

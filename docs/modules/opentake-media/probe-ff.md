@@ -62,11 +62,12 @@ pub fn parse_probe(json: &serde_json::Value) -> MediaProbe; // 纯函数，可�
 ### 测试
 `parse_probe` 有约 12 条 fixture 单测：横屏不交换、tags 旋转 90 交换、side-data −90 折叠为 270 交换、180 不交换、fps 回退 `r_frame_rate`、纯音频无视频尺寸、时长回退容器、全空为 0、视频带音轨双标记、0 声道音轨不计音频、多声道计音频。
 
-2026-08-01 最终 macOS 包复核：app 内 FFmpeg/ffprobe 6.0 均可执行，
-主程序 `otool -L` 无 libav 动态链接，严格深度签名验证通过。当前二进制的
-构建配置包含 `--enable-nonfree`，因此在替换为许可兼容的可分发构建并完成
-第三方许可清单前，它只构成本地 Beta 技术证据，不能作为公开发布许可结论。
-证据：[`cli-sidecar-boundary-real-device-2026-08-01.md`](../../audit/2026-07-14/runtime-artifacts/automated/cli-sidecar-boundary-real-device-2026-08-01.md)。
+2026-08-01 后续合规复核：Apple Silicon 的 FFmpeg/ffprobe 已替换为双哈希
+锁定的 7.0 GPL 构建；两者均不含 `--enable-nonfree`，`-L` 也不再报告不可
+再分发。供应脚本会在下载解包后、替换目标前检查版本、二进制摘要、configure
+flags 与许可输出。媒体 crate 的真实探测、解码、PCM、缩略图、波形、H.264、
+H.265 与 ProRes 往返均在这对二进制上通过。旧 6.0 包证据保留为历史记录，
+替换证据见 [`ffmpeg-license-replacement-2026-08-01.md`](../../audit/2026-07-14/runtime-artifacts/automated/ffmpeg-license-replacement-2026-08-01.md)。
 
 ---
 

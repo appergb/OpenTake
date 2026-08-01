@@ -38,6 +38,12 @@ def verify_reported_version(path, tool, record)
   expected = record.fetch("version")
   assert(reported == expected || reported.start_with?("#{expected}-"),
          "unexpected #{tool} version: #{output.lines.first}")
+  assert(!output.include?("--enable-nonfree"),
+         "#{tool} enables nonfree components and cannot be redistributed")
+
+  license = capture!(path.to_s, "-L", env: { "PATH" => "" })
+  assert(!license.downcase.include?("not legally redistributable"),
+         "#{tool} reports that it is not legally redistributable")
 end
 
 def verify_locked_binary(tool, target, lock)
@@ -121,7 +127,8 @@ def packaged_macos_windows_sidecars_resolve_and_execute(package: nil)
     # macOS code signing writes a Mach-O signature into each nested executable,
     # so a correctly signed final package will not retain the source SHA-256.
     # The source files were verified above; the final files must instead retain
-    # their locked version, execute the smoke, and satisfy code-sign validation.
+    # their locked version and license metadata, execute the smoke, and satisfy
+    # code-sign validation.
     capture!("codesign", "--verify", "--strict", packaged_ffmpeg.to_s)
     capture!("codesign", "--verify", "--strict", packaged_ffprobe.to_s)
   else
