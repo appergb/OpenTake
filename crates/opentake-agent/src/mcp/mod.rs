@@ -9,6 +9,7 @@
 //! shortens outbound ids. The rmcp server / HTTP handler is a thin shim over this
 //! and lands in a later phase.
 
+pub mod advanced;
 pub mod convert;
 pub mod core_handle;
 pub mod dispatch;

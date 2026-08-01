@@ -61,6 +61,16 @@ pub enum ToolName {
     // --- OpenTake Motion Canvas graphics (docs/MOTION-GRAPHICS-PLUGIN.md, Issue #34) ---
     AddMotionGraphic,
     EditMotionGraphic,
+    // --- Advanced AI workflows (capability-gated by the desktop host) ---
+    TrackMotion,
+    GenerateMatte,
+    RemoveObject,
+    MatchColor,
+    SeparateStems,
+    TranslateCaptions,
+    ScriptToVideo,
+    GenerateAvatar,
+    CloneVoice,
 }
 
 impl ToolName {
@@ -128,6 +138,15 @@ impl ToolName {
             ToolName::ApplyEffect => "apply_effect",
             ToolName::AddMotionGraphic => "add_motion_graphic",
             ToolName::EditMotionGraphic => "edit_motion_graphic",
+            ToolName::TrackMotion => "track_motion",
+            ToolName::GenerateMatte => "generate_matte",
+            ToolName::RemoveObject => "remove_object",
+            ToolName::MatchColor => "match_color",
+            ToolName::SeparateStems => "separate_stems",
+            ToolName::TranslateCaptions => "translate_captions",
+            ToolName::ScriptToVideo => "script_to_video",
+            ToolName::GenerateAvatar => "generate_avatar",
+            ToolName::CloneVoice => "clone_voice",
         }
     }
 
@@ -190,11 +209,26 @@ impl ToolName {
     /// all other hosts.
     pub const MOTION: [ToolName; 2] = [ToolName::AddMotionGraphic, ToolName::EditMotionGraphic];
 
+    /// Advanced workflows are schema-known but never unconditionally
+    /// advertised. The desktop host appends only the exact capabilities backed
+    /// by installed local models or a configured provider.
+    pub const ADVANCED_AI: [ToolName; 9] = [
+        ToolName::TrackMotion,
+        ToolName::GenerateMatte,
+        ToolName::RemoveObject,
+        ToolName::MatchColor,
+        ToolName::SeparateStems,
+        ToolName::TranslateCaptions,
+        ToolName::ScriptToVideo,
+        ToolName::GenerateAvatar,
+        ToolName::CloneVoice,
+    ];
+
     /// Every recognized schema/wire name, including capabilities deliberately
     /// hidden from discovery until a real backend exists. Keeping this set lets
     /// strict argument validation and compatibility tests cover future tools
     /// without advertising placeholder behavior to models.
-    pub const KNOWN: [ToolName; 45] = [
+    pub const KNOWN: [ToolName; 54] = [
         ToolName::GetTimeline,
         ToolName::GetMedia,
         ToolName::InspectMedia,
@@ -240,6 +274,15 @@ impl ToolName {
         ToolName::ApplyEffect,
         ToolName::AddMotionGraphic,
         ToolName::EditMotionGraphic,
+        ToolName::TrackMotion,
+        ToolName::GenerateMatte,
+        ToolName::RemoveObject,
+        ToolName::MatchColor,
+        ToolName::SeparateStems,
+        ToolName::TranslateCaptions,
+        ToolName::ScriptToVideo,
+        ToolName::GenerateAvatar,
+        ToolName::CloneVoice,
     ];
 
     /// The 31 upstream-equivalent tools (Issue #9's "31 tools").
@@ -299,12 +342,22 @@ mod tests {
     }
 
     #[test]
-    fn advertised_set_is_39_and_known_set_is_45() {
+    fn advertised_set_is_39_and_known_set_is_54() {
         assert_eq!(ToolName::ALL.len(), 39);
-        assert_eq!(ToolName::KNOWN.len(), 45);
+        assert_eq!(ToolName::KNOWN.len(), 54);
         assert!(ToolName::ALL
             .iter()
             .all(|tool| ToolName::KNOWN.contains(tool)));
+    }
+
+    #[test]
+    fn advanced_ai_tools_are_known_but_capability_gated() {
+        for tool in ToolName::ADVANCED_AI {
+            assert_eq!(ToolName::from_str(tool.as_str()), Ok(tool));
+            assert!(ToolName::KNOWN.contains(&tool));
+            assert!(!ToolName::ALL.contains(&tool));
+            assert!(!ToolName::UPSTREAM.contains(&tool));
+        }
     }
 
     #[test]

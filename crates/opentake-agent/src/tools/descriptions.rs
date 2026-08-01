@@ -109,6 +109,16 @@ pub fn description(tool: ToolName) -> &'static str {
         ToolName::AddMotionGraphic => "Renders a deterministic motion graphic to MP4, imports it, and places it on the timeline as one durable undoable workflow. Returns the new clipId. The packaged Beta uses the pinned Motion Canvas 3.17.2 runner for 'title-card'; it also supports the local 'lower-third.glass' template and self-contained HTML/CSS/JS fallback (animated through OpenTake.onSeek). Raw TypeScript/TSX and transparent output are reported as unsupported instead of being accepted as placeholders.\n\nstartFrame/durationFrames are project frames (from get_timeline). trackIndex is optional — omit to auto-create a new visual track; set it to target an existing non-audio track.",
 
         ToolName::EditMotionGraphic => "Re-renders an existing OpenTake motion graphic as one durable undoable workflow while preserving its timeline clipId and placement. Pass the clipId and either replacement self-contained HTML/CSS/JS for a code-authored graphic or parameter overrides for a template-authored graphic. Ordinary video clips and unsupported source types are rejected with typed errors.",
+
+        ToolName::TrackMotion => "Analyzes a bounded source region and returns editable position keyframes that follow the subject. Defaults to preview-only; set apply=true only after reviewing confidence and samples. Applying is one undoable edit. The tool is advertised only when a production tracking backend is available.",
+        ToolName::GenerateMatte => "Generates a frame-aligned reusable alpha matte for one clip without modifying the source asset. Defaults to preview-only and reports model/version/progress metadata. Applying the matte is one undoable edit. The tool is advertised only when an installed compatible model is available.",
+        ToolName::RemoveObject => "Produces a non-destructive derivative for the selected mask and frame range. Defaults to preview-only; provider costs require costAuthorized=true. Apply imports and swaps the reviewed derivative as one undoable workflow. Cancellation or failure leaves media and timeline unchanged.",
+        ToolName::MatchColor => "Analyzes a target clip and reference frame, then returns an editable ColorGrade plus deterministic comparison metrics. Defaults to preview-only; apply=true accepts the grade in one undoable edit. Source media and the previous grade remain recoverable.",
+        ToolName::SeparateStems => "Separates an audio-bearing asset into aligned vocals and accompaniment derivatives with source/model provenance. Optionally imports both stems to synchronized tracks in one undoable workflow. Cancellation or failure adds no media or tracks.",
+        ToolName::TranslateCaptions => "Translates selected caption clips while preserving every clip id and frame range. Defaults to a reviewable per-caption diff; apply=true accepts only the returned changes as one undoable edit. Provider costs require costAuthorized=true.",
+        ToolName::ScriptToVideo => "Builds and validates a persisted, reviewable multi-segment assembly plan from exact media and narration references. Defaults to planning only; apply=true places the reviewed segments and transitions through existing edit commands as one undoable workflow.",
+        ToolName::GenerateAvatar => "Generates a lip-synchronized avatar video from a portrait and narration through a configured provider. Requires explicit recorded consent and costAuthorized=true. Success imports the result; cancellation or failure imports nothing.",
+        ToolName::CloneVoice => "Enrolls, uses, or revokes a provider voice model. Every action requires a recorded consent id; paid enrollment/generation requires costAuthorized=true. Raw credentials and reference-audio bytes are never persisted in project metadata, and revoked voices cannot generate.",
     }
 }
 
@@ -712,6 +722,93 @@ pub fn input_schema(tool: ToolName) -> Value {
                 "params": {"type": "object", "description": "Template parameter overrides merged over current bindings. Only valid for a template-authored graphic.", "additionalProperties": {"oneOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]}}
             }),
             &["clipId"],
+        ),
+
+        ToolName::TrackMotion => object(
+            json!({
+                "clipId": {"type": "string"},
+                "region": {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "width": {"type": "number"}, "height": {"type": "number"}}, "required": ["x", "y", "width", "height"]},
+                "startFrame": {"type": "integer"}, "endFrame": {"type": "integer"},
+                "apply": {"type": "boolean", "default": false}
+            }),
+            &["clipId", "region"],
+        ),
+        ToolName::GenerateMatte => object(
+            json!({
+                "clipId": {"type": "string"}, "model": {"type": "string"},
+                "startFrame": {"type": "integer"}, "endFrame": {"type": "integer"},
+                "apply": {"type": "boolean", "default": false}
+            }),
+            &["clipId"],
+        ),
+        ToolName::RemoveObject => object(
+            json!({
+                "clipId": {"type": "string"}, "maskId": {"type": "string"},
+                "startFrame": {"type": "integer"}, "endFrame": {"type": "integer"},
+                "provider": {"type": "string"}, "model": {"type": "string"},
+                "costAuthorized": {"type": "boolean"}, "apply": {"type": "boolean", "default": false}
+            }),
+            &["clipId", "maskId"],
+        ),
+        ToolName::MatchColor => object(
+            json!({
+                "clipId": {"type": "string"}, "referenceMediaRef": {"type": "string"},
+                "referenceFrame": {"type": "integer"}, "targetFrame": {"type": "integer"},
+                "apply": {"type": "boolean", "default": false}
+            }),
+            &["clipId", "referenceMediaRef"],
+        ),
+        ToolName::SeparateStems => object(
+            json!({
+                "mediaRef": {"type": "string"}, "provider": {"type": "string"},
+                "model": {"type": "string"}, "importToTracks": {"type": "boolean", "default": false},
+                "startFrame": {"type": "integer"}
+            }),
+            &["mediaRef"],
+        ),
+        ToolName::TranslateCaptions => object(
+            json!({
+                "captionClipIds": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "sourceLocale": {"type": "string"}, "targetLocale": {"type": "string"},
+                "provider": {"type": "string"}, "model": {"type": "string"},
+                "costAuthorized": {"type": "boolean"}, "apply": {"type": "boolean", "default": false}
+            }),
+            &["captionClipIds", "targetLocale"],
+        ),
+        ToolName::ScriptToVideo => object(
+            json!({
+                "segments": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
+                    "script": {"type": "string"}, "mediaRef": {"type": "string"},
+                    "narrationMediaRef": {"type": "string"}, "durationFrames": {"type": "integer"},
+                    "transition": {"type": "string"}
+                }, "required": ["script", "mediaRef", "durationFrames"]}},
+                "apply": {"type": "boolean", "default": false}
+            }),
+            &["segments"],
+        ),
+        ToolName::GenerateAvatar => object(
+            json!({
+                "portraitMediaRef": {"type": "string"}, "audioMediaRef": {"type": "string"},
+                "consentId": {"type": "string"}, "provider": {"type": "string"},
+                "model": {"type": "string"}, "costAuthorized": {"type": "boolean"},
+                "startFrame": {"type": "integer"}
+            }),
+            &[
+                "portraitMediaRef",
+                "audioMediaRef",
+                "consentId",
+                "costAuthorized",
+            ],
+        ),
+        ToolName::CloneVoice => object(
+            json!({
+                "action": {"type": "string", "enum": ["enroll", "generate", "revoke"]},
+                "referenceAudioMediaRef": {"type": "string"}, "consentId": {"type": "string"},
+                "voiceId": {"type": "string"}, "voiceName": {"type": "string"},
+                "prompt": {"type": "string"}, "provider": {"type": "string"},
+                "model": {"type": "string"}, "costAuthorized": {"type": "boolean"}
+            }),
+            &["action", "consentId"],
         ),
     };
     close_declared_objects(&mut schema);

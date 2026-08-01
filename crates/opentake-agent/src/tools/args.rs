@@ -6,6 +6,7 @@
 //! entry keys).
 
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::tools::errors::ToolArgs;
 
@@ -692,6 +693,211 @@ pub struct RemoveFillerWordsArgs {
 impl ToolArgs for RemoveFillerWordsArgs {
     const ALLOWED_KEYS: &'static [&'static str] =
         &["clipIds", "trackIndex", "fillerWords", "paddingFrames"];
+}
+
+// --- capability-gated advanced AI workflows ---
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct MotionRegionArg {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+impl ToolArgs for MotionRegionArg {
+    const ALLOWED_KEYS: &'static [&'static str] = &["x", "y", "width", "height"];
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackMotionArgs {
+    pub clip_id: String,
+    pub region: Value,
+    pub start_frame: Option<i32>,
+    pub end_frame: Option<i32>,
+    pub apply: Option<bool>,
+}
+impl ToolArgs for TrackMotionArgs {
+    const ALLOWED_KEYS: &'static [&'static str] =
+        &["clipId", "region", "startFrame", "endFrame", "apply"];
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateMatteArgs {
+    pub clip_id: String,
+    pub model: Option<String>,
+    pub start_frame: Option<i32>,
+    pub end_frame: Option<i32>,
+    pub apply: Option<bool>,
+}
+impl ToolArgs for GenerateMatteArgs {
+    const ALLOWED_KEYS: &'static [&'static str] =
+        &["clipId", "model", "startFrame", "endFrame", "apply"];
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveObjectArgs {
+    pub clip_id: String,
+    pub mask_id: String,
+    pub start_frame: Option<i32>,
+    pub end_frame: Option<i32>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub cost_authorized: Option<bool>,
+    pub apply: Option<bool>,
+}
+impl ToolArgs for RemoveObjectArgs {
+    const ALLOWED_KEYS: &'static [&'static str] = &[
+        "clipId",
+        "maskId",
+        "startFrame",
+        "endFrame",
+        "provider",
+        "model",
+        "costAuthorized",
+        "apply",
+    ];
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchColorArgs {
+    pub clip_id: String,
+    pub reference_media_ref: String,
+    pub reference_frame: Option<i32>,
+    pub target_frame: Option<i32>,
+    pub apply: Option<bool>,
+}
+impl ToolArgs for MatchColorArgs {
+    const ALLOWED_KEYS: &'static [&'static str] = &[
+        "clipId",
+        "referenceMediaRef",
+        "referenceFrame",
+        "targetFrame",
+        "apply",
+    ];
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SeparateStemsArgs {
+    pub media_ref: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub import_to_tracks: Option<bool>,
+    pub start_frame: Option<i32>,
+}
+impl ToolArgs for SeparateStemsArgs {
+    const ALLOWED_KEYS: &'static [&'static str] = &[
+        "mediaRef",
+        "provider",
+        "model",
+        "importToTracks",
+        "startFrame",
+    ];
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TranslateCaptionsArgs {
+    pub caption_clip_ids: Vec<String>,
+    pub source_locale: Option<String>,
+    pub target_locale: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub cost_authorized: Option<bool>,
+    pub apply: Option<bool>,
+}
+impl ToolArgs for TranslateCaptionsArgs {
+    const ALLOWED_KEYS: &'static [&'static str] = &[
+        "captionClipIds",
+        "sourceLocale",
+        "targetLocale",
+        "provider",
+        "model",
+        "costAuthorized",
+        "apply",
+    ];
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptToVideoArgs {
+    pub segments: Vec<Value>,
+    pub apply: Option<bool>,
+}
+impl ToolArgs for ScriptToVideoArgs {
+    const ALLOWED_KEYS: &'static [&'static str] = &["segments", "apply"];
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptSegmentArg {
+    pub script: String,
+    pub media_ref: String,
+    pub narration_media_ref: Option<String>,
+    pub duration_frames: i32,
+    pub transition: Option<String>,
+}
+impl ToolArgs for ScriptSegmentArg {
+    const ALLOWED_KEYS: &'static [&'static str] = &[
+        "script",
+        "mediaRef",
+        "narrationMediaRef",
+        "durationFrames",
+        "transition",
+    ];
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateAvatarArgs {
+    pub portrait_media_ref: String,
+    pub audio_media_ref: String,
+    pub consent_id: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub cost_authorized: Option<bool>,
+    pub start_frame: Option<i32>,
+}
+impl ToolArgs for GenerateAvatarArgs {
+    const ALLOWED_KEYS: &'static [&'static str] = &[
+        "portraitMediaRef",
+        "audioMediaRef",
+        "consentId",
+        "provider",
+        "model",
+        "costAuthorized",
+        "startFrame",
+    ];
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneVoiceArgs {
+    pub action: String,
+    pub reference_audio_media_ref: Option<String>,
+    pub consent_id: String,
+    pub voice_id: Option<String>,
+    pub voice_name: Option<String>,
+    pub prompt: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub cost_authorized: Option<bool>,
+}
+impl ToolArgs for CloneVoiceArgs {
+    const ALLOWED_KEYS: &'static [&'static str] = &[
+        "action",
+        "referenceAudioMediaRef",
+        "consentId",
+        "voiceId",
+        "voiceName",
+        "prompt",
+        "provider",
+        "model",
+        "costAuthorized",
+    ];
 }
 
 // --- generate_video ---

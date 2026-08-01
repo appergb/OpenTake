@@ -35,6 +35,10 @@ use opentake_ops::{
 };
 use serde_json::Value;
 
+use crate::mcp::advanced::{
+    AdvancedWorkflowBridge, AdvancedWorkflowError, AdvancedWorkflowErrorKind,
+    AdvancedWorkflowRequest,
+};
 use crate::mcp::core_handle::CoreHandle;
 use crate::mcp::gen_catalog;
 use crate::mcp::generation::{GenerationBridge, GenerationRequest};
@@ -85,6 +89,9 @@ pub struct Dispatcher {
     /// Deterministic render + atomic import/place host capability. Motion tools
     /// are discoverable only while this bridge reports production readiness.
     motion_bridge: Option<Arc<dyn MotionBridge>>,
+    /// Capability-gated advanced workflows. Each tool is discovered only when
+    /// this bridge explicitly reports a production implementation for it.
+    advanced_bridge: Option<Arc<dyn AdvancedWorkflowBridge>>,
     /// Action names of agent edits applied through this dispatcher, newest last.
     /// Guards `undo`: we only revert when this session has pushed an edit.
     agent_undo: Mutex<Vec<String>>,
@@ -129,12 +136,31 @@ impl Dispatcher {
         generation_bridge: Option<Arc<dyn GenerationBridge>>,
         motion_bridge: Option<Arc<dyn MotionBridge>>,
     ) -> Self {
+        Self::with_all_capability_bridges(
+            handle,
+            registry,
+            bridge,
+            generation_bridge,
+            motion_bridge,
+            None,
+        )
+    }
+
+    pub fn with_all_capability_bridges(
+        handle: Arc<dyn CoreHandle>,
+        registry: Arc<RwLock<PluginRegistry>>,
+        bridge: Option<Arc<dyn MediaBridge>>,
+        generation_bridge: Option<Arc<dyn GenerationBridge>>,
+        motion_bridge: Option<Arc<dyn MotionBridge>>,
+        advanced_bridge: Option<Arc<dyn AdvancedWorkflowBridge>>,
+    ) -> Self {
         Dispatcher {
             handle,
             registry,
             bridge,
             generation_bridge,
             motion_bridge,
+            advanced_bridge,
             agent_undo: Mutex::new(Vec::new()),
         }
     }
@@ -167,6 +193,13 @@ impl Dispatcher {
         }
         if self.can_render_motion() {
             tools.extend(ToolName::MOTION);
+        }
+        if let Some(bridge) = &self.advanced_bridge {
+            for tool in bridge.supported_tools() {
+                if ToolName::ADVANCED_AI.contains(&tool) && !tools.contains(&tool) {
+                    tools.push(tool);
+                }
+            }
         }
         tools
     }
@@ -343,6 +376,69 @@ impl Dispatcher {
             | ToolName::UpscaleMedia => self.submit_generation(tool, args, cancel),
             ToolName::AddMotionGraphic => self.add_motion_graphic(args, cancel),
             ToolName::EditMotionGraphic => self.edit_motion_graphic(args, cancel),
+            ToolName::TrackMotion
+            | ToolName::GenerateMatte
+            | ToolName::RemoveObject
+            | ToolName::MatchColor
+            | ToolName::SeparateStems
+            | ToolName::TranslateCaptions
+            | ToolName::ScriptToVideo
+            | ToolName::GenerateAvatar
+            | ToolName::CloneVoice => self.run_advanced_workflow(tool, args, cancel),
+        }
+    }
+
+    fn run_advanced_workflow(
+        &self,
+        tool: ToolName,
+        args: &Value,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<ToolResult, ToolError> {
+        let request = match tool {
+            ToolName::TrackMotion => {
+                AdvancedWorkflowRequest::TrackMotion(decode_tool_args(args, "")?)
+            }
+            ToolName::GenerateMatte => {
+                AdvancedWorkflowRequest::GenerateMatte(decode_tool_args(args, "")?)
+            }
+            ToolName::RemoveObject => {
+                AdvancedWorkflowRequest::RemoveObject(decode_tool_args(args, "")?)
+            }
+            ToolName::MatchColor => {
+                AdvancedWorkflowRequest::MatchColor(decode_tool_args(args, "")?)
+            }
+            ToolName::SeparateStems => {
+                AdvancedWorkflowRequest::SeparateStems(decode_tool_args(args, "")?)
+            }
+            ToolName::TranslateCaptions => {
+                AdvancedWorkflowRequest::TranslateCaptions(decode_tool_args(args, "")?)
+            }
+            ToolName::ScriptToVideo => {
+                AdvancedWorkflowRequest::ScriptToVideo(decode_tool_args(args, "")?)
+            }
+            ToolName::GenerateAvatar => {
+                AdvancedWorkflowRequest::GenerateAvatar(decode_tool_args(args, "")?)
+            }
+            ToolName::CloneVoice => {
+                AdvancedWorkflowRequest::CloneVoice(decode_tool_args(args, "")?)
+            }
+            _ => return Err(ToolError::new("not an advanced workflow tool")),
+        };
+        let bridge = self
+            .advanced_bridge
+            .as_ref()
+            .ok_or_else(|| ToolError::new("advanced workflow host capability is not available"))?;
+        match bridge.execute(request, cancel) {
+            Ok(commit) => {
+                if let Some(action_name) = commit.action_name {
+                    self.agent_undo
+                        .lock()
+                        .expect("agent-undo mutex")
+                        .push(action_name);
+                }
+                Ok(ToolResult::ok(commit.result.to_string()))
+            }
+            Err(error) => Ok(advanced_workflow_error(tool, error)),
         }
     }
 
@@ -2465,6 +2561,21 @@ fn validate_tool_args(tool: ToolName, args: &Value) -> Result<(), ToolError> {
                 validate_motion_params(params, "params")?;
             }
         }
+        ToolName::TrackMotion => {
+            decode!(TrackMotionArgs);
+            validate_required_object::<MotionRegionArg>(args, "region", "region")?;
+        }
+        ToolName::GenerateMatte => decode!(GenerateMatteArgs),
+        ToolName::RemoveObject => decode!(RemoveObjectArgs),
+        ToolName::MatchColor => decode!(MatchColorArgs),
+        ToolName::SeparateStems => decode!(SeparateStemsArgs),
+        ToolName::TranslateCaptions => decode!(TranslateCaptionsArgs),
+        ToolName::ScriptToVideo => {
+            decode!(ScriptToVideoArgs);
+            validate_array::<ScriptSegmentArg>(args, "segments")?;
+        }
+        ToolName::GenerateAvatar => decode!(GenerateAvatarArgs),
+        ToolName::CloneVoice => decode!(CloneVoiceArgs),
     }
     Ok(())
 }
@@ -2496,6 +2607,26 @@ fn motion_bridge_error(tool: ToolName, error: MotionBridgeError) -> ToolResult {
         }
         MotionBridgeErrorKind::Cancelled => ToolResult::error("motion render cancelled"),
         MotionBridgeErrorKind::RenderFailed => ToolResult::error("motion render failed"),
+    }
+}
+
+fn advanced_workflow_error(tool: ToolName, error: AdvancedWorkflowError) -> ToolResult {
+    match error.kind {
+        AdvancedWorkflowErrorKind::InvalidArguments => {
+            ToolResult::public_error(PublicErrorKind::InvalidArguments(tool), error.message)
+        }
+        AdvancedWorkflowErrorKind::ResourceNotFound => {
+            ToolResult::public_error(PublicErrorKind::ResourceNotFound(tool), error.message)
+        }
+        AdvancedWorkflowErrorKind::CapabilityUnavailable => {
+            ToolResult::public_error(PublicErrorKind::CapabilityUnavailable(tool), error.message)
+        }
+        AdvancedWorkflowErrorKind::ConsentRequired
+        | AdvancedWorkflowErrorKind::CostAuthorizationRequired
+        | AdvancedWorkflowErrorKind::ExecutionFailed => {
+            ToolResult::error("advanced workflow failed")
+        }
+        AdvancedWorkflowErrorKind::Cancelled => ToolResult::error("advanced workflow cancelled"),
     }
 }
 
