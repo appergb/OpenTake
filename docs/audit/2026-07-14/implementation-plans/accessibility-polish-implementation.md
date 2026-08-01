@@ -1890,30 +1890,44 @@
   - Visible/accessibility/return path: success=focus an editor panel: onMouseDown -> focusPanel(panel) -> focus ring; accessibility={"focus":"Outer div is not keyboard focusable","label":"Visible child text/title or caller-provided label; verify at runtime","shortcut":"None declared on this control"}; returnPath=["Focus state remains on the selected panel until another panel is clicked/shortcut-selected."].
   - Outcome matrix: {"success":"focus an editor panel: onMouseDown -> focusPanel(panel) -> focus ring","pending":"Not applicable — this activation only changes local/caller state and starts no Promise, API, Tauri command, or Rust work.","empty":"Not applicable — this control does not consume a collection, selection, or free-form payload that has an empty state.","disabled":"No explicit disabled prop on this candidate.","cancel":"Not applicable — this immediate handler has no cancellable operation or dismissible transient surface.","retry":"Not applicable as an error-recovery state — the synchronous local action can simply be activated again.","failure":"Not applicable — this immediate activation calls no API/Tauri/Rust boundary, so there is no backend rejection path."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/ui/PanelShell.interaction.test.tsx#control-bbc125bbbf2275f2 focus an editor panel` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/ui/PanelShell.interaction.test.tsx -t "control-bbc125bbbf2275f2 focus an editor panel"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/ui/PanelShell.tsx`, `web/src/components/ui/PanelShell.tsx#PanelShell` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/ui/PanelShell.interaction.test.tsx -t "control-bbc125bbbf2275f2 focus an editor panel"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: the reviewed owner is now present and proves the exact
+  mousedown -> `focusPanel("media")` -> focus-ring path, including the intended
+  clip-selection clear without disturbing media selection. The baseline
+  production component already carried the required labeled region,
+  `tabIndex=0`, mouse handler and focus handler from the earlier panel-surface
+  hardening, so the contract passed without another production mutation; the
+  planned RED premise was stale. The keyboard focus path independently proves
+  retained DOM focus and the same visible ring. The Web gate passes with 110
+  files / 859 tests plus a production build.
+
+- [ ] **Runtime evidence gate:** in the packaged editor, switch among all five
+  panels by pointer and keyboard focus, verifying the focus ring and the media/
+  timeline selection-clearing rules before final control reclassification.
