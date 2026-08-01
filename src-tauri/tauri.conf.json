@@ -93,6 +93,11 @@
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"
+    },
+    "windows": {
+      "wix": {
+        "version": "1.0.0.1"
+      }
     }
   }
 }

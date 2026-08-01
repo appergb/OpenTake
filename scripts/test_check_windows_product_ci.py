@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 
@@ -16,6 +17,34 @@ class WindowsProductCiContractTests(unittest.TestCase):
 
     def test_repository_workflow_satisfies_contract(self) -> None:
         self.assertEqual([], contract.validate_workflow(WORKFLOW))
+
+    def test_accepts_beta_app_version_with_numeric_msi_mapping(self) -> None:
+        config = json.dumps(
+            {
+                "version": "1.0.0-beta.1",
+                "bundle": {"windows": {"wix": {"version": "1.0.0.1"}}},
+            }
+        )
+        self.assertEqual([], contract.validate_tauri_config(config))
+
+    def test_rejects_missing_numeric_msi_mapping(self) -> None:
+        config = json.dumps({"version": "1.0.0-beta.1", "bundle": {}})
+        self.assertIn(
+            "MSI-compatible numeric Beta version",
+            contract.validate_tauri_config(config),
+        )
+
+    def test_rejects_msi_mapping_for_a_different_release(self) -> None:
+        config = json.dumps(
+            {
+                "version": "1.1.0-beta.1",
+                "bundle": {"windows": {"wix": {"version": "1.0.0.1"}}},
+            }
+        )
+        self.assertIn(
+            "MSI version tracks public app version",
+            contract.validate_tauri_config(config),
+        )
 
     def test_comment_cannot_replace_workspace_test_command(self) -> None:
         mutated = WORKFLOW.replace(
