@@ -222,3 +222,44 @@ it("control-6e36c47f93f0d4fb dismiss keyframe context menu", async () => {
   expect(document.activeElement).toBe(diamond);
   expect(Object.values(editSpies).every((spy) => spy.mock.calls.length === 0)).toBe(true);
 });
+
+it("control-c191a17716450b1a delete keyframe", async () => {
+  await renderOpacityKeyframe();
+  const diamond = container.querySelector<HTMLElement>("[data-keyframe-diamond='105']")!;
+  diamond.focus();
+  await act(async () => {
+    diamond.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  });
+
+  const deleteItem = container.querySelector<HTMLButtonElement>(
+    "[data-keyframe-menu-action='delete']",
+  );
+  expect(deleteItem?.getAttribute("role")).toBe("menuitem");
+  expect(deleteItem?.type).toBe("button");
+  await act(async () => deleteItem?.click());
+  expect(editSpies.removeKeyframe).toHaveBeenCalledTimes(1);
+  expect(editSpies.removeKeyframe).toHaveBeenCalledWith("clip-1", "opacity", 105);
+  expect(editSpies.moveKeyframe).not.toHaveBeenCalled();
+  expect(editSpies.setKeyframeInterpolation).not.toHaveBeenCalled();
+  expect(container.querySelector("[role='menu']")).toBeNull();
+  expect(document.activeElement).toBe(diamond);
+
+  vi.clearAllMocks();
+  editSpies.removeKeyframe.mockRejectedValueOnce(new Error("locked"));
+  await act(async () => {
+    diamond.dispatchEvent(new KeyboardEvent("keydown", { key: "ContextMenu", bubbles: true }));
+  });
+  const retryDelete = container.querySelector<HTMLButtonElement>(
+    "[data-keyframe-menu-action='delete']",
+  )!;
+  await act(async () => {
+    retryDelete.click();
+    await Promise.resolve();
+  });
+  expect(editSpies.removeKeyframe).toHaveBeenCalledTimes(1);
+  expect(container.querySelector("[role='menu']")).toBeNull();
+  expect(document.activeElement).toBe(diamond);
+  expect(useEditorUiStore.getState().toast?.message).toBe(
+    "inspector.keyframes.deleteFailed:locked",
+  );
+});

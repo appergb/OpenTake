@@ -261,7 +261,10 @@ export function KeyframesLaneRow({
   };
 
   const handleDelete = (frame: number) => {
-    void edit.removeKeyframe(clip.id, property, frame);
+    void edit.removeKeyframe(clip.id, property, frame).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      pushToast(t("inspector.keyframes.deleteFailed", { error: message }));
+    });
     closeMenu();
   };
 
@@ -466,7 +469,7 @@ function KeyframeContextMenu({
           boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
         }}
       >
-        <MenuItem onClick={onDelete} label={t("inspector.keyframes.delete")} />
+        <MenuItem action="delete" onClick={onDelete} label={t("inspector.keyframes.delete")} />
         <div style={{ height: 1, background: "var(--border-primary)", margin: "2px 0" }} />
         <div
           style={{
@@ -479,14 +482,17 @@ function KeyframeContextMenu({
           {t("inspector.keyframes.interpolation")}
         </div>
         <MenuItem
+          action="linear"
           onClick={() => onSetInterpolation("linear")}
           label={t("inspector.keyframes.interpolation.linear")}
         />
         <MenuItem
+          action="hold"
           onClick={() => onSetInterpolation("hold")}
           label={t("inspector.keyframes.interpolation.hold")}
         />
         <MenuItem
+          action="smooth"
           onClick={() => onSetInterpolation("smooth")}
           label={t("inspector.keyframes.interpolation.smooth")}
         />
@@ -495,21 +501,35 @@ function KeyframeContextMenu({
   );
 }
 
-function MenuItem({ onClick, label }: { onClick: () => void; label: string }) {
+function MenuItem({
+  action,
+  onClick,
+  label,
+}: {
+  action: string;
+  onClick: () => void;
+  label: string;
+}) {
   return (
-    <div
+    <button
+      type="button"
+      role="menuitem"
+      data-keyframe-menu-action={action}
       onClick={onClick}
       style={{
+        display: "block",
+        width: "100%",
         padding: "4px 12px",
         fontSize: "var(--fs-xs)",
         color: "var(--text-primary)",
         cursor: "pointer",
+        textAlign: "left",
       }}
       onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-prominent)")}
       onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
     >
       {label}
-    </div>
+    </button>
   );
 }
 
