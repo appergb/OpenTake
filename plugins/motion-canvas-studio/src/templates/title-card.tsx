@@ -7,6 +7,8 @@ interface OpenTakeMotionConfig {
   accent?: string;
   background?: string;
   durationSeconds?: number;
+  width?: number;
+  height?: number;
 }
 
 declare global {
@@ -20,42 +22,54 @@ export default makeScene2D(function* (view) {
   const card = createRef<Rect>();
   const bar = createRef<Rect>();
   const duration = Math.max(0.7, config.durationSeconds ?? 3);
+  // Keep the 1920×1080 design geometry valid on every accepted project
+  // canvas, including the deliberately tiny 64×36 native acceptance case.
+  const scale = Math.max(
+    Number.EPSILON,
+    Math.min((config.width ?? 1920) / 1920, (config.height ?? 1080) / 1080),
+  );
 
   view.fill(config.background ?? '#11131a');
   view.add(
     <Rect
       ref={card}
       width={'72%'}
-      padding={70}
-      radius={32}
+      padding={70 * scale}
+      radius={32 * scale}
       fill={'rgba(255,255,255,0.12)'}
       stroke={'rgba(255,255,255,0.30)'}
-      lineWidth={2}
+      lineWidth={2 * scale}
       opacity={0}
-      y={72}
+      y={72 * scale}
     >
-      <Layout direction={'column'} gap={28} width={'100%'}>
-        <Rect ref={bar} width={260} height={10} radius={5} fill={config.accent ?? '#7c5cff'} />
+      <Layout direction={'column'} gap={28 * scale} width={'100%'}>
+        <Rect
+          ref={bar}
+          width={260 * scale}
+          height={10 * scale}
+          radius={5 * scale}
+          fill={config.accent ?? '#7c5cff'}
+        />
         <Txt
           text={config.title ?? 'OpenTake'}
           fill={'#ffffff'}
           fontFamily={'Arial, sans-serif'}
-          fontSize={92}
+          fontSize={92 * scale}
           fontWeight={700}
-          lineHeight={108}
+          lineHeight={108 * scale}
         />
         <Txt
           text={config.subtitle ?? 'Motion Canvas'}
           fill={'rgba(255,255,255,0.76)'}
           fontFamily={'Arial, sans-serif'}
-          fontSize={42}
-          lineHeight={54}
+          fontSize={42 * scale}
+          lineHeight={54 * scale}
         />
       </Layout>
     </Rect>,
   );
 
   yield* all(card().opacity(1, 0.55, easeOutCubic), card().y(0, 0.55, easeOutCubic));
-  yield* bar().width(320, Math.max(0.1, duration - 0.75), easeOutCubic);
+  yield* bar().width(320 * scale, Math.max(0.1, duration - 0.75), easeOutCubic);
   yield* waitFor(0.2);
 });
