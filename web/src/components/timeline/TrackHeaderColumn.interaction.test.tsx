@@ -31,9 +31,15 @@ const timeline: Timeline = {
 
 let container: HTMLDivElement;
 let root: Root;
+let setPointerCapture: ReturnType<typeof vi.spyOn>;
+let releasePointerCapture: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  setPointerCapture = vi.spyOn(HTMLElement.prototype, "setPointerCapture")
+    .mockImplementation(() => {});
+  releasePointerCapture = vi.spyOn(HTMLElement.prototype, "releasePointerCapture")
+    .mockImplementation(() => {});
   editSpies.setTrackProps.mockResolvedValue(undefined);
   editSpies.swapTracks.mockResolvedValue(undefined);
   useEditorUiStore.setState({ trackDisplayHeights: {}, toast: null });
@@ -48,6 +54,7 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
+  vi.restoreAllMocks();
 });
 
 async function exerciseTrackAction(
@@ -87,4 +94,71 @@ it("control-74289f5806f8162a hide visual track", async () => {
 
 it("control-71e7fa7fcd6aa730 toggle track sync lock", async () => {
   await exerciseTrackAction("sync-lock", 1, { syncLocked: true });
+});
+
+it("control-9f9173ff2ee37464 resize track display height", async () => {
+  const grip = container.querySelector<HTMLElement>("[data-track-resize='audio-1']")!;
+  expect(grip.getAttribute("role")).toBe("separator");
+  expect(grip.getAttribute("aria-orientation")).toBe("horizontal");
+  expect(grip.getAttribute("aria-valuemin")).toBe("32");
+  expect(grip.getAttribute("aria-valuemax")).toBe("200");
+  expect(grip.getAttribute("aria-valuenow")).toBe("50");
+  expect(grip.getAttribute("aria-label")).toContain("A1");
+  expect(grip.tabIndex).toBe(0);
+
+  await act(async () => {
+    grip.dispatchEvent(new PointerEvent("pointerdown", {
+      bubbles: true,
+      pointerId: 9,
+      clientY: 100,
+    }));
+    grip.dispatchEvent(new PointerEvent("pointermove", {
+      bubbles: true,
+      pointerId: 9,
+      clientY: 400,
+    }));
+  });
+  expect(setPointerCapture).toHaveBeenCalledWith(9);
+  expect(grip.dataset.interactionState).toBe("dragging");
+  expect(useEditorUiStore.getState().trackDisplayHeights["audio-1"]).toBe(200);
+  expect(grip.getAttribute("aria-valuenow")).toBe("200");
+
+  await act(async () => {
+    grip.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 9 }));
+  });
+  expect(releasePointerCapture).toHaveBeenCalledWith(9);
+  expect(grip.dataset.interactionState).toBe("enabled");
+
+  await act(async () => {
+    grip.dispatchEvent(new PointerEvent("pointerdown", {
+      bubbles: true,
+      pointerId: 10,
+      clientY: 200,
+    }));
+    grip.dispatchEvent(new PointerEvent("pointermove", {
+      bubbles: true,
+      pointerId: 10,
+      clientY: -200,
+    }));
+    grip.dispatchEvent(new PointerEvent("pointercancel", { bubbles: true, pointerId: 10 }));
+  });
+  expect(useEditorUiStore.getState().trackDisplayHeights["audio-1"]).toBe(32);
+  expect(releasePointerCapture).toHaveBeenCalledWith(10);
+  expect(grip.dataset.interactionState).toBe("enabled");
+
+  grip.focus();
+  await act(async () => {
+    grip.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+  });
+  expect(useEditorUiStore.getState().trackDisplayHeights["audio-1"]).toBe(200);
+  await act(async () => {
+    grip.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+  });
+  await act(async () => {
+    grip.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  });
+  expect(useEditorUiStore.getState().trackDisplayHeights["audio-1"]).toBe(42);
+  expect(document.activeElement).toBe(grip);
+  expect(editSpies.setTrackProps).not.toHaveBeenCalled();
+  expect(editSpies.swapTracks).not.toHaveBeenCalled();
 });

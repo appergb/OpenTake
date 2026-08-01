@@ -1684,33 +1684,46 @@
   - Visible/accessibility/return path: success=resize track display height: assert exactly pointerdown captures startY; pointermove calls p.onResize(delta), whose wrapper computes clamp(h + delta, TRACK_SIZE.minHeight, TRACK_SIZE.maxHeight) then setTrackHeight(track.id,next); pointerup releases capture and no sibling branch/command.; accessibility={"focus":"Custom rendered element has no proven tabIndex/keyboard equivalent at this candidate.","label":"No explicit aria-label/title association was discovered at this candidate.","shortcut":"No dedicated shortcut is declared."}; returnPath=["Pointerup/cancel releases the gesture and remains on the same editor surface.","A keyboard equivalent must retain/restore focus; current custom drag surface does not prove one."].
   - Outcome matrix: {"success":"resize track display height: assert exactly pointerdown captures startY; pointermove calls p.onResize(delta), whose wrapper computes clamp(h + delta, TRACK_SIZE.minHeight, TRACK_SIZE.maxHeight) then setTrackHeight(track.id,next); pointerup releases capture and no sibling branch/command.","pending":"N/A — synchronous local/browser state only.","empty":"N/A — owning visibility/handler guards prevent an absent target from emitting a command.","disabled":"No explicit disabled attribute beyond the listed visibility/handler guards.","cancel":"Pointerup/cancel follows the exact profile; Escape rollback is not otherwise implemented.","retry":"N/A — repeated activation is a new synchronous action.","failure":"N/A — no API/Tauri/Rust failure route."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/timeline/TrackHeaderColumn.interaction.test.tsx#control-9f9173ff2ee37464 resize track display height` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/timeline/TrackHeaderColumn.interaction.test.tsx -t "control-9f9173ff2ee37464 resize track display height"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/timeline/TrackHeaderColumn.tsx`, `web/src/components/timeline/TrackHeaderColumn.tsx#TrackHeaderRow`, `web/src/components/timeline/TrackHeaderColumn.tsx#TrackHeaderColumn` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/timeline/TrackHeaderColumn.interaction.test.tsx -t "control-9f9173ff2ee37464 resize track display height"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: the focused owner first failed because the resize grip
+  exposed no accessible control or cancellation state. The grip is now a
+  labeled horizontal separator with current/min/max values, retained focus,
+  Home/End/Arrow keyboard resizing, exact incremental pointer deltas and safe
+  pointerup/cancel/lost-capture release. The wrapper still owns the 32..200
+  clamp and the UI-only `setTrackHeight` write; no edit or reorder command is
+  emitted. The Web gate passes with 108 files / 856 tests plus a production
+  build.
+
+- [ ] **Runtime evidence gate:** resize an audio and visual track in the
+  packaged timeline by pointer and keyboard, then cancel an active drag and
+  verify focus/value/state recovery before final control reclassification.
 
 ### Task 20: control-acceptance (implementation-slice-a9b2786eddf478dc)
 

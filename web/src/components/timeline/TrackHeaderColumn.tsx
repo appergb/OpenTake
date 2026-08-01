@@ -73,6 +73,7 @@ export function TrackHeaderColumn({ timeline, scrollTop, totalHeight }: Props) {
           return (
             <TrackHeaderRow
               key={track.id || i}
+              trackId={track.id}
               index={i}
               label={trackDisplayLabel(timeline, i)}
               color={trackColor(track.type)}
@@ -111,6 +112,7 @@ function trackTop(
 }
 
 interface RowProps {
+  trackId: string;
   index: number;
   label: string;
   color: string;
@@ -129,31 +131,75 @@ interface RowProps {
 function TrackHeaderRow(p: RowProps) {
   const t = useT();
   const pushToast = useEditorUiStore((s) => s.pushToast);
-  const dragRef = useRef<{ startY: number } | null>(null);
+  const dragRef = useRef<{
+    startY: number;
+    pointerId: number;
+    target: HTMLElement;
+  } | null>(null);
+  const [isResizing, setIsResizing] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+
+  const finishResize = useCallback((releaseCapture: boolean) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    dragRef.current = null;
+    setIsResizing(false);
+    if (releaseCapture) {
+      try {
+        drag.target.releasePointerCapture(drag.pointerId);
+      } catch {
+        // Capture can already be gone when the browser ends the gesture.
+      }
+    }
+  }, []);
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      dragRef.current = { startY: e.clientY };
-      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      const target = e.currentTarget as HTMLElement;
+      dragRef.current = { startY: e.clientY, pointerId: e.pointerId, target };
+      setIsResizing(true);
+      target.focus();
+      target.setPointerCapture(e.pointerId);
     },
     [],
   );
   const onPointerMove = useCallback(
     (e: React.PointerEvent) => {
-      if (!dragRef.current) return;
-      const delta = e.clientY - dragRef.current.startY;
-      dragRef.current.startY = e.clientY;
+      const drag = dragRef.current;
+      if (!drag || drag.pointerId !== e.pointerId) return;
+      const delta = e.clientY - drag.startY;
+      drag.startY = e.clientY;
       p.onResize(delta);
     },
     [p],
   );
-  const onPointerUp = useCallback((e: React.PointerEvent) => {
-    dragRef.current = null;
-    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
-  }, []);
+  const onPointerUp = useCallback(
+    (e: React.PointerEvent) => {
+      if (dragRef.current?.pointerId !== e.pointerId) return;
+      finishResize(true);
+    },
+    [finishResize],
+  );
+  const onKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      let delta: number | null = null;
+      if (e.key === "ArrowUp") delta = -10;
+      else if (e.key === "ArrowDown") delta = 10;
+      else if (e.key === "Home") delta = TRACK_SIZE.minHeight - p.height;
+      else if (e.key === "End") delta = TRACK_SIZE.maxHeight - p.height;
+      else if (e.key === "Escape" && dragRef.current) {
+        e.preventDefault();
+        finishResize(true);
+        return;
+      }
+      if (delta === null) return;
+      e.preventDefault();
+      p.onResize(delta);
+    },
+    [finishResize, p],
+  );
 
   const iconColor = (active: boolean) =>
     active ? "var(--text-secondary)" : "rgba(255,255,255,0.186)"; // 0.62*0.3
@@ -263,9 +309,21 @@ function TrackHeaderRow(p: RowProps) {
         )}
       {/* Bottom resize grip. */}
       <div
+        data-track-resize={p.trackId}
+        data-interaction-state={isResizing ? "dragging" : "enabled"}
+        role="separator"
+        aria-label={p.label}
+        aria-orientation="horizontal"
+        aria-valuemin={TRACK_SIZE.minHeight}
+        aria-valuemax={TRACK_SIZE.maxHeight}
+        aria-valuenow={p.height}
+        tabIndex={0}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onPointerCancel={() => finishResize(true)}
+        onLostPointerCapture={() => finishResize(false)}
+        onKeyDown={onKeyDown}
         style={{
           position: "absolute",
           left: 0,
