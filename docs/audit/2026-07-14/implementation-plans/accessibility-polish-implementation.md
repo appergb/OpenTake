@@ -341,7 +341,7 @@
   - Add token, semantic-role, keyboard-focus, state, privacy, and visual assertions for every named surface; the affected lint, typecheck, and web suites must pass.
   - Exercise the named surface with keyboard and browser or packaged-app visual inspection, and retain exact accessibility or screenshot evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/preview/TransformOverlay.test.tsx#renders 4 corner handles at the OpenTake spacing/opacity tokens matching upstream AppTheme.Spacing.smMd / Opacity.strong` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `web/src/components/shell/TitleBar.visual.test.ts#TitleBar alignment` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -350,7 +350,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/preview/TransformOverlay.test.tsx -t "renders 4 corner handles at the OpenTake spacing/opacity tokens matching upstream AppTheme.Spacing.smMd / Opacity.strong"`
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.visual.test.ts -t "TitleBar alignment"`
@@ -359,11 +359,11 @@
 
   Expected: FAIL because one or more of the 17 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/ui/PanelShell.tsx#PanelShell`, `web/src/lib/theme.ts#ACCENT`, `web/src/lib/theme.ts#BG`, `web/src/lib/theme.ts#BORDER`, `web/src/lib/theme.ts#FS`, `web/src/lib/theme.ts#LAYOUT`, `web/src/lib/theme.ts#RADIUS`, `web/src/lib/theme.ts#SPACE`, `web/src/lib/theme.ts#TEXT`, `web/src/lib/theme.ts#TRACK_COLOR`, `web/src/styles/tokens.css`, `web/src/styles/tokens.css#--bg-raised`, `docs/architecture/MODULE-PORT-MAP.md`, `docs/modules/web/SPEC.md`, `docs/specs/frontend/1-design-tokens.md`, `docs/specs/frontend/13-implementation.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/preview/TransformOverlay.test.tsx -t "renders 4 corner handles at the OpenTake spacing/opacity tokens matching upstream AppTheme.Spacing.smMd / Opacity.strong"`
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.visual.test.ts -t "TitleBar alignment"`
@@ -372,11 +372,24 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Code acceptance completed 2026-08-01. Both reviewed-planned owners were
+  observed RED, then all four focused runners passed (17 assertions). The full
+  Web gate passes with 97 files / 834 tests and a production build; only the
+  pre-existing dynamic-import and chunk-size advisories remain. The typed table
+  now covers every documented token and local dimension, the CSS projection has
+  no undefined production references, and captions/keyframe UI consume their
+  typed local constants. Keyframe rows were corrected from 24px to the specified
+  22px.
+
+- [ ] **Runtime evidence gate:** inspect the packaged editor at the pinned
+  viewport/scale/locale and retain the six-surface Shell/Toolbar/Media/Inspector/
+  Preview/Timeline token-parity evidence during the sequential GUI phase.
 
 ### Task 3: dsn-gated-telemetry-init (implementation-slice-6fd8dbcff3a60a4b)
 

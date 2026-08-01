@@ -26,6 +26,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { useEditorUiStore } from "../../store/uiStore";
 import * as edit from "../../store/editActions";
 import { snapFrame } from "../../lib/keyframeSnap";
+import { LAYOUT } from "../../lib/theme";
 import type {
   AnimPair,
   Clip,
@@ -36,9 +37,9 @@ import type {
 } from "../../lib/types";
 import type { TFunction } from "../../i18n";
 
-const DIAMOND_SIZE = 8;
+const DIAMOND_SIZE = LAYOUT.keyframeDiamondSize;
 const SNAP_FRAMES = 5;
-const LANE_HEIGHT = 24;
+const LANE_HEIGHT = LAYOUT.keyframeRowHeight;
 
 /** Union of all concrete keyframe-track value types (mirror of Clip's *Track
  *  fields). Used so `getTrack` can return a single typed union. */

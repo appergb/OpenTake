@@ -1136,6 +1136,8 @@ MCPService 端口 19789 与工具注册属 Agent/MCP 子系统,App 层只做开�
 
 **核心类型**:
 - `AppTheme` (enum) — 全局设计令牌根命名空间(纯静态、不可实例化)。内含嵌套枚举:Background/Border/BorderWidth/Accent/Glass/Status/Text/Opacity/TrackColor/Radius/Spacing/FontSize/FontWeight/Tracking/IconSize/ComponentSize/Window/Caption/GenerationPanel/MediaPanel/Anim,以及顶层 aiGradient/aiGradientDark 渐变与 ShadowStyle 结构和 Shadow 枚举。所有 UI 数值都必须从这里取(项目硬性规定),是整个前端的视觉单一真相源。
+
+OpenTake 的对应真相源是 `web/src/lib/theme.ts` + `web/src/styles/tokens.css`：前者供 Canvas/TypeScript 数值路径消费，后者是 DOM 投影。完整表契约测试锁定每项精确值，使用审计测试覆盖六个主界面并拒绝未定义 CSS 令牌。旧组件的语义别名只能通过 `var(...)` 指向规范令牌，不得重复声明颜色或时长字面量。
 - `AppTheme.Caption` (enum) — 字幕相关的约束常量(本目录唯一带编辑业务语义的部分):defaultFontSize=48、minFontSize=12、maxFontSize=300、minPosition=0、maxPosition=1、centerSnapValue=0.5、centerSnapThreshold=0.02、defaultCenterY=0.9、defaultCenter=(0.5,0.9)、minDisplayDuration=0.7。被 CaptionTab、ToolExecutor+Captions、EditorViewModel+Captions 消费,决定字幕默认样式、归一化坐标钳制与吸附、最短分句时长。
 - `AppTheme.ShadowStyle` (struct) — 阴影参数值类型(color/radius/x/y),配合 Shadow.sm/md/lg 预设与 View.shadow(_:) 扩展使用。
 - `CapsuleButtonStyle` (struct) — 实现 SwiftUI ButtonStyle 的胶囊按钮样式。含 Variant(secondary/prominent)与 Size(small/regular)枚举及可选 fill。内部私有 Chrome 视图持有 @State hovered,负责字号/内边距/前景背景色推导与悬停/按下交互态;通过 ButtonStyle 扩展暴露 .capsule 便捷构造器。

@@ -28,7 +28,7 @@ import {
   onTranscribeProgress,
   transcribeModelStatus,
 } from "../../lib/api";
-import { SPACE, RADIUS } from "../../lib/theme";
+import { LAYOUT, SPACE, RADIUS } from "../../lib/theme";
 import type {
   CaptionCase,
   CaptionRequest,
@@ -40,13 +40,13 @@ import type {
 } from "../../lib/types";
 
 /** Caption style/placement defaults, 1:1 with upstream `AppTheme.Caption`. */
-const DEFAULT_FONT_SIZE = 48;
-const MIN_FONT_SIZE = 12;
-const MAX_FONT_SIZE = 300;
+const DEFAULT_FONT_SIZE = LAYOUT.captionDefaultFontSize;
+const MIN_FONT_SIZE = LAYOUT.captionMinFontSize;
+const MAX_FONT_SIZE = LAYOUT.captionMaxFontSize;
 const DEFAULT_CENTER_X = 0.5;
-const DEFAULT_CENTER_Y = 0.9;
+const DEFAULT_CENTER_Y = LAYOUT.captionDefaultCenterY;
 const CENTER_SNAP = 0.5;
-const CENTER_SNAP_THRESHOLD = 0.02;
+const CENTER_SNAP_THRESHOLD = LAYOUT.captionCenterSnapThreshold;
 
 const CASE_OPTIONS: ReadonlyArray<CaptionCase> = ["auto", "upper", "lower"];
 
@@ -74,7 +74,7 @@ export function CaptionsTab() {
   }, [mediaItems]);
 
   // Style (caption font size default 48, not the generic text 96).
-  const [fontSize, setFontSize] = useState(DEFAULT_FONT_SIZE);
+  const [fontSize, setFontSize] = useState<number>(DEFAULT_FONT_SIZE);
   const [color, setColor] = useState<Rgba>({ r: 1, g: 1, b: 1, a: 1 });
   const [background, setBackground] = useState<{ enabled: boolean; color: Rgba }>({
     enabled: false,
@@ -85,7 +85,7 @@ export function CaptionsTab() {
 
   // Placement (normalized canvas center; default bottom-center).
   const [centerX, setCenterX] = useState(DEFAULT_CENTER_X);
-  const [centerY, setCenterY] = useState(DEFAULT_CENTER_Y);
+  const [centerY, setCenterY] = useState<number>(DEFAULT_CENTER_Y);
 
   // Source: null = auto (or selected clips), else a specific track id.
   const [trackId, setTrackId] = useState<string | null>(null);
