@@ -162,3 +162,57 @@ it("control-9f9173ff2ee37464 resize track display height", async () => {
   expect(editSpies.setTrackProps).not.toHaveBeenCalled();
   expect(editSpies.swapTracks).not.toHaveBeenCalled();
 });
+
+it("control-db7fbb7edbcca44d dismiss track reorder menu", async () => {
+  const row = container.querySelector<HTMLElement>("[data-track-row='audio-1']")!;
+  row.focus();
+  await act(async () => {
+    row.dispatchEvent(new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 80,
+      clientY: 90,
+    }));
+  });
+  expect(document.body.querySelector("[role='menu']")).not.toBeNull();
+  expect(document.activeElement?.getAttribute("role")).toBe("menu");
+
+  const backdrop = document.body.querySelector<HTMLElement>("[data-track-menu-backdrop]")!;
+  await act(async () => {
+    backdrop.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+  });
+  expect(document.body.querySelector("[role='menu']")).toBeNull();
+  expect(document.activeElement).toBe(row);
+
+  await act(async () => {
+    row.dispatchEvent(new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 80,
+      clientY: 90,
+    }));
+  });
+  const contextBackdrop = document.body.querySelector<HTMLElement>("[data-track-menu-backdrop]")!;
+  const contextEvent = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+  await act(async () => contextBackdrop.dispatchEvent(contextEvent));
+  expect(contextEvent.defaultPrevented).toBe(true);
+  expect(document.body.querySelector("[role='menu']")).toBeNull();
+  expect(document.activeElement).toBe(row);
+
+  await act(async () => {
+    row.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "F10",
+      shiftKey: true,
+      bubbles: true,
+    }));
+  });
+  const keyboardMenu = document.body.querySelector<HTMLElement>("[role='menu']")!;
+  expect(keyboardMenu).not.toBeNull();
+  await act(async () => {
+    keyboardMenu.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  });
+  expect(document.body.querySelector("[role='menu']")).toBeNull();
+  expect(document.activeElement).toBe(row);
+  expect(editSpies.setTrackProps).not.toHaveBeenCalled();
+  expect(editSpies.swapTracks).not.toHaveBeenCalled();
+});

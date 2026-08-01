@@ -1755,33 +1755,47 @@
   - Visible/accessibility/return path: success=dismiss track reorder menu: assert exactly backdrop mousedown calls onClose(); contextmenu preventDefault() then onClose() and no sibling branch/command.; accessibility={"focus":"Custom rendered element has no proven tabIndex/keyboard equivalent at this candidate.","label":"No explicit aria-label/title association was discovered at this candidate.","shortcut":"Escape/outside close exists where mounted, but arrow-key roving focus and invoking-control focus restoration are not proven."}; returnPath=["Close through selected item, Escape, or outside action exactly where implemented.","Restore focus to the invoking control; current code does not explicitly prove this."].
   - Outcome matrix: {"success":"dismiss track reorder menu: assert exactly backdrop mousedown calls onClose(); contextmenu preventDefault() then onClose() and no sibling branch/command.","pending":"N/A — synchronous local/browser state only.","empty":"N/A — owning visibility/handler guards prevent an absent target from emitting a command.","disabled":"No explicit disabled attribute beyond the listed visibility/handler guards.","cancel":"Dismiss/close leaves authoritative state unchanged; invoking-control focus restoration is not proven.","retry":"N/A — repeated activation is a new synchronous action.","failure":"N/A — no API/Tauri/Rust failure route."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/timeline/TrackHeaderColumn.interaction.test.tsx#control-db7fbb7edbcca44d dismiss track reorder menu` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/timeline/TrackHeaderColumn.interaction.test.tsx -t "control-db7fbb7edbcca44d dismiss track reorder menu"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/timeline/TrackHeaderColumn.tsx`, `web/src/components/timeline/TrackHeaderColumn.tsx#TrackHeaderContextMenu`, `web/src/components/timeline/TrackHeaderColumn.tsx#TrackHeaderColumn` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/timeline/TrackHeaderColumn.interaction.test.tsx -t "control-db7fbb7edbcca44d dismiss track reorder menu"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: the focused owner first failed because the invoking row
+  and menu backdrop had no stable accessible boundary. The row now supports
+  pointer context menus plus ContextMenu/Shift+F10, the menu moves focus to an
+  enabled item or its container, supports roving Arrow/Home/End focus and
+  Escape dismissal, and every dismissal restores focus to the invoking row.
+  Backdrop contextmenu now stops Portal bubbling so closing cannot immediately
+  reopen the menu. Outside mousedown and contextmenu emit no edit/reorder
+  command. The Web gate passes with 108 files / 857 tests plus a production
+  build.
+
+- [ ] **Runtime evidence gate:** open the packaged track reorder menu by right
+  click and Shift+F10, traverse it by keyboard, dismiss it by outside click,
+  right click and Escape, and verify invoking-row focus restoration.
 
 ### Task 21: control-acceptance (implementation-slice-440d530594b95cd0)
 

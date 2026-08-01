@@ -5,7 +5,7 @@
  * UI-only displayHeight (not persisted).
  */
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Eye, EyeOff, Volume2, VolumeX, Link, Unlink } from "lucide-react";
 import { Icon } from "../ui/Icon";
@@ -131,6 +131,7 @@ interface RowProps {
 function TrackHeaderRow(p: RowProps) {
   const t = useT();
   const pushToast = useEditorUiStore((s) => s.pushToast);
+  const rowRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{
     startY: number;
     pointerId: number;
@@ -138,6 +139,11 @@ function TrackHeaderRow(p: RowProps) {
   } | null>(null);
   const [isResizing, setIsResizing] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+
+  const closeMenu = useCallback(() => {
+    setMenu(null);
+    rowRef.current?.focus();
+  }, []);
 
   const finishResize = useCallback((releaseCapture: boolean) => {
     const drag = dragRef.current;
@@ -213,9 +219,20 @@ function TrackHeaderRow(p: RowProps) {
 
   return (
     <div
+      ref={rowRef}
+      data-track-row={p.trackId}
+      tabIndex={0}
+      aria-label={p.label}
       onContextMenu={(e) => {
         e.preventDefault();
         setMenu({ x: e.clientX, y: e.clientY });
+      }}
+      onKeyDown={(e) => {
+        if (e.currentTarget !== e.target) return;
+        if (e.key !== "ContextMenu" && !(e.shiftKey && e.key === "F10")) return;
+        e.preventDefault();
+        const rect = e.currentTarget.getBoundingClientRect();
+        setMenu({ x: rect.left + 8, y: rect.top + 8 });
       }}
       style={{
         position: "absolute",
@@ -299,7 +316,8 @@ function TrackHeaderRow(p: RowProps) {
             canSwapDown={p.canSwapDown}
             onSwapUp={() => void swapTracks(p.index, p.index - 1)}
             onSwapDown={() => void swapTracks(p.index, p.index + 1)}
-            onClose={() => setMenu(null)}
+            onClose={closeMenu}
+            menuLabel={p.label}
             labels={{
               moveUp: t("timeline.moveTrackUp"),
               moveDown: t("timeline.moveTrackDown"),
@@ -345,6 +363,7 @@ function TrackHeaderContextMenu({
   onSwapUp,
   onSwapDown,
   onClose,
+  menuLabel,
   labels,
 }: {
   x: number;
@@ -354,22 +373,49 @@ function TrackHeaderContextMenu({
   onSwapUp: () => void;
   onSwapDown: () => void;
   onClose: () => void;
+  menuLabel: string;
   labels: { moveUp: string; moveDown: string };
 }) {
+  const menuRef = useRef<HTMLDivElement>(null);
   const items = [
     { label: labels.moveUp, enabled: canSwapUp, action: onSwapUp },
     { label: labels.moveDown, enabled: canSwapDown, action: onSwapDown },
   ];
+
+  useEffect(() => {
+    const firstEnabled = menuRef.current?.querySelector<HTMLButtonElement>(
+      "button:not(:disabled)",
+    );
+    (firstEnabled ?? menuRef.current)?.focus();
+  }, []);
+
+  const moveFocus = (direction: 1 | -1) => {
+    const enabled = Array.from(
+      menuRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? [],
+    );
+    if (enabled.length === 0) return;
+    const current = enabled.indexOf(document.activeElement as HTMLButtonElement);
+    const next = current < 0
+      ? direction === 1 ? 0 : enabled.length - 1
+      : (current + direction + enabled.length) % enabled.length;
+    enabled[next].focus();
+  };
+
   return (
     <div
+      data-track-menu-backdrop
       onMouseDown={onClose}
       onContextMenu={(e) => {
         e.preventDefault();
+        e.stopPropagation();
         onClose();
       }}
       style={{ position: "fixed", inset: 0, zIndex: 1000 }}
     >
       <div
+        ref={menuRef}
+        aria-label={menuLabel}
+        tabIndex={-1}
         style={{
           position: "fixed",
           left: x,
@@ -384,6 +430,27 @@ function TrackHeaderContextMenu({
         }}
         role="menu"
         onMouseDown={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            onClose();
+          } else if (e.key === "ArrowDown") {
+            e.preventDefault();
+            moveFocus(1);
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            moveFocus(-1);
+          } else if (e.key === "Home") {
+            e.preventDefault();
+            menuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+          } else if (e.key === "End") {
+            e.preventDefault();
+            const enabled = menuRef.current?.querySelectorAll<HTMLButtonElement>(
+              "button:not(:disabled)",
+            );
+            enabled?.[enabled.length - 1]?.focus();
+          }
+        }}
       >
         {items.map((item) => (
           <button
