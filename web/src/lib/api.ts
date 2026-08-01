@@ -27,6 +27,8 @@ import type {
   MatchColorResult,
   CaptionTranslationResult,
   CaptionTranslationReviewChange,
+  ScriptToVideoResult,
+  ScriptToVideoSegmentInput,
   LutReference,
   LoudnessNormalization,
   DenoiseMode,
@@ -886,6 +888,19 @@ export async function applyCaptionTranslationReview(
     });
   }
   throw new Error("caption translation review requires the desktop app");
+}
+
+export async function scriptToVideo(
+  segments: ScriptToVideoSegmentInput[],
+  apply: boolean,
+): Promise<ScriptToVideoResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<ScriptToVideoResult>("advanced_script_to_video", {
+      request: { segments, apply },
+    });
+  }
+  throw new Error("script-to-video requires the desktop app");
 }
 
 export async function cancelAdvancedWorkflow(): Promise<boolean> {

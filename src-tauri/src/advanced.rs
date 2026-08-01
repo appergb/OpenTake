@@ -10,8 +10,8 @@ use opentake_agent::mcp::advanced::{
     AdvancedWorkflowErrorKind, AdvancedWorkflowRequest,
 };
 use opentake_agent::tools::args::{
-    GenerateMatteArgs, MatchColorArgs, RemoveObjectArgs, SeparateStemsArgs, TrackMotionArgs,
-    TranslateCaptionsArgs,
+    GenerateMatteArgs, MatchColorArgs, RemoveObjectArgs, ScriptSegmentArg, ScriptToVideoArgs,
+    SeparateStemsArgs, TrackMotionArgs, TranslateCaptionsArgs,
 };
 use opentake_agent::tools::names::ToolName;
 use opentake_core::{
@@ -21,6 +21,7 @@ use opentake_core::{
 use opentake_domain::{
     luma709, AnimPair, CaptionTranslationInput, ColorGrade, ColorMatchInput, GenerationInput,
     GenerationJobStatus, Interpolation, Keyframe, KeyframeTrack, LiftGammaGain, Mask, Rgb,
+    ScriptAssemblyPlan, ScriptAssemblySegment, TransitionKind,
 };
 use opentake_gen::{KeyStore, KeyringStore, ProviderKey};
 use opentake_media::analysis::{
@@ -462,6 +463,31 @@ pub async fn advanced_translate_captions(
     let result = tauri::async_runtime::spawn_blocking(move || {
         bridge.execute(
             AdvancedWorkflowRequest::TranslateCaptions(request),
+            &worker_token,
+        )
+    })
+    .await
+    .map_err(|error| format!("advanced workflow worker failed: {error}"))
+    .and_then(|result| result.map_err(|error| error.message));
+    state.finish(&token);
+    let commit = result?;
+    Ok(GenerateMatteResultDto {
+        result: commit.result,
+        action_name: commit.action_name,
+    })
+}
+
+#[tauri::command]
+pub async fn advanced_script_to_video(
+    state: State<'_, AdvancedWorkflowCommandState>,
+    request: ScriptToVideoArgs,
+) -> Result<GenerateMatteResultDto, String> {
+    let token = state.begin()?;
+    let bridge = Arc::clone(&state.bridge);
+    let worker_token = token.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        bridge.execute(
+            AdvancedWorkflowRequest::ScriptToVideo(request),
             &worker_token,
         )
     })
@@ -1773,6 +1799,226 @@ impl TauriAdvancedWorkflowBridge {
             action_name,
         })
     }
+
+    fn script_to_video(
+        &self,
+        args: ScriptToVideoArgs,
+        cancel: &MediaCancelToken,
+    ) -> Result<AdvancedWorkflowCommit, AdvancedWorkflowError> {
+        if cancel.checkpoint() {
+            return Err(cancelled_workflow("script assembly cancelled"));
+        }
+        if args.segments.is_empty() || args.segments.len() > 100 {
+            return Err(advanced_invalid(
+                "segments must contain between 1 and 100 reviewed segments",
+            ));
+        }
+        let segment_count = args.segments.len();
+        let snapshot = self.core.runtime_snapshot();
+        let start_frame = snapshot.timeline.total_frames();
+        let fps = snapshot.timeline.fps.max(1) as f64;
+        let mut segments = Vec::with_capacity(args.segments.len());
+        for (index, value) in args.segments.into_iter().enumerate() {
+            let segment: ScriptSegmentArg = serde_json::from_value(value)
+                .map_err(|error| advanced_invalid(format!("segments[{index}]: {error}")))?;
+            if segment.script.trim().is_empty()
+                || segment.script.len() > 20_000
+                || !(1..=36_000).contains(&segment.duration_frames)
+            {
+                return Err(advanced_invalid(format!(
+                    "segments[{index}] requires non-empty script and durationFrames 1..36000"
+                )));
+            }
+            let media = snapshot
+                .media
+                .entries
+                .iter()
+                .find(|entry| entry.id == segment.media_ref)
+                .ok_or_else(|| {
+                    advanced_resource(format!(
+                        "segments[{index}] media not found: {}",
+                        segment.media_ref
+                    ))
+                })?;
+            if !matches!(
+                media.kind,
+                opentake_domain::ClipType::Image
+                    | opentake_domain::ClipType::Video
+                    | opentake_domain::ClipType::Lottie
+            ) {
+                return Err(advanced_invalid(format!(
+                    "segments[{index}].mediaRef must be visual media"
+                )));
+            }
+            if media.kind == opentake_domain::ClipType::Video
+                && media.duration > 0.0
+                && (media.duration * fps).round() as i32 + 1 < segment.duration_frames
+            {
+                return Err(advanced_invalid(format!(
+                    "segments[{index}] is longer than its video source"
+                )));
+            }
+            if let Some(narration_ref) = &segment.narration_media_ref {
+                let narration = snapshot
+                    .media
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == *narration_ref)
+                    .ok_or_else(|| {
+                        advanced_resource(format!(
+                            "segments[{index}] narration not found: {narration_ref}"
+                        ))
+                    })?;
+                if !matches!(
+                    narration.kind,
+                    opentake_domain::ClipType::Audio | opentake_domain::ClipType::Video
+                ) || !narration
+                    .has_audio
+                    .unwrap_or(narration.kind == opentake_domain::ClipType::Audio)
+                {
+                    return Err(advanced_invalid(format!(
+                        "segments[{index}].narrationMediaRef must contain audio"
+                    )));
+                }
+                let narration_frames = (narration.duration * fps).round() as i32;
+                if narration.duration > 0.0
+                    && (narration_frames - segment.duration_frames).abs() > 1
+                {
+                    return Err(advanced_invalid(format!(
+                        "segments[{index}] narration duration must match within one frame"
+                    )));
+                }
+            }
+            let transition = match segment.transition.as_deref() {
+                None => None,
+                Some("crossDissolve") => Some(TransitionKind::CrossDissolve),
+                Some(other) => {
+                    return Err(advanced_invalid(format!(
+                        "segments[{index}].transition is unsupported: {other}"
+                    )))
+                }
+            };
+            if transition.is_some() && index + 1 == segment_count {
+                return Err(advanced_invalid(
+                    "the final script segment cannot have an outgoing transition",
+                ));
+            }
+            segments.push(ScriptAssemblySegment {
+                script: segment.script,
+                media_ref: segment.media_ref,
+                narration_media_ref: segment.narration_media_ref,
+                duration_frames: segment.duration_frames,
+                transition,
+            });
+        }
+        for index in 0..segments.len().saturating_sub(1) {
+            if segments[index].transition.is_some()
+                && (segments[index].duration_frames < 2 || segments[index + 1].duration_frames < 2)
+            {
+                return Err(advanced_invalid(format!(
+                    "segments[{index}] transition needs at least two frames on both sides"
+                )));
+            }
+        }
+        let canonical = serde_json::to_vec(&json!({
+            "planner": "opentake-script-assembly",
+            "plannerVersion": 1,
+            "startFrame": start_frame,
+            "segments": segments
+        }))
+        .map_err(|error| advanced_execution(error.to_string()))?;
+        let plan_hash = format!("{:x}", Sha256::digest(&canonical));
+        let plan = ScriptAssemblyPlan {
+            id: format!("script-plan-{}", &plan_hash[..16]),
+            plan_hash: plan_hash.clone(),
+            planner: "opentake-script-assembly".into(),
+            planner_version: 1,
+            start_frame,
+            segments,
+        };
+        let apply_requested = args.apply.unwrap_or(false);
+        let (applied, action_name, version) = if apply_requested {
+            if !snapshot
+                .timeline
+                .script_assembly_plans
+                .iter()
+                .any(|existing| existing == &plan)
+            {
+                return Err(advanced_invalid(
+                    "preview and persist this exact script plan before apply=true",
+                ));
+            }
+            if cancel.checkpoint() {
+                return Err(cancelled_workflow("script assembly cancelled"));
+            }
+            let edit = self
+                .core
+                .apply_at_revision(
+                    ProjectRevision {
+                        project_epoch: snapshot.project_epoch,
+                        version: snapshot.version,
+                    },
+                    EditCommand::ApplyScriptAssemblyPlan {
+                        plan_id: plan.id.clone(),
+                    },
+                )
+                .map_err(|error| advanced_execution(error.to_string()))?;
+            let version = self.core.runtime_snapshot().version;
+            (
+                edit.changed,
+                edit.changed.then_some(edit.action_name),
+                version,
+            )
+        } else {
+            if cancel.checkpoint() {
+                return Err(cancelled_workflow("script planning cancelled"));
+            }
+            let edit = self
+                .core
+                .apply_at_revision(
+                    ProjectRevision {
+                        project_epoch: snapshot.project_epoch,
+                        version: snapshot.version,
+                    },
+                    EditCommand::SaveScriptAssemblyPlan { plan: plan.clone() },
+                )
+                .map_err(|error| advanced_execution(error.to_string()))?;
+            let version = self.core.runtime_snapshot().version;
+            (false, edit.changed.then_some(edit.action_name), version)
+        };
+        let mut cursor = start_frame;
+        let review: Vec<serde_json::Value> = plan
+            .segments
+            .iter()
+            .map(|segment| {
+                let segment_start = cursor;
+                cursor += segment.duration_frames;
+                json!({
+                    "script": segment.script,
+                    "mediaRef": segment.media_ref,
+                    "narrationMediaRef": segment.narration_media_ref,
+                    "startFrame": segment_start,
+                    "durationFrames": segment.duration_frames,
+                    "transition": segment.transition
+                })
+            })
+            .collect();
+        Ok(AdvancedWorkflowCommit {
+            result: json!({
+                "projectEpoch": snapshot.project_epoch,
+                "version": version,
+                "planId": plan.id,
+                "planHash": plan_hash,
+                "planner": plan.planner,
+                "plannerVersion": plan.planner_version,
+                "startFrame": start_frame,
+                "endFrame": cursor,
+                "segments": review,
+                "applied": applied
+            }),
+            action_name,
+        })
+    }
 }
 
 impl AdvancedWorkflowBridge for TauriAdvancedWorkflowBridge {
@@ -1783,6 +2029,7 @@ impl AdvancedWorkflowBridge for TauriAdvancedWorkflowBridge {
             ToolName::MatchColor,
             ToolName::SeparateStems,
             ToolName::TranslateCaptions,
+            ToolName::ScriptToVideo,
         ];
         if verify_rvm_model(&self.models_dir).is_ok() {
             tools.push(ToolName::GenerateMatte);
@@ -1804,6 +2051,7 @@ impl AdvancedWorkflowBridge for TauriAdvancedWorkflowBridge {
             AdvancedWorkflowRequest::TranslateCaptions(args) => {
                 self.translate_captions(args, cancel)
             }
+            AdvancedWorkflowRequest::ScriptToVideo(args) => self.script_to_video(args, cancel),
             _ => Err(AdvancedWorkflowError::new(
                 AdvancedWorkflowErrorKind::CapabilityUnavailable,
                 "advanced workflow is not supported by this desktop host",
@@ -3629,5 +3877,186 @@ mod tests {
             .translate_captions(translation_args(ids, true), &MediaCancelToken::new())
             .is_err());
         assert_eq!(core.runtime_snapshot().timeline, before.timeline);
+    }
+
+    #[test]
+    fn script_to_video_three_segment_plan_apply_cancel_reopen_and_export() {
+        if !opentake_media::ffmpeg_status::ffmpeg_available()
+            || !opentake_media::ffmpeg_status::ffprobe_available()
+        {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("ScriptVideo.opentake");
+        let core = AppCore::new();
+        core.apply(EditCommand::SetTimelineSettings {
+            fps: 6,
+            width: 96,
+            height: 54,
+        })
+        .unwrap();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let colors = [[220, 40, 40, 255], [40, 220, 40, 255], [40, 40, 220, 255]];
+        let mut imports = Vec::new();
+        for (index, color) in colors.into_iter().enumerate() {
+            let path = root.path().join(format!("scene-{index}.png"));
+            image::RgbaImage::from_pixel(96, 54, image::Rgba(color))
+                .save(&path)
+                .unwrap();
+            imports.push(PreparedMediaImportOp::ImportFile {
+                path,
+                name: format!("scene-{index}.png"),
+                probe: ProbedMedia {
+                    duration_secs: 0.0,
+                    width: Some(96),
+                    height: Some(54),
+                    ..ProbedMedia::default()
+                },
+                folder: None,
+            });
+        }
+        let narration_path = root.path().join("narration.wav");
+        let status = Command::new(opentake_media::ffmpeg_status::ffmpeg_path())
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
+            .arg("sine=frequency=440:sample_rate=48000:duration=1")
+            .arg(&narration_path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        imports.push(PreparedMediaImportOp::ImportFile {
+            path: narration_path,
+            name: "narration.wav".into(),
+            probe: ProbedMedia {
+                duration_secs: 1.0,
+                has_audio: true,
+                ..ProbedMedia::default()
+            },
+            folder: None,
+        });
+        let snapshot = core.runtime_snapshot();
+        let imported = core
+            .import_media_batch_for_project_persisted(snapshot.project_epoch, &bundle, imports)
+            .unwrap();
+        let visual_ids: Vec<_> = imported[..3]
+            .iter()
+            .map(|item| item.entry.id.clone())
+            .collect();
+        let narration_id = imported[3].entry.id.clone();
+        let args = ScriptToVideoArgs {
+            segments: visual_ids
+                .iter()
+                .enumerate()
+                .map(|(index, media_ref)| {
+                    let mut value = json!({
+                        "script": format!("Scene {}", index + 1),
+                        "mediaRef": media_ref,
+                        "narrationMediaRef": narration_id,
+                        "durationFrames": 6
+                    });
+                    if index < 2 {
+                        value["transition"] = json!("crossDissolve");
+                    }
+                    value
+                })
+                .collect(),
+            apply: Some(false),
+        };
+        let bridge = TauriAdvancedWorkflowBridge::new(
+            core.clone(),
+            root.path().join("cache"),
+            root.path().join("models"),
+        );
+        assert!(bridge.supported_tools().contains(&ToolName::ScriptToVideo));
+        let planned = bridge
+            .script_to_video(args.clone(), &MediaCancelToken::new())
+            .unwrap();
+        assert_eq!(planned.action_name.as_deref(), Some("Plan Script Video"));
+        assert_eq!(planned.result["segments"].as_array().unwrap().len(), 3);
+        let after_plan = core.runtime_snapshot();
+        assert!(after_plan.timeline.tracks.is_empty());
+        assert_eq!(after_plan.timeline.script_assembly_plans.len(), 1);
+
+        let cancelled = MediaCancelToken::new();
+        cancelled.cancel();
+        let error = bridge
+            .script_to_video(
+                ScriptToVideoArgs {
+                    apply: Some(true),
+                    ..args.clone()
+                },
+                &cancelled,
+            )
+            .expect_err("pre-cancelled assembly must not mutate");
+        assert_eq!(error.kind, AdvancedWorkflowErrorKind::Cancelled);
+        assert_eq!(core.runtime_snapshot().timeline, after_plan.timeline);
+
+        let applied = bridge
+            .script_to_video(
+                ScriptToVideoArgs {
+                    apply: Some(true),
+                    ..args
+                },
+                &MediaCancelToken::new(),
+            )
+            .unwrap();
+        assert_eq!(applied.action_name.as_deref(), Some("Build Script Video"));
+        let assembled = core.runtime_snapshot();
+        assert_eq!(assembled.timeline.tracks.len(), 2);
+        assert_eq!(assembled.timeline.tracks[0].clips.len(), 3);
+        assert_eq!(assembled.timeline.tracks[1].clips.len(), 3);
+        for index in 0..3 {
+            assert_eq!(
+                assembled.timeline.tracks[0].clips[index].start_frame,
+                index as i32 * 6
+            );
+            assert_eq!(
+                assembled.timeline.tracks[1].clips[index].start_frame,
+                index as i32 * 6
+            );
+        }
+        for index in 0..2 {
+            let transition = assembled.timeline.tracks[0].clips[index]
+                .transition_out
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                transition.to_clip_id,
+                assembled.timeline.tracks[0].clips[index + 1].id
+            );
+        }
+        core.save_project(None).unwrap();
+        let reopened = AppCore::new();
+        reopened.open_project(&bundle).unwrap();
+        assert_eq!(reopened.runtime_snapshot().timeline, assembled.timeline);
+
+        let out = root.path().join("script-video.mp4");
+        let summary = crate::export::run_export(
+            &assembled.timeline,
+            &assembled.media,
+            &assembled.project_dir,
+            &crate::export::ExportRequest {
+                out_path: out.to_string_lossy().into_owned(),
+                codec: crate::export::ExportCodec::H264,
+                quality: crate::export::ExportQuality::P720,
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.frame_count, 18);
+        assert!(summary.has_audio);
+        let output_probe = probe(&out).unwrap();
+        assert!(output_probe.has_audio);
+
+        core.undo().unwrap();
+        let undone = core.runtime_snapshot();
+        assert!(undone.timeline.tracks.is_empty());
+        assert_eq!(undone.timeline.script_assembly_plans.len(), 1);
     }
 }

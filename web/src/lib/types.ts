@@ -22,7 +22,25 @@ export interface Timeline {
   height: number; // default 1080
   settingsConfigured: boolean;
   nestedSequences?: NestedSequence[];
+  scriptAssemblyPlans?: ScriptAssemblyPlan[];
   tracks: Track[];
+}
+
+export interface ScriptAssemblySegment {
+  script: string;
+  mediaRef: string;
+  narrationMediaRef?: string;
+  durationFrames: number;
+  transition?: TransitionKind;
+}
+
+export interface ScriptAssemblyPlan {
+  id: string;
+  planHash: string;
+  planner: string;
+  plannerVersion: number;
+  startFrame: number;
+  segments: ScriptAssemblySegment[];
 }
 
 export interface NestedSequence {
@@ -673,6 +691,30 @@ export interface CaptionTranslationResult {
     errors: Array<{ id: string; message: string }>;
     captionCount: number;
     translatedCount: number;
+    applied: boolean;
+  };
+  actionName?: string | null;
+}
+
+export interface ScriptToVideoSegmentInput {
+  script: string;
+  mediaRef: string;
+  narrationMediaRef?: string;
+  durationFrames: number;
+  transition?: "crossDissolve";
+}
+
+export interface ScriptToVideoResult {
+  result: {
+    projectEpoch: number;
+    version: number;
+    planId: string;
+    planHash: string;
+    planner: string;
+    plannerVersion: number;
+    startFrame: number;
+    endFrame: number;
+    segments: Array<ScriptToVideoSegmentInput & { startFrame: number }>;
     applied: boolean;
   };
   actionName?: string | null;

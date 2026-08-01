@@ -832,6 +832,7 @@ impl ToolArgs for ScriptToVideoArgs {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct ScriptSegmentArg {
     pub script: String,

@@ -12,6 +12,35 @@ use serde::{Deserialize, Serialize};
 
 use crate::clip::Clip;
 use crate::clip_type::ClipType;
+use crate::transition::TransitionKind;
+
+/// One reviewed script-to-video segment. Exact media identities and frame
+/// duration are persisted before assembly so applying never repeats creative
+/// selection or frame arithmetic.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptAssemblySegment {
+    pub script: String,
+    pub media_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub narration_media_ref: Option<String>,
+    pub duration_frames: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition: Option<TransitionKind>,
+}
+
+/// Persisted, reviewable assembly plan. `plan_hash` is the SHA-256 of the
+/// canonical segment payload; planner provenance is deliberately non-secret.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptAssemblyPlan {
+    pub id: String,
+    pub plan_hash: String,
+    pub planner: String,
+    pub planner_version: u32,
+    pub start_frame: i32,
+    pub segments: Vec<ScriptAssemblySegment>,
+}
 
 /// Clip location inside track storage.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -55,6 +84,10 @@ pub struct Timeline {
     /// every reference has one stable identity and graph cycles are detectable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nested_sequences: Vec<NestedSequence>,
+    /// Reviewed script assembly plans. Bounded by the command layer and
+    /// ignored by render/export until explicitly applied.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub script_assembly_plans: Vec<ScriptAssemblyPlan>,
     #[serde(default)]
     pub tracks: Vec<Track>,
 }
@@ -89,6 +122,7 @@ impl Default for Timeline {
             height: 1080,
             settings_configured: false,
             nested_sequences: Vec::new(),
+            script_assembly_plans: Vec::new(),
             tracks: Vec::new(),
         }
     }
@@ -97,6 +131,7 @@ impl Default for Timeline {
 impl Timeline {
     pub const TRACKS_WIRE_FIELD: &'static str = "tracks";
     pub const NESTED_SEQUENCES_WIRE_FIELD: &'static str = "nestedSequences";
+    pub const SCRIPT_ASSEMBLY_PLANS_WIRE_FIELD: &'static str = "scriptAssemblyPlans";
 
     pub fn new() -> Self {
         Timeline::default()
@@ -447,6 +482,33 @@ mod tests {
         // and decodes back from the camelCase key
         let back: Timeline = serde_json::from_str(&json).unwrap();
         assert!(back.settings_configured);
+    }
+
+    #[test]
+    fn script_assembly_plan_roundtrips_and_legacy_timelines_default_empty() {
+        let mut timeline = Timeline::new();
+        timeline.script_assembly_plans.push(ScriptAssemblyPlan {
+            id: "plan-1".into(),
+            plan_hash: "a".repeat(64),
+            planner: "opentake-script-assembly".into(),
+            planner_version: 1,
+            start_frame: 42,
+            segments: vec![ScriptAssemblySegment {
+                script: "Opening".into(),
+                media_ref: "visual".into(),
+                narration_media_ref: Some("voice".into()),
+                duration_frames: 30,
+                transition: Some(TransitionKind::CrossDissolve),
+            }],
+        });
+        let json = serde_json::to_string(&timeline).unwrap();
+        assert!(json.contains("\"scriptAssemblyPlans\""));
+        assert_eq!(serde_json::from_str::<Timeline>(&json).unwrap(), timeline);
+        let legacy: Timeline = serde_json::from_str(
+            r#"{"fps":30,"width":1920,"height":1080,"settingsConfigured":true,"tracks":[]}"#,
+        )
+        .unwrap();
+        assert!(legacy.script_assembly_plans.is_empty());
     }
 
     #[test]

@@ -21,8 +21,8 @@ use std::collections::{HashMap, HashSet};
 use opentake_domain::{
     AudioDenoise, CaptionTranslationInput, ChromaKey, Clip, ClipType, ColorGrade, ColorMatchInput,
     Crop, Effect, Interpolation, LoudnessNormalization, LutReference, Mask, MaskShape,
-    MediaManifestEntry, NestedSequence, StabilizationTrack, Timeline, Track, Transform, Transition,
-    TransitionKind, MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS,
+    MediaManifestEntry, NestedSequence, ScriptAssemblyPlan, StabilizationTrack, Timeline, Track,
+    Transform, Transition, TransitionKind, MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS,
 };
 
 use crate::editor_state::EditorState;
@@ -940,6 +940,11 @@ pub enum EditCommand {
     ApplyCaptionTranslations {
         changes: Vec<CaptionTranslationChange>,
     },
+    /// Persist a reviewable script assembly plan without placing any clips.
+    SaveScriptAssemblyPlan { plan: ScriptAssemblyPlan },
+    /// Apply one already persisted plan to fresh visual/narration tracks as a
+    /// single timeline transaction.
+    ApplyScriptAssemblyPlan { plan_id: String },
     /// Link clips into one group.
     Link { clip_ids: Vec<String> },
     /// Unlink clips (and their whole groups).
@@ -1217,6 +1222,10 @@ pub fn apply(
         EditCommand::ApplyCaptionTranslations { changes } => {
             apply_caption_translations(state, changes)
         }
+        EditCommand::SaveScriptAssemblyPlan { plan } => save_script_assembly_plan(state, plan),
+        EditCommand::ApplyScriptAssemblyPlan { plan_id } => {
+            apply_script_assembly_plan(state, plan_id, ids)
+        }
         EditCommand::Link { clip_ids } => link(state, clip_ids, ids),
         EditCommand::Unlink { clip_ids } => unlink(state, clip_ids),
         EditCommand::RemoveTracks { track_indexes } => remove_tracks(state, track_indexes),
@@ -1467,6 +1476,8 @@ fn edit_nested_sequence(
             | EditCommand::DeleteMedia { .. }
             | EditCommand::DeleteFolder { .. }
             | EditCommand::SetTimelineSettings { .. }
+            | EditCommand::SaveScriptAssemblyPlan { .. }
+            | EditCommand::ApplyScriptAssemblyPlan { .. }
     ) {
         return Err(EditError::Invalid(
             "nested-sequence, media-library, and project-settings commands must target the root timeline".into(),
@@ -2766,6 +2777,230 @@ fn apply_caption_translations(
                 .iter()
                 .map(|change| change.clip_id.clone())
                 .collect())
+        },
+    )
+}
+
+fn validate_script_assembly_plan(plan: &ScriptAssemblyPlan) -> Result<(), EditError> {
+    if plan.id.is_empty()
+        || plan.id.len() > 128
+        || plan.plan_hash.len() != 64
+        || !plan.plan_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || plan.planner.trim().is_empty()
+        || plan.planner.len() > 128
+        || plan.planner_version == 0
+        || plan.start_frame < 0
+        || plan.segments.is_empty()
+        || plan.segments.len() > 100
+    {
+        return Err(EditError::Invalid("invalid script assembly plan".into()));
+    }
+    for (index, segment) in plan.segments.iter().enumerate() {
+        if segment.script.trim().is_empty()
+            || segment.script.len() > 20_000
+            || segment.media_ref.is_empty()
+            || segment.media_ref.len() > 256
+            || segment
+                .narration_media_ref
+                .as_ref()
+                .is_some_and(|value| value.is_empty() || value.len() > 256)
+            || !(1..=36_000).contains(&segment.duration_frames)
+        {
+            return Err(EditError::Invalid(format!(
+                "invalid script assembly segment {index}"
+            )));
+        }
+        if segment.transition.is_some()
+            && (index + 1 == plan.segments.len()
+                || segment.duration_frames < 2
+                || plan.segments[index + 1].duration_frames < 2)
+        {
+            return Err(EditError::Invalid(format!(
+                "segment {index} transition requires a following segment with at least two frames"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn save_script_assembly_plan(
+    state: &mut EditorState,
+    plan: ScriptAssemblyPlan,
+) -> Result<EditResult, EditError> {
+    validate_script_assembly_plan(&plan)?;
+    let plan_id = plan.id.clone();
+    transact(
+        state,
+        "Plan Script Video",
+        |_| format!("Saved script assembly plan {plan_id}"),
+        move |st| {
+            if let Some(existing) = st
+                .timeline
+                .script_assembly_plans
+                .iter_mut()
+                .find(|existing| existing.id == plan.id)
+            {
+                *existing = plan.clone();
+            } else {
+                if st.timeline.script_assembly_plans.len() >= 20 {
+                    st.timeline.script_assembly_plans.remove(0);
+                }
+                st.timeline.script_assembly_plans.push(plan.clone());
+            }
+            Ok(Vec::new())
+        },
+    )
+}
+
+fn apply_script_assembly_plan(
+    state: &mut EditorState,
+    plan_id: String,
+    ids: &dyn IdGen,
+) -> Result<EditResult, EditError> {
+    let plan = state
+        .timeline
+        .script_assembly_plans
+        .iter()
+        .find(|plan| plan.id == plan_id)
+        .cloned()
+        .ok_or_else(|| EditError::Invalid(format!("script assembly plan not found: {plan_id}")))?;
+    validate_script_assembly_plan(&plan)?;
+    let fps = state.timeline.fps.max(1) as f64;
+    for (index, segment) in plan.segments.iter().enumerate() {
+        let visual = state
+            .manifest
+            .entries
+            .iter()
+            .find(|entry| entry.id == segment.media_ref)
+            .ok_or_else(|| {
+                EditError::Invalid(format!(
+                    "script segment {index} visual media not found: {}",
+                    segment.media_ref
+                ))
+            })?;
+        if !matches!(
+            visual.kind,
+            ClipType::Image | ClipType::Video | ClipType::Lottie
+        ) {
+            return Err(EditError::Invalid(format!(
+                "script segment {index} media must be visual"
+            )));
+        }
+        if visual.kind == ClipType::Video
+            && visual.duration > 0.0
+            && (visual.duration * fps).round() as i32 + 1 < segment.duration_frames
+        {
+            return Err(EditError::Invalid(format!(
+                "script segment {index} is longer than its video source"
+            )));
+        }
+        if let Some(narration_ref) = &segment.narration_media_ref {
+            let narration = state
+                .manifest
+                .entries
+                .iter()
+                .find(|entry| entry.id == *narration_ref)
+                .ok_or_else(|| {
+                    EditError::Invalid(format!(
+                        "script segment {index} narration media not found: {narration_ref}"
+                    ))
+                })?;
+            if !narration
+                .has_audio
+                .unwrap_or(narration.kind == ClipType::Audio)
+                || !matches!(narration.kind, ClipType::Audio | ClipType::Video)
+            {
+                return Err(EditError::Invalid(format!(
+                    "script segment {index} narration must contain audio"
+                )));
+            }
+            let narration_frames = (narration.duration * fps).round() as i32;
+            if narration.duration > 0.0 && (narration_frames - segment.duration_frames).abs() > 1 {
+                return Err(EditError::Invalid(format!(
+                    "script segment {index} narration duration must match within one frame"
+                )));
+            }
+        }
+    }
+
+    transact(
+        state,
+        "Build Script Video",
+        |affected| format!("Built script video with {} clip(s)", affected.len()),
+        move |st| {
+            let visual_track_id = ids.next_id();
+            let mut visual_track = Track::new(visual_track_id, ClipType::Video);
+            let mut narration_track = plan
+                .segments
+                .iter()
+                .any(|segment| segment.narration_media_ref.is_some())
+                .then(|| Track::new(ids.next_id(), ClipType::Audio));
+            let mut cursor = plan.start_frame;
+            let mut affected = Vec::new();
+            for segment in &plan.segments {
+                let media = st
+                    .manifest
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == segment.media_ref)
+                    .expect("script assembly media was prevalidated");
+                let mut clip = Clip::new(
+                    ids.next_id(),
+                    segment.media_ref.clone(),
+                    cursor,
+                    segment.duration_frames,
+                );
+                clip.media_type = media.kind;
+                clip.source_clip_type = media.kind;
+                if segment.narration_media_ref.is_some() {
+                    clip.volume = 0.0;
+                }
+                affected.push(clip.id.clone());
+                visual_track.clips.push(clip);
+                if let (Some(track), Some(narration_ref)) =
+                    (&mut narration_track, &segment.narration_media_ref)
+                {
+                    let narration = st
+                        .manifest
+                        .entries
+                        .iter()
+                        .find(|entry| entry.id == *narration_ref)
+                        .expect("script narration was prevalidated");
+                    let mut clip = Clip::new(
+                        ids.next_id(),
+                        narration_ref.clone(),
+                        cursor,
+                        segment.duration_frames,
+                    );
+                    clip.media_type = ClipType::Audio;
+                    clip.source_clip_type = narration.kind;
+                    affected.push(clip.id.clone());
+                    track.clips.push(clip);
+                }
+                cursor = cursor.saturating_add(segment.duration_frames);
+            }
+            for index in 0..visual_track.clips.len().saturating_sub(1) {
+                let Some(kind) = plan.segments[index].transition else {
+                    continue;
+                };
+                let from = &visual_track.clips[index];
+                let to = &visual_track.clips[index + 1];
+                let duration_frames = 12
+                    .min(from.duration_frames / 2)
+                    .min(to.duration_frames / 2)
+                    .max(1);
+                visual_track.clips[index].transition_out = Some(Transition {
+                    from_clip_id: from.id.clone(),
+                    to_clip_id: to.id.clone(),
+                    kind,
+                    duration_frames,
+                });
+            }
+            st.timeline.tracks.insert(0, visual_track);
+            if let Some(track) = narration_track {
+                st.timeline.tracks.push(track);
+            }
+            Ok(affected)
         },
     )
 }
@@ -6191,6 +6426,180 @@ mod add_captions_tests {
         assert!(state.timeline.tracks[0].clips[0]
             .caption_translation_input
             .is_none());
+    }
+}
+
+#[cfg(test)]
+mod script_assembly_command_tests {
+    use super::*;
+    use crate::id::SeqIdGen;
+    use opentake_domain::{MediaSource, ScriptAssemblySegment};
+
+    fn media(id: &str, kind: ClipType, duration: f64, has_audio: bool) -> MediaManifestEntry {
+        MediaManifestEntry {
+            id: id.into(),
+            name: id.into(),
+            kind,
+            source: MediaSource::Project {
+                relative_path: format!("media/{id}"),
+            },
+            duration,
+            generation_input: None,
+            source_width: None,
+            source_height: None,
+            source_fps: None,
+            has_audio: Some(has_audio),
+            color: None,
+            proxy: None,
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        }
+    }
+
+    fn plan() -> ScriptAssemblyPlan {
+        ScriptAssemblyPlan {
+            id: "script-plan-test".into(),
+            plan_hash: "a".repeat(64),
+            planner: "test-planner".into(),
+            planner_version: 1,
+            start_frame: 0,
+            segments: (0..3)
+                .map(|index| ScriptAssemblySegment {
+                    script: format!("Scene {}", index + 1),
+                    media_ref: format!("visual-{index}"),
+                    narration_media_ref: Some(format!("voice-{index}")),
+                    duration_frames: 30,
+                    transition: (index < 2).then_some(TransitionKind::CrossDissolve),
+                })
+                .collect(),
+        }
+    }
+
+    fn state() -> EditorState {
+        let mut state = EditorState::default();
+        state.timeline.settings_configured = true;
+        for index in 0..3 {
+            state.manifest.entries.push(media(
+                &format!("visual-{index}"),
+                ClipType::Image,
+                0.0,
+                false,
+            ));
+            state.manifest.entries.push(media(
+                &format!("voice-{index}"),
+                ClipType::Audio,
+                1.0,
+                true,
+            ));
+        }
+        state
+    }
+
+    #[test]
+    fn reviewed_three_segment_plan_applies_tracks_sync_transitions_and_one_undo() {
+        let mut state = state();
+        let ids = SeqIdGen::new("script-");
+        apply(
+            &mut state,
+            EditCommand::SaveScriptAssemblyPlan { plan: plan() },
+            &ids,
+        )
+        .unwrap();
+        assert!(state.timeline.tracks.is_empty());
+        assert_eq!(state.timeline.script_assembly_plans, vec![plan()]);
+        let undo_depth_before_apply = state.undo_depth();
+        let result = apply(
+            &mut state,
+            EditCommand::ApplyScriptAssemblyPlan {
+                plan_id: "script-plan-test".into(),
+            },
+            &ids,
+        )
+        .unwrap();
+        assert_eq!(result.action_name, "Build Script Video");
+        assert_eq!(state.undo_depth(), undo_depth_before_apply + 1);
+        assert_eq!(state.timeline.tracks.len(), 2);
+        let visual = &state.timeline.tracks[0];
+        let narration = &state.timeline.tracks[1];
+        assert_eq!(visual.kind, ClipType::Video);
+        assert_eq!(narration.kind, ClipType::Audio);
+        assert_eq!(visual.clips.len(), 3);
+        assert_eq!(narration.clips.len(), 3);
+        for index in 0..3 {
+            assert_eq!(visual.clips[index].start_frame, index as i32 * 30);
+            assert_eq!(narration.clips[index].start_frame, index as i32 * 30);
+            assert_eq!(visual.clips[index].duration_frames, 30);
+            assert_eq!(narration.clips[index].duration_frames, 30);
+            assert_eq!(visual.clips[index].volume, 0.0);
+        }
+        for index in 0..2 {
+            let transition = visual.clips[index].transition_out.as_ref().unwrap();
+            assert_eq!(transition.from_clip_id, visual.clips[index].id);
+            assert_eq!(transition.to_clip_id, visual.clips[index + 1].id);
+            assert_eq!(transition.kind, TransitionKind::CrossDissolve);
+            assert_eq!(transition.duration_frames, 12);
+        }
+        assert!(visual.clips[2].transition_out.is_none());
+
+        apply(&mut state, EditCommand::Undo, &ids).unwrap();
+        assert!(state.timeline.tracks.is_empty());
+        assert_eq!(state.timeline.script_assembly_plans, vec![plan()]);
+    }
+
+    #[test]
+    fn missing_media_refuses_atomically_and_narration_must_match_within_one_frame() {
+        let mut state = state();
+        let ids = SeqIdGen::new("script-");
+        let mut invalid = plan();
+        invalid.id = "missing-plan".into();
+        invalid.segments[1].media_ref = "missing".into();
+        apply(
+            &mut state,
+            EditCommand::SaveScriptAssemblyPlan {
+                plan: invalid.clone(),
+            },
+            &ids,
+        )
+        .unwrap();
+        let before = state.timeline.clone();
+        assert!(apply(
+            &mut state,
+            EditCommand::ApplyScriptAssemblyPlan {
+                plan_id: invalid.id,
+            },
+            &ids,
+        )
+        .is_err());
+        assert_eq!(state.timeline, before);
+
+        let mut mismatch = plan();
+        mismatch.id = "mismatch-plan".into();
+        state
+            .manifest
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == "voice-0")
+            .unwrap()
+            .duration = 2.0;
+        apply(
+            &mut state,
+            EditCommand::SaveScriptAssemblyPlan {
+                plan: mismatch.clone(),
+            },
+            &ids,
+        )
+        .unwrap();
+        let before = state.timeline.clone();
+        assert!(apply(
+            &mut state,
+            EditCommand::ApplyScriptAssemblyPlan {
+                plan_id: mismatch.id,
+            },
+            &ids,
+        )
+        .is_err());
+        assert_eq!(state.timeline, before);
     }
 }
 

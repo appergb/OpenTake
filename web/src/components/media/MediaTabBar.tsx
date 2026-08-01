@@ -27,7 +27,7 @@ const MAIN_TABS: ReadonlyArray<MainTab> = [
   { id: "effect", labelKey: "media.tab.effect", enabled: false },
   { id: "transition", labelKey: "media.tab.transition", enabled: true },
   { id: "subtitle", labelKey: "media.tab.subtitle", enabled: true },
-  { id: "smartPack", labelKey: "media.tab.smartPack", enabled: false },
+  { id: "smartPack", labelKey: "media.tab.smartPack", enabled: true },
 ];
 
 export function MediaTabBar({
