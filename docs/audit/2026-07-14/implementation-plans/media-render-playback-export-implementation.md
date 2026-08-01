@@ -2463,36 +2463,47 @@ not the separately owned desktop motion/Lottie materialization.
   - Visible/returned assertion: assert the returned project/error variant, exact post-operation files and decoded state, and save-then-reopen equality or the specified fail-closed no-write result.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_94ba8c5254bc852d.rs#completion_94ba8c5254bc852d_the_media_facade_exposes_probe_decode_encode_sea.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-media/src/lib.rs#crate_public_types_are_reachable` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-media/tests/facade_contract.rs#all_services_are_reachable_only_through_facade_and_dependencies_stay_acyclic` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-media crate_public_types_are_reachable`
   - Run: `cargo test -p opentake-media --test facade_contract all_services_are_reachable_only_through_facade_and_dependencies_stay_acyclic -- --exact`
 
   Expected: FAIL because one or more of the 4 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-media/src/lib.rs#MediaEngine`, `crates/opentake-media/src/probe.rs`, `crates/opentake-media/src/decode/mod.rs`, `crates/opentake-media/src/encode/mod.rs`, `crates/opentake-media/src/search/mod.rs`, `crates/opentake-media/src/transcribe/mod.rs`, `docs/specs/media/8-coordinator.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-media crate_public_types_are_reachable`
   - Run: `cargo test -p opentake-media --test facade_contract all_services_are_reachable_only_through_facade_and_dependencies_stay_acyclic -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. The planned facade contract first failed to compile
+  because `MediaEngine` had no decode, PCM extraction, encoder-construction,
+  or visual-ranking methods. The minimal implementation now owns those four
+  boundaries while retaining the existing probe, transcript, and spoken-search
+  services. The owning integration test generates a deterministic 32x18 A/V
+  fixture and passes probe -> frame decode -> 16 kHz mono PCM -> fixture
+  transcriber -> H.264 encode -> re-probe through `MediaEngine`; it also ranks
+  a persisted visual index and asserts the workspace dependency DAG remains
+  acyclic. Both exact owning tests pass, strict all-feature Clippy is clean,
+  rustfmt is clean, and the full workspace suite passes.
 
 ### Task 36: MR-image-lottie-materialization (implementation-slice-a90703f04ca7e8c5)
 

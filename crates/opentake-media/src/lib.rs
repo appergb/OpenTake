@@ -175,8 +175,8 @@ pub use transcribe::{
 pub use transcribe::whisper::WhisperTranscriber;
 
 pub use search::{
-    rank as search_visual_ranked, AssetIndex, CancelToken, Embedder, EmbedderSpec, Hit,
-    SamplerOptions,
+    rank as search_visual_ranked, AssetIndex, CancelToken, Embedder, EmbedderSpec, Header, Hit,
+    Row, SamplerOptions,
 };
 
 pub use index_coordinator::{work_needed, ExportPause, IndexProgress, WorkNeeded};
@@ -230,6 +230,33 @@ impl MediaEngine {
         probe::probe_file(file)
     }
 
+    /// Decode the nearest source frame for preview/render materialization.
+    pub fn decode_frame(&self, path: &Path, request: &FrameRequest) -> Result<(f64, RgbaFrame)> {
+        decode::decode_frame_at(path, request)
+    }
+
+    /// Decode the first audio track into the requested PCM contract.
+    pub fn extract_pcm(
+        &self,
+        path: &Path,
+        spec: &PcmSpec,
+        range: Option<(f64, f64)>,
+    ) -> Result<PcmBuffer> {
+        decode::extract_pcm(path, spec, range)
+    }
+
+    /// Start the streaming encoder used by the render/export adapter.
+    pub fn video_encoder(
+        &self,
+        output: &Path,
+        width: u32,
+        height: u32,
+        fps: i32,
+        preset: &ExportPreset,
+    ) -> Result<VideoEncoder> {
+        encode::VideoEncoder::new(output, width, height, fps, preset)
+    }
+
     /// Generate (and cache) a video thumbnail sequence.
     pub fn video_thumbnails(
         &self,
@@ -270,6 +297,20 @@ impl MediaEngine {
         limit: usize,
     ) -> Vec<SpokenHit> {
         transcribe::search::search(&self.cache_root, query, assets, limit)
+    }
+
+    /// Rank one encoded visual query against caller-owned current index
+    /// snapshots. Model loading/text encoding stay in the bounded worker; this
+    /// facade owns the deterministic index/ranking boundary.
+    pub fn search_visual(
+        &self,
+        query_vector: &[f32],
+        indexes: &[(String, AssetIndex)],
+        limit: usize,
+        relative_cutoff: f32,
+        min_score: Option<f32>,
+    ) -> Vec<Hit> {
+        search::rank(query_vector, indexes, limit, relative_cutoff, min_score)
     }
 
     /// The shared export-pause signal; `opentake-render` calls `begin`/`end`
@@ -388,6 +429,13 @@ mod tests {
         let _: Option<Hit> = None;
         let _ = PcmFormat::F32;
         let _ = VideoCodec::H264;
+
+        // The high-level facade owns every service family as methods; callers
+        // do not need to assemble the flat modules themselves.
+        let _ = MediaEngine::decode_frame;
+        let _ = MediaEngine::extract_pcm;
+        let _ = MediaEngine::video_encoder;
+        let _ = MediaEngine::search_visual;
     }
 
     // --- extract_audio codec selection (Issue #39 review #3) ---
