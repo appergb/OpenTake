@@ -818,23 +818,23 @@
   - Visible/returned assertion: assert the exact visible text/control/state/focus result and the returned success or typed failure, including a no-op assertion for disabled, cancelled, or rejected input.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:web/src/__tests__/completion/doc-de0f95b975d2b2c6.test.ts#completion_de0f95b975d2b2c6_define_bg_placeholder_exactly_as_rgb_30_30_30_eq.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/styles/tokens.test.ts#bg_placeholder_equals_raised_rgb_30` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/styles/tokens.test.ts -t "bg_placeholder_equals_raised_rgb_30"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/styles/tokens.css#--bg-placeholder`, `web/src/styles/tokens.css#--bg-raised`, `docs/specs/frontend/1-design-tokens.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/styles/tokens.test.ts -t "bg_placeholder_equals_raised_rgb_30"`
 
@@ -845,6 +845,16 @@
   Run: `node --test tools/completion-audit.test.mjs`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: focused RED was the reviewed owner being absent. The
+  existing CSS projection already held both tokens at exact `rgb(30,30,30)`,
+  so GREEN adds the missing direct equality proof without changing production
+  values. The focused owner passes. The full completion-audit regression gate
+  ran 206 assertions (203 passed); after removing an induced frozen-source
+  drift, the two remaining focused failures are both caused by the four
+  preserved, user-owned audit outputs not matching their normative
+  renders/inventory. Step 5 remains open until that external dirty state is
+  reconciled.
 
 ### Task 9: five-panel-layout-focus (implementation-slice-b99fb8c63f2086b0)
 
