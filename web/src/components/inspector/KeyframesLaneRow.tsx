@@ -153,6 +153,19 @@ export function KeyframesLaneRow({
     setActiveFrame(startFrame + rel);
   };
 
+  const handleTrackKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const endFrame = startFrame + duration;
+    const currentFrame = Math.max(startFrame, Math.min(endFrame, activeFrame));
+    let nextFrame: number | null = null;
+    if (e.key === "ArrowLeft" || e.key === "ArrowDown") nextFrame = currentFrame - 1;
+    if (e.key === "ArrowRight" || e.key === "ArrowUp") nextFrame = currentFrame + 1;
+    if (e.key === "Home") nextFrame = startFrame;
+    if (e.key === "End") nextFrame = endFrame;
+    if (nextFrame === null) return;
+    e.preventDefault();
+    setActiveFrame(Math.max(startFrame, Math.min(endFrame, nextFrame)));
+  };
+
   // Start a keyframe drag. Uses window listeners so the drag continues even
   // when the cursor leaves the track (matches the app's existing drag pattern).
   // The cleanup ref ensures listeners are removed if the component unmounts
@@ -279,7 +292,16 @@ export function KeyframesLaneRow({
       {/* Keyframe track strip */}
       <div
         ref={trackRef}
+        data-keyframe-lane={property}
+        role="slider"
+        tabIndex={0}
+        aria-label={propertyLabel}
+        aria-orientation="horizontal"
+        aria-valuemin={startFrame}
+        aria-valuemax={startFrame + duration}
+        aria-valuenow={Math.max(startFrame, Math.min(startFrame + duration, activeFrame))}
         onClick={handleTrackClick}
+        onKeyDown={handleTrackKeyDown}
         onContextMenu={(e) => e.preventDefault()}
         style={{
           position: "relative",

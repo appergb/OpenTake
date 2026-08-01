@@ -951,33 +951,44 @@
   - Visible/accessibility/return path: success=keyframe lane seek: assert exactly if (e.target === e.currentTarget) setActiveFrame(startFrame + xToFrame(e.clientX)); contextmenu only preventDefault() and no sibling branch/command.; accessibility={"focus":"Custom rendered element has no proven tabIndex/keyboard equivalent at this candidate.","label":"No explicit aria-label/title association was discovered at this candidate.","shortcut":"No dedicated shortcut is declared."}; returnPath=["Remain on the owning editor surface after local state or authoritative mirror refresh.","Retain focus on the native control or explicitly restore it when conditional UI closes; this must be asserted."].
   - Outcome matrix: {"success":"keyframe lane seek: assert exactly if (e.target === e.currentTarget) setActiveFrame(startFrame + xToFrame(e.clientX)); contextmenu only preventDefault() and no sibling branch/command.","pending":"N/A — synchronous local/browser state only.","empty":"N/A — owning visibility/handler guards prevent an absent target from emitting a command.","disabled":"No explicit disabled attribute beyond the listed visibility/handler guards.","cancel":"N/A — no separate cancellation phase.","retry":"N/A — repeated activation is a new synchronous action.","failure":"N/A — no API/Tauri/Rust failure route."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/inspector/KeyframesLaneRow.interaction.test.tsx#control-75a9964d0b81961a keyframe lane seek` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-75a9964d0b81961a keyframe lane seek"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/inspector/KeyframesLaneRow.tsx`, `web/src/components/inspector/KeyframesLaneRow.tsx#KeyframesLaneRow` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-75a9964d0b81961a keyframe lane seek"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: the focused owner failed first because the lane had no
+  queryable/focusable semantic boundary. It now proves empty-lane pointer seek,
+  child-click isolation, context-menu no-op, zero edit-command emission,
+  horizontal slider semantics and keyboard frame seek with retained focus. The
+  full Web gate passes with 104 files / 842 tests and the production build
+  passes, with only the existing dynamic-import and chunk-size advisories.
+
+- [ ] **Runtime evidence gate:** in the packaged Inspector keyframes panel,
+  verify pointer and keyboard seek, visible focus, frame updates, child click
+  isolation and right-click no-op before final control reclassification.
 
 ### Task 11: control-acceptance (implementation-slice-0fa7eb23d9e9be73)
 
