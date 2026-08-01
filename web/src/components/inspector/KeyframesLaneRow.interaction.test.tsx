@@ -182,3 +182,43 @@ it("control-4e0a20c7d0e54f3e keyframe diamond drag/context menu", async () => {
     "inspector.keyframes.moveFailed:occupied",
   );
 });
+
+it("control-6e36c47f93f0d4fb dismiss keyframe context menu", async () => {
+  await renderOpacityKeyframe();
+  const diamond = container.querySelector<HTMLElement>("[data-keyframe-diamond='105']")!;
+
+  diamond.focus();
+  await act(async () => {
+    diamond.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  });
+  expect(container.querySelector("[role='menu']")).not.toBeNull();
+  expect(document.activeElement?.getAttribute("role")).toBe("menu");
+
+  const backdrop = container.querySelector<HTMLElement>("[data-keyframe-menu-backdrop]")!;
+  await act(async () => backdrop.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+  expect(container.querySelector("[role='menu']")).toBeNull();
+  expect(document.activeElement).toBe(diamond);
+  expect(Object.values(editSpies).every((spy) => spy.mock.calls.length === 0)).toBe(true);
+
+  await act(async () => {
+    diamond.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  });
+  const secondBackdrop = container.querySelector<HTMLElement>("[data-keyframe-menu-backdrop]")!;
+  const dismissContextMenu = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+  await act(async () => {
+    expect(secondBackdrop.dispatchEvent(dismissContextMenu)).toBe(false);
+  });
+  expect(container.querySelector("[role='menu']")).toBeNull();
+  expect(document.activeElement).toBe(diamond);
+
+  await act(async () => {
+    diamond.dispatchEvent(new KeyboardEvent("keydown", { key: "ContextMenu", bubbles: true }));
+  });
+  const menu = container.querySelector<HTMLElement>("[role='menu']")!;
+  await act(async () => {
+    menu.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  });
+  expect(container.querySelector("[role='menu']")).toBeNull();
+  expect(document.activeElement).toBe(diamond);
+  expect(Object.values(editSpies).every((spy) => spy.mock.calls.length === 0)).toBe(true);
+});

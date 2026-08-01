@@ -1095,33 +1095,44 @@
   - Visible/accessibility/return path: success=dismiss keyframe context menu: assert exactly click calls onClose(); contextmenu preventDefault() then onClose() and no sibling branch/command.; accessibility={"focus":"Custom rendered element has no proven tabIndex/keyboard equivalent at this candidate.","label":"No explicit aria-label/title association was discovered at this candidate.","shortcut":"Escape/outside close exists where mounted, but arrow-key roving focus and invoking-control focus restoration are not proven."}; returnPath=["Close through selected item, Escape, or outside action exactly where implemented.","Restore focus to the invoking control; current code does not explicitly prove this."].
   - Outcome matrix: {"success":"dismiss keyframe context menu: assert exactly click calls onClose(); contextmenu preventDefault() then onClose() and no sibling branch/command.","pending":"N/A — synchronous local/browser state only.","empty":"N/A — owning visibility/handler guards prevent an absent target from emitting a command.","disabled":"No explicit disabled attribute beyond the listed visibility/handler guards.","cancel":"Dismiss/close leaves authoritative state unchanged; invoking-control focus restoration is not proven.","retry":"N/A — repeated activation is a new synchronous action.","failure":"N/A — no API/Tauri/Rust failure route."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/inspector/KeyframesLaneRow.interaction.test.tsx#control-6e36c47f93f0d4fb dismiss keyframe context menu` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-6e36c47f93f0d4fb dismiss keyframe context menu"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/inspector/KeyframesLaneRow.tsx`, `web/src/components/inspector/KeyframesLaneRow.tsx#KeyframeContextMenu`, `web/src/components/inspector/KeyframesLaneRow.tsx#KeyframesLaneRow` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-6e36c47f93f0d4fb dismiss keyframe context menu"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: RED proved the context menu had no menu semantic or
+  focus contract. The owning test now proves outside click, outside
+  context-menu and Escape each dismiss without an edit command, and each path
+  restores focus to the invoking diamond. The full Web gate passes with 104
+  files / 844 tests and the production build passes, with only the existing
+  dynamic-import and chunk-size advisories.
+
+- [ ] **Runtime evidence gate:** open and dismiss the packaged keyframe menu by
+  pointer, right-click and Escape, confirming visible focus returns to the
+  invoking diamond before final control reclassification.
 
 ### Task 13: control-acceptance (implementation-slice-29f0b31549c65faf)
 

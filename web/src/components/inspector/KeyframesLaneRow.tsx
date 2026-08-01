@@ -97,6 +97,7 @@ export function KeyframesLaneRow({
   const pushToast = useEditorUiStore((s) => s.pushToast);
   const track = getTrack(clip, property);
   const trackRef = useRef<HTMLDivElement>(null);
+  const menuTriggerRef = useRef<HTMLElement | null>(null);
   const [dragging, setDragging] = useState<{ fromFrame: number; currentFrame: number } | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; frame: number } | null>(null);
   /** Holds the cleanup function for the active drag's window listeners.
@@ -231,6 +232,7 @@ export function KeyframesLaneRow({
   const handleDiamondContextMenu = (e: React.MouseEvent<HTMLDivElement>, absFrame: number) => {
     e.preventDefault();
     e.stopPropagation();
+    menuTriggerRef.current = e.currentTarget;
     setMenu({ x: e.clientX, y: e.clientY, frame: absFrame });
   };
 
@@ -247,11 +249,16 @@ export function KeyframesLaneRow({
       e.preventDefault();
       e.stopPropagation();
       const rect = e.currentTarget.getBoundingClientRect();
+      menuTriggerRef.current = e.currentTarget;
       setMenu({ x: rect.left + rect.width / 2, y: rect.bottom, frame: absFrame });
     }
   };
 
-  const closeMenu = () => setMenu(null);
+  const closeMenu = () => {
+    const trigger = menuTriggerRef.current;
+    setMenu(null);
+    trigger?.focus();
+  };
 
   const handleDelete = (frame: number) => {
     void edit.removeKeyframe(clip.id, property, frame);
@@ -419,9 +426,14 @@ function KeyframeContextMenu({
   onSetInterpolation: (interp: Interpolation) => void;
   onClose: () => void;
 }) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => menuRef.current?.focus(), []);
+
   return (
     <>
       <div
+        data-keyframe-menu-backdrop
+        aria-hidden="true"
         style={{ position: "fixed", inset: 0, zIndex: 1000 }}
         onClick={onClose}
         onContextMenu={(e) => {
@@ -430,7 +442,17 @@ function KeyframeContextMenu({
         }}
       />
       <div
+        ref={menuRef}
         data-keyframe-context-menu
+        role="menu"
+        tabIndex={-1}
+        aria-label={t("inspector.keyframes.contextMenu")}
+        onKeyDown={(e) => {
+          if (e.key !== "Escape") return;
+          e.preventDefault();
+          e.stopPropagation();
+          onClose();
+        }}
         style={{
           position: "fixed",
           left: x,
