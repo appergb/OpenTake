@@ -208,6 +208,14 @@ export interface ColorMatchInput {
   targetLumaAfter: number;
 }
 
+export interface CaptionTranslationInput {
+  sourceText: string;
+  sourceLocale: string;
+  targetLocale: string;
+  provider: string;
+  model: string;
+}
+
 export interface ChromaKeyInput {
   keyColor?: Partial<Rgb>;
   similarity?: number;
@@ -286,6 +294,7 @@ export interface Clip {
   nestedSequenceId?: string;
   textContent?: string;
   textStyle?: TextStyle;
+  captionTranslationInput?: CaptionTranslationInput;
   opacityTrack?: KeyframeTrack<number>;
   positionTrack?: KeyframeTrack<AnimPair>;
   scaleTrack?: KeyframeTrack<AnimPair>;
@@ -641,6 +650,29 @@ export interface MatchColorResult {
     deltaEAfter: number;
     targetLumaBefore: number;
     targetLumaAfter: number;
+    applied: boolean;
+  };
+  actionName?: string | null;
+}
+
+export interface CaptionTranslationReviewChange {
+  id: string;
+  sourceText: string;
+  translatedText: string;
+}
+
+export interface CaptionTranslationResult {
+  result: {
+    projectEpoch: number;
+    version: number;
+    sourceLocale: string;
+    targetLocale: string;
+    provider: string;
+    model: string;
+    review: CaptionTranslationReviewChange[];
+    errors: Array<{ id: string; message: string }>;
+    captionCount: number;
+    translatedCount: number;
     applied: boolean;
   };
   actionName?: string | null;

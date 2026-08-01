@@ -25,6 +25,8 @@ import type {
   GenerateMatteResult,
   RemoveObjectResult,
   MatchColorResult,
+  CaptionTranslationResult,
+  CaptionTranslationReviewChange,
   LutReference,
   LoudnessNormalization,
   DenoiseMode,
@@ -840,6 +842,50 @@ export async function matchColor(
     });
   }
   throw new Error("color match requires the desktop app");
+}
+
+export async function translateCaptions(
+  captionClipIds: string[],
+  sourceLocale: string,
+  targetLocale: string,
+  provider: "openai" | "anthropic",
+  costAuthorized: boolean,
+): Promise<CaptionTranslationResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<CaptionTranslationResult>("advanced_translate_captions", {
+      request: {
+        captionClipIds,
+        sourceLocale: sourceLocale.trim() || "auto",
+        targetLocale: targetLocale.trim(),
+        provider,
+        costAuthorized,
+        apply: false,
+      },
+    });
+  }
+  throw new Error("caption translation requires the desktop app");
+}
+
+export async function applyCaptionTranslationReview(
+  result: CaptionTranslationResult["result"],
+  changes: CaptionTranslationReviewChange[],
+): Promise<GenerateMatteResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<GenerateMatteResult>("advanced_apply_caption_translation_review", {
+      request: {
+        projectEpoch: result.projectEpoch,
+        version: result.version,
+        sourceLocale: result.sourceLocale,
+        targetLocale: result.targetLocale,
+        provider: result.provider,
+        model: result.model,
+        changes,
+      },
+    });
+  }
+  throw new Error("caption translation review requires the desktop app");
 }
 
 export async function cancelAdvancedWorkflow(): Promise<boolean> {

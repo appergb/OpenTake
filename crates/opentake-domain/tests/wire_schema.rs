@@ -1,10 +1,10 @@
 use std::collections::BTreeSet;
 
 use opentake_domain::{
-    AnimPair, AudioDenoise, ChromaKey, Clip, ClipType, ColorGrade, Crop, DenoiseMode, Effect, Fill,
-    Interpolation, Keyframe, KeyframeTrack, LoudnessNormalization, LutReference, Mask, Rgba,
-    Shadow, StabilizationKeyframe, StabilizationTrack, TextAlignment, TextStyle, Track, Transform,
-    Transition, TransitionKind,
+    AnimPair, AudioDenoise, CaptionTranslationInput, ChromaKey, Clip, ClipType, ColorGrade, Crop,
+    DenoiseMode, Effect, Fill, Interpolation, Keyframe, KeyframeTrack, LoudnessNormalization,
+    LutReference, Mask, Rgba, Shadow, StabilizationKeyframe, StabilizationTrack, TextAlignment,
+    TextStyle, Track, Transform, Transition, TransitionKind,
 };
 use serde::Serialize;
 
@@ -78,6 +78,13 @@ fn full_clip() -> Clip {
     clip.nested_sequence_id = Some("sequence".to_owned());
     clip.text_content = Some("text".to_owned());
     clip.text_style = Some(full_text_style());
+    clip.caption_translation_input = Some(CaptionTranslationInput {
+        source_text: "source".into(),
+        source_locale: "en-US".into(),
+        target_locale: "zh-CN".into(),
+        provider: "wire".into(),
+        model: "wire-v1".into(),
+    });
     clip.opacity_track = Some(KeyframeTrack::from_keyframes(vec![
         Keyframe::with_interpolation(0, 0.5, Interpolation::Linear),
     ]));

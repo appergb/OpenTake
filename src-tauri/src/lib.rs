@@ -332,6 +332,8 @@ pub fn run() {
             advanced::advanced_generate_matte,
             advanced::advanced_remove_object,
             advanced::advanced_match_color,
+            advanced::advanced_translate_captions,
+            advanced::advanced_apply_caption_translation_review,
             advanced::cancel_advanced_workflow,
             secret::secret_save,
             secret::secret_load,

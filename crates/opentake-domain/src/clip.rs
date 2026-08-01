@@ -25,6 +25,19 @@ use crate::text::TextStyle;
 use crate::transform::{Crop, Point, Transform};
 use crate::transition::Transition;
 
+/// Persisted provenance for one accepted caption translation. The original
+/// text remains available for review/recovery and manual text edits clear this
+/// record so the project never attributes authored text to a provider.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionTranslationInput {
+    pub source_text: String,
+    pub source_locale: String,
+    pub target_locale: String,
+    pub provider: String,
+    pub model: String,
+}
+
 /// Linear amplitude <-> dB mapping for the volume slider. 1:1 port of
 /// upstream `VolumeScale`. Below the floor we snap to true 0 (hard mute).
 pub struct VolumeScale;
@@ -173,6 +186,8 @@ pub struct Clip {
         skip_serializing_if = "Option::is_none"
     )]
     pub text_style: Option<TextStyle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption_translation_input: Option<CaptionTranslationInput>,
 
     // Keyframe tracks for each animatable property. None when no animation exists.
     #[serde(
@@ -288,6 +303,7 @@ impl Clip {
         "nestedSequenceId",
         "textContent",
         "textStyle",
+        "captionTranslationInput",
         "opacityTrack",
         "positionTrack",
         "scaleTrack",
@@ -383,6 +399,7 @@ impl Clip {
             nested_sequence_id: None,
             text_content: None,
             text_style: None,
+            caption_translation_input: None,
             opacity_track: None,
             position_track: None,
             scale_track: None,

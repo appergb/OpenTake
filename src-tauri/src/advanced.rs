@@ -1,7 +1,7 @@
 //! Production desktop implementations for capability-gated advanced workflows.
 
 use std::collections::VecDeque;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -11,6 +11,7 @@ use opentake_agent::mcp::advanced::{
 };
 use opentake_agent::tools::args::{
     GenerateMatteArgs, MatchColorArgs, RemoveObjectArgs, SeparateStemsArgs, TrackMotionArgs,
+    TranslateCaptionsArgs,
 };
 use opentake_agent::tools::names::ToolName;
 use opentake_core::{
@@ -18,9 +19,10 @@ use opentake_core::{
     ProjectRevision,
 };
 use opentake_domain::{
-    luma709, AnimPair, ColorGrade, ColorMatchInput, GenerationInput, GenerationJobStatus,
-    Interpolation, Keyframe, KeyframeTrack, LiftGammaGain, Mask, Rgb,
+    luma709, AnimPair, CaptionTranslationInput, ColorGrade, ColorMatchInput, GenerationInput,
+    GenerationJobStatus, Interpolation, Keyframe, KeyframeTrack, LiftGammaGain, Mask, Rgb,
 };
+use opentake_gen::{KeyStore, KeyringStore, ProviderKey};
 use opentake_media::analysis::{
     track_region_motion, verify_rvm_model, NormalizedMotionRegion, RegionMotionTrack,
     RvmMattingSession, StemExecution, StemSeparationRequest,
@@ -31,9 +33,11 @@ use opentake_media::{
     ExportResolution, FrameRequest, MediaCancelToken, MediaError, PcmFormat, PcmSpec, RgbaFrame,
     StreamVideoFrame, VideoCodec, VideoEncoder, VideoStream, VideoStreamRequest,
 };
-use opentake_ops::{ClipEntry, EditCommand, KeyframePayload, KeyframeProperty};
+use opentake_ops::{
+    CaptionTranslationChange, ClipEntry, EditCommand, KeyframePayload, KeyframeProperty,
+};
 use same_file::Handle;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, State};
@@ -44,6 +48,168 @@ pub struct TauriAdvancedWorkflowBridge {
     core: AppCore,
     cache_root: PathBuf,
     models_dir: PathBuf,
+    caption_translator: Arc<dyn CaptionTranslationProvider>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct CaptionTranslationDraft {
+    id: String,
+    text: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct CaptionTranslationFailure {
+    id: String,
+    message: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct CaptionTranslationProviderResult {
+    translations: Vec<CaptionTranslationDraft>,
+    #[serde(default)]
+    errors: Vec<CaptionTranslationFailure>,
+}
+
+trait CaptionTranslationProvider: Send + Sync {
+    fn translate(
+        &self,
+        provider: &str,
+        model: &str,
+        source_locale: &str,
+        target_locale: &str,
+        captions: &[CaptionTranslationDraft],
+        cancel: &MediaCancelToken,
+    ) -> Result<CaptionTranslationProviderResult, AdvancedWorkflowError>;
+}
+
+struct NetworkCaptionTranslationProvider;
+
+impl CaptionTranslationProvider for NetworkCaptionTranslationProvider {
+    fn translate(
+        &self,
+        provider: &str,
+        model: &str,
+        source_locale: &str,
+        target_locale: &str,
+        captions: &[CaptionTranslationDraft],
+        cancel: &MediaCancelToken,
+    ) -> Result<CaptionTranslationProviderResult, AdvancedWorkflowError> {
+        if cancel.checkpoint() {
+            return Err(cancelled_workflow("caption translation cancelled"));
+        }
+        let key = match provider {
+            "openai" => ProviderKey::OpenAI,
+            "anthropic" => ProviderKey::Anthropic,
+            _ => {
+                return Err(AdvancedWorkflowError::new(
+                    AdvancedWorkflowErrorKind::CapabilityUnavailable,
+                    "caption translation supports OpenAI or Anthropic",
+                ))
+            }
+        };
+        let secret = KeyringStore::new()
+            .load(key.account())
+            .map_err(|error| advanced_execution(format!("could not read {provider} key: {error}")))?
+            .ok_or_else(|| {
+                AdvancedWorkflowError::new(
+                    AdvancedWorkflowErrorKind::ConsentRequired,
+                    format!("no {provider} API key is configured; open Settings → AI"),
+                )
+            })?;
+        let payload = serde_json::to_string(captions)
+            .map_err(|error| advanced_execution(error.to_string()))?;
+        let instruction = format!(
+            "Translate every caption from locale {source_locale} to {target_locale}. Preserve meaning and natural subtitle phrasing. Return only JSON with shape {{\"translations\":[{{\"id\":string,\"text\":string}}],\"errors\":[{{\"id\":string,\"message\":string}}]}}. Every input id must appear exactly once in translations or errors. Never change ids. Captions: {payload}"
+        );
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .map_err(|error| advanced_execution(format!("translation client: {error}")))?;
+        let response = match provider {
+            "openai" => client
+                .post("https://api.openai.com/v1/chat/completions")
+                .bearer_auth(secret)
+                .json(&json!({
+                    "model": model,
+                    "temperature": 0,
+                    "response_format": {"type": "json_object"},
+                    "messages": [
+                        {"role": "system", "content": "You are a precise audiovisual subtitle translator."},
+                        {"role": "user", "content": instruction}
+                    ]
+                }))
+                .send(),
+            "anthropic" => client
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", secret)
+                .header("anthropic-version", "2023-06-01")
+                .json(&json!({
+                    "model": model,
+                    "max_tokens": 8192,
+                    "temperature": 0,
+                    "system": "You are a precise audiovisual subtitle translator. Return only JSON.",
+                    "messages": [{"role": "user", "content": instruction}]
+                }))
+                .send(),
+            _ => unreachable!(),
+        }
+        .map_err(|error| advanced_execution(format!("caption translation network error: {error}")))?;
+        if !response.status().is_success() {
+            return Err(advanced_execution(format!(
+                "caption translation provider returned HTTP {}",
+                response.status()
+            )));
+        }
+        const MAX_PROVIDER_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+        if response
+            .content_length()
+            .is_some_and(|bytes| bytes > MAX_PROVIDER_RESPONSE_BYTES)
+        {
+            return Err(advanced_execution(
+                "translation provider response is too large",
+            ));
+        }
+        let response = response;
+        let mut body = Vec::new();
+        response
+            .take(MAX_PROVIDER_RESPONSE_BYTES + 1)
+            .read_to_end(&mut body)
+            .map_err(|error| {
+                advanced_execution(format!("could not read provider response: {error}"))
+            })?;
+        if body.len() as u64 > MAX_PROVIDER_RESPONSE_BYTES {
+            return Err(advanced_execution(
+                "translation provider response is too large",
+            ));
+        }
+        let wire: serde_json::Value = serde_json::from_slice(&body)
+            .map_err(|error| advanced_execution(format!("invalid provider response: {error}")))?;
+        if cancel.checkpoint() {
+            return Err(cancelled_workflow("caption translation cancelled"));
+        }
+        let raw = if provider == "openai" {
+            wire.pointer("/choices/0/message/content")
+        } else {
+            wire.pointer("/content/0/text")
+        }
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| advanced_execution("translation provider returned no JSON content"))?;
+        let raw = raw
+            .trim()
+            .strip_prefix("```json")
+            .or_else(|| raw.trim().strip_prefix("```"))
+            .unwrap_or(raw.trim())
+            .trim()
+            .strip_suffix("```")
+            .unwrap_or(raw.trim())
+            .trim();
+        serde_json::from_str(raw)
+            .map_err(|error| advanced_execution(format!("invalid translation JSON: {error}")))
+    }
 }
 
 pub struct AdvancedWorkflowCommandState {
@@ -286,6 +452,109 @@ pub async fn advanced_match_color(
 }
 
 #[tauri::command]
+pub async fn advanced_translate_captions(
+    state: State<'_, AdvancedWorkflowCommandState>,
+    request: TranslateCaptionsArgs,
+) -> Result<GenerateMatteResultDto, String> {
+    let token = state.begin()?;
+    let bridge = Arc::clone(&state.bridge);
+    let worker_token = token.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        bridge.execute(
+            AdvancedWorkflowRequest::TranslateCaptions(request),
+            &worker_token,
+        )
+    })
+    .await
+    .map_err(|error| format!("advanced workflow worker failed: {error}"))
+    .and_then(|result| result.map_err(|error| error.message));
+    state.finish(&token);
+    let commit = result?;
+    Ok(GenerateMatteResultDto {
+        result: commit.result,
+        action_name: commit.action_name,
+    })
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyCaptionTranslationReviewRequest {
+    project_epoch: u64,
+    version: u64,
+    source_locale: String,
+    target_locale: String,
+    provider: String,
+    model: String,
+    changes: Vec<CaptionTranslationReviewChange>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CaptionTranslationReviewChange {
+    id: String,
+    source_text: String,
+    translated_text: String,
+}
+
+#[tauri::command]
+pub fn advanced_apply_caption_translation_review(
+    state: State<'_, AdvancedWorkflowCommandState>,
+    request: ApplyCaptionTranslationReviewRequest,
+) -> Result<GenerateMatteResultDto, String> {
+    if request.changes.is_empty() || request.changes.len() > 500 {
+        return Err("select between 1 and 500 translated captions to apply".into());
+    }
+    if request.source_locale.is_empty()
+        || request.source_locale.len() > 64
+        || request.target_locale.is_empty()
+        || request.target_locale.len() > 64
+        || request.provider.is_empty()
+        || request.provider.len() > 32
+        || request.model.is_empty()
+        || request.model.len() > 128
+        || request.changes.iter().any(|change| {
+            change.id.is_empty()
+                || change.id.len() > 256
+                || change.source_text.len() > 20_000
+                || change.translated_text.len() > 20_000
+        })
+    {
+        return Err("caption translation review contains invalid or oversized fields".into());
+    }
+    let changes = request
+        .changes
+        .into_iter()
+        .map(|change| CaptionTranslationChange {
+            clip_id: change.id,
+            expected_source_text: change.source_text.clone(),
+            translated_text: change.translated_text,
+            input: CaptionTranslationInput {
+                source_text: change.source_text,
+                source_locale: request.source_locale.clone(),
+                target_locale: request.target_locale.clone(),
+                provider: request.provider.clone(),
+                model: request.model.clone(),
+            },
+        })
+        .collect();
+    let edit = state
+        .bridge
+        .core
+        .apply_at_revision(
+            ProjectRevision {
+                project_epoch: request.project_epoch,
+                version: request.version,
+            },
+            EditCommand::ApplyCaptionTranslations { changes },
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(GenerateMatteResultDto {
+        result: json!({"applied": edit.changed}),
+        action_name: edit.changed.then_some(edit.action_name),
+    })
+}
+
+#[tauri::command]
 pub fn cancel_advanced_workflow(state: State<'_, AdvancedWorkflowCommandState>) -> bool {
     state.cancel_active()
 }
@@ -296,6 +565,22 @@ impl TauriAdvancedWorkflowBridge {
             core,
             cache_root,
             models_dir,
+            caption_translator: Arc::new(NetworkCaptionTranslationProvider),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_caption_translator(
+        core: AppCore,
+        cache_root: PathBuf,
+        models_dir: PathBuf,
+        caption_translator: Arc<dyn CaptionTranslationProvider>,
+    ) -> Self {
+        Self {
+            core,
+            cache_root,
+            models_dir,
+            caption_translator,
         }
     }
 
@@ -1272,6 +1557,222 @@ impl TauriAdvancedWorkflowBridge {
             action_name,
         })
     }
+
+    fn translate_captions(
+        &self,
+        args: TranslateCaptionsArgs,
+        cancel: &MediaCancelToken,
+    ) -> Result<AdvancedWorkflowCommit, AdvancedWorkflowError> {
+        if cancel.checkpoint() {
+            return Err(cancelled_workflow("caption translation cancelled"));
+        }
+        if args.caption_clip_ids.is_empty() || args.caption_clip_ids.len() > 500 {
+            return Err(advanced_invalid(
+                "captionClipIds must contain between 1 and 500 captions",
+            ));
+        }
+        let source_locale = args.source_locale.as_deref().unwrap_or("auto").trim();
+        let target_locale = args.target_locale.trim();
+        if source_locale.is_empty()
+            || source_locale.len() > 64
+            || target_locale.is_empty()
+            || target_locale.len() > 64
+            || source_locale.eq_ignore_ascii_case(target_locale)
+        {
+            return Err(advanced_invalid(
+                "sourceLocale and targetLocale must be distinct locale identifiers",
+            ));
+        }
+        let provider = args.provider.as_deref().unwrap_or("openai");
+        let model = args.model.as_deref().unwrap_or(match provider {
+            "openai" => "gpt-4o-mini",
+            "anthropic" => "claude-3-5-haiku-latest",
+            _ => "",
+        });
+        if model.trim().is_empty() || model.len() > 128 {
+            return Err(advanced_invalid("model must be a valid model identifier"));
+        }
+        if args.cost_authorized != Some(true) {
+            return Err(AdvancedWorkflowError::new(
+                AdvancedWorkflowErrorKind::CostAuthorizationRequired,
+                "caption translation sends subtitle text to the selected paid provider; set costAuthorized=true after review",
+            ));
+        }
+        let snapshot = self.core.runtime_snapshot();
+        let mut seen = std::collections::HashSet::new();
+        let mut originals = Vec::with_capacity(args.caption_clip_ids.len());
+        let mut source_bytes = 0_usize;
+        for id in &args.caption_clip_ids {
+            if !seen.insert(id.as_str()) {
+                return Err(advanced_invalid(format!("duplicate caption clip: {id}")));
+            }
+            let clip = snapshot
+                .timeline
+                .tracks
+                .iter()
+                .flat_map(|track| &track.clips)
+                .find(|clip| clip.id == *id)
+                .ok_or_else(|| advanced_resource(format!("caption clip not found: {id}")))?;
+            if clip.media_type != opentake_domain::ClipType::Text || clip.caption_group_id.is_none()
+            {
+                return Err(advanced_invalid(format!("clip is not a caption: {id}")));
+            }
+            let text = clip
+                .text_content
+                .as_deref()
+                .filter(|text| !text.trim().is_empty())
+                .ok_or_else(|| advanced_invalid(format!("caption text is empty: {id}")))?;
+            if text.len() > 20_000 {
+                return Err(advanced_invalid(format!("caption text is too large: {id}")));
+            }
+            source_bytes = source_bytes.saturating_add(text.len());
+            if source_bytes > 1_000_000 {
+                return Err(advanced_invalid(
+                    "selected caption text exceeds the 1 MB translation limit",
+                ));
+            }
+            originals.push(CaptionTranslationDraft {
+                id: id.clone(),
+                text: text.to_string(),
+            });
+        }
+        let returned = self.caption_translator.translate(
+            provider,
+            model,
+            source_locale,
+            target_locale,
+            &originals,
+            cancel,
+        )?;
+        if returned
+            .translations
+            .len()
+            .saturating_add(returned.errors.len())
+            > originals.len().saturating_mul(2)
+        {
+            return Err(advanced_execution(
+                "translation provider returned too many caption results",
+            ));
+        }
+        let original_by_id: std::collections::HashMap<&str, &str> = originals
+            .iter()
+            .map(|caption| (caption.id.as_str(), caption.text.as_str()))
+            .collect();
+        let mut response_ids = std::collections::HashSet::new();
+        let mut translations = Vec::new();
+        let mut failures = Vec::new();
+        for translation in returned.translations {
+            if !original_by_id.contains_key(translation.id.as_str())
+                || !response_ids.insert(translation.id.clone())
+            {
+                return Err(advanced_execution(
+                    "translation provider returned an unknown or duplicate caption id",
+                ));
+            }
+            if translation.text.trim().is_empty() || translation.text.len() > 20_000 {
+                failures.push(CaptionTranslationFailure {
+                    id: translation.id,
+                    message: "provider returned empty or oversized translated text".into(),
+                });
+            } else {
+                translations.push(translation);
+            }
+        }
+        for failure in returned.errors {
+            if !original_by_id.contains_key(failure.id.as_str())
+                || !response_ids.insert(failure.id.clone())
+            {
+                return Err(advanced_execution(
+                    "translation provider returned an unknown or duplicate caption id",
+                ));
+            }
+            failures.push(CaptionTranslationFailure {
+                id: failure.id,
+                message: if failure.message.trim().is_empty() {
+                    "provider could not translate this caption".into()
+                } else {
+                    failure.message.chars().take(512).collect()
+                },
+            });
+        }
+        for original in &originals {
+            if !response_ids.contains(&original.id) {
+                failures.push(CaptionTranslationFailure {
+                    id: original.id.clone(),
+                    message: "provider omitted this caption".into(),
+                });
+            }
+        }
+        if translations.is_empty() {
+            return Err(advanced_execution(
+                "caption translation produced no reviewable changes",
+            ));
+        }
+        if cancel.checkpoint() {
+            return Err(cancelled_workflow("caption translation cancelled"));
+        }
+        let changes: Vec<CaptionTranslationChange> = translations
+            .iter()
+            .map(|translation| {
+                let source_text = original_by_id[translation.id.as_str()].to_string();
+                CaptionTranslationChange {
+                    clip_id: translation.id.clone(),
+                    expected_source_text: source_text.clone(),
+                    translated_text: translation.text.clone(),
+                    input: CaptionTranslationInput {
+                        source_text,
+                        source_locale: source_locale.to_string(),
+                        target_locale: target_locale.to_string(),
+                        provider: provider.to_string(),
+                        model: model.to_string(),
+                    },
+                }
+            })
+            .collect();
+        let apply_requested = args.apply.unwrap_or(false);
+        let (applied, action_name) = if apply_requested {
+            let edit = self
+                .core
+                .apply_at_revision(
+                    ProjectRevision {
+                        project_epoch: snapshot.project_epoch,
+                        version: snapshot.version,
+                    },
+                    EditCommand::ApplyCaptionTranslations { changes },
+                )
+                .map_err(|error| advanced_execution(error.to_string()))?;
+            (edit.changed, edit.changed.then_some(edit.action_name))
+        } else {
+            (false, None)
+        };
+        let review: Vec<serde_json::Value> = translations
+            .into_iter()
+            .map(|translation| {
+                let source_text = original_by_id[translation.id.as_str()];
+                json!({
+                    "id": translation.id,
+                    "sourceText": source_text,
+                    "translatedText": translation.text
+                })
+            })
+            .collect();
+        Ok(AdvancedWorkflowCommit {
+            result: json!({
+                "projectEpoch": snapshot.project_epoch,
+                "version": snapshot.version,
+                "sourceLocale": source_locale,
+                "targetLocale": target_locale,
+                "provider": provider,
+                "model": model,
+                "review": review,
+                "errors": failures,
+                "captionCount": originals.len(),
+                "translatedCount": review.len(),
+                "applied": applied
+            }),
+            action_name,
+        })
+    }
 }
 
 impl AdvancedWorkflowBridge for TauriAdvancedWorkflowBridge {
@@ -1281,6 +1782,7 @@ impl AdvancedWorkflowBridge for TauriAdvancedWorkflowBridge {
             ToolName::RemoveObject,
             ToolName::MatchColor,
             ToolName::SeparateStems,
+            ToolName::TranslateCaptions,
         ];
         if verify_rvm_model(&self.models_dir).is_ok() {
             tools.push(ToolName::GenerateMatte);
@@ -1299,6 +1801,9 @@ impl AdvancedWorkflowBridge for TauriAdvancedWorkflowBridge {
             AdvancedWorkflowRequest::RemoveObject(args) => self.remove_object(args, cancel),
             AdvancedWorkflowRequest::MatchColor(args) => self.match_color(args, cancel),
             AdvancedWorkflowRequest::SeparateStems(args) => self.separate_stems(args, cancel),
+            AdvancedWorkflowRequest::TranslateCaptions(args) => {
+                self.translate_captions(args, cancel)
+            }
             _ => Err(AdvancedWorkflowError::new(
                 AdvancedWorkflowErrorKind::CapabilityUnavailable,
                 "advanced workflow is not supported by this desktop host",
@@ -2942,5 +3447,187 @@ mod tests {
         let after_cancel = core.runtime_snapshot();
         assert_eq!(after_cancel.timeline, before_cancel.timeline);
         assert_eq!(after_cancel.media, before_cancel.media);
+    }
+
+    #[derive(Clone)]
+    struct MockCaptionTranslator {
+        result: Result<CaptionTranslationProviderResult, AdvancedWorkflowError>,
+    }
+
+    impl CaptionTranslationProvider for MockCaptionTranslator {
+        fn translate(
+            &self,
+            _provider: &str,
+            _model: &str,
+            _source_locale: &str,
+            _target_locale: &str,
+            _captions: &[CaptionTranslationDraft],
+            _cancel: &MediaCancelToken,
+        ) -> Result<CaptionTranslationProviderResult, AdvancedWorkflowError> {
+            self.result.clone()
+        }
+    }
+
+    fn caption_translation_fixture() -> (AppCore, Vec<String>) {
+        let core = AppCore::new();
+        let placed = core
+            .apply(EditCommand::AddCaptions {
+                entries: [(4, 12, "Hello"), (21, 15, "World")]
+                    .into_iter()
+                    .map(
+                        |(start_frame, duration_frames, content)| opentake_ops::CaptionEntry {
+                            start_frame,
+                            duration_frames,
+                            content: content.into(),
+                            text_style: opentake_domain::TextStyle::default(),
+                            transform: opentake_domain::Transform::default(),
+                            caption_group_id: "captions-1".into(),
+                        },
+                    )
+                    .collect(),
+            })
+            .unwrap();
+        (core, placed.affected_clip_ids)
+    }
+
+    fn translation_args(ids: Vec<String>, apply: bool) -> TranslateCaptionsArgs {
+        TranslateCaptionsArgs {
+            caption_clip_ids: ids,
+            source_locale: Some("en-US".into()),
+            target_locale: "zh-CN".into(),
+            provider: Some("openai".into()),
+            model: Some("mock-v1".into()),
+            cost_authorized: Some(true),
+            apply: Some(apply),
+        }
+    }
+
+    #[test]
+    fn caption_translation_mock_success_preserves_timing_undo_and_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("CaptionTranslation.opentake");
+        let (core, ids) = caption_translation_fixture();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let before = core.runtime_snapshot();
+        let translator = MockCaptionTranslator {
+            result: Ok(CaptionTranslationProviderResult {
+                translations: vec![
+                    CaptionTranslationDraft {
+                        id: ids[0].clone(),
+                        text: "你好".into(),
+                    },
+                    CaptionTranslationDraft {
+                        id: ids[1].clone(),
+                        text: "世界".into(),
+                    },
+                ],
+                errors: vec![],
+            }),
+        };
+        let bridge = TauriAdvancedWorkflowBridge::with_caption_translator(
+            core.clone(),
+            root.path().join("cache"),
+            root.path().join("models"),
+            Arc::new(translator),
+        );
+        assert!(bridge
+            .supported_tools()
+            .contains(&ToolName::TranslateCaptions));
+        let preview = bridge
+            .translate_captions(
+                translation_args(ids.clone(), false),
+                &MediaCancelToken::new(),
+            )
+            .unwrap();
+        assert_eq!(preview.result["translatedCount"], 2);
+        assert_eq!(core.runtime_snapshot().timeline, before.timeline);
+        let applied = bridge
+            .translate_captions(
+                translation_args(ids.clone(), true),
+                &MediaCancelToken::new(),
+            )
+            .unwrap();
+        assert_eq!(applied.action_name.as_deref(), Some("Translate Captions"));
+        let after = core.runtime_snapshot();
+        for (index, clip) in after.timeline.tracks[0].clips.iter().enumerate() {
+            let original = &before.timeline.tracks[0].clips[index];
+            assert_eq!(clip.id, original.id);
+            assert_eq!(clip.start_frame, original.start_frame);
+            assert_eq!(clip.duration_frames, original.duration_frames);
+            assert_eq!(clip.caption_group_id, original.caption_group_id);
+            let provenance = clip.caption_translation_input.as_ref().unwrap();
+            assert_eq!(provenance.source_locale, "en-US");
+            assert_eq!(provenance.target_locale, "zh-CN");
+        }
+        core.undo().unwrap();
+        assert_eq!(core.runtime_snapshot().timeline, before.timeline);
+        core.redo().unwrap();
+        core.save_project(None).unwrap();
+        let reopened = AppCore::new();
+        reopened.open_project(&bundle).unwrap();
+        assert_eq!(
+            reopened.runtime_snapshot().timeline,
+            core.runtime_snapshot().timeline
+        );
+    }
+
+    #[test]
+    fn caption_translation_mock_partial_and_failure_keep_failed_text_untouched() {
+        let root = tempfile::tempdir().unwrap();
+        let (core, ids) = caption_translation_fixture();
+        let before = core.runtime_snapshot();
+        let partial = TauriAdvancedWorkflowBridge::with_caption_translator(
+            core.clone(),
+            root.path().join("cache"),
+            root.path().join("models"),
+            Arc::new(MockCaptionTranslator {
+                result: Ok(CaptionTranslationProviderResult {
+                    translations: vec![CaptionTranslationDraft {
+                        id: ids[0].clone(),
+                        text: "Bonjour".into(),
+                    }],
+                    errors: vec![CaptionTranslationFailure {
+                        id: ids[1].clone(),
+                        message: "temporary refusal".into(),
+                    }],
+                }),
+            }),
+        );
+        let result = partial
+            .translate_captions(
+                translation_args(ids.clone(), true),
+                &MediaCancelToken::new(),
+            )
+            .unwrap();
+        assert_eq!(result.result["translatedCount"], 1);
+        assert_eq!(result.result["errors"].as_array().unwrap().len(), 1);
+        let after_partial = core.runtime_snapshot();
+        assert_eq!(
+            after_partial.timeline.tracks[0].clips[0]
+                .text_content
+                .as_deref(),
+            Some("Bonjour")
+        );
+        assert_eq!(
+            after_partial.timeline.tracks[0].clips[1]
+                .text_content
+                .as_deref(),
+            Some("World")
+        );
+        core.undo().unwrap();
+        assert_eq!(core.runtime_snapshot().timeline, before.timeline);
+
+        let failed = TauriAdvancedWorkflowBridge::with_caption_translator(
+            core.clone(),
+            root.path().join("cache-2"),
+            root.path().join("models"),
+            Arc::new(MockCaptionTranslator {
+                result: Err(advanced_execution("mock provider failed")),
+            }),
+        );
+        assert!(failed
+            .translate_captions(translation_args(ids, true), &MediaCancelToken::new())
+            .is_err());
+        assert_eq!(core.runtime_snapshot().timeline, before.timeline);
     }
 }

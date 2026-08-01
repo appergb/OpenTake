@@ -19,10 +19,10 @@
 use std::collections::{HashMap, HashSet};
 
 use opentake_domain::{
-    AudioDenoise, ChromaKey, Clip, ClipType, ColorGrade, ColorMatchInput, Crop, Effect,
-    Interpolation, LoudnessNormalization, LutReference, Mask, MaskShape, MediaManifestEntry,
-    NestedSequence, StabilizationTrack, Timeline, Track, Transform, Transition, TransitionKind,
-    MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS,
+    AudioDenoise, CaptionTranslationInput, ChromaKey, Clip, ClipType, ColorGrade, ColorMatchInput,
+    Crop, Effect, Interpolation, LoudnessNormalization, LutReference, Mask, MaskShape,
+    MediaManifestEntry, NestedSequence, StabilizationTrack, Timeline, Track, Transform, Transition,
+    TransitionKind, MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS,
 };
 
 use crate::editor_state::EditorState;
@@ -613,6 +613,16 @@ pub struct CaptionEntry {
     pub caption_group_id: String,
 }
 
+/// One reviewed caption text replacement. A batch is validated completely
+/// before mutation, preserving clip identity and timing as one undo step.
+#[derive(Clone, Debug)]
+pub struct CaptionTranslationChange {
+    pub clip_id: String,
+    pub expected_source_text: String,
+    pub translated_text: String,
+    pub input: CaptionTranslationInput,
+}
+
 /// A single clip property assignment for [`EditCommand::SetClipProperties`].
 /// `None` fields are left unchanged; setting a scalar clears the matching
 /// keyframe track (mirrors `applyPropertyChanges`).
@@ -925,6 +935,11 @@ pub enum EditCommand {
     /// composing `InsertTrack` + `AddTexts` would be two undo steps and could not
     /// stamp `caption_group_id`. Empty `entries` is a no-op (no track, no change).
     AddCaptions { entries: Vec<CaptionEntry> },
+    /// Accept a reviewed batch of translated captions without changing IDs,
+    /// track placement, or frame ranges.
+    ApplyCaptionTranslations {
+        changes: Vec<CaptionTranslationChange>,
+    },
     /// Link clips into one group.
     Link { clip_ids: Vec<String> },
     /// Unlink clips (and their whole groups).
@@ -1199,6 +1214,9 @@ pub fn apply(
         EditCommand::AddTexts { entries } => add_texts(state, entries, ids),
         EditCommand::AddTextsAutoTrack { entries } => add_texts_auto_track(state, entries, ids),
         EditCommand::AddCaptions { entries } => add_captions(state, entries, ids),
+        EditCommand::ApplyCaptionTranslations { changes } => {
+            apply_caption_translations(state, changes)
+        }
         EditCommand::Link { clip_ids } => link(state, clip_ids, ids),
         EditCommand::Unlink { clip_ids } => unlink(state, clip_ids),
         EditCommand::RemoveTracks { track_indexes } => remove_tracks(state, track_indexes),
@@ -2678,10 +2696,78 @@ fn apply_property_changes(
     }
     if let Some(c) = &props.text_content {
         clip.text_content = Some(c.clone());
+        clip.caption_translation_input = None;
     }
     if let Some(s) = &props.text_style {
         clip.text_style = Some(s.clone());
     }
+}
+
+fn apply_caption_translations(
+    state: &mut EditorState,
+    changes: Vec<CaptionTranslationChange>,
+) -> Result<EditResult, EditError> {
+    if changes.is_empty() {
+        return Err(EditError::Invalid(
+            "Missing or empty caption translation changes".into(),
+        ));
+    }
+    let mut seen = HashSet::new();
+    for change in &changes {
+        if !seen.insert(change.clip_id.as_str()) {
+            return Err(EditError::Invalid(format!(
+                "Duplicate caption clip: {}",
+                change.clip_id
+            )));
+        }
+        if change.translated_text.trim().is_empty() {
+            return Err(EditError::Invalid(format!(
+                "Translated text is empty for clip {}",
+                change.clip_id
+            )));
+        }
+        let location = state
+            .find_clip(&change.clip_id)
+            .ok_or_else(|| EditError::Invalid(format!("Clip not found: {}", change.clip_id)))?;
+        let clip = &state.timeline.tracks[location.track_index].clips[location.clip_index];
+        if clip.media_type != ClipType::Text || clip.caption_group_id.is_none() {
+            return Err(EditError::Invalid(format!(
+                "Clip is not a caption: {}",
+                change.clip_id
+            )));
+        }
+        if clip.text_content.as_deref() != Some(change.expected_source_text.as_str()) {
+            return Err(EditError::Invalid(format!(
+                "Caption text changed during review: {}",
+                change.clip_id
+            )));
+        }
+        if change.input.source_text != change.expected_source_text {
+            return Err(EditError::Invalid(format!(
+                "Caption provenance does not match source text: {}",
+                change.clip_id
+            )));
+        }
+    }
+    let n = changes.len();
+    transact(
+        state,
+        "Translate Captions",
+        move |_| format!("Translated {n} caption(s)"),
+        move |st| {
+            for change in &changes {
+                let (track_index, clip_index) = find(&st.timeline, &change.clip_id)
+                    .expect("caption translations were prevalidated");
+                let clip = &mut st.timeline.tracks[track_index].clips[clip_index];
+                clip.text_content = Some(change.translated_text.clone());
+                clip.caption_translation_input = Some(change.input.clone());
+            }
+            Ok(changes
+                .iter()
+                .map(|change| change.clip_id.clone())
+                .collect())
+        },
+    )
 }
 
 fn set_keyframes(
@@ -5980,6 +6066,131 @@ mod add_captions_tests {
         assert!(matches!(err, EditError::Invalid(_)));
         // State untouched by the refusal.
         assert_eq!(state.timeline.tracks.len(), 2);
+    }
+
+    #[test]
+    fn caption_translation_preserves_identity_timing_and_is_one_undo_step() {
+        let mut state = state_with_video_and_audio();
+        let ids = SeqIdGen::new("cap-");
+        apply(
+            &mut state,
+            EditCommand::AddCaptions {
+                entries: vec![caption("Hello", 3, 17, "g"), caption("World", 25, 19, "g")],
+            },
+            &ids,
+        )
+        .unwrap();
+        let captions = state.timeline.tracks[0].clips.clone();
+        let changes = captions
+            .iter()
+            .zip(["你好", "世界"])
+            .map(|(clip, translated)| {
+                let source = clip.text_content.clone().unwrap();
+                CaptionTranslationChange {
+                    clip_id: clip.id.clone(),
+                    expected_source_text: source.clone(),
+                    translated_text: translated.into(),
+                    input: CaptionTranslationInput {
+                        source_text: source,
+                        source_locale: "en-US".into(),
+                        target_locale: "zh-CN".into(),
+                        provider: "mock".into(),
+                        model: "mock-v1".into(),
+                    },
+                }
+            })
+            .collect();
+        let result = apply(
+            &mut state,
+            EditCommand::ApplyCaptionTranslations { changes },
+            &ids,
+        )
+        .unwrap();
+        assert_eq!(result.action_name, "Translate Captions");
+        for (before, after) in captions.iter().zip(&state.timeline.tracks[0].clips) {
+            assert_eq!(after.id, before.id);
+            assert_eq!(after.start_frame, before.start_frame);
+            assert_eq!(after.duration_frames, before.duration_frames);
+            assert_eq!(after.caption_group_id, before.caption_group_id);
+            assert_eq!(
+                after
+                    .caption_translation_input
+                    .as_ref()
+                    .unwrap()
+                    .source_text,
+                before.text_content.clone().unwrap()
+            );
+        }
+        apply(&mut state, EditCommand::Undo, &ids).unwrap();
+        assert_eq!(state.timeline.tracks[0].clips, captions);
+    }
+
+    #[test]
+    fn caption_translation_stale_batch_is_atomic_and_manual_edit_clears_provenance() {
+        let mut state = state_with_video_and_audio();
+        let ids = SeqIdGen::new("cap-");
+        apply(
+            &mut state,
+            EditCommand::AddCaptions {
+                entries: vec![caption("One", 0, 10, "g"), caption("Two", 10, 10, "g")],
+            },
+            &ids,
+        )
+        .unwrap();
+        let before = state.timeline.clone();
+        let caption_ids: Vec<_> = state.timeline.tracks[0]
+            .clips
+            .iter()
+            .map(|clip| clip.id.clone())
+            .collect();
+        let change = |clip_id: String, source: &str, translated: &str| CaptionTranslationChange {
+            clip_id,
+            expected_source_text: source.into(),
+            translated_text: translated.into(),
+            input: CaptionTranslationInput {
+                source_text: source.into(),
+                source_locale: "en".into(),
+                target_locale: "fr".into(),
+                provider: "mock".into(),
+                model: "mock-v1".into(),
+            },
+        };
+        assert!(apply(
+            &mut state,
+            EditCommand::ApplyCaptionTranslations {
+                changes: vec![
+                    change(caption_ids[0].clone(), "One", "Un"),
+                    change(caption_ids[1].clone(), "stale", "Deux"),
+                ],
+            },
+            &ids,
+        )
+        .is_err());
+        assert_eq!(state.timeline, before);
+
+        apply(
+            &mut state,
+            EditCommand::ApplyCaptionTranslations {
+                changes: vec![change(caption_ids[0].clone(), "One", "Un")],
+            },
+            &ids,
+        )
+        .unwrap();
+        apply(
+            &mut state,
+            EditCommand::SetClipProperties {
+                clip_ids: vec![caption_ids[0].clone()],
+                properties: Box::new(ClipProperties {
+                    text_content: Some("Edited".into()),
+                    ..ClipProperties::default()
+                }),
+            },
+            &ids,
+        )
+        .unwrap();
+        assert!(state.timeline.tracks[0].clips[0]
+            .caption_translation_input
+            .is_none());
     }
 }
 
