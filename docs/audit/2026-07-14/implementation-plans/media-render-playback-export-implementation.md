@@ -2960,33 +2960,43 @@ the focused owning test, and
   - Visible/accessibility/return path: success=cancel Save Clip as Media: when current progress is cancellable and not cancelling, set cancelling=true and call cancelExport(current.operationId); rejection restores cancelling=false and pushes a failure toast; accessibility={"focus":"Native keyboard-focusable control","label":"Visible child text/title or caller-provided label; verify at runtime","shortcut":"None declared on this control"}; returnPath=["The non-modal status stays in the editor and disappears when store progress clears."].
   - Outcome matrix: {"success":"cancel Save Clip as Media: when current progress is cancellable and not cancelling, set cancelling=true and call cancelExport(current.operationId); rejection restores cancelling=false and pushes a failure toast","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/shell/SaveAsProgress.tsx:42; no additional state is inferred beyond the source.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/shell/SaveAsProgress.tsx:42; the candidate-specific interaction test must assert that exact guard.","disabled":"Disabled when {!progress.cancellable || progress.cancelling}.","cancel":"Cancellation/dismissal follows the exact guard in when current progress is cancellable and not cancelling, set cancelling=true and call cancelExport(current.operationId); rejection restores cancelling=false and pushes a failure toast; no broader cancellation behavior is assumed.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in when current progress is cancellable and not cancelling, set cancelling=true and call cancelExport(current.operationId); rejection restores cancelling=false and pushes a failure toast.","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/shell/SaveAsProgress.tsx:42; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/SaveAsProgress.interaction.test.tsx#control-b0b920085e77d039 cancel Save Clip as Media` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/shell/SaveAsProgress.interaction.test.tsx -t "control-b0b920085e77d039 cancel Save Clip as Media"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/SaveAsProgress.tsx`, `web/src/store/editActions.ts#cancelSaveAsMedia`, `web/src/lib/api.ts#cancelExport`, `src-tauri/src/export.rs#cancel_export`, `web/src/components/shell/SaveAsProgress.tsx#SaveAsProgress` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/SaveAsProgress.interaction.test.tsx -t "control-b0b920085e77d039 cancel Save Clip as Media"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. RED was reproduced because the declared DOM owner did
+  not exist. The new real-store interaction test proves visible progress,
+  disabled preparation state, exact operation-id cancellation, immediate
+  cancelling/duplicate-click protection, and rejection recovery with the
+  concrete failure toast. The focused owner passes; the full Web suite passes
+  95 files / 832 tests, and the production Web build passes with only the
+  pre-existing chunk/dynamic-import advisories. The Rust cancellation boundary
+  is unchanged and passed the full workspace gate in the immediately preceding
+  cancellation slice. No production change was required for this slice.
 
 ## Shared capability references
 
