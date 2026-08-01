@@ -2744,7 +2744,7 @@ the focused owning test, and
   - Visible/accessibility/return path: success=choose export resolution: setQuality controls export preset; accessibility={"focus":"Custom Dropdown focus behavior depends on its implementation","label":"Visible child text/title or caller-provided label; verify at runtime","shortcut":"None declared on this control"}; returnPath=["Success/cancel closes to the editor; failure keeps the dialog open. Trigger focus restoration is not implemented/tested."].
   - Outcome matrix: {"success":"choose export resolution: setQuality controls export preset","pending":"Not applicable — this activation only changes local/caller state and starts no Promise, API, Tauri command, or Rust work.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/shell/ExportDialog.tsx:462; the candidate-specific interaction test must assert that exact guard.","disabled":"No explicit disabled prop on this candidate.","cancel":"Cancellation/dismissal follows the exact guard in setQuality controls export preset; no broader cancellation behavior is assumed.","retry":"Not applicable as an error-recovery state — the synchronous local action can simply be activated again.","failure":"Not applicable — this immediate activation calls no API/Tauri/Rust boundary, so there is no backend rejection path."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/ExportDialog.interaction.test.tsx#control-580ab884755388a9 dismiss Export by clicking the backdrop` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
   - `web/src/components/shell/ExportDialog.interaction.test.tsx#control-6064916ed05a1362 close Export from its header` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
@@ -2754,7 +2754,7 @@ the focused owning test, and
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ExportDialog.interaction.test.tsx -t "control-580ab884755388a9 dismiss Export by clicking the backdrop"`
   - Run: `pnpm -C web test -- --run src/components/shell/ExportDialog.interaction.test.tsx -t "control-6064916ed05a1362 close Export from its header"`
@@ -2764,11 +2764,11 @@ the focused owning test, and
 
   Expected: FAIL because one or more of the 5 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/ExportDialog.tsx`, `web/src/components/shell/ExportDialog.tsx#ExportDialog` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ExportDialog.interaction.test.tsx -t "control-580ab884755388a9 dismiss Export by clicking the backdrop"`
   - Run: `pnpm -C web test -- --run src/components/shell/ExportDialog.interaction.test.tsx -t "control-6064916ed05a1362 close Export from its header"`
@@ -2778,11 +2778,21 @@ the focused owning test, and
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. RED was reproduced because the five declared DOM
+  owning tests did not exist. The new interaction runner exercises idle and
+  busy backdrop behavior, the header close guard, stale-error cleanup through
+  mode selection, codec-to-container routing, and resolution-to-request
+  routing against the real Zustand component state. All five focused tests
+  pass; the full Web suite passes 94 files / 829 tests, and the TypeScript plus
+  production Vite build passes with only the pre-existing chunk/dynamic-import
+  advisories. The production component already met the declared behavior, so
+  no component change was required.
 
 ### Task 39: control-acceptance (implementation-slice-c6fbd815566d6b64)
 
