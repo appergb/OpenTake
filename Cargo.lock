@@ -3517,7 +3517,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-agent"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3549,7 +3549,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-core"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "opentake-domain",
  "opentake-ops",
@@ -3563,7 +3563,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-domain"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3571,7 +3571,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-gen"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3589,7 +3589,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-media"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -3624,7 +3624,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-motion"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -3641,7 +3641,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-ops"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "opentake-domain",
  "serde_json",
@@ -3649,7 +3649,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-project"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -3668,7 +3668,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-render"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "bytemuck",
  "cosmic-text",
@@ -3685,7 +3685,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-tauri"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "axum",
  "base64 0.22.1",

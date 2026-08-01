@@ -2,6 +2,38 @@
 
 本文件记录 OpenTake 的重要改动。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)。
 
+## [1.0.0-beta.1] — 2026-08-01
+
+OpenTake 的第一个可安装 Beta。核心闭环为：创建/打开工程 → 导入与管理素材 →
+多轨剪辑、字幕、关键帧、特效/蒙版/调色/转场 → 本地 AI 与生成式 AI 审阅工作流 →
+预览、保存重开、H.264/H.265/ProRes 与字幕/交换格式导出。
+
+### 新增（Added）
+
+- 可恢复的工程持久化、全局素材库、缩略图/波形/代理媒体、缺失素材重链接。
+- Rust/WGPU 预览与导出共享合成路径，支持文本、调色、绿幕、蒙版、LUT、HSL、
+  Lift/Gamma/Gain、通用特效、交叉溶解、嵌套时间线、补帧与防抖。
+- Agent/MCP 编辑、内置聊天、BYOK 生成作业、Motion Canvas 动效与原生 Chromium fallback。
+- 本地口播清理、响度统一、降噪、声部分离、RVM 抠像、智能擦除、参考色彩匹配和
+  可视化运动追踪；字幕翻译、图文成片、数字人与音色克隆提供审阅/同意/成本边界。
+- 完整键盘、焦点、菜单、拖拽、撤销/重做与辅助功能回归门禁。
+
+### 安全与可靠性（Security / Reliability）
+
+- 生产 CSP、最小 asset scope、凭据 keychain 边界、URL/重定向/大小限制、下载校验与
+  项目修订原子提交。
+- macOS/Linux/Windows 安全文件系统契约、打包 FFmpeg sidecar 供应链校验、取消与失败
+  清理、生成/导出恢复与防陈旧结果提交。
+
+### Beta 已知边界
+
+- 本地 macOS Beta 包未使用 Developer ID 签名或 Apple 公证；首次打开需要用户明确允许。
+- 数字人、音色克隆、通用云生成和 Agent 云模型需要用户自己的 provider key，并可能产生
+  第三方费用；无 key 时功能会显式不可用或拒绝，不会静默调用。
+- Windows 安装包由精确 SHA CI 构建和验证；原生 Windows WebView 的最终人工交互烟测仍是
+  平台发布门槛，不影响本次 Apple Silicon macOS 本地 Beta。
+- 任意 Motion Canvas TSX、透明动效、神经语义级任意人声分离等属于后续 Beta 范围。
+
 ## [未发布] — 2026-06-23 第三轮（自动 PR 审核：全局素材库 + 文本工具 + 字幕/视频导出 + list_models）
 
 本轮为**自动 PR 审核流程**:逐 PR 专家审核 + 对抗验证 + 对照开发文档,审核通过且 CI 双绿的纯新增项合并,其余 @作者 rebase/修改。

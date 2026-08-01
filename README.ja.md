@@ -233,7 +233,9 @@ cd web && pnpm install && pnpm build
 cd .. && cargo tauri dev
 ```
 
-> ⚠️ **現在の状態**: 初期設計段階。アーキテクチャ、ロードマップ、モジュール移植マップは完了。コード実装中。
+> **現在の状態**: `1.0.0-beta.1` 候補版。ローカル編集、プレビュー、保存、
+> 書き出し、Agent、Motion Canvas、レビュー可能な AI ワークフローを実装済みです。
+> 検証範囲と制限は [Beta リリースノート](docs/releases/1.0.0-beta.1.md) を参照してください。
 
 ---
 
@@ -242,6 +244,7 @@ cd .. && cargo tauri dev
 | バージョン | 日付 | マイルストーン |
 |:--|:--|:--|
 | `0.1.0-dev` | 2026-06 | Phase 0+1: Cargo workspace + Domain models + Edit ops |
+| `1.0.0-beta.1` | 2026-08-01 | 初回インストール可能 Beta：ローカル編集、Agent、Motion、レビュー可能な AI ワークフロー |
 | *(planned)* `1.0.0` | TBD | Phase 10: フルリリース |
 
 📖 [完全なロードマップ](docs/architecture/ROADMAP.md)
