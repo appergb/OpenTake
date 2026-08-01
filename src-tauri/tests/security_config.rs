@@ -138,8 +138,9 @@ fn windows_bundle_installs_webview2_without_network_access() {
 fn windows_bundle_does_not_expect_an_unpublished_onnxruntime_dll() {
     let media_manifest = include_str!("../../crates/opentake-media/Cargo.toml");
     assert!(
-        media_manifest.contains("features = [\"std\", \"ndarray\", \"download-binaries\"]"),
-        "the pinned ONNX Runtime distribution must remain statically linked"
+        media_manifest
+            .contains("features = [\"std\", \"ndarray\", \"download-binaries\", \"copy-dylibs\"]"),
+        "ort-sys must expose the pinned DirectML provider companion"
     );
 
     let config = windows_config();
@@ -152,6 +153,18 @@ fn windows_bundle_does_not_expect_an_unpublished_onnxruntime_dll() {
             .all(|source| !source.contains("onnxruntime")),
         "the static Windows archive does not publish an onnxruntime DLL"
     );
+    assert_eq!(
+        resources
+            .get("../target/opentake-runtime/DirectML.dll")
+            .and_then(Value::as_str),
+        Some("DirectML.dll")
+    );
+
+    let manifest = include_str!("../Cargo.toml");
+    assert!(manifest.contains("[target.'cfg(windows)'.build-dependencies]"));
+    let build_script = include_str!("../build.rs");
+    assert!(build_script.contains("profile_dir.join(\"deps/DirectML.dll\")"));
+    assert!(build_script.contains("workspace_target.join(\"opentake-runtime/DirectML.dll\")"));
 }
 
 #[test]

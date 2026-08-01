@@ -258,6 +258,10 @@ jobs:
           }
           if (-not $application) { throw "installed OpenTake executable not found: $($candidates -join ', ')" }
           $installDirectory = Split-Path -Parent $application
+          $directml = Join-Path $installDirectory 'DirectML.dll'
+          if (-not (Test-Path $directml -PathType Leaf)) {
+            throw "installed DirectML provider not found beside OpenTake: $directml"
+          }
           ruby scripts/tests/packaged-sidecars-test.rb `
             --name packaged_macos_windows_sidecars_resolve_and_execute `
             --package $installDirectory
