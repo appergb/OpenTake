@@ -33,6 +33,7 @@ export function SplitPane({
   const [size, setSize] = useState(initial);
   const [totalSize, setTotalSize] = useState(initial + secondMin);
   const dragging = useRef(false);
+  const captureRef = useRef<{ element: HTMLElement; pointerId: number } | null>(null);
   const [dragActive, setDragActive] = useState(false);
 
   useEffect(() => {
@@ -66,7 +67,10 @@ export function SplitPane({
       e.preventDefault();
       dragging.current = true;
       setDragActive(true);
-      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      const element = e.currentTarget as HTMLElement;
+      element.focus();
+      captureRef.current = { element, pointerId: e.pointerId };
+      element.setPointerCapture(e.pointerId);
     },
     [],
   );
@@ -83,14 +87,28 @@ export function SplitPane({
     [isH, setClampedSize],
   );
 
-  const onPointerUp = useCallback((e: React.PointerEvent) => {
+  const endPointerDrag = useCallback((releaseCapture: boolean) => {
     dragging.current = false;
     setDragActive(false);
-    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+    const capture = captureRef.current;
+    captureRef.current = null;
+    if (!releaseCapture || !capture) return;
+    try {
+      capture.element.releasePointerCapture(capture.pointerId);
+    } catch {
+      // Pointer capture may already have been released by the browser.
+    }
   }, []);
+
+  const onPointerUp = useCallback(() => endPointerDrag(true), [endPointerDrag]);
 
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
+      if (event.key === "Escape" && dragging.current) {
+        event.preventDefault();
+        endPointerDrag(true);
+        return;
+      }
       const decrease = isH ? event.key === "ArrowLeft" : event.key === "ArrowUp";
       const increase = isH ? event.key === "ArrowRight" : event.key === "ArrowDown";
       if (!decrease && !increase && event.key !== "Home" && event.key !== "End") return;
@@ -99,7 +117,7 @@ export function SplitPane({
       else if (event.key === "End") setClampedSize(totalSize - secondMin);
       else setClampedSize(size + (increase ? 10 : -10));
     },
-    [isH, min, secondMin, setClampedSize, size, totalSize],
+    [endPointerDrag, isH, min, secondMin, setClampedSize, size, totalSize],
   );
 
   return (
@@ -146,6 +164,8 @@ export function SplitPane({
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
+          onPointerCancel={() => endPointerDrag(true)}
+          onLostPointerCapture={() => endPointerDrag(false)}
           onKeyDown={onKeyDown}
           style={{
             position: "absolute",
