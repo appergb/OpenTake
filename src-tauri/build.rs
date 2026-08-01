@@ -8,6 +8,7 @@ fn main() {
     // STATUS_ENTRYPOINT_NOT_FOUND. The global link arg reaches the lib-test
     // harness; Cargo's `rustc-link-arg-tests` does not.
     if std::env::var("TARGET").is_ok_and(|target| target.contains("windows-msvc")) {
+        println!("cargo:rustc-link-arg=/MANIFEST:EMBED,ID=1");
         println!(
             "cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' \
              name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
