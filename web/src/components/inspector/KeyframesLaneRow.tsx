@@ -94,6 +94,7 @@ export function KeyframesLaneRow({
 }) {
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
   const setActiveFrame = useEditorUiStore((s) => s.setActiveFrame);
+  const pushToast = useEditorUiStore((s) => s.pushToast);
   const track = getTrack(clip, property);
   const trackRef = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState<{ fromFrame: number; currentFrame: number } | null>(null);
@@ -166,6 +167,17 @@ export function KeyframesLaneRow({
     setActiveFrame(Math.max(startFrame, Math.min(endFrame, nextFrame)));
   };
 
+  const commitKeyframeMove = useCallback(
+    (fromFrame: number, toFrame: number) => {
+      if (fromFrame === toFrame) return;
+      void edit.moveKeyframe(clip.id, property, fromFrame, toFrame).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        pushToast(t("inspector.keyframes.moveFailed", { error: message }));
+      });
+    },
+    [clip.id, property, pushToast, t],
+  );
+
   // Start a keyframe drag. Uses window listeners so the drag continues even
   // when the cursor leaves the track (matches the app's existing drag pattern).
   // The cleanup ref ensures listeners are removed if the component unmounts
@@ -203,7 +215,7 @@ export function KeyframesLaneRow({
       onSnapChange?.(null);
       setDragging((d) => {
         if (d && d.fromFrame !== d.currentFrame) {
-          void edit.moveKeyframe(clip.id, property, d.fromFrame, d.currentFrame);
+          commitKeyframeMove(d.fromFrame, d.currentFrame);
         }
         return null;
       });
@@ -220,6 +232,23 @@ export function KeyframesLaneRow({
     e.preventDefault();
     e.stopPropagation();
     setMenu({ x: e.clientX, y: e.clientY, frame: absFrame });
+  };
+
+  const handleDiamondKeyDown = (e: React.KeyboardEvent<HTMLDivElement>, absFrame: number) => {
+    const lastFrame = startFrame + duration - 1;
+    if (["ArrowLeft", "ArrowDown", "ArrowRight", "ArrowUp"].includes(e.key)) {
+      e.preventDefault();
+      e.stopPropagation();
+      const delta = e.key === "ArrowLeft" || e.key === "ArrowDown" ? -1 : 1;
+      commitKeyframeMove(absFrame, Math.max(startFrame, Math.min(lastFrame, absFrame + delta)));
+      return;
+    }
+    if (e.key === "Enter" || e.key === " " || e.key === "ContextMenu") {
+      e.preventDefault();
+      e.stopPropagation();
+      const rect = e.currentTarget.getBoundingClientRect();
+      setMenu({ x: rect.left + rect.width / 2, y: rect.bottom, frame: absFrame });
+    }
   };
 
   const closeMenu = () => setMenu(null);
@@ -315,8 +344,16 @@ export function KeyframesLaneRow({
         {displayKeyframes.map((kf) => (
           <div
             key={kf.key}
+            data-keyframe-diamond={kf.key}
+            role="button"
+            tabIndex={0}
+            aria-label={t("inspector.keyframes.diamondLabel", {
+              property: propertyLabel,
+              frame: kf.key,
+            })}
             onMouseDown={(e) => handleDiamondMouseDown(e, kf.key)}
             onContextMenu={(e) => handleDiamondContextMenu(e, kf.key)}
+            onKeyDown={(e) => handleDiamondKeyDown(e, kf.key)}
             style={{
               position: "absolute",
               left: `${frameToRatio(kf.frame) * 100}%`,
@@ -393,6 +430,7 @@ function KeyframeContextMenu({
         }}
       />
       <div
+        data-keyframe-context-menu
         style={{
           position: "fixed",
           left: x,

@@ -1024,33 +1024,46 @@
   - Visible/accessibility/return path: success=keyframe diamond drag/context menu: assert exactly onMouseDown starts local drag; window mouseup calls edit.moveKeyframe(clip.id, property, fromFrame, currentFrame) only when the frame changed; onContextMenu sets menu { x: e.clientX, y: e.clientY, frame: kf.key } and emits no edit command and no sibling branch/command.; accessibility={"focus":"Custom rendered element has no proven tabIndex/keyboard equivalent at this candidate.","label":"No explicit aria-label/title association was discovered at this candidate.","shortcut":"No dedicated shortcut is declared."}; returnPath=["Remain on the owning editor surface after local state or authoritative mirror refresh.","Retain focus on the native control or explicitly restore it when conditional UI closes; this must be asserted."].
   - Outcome matrix: {"success":"keyframe diamond drag/context menu: assert exactly onMouseDown starts local drag; window mouseup calls edit.moveKeyframe(clip.id, property, fromFrame, currentFrame) only when the frame changed; onContextMenu sets menu { x: e.clientX, y: e.clientY, frame: kf.key } and emits no edit command and no sibling branch/command.","pending":"A promise may be pending, but this candidate exposes no explicit progress state.","empty":"N/A — owning visibility/handler guards prevent an absent target from emitting a command.","disabled":"No explicit disabled attribute beyond the listed visibility/handler guards.","cancel":"N/A — no separate cancellation phase.","retry":"No automatic retry; repeated activation resubmits after the candidate becomes actionable.","failure":"Backend rejection is not caught/rendered at this fire-and-forget candidate; visible recovery evidence is required."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/inspector/KeyframesLaneRow.interaction.test.tsx#control-4e0a20c7d0e54f3e keyframe diamond drag/context menu` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-4e0a20c7d0e54f3e keyframe diamond drag/context menu"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/inspector/KeyframesLaneRow.tsx`, `web/src/components/inspector/KeyframesLaneRow.tsx#handleDiamondMouseDown`, `web/src/store/editActions.ts#moveKeyframe`, `web/src/store/editActions.ts#applyAndRefresh`, `web/src/lib/api.ts#editApply`, `src-tauri/src/commands.rs#edit_apply`, `crates/opentake-core/src/dto.rs#handle_edit_apply`, `crates/opentake-ops/src/command.rs#EditCommand::MoveKeyframe`, `web/src/components/inspector/KeyframesLaneRow.tsx#KeyframesLaneRow`, `crates/opentake-ops/src/command.rs#EditCommand` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-4e0a20c7d0e54f3e keyframe diamond drag/context menu"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: RED proved the diamond lacked an accessible owner. The
+  focused test now covers unchanged-drag no-op, changed-drag exact single
+  command, right-click menu coordinates with zero edit calls, keyboard
+  one-frame movement with focus retention, and visible toast recovery on a
+  rejected command. The Web gate passes with 104 files / 843 tests plus a
+  production build. Formatting and the complete Rust workspace pass; only the
+  seven pre-existing real-device probes remain ignored.
+
+- [ ] **Runtime evidence gate:** in the packaged Inspector, drag a diamond,
+  open its menu by pointer and keyboard, verify focus/labels, and force a safe
+  rejected move to confirm visible recovery before final control
+  reclassification.
 
 ### Task 12: control-acceptance (implementation-slice-40b57db02ead9758)
 
