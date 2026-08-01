@@ -21,6 +21,13 @@ path = "src/main.rs"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# The Windows bundle build script stages ONNX Runtime before `tauri-build`
+# validates resources. Keep ort-sys in the build-dependency graph so Cargo
+# guarantees its checksum-pinned DLL copy has completed before our build.rs
+# reads it; the runtime dependency alone does not impose that ordering.
+[target.'cfg(windows)'.build-dependencies]
+ort-sys = { version = "=2.0.0-rc.10", default-features = false, features = ["download-binaries", "copy-dylibs"] }
+
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"

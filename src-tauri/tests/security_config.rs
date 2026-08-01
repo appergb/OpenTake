@@ -143,6 +143,15 @@ fn windows_bundle_ships_the_linked_onnxruntime_beside_the_executable() {
         "ort-sys must copy the exact downloaded runtime beside Windows binaries"
     );
 
+    let tauri_manifest = include_str!("../Cargo.toml");
+    assert!(
+        tauri_manifest.contains("[target.'cfg(windows)'.build-dependencies]")
+            && tauri_manifest.contains(
+                "ort-sys = { version = \"=2.0.0-rc.10\", default-features = false, features = [\"download-binaries\", \"copy-dylibs\"] }",
+            ),
+        "the Tauri build script must wait for ort-sys to stage the Windows DLL"
+    );
+
     let config = windows_config();
     let resources = config["bundle"]["resources"]
         .as_object()
